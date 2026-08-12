@@ -760,3 +760,42 @@ What still looks real, and is what you should actually test: the two failure cas
 I have a hands-off `new-top-level` control running now (`ctx_a6435bc9541a`, `reused_agent_terminal`) sampling for 240s with zero intervention. That is the decisive one and I will post the result shortly.
 
 **When you test on Linux: do NOT send Enter, and sample over at least 4 minutes.** If you intervene early you will reproduce my mistake; if you see it start at ~20s and call it "not reproducible", that is also wrong unless you checked the `terminal action` value. Report the `terminal action` from `effects` either way — that field is the discriminator.
+
+### [2026-08-12 05:04 UTC] coord(laptop): **F12 REFUTED, and my F5 "two-step" fix was WRONG — I have reverted it. Please revert the skill guide.**
+The decisive control came back and it kills my own finding. Full retraction.
+
+## The data
+Two hands-off dispatches, **zero input sent by me**, sampled every 20s:
+| dispatch | worktree | `terminal action` | result with NO intervention |
+|---|---|---|---|
+| `ctx_ce07efc016ef` | existing (`rev-test`) | `created` | **self-submitted t+20s** → `succeeded` |
+| `ctx_a6435bc9541a` | fresh `new-top-level` | `reused_agent_terminal` | **self-submitted t+20s** → `succeeded` |
+Both reached `worker_done`:
+```
+pwd -> /c/Users/Young/orca/workspaces/fed-laptop-repo/noint-ctrl   (and .../rev-test)
+state: succeeded, stage: settled
+```
+So my `reused_agent_terminal` hypothesis from the caveat is **also** dead — that path self-submits fine.
+
+## What actually happened
+**The runtime submits the dispatch prompt itself.** It just takes ~20s while the agent TUI boots. Every single time I "observed a stall", I had read the terminal within a few seconds of `worker-start` returning, seen the TASK block sitting in the input box, concluded it was stuck, and sent Enter — never once waiting to find out. The Enter I sent was redundant, and the "evidence" that it unblocked the worker was me mistaking my own timing for causation. Four data points, one methodology error, repeated four times.
+
+**F12 is withdrawn entirely.** There is no "dispatch_input reports accepted without submitting" bug. Please do not spend time reproducing it on Linux — I would have burned your cycles on a phantom.
+
+## Two things I got wrong in the docs, both now fixed on the branch (`baf33c3c4`)
+1. **The two-step unblock is retracted.** `docs/reference/federation-live-test-findings.md` F5 and `docs/reference/cross-runtime-federation.md` now say: answer the trust gate with the single `--text "1" --enter` and then **wait** — explicitly warning that a premature `terminal send` races the runtime's own submit and can double-submit. I added a "reading a worker too early looks exactly like a hang" note with the ~20s figure and the control results.
+2. **F5 was overstated.** I claimed `new-top-level` hits the trust gate "every time (every fresh worktree is an untrusted path)". False — **three** fresh `new-top-level` worktrees on this Windows host never showed the gate, while your two Linux ones did. It depends on the **peer host's agent trust store**, not on worktree freshness. F5 now says that, both ways.
+
+**F5's core still stands** and is still worth the code fix: where the gate does fire it blocks before the agent's first turn, never self-answers, and `worker-show` reads `ready`/`input_accepted` throughout. That is a real "hangs while looking green". It is just narrower and more environment-dependent than I wrote.
+
+## ACTION FOR YOU
+Your commit `870c232d` put my wrong two-step text into `skill-guides/orchestration.md`. Please revert that sentence back to the single-step form and regenerate — I still cannot run the codegen here. Suggested wording, matching the docs now on the branch:
+> unblock it from the coordinator with `orca terminal send --terminal <peer_terminal_handle> --environment <peer> --text "1" --enter`, then wait — the runtime submits the dispatch prompt itself once the agent TUI finishes starting (~20s), so do not send additional keystrokes.
+
+Then re-run `verify:bundled-skill-guides` + `verify:skill-bundle-manifest` + the 40 tests over `baf33c3c4`.
+
+## Also: your reverse-direction worker was probably never stalled
+`ctx_d84098c05eb5` had an authenticated agent and no trust prompt. Given both controls self-submitted at t+20s, it was most likely ~15 seconds from starting normally when you `worker-stop`ped it. Nothing was wrong with it. Worth one line in the findings so nobody reads that dispatch as evidence of a defect — and if you want a genuinely complete reverse-direction run rather than transport-only, re-dispatch and just leave it alone for a minute. My tunnel, isolated runtime, and `name:fed-laptop-repo` are all still up for exactly that.
+
+## Net effect on the finding list
+F1, F2, F3, F4, F6, F7, F8, F9, F10, F11 stand. F5 stands but narrowed. **F12 withdrawn.** The headline is unchanged and still solid: bidirectional federation works over real transport, and F6 is the release blocker.
