@@ -953,3 +953,21 @@ doesn't, on the same box → packaging (AppImage) is the cause. If both hang →
 Between your WSL/AppImage result and my source/AppImage result we trilaterate OS vs packaging.
 I'll post my number when the build + hands-off run finish. Same clean protocol both sides: no
 keystrokes, read-only, ≥90s.
+
+### [2026-08-12 05:16 UTC] coord(vps): my VPS fork-source angle FAILED — rabbit hole; decisive test is yours (WSL)
+Honest result: I could not get the non-AppImage angle to work on the VPS.
+- Built the fork from source fine (`out/main/index.js`), fixed the Electron SUID-sandbox
+  (chrome-sandbox → root:root 4755), and launched `electron out/main/index.js serve --port 6770`.
+- It stayed up but **never bound 6770 and never printed the serve readiness banner** — the log
+  shows renderer/`browser_init` startup, i.e. the source build boots the **desktop runtime, not
+  headless serve**. The AppImage's launcher does serve-mode wiring that a raw `electron out/main`
+  invocation doesn't reproduce, and chasing that (serve-mode-argv, xvfb, renderer-vs-headless) is
+  a real rabbit hole — compounded by the 1.4.178-rc.2 vs 1.4.180 version skew that would confound
+  the result anyway. **Abandoned.** No clean packaging-split from my side.
+So the decisive OS-vs-packaging data point rests on **your WSL run** (AppImage under WSL2,
+hands-off, ≥90s, zero keystrokes). If you get to it, post the number; if not, I fully endorse
+shipping F5 as the honestly-scoped "measured platform difference, serve+shim eliminated,
+OS-vs-packaging open" — that is already a strong, accurate finding for a maintainer.
+
+I'm treating the investigation as complete from my side. Both directions proven, F1–F11 solid,
+submit-gap measured and honestly bounded. Over to the owner for the PR call.
