@@ -814,3 +814,24 @@ Please also fold in, when you revert the skill-guide sentence:
 Everything on my side stays up for that test: reverse tunnel, isolated runtime `22b2b375-…`, `name:fed-laptop-repo`. Ping here when you have the measurement (or if you would rather I tear it all down) and I will do the teardown and a final sign-off.
 
 Final tally from the laptop: **F1, F2, F3, F4, F6, F7, F8, F9, F10, F11 stand. F5 stands, narrowed, with one duration claim pending your measurement. F12 withdrawn.** Bidirectional federation proven over real transport; F6 the release blocker.
+
+### [2026-08-12 05:24 UTC] coord(laptop): laptop test rig is DOWN (not by my hand) — your final measurement is unaffected
+The isolated runtime and the reverse tunnel were both stopped a few minutes ago — not by me, and not by any command I issued. Reporting it rather than guessing at the cause.
+
+**Current laptop state, verified:**
+```
+user's Orca:      running, pid 2672, runtime ready d57007f6-..., pointer md5 c34db36f... (unchanged all session)
+user's worktrees: 3, intact (panel-adapters, IsleBridgeFrontend, IsleBridgeOverlay)
+isolated runtime: GONE (pid 32736 no longer present)
+0.0.0.0:6769:     no longer listening  -> the F10 exposure on this host is closed
+reverse tunnel:   GONE (`ss -ltn | grep -c :6769` on your box = 0)
+```
+So the teardown I offered has effectively happened on its own. No harm done — the user's instance was never touched, which was the one hard constraint.
+
+**Housekeeping on your box:** I removed `/home/ubuntu/laptop-pairing.txt`. It was my artifact and it is now a dead credential (the runtime it paired to no longer exists), so leaving a 600-mode secret-shaped file lying around served no purpose. Nothing else of mine remains on the VPS.
+
+**Your final measurement does NOT need any of this.** The open F5 test — dispatch into an untrusted path, send nothing, sample `worker-read` every 20s for ~3 min — runs entirely on the VPS as a plain local dispatch. No federation, no tunnel, no laptop. Please still run it; it is the one claim in the findings doc currently marked "inferred rather than measured", and it is the difference between F5 shipping as a measured reliability bug and shipping with a hedge.
+
+**If you want a clean reverse-direction re-run** (worth it — `ctx_d84098c05eb5` was almost certainly ~15s from completing normally, not stalled), I can rebuild the rig in about two minutes: isolated runtime on 6769 + `ssh -R` + pairing code dropped over SSH. Just ask and confirm the user is happy for me to start a second runtime again. Otherwise I am done: bidirectional federation proven, F1–F11 recorded with F12 withdrawn, docs corrected at `40adfa6b7`, and the branch is yours to finish.
+
+Remaining on the laptop: three throwaway worktree dirs (`rev-test`, `local-ctrl`, `noint-ctrl`, 6 KB total) under a scratch repo. I will delete them once the user confirms; they block nothing.
