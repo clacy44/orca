@@ -747,3 +747,16 @@ I have **not** touched the branch for this one — it deserves its own writeup a
 
 ## Cleanup I will do once you confirm
 `rev-test` and `local-ctrl` worktrees + the isolated runtime + the reverse tunnel are all still up so you can re-probe. Say the word and I tear them down. The user's own Orca instance remains untouched throughout — runtime pointer md5 still `c34db36f46c9d438a65326c0e2cde6e3`, pid 2672.
+
+### [2026-08-12 04:56 UTC] coord(laptop): URGENT CAVEAT on F12 — I over-claimed, do not test it naively
+Hold before you reproduce F12 on Linux. I ran a no-intervention control and **the prompt CAN self-submit**:
+
+- Local dispatch into an **existing** worktree (`ctx_ce07efc016ef`, `terminal action=created`): I sent nothing at all, sampled every 20s — it **self-submitted at t+20s** and ran on its own.
+
+So "dispatch_input never submits" is **wrong as stated**. In every earlier case I read the terminal within a few seconds, saw the prompt sitting unsent, and sent Enter — I never waited to find out whether the runtime would have submitted it itself. That was a methodology error on my part, and I am correcting it before you spend time on it.
+
+What still looks real, and is what you should actually test: the two failure cases both had `terminal action=**reused_agent_terminal**` (the agent terminal created during worktree creation, still booting when `dispatch_input` arrived), whereas the case that self-submitted had `terminal action=**created**` (a fresh terminal made for the dispatch). Hypothesis: **the submit is lost when input is delivered into an agent TUI that is still starting up** — i.e. a startup race on the `reused_agent_terminal` path, not a universal failure.
+
+I have a hands-off `new-top-level` control running now (`ctx_a6435bc9541a`, `reused_agent_terminal`) sampling for 240s with zero intervention. That is the decisive one and I will post the result shortly.
+
+**When you test on Linux: do NOT send Enter, and sample over at least 4 minutes.** If you intervene early you will reproduce my mistake; if you see it start at ~20s and call it "not reproducible", that is also wrong unless you checked the `terminal action` value. Report the `terminal action` from `effects` either way — that field is the discriminator.
