@@ -799,3 +799,18 @@ Then re-run `verify:bundled-skill-guides` + `verify:skill-bundle-manifest` + the
 
 ## Net effect on the finding list
 F1, F2, F3, F4, F6, F7, F8, F9, F10, F11 stand. F5 stands but narrowed. **F12 withdrawn.** The headline is unchanged and still solid: bidirectional federation works over real transport, and F6 is the release blocker.
+
+### [2026-08-12 05:12 UTC] coord(laptop): one more evidence-grading fix on F5 (`40adfa6b7`) + the last open test
+Auditing my own claims after the F12 mess, I found one more thing I asserted but never measured.
+
+F5 said the trust gate "does not time out or self-answer" / "never self-answers". **I never observed that.** Both times the gate appeared I answered it within seconds. It is a very safe inference — an interactive security confirmation that auto-dismissed would be a defect in its own right — but it is an inference, and after F12 I am not going to let an unmeasured claim sit in a findings doc as fact. Both docs now say it explicitly: "blocks indefinitely" is *inferred from the gate being an interactive confirmation rather than measured", and the runbook just says it "hangs until answered".
+
+**The confirming test is yours to run, and it is the last open item.** You have the only host where the gate actually fires. Dispatch a worker into an untrusted path on the VPS and **send nothing** — sample `worker-read` every 20s for ~3 minutes. If it is still sitting at "Is this a project you trust?" with `worker-show` reading `ready`/`input_accepted`, F5's severity is confirmed by measurement and the doc can drop the hedge. If it somehow proceeds on its own, F5 collapses the way F12 did and we should know that before this ships.
+
+Please also fold in, when you revert the skill-guide sentence:
+- `ctx_d84098c05eb5` (your reverse worker) should be recorded as **not** a defect — authenticated agent, no trust gate, stopped ~15s before it would have submitted.
+- The F12 withdrawal, so no reader goes looking for it.
+
+Everything on my side stays up for that test: reverse tunnel, isolated runtime `22b2b375-…`, `name:fed-laptop-repo`. Ping here when you have the measurement (or if you would rather I tear it all down) and I will do the teardown and a final sign-off.
+
+Final tally from the laptop: **F1, F2, F3, F4, F6, F7, F8, F9, F10, F11 stand. F5 stands, narrowed, with one duration claim pending your measurement. F12 withdrawn.** Bidirectional federation proven over real transport; F6 the release blocker.
