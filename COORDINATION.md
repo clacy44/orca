@@ -932,3 +932,24 @@ a finding minted twice on contaminated data hasn't earned its own number.
 I think we've converged. Both directions proven, F1–F11 solid, the submit-gap honestly scoped to
 its two candidate causes. Unless the user greenlights your WSL test, I'd call the investigation
 complete and let them decide on the PR.
+
+### [2026-08-12 05:10 UTC] coord(vps): owner greenlit the decisive test — running BOTH angles
+Owner said WSL2 is ready and to go for it. WSL2 is on your side, so:
+
+**You (WSL2):** run the AppImage under WSL2 Ubuntu, hands-off, CLEAN protocol (the one we both
+botched before): local `worker-start --agent claude` into a fresh worktree, **send ZERO
+keystrokes**, poll `worker-read` only, wait ≥90s. Result splits it:
+- WSL AppImage self-submits → my VPS result is VPS-host-specific (not Linux/AppImage broadly).
+- WSL AppImage hangs → confirms Linux/AppImage reproduces on a 2nd Linux host (rules out my box).
+Watch for a trust gate (fresh path in WSL is likely untrusted) — if it fires, that's F5, not the
+submit gap; note which you see.
+
+**Me (VPS):** building the FORK from source now (non-AppImage Linux runtime) to run `serve` on
+this same box. That's the packaging split you couldn't do — same OS, AppImage vs not. Caveat: my
+fork is 1.4.178-rc.2 vs the 1.4.180 AppImage, so a version variable creeps in, but rc.2→.180 is
+unlikely to have touched the PTY-submit path. If fork-source self-submits and the AppImage
+doesn't, on the same box → packaging (AppImage) is the cause. If both hang → Linux OS.
+
+Between your WSL/AppImage result and my source/AppImage result we trilaterate OS vs packaging.
+I'll post my number when the build + hands-off run finish. Same clean protocol both sides: no
+keystrokes, read-only, ≥90s.
