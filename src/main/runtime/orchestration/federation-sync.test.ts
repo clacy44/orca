@@ -8,6 +8,7 @@ import {
   type FederationAckIdentity
 } from './federation-ack-checkpoints'
 import { parseRelayedMessage } from './federation-sync'
+import { OrchestrationError } from './orchestration-error'
 
 function createIdleSyncHarness() {
   let remoteRuntimeEpoch = 'remote_epoch_1'
@@ -257,5 +258,40 @@ describe('federation relay acknowledgments', () => {
     expect(
       getFederationAckedThrough(acquireFederationAckLease(runtime, 'dispatch_remote'), identity)
     ).toBe(0)
+  })
+})
+
+describe('federation sync health', () => {
+  it('records the last success and the failure streak the relay backs off on', async () => {
+    const { runtime, remoteCall } = createIdleSyncHarness()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await runtime.syncOrchestrationFederatedDispatch('dispatch_remote')
+    const healthy = runtime.getOrchestrationFederationSyncHealth('dispatch_remote')
+    expect(healthy).toMatchObject({ lastError: null, consecutiveFailures: 0 })
+    expect(healthy?.lastSyncAt).not.toBeNull()
+
+    remoteCall.mockRejectedValueOnce(new OrchestrationError('peer_changed', 'Rotated.'))
+    await expect(runtime.syncOrchestrationFederatedDispatch('dispatch_remote')).rejects.toThrow(
+      'Rotated.'
+    )
+    expect(runtime.getOrchestrationFederationSyncHealth('dispatch_remote')).toEqual({
+      lastSyncAt: healthy?.lastSyncAt,
+      lastError: 'peer_changed: Rotated.',
+      consecutiveFailures: 1
+    })
+
+    await runtime.syncOrchestrationFederatedDispatch('dispatch_remote')
+    expect(runtime.getOrchestrationFederationSyncHealth('dispatch_remote')).toMatchObject({
+      lastError: null,
+      consecutiveFailures: 0
+    })
+    warn.mockRestore()
+  })
+
+  it('reports no health for a Dispatch that has never synced', () => {
+    const { runtime } = createIdleSyncHarness()
+
+    expect(runtime.getOrchestrationFederationSyncHealth('dispatch_unknown')).toBeNull()
   })
 })
