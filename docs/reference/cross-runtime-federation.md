@@ -99,6 +99,77 @@ Remote `current` and `new-child` worktrees are intentionally invalid — those
 words are ambiguous across runtimes. Use an exact discovered remote worktree
 selector, or `new-top-level` with an explicit remote repo selector.
 
+## Remote run mailbox
+
+A Run — its Tasks, its mailbox, its Deliveries — lives in exactly one runtime's
+SQLite. `orca orchestration check --run <run_id>` reads that runtime's database
+and nothing else. Posting mail into a Run and then telling an agent on a
+**different** runtime to "check `run_X`" therefore fails by construction unless
+one of the two rules below holds.
+
+**Addressing rule.** Posting mail into a Run and telling an agent on another
+runtime to check it REQUIRES either this feature on both builds, or targeting a
+Run that lives on the recipient's runtime. There is no third option: a Run ID is
+meaningless outside the runtime that minted it.
+
+With matching builds, add `--environment <peer>` to route the mailbox operation
+to the runtime that owns the Run:
+
+```bash
+# Read (and consume) mail sitting in a Run on the peer
+orca orchestration check --run <run_id> --environment <peer> --json
+
+# Acknowledge the delivery the previous read returned — the ack lands in the
+# PEER's database, which is the authoritative one; nothing is mirrored locally.
+orca orchestration check --run <run_id> --ack <delivery_id> --environment <peer> --json
+
+# Post into that Run's mailbox
+orca orchestration send --to run:<run_id> --subject "..." --body "..." \
+  --environment <peer> --json
+
+# Answer a question raised inside that Run
+orca orchestration reply --id <message_id> --body "..." --environment <peer> --json
+```
+
+### When to use it vs federated dispatch mail
+
+| Situation | Use |
+| --- | --- |
+| You started the worker with `worker-start --on <peer>`; the Run is yours | Federated dispatch mail (`send --to dispatch:<id>`), which relays home automatically |
+| The Run lives on the other runtime and you were told to read/answer its mail | Remote run mailbox (`--environment <peer>`) |
+| Both runtimes own separate Runs that need to talk | Remote run mailbox in both directions; there is no shared Run |
+
+Federated dispatch mail is Run-home-authoritative and relayed by the coordinator;
+the remote run mailbox is a direct, synchronous call against the owning runtime.
+Do not reach for the remote mailbox to talk to a federated worker you started —
+`dispatch:<id>` addressing already handles that and enforces the settlement fences.
+
+### Why this is not a privilege escalation
+
+Ordinary Run scope asks "is the caller's *pane* the Run's current consumer".
+A paired peer owns no pane on the Run's runtime, so that question is
+unanswerable rather than merely unanswered. The remote mailbox path answers a
+different question — "is this an authenticated runtime-scope paired device" —
+checked against the authenticated socket identity, never against a
+caller-supplied handle. That credential already grants terminal-drive rights on
+the host (`terminal.send`, `worker-start`), so the peer could always read and
+post Run mail by driving a local pane; calling the mailbox directly is strictly
+less capable. Mobile-scope pairings are refused. The read joins the Run's
+**current consumer generation** rather than rebinding it, so a locally bound
+coordinator is never fenced, and acks land in the owning runtime's database
+(`--retry-request <id>` gives the same `request_mismatch` idempotency there as
+it does locally).
+
+### Version skew
+
+The peer advertises `orchestration.remote-run-mailbox.v1`. The CLI checks that
+capability before it relies on the new `remoteRunMailbox` parameter, because an
+older peer silently strips the field (zod `.strip()`) and then refuses the call
+as an unbound coordinator. When the capability is missing and the peer refuses
+on Run binding, the CLI reports `peer does not support remote run mailbox (needs
+matching build)` instead of a misleading "No Run is bound". `RUNTIME_PROTOCOL_VERSION`
+is unchanged — new methods and new optional params are additive.
+
 ## Operational notes
 
 - **Give a new worker ~60s before judging it stuck.** For roughly the first 20s after
