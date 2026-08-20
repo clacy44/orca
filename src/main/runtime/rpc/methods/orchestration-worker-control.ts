@@ -4,6 +4,7 @@ import {
   type OrchestrationWorkerReadResult
 } from '../../../../shared/orchestration-worker-output'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { summarizeQueuedWorkerMail } from '../../orchestration/federation-worker-mail-fence'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, requiredString } from '../schemas'
 import {
@@ -102,7 +103,10 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
           observation: remote.observation,
           // Why: additive field — it tells a coordinator whether the home-driven pull is
           // still landing, which state/stage alone cannot (both stay green while it fails).
-          sync: runtime.getOrchestrationFederationSyncHealth(params.dispatch)
+          sync: runtime.getOrchestrationFederationSyncHealth(params.dispatch),
+          // Why: mail queued before a settlement is stranded by the relay's ready-gate;
+          // report it rather than leave it undelivered and unmentioned.
+          workerMail: summarizeQueuedWorkerMail(db, params.dispatch, worker.state)
         }
       }
       if (worker.runtime_epoch && worker.runtime_epoch !== runtime.getRuntimeId()) {

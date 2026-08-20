@@ -269,6 +269,43 @@ describe('orchestration federation control mail', () => {
     })
   })
 
+  it('relays a coordinator reply while the federated Dispatch is ready', async () => {
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const asked = homeDb.createQuestion({
+      runId,
+      dispatchId,
+      askerHandle: `dispatch:${dispatchId}`,
+      question: 'Which base branch?'
+    })
+
+    await expect(
+      homeDispatcher.dispatch(replyRequest('reply-ready', asked.question.message_id, 'main'))
+    ).resolves.toMatchObject({ ok: true })
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toMatchObject([
+      { kind: 'reply' }
+    ])
+  })
+
+  it('refuses a coordinator reply once the federated Dispatch is no longer ready', async () => {
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const asked = homeDb.createQuestion({
+      runId,
+      dispatchId,
+      askerHandle: `dispatch:${dispatchId}`,
+      question: 'Which base branch?'
+    })
+    // Why: stands in for any settlement that leaves the question row pending — the relay
+    // would accept the item and never push it.
+    const settled = { ...homeDb.getWorkerDispatch(dispatchId)!, state: 'stopped' as const }
+    vi.spyOn(homeDb, 'getWorkerDispatch').mockReturnValue(settled)
+
+    await expect(
+      homeDispatcher.dispatch(replyRequest('reply-settled', asked.question.message_id, 'main'))
+    ).resolves.toMatchObject({ ok: false, error: { code: 'dispatch_inactive' } })
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
+    expect(homeDb.getQuestion(asked.question.message_id)?.status).toBe('pending')
+  })
+
   it('wakes only waiters whose filter matches an imported control message', async () => {
     const escalationWaiter = workerDispatcher.dispatch(
       checkRequest('wait-escalation', true, 1_000, 'escalation')
@@ -305,6 +342,17 @@ describe('orchestration federation control mail', () => {
         timeoutMs,
         types
       }
+    }
+  }
+
+  function replyRequest(id: string, messageId: string, body: string): RpcRequest {
+    return {
+      id,
+      authToken: 'coordinator-token',
+      orchestrationContractVersion: ORCHESTRATION_CONTRACT_VERSION,
+      orchestrationRequestId: `${id}-request`,
+      method: 'orchestration.reply',
+      params: { from: 'term_coord', id: messageId, body }
     }
   }
 
