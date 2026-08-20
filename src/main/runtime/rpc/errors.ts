@@ -97,6 +97,7 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'answer_conflict',
   'stale_delivery',
   'waiter_exists',
+  'remote_mailbox_unpaired',
   'invalid_argument',
   ARTIFACT_SHARING_DISABLED_CODE
 ])

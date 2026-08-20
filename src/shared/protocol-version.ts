@@ -36,6 +36,13 @@ export const ORCHESTRATION_FEDERATION_LIFECYCLE_SETTLEMENT_RUNTIME_CAPABILITY =
   'orchestration.federation-lifecycle-settlement.v1' as const
 export const ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY =
   'orchestration.worker-launch-preferences.v1' as const
+// Why: older hosts strip the remoteRunMailbox param and fall back to pane-bound Run
+// scope, which a paired caller on another runtime can never satisfy; the client must
+// negotiate before it relies on the field (remote-wire-compatibility.md rule 1).
+export const ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY =
+  'orchestration.remote-run-mailbox.v1' as const
+export const ORCHESTRATION_REMOTE_RUN_MAILBOX_UNSUPPORTED_MESSAGE =
+  'peer does not support remote run mailbox (needs matching build)'
 export const ORCHESTRATION_FEDERATION_CONTROL_MAIL_PROTOCOL_VERSION = 2 as const
 export const ORCHESTRATION_FEDERATION_LIFECYCLE_SETTLEMENT_PROTOCOL_VERSION = 3 as const
 export const ORCHESTRATION_CONTRACT_VERSION = 1 as const
@@ -122,7 +129,8 @@ export const RUNTIME_CAPABILITIES = [
   AGENT_SESSION_OMP_RESUME_PATH_RUNTIME_CAPABILITY,
   FILE_MUTATION_OWNERSHIP_RUNTIME_CAPABILITY,
   ACCOUNT_IMPORT_RUNTIME_CAPABILITY,
-  CODEX_RESET_CREDIT_RUNTIME_CAPABILITY
+  CODEX_RESET_CREDIT_RUNTIME_CAPABILITY,
+  ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})
