@@ -22,6 +22,11 @@ import {
 import { clampOrchestrationAskTimeoutMs } from '../../../../shared/orchestration-ask-timeout'
 import { ORCHESTRATION_GATE_METHODS } from './orchestration-gates'
 import { resolveRunScope } from './orchestration-run-scope'
+import {
+  assertRemoteRunMailboxCaller,
+  isRemoteRunMailboxRequest,
+  resolveRemoteRunMailboxScope
+} from './orchestration-remote-run-mailbox'
 import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
@@ -92,6 +97,8 @@ const SendParams = z
     senderPaneKey: OptionalString,
     run: OptionalString,
     waitForLifecycleSettlement: OptionalBoolean,
+    // Why: capability-negotiated opt-in; see orchestration-remote-run-mailbox.ts.
+    remoteRunMailbox: OptionalBoolean,
     devMode: OptionalBoolean
   })
   .superRefine((params, ctx) => {
@@ -127,6 +134,7 @@ const CheckParams = z
     compatibilityQuestionAck: OptionalString,
     compatibilityCliCommand: z.enum(['orca', 'orca-ide', 'orca-dev']).optional(),
     run: OptionalString,
+    remoteRunMailbox: OptionalBoolean,
     wait: OptionalBoolean,
     timeoutMs: OptionalFiniteNumber
   })
@@ -149,7 +157,8 @@ const ReplyParams = z.object({
   id: requiredString('Missing --id'),
   body: requiredString('Missing --body'),
   from: OptionalString,
-  run: OptionalString
+  run: OptionalString,
+  remoteRunMailbox: OptionalBoolean
 })
 
 const InboxParams = z.object({
@@ -275,6 +284,8 @@ function resolveMessageRun(
     to?: string
     runId?: string
     payload?: string
+    // Why: a paired caller's handle names a pane on ITS runtime, so guessing a local Run from it would misdeliver.
+    allowPaneFallback?: boolean
   }
 ): { run: RunRow | undefined; dispatchId: string | undefined } {
   const db = runtime.getOrchestrationDb()
@@ -313,7 +324,7 @@ function resolveMessageRun(
   const resolvedRunId = params.runId ?? targetRunId ?? dispatch?.run_id
   let run = resolvedRunId ? db.getRun(resolvedRunId) : undefined
 
-  if (!run && params.from) {
+  if (!run && params.from && params.allowPaneFallback !== false) {
     const paneKey = params.senderPaneKey ?? runtime.getTerminalPaneKey(params.from)
     run = paneKey ? db.getCurrentRunForPane(paneKey) : undefined
   }
@@ -399,10 +410,26 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         legacyCoordinatorRunId,
         revalidateLegacyCoordinator,
         orchestrationCompatibilityCallerAuthority,
+        pairedDeviceId,
+        clientKind,
         signal
       }
     ) => {
       const db = runtime.getOrchestrationDb()
+      const remoteRunMailbox = {
+        remoteRunMailbox: params.remoteRunMailbox,
+        pairedDeviceId,
+        clientKind
+      }
+      if (isRemoteRunMailboxRequest(remoteRunMailbox)) {
+        assertRemoteRunMailboxCaller(remoteRunMailbox)
+        if (!params.to && !params.run) {
+          throw new OrchestrationError(
+            'invalid_argument',
+            'Cross-runtime mail needs an explicit recipient: --to run:<id> or --run <id>.'
+          )
+        }
+      }
       const from = params.from ?? 'unknown'
       const attestedCaller =
         orchestrationCompatibilityCallerAuthority?.terminalHandle === from
@@ -509,7 +536,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         senderPaneKey,
         to: params.to,
         runId: params.run,
-        payload: params.payload
+        payload: params.payload,
+        allowPaneFallback: !isRemoteRunMailboxRequest(remoteRunMailbox)
       })
       if (
         params.type === 'worker_done' &&
@@ -715,7 +743,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         signal,
         legacyCoordinatorRunId,
         revalidateLegacyCoordinator,
-        recordMutationReceipt
+        recordMutationReceipt,
+        pairedDeviceId,
+        clientKind
       }
     ) => {
       const db = runtime.getOrchestrationDb()
@@ -726,14 +756,18 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       const paneKey = runtime.getTerminalPaneKey(handle) ?? params.terminalPaneKey
       const boundRun = paneKey ? db.getCurrentRunForPane(paneKey) : undefined
       if (params.run || boundRun) {
-        const run = resolveRunScope(runtime, {
-          runId: params.run,
-          callerTerminalHandle: handle,
-          callerPaneKey: paneKey ?? undefined,
-          requireCurrentConsumer: true,
-          legacyCoordinatorRunId,
-          callerEvidence: orchestrationCompatibilityEvidence
-        })
+        const run = resolveRemoteRunMailboxScope(
+          runtime,
+          {
+            runId: params.run,
+            callerTerminalHandle: handle,
+            callerPaneKey: paneKey ?? undefined,
+            requireCurrentConsumer: true,
+            legacyCoordinatorRunId,
+            callerEvidence: orchestrationCompatibilityEvidence
+          },
+          { remoteRunMailbox: params.remoteRunMailbox, pairedDeviceId, clientKind }
+        )
         const generation = run.consumer_generation
         const address = `run:${run.id}`
         runtime.ensureOrchestrationFederationRelay(run.id)
@@ -1018,9 +1052,18 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     params: ReplyParams,
     handler: async (
       params,
-      { orchestrationCompatibilityEvidence, runtime, legacyCoordinatorRunId }
+      {
+        orchestrationCompatibilityEvidence,
+        runtime,
+        legacyCoordinatorRunId,
+        pairedDeviceId,
+        clientKind
+      }
     ) => {
       const db = runtime.getOrchestrationDb()
+      if (isRemoteRunMailboxRequest({ remoteRunMailbox: params.remoteRunMailbox })) {
+        assertRemoteRunMailboxCaller({ pairedDeviceId, clientKind })
+      }
       const original = db.getMessageById(params.id)
       if (!original) {
         throw new Error(`Message not found: ${params.id}`)
@@ -1050,13 +1093,17 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
 
       const question = db.getQuestion(params.id)
       if (question) {
-        const run = resolveRunScope(runtime, {
-          runId: params.run ?? question.run_id,
-          callerTerminalHandle: params.from,
-          requireCurrentConsumer: true,
-          legacyCoordinatorRunId,
-          callerEvidence: orchestrationCompatibilityEvidence
-        })
+        const run = resolveRemoteRunMailboxScope(
+          runtime,
+          {
+            runId: params.run ?? question.run_id,
+            callerTerminalHandle: params.from,
+            requireCurrentConsumer: true,
+            legacyCoordinatorRunId,
+            callerEvidence: orchestrationCompatibilityEvidence
+          },
+          { remoteRunMailbox: params.remoteRunMailbox, pairedDeviceId, clientKind }
+        )
         const federated = db.getFederatedDispatch(question.dispatch_id)
         // Why: fence before the answer is recorded so a refused reply applies no effects;
         // an already-answered question still resolves to its recorded answer.
