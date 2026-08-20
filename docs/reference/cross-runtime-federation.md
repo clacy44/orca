@@ -119,8 +119,18 @@ selector, or `new-top-level` with an explicit remote repo selector.
   access path, not a replacement) — that ingress filtering is what satisfies the "do not
   expose the runtime port" guidance above.
 - **Coordinator→worker mail only reaches an ACTIVE Dispatch.** After the worker sends
-  `worker_done` the Dispatch is fenced and `orca orchestration send --to dispatch:<id>`
-  returns `dispatch_inactive`. Send follow-ups before completion, or start a new Dispatch.
+  `worker_done` the Dispatch is fenced and both `orca orchestration send --to dispatch:<id>`
+  and `orca orchestration reply` return `dispatch_inactive` rather than queueing an item the
+  relay can never push. Send follow-ups before completion, or start a new Dispatch.
+- **`worker-show` reports the relay's own health.** `sync` carries `lastSyncAt`,
+  `lastError` and `consecutiveFailures` for the home-driven pull — a federated worker keeps
+  reporting `ready` even when nothing is syncing, so check `sync` before believing the
+  state. `workerMail` reports coordinator mail still queued for the worker and whether the
+  Dispatch can still receive it; `deliverable: false` with a non-zero `pending` means that
+  mail was stranded by a settlement that landed first.
+- **A failing relay backs off.** Sync retries start at 1s and double to a 60s cap while the
+  peer is unreachable, resetting on the first success, and relays for unsettled dispatches
+  are re-armed automatically when the runtime restarts.
 - **`orca environment roster` lists terminals across every runtime at once.** It polls
   the local runtime and each saved environment in parallel with a bounded per-peer
   timeout, so a peer that is down contributes one `unreachable(<reason>)` row instead of

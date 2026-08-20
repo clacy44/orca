@@ -26,6 +26,7 @@ import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { RunRow } from '../../orchestration/types'
 import { encodeFederatedControlMessage } from '../../orchestration/federation-control-message'
@@ -558,12 +559,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               `Federated Dispatch ${dispatchId} does not support coordinator control mail; start a fresh worker after updating its Orca server.`
             )
           }
-          if (db.getWorkerDispatch(dispatchId)?.state !== 'ready') {
-            throw new OrchestrationError(
-              'dispatch_inactive',
-              `Federated Dispatch ${dispatchId} is not active.`
-            )
-          }
+          requireFederatedDispatchAcceptsWorkerMail(db, dispatchId)
           if (params.type === 'worker_done' || params.type === 'heartbeat') {
             throw new OrchestrationError(
               'invalid_argument',
@@ -1061,13 +1057,18 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           legacyCoordinatorRunId,
           callerEvidence: orchestrationCompatibilityEvidence
         })
+        const federated = db.getFederatedDispatch(question.dispatch_id)
+        // Why: fence before the answer is recorded so a refused reply applies no effects;
+        // an already-answered question still resolves to its recorded answer.
+        if (federated && question.status === 'pending') {
+          requireFederatedDispatchAcceptsWorkerMail(db, question.dispatch_id)
+        }
         const answered = db.answerQuestion({
           messageId: question.message_id,
           runId: run.id,
           consumerGeneration: run.consumer_generation,
           body: params.body
         })
-        const federated = db.getFederatedDispatch(question.dispatch_id)
         if (federated) {
           db.enqueueFederationRelay({
             dispatchId: question.dispatch_id,

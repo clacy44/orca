@@ -94,4 +94,18 @@ describe('federated worker-show sync health', () => {
 
     await expect(workerShow(runtime, dispatchId)).resolves.toMatchObject({ sync: null })
   })
+
+  it('counts coordinator mail still queued for the worker', async () => {
+    const { db, runtime, dispatchId } = createReadyFederatedDispatch()
+    db.enqueueFederationRelay({
+      dispatchId,
+      direction: 'to_worker',
+      kind: 'control_message',
+      payload: JSON.stringify({ subject: 'Follow-up', body: 'Keep going', type: 'status' })
+    })
+
+    await expect(workerShow(runtime, dispatchId)).resolves.toMatchObject({
+      workerMail: { pending: 1, deliverable: true }
+    })
+  })
 })
