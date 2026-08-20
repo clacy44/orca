@@ -13,7 +13,10 @@ vi.mock('./federation-sync', () => ({
 
 import { OrcaRuntimeService } from '../orca-runtime'
 import type { OrchestrationEnvironmentTransport } from './environment-transport'
-import { isFederationRelayActiveWorkerState } from './federation-relay-arming'
+import {
+  isFederationRelayActiveWorkerState,
+  selectFederationRelayResumeDispatchIds
+} from './federation-relay-arming'
 import {
   federationRelayIntervalMs,
   FEDERATION_RELAY_MAX_INTERVAL_MS,
@@ -58,6 +61,18 @@ describe('federation relay arming', () => {
         isFederationRelayActiveWorkerState
       )
     ).toEqual([false, false, false, false, false, false])
+  })
+
+  it('selects the still-active dispatches to resume and de-duplicates them', () => {
+    expect(
+      selectFederationRelayResumeDispatchIds([
+        { dispatchId: 'dispatch_ready', workerState: 'ready' },
+        { dispatchId: 'dispatch_settled', workerState: 'succeeded' },
+        { dispatchId: 'dispatch_stopping', workerState: 'stopping' },
+        { dispatchId: 'dispatch_ready', workerState: 'ready' },
+        { dispatchId: 'dispatch_gone', workerState: undefined }
+      ])
+    ).toEqual(['dispatch_ready', 'dispatch_stopping'])
   })
 })
 
@@ -183,5 +198,63 @@ describe('federation relay scheduling', () => {
 
     await vi.advanceTimersByTimeAsync(60_000)
     expect(harness.sync).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-arms unsettled federated dispatches after a restart', async () => {
+    const { runtime, sync } = createRelayHarness({
+      dispatch_starting: 'starting',
+      dispatch_ready: 'ready',
+      dispatch_stopping: 'stopping',
+      dispatch_done: 'succeeded'
+    })
+
+    expect(runtime.resumeOrchestrationFederationRelayAfterRestart()).toEqual([
+      'dispatch_starting',
+      'dispatch_ready',
+      'dispatch_stopping'
+    ])
+    expect(sync.mock.calls.map(([, dispatchId]) => dispatchId)).toEqual([
+      'dispatch_starting',
+      'dispatch_ready',
+      'dispatch_stopping'
+    ])
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(sync).toHaveBeenCalledTimes(6)
+    runtime.stopOrchestrationFederationRelay()
+  })
+
+  it('resumes nothing when the runtime cannot federate', () => {
+    const runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb({
+      listActiveFederatedDispatches: () => [{ dispatch_id: 'dispatch_ready' }],
+      getWorkerDispatch: () => ({ state: 'ready' })
+    } as never)
+
+    expect(runtime.resumeOrchestrationFederationRelayAfterRestart()).toEqual([])
+  })
+
+  it('survives a boot scan that cannot read the orchestration database', () => {
+    const runtime = new OrcaRuntimeService(null, undefined, {
+      orchestrationEnvironmentTransport: IDLE_TRANSPORT
+    })
+    const scanWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // Why: installing the database already reads it, so the failure has to start after.
+    let readable = true
+    runtime.setOrchestrationDb({
+      listActiveFederatedDispatches: () => {
+        if (!readable) {
+          throw new Error('database is locked')
+        }
+        return []
+      },
+      findNextTerminalFederatedDispatchPendingAcknowledgment: () => undefined,
+      getUndeliveredUnreadMailboxHandles: () => []
+    } as never)
+    readable = false
+
+    expect(runtime.resumeOrchestrationFederationRelayAfterRestart()).toEqual([])
+    expect(scanWarn).toHaveBeenCalled()
+    scanWarn.mockRestore()
   })
 })

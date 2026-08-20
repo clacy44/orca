@@ -167,6 +167,7 @@ import {
   releaseFederationAckCheckpoint
 } from './orchestration/federation-ack-checkpoints'
 import { syncFederatedDispatch } from './orchestration/federation-sync'
+import { selectFederationRelayResumeDispatchIds } from './orchestration/federation-relay-arming'
 import {
   federationRelayIntervalMs,
   recordFederationSyncFailure,
@@ -4839,6 +4840,31 @@ export class OrcaRuntimeService {
       this.armOrchestrationFederationRelay(dispatch.dispatch_id)
     }
     this.ensureTerminalHistoryRecovery()
+  }
+
+  // Why: a restart drops every relay timer while both sides still hold queued mail;
+  // rearming at boot resumes delivery instead of waiting for an RPC to touch the Run.
+  resumeOrchestrationFederationRelayAfterRestart(): string[] {
+    if (!this.orchestrationEnvironmentTransport) {
+      return []
+    }
+    let dispatchIds: string[] = []
+    try {
+      const db = this.getOrchestrationDb()
+      dispatchIds = selectFederationRelayResumeDispatchIds(
+        db.listActiveFederatedDispatches().map((dispatch) => ({
+          dispatchId: dispatch.dispatch_id,
+          workerState: db.getWorkerDispatch(dispatch.dispatch_id)?.state
+        }))
+      )
+    } catch (error) {
+      console.warn('[orchestration] Federation relay resume scan failed:', error)
+      return []
+    }
+    for (const dispatchId of dispatchIds) {
+      this.armOrchestrationFederationRelay(dispatchId)
+    }
+    return dispatchIds
   }
 
   getOrchestrationFederationSyncHealth(dispatchId: string): FederationSyncHealth | null {

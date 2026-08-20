@@ -2557,6 +2557,9 @@ void app.whenReady().then(async () => {
   })
   runtime = runtimeService
   runtimeService.prepareLegacyWorkerTerminalRecovery()
+  // Why: federated mail queued before the restart resumes here instead of waiting for
+  // an RPC to touch the Run.
+  runtimeService.resumeOrchestrationFederationRelayAfterRestart()
   publishProviderSessionChanges(agentHookServer.getProviderSessionIdentities())
   browserManager.setBrowserGuestStateChangedListener((worktreeId) => {
     runtimeService.notifyMobileSessionTabsChanged(worktreeId)
