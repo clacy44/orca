@@ -99,7 +99,10 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
           server: { environmentId: server.environmentId, name: server.name },
           remoteRuntimeEpoch: remote.runtimeEpoch,
           terminal: remote.terminal,
-          observation: remote.observation
+          observation: remote.observation,
+          // Why: additive field — it tells a coordinator whether the home-driven pull is
+          // still landing, which state/stage alone cannot (both stay green while it fails).
+          sync: runtime.getOrchestrationFederationSyncHealth(params.dispatch)
         }
       }
       if (worker.runtime_epoch && worker.runtime_epoch !== runtime.getRuntimeId()) {
