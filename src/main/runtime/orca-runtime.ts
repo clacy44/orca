@@ -163,6 +163,13 @@ import type {
 } from './orchestration/environment-transport'
 import { clearFederationAckCheckpoints } from './orchestration/federation-ack-checkpoints'
 import { syncFederatedDispatch } from './orchestration/federation-sync'
+import { isFederationRelayActiveWorkerState } from './orchestration/federation-relay-arming'
+import {
+  federationRelayIntervalMs,
+  recordFederationSyncFailure,
+  recordFederationSyncSuccess,
+  type FederationSyncHealth
+} from './orchestration/federation-sync-health'
 import { formatMessagePointer } from './orchestration/formatter'
 import { selectExactWorkerProviderSession } from './orchestration/worker-provider-session'
 import type {
@@ -2698,12 +2705,14 @@ export class OrcaRuntimeService {
   private managedHookReconciliationGeneration = 0
   private managedHookReconciliationTail: Promise<void> = Promise.resolve()
   private readonly orchestrationEnvironmentTransport: OrchestrationEnvironmentTransport | null
-  private readonly orchestrationFederationTimers = new Map<string, ReturnType<typeof setInterval>>()
+  private readonly orchestrationFederationRelays = new Set<string>()
+  private readonly orchestrationFederationTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly orchestrationFederationSyncs = new Map<
     string,
     { db: OrchestrationDb; promise: Promise<void> }
   >()
   private readonly orchestrationFederationWarnings = new Set<string>()
+  private readonly orchestrationFederationSyncHealth = new Map<string, FederationSyncHealth>()
   private rendererGraphEpoch = 0
   private graphStatus: RuntimeGraphStatus = 'unavailable'
   private authoritativeWindowId: number | null = null
@@ -3838,6 +3847,7 @@ export class OrcaRuntimeService {
     clearFederationAckCheckpoints(this)
     this.orchestrationFederationSyncs.clear()
     this.orchestrationFederationWarnings.clear()
+    this.orchestrationFederationSyncHealth.clear()
     this._orchestrationDb = db
   }
 
@@ -4678,15 +4688,25 @@ export class OrcaRuntimeService {
       .then(() => {
         if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
           this.orchestrationFederationWarnings.delete(dispatchId)
+          this.orchestrationFederationSyncHealth.set(
+            dispatchId,
+            recordFederationSyncSuccess(new Date().toISOString())
+          )
         }
       })
       .catch((error: unknown) => {
-        if (
-          this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync &&
-          !this.orchestrationFederationWarnings.has(dispatchId)
-        ) {
-          console.warn(`[orchestration] Federation sync failed for ${dispatchId}:`, error)
-          this.orchestrationFederationWarnings.add(dispatchId)
+        if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
+          this.orchestrationFederationSyncHealth.set(
+            dispatchId,
+            recordFederationSyncFailure(
+              this.orchestrationFederationSyncHealth.get(dispatchId),
+              error
+            )
+          )
+          if (!this.orchestrationFederationWarnings.has(dispatchId)) {
+            console.warn(`[orchestration] Federation sync failed for ${dispatchId}:`, error)
+            this.orchestrationFederationWarnings.add(dispatchId)
+          }
         }
         throw error
       })
@@ -4713,36 +4733,70 @@ export class OrcaRuntimeService {
       return
     }
     for (const dispatch of this.getOrchestrationDb().listActiveFederatedDispatches(runId)) {
-      if (this.orchestrationFederationTimers.has(dispatch.dispatch_id)) {
-        continue
-      }
-      const tick = () => {
-        const worker = this.getOrchestrationDb().getWorkerDispatch(dispatch.dispatch_id)
-        if (!worker || !['starting', 'ready', 'stopping'].includes(worker.state)) {
-          const activeTimer = this.orchestrationFederationTimers.get(dispatch.dispatch_id)
-          if (activeTimer) {
-            clearInterval(activeTimer)
-          }
-          this.orchestrationFederationTimers.delete(dispatch.dispatch_id)
-          this.orchestrationFederationWarnings.delete(dispatch.dispatch_id)
+      this.armOrchestrationFederationRelay(dispatch.dispatch_id)
+    }
+  }
+
+  getOrchestrationFederationSyncHealth(dispatchId: string): FederationSyncHealth | null {
+    return this.orchestrationFederationSyncHealth.get(dispatchId) ?? null
+  }
+
+  private armOrchestrationFederationRelay(dispatchId: string): void {
+    if (this.orchestrationFederationRelays.has(dispatchId)) {
+      return
+    }
+    this.orchestrationFederationRelays.add(dispatchId)
+    this.tickOrchestrationFederationRelay(dispatchId)
+  }
+
+  private tickOrchestrationFederationRelay(dispatchId: string): void {
+    if (
+      !isFederationRelayActiveWorkerState(
+        this.getOrchestrationDb().getWorkerDispatch(dispatchId)?.state
+      )
+    ) {
+      this.disarmOrchestrationFederationRelay(dispatchId)
+      return
+    }
+    // Why: schedule the next tick only once this one settles, so a slow or failing peer
+    // cannot stack overlapping syncs behind the coalescing map.
+    void this.syncOrchestrationFederatedDispatch(dispatchId)
+      .catch(() => undefined)
+      .finally(() => {
+        if (!this.orchestrationFederationRelays.has(dispatchId)) {
           return
         }
-        void this.syncOrchestrationFederatedDispatch(dispatch.dispatch_id).catch(() => undefined)
-      }
-      const timer = setInterval(tick, 1_000)
-      timer.unref?.()
-      this.orchestrationFederationTimers.set(dispatch.dispatch_id, timer)
-      tick()
+        const timer = setTimeout(
+          () => this.tickOrchestrationFederationRelay(dispatchId),
+          federationRelayIntervalMs(
+            this.orchestrationFederationSyncHealth.get(dispatchId)?.consecutiveFailures ?? 0
+          )
+        )
+        timer.unref?.()
+        this.orchestrationFederationTimers.set(dispatchId, timer)
+      })
+  }
+
+  private disarmOrchestrationFederationRelay(dispatchId: string): void {
+    const timer = this.orchestrationFederationTimers.get(dispatchId)
+    if (timer) {
+      clearTimeout(timer)
     }
+    this.orchestrationFederationRelays.delete(dispatchId)
+    this.orchestrationFederationTimers.delete(dispatchId)
+    this.orchestrationFederationWarnings.delete(dispatchId)
+    this.orchestrationFederationSyncHealth.delete(dispatchId)
   }
 
   stopOrchestrationFederationRelay(): void {
     for (const timer of this.orchestrationFederationTimers.values()) {
-      clearInterval(timer)
+      clearTimeout(timer)
     }
+    this.orchestrationFederationRelays.clear()
     this.orchestrationFederationTimers.clear()
     this.orchestrationFederationWarnings.clear()
     this.orchestrationFederationSyncs.clear()
+    this.orchestrationFederationSyncHealth.clear()
     clearFederationAckCheckpoints(this)
   }
 
