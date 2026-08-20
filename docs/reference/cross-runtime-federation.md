@@ -121,6 +121,11 @@ selector, or `new-top-level` with an explicit remote repo selector.
 - **Coordinator→worker mail only reaches an ACTIVE Dispatch.** After the worker sends
   `worker_done` the Dispatch is fenced and `orca orchestration send --to dispatch:<id>`
   returns `dispatch_inactive`. Send follow-ups before completion, or start a new Dispatch.
+- **`orca environment roster` lists terminals across every runtime at once.** It polls
+  the local runtime and each saved environment in parallel with a bounded per-peer
+  timeout, so a peer that is down contributes one `unreachable(<reason>)` row instead of
+  failing the roster. Use it to find a peer terminal handle without guessing which
+  `--environment` owns it.
 - **Inspecting a saved peer uses `--environment`, not `--name`:**
   `orca environment show --environment <selector>` (only `environment add` takes `--name`).
 - **Peer re-pairing rotates the peer's identity key.** If the peer is re-paired

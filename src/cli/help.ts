@@ -32,6 +32,7 @@ Environments:
   environment add           Save a remote Orca runtime from a pairing code
   environment list          List saved remote Orca runtimes
   environment show          Show one saved remote Orca runtime
+  environment roster        List terminals across the local runtime and every saved environment
   environment rm            Remove a saved remote Orca runtime
 
 Environment Recipes:
@@ -226,6 +227,7 @@ Common Commands:
   orca environment add --name <name> --pairing-code <code> [--json]
   orca environment list [--json]
   orca environment show --environment <selector> [--json]
+  orca environment roster [--limit <n>] [--timeout-ms <ms>] [--json]
   orca environment rm --environment <selector> [--json]
   orca worktree list [--repo <selector>] [--limit <n>] [--json]
   orca worktree create --name <name> [--repo <selector>|--project <id> [--host <host-id>]|--project-host-setup <id>] [--agent <id>] [--prompt <text>] [--setup run|skip|inherit] [--base-branch <ref>] [--issue <number>] [--linear-issue <identifier-or-url>] [--comment <text>] [--parent-worktree <selector>] [--no-parent] [--run-hooks] [--activate] [--json]
