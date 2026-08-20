@@ -73,7 +73,8 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
       'From an active Dispatch, an omitted recipient defaults to its owning Run mailbox.',
       'Use --to dispatch:<id> for attempt-specific coordinator guidance; Orca durably relays it to a connected worker server.',
       'A worker_done with the active task/dispatch IDs completes that task only from the dispatched pane. When stable pane identity is unavailable, the sender handle must exactly match the dispatch assignee; injected preambles include the correct --from value.',
-      'Prefer --task-id/--dispatch-id/etc. over raw --payload JSON in worker commands; PowerShell strips JSON quotes easily.'
+      'Prefer --task-id/--dispatch-id/etc. over raw --payload JSON in worker commands; PowerShell strips JSON quotes easily.',
+      'Use --to run:<id> --environment <peer> to post into a Run owned by another runtime; a Run ID is meaningless outside its own runtime.'
     ]
   },
   {
@@ -107,7 +108,8 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     notes: [
       'On Windows PowerShell, quote comma-separated type filters, e.g. --types "worker_done,escalation".',
       '--format renders the returned rows as local text only; it never writes to another terminal.',
-      'A bound Run replays the same Delivery until --ack; process every message before acknowledging.'
+      'A bound Run replays the same Delivery until --ack; process every message before acknowledging.',
+      'A Run lives in one runtime. To read a Run owned by another runtime, add --environment <peer>; the ack lands in that peer, not locally.'
     ]
   },
   {

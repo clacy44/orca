@@ -9,6 +9,10 @@ import {
 } from '../flags'
 import { RuntimeClientError } from '../runtime-client'
 import { requireWorkerDoneSettlement } from './orchestration-worker-settlement'
+import {
+  negotiateRemoteRunMailbox,
+  withRemoteRunMailboxDegradation
+} from './orchestration-remote-run-mailbox'
 import { getTerminalHandle } from '../selectors'
 import {
   clampOrchestrationAskTimeoutMs,
@@ -570,10 +574,16 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
 
     // Why: lifecycle senders preserve ORCA_TERMINAL_HANDLE across restarts for older runtimes.
     const from = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from')
+    const run = getOptionalStringFlag(flags, 'run')
+    const remoteRunMailbox = await negotiateRemoteRunMailbox(
+      client,
+      run !== undefined || to?.startsWith('run:') === true
+    )
     const sendParams = {
       from,
       to,
-      run: getOptionalStringFlag(flags, 'run'),
+      run,
+      remoteRunMailbox: remoteRunMailbox.param,
       subject: getRequiredStringFlag(flags, 'subject'),
       body: getOptionalStringFlag(flags, 'body'),
       type,
@@ -586,12 +596,14 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       devMode: isDevCliInvocation()
     }
     const dispatchCapability = getOptionalStringFlag(flags, 'dispatch-capability')
-    const result = await callMutation<OrchestrationSendResult>(
-      client,
-      flags,
-      'orchestration.send',
-      sendParams,
-      dispatchCapability ? { orchestrationCapability: dispatchCapability } : undefined
+    const result = await withRemoteRunMailboxDegradation(remoteRunMailbox, () =>
+      callMutation<OrchestrationSendResult>(
+        client,
+        flags,
+        'orchestration.send',
+        sendParams,
+        dispatchCapability ? { orchestrationCapability: dispatchCapability } : undefined
+      )
     )
     await requireWorkerDoneSettlement(client, type, sendParams.payload, result.result)
     if ('lifecycle' in result.result && result.result.lifecycle?.action === 'rejected') {
@@ -623,6 +635,8 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     }
     const timeoutMs = getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms')
     const explicitTerminal = getOptionalStringFlag(flags, 'terminal')
+    const requestedRun = getOptionalStringFlag(flags, 'run')
+    const remoteRunMailbox = await negotiateRemoteRunMailbox(client, requestedRun !== undefined)
     const terminal = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'terminal')
 
     // Why: Claude Code auto-backgrounds subprocesses silent ~2 min; emit JSON keepalives to stderr (stdout stays one payload). See §3.4.
@@ -640,22 +654,29 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     }
     let result: Awaited<ReturnType<typeof client.call<CheckResult>>>
     try {
-      result = await callMutation<CheckResult>(client, flags, 'orchestration.check', {
-        terminal,
-        terminalPaneKey: explicitTerminal ? undefined : process.env.ORCA_PANE_KEY || undefined,
-        // Why: peek also sends unread:false so pre-peek runtimes degrade to non-consuming all mode instead of destructive mark-read.
-        unread: flags.has('unread') ? true : peek ? false : undefined,
-        peek: peek ? true : undefined,
-        all: flags.has('all') ? true : undefined,
-        types: getOptionalStringFlag(flags, 'types'),
-        format: flags.has('format') ? true : undefined,
-        inject: flags.has('inject') ? true : undefined,
-        compatibilityCliCommand: resolveCompatibilityCliCommand(),
-        run: getOptionalStringFlag(flags, 'run'),
-        ack: getOptionalStringFlag(flags, 'ack'),
-        wait: wait ? true : undefined,
-        timeoutMs
-      })
+      result = await withRemoteRunMailboxDegradation(remoteRunMailbox, () =>
+        callMutation<CheckResult>(client, flags, 'orchestration.check', {
+          terminal,
+          // Why: a local pane key names nothing on the peer, so never offer it as identity there.
+          terminalPaneKey:
+            explicitTerminal || remoteRunMailbox.remote
+              ? undefined
+              : process.env.ORCA_PANE_KEY || undefined,
+          // Why: peek also sends unread:false so pre-peek runtimes degrade to non-consuming all mode instead of destructive mark-read.
+          unread: flags.has('unread') ? true : peek ? false : undefined,
+          peek: peek ? true : undefined,
+          all: flags.has('all') ? true : undefined,
+          types: getOptionalStringFlag(flags, 'types'),
+          format: flags.has('format') ? true : undefined,
+          inject: flags.has('inject') ? true : undefined,
+          compatibilityCliCommand: resolveCompatibilityCliCommand(),
+          run: requestedRun,
+          remoteRunMailbox: remoteRunMailbox.param,
+          ack: getOptionalStringFlag(flags, 'ack'),
+          wait: wait ? true : undefined,
+          timeoutMs
+        })
+      )
     } finally {
       stopKeepalive?.()
     }
@@ -710,16 +731,16 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
 
   'orchestration reply': async ({ flags, client, cwd, json }) => {
     const from = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from')
-    const result = await callMutation<{ message: { id: string } }>(
-      client,
-      flags,
-      'orchestration.reply',
-      {
+    // Why: only the runtime knows whether --id names a question (Run-scoped) or plain mail, so negotiate for every remote reply.
+    const remoteRunMailbox = await negotiateRemoteRunMailbox(client, true)
+    const result = await withRemoteRunMailboxDegradation(remoteRunMailbox, () =>
+      callMutation<{ message: { id: string } }>(client, flags, 'orchestration.reply', {
         id: getRequiredStringFlag(flags, 'id'),
         body: getRequiredStringFlag(flags, 'body'),
         run: getOptionalStringFlag(flags, 'run'),
+        remoteRunMailbox: remoteRunMailbox.param,
         from
-      }
+      })
     )
     printResult(result, json, (r) => `Replied ${r.message.id}`)
   },
