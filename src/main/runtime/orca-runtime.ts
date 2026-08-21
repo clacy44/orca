@@ -31912,6 +31912,17 @@ export class OrcaRuntimeService {
     return pty.worktreeId === worktreeId && pty.tabId === tab.parentTabId && pty.paneKey === paneKey
   }
 
+  // Why: the gate's first-sighting stamp lives on the PTY snapshot; observation callers need it as
+  // evidence of dwell, and must never fail because a handle went stale — return null on any error.
+  getTerminalWaitBlockedAt(handle: string): number | null {
+    try {
+      const ptyId = this.getTerminalAgentStatusPtyId(handle)
+      return this.getTerminalAgentStatusSnapshot(handle, ptyId).waitBlockedAt
+    } catch {
+      return null
+    }
+  }
+
   // Why: group address resolution (Section 4.5) queries per-handle status and must not throw on stale handles; return null on any error.
   getAgentStatusForHandle(handle: string): string | null {
     try {

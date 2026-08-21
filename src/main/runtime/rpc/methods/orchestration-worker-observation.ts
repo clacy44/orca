@@ -3,15 +3,22 @@ import type { OrchestrationDb } from '../../orchestration/db'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { FederatedDispatchRow, WorkerDispatchRow } from '../../orchestration/types'
 
+export type WorkerAgentGateObservation = {
+  agentStatus?: 'working' | 'permission' | 'idle'
+  blockedSince?: string
+}
+
+export type WorkerTerminalObservation = WorkerAgentGateObservation & {
+  terminal: Awaited<ReturnType<OrcaRuntimeService['showTerminal']>> | null
+  exact: boolean
+  status: 'unattached' | 'missing' | 'identity_changed' | 'running' | 'exited'
+}
+
 export async function inspectWorkerTerminal(
   runtime: OrcaRuntimeService,
   db: OrchestrationDb,
   dispatchId: string
-): Promise<{
-  terminal: Awaited<ReturnType<OrcaRuntimeService['showTerminal']>> | null
-  exact: boolean
-  status: 'unattached' | 'missing' | 'identity_changed' | 'running' | 'exited'
-}> {
+): Promise<WorkerTerminalObservation> {
   const worker = db.getWorkerDispatch(dispatchId)
   if (!worker?.agent_terminal_handle) {
     return { terminal: null, exact: false, status: 'unattached' }
@@ -28,7 +35,43 @@ export async function inspectWorkerTerminal(
   return {
     terminal,
     exact,
-    status: exact ? (terminal.connected === false ? 'exited' : 'running') : 'identity_changed'
+    status: exact ? (terminal.connected === false ? 'exited' : 'running') : 'identity_changed',
+    // Why: a non-exact handle names some other process, so its status would be a fabricated
+    // verdict about this worker; identity_changed stays the whole answer.
+    ...(exact ? await observeWorkerAgentGate(runtime, worker.agent_terminal_handle) : {})
+  }
+}
+
+// Why: getTerminalAgentStatus throws for gone/exited/stale handles, and worker-show already
+// succeeds on those — every failure must read as unknown (absent), never propagate.
+async function observeWorkerAgentGate(
+  runtime: OrcaRuntimeService,
+  handle: string
+): Promise<WorkerAgentGateObservation> {
+  const agentStatus = await runtime
+    .getTerminalAgentStatus(handle)
+    .then((result) => result.status)
+    .catch(() => null)
+  if (agentStatus !== 'permission') {
+    return agentStatus ? { agentStatus } : {}
+  }
+  // Why: blockedSince denotes the gate's first sighting, so it means nothing unless the worker
+  // is actually at one; a falsy stamp is no evidence and must stay absent rather than read as 0.
+  const blockedAt = runtime.getTerminalWaitBlockedAt(handle)
+  return blockedAt
+    ? { agentStatus, blockedSince: new Date(blockedAt).toISOString() }
+    : { agentStatus }
+}
+
+export function exposeWorkerObservation(observation: WorkerTerminalObservation): {
+  status: string
+  exactWorker: boolean
+} & WorkerAgentGateObservation {
+  return {
+    status: observation.status,
+    exactWorker: observation.exact,
+    ...(observation.agentStatus ? { agentStatus: observation.agentStatus } : {}),
+    ...(observation.blockedSince ? { blockedSince: observation.blockedSince } : {})
   }
 }
 
@@ -71,7 +114,9 @@ export async function callFederatedWorkerShow(
     residualResources: unknown[]
   }
   terminal: unknown
-  observation: { status: string; exactWorker: boolean }
+  // Why optional: the gate fields arrive only from a peer new enough to observe them; absent
+  // must read as unknown on the home rather than as a verdict.
+  observation: { status: string; exactWorker: boolean } & WorkerAgentGateObservation
 }> {
   return (await runtime.callOrchestrationWorkerServer(
     federated.environment_id,

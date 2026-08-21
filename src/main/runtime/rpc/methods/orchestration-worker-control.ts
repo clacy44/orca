@@ -10,6 +10,7 @@ import { OptionalFiniteNumber, requiredString } from '../schemas'
 import {
   callFederatedWorkerShow,
   exposeWorker,
+  exposeWorkerObservation,
   inspectWorkerTerminal,
   resolvePinnedFederatedServer
 } from './orchestration-worker-observation'
@@ -129,7 +130,7 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
         dispatch,
         worker: exposeWorker(worker),
         terminal: observation.exact ? observation.terminal : null,
-        observation: { status: observation.status, exactWorker: observation.exact },
+        observation: exposeWorkerObservation(observation),
         terminalResource: resource ? exposeWorkerTerminalResource(resource) : null
       }
     }
