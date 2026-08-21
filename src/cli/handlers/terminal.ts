@@ -1,4 +1,5 @@
 import type {
+  RuntimeTerminalAgentStatus,
   RuntimeTerminalClose,
   RuntimeTerminalCreate,
   RuntimeTerminalFocus,
@@ -13,6 +14,7 @@ import type {
 import type { CommandHandler } from '../dispatch'
 import { shouldUseRendererBackedInteractiveTerminal } from '../codex-command-classification'
 import {
+  formatTerminalAgentStatus,
   formatTerminalClose,
   formatTerminalCreate,
   formatTerminalFocus,
@@ -92,6 +94,25 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
       client: { id: 'orca-cli', type: 'desktop' }
     })
     printResult(result, json, formatTerminalSend)
+  },
+  'terminal agent-status': async ({ flags, client, json }) => {
+    // Why required: a coordinator asks about a named worker pane, and with --environment the
+    // cwd-derived active terminal names nothing on the peer that would answer.
+    const terminal = getRequiredStringFlag(flags, 'terminal')
+    const result = await client
+      .call<{ agentStatus: RuntimeTerminalAgentStatus }>('terminal.agentStatus', { terminal })
+      .catch((error: unknown) => {
+        // Why: an older host answers an unknown method with method_not_found; name the
+        // compatibility gap instead of surfacing a raw protocol code.
+        if (error instanceof RuntimeClientError && error.code === 'method_not_found') {
+          throw new RuntimeClientError(
+            'capability_unsupported',
+            'The connected Orca runtime does not support terminal agent-status. Update or restart Orca and try again.'
+          )
+        }
+        throw error
+      })
+    printResult(result, json, formatTerminalAgentStatus)
   },
   'terminal wait': async ({ flags, client, cwd, json }) => {
     const timeoutMs = getOptionalPositiveIntegerFlag(flags, 'timeout-ms')

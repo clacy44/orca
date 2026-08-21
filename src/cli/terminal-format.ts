@@ -1,4 +1,5 @@
 import type {
+  RuntimeTerminalAgentStatus,
   RuntimeTerminalClose,
   RuntimeTerminalCreate,
   RuntimeTerminalFocus,
@@ -176,6 +177,18 @@ export function formatTerminalClose(result: { close: RuntimeTerminalClose }): st
   }
   const ptyNote = result.close.ptyKilled ? ' PTY killed.' : ''
   return `Closed terminal ${result.close.handle}.${ptyNote}`
+}
+
+export function formatTerminalAgentStatus(result: {
+  agentStatus: RuntimeTerminalAgentStatus
+}): string {
+  return [
+    `handle: ${result.agentStatus.handle}`,
+    `isRunningAgent: ${result.agentStatus.isRunningAgent}`,
+    // Why unknown, not a value: a null status is the runtime declining to judge, and printing
+    // `null` reads as a verdict a coordinator would act on.
+    `status: ${result.agentStatus.status ?? 'unknown'}`
+  ].join('\n')
 }
 
 export function formatTerminalWait(result: { wait: RuntimeTerminalWait }): string {

@@ -83,6 +83,7 @@ Terminals:
   terminal read             Read bounded terminal output
   terminal send             Send input to a live terminal
   terminal wait             Wait for a terminal condition (exit, tui-idle)
+  terminal agent-status     Report whether a terminal agent is working, gated, or idle
   terminal stop             Stop terminals for a worktree
   terminal create           Create a terminal session in a worktree
   terminal rename           Set or clear the title of a terminal tab
@@ -244,6 +245,7 @@ Common Commands:
   orca terminal read [--terminal <handle>] [--cursor <n>] [--limit <n>] [--json]
   orca terminal send [--terminal <handle>] [--text <text>] [--enter] [--interrupt] [--json]
   orca terminal wait [--terminal <handle>] --for exit|tui-idle [--timeout-ms <ms>] [--json]
+  orca terminal agent-status --terminal <handle> [--environment <peer>] [--json]
   orca terminal stop --worktree <selector> [--json]
   orca terminal create [--worktree <selector>] [--title <name>] [--command <text>] [--focus] [--json]
   orca terminal split [--terminal <handle>] [--direction horizontal|vertical] [--json]
