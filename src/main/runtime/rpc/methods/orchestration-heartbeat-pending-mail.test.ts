@@ -182,12 +182,12 @@ describe('orchestration.send pendingMail', () => {
     expect(result).not.toHaveProperty('pendingMail')
   })
 
-  it('answers a suppressed heartbeat with the verdict instead of a mail hint', async () => {
+  it('answers a suppressed heartbeat with the verdict and still reports waiting mail', async () => {
     const { dispatcher, dispatchId, taskId, orchestrationDb } = localSetup()
     orchestrationDb.completeDispatch(dispatchId)
-    // A retry re-dispatches the same pane, so mail is waiting — but the straggler heartbeat
-    // from the settled attempt must carry the closed-relationship verdict, not a receipt the
-    // CLI would decorate with an unread-mail hint it never prints.
+    // A retry re-dispatches the same pane, so mail is waiting. The straggler heartbeat from the
+    // settled attempt carries the closed-relationship verdict, and keeps the hint a CLI that
+    // predates the verdict still prints — dropping it would regress that old client (Rule 3).
     const retryTask = orchestrationDb.createTask({
       spec: 'retry',
       runId: orchestrationDb.getTask(taskId)?.run_id
@@ -208,9 +208,9 @@ describe('orchestration.send pendingMail', () => {
     })
 
     expect(result).toMatchObject({
-      lifecycle: { action: 'suppressed', dispatchId, reason: 'Dispatch is no longer active.' }
+      lifecycle: { action: 'suppressed', dispatchId, reason: 'Dispatch is no longer active.' },
+      pendingMail: 2
     })
-    expect(result).not.toHaveProperty('pendingMail')
   })
 
   it('stays silent for a worker whose pane is bound to a Run its check would read instead', async () => {
