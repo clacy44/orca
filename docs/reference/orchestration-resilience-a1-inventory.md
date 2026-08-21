@@ -381,7 +381,7 @@ Do **not** extend this to the relay's own successful pull: a healthy relay prove
 ### 15. Coordinator→worker mail queued before a settlement is stranded forever behind `accepted: true`
 **[adjusted — mechanism corrected, fix redirected] · effort: M**
 
-*A coordinator sends a follow-up to a federated worker, the CLI prints "Queued <id> for worker Dispatch <ctx>", and the item is never delivered, never retried, never expired, never reported.*
+*A coordinator sends a follow-up to a federated worker, the CLI prints "Queued `<id>` for worker Dispatch `<ctx>`", and the item is never delivered, never retried, never expired, never reported.*
 
 **MECHANISM — corrected.** The original TOCTOU claim is **refuted**: `orchestration.ts:590` (the fence) and `:598` (the enqueue) are straight-line synchronous, with only a type check and a non-awaited `revalidateLegacyCoordinator?.()` between them; in a single-threaded runtime owning the SQLite handle there is no yield point. The real, non-racy window — and the one the repo's own test pins — is **queue-while-ready, then settle before the next relay tick**. `orchestration-federation-control-mail.test.ts:214-259` sends while `state==='ready'`, settles, and asserts `listPendingFederationRelay(...,'to_worker')` is still length 1. **[code-verified]**
 
