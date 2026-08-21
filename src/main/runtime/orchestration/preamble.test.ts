@@ -102,7 +102,12 @@ describe('buildDispatchPreamble', () => {
     // Why: the cadence quotes HEARTBEAT_INTERVAL_MIN, so retuning the beat stays a one-line change.
     expect(cliBlock).toMatch(/alongside every heartbeat \(so every\s+# 5 minutes\)/)
     expect(cliBlock).toContain('before any irreversible step')
-    expect(cliBlock).toMatch(/follow-ups\s+# only reach you here/)
+    // Why not "nothing interrupts you": a dispatch mailbox does get an ambient pane
+    // notice now, so the cadence rests on that write being unreliable, not absent.
+    expect(cliBlock).toMatch(
+      /a one-line\s+# notice into this pane when mail arrives, but do not rely on it/
+    )
+    expect(cliBlock).not.toContain('nothing interrupts you')
     expect(cliBlock).toContain('orchestration check --terminal term_worker')
   })
 
