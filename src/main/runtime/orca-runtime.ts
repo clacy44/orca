@@ -119,6 +119,7 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import { OrchestrationDb } from './orchestration/db'
+import { resolveDispatchMailboxTerminalHandle } from './orchestration/dispatch-mailbox-terminal'
 import { reconcileRequestedWorkerTerminalReleases } from './orchestration/worker-terminal-release-reconciliation'
 import {
   classifyWorkerTerminalProcessIncarnation,
@@ -32368,17 +32369,35 @@ export class OrcaRuntimeService {
     return this.getLeavesForPty(ptyId)[0] ?? null
   }
 
+  // Why: `run:` and `dispatch:` mailboxes are addressed by row, never by pane, so the
+  // ambient notice has to resolve which live terminal owns the mailbox from persisted data.
+  private resolveMailboxTerminalHandle(mailboxHandle: string): string | null {
+    const db = this._orchestrationDb
+    if (!db) {
+      return null
+    }
+    if (mailboxHandle.startsWith('run:')) {
+      return db.getRun(mailboxHandle.slice('run:'.length))?.coordinator_handle ?? null
+    }
+    if (mailboxHandle.startsWith('dispatch:')) {
+      const dispatchId = mailboxHandle.slice('dispatch:'.length)
+      return resolveDispatchMailboxTerminalHandle({
+        dispatch: db.getDispatchContextById?.(dispatchId),
+        worker: db.getWorkerDispatch?.(dispatchId),
+        attachment: db.getRemoteDispatchAttachment?.(dispatchId)
+      })
+    }
+    return null
+  }
+
   deliverPendingMessagesForHandle(handle: string, reservedTypes?: ReadonlySet<string>): void {
     let terminalHandle = handle
     if (!this.handles.has(terminalHandle)) {
-      const runId = handle.startsWith('run:') ? handle.slice('run:'.length) : ''
-      const coordinatorHandle = runId
-        ? this._orchestrationDb?.getRun(runId)?.coordinator_handle
-        : null
-      if (!coordinatorHandle || !this.handles.has(coordinatorHandle)) {
+      const mailboxTerminal = this.resolveMailboxTerminalHandle(handle)
+      if (!mailboxTerminal || !this.handles.has(mailboxTerminal)) {
         return
       }
-      terminalHandle = coordinatorHandle
+      terminalHandle = mailboxTerminal
     }
     try {
       const { leaf } = this.getLiveLeafForHandle(terminalHandle)
@@ -32398,9 +32417,7 @@ export class OrcaRuntimeService {
   private scheduleRestoredMessageRepoints(): void {
     const handles = this._orchestrationDb?.getUndeliveredUnreadMailboxHandles?.() ?? []
     for (const handle of handles) {
-      if (!handle.startsWith('dispatch:')) {
-        this.mailPointerRepointScheduler.schedule(handle)
-      }
+      this.mailPointerRepointScheduler.schedule(handle)
     }
   }
 
@@ -32425,9 +32442,7 @@ export class OrcaRuntimeService {
 
   // Why: wake blocking orchestration.check --wait calls on this handle so they return the new message immediately instead of polling.
   notifyMessageArrived(handle: string, messageType?: string): void {
-    if (!handle.startsWith('dispatch:')) {
-      this.mailPointerRepointScheduler.schedule(handle)
-    }
+    this.mailPointerRepointScheduler.schedule(handle)
     // Why: push-on-idle is driven by status transitions; a message that
     // arrives while the recipient is already idle never sees a transition, so
     // deliver now (#12536). deliverPendingMessagesForHandle no-ops when the
