@@ -26,6 +26,25 @@ export type DeviceEntry = {
   // Why: STA-2370 — a grant minted for "This computer only" proves nothing about off-host reach when its
   // client connects, so the bind decision must be able to tell it apart from a LAN/phone grant.
   pairingReach?: RuntimePairingReach
+  // Why: always-minted invites bypass the pending-row coalescing below, so each one carries its own
+  // deadline; absent (legacy rows, and every coalesced row) means "never expires", so an upgrade cannot
+  // invalidate a link already handed out.
+  pendingExpiresAt?: number
+}
+
+// Why: a named invite is handed to one human, so it must not stay a live credential for longer than the
+// day it was created — expiry is the leak control that replaces coalescing on the always-mint path.
+const PENDING_GRANT_TTL_MS = 24 * 60 * 60 * 1000
+
+// Why: only never-connected rows that carry an explicit deadline are sweepable; a row that has been
+// scanned is a real pairing, and a row without a deadline predates this field.
+function retainUnexpiredPendingDevices(devices: DeviceEntry[], now: number): DeviceEntry[] {
+  return devices.filter(
+    (device) =>
+      device.lastSeenAt !== 0 ||
+      device.pendingExpiresAt === undefined ||
+      device.pendingExpiresAt > now
+  )
 }
 
 function validRelayBinding(value: unknown, deviceId: string): RelayDeviceBinding | undefined {
@@ -73,7 +92,8 @@ export class DeviceRegistry {
     existingDevices: DeviceEntry[],
     name: string,
     scope: DeviceScope,
-    pairingReach: RuntimePairingReach
+    pairingReach: RuntimePairingReach,
+    pendingExpiresAt?: number
   ): DeviceEntry {
     const entry: DeviceEntry = {
       deviceId: randomUUID(),
@@ -82,7 +102,9 @@ export class DeviceRegistry {
       scope,
       pairedAt: Date.now(),
       lastSeenAt: 0,
-      pairingReach
+      pairingReach,
+      // Why: omit the key entirely when absent so a coalesced grant's persisted shape is unchanged.
+      ...(pendingExpiresAt === undefined ? {} : { pendingExpiresAt })
     }
     const nextDevices = [...existingDevices, entry]
     // Why: a credential is not valid until its durable registry write succeeds.
@@ -111,6 +133,25 @@ export class DeviceRegistry {
         : existing
     }
     return this.addDevice(name, scope, pairingReach)
+  }
+
+  // Why: two humans handed one coalesced link land on one deviceId and one token, so nothing downstream
+  // can tell them apart. A grant can only be split per person at offer time, so this path mints a fresh
+  // row on every call and never reuses a pending one. Unlike rotatePendingDevice it keeps sibling pending
+  // rows, so minting Ben's invite cannot kill Ana's un-scanned one.
+  mintPendingDevice(
+    name: string,
+    scope: DeviceScope = 'mobile',
+    pairingReach: RuntimePairingReach = 'network'
+  ): DeviceEntry {
+    const now = Date.now()
+    return this.createAndPersistDevice(
+      retainUnexpiredPendingDevices(this.devices, now),
+      name,
+      scope,
+      pairingReach,
+      now + PENDING_GRANT_TTL_MS
+    )
   }
 
   private setPairingReach(existing: DeviceEntry, pairingReach: RuntimePairingReach): DeviceEntry {
@@ -281,7 +322,7 @@ export class DeviceRegistry {
     try {
       hardenExistingSecureFile(this.registryPath)
       const parsed = JSON.parse(readFileSync(this.registryPath, 'utf-8')) as DeviceEntry[]
-      this.devices = parsed.map((device) => ({
+      const loaded = parsed.map((device) => ({
         ...device,
         // Why: older registries only existed for phone pairing. Treat missing
         // scope as mobile so legacy device tokens do not gain new CLI powers.
@@ -291,8 +332,17 @@ export class DeviceRegistry {
           device.mobilePairingConnectionMode === 'local-only' ? 'local-only' : 'automatic',
         // Why: registries written before this field existed only ever held network-reach grants (phones and
         // LAN links), so a missing value must keep binding every interface on reconnect.
-        pairingReach: device.pairingReach === 'this-computer' ? 'this-computer' : 'network'
+        pairingReach: device.pairingReach === 'this-computer' ? 'this-computer' : 'network',
+        // Why: a non-finite value on disk would make every comparison false and pin the row forever, so
+        // normalize anything unusable back to the legacy "never expires" shape.
+        pendingExpiresAt:
+          typeof device.pendingExpiresAt === 'number' && Number.isFinite(device.pendingExpiresAt)
+            ? device.pendingExpiresAt
+            : undefined
       }))
+      // Why: sweep in memory only — the next mutation persists the pruned array, and rewriting here would
+      // pay a secure-file write (two synchronous PowerShell ACL spawns on Windows) on every construction.
+      this.devices = retainUnexpiredPendingDevices(loaded, Date.now())
     } catch {
       this.devices = []
     }
