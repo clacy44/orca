@@ -10,7 +10,7 @@ import type { RpcRequest } from '../core'
 import { RpcDispatcher } from '../dispatcher'
 import { ORCHESTRATION_METHODS } from './orchestration'
 
-type SendResult = { pendingMail?: number }
+type SendResult = { pendingMail?: number; lifecycle?: { action: string } }
 
 const WORKER_PANE_KEY = 'tab_worker:leaf_worker'
 const WORKER_HANDLE = 'term_worker'
@@ -182,11 +182,12 @@ describe('orchestration.send pendingMail', () => {
     expect(result).not.toHaveProperty('pendingMail')
   })
 
-  it('still reports the mailbox when the named Dispatch is settled and the heartbeat is suppressed', async () => {
+  it('answers a suppressed heartbeat with the verdict instead of a mail hint', async () => {
     const { dispatcher, dispatchId, taskId, orchestrationDb } = localSetup()
     orchestrationDb.completeDispatch(dispatchId)
-    // A retry re-dispatches the same pane; a straggler heartbeat from the failed attempt
-    // is suppressed, but the count names the mailbox this worker's `check` will read.
+    // A retry re-dispatches the same pane, so mail is waiting — but the straggler heartbeat
+    // from the settled attempt must carry the closed-relationship verdict, not a receipt the
+    // CLI would decorate with an unread-mail hint it never prints.
     const retryTask = orchestrationDb.createTask({
       spec: 'retry',
       runId: orchestrationDb.getTask(taskId)?.run_id
@@ -206,7 +207,10 @@ describe('orchestration.send pendingMail', () => {
       payload: JSON.stringify({ taskId, dispatchId })
     })
 
-    expect(result.pendingMail).toBe(2)
+    expect(result).toMatchObject({
+      lifecycle: { action: 'suppressed', dispatchId, reason: 'Dispatch is no longer active.' }
+    })
+    expect(result).not.toHaveProperty('pendingMail')
   })
 
   it('stays silent for a worker whose pane is bound to a Run its check would read instead', async () => {

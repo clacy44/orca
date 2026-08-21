@@ -591,10 +591,15 @@ describe('orchestration RPC methods', () => {
         subject: 'alive',
         type: 'heartbeat',
         payload: JSON.stringify({ dispatchId: dispatch.id })
-      })) as { message: { id: string } }
+      })) as { message: { id: string }; lifecycle: unknown }
 
       expect(notify).not.toHaveBeenCalled()
       expect(db.getMessageById(result.message.id)).toMatchObject({ read: 1 })
+      expect(result.lifecycle).toEqual({
+        action: 'suppressed',
+        dispatchId: dispatch.id,
+        reason: 'Dispatch is no longer active.'
+      })
     })
 
     it('still wakes waiters for a heartbeat on an active dispatch', async () => {
@@ -604,7 +609,7 @@ describe('orchestration RPC methods', () => {
       vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
       const notify = vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
 
-      await call('orchestration.send', {
+      const result = await call('orchestration.send', {
         from: 'term_worker',
         to: 'term_coord',
         subject: 'alive',
@@ -613,6 +618,31 @@ describe('orchestration RPC methods', () => {
       })
 
       expect(notify).toHaveBeenCalledWith(`run:${activeRunId}`, 'heartbeat')
+      // Negative control: a live heartbeat carries no verdict, so the CLI still prints Sent <id>.
+      expect(result).not.toHaveProperty('lifecycle')
+    })
+
+    it('keeps a wrong-pane heartbeat on the rejection path', async () => {
+      setup()
+      const task = db.createTask({ spec: 'work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker', 'tab_worker:leaf_assigned')
+      vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
+      vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+
+      // Negative control: a foreign sender is rejected, never suppressed.
+      const result = (await call('orchestration.send', {
+        from: 'term_other',
+        to: 'term_coord',
+        subject: 'alive',
+        type: 'heartbeat',
+        senderPaneKey: 'tab_other:leaf_other',
+        payload: JSON.stringify({ dispatchId: dispatch.id })
+      })) as { lifecycle: { action: string; code: string } }
+
+      expect(result.lifecycle).toMatchObject({
+        action: 'rejected',
+        code: 'sender_not_assignee'
+      })
     })
 
     it('allows an omitted recipient so an active Dispatch can default to its Run', () => {

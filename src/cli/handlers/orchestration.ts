@@ -102,6 +102,9 @@ type LifecycleSendResult =
     }
   | { action: 'settled'; outcome: 'succeeded' | 'failed'; duplicate?: boolean }
   | { action: 'rejected'; code: string; reason: string }
+  // Why additive-optional: runtimes that predate the verdict answer a suppressed heartbeat
+  // with a bare message, which still renders as today's `Sent <id>`.
+  | { action: 'suppressed'; dispatchId?: string; reason?: string }
 
 // Why: a reply to a federated worker crosses on the relay, so it answers with the same
 // relay receipt the send path returns instead of a locally-inserted message row.
@@ -629,6 +632,14 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     await requireWorkerDoneSettlement(client, type, sendParams.payload, result.result)
     if ('lifecycle' in result.result && result.result.lifecycle?.action === 'rejected') {
       throw new RuntimeClientError(result.result.lifecycle.code, result.result.lifecycle.reason)
+    }
+    if ('lifecycle' in result.result && result.result.lifecycle?.action === 'suppressed') {
+      // Why an error: a success string here reads as delivered liveness, so the worker keeps
+      // reporting into a closed relationship for the rest of its run.
+      throw new RuntimeClientError(
+        'dispatch_inactive',
+        `Heartbeat suppressed: Dispatch ${result.result.lifecycle.dispatchId ?? 'unknown'} is no longer active — stop work and do not send worker_done for this Dispatch.`
+      )
     }
     printResult(result, json, (r) => {
       const mailHint = pendingMailHint(r)

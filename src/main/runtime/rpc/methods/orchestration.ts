@@ -715,7 +715,16 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           const reconciled = reconcileLifecycleMessage(db, msg)
           // Why: a suppressed message is already read, so skip the notify that would wake a check --wait waiter to an empty result.
           if (reconciled.action === 'suppressed') {
-            return { message: msg, ...pendingMail }
+            // Why no pendingMail: the sender is being told this Dispatch is over, and the CLI
+            // raises that verdict instead of printing a receipt the hint would ride on.
+            return {
+              message: msg,
+              lifecycle: {
+                action: 'suppressed',
+                dispatchId: reconciled.dispatchId,
+                reason: 'Dispatch is no longer active.'
+              }
+            }
           }
           if (reconciled.action === 'rejected') {
             const rejection = db.getMessageById(msg.id) ?? msg

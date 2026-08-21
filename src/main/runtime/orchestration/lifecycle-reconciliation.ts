@@ -31,8 +31,9 @@ export type LifecycleReconciliationResult =
   | { action: 'ignored' }
   // Why: `suppressed` means the message was consumed at reconcile time (marked
   // read); senders must not wake waiters for it, unlike `ignored` rows that
-  // stay unread and still need delivery.
-  | { action: 'suppressed' }
+  // stay unread and still need delivery. The Dispatch id rides along so the
+  // sender can be told which relationship it is reporting into.
+  | { action: 'suppressed'; dispatchId: string }
   | LifecycleRejectionResult
   | { action: 'completed'; taskId: string; dispatchId: string }
   | { action: 'failed'; taskId: string; dispatchId: string }
@@ -153,7 +154,7 @@ function reconcileHeartbeatMessage(
     // audit history without surfacing obsolete liveness to the coordinator.
     db.markAsReadAndDelivered([msg.id])
     onLog(`Heartbeat for inactive dispatch ${dispatchId} suppressed`)
-    return { action: 'suppressed' }
+    return { action: 'suppressed', dispatchId }
   }
 
   if (!hasLifecycleAuthority(dispatch, msg)) {
