@@ -62,7 +62,7 @@ import {
 import {
   TERMINAL_PRESENCE_ACTIVITY_TTL_MS,
   buildTerminalPresenceActivityRows
-} from '../runtime/terminal-presence-snapshot'
+} from '../runtime/terminal-presence-activity-rows'
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
 
 const PTY_ID = 'pty-host-1'

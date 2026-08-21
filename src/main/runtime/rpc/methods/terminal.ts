@@ -40,8 +40,8 @@ import {
   terminalPresenceRegistry,
   type TerminalPresenceParticipant
 } from '../../terminal-presence-registry'
+import { buildTerminalPresenceActivityRows } from '../../terminal-presence-activity-rows'
 import {
-  buildTerminalPresenceActivityRows,
   isPublishedPresenceParticipant,
   resolveStreamParticipant,
   toStreamPresence,

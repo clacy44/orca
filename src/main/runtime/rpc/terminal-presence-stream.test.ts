@@ -4,7 +4,7 @@ import {
   TERMINAL_PRESENCE_COALESCE_MAX_WAIT_MS,
   TERMINAL_PRESENCE_COALESCE_WINDOW_MS
 } from '../terminal-presence-change-notifier'
-import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from '../terminal-presence-snapshot'
+import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from '../terminal-presence-activity-rows'
 import {
   CONNECTION,
   GRANT,

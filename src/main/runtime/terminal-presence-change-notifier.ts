@@ -6,7 +6,7 @@ import {
   terminalPresenceRegistry,
   type TerminalPresenceRegistry
 } from './terminal-presence-registry'
-import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from './terminal-presence-snapshot'
+import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from './terminal-presence-activity-rows'
 
 // Why: a keystroke burst must publish at human speed, not at PTY speed. 750 ms is below the 3 s activity
 // TTL so a chip lights well inside its own window, and the 3x max-wait keeps a sustained typist visible.
