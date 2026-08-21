@@ -15,6 +15,7 @@ export { getBashShellReadyRcfileContent } from '../providers/local-pty-shell-rea
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
 import type { PtyBindingSourceExpectation, Store } from '../persistence'
 import { retireTerminalSurfaceFromPersistence } from '../runtime/mobile-session-terminal-persistence-retirement'
+import { terminalPresenceRegistry } from '../runtime/terminal-presence-registry'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { TuiAgent } from '../../shared/tui-agent'
 import { toSshExecutionHostId } from '../../shared/execution-host'
@@ -7179,6 +7180,10 @@ export function registerPtyHandlers(
     !(typeof mainWebContents.isDestroyed === 'function' && mainWebContents.isDestroyed())
 
   const writePtyInput = (args: PtyWritePayload): boolean | Promise<boolean> => {
+    // Why first: this is the local human's keystroke, and presence reports intent, not PTY effect — every
+    // guard below can drop the write, and a peer whose input is blocked must still read as typing. Its
+    // Date.now() stamp lives in the presence registry alone; lastInputAtByPty stays performance.now().
+    terminalPresenceRegistry.recordHostInteractiveInput(args.id)
     // Why: mobile-presence-lock defense-in-depth — the renderer's onData guard can let one keystroke slip during the state-flip lag, so catch it server-side. See docs/mobile-presence-lock.md.
     if (runtime?.getDriver(args.id).kind === 'mobile') {
       return false
@@ -7201,6 +7206,9 @@ export function registerPtyHandlers(
   }
 
   const writePtyInputAccepted = (args: PtyWritePayload): boolean | Promise<boolean> => {
+    // Why first: same intent-not-effect rule as writePtyInput — the driver, ownership and provider checks
+    // below each return false on a keystroke the human really typed.
+    terminalPresenceRegistry.recordHostInteractiveInput(args.id)
     if (runtime?.getDriver(args.id).kind === 'mobile') {
       return false
     }
