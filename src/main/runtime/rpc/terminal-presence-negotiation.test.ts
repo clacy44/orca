@@ -398,10 +398,15 @@ describe('terminal.subscribe presence negotiation', () => {
     await harness.dispatchPromise
   })
 
-  it('refuses a subscribe participant on a mobile-scope envelope', async () => {
-    // Why: no phone is a tracked participant in this slice, so no phone stream may carry a
-    // participantId a peer's roster could never corroborate.
-    registerDesktopGrant()
+  it('refuses a subscribe participant to a tracked mobile grant', async () => {
+    // Why: a phone IS tracked (the registry takes every authenticated socket), so only the kind gate
+    // withholds the participantId — this slice publishes presence to runtime peers alone.
+    terminalPresenceRegistry.registerConnection({
+      connectionId: CONNECTION,
+      pairedDeviceId: GRANT,
+      label: 'Ana phone',
+      kind: 'mobile'
+    })
     const harness = startSubscribe(
       { pairedDeviceId: GRANT, clientKind: 'mobile' },
       {

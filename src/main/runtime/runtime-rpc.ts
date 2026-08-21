@@ -1342,16 +1342,16 @@ export class OrcaRuntimeRpcServer {
       onBinary: (socket, bytes) => this.handleWebSocketBinaryMessage(bytes, socket.ws),
       onReady: (socket) => {
         // Why: created for ANY authenticated socket, not only a terminal stream, or a peer connected
-        // with no terminal open would never appear. Mobile grants become participants in a later slice;
-        // E2EEAuthenticatedDevice carries no name, so the label is fetched from the registry here.
-        if (socket.device.scope === 'runtime') {
-          terminalPresenceRegistry.registerConnection({
-            connectionId: socket.connectionId,
-            pairedDeviceId: socket.device.deviceId,
-            label: deviceRegistry.getDevice(socket.device.deviceId)?.name ?? 'Paired device',
-            kind: 'runtime'
-          })
-        }
+        // with no terminal open would never appear; the kind is host-observed (device.scope), never a
+        // client-declared field. E2EEAuthenticatedDevice carries no name, so the label is fetched from
+        // the registry here — and an unnamed grant ships none rather than an English literal a peer
+        // could not translate.
+        terminalPresenceRegistry.registerConnection({
+          connectionId: socket.connectionId,
+          pairedDeviceId: socket.device.deviceId,
+          label: deviceRegistry.getDevice(socket.device.deviceId)?.name ?? '',
+          kind: socket.device.scope
+        })
         // Why: first authenticated mobile/remote client (direct WS and
         // cloud relay both attach here) starts path-candidate tracking.
         // Activation is a local-host concern: candidate buffers live on the

@@ -2941,15 +2941,6 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
     ) => {
       let leaf = runtime.resolveLeafForHandle(params.terminal)
       const isMobile = params.client?.type === 'mobile'
-      // Why: gap 5 — the phone attaches here, not through terminal.multiplex, so identity must be
-      // resolved on this path too or every phone is invisible to the roster.
-      const supportsPresence = params.capabilities?.presence === 1
-      const presenceParticipant = resolveStreamParticipant(terminalPresenceRegistry, {
-        connectionId,
-        pairedDeviceId,
-        clientKind
-      })
-      const streamPresence = negotiatedStreamPresence(supportsPresence, presenceParticipant)
       const serializerGenerationBeforeAnyMount = isMobile
         ? (runtime.getRendererTerminalSerializerGenerationForHandle?.(params.terminal) ?? 0)
         : 0
@@ -3524,6 +3515,19 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         const layoutSeq = runtime.getLayout(ptyId)?.seq
         // Why: only an output offset can cover buffered chunks; layout versions are a separate sequence domain.
         let snapshotOutputSeq = serialized?.seq
+        // Why: scoped to the branch that echoes, not to the request — the no-PTY reply and the
+        // viewless lease both leave before here, so a later presence emit reading these can never
+        // publish to a client that was not told negotiation succeeded. Gap 5: the phone attaches on
+        // this handler, not terminal.multiplex, so identity must be resolved here too.
+        const supportsPresence = params.capabilities?.presence === 1
+        const streamPresence = negotiatedStreamPresence(
+          supportsPresence,
+          resolveStreamParticipant(terminalPresenceRegistry, {
+            connectionId,
+            pairedDeviceId,
+            clientKind
+          })
+        )
         emit({
           type: 'subscribed',
           streamId,
@@ -3534,8 +3538,6 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           rows: serialized?.rows ?? size?.rows,
           displayMode,
           seq: layoutSeq,
-          // Why: the live emit is the only one that gains an echo — the no-PTY reply ends immediately
-          // and the lease-only branch is viewless, so neither has anything to gate.
           ...(supportsPresence ? { capabilities: { presence: 1 as const } } : {}),
           ...(streamPresence ? { presence: streamPresence } : {})
         })
