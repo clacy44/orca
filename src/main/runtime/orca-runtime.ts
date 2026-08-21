@@ -32408,12 +32408,28 @@ export class OrcaRuntimeService {
     if (mailboxHandle.startsWith('dispatch:')) {
       const dispatchId = mailboxHandle.slice('dispatch:'.length)
       return resolveDispatchMailboxTerminalHandle({
-        dispatch: db.getDispatchContextById?.(dispatchId),
-        worker: db.getWorkerDispatch?.(dispatchId),
-        attachment: db.getRemoteDispatchAttachment?.(dispatchId)
+        dispatch: db.getDispatchContextById(dispatchId),
+        worker: db.getWorkerDispatch(dispatchId),
+        attachment: db.getRemoteDispatchAttachment(dispatchId)
       })
     }
     return null
+  }
+
+  // Why: a worker pane owns no handle- or Run-keyed mailbox — `runsBoundToPane`
+  // matches coordinator panes only — so its Dispatch is the only address the
+  // busy→idle edge can announce, and it has to be resolved from the pane.
+  private resolveDispatchMailboxForLeaf(leaf: RuntimeLeafRecord): string | null {
+    const db = this._orchestrationDb
+    if (!db) {
+      return null
+    }
+    const paneKey = `${leaf.tabId}:${leaf.leafId}`
+    const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
+    const dispatchId =
+      (handle ? db.getActiveDispatchForIdentity(handle, paneKey)?.id : undefined) ??
+      db.findActiveRemoteAttachmentForPane(paneKey)?.dispatch_id
+    return dispatchId ? `dispatch:${dispatchId}` : null
   }
 
   deliverPendingMessagesForHandle(handle: string, reservedTypes?: ReadonlySet<string>): void {
@@ -32463,6 +32479,13 @@ export class OrcaRuntimeService {
     const run = this._orchestrationDb.getCurrentRunForPane?.(`${leaf.tabId}:${leaf.leafId}`)
     if (run) {
       this.deliverPendingMessages(leaf, { mailboxHandle: `run:${run.id}` })
+    }
+    // Why here too: a coordinator follow-up sent while the worker was busy is
+    // attempted at notify time and once more by the 2s repoint, both of which
+    // find the pane non-idle. Without this edge the mailbox stays pull-only.
+    const dispatchMailbox = this.resolveDispatchMailboxForLeaf(leaf)
+    if (dispatchMailbox) {
+      this.deliverPendingMessages(leaf, { mailboxHandle: dispatchMailbox })
     }
   }
 
@@ -33186,6 +33209,14 @@ export class OrcaRuntimeService {
         this.lastPointedMessageSequenceByHandle.delete(`run:${run.id}`)
         this.pointedMessageIdsByHandle.delete(`run:${run.id}`)
         this.mailPointerRepointScheduler.schedule(`run:${run.id}`)
+      }
+      // Why the same for the pane's Dispatch: a re-mint leaves the worker mailbox
+      // pointed at a dead process, and only a cleared watermark re-announces it.
+      const dispatchMailbox = this.resolveDispatchMailboxForLeaf(leaf)
+      if (dispatchMailbox) {
+        this.lastPointedMessageSequenceByHandle.delete(dispatchMailbox)
+        this.pointedMessageIdsByHandle.delete(dispatchMailbox)
+        this.mailPointerRepointScheduler.schedule(dispatchMailbox)
       }
     }
   }

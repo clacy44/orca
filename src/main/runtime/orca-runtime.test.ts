@@ -1074,7 +1074,7 @@ class InMemoryOrchestrationMessages {
 
   private dispatchContexts = new Map<
     string,
-    { status: DispatchStatus; assignee_handle: string | null }
+    { id: string; status: DispatchStatus; assignee_handle: string | null }
   >()
 
   private workerDispatches = new Map<
@@ -1084,7 +1084,12 @@ class InMemoryOrchestrationMessages {
 
   private remoteAttachments = new Map<
     string,
-    { state: WorkerDispatchState; terminal_handle: string | null }
+    {
+      dispatch_id: string
+      state: WorkerDispatchState
+      terminal_handle: string | null
+      pane_key: string | null
+    }
   >()
 
   insertMessage(msg: {
@@ -1168,6 +1173,7 @@ class InMemoryOrchestrationMessages {
     agentTerminalHandle?: string | null
   }): void {
     this.dispatchContexts.set(dispatch.id, {
+      id: dispatch.id,
       status: dispatch.status ?? 'dispatched',
       assignee_handle: dispatch.assigneeHandle ?? null
     })
@@ -1181,17 +1187,45 @@ class InMemoryOrchestrationMessages {
     id: string
     state?: WorkerDispatchState
     terminalHandle?: string | null
+    paneKey?: string | null
   }): void {
     this.remoteAttachments.set(attachment.id, {
+      dispatch_id: attachment.id,
       state: attachment.state ?? 'ready',
-      terminal_handle: attachment.terminalHandle ?? null
+      terminal_handle: attachment.terminalHandle ?? null,
+      pane_key: attachment.paneKey ?? null
     })
   }
 
   getDispatchContextById(
     id: string
-  ): { status: DispatchStatus; assignee_handle: string | null } | undefined {
+  ): { id: string; status: DispatchStatus; assignee_handle: string | null } | undefined {
     return this.dispatchContexts.get(id)
+  }
+
+  getActiveDispatchForIdentity(
+    handle: string
+  ): { id: string; status: DispatchStatus; assignee_handle: string | null } | undefined {
+    return [...this.dispatchContexts.values()].find(
+      (dispatch) =>
+        dispatch.assignee_handle === handle &&
+        (dispatch.status === 'pending' || dispatch.status === 'dispatched')
+    )
+  }
+
+  findActiveRemoteAttachmentForPane(paneKey: string):
+    | {
+        dispatch_id: string
+        state: WorkerDispatchState
+        terminal_handle: string | null
+        pane_key: string | null
+      }
+    | undefined {
+    return [...this.remoteAttachments.values()].find(
+      (attachment) =>
+        attachment.pane_key === paneKey &&
+        (attachment.state === 'starting' || attachment.state === 'ready')
+    )
   }
 
   getWorkerDispatch(
@@ -1200,9 +1234,14 @@ class InMemoryOrchestrationMessages {
     return this.workerDispatches.get(id)
   }
 
-  getRemoteDispatchAttachment(
-    id: string
-  ): { state: WorkerDispatchState; terminal_handle: string | null } | undefined {
+  getRemoteDispatchAttachment(id: string):
+    | {
+        dispatch_id: string
+        state: WorkerDispatchState
+        terminal_handle: string | null
+        pane_key: string | null
+      }
+    | undefined {
     return this.remoteAttachments.get(id)
   }
 
@@ -13437,6 +13476,8 @@ describe('OrcaRuntimeService', () => {
         handle === 'term_ssh_retained'
           ? { id: 'dispatch-ssh', task_id: 'task-ssh', status: 'dispatched' }
           : undefined,
+      getActiveDispatchForIdentity: () => undefined,
+      findActiveRemoteAttachmentForPane: () => undefined,
       failDispatch,
       getActiveCoordinatorRun: () => undefined
     } as unknown as OrchestrationDb)
@@ -20211,6 +20252,8 @@ describe('OrcaRuntimeService', () => {
     })
     runtime.setOrchestrationDb({
       getActiveDispatchForTerminal: () => undefined,
+      getActiveDispatchForIdentity: () => undefined,
+      findActiveRemoteAttachmentForPane: () => undefined,
       listLegacyWorkerTerminalRecoveryRows: () => [
         {
           dispatch_id: 'dispatch-legacy',
@@ -20374,6 +20417,8 @@ describe('OrcaRuntimeService', () => {
     )
     runtime.setOrchestrationDb({
       getActiveDispatchForTerminal: () => undefined,
+      getActiveDispatchForIdentity: () => undefined,
+      findActiveRemoteAttachmentForPane: () => undefined,
       listLegacyWorkerTerminalRecoveryRows: () => [
         {
           dispatch_id: 'dispatch-reveal-retry',
@@ -20488,6 +20533,8 @@ describe('OrcaRuntimeService', () => {
     )
     runtime.setOrchestrationDb({
       getActiveDispatchForTerminal: () => undefined,
+      getActiveDispatchForIdentity: () => undefined,
+      findActiveRemoteAttachmentForPane: () => undefined,
       listLegacyWorkerTerminalRecoveryRows: () => [
         {
           dispatch_id: 'dispatch-post-reveal',
@@ -35304,6 +35351,73 @@ describe('OrcaRuntimeService', () => {
         })
         expect(() => runtime.notifyMessageArrived(`dispatch:${dispatchId}`, 'status')).not.toThrow()
       }
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('announces dispatch mail that arrived while the worker was busy on its next idle edge', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_busy', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      write.mockClear()
+
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_busy',
+        subject: 'mid-dispatch correction',
+        type: 'status'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_busy', 'status')
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+      // Nothing lands while the worker is working, and the 2s repoint cannot repair it.
+      expect(write).not.toHaveBeenCalled()
+
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      await Promise.resolve()
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-1',
+        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+      )
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+      expect(write).toHaveBeenCalledWith('pty-1', '\r')
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the idle edge silent for a dispatch the coordinator already settled', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({
+        id: 'ctx_settled_edge',
+        status: 'completed',
+        workerState: 'succeeded',
+        assigneeHandle: terminal.handle
+      })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      write.mockClear()
+
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_settled_edge',
+        subject: 'arrived after settlement',
+        type: 'status'
+      })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       await Promise.resolve()
       await vi.advanceTimersByTimeAsync(2_500)
 
