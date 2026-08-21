@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const callMock = vi.fn()
 const getTerminalHandleMock = vi.hoisted(() => vi.fn())
+const originalCliCommand = process.env.ORCA_CLI_COMMAND
 
 // Why: isolate the send handler's verdict handling; printResult only writes the formatted line.
 vi.mock('../format', () => ({ printResult: vi.fn() }))
@@ -12,12 +13,20 @@ import { printResult } from '../format'
 import { requireWorkerDoneSettlement } from './orchestration-worker-settlement'
 
 function sendHeartbeat(result: unknown): Promise<void> {
+  return send(result, 'heartbeat')
+}
+
+function sendStatus(result: unknown): Promise<void> {
+  return send(result, 'status')
+}
+
+function send(result: unknown, type: string): Promise<void> {
   callMock.mockReset().mockResolvedValue({ result })
   return ORCHESTRATION_HANDLERS['orchestration send']({
     flags: new Map<string, string | boolean>([
       ['from', 'term_worker'],
       ['subject', 'alive'],
-      ['type', 'heartbeat']
+      ['type', type]
     ]),
     client: { call: callMock },
     cwd: '/tmp/repo',
@@ -26,9 +35,19 @@ function sendHeartbeat(result: unknown): Promise<void> {
 }
 
 describe('orchestration send heartbeat verdict', () => {
+  beforeEach(() => {
+    // Why pin the binary: the recovery step names the resolved CLI, which is platform-derived.
+    process.env.ORCA_CLI_COMMAND = 'orca'
+  })
+
   afterEach(() => {
     vi.mocked(printResult).mockReset()
     getTerminalHandleMock.mockReset()
+    if (originalCliCommand === undefined) {
+      delete process.env.ORCA_CLI_COMMAND
+    } else {
+      process.env.ORCA_CLI_COMMAND = originalCliCommand
+    }
   })
 
   it('raises the suppressed verdict for the CLI error boundary', async () => {
@@ -44,9 +63,33 @@ describe('orchestration send heartbeat verdict', () => {
     ).rejects.toMatchObject({
       code: 'dispatch_inactive',
       message:
-        'Heartbeat suppressed: Dispatch ctx_1 is no longer active — stop work and do not send worker_done for this Dispatch.'
+        'Heartbeat suppressed: Dispatch ctx_1 is no longer active — stop work and do not send worker_done for this Dispatch.',
+      // Why the steps: formatCliError renders `data.nextSteps` as `Next step:` lines, so this
+      // refusal is a signpost rather than the dead end §16 exists to remove.
+      data: {
+        effectsApplied: false,
+        nextSteps: [
+          'Stop work on this Dispatch; do not send worker_done for it.',
+          'Read what the coordinator sent instead: orca orchestration check --terminal term_worker'
+        ]
+      }
     })
     expect(printResult).not.toHaveBeenCalled()
+  })
+
+  it('names the sent type when a future path suppresses something else', async () => {
+    // Negative control: the verdict is a lifecycle field any send can carry, so the noun must
+    // not claim a heartbeat for a message that was not one.
+    await expect(
+      sendStatus({
+        message: { id: 'msg_suppressed' },
+        lifecycle: { action: 'suppressed', dispatchId: 'ctx_1' }
+      })
+    ).rejects.toMatchObject({
+      code: 'dispatch_inactive',
+      message:
+        'Message suppressed: Dispatch ctx_1 is no longer active — stop work and do not send worker_done for this Dispatch.'
+    })
   })
 
   it('prints the receipt unchanged for a delivered heartbeat', async () => {

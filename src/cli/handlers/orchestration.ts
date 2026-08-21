@@ -135,6 +135,21 @@ type OrchestrationSendResult = (
 
 // Why: a worker's heartbeat is its only scheduled round trip, so the unread hint rides back on it;
 // both send shapes carry it because a federated worker only ever sees the relay branch.
+// Why steps here and not on the host: the runtime answers a suppressed heartbeat with the
+// verdict, and this refusal is minted client-side, so it must carry its own signpost.
+function suppressedDispatchRecoveryData(workerHandle: string): {
+  effectsApplied: false
+  nextSteps: string[]
+} {
+  return {
+    effectsApplied: false,
+    nextSteps: [
+      'Stop work on this Dispatch; do not send worker_done for it.',
+      `Read what the coordinator sent instead: ${resolveCompatibilityCliCommand()} orchestration check --terminal ${workerHandle}`
+    ]
+  }
+}
+
 function pendingMailHint(result: OrchestrationSendResult): string {
   const pending = result.pendingMail
   if (pending === undefined || pending <= 0) {
@@ -637,12 +652,19 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     if ('lifecycle' in result.result && result.result.lifecycle?.action === 'rejected') {
       throw new RuntimeClientError(result.result.lifecycle.code, result.result.lifecycle.reason)
     }
-    if ('lifecycle' in result.result && result.result.lifecycle?.action === 'suppressed') {
+    const suppressed =
+      'lifecycle' in result.result && result.result.lifecycle?.action === 'suppressed'
+        ? result.result.lifecycle
+        : undefined
+    if (suppressed) {
       // Why an error: a success string here reads as delivered liveness, so the worker keeps
       // reporting into a closed relationship for the rest of its run.
       throw new RuntimeClientError(
         'dispatch_inactive',
-        `Heartbeat suppressed: Dispatch ${result.result.lifecycle.dispatchId ?? 'unknown'} is no longer active — stop work and do not send worker_done for this Dispatch.`
+        // Why derive the noun: only heartbeats are suppressed today, but the verdict is a
+        // lifecycle field any send can carry, and a wrong noun reads as the wrong refusal.
+        `${type === 'heartbeat' ? 'Heartbeat' : 'Message'} suppressed: Dispatch ${suppressed.dispatchId ?? 'unknown'} is no longer active — stop work and do not send worker_done for this Dispatch.`,
+        suppressedDispatchRecoveryData(from)
       )
     }
     printResult(result, json, (r) => {
