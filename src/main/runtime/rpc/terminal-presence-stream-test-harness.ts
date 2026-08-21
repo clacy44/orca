@@ -60,7 +60,9 @@ export function stubRuntime(overrides: Partial<OrcaRuntimeService> = {}): OrcaRu
     getDriver: vi.fn().mockReturnValue({ kind: 'idle' }),
     handleMobileSubscribe: vi.fn().mockResolvedValue(true),
     handleMobileUnsubscribe: vi.fn(),
-    sendTerminal: vi.fn().mockResolvedValue({ accepted: true, bytesWritten: 1 }),
+    sendTerminal: vi
+      .fn()
+      .mockResolvedValue({ handle: 'terminal-1', accepted: true, bytesWritten: 1 }),
     waitForTerminal: vi.fn(() => new Promise<RuntimeTerminalWait>(() => {})),
     ...overrides
   } as unknown as OrcaRuntimeService

@@ -71,7 +71,11 @@ describe('terminal.send presence attribution', () => {
       // Why patched rather than stubbed wholesale: the gate reads the REAL subscription index, which is
       // the only thing that separates a desktop's grant from a coordinator agent's.
       runtime.resolveLiveLeafForHandle = () => ({ ptyId: PTY_ID })
-      runtime.sendTerminal = async () => ({ accepted: true, bytesWritten: 5 })
+      runtime.sendTerminal = async () => ({
+        handle: TERMINAL_HANDLE,
+        accepted: true,
+        bytesWritten: 5
+      })
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
