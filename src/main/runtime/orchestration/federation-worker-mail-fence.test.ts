@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { OrchestrationDb } from './db'
+import type { OrchestrationError } from './orchestration-error'
 import {
   requireFederatedDispatchAcceptsWorkerMail,
   summarizeQueuedWorkerMail
@@ -55,6 +56,53 @@ describe('coordinator-to-worker mail fence', () => {
       'Federated Dispatch ctx_missing is not active.'
     )
   })
+
+  it('names the worker terminal the sender can still reach', () => {
+    const { db, dispatchId } = createFederatedDispatch()
+    db.updateFederatedDispatchResources({
+      dispatchId,
+      remoteRuntimeEpoch: 'peer_epoch',
+      worktreeId: 'repo::peer-worktree',
+      terminalHandle: 'term_peer_worker'
+    })
+
+    const error = captureFenceError(db, dispatchId)
+
+    expect(error.message).toBe(`Federated Dispatch ${dispatchId} is not active.`)
+    expect(error.data).toEqual({
+      effectsApplied: false,
+      nextSteps: [
+        'Reach the worker\'s terminal directly: orca terminal send --terminal term_peer_worker --environment peer --text "<message>" --enter',
+        'Start a new Dispatch for the follow-up work; this one no longer accepts coordinator mail.'
+      ]
+    })
+  })
+
+  it('still names a route when the peer never reported a terminal handle', () => {
+    // Negative control: an unresolvable handle must not fabricate a terminal command.
+    const { db, dispatchId } = createFederatedDispatch()
+
+    const error = captureFenceError(db, dispatchId)
+
+    expect(error.data).toEqual({
+      effectsApplied: false,
+      nextSteps: [
+        'Start a new Dispatch for the follow-up work; this one no longer accepts coordinator mail.'
+      ]
+    })
+  })
+
+  function captureFenceError(
+    db: OrchestrationDb,
+    dispatchId: string
+  ): { message: string; data: unknown } {
+    try {
+      requireFederatedDispatchAcceptsWorkerMail(db, dispatchId)
+    } catch (error) {
+      return error as OrchestrationError
+    }
+    throw new Error('expected the fence to refuse')
+  }
 
   it('reports queued mail as undeliverable once the Dispatch leaves ready', () => {
     const { db, dispatchId } = createFederatedDispatch()

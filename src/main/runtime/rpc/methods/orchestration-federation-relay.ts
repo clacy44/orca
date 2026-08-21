@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ORCHESTRATION_FEDERATION_CONTROL_MAIL_PROTOCOL_VERSION } from '../../../../shared/protocol-version'
+import { federatedDispatchInactiveRecoveryData } from '../../orchestration/dispatch-inactive-recovery'
 import { importFederatedControlMessage } from '../../orchestration/federation-control-message'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
@@ -171,7 +172,10 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
         if (currentAttachment.state !== 'ready') {
           throw new OrchestrationError(
             'dispatch_inactive',
-            `Remote Dispatch ${params.dispatchId} is not active.`
+            `Remote Dispatch ${params.dispatchId} is not active.`,
+            federatedDispatchInactiveRecoveryData({
+              terminalHandle: currentAttachment.terminal_handle
+            })
           )
         }
         if (item.kind === 'reply') {

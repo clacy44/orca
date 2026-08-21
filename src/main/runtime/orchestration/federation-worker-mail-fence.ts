@@ -1,4 +1,5 @@
 import type { OrchestrationDb } from './db'
+import { federatedDispatchInactiveRecoveryData } from './dispatch-inactive-recovery'
 import { OrchestrationError } from './orchestration-error'
 
 // Why: the relay only pushes to_worker items while the Dispatch is `ready`, so anything
@@ -9,9 +10,14 @@ export function requireFederatedDispatchAcceptsWorkerMail(
   dispatchId: string
 ): void {
   if (db.getWorkerDispatch(dispatchId)?.state !== 'ready') {
+    const federated = db.getFederatedDispatch(dispatchId)
     throw new OrchestrationError(
       'dispatch_inactive',
-      `Federated Dispatch ${dispatchId} is not active.`
+      `Federated Dispatch ${dispatchId} is not active.`,
+      federatedDispatchInactiveRecoveryData({
+        terminalHandle: federated?.remote_terminal_handle,
+        environmentName: federated?.environment_name
+      })
     )
   }
 }

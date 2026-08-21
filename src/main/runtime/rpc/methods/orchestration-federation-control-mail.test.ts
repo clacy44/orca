@@ -264,7 +264,18 @@ describe('orchestration federation control mail', () => {
       workerDispatcher.dispatch(importRequest('late-direct-import', 1, 'late-control'))
     ).resolves.toMatchObject({
       ok: false,
-      error: { code: 'dispatch_inactive' }
+      error: {
+        code: 'dispatch_inactive',
+        message: `Remote Dispatch ${dispatchId} is not active.`,
+        // Why no --environment: this refusal is raised by the runtime that owns the pane.
+        data: {
+          effectsApplied: false,
+          nextSteps: [
+            'Reach the worker\'s terminal directly: orca terminal send --terminal term_worker --text "<message>" --enter',
+            'Start a new Dispatch for the follow-up work; this one no longer accepts coordinator mail.'
+          ]
+        }
+      }
     })
     await expect(waiting).resolves.toMatchObject({
       ok: true,
