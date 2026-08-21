@@ -277,17 +277,23 @@ function parseMessageTypes(rawTypes: string | undefined): MessageType[] | undefi
   return types && types.length > 0 ? types : undefined
 }
 
-// Why: a dispatch mailbox has no ambient push path, so the worker's own heartbeat reply is the
-// only beat that can tell it coordinator mail is waiting. Zero is omitted, not sent: the field is
-// additive and optional, and a "0 unread" line on every heartbeat would train workers to skip it.
+// Why: an ambient pane notice can be lost on hosts whose PTY write path never lands, so the
+// worker's own heartbeat reply is the beat that can still tell it coordinator mail is waiting.
+// Zero is omitted, not sent: the field is additive and optional, and a "0 unread" line on every
+// heartbeat would train workers to skip it.
 function pendingDispatchMail(
   db: OrchestrationDb,
-  dispatchId: string | undefined
+  params: { dispatchId: string | undefined; senderPaneKey: string | null | undefined }
 ): { pendingMail?: number } {
-  if (!dispatchId) {
+  if (!params.dispatchId) {
     return {}
   }
-  const count = db.countUnreadMessages(`dispatch:${dispatchId}`)
+  // Why silent for a run-bound pane: `check` takes the Run branch first and never reads the
+  // dispatch mailbox, so hinting at unread mail would send that worker to "No messages."
+  if (params.senderPaneKey && db.getCurrentRunForPane(params.senderPaneKey)) {
+    return {}
+  }
+  const count = db.countUnreadMessages(`dispatch:${params.dispatchId}`)
   return count > 0 ? { pendingMail: count } : {}
 }
 
@@ -545,7 +551,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           },
           ...(lifecycle ? { lifecycle } : {}),
           // Why: imported coordinator control mail lands in this peer's own dispatch mailbox, so the count is local.
-          ...(type === 'heartbeat' ? pendingDispatchMail(db, remoteAttachment.dispatch_id) : {})
+          ...(type === 'heartbeat'
+            ? pendingDispatchMail(db, {
+                dispatchId: remoteAttachment.dispatch_id,
+                senderPaneKey
+              })
+            : {})
         }
       }
       const routing = resolveMessageRun(runtime, {
@@ -692,7 +703,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // Why: read before reconcile so a heartbeat reports the mailbox the worker is about to poll, not one mutated by settlement.
           const pendingMail =
             msg.type === 'heartbeat'
-              ? pendingDispatchMail(db, db.getActiveDispatchForIdentity(from, senderPaneKey)?.id)
+              ? pendingDispatchMail(db, {
+                  dispatchId: db.getActiveDispatchForIdentity(from, senderPaneKey)?.id,
+                  senderPaneKey
+                })
               : {}
           const reconciled = reconcileLifecycleMessage(db, msg)
           // Why: a suppressed message is already read, so skip the notify that would wake a check --wait waiter to an empty result.

@@ -182,6 +182,54 @@ describe('orchestration.send pendingMail', () => {
     expect(result).not.toHaveProperty('pendingMail')
   })
 
+  it('still reports the mailbox when the named Dispatch is settled and the heartbeat is suppressed', async () => {
+    const { dispatcher, dispatchId, taskId, orchestrationDb } = localSetup()
+    orchestrationDb.completeDispatch(dispatchId)
+    // A retry re-dispatches the same pane; a straggler heartbeat from the failed attempt
+    // is suppressed, but the count names the mailbox this worker's `check` will read.
+    const retryTask = orchestrationDb.createTask({
+      spec: 'retry',
+      runId: orchestrationDb.getTask(taskId)?.run_id
+    })
+    orchestrationDb.updateTaskStatus(retryTask.id, 'ready')
+    const retry = orchestrationDb.createDispatchContext(
+      retryTask.id,
+      WORKER_HANDLE,
+      WORKER_PANE_KEY
+    )
+    queueCoordinatorMail(orchestrationDb, retry.id, 2)
+
+    const result = await send(dispatcher, 'hb_straggler', {
+      from: WORKER_HANDLE,
+      subject: 'alive',
+      type: 'heartbeat',
+      payload: JSON.stringify({ taskId, dispatchId })
+    })
+
+    expect(result.pendingMail).toBe(2)
+  })
+
+  it('stays silent for a worker whose pane is bound to a Run its check would read instead', async () => {
+    const { dispatcher, dispatchId, taskId, orchestrationDb } = localSetup()
+    queueCoordinatorMail(orchestrationDb, dispatchId, 3)
+    // Negative control: `check` takes the Run branch for this pane and never reaches the
+    // dispatch mailbox, so hinting at unread mail would send the worker to "No messages."
+    orchestrationDb.createRun({
+      objective: 'nested run',
+      coordinatorHandle: WORKER_HANDLE,
+      coordinatorPaneKey: WORKER_PANE_KEY
+    })
+
+    const result = await send(dispatcher, 'hb_nested', {
+      from: WORKER_HANDLE,
+      subject: 'alive',
+      type: 'heartbeat',
+      payload: JSON.stringify({ taskId, dispatchId })
+    })
+
+    expect(result).not.toHaveProperty('pendingMail')
+  })
+
   it('reports the count on a federated worker heartbeat relayed to its Run home', async () => {
     const orchestrationDb = new OrchestrationDb(':memory:')
     db = orchestrationDb
