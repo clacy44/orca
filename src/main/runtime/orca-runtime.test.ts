@@ -35369,6 +35369,77 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  it('re-arms a restored dispatch mailbox onto its live-idle worker terminal', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_restored', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_restored',
+        subject: 'survived the restart',
+        type: 'status'
+      })
+      write.mockClear()
+
+      // Why re-set: adopting a database is the boot path that re-arms every unread mailbox.
+      setInMemoryOrchestrationMessages(runtime, db)
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(
+        write.mock.calls.filter(
+          ([, payload]) =>
+            typeof payload === 'string' && payload.includes('orca orchestration check')
+        )
+      ).toHaveLength(1)
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['a handle minted by a runtime that is gone', 'dead_handle'],
+    ['a dispatch the coordinator already settled', 'settled'],
+    ['a pane whose idle was seeded by the restore, never observed', 'seeded_idle']
+  ] as const)('keeps a restored dispatch repoint silent for %s', async (_name, kind) => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({
+        id: 'ctx_restore_control',
+        status: kind === 'settled' ? 'completed' : 'dispatched',
+        workerState: kind === 'settled' ? 'succeeded' : 'ready',
+        assigneeHandle: kind === 'dead_handle' ? 'term_from_a_dead_runtime' : terminal.handle
+      })
+      if (kind === 'seeded_idle') {
+        seedLeafAgentStatus(runtime, 'idle', false)
+      } else {
+        runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+        runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      }
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_restore_control',
+        subject: 'must stay unannounced',
+        type: 'status'
+      })
+      write.mockClear()
+
+      setInMemoryOrchestrationMessages(runtime, db)
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
   it('announces dispatch mail that arrived while the worker was busy on its next idle edge', async () => {
     vi.useFakeTimers()
     const { runtime, db, write } = createDispatchMailboxHarness()
