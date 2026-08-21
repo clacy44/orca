@@ -34925,6 +34925,30 @@ describe('OrcaRuntimeService', () => {
         vi.useRealTimers()
       }
     })
+
+    it('drops a parked notice when the worker went busy inside the claimed span', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'never typed' })
+
+        const prompt = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
+        await drainToInterChunkYield()
+        runtime.notifyMessageArrived(handle, 'status')
+        await drainToInterChunkYield()
+        // The dispatch put the worker to work; the notice must not follow its task in.
+        runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 200)
+
+        await advanceUntil(() => writtenPayloads(write).at(-1) === '\r')
+        await prompt
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+        expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
   })
 
   it('delivers pending mail via notifyMessageArrived when the recipient is already idle', async () => {

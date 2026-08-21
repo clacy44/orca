@@ -33144,7 +33144,21 @@ export class OrcaRuntimeService {
     }
     this.parkedMessageRedeliveriesByPtyId.delete(ptyId)
     for (const [mailboxHandle, delivery] of parked) {
-      this.deliverPendingMessages(delivery.leaf, {
+      // Why re-read the gate: a claim now spans a whole prompt injection, so the
+      // live idle that authorized this delivery was observed before the pane was
+      // handed its task. Typing a pointer plus Enter into a worker that went busy
+      // inside the span is the hazard the push exists to avoid.
+      const currentLeaf = this.leaves.get(
+        this.getLeafKey(delivery.leaf.tabId, delivery.leaf.leafId)
+      )
+      if (
+        currentLeaf?.ptyId !== ptyId ||
+        currentLeaf.lastAgentStatus !== 'idle' ||
+        !currentLeaf.lastAgentStatusObservedLive
+      ) {
+        continue
+      }
+      this.deliverPendingMessages(currentLeaf, {
         mailboxHandle,
         reservedTypes: delivery.reservedTypes
       })
