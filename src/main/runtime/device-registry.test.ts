@@ -43,17 +43,37 @@ describe('DeviceRegistry pending grants', () => {
     expect(new Set(persisted.map((device) => device.token)).size).toBe(2)
   })
 
-  it('keeps sibling pending rows when minting, unlike getOrCreatePendingDevice which reuses one', () => {
+  it('keeps sibling pending rows when minting and never lets one leak into the shared lane', () => {
     const registry = new DeviceRegistry(userDataPath)
 
-    const first = registry.mintPendingDevice('Ana', 'runtime')
-    registry.mintPendingDevice('Ben', 'runtime')
+    const ana = registry.mintPendingDevice('Ana', 'runtime')
+    const ben = registry.mintPendingDevice('Ben', 'runtime')
 
-    expect(registry.getDevice(first.deviceId)).not.toBeNull()
+    expect(registry.getDevice(ana.deviceId)).not.toBeNull()
 
-    // Negative control on the path S1 must not disturb: coalescing still returns the first pending row.
-    const coalesced = registry.getOrCreatePendingDevice('Ignored', 'runtime')
-    expect(coalesced.deviceId).toBe(first.deviceId)
+    // The lane fence: an unnamed `orca serve` must never re-advertise a named person's invite.
+    const coalesced = registry.getOrCreatePendingDevice('Unnamed', 'runtime')
+    expect(coalesced.deviceId).not.toBe(ana.deviceId)
+    expect(coalesced.deviceId).not.toBe(ben.deviceId)
+    expect(coalesced.pendingExpiresAt).toBeUndefined()
+    // Same fence for the mobile QR flow, which reads the shared pending row directly.
+    expect(registry.getPendingDevice('runtime')?.deviceId).toBe(coalesced.deviceId)
+
+    // Negative control on the path S1 must not disturb: two unnamed calls still coalesce onto one row.
+    expect(registry.getOrCreatePendingDevice('Unnamed', 'runtime').deviceId).toBe(
+      coalesced.deviceId
+    )
+  })
+
+  it('hides minted rows from the mobile pending lookup', () => {
+    const registry = new DeviceRegistry(userDataPath)
+
+    const minted = registry.mintPendingDevice('Ana', 'mobile')
+
+    // Why it matters: createMobilePairingOfferSerial binds a Relay invite onto whatever getPendingDevice
+    // returns, so a named grant surfacing here would take a cloud credential meant for someone else.
+    expect(registry.getPendingDevice('mobile')).toBeNull()
+    expect(registry.getDevice(minted.deviceId)).not.toBeNull()
   })
 
   it('stamps a 24h deadline on minted rows and leaves coalesced rows without one', () => {
@@ -163,18 +183,22 @@ describe('DeviceRegistry pending grants', () => {
     expect(persisted[0]).not.toHaveProperty('pendingExpiresAt')
   })
 
-  it('rotatePendingDevice still drops sibling pending rows of its scope', () => {
+  it('rotatePendingDevice drops the shared pending row but spares named invites', () => {
     const registry = new DeviceRegistry(userDataPath)
 
     const ana = registry.mintPendingDevice('Ana', 'runtime')
     const phone = registry.mintPendingDevice('Phone', 'mobile')
     const scanned = registry.mintPendingDevice('Scanned', 'runtime')
     registry.updateLastSeen(scanned.deviceId)
+    const shared = registry.getOrCreatePendingDevice('Shared', 'runtime')
 
     const rotated = registry.rotatePendingDevice('Rotated', 'runtime')
 
-    // Negative control: rotate is unchanged — it still kills every un-scanned row of its own scope.
-    expect(registry.getDevice(ana.deviceId)).toBeNull()
+    // Negative control: rotate still kills the one shared, possibly-screenshotted token of its scope...
+    expect(registry.getDevice(shared.deviceId)).toBeNull()
+    // ...and nothing else. A named invite is separately revocable, so an unrelated "Regenerate" click in
+    // Settings (which always rotates) must not silently invalidate every `serve --pair-name` grant.
+    expect(registry.getDevice(ana.deviceId)).not.toBeNull()
     expect(registry.getDevice(scanned.deviceId)).not.toBeNull()
     expect(registry.getDevice(phone.deviceId)).not.toBeNull()
     expect(registry.getDevice(rotated.deviceId)).not.toBeNull()

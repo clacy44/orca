@@ -2105,6 +2105,23 @@ describe('OrcaRuntimeRpcServer', () => {
       ) as { deviceId: string; name: string }[]
       expect(persisted.filter((device) => device.name === 'Ana')).toHaveLength(1)
       expect(persisted.filter((device) => device.name === 'Ben')).toHaveLength(1)
+
+      // The lane fence, at the level the operator sees it: a later unnamed offer — what a plain
+      // `orca serve` or a rotate-less desktop link makes — must never re-advertise Ana's invite.
+      const unnamed = server.createPairingOffer({ address: '127.0.0.1', scope: 'runtime' })
+      const rotated = server.createPairingOffer({
+        address: '127.0.0.1',
+        rotate: true,
+        scope: 'runtime'
+      })
+      if (!unnamed.available || !rotated.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+      expect([unnamed.deviceId, rotated.deviceId]).not.toContain(ana.deviceId)
+      expect([unnamed.pairingUrl, rotated.pairingUrl]).not.toContain(ana.pairingUrl)
+      // ...and rotating the shared token must leave both named invites usable.
+      expect(server.getDeviceRegistry()?.getDevice(ana.deviceId)).not.toBeNull()
+      expect(server.getDeviceRegistry()?.getDevice(ben.deviceId)).not.toBeNull()
     } finally {
       await server.stop()
     }

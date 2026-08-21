@@ -124,7 +124,11 @@ export class DeviceRegistry {
     scope: DeviceScope = 'mobile',
     pairingReach: RuntimePairingReach = 'network'
   ): DeviceEntry {
-    const existing = this.devices.find((d) => d.lastSeenAt === 0 && d.scope === scope)
+    // Why: a minted row carries a deadline and belongs to one named human, so reusing it here would hand
+    // that person's link out again as the shared unnamed one. The two lanes stay disjoint by construction.
+    const existing = this.devices.find(
+      (d) => d.lastSeenAt === 0 && d.scope === scope && d.pendingExpiresAt === undefined
+    )
     if (existing) {
       // Why: the same pending token can be re-advertised at a broader reach; widen it but never narrow it,
       // or a link already handed out for off-host use would stop being served after the next launch.
@@ -177,7 +181,12 @@ export class DeviceRegistry {
     scope: DeviceScope = 'mobile',
     pairingReach: RuntimePairingReach = 'network'
   ): DeviceEntry {
-    const retainedDevices = this.devices.filter((d) => d.lastSeenAt !== 0 || d.scope !== scope)
+    // Why: rotation revokes the ONE shared token that may have been screenshotted; a minted invite is
+    // named, individually revocable (mobile:revokeRuntimeAccess), and must survive an unrelated
+    // "Regenerate" click — the desktop generator sends rotate on every unnamed link.
+    const retainedDevices = this.devices.filter(
+      (d) => d.lastSeenAt !== 0 || d.scope !== scope || d.pendingExpiresAt !== undefined
+    )
     return this.createAndPersistDevice(retainedDevices, name, scope, pairingReach)
   }
 
@@ -197,8 +206,14 @@ export class DeviceRegistry {
     return this.devices.find((d) => d.deviceId === deviceId) ?? null
   }
 
+  /** The shared, regenerable pending row of a scope — never a minted named invite. */
   getPendingDevice(scope: DeviceScope = 'mobile'): DeviceEntry | null {
-    return this.devices.find((device) => device.lastSeenAt === 0 && device.scope === scope) ?? null
+    return (
+      this.devices.find(
+        (device) =>
+          device.lastSeenAt === 0 && device.scope === scope && device.pendingExpiresAt === undefined
+      ) ?? null
+    )
   }
 
   setRelayBinding(deviceId: string, binding: RelayDeviceBinding): boolean {
