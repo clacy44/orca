@@ -1105,7 +1105,9 @@ describe('orchestration RPC methods', () => {
       setup()
       vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
       vi.spyOn(runtime, 'listTerminals').mockResolvedValue({
-        terminals: [{ handle: 'term_worker', title: 'Codex' }] as RuntimeTerminalSummary[]
+        terminals: [{ handle: 'term_worker', title: 'Codex' }] as RuntimeTerminalSummary[],
+        totalCount: 1,
+        truncated: false
       })
       const task = db.createTask({ spec: 'post-settlement routes' })
       const dispatch = db.createDispatchContext(task.id, 'term_worker')

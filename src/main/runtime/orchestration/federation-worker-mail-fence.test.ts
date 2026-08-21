@@ -92,10 +92,7 @@ describe('coordinator-to-worker mail fence', () => {
     })
   })
 
-  function captureFenceError(
-    db: OrchestrationDb,
-    dispatchId: string
-  ): { message: string; data: unknown } {
+  function captureFenceError(db: OrchestrationDb, dispatchId: string): OrchestrationError {
     try {
       requireFederatedDispatchAcceptsWorkerMail(db, dispatchId)
     } catch (error) {
