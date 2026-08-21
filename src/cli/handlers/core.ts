@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import type { CommandHandler } from '../dispatch'
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import { getRepeatedStringFlag } from '../flags'
 import { formatCliStatus, formatStatus, printResult } from '../format'
 import { RuntimeClientError, serveOrcaApp } from '../runtime-client'
@@ -119,7 +120,13 @@ export const CORE_HANDLERS: Record<string, CommandHandler> = {
         'Recipe JSON output requires --project-root.'
       )
     }
-    const pairNames = getRepeatedStringFlag(flags, 'pair-name')
+    const pairNames = getRepeatedStringFlag(flags, 'pair-name').map(normalizePairingDeviceName)
+    // Why: parseArgs records a valueless flag as `true`, which overwrites the accumulated names, so
+    // `--pair-name Ana --pair-name` would otherwise fall back to the shared unnamed link with no error —
+    // a typo silently reintroducing the shared grant this flag exists to remove.
+    if (flags.has('pair-name') && (pairNames.length === 0 || pairNames.some((name) => !name))) {
+      throw new RuntimeClientError('invalid_argument', '--pair-name requires a name.')
+    }
     if (pairNames.length > 0 && flags.get('no-pairing') === true) {
       throw new RuntimeClientError(
         'invalid_argument',
