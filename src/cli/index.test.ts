@@ -2160,6 +2160,42 @@ describe('orca cli worktree awareness', () => {
     })
   })
 
+  it('forwards each --pair-name occurrence to the headless server', async () => {
+    serveOrcaAppMock.mockResolvedValue(0)
+
+    await main(
+      ['serve', '--pairing-address', '100.64.1.20', '--pair-name', 'Ana', '--pair-name', 'Ben'],
+      '/tmp/repo'
+    )
+
+    expect(serveOrcaAppMock).toHaveBeenCalledWith({
+      json: false,
+      port: null,
+      pairingAddress: '100.64.1.20',
+      pairNames: ['Ana', 'Ben'],
+      noPairing: false,
+      mobilePairing: false,
+      recipeJson: false,
+      projectRoot: null
+    })
+  })
+
+  it('refuses --pair-name when pairing is disabled', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const priorExitCode = process.exitCode
+
+    await main(['serve', '--pair-name', 'Ana', '--no-pairing'], '/tmp/repo')
+
+    expect(serveOrcaAppMock).not.toHaveBeenCalled()
+    expect([...logSpy.mock.calls, ...errSpy.mock.calls].flat().join('\n')).toContain(
+      'Named pairing links require pairing; remove --no-pairing.'
+    )
+    expect(process.exitCode).toBe(1)
+
+    process.exitCode = priorExitCode
+  })
+
   it('starts a foreground headless server with mobile pairing enabled', async () => {
     serveOrcaAppMock.mockResolvedValue(0)
 

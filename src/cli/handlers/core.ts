@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import type { CommandHandler } from '../dispatch'
+import { getRepeatedStringFlag } from '../flags'
 import { formatCliStatus, formatStatus, printResult } from '../format'
 import { RuntimeClientError, serveOrcaApp } from '../runtime-client'
 import { stripElectronRunAsNode } from '../runtime/launch'
@@ -118,6 +119,13 @@ export const CORE_HANDLERS: Record<string, CommandHandler> = {
         'Recipe JSON output requires --project-root.'
       )
     }
+    const pairNames = getRepeatedStringFlag(flags, 'pair-name')
+    if (pairNames.length > 0 && flags.get('no-pairing') === true) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        'Named pairing links require pairing; remove --no-pairing.'
+      )
+    }
     const port = getOptionalServePort(flags)
     const exitCode = await serveOrcaApp({
       json,
@@ -126,6 +134,8 @@ export const CORE_HANDLERS: Record<string, CommandHandler> = {
         typeof flags.get('pairing-address') === 'string'
           ? (flags.get('pairing-address') as string)
           : null,
+      // Why: omitted entirely when unused so a plain `orca serve` spawns the exact argv it always has.
+      ...(pairNames.length > 0 ? { pairNames } : {}),
       noPairing: flags.get('no-pairing') === true,
       mobilePairing: flags.get('mobile-pairing') === true,
       recipeJson: flags.get('recipe-json') === true,

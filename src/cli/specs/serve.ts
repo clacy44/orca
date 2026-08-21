@@ -6,11 +6,12 @@ export const SERVE_COMMAND_SPECS: CommandSpec[] = [
     path: ['serve'],
     summary: 'Start an Orca runtime server without opening a desktop window',
     usage:
-      'orca serve [--port <port>] [--pairing-address <host>] [--mobile-pairing] [--no-pairing] [--project-root <path>] [--recipe-json] [--json]',
+      'orca serve [--port <port>] [--pairing-address <host>] [--pair-name <name>]… [--mobile-pairing] [--no-pairing] [--project-root <path>] [--recipe-json] [--json]',
     allowedFlags: [
       ...GLOBAL_FLAGS,
       'port',
       'pairing-address',
+      'pair-name',
       'mobile-pairing',
       'no-pairing',
       'project-root',
@@ -21,6 +22,7 @@ export const SERVE_COMMAND_SPECS: CommandSpec[] = [
       '--pairing-address changes only the client-advertised address; use a reachable LAN, Tailscale, SSH-forward, or reverse-proxy endpoint.',
       'Use --recipe-json with --project-root from VM recipes to print the recipe result JSON and leave the server running.',
       'Use --mobile-pairing to print a mobile-scoped pairing QR/link instead of the default runtime-environment pairing link.',
+      'Repeat --pair-name once per person: each occurrence prints its own pairing link bound to a separate revocable grant, so two people never share one identity. Without it a single unnamed link is printed, as before.',
       'When the web client bundle is available, the server also prints a browser URL with the pairing data embedded.'
     ],
     examples: [
@@ -28,7 +30,8 @@ export const SERVE_COMMAND_SPECS: CommandSpec[] = [
       'orca serve --json',
       'orca serve --project-root /workspace/repo --pairing-address wss://sandbox.example.com --recipe-json',
       'orca serve --port 6768 --pairing-address 100.64.1.20',
-      'orca serve --pairing-address 100.64.1.20 --mobile-pairing'
+      'orca serve --pairing-address 100.64.1.20 --mobile-pairing',
+      'orca serve --pairing-address 100.64.1.20 --pair-name Ana --pair-name Ben'
     ]
   }
 ]

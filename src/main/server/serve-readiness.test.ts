@@ -121,3 +121,41 @@ describe('ServeReadinessPublisher', () => {
     )
   })
 })
+
+describe('named pairing blocks', () => {
+  const named: ServeReadiness = {
+    ...ready,
+    namedPairings: [
+      { name: 'Ana', pairing: { ...ready.pairing, url: 'orca://pair?code=ana', deviceId: 'ana' } },
+      { name: 'Ben', pairing: { ...ready.pairing, url: 'orca://pair?code=ben', deviceId: 'ben' } }
+    ]
+  }
+
+  it('renders one labelled block per name instead of a single shared link', () => {
+    const rendered = renderServeReadiness(named, { mode: 'human' })
+
+    expect(rendered).toContain('Pairing URL (Ana): orca://pair?code=ana')
+    expect(rendered).toContain('Pairing URL (Ben): orca://pair?code=ben')
+    // The unlabelled line is what two humans would share; with names it must not be printed at all.
+    expect(rendered).not.toContain('Pairing URL: ')
+  })
+
+  it('carries the named grants on the JSON contract', () => {
+    const payload = JSON.parse(renderServeReadiness(named, { mode: 'json' })) as {
+      namedPairings: { name: string; pairing: { deviceId: string } }[]
+    }
+
+    expect(payload.namedPairings.map((entry) => [entry.name, entry.pairing.deviceId])).toEqual([
+      ['Ana', 'ana'],
+      ['Ben', 'ben']
+    ])
+  })
+
+  it('omits the key entirely when no name was given', () => {
+    // Negative control: an unnamed serve's payload must stay byte-identical to today's.
+    expect(renderServeReadiness(ready, { mode: 'json' })).not.toContain('namedPairings')
+    expect(renderServeReadiness(ready, { mode: 'human' })).toContain(
+      'Pairing URL: orca://pair?code=secret'
+    )
+  })
+})
