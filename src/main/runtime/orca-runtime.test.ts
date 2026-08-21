@@ -95,6 +95,7 @@ import { MAX_QUICK_COMMANDS } from '../../shared/terminal-quick-commands'
 import {
   AGENT_PROMPT_BRACKETED_PASTE_END,
   AGENT_PROMPT_BRACKETED_PASTE_START,
+  AGENT_PROMPT_SUBMIT_DELAY_MS,
   buildAgentPromptPasteBytes
 } from '../../shared/agent-prompt-injection'
 import { CLIPBOARD_TEXT_MEASURE_YIELD_CODE_UNITS } from '../../shared/clipboard-text'
@@ -1219,6 +1220,11 @@ class InMemoryOrchestrationMessages {
     | { id: string; coordinator_handle: string | null; coordinator_pane_key: string | null }
     | undefined {
     return [...this.runs.values()].find((run) => run.coordinator_pane_key === paneKey)
+  }
+
+  // Why: onPtyExit consults it before failing a dispatch; these fixtures own none.
+  getActiveDispatchForTerminal(): undefined {
+    return undefined
   }
 
   markAsDelivered(ids: string[]): void {
@@ -34612,6 +34618,224 @@ describe('OrcaRuntimeService', () => {
 
     runtime.cleanupSubscription('browser-screencast:page-1:first')
     await task
+  })
+
+  describe('structured pty write claim', () => {
+    const PROMPT_TEXT = 'a'.repeat(40_000)
+    const POINTER_TEXT = '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+
+    // Why 50: the send path resolves its guards through several awaited
+    // promises before the first chunk; the paste then parks on a 0ms timer,
+    // so draining microtasks lands deterministically inside an inter-chunk yield.
+    async function drainToInterChunkYield(): Promise<void> {
+      for (let index = 0; index < 50; index += 1) {
+        await Promise.resolve()
+      }
+    }
+
+    // Why a loop: a fake-timer tick only fires timers already due when it
+    // starts, and the paste arms its submit delay from inside the tick that
+    // drains its inter-chunk yields.
+    async function advanceUntil(reached: () => boolean): Promise<void> {
+      for (let index = 0; index < 20 && !reached(); index += 1) {
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+      }
+    }
+
+    function writtenPayloads(write: ReturnType<typeof vi.fn>): string[] {
+      return write.mock.calls.map(([, payload]) => payload as string)
+    }
+
+    function isMailPointer(payload: string): boolean {
+      return payload.includes('orchestration message')
+    }
+
+    async function createIdleMailboxHarness(): Promise<{
+      runtime: OrcaRuntimeService
+      db: InMemoryOrchestrationMessages
+      write: ReturnType<typeof vi.fn>
+      handle: string
+    }> {
+      const harness = createDispatchMailboxHarness()
+      const [terminal] = (await harness.runtime.listTerminals()).terminals
+      harness.runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      harness.runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      harness.write.mockClear()
+      return { ...harness, handle: terminal.handle }
+    }
+
+    it('parks a mail pointer until an in-flight agent prompt has pasted and submitted', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'narrow the retry' })
+
+        const prompt = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
+        await drainToInterChunkYield()
+        expect(write).toHaveBeenCalledTimes(1)
+        expect(writtenPayloads(write)[0]).toContain(AGENT_PROMPT_BRACKETED_PASTE_START)
+
+        runtime.notifyMessageArrived(handle, 'status')
+        await drainToInterChunkYield()
+        expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+
+        await advanceUntil(() => writtenPayloads(write).some(isMailPointer))
+        await prompt
+
+        const payloads = writtenPayloads(write)
+        const pointerIndex = payloads.findIndex(isMailPointer)
+        expect(pointerIndex).toBeGreaterThan(0)
+        const beforePointer = payloads.slice(0, pointerIndex).join('')
+        // The paste is contiguous and carries exactly one submit before the notice.
+        expect(beforePointer).toBe(
+          `${AGENT_PROMPT_BRACKETED_PASTE_START}${PROMPT_TEXT}${AGENT_PROMPT_BRACKETED_PASTE_END}\r`
+        )
+        expect(beforePointer.split('\r')).toHaveLength(2)
+
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+        expect(writtenPayloads(write).filter(isMailPointer)).toHaveLength(1)
+        expect(writtenPayloads(write).at(-1)).toBe('\r')
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
+
+    it('replays a mailbox parked behind a prompt exactly once, not once per chunk', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'first' })
+
+        const prompt = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
+        await drainToInterChunkYield()
+        runtime.notifyMessageArrived(handle, 'status')
+        runtime.notifyMessageArrived(handle, 'status')
+        runtime.notifyMessageArrived(handle, 'status')
+        await drainToInterChunkYield()
+
+        await advanceUntil(() => writtenPayloads(write).some(isMailPointer))
+        await prompt
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+        expect(writtenPayloads(write).filter(isMailPointer)).toHaveLength(1)
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
+
+    it('leaves the pointer path unchanged when no structured write is in flight', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'no contention' })
+
+        runtime.notifyMessageArrived(handle, 'status')
+        await Promise.resolve()
+        expect(write.mock.calls).toEqual([['pty-1', POINTER_TEXT]])
+
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS - 1)
+        expect(write.mock.calls).toEqual([['pty-1', POINTER_TEXT]])
+        await vi.advanceTimersByTimeAsync(1)
+        expect(write.mock.calls).toEqual([
+          ['pty-1', POINTER_TEXT],
+          ['pty-1', '\r']
+        ])
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
+
+    it('releases the claim and runs the parked delivery when a paste throws mid-write', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'after the throw' })
+        let writes = 0
+        write.mockImplementation(() => {
+          writes += 1
+          return writes !== 2
+        })
+
+        const failure = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT).then(
+          () => null,
+          (error: Error) => error
+        )
+        await drainToInterChunkYield()
+        runtime.notifyMessageArrived(handle, 'status')
+        await drainToInterChunkYield()
+        expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+
+        await advanceUntil(() => writtenPayloads(write).some(isMailPointer))
+        expect((await failure)?.message).toBe('terminal_not_writable')
+
+        const payloads = writtenPayloads(write)
+        const pointerIndex = payloads.findIndex(isMailPointer)
+        // The aborted paste is closed before the parked notice is announced.
+        expect(payloads[pointerIndex - 1]).toBe(AGENT_PROMPT_BRACKETED_PASTE_END)
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+        expect(writtenPayloads(write).slice(pointerIndex + 1)).toEqual(['\r'])
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
+
+    it('retires a claim and its parked delivery when the pty exits mid-prompt', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'never pointed' })
+
+        const settled = runtime
+          .sendTerminalAgentPrompt(handle, PROMPT_TEXT)
+          .catch((error: Error) => error)
+        await drainToInterChunkYield()
+        runtime.notifyMessageArrived(handle, 'status')
+        await drainToInterChunkYield()
+
+        runtime.onPtyExit('pty-1', 0)
+        // Two ticks drain the paste and its submit while staying inside the
+        // repoint scheduler's 2s debounce, which retire deliberately re-arms.
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+        await settled
+
+        expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
+
+    it('holds the claim across the chunks of a terminal send --enter', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'during a send' })
+
+        const send = runtime.sendTerminal(handle, { text: PROMPT_TEXT, enter: true })
+        await drainToInterChunkYield()
+        expect(write).toHaveBeenCalledTimes(1)
+
+        runtime.notifyMessageArrived(handle, 'status')
+        await drainToInterChunkYield()
+        expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+
+        await advanceUntil(() => writtenPayloads(write).some(isMailPointer))
+        const payloads = writtenPayloads(write)
+        const pointerIndex = payloads.findIndex(isMailPointer)
+        expect(pointerIndex).toBeGreaterThan(0)
+        expect(payloads.slice(0, pointerIndex).join('')).toBe(PROMPT_TEXT)
+
+        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+        await send
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
   })
 
   it('delivers pending mail via notifyMessageArrived when the recipient is already idle', async () => {
