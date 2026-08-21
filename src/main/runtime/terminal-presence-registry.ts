@@ -36,19 +36,39 @@ export type TerminalPresenceRegistryOptions = {
   now?: () => number
 }
 
+// Why: every mutator publishes here, so a stamp site cannot land a change no surface hears — the
+// alternative (each caller remembering to notify) is exactly how a silent presence bug ships.
+export type TerminalPresenceChangeListener = (ptyId: string) => void
+
 export class TerminalPresenceRegistry {
   private readonly participants = new Map<string, TerminalPresenceParticipant>()
   private readonly attachments = new Map<string, Map<string, TerminalPresenceAttachment>>()
   private readonly grantWrites = new Map<string, Map<string, number>>()
   private readonly participantIds = new Map<string, string>()
+  private readonly changeListeners = new Set<TerminalPresenceChangeListener>()
   private readonly now: () => number
   // Why: the synthesized host row's `since`, taken from the injected clock rather than module import,
   // so it is the one presence stamp a test can drive alongside every other one.
   startedAt: number
 
   constructor(options: TerminalPresenceRegistryOptions = {}) {
-    this.now = options.now ?? Date.now
+    // Why read through rather than capture Date.now: one clock must drive the remote stamp sites and the
+    // host's IPC writers alike, and a captured reference would ignore a test's injected clock.
+    this.now = options.now ?? ((): number => Date.now())
     this.startedAt = this.now()
+  }
+
+  onChange(listener: TerminalPresenceChangeListener): () => void {
+    this.changeListeners.add(listener)
+    return () => {
+      this.changeListeners.delete(listener)
+    }
+  }
+
+  private notifyChanged(ptyId: string): void {
+    for (const listener of this.changeListeners) {
+      listener(ptyId)
+    }
   }
 
   // Why: minted once per grant and reused for every later socket of that grant, so one peer's
@@ -93,13 +113,18 @@ export class TerminalPresenceRegistry {
     // Why: leak guard only — every stream teardown already detaches its own key; a socket that dies
     // without running one must not strand a row the rosters would keep showing.
     for (const [ptyId, byKey] of this.attachments) {
+      let dropped = false
       for (const [key, attachment] of byKey) {
         if (attachment.connectionId === connectionId) {
           byKey.delete(key)
+          dropped = true
         }
       }
       if (byKey.size === 0) {
         this.attachments.delete(ptyId)
+      }
+      if (dropped) {
+        this.notifyChanged(ptyId)
       }
     }
   }
@@ -133,6 +158,7 @@ export class TerminalPresenceRegistry {
       connectionId,
       lastInteractiveInputAt: 0
     })
+    this.notifyChanged(ptyId)
   }
 
   // Why: the reserved key is written by the two guarded renderer writers, which belong to no socket.
@@ -143,23 +169,25 @@ export class TerminalPresenceRegistry {
       connectionId: null,
       lastInteractiveInputAt: existing?.lastInteractiveInputAt ?? 0
     })
+    this.notifyChanged(ptyId)
   }
 
   detach(ptyId: string, subscriptionKey: string): void {
     const byKey = this.attachments.get(ptyId)
-    if (!byKey) {
+    if (!byKey?.delete(subscriptionKey)) {
       return
     }
-    byKey.delete(subscriptionKey)
     if (byKey.size === 0) {
       this.attachments.delete(ptyId)
     }
+    this.notifyChanged(ptyId)
   }
 
   // Why: the reserved host key belongs to no teardown path, so it dies with the PTY's whole entry.
   releasePty(ptyId: string): void {
     this.attachments.delete(ptyId)
     this.grantWrites.delete(ptyId)
+    this.notifyChanged(ptyId)
   }
 
   attachmentsOf(ptyId: string): ReadonlyMap<string, TerminalPresenceAttachment> {
@@ -175,6 +203,7 @@ export class TerminalPresenceRegistry {
     const attachment = this.attachments.get(ptyId)?.get(subscriptionKey)
     if (attachment) {
       attachment.lastInteractiveInputAt = this.now()
+      this.notifyChanged(ptyId)
     }
   }
 
@@ -192,12 +221,15 @@ export class TerminalPresenceRegistry {
       this.grantWrites.set(ptyId, byGrant)
     }
     byGrant.set(pairedDeviceId, this.now())
+    this.notifyChanged(ptyId)
   }
 
   grantWritesOf(ptyId: string): ReadonlyMap<string, number> {
     return this.grantWrites.get(ptyId) ?? new Map()
   }
 
+  // Why listeners survive: reset clears state, not wiring — the notifier subscribes once at import and
+  // a test that reset it would silently stop publishing every later change.
   reset(): void {
     this.participants.clear()
     this.attachments.clear()
