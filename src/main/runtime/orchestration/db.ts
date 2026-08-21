@@ -3469,6 +3469,17 @@ export class OrchestrationDb {
     )
   }
 
+  // Why: the heartbeat mail hint needs a count only; loading a whole dispatch mailbox page to length it would be waste.
+  countUnreadMessages(toHandle: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM messages
+         WHERE to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery'`
+      )
+      .get(toHandle) as { count: number } | undefined
+    return row?.count ?? 0
+  }
+
   convertLifecycleMessageToRejection(
     messageId: string,
     code: string,

@@ -103,7 +103,7 @@ type LifecycleSendResult =
   | { action: 'settled'; outcome: 'succeeded' | 'failed'; duplicate?: boolean }
   | { action: 'rejected'; code: string; reason: string }
 
-type OrchestrationSendResult =
+type OrchestrationSendResult = (
   | { message: { id: string; run_id?: string }; lifecycle?: LifecycleSendResult }
   | { messages: { id: string }[]; recipients: number }
   | {
@@ -116,6 +116,18 @@ type OrchestrationSendResult =
       }
       lifecycle?: LifecycleSendResult
     }
+) &
+  // Why: additive and optional on every send shape — runtimes that predate it simply omit it.
+  { pendingMail?: number }
+
+// Why: a worker's heartbeat is its only scheduled round trip, so the unread hint rides back on it;
+// both send shapes carry it because a federated worker only ever sees the relay branch.
+function pendingMailHint(result: OrchestrationSendResult): string {
+  const pending = result.pendingMail
+  return pending !== undefined && pending > 0
+    ? `\nUnread coordinator mail: ${pending} — run orchestration check`
+    : ''
+}
 
 function resolveCompatibilityCliCommand(): 'orca' | 'orca-ide' | 'orca-dev' {
   const configured = process.env.ORCA_CLI_COMMAND
@@ -610,14 +622,15 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       throw new RuntimeClientError(result.result.lifecycle.code, result.result.lifecycle.reason)
     }
     printResult(result, json, (r) => {
+      const mailHint = pendingMailHint(r)
       if ('message' in r) {
-        return `Sent ${r.message.id}`
+        return `Sent ${r.message.id}${mailHint}`
       }
       if ('relay' in r) {
         if (r.relay.destination === 'worker') {
-          return `Queued ${r.relay.messageId} for worker Dispatch ${r.relay.dispatchId}`
+          return `Queued ${r.relay.messageId} for worker Dispatch ${r.relay.dispatchId}${mailHint}`
         }
-        return `Queued ${r.relay.messageId} for Run home (Dispatch ${r.relay.dispatchId})`
+        return `Queued ${r.relay.messageId} for Run home (Dispatch ${r.relay.dispatchId})${mailHint}`
       }
       return `Sent ${r.messages.length} messages to ${r.recipients} recipients`
     })
