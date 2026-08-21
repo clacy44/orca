@@ -69,7 +69,14 @@ Slack, GitHub comments, or any other channel to reach a human during the run.
     --body "<details>" \\
     --task-id task_SNAP
 
-  # Check for messages from the coordinator:
+  # Check for messages from the coordinator.
+  #
+  # BEHAVIOR RULE: run this alongside every heartbeat (so every
+  # 5 minutes) and again before any irreversible step — merging,
+  # pushing, deleting, or rewriting shared state. The coordinator's follow-ups
+  # only reach you here: nothing interrupts you when its mail arrives, so mail
+  # you never check is a correction you never see. This cadence stops when you
+  # send worker_done; the section below governs from then on.
   orca orchestration check --terminal term_WORKER
 
 === AFTER YOU SEND worker_done ===
