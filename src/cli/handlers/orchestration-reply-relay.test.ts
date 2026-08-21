@@ -64,4 +64,23 @@ describe('orchestration reply receipt rendering', () => {
     // Negative control: a local reply still renders exactly as before.
     await expect(renderReply({ message: { id: 'msg_reply' } })).resolves.toBe('Replied msg_reply')
   })
+
+  it('stays readable for a CLI that predates the relay branch', () => {
+    // Negative control: the shipped formatter dereferences message.id unconditionally, so a
+    // relay receipt without that field is a TypeError on a reply the relay already accepted.
+    const shippedFormatter = (r: { message: { id: string } }): string => `Replied ${r.message.id}`
+
+    expect(
+      shippedFormatter({
+        relay: {
+          messageId: 'relay_1',
+          sequence: 3,
+          dispatchId: 'ctx_remote',
+          destination: 'worker',
+          accepted: true
+        },
+        message: { id: 'relay_1' }
+      } as never)
+    ).toBe('Replied relay_1')
+  })
 })

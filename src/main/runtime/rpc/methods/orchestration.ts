@@ -1237,7 +1237,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             dispatchId: relay.dispatch_id,
             destination: 'worker',
             accepted: true
-          }
+          },
+          // Why keep `message`: every CLI shipped before the relay branch formats a reply as
+          // `Replied ${r.message.id}`, so omitting it crashes an older client on a reply the
+          // relay accepted — the reply lands and the coordinator never learns it did.
+          message: { id: relay.message_id }
         }
       }
 

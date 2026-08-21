@@ -337,6 +337,12 @@ describe('orchestration federation control mail', () => {
       ok: true,
       result: { relay: { dispatchId, destination: 'worker', accepted: true } }
     })
+    // Why the message id too: a CLI shipped before the relay branch renders `Replied
+    // ${r.message.id}` and would crash on a receipt that carries only `relay`.
+    const receipt = (
+      replied as { result: { relay: { messageId: string }; message: { id: string } } }
+    ).result
+    expect(receipt.message.id).toBe(receipt.relay.messageId)
     expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toMatchObject([
       { kind: 'control_message' }
     ])

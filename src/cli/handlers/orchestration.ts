@@ -110,7 +110,11 @@ type LifecycleSendResult =
 // relay receipt the send path returns instead of a locally-inserted message row.
 type OrchestrationReplyResult =
   | { message: { id: string } }
-  | { relay: { messageId: string; dispatchId: string; sequence: number; accepted: true } }
+  | {
+      relay: { messageId: string; dispatchId: string; sequence: number; accepted: true }
+      // Why also `message`: CLIs that predate this branch render `Replied ${r.message.id}`.
+      message: { id: string }
+    }
 
 type OrchestrationSendResult = (
   | { message: { id: string; run_id?: string }; lifecycle?: LifecycleSendResult }
