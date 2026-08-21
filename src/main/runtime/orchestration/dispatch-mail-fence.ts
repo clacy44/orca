@@ -7,8 +7,17 @@ import { OrchestrationError } from './orchestration-error'
 // no reader at all. Refuse it at send instead of storing mail nobody will ever read.
 export function requireActiveDispatchForWorkerMail(db: OrchestrationDb, dispatchId: string): void {
   const dispatch = db.getDispatchContextById(dispatchId)
-  // Why the missing-row pass: the send path already answered dispatch_not_found for it.
-  if (!dispatch || dispatch.status === 'pending' || dispatch.status === 'dispatched') {
+  if (!dispatch) {
+    // Why refuse rather than pass: neither caller vouches for this id — send resolves the Dispatch
+    // its payload named, not the one `to:` addresses, and reply resolves none — and a mailbox whose
+    // Dispatch row is gone can never be read, so an insert here is mail with no reader.
+    throw new OrchestrationError(
+      'dispatch_not_found',
+      `Dispatch ${dispatchId} was not found.`,
+      localDispatchInactiveRecoveryData(null)
+    )
+  }
+  if (dispatch.status === 'pending' || dispatch.status === 'dispatched') {
     return
   }
   throw new OrchestrationError(

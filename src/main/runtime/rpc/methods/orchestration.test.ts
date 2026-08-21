@@ -1032,6 +1032,29 @@ describe('orchestration RPC methods', () => {
       expect(db.getAllMessagesForHandle(`dispatch:${dispatch.id}`)).toHaveLength(0)
     })
 
+    it('refuses a follow-up whose recipient names a Dispatch that does not exist', async () => {
+      setup()
+      const task = db.createTask({ spec: 'live work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+
+      // Negative control: the payload resolves the Run from a live Dispatch, so routing never
+      // validates the id `to:` names and the fence is the only thing standing between a typo
+      // and a durable row in a mailbox nothing reads.
+      await expect(
+        call('orchestration.send', {
+          from: 'term_coord',
+          to: 'dispatch:ctx_typo',
+          subject: 'One more thing',
+          payload: JSON.stringify({ dispatchId: dispatch.id })
+        })
+      ).rejects.toMatchObject({
+        code: 'dispatch_not_found',
+        message: 'Dispatch ctx_typo was not found.',
+        data: { effectsApplied: false }
+      })
+      expect(db.getAllMessagesForHandle('dispatch:ctx_typo')).toHaveLength(0)
+    })
+
     it('accepts the same follow-up while the Dispatch is still dispatched', async () => {
       setup()
       vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
@@ -1897,6 +1920,28 @@ describe('orchestration RPC methods', () => {
         code: 'dispatch_inactive',
         data: { effectsApplied: false }
       })
+      expect(db.getMessageById(escalation.id)?.read).toBe(0)
+    })
+
+    it('refuses a reply whose sender names a Dispatch that is gone', async () => {
+      setup()
+      // Why this shape: resetTasks drops dispatch_contexts and keeps messages, so a retained
+      // escalation outlives its Dispatch row — and that mailbox has no reader either.
+      const escalation = db.insertMessage({
+        from: 'dispatch:ctx_purged',
+        to: `run:${activeRunId}`,
+        subject: 'Blocked',
+        type: 'escalation',
+        runId: activeRunId
+      })
+
+      await expect(
+        call('orchestration.reply', { id: escalation.id, body: 'answer', from: 'term_coord' })
+      ).rejects.toMatchObject({
+        code: 'dispatch_not_found',
+        message: 'Dispatch ctx_purged was not found.'
+      })
+      expect(db.getAllMessagesForHandle('dispatch:ctx_purged')).toHaveLength(0)
       expect(db.getMessageById(escalation.id)?.read).toBe(0)
     })
   })
