@@ -664,9 +664,10 @@ export class OrcaRuntimeRpcServer {
     address?: string | null
     name?: string
     rotate?: boolean
-    // Why: opt-in per-human invites. Reuse is the default so every existing caller keeps coalescing onto
-    // one pending grant; only a caller that knows it is naming one person asks for a distinct one.
-    mint?: boolean
+    // Why: opt-in per-human invites. 'reuse' is the default so every existing caller keeps coalescing
+    // onto one pending grant; only a caller that knows it is naming one person asks for 'always'. Named
+    // rather than boolean so the three-way mint/rotate/reuse resolution reads at the call site (B1 §2.5).
+    mint?: 'always' | 'reuse'
     scope?: DeviceScope
     // Why: STA-2370 — recorded on the grant so a "This computer only" client reconnecting cannot make the
     // next launch bind every interface. Defaults to network reach, which is what every other caller means.
@@ -714,11 +715,12 @@ export class OrcaRuntimeRpcServer {
       const reach = args.reach ?? 'network'
       // Why: mint wins over rotate — rotate drops every sibling pending row, which would silently kill a
       // co-worker's un-scanned invite the moment a second named one is created.
-      device = args.mint
-        ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach)
-        : args.rotate
-          ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
-          : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
+      device =
+        args.mint === 'always'
+          ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach)
+          : args.rotate
+            ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
+            : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
     } catch (error) {
       console.error('[runtime] Failed to persist pairing credential:', error)
       return pairingUnavailable('device_registry_unavailable', DEVICE_REGISTRY_UNAVAILABLE_GUIDANCE)

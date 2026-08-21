@@ -40,8 +40,8 @@ describe('resolveServePairingOffers', () => {
     // The guard that carries the whole feature: exactly as many offers as people, each minted.
     expect(source.createPairingOffer).toHaveBeenCalledTimes(2)
     expect(source.createPairingOffer.mock.calls.map(([args]) => args)).toEqual([
-      { address: '100.64.1.20', name: 'Ana', mint: true, scope: 'runtime' },
-      { address: '100.64.1.20', name: 'Ben', mint: true, scope: 'runtime' }
+      { address: '100.64.1.20', name: 'Ana', mint: 'always', scope: 'runtime' },
+      { address: '100.64.1.20', name: 'Ben', mint: 'always', scope: 'runtime' }
     ])
     // Negative control: the dated host-minted fallback — the shared grant — is never created.
     expect(source.createPairingOffer).not.toHaveBeenCalledWith(

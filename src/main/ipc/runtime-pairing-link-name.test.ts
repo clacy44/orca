@@ -61,7 +61,7 @@ describe('naming a runtime pairing link', () => {
         address: '100.64.1.20',
         rotate: undefined,
         name: 'Ana',
-        mint: true,
+        mint: 'always',
         scope: 'runtime',
         reach: 'network'
       },
@@ -69,7 +69,7 @@ describe('naming a runtime pairing link', () => {
         address: '100.64.1.20',
         rotate: undefined,
         name: 'Ben',
-        mint: true,
+        mint: 'always',
         scope: 'runtime',
         reach: 'network'
       }

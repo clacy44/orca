@@ -191,7 +191,7 @@ export function registerMobileHandlers(
         // coalescing onto the shared pending row — two named links are two distinct devices. Both keys
         // are omitted when blank so an unnamed link makes exactly today's call.
         ...(deviceName
-          ? { name: deviceName, mint: true }
+          ? { name: deviceName, mint: 'always' as const }
           : { name: `Runtime ${new Date().toLocaleDateString()}` }),
         scope: 'runtime',
         // Why: a grant that only ever pointed at loopback must not make the next launch bind every

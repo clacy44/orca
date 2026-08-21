@@ -28,7 +28,7 @@ export type ServePairingOfferSource = {
   createPairingOffer: (args: {
     address: string | null
     name: string
-    mint?: boolean
+    mint?: 'always' | 'reuse'
     scope: ServePairingScope
   }) => ServePairingOffer
   renderPairingQr: (pairingUrl: string) => Promise<string | null>
@@ -86,7 +86,12 @@ export async function resolveServePairingOffers(
       name,
       pairing: await toPairingReadiness(
         // Why: one grant per person — a shared link makes two humans one indistinguishable device.
-        source.createPairingOffer({ address: request.pairingAddress, name, mint: true, scope }),
+        source.createPairingOffer({
+          address: request.pairingAddress,
+          name,
+          mint: 'always',
+          scope
+        }),
         scope,
         source
       )

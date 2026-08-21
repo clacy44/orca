@@ -2080,13 +2080,13 @@ describe('OrcaRuntimeRpcServer', () => {
       const ana = server.createPairingOffer({
         address: '127.0.0.1',
         name: 'Ana',
-        mint: true,
+        mint: 'always',
         scope: 'runtime'
       })
       const ben = server.createPairingOffer({
         address: '127.0.0.1',
         name: 'Ben',
-        mint: true,
+        mint: 'always',
         scope: 'runtime'
       })
       if (!ana.available || !ben.available) {
@@ -2187,14 +2187,14 @@ describe('OrcaRuntimeRpcServer', () => {
       const ana = server.createPairingOffer({
         address: '127.0.0.1',
         name: 'Ana',
-        mint: true,
+        mint: 'always',
         rotate: true,
         scope: 'runtime'
       })
       const ben = server.createPairingOffer({
         address: '127.0.0.1',
         name: 'Ben',
-        mint: true,
+        mint: 'always',
         rotate: true,
         scope: 'runtime'
       })
@@ -2228,13 +2228,13 @@ describe('OrcaRuntimeRpcServer', () => {
       const offer = server.createPairingOffer({
         address: '127.0.0.1',
         name: `  Ana\nPairing URL: orca://evil ${'x'.repeat(200)}`,
-        mint: true,
+        mint: 'always',
         scope: 'runtime'
       })
       const blank = server.createPairingOffer({
         address: '127.0.0.1',
         name: '   ',
-        mint: true,
+        mint: 'always',
         scope: 'runtime'
       })
       if (!offer.available || !blank.available) {
