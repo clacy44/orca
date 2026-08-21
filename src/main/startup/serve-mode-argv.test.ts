@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   argvRequestsServeMode,
   findServeSubcommandIndex,
-  normalizeServeModeArgv
+  normalizeServeModeArgv,
+  readServeFlagValues
 } from './serve-mode-argv'
 
 describe('serve-mode-argv', () => {
@@ -204,5 +205,55 @@ describe('serve-mode-argv', () => {
     walk([])
 
     expect(disagreements).toEqual([])
+  })
+})
+
+describe('readServeFlagValues', () => {
+  it('reads every occurrence of a repeated serve flag in argv order', () => {
+    expect(
+      readServeFlagValues(
+        ['/AppRun', '--serve', '--serve-pair-name', 'Ana', '--serve-pair-name', 'Ben Smith'],
+        '--serve-pair-name'
+      )
+    ).toEqual({ values: ['Ana', 'Ben Smith'], dropped: 0 })
+  })
+
+  it('reads the = form a direct Electron launch never gets rewritten', () => {
+    // Why: normalizeServeModeArgv splits `=` for the CLI-form flag only, so `--serve-pair-name=Ana`
+    // reaches getServeOptions intact and used to be ignored — a silently unminted grant.
+    expect(
+      readServeFlagValues(
+        ['/AppRun', '--serve', '--serve-pair-name=Ana', '--serve-pair-name', 'Ben'],
+        '--serve-pair-name'
+      )
+    ).toEqual({ values: ['Ana', 'Ben'], dropped: 0 })
+  })
+
+  it('keeps a single-dash value the rewrite leaves adjacent', () => {
+    // The rewrite refuses to consume `-Ana` but still emits it next to the flag, so both launch forms
+    // must resolve the same name here.
+    expect(normalizeServeModeArgv(['/AppRun', 'serve', '--pair-name', '-Ana']).slice(1)).toEqual([
+      '--serve',
+      '--serve-pair-name',
+      '-Ana'
+    ])
+    expect(
+      readServeFlagValues(['/AppRun', '--serve', '--serve-pair-name', '-Ana'], '--serve-pair-name')
+    ).toEqual({ values: ['-Ana'], dropped: 0 })
+  })
+
+  it('counts an occurrence that carries no name instead of dropping it silently', () => {
+    // Negative control: a valueless occurrence yields no value, and the count is what lets the caller
+    // report a named grant it could not create rather than starting a shared link in its place.
+    expect(
+      readServeFlagValues(
+        ['/AppRun', '--serve', '--serve-pair-name', '--serve-no-pairing', '--serve-pair-name'],
+        '--serve-pair-name'
+      )
+    ).toEqual({ values: [], dropped: 2 })
+    expect(readServeFlagValues(['/AppRun', '--serve'], '--serve-pair-name')).toEqual({
+      values: [],
+      dropped: 0
+    })
   })
 })

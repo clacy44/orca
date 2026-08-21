@@ -85,7 +85,8 @@ import {
   showRuntimeRpcStartupFailureDialog
 } from './runtime/runtime-rpc-startup-failure'
 import { resolveAdvertisedPairingEndpoint } from './runtime/pairing-endpoint'
-import { ServeReadinessPublisher, type ServePairingReadiness } from './server/serve-readiness'
+import { ServeReadinessPublisher } from './server/serve-readiness'
+import { resolveServePairingOffers } from './server/serve-pairing-offers'
 import { reserveServeStdoutForReadiness } from './server/serve-stdout-boundary'
 import { DesktopRelayService } from './runtime/relay/desktop-relay-service'
 import type { RelayBrokerStatus } from './runtime/relay/relay-session-broker'
@@ -133,7 +134,11 @@ import {
   installUnhandledRejectionLogging
 } from './startup/main-process-error-guards'
 import { enableRendererHeapHeadroom } from './startup/renderer-heap-headroom'
-import { argvRequestsServeMode, normalizeServeModeArgv } from './startup/serve-mode-argv'
+import {
+  argvRequestsServeMode,
+  normalizeServeModeArgv,
+  readServeFlagValues
+} from './startup/serve-mode-argv'
 import { ensureVirtualDisplayForHeadlessServe } from './startup/ensure-virtual-display'
 import {
   readActiveGpuFallbackMarker,
@@ -1833,15 +1838,13 @@ function getServeOptions(argv = process.argv): ServeOptions {
     const value = argv[index + 1]
     return value && !value.startsWith('--') ? value : null
   }
-  const valuesAfter = (flag: string): string[] => {
-    const values: string[] = []
-    for (let index = 0; index < argv.length; index += 1) {
-      const value = argv[index + 1]
-      if (argv[index] === flag && value !== undefined && !value.startsWith('--')) {
-        values.push(value)
-      }
-    }
-    return values
+  const pairNames = readServeFlagValues(argv, '--serve-pair-name')
+  if (pairNames.dropped > 0) {
+    // Why: silently starting with fewer named grants than the operator asked for reintroduces the shared
+    // link this flag exists to replace, so make the dropped request visible.
+    console.warn(
+      `[serve] Ignored ${pairNames.dropped} --serve-pair-name occurrence(s) with no name.`
+    )
   }
   const rawPort = valueAfter('--serve-port')
   let wsPort: number | undefined
@@ -1856,7 +1859,7 @@ function getServeOptions(argv = process.argv): ServeOptions {
     json: argv.includes('--serve-json'),
     ...(wsPort !== undefined ? { wsPort } : {}),
     pairingAddress: valueAfter('--serve-pairing-address'),
-    pairNames: valuesAfter('--serve-pair-name'),
+    pairNames: pairNames.values,
     noPairing: argv.includes('--serve-no-pairing'),
     mobilePairing: argv.includes('--serve-mobile-pairing'),
     recipeJson: argv.includes('--serve-recipe-json'),
@@ -1889,25 +1892,6 @@ async function renderTerminalPairingQr(pairingUrl: string): Promise<string | nul
   }
 }
 
-async function toServePairingReadiness(
-  offer: ReturnType<OrcaRuntimeRpcServer['createPairingOffer']>,
-  options: ServeOptions
-): Promise<ServePairingReadiness> {
-  if (!offer.available) {
-    return offer
-  }
-  return {
-    available: true,
-    url: offer.pairingUrl,
-    endpoint: offer.endpoint,
-    deviceId: offer.deviceId,
-    webClientUrl: offer.webClientUrl,
-    scope: options.mobilePairing ? 'mobile' : 'runtime',
-    // Why: a QR per named link is the point — each person scans their own, not a shared one.
-    qr: options.mobilePairing ? await renderTerminalPairingQr(offer.pairingUrl) : null
-  }
-}
-
 async function printServeReady(options: ServeOptions): Promise<void> {
   if (!runtime || !runtimeRpc) {
     throw new Error('Runtime server must be initialized before printing serve readiness')
@@ -1928,42 +1912,18 @@ async function printServeReady(options: ServeOptions): Promise<void> {
   const advertised = boundEndpoint
     ? resolveAdvertisedPairingEndpoint(boundEndpoint, options.pairingAddress)
     : null
-  const scope = options.mobilePairing ? 'mobile' : 'runtime'
-  // Why: --serve-no-pairing wins outright — a direct `<binary> --serve` launch can carry both, and the
-  // operator's refusal to pair must not be overridden by a name.
-  const pairNames = options.noPairing ? [] : options.pairNames
-  const namedPairings = await Promise.all(
-    pairNames.map(async (name) => ({
-      name,
-      pairing: await toServePairingReadiness(
-        runtimeRpc!.createPairingOffer({
-          address: options.pairingAddress,
-          name,
-          // Why: one grant per person — a shared link makes two humans one indistinguishable device.
-          mint: true,
-          scope
-        }),
-        options
-      )
-    }))
+  const { pairing, namedPairings } = await resolveServePairingOffers(
+    {
+      pairingAddress: options.pairingAddress,
+      pairNames: options.pairNames,
+      noPairing: options.noPairing,
+      mobilePairing: options.mobilePairing
+    },
+    {
+      createPairingOffer: (args) => runtimeRpc!.createPairingOffer(args),
+      renderPairingQr: renderTerminalPairingQr
+    }
   )
-  const pairing: ServePairingReadiness = options.noPairing
-    ? {
-        available: false,
-        reason: 'disabled_by_operator',
-        guidance: 'Restart without --no-pairing to create a client pairing offer.'
-      }
-    : // Why: `??` short-circuits, so the unnamed host-minted offer is never created when names were
-      // given — creating it would add exactly the shared grant --pair-name exists to avoid.
-      (namedPairings[0]?.pairing ??
-      (await toServePairingReadiness(
-        runtimeRpc.createPairingOffer({
-          address: options.pairingAddress,
-          name: `${options.mobilePairing ? 'Mobile' : 'CLI'} ${new Date().toLocaleDateString()}`,
-          scope
-        }),
-        options
-      )))
   await serveReadinessPublisher.publish(
     {
       runtimeId: runtime.getRuntimeId(),
@@ -1973,7 +1933,7 @@ async function printServeReady(options: ServeOptions): Promise<void> {
       managedWslCliReconciliation: managedWslCliReconciliationStatus,
       pairing,
       // Why: key omitted when unused so an unnamed serve publishes exactly today's payload.
-      ...(namedPairings.length > 0 ? { namedPairings } : {})
+      ...(namedPairings ? { namedPairings } : {})
     },
     options.recipeJson
       ? { mode: 'recipe-json', projectRoot: options.projectRoot! }
