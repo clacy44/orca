@@ -17,6 +17,7 @@ import {
   superviseForegroundServe
 } from './serve-update-supervisor'
 import { RuntimeClientError } from './types'
+import { quoteWindowsShellArgument } from './windows-shell-argument-quoting'
 
 const IGNORED_NON_RECIPE_STDOUT = '[serve] ignored non-recipe stdout'
 
@@ -141,26 +142,30 @@ export function serveOrcaApp(
     ...getExecutableSpawnOptions(executable),
     env: childEnv
   }
+  // Why: only the shim path goes through cmd.exe, so quoting elsewhere would change argv the child
+  // already receives correctly.
+  const spawnArgs =
+    spawnOptions.shell === true ? childArgs.map(quoteWindowsShellArgument) : childArgs
   const interruptedHandoff = handoffPath ? readServeUpdateHandoffSync(handoffPath) : null
   if (interruptedHandoff?.phase === 'install-requested') {
     // Why: the node-mode CLI is not an NSRunningApplication, so it can retain launchd ownership while ShipIt swaps the app.
     return resumeInterruptedServeUpdate({
       executable,
-      childArgs,
+      childArgs: spawnArgs,
       spawnOptions,
       spawnChild: spawnProcess,
       handoffPath: handoffPath!,
       handoff: interruptedHandoff
     })
   }
-  const child = spawnProcess(executable, childArgs, spawnOptions)
+  const child = spawnProcess(executable, spawnArgs, spawnOptions)
 
   if (args.recipeJson) {
     return waitForRecipeJson(child)
   }
   return superviseForegroundServe({
     executable,
-    childArgs,
+    childArgs: spawnArgs,
     spawnOptions,
     spawnChild: spawnProcess,
     child,
