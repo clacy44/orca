@@ -87,7 +87,8 @@ orca orchestration worker-start \
 orca orchestration worker-show --dispatch <dispatch_id> --json
 orca orchestration worker-read --dispatch <dispatch_id> --limit 50 --json
 
-# Send follow-up mail (delivered to the worker's next `orchestration check`)
+# Send follow-up mail (delivered to the worker's next `orchestration check`, and
+# announced in its pane when the worker is idle and its PTY write path is healthy)
 orca orchestration send --to dispatch:<dispatch_id> \
   --subject "Follow-up" --body "<attempt-specific guidance>" --json
 
