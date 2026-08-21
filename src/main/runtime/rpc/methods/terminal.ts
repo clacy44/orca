@@ -41,10 +41,13 @@ import {
   type TerminalPresenceParticipant
 } from '../../terminal-presence-registry'
 import {
+  buildTerminalPresenceActivityRows,
+  isPublishedPresenceParticipant,
   resolveStreamParticipant,
   toStreamPresence,
   type TerminalPresenceStreamPresence
 } from '../../terminal-presence-snapshot'
+import { terminalPresenceChangeNotifier } from '../../terminal-presence-change-notifier'
 import { isTuiAgent } from '../../../../shared/tui-agent-config'
 import { isTerminalQueryReply } from '../../../../shared/terminal-query-reply'
 import {
@@ -141,6 +144,25 @@ function negotiatedStreamPresence(
   return supportsPresence && participant ? toStreamPresence(participant) : null
 }
 
+// Why one builder for both handlers: `self` is resolved per emitting stream, so the two paths differ in
+// exactly one argument — duplicating the payload shape is how they would silently drift.
+function terminalPresenceStreamEvent(
+  streamId: number,
+  ptyId: string,
+  participant: TerminalPresenceParticipant | null
+): Record<string, unknown> {
+  return {
+    type: 'terminal-presence',
+    streamId,
+    participants: buildTerminalPresenceActivityRows({
+      registry: terminalPresenceRegistry,
+      ptyId,
+      now: Date.now(),
+      selfParticipantId: participant?.participantId ?? null
+    })
+  }
+}
+
 type TerminalMultiplexStream = {
   streamId: number
   terminal: string
@@ -184,6 +206,7 @@ type TerminalMultiplexStream = {
   unsubscribeResize: () => void
   unsubscribeFit: () => void
   unsubscribeDriver: () => void
+  unsubscribePresence: () => void
   unregisterBinaryHandler: () => void
   // Why: the runtime drops the exit-waiter only on real PTY exit; abort on detach so a never-exiting agent terminal doesn't leak the waiter.
   exitWaiterAbort: AbortController
@@ -1249,7 +1272,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.send',
     params: TerminalSend,
-    handler: async (params, { runtime, clientId }) => {
+    handler: async (params, { runtime, clientId, pairedDeviceId }) => {
       await assertTerminalSendTextWithinLimit(params.text)
       await assertTerminalSendTextWithinLimit(params.resolvedLaunchDraft?.text)
       const queryReplyClientId = clientId ?? params.client?.id
@@ -1269,6 +1292,23 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
       // Why: a stale handle must fail with terminal_handle_stale, not evaluate driver/lock state against the wrong PTY (#7718).
       const leaf = runtime.resolveLiveLeafForHandle(params.terminal)
       const driver = leaf?.ptyId ? runtime.getDriver(leaf.ptyId) : null
+      // Why the grant map and not the attachment map: this lane carries chat composers, the desktop's own
+      // remote input and scripted automation alike, and no host-observed field tells them apart — so it
+      // publishes "this grant is writing" and, by opening a different map, can never arm a typing hold.
+      if (
+        leaf?.ptyId &&
+        pairedDeviceId &&
+        // Why excluded: a query reply is the terminal answering a DSR-style probe, not a person writing —
+        // publishing it would light a peer's chip for protocol traffic nobody typed.
+        params.inputKind !== 'query-reply' &&
+        isPublishedPresenceParticipant(
+          terminalPresenceRegistry,
+          (connectionId) => runtime.hasEstablishedSubscription(connectionId),
+          pairedDeviceId
+        )
+      ) {
+        terminalPresenceRegistry.recordGrantWrite(leaf.ptyId, pairedDeviceId)
+      }
       if (
         params.inputKind === 'query-reply' &&
         leaf?.ptyId &&
@@ -2107,6 +2147,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         stream.unsubscribeResize()
         stream.unsubscribeFit()
         stream.unsubscribeDriver()
+        stream.unsubscribePresence()
         stream.unregisterBinaryHandler()
         terminalPresenceRegistry.detach(stream.ptyId, stream.remoteDesktopSubscriptionKey)
         streams.delete(streamId)
@@ -2202,6 +2243,13 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           if (!text) {
             return
           }
+          // Why before every gate: a keystroke dropped by the mobile lock, a lost claim or (later) a
+          // typing hold is still human intent, and a peer who goes dark exactly when blocked is worse
+          // than one who reports typing that did not land.
+          terminalPresenceRegistry.recordInteractiveInput(
+            stream.ptyId,
+            stream.remoteDesktopSubscriptionKey
+          )
           if (isTerminalInputLockedForClient(runtime, stream.ptyId, stream.client)) {
             return
           }
@@ -2595,6 +2643,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           unsubscribeResize: () => {},
           unsubscribeFit: () => {},
           unsubscribeDriver: () => {},
+          unsubscribePresence: () => {},
           unregisterBinaryHandler: () => {},
           exitWaiterAbort: new AbortController()
         }
@@ -2814,6 +2863,19 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
               streamId: request.streamId,
               driver: runtime.getDriver(ptyId)
             })
+            if (stream.supportsPresence) {
+              const emitPresence = (): void => {
+                if (closed || streams.get(request.streamId) !== stream) {
+                  return
+                }
+                emit(terminalPresenceStreamEvent(request.streamId, ptyId, stream.participant))
+              }
+              stream.unsubscribePresence = terminalPresenceChangeNotifier.subscribe(
+                ptyId,
+                emitPresence
+              )
+              emitPresence()
+            }
           }
           stream.unsubscribeResize = runtime.subscribeToTerminalResize(ptyId, (event) => {
             stream.outputBatcher.flush()
@@ -3180,6 +3242,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
       let unsubscribeResize = (): void => {}
       let unsubscribeFit = (): void => {}
       let unregisterBinaryHandler = (): void => {}
+      let unsubscribePresence = (): void => {}
       let abortRendererMountWait = (): void => {}
       let lateRendererReadyPromise: Promise<boolean> | null = null
       let outputBatcher: ReturnType<typeof createTerminalOutputBatcher> | null = null
@@ -3199,6 +3262,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           unsubscribeResize()
           unsubscribeFit()
           unregisterBinaryHandler()
+          unsubscribePresence()
           abortRendererMountWait()
           terminalPresenceRegistry.detach(ptyId, remoteDesktopSubscriptionKey)
           if (isMobile && clientId) {
@@ -3251,6 +3315,9 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
             if (!text) {
               return
             }
+            // Why here too: gap 5 — the phone attaches on this handler, not terminal.multiplex, so a
+            // stamp only on the multiplex path would report every phone as attached-but-never-typing.
+            terminalPresenceRegistry.recordInteractiveInput(ptyId, remoteDesktopSubscriptionKey)
             if (isTerminalInputLockedForClient(runtime, ptyId, params.client)) {
               return
             }
@@ -3520,14 +3587,12 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         // publish to a client that was not told negotiation succeeded. Gap 5: the phone attaches on
         // this handler, not terminal.multiplex, so identity must be resolved here too.
         const supportsPresence = params.capabilities?.presence === 1
-        const streamPresence = negotiatedStreamPresence(
-          supportsPresence,
-          resolveStreamParticipant(terminalPresenceRegistry, {
-            connectionId,
-            pairedDeviceId,
-            clientKind
-          })
-        )
+        const streamParticipant = resolveStreamParticipant(terminalPresenceRegistry, {
+          connectionId,
+          pairedDeviceId,
+          clientKind
+        })
+        const streamPresence = negotiatedStreamPresence(supportsPresence, streamParticipant)
         emit({
           type: 'subscribed',
           streamId,
@@ -3541,6 +3606,16 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           ...(supportsPresence ? { capabilities: { presence: 1 as const } } : {}),
           ...(streamPresence ? { presence: streamPresence } : {})
         })
+        if (supportsPresence) {
+          const emitPresence = (): void => {
+            if (closed) {
+              return
+            }
+            emit(terminalPresenceStreamEvent(streamId, ptyId, streamParticipant))
+          }
+          unsubscribePresence = terminalPresenceChangeNotifier.subscribe(ptyId, emitPresence)
+          emitPresence()
+        }
         const snapshotStats = sendSnapshotFrames(sendFrame, {
           kind: 'scrollback',
           // Why: prefer the subscriber's viewport over the 80x24 stopgap when the PTY has

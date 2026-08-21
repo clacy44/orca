@@ -1,125 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { RpcDispatcher } from './dispatcher'
-import type { RpcRequest } from './core'
-import type { OrcaRuntimeService } from '../orca-runtime'
-import { TERMINAL_METHODS } from './methods/terminal'
-import type { RuntimeTerminalWait } from '../../../shared/runtime-types'
-import {
-  TerminalStreamOpcode,
-  decodeTerminalStreamFrame,
-  encodeTerminalStreamFrame,
-  encodeTerminalStreamJson
-} from '../../../shared/terminal-stream-protocol'
 import { terminalPresenceRegistry } from '../terminal-presence-registry'
-
-const GRANT = 'device-runtime-1'
-const CONNECTION = 'conn-desktop-1'
-
-function stubRuntime(overrides: Partial<OrcaRuntimeService> = {}): OrcaRuntimeService {
-  return {
-    getRuntimeId: () => 'test-runtime',
-    registerRemoteTerminalViewSubscriber: () => () => {},
-    requestRendererTerminalTabMount: vi.fn().mockReturnValue(false),
-    resolveLiveLeafForHandle: vi.fn().mockReturnValue({ ptyId: 'pty-1' }),
-    resolveLeafForHandle: vi.fn().mockReturnValue({ ptyId: 'pty-1' }),
-    updateRemoteDesktopViewer: vi.fn().mockResolvedValue(true),
-    unregisterRemoteDesktopViewer: vi.fn().mockResolvedValue(true),
-    unregisterRemoteDesktopViewers: vi.fn().mockResolvedValue(true),
-    isPtyResizeDrivenRemotely: vi.fn().mockReturnValue(false),
-    getRemoteDesktopFitHold: vi.fn().mockReturnValue({ mode: 'desktop-fit', cols: 120, rows: 40 }),
-    isRemoteDesktopViewerOwner: vi.fn().mockReturnValue(false),
-    getPtyOutputSequence: vi.fn().mockReturnValue(0),
-    readTerminal: vi.fn().mockResolvedValue({ tail: [], truncated: false }),
-    serializeTerminalBuffer: vi.fn().mockResolvedValue({ data: 'snapshot', cols: 120, rows: 40 }),
-    serializeAuthoritativeTerminalBuffer: vi
-      .fn()
-      .mockResolvedValue({ data: 'snapshot', cols: 120, rows: 40 }),
-    getTerminalSize: vi.fn().mockReturnValue({ cols: 120, rows: 40 }),
-    getMobileDisplayMode: vi.fn().mockReturnValue('auto'),
-    getLayout: vi.fn().mockReturnValue({ seq: 1 }),
-    isTerminalAlternateScreen: vi.fn().mockReturnValue(false),
-    subscribeToTerminalData: vi.fn().mockReturnValue(vi.fn()),
-    subscribeToTerminalResize: vi.fn().mockReturnValue(vi.fn()),
-    subscribeToFitOverrideChanges: vi.fn().mockReturnValue(vi.fn()),
-    subscribeToDriverChanges: vi.fn().mockReturnValue(vi.fn()),
-    getTerminalFitOverride: vi.fn().mockReturnValue(null),
-    getDriver: vi.fn().mockReturnValue({ kind: 'idle' }),
-    handleMobileSubscribe: vi.fn().mockResolvedValue(true),
-    handleMobileUnsubscribe: vi.fn(),
-    waitForTerminal: vi.fn(() => new Promise<RuntimeTerminalWait>(() => {})),
-    ...overrides
-  } as unknown as OrcaRuntimeService
-}
-
-function makeRequest(method: string, params?: unknown): RpcRequest {
-  return { id: 'req-1', authToken: 'tok', method, params }
-}
-
-type Identity = { pairedDeviceId?: string; clientKind?: 'mobile' | 'runtime' }
-
-function startMultiplex(identity: Identity, cleanups = new Map<string, () => void>()) {
-  const messages: string[] = []
-  const handlers = new Map<
-    number,
-    (frame: NonNullable<ReturnType<typeof decodeTerminalStreamFrame>>) => void
-  >()
-  const runtime = stubRuntime({
-    registerSubscriptionCleanup: vi.fn((id: string, cleanup: () => void) => {
-      cleanups.set(id, cleanup)
-    }),
-    cleanupSubscription: vi.fn((id: string) => {
-      cleanups.get(id)?.()
-    })
-  })
-  const dispatcher = new RpcDispatcher({ runtime, methods: TERMINAL_METHODS })
-  const dispatchPromise = dispatcher.dispatchStreaming(
-    makeRequest('terminal.multiplex', {}),
-    (message) => messages.push(message),
-    {
-      connectionId: CONNECTION,
-      ...identity,
-      sendBinary: () => true,
-      registerBinaryStreamHandler: (streamId, handler) => {
-        handlers.set(streamId, handler)
-        return () => handlers.delete(streamId)
-      }
-    }
-  )
-  return { messages, handlers, cleanups, dispatchPromise }
-}
-
-function sendSubscribeFrame(
-  handlers: Map<number, (frame: NonNullable<ReturnType<typeof decodeTerminalStreamFrame>>) => void>,
-  capabilities: Record<string, number>
-) {
-  handlers.get(0)?.(
-    decodeTerminalStreamFrame(
-      encodeTerminalStreamFrame({
-        opcode: TerminalStreamOpcode.Subscribe,
-        streamId: 0,
-        seq: 1,
-        payload: encodeTerminalStreamJson({
-          streamId: 7,
-          terminal: 'terminal-1',
-          client: { id: 'desktop-1', type: 'desktop' },
-          capabilities,
-          viewport: { cols: 120, rows: 40 }
-        })
-      })
-    )!
-  )
-}
-
-async function awaitSubscribed(messages: string[]): Promise<Record<string, unknown>> {
-  await vi.waitFor(() =>
-    expect(
-      messages.map((message) => JSON.parse(message).result).some((r) => r?.type === 'subscribed')
-    ).toBe(true)
-  )
-  return messages
-    .map((message) => JSON.parse(message).result)
-    .find((result) => result?.type === 'subscribed')
-}
+import {
+  CONNECTION,
+  GRANT,
+  awaitSubscribed,
+  sendSubscribeFrame,
+  startMultiplex,
+  startSubscribe
+} from './terminal-presence-stream-test-harness'
 
 function registerDesktopGrant(): string {
   return terminalPresenceRegistry.registerConnection({
@@ -281,37 +169,6 @@ describe('terminal.multiplex presence negotiation', () => {
     await harness.dispatchPromise
   })
 })
-
-function startSubscribe(
-  identity: Identity,
-  params: Record<string, unknown>,
-  cleanups = new Map<string, () => void>(),
-  runtimeOverrides: Partial<OrcaRuntimeService> = {}
-) {
-  const messages: string[] = []
-  const runtime = stubRuntime({
-    registerSubscriptionCleanup: vi.fn((id: string, cleanup: () => void) => {
-      cleanups.set(id, cleanup)
-    }),
-    cleanupSubscription: vi.fn((id: string) => {
-      cleanups.get(id)?.()
-      cleanups.delete(id)
-    }),
-    ...runtimeOverrides
-  })
-  const dispatcher = new RpcDispatcher({ runtime, methods: TERMINAL_METHODS })
-  const dispatchPromise = dispatcher.dispatchStreaming(
-    makeRequest('terminal.subscribe', params),
-    (message) => messages.push(message),
-    {
-      connectionId: CONNECTION,
-      ...identity,
-      sendBinary: () => true,
-      registerBinaryStreamHandler: () => () => {}
-    }
-  )
-  return { messages, cleanups, dispatchPromise, runtime }
-}
 
 describe('terminal.subscribe presence negotiation', () => {
   it('echoes the capability and the participant on the live subscribed emit', async () => {
