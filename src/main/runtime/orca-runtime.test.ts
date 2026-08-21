@@ -16841,7 +16841,7 @@ describe('OrcaRuntimeService', () => {
       const sendPromise = runtime.sendTerminalAgentPrompt(handle, 'review this change', {
         beforeWrite: assertAuthority
       })
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
 
       expect(writes).not.toContain('\r')
       await vi.advanceTimersByTimeAsync(150)
@@ -19701,7 +19701,7 @@ describe('OrcaRuntimeService', () => {
         'pty-1',
         expect.stringContaining('You have 1 orchestration message')
       )
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
 
       const unread = db.getUnreadMessages(terminal.handle)
@@ -19744,7 +19744,7 @@ describe('OrcaRuntimeService', () => {
         'pty-1',
         expect.stringContaining('You have 1 orchestration message')
       )
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const submitWrites = write.mock.calls.filter(
         ([ptyId, text]) => ptyId === 'pty-1' && text === '\r'
       )
@@ -19785,7 +19785,7 @@ describe('OrcaRuntimeService', () => {
         'pty-1',
         expect.stringContaining('You have 1 orchestration message')
       )
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const submitWrites = write.mock.calls.filter(
         ([ptyId, text]) => ptyId === 'pty-1' && text === '\r'
       )
@@ -19821,7 +19821,7 @@ describe('OrcaRuntimeService', () => {
       db.insertMessage({ from: 'term_sender', to: terminal.handle, subject: 'hello claude' })
 
       runtime.deliverPendingMessagesForHandle(terminal.handle)
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
@@ -19854,7 +19854,7 @@ describe('OrcaRuntimeService', () => {
       db.insertMessage({ from: 'term_sender', to: terminal.handle, subject: 'hello' })
 
       runtime.deliverPendingMessagesForHandle(terminal.handle)
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
 
       const firstInjections = write.mock.calls.filter(
         (c) => typeof c[1] === 'string' && c[1].includes('orca orchestration check')
@@ -19863,7 +19863,7 @@ describe('OrcaRuntimeService', () => {
 
       // The row remains pending, so the in-memory sequence watermark prevents replay.
       runtime.deliverPendingMessagesForHandle(terminal.handle)
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
 
       const totalInjections = write.mock.calls.filter(
         (c) => typeof c[1] === 'string' && c[1].includes('orca orchestration check')
@@ -35041,7 +35041,7 @@ describe('OrcaRuntimeService', () => {
         expect.stringContaining('You have 1 orchestration message')
       )
       expect(write).not.toHaveBeenCalledWith('pty-1', expect.stringContaining('after wait'))
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       expect(message.delivered_at).toBeNull()
       db.close()
@@ -35092,13 +35092,13 @@ describe('OrcaRuntimeService', () => {
         'pty-1',
         expect.stringContaining('private worker report')
       )
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       expect(message.delivered_at).toBeNull()
 
       runtime.notifyMessageArrived('run:run_mailbox', 'worker_done')
       await Promise.resolve()
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(
         write.mock.calls.filter(
           ([, payload]) =>
@@ -35139,7 +35139,7 @@ describe('OrcaRuntimeService', () => {
         'pty-1',
         expect.stringContaining('private coordinator guidance')
       )
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       // The pointer announces; the row stays undelivered until the worker checks.
       expect(message.delivered_at).toBeNull()
@@ -35171,7 +35171,7 @@ describe('OrcaRuntimeService', () => {
       })
 
       runtime.deliverPendingMessagesForHandle('dispatch:ctx_waiter')
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).not.toHaveBeenCalled()
 
       runtime.notifyMessageArrived('dispatch:ctx_waiter', 'status')
@@ -35553,7 +35553,7 @@ describe('OrcaRuntimeService', () => {
         type: 'status'
       })
       runtime.deliverPendingMessagesForHandle('run:run_stale_waiter', new Set(['worker_done']))
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
 
       const pointers = () =>
         write.mock.calls.filter(
@@ -36420,7 +36420,7 @@ describe('OrcaRuntimeService', () => {
       )
       expect(pointerWrites).toHaveLength(1)
 
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const enterWrites = write.mock.calls.filter(([, payload]) => payload === '\r')
       expect(enterWrites).toHaveLength(1)
 
