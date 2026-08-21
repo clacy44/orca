@@ -1897,6 +1897,40 @@ describe('orchestration RPC methods', () => {
       ).rejects.toMatchObject({ code: 'legacy_read_only' })
     })
 
+    it('answers request_mismatch before resolving the Dispatch sender', async () => {
+      setup()
+      const task = db.createTask({ spec: 'adopted escalation work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      const escalation = db.insertMessage({
+        from: `dispatch:${dispatch.id}`,
+        to: `run:${activeRunId}`,
+        subject: 'Blocked',
+        type: 'escalation',
+        runId: activeRunId
+      })
+      // Why settle first: the ordering only shows if the newer fence would otherwise answer.
+      db.completeDispatch(dispatch.id)
+      const method = findMethod('orchestration.reply')
+
+      await expect(
+        method.handler(
+          method.params?.parse({
+            id: escalation.id,
+            body: 'answer',
+            from: 'term_coord',
+            run: 'run_not_this_one'
+          }),
+          { ...ctx, legacyCoordinatorRunId: activeRunId }
+        )
+      ).rejects.toMatchObject({ code: 'request_mismatch' })
+      expect(db.listPendingFederationRelay(dispatch.id, 'to_worker')).toHaveLength(0)
+      expect(db.getMessageById(escalation.id)?.read).toBe(0)
+      // Why: proves the newer fence is live in this fixture, so the assertion above is ordering.
+      await expect(
+        call('orchestration.reply', { id: escalation.id, body: 'answer', from: 'term_coord' })
+      ).rejects.toMatchObject({ code: 'dispatch_inactive' })
+    })
+
     it('refuses a reply to a settled local Dispatch', async () => {
       setup()
       const task = db.createTask({ spec: 'settled escalation work' })
