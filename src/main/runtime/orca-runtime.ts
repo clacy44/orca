@@ -17596,19 +17596,26 @@ export class OrcaRuntimeService {
       afterWrite?: (ptyId: string) => void | Promise<void>
     } = {}
   ): Promise<void> {
-    const chunks = iterateTerminalInputChunks(text)
-    let chunk = chunks.next()
-    while (!chunk.done) {
-      await options.beforeWrite?.(ptyId)
-      options.reserveWrite?.(ptyId)
-      const wrote = this.ptyController?.write(ptyId, chunk.value) ?? false
-      if (!wrote) {
-        throw new Error('terminal_not_writable')
+    const flight = this.claimStructuredPtyWrite(ptyId)
+    try {
+      const chunks = iterateTerminalInputChunks(text)
+      let chunk = chunks.next()
+      while (!chunk.done) {
+        await options.beforeWrite?.(ptyId)
+        options.reserveWrite?.(ptyId)
+        const wrote = this.ptyController?.write(ptyId, chunk.value) ?? false
+        if (!wrote) {
+          throw new Error('terminal_not_writable')
+        }
+        await options.afterWrite?.(ptyId)
+        chunk = chunks.next()
+        if (!chunk.done) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
       }
-      await options.afterWrite?.(ptyId)
-      chunk = chunks.next()
-      if (!chunk.done) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      if (flight) {
+        this.settlePendingMessageDelivery(ptyId, flight)
       }
     }
   }
@@ -17621,54 +17628,61 @@ export class OrcaRuntimeService {
       suffixFailureError?: string
     } = {}
   ): Promise<void> {
-    const renderGate = this.createClaudeAgentPromptRenderGate(ptyId)
-    let wrotePasteBytes = false
-    let completedPaste = false
+    const flight = this.claimStructuredPtyWrite(ptyId)
     try {
-      const chunks = iterateTerminalInputChunks(pastePayload)
-      let chunk = chunks.next()
-      while (!chunk.done) {
-        const nextChunk = chunks.next()
-        await options.beforeWrite?.(ptyId)
-        if (nextChunk.done) {
-          renderGate?.arm()
+      const renderGate = this.createClaudeAgentPromptRenderGate(ptyId)
+      let wrotePasteBytes = false
+      let completedPaste = false
+      try {
+        const chunks = iterateTerminalInputChunks(pastePayload)
+        let chunk = chunks.next()
+        while (!chunk.done) {
+          const nextChunk = chunks.next()
+          await options.beforeWrite?.(ptyId)
+          if (nextChunk.done) {
+            renderGate?.arm()
+          }
+          const wrote = this.ptyController?.write(ptyId, chunk.value) ?? false
+          if (!wrote) {
+            throw new Error('terminal_not_writable')
+          }
+          wrotePasteBytes = true
+          chunk = nextChunk
+          if (!chunk.done) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
         }
-        const wrote = this.ptyController?.write(ptyId, chunk.value) ?? false
-        if (!wrote) {
-          throw new Error('terminal_not_writable')
+        completedPaste = true
+      } catch (error) {
+        if (wrotePasteBytes && !completedPaste) {
+          this.ptyController?.write(ptyId, AGENT_PROMPT_BRACKETED_PASTE_END)
         }
-        wrotePasteBytes = true
-        chunk = nextChunk
-        if (!chunk.done) {
-          await new Promise((resolve) => setTimeout(resolve, 0))
-        }
+        renderGate?.dispose()
+        throw error
       }
-      completedPaste = true
-    } catch (error) {
-      if (wrotePasteBytes && !completedPaste) {
-        this.ptyController?.write(ptyId, AGENT_PROMPT_BRACKETED_PASTE_END)
-      }
-      renderGate?.dispose()
-      throw error
-    }
 
-    if (renderGate) {
-      await renderGate.wait()
-      renderGate.dispose()
-    } else {
-      await new Promise((resolve) => setTimeout(resolve, AGENT_PROMPT_SUBMIT_DELAY_MS))
-    }
-    try {
-      await options.beforeWrite?.(ptyId)
-    } catch (error) {
-      if (options.suffixFailureError) {
-        throw new Error(options.suffixFailureError)
+      if (renderGate) {
+        await renderGate.wait()
+        renderGate.dispose()
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, AGENT_PROMPT_SUBMIT_DELAY_MS))
       }
-      throw error
-    }
-    const suffixWrote = this.ptyController?.write(ptyId, AGENT_PROMPT_SUBMIT) ?? false
-    if (!suffixWrote) {
-      throw new Error(options.suffixFailureError ?? 'terminal_not_writable')
+      try {
+        await options.beforeWrite?.(ptyId)
+      } catch (error) {
+        if (options.suffixFailureError) {
+          throw new Error(options.suffixFailureError)
+        }
+        throw error
+      }
+      const suffixWrote = this.ptyController?.write(ptyId, AGENT_PROMPT_SUBMIT) ?? false
+      if (!suffixWrote) {
+        throw new Error(options.suffixFailureError ?? 'terminal_not_writable')
+      }
+    } finally {
+      if (flight) {
+        this.settlePendingMessageDelivery(ptyId, flight)
+      }
     }
   }
 
@@ -33080,6 +33094,22 @@ export class OrcaRuntimeService {
     Map<string, { leaf: RuntimeLeafRecord; reservedTypes?: ReadonlySet<string> }>
   >()
 
+  // Why: the pointer writer and the prompt writer share one pty, and both yield
+  // mid-write — an unclaimed span lets a raw pointer land inside a bracketed
+  // paste and arm a second Enter. A structured write takes the same flight so
+  // mail parks and replays once on settle. Never evicts an in-flight pointer:
+  // that flight object is its Enter callback's settle identity.
+  private claimStructuredPtyWrite(
+    ptyId: string
+  ): { enterTimer: ReturnType<typeof setTimeout> | null } | null {
+    if (this.messageDeliveryFlightsByPtyId.has(ptyId)) {
+      return null
+    }
+    const flight: { enterTimer: ReturnType<typeof setTimeout> | null } = { enterTimer: null }
+    this.messageDeliveryFlightsByPtyId.set(ptyId, flight)
+    return flight
+  }
+
   private settlePendingMessageDelivery(
     ptyId: string,
     flight: { enterTimer: ReturnType<typeof setTimeout> | null }
@@ -33310,7 +33340,7 @@ export class OrcaRuntimeService {
           // and settle re-runs any trigger parked during it so nothing strands.
           this.settlePendingMessageDelivery(deliveryPtyId, flight)
         }
-      }, 500)
+      }, AGENT_PROMPT_SUBMIT_DELAY_MS)
       settlesInEnterCallback = true
     } finally {
       if (!settlesInEnterCallback) {
