@@ -1,9 +1,11 @@
+import { hostname } from 'node:os'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { DeviceEntry } from './device-registry'
 import { OrcaRuntimeService } from './orca-runtime'
 import { TerminalPresenceRegistry } from './terminal-presence-registry'
 import {
   HOST_PARTICIPANT_ID,
+  TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS,
   TERMINAL_PRESENCE_MAX_PARTICIPANTS,
   buildTerminalPresenceRows,
   resolveHostPresenceLabel
@@ -31,10 +33,15 @@ function connectAna(connectionId: string): string {
   }).participantId
 }
 
+// Why: the graph resolves pty-N to terminal-N; an unmapped pty has no handle to publish.
+const resolveTerminalHandle = (ptyId: string): string | null =>
+  ptyId.startsWith('pty-') ? ptyId.replace('pty-', 'terminal-') : null
+
 function rows(established: readonly string[]) {
   return buildTerminalPresenceRows({
     registry,
-    hasEstablishedSubscription: (connectionId) => established.includes(connectionId)
+    hasEstablishedSubscription: (connectionId) => established.includes(connectionId),
+    resolveTerminalHandle
   })
 }
 
@@ -54,7 +61,7 @@ describe('terminal presence identity and aggregation', () => {
     const { participants } = rows(['conn-shared-control', 'conn-terminal'])
     const ana = participants.filter((row) => row.participantId === first)
     expect(ana).toHaveLength(1)
-    expect(ana[0].attachedPtyIds.sort()).toEqual(['pty-1', 'pty-2'])
+    expect(ana[0].attachedTerminals.sort()).toEqual(['terminal-1', 'terminal-2'])
     expect(ana[0].label).toBe('Ana laptop')
   })
 
@@ -100,7 +107,7 @@ describe('terminal presence identity and aggregation', () => {
     const [, ana] = rows(['conn-terminal']).participants
     // Why: the host key carries connectionId null; folding it into a peer's union would credit that
     // peer with a terminal it never attached to.
-    expect(ana.attachedPtyIds).toEqual([])
+    expect(ana.attachedTerminals).toEqual([])
   })
 
   it('rotates participantIds across a host restart and persists nothing', () => {
@@ -128,7 +135,7 @@ describe('terminal presence payload shape', () => {
     // makes a newly threaded field (ctx.clientId IS a device token) fail loudly instead of shipping.
     for (const row of built.participants) {
       expect(Object.keys(row).sort()).toEqual([
-        'attachedPtyIds',
+        'attachedTerminals',
         'kind',
         'label',
         'participantId',
@@ -145,10 +152,39 @@ describe('terminal presence payload shape', () => {
       label: resolveHostPresenceLabel(),
       kind: 'host',
       self: false,
-      attachedPtyIds: [],
+      attachedTerminals: [],
       since: expect.any(Number)
     })
-    expect(host.label).toMatch(/ \(host\)$/)
+    // Why: the row already carries kind 'host', so a concatenated "(host)" suffix would only make a
+    // peer-facing display name untranslatable and force a renderer to strip English by regex.
+    expect(host.label).toBe(hostname() || 'This device')
+    expect(host.label).not.toMatch(/\(host\)/)
+  })
+
+  it('stamps the host row since from the injected clock, not module load', () => {
+    const clocked = new TerminalPresenceRegistry({ now: () => 1_700_000_000_000 })
+    const [host] = buildTerminalPresenceRows({
+      registry: clocked,
+      hasEstablishedSubscription: () => false,
+      resolveTerminalHandle
+    }).participants
+    expect(host.since).toBe(1_700_000_000_000)
+  })
+
+  it('resolves handles before applying the attached-terminal cap', () => {
+    connectAna('conn-terminal')
+    // Why: ptys with no live handle must not spend the cap — bounding ptyIds first and translating
+    // afterwards silently ships a short list, which is the failure the ordering exists to prevent.
+    for (let index = 0; index < TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS + 5; index += 1) {
+      registry.attach(`orphan-${index}`, `orphan-key-${index}`, 'conn-terminal')
+    }
+    for (let index = 0; index < TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS; index += 1) {
+      registry.attach(`pty-${index}`, `pty-key-${index}`, 'conn-terminal')
+    }
+
+    const [, ana] = rows(['conn-terminal']).participants
+    expect(ana.attachedTerminals).toHaveLength(TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS)
+    expect(ana.attachedTerminals.every((handle) => handle.startsWith('terminal-'))).toBe(true)
   })
 
   it('marks exactly one row self, resolved per listener', () => {
@@ -156,11 +192,13 @@ describe('terminal presence payload shape', () => {
     const forAna = buildTerminalPresenceRows({
       registry,
       hasEstablishedSubscription: () => true,
+      resolveTerminalHandle,
       selfParticipantId: participantId
     })
     const forHost = buildTerminalPresenceRows({
       registry,
       hasEstablishedSubscription: () => true,
+      resolveTerminalHandle,
       selfParticipantId: HOST_PARTICIPANT_ID
     })
     expect(forAna.participants.filter((row) => row.self).map((row) => row.participantId)).toEqual([

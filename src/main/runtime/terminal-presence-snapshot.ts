@@ -17,16 +17,15 @@ export const HOST_PARTICIPANT_ID = 'host'
 export const TERMINAL_PRESENCE_MAX_PARTICIPANTS = 32
 export const TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS = 64
 
-// Why: the host row does not depend on anything connecting, so its "since" is process start.
-const HOST_PRESENCE_SINCE = Date.now()
-
 let cachedHostName: string | null = null
 
 // Why: copied from the SSH shared-workspace roster (`hostname() || 'This device'`), the one in-repo
-// precedent for naming this machine; read once so the label is identical on every target.
+// precedent for naming this machine; read once so the label is identical on every target. The bare
+// machine name only — the "(host)" suffix is a localization-catalog string the renderer composes off
+// `kind === 'host'`, never a literal concatenated onto a peer-facing display name here.
 export function resolveHostPresenceLabel(): string {
   cachedHostName ??= hostname() || 'This device'
-  return `${cachedHostName} (host)`
+  return cachedHostName
 }
 
 export type TerminalPresenceStreamIdentity = {
@@ -78,7 +77,8 @@ export type TerminalPresenceRow = {
   label: string
   kind: TerminalPresenceKind
   self: boolean
-  attachedPtyIds: string[]
+  // Why: handles, never ptyIds — ptyId is an internal runtime identifier no presence surface publishes.
+  attachedTerminals: string[]
   since: number
 }
 
@@ -87,10 +87,13 @@ export type TerminalPresenceRowsOptions = {
   // Why: publish a grant only once one of its sockets holds a live subscription, so the one-shot socket
   // every remote `orca` command opens never flashes a participant in and out.
   hasEstablishedSubscription: (connectionId: string) => boolean
+  // Why: required, and applied before the cap — bounding ptyIds and translating afterwards would apply
+  // the limit to the wrong list. A pty with no live handle resolves to null and is dropped.
+  resolveTerminalHandle: (ptyId: string) => string | null
   // Why: resolved per listener — nothing else lets a client learn which row is itself.
   selfParticipantId?: string | null
   // Why: the host's attachments are "what is selected and visible", not its reserved activity key.
-  hostAttachedPtyIds?: readonly string[]
+  hostAttachedTerminals?: readonly string[]
 }
 
 export type TerminalPresenceRows = {
@@ -140,19 +143,24 @@ function collectAggregates(
   return byParticipant
 }
 
-function toRow(
-  aggregate: Aggregate,
-  selfParticipantId: string | null | undefined
-): TerminalPresenceRow {
+function boundTerminals(handles: Iterable<string>): string[] {
+  return Array.from(handles).slice(0, TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS)
+}
+
+function toRow(aggregate: Aggregate, options: TerminalPresenceRowsOptions): TerminalPresenceRow {
+  const handles: string[] = []
+  for (const ptyId of aggregate.attachedPtyIds) {
+    const handle = options.resolveTerminalHandle(ptyId)
+    if (handle) {
+      handles.push(handle)
+    }
+  }
   return {
     participantId: aggregate.participant.participantId,
     label: aggregate.participant.label,
     kind: aggregate.participant.kind,
-    self: selfParticipantId === aggregate.participant.participantId,
-    attachedPtyIds: Array.from(aggregate.attachedPtyIds).slice(
-      0,
-      TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS
-    ),
+    self: options.selfParticipantId === aggregate.participant.participantId,
+    attachedTerminals: boundTerminals(handles),
     since: aggregate.connectedAt
   }
 }
@@ -175,16 +183,15 @@ export function buildTerminalPresenceRows(
     label: resolveHostPresenceLabel(),
     kind: 'host',
     self: options.selfParticipantId === HOST_PARTICIPANT_ID,
-    attachedPtyIds: Array.from(options.hostAttachedPtyIds ?? []).slice(
-      0,
-      TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS
-    ),
-    since: HOST_PRESENCE_SINCE
+    attachedTerminals: boundTerminals(options.hostAttachedTerminals ?? []),
+    // Why: the host row does not depend on anything connecting, so its "since" is when presence
+    // started — read from the registry's injected clock so tests drive every stamp through one clock.
+    since: options.registry.startedAt
   }
   const capacity = TERMINAL_PRESENCE_MAX_PARTICIPANTS - 1
   const participants = [
     hostRow,
-    ...aggregates.slice(0, capacity).map((aggregate) => toRow(aggregate, options.selfParticipantId))
+    ...aggregates.slice(0, capacity).map((aggregate) => toRow(aggregate, options))
   ]
   return aggregates.length > capacity ? { participants, truncated: true } : { participants }
 }

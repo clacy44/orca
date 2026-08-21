@@ -42,9 +42,13 @@ export class TerminalPresenceRegistry {
   private readonly grantWrites = new Map<string, Map<string, number>>()
   private readonly participantIds = new Map<string, string>()
   private readonly now: () => number
+  // Why: the synthesized host row's `since`, taken from the injected clock rather than module import,
+  // so it is the one presence stamp a test can drive alongside every other one.
+  startedAt: number
 
   constructor(options: TerminalPresenceRegistryOptions = {}) {
     this.now = options.now ?? Date.now
+    this.startedAt = this.now()
   }
 
   // Why: minted once per grant and reused for every later socket of that grant, so one peer's
@@ -188,6 +192,7 @@ export class TerminalPresenceRegistry {
     this.attachments.clear()
     this.grantWrites.clear()
     this.participantIds.clear()
+    this.startedAt = this.now()
   }
 }
 
