@@ -521,6 +521,9 @@ class RemoteRuntimeTerminalMultiplexer {
             ackOutputSourceRanges: 1,
             outputPause: 1,
             writeUnavailable: 1,
+            // Why: unconditional like every sibling — gating this on a status.get probe would make the
+            // same-version cross-version pairing negotiate nothing and pass vacuously.
+            presence: 1,
             ...(args.client.type === 'desktop' ? { desktopViewportClaims: 1 } : {})
           }
         })

@@ -107,6 +107,7 @@ describe('remote runtime terminal data subscriptions', () => {
           ackOutputSourceRanges?: 1
           desktopViewportClaims?: 1
           outputPause?: 1
+          presence?: 1
           writeUnavailable?: 1
         }
       }>(subscribeFrame.payload)
@@ -116,6 +117,7 @@ describe('remote runtime terminal data subscriptions', () => {
       ackOutputSourceRanges: 1,
       desktopViewportClaims: 1,
       outputPause: 1,
+      presence: 1,
       writeUnavailable: 1
     })
 
