@@ -268,11 +268,11 @@ describe('orchestration federation control mail', () => {
       error: {
         code: 'dispatch_inactive',
         message: `Remote Dispatch ${dispatchId} is not active.`,
-        // Why no --environment: this refusal is raised by the runtime that owns the pane.
+        // Why no terminal step: the Run home reads this refusal, and its `orca terminal send`
+        // addresses its own namespace — the peer's pane handle would name the wrong runtime.
         data: {
           effectsApplied: false,
           nextSteps: [
-            'Reach the worker\'s terminal directly: orca terminal send --terminal term_worker --text "<message>" --enter',
             'Start a new Dispatch for the follow-up work; this one no longer accepts coordinator mail.'
           ]
         }

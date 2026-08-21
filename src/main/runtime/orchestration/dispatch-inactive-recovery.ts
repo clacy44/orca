@@ -26,6 +26,13 @@ export function federatedDispatchInactiveRecoveryData(worker: {
   return { effectsApplied: false, nextSteps }
 }
 
+// Why no terminal step: this refusal is raised on the worker's own runtime but read on the Run
+// home, whose `orca terminal send` addresses its own namespace — and the peer cannot know the
+// alias the home files it under, so naming the pane handle there points at the wrong runtime.
+export function peerDispatchInactiveRecoveryData(): DispatchInactiveRecoveryData {
+  return { effectsApplied: false, nextSteps: [START_NEW_DISPATCH_STEP] }
+}
+
 export function localDispatchInactiveRecoveryData(
   workerTerminalHandle?: string | null
 ): DispatchInactiveRecoveryData {
