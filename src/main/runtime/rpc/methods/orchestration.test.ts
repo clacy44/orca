@@ -976,6 +976,109 @@ describe('orchestration RPC methods', () => {
       expect(db.getActiveDispatchForTerminal('term_worker')).toBeDefined()
     })
 
+    it('refuses a follow-up to a settled Dispatch and names the mailbox that still reads', async () => {
+      setup()
+      const task = db.createTask({ spec: 'settled work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      db.completeDispatch(dispatch.id)
+
+      await expect(
+        call('orchestration.send', {
+          from: 'term_coord',
+          to: `dispatch:${dispatch.id}`,
+          subject: 'One more thing'
+        })
+      ).rejects.toMatchObject({
+        code: 'dispatch_inactive',
+        message: `Dispatch ${dispatch.id} is completed; its worker no longer reads this mailbox.`,
+        data: {
+          effectsApplied: false,
+          nextSteps: [
+            'Send to the worker\'s terminal mailbox instead: orca orchestration send --to term_worker --subject "<subject>"',
+            'Start a new Dispatch for the follow-up work; this one no longer accepts coordinator mail.'
+          ]
+        }
+      })
+      expect(db.getAllMessagesForHandle(`dispatch:${dispatch.id}`)).toHaveLength(0)
+    })
+
+    it('accepts the same follow-up while the Dispatch is still dispatched', async () => {
+      setup()
+      vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
+      const task = db.createTask({ spec: 'live work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+
+      const result = (await call('orchestration.send', {
+        from: 'term_coord',
+        to: `dispatch:${dispatch.id}`,
+        subject: 'One more thing'
+      })) as { message: { to_handle: string } }
+
+      expect(result.message.to_handle).toBe(`dispatch:${dispatch.id}`)
+      expect(db.getUnreadMessages(`dispatch:${dispatch.id}`)).toHaveLength(1)
+    })
+
+    it('still accepts worker_done and a later heartbeat from a settling worker', async () => {
+      setup()
+      vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
+      vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+      const task = db.createTask({ spec: 'settling work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      const payload = JSON.stringify({ taskId: task.id, dispatchId: dispatch.id })
+
+      // Negative control: lifecycle mail is rewritten to run:<id> before the fence, and gating it
+      // would break the very report that settles the Dispatch.
+      const done = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: `dispatch:${dispatch.id}`,
+        subject: 'done',
+        type: 'worker_done',
+        payload: JSON.stringify({ taskId: task.id, dispatchId: dispatch.id, outcome: 'succeeded' })
+      })) as { message: { to_handle: string } }
+      expect(done.message.to_handle).toBe(`run:${activeRunId}`)
+      expect(db.getDispatchContextById(dispatch.id)?.status).toBe('completed')
+
+      const straggler = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: `dispatch:${dispatch.id}`,
+        subject: 'alive',
+        type: 'heartbeat',
+        payload
+      })) as { message: { to_handle: string } }
+      expect(straggler.message.to_handle).toBe(`run:${activeRunId}`)
+    })
+
+    it('leaves group, Run and bare-handle recipients alone after settlement', async () => {
+      setup()
+      vi.spyOn(runtime, 'deliverPendingMessagesForHandle').mockImplementation(() => {})
+      vi.spyOn(runtime, 'listTerminals').mockResolvedValue({
+        terminals: [{ handle: 'term_worker', title: 'Codex' }] as RuntimeTerminalSummary[]
+      })
+      const task = db.createTask({ spec: 'post-settlement routes' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      db.completeDispatch(dispatch.id)
+
+      // Negative controls: none of these addresses resolve through the dispatch mailbox.
+      const group = (await call('orchestration.send', {
+        from: 'term_coord',
+        to: '@all',
+        subject: 'broadcast'
+      })) as { messages: { id: string }[] }
+      expect(group.messages).toHaveLength(1)
+      const runMail = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: `run:${activeRunId}`,
+        subject: 'late note'
+      })) as { message: { to_handle: string } }
+      expect(runMail.message.to_handle).toBe(`run:${activeRunId}`)
+      const handleMail = (await call('orchestration.send', {
+        from: 'term_coord',
+        to: 'term_worker',
+        subject: 'read this instead'
+      })) as { message: { to_handle: string } }
+      expect(handleMail.message.to_handle).toBe('term_worker')
+    })
+
     it('does not release dispatch lock for non-lifecycle sends', async () => {
       setup()
       const task = db.createTask({ spec: 'in-flight work' })

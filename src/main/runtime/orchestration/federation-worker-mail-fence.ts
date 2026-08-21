@@ -3,8 +3,8 @@ import { federatedDispatchInactiveRecoveryData } from './dispatch-inactive-recov
 import { OrchestrationError } from './orchestration-error'
 
 // Why: the relay only pushes to_worker items while the Dispatch is `ready`, so anything
-// queued outside that window is never delivered and never errors. Refuse it at enqueue,
-// the way the non-federated send path fences a settled Dispatch.
+// queued outside that window is never delivered and never errors. Refuse it at enqueue; the
+// non-federated peer of this fence is requireActiveDispatchForWorkerMail in dispatch-mail-fence.ts.
 export function requireFederatedDispatchAcceptsWorkerMail(
   db: OrchestrationDb,
   dispatchId: string

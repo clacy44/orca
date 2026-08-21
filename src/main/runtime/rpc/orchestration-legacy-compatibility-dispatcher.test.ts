@@ -414,6 +414,62 @@ describe('legacy compatibility through RpcDispatcher', () => {
     expect(counts(harness.db)).toEqual(before)
   })
 
+  it('fences a legacy Dispatch mailbox only after that Dispatch settles', async () => {
+    const harness = createHarness()
+
+    // Negative control: the legacy_direct contract still resolves while the Dispatch is live.
+    const live = await harness.dispatcher.dispatch(
+      request(
+        'orchestration.send',
+        {
+          from: COORDINATOR_HANDLE,
+          to: `dispatch:${harness.dispatchId}`,
+          subject: 'Legacy follow-up',
+          type: 'status'
+        },
+        evidence('coordinator'),
+        'legacy-live-dispatch-mail'
+      )
+    )
+    expect(live).toMatchObject({
+      ok: true,
+      result: {
+        message: {
+          to_handle: `dispatch:${harness.dispatchId}`,
+          delivery_contract: 'legacy_direct'
+        }
+      }
+    })
+
+    await harness.dispatcher.dispatch(
+      request(
+        'orchestration.send',
+        {
+          ...escalationParams(harness),
+          type: 'worker_done',
+          subject: 'Completed',
+          payload: JSON.stringify({ taskId: harness.taskId, dispatchId: harness.dispatchId })
+        },
+        evidence('worker'),
+        'legacy-settle-before-fence'
+      )
+    )
+    const settled = await harness.dispatcher.dispatch(
+      request(
+        'orchestration.send',
+        {
+          from: COORDINATOR_HANDLE,
+          to: `dispatch:${harness.dispatchId}`,
+          subject: 'Too late',
+          type: 'status'
+        },
+        evidence('coordinator'),
+        'legacy-settled-dispatch-mail'
+      )
+    )
+    expect(settled).toMatchObject({ ok: false, error: { code: 'dispatch_inactive' } })
+  })
+
   it('rejects invalid typed ACKs and consumes only the filtered legacy page', async () => {
     const harness = createHarness()
     await harness.dispatcher.dispatch(

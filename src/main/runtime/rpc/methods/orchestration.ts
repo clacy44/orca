@@ -32,6 +32,7 @@ import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { RunRow } from '../../orchestration/types'
@@ -647,6 +648,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               accepted: true
             }
           }
+        }
+        if (to.startsWith('dispatch:')) {
+          requireActiveDispatchForWorkerMail(db, to.slice('dispatch:'.length))
         }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()
