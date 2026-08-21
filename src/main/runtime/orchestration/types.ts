@@ -12,6 +12,14 @@ export const MESSAGE_TYPES = [
 
 export type MessageType = (typeof MESSAGE_TYPES)[number]
 
+// Why this exists as a constant: every runtime-generated Dispatch notification (stall verdict,
+// liveness breach, relay outage) MUST use this type. A new type is not additive — MESSAGE_TYPES
+// is enforced by a CHECK constraint on the messages table and rebuilt across migrations, so it
+// would be a schema migration on both sides plus a hard import failure on an older Run home. And
+// `status` is in the enum but not in the taught `--types worker_done,escalation,question` filter,
+// so it lands in the inbox without waking the coordinator that is waiting for it.
+export const RUNTIME_NOTIFICATION_MESSAGE_TYPE: MessageType = 'escalation'
+
 export type MessagePriority = 'normal' | 'high' | 'urgent'
 
 export type MessageDeliveryContract = 'legacy_direct' | 'current_delivery' | 'audit_only'
