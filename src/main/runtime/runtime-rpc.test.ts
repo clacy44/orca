@@ -1,5 +1,5 @@
 /* eslint-disable max-lines -- Why: this integration-style RPC test keeps the request/response contract together so regressions in the external CLI surface are easier to spot. */
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -2058,6 +2058,94 @@ describe('OrcaRuntimeRpcServer', () => {
 
       expect(server.getDeviceRegistry()?.getDevice(second.deviceId)).not.toBeNull()
       expect(server.getDeviceRegistry()?.getDevice(third.deviceId)).not.toBeNull()
+    } finally {
+      await server.stop()
+    }
+  }, 15_000)
+
+  it('mints a distinct grant per named pairing offer without dropping siblings', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+
+    await server.start()
+
+    try {
+      const ana = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Ana',
+        mint: true,
+        scope: 'runtime'
+      })
+      const ben = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Ben',
+        mint: true,
+        scope: 'runtime'
+      })
+      if (!ana.available || !ben.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+
+      expect(ana.deviceId).not.toBe(ben.deviceId)
+      expect(parsePairingCode(ana.pairingUrl)?.deviceToken).not.toBe(
+        parsePairingCode(ben.pairingUrl)?.deviceToken
+      )
+      // Unlike rotate, minting Ben's invite must not kill Ana's un-scanned one.
+      expect(server.getDeviceRegistry()?.getDevice(ana.deviceId)).not.toBeNull()
+
+      // The gate reads the registry file, not memory: two humans, two pairedDeviceIds, one runtime.
+      const persisted = JSON.parse(
+        readFileSync(join(userDataPath, DEVICE_REGISTRY_FILENAME), 'utf-8')
+      ) as { deviceId: string; name: string }[]
+      expect(persisted.filter((device) => device.name === 'Ana')).toHaveLength(1)
+      expect(persisted.filter((device) => device.name === 'Ben')).toHaveLength(1)
+    } finally {
+      await server.stop()
+    }
+  }, 15_000)
+
+  it('leaves a pairing offer without mint byte-identical to the coalescing behavior', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+
+    await server.start()
+
+    try {
+      const first = server.createPairingOffer({ address: '127.0.0.1', name: 'CLI test' })
+      const second = server.createPairingOffer({ address: '127.0.0.1', name: 'CLI test' })
+      if (!first.available || !second.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+
+      // Negative control for the mint path: the default still coalesces onto one grant...
+      expect(second.deviceId).toBe(first.deviceId)
+      expect(second.pairingUrl).toBe(first.pairingUrl)
+      const persisted = JSON.parse(
+        readFileSync(join(userDataPath, DEVICE_REGISTRY_FILENAME), 'utf-8')
+      ) as Record<string, unknown>[]
+      expect(persisted).toHaveLength(1)
+      // ...and writes exactly the pre-change row shape, with no pendingExpiresAt deadline.
+      expect(Object.keys(persisted[0]!).sort()).toEqual([
+        'deviceId',
+        'lastSeenAt',
+        'name',
+        'pairedAt',
+        'pairingReach',
+        'scope',
+        'token'
+      ])
     } finally {
       await server.stop()
     }
