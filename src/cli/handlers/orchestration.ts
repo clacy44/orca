@@ -135,6 +135,16 @@ type OrchestrationSendResult = (
 
 // Why: a worker's heartbeat is its only scheduled round trip, so the unread hint rides back on it;
 // both send shapes carry it because a federated worker only ever sees the relay branch.
+function pendingMailHint(result: OrchestrationSendResult): string {
+  const pending = result.pendingMail
+  if (pending === undefined || pending <= 0) {
+    return ''
+  }
+  // Why the resolved binary: a worker inside the dev runtime must call orca-dev, and a
+  // bare verb sends it to whichever runtime the plain `orca` on PATH happens to name.
+  return `\nUnread coordinator mail: ${pending} — run \`${resolveCompatibilityCliCommand()} orchestration check\``
+}
+
 // Why steps here and not on the host: the runtime answers a suppressed heartbeat with the
 // verdict, and this refusal is minted client-side, so it must carry its own signpost.
 function suppressedDispatchRecoveryData(workerHandle: string): {
@@ -148,16 +158,6 @@ function suppressedDispatchRecoveryData(workerHandle: string): {
       `Read what the coordinator sent instead: ${resolveCompatibilityCliCommand()} orchestration check --terminal ${workerHandle}`
     ]
   }
-}
-
-function pendingMailHint(result: OrchestrationSendResult): string {
-  const pending = result.pendingMail
-  if (pending === undefined || pending <= 0) {
-    return ''
-  }
-  // Why the resolved binary: a worker inside the dev runtime must call orca-dev, and a
-  // bare verb sends it to whichever runtime the plain `orca` on PATH happens to name.
-  return `\nUnread coordinator mail: ${pending} — run \`${resolveCompatibilityCliCommand()} orchestration check\``
 }
 
 function resolveCompatibilityCliCommand(): 'orca' | 'orca-ide' | 'orca-dev' {
