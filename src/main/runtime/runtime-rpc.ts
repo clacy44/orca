@@ -47,6 +47,7 @@ import type {
   PairingProvisionRelayParams
 } from '../../shared/mobile-relay-credential-contract'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import { resolveAdvertisedPairingEndpoint } from './pairing-endpoint'
 import {
   decodeTerminalStreamFrame,
@@ -702,7 +703,11 @@ export class OrcaRuntimeRpcServer {
       return pairingUnavailable(advertised.reason, advertised.guidance)
     }
     const endpoint = advertised.endpoint
-    const deviceName = args.name ?? `CLI ${new Date().toLocaleDateString()}`
+    // Why here: this is the one boundary every naming entry point crosses, so a name that arrives
+    // unbounded or carrying control characters is normalized once for the registry, the serve banner and
+    // every later presence label. A name that normalizes away is treated as unnamed.
+    const deviceName =
+      normalizePairingDeviceName(args.name) || `CLI ${new Date().toLocaleDateString()}`
     const scope = args.scope ?? 'runtime'
     let device: DeviceEntry
     try {

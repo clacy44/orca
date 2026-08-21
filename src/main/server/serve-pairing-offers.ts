@@ -1,6 +1,7 @@
 // Why a module and not inline in index.ts: the guards here are the ones that carry S1's security
 // property — no unnamed shared grant beside named ones, and no named grant at all under --no-pairing —
 // and index.ts is an Electron entrypoint no test can load.
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import type { PairingOfferUnavailableReason } from '../runtime/runtime-rpc'
 import type { ServeNamedPairingReadiness, ServePairingReadiness } from './serve-readiness'
 
@@ -75,8 +76,13 @@ export async function resolveServePairingOffers(
     }
   }
   const scope: ServePairingScope = request.mobilePairing ? 'mobile' : 'runtime'
+  // Why: the readiness banner interpolates this name into its own lines, so a name carrying a newline
+  // would forge readiness output. One that normalizes away is unnamed, as a blank desktop field is.
+  const pairNames = request.pairNames
+    .map((name) => normalizePairingDeviceName(name))
+    .filter((name) => name.length > 0)
   const namedPairings = await Promise.all(
-    request.pairNames.map(async (name) => ({
+    pairNames.map(async (name) => ({
       name,
       pairing: await toPairingReadiness(
         // Why: one grant per person — a shared link makes two humans one indistinguishable device.

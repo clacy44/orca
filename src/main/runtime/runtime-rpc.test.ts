@@ -28,6 +28,7 @@ import { decrypt, deriveSharedKey, encrypt, generateKeyPair } from './rpc/e2ee-c
 import { WebSocketTransport } from './rpc/ws-transport'
 import { DeviceRegistry } from './device-registry'
 import { DEVICE_REGISTRY_FILENAME, E2EE_KEYPAIR_FILENAME } from './mobile-pairing-files'
+import { PAIRING_DEVICE_NAME_MAX_LENGTH } from '../../shared/pairing-device-name'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../shared/protocol-version'
 
 vi.mock('../git/worktree', () => {
@@ -2163,6 +2164,91 @@ describe('OrcaRuntimeRpcServer', () => {
         'scope',
         'token'
       ])
+    } finally {
+      await server.stop()
+    }
+  }, 15_000)
+
+  it('mints and keeps siblings when a name arrives alongside rotate', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+
+    await server.start()
+
+    try {
+      // The desktop generator's exact shape: it sends rotate on every click, named or not.
+      const shared = server.createPairingOffer({ address: '127.0.0.1', scope: 'runtime' })
+      const ana = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Ana',
+        mint: true,
+        rotate: true,
+        scope: 'runtime'
+      })
+      const ben = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Ben',
+        mint: true,
+        rotate: true,
+        scope: 'runtime'
+      })
+      if (!shared.available || !ana.available || !ben.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+
+      // Mint must win over rotate: if that ternary ever flipped, every named desktop link would
+      // silently destroy its siblings — including the shared row rotate is meant to replace.
+      expect(ana.deviceId).not.toBe(ben.deviceId)
+      expect(server.getDeviceRegistry()?.getDevice(ana.deviceId)).not.toBeNull()
+      expect(server.getDeviceRegistry()?.getDevice(shared.deviceId)).not.toBeNull()
+    } finally {
+      await server.stop()
+    }
+  }, 15_000)
+
+  it('normalizes a supplied pairing name before persisting it', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+
+    await server.start()
+
+    try {
+      const offer = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: `  Ana\nPairing URL: orca://evil ${'x'.repeat(200)}`,
+        mint: true,
+        scope: 'runtime'
+      })
+      const blank = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: '   ',
+        mint: true,
+        scope: 'runtime'
+      })
+      if (!offer.available || !blank.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+
+      const persisted = JSON.parse(
+        readFileSync(join(userDataPath, DEVICE_REGISTRY_FILENAME), 'utf-8')
+      ) as { deviceId: string; name: string }[]
+      const named = persisted.find((device) => device.deviceId === offer.deviceId)
+      expect(named?.name).not.toContain('\n')
+      expect(named?.name.length).toBeLessThanOrEqual(PAIRING_DEVICE_NAME_MAX_LENGTH)
+      // Negative control: a name that normalizes away falls back to the host-minted label.
+      expect(persisted.find((device) => device.deviceId === blank.deviceId)?.name).toMatch(/^CLI /)
     } finally {
       await server.stop()
     }

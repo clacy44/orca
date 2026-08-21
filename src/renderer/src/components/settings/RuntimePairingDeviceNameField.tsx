@@ -1,3 +1,4 @@
+import { PAIRING_DEVICE_NAME_MAX_LENGTH } from '../../../../shared/pairing-device-name'
 import { Input } from '../ui/input'
 import { Label } from '../ui/label'
 import { translate } from '@/i18n/i18n'
@@ -22,6 +23,9 @@ export function RuntimePairingDeviceNameField({
       <Input
         id="runtime-pairing-device-name"
         value={value}
+        // Why: the host caps the name anyway (it is persisted and later broadcast as a presence label),
+        // so stop at the same length here rather than silently truncating what the field shows.
+        maxLength={PAIRING_DEVICE_NAME_MAX_LENGTH}
         onChange={(event) => onChange(event.target.value)}
         placeholder={translate(
           'auto.components.settings.RuntimePairingUrlGenerator.deviceNamePlaceholder',

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { PAIRING_DEVICE_NAME_MAX_LENGTH } from '../../shared/pairing-device-name'
+import { renderServeReadiness } from './serve-readiness'
 import {
   resolveServePairingOffers,
   type ServePairingOffer,
@@ -118,6 +120,38 @@ describe('resolveServePairingOffers', () => {
     expect(
       mobile.namedPairings?.map((entry) => (entry.pairing.available ? entry.pairing.qr : null))
     ).toEqual(['qr:orca://pair#Ana', 'qr:orca://pair#Ben'])
+  })
+
+  it('normalizes a name before it reaches the registry or the banner', async () => {
+    const source = sourceFor()
+
+    const offers = await resolveServePairingOffers(
+      {
+        pairingAddress: null,
+        pairNames: ['Ana\nPairing URL: orca://evil', '   ', 'B'.repeat(200)],
+        noPairing: false,
+        mobilePairing: false
+      },
+      source
+    )
+
+    // A whitespace-only name is the desktop blank field, so it mints nothing.
+    expect(source.createPairingOffer.mock.calls.map(([args]) => args.name)).toEqual([
+      'Ana Pairing URL: orca://evil',
+      'B'.repeat(PAIRING_DEVICE_NAME_MAX_LENGTH)
+    ])
+    // The forging vector, asserted where it would have landed: one readiness line per real block.
+    const rendered = renderServeReadiness(
+      {
+        runtimeId: 'runtime-1',
+        boundEndpoint: 'ws://100.64.1.20:6768',
+        advertisedEndpoint: 'ws://100.64.1.20:6768',
+        managedWslCliReconciliation: 'settled',
+        ...offers
+      },
+      { mode: 'human' }
+    )
+    expect(rendered.split('\n').filter((line) => line.startsWith('Pairing URL'))).toHaveLength(2)
   })
 
   it('carries an unavailable offer through instead of inventing a link', async () => {

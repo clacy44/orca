@@ -2,6 +2,7 @@ import { app, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import type { RuntimeAccessGrant } from '../../shared/runtime-access-grants'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
 import { classifyRemotePairingHostname } from '../../shared/remote-pairing-address'
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
 import type { DeviceEntry } from '../runtime/device-registry'
 import { NETWORK_EXPOSURE_FAILED_GUIDANCE } from '../runtime/network-exposure-guidance'
@@ -182,7 +183,7 @@ export function registerMobileHandlers(
 
       // Why: web/desktop runtime clients need full runtime access, not the
       // mobile allowlist used by phone QR pairing.
-      const deviceName = args?.name?.trim() ?? ''
+      const deviceName = normalizePairingDeviceName(args?.name)
       const offer = rpcServer.createPairingOffer({
         address: ip,
         rotate: args?.rotate,
