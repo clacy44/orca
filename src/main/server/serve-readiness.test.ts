@@ -2,23 +2,27 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   renderServeReadiness,
   ServeReadinessPublisher,
+  type ServePairingReadiness,
   type ServeReadiness
 } from './serve-readiness'
+
+// Kept on the available variant so a named block can override its url and deviceId.
+const availablePairing: Extract<ServePairingReadiness, { available: true }> = {
+  available: true,
+  url: 'orca://pair?code=secret',
+  endpoint: 'wss://orca.example.test/runtime',
+  deviceId: 'device-1',
+  webClientUrl: 'https://orca.example.test/runtime/web-index.html#pairing=secret',
+  scope: 'runtime',
+  qr: null
+}
 
 const ready: ServeReadiness = {
   runtimeId: 'runtime-1',
   boundEndpoint: 'ws://0.0.0.0:6768',
   advertisedEndpoint: 'wss://orca.example.test/runtime',
   managedWslCliReconciliation: 'settled',
-  pairing: {
-    available: true,
-    url: 'orca://pair?code=secret',
-    endpoint: 'wss://orca.example.test/runtime',
-    deviceId: 'device-1',
-    webClientUrl: 'https://orca.example.test/runtime/web-index.html#pairing=secret',
-    scope: 'runtime',
-    qr: null
-  }
+  pairing: availablePairing
 }
 
 describe('ServeReadinessPublisher', () => {
@@ -126,8 +130,14 @@ describe('named pairing blocks', () => {
   const named: ServeReadiness = {
     ...ready,
     namedPairings: [
-      { name: 'Ana', pairing: { ...ready.pairing, url: 'orca://pair?code=ana', deviceId: 'ana' } },
-      { name: 'Ben', pairing: { ...ready.pairing, url: 'orca://pair?code=ben', deviceId: 'ben' } }
+      {
+        name: 'Ana',
+        pairing: { ...availablePairing, url: 'orca://pair?code=ana', deviceId: 'ana' }
+      },
+      {
+        name: 'Ben',
+        pairing: { ...availablePairing, url: 'orca://pair?code=ben', deviceId: 'ben' }
+      }
     ]
   }
 

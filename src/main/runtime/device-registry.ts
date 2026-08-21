@@ -339,7 +339,7 @@ export class DeviceRegistry {
     try {
       hardenExistingSecureFile(this.registryPath)
       const parsed = JSON.parse(readFileSync(this.registryPath, 'utf-8')) as DeviceEntry[]
-      const loaded = parsed.map((device) => ({
+      const loaded: DeviceEntry[] = parsed.map((device) => ({
         ...device,
         // Why: older registries only existed for phone pairing. Treat missing
         // scope as mobile so legacy device tokens do not gain new CLI powers.
