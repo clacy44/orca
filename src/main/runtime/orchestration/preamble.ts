@@ -125,7 +125,14 @@ Slack, GitHub comments, or any other channel to reach a human during the run.
     --body "<details>" \\
     --task-id ${params.taskId}
 
-  # Check for messages from the coordinator:
+  # Check for messages from the coordinator.
+  #
+  # BEHAVIOR RULE: run this alongside every heartbeat (so every
+  # ${HEARTBEAT_INTERVAL_MIN} minutes) and again before any irreversible step — merging,
+  # pushing, deleting, or rewriting shared state. The coordinator's follow-ups
+  # only reach you here: nothing interrupts you when its mail arrives, so mail
+  # you never check is a correction you never see. This cadence stops when you
+  # send worker_done; the section below governs from then on.
   ${cli} orchestration check --terminal ${params.workerHandle}
 
 ${postDoneInstructions}`

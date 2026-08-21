@@ -91,6 +91,35 @@ describe('buildDispatchPreamble', () => {
     expect(result).toMatch(/orchestration send --from term_worker/)
   })
 
+  it('gives the inbound check verb a cadence tied to the heartbeat and irreversible steps', () => {
+    const result = buildDispatchPreamble(baseParams())
+    const cliBlock = result.slice(
+      result.indexOf('=== CLI COMMANDS ==='),
+      result.indexOf('=== AFTER YOU SEND worker_done ===')
+    )
+
+    expect(cliBlock).toContain('BEHAVIOR RULE: run this alongside every heartbeat')
+    // Why: the cadence quotes HEARTBEAT_INTERVAL_MIN, so retuning the beat stays a one-line change.
+    expect(cliBlock).toMatch(/alongside every heartbeat \(so every\s+# 5 minutes\)/)
+    expect(cliBlock).toContain('before any irreversible step')
+    expect(cliBlock).toMatch(/follow-ups\s+# only reach you here/)
+    expect(cliBlock).toContain('orchestration check --terminal term_worker')
+  })
+
+  it.each(['prompt-returning-agent', 'bare-shell'] as const)(
+    'keeps the stop-after-worker_done rule free of the check cadence (%s)',
+    (workerKind) => {
+      const section = afterWorkerDoneSection(buildDispatchPreamble(baseParams({ workerKind })))
+
+      // Negative control: the cadence is a pre-settlement rule and must never reach a settled worker.
+      expect(section).not.toContain('BEHAVIOR RULE')
+      expect(section).not.toContain('alongside every heartbeat')
+      expect(section).not.toContain('irreversible step')
+      expect(section).toContain('do NOT keep calling')
+      expect(section).toContain('do NOT run a sleep/poll loop')
+    }
+  )
+
   it('includes ask block with BEHAVIOR RULE #1 forbidding AskUserQuestion', () => {
     const result = buildDispatchPreamble(baseParams())
     expect(result).toMatch(/orchestration ask --from term_worker/)
