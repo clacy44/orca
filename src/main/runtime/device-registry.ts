@@ -8,6 +8,13 @@ import { join } from 'node:path'
 import { hardenExistingSecureFile, writeSecureJsonFile } from '../../shared/secure-file'
 import type { DeviceScope } from '../../shared/runtime-types'
 import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
+import {
+  MAX_LIVE_MINTED_GRANTS,
+  PENDING_GRANT_TTL_MS,
+  isExpiredPendingDevice,
+  retainNewestMintedGrants,
+  retainUnexpiredPendingDevices
+} from './device-registry-pending-grants'
 import type { RelayDeviceBinding } from './relay/relay-revoke-outbox'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
@@ -30,21 +37,6 @@ export type DeviceEntry = {
   // deadline; absent (legacy rows, and every coalesced row) means "never expires", so an upgrade cannot
   // invalidate a link already handed out.
   pendingExpiresAt?: number
-}
-
-// Why: a named invite is handed to one human, so it must not stay a live credential for longer than the
-// day it was created — expiry is the leak control that replaces coalescing on the always-mint path.
-const PENDING_GRANT_TTL_MS = 24 * 60 * 60 * 1000
-
-// Why: only never-connected rows that carry an explicit deadline are sweepable; a row that has been
-// scanned is a real pairing, and a row without a deadline predates this field.
-function retainUnexpiredPendingDevices(devices: DeviceEntry[], now: number): DeviceEntry[] {
-  return devices.filter(
-    (device) =>
-      device.lastSeenAt !== 0 ||
-      device.pendingExpiresAt === undefined ||
-      device.pendingExpiresAt > now
-  )
 }
 
 function validRelayBinding(value: unknown, deviceId: string): RelayDeviceBinding | undefined {
@@ -150,7 +142,12 @@ export class DeviceRegistry {
   ): DeviceEntry {
     const now = Date.now()
     return this.createAndPersistDevice(
-      retainUnexpiredPendingDevices(this.devices, now),
+      // Why: the cap leaves room for the row about to be appended, so no window ever holds more than
+      // MAX_LIVE_MINTED_GRANTS live invites no matter how often the renderer regenerates.
+      retainNewestMintedGrants(
+        retainUnexpiredPendingDevices(this.devices, now),
+        MAX_LIVE_MINTED_GRANTS - 1
+      ),
       name,
       scope,
       pairingReach,
@@ -259,7 +256,11 @@ export class DeviceRegistry {
   }
 
   validateToken(token: string): DeviceEntry | null {
-    return this.devices.find((d) => d.token === token) ?? null
+    const device = this.devices.find((d) => d.token === token) ?? null
+    // Why: the sweep only runs on load and on the next mint, so a headless serve that mints once at
+    // startup would keep a stale invite usable for the whole process lifetime. The deadline has to bind
+    // where the credential is consumed — this is the single authorization lookup for every socket.
+    return device && isExpiredPendingDevice(device, Date.now()) ? null : device
   }
 
   updateLastSeen(deviceId: string): void {

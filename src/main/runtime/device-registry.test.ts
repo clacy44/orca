@@ -1,8 +1,9 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeviceRegistry, type DeviceEntry } from './device-registry'
+import { MAX_LIVE_MINTED_GRANTS } from './device-registry-pending-grants'
 import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -203,5 +204,118 @@ describe('DeviceRegistry pending grants', () => {
     expect(registry.getDevice(phone.deviceId)).not.toBeNull()
     expect(registry.getDevice(rotated.deviceId)).not.toBeNull()
     expect(rotated.pendingExpiresAt).toBeUndefined()
+  })
+
+  it('refuses an expired minted token at validation even when no sweep has run', () => {
+    vi.useFakeTimers()
+    try {
+      const registry = new DeviceRegistry(userDataPath)
+      const minted = registry.mintPendingDevice('Ana', 'runtime')
+      const shared = registry.getOrCreatePendingDevice('Shared', 'runtime')
+      const scanned = registry.mintPendingDevice('Scanned', 'runtime')
+      registry.updateLastSeen(scanned.deviceId)
+
+      expect(registry.validateToken(minted.token)?.deviceId).toBe(minted.deviceId)
+
+      // A headless serve mints once at startup and never mints again, so nothing sweeps this row for the
+      // rest of the process. The deadline has to bind where the credential is consumed.
+      vi.setSystemTime(Date.now() + DAY_MS + 1_000)
+
+      expect(registry.validateToken(minted.token)).toBeNull()
+      // Negative controls: neither a deadline-free shared row nor an already-scanned grant expires.
+      expect(registry.validateToken(shared.token)?.deviceId).toBe(shared.deviceId)
+      expect(registry.validateToken(scanned.token)?.deviceId).toBe(scanned.deviceId)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps an expired minted row that still holds a Relay binding', () => {
+    const now = Date.now()
+    writeRegistryFile([
+      {
+        deviceId: 'relay-bound',
+        name: 'Ana',
+        token: 'relay-bound-token',
+        scope: 'mobile',
+        pairedAt: now - 2 * DAY_MS,
+        lastSeenAt: 0,
+        pendingExpiresAt: now - 1_000,
+        relayBinding: {
+          relayHostId: 'host-1',
+          relayDeviceId: 'relay-bound',
+          ownerIdentityKey: 'owner-key'
+        }
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+    registry.mintPendingDevice('Ben', 'runtime')
+
+    // Why the row survives both sweeps: it is the only key to a live cloud invite, and the sweep — unlike
+    // revokeMobileDevice — cannot queue the durable Relay revoke first.
+    expect(registry.getDevice('relay-bound')).not.toBeNull()
+    expect(readRegistryFile().some((device) => device.deviceId === 'relay-bound')).toBe(true)
+    // It is retained for revocation, not for use: an expired invite still fails validation.
+    expect(registry.validateToken('relay-bound-token')).toBeNull()
+  })
+
+  it('caps how many live minted grants can accumulate, ignoring scanned rows', () => {
+    const registry = new DeviceRegistry(userDataPath)
+    const scanned = registry.mintPendingDevice('Scanned', 'runtime')
+    registry.updateLastSeen(scanned.deviceId)
+    const shared = registry.getOrCreatePendingDevice('Shared', 'runtime')
+
+    const minted = Array.from({ length: MAX_LIVE_MINTED_GRANTS + 4 }, (_, index) =>
+      registry.mintPendingDevice(`Person ${index}`, 'runtime')
+    )
+
+    const live = registry
+      .listDevices()
+      .filter((device) => device.lastSeenAt === 0 && device.pendingExpiresAt !== undefined)
+    expect(live).toHaveLength(MAX_LIVE_MINTED_GRANTS)
+    // The oldest are the ones dropped, and the newest cap-worth survive.
+    expect(registry.getDevice(minted[0]!.deviceId)).toBeNull()
+    expect(registry.getDevice(minted.at(-1)!.deviceId)).not.toBeNull()
+    // Negative control: rows outside the mint lane are never counted against or dropped by the cap.
+    expect(registry.getDevice(scanned.deviceId)).not.toBeNull()
+    expect(registry.getDevice(shared.deviceId)).not.toBeNull()
+  })
+
+  it('treats an unusable pendingExpiresAt on disk as a never-expiring legacy row', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'text-deadline',
+        name: 'Ana',
+        token: 'text-deadline-token',
+        scope: 'runtime',
+        pairedAt: 0,
+        lastSeenAt: 0,
+        pendingExpiresAt: 'soon' as unknown as number
+      },
+      {
+        deviceId: 'nan-deadline',
+        name: 'Ben',
+        token: 'nan-deadline-token',
+        scope: 'runtime',
+        pairedAt: 0,
+        lastSeenAt: 0,
+        pendingExpiresAt: Number.NaN
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    // Negative control on the normalization: a value no comparison can order must not silently become an
+    // instantly-expired grant, nor an immortal one that pins the row forever.
+    expect(registry.validateToken('text-deadline-token')?.deviceId).toBe('text-deadline')
+    expect(registry.validateToken('nan-deadline-token')?.deviceId).toBe('nan-deadline')
+    registry.mintPendingDevice('Cara', 'runtime')
+    expect(readRegistryFile().map((device) => device.deviceId)).toEqual([
+      'text-deadline',
+      'nan-deadline',
+      expect.any(String)
+    ])
+    expect(readRegistryFile()[0]).not.toHaveProperty('pendingExpiresAt')
   })
 })
