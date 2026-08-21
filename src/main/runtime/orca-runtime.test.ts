@@ -54,7 +54,13 @@ import {
 } from '../hooks'
 import { getBaseRefDefault, getBranchConflictKind } from '../git/repo'
 import { OrchestrationDb } from './orchestration/db'
-import type { MessagePriority, MessageRow, MessageType } from './orchestration/types'
+import type {
+  DispatchStatus,
+  MessagePriority,
+  MessageRow,
+  MessageType,
+  WorkerDispatchState
+} from './orchestration/types'
 import {
   AUTHORITATIVE_TERMINAL_SNAPSHOT_TIMEOUT_MS,
   appendNormalizedToTailBuffer,
@@ -1065,6 +1071,21 @@ class InMemoryOrchestrationMessages {
     { id: string; coordinator_handle: string | null; coordinator_pane_key: string | null }
   >()
 
+  private dispatchContexts = new Map<
+    string,
+    { status: DispatchStatus; assignee_handle: string | null }
+  >()
+
+  private workerDispatches = new Map<
+    string,
+    { state: WorkerDispatchState; agent_terminal_handle: string | null }
+  >()
+
+  private remoteAttachments = new Map<
+    string,
+    { state: WorkerDispatchState; terminal_handle: string | null }
+  >()
+
   insertMessage(msg: {
     from: string
     to: string
@@ -1138,6 +1159,52 @@ class InMemoryOrchestrationMessages {
     this.runs.set(run.id, { coordinator_pane_key: null, ...run })
   }
 
+  setDispatch(dispatch: {
+    id: string
+    status?: DispatchStatus
+    assigneeHandle?: string | null
+    workerState?: WorkerDispatchState
+    agentTerminalHandle?: string | null
+  }): void {
+    this.dispatchContexts.set(dispatch.id, {
+      status: dispatch.status ?? 'dispatched',
+      assignee_handle: dispatch.assigneeHandle ?? null
+    })
+    this.workerDispatches.set(dispatch.id, {
+      state: dispatch.workerState ?? 'ready',
+      agent_terminal_handle: dispatch.agentTerminalHandle ?? dispatch.assigneeHandle ?? null
+    })
+  }
+
+  setRemoteDispatchAttachment(attachment: {
+    id: string
+    state?: WorkerDispatchState
+    terminalHandle?: string | null
+  }): void {
+    this.remoteAttachments.set(attachment.id, {
+      state: attachment.state ?? 'ready',
+      terminal_handle: attachment.terminalHandle ?? null
+    })
+  }
+
+  getDispatchContextById(
+    id: string
+  ): { status: DispatchStatus; assignee_handle: string | null } | undefined {
+    return this.dispatchContexts.get(id)
+  }
+
+  getWorkerDispatch(
+    id: string
+  ): { state: WorkerDispatchState; agent_terminal_handle: string | null } | undefined {
+    return this.workerDispatches.get(id)
+  }
+
+  getRemoteDispatchAttachment(
+    id: string
+  ): { state: WorkerDispatchState; terminal_handle: string | null } | undefined {
+    return this.remoteAttachments.get(id)
+  }
+
   getRun(
     id: string
   ):
@@ -1171,6 +1238,51 @@ function setInMemoryOrchestrationMessages(
   db: InMemoryOrchestrationMessages
 ): void {
   runtime.setOrchestrationDb(db as unknown as OrchestrationDb)
+}
+
+function createDispatchMailboxHarness(options: { tabTitle?: string } = {}): {
+  runtime: OrcaRuntimeService
+  db: InMemoryOrchestrationMessages
+  write: ReturnType<typeof vi.fn>
+} {
+  const runtime = new OrcaRuntimeService(store)
+  const db = new InMemoryOrchestrationMessages()
+  const write = vi.fn().mockReturnValue(true)
+  setInMemoryOrchestrationMessages(runtime, db)
+  runtime.setPtyController({
+    write,
+    kill: vi.fn(),
+    getForegroundProcess: async () => null
+  } as never)
+  syncSinglePty(runtime, 'pty-1', options)
+  return { runtime, db, write }
+}
+
+type LeafAgentStatusRecord = {
+  lastAgentStatus: string | null
+  lastAgentStatusObservedLive: boolean
+}
+
+function onlyLeafOf(runtime: OrcaRuntimeService): LeafAgentStatusRecord {
+  return [
+    ...(runtime as unknown as { leaves: Map<string, LeafAgentStatusRecord> }).leaves.values()
+  ][0]
+}
+
+// Why written directly: a cold restore seeds `idle` from a persisted title, which no
+// live PTY frame in a test can reproduce.
+function seedLeafAgentStatus(
+  runtime: OrcaRuntimeService,
+  status: string | null,
+  observedLive: boolean
+): void {
+  const leaf = onlyLeafOf(runtime)
+  leaf.lastAgentStatus = status
+  leaf.lastAgentStatusObservedLive = observedLive
+}
+
+function readLeafAgentStatus(runtime: OrcaRuntimeService): string | null {
+  return onlyLeafOf(runtime).lastAgentStatus
 }
 
 function expectStablePaneKeyEnv(env: Record<string, string>): string {
@@ -34603,6 +34715,264 @@ describe('OrcaRuntimeService', () => {
       ).toHaveLength(1)
       db.close()
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('points a dispatch mailbox at its live-idle worker terminal', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_push', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      const message = db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_push',
+        subject: 'narrow the retry to the SSH path',
+        body: 'private coordinator guidance',
+        type: 'status'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_push', 'status')
+      await Promise.resolve()
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-1',
+        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+      )
+      expect(write).not.toHaveBeenCalledWith(
+        'pty-1',
+        expect.stringContaining('private coordinator guidance')
+      )
+      await vi.advanceTimersByTimeAsync(500)
+      expect(write).toHaveBeenCalledWith('pty-1', '\r')
+      // The pointer announces; the row stays undelivered until the worker checks.
+      expect(message.delivered_at).toBeNull()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets a blocked dispatch check --wait consume the row instead of pointing the pane', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_waiter', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      const waiting = runtime.waitForMessage('dispatch:ctx_waiter', {
+        typeFilter: ['status'],
+        timeoutMs: 60_000
+      })
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_waiter',
+        subject: 'the waiter owns this row',
+        type: 'status'
+      })
+
+      runtime.deliverPendingMessagesForHandle('dispatch:ctx_waiter')
+      await vi.advanceTimersByTimeAsync(500)
+      expect(write).not.toHaveBeenCalled()
+
+      runtime.notifyMessageArrived('dispatch:ctx_waiter', 'status')
+      await expect(waiting).resolves.toBe('notified')
+      await Promise.resolve()
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not point a dispatch mailbox at a worker whose idle was only restored, never observed', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_seeded', assigneeHandle: terminal.handle })
+      seedLeafAgentStatus(runtime, 'idle', false)
+
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_seeded',
+        subject: 'must not type into a restored pane',
+        type: 'status'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_seeded', 'status')
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not point a dispatch mailbox at a bare-shell worker pane with no agent status', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_shell', assigneeHandle: terminal.handle })
+      expect(readLeafAgentStatus(runtime)).toBeNull()
+
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_shell',
+        subject: 'no agent to announce to',
+        type: 'status'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_shell', 'status')
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('never pokes a settled worker with late dispatch mail', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({
+        id: 'ctx_done',
+        status: 'completed',
+        workerState: 'succeeded',
+        assigneeHandle: terminal.handle
+      })
+      db.setDispatch({
+        id: 'ctx_stopped',
+        status: 'dispatched',
+        workerState: 'stopped',
+        assigneeHandle: terminal.handle
+      })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      for (const dispatchId of ['ctx_done', 'ctx_stopped']) {
+        db.insertMessage({
+          from: 'term_coord',
+          to: `dispatch:${dispatchId}`,
+          subject: 'arrived after settlement',
+          type: 'status'
+        })
+        runtime.notifyMessageArrived(`dispatch:${dispatchId}`, 'status')
+      }
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('announces dispatch mail to a Cursor worker without submitting it', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness({ tabTitle: 'Cursor Agent' })
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_cursor', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_cursor',
+        subject: 'cursor keeps the submit',
+        type: 'status'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_cursor', 'status')
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-1',
+        expect.stringContaining('You have 1 orchestration message')
+      )
+      expect(write).not.toHaveBeenCalledWith('pty-1', '\r')
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('suppresses a repeat dispatch trigger for rows already pointed at', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_repeat', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_repeat',
+        subject: 'announced once',
+        type: 'status'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_repeat', 'status')
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      runtime.notifyMessageArrived('dispatch:ctx_repeat', 'status')
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(
+        write.mock.calls.filter(
+          ([, payload]) =>
+            typeof payload === 'string' && payload.includes('orca orchestration check')
+        )
+      ).toHaveLength(1)
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('returns cleanly when a dispatch mailbox resolves to no live terminal', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      db.setDispatch({ id: 'ctx_reminted', assigneeHandle: 'term_retired' })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      for (const dispatchId of ['ctx_reminted', 'ctx_never_existed']) {
+        db.insertMessage({
+          from: 'term_coord',
+          to: `dispatch:${dispatchId}`,
+          subject: 'nothing to point at',
+          type: 'status'
+        })
+        expect(() => runtime.notifyMessageArrived(`dispatch:${dispatchId}`, 'status')).not.toThrow()
+      }
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
       vi.useRealTimers()
     }
   })
