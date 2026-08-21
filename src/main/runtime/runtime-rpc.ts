@@ -23,6 +23,7 @@ import type { WebSocket } from 'ws'
 import { DeviceRegistry, type DeviceEntry, type DeviceScope } from './device-registry'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from './e2ee-keypair'
 import { UnpairedDeviceAuthThrottle } from './rpc/unpaired-device-auth-throttle'
+import { terminalPresenceRegistry } from './terminal-presence-registry'
 import {
   MobileSocketWiring,
   type AuthenticatedMobileSocket,
@@ -1335,7 +1336,18 @@ export class OrcaRuntimeRpcServer {
         )
       },
       onBinary: (socket, bytes) => this.handleWebSocketBinaryMessage(bytes, socket.ws),
-      onReady: () => {
+      onReady: (socket) => {
+        // Why: created for ANY authenticated socket, not only a terminal stream, or a peer connected
+        // with no terminal open would never appear. Mobile grants become participants in a later slice;
+        // E2EEAuthenticatedDevice carries no name, so the label is fetched from the registry here.
+        if (socket.device.scope === 'runtime') {
+          terminalPresenceRegistry.registerConnection({
+            connectionId: socket.connectionId,
+            pairedDeviceId: socket.device.deviceId,
+            label: deviceRegistry.getDevice(socket.device.deviceId)?.name ?? 'Paired device',
+            kind: 'runtime'
+          })
+        }
         // Why: first authenticated mobile/remote client (direct WS and
         // cloud relay both attach here) starts path-candidate tracking.
         // Activation is a local-host concern: candidate buffers live on the
@@ -1351,6 +1363,9 @@ export class OrcaRuntimeRpcServer {
         this.abortWebSocketDispatches(socket.ws)
         // Why: subscriptions and binary streams are socket-scoped, but disconnect state is device-scoped across transports.
         this.runtime.cleanupSubscriptionsForConnection(socket.connectionId)
+        // Why: per-connection, never onClientDisconnected — that fires only when the device has no
+        // other socket, so a two-window peer would never clear.
+        terminalPresenceRegistry.releaseConnection(socket.connectionId)
         this.runtime.cancelMobileDictationForConnection(socket.connectionId)
         this.binaryStreamHandlers.delete(socket.connectionId)
         if (!hasOtherConnections) {

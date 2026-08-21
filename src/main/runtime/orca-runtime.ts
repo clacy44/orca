@@ -12967,6 +12967,12 @@ export class OrcaRuntimeService {
     }
   }
 
+  // Why: presence publishes a connection only once it holds a live subscription; a narrow read keeps
+  // subscriptionsByConnection private instead of exposing the index itself.
+  hasEstablishedSubscription(connectionId: string): boolean {
+    return (this.subscriptionsByConnection.get(connectionId)?.size ?? 0) > 0
+  }
+
   cleanupSubscriptionsByPrefix(prefix: string): void {
     const ids = Array.from(this.subscriptionCleanups.keys()).filter((id) => id.startsWith(prefix))
     for (const id of ids) {
