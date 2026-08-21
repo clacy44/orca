@@ -147,7 +147,10 @@ export function registerMobileHandlers(
 
   ipcMain.handle(
     'mobile:getRuntimePairingUrl',
-    async (_event, args?: { address?: string; rotate?: boolean; reach?: RuntimePairingReach }) => {
+    async (
+      _event,
+      args?: { address?: string; rotate?: boolean; reach?: RuntimePairingReach; name?: string }
+    ) => {
       const ip = args?.address ?? (await getDefaultPairingAddress(getDefaultRouteInterfaceNames))
       if (!ip) {
         return { available: false as const }
@@ -179,10 +182,16 @@ export function registerMobileHandlers(
 
       // Why: web/desktop runtime clients need full runtime access, not the
       // mobile allowlist used by phone QR pairing.
+      const deviceName = args?.name?.trim() ?? ''
       const offer = rpcServer.createPairingOffer({
         address: ip,
         rotate: args?.rotate,
-        name: `Runtime ${new Date().toLocaleDateString()}`,
+        // Why: a named link is handed to one person, so it gets its own revocable grant instead of
+        // coalescing onto the shared pending row — two named links are two distinct devices. Both keys
+        // are omitted when blank so an unnamed link makes exactly today's call.
+        ...(deviceName
+          ? { name: deviceName, mint: true }
+          : { name: `Runtime ${new Date().toLocaleDateString()}` }),
         scope: 'runtime',
         // Why: a grant that only ever pointed at loopback must not make the next launch bind every
         // interface when its local client reconnects (that would restore the exposure one restart later).

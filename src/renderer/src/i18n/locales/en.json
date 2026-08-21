@@ -7256,7 +7256,10 @@
           "localLinkHelp": "This link only works in a browser or Orca client running on this computer.",
           "noExternalAddress": "No address for another device was found. Connect this computer to a LAN or Tailscale, refresh, or choose Custom address.",
           "staleAddress": "The connection address changed. Generate a new link for {{address}}.",
-          "customInvalid": "Enter a valid host, host:port, IPv6 address, or ws(s):// URL."
+          "customInvalid": "Enter a valid host, host:port, IPv6 address, or ws(s):// URL.",
+          "deviceNameLabel": "Who is this link for?",
+          "deviceNamePlaceholder": "A person or device name",
+          "deviceNameHelp": "Each named link gets its own revocable grant, so two people never share one identity. Leave blank for an unnamed link."
         },
         "Settings": {
           "3bf149e873": "Project Settings > {{value0}}",

@@ -6,6 +6,7 @@ import { Label } from '../ui/label'
 import { RuntimeAccessGrantList } from './RuntimeAccessGrantList'
 import { translate } from '@/i18n/i18n'
 import { RuntimePairingGeneratorForm } from './RuntimePairingGeneratorForm'
+import { useRuntimePairingLinkCopy } from './use-runtime-pairing-link-copy'
 import {
   RUNTIME_PAIRING_LOOPBACK_ADDRESS,
   cacheGeneratedRuntimePairingLink,
@@ -39,35 +40,16 @@ export function RuntimePairingUrlGenerator({
   const [runtimePairingDeviceId, setRuntimePairingDeviceId] = useState<string | null>(
     runtimePairingLinkCache.runtimePairingDeviceId
   )
+  const [deviceName, setDeviceName] = useState(runtimePairingLinkCache.deviceName)
   const [runtimeAccessGrants, setRuntimeAccessGrants] = useState<RuntimeAccessGrant[]>([])
   const [isLoadingAccessGrants, setIsLoadingAccessGrants] = useState(false)
   const [refreshingNetworkInterfaces, setRefreshingNetworkInterfaces] = useState(false)
   const [revokingGrantId, setRevokingGrantId] = useState<string | null>(null)
-  const [copiedTarget, setCopiedTarget] = useState<'web' | 'pairing' | null>(null)
   const [isGeneratingPairing, setIsGeneratingPairing] = useState(false)
   const networkInterfaceLoadIdRef = useRef(0)
   const accessGrantLoadIdRef = useRef(0)
-  const copiedTargetResetTimerRef = useRef<number | null>(null)
   const mountedRef = useMountedRef()
-
-  const clearCopiedTargetResetTimer = useCallback((): void => {
-    if (copiedTargetResetTimerRef.current === null) {
-      return
-    }
-    window.clearTimeout(copiedTargetResetTimerRef.current)
-    copiedTargetResetTimerRef.current = null
-  }, [])
-
-  const setContainerNode = useCallback(
-    (node: HTMLDivElement | null): void => {
-      // Why: copy feedback timers are owned by this settings surface; clear
-      // them when Settings collapses or navigates away.
-      if (!node) {
-        clearCopiedTargetResetTimer()
-      }
-    },
-    [clearCopiedTargetResetTimer]
-  )
+  const { copiedTarget, setContainerNode, copyGeneratedUrl } = useRuntimePairingLinkCopy()
 
   const loadRuntimeAccessGrants = useCallback(
     async (options: { showToastOnError?: boolean } = {}): Promise<void> => {
@@ -179,6 +161,7 @@ export function RuntimePairingUrlGenerator({
 
   const generateRuntimePairingUrl = async (): Promise<void> => {
     const address = selectedAddress.trim()
+    const pairedDeviceName = deviceName.trim()
     runtimePairingLinkCache.selectedAddress = address
     setSelectedAddress(address)
     if (intent === 'custom') {
@@ -189,6 +172,8 @@ export function RuntimePairingUrlGenerator({
       const result = await window.api.mobile.getRuntimePairingUrl({
         address,
         rotate: true,
+        // Why: omitted when blank so an unnamed link keeps today's coalescing behavior exactly.
+        ...(pairedDeviceName ? { name: pairedDeviceName } : {}),
         // Why: main gates the one-way network widen on this, so the declared choice must travel with the
         // address — the address alone cannot tell "This computer only" from a loopback tunnel front-end.
         reach: runtimePairingReachForIntent(intent)
@@ -302,44 +287,6 @@ export function RuntimePairingUrlGenerator({
     }
   }
 
-  const copyGeneratedUrl = async (target: 'web' | 'pairing', value: string): Promise<void> => {
-    try {
-      await window.api.ui.writeClipboardText(value)
-      if (mountedRef.current) {
-        clearCopiedTargetResetTimer()
-        setCopiedTarget(target)
-        copiedTargetResetTimerRef.current = window.setTimeout(() => {
-          copiedTargetResetTimerRef.current = null
-          if (mountedRef.current) {
-            setCopiedTarget((current) => (current === target ? null : current))
-          }
-        }, 1400)
-        toast.success(
-          target === 'web'
-            ? translate(
-                'auto.components.settings.RuntimePairingUrlGenerator.13704d635e',
-                'Copied web client URL.'
-              )
-            : translate(
-                'auto.components.settings.RuntimePairingUrlGenerator.df0aa45a86',
-                'Copied pairing URL.'
-              )
-        )
-      }
-    } catch (error) {
-      if (mountedRef.current) {
-        toast.error(
-          error instanceof Error
-            ? error.message
-            : translate(
-                'auto.components.settings.RuntimePairingUrlGenerator.d6c081adf4',
-                'Failed to copy URL.'
-              )
-        )
-      }
-    }
-  }
-
   const containerClassName = framed
     ? 'space-y-3 rounded-lg border border-border/50 bg-muted/25 p-3'
     : 'space-y-4'
@@ -358,6 +305,11 @@ export function RuntimePairingUrlGenerator({
     } else if (intent === 'custom') {
       runtimePairingLinkCache.customAddress = address
     }
+  }
+
+  const updateDeviceName = (name: string): void => {
+    runtimePairingLinkCache.deviceName = name
+    setDeviceName(name)
   }
 
   const updateIntent = (nextIntent: RuntimePairingIntent): void => {
@@ -391,6 +343,7 @@ export function RuntimePairingUrlGenerator({
       ) : null}
       {showGeneratorForm ? (
         <RuntimePairingGeneratorForm
+          deviceName={deviceName}
           intent={intent}
           loopbackAddress={RUNTIME_PAIRING_LOOPBACK_ADDRESS}
           networkInterfaces={networkInterfaces}
@@ -401,6 +354,7 @@ export function RuntimePairingUrlGenerator({
           runtimePairingUrl={runtimePairingUrl}
           copiedTarget={copiedTarget}
           generatedAddress={generatedAddress}
+          onDeviceNameChange={updateDeviceName}
           onIntentChange={updateIntent}
           onSelectedAddressChange={updateSelectedAddress}
           onRefreshNetworkInterfaces={() => void loadNetworkInterfaces({ showToastOnError: true })}

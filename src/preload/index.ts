@@ -4755,6 +4755,8 @@ const api = {
       // Why: the widen is one-way and host-wide, so main must gate it on the reach the user picked, not
       // on how the typed address happens to look (a Custom loopback may front an SSH tunnel).
       reach?: RuntimePairingReach
+      // Why: the human names the person this link is for, and that name is what host-side presence shows.
+      name?: string
     }): Promise<
       | { available: false; reason?: 'network_exposure_failed'; guidance?: string }
       | {

@@ -21,6 +21,9 @@ export type RuntimePairingUrlGeneratorProps = {
 export const runtimePairingLinkCache: {
   selectedAddress: string
   customAddress: string
+  // Why: the name the human typed for this link, kept beside the address so navigating away from
+  // Settings mid-flow does not silently drop it and mint an unnamed grant on the next click.
+  deviceName: string
   intent: RuntimePairingIntent
   generatedAddress: string | null
   runtimePairingUrl: string | null
@@ -29,6 +32,7 @@ export const runtimePairingLinkCache: {
 } = {
   selectedAddress: '',
   customAddress: '',
+  deviceName: '',
   intent: 'another',
   generatedAddress: null,
   runtimePairingUrl: null,

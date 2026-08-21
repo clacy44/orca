@@ -6,12 +6,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
 import { AddressPicker, type AddressOption } from '../network/AddressPicker'
 import { parseServerShareAddress } from '../../../../shared/network/server-share-address'
 import { GeneratedUrlRow, UnavailableUrlRow } from './RuntimePairingGeneratedUrlRows'
+import { RuntimePairingDeviceNameField } from './RuntimePairingDeviceNameField'
 import type { RuntimePairingIntent } from './runtime-pairing-link-state'
 import { translate } from '@/i18n/i18n'
 
 export type { RuntimePairingIntent } from './runtime-pairing-link-state'
 
 type RuntimePairingGeneratorFormProps = {
+  deviceName: string
   intent: RuntimePairingIntent
   loopbackAddress: string
   networkInterfaces: { name: string; address: string }[]
@@ -22,6 +24,7 @@ type RuntimePairingGeneratorFormProps = {
   runtimePairingUrl: string | null
   copiedTarget: 'web' | 'pairing' | null
   generatedAddress: string | null
+  onDeviceNameChange: (name: string) => void
   onIntentChange: (intent: RuntimePairingIntent) => void
   onSelectedAddressChange: (address: string) => void
   onRefreshNetworkInterfaces: () => void
@@ -30,6 +33,7 @@ type RuntimePairingGeneratorFormProps = {
 }
 
 export function RuntimePairingGeneratorForm({
+  deviceName,
   intent,
   loopbackAddress,
   networkInterfaces,
@@ -40,6 +44,7 @@ export function RuntimePairingGeneratorForm({
   runtimePairingUrl,
   copiedTarget,
   generatedAddress,
+  onDeviceNameChange,
   onIntentChange,
   onSelectedAddressChange,
   onRefreshNetworkInterfaces,
@@ -60,6 +65,7 @@ export function RuntimePairingGeneratorForm({
   return (
     <>
       <div className="space-y-3">
+        <RuntimePairingDeviceNameField value={deviceName} onChange={onDeviceNameChange} />
         <fieldset className="space-y-2">
           <legend className="text-sm font-medium">
             {translate(

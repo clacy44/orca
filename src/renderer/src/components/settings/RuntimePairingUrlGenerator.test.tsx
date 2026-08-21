@@ -2,7 +2,7 @@
 
 import '@testing-library/jest-dom/vitest'
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -15,9 +15,19 @@ vi.mock('@/i18n/i18n', () => ({ translate: (_key: string, fallback: string) => f
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
 vi.mock('./RuntimeAccessGrantList', () => ({ RuntimeAccessGrantList: () => null }))
 vi.mock('./RuntimePairingGeneratorForm', () => ({
-  RuntimePairingGeneratorForm: (props: { selectedAddress: string; onGenerate: () => void }) => (
+  RuntimePairingGeneratorForm: (props: {
+    selectedAddress: string
+    deviceName: string
+    onDeviceNameChange: (name: string) => void
+    onGenerate: () => void
+  }) => (
     <div>
       <div data-testid="selected-address">{props.selectedAddress}</div>
+      <input
+        aria-label="device-name"
+        value={props.deviceName}
+        onChange={(event) => props.onDeviceNameChange(event.target.value)}
+      />
       <button type="button" onClick={props.onGenerate}>
         Generate
       </button>
@@ -32,6 +42,7 @@ describe('RuntimePairingUrlGenerator', () => {
   beforeEach(() => {
     runtimePairingLinkCache.selectedAddress = '100.76.32.125'
     runtimePairingLinkCache.customAddress = ''
+    runtimePairingLinkCache.deviceName = ''
     runtimePairingLinkCache.intent = 'another'
     runtimePairingLinkCache.generatedAddress = null
     runtimePairingLinkCache.runtimePairingUrl = null
@@ -103,6 +114,29 @@ describe('RuntimePairingUrlGenerator', () => {
 
     await waitFor(() =>
       expect(mocks.getRuntimePairingUrl).toHaveBeenCalledWith({ address, rotate: true, reach })
+    )
+  })
+
+  // Why: the host only learns a client's name when the grant is minted, so the name the human types has
+  // to reach main on this call or the device is permanently unnamed.
+  it('sends the trimmed name the human typed', async () => {
+    mocks.listNetworkInterfaces.mockResolvedValue({
+      interfaces: [{ name: 'tailscale0', address: '100.76.32.125' }]
+    })
+
+    render(<RuntimePairingUrlGenerator />)
+    await waitFor(() => expect(mocks.listNetworkInterfaces).toHaveBeenCalledOnce())
+
+    fireEvent.change(screen.getByLabelText('device-name'), { target: { value: '  Ana  ' } })
+    screen.getByRole('button', { name: 'Generate' }).click()
+
+    await waitFor(() =>
+      expect(mocks.getRuntimePairingUrl).toHaveBeenCalledWith({
+        address: '100.76.32.125',
+        rotate: true,
+        name: 'Ana',
+        reach: 'network'
+      })
     )
   })
 })
