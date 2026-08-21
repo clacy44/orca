@@ -16,6 +16,8 @@ describe('orchestration federation control mail', () => {
   const coordinatorPaneKey = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
   const workerPaneKey = 'tab_worker:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
   const processIncarnation = 'worker-runtime:pty:1'
+  const workerWorktreeId = 'repo-1::/tmp/worker-worktree'
+  const workerLeafId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
   let homeDb: OrchestrationDb
   let workerDb: OrchestrationDb
   let homeRuntime: OrcaRuntimeService
@@ -329,6 +331,83 @@ describe('orchestration federation control mail', () => {
       result: { count: 0, timedOut: true }
     })
   })
+
+  it('points the peer worker pane at imported coordinator mail exactly once', async () => {
+    vi.useFakeTimers()
+    try {
+      const write = await attachLiveWorkerPane()
+
+      await expect(
+        workerDispatcher.dispatch(importRequest('import-pointed', 1, 'relay-pointed'))
+      ).resolves.toMatchObject({ ok: true, result: { imported: 1 } })
+      await Promise.resolve()
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-worker',
+        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+      )
+      expect(write).not.toHaveBeenCalledWith(
+        'pty-worker',
+        expect.stringContaining('Run the focused follow-up.')
+      )
+      await vi.advanceTimersByTimeAsync(500)
+      expect(write).toHaveBeenCalledWith('pty-worker', '\r')
+
+      write.mockClear()
+      await expect(
+        workerDispatcher.dispatch(importRequest('import-repeated', 1, 'different-message-id'))
+      ).resolves.toMatchObject({ ok: true, result: { imported: 0 } })
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  async function attachLiveWorkerPane(): Promise<ReturnType<typeof vi.fn>> {
+    const write = vi.fn().mockReturnValue(true)
+    workerRuntime.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => null
+    } as never)
+    workerRuntime.attachWindow(1)
+    workerRuntime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'tab-worker',
+          worktreeId: workerWorktreeId,
+          title: 'Codex',
+          activeLeafId: workerLeafId,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-worker',
+          worktreeId: workerWorktreeId,
+          leafId: workerLeafId,
+          paneRuntimeId: 1,
+          ptyId: 'pty-worker',
+          paneTitle: null
+        }
+      ]
+    })
+    const [pane] = (await workerRuntime.listTerminals()).terminals
+    // Why re-stamp the handle: the attachment is written before this test mints a pane,
+    // and the peer resolves the mailbox through exactly the handle it recorded.
+    workerDb.recordRemoteAttachmentStage({
+      dispatchId,
+      stage: 'input_accepted',
+      terminalHandle: pane.handle
+    })
+    workerRuntime.onPtyData('pty-worker', '\u001b]0;Codex working\u0007', 100)
+    workerRuntime.onPtyData('pty-worker', '\u001b]0;Codex done\u0007', 101)
+    write.mockClear()
+    return write
+  }
 
   function checkRequest(id: string, wait = false, timeoutMs = 5_000, types?: string): RpcRequest {
     return {
