@@ -2112,6 +2112,14 @@ type MessageWaiter = {
   abortCleanup: (() => void) | null
 }
 
+// Why `settled`: a structured write queues behind the pointer's armed Enter rather
+// than racing it, so the claim needs a completion signal the flight owner resolves.
+type PtyWriteFlight = {
+  enterTimer: ReturnType<typeof setTimeout> | null
+  settled: Promise<void>
+  markSettled: () => void
+}
+
 export type MessageWaitResult = 'notified' | 'timed_out' | 'cancelled' | 'waiter_exists'
 
 // Why: an unfiltered waiter claims every type. A row a live waiter will return
@@ -17550,41 +17558,52 @@ export class OrcaRuntimeService {
     // clients; chunk text before PTY/ConPTY while preserving suffix separation.
     const hasText = typeof action.text === 'string' && action.text.length > 0
     const hasSuffix = action.enter || action.interrupt
-    if (hasText) {
-      await this.writeTerminalInputChunks(ptyId, action.text!, options)
-    }
-    if (hasSuffix) {
-      const suffix = (action.enter ? '\r' : '') + (action.interrupt ? '\x03' : '')
+    // Why the claim spans text→suffix and not just the chunks: releasing between
+    // them replays parked mail into the gap, so this send's own \r submits the
+    // pointer text along with the user's, and the pointer's Enter submits again.
+    // A suffix-only action carries no such gap and must not wait on a pointer.
+    const flight = hasText ? await this.claimStructuredPtyWrite(ptyId) : null
+    try {
       if (hasText) {
-        await new Promise((resolve) => setTimeout(resolve, 500))
+        await this.writeTerminalInputChunks(ptyId, action.text!, options)
       }
-      try {
-        await options.beforeWrite?.(ptyId)
-        options.reserveWrite?.(ptyId)
-      } catch (error) {
-        if (options.suffixFailureError) {
-          throw new Error(options.suffixFailureError)
+      if (hasSuffix) {
+        const suffix = (action.enter ? '\r' : '') + (action.interrupt ? '\x03' : '')
+        if (hasText) {
+          await new Promise((resolve) => setTimeout(resolve, 500))
         }
-        throw error
+        try {
+          await options.beforeWrite?.(ptyId)
+          options.reserveWrite?.(ptyId)
+        } catch (error) {
+          if (options.suffixFailureError) {
+            throw new Error(options.suffixFailureError)
+          }
+          throw error
+        }
+        const suffixWrote = this.ptyController?.write(ptyId, suffix) ?? false
+        if (!suffixWrote) {
+          throw new Error(options.suffixFailureError ?? 'terminal_not_writable')
+        }
+        await options.afterWrite?.(ptyId)
+        return
       }
-      const suffixWrote = this.ptyController?.write(ptyId, suffix) ?? false
-      if (!suffixWrote) {
-        throw new Error(options.suffixFailureError ?? 'terminal_not_writable')
+      if (hasText) {
+        return
+      }
+
+      await options.beforeWrite?.(ptyId)
+      options.reserveWrite?.(ptyId)
+      const wrote = this.ptyController?.write(ptyId, payload) ?? false
+      if (!wrote) {
+        throw new Error('terminal_not_writable')
       }
       await options.afterWrite?.(ptyId)
-      return
+    } finally {
+      if (flight) {
+        this.settlePendingMessageDelivery(ptyId, flight)
+      }
     }
-    if (hasText) {
-      return
-    }
-
-    await options.beforeWrite?.(ptyId)
-    options.reserveWrite?.(ptyId)
-    const wrote = this.ptyController?.write(ptyId, payload) ?? false
-    if (!wrote) {
-      throw new Error('terminal_not_writable')
-    }
-    await options.afterWrite?.(ptyId)
   }
 
   private async writeTerminalInputChunks(
@@ -17596,26 +17615,21 @@ export class OrcaRuntimeService {
       afterWrite?: (ptyId: string) => void | Promise<void>
     } = {}
   ): Promise<void> {
-    const flight = this.claimStructuredPtyWrite(ptyId)
-    try {
-      const chunks = iterateTerminalInputChunks(text)
-      let chunk = chunks.next()
-      while (!chunk.done) {
-        await options.beforeWrite?.(ptyId)
-        options.reserveWrite?.(ptyId)
-        const wrote = this.ptyController?.write(ptyId, chunk.value) ?? false
-        if (!wrote) {
-          throw new Error('terminal_not_writable')
-        }
-        await options.afterWrite?.(ptyId)
-        chunk = chunks.next()
-        if (!chunk.done) {
-          await new Promise((resolve) => setTimeout(resolve, 0))
-        }
+    // Why no claim of its own: writeTerminalAction owns the text→suffix span, and the
+    // pop-out preview streams raw keystrokes that must not stall behind a pointer's Enter.
+    const chunks = iterateTerminalInputChunks(text)
+    let chunk = chunks.next()
+    while (!chunk.done) {
+      await options.beforeWrite?.(ptyId)
+      options.reserveWrite?.(ptyId)
+      const wrote = this.ptyController?.write(ptyId, chunk.value) ?? false
+      if (!wrote) {
+        throw new Error('terminal_not_writable')
       }
-    } finally {
-      if (flight) {
-        this.settlePendingMessageDelivery(ptyId, flight)
+      await options.afterWrite?.(ptyId)
+      chunk = chunks.next()
+      if (!chunk.done) {
+        await new Promise((resolve) => setTimeout(resolve, 0))
       }
     }
   }
@@ -17628,7 +17642,7 @@ export class OrcaRuntimeService {
       suffixFailureError?: string
     } = {}
   ): Promise<void> {
-    const flight = this.claimStructuredPtyWrite(ptyId)
+    const flight = await this.claimStructuredPtyWrite(ptyId)
     try {
       const renderGate = this.createClaudeAgentPromptRenderGate(ptyId)
       let wrotePasteBytes = false
@@ -17680,9 +17694,7 @@ export class OrcaRuntimeService {
         throw new Error(options.suffixFailureError ?? 'terminal_not_writable')
       }
     } finally {
-      if (flight) {
-        this.settlePendingMessageDelivery(ptyId, flight)
-      }
+      this.settlePendingMessageDelivery(ptyId, flight)
     }
   }
 
@@ -33084,36 +33096,44 @@ export class OrcaRuntimeService {
   // landing mid-flight park their mailbox and re-run once on settle. The
   // flight object is the settle identity: a stale settle surviving an exit
   // retire must not clear a newer same-id flight or flush its parked trigger.
-  private readonly messageDeliveryFlightsByPtyId = new Map<
-    string,
-    { enterTimer: ReturnType<typeof setTimeout> | null }
-  >()
+  private readonly messageDeliveryFlightsByPtyId = new Map<string, PtyWriteFlight>()
 
   private readonly parkedMessageRedeliveriesByPtyId = new Map<
     string,
     Map<string, { leaf: RuntimeLeafRecord; reservedTypes?: ReadonlySet<string> }>
   >()
 
+  private createPtyWriteFlight(): PtyWriteFlight {
+    let markSettled!: () => void
+    const settled = new Promise<void>((resolve) => {
+      markSettled = resolve
+    })
+    return { enterTimer: null, settled, markSettled }
+  }
+
   // Why: the pointer writer and the prompt writer share one pty, and both yield
   // mid-write — an unclaimed span lets a raw pointer land inside a bracketed
-  // paste and arm a second Enter. A structured write takes the same flight so
-  // mail parks and replays once on settle. Never evicts an in-flight pointer:
-  // that flight object is its Enter callback's settle identity.
-  private claimStructuredPtyWrite(
-    ptyId: string
-  ): { enterTimer: ReturnType<typeof setTimeout> | null } | null {
-    if (this.messageDeliveryFlightsByPtyId.has(ptyId)) {
-      return null
+  // paste and arm a second Enter. Why wait instead of proceeding unclaimed: the
+  // pointer's Enter is already armed when a prompt starts, so bailing would leave
+  // exactly the mail-first ordering unserialized. Waiting is bounded — every
+  // flight settles in its own finally or its Enter callback, and a pty exit
+  // retires it — and never evicts an in-flight pointer, whose flight object is
+  // its Enter callback's settle identity.
+  private async claimStructuredPtyWrite(ptyId: string): Promise<PtyWriteFlight> {
+    let inFlight = this.messageDeliveryFlightsByPtyId.get(ptyId)
+    while (inFlight) {
+      await inFlight.settled
+      inFlight = this.messageDeliveryFlightsByPtyId.get(ptyId)
     }
-    const flight: { enterTimer: ReturnType<typeof setTimeout> | null } = { enterTimer: null }
+    const flight = this.createPtyWriteFlight()
     this.messageDeliveryFlightsByPtyId.set(ptyId, flight)
     return flight
   }
 
-  private settlePendingMessageDelivery(
-    ptyId: string,
-    flight: { enterTimer: ReturnType<typeof setTimeout> | null }
-  ): void {
+  private settlePendingMessageDelivery(ptyId: string, flight: PtyWriteFlight): void {
+    // Why unconditional: a claim waiting on this flight must be released even when
+    // an exit retire already dropped it from the map, or that write hangs forever.
+    flight.markSettled()
     if (this.messageDeliveryFlightsByPtyId.get(ptyId) !== flight) {
       return
     }
@@ -33137,6 +33157,7 @@ export class OrcaRuntimeService {
     if (flight?.enterTimer != null) {
       clearTimeout(flight.enterTimer)
     }
+    flight?.markSettled()
     this.messageDeliveryFlightsByPtyId.delete(ptyId)
     this.parkedMessageRedeliveriesByPtyId.delete(ptyId)
     for (const leaf of this.getLeavesForPty(ptyId)) {
@@ -33290,7 +33311,7 @@ export class OrcaRuntimeService {
     }
 
     const deliveryPtyId = leaf.ptyId
-    const flight: { enterTimer: ReturnType<typeof setTimeout> | null } = { enterTimer: null }
+    const flight = this.createPtyWriteFlight()
     this.messageDeliveryFlightsByPtyId.set(deliveryPtyId, flight)
     // Why: every sync outcome — failed write, Cursor branch, or a throw —
     // must end the flight here, or a leaked flag parks this pty's deliveries

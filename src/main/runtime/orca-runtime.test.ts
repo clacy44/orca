@@ -1291,6 +1291,17 @@ function readLeafAgentStatus(runtime: OrcaRuntimeService): string | null {
   return onlyLeafOf(runtime).lastAgentStatus
 }
 
+// Why written directly: launchAgent is stamped by the spawn path, which a graph-synced
+// fixture pty never goes through, and the claude prompt render gate keys off it.
+function setPtyLaunchAgent(runtime: OrcaRuntimeService, ptyId: string, agent: string): void {
+  const pty = (
+    runtime as unknown as { ptysById: Map<string, { launchAgent: string | null }> }
+  ).ptysById.get(ptyId)
+  if (pty) {
+    pty.launchAgent = agent
+  }
+}
+
 function expectStablePaneKeyEnv(env: Record<string, string>): string {
   expect(env.ORCA_TAB_ID).toMatch(UUID_RE)
   const leafId = env.ORCA_PANE_KEY?.slice(`${env.ORCA_TAB_ID}:`.length)
@@ -34642,8 +34653,20 @@ describe('OrcaRuntimeService', () => {
       }
     }
 
+    // Why a longer step than advanceUntil's: the claude render gate holds the submit
+    // for CLAUDE_AGENT_PROMPT_RENDER_TIMEOUT_MS when its marker never arrives.
+    async function advanceThroughRenderGate(reached: () => boolean): Promise<void> {
+      for (let index = 0; index < 10 && !reached(); index += 1) {
+        await vi.advanceTimersByTimeAsync(10_000)
+      }
+    }
+
     function writtenPayloads(write: ReturnType<typeof vi.fn>): string[] {
       return write.mock.calls.map(([, payload]) => payload as string)
+    }
+
+    function countSubmits(write: ReturnType<typeof vi.fn>): number {
+      return writtenPayloads(write).filter((payload) => payload === '\r').length
     }
 
     function isMailPointer(payload: string): boolean {
@@ -34809,28 +34832,94 @@ describe('OrcaRuntimeService', () => {
       }
     })
 
-    it('holds the claim across the chunks of a terminal send --enter', async () => {
+    it.each([
+      ['enter', { enter: true }, '\r'],
+      ['interrupt', { interrupt: true }, '\x03']
+    ] as const)(
+      'holds the claim across the text and the suffix of a terminal send --%s',
+      async (_name, suffixAction, suffix) => {
+        vi.useFakeTimers()
+        const { runtime, db, write, handle } = await createIdleMailboxHarness()
+        try {
+          db.insertMessage({ from: 'term_coord', to: handle, subject: 'during a send' })
+
+          const send = runtime.sendTerminal(handle, { text: PROMPT_TEXT, ...suffixAction })
+          await drainToInterChunkYield()
+          expect(write).toHaveBeenCalledTimes(1)
+
+          runtime.notifyMessageArrived(handle, 'status')
+          await drainToInterChunkYield()
+          expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+
+          await advanceUntil(() => writtenPayloads(write).some(isMailPointer))
+          const payloads = writtenPayloads(write)
+          const pointerIndex = payloads.findIndex(isMailPointer)
+          // The notice lands strictly after the send's own suffix, so it can be
+          // neither absorbed into the composed text nor submitted twice.
+          expect(payloads.slice(0, pointerIndex).join('')).toBe(`${PROMPT_TEXT}${suffix}`)
+
+          await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+          await send
+        } finally {
+          db.close()
+          vi.useRealTimers()
+        }
+      }
+    )
+
+    it('queues an agent prompt behind a mail pointer whose Enter is already armed', async () => {
       vi.useFakeTimers()
       const { runtime, db, write, handle } = await createIdleMailboxHarness()
       try {
-        db.insertMessage({ from: 'term_coord', to: handle, subject: 'during a send' })
-
-        const send = runtime.sendTerminal(handle, { text: PROMPT_TEXT, enter: true })
-        await drainToInterChunkYield()
-        expect(write).toHaveBeenCalledTimes(1)
+        // Why claude: its render gate holds the paste open for seconds, which is the
+        // window an unserialized mail Enter would submit into.
+        setPtyLaunchAgent(runtime, 'pty-1', 'claude')
+        db.insertMessage({ from: 'term_coord', to: handle, subject: 'arrived first' })
 
         runtime.notifyMessageArrived(handle, 'status')
+        await Promise.resolve()
+        expect(writtenPayloads(write)).toEqual([POINTER_TEXT])
+
+        const prompt = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
         await drainToInterChunkYield()
-        expect(writtenPayloads(write).some(isMailPointer)).toBe(false)
+        // The prompt waits for the pointer's Enter instead of pasting into it.
+        expect(writtenPayloads(write)).toEqual([POINTER_TEXT])
 
-        await advanceUntil(() => writtenPayloads(write).some(isMailPointer))
+        // The claude render gate never sees its marker, so the submit waits out its
+        // hard timeout — the span an unserialized mail Enter would land inside.
+        await advanceThroughRenderGate(() => countSubmits(write) === 2)
+        await prompt
+
         const payloads = writtenPayloads(write)
-        const pointerIndex = payloads.findIndex(isMailPointer)
-        expect(pointerIndex).toBeGreaterThan(0)
-        expect(payloads.slice(0, pointerIndex).join('')).toBe(PROMPT_TEXT)
+        const pasteStart = payloads.findIndex((payload) =>
+          payload.includes(AGENT_PROMPT_BRACKETED_PASTE_START)
+        )
+        expect(payloads.slice(0, pasteStart)).toEqual([POINTER_TEXT, '\r'])
+        expect(payloads.slice(pasteStart).join('')).toBe(
+          `${AGENT_PROMPT_BRACKETED_PASTE_START}${PROMPT_TEXT}${AGENT_PROMPT_BRACKETED_PASTE_END}\r`
+        )
+      } finally {
+        db.close()
+        vi.useRealTimers()
+      }
+    })
 
-        await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
-        await send
+    it('serializes two overlapping structured writes on one pty', async () => {
+      vi.useFakeTimers()
+      const { runtime, db, write, handle } = await createIdleMailboxHarness()
+      try {
+        const first = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
+        await drainToInterChunkYield()
+        const second = runtime.sendTerminal(handle, { text: 'b'.repeat(40_000), enter: true })
+        await drainToInterChunkYield()
+
+        await advanceUntil(() => countSubmits(write) === 2)
+        await Promise.all([first, second])
+
+        const written = writtenPayloads(write).join('')
+        expect(written).toBe(
+          `${AGENT_PROMPT_BRACKETED_PASTE_START}${PROMPT_TEXT}${AGENT_PROMPT_BRACKETED_PASTE_END}\r${'b'.repeat(40_000)}\r`
+        )
       } finally {
         db.close()
         vi.useRealTimers()
