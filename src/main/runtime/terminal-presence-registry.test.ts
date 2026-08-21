@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import type { DeviceEntry } from './device-registry'
 import { OrcaRuntimeService } from './orca-runtime'
 import { TerminalPresenceRegistry } from './terminal-presence-registry'
 import {
@@ -8,17 +9,25 @@ import {
   resolveHostPresenceLabel
 } from './terminal-presence-snapshot'
 
-const ANA_GRANT = 'device-ana'
-const ANA_TOKEN = 'token-ana-secret'
-
+// Why: the disclosure control is only real if the secret exists in the data the snapshot is derived
+// from, so the fixture is a whole registry row and the connection is mapped off it exactly as
+// runtime-rpc.ts's onReady consumer does.
+const ANA_DEVICE: DeviceEntry = {
+  deviceId: 'device-ana',
+  name: 'Ana laptop',
+  token: 'token-ana-secret',
+  scope: 'runtime',
+  pairedAt: 1,
+  lastSeenAt: 2
+}
 let registry: TerminalPresenceRegistry
 
 function connectAna(connectionId: string): string {
   return registry.registerConnection({
     connectionId,
-    pairedDeviceId: ANA_GRANT,
-    label: 'Ana laptop',
-    kind: 'runtime'
+    pairedDeviceId: ANA_DEVICE.deviceId,
+    label: ANA_DEVICE.name,
+    kind: ANA_DEVICE.scope
   }).participantId
 }
 
@@ -99,9 +108,9 @@ describe('terminal presence identity and aggregation', () => {
     const afterRestart = new TerminalPresenceRegistry()
     const after = afterRestart.registerConnection({
       connectionId: 'conn-terminal',
-      pairedDeviceId: ANA_GRANT,
-      label: 'Ana laptop',
-      kind: 'runtime'
+      pairedDeviceId: ANA_DEVICE.deviceId,
+      label: ANA_DEVICE.name,
+      kind: ANA_DEVICE.scope
     }).participantId
     expect(after).not.toBe(before)
   })
@@ -111,9 +120,22 @@ describe('terminal presence payload shape', () => {
   it('carries neither the registry deviceId nor the device token', () => {
     connectAna('conn-terminal')
     registry.attach('pty-1', 'multiplex:conn-terminal:1', 'conn-terminal')
-    const serialized = JSON.stringify(rows(['conn-terminal']))
-    expect(serialized).not.toContain(ANA_GRANT)
-    expect(serialized).not.toContain(ANA_TOKEN)
+    const built = rows(['conn-terminal'])
+    const serialized = JSON.stringify(built)
+    expect(serialized).not.toContain(ANA_DEVICE.deviceId)
+    expect(serialized).not.toContain(ANA_DEVICE.token)
+    // Why: substring checks only catch what the fixture happens to name — pinning the key set is what
+    // makes a newly threaded field (ctx.clientId IS a device token) fail loudly instead of shipping.
+    for (const row of built.participants) {
+      expect(Object.keys(row).sort()).toEqual([
+        'attachedPtyIds',
+        'kind',
+        'label',
+        'participantId',
+        'self',
+        'since'
+      ])
+    }
   })
 
   it('synthesizes the host row with no socket, no subscription and no attachments', () => {

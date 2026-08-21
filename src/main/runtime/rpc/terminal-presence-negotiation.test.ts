@@ -235,6 +235,38 @@ describe('terminal.multiplex presence negotiation', () => {
     await harness.dispatchPromise
   })
 
+  it('attaches the stream under its connection-scoped key and drops it on close', async () => {
+    registerDesktopGrant()
+    const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'runtime' })
+    await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
+    sendSubscribeFrame(harness.handlers, { outputPause: 1, presence: 1 })
+    await awaitSubscribed(harness.messages)
+
+    expect(Array.from(terminalPresenceRegistry.attachmentsOf('pty-1').keys())).toEqual([
+      `multiplex:${CONNECTION}:7`
+    ])
+    harness.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    await harness.dispatchPromise
+    expect(terminalPresenceRegistry.attachmentsOf('pty-1').size).toBe(0)
+  })
+
+  it('counts an un-negotiated multiplex stream as an attachment anyway', async () => {
+    // Why: attachment is host-observed, not client-declared — a peer that negotiated nothing must
+    // still be visible to everyone else, which is the whole reason the host owns this fact.
+    registerDesktopGrant()
+    const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'runtime' })
+    await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
+    sendSubscribeFrame(harness.handlers, { outputPause: 1 })
+    await awaitSubscribed(harness.messages)
+
+    expect(Array.from(terminalPresenceRegistry.attachmentsOf('pty-1').keys())).toEqual([
+      `multiplex:${CONNECTION}:7`
+    ])
+
+    harness.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    await harness.dispatchPromise
+  })
+
   it('strips unknown capability keys from a future client instead of failing the subscribe', async () => {
     registerDesktopGrant()
     const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'runtime' })
@@ -253,7 +285,8 @@ describe('terminal.multiplex presence negotiation', () => {
 function startSubscribe(
   identity: Identity,
   params: Record<string, unknown>,
-  cleanups = new Map<string, () => void>()
+  cleanups = new Map<string, () => void>(),
+  runtimeOverrides: Partial<OrcaRuntimeService> = {}
 ) {
   const messages: string[] = []
   const runtime = stubRuntime({
@@ -263,7 +296,8 @@ function startSubscribe(
     cleanupSubscription: vi.fn((id: string) => {
       cleanups.get(id)?.()
       cleanups.delete(id)
-    })
+    }),
+    ...runtimeOverrides
   })
   const dispatcher = new RpcDispatcher({ runtime, methods: TERMINAL_METHODS })
   const dispatchPromise = dispatcher.dispatchStreaming(
@@ -333,6 +367,121 @@ describe('terminal.subscribe presence negotiation', () => {
     expect('presence' in subscribed).toBe(false)
 
     harness.cleanups.get('terminal-1:desktop-1')?.()
+    await harness.dispatchPromise
+  })
+
+  it('omits presence when a negotiated subscribe maps to no tracked participant', async () => {
+    // Why: the tracked row carries this very grant on another socket, so only a per-connection
+    // lookup can reject it — an unconditional participantId would sail past every other assertion.
+    terminalPresenceRegistry.registerConnection({
+      connectionId: 'conn-other-socket',
+      pairedDeviceId: GRANT,
+      label: 'Ana laptop',
+      kind: 'runtime'
+    })
+    const harness = startSubscribe(
+      { pairedDeviceId: GRANT, clientKind: 'runtime' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'desktop-1', type: 'desktop' },
+        viewport: { cols: 120, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1 }
+      }
+    )
+
+    const subscribed = await awaitSubscribed(harness.messages)
+    // Why: negotiation still succeeded; only the unverifiable participantId is withheld.
+    expect(subscribed.capabilities).toEqual({ presence: 1 })
+    expect('presence' in subscribed).toBe(false)
+
+    harness.cleanups.get('terminal-1:desktop-1')?.()
+    await harness.dispatchPromise
+  })
+
+  it('refuses a subscribe participant on a mobile-scope envelope', async () => {
+    // Why: no phone is a tracked participant in this slice, so no phone stream may carry a
+    // participantId a peer's roster could never corroborate.
+    registerDesktopGrant()
+    const harness = startSubscribe(
+      { pairedDeviceId: GRANT, clientKind: 'mobile' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'desktop-1', type: 'desktop' },
+        viewport: { cols: 120, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1 }
+      }
+    )
+
+    const subscribed = await awaitSubscribed(harness.messages)
+    expect(subscribed.capabilities).toEqual({ presence: 1 })
+    expect('presence' in subscribed).toBe(false)
+
+    harness.cleanups.get('terminal-1:desktop-1')?.()
+    await harness.dispatchPromise
+  })
+
+  it('refuses a subscribe participant when only the paired grant disagrees', async () => {
+    registerDesktopGrant()
+    const harness = startSubscribe(
+      { pairedDeviceId: 'device-runtime-9', clientKind: 'runtime' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'desktop-1', type: 'desktop' },
+        viewport: { cols: 120, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1 }
+      }
+    )
+
+    const subscribed = await awaitSubscribed(harness.messages)
+    expect(subscribed.capabilities).toEqual({ presence: 1 })
+    expect('presence' in subscribed).toBe(false)
+
+    harness.cleanups.get('terminal-1:desktop-1')?.()
+    await harness.dispatchPromise
+  })
+
+  it('attaches a binary stream subscriber and drops it on unsubscribe', async () => {
+    registerDesktopGrant()
+    const harness = startSubscribe(
+      { pairedDeviceId: GRANT, clientKind: 'runtime' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'desktop-1', type: 'desktop' },
+        viewport: { cols: 120, rows: 40 },
+        capabilities: { terminalBinaryStream: 1 }
+      }
+    )
+
+    await awaitSubscribed(harness.messages)
+    // Why: un-negotiated too — the host counts the attachment regardless of what the client asked for.
+    expect(Array.from(terminalPresenceRegistry.attachmentsOf('pty-1').keys())).toEqual([
+      expect.stringMatching(/^stream:\d+$/)
+    ])
+
+    harness.cleanups.get('terminal-1:desktop-1')?.()
+    await harness.dispatchPromise
+    expect(terminalPresenceRegistry.attachmentsOf('pty-1').size).toBe(0)
+  })
+
+  it('sends no capability echo and no presence on the no-PTY reply', async () => {
+    // Why: only the live emit echoes, so a client that advertised presence on a handle with no PTY
+    // must be told nothing — a later presence emit hung off the request rather than the echo would
+    // reach a client that never learned negotiation succeeded.
+    registerDesktopGrant()
+    const harness = startSubscribe(
+      { pairedDeviceId: GRANT, clientKind: 'runtime' },
+      { terminal: 'terminal-1', capabilities: { presence: 1 } },
+      new Map(),
+      { resolveLeafForHandle: vi.fn().mockReturnValue(null) }
+    )
+
+    const subscribed = await awaitSubscribed(harness.messages)
+    expect(subscribed).toEqual({
+      type: 'subscribed',
+      streamId: null,
+      lines: [],
+      truncated: false
+    })
     await harness.dispatchPromise
   })
 
