@@ -642,6 +642,7 @@ export class OrcaRuntimeRpcServer {
     }
     this.mobileRelayPairingProvider?.onDemandStateChanged?.()
     this.runtime.forgetClientNavigationState(deviceId)
+    terminalPresenceRegistry.forgetGrant(deviceId)
     this.mobileSocketWiring?.terminateDeviceConnections(device.token)
     return true
   }
@@ -652,6 +653,9 @@ export class OrcaRuntimeRpcServer {
       return false
     }
     this.runtime.forgetClientNavigationState(deviceId)
+    // Why: the participantId mapping is keyed on the durable grant, so only revoking the grant may
+    // drop it — otherwise it is the one presence map no lifecycle event can ever remove an entry from.
+    terminalPresenceRegistry.forgetGrant(deviceId)
     this.mobileSocketWiring?.terminateDeviceConnections(device.token)
     return true
   }

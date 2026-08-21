@@ -2,7 +2,11 @@ import { hostname } from 'node:os'
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { DeviceEntry } from './device-registry'
 import { OrcaRuntimeService } from './orca-runtime'
-import { TerminalPresenceRegistry } from './terminal-presence-registry'
+import {
+  HOST_ATTACHMENT_KEY,
+  TerminalPresenceRegistry,
+  terminalPresenceRegistry
+} from './terminal-presence-registry'
 import {
   HOST_PARTICIPANT_ID,
   TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS,
@@ -108,6 +112,17 @@ describe('terminal presence identity and aggregation', () => {
     // Why: the host key carries connectionId null; folding it into a peer's union would credit that
     // peer with a terminal it never attached to.
     expect(ana.attachedTerminals).toEqual([])
+  })
+
+  it('keeps a grant participantId across a reconnect and drops it only on revocation', () => {
+    const before = connectAna('conn-window-a')
+    registry.releaseConnection('conn-window-a')
+    // Why: a mere disconnect must not re-mint — the peer would split into two roster rows.
+    expect(connectAna('conn-window-b')).toBe(before)
+
+    registry.forgetGrant(ANA_DEVICE.deviceId)
+    expect(registry.getParticipantByConnection('conn-window-b')).toBeNull()
+    expect(connectAna('conn-window-c')).not.toBe(before)
   })
 
   it('rotates participantIds across a host restart and persists nothing', () => {
@@ -226,6 +241,100 @@ describe('terminal presence payload shape', () => {
     expect(bounded.truncated).toBe(true)
     // Why: the negative control — an under-cap roster must not claim truncation.
     expect(rows(connectionIds.slice(0, 3)).truncated).toBeUndefined()
+  })
+})
+
+describe('terminal presence stamp provenance', () => {
+  let clock = 0
+  let clocked: TerminalPresenceRegistry
+
+  beforeEach(() => {
+    clock = 1_000
+    clocked = new TerminalPresenceRegistry({ now: () => clock })
+  })
+
+  it('writes an interactive stamp on the attachment and no grant row', () => {
+    clocked.attach('pty-1', 'multiplex:conn-a:1', 'conn-a')
+    clock = 2_000
+    clocked.recordInteractiveInput('pty-1', 'multiplex:conn-a:1')
+
+    expect(clocked.attachmentsOf('pty-1').get('multiplex:conn-a:1')).toEqual({
+      connectionId: 'conn-a',
+      lastInteractiveInputAt: 2_000
+    })
+    // Why: "site (d) never arms a hold" is a property of which map the stamp lands in, so the two
+    // maps must be driven apart by the same clock or one shared field would pass both directions.
+    expect(clocked.grantWritesOf('pty-1').size).toBe(0)
+  })
+
+  it('writes a grant stamp on the grant row and leaves the attachment unstamped', () => {
+    clocked.attach('pty-1', 'multiplex:conn-a:1', 'conn-a')
+    clock = 2_000
+    clocked.recordGrantWrite('pty-1', ANA_DEVICE.deviceId)
+
+    expect(clocked.grantWritesOf('pty-1').get(ANA_DEVICE.deviceId)).toBe(2_000)
+    expect(clocked.attachmentsOf('pty-1').get('multiplex:conn-a:1')?.lastInteractiveInputAt).toBe(0)
+  })
+
+  it('never conjures an attachment for an unknown subscription key', () => {
+    clocked.recordInteractiveInput('pty-1', 'multiplex:conn-a:1')
+    expect(clocked.attachmentsOf('pty-1').size).toBe(0)
+  })
+
+  it('stamps the local human under the reserved key with no connection', () => {
+    clock = 3_000
+    clocked.recordHostInteractiveInput('pty-1')
+
+    // Why: keeping the host in the interactive map is what lets it read as typing rather than writing.
+    expect(clocked.attachmentsOf('pty-1').get(HOST_ATTACHMENT_KEY)).toEqual({
+      connectionId: null,
+      lastInteractiveInputAt: 3_000
+    })
+    expect(clocked.grantWritesOf('pty-1').size).toBe(0)
+  })
+
+  it('preserves an existing host stamp when the reserved key is re-attached', () => {
+    clock = 3_000
+    clocked.recordHostInteractiveInput('pty-1')
+    clock = 9_000
+    clocked.attachHost('pty-1')
+
+    expect(clocked.attachmentsOf('pty-1').get(HOST_ATTACHMENT_KEY)?.lastInteractiveInputAt).toBe(
+      3_000
+    )
+  })
+
+  it('stamps inbound traffic on the connection that carried it and nowhere else', () => {
+    clocked.registerConnection({
+      connectionId: 'conn-a',
+      pairedDeviceId: ANA_DEVICE.deviceId,
+      label: ANA_DEVICE.name,
+      kind: ANA_DEVICE.scope
+    })
+    clock = 4_000
+    clocked.stampInbound('conn-a')
+    clocked.stampInbound('conn-already-closed')
+
+    expect(clocked.getParticipantByConnection('conn-a')?.lastInboundAt).toBe(4_000)
+    expect(clocked.getParticipantByConnection('conn-already-closed')).toBeNull()
+  })
+})
+
+describe('OrcaRuntimeService PTY teardown', () => {
+  it('releases the reserved host key and the grant writes when the PTY exits', () => {
+    terminalPresenceRegistry.reset()
+    terminalPresenceRegistry.recordHostInteractiveInput('pty-exit')
+    terminalPresenceRegistry.recordGrantWrite('pty-exit', ANA_DEVICE.deviceId)
+    expect(Array.from(terminalPresenceRegistry.attachmentsOf('pty-exit').keys())).toEqual([
+      HOST_ATTACHMENT_KEY
+    ])
+
+    // Why: the reserved key belongs to no stream and no connection, so nothing but the PTY's own
+    // teardown can ever drop it — one local keystroke would otherwise leak the entry for the process.
+    new OrcaRuntimeService(null).onPtyExit('pty-exit', 0)
+
+    expect(terminalPresenceRegistry.attachmentsOf('pty-exit').size).toBe(0)
+    expect(terminalPresenceRegistry.grantWritesOf('pty-exit').size).toBe(0)
   })
 })
 

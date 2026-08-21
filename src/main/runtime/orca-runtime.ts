@@ -1049,6 +1049,7 @@ import {
   type MobileSessionTabsAgentStatusHeartbeat
 } from './mobile-session-tabs-agent-status-heartbeat'
 import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-coalescer'
+import { terminalPresenceRegistry } from './terminal-presence-registry'
 import {
   appendRecentPtyPathCandidates,
   recentTerminalOutputIncludesPath,
@@ -13938,6 +13939,9 @@ export class OrcaRuntimeService {
     advertisedUrlWatcher.unbindPty(ptyId)
     // Clean up new mobile state for this PTY
     this.mobileSubscribers.delete(ptyId)
+    // Why: the reserved 'host' presence key belongs to no stream and no connection, so no stream
+    // teardown can drop it — without this the PTY's attachments entry outlives the PTY forever.
+    terminalPresenceRegistry.releasePty(ptyId)
     this.remoteTerminalViewSubscriberCounts.delete(ptyId)
     this.rawTerminalViewSubscriberCounts.delete(ptyId)
     this.mobileDisplayModes.delete(ptyId)

@@ -77,6 +77,17 @@ export class TerminalPresenceRegistry {
     return participant
   }
 
+  // Why: the mint-once mapping is bound to the DURABLE grant, not to a connection, so no disconnect may
+  // drop it (§2.1 wants one id across a peer's reconnects) — revocation is the one event that may.
+  forgetGrant(pairedDeviceId: string): void {
+    this.participantIds.delete(pairedDeviceId)
+    for (const [connectionId, participant] of this.participants) {
+      if (participant.pairedDeviceId === pairedDeviceId) {
+        this.releaseConnection(connectionId)
+      }
+    }
+  }
+
   releaseConnection(connectionId: string): void {
     this.participants.delete(connectionId)
     // Why: leak guard only — every stream teardown already detaches its own key; a socket that dies
