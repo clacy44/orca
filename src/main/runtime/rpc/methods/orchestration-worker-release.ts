@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { summarizeDispatchHeartbeat } from '../../orchestration/dispatch-heartbeat-age'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { WorkerTerminalListState } from '../../orchestration/worker-terminal-ownership'
 import { defineMethod, type RpcMethod } from '../core'
@@ -162,7 +163,10 @@ export const ORCHESTRATION_WORKER_RELEASE_METHODS: RpcMethod[] = [
           dispatchStatus: row.dispatchStatus,
           agentTerminalHandle: row.agentTerminalHandle,
           terminalState: row.terminalState,
-          resource: row.resource ? exposeWorkerTerminalResource(row.resource) : null
+          resource: row.resource ? exposeWorkerTerminalResource(row.resource) : null,
+          // Why on the list too: a coordinator scanning a whole wave should not need one
+          // worker-show per Dispatch to learn which ones have gone quiet.
+          ...summarizeDispatchHeartbeat(row.lastHeartbeatAt)
         }))
       const counts: Partial<Record<WorkerTerminalListState, number>> = {}
       for (const row of rows) {

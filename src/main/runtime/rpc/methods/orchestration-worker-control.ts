@@ -4,6 +4,8 @@ import {
   type OrchestrationWorkerReadResult
 } from '../../../../shared/orchestration-worker-output'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { summarizeDispatchHeartbeat } from '../../orchestration/dispatch-heartbeat-age'
+import { summarizeDispatchMailboxBacklog } from '../../orchestration/dispatch-mailbox-backlog'
 import { summarizeQueuedWorkerMail } from '../../orchestration/federation-worker-mail-fence'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, requiredString } from '../schemas'
@@ -95,13 +97,17 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
             `Worker Dispatch ${params.dispatch} was not found after remote reconciliation.`
           )
         }
+        const reconciled = db.getDispatchContextById(params.dispatch)
         return {
-          dispatch: db.getDispatchContextById(params.dispatch),
+          dispatch: reconciled,
           worker: exposeWorker(worker),
           server: { environmentId: server.environmentId, name: server.name },
           remoteRuntimeEpoch: remote.runtimeEpoch,
           terminal: remote.terminal,
           observation: remote.observation,
+          // Why the home's own column: every last_heartbeat_at is stamped here — locally by the
+          // messages DEFAULT, for a federated worker at import — so no peer clock is compared.
+          ...summarizeDispatchHeartbeat(reconciled?.last_heartbeat_at),
           // Why: additive field — it tells a coordinator whether the home-driven pull is
           // still landing, which state/stage alone cannot (both stay green while it fails).
           sync: runtime.getOrchestrationFederationSyncHealth(params.dispatch),
@@ -131,7 +137,11 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
         worker: exposeWorker(worker),
         terminal: observation.exact ? observation.terminal : null,
         observation: exposeWorkerObservation(observation),
-        terminalResource: resource ? exposeWorkerTerminalResource(resource) : null
+        terminalResource: resource ? exposeWorkerTerminalResource(resource) : null,
+        ...summarizeDispatchHeartbeat(dispatch.last_heartbeat_at),
+        // Why: sync and workerMail are federated-only, so without this a local Dispatch carries
+        // no mail signal at all and stranded follow-ups stay invisible.
+        dispatchMailbox: summarizeDispatchMailboxBacklog(db, params.dispatch, dispatch.status)
       }
     }
   }),

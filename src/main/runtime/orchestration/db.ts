@@ -6415,13 +6415,14 @@ export class OrchestrationDb {
     workerState: WorkerDispatchState
     dispatchStatus: DispatchStatus
     agentTerminalHandle: string | null
+    lastHeartbeatAt: string | null
     terminalState: WorkerTerminalListState | null
     resource: WorkerTerminalResourceRow | null
   }[] {
     const rows = this.db
       .prepare(
         `SELECT w.dispatch_id, w.state AS worker_state, w.agent_terminal_handle,
-                d.task_id, d.run_id, d.status AS dispatch_status
+                d.task_id, d.run_id, d.status AS dispatch_status, d.last_heartbeat_at
            FROM worker_dispatches w
            JOIN dispatch_contexts d ON d.id = w.dispatch_id
           ${params.runId ? 'WHERE d.run_id = ?' : ''}
@@ -6434,6 +6435,7 @@ export class OrchestrationDb {
       task_id: string
       run_id: string
       dispatch_status: DispatchStatus
+      last_heartbeat_at: string | null
     }[]
     const resources = this.db
       .prepare(
@@ -6454,6 +6456,7 @@ export class OrchestrationDb {
         workerState: row.worker_state,
         dispatchStatus: row.dispatch_status,
         agentTerminalHandle: row.agent_terminal_handle,
+        lastHeartbeatAt: row.last_heartbeat_at,
         terminalState: deriveWorkerTerminalListState({
           workerState: row.worker_state,
           agentTerminalHandle: row.agent_terminal_handle,
