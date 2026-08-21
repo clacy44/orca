@@ -1166,17 +1166,22 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           body: params.body
         })
         if (federated) {
-          db.enqueueFederationRelay({
-            dispatchId: question.dispatch_id,
-            direction: 'to_worker',
-            kind: 'reply',
-            payload: JSON.stringify({
-              questionId: question.message_id,
-              answerMessageId: answered.message.id,
-              body: params.body
+          // Why only a fresh answer: a replay resolves to the recorded reply, whose relay item
+          // was queued the first time — and the fence above skips an answered question, so a
+          // second enqueue would stack unpushable rows behind it once the Dispatch settles.
+          if (!answered.duplicate) {
+            db.enqueueFederationRelay({
+              dispatchId: question.dispatch_id,
+              direction: 'to_worker',
+              kind: 'reply',
+              payload: JSON.stringify({
+                questionId: question.message_id,
+                answerMessageId: answered.message.id,
+                body: params.body
+              })
             })
-          })
-          runtime.ensureOrchestrationFederationRelay(run.id)
+            runtime.ensureOrchestrationFederationRelay(run.id)
+          }
         } else {
           runtime.notifyMessageArrived(`dispatch:${question.dispatch_id}`, 'status')
         }

@@ -304,6 +304,29 @@ describe('orchestration federation control mail', () => {
     expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(1)
   })
 
+  it('queues no second relay item for a replayed answer', async () => {
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const asked = homeDb.createQuestion({
+      runId,
+      dispatchId,
+      askerHandle: `dispatch:${dispatchId}`,
+      question: 'Which base branch?'
+    })
+    await expect(
+      homeDispatcher.dispatch(replyRequest('reply-first', asked.question.message_id, 'main'))
+    ).resolves.toMatchObject({ ok: true, result: { duplicate: false } })
+    // Why settle between the two: the fence skips an answered question, so a replay is the one
+    // path that can enqueue to_worker work the relay's ready gate will never push.
+    const settled = { ...homeDb.getWorkerDispatch(dispatchId)!, state: 'stopped' as const }
+    vi.spyOn(homeDb, 'getWorkerDispatch').mockReturnValue(settled)
+
+    await expect(
+      homeDispatcher.dispatch(replyRequest('reply-replayed', asked.question.message_id, 'main'))
+    ).resolves.toMatchObject({ ok: true, result: { duplicate: true } })
+
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(1)
+  })
+
   it('refuses a coordinator reply once the federated Dispatch is no longer ready', async () => {
     vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
     const asked = homeDb.createQuestion({
