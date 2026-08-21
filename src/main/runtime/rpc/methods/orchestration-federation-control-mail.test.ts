@@ -4,6 +4,7 @@ import { ORCHESTRATION_CONTRACT_VERSION } from '../../../../shared/protocol-vers
 import type { RuntimeRpcResponse } from '../../../../shared/runtime-rpc-envelope'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
+import type { MessageRow } from '../../orchestration/types'
 import type { OrchestrationEnvironmentTransport } from '../../orchestration/environment-transport'
 import type { RpcRequest } from '../core'
 import { RpcDispatcher } from '../dispatcher'
@@ -295,9 +296,12 @@ describe('orchestration federation control mail', () => {
     await expect(
       homeDispatcher.dispatch(replyRequest('reply-ready', asked.question.message_id, 'main'))
     ).resolves.toMatchObject({ ok: true })
+    // Negative control: the question branch answers before the generic branch runs, so exactly
+    // one item is queued and no control_message duplicates it.
     expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toMatchObject([
       { kind: 'reply' }
     ])
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(1)
   })
 
   it('refuses a coordinator reply once the federated Dispatch is no longer ready', async () => {
@@ -318,6 +322,97 @@ describe('orchestration federation control mail', () => {
     ).resolves.toMatchObject({ ok: false, error: { code: 'dispatch_inactive' } })
     expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
     expect(homeDb.getQuestion(asked.question.message_id)?.status).toBe('pending')
+  })
+
+  it('relays a generic reply to an imported worker escalation', async () => {
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const escalation = await importWorkerEscalation()
+    expect(escalation.from_handle).toBe(`dispatch:${dispatchId}`)
+
+    const replied = await homeDispatcher.dispatch(
+      replyRequest('reply-escalation', escalation.id, 'Skip the migration and report back.')
+    )
+
+    expect(replied).toMatchObject({
+      ok: true,
+      result: { relay: { dispatchId, destination: 'worker', accepted: true } }
+    })
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toMatchObject([
+      { kind: 'control_message' }
+    ])
+
+    vi.mocked(homeRuntime.ensureOrchestrationFederationRelay).mockRestore()
+    await homeRuntime.syncOrchestrationFederation()
+    await expect(
+      workerDispatcher.dispatch(checkRequest('read-relayed-reply'))
+    ).resolves.toMatchObject({
+      ok: true,
+      result: {
+        count: 1,
+        messages: [
+          {
+            // Why the coordinator handle: the reply's default sender is the Run mailbox, which
+            // names nothing the worker can answer.
+            from_handle: 'term_coord',
+            subject: 'Re: Blocked on the schema',
+            body: 'Skip the migration and report back.'
+          }
+        ]
+      }
+    })
+  })
+
+  it('refuses a generic reply once the federated Dispatch is no longer ready', async () => {
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const escalation = await importWorkerEscalation()
+    const settled = { ...homeDb.getWorkerDispatch(dispatchId)!, state: 'stopped' as const }
+    vi.spyOn(homeDb, 'getWorkerDispatch').mockReturnValue(settled)
+
+    await expect(
+      homeDispatcher.dispatch(replyRequest('reply-settled-escalation', escalation.id, 'too late'))
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'dispatch_inactive', data: { effectsApplied: false } }
+    })
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
+    // Why: a refused reply applies no effects, so the escalation stays unread for a retry.
+    expect(homeDb.getMessageById(escalation.id)?.read).toBe(0)
+  })
+
+  it('refuses a generic reply an old peer could not decode', async () => {
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const escalation = await importWorkerEscalation()
+    const legacyPeer = { ...homeDb.getFederatedDispatch(dispatchId)!, protocol_version: 1 }
+    vi.spyOn(homeDb, 'getFederatedDispatch').mockReturnValue(legacyPeer)
+
+    await expect(
+      homeDispatcher.dispatch(replyRequest('reply-old-peer', escalation.id, 'anything'))
+    ).resolves.toMatchObject({ ok: false, error: { code: 'capability_unsupported' } })
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
+  })
+
+  it('keeps replying to a non-dispatch sender local', async () => {
+    // Negative control: only a dispatch:<id> sender resolves a federated worker.
+    vi.spyOn(homeRuntime, 'ensureOrchestrationFederationRelay').mockImplementation(() => {})
+    const notify = vi.spyOn(homeRuntime, 'notifyMessageArrived').mockImplementation(() => {})
+    const local = homeDb.insertMessage({
+      runId,
+      from: 'term_other',
+      to: `run:${runId}`,
+      subject: 'Question from a peer coordinator',
+      type: 'status'
+    })
+
+    const replied = await homeDispatcher.dispatch(replyRequest('reply-local', local.id, 'ack'))
+
+    expect(replied).toMatchObject({
+      ok: true,
+      result: {
+        message: { to_handle: 'term_other', subject: 'Re: Question from a peer coordinator' }
+      }
+    })
+    expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
+    expect(notify).toHaveBeenCalledWith('term_other', 'status')
   })
 
   it('wakes only waiters whose filter matches an imported control message', async () => {
@@ -425,6 +520,33 @@ describe('orchestration federation control mail', () => {
       vi.useRealTimers()
     }
   })
+
+  // Why the round trip: only the pull path stores worker mail with from_handle = dispatch:<id>,
+  // which is the shape the generic reply branch has to recognize.
+  async function importWorkerEscalation(): Promise<MessageRow> {
+    workerDb.enqueueFederationRelay({
+      dispatchId,
+      direction: 'to_home',
+      kind: 'message',
+      payload: JSON.stringify({
+        from: `dispatch:${dispatchId}`,
+        subject: 'Blocked on the schema',
+        body: 'The migration conflicts with main.',
+        type: 'escalation',
+        priority: 'high',
+        threadId: null,
+        payload: null
+      })
+    })
+    await homeRuntime.syncOrchestrationFederation()
+    const imported = homeDb
+      .getUnreadMessages(`run:${runId}`, ['escalation'])
+      .find((message) => message.from_handle === `dispatch:${dispatchId}`)
+    if (!imported) {
+      throw new Error('the escalation did not import')
+    }
+    return imported
+  }
 
   async function attachLiveWorkerPane(): Promise<ReturnType<typeof vi.fn>> {
     const write = vi.fn().mockReturnValue(true)

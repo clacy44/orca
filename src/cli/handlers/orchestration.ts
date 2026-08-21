@@ -103,6 +103,12 @@ type LifecycleSendResult =
   | { action: 'settled'; outcome: 'succeeded' | 'failed'; duplicate?: boolean }
   | { action: 'rejected'; code: string; reason: string }
 
+// Why: a reply to a federated worker crosses on the relay, so it answers with the same
+// relay receipt the send path returns instead of a locally-inserted message row.
+type OrchestrationReplyResult =
+  | { message: { id: string } }
+  | { relay: { messageId: string; dispatchId: string; sequence: number; accepted: true } }
+
 type OrchestrationSendResult = (
   | { message: { id: string; run_id?: string }; lifecycle?: LifecycleSendResult }
   | { messages: { id: string }[]; recipients: number }
@@ -750,7 +756,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     // Why: only the runtime knows whether --id names a question (Run-scoped) or plain mail, so negotiate for every remote reply.
     const remoteRunMailbox = await negotiateRemoteRunMailbox(client, true)
     const result = await withRemoteRunMailboxDegradation(remoteRunMailbox, () =>
-      callMutation<{ message: { id: string } }>(client, flags, 'orchestration.reply', {
+      callMutation<OrchestrationReplyResult>(client, flags, 'orchestration.reply', {
         id: getRequiredStringFlag(flags, 'id'),
         body: getRequiredStringFlag(flags, 'body'),
         run: getOptionalStringFlag(flags, 'run'),
@@ -758,7 +764,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         from
       })
     )
-    printResult(result, json, (r) => `Replied ${r.message.id}`)
+    printResult(result, json, (r) =>
+      'relay' in r
+        ? `Queued ${r.relay.messageId} for worker Dispatch ${r.relay.dispatchId}`
+        : `Replied ${r.message.id}`
+    )
   },
 
   'orchestration inbox': async ({ flags, client, json }) => {

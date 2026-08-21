@@ -1798,6 +1798,77 @@ describe('orchestration RPC methods', () => {
         })
       ).rejects.toMatchObject({ code: 'answer_conflict' })
     })
+
+    it('keeps a reply to a live local Dispatch on the local mailbox', async () => {
+      setup()
+      const task = db.createTask({ spec: 'local escalation work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      const escalation = db.insertMessage({
+        from: `dispatch:${dispatch.id}`,
+        to: `run:${activeRunId}`,
+        subject: 'Blocked',
+        type: 'escalation',
+        runId: activeRunId
+      })
+      const notify = vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+
+      const result = (await call('orchestration.reply', {
+        id: escalation.id,
+        body: 'Proceed on main.',
+        from: 'term_coord'
+      })) as { message: { to_handle: string } }
+
+      // Negative control: a purely local Dispatch enqueues nothing on the relay.
+      expect(result.message.to_handle).toBe(`dispatch:${dispatch.id}`)
+      expect(db.listPendingFederationRelay(dispatch.id, 'to_worker')).toHaveLength(0)
+      expect(notify).toHaveBeenCalledWith(`dispatch:${dispatch.id}`, 'status')
+    })
+
+    it('answers legacy_read_only before resolving the Dispatch sender', async () => {
+      setup()
+      const task = db.createTask({ spec: 'retained escalation work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      const retained = db.insertMessage({
+        from: `dispatch:${dispatch.id}`,
+        to: `run:${activeRunId}`,
+        subject: 'Retained escalation',
+        type: 'escalation',
+        runId: activeRunId,
+        deliveryContract: 'audit_only'
+      })
+      // Why settle first: the ordering only shows if the newer fence would otherwise answer.
+      db.completeDispatch(dispatch.id)
+
+      await expect(
+        call('orchestration.reply', { id: retained.id, body: 'answer', from: 'term_coord' })
+      ).rejects.toMatchObject({ code: 'legacy_read_only' })
+    })
+
+    it('refuses a reply to a settled local Dispatch', async () => {
+      setup()
+      const task = db.createTask({ spec: 'settled escalation work' })
+      const dispatch = db.createDispatchContext(task.id, 'term_worker')
+      const escalation = db.insertMessage({
+        from: `dispatch:${dispatch.id}`,
+        to: `run:${activeRunId}`,
+        subject: 'Blocked',
+        type: 'escalation',
+        runId: activeRunId
+      })
+      db.completeDispatch(dispatch.id)
+
+      await expect(
+        call('orchestration.reply', {
+          id: escalation.id,
+          body: 'too late',
+          from: 'term_coord'
+        })
+      ).rejects.toMatchObject({
+        code: 'dispatch_inactive',
+        data: { effectsApplied: false }
+      })
+      expect(db.getMessageById(escalation.id)?.read).toBe(0)
+    })
   })
 
   describe('orchestration.inbox', () => {

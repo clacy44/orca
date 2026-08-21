@@ -1178,7 +1178,59 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
       }
 
+      // Why: imported worker mail carries from_handle = dispatch:<id>, and a plain local insert
+      // to that address is unreachable for a federated worker — it reads its peer's own mailbox.
+      const workerDispatchId = original.from_handle.startsWith('dispatch:')
+        ? original.from_handle.slice('dispatch:'.length)
+        : undefined
+      const federatedWorker = workerDispatchId
+        ? db.getFederatedDispatch(workerDispatchId)
+        : undefined
+      if (workerDispatchId && federatedWorker) {
+        if (
+          federatedWorker.protocol_version < ORCHESTRATION_FEDERATION_CONTROL_MAIL_PROTOCOL_VERSION
+        ) {
+          throw new OrchestrationError(
+            'capability_unsupported',
+            `Federated Dispatch ${workerDispatchId} does not support coordinator control mail; start a fresh worker after updating its Orca server.`
+          )
+        }
+        requireFederatedDispatchAcceptsWorkerMail(db, workerDispatchId)
+      } else if (workerDispatchId) {
+        requireActiveDispatchForWorkerMail(db, workerDispatchId)
+      }
+
       db.markAsRead([original.id])
+
+      if (workerDispatchId && federatedWorker) {
+        const relay = db.enqueueFederationRelay({
+          dispatchId: workerDispatchId,
+          direction: 'to_worker',
+          kind: 'control_message',
+          payload: encodeFederatedControlMessage({
+            // Why name the coordinator: the reply's default sender is the Run mailbox the
+            // escalation was addressed to, which is not a handle the worker can answer.
+            from:
+              params.from ?? db.getRun(original.run_id)?.coordinator_handle ?? original.to_handle,
+            subject: `Re: ${original.subject}`,
+            body: params.body,
+            type: 'status',
+            priority: 'normal',
+            threadId: original.thread_id ?? original.id,
+            payload: null
+          })
+        })
+        runtime.ensureOrchestrationFederationRelay(original.run_id)
+        return {
+          relay: {
+            messageId: relay.message_id,
+            sequence: relay.sequence,
+            dispatchId: relay.dispatch_id,
+            destination: 'worker',
+            accepted: true
+          }
+        }
+      }
 
       const reply = db.insertMessage({
         from: params.from ?? original.to_handle,
