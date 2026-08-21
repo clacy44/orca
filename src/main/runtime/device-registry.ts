@@ -12,6 +12,7 @@ import {
   MAX_LIVE_MINTED_GRANTS,
   PENDING_GRANT_TTL_MS,
   isExpiredPendingDevice,
+  isMintedPendingDevice,
   retainNewestMintedGrants,
   retainUnexpiredPendingDevices
 } from './device-registry-pending-grants'
@@ -119,7 +120,7 @@ export class DeviceRegistry {
     // Why: a minted row carries a deadline and belongs to one named human, so reusing it here would hand
     // that person's link out again as the shared unnamed one. The two lanes stay disjoint by construction.
     const existing = this.devices.find(
-      (d) => d.lastSeenAt === 0 && d.scope === scope && d.pendingExpiresAt === undefined
+      (d) => d.lastSeenAt === 0 && d.scope === scope && !isMintedPendingDevice(d)
     )
     if (existing) {
       // Why: the same pending token can be re-advertised at a broader reach; widen it but never narrow it,
@@ -182,7 +183,7 @@ export class DeviceRegistry {
     // named, individually revocable (mobile:revokeRuntimeAccess), and must survive an unrelated
     // "Regenerate" click — the desktop generator sends rotate on every unnamed link.
     const retainedDevices = this.devices.filter(
-      (d) => d.lastSeenAt !== 0 || d.scope !== scope || d.pendingExpiresAt !== undefined
+      (d) => d.lastSeenAt !== 0 || d.scope !== scope || isMintedPendingDevice(d)
     )
     return this.createAndPersistDevice(retainedDevices, name, scope, pairingReach)
   }
@@ -208,7 +209,7 @@ export class DeviceRegistry {
     return (
       this.devices.find(
         (device) =>
-          device.lastSeenAt === 0 && device.scope === scope && device.pendingExpiresAt === undefined
+          device.lastSeenAt === 0 && device.scope === scope && !isMintedPendingDevice(device)
       ) ?? null
     )
   }
