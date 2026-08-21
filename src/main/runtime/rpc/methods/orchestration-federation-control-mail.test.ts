@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../../../shared/agent-prompt-injection'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../../../shared/protocol-version'
 import type { RuntimeRpcResponse } from '../../../../shared/runtime-rpc-envelope'
 import { OrcaRuntimeService } from '../../orca-runtime'
@@ -350,13 +351,61 @@ describe('orchestration federation control mail', () => {
         'pty-worker',
         expect.stringContaining('Run the focused follow-up.')
       )
-      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-worker', '\r')
 
       write.mockClear()
       await expect(
         workerDispatcher.dispatch(importRequest('import-repeated', 1, 'different-message-id'))
       ).resolves.toMatchObject({ ok: true, result: { imported: 0 } })
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not point a peer pane whose worker process re-spawned under the attachment', async () => {
+    vi.useFakeTimers()
+    try {
+      const write = await attachLiveWorkerPane()
+      // Negative control: `check` answers dispatch_inactive here, so the push must be silent.
+      vi.spyOn(workerRuntime, 'getTerminalProcessIncarnation').mockReturnValue(
+        'worker-runtime:pty:2'
+      )
+
+      await expect(
+        workerDispatcher.dispatch(importRequest('import-reminted', 1, 'relay-reminted'))
+      ).resolves.toMatchObject({ ok: true, result: { imported: 1 } })
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2_500)
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not point a peer worker that already settled', async () => {
+    vi.useFakeTimers()
+    try {
+      const write = await attachLiveWorkerPane()
+      // Why insert directly: federationImport already refuses a settled attachment, so
+      // the row this control needs is one that landed before the worker stopped.
+      workerDb.insertMessage({
+        from: 'term_coord',
+        to: `dispatch:${dispatchId}`,
+        subject: 'Continue',
+        body: 'Run the focused follow-up.',
+        type: 'status'
+      })
+      // Negative control: the preamble's stop-after-settlement rule depends on this.
+      workerDb.beginRemoteAttachmentStop(dispatchId)
+      workerDb.settleRemoteAttachmentStop(dispatchId)
+
+      workerRuntime.notifyMessageArrived(`dispatch:${dispatchId}`, 'status')
       await Promise.resolve()
       await vi.advanceTimersByTimeAsync(2_500)
 
@@ -403,6 +452,14 @@ describe('orchestration federation control mail', () => {
       stage: 'input_accepted',
       terminalHandle: pane.handle
     })
+    // Why re-point the identity mocks: this pane IS the attached worker process, so it
+    // answers with the pane key and incarnation the attachment pinned at start.
+    vi.spyOn(workerRuntime, 'getTerminalPaneKey').mockImplementation((handle) =>
+      handle === pane.handle || handle === 'term_worker' ? workerPaneKey : null
+    )
+    vi.spyOn(workerRuntime, 'getTerminalProcessIncarnation').mockImplementation((handle) =>
+      handle === pane.handle || handle === 'term_worker' ? processIncarnation : null
+    )
     workerRuntime.onPtyData('pty-worker', '\u001b]0;Codex working\u0007', 100)
     workerRuntime.onPtyData('pty-worker', '\u001b]0;Codex done\u0007', 101)
     write.mockClear()

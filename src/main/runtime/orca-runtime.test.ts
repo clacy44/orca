@@ -1089,6 +1089,7 @@ class InMemoryOrchestrationMessages {
       state: WorkerDispatchState
       terminal_handle: string | null
       pane_key: string | null
+      process_current: boolean
     }
   >()
 
@@ -1188,13 +1189,19 @@ class InMemoryOrchestrationMessages {
     state?: WorkerDispatchState
     terminalHandle?: string | null
     paneKey?: string | null
+    processCurrent?: boolean
   }): void {
     this.remoteAttachments.set(attachment.id, {
       dispatch_id: attachment.id,
       state: attachment.state ?? 'ready',
       terminal_handle: attachment.terminalHandle ?? null,
-      pane_key: attachment.paneKey ?? null
+      pane_key: attachment.paneKey ?? null,
+      process_current: attachment.processCurrent ?? true
     })
+  }
+
+  isRemoteAttachmentProcessCurrent(params: { dispatchId: string }): boolean {
+    return this.remoteAttachments.get(params.dispatchId)?.process_current === true
   }
 
   getDispatchContextById(
@@ -1219,6 +1226,7 @@ class InMemoryOrchestrationMessages {
         state: WorkerDispatchState
         terminal_handle: string | null
         pane_key: string | null
+        process_current: boolean
       }
     | undefined {
     return [...this.remoteAttachments.values()].find(

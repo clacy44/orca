@@ -32407,10 +32407,18 @@ export class OrcaRuntimeService {
     }
     if (mailboxHandle.startsWith('dispatch:')) {
       const dispatchId = mailboxHandle.slice('dispatch:'.length)
+      const attachment = db.getRemoteDispatchAttachment(dispatchId)
       return resolveDispatchMailboxTerminalHandle({
         dispatch: db.getDispatchContextById(dispatchId),
         worker: db.getWorkerDispatch(dispatchId),
-        attachment: db.getRemoteDispatchAttachment(dispatchId)
+        attachment,
+        isAttachmentProcessCurrent: attachment?.terminal_handle
+          ? db.isRemoteAttachmentProcessCurrent({
+              dispatchId,
+              paneKey: this.getTerminalPaneKey(attachment.terminal_handle),
+              processIncarnation: this.getTerminalProcessIncarnation(attachment.terminal_handle)
+            })
+          : false
       })
     }
     return null
