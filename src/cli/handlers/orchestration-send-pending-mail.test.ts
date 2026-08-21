@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const callMock = vi.fn()
 const getTerminalHandleMock = vi.hoisted(() => vi.fn())
 const originalTerminalHandle = process.env.ORCA_TERMINAL_HANDLE
+const originalCliCommand = process.env.ORCA_CLI_COMMAND
 
 // Why: isolate the send handler's rendering; printResult only writes the formatted line to stdout.
 vi.mock('../format', () => ({ printResult: vi.fn() }))
@@ -36,6 +37,8 @@ describe('orchestration send pendingMail hint', () => {
   beforeEach(() => {
     getTerminalHandleMock.mockReset()
     delete process.env.ORCA_TERMINAL_HANDLE
+    // Why pinned: the hint names the CLI the worker must call, which otherwise varies by host.
+    process.env.ORCA_CLI_COMMAND = 'orca'
   })
 
   afterEach(() => {
@@ -44,11 +47,16 @@ describe('orchestration send pendingMail hint', () => {
     } else {
       process.env.ORCA_TERMINAL_HANDLE = originalTerminalHandle
     }
+    if (originalCliCommand === undefined) {
+      delete process.env.ORCA_CLI_COMMAND
+    } else {
+      process.env.ORCA_CLI_COMMAND = originalCliCommand
+    }
   })
 
   it('appends the hint to the local Sent branch', async () => {
     await expect(renderSend({ message: { id: 'msg_1' }, pendingMail: 2 })).resolves.toBe(
-      'Sent msg_1\nUnread coordinator mail: 2 — run orchestration check'
+      'Sent msg_1\nUnread coordinator mail: 2 — run `orca orchestration check`'
     )
   })
 
@@ -65,7 +73,7 @@ describe('orchestration send pendingMail hint', () => {
         pendingMail: 1
       })
     ).resolves.toBe(
-      'Queued msg_relay for Run home (Dispatch ctx_remote)\nUnread coordinator mail: 1 — run orchestration check'
+      'Queued msg_relay for Run home (Dispatch ctx_remote)\nUnread coordinator mail: 1 — run `orca orchestration check`'
     )
   })
 
@@ -82,7 +90,7 @@ describe('orchestration send pendingMail hint', () => {
         pendingMail: 5
       })
     ).resolves.toBe(
-      'Queued msg_worker for worker Dispatch ctx_worker\nUnread coordinator mail: 5 — run orchestration check'
+      'Queued msg_worker for worker Dispatch ctx_worker\nUnread coordinator mail: 5 — run `orca orchestration check`'
     )
   })
 
@@ -122,6 +130,16 @@ describe('orchestration send pendingMail hint', () => {
       'Sent msg_1'
     )
   })
+
+  it.each(['orca-dev', 'orca-ide'] as const)(
+    'names the %s binary the worker must call',
+    async (cli) => {
+      process.env.ORCA_CLI_COMMAND = cli
+      await expect(renderSend({ message: { id: 'msg_1' }, pendingMail: 3 })).resolves.toBe(
+        `Sent msg_1\nUnread coordinator mail: 3 — run \`${cli} orchestration check\``
+      )
+    }
+  )
 
   it('leaves the group fan-out branch alone', async () => {
     await expect(

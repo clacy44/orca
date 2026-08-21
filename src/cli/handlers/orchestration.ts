@@ -124,9 +124,12 @@ type OrchestrationSendResult = (
 // both send shapes carry it because a federated worker only ever sees the relay branch.
 function pendingMailHint(result: OrchestrationSendResult): string {
   const pending = result.pendingMail
-  return pending !== undefined && pending > 0
-    ? `\nUnread coordinator mail: ${pending} — run orchestration check`
-    : ''
+  if (pending === undefined || pending <= 0) {
+    return ''
+  }
+  // Why the resolved binary: a worker inside the dev runtime must call orca-dev, and a
+  // bare verb sends it to whichever runtime the plain `orca` on PATH happens to name.
+  return `\nUnread coordinator mail: ${pending} — run \`${resolveCompatibilityCliCommand()} orchestration check\``
 }
 
 function resolveCompatibilityCliCommand(): 'orca' | 'orca-ide' | 'orca-dev' {
