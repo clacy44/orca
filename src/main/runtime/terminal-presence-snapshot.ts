@@ -170,6 +170,9 @@ function toRow(aggregate: Aggregate, options: TerminalPresenceRowsOptions): Term
 export function buildTerminalPresenceRows(
   options: TerminalPresenceRowsOptions
 ): TerminalPresenceRows {
+  // Why: kind 'mobile' rows reach here as soon as a phone authenticates, but a phone has no bounded
+  // reap horizon — S7 owes them the `stale` suffix before any surface publishes them, or the two
+  // liveness contracts blend silently.
   const aggregates = Array.from(
     collectAggregates(options.registry, options.hasEstablishedSubscription).values()
   ).filter((aggregate) => aggregate.established)
