@@ -125,6 +125,22 @@ describe('terminal presence identity and aggregation', () => {
     expect(connectAna('conn-window-c')).not.toBe(before)
   })
 
+  it('clears a revoked grant s writes at revocation, not at TTL', () => {
+    connectAna('conn-terminal')
+    registry.recordGrantWrite('pty-1', ANA_DEVICE.deviceId)
+    const changed: string[] = []
+    const stopWatching = registry.onChange((ptyId) => changed.push(ptyId))
+
+    registry.forgetGrant(ANA_DEVICE.deviceId)
+    stopWatching()
+
+    // Why not left to the 3 s freshness test: the row is dropped either way, but a revoked device's
+    // stamp outliving its revocation is the wrong default for a security-adjacent map, and the
+    // surfaces only re-read on a change they are told about.
+    expect(registry.grantWritesOf('pty-1').size).toBe(0)
+    expect(changed).toContain('pty-1')
+  })
+
   it('rotates participantIds across a host restart and persists nothing', () => {
     const before = connectAna('conn-terminal')
     const afterRestart = new TerminalPresenceRegistry()
@@ -291,6 +307,18 @@ describe('terminal presence stamp provenance', () => {
       lastInteractiveInputAt: 3_000
     })
     expect(clocked.grantWritesOf('pty-1').size).toBe(0)
+  })
+
+  it('publishes one change per host keystroke', () => {
+    const changed: string[] = []
+    const stopWatching = clocked.onChange((ptyId) => changed.push(ptyId))
+
+    clocked.recordHostInteractiveInput('pty-1')
+    stopWatching()
+
+    // Why pinned: creating the reserved key and stamping it are one keystroke, and publishing twice
+    // sends every surface through its coalescer a second time for a change it already has.
+    expect(changed).toEqual(['pty-1'])
   })
 
   it('preserves an existing host stamp when the reserved key is re-attached', () => {

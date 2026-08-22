@@ -106,6 +106,17 @@ export class TerminalPresenceRegistry {
         this.releaseConnection(connectionId)
       }
     }
+    // Why swept separately: grant writes are keyed on the durable grant, so the connection sweep above
+    // never reaches them — a revoked device's write would otherwise sit in the map until PTY exit.
+    for (const [ptyId, byGrant] of this.grantWrites) {
+      if (!byGrant.delete(pairedDeviceId)) {
+        continue
+      }
+      if (byGrant.size === 0) {
+        this.grantWrites.delete(ptyId)
+      }
+      this.notifyChanged(ptyId)
+    }
   }
 
   releaseConnection(connectionId: string): void {
@@ -207,9 +218,14 @@ export class TerminalPresenceRegistry {
     }
   }
 
+  // Why not attachHost + recordInteractiveInput: the reserved key is created and stamped in one step, so
+  // one keystroke publishes one change instead of two rounds through every surface's coalescer.
   recordHostInteractiveInput(ptyId: string): void {
-    this.attachHost(ptyId)
-    this.recordInteractiveInput(ptyId, HOST_ATTACHMENT_KEY)
+    this.attachmentsFor(ptyId).set(HOST_ATTACHMENT_KEY, {
+      connectionId: null,
+      lastInteractiveInputAt: this.now()
+    })
+    this.notifyChanged(ptyId)
   }
 
   // Why: site (d) is a bare RPC with no subscription to hang a stamp on, so grant writes key on the
