@@ -311,6 +311,11 @@ import {
   createTerminalPresenceRosterPublisher,
   type TerminalPresenceRosterPublisher
 } from './terminal-presence-roster-publisher'
+import { createKeyedTrailingEdgeCoalescer } from './keyed-trailing-edge-coalescer'
+import {
+  TERMINAL_PRESENCE_COALESCE_MAX_WAIT_MS,
+  TERMINAL_PRESENCE_COALESCE_WINDOW_MS
+} from './terminal-presence-change-notifier'
 import {
   navigationTargetsClients,
   navigationTargetsHost,
@@ -2886,6 +2891,10 @@ export class OrcaRuntimeService {
   private mobileSessionTabListeners = new Set<{
     listener: (snapshot: RuntimeMobileSessionTabsResult) => void
     clientNavigationId?: string
+    // Why gated on the subscriber's own opt-in: the W9 cadence below emits purely because somebody
+    // else moved, so a pre-presence client that never asked for deviceSelections must not start
+    // receiving `updated` frames it has no way to explain.
+    consumesDeviceSelections?: boolean
   }>()
   // Why: one watermark per repo replaces per-closed-pane fences while preserving stale-write safety.
   private terminalTopologyRevisionByRepoId = new Map<string, number>()
@@ -5306,6 +5315,44 @@ export class OrcaRuntimeService {
 
   flushTerminalPresenceRosterPublish(): void {
     this.terminalPresenceRoster?.flush()
+  }
+
+  // Why a third coalescer instance keyed by worktreeId (§2.1) and not the existing session.tabs one:
+  // that one carries structural change to everybody, while this one carries "somebody else moved" to
+  // presence-capable subscribers alone. Sharing a key would make the second audience impossible.
+  private readonly terminalPresenceDeviceSelectionCoalescer = createKeyedTrailingEdgeCoalescer(
+    (worktreeId) => this.notifyMobileSessionTabDeviceSelectionsChangedNow(worktreeId),
+    {
+      windowMs: TERMINAL_PRESENCE_COALESCE_WINDOW_MS,
+      maxWaitMs: TERMINAL_PRESENCE_COALESCE_MAX_WAIT_MS
+    }
+  )
+
+  scheduleTerminalPresenceDeviceSelectionsPublish(worktreeId: string): void {
+    this.terminalPresenceDeviceSelectionCoalescer.schedule(worktreeId)
+  }
+
+  flushTerminalPresenceDeviceSelectionsPublish(): void {
+    this.terminalPresenceDeviceSelectionCoalescer.flushAll()
+  }
+
+  // Why each subscriber re-projects its own selection: the only field this frame moves is
+  // `deviceSelections`, so nobody's own activeTabId may travel with it — a re-emit that carried the
+  // activating device's selection would drag every other client's tab along with it.
+  private notifyMobileSessionTabDeviceSelectionsChangedNow(worktreeId: string): void {
+    const snapshot = this.mobileSessionTabsByWorktree.get(worktreeId)
+    if (!snapshot) {
+      return
+    }
+    const result = this.toMobileSessionTabsResult(snapshot)
+    for (const subscription of this.mobileSessionTabListeners) {
+      if (subscription.consumesDeviceSelections !== true) {
+        continue
+      }
+      subscription.listener(
+        this.clientSessionTabSelections.project(result, subscription.clientNavigationId)
+      )
+    }
   }
 
   // Why exposed here: W9 joins each device's stored selection against the presence roster, and that
@@ -8010,6 +8057,11 @@ export class OrcaRuntimeService {
       )
       this.emitMobileSessionTabsSnapshotToClient(callerSnapshot, clientNavigationId)
     }
+    if (navigationTargetsClients(navigation) || clientNavigationId) {
+      // Why scheduled rather than emitted here: the emits above reach the activating device only, so
+      // without this every other subscriber's deviceSelections column is stale by construction.
+      this.scheduleTerminalPresenceDeviceSelectionsPublish(snapshot.worktree)
+    }
     if (clientNavigationId) {
       return callerSnapshot ?? this.clientSessionTabSelections.project(snapshot, clientNavigationId)
     }
@@ -9601,14 +9653,19 @@ export class OrcaRuntimeService {
 
   onMobileSessionTabsChanged(
     listener: (snapshot: RuntimeMobileSessionTabsResult) => void,
-    clientNavigationId?: string
+    clientNavigationId?: string,
+    options?: { consumesDeviceSelections?: boolean }
   ): () => void {
     // Why: a notify coalesced before this subscriber existed is already folded
     // into the initial snapshot it was just sent. Draining it here — before the
     // listener joins — keeps that pending timer from landing as a redundant
     // `updated` frame carrying pre-subscribe state. Mirrors the unsubscribe flush.
     this.mobileSessionTabsNotifyCoalescer.flushAll()
-    const subscription = { listener, clientNavigationId }
+    const subscription = {
+      listener,
+      clientNavigationId,
+      consumesDeviceSelections: options?.consumesDeviceSelections === true
+    }
     this.mobileSessionTabListeners.add(subscription)
     return () => {
       // Why: flush pending coalesced notifies before dropping this listener so a

@@ -174,14 +174,20 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
         return
       }
 
-      unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => {
-        if (snapshot.worktree === subscribedWorktree) {
-          emit({
-            type: 'updated',
-            ...projectSessionTabsForClient(snapshot, ctx, params.includeDeviceSelections === true)
-          })
-        }
-      }, pairedDeviceId)
+      unsubscribe = runtime.onMobileSessionTabsChanged(
+        (snapshot) => {
+          if (snapshot.worktree === subscribedWorktree) {
+            emit({
+              type: 'updated',
+              ...projectSessionTabsForClient(snapshot, ctx, params.includeDeviceSelections === true)
+            })
+          }
+        },
+        pairedDeviceId,
+        // Why declared on the subscription: a peer switching tabs is a change only this subscriber
+        // asked to hear about, so the W9 cadence has to know who opted in before it fans anything out.
+        { consumesDeviceSelections: params.includeDeviceSelections === true }
+      )
       if (closed) {
         unsubscribe()
       }
