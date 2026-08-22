@@ -142,4 +142,37 @@ describe('RuntimePresenceStatusRows', () => {
     expect(markup).not.toContain('Nobody')
     expect(markup).not.toContain('ghost.ts')
   })
+
+  it('says how long ago a stale phone was last seen, ahead of what it had selected', () => {
+    setPresenceRosterForEnvironment('env-1', {
+      participants: [
+        {
+          participantId: 'p-ben',
+          label: "Ben's phone",
+          kind: 'mobile',
+          attachedTerminals: ['term_1'],
+          self: false,
+          stale: true,
+          lastSeenAt: Date.now() - 4 * 60_000
+        }
+      ]
+    })
+    setPresenceSelectionsForEnvironment('env-1', [
+      {
+        participantId: 'p-ben',
+        label: "Ben's phone",
+        kind: 'mobile',
+        self: false,
+        activeTabId: 'tab-1',
+        activeTabType: 'terminal',
+        activeTabTitle: 'server.ts'
+      }
+    ])
+
+    const markup = renderToStaticMarkup(<RuntimePresenceStatusRows />)
+
+    expect(markup).toContain('Attached · last seen 4m ago')
+    expect(markup).toContain('data-presence-stale="true"')
+    expect(markup).not.toContain('server.ts')
+  })
 })

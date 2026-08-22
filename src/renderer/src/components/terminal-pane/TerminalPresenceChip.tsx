@@ -2,6 +2,7 @@ import type { ReactElement } from 'react'
 import { Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { translate } from '@/i18n/i18n'
+import { terminalPresenceLastSeenMinutes } from '../../../../shared/terminal-presence-last-seen'
 import type { TerminalPresenceChipState } from './terminal-presence-chip-state'
 
 // Why the LockChip pill geometry with no button: presence is awareness, not a lock, so the chip must
@@ -28,6 +29,17 @@ function chipCopy(state: TerminalPresenceChipState): string {
         'auto.components.terminal.pane.TerminalPresenceChip.b9ac6c07ca',
         '{{value0}} is typing — press again',
         { value0: state.label }
+      )
+    case 'stale':
+      // Why "attached" is still said: the phone has not left — nothing removes a row on silence — so the
+      // honest reading is "still attached, but this is how long ago we last heard from it".
+      return translate(
+        'auto.components.terminal.pane.TerminalPresenceChip.stale',
+        '{{value0}} attached · last seen {{value1}}m ago',
+        {
+          value0: state.label,
+          value1: terminalPresenceLastSeenMinutes(state.lastSeenAt ?? 0, Date.now())
+        }
       )
     case 'attached':
       return translate(

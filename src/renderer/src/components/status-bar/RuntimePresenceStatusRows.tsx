@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { translate } from '@/i18n/i18n'
+import { terminalPresenceLastSeenMinutes } from '../../../../shared/terminal-presence-last-seen'
 import {
   getPresenceRosterEnvironmentIds,
   getPresenceRosterForEnvironment,
@@ -38,6 +39,15 @@ function rowLabel(row: RuntimePresenceRosterRow): string {
 }
 
 function rowDetail(row: RuntimePresenceRosterRow): string {
+  // Why staleness outranks the tab title: what that phone last selected is not news once the host has
+  // stopped hearing from it, and the reader needs to know the row is old before they trust anything on it.
+  if (row.lastSeenAt !== null) {
+    return translate(
+      'auto.components.status.bar.RuntimePresenceStatusRows.stale',
+      'Attached · last seen {{value0}}m ago',
+      { value0: terminalPresenceLastSeenMinutes(row.lastSeenAt, Date.now()) }
+    )
+  }
   if (row.activeTabTitle) {
     return row.activeTabTitle
   }
@@ -65,6 +75,7 @@ export function RuntimePresenceStatusRows(): ReactElement | null {
           key={`${row.environmentId}:${row.participantId}`}
           className="flex items-center gap-2.5 px-2 py-1.5"
           data-presence-kind={row.kind}
+          data-presence-stale={row.lastSeenAt !== null ? 'true' : undefined}
         >
           <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" />
           <div className="min-w-0 flex-1">

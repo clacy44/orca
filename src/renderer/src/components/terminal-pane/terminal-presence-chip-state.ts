@@ -1,15 +1,18 @@
-// Why a pure resolver beside the component: the four-state ladder is the part with rules (typing outranks
-// writing, a hold outranks both, `self` is never a peer), and it must be assertable without a DOM.
+// Why a pure resolver beside the component: the state ladder is the part with rules (typing outranks
+// writing, a hold outranks both, a stale phone outranks nothing, `self` is never a peer), and it must be
+// assertable without a DOM.
 import type {
   TerminalPanePresence,
   TerminalPresenceParticipant
 } from '@/lib/pane-manager/terminal-presence-state'
 
-export type TerminalPresenceChipActivity = 'attached' | 'writing' | 'typing' | 'held'
+export type TerminalPresenceChipActivity = 'attached' | 'stale' | 'writing' | 'typing' | 'held'
 
 export type TerminalPresenceChipState = {
   label: string
   activity: TerminalPresenceChipActivity
+  /** Host-clock stamp behind the staleness copy; carried only for `stale`. */
+  lastSeenAt?: number
 }
 
 // Why typing outranks writing: the interactive stamp is the one that can hold your keystroke, so a
@@ -18,7 +21,12 @@ function activityRank(participant: TerminalPresenceParticipant): number {
   if (participant.typing) {
     return 2
   }
-  return participant.writing ? 1 : 0
+  if (participant.writing) {
+    return 1
+  }
+  // Why below plain attached: a phone the host has not heard from in two minutes is the least likely
+  // peer to be about to collide with you, so it must never displace one who is here.
+  return participant.stale ? -1 : 0
 }
 
 function pickLoudestPeer(
@@ -53,6 +61,11 @@ export function resolveTerminalPresenceChipState(
   const peer = pickLoudestPeer(presence.participants)
   if (!peer) {
     return null
+  }
+  // Why ahead of both flags rather than trusting them to be false: a stale row is one the host has heard
+  // nothing from, so rendering it as typing would report a stamp that no longer proves anybody is there.
+  if (peer.stale && peer.lastSeenAt !== undefined) {
+    return { label: peer.label, activity: 'stale', lastSeenAt: peer.lastSeenAt }
   }
   if (peer.typing) {
     return { label: peer.label, activity: 'typing' }

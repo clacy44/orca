@@ -3,7 +3,7 @@
 // value or an unrelated peer's keystroke repaints every tab in the strip.
 import { getPeerPresenceForPty } from '@/lib/pane-manager/terminal-presence-state'
 
-export type TerminalTabPresenceBadgeState = 'typing' | 'writing' | 'attached'
+export type TerminalTabPresenceBadgeState = 'typing' | 'writing' | 'attached' | 'stale'
 
 type TerminalTabPresenceInput = {
   tabId: string
@@ -21,10 +21,21 @@ export function resolveTerminalTabPresenceBadge(
   let badge: TerminalTabPresenceBadgeState | null = null
   for (const ptyId of ptyIdsForTab(input)) {
     for (const peer of getPeerPresenceForPty(ptyId)) {
+      // Why first: a stale row carries no live flag to read, and it must never upgrade a quieter tab.
+      if (peer.stale) {
+        badge ??= 'stale'
+        continue
+      }
       if (peer.typing) {
         return 'typing'
       }
-      badge = peer.writing ? 'writing' : (badge ?? 'attached')
+      if (peer.writing) {
+        badge = 'writing'
+        continue
+      }
+      // Why not `badge ?? 'attached'` any more: 'stale' is non-null, so the coalesce would let a silent
+      // phone outrank a peer who is actually here.
+      badge = badge === 'writing' ? 'writing' : 'attached'
     }
   }
   return badge
@@ -35,8 +46,13 @@ export function resolveTerminalTabPresenceBadge(
 export function resolveTerminalTabPresenceLabel(input: TerminalTabPresenceInput): string | null {
   let attached: string | null = null
   let writing: string | null = null
+  let stale: string | null = null
   for (const ptyId of ptyIdsForTab(input)) {
     for (const peer of getPeerPresenceForPty(ptyId)) {
+      if (peer.stale) {
+        stale ??= peer.label
+        continue
+      }
       if (peer.typing) {
         return peer.label
       }
@@ -46,5 +62,5 @@ export function resolveTerminalTabPresenceLabel(input: TerminalTabPresenceInput)
       attached ??= peer.label
     }
   }
-  return writing ?? attached
+  return writing ?? attached ?? stale
 }
