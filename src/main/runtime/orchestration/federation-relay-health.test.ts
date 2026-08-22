@@ -5,7 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import { recordFederationRelaySyncOutcome } from './federation-relay-health'
-import { federationSyncHealthFromRow } from './federation-sync-health'
+import {
+  FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD,
+  FEDERATION_RELAY_UNREACHABLE_MIN_OUTAGE_MS,
+  federationRelayFailuresToOutlast,
+  federationRelayIntervalMs,
+  federationSyncHealthFromRow
+} from './federation-sync-health'
 import { OrchestrationError } from './orchestration-error'
 
 const COORDINATOR_PANE_KEY = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -113,6 +119,26 @@ describe('federated relay health persistence', () => {
     })
     // Three failures is below the threshold, so nothing was announced yet.
     expect(notified).toEqual([])
+  })
+
+  // Why the schedule and not the count: A1 §9 asks for "sustained", and five failures on the 1s
+  // doubling curve is ~31 seconds — a peer restart, not an outage.
+  it('sets the unreachable threshold from an outage floor rather than a bare count', () => {
+    expect(FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD).toBe(
+      federationRelayFailuresToOutlast(FEDERATION_RELAY_UNREACHABLE_MIN_OUTAGE_MS)
+    )
+    let elapsedMs = 0
+    for (let failure = 1; failure < FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD; failure += 1) {
+      elapsedMs += federationRelayIntervalMs(failure)
+    }
+    expect(elapsedMs).toBeGreaterThanOrEqual(FEDERATION_RELAY_UNREACHABLE_MIN_OUTAGE_MS)
+    expect(
+      elapsedMs - federationRelayIntervalMs(FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD - 1)
+    ).toBeLessThan(FEDERATION_RELAY_UNREACHABLE_MIN_OUTAGE_MS)
+    // A 45-second peer restart cannot reach the threshold on this curve.
+    expect(federationRelayFailuresToOutlast(45_000)).toBeLessThan(
+      FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD
+    )
   })
 
   it('reports null for a federated Dispatch the relay has never settled on', () => {

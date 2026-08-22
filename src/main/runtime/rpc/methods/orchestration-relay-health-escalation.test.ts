@@ -4,7 +4,10 @@ import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
 import { sweepDispatchLivenessBreaches } from '../../orchestration/dispatch-liveness-monitor'
 import type { OrchestrationEnvironmentTransport } from '../../orchestration/environment-transport'
-import { FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD } from '../../orchestration/federation-sync-health'
+import {
+  FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD,
+  federationRelayFailuresToOutlast
+} from '../../orchestration/federation-sync-health'
 import { ORCHESTRATION_METHODS } from './orchestration'
 
 const COORDINATOR_PANE_KEY = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -247,7 +250,7 @@ describe('federation relay unreachable escalation', () => {
     peerFailure = DIRECT_TCP_REFUSAL
     await sync(dispatchId, FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD)
 
-    sweepDispatchLivenessBreaches({ db, runtime, now: Date.now() + 31 * 60_000 })
+    sweepDispatchLivenessBreaches({ db, runtime, now: Date.now() + 41 * 60_000 })
 
     const breach = runtimeMail().find((entry) => entry.payload.kind === 'liveness_breach')
     expect(breach?.payload.syncHealth).toMatchObject({
@@ -269,7 +272,7 @@ describe('federation relay unreachable escalation', () => {
       restarted.setOrchestrationDb(db)
       expect(restarted.getOrchestrationFederationSyncHealth(dispatchId)).toEqual(persisted)
 
-      sweepDispatchLivenessBreaches({ db, runtime: restarted, now: Date.now() + 31 * 60_000 })
+      sweepDispatchLivenessBreaches({ db, runtime: restarted, now: Date.now() + 41 * 60_000 })
       const breach = runtimeMail().find((entry) => entry.payload.kind === 'liveness_breach')
       expect(breach?.payload.syncHealth).toEqual(persisted)
     } finally {
@@ -315,6 +318,25 @@ describe('federation relay unreachable escalation', () => {
       expect(db.getFederatedDispatchSyncHealth(dispatchId)).toMatchObject({
         consecutiveFailures: 0,
         lastError: null
+      })
+    })
+
+    // Why 45 seconds specifically: a peer runtime restart or a tunnel re-dial takes about that
+    // long, and the count alone used to escalate it — waking every parked `check --wait` over an
+    // event that had already ended.
+    it('says nothing about a peer that refuses for forty-five seconds and then answers', async () => {
+      const { dispatchId } = startFederatedWorker()
+      peerFailure = DIRECT_TCP_REFUSAL
+
+      await sync(dispatchId, federationRelayFailuresToOutlast(45_000) - 1)
+      expect(relayMail()).toEqual([])
+
+      peerFailure = null
+      await sync(dispatchId, 2)
+
+      expect(relayMail()).toEqual([])
+      expect(db.getFederatedDispatchSyncHealth(dispatchId)).toMatchObject({
+        consecutiveFailures: 0
       })
     })
 

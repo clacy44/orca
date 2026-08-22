@@ -3,12 +3,27 @@ import { OrchestrationError } from './orchestration-error'
 export const FEDERATION_RELAY_BASE_INTERVAL_MS = 1_000
 export const FEDERATION_RELAY_MAX_INTERVAL_MS = 60_000
 
-// Why five and not one or twenty: the retry interval doubles from 1s per consecutive failure, so the
-// fifth is the first failure the home waited ~32s to make — one doubling short of the 60s cap, after
-// roughly half a minute of real re-dialing. Escalating earlier would name outages that end before
-// the coordinator reads the mail; later adds nothing, because every failure past the cap is the same
-// 60s wait. Tune it by passing a threshold rather than by editing call sites.
-export const FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD = 5
+// Why a duration and not a bare count: a count of five elapses in ~31s on the doubling curve, so it
+// escalates an ordinary peer restart or a tunnel re-dial — routine events that would then wake every
+// parked `check --wait`, which is the noise the brief exists to avoid.
+export const FEDERATION_RELAY_UNREACHABLE_MIN_OUTAGE_MS = FEDERATION_RELAY_MAX_INTERVAL_MS * 2
+
+// Why derived rather than written down: the count only means "the outage lasted this long" while the
+// backoff curve is what it is, so a curve change has to move the count with it. The schedule is a
+// lower bound — a failure that times out rather than refusing takes longer still.
+export function federationRelayFailuresToOutlast(outageMs: number): number {
+  let failures = 1
+  let elapsedMs = 0
+  while (elapsedMs < outageMs) {
+    elapsedMs += federationRelayIntervalMs(failures)
+    failures += 1
+  }
+  return failures
+}
+
+export const FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD = federationRelayFailuresToOutlast(
+  FEDERATION_RELAY_UNREACHABLE_MIN_OUTAGE_MS
+)
 
 export type FederationRelayHealthTransition = 'unreachable' | 'recovered' | null
 
