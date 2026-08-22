@@ -130,4 +130,57 @@ describe('useIpcEvents local presence lane', () => {
 
     expect(presence.getPeerPresenceForPty(PTY_ID)[0]?.typing).toBe(true)
   })
+
+  it('stays empty when the preload answers with no snapshot at all', async () => {
+    vi.resetModules()
+    const state = makeState()
+    const errors: unknown[] = []
+    vi.doMock('react', async () => {
+      const actual = await vi.importActual<typeof ReactModule>('react')
+      return { ...actual, useEffect: (effect: () => void | (() => void)) => void effect() }
+    })
+    vi.doMock('../store', () => ({
+      useAppStore: { subscribe: vi.fn(() => () => {}), getState: () => state }
+    }))
+    const noopListener = (): (() => void) => () => {}
+    const autoStubNamespace = new Proxy(
+      {},
+      {
+        get:
+          () =>
+          (...args: unknown[]) => {
+            if (typeof args[0] === 'function') {
+              return noopListener()
+            }
+            return new Promise(() => {})
+          }
+      }
+    )
+    vi.stubGlobal('window', {
+      api: new Proxy(
+        {
+          // The web client's preload fallback: an unknown namespace answers `undefined`, not a roster.
+          terminalPresence: {
+            get: () => Promise.resolve(undefined),
+            onChanged: () => () => {}
+          }
+        } as Record<string, unknown>,
+        { get: (target, prop: string) => target[prop] ?? autoStubNamespace }
+      )
+    })
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args)
+    })
+
+    const { useIpcEvents } = await import('./useIpcEvents')
+    const presence = await import('../lib/pane-manager/terminal-presence-state')
+    useIpcEvents()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Negative control for the guard: no local host means no rows and no logged failure.
+    expect(presence.getPresenceRosterEnvironmentIds()).toEqual([])
+    expect(errors).toEqual([])
+    vi.mocked(console.error).mockRestore()
+  })
 })

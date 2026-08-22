@@ -3817,7 +3817,9 @@ export function useIpcEvents(): void {
     void window.api.terminalPresence
       .get()
       .then((snapshot) => {
-        if (localPresenceHydrationDisposed) {
+        // Why the snapshot guard: the web client has no local runtime at all, and its preload fallback
+        // answers an unknown namespace with `undefined` rather than a roster. No host, no local lane.
+        if (localPresenceHydrationDisposed || !snapshot) {
           return
         }
         hydrateLocalTerminalPresence(snapshot)
