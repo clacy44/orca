@@ -237,6 +237,12 @@ export function buildTerminalPresenceRows(
 // CLI column must never disagree about who is here, and one builder is the only way to guarantee it.
 // `since` is dropped deliberately — W8 is membership, and every field it carries must be one a
 // keystroke cannot move, which is what makes the publisher's no-change suppression exact.
+//
+// The same rule is why no `activeTab` rides this row. A tab TITLE moves on terminal output (an OSC
+// title sequence is a keystroke away), so carrying it here would republish this broadcast to every
+// client on title churn — the exact cost the byte-identical diff exists to remove. The active-tab
+// text is sourced from W9's `deviceSelections` instead, which is per worktree (the scope a selection
+// actually has) and which the status bar already joins to these rows on `participantId`.
 export function buildTerminalPresenceRosterParticipants(
   options: Omit<TerminalPresenceRowsOptions, 'selfParticipantId'>
 ): { participants: RuntimeTerminalPresenceParticipant[]; truncated?: true } {
