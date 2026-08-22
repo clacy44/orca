@@ -39,6 +39,8 @@ export type TerminalPresenceArbitration = {
     ptyId: string,
     grantKey: string
   ) => RuntimeTerminalStreamPresenceArbitration | null
+  /** When this PTY's earliest un-retired notice stops being publishable, or null when none is. */
+  nextHoldExpiryAt: (ptyId: string) => number | null
   reset: () => void
 }
 
@@ -151,6 +153,24 @@ export function createTerminalPresenceArbitration(options: {
       }
       return { heldFor: record.heldFor, until: record.until }
     },
+    // Why the falling edge needs its own deadline from here: a hold outlives by 2 s the activity TTL that
+    // raised it, so the notifier arming on stamps alone stops emitting while the notice is still being
+    // published — and the last thing the held client ever hears is "press again".
+    nextHoldExpiryAt(ptyId) {
+      const now = registry.now()
+      let earliest: number | null = null
+      for (const record of holdsByPty.get(ptyId)?.values() ?? []) {
+        // Released and lapsed records publish no notice, so they need no emit behind them; excluding the
+        // lapsed one is also what stops an expiry emit from arming a timer for the deadline it just met.
+        if (record.released || now >= record.until) {
+          continue
+        }
+        if (earliest === null || record.until < earliest) {
+          earliest = record.until
+        }
+      }
+      return earliest
+    },
     reset() {
       holdsByPty.clear()
     }
@@ -173,6 +193,10 @@ export function activeTerminalPresenceHoldNotice(
   grantKey: string
 ): RuntimeTerminalStreamPresenceArbitration | null {
   return processArbitration.activeHoldNotice(ptyId, grantKey)
+}
+
+export function nextTerminalPresenceHoldExpiryAt(ptyId: string): number | null {
+  return processArbitration.nextHoldExpiryAt(ptyId)
 }
 
 /** Test-only: holds are process-global, so a case that armed one would otherwise leak into the next. */

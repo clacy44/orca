@@ -8,6 +8,7 @@ import {
 } from '../../../shared/terminal-stream-protocol'
 import { terminalPresenceRegistry } from '../terminal-presence-registry'
 import {
+  ARBITRATION_REPROMPT_MS,
   activeTerminalPresenceHoldNotice,
   resetTerminalPresenceArbitrationForTest
 } from '../terminal-presence-arbitration'
@@ -212,6 +213,36 @@ describe('terminal.multiplex soft arbitration', () => {
 
     await settle(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
     // Why absence and not a falsy value: the field is omitted entirely, which is what clears the chip.
+    expect('arbitration' in (lastPresence(ben.messages) ?? {})).toBe(false)
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
+
+  it('retires the notice on its own emit when the window closes unanswered', async () => {
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+    const ben = await startNegotiatedMultiplex(PEER_CONNECTION, PEER_GRANT, {
+      streamId: BEN_STREAM_ID,
+      clientId: 'ben'
+    })
+
+    sendInputFrame(ana.handlers, 7, 'a')
+    await settle(10)
+    sendInputFrame(ben.handlers, BEN_STREAM_ID, 'b')
+    await settle()
+    expect(lastPresence(ben.messages)?.arbitration).toMatchObject({ heldFor: anaParticipantId })
+    const heldEmits = presenceResults(ben.messages).length
+
+    // Why nobody types through this: the 5 s re-press window outlives the 3 s activity TTL, so every emit
+    // the STAMPS can produce is already behind us — a hold with no emit of its own strands "press again"
+    // on the pane for as long as both humans stay quiet, which is the ordinary end of a collision.
+    await settle(ARBITRATION_REPROMPT_MS)
+
+    expect(presenceResults(ben.messages).length).toBeGreaterThan(heldEmits)
     expect('arbitration' in (lastPresence(ben.messages) ?? {})).toBe(false)
 
     vi.useRealTimers()

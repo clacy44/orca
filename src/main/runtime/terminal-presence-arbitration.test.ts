@@ -169,6 +169,35 @@ describe('shouldHoldInputForTypingPeer', () => {
   })
 })
 
+describe('nextHoldExpiryAt', () => {
+  it('names the deadline the falling edge owes a notice, and nothing once it is retired', () => {
+    participantIdOf(ANA_GRANT, 'conn-ana', 'Ana laptop')
+    typeOn('conn-ana', 'stream:ana')
+    expect(arbitration.nextHoldExpiryAt(PTY_ID)).toBeNull()
+
+    clock += 10
+    const held = arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)
+    expect(arbitration.nextHoldExpiryAt(PTY_ID)).toBe(held?.until)
+
+    // Why nothing after the re-press: that keystroke mutated the registry, so the emit dropping the
+    // notice already rides the coalescer — only the unanswered window needs an emit of its own.
+    clock += 10
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toBeNull()
+    expect(arbitration.nextHoldExpiryAt(PTY_ID)).toBeNull()
+  })
+
+  it('stops naming a deadline the moment it is met, so its own emit arms nothing further', () => {
+    participantIdOf(ANA_GRANT, 'conn-ana', 'Ana laptop')
+    typeOn('conn-ana', 'stream:ana')
+    const held = arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)!
+
+    clock = held.until - 1
+    expect(arbitration.nextHoldExpiryAt(PTY_ID)).toBe(held.until)
+    clock = held.until
+    expect(arbitration.nextHoldExpiryAt(PTY_ID)).toBeNull()
+  })
+})
+
 describe('arbitration reach', () => {
   it('is wired at the two live stream handlers and nowhere else', () => {
     // Why source-level: "the host is never held" and "site (d) is never held" are code-level omissions

@@ -132,6 +132,28 @@ describe('terminal presence falling edge', () => {
     ])
   })
 
+  it('arms an expiry emit for a hold that outlives every activity stamp', () => {
+    attachPeers()
+    const start = Date.now()
+    const holdUntil = start + TERMINAL_PRESENCE_ACTIVITY_TTL_MS + 2000
+    notifier.dispose()
+    // Why injected: holds are process-global, and the deadline under test belongs to this registry's
+    // hold rather than to any stamp it holds — the two are 2 s apart by design (§2.6).
+    notifier = createTerminalPresenceChangeNotifier({
+      registry,
+      holdExpiryAt: () => (Date.now() < holdUntil ? holdUntil : null)
+    })
+    const emits: Emit[] = []
+    recordEmits(emits)
+    registry.recordInteractiveInput(PTY_ID, ANA_KEY)
+
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_ACTIVITY_TTL_MS * 3)
+
+    // Why the LAST emit and not merely one at the TTL: the re-press window outlives the stamp that raised
+    // it, so arming on stamps alone leaves the held client's final payload still saying "press again".
+    expect(emits.at(-1)?.at).toBe(holdUntil)
+  })
+
   it('arms nothing for a PTY whose only stamps have already expired', () => {
     attachPeers()
     registry.recordInteractiveInput(PTY_ID, ANA_KEY)
