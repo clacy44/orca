@@ -2612,7 +2612,11 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           ackWindowBytes: TERMINAL_MULTIPLEX_ACK_STREAM_INITIAL_WINDOW_BYTES,
           supportsOutputPause: request.capabilities?.outputPause === 1,
           supportsWriteUnavailable: request.capabilities?.writeUnavailable === 1,
-          supportsPresence: request.capabilities?.presence === 1,
+          // Why !isMobile here and not only at the emit: the W4 emit lives inside the isMobile branch, so
+          // a client self-declaring mobile would be told negotiation succeeded on a channel it provably
+          // never receives — and S6 gates its hold on this same flag, which would drop that client's
+          // keystroke with the "press again" notice riding the event it never gets.
+          supportsPresence: request.capabilities?.presence === 1 && !isMobile,
           participant: connectionParticipant,
           outputPaused: false,
           supportsDesktopViewportClaims: request.capabilities?.desktopViewportClaims === 1,

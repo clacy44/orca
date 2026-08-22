@@ -117,7 +117,12 @@ export function startMultiplex(
 export function sendSubscribeFrame(
   handlers: BinaryStreamHandlers,
   capabilities: Record<string, number>,
-  options: { streamId?: number; clientId?: string; terminal?: string } = {}
+  options: {
+    streamId?: number
+    clientId?: string
+    terminal?: string
+    clientType?: 'mobile' | 'desktop'
+  } = {}
 ): void {
   handlers.get(0)?.(
     decodeTerminalStreamFrame(
@@ -128,7 +133,7 @@ export function sendSubscribeFrame(
         payload: encodeTerminalStreamJson({
           streamId: options.streamId ?? 7,
           terminal: options.terminal ?? 'terminal-1',
-          client: { id: options.clientId ?? 'desktop-1', type: 'desktop' },
+          client: { id: options.clientId ?? 'desktop-1', type: options.clientType ?? 'desktop' },
           capabilities,
           viewport: { cols: 120, rows: 40 }
         })

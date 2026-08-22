@@ -124,6 +124,27 @@ describe('terminal.multiplex presence negotiation', () => {
     await harness.dispatchPromise
   })
 
+  it('withholds the echo from a stream that self-declares mobile', async () => {
+    // Why: the W4 emit sits inside the `!isMobile` branch, so echoing the capability to this client
+    // promises a channel it provably never receives — and S6 gates its hold on the same flag, which
+    // would drop its keystroke with the "press again" notice riding an event it cannot see.
+    registerDesktopGrant()
+    const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'runtime' })
+    await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
+    sendSubscribeFrame(
+      harness.handlers,
+      { outputPause: 1, presence: 1 },
+      { clientType: 'mobile', clientId: 'phone-1' }
+    )
+
+    const subscribed = await awaitSubscribed(harness.messages)
+    expect(subscribed.capabilities).toEqual({ outputPause: 1 })
+    expect('presence' in subscribed).toBe(false)
+
+    harness.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    await harness.dispatchPromise
+  })
+
   it('attaches the stream under its connection-scoped key and drops it on close', async () => {
     registerDesktopGrant()
     const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'runtime' })

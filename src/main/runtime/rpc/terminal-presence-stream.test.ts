@@ -71,6 +71,7 @@ async function startNegotiatedMultiplex(
     streamId?: number
     clientId?: string
     presence?: boolean
+    clientType?: 'mobile' | 'desktop'
     runtimeOverrides?: Partial<OrcaRuntimeService>
   } = {}
 ) {
@@ -82,7 +83,8 @@ async function startNegotiatedMultiplex(
   await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
   sendSubscribeFrame(harness.handlers, options.presence === false ? {} : { presence: 1 }, {
     streamId: options.streamId ?? 7,
-    clientId: options.clientId ?? `desktop-${connectionId}`
+    clientId: options.clientId ?? `desktop-${connectionId}`,
+    clientType: options.clientType
   })
   await awaitSubscribed(harness.messages)
   return harness
@@ -189,6 +191,35 @@ describe('terminal.multiplex presence events', () => {
     vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
     // Why non-vacuous: the negotiated peer on the same PTY saw its own attach and its own typing over
     // this window, so the silence below is the capability gate and not an absent change feed.
+    expect(lastPresence(ben.messages).some((row) => row.typing)).toBe(true)
+
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_ACTIVITY_TTL_MS)
+    expect(presenceEvents(ana.messages)).toEqual([])
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
+
+  it('sends zero presence events to a stream that self-declares mobile', async () => {
+    useOnePresenceClock()
+    registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, {
+      clientId: 'ana',
+      clientType: 'mobile'
+    })
+    const ben = await startNegotiatedMultiplex(PEER_CONNECTION, PEER_GRANT, {
+      streamId: 9,
+      clientId: 'ben'
+    })
+
+    sendInputFrame(ben.handlers, 9, 'x')
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+    // Why non-vacuous: the self-declared phone IS attached to this PTY and shows up on Ben's roster, so
+    // the silence below is the isMobile gate rather than an empty change feed.
+    expect(lastPresence(ben.messages)).toHaveLength(2)
     expect(lastPresence(ben.messages).some((row) => row.typing)).toBe(true)
 
     vi.advanceTimersByTime(TERMINAL_PRESENCE_ACTIVITY_TTL_MS)
