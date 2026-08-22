@@ -284,6 +284,7 @@ export type DispatchContextRow = {
   created_at: string
   last_heartbeat_at: string | null
   blocked_since: string | null
+  liveness_breached_at: string | null
 }
 
 export type DecisionGateRow = {

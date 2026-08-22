@@ -42,6 +42,7 @@ import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-c
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { OrchestrationError } from './orchestration-error'
 import { resolveOrchestrationMigrationStartVersion } from './orchestration-schema-version-skew'
+import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
 import {
   deriveWorkerTerminalListState,
   WORKER_SETTLED_STATES,
@@ -298,7 +299,7 @@ type RunListCursor = {
 }
 
 // Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption.
-const SCHEMA_VERSION = 28
+const SCHEMA_VERSION = 29
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -586,7 +587,8 @@ export class OrchestrationDb {
         completed_at        TEXT,
         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
         last_heartbeat_at   TEXT,
-        blocked_since       TEXT
+        blocked_since       TEXT,
+        liveness_breached_at TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch_contexts(task_id);
@@ -1015,6 +1017,9 @@ export class OrchestrationDb {
       }
       if (current < 28 && !this.hasColumn('dispatch_contexts', 'blocked_since')) {
         this.db.exec('ALTER TABLE dispatch_contexts ADD COLUMN blocked_since TEXT')
+      }
+      if (current < 29 && !this.hasColumn('dispatch_contexts', 'liveness_breached_at')) {
+        this.db.exec('ALTER TABLE dispatch_contexts ADD COLUMN liveness_breached_at TEXT')
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -6903,12 +6908,43 @@ export class OrchestrationDb {
   }
 
   // Why: only bump status='dispatched' — a zombie heartbeat from a finished dispatch would mask a hung retry from the stale detector (§5.3.4).
+  // Why clear the breach here: one escalation per silence, re-armed by the evidence that the worker
+  // came back. The same guard keeps a late heartbeat from a failed retry off the live Dispatch's row.
   recordHeartbeat(dispatchId: string, at: string): void {
     this.db
       .prepare(
-        "UPDATE dispatch_contexts SET last_heartbeat_at = ? WHERE id = ? AND status = 'dispatched'"
+        `UPDATE dispatch_contexts SET last_heartbeat_at = ?, liveness_breached_at = NULL
+         WHERE id = ? AND status = 'dispatched'`
       )
       .run(at, dispatchId)
+  }
+
+  // Why the join, not dispatch_contexts alone: only a supervised worker-start was handed the
+  // preamble that promises a heartbeat cadence, and only it carries a start_options window. A
+  // legacy `orchestration.run` dispatch context has no worker row and is never judged here.
+  listDispatchLivenessCandidates(): DispatchLivenessCandidateRow[] {
+    return this.db
+      .prepare(
+        `SELECT d.id, d.run_id, d.task_id, d.dispatched_at, d.last_heartbeat_at, d.blocked_since,
+                w.start_options
+         FROM dispatch_contexts d
+         JOIN worker_dispatches w ON w.dispatch_id = d.id
+         WHERE d.status = 'dispatched' AND d.liveness_breached_at IS NULL`
+      )
+      .all() as DispatchLivenessCandidateRow[]
+  }
+
+  // Why claim-before-emit: the column is the once-per-breach fence, so the writer that flips it is
+  // the only one allowed to insert the escalation. Returns false when someone else already did.
+  markDispatchLivenessBreached(dispatchId: string, at: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE dispatch_contexts SET liveness_breached_at = ?
+           WHERE id = ? AND status = 'dispatched' AND liveness_breached_at IS NULL`
+        )
+        .run(at, dispatchId).changes > 0
+    )
   }
 
   // Why: dispatched_at grace skips workers still within their first heartbeat interval; julianday() vs raw-TEXT compare avoids misflagging space-format timestamps as stale (#8452).

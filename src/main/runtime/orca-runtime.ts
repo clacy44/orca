@@ -119,6 +119,10 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import { OrchestrationDb } from './orchestration/db'
+import {
+  DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
+  sweepDispatchLivenessBreaches
+} from './orchestration/dispatch-liveness-monitor'
 import { resolveDispatchMailboxTerminalHandle } from './orchestration/dispatch-mailbox-terminal'
 import { reconcileRequestedWorkerTerminalReleases } from './orchestration/worker-terminal-release-reconciliation'
 import {
@@ -2789,6 +2793,7 @@ export class OrcaRuntimeService {
   private readonly orchestrationEnvironmentTransport: OrchestrationEnvironmentTransport | null
   private readonly orchestrationFederationRelays = new Set<string>()
   private readonly orchestrationFederationTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private orchestrationDispatchLivenessTimer: ReturnType<typeof setInterval> | null = null
   private orchestrationTerminalHistoryRecoveryTimer: ReturnType<typeof setTimeout> | null = null
   private orchestrationTerminalHistoryRecoveryInFlight: Promise<void> | null = null
   private orchestrationTerminalRecoveryRowId = 0
@@ -3945,6 +3950,7 @@ export class OrcaRuntimeService {
       const dbPath = join(app.getPath('userData'), 'orchestration.db')
       this._orchestrationDb = new OrchestrationDb(dbPath)
       this.ensureOrchestrationFederationRelay()
+      this.ensureDispatchLivenessMonitor()
       this.scheduleRestoredMessageRepoints()
     }
     return this._orchestrationDb
@@ -3952,12 +3958,50 @@ export class OrcaRuntimeService {
 
   setOrchestrationDb(db: OrchestrationDb): void {
     this.stopOrchestrationFederationRelay()
+    this.stopDispatchLivenessMonitor()
     this.mailPointerRepointScheduler.clear()
     this.lastPointedMessageSequenceByHandle.clear()
     this.pointedMessageIdsByHandle.clear()
     this._orchestrationDb = db
     this.ensureOrchestrationFederationRelay()
+    this.ensureDispatchLivenessMonitor()
     this.scheduleRestoredMessageRepoints()
+  }
+
+  // Why armed with the database rather than with each worker-start: the breach fence lives in a
+  // column, so a runtime that restarts mid-window re-arms here and resumes from what the column
+  // already says instead of re-firing for silence it has already reported.
+  ensureDispatchLivenessMonitor(): void {
+    if (this.orchestrationDispatchLivenessTimer) {
+      return
+    }
+    const timer = setInterval(
+      () => this.tickDispatchLivenessMonitor(),
+      DISPATCH_LIVENESS_SWEEP_INTERVAL_MS
+    )
+    timer.unref?.()
+    this.orchestrationDispatchLivenessTimer = timer
+  }
+
+  stopDispatchLivenessMonitor(): void {
+    if (this.orchestrationDispatchLivenessTimer) {
+      clearInterval(this.orchestrationDispatchLivenessTimer)
+      this.orchestrationDispatchLivenessTimer = null
+    }
+  }
+
+  // Why _orchestrationDb and not the getter: a sweep must never be the thing that creates the
+  // database, and a runtime with no orchestration state has nothing to evaluate.
+  tickDispatchLivenessMonitor(): void {
+    const db = this._orchestrationDb
+    if (!db) {
+      return
+    }
+    try {
+      sweepDispatchLivenessBreaches({ db, runtime: this })
+    } catch (error) {
+      console.warn('[orchestration] dispatch liveness sweep failed', error)
+    }
   }
 
   private getLegacyWorkerTerminalRecoveryPlan(): LegacyWorkerTerminalRecoveryPlan {
