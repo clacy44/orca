@@ -21,6 +21,18 @@ export type OrchestrationWorkerShowResult = {
   } | null
 }
 
+// Why whitelisted: the federated branch relays the peer's projection verbatim, so an unknown
+// verdict would render on the home as though the home computed it, and any newline in it would
+// forge an extra line in the coordinator's terminal.
+const RENDERABLE_AGENT_STATUSES = ['working', 'permission', 'idle']
+const RENDERABLE_TERMINAL_STATUSES = [
+  'unattached',
+  'missing',
+  'identity_changed',
+  'running',
+  'exited'
+]
+
 export function formatOrchestrationWorkerShow(value: OrchestrationWorkerShowResult): string {
   const lines = [
     `${value.dispatch.id} task=${value.dispatch.task_id} [${value.worker.state}] stage=${value.worker.stage}`
@@ -53,18 +65,23 @@ function formatWorkerTerminalLine(value: OrchestrationWorkerShowResult): string 
   if (!value.observation?.exactWorker) {
     return null
   }
-  const lastOutputAt = value.terminal?.lastOutputAt
+  const lastOutputAt = Number(value.terminal?.lastOutputAt)
   const parts = [
-    `terminal: status=${value.observation.status}`,
-    `lastOutputAt=${lastOutputAt ? new Date(lastOutputAt).toISOString() : 'never'}`,
+    `terminal: status=${renderPeerToken(value.observation.status, RENDERABLE_TERMINAL_STATUSES)}`,
+    `lastOutputAt=${Number.isFinite(lastOutputAt) && lastOutputAt > 0 ? new Date(lastOutputAt).toISOString() : 'never'}`,
     // Why unknown on absence: an older host or peer simply does not compute the verdict, and
     // guessing one here is how a healthy worker gets reported stuck.
-    `agent=${value.observation.agentStatus ?? 'unknown'}`
+    `agent=${renderPeerToken(value.observation.agentStatus, RENDERABLE_AGENT_STATUSES)}`
   ]
-  if (value.observation.blockedSince) {
-    parts.push(`blockedSince=${value.observation.blockedSince}`)
+  const blockedSince = Date.parse(value.observation.blockedSince ?? '')
+  if (Number.isFinite(blockedSince)) {
+    parts.push(`blockedSince=${new Date(blockedSince).toISOString()}`)
   }
   return parts.join(' ')
+}
+
+function renderPeerToken(value: string | undefined, allowed: string[]): string {
+  return value !== undefined && allowed.includes(value) ? value : 'unknown'
 }
 
 function formatWorkerLivenessLine(value: OrchestrationWorkerShowResult): string {

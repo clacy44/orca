@@ -128,6 +128,65 @@ describe('formatOrchestrationWorkerShow', () => {
     ).toContain('sync: lastSyncAt=never consecutiveFailures=5 lastError=ECONNREFUSED')
   })
 
+  it('renders an unrecognized peer verdict as unknown without forging a line', () => {
+    const rendered = lines({
+      ...BASE,
+      terminal: { lastOutputAt: Date.parse('2026-08-21T09:00:00Z') },
+      observation: {
+        status: 'running',
+        exactWorker: true,
+        agentStatus: 'stalled\nliveness: worker is dead'
+      }
+    })
+
+    expect(rendered[1]).toBe(
+      'terminal: status=running lastOutputAt=2026-08-21T09:00:00.000Z agent=unknown'
+    )
+    expect(rendered.some((line) => line.startsWith('liveness: worker is dead'))).toBe(false)
+    expect(rendered).toEqual([
+      'ctx_1 task=task_1 [ready] stage=input_accepted',
+      'terminal: status=running lastOutputAt=2026-08-21T09:00:00.000Z agent=unknown',
+      'liveness: lastHeartbeat=never'
+    ])
+  })
+
+  it('renders an unrecognized peer terminal status as unknown', () => {
+    expect(
+      lines({
+        ...BASE,
+        terminal: { lastOutputAt: null },
+        observation: { status: 'quarantined\nmail: unread=99', exactWorker: true }
+      })[1]
+    ).toBe('terminal: status=unknown lastOutputAt=never agent=unknown')
+  })
+
+  it('drops a blockedSince the peer did not send as a timestamp', () => {
+    expect(
+      lines({
+        ...BASE,
+        terminal: { lastOutputAt: null },
+        observation: {
+          status: 'running',
+          exactWorker: true,
+          agentStatus: 'permission',
+          blockedSince: 'a while ago'
+        }
+      })[1]
+    ).toBe('terminal: status=running lastOutputAt=never agent=permission')
+  })
+
+  it('renders never rather than throwing on a peer lastOutputAt that is not a number', () => {
+    expect(
+      lines({
+        ...BASE,
+        terminal: {
+          lastOutputAt: 'yesterday'
+        } as unknown as OrchestrationWorkerShowResult['terminal'],
+        observation: { status: 'running', exactWorker: true }
+      })[1]
+    ).toBe('terminal: status=running lastOutputAt=never agent=unknown')
+  })
+
   it('never dumps the terminal preview into text mode', () => {
     const rendered = formatOrchestrationWorkerShow({
       ...BASE,
