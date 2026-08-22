@@ -2,7 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -1896,6 +1904,78 @@ describe('ClaudeAccountService.addAccountFromConfigDir', () => {
       '{"claudeAiOauth":{"accessToken":"tok"}}\n'
     )
     expect(deps.runtimeAuth.clearLastWrittenCredentialsJson).toHaveBeenCalledWith(accounts[0].id)
+  })
+
+  it('refuses a config dir inside the claude-grants root', async () => {
+    const laneDir = join(managedRoot, 'claude-grants', 'grant-a')
+    mkdirSync(laneDir, { recursive: true })
+    writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"t"}}\n')
+
+    const deps = makeDeps()
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      deps.store as never,
+      deps.rateLimits as never,
+      deps.runtimeAuth as never
+    )
+
+    await expect(service.addAccountFromConfigDir(laneDir)).rejects.toThrow(
+      /per-grant credential storage/
+    )
+    expect(deps.getSettings().claudeManagedAccounts).toHaveLength(0)
+  })
+
+  it('refuses a decoy symlink whose realpath lands inside claude-grants', async () => {
+    const laneDir = join(managedRoot, 'claude-grants', 'grant-a')
+    mkdirSync(laneDir, { recursive: true })
+    writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"t"}}\n')
+    sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-decoy-'))
+    const decoy = join(sourceDir, 'decoy')
+    symlinkSync(laneDir, decoy)
+
+    const deps = makeDeps()
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      deps.store as never,
+      deps.rateLimits as never,
+      deps.runtimeAuth as never
+    )
+
+    await expect(service.addAccountFromConfigDir(decoy)).rejects.toThrow(
+      /symbolic link|per-grant credential storage/
+    )
+    expect(deps.getSettings().claudeManagedAccounts).toHaveLength(0)
+  })
+
+  it('allows a config dir whose path merely contains claude-grants as text', async () => {
+    sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-grants-lookalike-'))
+    const configDir = join(sourceDir, 'claude-grants-archive')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(
+      join(configDir, '.credentials.json'),
+      '{"claudeAiOauth":{"accessToken":"tok"}}\n',
+      'utf-8'
+    )
+    writeFileSync(
+      join(configDir, '.claude.json'),
+      JSON.stringify({ oauthAccount: { emailAddress: 'lookalike@example.com' } }),
+      'utf-8'
+    )
+
+    const deps = makeDeps()
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      deps.store as never,
+      deps.rateLimits as never,
+      deps.runtimeAuth as never
+    )
+    ;(service as unknown as { runClaudeCommand: () => Promise<string> }).runClaudeCommand = vi.fn(
+      async () => '{"email":"lookalike@example.com"}'
+    )
+
+    await service.addAccountFromConfigDir(configDir)
+
+    expect(deps.getSettings().claudeManagedAccounts[0]?.email).toBe('lookalike@example.com')
   })
 
   it('captures only the config-scoped macOS Keychain credential', async () => {

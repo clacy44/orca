@@ -8,6 +8,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync
 } from 'node:fs'
@@ -3879,6 +3880,40 @@ describe('CodexAccountService.addAccountFromHome', () => {
     } finally {
       rmSync(sourceHome, { recursive: true, force: true })
       vi.doUnmock('../codex-cli/command')
+    }
+  })
+
+  it('refuses a sourceHome inside the claude-grants root, symlinked or not', async () => {
+    const laneHome = join(testState.userDataDir, 'claude-grants', 'grant-a')
+    mkdirSync(laneHome, { recursive: true })
+    writeFileSync(
+      join(laneHome, 'auth.json'),
+      createCodexAuthJson('lane@example.com', 'provider-account-1', 'refresh-token'),
+      'utf-8'
+    )
+    const decoyParent = mkdtempSync(join(tmpdir(), 'orca-codex-decoy-'))
+    const decoy = join(decoyParent, 'decoy')
+    symlinkSync(laneHome, decoy)
+
+    try {
+      const settings = createSettings()
+      const store = createStore(settings)
+      const { CodexAccountService } = await import('./service')
+      const service = new CodexAccountService(
+        store as never,
+        createRateLimits() as never,
+        createRuntimeHome() as never
+      )
+
+      await expect(service.addAccountFromHome(laneHome)).rejects.toThrow(
+        /per-grant credential storage/
+      )
+      await expect(service.addAccountFromHome(decoy)).rejects.toThrow(
+        /symbolic link|per-grant credential storage/
+      )
+      expect(store.getSettings().codexManagedAccounts).toHaveLength(0)
+    } finally {
+      rmSync(decoyParent, { recursive: true, force: true })
     }
   })
 
