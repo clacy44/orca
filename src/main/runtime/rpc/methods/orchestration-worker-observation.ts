@@ -1,5 +1,6 @@
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationDb } from '../../orchestration/db'
+import { parseDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { FederatedDispatchRow, WorkerDispatchRow } from '../../orchestration/types'
 
@@ -81,11 +82,16 @@ export function exposeWorkerObservation(observation: WorkerTerminalObservation):
 }
 
 export function exposeWorker(worker: WorkerDispatchRow) {
+  // Why absent rather than null when there is none: a coordinator reading `inputEvidence: null`
+  // would take it as "nothing was on screen", and the honest answer for a row written before the
+  // column existed is that nobody looked (A1 section 2).
+  const inputEvidence = parseDispatchInputEvidence(worker.input_evidence)
   return {
     ...worker,
     effects: JSON.parse(worker.effects) as unknown[],
     residualResources: JSON.parse(worker.residual_resources) as unknown[],
-    startOptions: JSON.parse(worker.start_options) as unknown
+    startOptions: JSON.parse(worker.start_options) as unknown,
+    ...(inputEvidence ? { inputEvidence } : {})
   }
 }
 

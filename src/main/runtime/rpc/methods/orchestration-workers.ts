@@ -1,5 +1,6 @@
 import type { TuiAgent } from '../../../../shared/tui-agent'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
+import { captureDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
 import { startFederatedWorker } from './orchestration-federated-worker-start'
@@ -237,13 +238,17 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           cliCommand: runtime.getTerminalOrchestrationCliCommand(terminalHandle)
         })
         await runtime.sendTerminalAgentPrompt(terminalHandle, preamble)
+        // Why read the tail here and not one tick later: `ready` has always meant "the bytes were
+        // written", and this is the only moment where a gate already on screen can be attributed to
+        // the submit rather than to something the agent did afterwards (A1 section 2).
+        const inputEvidence = captureDispatchInputEvidence(runtime, terminalHandle)
         effects.push({
           kind: 'dispatch_input',
           role: 'agent',
           id: terminalHandle,
           state: 'accepted'
         })
-        const worker = db.markWorkerDispatchReady(started.dispatch.id, effects)
+        const worker = db.markWorkerDispatchReady(started.dispatch.id, effects, inputEvidence)
         monitorWorkerSetup({
           runtime,
           db,
@@ -261,6 +266,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           setup: setupReceipt,
           launch: launch.receipt,
           timeoutMs: params.timeoutMs ?? 60_000,
+          inputEvidence,
           effects,
           residualResources: [],
           ...(terminalRevealWarning ? { warning: terminalRevealWarning } : {})

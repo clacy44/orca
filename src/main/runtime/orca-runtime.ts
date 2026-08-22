@@ -31956,6 +31956,22 @@ export class OrcaRuntimeService {
     return pty.worktreeId === worktreeId && pty.tabId === tab.parentTabId && pty.paneKey === paneKey
   }
 
+  // Why one read for both A1 section 2 consumers: the post-write receipt needs the gate verdict and
+  // the post-ready observer needs the tail that verdict came from, and neither may touch the PTY —
+  // both run off the buffer already in memory. Every failure reads as unknown (null), never as a
+  // verdict, so a stale or exited handle can never be reported as evidence about the worker.
+  getTerminalWaitEvidence(
+    handle: string
+  ): { tailText: string; blockedReason: RuntimeTerminalWaitBlockedReason | null } | null {
+    try {
+      const ptyId = this.getTerminalAgentStatusPtyId(handle)
+      const tailText = this.getTerminalAgentStatusSnapshot(handle, ptyId).waitText
+      return { tailText, blockedReason: detectTerminalWaitBlockedReason(tailText) }
+    } catch {
+      return null
+    }
+  }
+
   // Why: the gate's first-sighting stamp lives on the PTY snapshot; observation callers need it as
   // evidence of dwell, and must never fail because a handle went stale — return null on any error.
   getTerminalWaitBlockedAt(handle: string): number | null {

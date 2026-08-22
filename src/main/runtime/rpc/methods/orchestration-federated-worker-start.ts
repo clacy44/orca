@@ -11,15 +11,20 @@ import {
 import { orchestrationMigrationData } from '../../../../shared/orchestration-rpc-contract'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationDb } from '../../orchestration/db'
+import { parseDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { WorkerStartInput } from './orchestration-worker-start-schema'
 import {
   assertWorkerLaunchPreferencesRuntimeSupported,
   assertWorkerLaunchPreferencesCreateTerminal,
   createPendingWorkerLaunchReceipt,
-  resolveFederatedWorkerLaunchReceipt,
-  type OrchestrationWorkerLaunchReceipt
+  resolveFederatedWorkerLaunchReceipt
 } from './orchestration-worker-launch-preferences'
+import {
+  federatedUnknownReceipt,
+  isKnownRemoteStartFailure,
+  type RemoteStartReceipt
+} from './orchestration-federated-start-outcome'
 import { validateFederatedWorkerStartPlacement } from './orchestration-worker-start-validation'
 
 export async function startFederatedWorker(args: {
@@ -191,7 +196,15 @@ export async function startFederatedWorker(args: {
         effects: remote.effects,
         residualResources: remote.residualResources
       })
-      const readyWorker = db.markWorkerDispatchReady(started.dispatch.id)
+      // Why re-parsed and not trusted: the field crosses the wire from a peer, and an older peer
+      // sends none at all — an unrecognized shape must reach the coordinator as absent rather than
+      // as a verdict the home cannot vouch for.
+      const inputEvidence = parseDispatchInputEvidence(remote.inputEvidence)
+      const readyWorker = db.markWorkerDispatchReady(
+        started.dispatch.id,
+        undefined,
+        inputEvidence ?? undefined
+      )
       runtime.ensureOrchestrationFederationRelay(runId)
       return {
         runId,
@@ -203,6 +216,7 @@ export async function startFederatedWorker(args: {
         setup: remote.setup,
         launch,
         timeoutMs: params.timeoutMs ?? 60_000,
+        ...(inputEvidence ? { inputEvidence } : {}),
         effects: remote.effects ?? [],
         residualResources: remote.residualResources ?? []
       }
@@ -254,53 +268,5 @@ export async function startFederatedWorker(args: {
     }
     const worker = db.markWorkerStartUnknown(started.dispatch.id, 'remote_attach', reason)
     return federatedUnknownReceipt(worker, task.id, server.name, requestedLaunch)
-  }
-}
-
-type RemoteStartReceipt = {
-  dispatchId: string
-  state: string
-  runtimeEpoch: string
-  worktreeId?: string
-  terminalHandle?: string
-  setup?: { state: string }
-  launch?: OrchestrationWorkerLaunchReceipt
-  effects?: unknown[]
-  residualResources?: unknown[]
-  failedStage?: string
-  lastError?: string
-}
-
-function isKnownRemoteStartFailure(code: string): boolean {
-  return [
-    'invalid_argument',
-    'agent_unconfigured',
-    'worktree_not_found_on_server',
-    'terminal_worktree_mismatch',
-    'capability_unsupported'
-  ].includes(code)
-}
-
-function federatedUnknownReceipt(
-  worker: { dispatch_id: string; state: string; stage: string; last_error: string | null },
-  taskId: string,
-  serverName: string,
-  launch: OrchestrationWorkerLaunchReceipt
-): unknown {
-  return {
-    taskId,
-    dispatchId: worker.dispatch_id,
-    state: 'outcome_unknown',
-    stage: worker.stage,
-    server: { name: serverName },
-    launch,
-    failedStage: worker.stage,
-    lastError: worker.last_error,
-    effects: [],
-    residualResources: [],
-    nextCommands: [
-      `orca orchestration worker-show --dispatch ${worker.dispatch_id} --json`,
-      `orca orchestration worker-abandon --dispatch ${worker.dispatch_id} --json`
-    ]
   }
 }

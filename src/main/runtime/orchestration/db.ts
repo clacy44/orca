@@ -42,6 +42,7 @@ import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-c
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { OrchestrationError } from './orchestration-error'
 import { resolveOrchestrationMigrationStartVersion } from './orchestration-schema-version-skew'
+import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
 import {
   deriveWorkerTerminalListState,
@@ -298,8 +299,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption.
-const SCHEMA_VERSION = 29
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence.
+const SCHEMA_VERSION = 30
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -421,6 +422,8 @@ export class OrchestrationDb {
         effects                TEXT NOT NULL DEFAULT '[]',
         residual_resources     TEXT NOT NULL DEFAULT '[]',
         start_options          TEXT NOT NULL DEFAULT '{}',
+        input_evidence         TEXT,
+        input_observed_at      TEXT,
         last_error             TEXT,
         created_at             TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1020,6 +1023,12 @@ export class OrchestrationDb {
       }
       if (current < 29 && !this.hasColumn('dispatch_contexts', 'liveness_breached_at')) {
         this.db.exec('ALTER TABLE dispatch_contexts ADD COLUMN liveness_breached_at TEXT')
+      }
+      if (current < 30 && !this.hasColumn('worker_dispatches', 'input_evidence')) {
+        this.db.exec('ALTER TABLE worker_dispatches ADD COLUMN input_evidence TEXT')
+      }
+      if (current < 30 && !this.hasColumn('worker_dispatches', 'input_observed_at')) {
+        this.db.exec('ALTER TABLE worker_dispatches ADD COLUMN input_observed_at TEXT')
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -4368,7 +4377,14 @@ export class OrchestrationDb {
     }
   }
 
-  markWorkerDispatchReady(dispatchId: string, effects?: unknown[]): WorkerDispatchRow {
+  // Why inputEvidence lands in the same statement that stamps readiness: the receipt and the row
+  // must agree about what the terminal showed at the submit, and a second write could be lost to a
+  // crash between them — leaving `ready` claiming more than the evidence supports (A1 section 2).
+  markWorkerDispatchReady(
+    dispatchId: string,
+    effects?: unknown[],
+    inputEvidence?: DispatchInputEvidence
+  ): WorkerDispatchRow {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const dispatch = this.getDispatchContextById(dispatchId)
@@ -4383,10 +4399,15 @@ export class OrchestrationDb {
         .prepare(
           `UPDATE worker_dispatches
            SET state = 'ready', stage = 'input_accepted',
-               effects = COALESCE(?, effects), updated_at = datetime('now')
+               effects = COALESCE(?, effects), input_evidence = COALESCE(?, input_evidence),
+               updated_at = datetime('now')
            WHERE dispatch_id = ?`
         )
-        .run(effects ? JSON.stringify(effects) : null, dispatchId)
+        .run(
+          effects ? JSON.stringify(effects) : null,
+          inputEvidence ? JSON.stringify(inputEvidence) : null,
+          dispatchId
+        )
       this.db.exec('COMMIT')
       return this.getWorkerDispatch(dispatchId) as WorkerDispatchRow
     } catch (error) {

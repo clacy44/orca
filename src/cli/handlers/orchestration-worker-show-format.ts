@@ -1,6 +1,11 @@
 export type OrchestrationWorkerShowResult = {
   dispatch: { id: string; task_id: string; status: string }
-  worker: { state: string; stage: string; agent_terminal_handle: string | null }
+  worker: {
+    state: string
+    stage: string
+    agent_terminal_handle: string | null
+    inputEvidence?: { submittedAt: string; blockedReason?: string }
+  }
   // Why loose: the federated branch relays the peer's projection verbatim, so only the fields
   // this formatter reads can be relied on.
   terminal?: { lastOutputAt?: number | null } | null
@@ -25,6 +30,14 @@ export type OrchestrationWorkerShowResult = {
 // verdict would render on the home as though the home computed it, and any newline in it would
 // forge an extra line in the coordinator's terminal.
 const RENDERABLE_AGENT_STATUSES = ['working', 'permission', 'idle']
+const RENDERABLE_BLOCKED_REASONS = [
+  'codex-update-prompt',
+  'codex-trust-workspace',
+  'codex-cwd-prompt',
+  'codex-model-migration-prompt',
+  'codex-hooks-review-prompt',
+  'codex-interactive-prompt'
+]
 const RENDERABLE_TERMINAL_STATUSES = [
   'unattached',
   'missing',
@@ -42,6 +55,10 @@ export function formatOrchestrationWorkerShow(value: OrchestrationWorkerShowResu
     lines.push(terminal)
   }
   lines.push(formatWorkerLivenessLine(value))
+  const input = formatWorkerInputEvidenceLine(value)
+  if (input) {
+    lines.push(input)
+  }
   const mail = formatWorkerMailLine(value)
   if (mail) {
     lines.push(mail)
@@ -78,6 +95,20 @@ function formatWorkerTerminalLine(value: OrchestrationWorkerShowResult): string 
     parts.push(`blockedSince=${new Date(blockedSince).toISOString()}`)
   }
   return parts.join(' ')
+}
+
+// Why silent unless a gate was seen: `ready` plus nothing here is the ordinary case, and printing
+// a line that says only "we looked and saw nothing" on every healthy worker is how the one line
+// that matters stops being read.
+function formatWorkerInputEvidenceLine(value: OrchestrationWorkerShowResult): string | null {
+  const evidence = value.worker.inputEvidence
+  if (!evidence || !RENDERABLE_BLOCKED_REASONS.includes(evidence.blockedReason ?? '')) {
+    return null
+  }
+  return (
+    `input: submittedAt=${evidence.submittedAt} blockedReason=${evidence.blockedReason} — ` +
+    'a gate was already on screen when the dispatch prompt was written'
+  )
 }
 
 function renderPeerToken(value: string | undefined, allowed: string[]): string {

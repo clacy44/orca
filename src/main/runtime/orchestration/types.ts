@@ -159,6 +159,10 @@ export type WorkerDispatchRow = {
   effects: string
   residual_resources: string
   start_options: string
+  // Why nullable forever: the evidence is captured at the submit, so every row written before this
+  // column existed — and every start that failed before the submit — legitimately has none.
+  input_evidence: string | null
+  input_observed_at: string | null
   last_error: string | null
   created_at: string
   updated_at: string

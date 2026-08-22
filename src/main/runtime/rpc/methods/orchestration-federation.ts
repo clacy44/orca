@@ -1,5 +1,6 @@
 import type { TuiAgent } from '../../../../shared/tui-agent'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
+import { captureDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
 import { assertOrchestrationWorktreeCreationSupported } from './orchestration-folder-worktree-placement'
@@ -238,6 +239,9 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
             cliCommand: runtime.getTerminalOrchestrationCliCommand(terminalHandle)
           })
         )
+        // Why the peer reads its own terminal: the home never sees this PTY, so the only runtime
+        // that can say what was on screen at the submit is the one that wrote it (A1 section 2).
+        const inputEvidence = captureDispatchInputEvidence(runtime, terminalHandle)
         effects.push({
           kind: 'dispatch_input',
           role: 'agent',
@@ -255,6 +259,7 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           terminalHandle,
           setup,
           launch: launch.receipt,
+          inputEvidence,
           effects,
           residualResources: []
         }
