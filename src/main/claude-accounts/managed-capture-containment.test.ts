@@ -78,3 +78,42 @@ describe('assertCaptureSourceOutsideClaudeLanes', () => {
     ).not.toThrow()
   })
 })
+
+// §2m(4)'s Windows-only control for the §2d capture refusal. SKIPS on POSIX: only a real
+// Windows host exercises `realpathSync.native` and the junction/case behaviour it is here for.
+describe.runIf(process.platform === 'win32')('win32 capture containment', () => {
+  let userData = ''
+  let elsewhere = ''
+
+  beforeEach(() => {
+    userData = mkdtempSync(join(tmpdir(), 'orca-win-capture-'))
+    elsewhere = mkdtempSync(join(tmpdir(), 'orca-win-capture-elsewhere-'))
+  })
+
+  afterEach(() => {
+    rmSync(userData, { recursive: true, force: true })
+    rmSync(elsewhere, { recursive: true, force: true })
+  })
+
+  const lanesRoot = (): string => join(userData, 'claude-lanes')
+
+  it('refuses a case-flipped lane path', () => {
+    const lane = join(lanesRoot(), 'principal-a')
+    mkdirSync(lane, { recursive: true })
+
+    expect(() =>
+      assertCaptureSourceOutsideClaudeLanes(lane.toUpperCase(), 'claude-config-dir', lanesRoot())
+    ).toThrow(/per-principal credential lane storage/)
+  })
+
+  it('refuses a junction rather than following it, for a Codex home too', () => {
+    const lane = join(lanesRoot(), 'principal-b')
+    mkdirSync(lane, { recursive: true })
+    const decoy = join(elsewhere, 'decoy')
+    symlinkSync(lane, decoy, 'junction')
+
+    expect(() => assertCaptureSourceOutsideClaudeLanes(decoy, 'codex-home', lanesRoot())).toThrow(
+      /symbolic link/
+    )
+  })
+})

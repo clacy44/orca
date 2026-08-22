@@ -89,3 +89,60 @@ describe('canonicalizePathForContainment', () => {
     }
   })
 })
+
+// §2m(4) asks for a Windows-only control per containment site: the four Windows-specific
+// escapes are 8.3 short names, drive-letter/segment case, junctions and the extended-length
+// `\\?\` prefix, and only a real Windows host can exercise `realpathSync.native`'s handling
+// of them. These SKIP on POSIX by construction — a Linux run proves nothing about them.
+describe.runIf(process.platform === 'win32')('win32 containment', () => {
+  let userData = ''
+  let elsewhere = ''
+
+  beforeEach(() => {
+    userData = mkdtempSync(join(tmpdir(), 'orca-win-root-'))
+    elsewhere = mkdtempSync(join(tmpdir(), 'orca-win-elsewhere-'))
+  })
+
+  afterEach(() => {
+    rmSync(userData, { recursive: true, force: true })
+    rmSync(elsewhere, { recursive: true, force: true })
+  })
+
+  const lanesRoot = (): string => join(userData, 'claude-lanes')
+
+  it('denies a lane path whose drive letter and segments are case-flipped', () => {
+    const lane = join(lanesRoot(), 'principal-a')
+
+    expect(isPathWithinRootForDenial(lanesRoot(), lane.toUpperCase())).toBe(true)
+    expect(isPathWithinRootForDenial(lanesRoot(), lane.toLowerCase())).toBe(true)
+  })
+
+  it('denies a lane path wearing the extended-length prefix', () => {
+    const lane = join(lanesRoot(), 'principal-a')
+
+    expect(isPathWithinRootForDenial(lanesRoot(), `\\\\?\\${lane}`)).toBe(true)
+  })
+
+  // A junction needs no privilege on Windows, which makes it the cheap escape; Node reports
+  // it as both a symlink and a directory, and the symlink branch must win.
+  it('reports a junction as a symlink, not as its target directory', () => {
+    const lane = join(lanesRoot(), 'principal-b')
+    mkdirSync(lane, { recursive: true })
+    const decoy = join(elsewhere, 'decoy')
+    symlinkSync(lane, decoy, 'junction')
+
+    expect(canonicalizePathForContainment(decoy)).toEqual({ kind: 'symlink' })
+    expect(isPathWithinRootForDenial(lanesRoot(), decoy)).toBe(true)
+  })
+
+  it('resolves an 8.3 short name back to the long path it addresses', () => {
+    const lane = join(lanesRoot(), 'principal-with-a-very-long-name')
+    mkdirSync(lane, { recursive: true })
+    const canonical = canonicalizePathForContainment(lane)
+
+    expect(canonical.kind).toBe('canonical')
+    expect(
+      canonical.kind === 'canonical' && isCanonicalPathWithinRoot(lanesRoot(), canonical.path)
+    ).toBe(true)
+  })
+})
