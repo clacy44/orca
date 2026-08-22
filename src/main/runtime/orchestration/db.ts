@@ -46,6 +46,11 @@ import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
 import {
+  federationSyncHealthFromRow,
+  type FederationSyncHealth,
+  type FederationSyncHealthRow
+} from './federation-sync-health'
+import {
   deriveWorkerTerminalListState,
   WORKER_SETTLED_STATES,
   type WorkerTerminalResourceRow,
@@ -301,7 +306,7 @@ type RunListCursor = {
 }
 
 // Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence.
-const SCHEMA_VERSION = 30
+const SCHEMA_VERSION = 31
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -486,6 +491,9 @@ export class OrchestrationDb {
         remote_terminal_handle  TEXT,
         to_home_imported_sequence INTEGER NOT NULL DEFAULT 0,
         to_home_acknowledged_sequence INTEGER NOT NULL DEFAULT 0,
+        last_sync_at            TEXT,
+        last_error              TEXT,
+        consecutive_failures    INTEGER NOT NULL DEFAULT 0,
         created_at              TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -1030,6 +1038,19 @@ export class OrchestrationDb {
       }
       if (current < 30 && !this.hasColumn('worker_dispatches', 'input_observed_at')) {
         this.db.exec('ALTER TABLE worker_dispatches ADD COLUMN input_observed_at TEXT')
+      }
+      if (current < 31) {
+        if (!this.hasColumn('federated_dispatches', 'last_sync_at')) {
+          this.db.exec('ALTER TABLE federated_dispatches ADD COLUMN last_sync_at TEXT')
+        }
+        if (!this.hasColumn('federated_dispatches', 'last_error')) {
+          this.db.exec('ALTER TABLE federated_dispatches ADD COLUMN last_error TEXT')
+        }
+        if (!this.hasColumn('federated_dispatches', 'consecutive_failures')) {
+          this.db.exec(
+            'ALTER TABLE federated_dispatches ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0'
+          )
+        }
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -4658,6 +4679,49 @@ export class OrchestrationDb {
     return this.db
       .prepare('SELECT * FROM federated_dispatches WHERE dispatch_id = ?')
       .get(dispatchId) as FederatedDispatchRow | undefined
+  }
+
+  // Why the health lives on the row and not only in the relay's Map: the Map dies with the process,
+  // and a resumed relay that starts from a zeroed failure count re-dials a peer it already knows is
+  // unreachable at the 1s base interval, then reports `never / 0` to whoever asks (A1 section 9).
+  recordFederatedDispatchSyncHealth(dispatchId: string, health: FederationSyncHealth): void {
+    // Why updated_at is deliberately untouched: it is the receipt for a change to the binding, and a
+    // column rewritten on every relay tick could no longer answer when the binding last changed.
+    this.db
+      .prepare(
+        `UPDATE federated_dispatches
+         SET last_sync_at = ?, last_error = ?, consecutive_failures = ?
+         WHERE dispatch_id = ?`
+      )
+      .run(health.lastSyncAt, health.lastError, health.consecutiveFailures, dispatchId)
+  }
+
+  getFederatedDispatchSyncHealth(dispatchId: string): FederationSyncHealth | null {
+    return federationSyncHealthFromRow(
+      this.db
+        .prepare(
+          `SELECT last_sync_at, last_error, consecutive_failures
+           FROM federated_dispatches
+           WHERE dispatch_id = ?`
+        )
+        .get(dispatchId) as FederationSyncHealthRow | undefined
+    )
+  }
+
+  // Why the unsettled predicate: a transport that dies after the Dispatch settled is nothing the
+  // coordinator can act on, and the relay stays armed past settlement until the peer's queue is
+  // acknowledged — so without this an outage spanning a settlement would escalate afterwards.
+  getFederatedRelayNoticeTarget(
+    dispatchId: string
+  ): { runId: string; taskId: string; environmentName: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT d.run_id AS runId, d.task_id AS taskId, f.environment_name AS environmentName
+         FROM federated_dispatches f
+         JOIN dispatch_contexts d ON d.id = f.dispatch_id
+         WHERE f.dispatch_id = ? AND d.status IN ('pending', 'dispatched')`
+      )
+      .get(dispatchId) as { runId: string; taskId: string; environmentName: string } | undefined
   }
 
   listActiveFederatedDispatches(runId?: string): FederatedDispatchRow[] {

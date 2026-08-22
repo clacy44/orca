@@ -11,6 +11,31 @@ export type FederationSyncHealth = {
   consecutiveFailures: number
 }
 
+// Why the health survives the process: A1 section 9 measured a restart laundering a peer that had
+// been dead for days into `never / 0`, which reads to a coordinator as "this Dispatch never
+// federated" rather than "nothing has reached it".
+export type FederationSyncHealthRow = {
+  last_sync_at: string | null
+  last_error: string | null
+  consecutive_failures: number
+}
+
+// Why null rather than a zeroed record for an untouched row: `sync` may only widen — the same field
+// and shape, non-null more often — so a Dispatch the relay has never settled on keeps reporting the
+// null it reports today instead of gaining a fabricated "healthy" reading.
+export function federationSyncHealthFromRow(
+  row: FederationSyncHealthRow | undefined
+): FederationSyncHealth | null {
+  if (!row || (row.last_sync_at === null && row.last_error === null && !row.consecutive_failures)) {
+    return null
+  }
+  return {
+    lastSyncAt: row.last_sync_at,
+    lastError: row.last_error,
+    consecutiveFailures: row.consecutive_failures
+  }
+}
+
 export function initialFederationSyncHealth(): FederationSyncHealth {
   return { lastSyncAt: null, lastError: null, consecutiveFailures: 0 }
 }

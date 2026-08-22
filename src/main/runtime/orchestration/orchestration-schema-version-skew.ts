@@ -30,7 +30,9 @@ const VERSIONED_POST_V6_COLUMNS = [
   { version: 28, table: 'dispatch_contexts', column: 'blocked_since' },
   { version: 29, table: 'dispatch_contexts', column: 'liveness_breached_at' },
   { version: 30, table: 'worker_dispatches', column: 'input_evidence' },
-  { version: 30, table: 'worker_dispatches', column: 'input_observed_at' }
+  { version: 30, table: 'worker_dispatches', column: 'input_observed_at' },
+  { version: 31, table: 'federated_dispatches', column: 'last_sync_at' },
+  { version: 31, table: 'federated_dispatches', column: 'consecutive_failures' }
 ] as const
 
 const POST_V6_INDEXES = [

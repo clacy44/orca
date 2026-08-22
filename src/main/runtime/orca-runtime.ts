@@ -180,9 +180,11 @@ import {
 import { syncFederatedDispatch } from './orchestration/federation-sync'
 import { selectFederationRelayResumeDispatchIds } from './orchestration/federation-relay-arming'
 import {
+  recordFederationRelaySyncOutcome,
+  type FederationRelaySyncOutcome
+} from './orchestration/federation-relay-health'
+import {
   federationRelayIntervalMs,
-  recordFederationSyncFailure,
-  recordFederationSyncSuccess,
   type FederationSyncHealth
 } from './orchestration/federation-sync-health'
 import { formatMessagePointer } from './orchestration/formatter'
@@ -4930,21 +4932,15 @@ export class OrcaRuntimeService {
       .then(() => {
         if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
           this.orchestrationFederationWarnings.delete(dispatchId)
-          this.orchestrationFederationSyncHealth.set(
-            dispatchId,
-            recordFederationSyncSuccess(new Date().toISOString())
-          )
+          this.settleOrchestrationFederationSyncHealth(dispatchId, {
+            kind: 'success',
+            at: new Date().toISOString()
+          })
         }
       })
       .catch((error: unknown) => {
         if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
-          this.orchestrationFederationSyncHealth.set(
-            dispatchId,
-            recordFederationSyncFailure(
-              this.orchestrationFederationSyncHealth.get(dispatchId),
-              error
-            )
-          )
+          this.settleOrchestrationFederationSyncHealth(dispatchId, { kind: 'failure', error })
           if (!this.orchestrationFederationWarnings.has(dispatchId)) {
             console.warn(`[orchestration] Federation sync failed for ${dispatchId}:`, error)
             this.orchestrationFederationWarnings.add(dispatchId)
@@ -5009,13 +5005,43 @@ export class OrcaRuntimeService {
     return dispatchIds
   }
 
+  // Why the persisted fallback: this Map is empty for the whole life of a restarted runtime until
+  // its first settle, so without it a peer that has been unreachable for days answers `sync: null` —
+  // which reads as "this Dispatch never federated", not "nothing has reached it" (A1 section 9).
   getOrchestrationFederationSyncHealth(dispatchId: string): FederationSyncHealth | null {
-    return this.orchestrationFederationSyncHealth.get(dispatchId) ?? null
+    return (
+      this.orchestrationFederationSyncHealth.get(dispatchId) ??
+      this.getOrchestrationDb().getFederatedDispatchSyncHealth(dispatchId)
+    )
+  }
+
+  private settleOrchestrationFederationSyncHealth(
+    dispatchId: string,
+    outcome: FederationRelaySyncOutcome
+  ): void {
+    this.orchestrationFederationSyncHealth.set(
+      dispatchId,
+      recordFederationRelaySyncOutcome({
+        db: this.getOrchestrationDb(),
+        dispatchId,
+        previous: this.orchestrationFederationSyncHealth.get(dispatchId),
+        outcome
+      })
+    )
   }
 
   private armOrchestrationFederationRelay(dispatchId: string): void {
     if (this.orchestrationFederationRelays.has(dispatchId)) {
       return
+    }
+    // Why seeded before the first tick: the interval scheduled after that tick reads
+    // consecutiveFailures, so a relay resumed against an already-dead peer has to start from the
+    // backoff level it had reached rather than re-dialing it every second.
+    if (!this.orchestrationFederationSyncHealth.has(dispatchId)) {
+      const persisted = this.getOrchestrationDb().getFederatedDispatchSyncHealth(dispatchId)
+      if (persisted) {
+        this.orchestrationFederationSyncHealth.set(dispatchId, persisted)
+      }
     }
     this.orchestrationFederationRelays.add(dispatchId)
     this.tickOrchestrationFederationRelay(dispatchId)

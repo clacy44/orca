@@ -192,6 +192,9 @@ export type FederatedDispatchRow = {
   remote_terminal_handle: string | null
   to_home_imported_sequence: number
   to_home_acknowledged_sequence: number
+  last_sync_at: string | null
+  last_error: string | null
+  consecutive_failures: number
   created_at: string
   updated_at: string
 }

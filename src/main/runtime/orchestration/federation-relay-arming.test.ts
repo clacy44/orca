@@ -21,7 +21,8 @@ import {
   federationRelayIntervalMs,
   FEDERATION_RELAY_MAX_INTERVAL_MS,
   recordFederationSyncFailure,
-  recordFederationSyncSuccess
+  recordFederationSyncSuccess,
+  type FederationSyncHealth
 } from './federation-sync-health'
 import { OrchestrationError } from './orchestration-error'
 
@@ -32,7 +33,10 @@ const IDLE_TRANSPORT = {
 
 type WorkerState = string
 
-function createRelayHarness(states: Record<string, WorkerState>) {
+function createRelayHarness(
+  states: Record<string, WorkerState>,
+  persisted: Record<string, FederationSyncHealth> = {}
+) {
   const runtime = new OrcaRuntimeService(null, undefined, {
     orchestrationEnvironmentTransport: IDLE_TRANSPORT
   })
@@ -44,9 +48,14 @@ function createRelayHarness(states: Record<string, WorkerState>) {
     isFederatedDispatchRelayEligible: (dispatchId: string) =>
       isFederationRelayActiveWorkerState(states[dispatchId]),
     findNextTerminalFederatedDispatchPendingAcknowledgment: () => undefined,
-    getUndeliveredUnreadMailboxHandles: () => []
+    getUndeliveredUnreadMailboxHandles: () => [],
+    getFederatedDispatchSyncHealth: (dispatchId: string) => persisted[dispatchId] ?? null,
+    recordFederatedDispatchSyncHealth: (dispatchId: string, health: FederationSyncHealth) => {
+      persisted[dispatchId] = health
+    },
+    getFederatedRelayNoticeTarget: () => undefined
   } as never)
-  return { runtime, sync: syncFederatedDispatchMock, states }
+  return { runtime, sync: syncFederatedDispatchMock, states, persisted }
 }
 
 describe('federation relay arming', () => {
@@ -182,6 +191,56 @@ describe('federation relay scheduling', () => {
     expect(sync).toHaveBeenCalledTimes(4)
     await vi.advanceTimersByTimeAsync(1_000)
     expect(sync).toHaveBeenCalledTimes(5)
+
+    runtime.stopOrchestrationFederationRelay()
+  })
+
+  it('persists every settle so a later process can read the real relay state', async () => {
+    const { runtime, persisted } = createRelayHarness({ dispatch_ready: 'ready' })
+
+    runtime.ensureOrchestrationFederationRelay()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(persisted.dispatch_ready).toMatchObject({ lastError: null, consecutiveFailures: 0 })
+    expect(persisted.dispatch_ready.lastSyncAt).not.toBeNull()
+
+    syncFederatedDispatchMock.mockRejectedValue(
+      new OrchestrationError('runtime_unreachable', 'Peer is down.')
+    )
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(persisted.dispatch_ready).toMatchObject({
+      lastError: 'runtime_unreachable: Peer is down.',
+      consecutiveFailures: 1
+    })
+    runtime.stopOrchestrationFederationRelay()
+  })
+
+  it('resumes a relay at the backoff level the peer had already earned', async () => {
+    syncFederatedDispatchMock.mockRejectedValue(
+      new OrchestrationError('runtime_unreachable', 'Peer is down.')
+    )
+    const { runtime, sync } = createRelayHarness(
+      { dispatch_ready: 'ready' },
+      {
+        dispatch_ready: {
+          lastSyncAt: '2026-08-20T00:00:00.000Z',
+          lastError: 'runtime_unreachable: Peer is down.',
+          consecutiveFailures: 6
+        }
+      }
+    )
+
+    runtime.resumeOrchestrationFederationRelayAfterRestart()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sync).toHaveBeenCalledTimes(1)
+
+    // Why the full cap and not 1s: a resumed relay that zeroed the count would have re-dialed a peer
+    // it already knows is unreachable 59 seconds ago, which is the laundering A1 section 9 names.
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(sync).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sync).toHaveBeenCalledTimes(2)
 
     runtime.stopOrchestrationFederationRelay()
   })
