@@ -109,9 +109,9 @@ export function createTerminalPresenceArbitration(options: {
     }
   }
 
-  // Why swept at hold time and nowhere else: a lapsed record carries no rule (it neither publishes a
-  // notice nor suppresses a nudge), and holds for a PTY that has since exited are never consulted again,
-  // so the rare path that adds one is the only place that has to walk the map.
+  // Why a global walk and not a per-PTY drop: a lapsed record carries no rule (it neither publishes a
+  // notice nor suppresses a nudge), so the only thing left to reclaim is the memory of holds for PTYs
+  // and grants that are gone — and those are reachable from no consult of their own.
   const sweepLapsed = (now: number): void => {
     for (const [ptyId, byGrant] of holdsByPty) {
       for (const [grantKey, record] of byGrant) {
@@ -133,12 +133,20 @@ export function createTerminalPresenceArbitration(options: {
         // Why cleared: the typist has gone quiet, so this episode is over and the next collision earns
         // its own nudge rather than inheriting a spent one.
         forget(ptyId, grantKey)
+        // Why swept on this branch too: it is the quiet path every non-colliding keystroke takes, so a
+        // record left by an exited PTY or a revoked grant is reaped here instead of waiting for the rare
+        // arming path to run again somewhere else in the process.
+        sweepLapsed(now)
         return null
       }
       const record = holdsByPty.get(ptyId)?.get(grantKey)
-      if (record && record.heldFor === peer.participantId && now < record.until) {
+      // Why any live record and not only one naming this peer: with three people typing the loudest can
+      // change between a peer's two keystrokes, and re-arming on the new name charges them twice for one
+      // collision. §2.6 promises one speed bump per window, whoever is at the other end of it. The name
+      // the record carries is spent either way — a released record publishes no notice.
+      if (record && now < record.until) {
         // The re-press: one speed bump per collision. The window slides so a peer who keeps typing
-        // through a long episode is never nudged twice about the same person.
+        // through a long episode is never nudged twice.
         record.released = true
         record.until = now + ARBITRATION_REPROMPT_MS
         return null

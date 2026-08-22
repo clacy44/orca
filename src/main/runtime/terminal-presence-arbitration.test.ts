@@ -13,6 +13,7 @@ import { HOST_PARTICIPANT_ID } from './terminal-presence-snapshot'
 const PTY_ID = 'pty-1'
 const ANA_GRANT = 'device-ana'
 const BEN_GRANT = 'device-ben'
+const CASS_GRANT = 'device-cass'
 
 let clock = 1_000
 let registry: TerminalPresenceRegistry
@@ -185,6 +186,32 @@ describe('shouldHoldInputForTypingPeer', () => {
     registry.recordInteractiveInput(PTY_ID, 'stream:ana')
     expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, ANA_GRANT)).toMatchObject({
       heldFor: benId
+    })
+  })
+
+  it('nudges a peer once per window even when the loudest typist changes', () => {
+    // §2.6 promises ONE speed bump per collision; with three people typing the loudest can change between
+    // a peer's two keystrokes, and re-arming on the new name charges them twice for one episode.
+    const anaId = participantIdOf(ANA_GRANT, 'conn-ana', 'Ana laptop')
+    const cassId = participantIdOf(CASS_GRANT, 'conn-cass', 'Cass laptop')
+    typeOn('conn-ana', 'stream:ana')
+    registry.attach(PTY_ID, 'stream:cass', 'conn-cass')
+
+    clock += 10
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toMatchObject({
+      heldFor: anaId
+    })
+
+    clock += 10
+    registry.recordInteractiveInput(PTY_ID, 'stream:cass')
+    clock += 10
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toBeNull()
+    // Non-vacuous: Cass really is the loudest now, so a fresh episode after this window names her.
+    expect(cassId).not.toBe(anaId)
+    clock += ARBITRATION_REPROMPT_MS
+    registry.recordInteractiveInput(PTY_ID, 'stream:cass')
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toMatchObject({
+      heldFor: cassId
     })
   })
 
