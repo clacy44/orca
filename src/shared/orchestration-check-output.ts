@@ -88,8 +88,13 @@ export function formatOrchestrationCheckText(
         : '[LEGACY COMPATIBILITY]\n'
     : ''
   const deliveryNotice = formatCurrentDeliveryNotice(prepared.legacyCompatibility?.currentDelivery)
+  const deliveryTag = prepared.deliveryId ? formatDeliveryBacklogTag(prepared) : ''
   if (prepared.formatted) {
-    return `${legacyHeader}${prepared.formatted}${deliveryNotice}`
+    // Why prepended here too: --format and --inject return before the Delivery line is built, so
+    // without this the injected banner is byte-identical on every replay and the starvation stays
+    // invisible in the one mode that writes into a pane. An untagged batch renders as it did.
+    const deliveryLine = deliveryTag ? `Delivery ${prepared.deliveryId}${deliveryTag}\n` : ''
+    return `${legacyHeader}${deliveryLine}${prepared.formatted}${deliveryNotice}`
   }
   if (prepared.count === 0) {
     if (prepared.timedOut) {
@@ -128,7 +133,7 @@ export function formatOrchestrationCheckText(
     )
     .join('\n')
   const output = prepared.deliveryId
-    ? `Delivery ${prepared.deliveryId}${formatDeliveryReplayTag(prepared)}\n${rendered}`
+    ? `Delivery ${prepared.deliveryId}${deliveryTag}\n${rendered}`
     : rendered
   return `${legacyHeader}${output}${deliveryNotice}`
 }
@@ -155,13 +160,18 @@ export function prepareOrchestrationCheckOutput<T extends OrchestrationCheckOutp
 
 // Why: a replayed Delivery is byte-identical to fresh mail, so a coordinator that never acks
 // re-reads the same batch forever while everything newer stays invisible behind it.
-function formatDeliveryReplayTag(result: OrchestrationCheckOutput): string {
-  if (result.replayed !== true) {
-    return ''
-  }
+function formatDeliveryBacklogTag(result: OrchestrationCheckOutput): string {
   const acknowledge = `acknowledge with --ack ${result.deliveryId}`
-  return typeof result.pendingBehind === 'number' && result.pendingBehind > 0
-    ? ` [REPLAY — ${result.pendingBehind} newer messages are blocked behind it; ${acknowledge}]`
+  const pendingBehind = typeof result.pendingBehind === 'number' ? result.pendingBehind : 0
+  if (result.replayed !== true) {
+    // Why still tagged: a fresh batch is capped, so an overflowing mailbox strands the remainder
+    // from the moment the Delivery is created. An older host sends no count and keeps today's line.
+    return pendingBehind > 0
+      ? ` [${pendingBehind} more queued behind this batch; ${acknowledge}]`
+      : ''
+  }
+  return pendingBehind > 0
+    ? ` [REPLAY — ${pendingBehind} newer messages are blocked behind it; ${acknowledge}]`
     : ` [REPLAY — ${acknowledge}]`
 }
 

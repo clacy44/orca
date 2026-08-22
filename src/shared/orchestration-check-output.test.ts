@@ -156,4 +156,41 @@ describe('formatOrchestrationCheckText delivery replay', () => {
       'Delivery delivery_1\n'
     )
   })
+
+  it('names the remainder a capped fresh batch already left behind', () => {
+    expect(
+      formatOrchestrationCheckText(delivered({ replayed: false, pendingBehind: 5 }), 'term_coord')
+    ).toContain(
+      'Delivery delivery_1 [5 more queued behind this batch; acknowledge with --ack delivery_1]'
+    )
+  })
+
+  it('keeps the replay marker on the --format and --inject path', () => {
+    const rendered = formatOrchestrationCheckText(
+      delivered({ replayed: true, pendingBehind: 3, formatted: '[FROM term_worker] progress' }),
+      'term_coord'
+    )
+
+    expect(rendered).toBe(
+      'Delivery delivery_1 [REPLAY — 3 newer messages are blocked behind it; acknowledge with --ack delivery_1]\n[FROM term_worker] progress'
+    )
+  })
+
+  it('renders a fresh formatted Delivery byte-identically to today', () => {
+    expect(
+      formatOrchestrationCheckText(
+        delivered({ replayed: false, pendingBehind: 0, formatted: '[FROM term_worker] progress' }),
+        'term_coord'
+      )
+    ).toBe('[FROM term_worker] progress')
+  })
+
+  it('leaves a formatted peek with no Delivery untouched', () => {
+    expect(
+      formatOrchestrationCheckText(
+        { count: 1, messages: [], formatted: '[FROM term_worker] progress' },
+        'term_coord'
+      )
+    ).toBe('[FROM term_worker] progress')
+  })
 })
