@@ -54,7 +54,7 @@ vi.mock('../pi/titlebar-extension-service', () => ({
   piTitlebarExtensionService: { buildPtyEnv: () => ({}), clearPty: vi.fn() }
 }))
 
-import { registerPtyHandlers } from './pty'
+import { deletePtyOwnership, registerPtyHandlers, setPtyOwnership } from './pty'
 import {
   HOST_ATTACHMENT_KEY,
   terminalPresenceRegistry
@@ -66,6 +66,10 @@ import {
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
 
 const PTY_ID = 'pty-host-1'
+// Why an SSH connection with no registered provider: it makes this PTY one the process still routes
+// (ownership answers for it) while every writer below still rejects the keystroke, which is the pairing
+// the stamp has to survive.
+const OWNER_CONNECTION = 'conn-ssh-owner'
 const PEER_CONNECTION = 'conn-peer-1'
 const PEER_GRANT = 'device-runtime-9'
 
@@ -95,6 +99,7 @@ function setup(
     ...runtimeOverrides
   } as unknown as OrcaRuntimeService
   registerPtyHandlers(mainWindow as never, runtime)
+  setPtyOwnership(PTY_ID, OWNER_CONNECTION)
 }
 
 function hostRows(now = Date.now()) {
@@ -149,6 +154,7 @@ function setupWithPendingViewportClaim(): (claimed: boolean) => void {
 
 beforeEach(() => {
   terminalPresenceRegistry.reset()
+  deletePtyOwnership(PTY_ID)
 })
 
 afterEach(() => {
@@ -158,7 +164,7 @@ afterEach(() => {
 describe('host presence stamp (site c)', () => {
   it('stamps the reserved host key on a write the provider check rejects', () => {
     setup()
-    // Why: no ownership is registered for this PTY, so writePtyInput returns false at the provider
+    // Why: the owning SSH connection has no provider, so writePtyInput returns false at the provider
     // check — a stamp placed after the guards would report PTY effect instead of human intent.
     writeFromMainWindow()
 
@@ -224,6 +230,34 @@ describe('host presence stamp (site c)', () => {
 
     expect(terminalPresenceRegistry.attachmentsOf(PTY_ID).size).toBe(0)
     expect(hostRows()).toEqual([])
+  })
+
+  it('stamps nothing for a PTY this process no longer routes', () => {
+    setup()
+    // Why exactly the exit ordering: onExit drops ownership and then calls onPtyExit -> releasePty, so a
+    // keystroke racing that teardown is the write that would re-create an attachments entry no later
+    // teardown can reach — the registry has no liveness of its own to refuse it with.
+    deletePtyOwnership(PTY_ID)
+    writeFromMainWindow()
+
+    expect(terminalPresenceRegistry.attachmentsOf(PTY_ID).size).toBe(0)
+    expect(hostRows()).toEqual([])
+  })
+
+  it('stamps nothing for an id the renderer invented', async () => {
+    setup()
+    ;(handlers.get('pty:write') as (event: unknown, args: unknown) => void)(mainWindowIpcEvent, {
+      id: 'pty-never-created',
+      data: 'x'
+    })
+    await (
+      handlers.get('pty:writeAccepted') as (
+        event: unknown,
+        args: unknown
+      ) => Promise<boolean> | boolean
+    )(mainWindowIpcEvent, { id: 'pty-never-created', data: 'x' })
+
+    expect(terminalPresenceRegistry.attachmentsOf('pty-never-created').size).toBe(0)
   })
 
   it('expires with a remote stream stamp on one clock', () => {

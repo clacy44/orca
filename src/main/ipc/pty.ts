@@ -7234,6 +7234,13 @@ export function registerPtyHandlers(
   // the writers can drop it too. Its Date.now() stamp lives in the presence registry alone;
   // lastInputAtByPty stays performance.now().
   const stampHostInput = (args: PtyWritePayload): void => {
+    // Why liveness is the one thing checked here: every guard below can drop a keystroke the human
+    // really typed, so the stamp stays above them — but a write for a PTY this process no longer routes
+    // (already exited, or never created) has no pane for a peer to watch, and recordHostInteractiveInput
+    // would CREATE its attachments entry, which only releasePty on PTY exit can ever remove.
+    if (!ptyOwnership.has(args.id)) {
+      return
+    }
     terminalPresenceRegistry.recordHostInteractiveInput(args.id)
   }
 

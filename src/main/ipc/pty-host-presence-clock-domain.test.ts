@@ -51,6 +51,9 @@ describe('host presence clock-domain boundary', () => {
   )
 
   it('writes the presence stamp from exactly one place', () => {
-    expect(source.match(/recordHostInteractiveInput/g)).toHaveLength(1)
+    // Why comments are stripped: the pin is on CALL sites, and a WHY comment naming the mutator is how
+    // the next reader learns why it is called there — it must not read as a second stamp.
+    const code = source.replace(/^\s*\/\/.*$/gm, '')
+    expect(code.match(/recordHostInteractiveInput/g)).toHaveLength(1)
   })
 })
