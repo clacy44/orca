@@ -35645,6 +35645,9 @@ describe('OrcaRuntimeService', () => {
 
       await vi.advanceTimersByTimeAsync(20_000)
       expect(pendingReads).not.toHaveBeenCalled()
+      // Why stopped first: the assertion is about the repoint scheduler having nothing queued, and
+      // the runtime's own liveness sweep is an unrelated interval that would otherwise be counted.
+      runtime.stopDispatchLivenessMonitor()
       expect(vi.getTimerCount()).toBe(0)
 
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
@@ -35722,6 +35725,9 @@ describe('OrcaRuntimeService', () => {
             typeof payload === 'string' && payload.includes('orca orchestration check')
         )
       ).toHaveLength(1)
+      // Why stopped first: the assertion is about the repoint scheduler having nothing queued, and
+      // the runtime's own liveness sweep is an unrelated interval that would otherwise be counted.
+      runtime.stopDispatchLivenessMonitor()
       expect(vi.getTimerCount()).toBe(0)
       db.close()
     } finally {
