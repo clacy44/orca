@@ -3311,6 +3311,12 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
       let unsubscribePresence = (): void => {}
       // Why null until the negotiated branch below assigns it: negotiation IS the arbitration gate, so a
       // stream that never advertised presence has no closure to consult and can never be held (§2.6).
+      // Deliberate consequence, unlike terminal.multiplex — which has both facts at stream creation: the
+      // binary handler is registered several awaits ABOVE that branch, so an Input frame arriving before
+      // the `subscribed` echo passes UNGATED. That window fails open (a keystroke lands rather than being
+      // dropped) and it has to: the echo is where this client is first told both the host-minted streamId
+      // and that presence was negotiated, so a notice emitted ahead of it names a stream the client
+      // cannot place and would drop the keystroke with nothing rendered. Pinned by its own control.
       let holdInputForTypingPeer: (() => boolean) | null = null
       let abortRendererMountWait = (): void => {}
       let lateRendererReadyPromise: Promise<boolean> | null = null

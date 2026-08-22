@@ -715,4 +715,63 @@ describe('terminal.subscribe soft arbitration', () => {
     ana.cleanups.get('terminal-1:ana')?.()
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
   })
+
+  it('leaves the frames before its negotiated echo ungated, and gates every one after', async () => {
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    const ana = await startNegotiatedSubscribe(CONNECTION, GRANT, 'ana')
+    let releaseRead = (): void => {}
+    const parkedRead = new Promise<{ tail: string[]; truncated: boolean }>((resolve) => {
+      releaseRead = () => resolve({ tail: [], truncated: false })
+    })
+    // Why parked on readTerminal: this handler registers its binary handler several awaits ABOVE the
+    // branch that resolves identity, so parking the first of those awaits reproduces the real window in
+    // which a phone's early keystroke arrives — unlike terminal.multiplex, which has both facts at
+    // stream creation. The window is deliberate and it fails OPEN.
+    const ben = startSubscribe(
+      { connectionId: PEER_CONNECTION, pairedDeviceId: PEER_GRANT, clientKind: 'runtime' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'ben', type: 'desktop' },
+        viewport: { cols: 120, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1 }
+      },
+      new Map(),
+      { readTerminal: vi.fn(() => parkedRead) as unknown as OrcaRuntimeService['readTerminal'] }
+    )
+    await vi.waitFor(() => expect(ben.binaryHandlers.size).toBe(1))
+    const benStreamId = Array.from(ben.binaryHandlers.keys())[0]
+
+    sendInputFrame(ana.binaryHandlers, ana.streamId, 'a')
+    await settle(10)
+    sendInputFrame(ben.binaryHandlers, benStreamId, 'b')
+    await settle()
+
+    // The echo is where this client is first told its host-minted streamId and that presence was
+    // negotiated, so a notice ahead of it names a stream the client cannot place: a keystroke lands
+    // rather than being dropped with nothing rendered, and no hold is spent behind it.
+    expect(sentTexts(ben.runtime)).toEqual(['b'])
+    expect(activeTerminalPresenceHoldNotice(PRESENCE_PTY_ID, PEER_GRANT)).toBeNull()
+
+    releaseRead()
+    await awaitSubscribed(ben.messages)
+    // Non-vacuous: the identical collision, with the echo delivered, is held. Both stamps are left to
+    // lapse first so the holder is an uncontested typist rather than a leftover of the ungated frame —
+    // that frame LANDED, which makes Ben the incumbent and Ana the interrupting party until it expires.
+    await settle(TERMINAL_PRESENCE_ACTIVITY_TTL_MS + 10)
+    sendInputFrame(ana.binaryHandlers, ana.streamId, 'a', 3)
+    await settle(10)
+    sendInputFrame(ben.binaryHandlers, benStreamId, 'c', 4)
+    await settle()
+    expect(sentTexts(ben.runtime)).toEqual(['b'])
+    expect(lastPresence(ben.messages)?.arbitration).toEqual({
+      heldFor: anaParticipantId,
+      until: expect.any(Number)
+    })
+
+    vi.useRealTimers()
+    ana.cleanups.get('terminal-1:ana')?.()
+    ben.cleanups.get('terminal-1:ben')?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
 })
