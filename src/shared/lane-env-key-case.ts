@@ -71,10 +71,10 @@ export function withoutEnvKeyDeletion(
 /** Deletes every casing of each key from `env`, in place. */
 export function deleteEnvKeyVariants(
   env: Record<string, string> | undefined,
-  envKeys: readonly string[],
+  envKeys: readonly string[] | undefined,
   platform: NodeJS.Platform = process.platform
 ): void {
-  if (!env) {
+  if (!env || !envKeys) {
     return
   }
   for (const envKey of envKeys) {

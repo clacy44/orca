@@ -14506,6 +14506,56 @@ describe('OrcaRuntimeService', () => {
     expect(normalAgent.env?.TMUX).toBeUndefined()
   })
 
+  // Why here and not in pty.ts: guard 3 covers path A's spawn env, but the launch config
+  // never reaches that file — the runtime-owned create persists it on the pane record and
+  // publishes it back to clients, so an unscrubbed value would outlive the spawn (S9 §2a
+  // guard 1, `launchConfig.agentEnv`).
+  it('scrubs a client CLAUDE_CONFIG_DIR out of the launch config it publishes', async () => {
+    const spawn = vi.fn().mockResolvedValue({ id: 'pty-bg' })
+    const revealTerminalSession = vi.fn().mockResolvedValue({ tabId: 'tab-bg' })
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.setNotifier({
+      worktreesChanged: vi.fn(),
+      reposChanged: vi.fn(),
+      activateWorktree: vi.fn(),
+      createTerminal: vi.fn(),
+      revealTerminalSession,
+      splitTerminal: vi.fn(),
+      renameTerminal: vi.fn(),
+      focusTerminal: vi.fn(),
+      closeTerminal: vi.fn(),
+      sleepWorktree: vi.fn(),
+      terminalFitOverrideChanged: vi.fn(),
+      terminalDriverChanged: vi.fn()
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      command: 'claude',
+      launchAgent: 'claude',
+      launchConfig: {
+        agentCommand: 'claude',
+        agentArgs: '',
+        agentEnv: {
+          CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/victim/auth',
+          CLAUDE_PROFILE: 'captured'
+        }
+      }
+    })
+
+    const publishedLaunchConfig = revealTerminalSession.mock.calls[0]?.[1]?.launchConfig as
+      | { agentEnv?: Record<string, string> }
+      | undefined
+    expect(publishedLaunchConfig?.agentEnv).toEqual({ CLAUDE_PROFILE: 'captured' })
+  })
+
   it('reveals Claude Agent Teams launches with the rewritten launch config', async () => {
     const spawn = vi.fn().mockResolvedValue({ id: 'pty-bg' })
     const revealTerminalSession = vi.fn().mockResolvedValue({ tabId: 'tab-bg' })

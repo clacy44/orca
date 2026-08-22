@@ -150,28 +150,34 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
     const result = enforceClaudeConfigDirLaunchScope({
       env: { PATH: '/usr/bin' },
       envToDelete: undefined,
-      agentEnv: { CLAUDE_CONFIG_DIR: '/tmp/victim', ORCA_TAB_ID: 't1' },
+      launchConfig: {
+        agentArgs: '',
+        agentEnv: { CLAUDE_CONFIG_DIR: '/tmp/victim', ORCA_TAB_ID: 't1' }
+      },
       hostConfigDir: null,
       hasHostClaudeAuth: false,
       connectionId: null
     })
 
-    expect(result.agentEnv).toEqual({ ORCA_TAB_ID: 't1' })
+    expect(result.launchConfig?.agentEnv).toEqual({ ORCA_TAB_ID: 't1' })
   })
 
-  it('leaves a remote pane agentEnv untouched', () => {
-    const agentEnv = { CLAUDE_CONFIG_DIR: '/home/remote/.claude-work' }
+  it('leaves a remote pane launchConfig untouched', () => {
+    const launchConfig = {
+      agentArgs: '',
+      agentEnv: { CLAUDE_CONFIG_DIR: '/home/remote/.claude-work' }
+    }
 
     const result = enforceClaudeConfigDirLaunchScope({
       env: {},
       envToDelete: undefined,
-      agentEnv,
+      launchConfig,
       hostConfigDir: null,
       hasHostClaudeAuth: false,
       connectionId: 'ssh-1'
     })
 
-    expect(result.agentEnv).toBe(agentEnv)
+    expect(result.launchConfig).toBe(launchConfig)
   })
 
   describe('win32 env-key case folding', () => {
@@ -202,18 +208,18 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       expect(result.envToDelete).toEqual([])
     })
 
-    it('scrubs a lower-cased key from agentEnv too', () => {
+    it('scrubs a lower-cased key from the persisted agentEnv too', () => {
       const result = enforceClaudeConfigDirLaunchScope({
         env: {},
         envToDelete: undefined,
-        agentEnv: { Claude_Config_Dir: 'C:\\victim\\auth' },
+        launchConfig: { agentArgs: '', agentEnv: { Claude_Config_Dir: 'C:\\victim\\auth' } },
         hostConfigDir: null,
         hasHostClaudeAuth: false,
         connectionId: null,
         platform: 'win32'
       })
 
-      expect(result.agentEnv).toEqual({})
+      expect(result.launchConfig?.agentEnv).toEqual({})
     })
 
     it('keeps a lower-cased key on posix, where it is a different variable', () => {

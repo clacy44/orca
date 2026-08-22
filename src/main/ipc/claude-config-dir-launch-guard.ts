@@ -12,7 +12,12 @@ import { isWindowsAbsolutePathLike } from '../../shared/cross-platform-path'
 
 export const CLAUDE_CONFIG_DIR_ENV_KEY = 'CLAUDE_CONFIG_DIR'
 
-export type ClaudeConfigDirLaunchScope = {
+/** Just enough of `SleepingAgentLaunchConfig` for the scrub; the caller keeps its own type. */
+export type LaunchConfigWithAgentEnv = { agentEnv?: Record<string, string> | undefined }
+
+export type ClaudeConfigDirLaunchScope<
+  TLaunchConfig extends LaunchConfigWithAgentEnv = LaunchConfigWithAgentEnv
+> = {
   env: Record<string, string> | undefined
   envToDelete: string[] | undefined
   /** CLAUDE_CONFIG_DIR the host auth patch computed for this spawn, or null. */
@@ -25,17 +30,19 @@ export type ClaudeConfigDirLaunchScope = {
    */
   hasHostClaudeAuth: boolean
   connectionId: string | null | undefined
-  /** `launchConfig.agentEnv`, which path B persists onto the sleeping-agent record. */
-  agentEnv?: Record<string, string> | undefined
+  /** The launch config the caller persists; its `agentEnv` is scrubbed and handed back. */
+  launchConfig?: TLaunchConfig | undefined
   /** `<userData>/claude-lanes`, for clause (a)'s second conjunct; null skips it. */
   laneRoot?: string | null
   platform?: NodeJS.Platform
 }
 
-export type ClaudeConfigDirLaunchResult = {
+export type ClaudeConfigDirLaunchResult<
+  TLaunchConfig extends LaunchConfigWithAgentEnv = LaunchConfigWithAgentEnv
+> = {
   env: Record<string, string> | undefined
   envToDelete: string[] | undefined
-  agentEnv: Record<string, string> | undefined
+  launchConfig: TLaunchConfig | undefined
 }
 
 /**
@@ -59,10 +66,10 @@ export type ClaudeConfigDirLaunchResult = {
  * case-insensitively while this record does not, so a planted `claude_config_dir`
  * would otherwise pass the strip and outrank the host key in the child.
  */
-export function enforceClaudeConfigDirLaunchScope(
-  scope: ClaudeConfigDirLaunchScope
-): ClaudeConfigDirLaunchResult {
-  const { env, envToDelete, hostConfigDir, hasHostClaudeAuth, connectionId, agentEnv } = scope
+export function enforceClaudeConfigDirLaunchScope<TLaunchConfig extends LaunchConfigWithAgentEnv>(
+  scope: ClaudeConfigDirLaunchScope<TLaunchConfig>
+): ClaudeConfigDirLaunchResult<TLaunchConfig> {
+  const { env, envToDelete, hostConfigDir, hasHostClaudeAuth, connectionId, launchConfig } = scope
   const platform = scope.platform ?? process.platform
   if (connectionId) {
     if (hasHostClaudeAuth) {
@@ -71,9 +78,12 @@ export function enforceClaudeConfigDirLaunchScope(
       )
     }
     assertNoLanePathInRemoteEnv(env, scope.laneRoot ?? null)
-    return { env, envToDelete, agentEnv }
+    return { env, envToDelete, launchConfig }
   }
-  const scrubbedAgentEnv = withoutEnvKey(agentEnv, CLAUDE_CONFIG_DIR_ENV_KEY, platform)
+  const scopedLaunchConfig = scopeLaunchConfigClaudeConfigDir(launchConfig, {
+    connectionId,
+    platform
+  })
   const scrubbedEnvToDelete = withoutEnvKeyDeletion(
     envToDelete,
     CLAUDE_CONFIG_DIR_ENV_KEY,
@@ -95,14 +105,34 @@ export function enforceClaudeConfigDirLaunchScope(
     return {
       env: withEnvKeyCollapsed(env, CLAUDE_CONFIG_DIR_ENV_KEY, hostConfigDir, platform),
       envToDelete: scrubbedEnvToDelete,
-      agentEnv: scrubbedAgentEnv
+      launchConfig: scopedLaunchConfig
     }
   }
   return {
     env: withoutEnvKey(env, CLAUDE_CONFIG_DIR_ENV_KEY, platform),
     envToDelete: scrubbedEnvToDelete,
-    agentEnv: scrubbedAgentEnv
+    launchConfig: scopedLaunchConfig
   }
+}
+
+/**
+ * The `launchConfig.agentEnv` half of guard 1, on its own so the runtime-owned create can
+ * scrub the record it persists: path A's spawn env is guarded in `pty.ts`, but its
+ * `launchConfig` never enters that file, and the sleeping-agent record built from it
+ * outlives the spawn and is published back to clients.
+ *
+ * A remote pane's value names a config dir on the remote host, so it is left verbatim.
+ */
+export function scopeLaunchConfigClaudeConfigDir<TLaunchConfig extends LaunchConfigWithAgentEnv>(
+  launchConfig: TLaunchConfig | undefined,
+  options: { connectionId?: string | null | undefined; platform?: NodeJS.Platform }
+): TLaunchConfig | undefined {
+  if (!launchConfig || options.connectionId) {
+    return launchConfig
+  }
+  const platform = options.platform ?? process.platform
+  const scrubbed = withoutEnvKey(launchConfig.agentEnv, CLAUDE_CONFIG_DIR_ENV_KEY, platform)
+  return scrubbed === launchConfig.agentEnv ? launchConfig : { ...launchConfig, agentEnv: scrubbed }
 }
 
 /**

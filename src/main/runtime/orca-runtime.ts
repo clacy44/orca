@@ -305,6 +305,7 @@ import {
   type ExecutionHostId
 } from '../../shared/execution-host'
 import { preservedBranchCleanupScopeKey } from '../../shared/preserved-branch-cleanup'
+import { scopeLaunchConfigClaudeConfigDir } from '../ipc/claude-config-dir-launch-guard'
 import { getRegisteredSshState } from '../ipc/ssh'
 import type {
   AgentProviderSessionMetadata,
@@ -26476,7 +26477,10 @@ export class OrcaRuntimeService {
           claudeAgentTeamsSourceCommand !== launchOpts.command
             ? agentTeamsPlan.command
             : undefined
-        const effectiveLaunchConfig =
+        // Why here: guard 3 covers path A's spawn env inside pty.ts, but the launch config
+        // never enters that file — the record built from it below outlives the spawn and is
+        // published back to clients, so the client's CLAUDE_CONFIG_DIR is scrubbed here too.
+        const effectiveLaunchConfig = scopeLaunchConfigClaudeConfigDir(
           launchOpts.launchConfig && agentTeamsPlan
             ? {
                 ...launchOpts.launchConfig,
@@ -26490,7 +26494,9 @@ export class OrcaRuntimeService {
                   ...agentTeamsPlan.env
                 }
               }
-            : launchOpts.launchConfig
+            : launchOpts.launchConfig,
+          { connectionId: workspace.connectionId }
+        )
         // Why: setup/agent sequencing wraps the PTY launch in a wait shell before
         // Claude Agent Teams runs. Preserve the direct Claude command separately
         // so the wrapper can exec the teammate-mode variant after setup completes.

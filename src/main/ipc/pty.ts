@@ -1182,14 +1182,6 @@ function promoteAgentTeamsShimPath(
   env[currentPathKey] = [shimPath, ...remaining].join(delimiter)
 }
 
-function deleteRequestedEnvKeys(
-  env: Record<string, string> | undefined,
-  keys: string[] | undefined
-): void {
-  // Delegating: on win32 a requested key names every casing of one variable (§2m(5)).
-  deleteEnvKeyVariants(env, keys ?? [])
-}
-
 function shouldSkipCodexHomeEnvForWindowsShell(
   shellPath: string | undefined,
   cwd: string | undefined
@@ -4788,7 +4780,7 @@ export function registerPtyHandlers(
       if (codexResumeHomeSelected) {
         spawnOptions.envToDelete = removeCodexHomeDeletionRequests(spawnOptions.envToDelete)
       }
-      deleteRequestedEnvKeys(env, spawnOptions.envToDelete)
+      deleteEnvKeyVariants(env, spawnOptions.envToDelete)
       promoteAgentTeamsShimPath(env, requestedAgentTeamsPath)
       const configDirScope = enforceClaudeConfigDirLaunchScope({
         env,
@@ -6460,12 +6452,14 @@ export function registerPtyHandlers(
         if (codexResumeHomeSelected) {
           combinedEnvToDelete = removeCodexHomeDeletionRequests(combinedEnvToDelete)
         }
-        deleteRequestedEnvKeys(spawnEnv, combinedEnvToDelete)
+        deleteEnvKeyVariants(spawnEnv, combinedEnvToDelete)
         promoteAgentTeamsShimPath(spawnEnv, requestedAgentTeamsPath)
+        // Why launchConfig travels through the guard: the record persisted below outlives the
+        // spawn, so the client value must not survive on it either.
         const configDirScope = enforceClaudeConfigDirLaunchScope({
           env: spawnEnv,
           envToDelete: combinedEnvToDelete,
-          agentEnv: effectiveLaunchConfig?.agentEnv,
+          launchConfig: effectiveLaunchConfig,
           hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
           hasHostClaudeAuth: claudeAuth !== null,
           connectionId: args.connectionId,
@@ -6473,16 +6467,7 @@ export function registerPtyHandlers(
         })
         const scopedSpawnEnv = configDirScope.env
         combinedEnvToDelete = configDirScope.envToDelete
-        // Why: the record persisted below outlives the spawn, so the client value must not
-        // survive on it even though guard 3 already neutralised it in the spawn env.
-        const scopedAgentEnv = configDirScope.agentEnv
-        if (
-          effectiveLaunchConfig &&
-          scopedAgentEnv &&
-          scopedAgentEnv !== effectiveLaunchConfig.agentEnv
-        ) {
-          effectiveLaunchConfig = { ...effectiveLaunchConfig, agentEnv: scopedAgentEnv }
-        }
+        effectiveLaunchConfig = configDirScope.launchConfig
         const spawnOptions: PtySpawnOptions = {
           cols: args.cols,
           rows: args.rows,
