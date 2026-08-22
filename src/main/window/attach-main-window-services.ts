@@ -27,6 +27,7 @@ import {
 import { registerDaemonManagementHandlers } from '../ipc/pty-management'
 import { registerSshHandlers } from '../ipc/ssh'
 import { registerRemoteWorkspaceHandlers } from '../ipc/remote-workspace'
+import { registerTerminalPresenceHandlers } from '../ipc/terminal-presence'
 import { browserManager } from '../browser/browser-manager'
 import { hasSystemMediaAccess, requestSystemMediaAccess } from '../browser/browser-media-access'
 import type { OrcaRuntimeService, RuntimeWorktreeLifecycleEvent } from '../runtime/orca-runtime'
@@ -153,6 +154,11 @@ export function attachMainWindowServices(
   }
   registerSshHandlers(store, () => mainWindow, runtime)
   registerRemoteWorkspaceHandlers(store, () => mainWindow)
+  // Why here: the local presence lane pushes to this window and tears down with it, so it belongs
+  // where the other per-window channels are wired rather than in the process-wide core registration.
+  registerTerminalPresenceHandlers(mainWindow, {
+    resolveTerminalHandle: (ptyId) => runtime.resolveExistingTerminalHandleForPty(ptyId)
+  })
   registerFileDropRelay(mainWindow)
   registerTccPromptNoticeHandlers(mainWindow)
   // Why: setupAutoUpdater sync-require()s electron-updater (slow on cold Windows w/ Defender, #7225), so defer past first paint; timer fallback covers crash-looping renderers.

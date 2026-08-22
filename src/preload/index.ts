@@ -20,6 +20,7 @@ import type { AgentHookInstallStatus } from '../shared/agent-hook-types'
 import type { CodexConfigSyncStatus } from '../shared/codex-config-sync-types'
 import type { TerminalPaneSplitSource } from '../shared/feature-education-telemetry'
 import type { TerminalTabCreateReply } from '../shared/terminal-reveal-identity'
+import type { TerminalPresenceLocalTerminal } from '../shared/terminal-presence-ipc'
 import type { ProjectExecutionRuntimeResolution } from '../shared/project-execution-runtime'
 import type { StartupCommandDelivery } from '../shared/codex-startup-delivery'
 import type {
@@ -1298,6 +1299,19 @@ const api = {
       macTccAttribution: () => ipcRenderer.invoke('pty:management:macTccAttribution')
     }
   },
+
+  // Why beside pty: this is the host's own PTYs, reaching the renderer that owns them (gap 9).
+  terminalPresence: {
+    get: () => ipcRenderer.invoke('terminalPresence:get'),
+    onChanged: (callback: (terminal: TerminalPresenceLocalTerminal) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        terminal: TerminalPresenceLocalTerminal
+      ): void => callback(terminal)
+      ipcRenderer.on('terminalPresence:changed', listener)
+      return () => ipcRenderer.removeListener('terminalPresence:changed', listener)
+    }
+  } satisfies PreloadApi['terminalPresence'],
 
   feedback: {
     submit: (args: {

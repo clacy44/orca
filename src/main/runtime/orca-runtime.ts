@@ -5466,7 +5466,9 @@ export class OrcaRuntimeService {
   // Why read-only: minting a handle while building a broadcast would let a roster mutate the handle
   // table, and a peer attached to a pane nobody ever addressed by handle is better published with one
   // fewer entry than with an id invented for the occasion.
-  private resolveExistingTerminalHandleForPty(ptyId: string): string | null {
+  // Why public: the local presence IPC lane publishes this handle beside each ptyId as the roster's
+  // display token, and a second resolver there would be a second answer to "which handle is this PTY".
+  resolveExistingTerminalHandleForPty(ptyId: string): string | null {
     const preAllocated = this.handleByPtyId.get(ptyId)
     if (preAllocated) {
       return preAllocated

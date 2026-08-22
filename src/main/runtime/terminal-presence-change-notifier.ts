@@ -2,6 +2,7 @@
 // coalesced per-PTY feed instead of arming its own timer — including the TTL falling edge, which is the
 // one emit no mutation produces and which a per-surface timer would therefore forget.
 import { createKeyedTrailingEdgeCoalescer } from './keyed-trailing-edge-coalescer'
+import { nextTerminalPresenceHoldExpiryAt } from './terminal-presence-arbitration'
 import {
   terminalPresenceRegistry,
   type TerminalPresenceRegistry
@@ -26,6 +27,9 @@ export type TerminalPresenceChangeNotifierOptions = {
   // Why: presence's single clock domain, injectable alongside the registry's so one fake clock drives
   // the stamps and the falling edge that expires them.
   now?: () => number
+  // Why injectable beside the registry: holds are process-global, so a notifier built on its own
+  // registry must answer for its own holds rather than the host process's.
+  holdExpiryAt?: (ptyId: string) => number | null
 }
 
 export function createTerminalPresenceChangeNotifier(
@@ -35,6 +39,7 @@ export function createTerminalPresenceChangeNotifier(
   // Why the registry's clock by default: the falling edge exists to expire stamps this registry wrote,
   // so reading a second clock would arm timers against timestamps from a different domain.
   const now = options.now ?? ((): number => registry.now())
+  const holdExpiryAt = options.holdExpiryAt ?? nextTerminalPresenceHoldExpiryAt
   const listenersByPty = new Map<string, Set<() => void>>()
   const fallingEdgeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -57,6 +62,23 @@ export function createTerminalPresenceChangeNotifier(
     return earliest
   }
 
+  // Why the hold gets a deadline of its own: the re-press window (5 s) outlives the activity TTL (3 s)
+  // that raised it, so a falling edge armed on stamps alone stops emitting while the "press again" notice
+  // is still on the wire — and two humans who simply stop typing strand it forever (§2.6).
+  const nextExpiryAt = (ptyId: string, at: number): number | null => {
+    const earliestActivity = earliestFreshActivityAt(ptyId, at)
+    const activityExpiry =
+      earliestActivity === null ? null : earliestActivity + TERMINAL_PRESENCE_ACTIVITY_TTL_MS
+    const holdExpiry = holdExpiryAt(ptyId)
+    // Why re-tested against this clock: an already-met hold deadline must arm nothing, or the emit that
+    // met it would arm the same deadline again on every pass.
+    const publishableHoldExpiry = holdExpiry !== null && holdExpiry > at ? holdExpiry : null
+    if (activityExpiry === null || publishableHoldExpiry === null) {
+      return activityExpiry ?? publishableHoldExpiry
+    }
+    return Math.min(activityExpiry, publishableHoldExpiry)
+  }
+
   const clearFallingEdge = (ptyId: string): void => {
     const timer = fallingEdgeTimers.get(ptyId)
     if (timer) {
@@ -65,15 +87,15 @@ export function createTerminalPresenceChangeNotifier(
     }
   }
 
-  // Why: activity expiry is a state change no mutator reports, so the last published payload would keep a
-  // dead "typing" on screen forever.
+  // Why: an expiry — of an activity stamp or of a hold — is a state change no mutator reports, so the last
+  // published payload would keep a dead "typing", or a spent "press again", on screen forever.
   function armFallingEdge(ptyId: string): void {
     const at = now()
-    const earliest = earliestFreshActivityAt(ptyId, at)
-    if (earliest === null) {
+    const expiry = nextExpiryAt(ptyId, at)
+    if (expiry === null) {
       return
     }
-    const remaining = earliest + TERMINAL_PRESENCE_ACTIVITY_TTL_MS - at
+    const remaining = expiry - at
     const timer = setTimeout(() => {
       fallingEdgeTimers.delete(ptyId)
       emit(ptyId)
