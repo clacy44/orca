@@ -214,6 +214,20 @@ export class ClientSessionTabSelectionStore {
     }
   }
 
+  // Why read-only and why per worktree: W9 publishes what each device has selected here, and a builder
+  // that reached for `project()` instead would rewrite another client's stored selection as a side
+  // effect of being looked at.
+  selectionsForWorktree(worktreeId: string): Map<string, ClientSessionTabSelection> {
+    const byClient = new Map<string, ClientSessionTabSelection>()
+    for (const [clientNavigationId, statesByWorktree] of this.statesByClient) {
+      const state = statesByWorktree.get(worktreeId)
+      if (state) {
+        byClient.set(clientNavigationId, state.selection)
+      }
+    }
+    return byClient
+  }
+
   activate(
     snapshot: RuntimeMobileSessionTabsResult,
     clientNavigationId: string,

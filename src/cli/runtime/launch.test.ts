@@ -391,6 +391,35 @@ describe('serveOrcaApp', () => {
     )
   })
 
+  it('spawns one --serve-pair-name per named invite, in flag order', async () => {
+    const child = {
+      kill: vi.fn(),
+      once: vi.fn(
+        (event: string, handler: (code: number | null, signal: string | null) => void) => {
+          if (event === 'exit') {
+            handler(0, null)
+          }
+        }
+      ),
+      unref: vi.fn()
+    }
+    spawnMock.mockReturnValue(child)
+
+    await expect(
+      serveOrcaApp({ pairingAddress: '100.64.1.20', pairNames: ['Ana', 'Ben'] })
+    ).resolves.toBe(0)
+
+    expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+      '--serve',
+      '--serve-pairing-address',
+      '100.64.1.20',
+      '--serve-pair-name',
+      'Ana',
+      '--serve-pair-name',
+      'Ben'
+    ])
+  })
+
   it('preserves an AppImage no-sandbox launch for the server child', async () => {
     process.env.ORCA_APPIMAGE_NO_SANDBOX = '1'
     const child = {
@@ -560,6 +589,51 @@ describe('serveOrcaApp', () => {
 
     expect(stdoutSpy).toHaveBeenCalledWith(`${RECIPE_JSON}\n`)
     expect(child.unref).toHaveBeenCalledOnce()
+  })
+
+  it('quotes named invites for the Windows command shim and leaves them bare elsewhere', async () => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+    const child = {
+      kill: vi.fn(),
+      once: vi.fn(
+        (event: string, handler: (code: number | null, signal: string | null) => void) => {
+          if (event === 'exit') {
+            queueMicrotask(() => handler(0, null))
+          }
+          return child
+        }
+      ),
+      unref: vi.fn()
+    }
+    spawnMock.mockReturnValue(child)
+
+    try {
+      // Node joins argv with spaces and never quotes under `shell: true`, so an unquoted name would
+      // reach the child as two tokens and `&` in it would run as a cmd command.
+      Object.defineProperty(process, 'platform', { value: 'win32' })
+      process.env.ORCA_APP_EXECUTABLE = 'C:\\repo\\node_modules\\.bin\\electron.cmd'
+      await expect(serveOrcaApp({ pairNames: ['Ana Smith', 'a & whoami'] })).resolves.toBe(0)
+
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+        '--serve',
+        '--serve-pair-name',
+        '"Ana Smith"',
+        '--serve-pair-name',
+        '"a & whoami"'
+      ])
+
+      // Negative control: no shell, no quoting — the child receives the exact argv it always has.
+      spawnMock.mockClear()
+      Object.defineProperty(process, 'platform', { value: 'linux' })
+      process.env.ORCA_APP_EXECUTABLE = '/usr/local/bin/orca'
+      await expect(serveOrcaApp({ pairNames: ['Ana Smith'] })).resolves.toBe(0)
+
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual(['--serve', '--serve-pair-name', 'Ana Smith'])
+    } finally {
+      if (platformDescriptor) {
+        Object.defineProperty(process, 'platform', platformDescriptor)
+      }
+    }
   })
 
   it('uses a shell when a Windows npm command shim is the Electron executable', async () => {

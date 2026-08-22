@@ -168,7 +168,9 @@ function createReader(session: PairedSession): ResponseReader {
   }
   session.ws.on('message', onMessage)
   return {
-    next: (id, predicate = () => true) => {
+    // Why the default skips the roster: `terminalPresence` is an independent broadcast on this same
+    // stream, so a bare next() would hand a navigation assertion whichever frame arrived first.
+    next: (id, predicate = (response) => resultType(response) !== 'terminalPresence') => {
       const queuedIndex = queued.findIndex((response) => response.id === id && predicate(response))
       if (queuedIndex !== -1) {
         return Promise.resolve(queued.splice(queuedIndex, 1)[0]!)

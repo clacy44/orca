@@ -15,6 +15,7 @@ export { getBashShellReadyRcfileContent } from '../providers/local-pty-shell-rea
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
 import type { PtyBindingSourceExpectation, Store } from '../persistence'
 import { retireTerminalSurfaceFromPersistence } from '../runtime/mobile-session-terminal-persistence-retirement'
+import { terminalPresenceRegistry } from '../runtime/terminal-presence-registry'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { TuiAgent } from '../../shared/tui-agent'
 import { toSshExecutionHostId } from '../../shared/execution-host'
@@ -7227,10 +7228,27 @@ export function registerPtyHandlers(
 
   const hostViewportClaimTails = new Map<string, Promise<boolean>>()
 
+  // Why here and not inside the writers: this is the local human's keystroke, and presence reports
+  // intent, not PTY effect. The claim tail below drops the write entirely when a prior viewport claim
+  // lost — the contested moment a peer most needs the host to read as typing — and every guard inside
+  // the writers can drop it too. Its Date.now() stamp lives in the presence registry alone;
+  // lastInputAtByPty stays performance.now().
+  const stampHostInput = (args: PtyWritePayload): void => {
+    // Why liveness is the one thing checked here: every guard below can drop a keystroke the human
+    // really typed, so the stamp stays above them — but a write for a PTY this process no longer routes
+    // (already exited, or never created) has no pane for a peer to watch, and recordHostInteractiveInput
+    // would CREATE its attachments entry, which only releasePty on PTY exit can ever remove.
+    if (!ptyOwnership.has(args.id)) {
+      return
+    }
+    terminalPresenceRegistry.recordHostInteractiveInput(args.id)
+  }
+
   ipcMain.on('pty:write', (event, args: unknown) => {
     if (!isPtyWriteEventFromMainWindow(event, mainWindow.webContents) || !isPtyWritePayload(args)) {
       return
     }
+    stampHostInput(args)
     const claimTail = hostViewportClaimTails.get(args.id)
     if (claimTail) {
       void claimTail.then((claimed) => (claimed ? writePtyInput(args) : false))
@@ -7242,6 +7260,7 @@ export function registerPtyHandlers(
     if (!isPtyWriteEventFromMainWindow(event, mainWindow.webContents) || !isPtyWritePayload(args)) {
       return false
     }
+    stampHostInput(args)
     const claimTail = hostViewportClaimTails.get(args.id)
     return claimTail
       ? claimTail.then((claimed) => (claimed ? writePtyInputAccepted(args) : false))

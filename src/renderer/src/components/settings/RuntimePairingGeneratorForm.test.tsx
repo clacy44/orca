@@ -18,6 +18,7 @@ function renderForm(
   return renderToStaticMarkup(
     <TooltipProvider>
       <RuntimePairingGeneratorForm
+        deviceName="Ana"
         intent={intent}
         loopbackAddress="127.0.0.1"
         networkInterfaces={[{ name: 'tailscale0', address: '100.76.32.125' }]}
@@ -28,6 +29,7 @@ function renderForm(
         runtimePairingUrl={generated?.runtimePairingUrl ?? null}
         copiedTarget={null}
         generatedAddress={generated?.address ?? null}
+        onDeviceNameChange={vi.fn()}
         onIntentChange={vi.fn()}
         onSelectedAddressChange={vi.fn()}
         onRefreshNetworkInterfaces={vi.fn()}
@@ -39,6 +41,12 @@ function renderForm(
 }
 
 describe('RuntimePairingGeneratorForm', () => {
+  it('carries the name into the device-name field', () => {
+    const markup = renderForm('another', '100.76.32.125')
+    expect(markup).toContain('id="runtime-pairing-device-name"')
+    expect(markup).toContain('value="Ana"')
+  })
+
   it('uses detected interfaces for another-device intent', () => {
     const markup = renderForm('another', '100.76.32.125')
     expect(markup).toContain('role="combobox"')

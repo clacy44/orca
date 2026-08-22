@@ -71,6 +71,15 @@ describe('serve flag parity between the CLI spec and the Electron argv rewrite',
     }
   })
 
+  it('rewrites every --pair-name occurrence, not just the first', () => {
+    // Why a dedicated case: the it.each above passes one occurrence of each flag, so a rewrite that
+    // translated only the first --pair-name (the shape `valueAfter` in getServeOptions has) would pass
+    // it while silently dropping every person after the first.
+    expect(
+      normalizeServeModeArgv(['/AppRun', 'serve', '--pair-name', 'Ana', '--pair-name=Ben'])
+    ).toEqual(['/AppRun', '--serve', '--serve-pair-name', 'Ana', '--serve-pair-name', 'Ben'])
+  })
+
   it('keeps the untranslated allowlist tied to real global flags', () => {
     for (const flag of UNTRANSLATED_GLOBAL_FLAGS) {
       expect(GLOBAL_FLAGS).toContain(flag)

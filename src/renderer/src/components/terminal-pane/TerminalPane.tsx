@@ -59,6 +59,9 @@ import { resolveLeafCloseCopyKind } from '../terminal/terminal-close-copy-kind'
 import { RUNNING_CLOSE_PROBE_TIMEOUT_MS } from '../terminal/running-terminal-close-guard'
 import CodexRestartChip from '../CodexRestartChip'
 import { MobileDriverOverlay } from './MobileDriverOverlay'
+import { TerminalPresenceChip } from './TerminalPresenceChip'
+import { resolveTerminalPresenceChipState } from './terminal-presence-chip-state'
+import { getPresenceForPty } from '@/lib/pane-manager/terminal-presence-state'
 import { stripSshReconnectOwnedErrorLines, TerminalErrorToast } from './TerminalErrorToast'
 import { TerminalSessionStateSaveFailureDialog } from './TerminalSessionStateSaveFailureDialog'
 import TerminalContextMenu from './TerminalContextMenu'
@@ -3248,6 +3251,34 @@ function TerminalPane(
           />,
           pane.container,
           `mobile-driver-banner-${pane.id}`
+        )
+      })}
+      {managedPanes.map((pane) => {
+        const ptyId = paneTransportsRef.current.get(pane.id)?.getPtyId()
+        if (!ptyId) {
+          return null
+        }
+        // Why the same surface decision as the driver overlay above: a chat-replaced pane hides every
+        // piece of presence chrome, and a chip in its top-left is exactly what that rule excludes.
+        const paneSurface =
+          effectiveChatViewMode && pane.leafId === chatLeafId ? 'chat' : 'terminal'
+        if (shouldChatTakeOverMobileSurface(paneSurface)) {
+          return null
+        }
+        // Why beside the driver overlay and not in the pane header: the header renders only with titles
+        // or always-on headers enabled, so a chip mounted there is invisible to most panes.
+        const presence = resolveTerminalPresenceChipState(getPresenceForPty(ptyId))
+        if (!presence) {
+          return null
+        }
+        return createPortal(
+          <TerminalPresenceChip
+            key={`terminal-presence-${pane.id}-${ptyId}`}
+            state={presence}
+            rootClassName="terminal-presence-chip"
+          />,
+          pane.container,
+          `terminal-presence-chip-${pane.id}`
         )
       })}
       <CloseTerminalDialog

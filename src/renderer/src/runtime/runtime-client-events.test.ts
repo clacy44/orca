@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SshProviderEpoch } from '../../../shared/ssh-types'
-import { subscribeRuntimeClientEvents } from './runtime-client-events'
+import {
+  isAdmittedRuntimeClientEventType,
+  subscribeRuntimeClientEvents
+} from './runtime-client-events'
 import { replaceRuntimeEnvironmentRevisions } from './runtime-environment-revision'
 
 describe('subscribeRuntimeClientEvents', () => {
@@ -162,6 +165,68 @@ describe('subscribeRuntimeClientEvents', () => {
       'cancelled',
       'woken'
     ])
+  })
+
+  // W8 is Rule 3: the host starts sending a frame on an existing path. This decoder now admits it, and
+  // the frozen pre-change copy below is what keeps "old clients drop it, silently" a checked claim.
+  it('admits a terminalPresence frame and still drops an unknown type', async () => {
+    let capturedOnResponse: ((response: unknown) => void) | undefined
+    const subscribe = vi.fn(async (_args, nextCallbacks) => {
+      capturedOnResponse = (nextCallbacks as { onResponse: (response: unknown) => void }).onResponse
+      return { unsubscribe: vi.fn(), sendBinary: vi.fn() }
+    })
+    const onEvent = vi.fn()
+    const onError = vi.fn()
+    vi.stubGlobal('window', { api: { runtimeEnvironments: { subscribe } } })
+
+    await subscribeRuntimeClientEvents('env-1', onEvent, onError)
+    if (!capturedOnResponse) {
+      throw new Error('Expected subscription callbacks')
+    }
+    const roster = {
+      type: 'terminalPresence',
+      seq: 2,
+      participants: [
+        {
+          participantId: 'p-1',
+          label: 'Ana laptop',
+          kind: 'runtime',
+          attachedTerminals: ['term_1'],
+          self: false
+        }
+      ]
+    }
+    capturedOnResponse({ ok: true, result: roster })
+    // The negative control beside it: a type nobody declared must still fall through unrendered, so the
+    // admission above is one entry and not a widened decoder.
+    capturedOnResponse({ ok: true, result: { type: 'terminalTelepathy', seq: 3 } })
+    capturedOnResponse({ ok: true, result: { type: 'worktreesChanged', repoId: 'repo-1' } })
+
+    expect(onEvent).toHaveBeenCalledTimes(2)
+    expect(onEvent).toHaveBeenNthCalledWith(1, roster)
+    expect(onEvent).toHaveBeenNthCalledWith(2, { type: 'worktreesChanged', repoId: 'repo-1' })
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Hand-rolled skew where the cross-version harness covers nothing: the pre-change predicate, frozen as
+  // data, is the only thing that proves an old client drops the roster instead of erroring on it.
+  it('is dropped by a frozen pre-presence copy of the allowlist', () => {
+    const preChangeAllowlist = new Set([
+      'reposChanged',
+      'worktreesChanged',
+      'nativeChatLaunchDraftResolved',
+      'terminalSideEffects',
+      'sshStateChanged',
+      'linearLinkedIssueUpdated',
+      'activateWorktree',
+      'worktreeTerminalSleepState'
+    ])
+
+    expect(preChangeAllowlist.has('terminalPresence')).toBe(false)
+    for (const type of preChangeAllowlist) {
+      expect(isAdmittedRuntimeClientEventType(type)).toBe(true)
+    }
+    expect(isAdmittedRuntimeClientEventType('terminalPresence')).toBe(true)
   })
 
   it('preserves full SSH authority in retained snapshots and live client events', async () => {

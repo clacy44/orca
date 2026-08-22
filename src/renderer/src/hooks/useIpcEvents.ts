@@ -95,6 +95,10 @@ import { attachMobileMarkdownBridge } from '@/runtime/mobile-markdown-bridge'
 import { closeMobileSessionTabInStore } from '@/runtime/mobile-session-tab-close'
 import { createWorktreeChangeRefreshQueue } from './worktree-change-refresh-queue'
 import { subscribeRuntimeClientEvents } from '@/runtime/runtime-client-events'
+import {
+  clearPresenceRosterForEnvironment,
+  setPresenceRosterForEnvironment
+} from '@/lib/pane-manager/terminal-presence-state'
 import { applyNativeChatLaunchDraftResolved } from '@/runtime/native-chat-launch-draft-runtime-resolution'
 import { toRemoteRuntimePtyId } from '@/runtime/runtime-terminal-stream'
 import { dispatchTerminalSideEffectBatch } from '@/components/terminal-pane/terminal-side-effect-facts-handler'
@@ -973,6 +977,15 @@ export function useIpcEvents(): void {
         applyHostWorktreeTerminalSleepState(environmentId, event)
         return
       }
+      if (event.type === 'terminalPresence') {
+        // Why keyed by environment and never merged into the pane lane: this bus is membership-only and
+        // can be a debounce interval stale, so it feeds Surface 3 alone.
+        setPresenceRosterForEnvironment(environmentId, {
+          participants: event.participants,
+          truncated: event.truncated
+        })
+        return
+      }
       if (event.type === 'terminalSideEffects') {
         dispatchTerminalSideEffectBatch({
           ...event.batch,
@@ -1091,6 +1104,16 @@ export function useIpcEvents(): void {
       )) {
         // No-op when the environment has no SSH bucket (e.g. web client).
         useAppStore.getState().markEnvironmentSshStateStale(environmentId)
+      }
+      for (const environmentId of getNewlyDisconnectedRuntimeEnvironmentIds(
+        runtimeClientEventEnvironmentIds,
+        nextEnvironmentIds
+      )) {
+        // Why the desired set and not the reachable one: the roster only ever refreshes through this
+        // environment's clientEvents subscription, and leaving the desired set is what tears that down
+        // for good. An unreachable-but-desired runtime keeps its last roster, matching the pane lane's
+        // rule that a dead roster stream must not erase what it last asserted.
+        clearPresenceRosterForEnvironment(environmentId)
       }
       runtimeClientEventEnvironmentIds = nextEnvironmentIds
       runtimeClientEventEnvironmentKey = nextKey

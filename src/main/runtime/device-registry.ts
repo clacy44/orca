@@ -8,6 +8,14 @@ import { join } from 'node:path'
 import { hardenExistingSecureFile, writeSecureJsonFile } from '../../shared/secure-file'
 import type { DeviceScope } from '../../shared/runtime-types'
 import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
+import {
+  MAX_LIVE_MINTED_GRANTS,
+  PENDING_GRANT_TTL_MS,
+  isExpiredPendingDevice,
+  isMintedPendingDevice,
+  retainNewestMintedGrants,
+  retainUnexpiredPendingDevices
+} from './device-registry-pending-grants'
 import type { RelayDeviceBinding } from './relay/relay-revoke-outbox'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
@@ -26,6 +34,10 @@ export type DeviceEntry = {
   // Why: STA-2370 — a grant minted for "This computer only" proves nothing about off-host reach when its
   // client connects, so the bind decision must be able to tell it apart from a LAN/phone grant.
   pairingReach?: RuntimePairingReach
+  // Why: always-minted invites bypass the pending-row coalescing below, so each one carries its own
+  // deadline; absent (legacy rows, and every coalesced row) means "never expires", so an upgrade cannot
+  // invalidate a link already handed out.
+  pendingExpiresAt?: number
 }
 
 function validRelayBinding(value: unknown, deviceId: string): RelayDeviceBinding | undefined {
@@ -73,7 +85,8 @@ export class DeviceRegistry {
     existingDevices: DeviceEntry[],
     name: string,
     scope: DeviceScope,
-    pairingReach: RuntimePairingReach
+    pairingReach: RuntimePairingReach,
+    pendingExpiresAt?: number
   ): DeviceEntry {
     const entry: DeviceEntry = {
       deviceId: randomUUID(),
@@ -82,7 +95,9 @@ export class DeviceRegistry {
       scope,
       pairedAt: Date.now(),
       lastSeenAt: 0,
-      pairingReach
+      pairingReach,
+      // Why: omit the key entirely when absent so a coalesced grant's persisted shape is unchanged.
+      ...(pendingExpiresAt === undefined ? {} : { pendingExpiresAt })
     }
     const nextDevices = [...existingDevices, entry]
     // Why: a credential is not valid until its durable registry write succeeds.
@@ -102,7 +117,11 @@ export class DeviceRegistry {
     scope: DeviceScope = 'mobile',
     pairingReach: RuntimePairingReach = 'network'
   ): DeviceEntry {
-    const existing = this.devices.find((d) => d.lastSeenAt === 0 && d.scope === scope)
+    // Why: a minted row carries a deadline and belongs to one named human, so reusing it here would hand
+    // that person's link out again as the shared unnamed one. The two lanes stay disjoint by construction.
+    const existing = this.devices.find(
+      (d) => d.lastSeenAt === 0 && d.scope === scope && !isMintedPendingDevice(d)
+    )
     if (existing) {
       // Why: the same pending token can be re-advertised at a broader reach; widen it but never narrow it,
       // or a link already handed out for off-host use would stop being served after the next launch.
@@ -111,6 +130,30 @@ export class DeviceRegistry {
         : existing
     }
     return this.addDevice(name, scope, pairingReach)
+  }
+
+  // Why: two humans handed one coalesced link land on one deviceId and one token, so nothing downstream
+  // can tell them apart. A grant can only be split per person at offer time, so this path mints a fresh
+  // row on every call and never reuses a pending one. Unlike rotatePendingDevice it keeps sibling pending
+  // rows, so minting Ben's invite cannot kill Ana's un-scanned one.
+  mintPendingDevice(
+    name: string,
+    scope: DeviceScope = 'mobile',
+    pairingReach: RuntimePairingReach = 'network'
+  ): DeviceEntry {
+    const now = Date.now()
+    return this.createAndPersistDevice(
+      // Why: the cap leaves room for the row about to be appended, so no window ever holds more than
+      // MAX_LIVE_MINTED_GRANTS live invites no matter how often the renderer regenerates.
+      retainNewestMintedGrants(
+        retainUnexpiredPendingDevices(this.devices, now),
+        MAX_LIVE_MINTED_GRANTS - 1
+      ),
+      name,
+      scope,
+      pairingReach,
+      now + PENDING_GRANT_TTL_MS
+    )
   }
 
   private setPairingReach(existing: DeviceEntry, pairingReach: RuntimePairingReach): DeviceEntry {
@@ -136,7 +179,12 @@ export class DeviceRegistry {
     scope: DeviceScope = 'mobile',
     pairingReach: RuntimePairingReach = 'network'
   ): DeviceEntry {
-    const retainedDevices = this.devices.filter((d) => d.lastSeenAt !== 0 || d.scope !== scope)
+    // Why: rotation revokes the ONE shared token that may have been screenshotted; a minted invite is
+    // named, individually revocable (mobile:revokeRuntimeAccess), and must survive an unrelated
+    // "Regenerate" click — the desktop generator sends rotate on every unnamed link.
+    const retainedDevices = this.devices.filter(
+      (d) => d.lastSeenAt !== 0 || d.scope !== scope || isMintedPendingDevice(d)
+    )
     return this.createAndPersistDevice(retainedDevices, name, scope, pairingReach)
   }
 
@@ -156,8 +204,14 @@ export class DeviceRegistry {
     return this.devices.find((d) => d.deviceId === deviceId) ?? null
   }
 
+  /** The shared, regenerable pending row of a scope — never a minted named invite. */
   getPendingDevice(scope: DeviceScope = 'mobile'): DeviceEntry | null {
-    return this.devices.find((device) => device.lastSeenAt === 0 && device.scope === scope) ?? null
+    return (
+      this.devices.find(
+        (device) =>
+          device.lastSeenAt === 0 && device.scope === scope && !isMintedPendingDevice(device)
+      ) ?? null
+    )
   }
 
   setRelayBinding(deviceId: string, binding: RelayDeviceBinding): boolean {
@@ -203,7 +257,11 @@ export class DeviceRegistry {
   }
 
   validateToken(token: string): DeviceEntry | null {
-    return this.devices.find((d) => d.token === token) ?? null
+    const device = this.devices.find((d) => d.token === token) ?? null
+    // Why: the sweep only runs on load and on the next mint, so a headless serve that mints once at
+    // startup would keep a stale invite usable for the whole process lifetime. The deadline has to bind
+    // where the credential is consumed — this is the single authorization lookup for every socket.
+    return device && isExpiredPendingDevice(device, Date.now()) ? null : device
   }
 
   updateLastSeen(deviceId: string): void {
@@ -281,7 +339,7 @@ export class DeviceRegistry {
     try {
       hardenExistingSecureFile(this.registryPath)
       const parsed = JSON.parse(readFileSync(this.registryPath, 'utf-8')) as DeviceEntry[]
-      this.devices = parsed.map((device) => ({
+      const loaded: DeviceEntry[] = parsed.map((device) => ({
         ...device,
         // Why: older registries only existed for phone pairing. Treat missing
         // scope as mobile so legacy device tokens do not gain new CLI powers.
@@ -291,8 +349,17 @@ export class DeviceRegistry {
           device.mobilePairingConnectionMode === 'local-only' ? 'local-only' : 'automatic',
         // Why: registries written before this field existed only ever held network-reach grants (phones and
         // LAN links), so a missing value must keep binding every interface on reconnect.
-        pairingReach: device.pairingReach === 'this-computer' ? 'this-computer' : 'network'
+        pairingReach: device.pairingReach === 'this-computer' ? 'this-computer' : 'network',
+        // Why: a non-finite value on disk would make every comparison false and pin the row forever, so
+        // normalize anything unusable back to the legacy "never expires" shape.
+        pendingExpiresAt:
+          typeof device.pendingExpiresAt === 'number' && Number.isFinite(device.pendingExpiresAt)
+            ? device.pendingExpiresAt
+            : undefined
       }))
+      // Why: sweep in memory only — the next mutation persists the pruned array, and rewriting here would
+      // pay a secure-file write (two synchronous PowerShell ACL spawns on Windows) on every construction.
+      this.devices = retainUnexpiredPendingDevices(loaded, Date.now())
     } catch {
       this.devices = []
     }

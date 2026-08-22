@@ -53,6 +53,7 @@ export type MobileApi = {
     address?: string
     rotate?: boolean
     reach?: RuntimePairingReach
+    name?: string
   }) => Promise<
     | {
         available: false

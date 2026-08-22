@@ -156,6 +156,12 @@ describe('parseArgs', () => {
     expect(parsed.flags.get('label')).toBe(`Bug${REPEATED_FLAG_SEPARATOR}Regression`)
   })
 
+  it('preserves repeated --pair-name occurrences in order', () => {
+    const parsed = parseArgs(['serve', '--pair-name', 'Ana', '--pair-name=Ben'])
+
+    expect(parsed.flags.get('pair-name')).toBe(`Ana${REPEATED_FLAG_SEPARATOR}Ben`)
+  })
+
   it('does not apply repeated flag encoding to ordinary string flags', () => {
     const parsed = parseArgs(['linear', 'list', '--workspace', 'old', '--workspace', 'new'])
 

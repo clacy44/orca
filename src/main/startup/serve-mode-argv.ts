@@ -18,6 +18,7 @@ const CLI_TO_SERVE_FLAG = new Map([
 const CLI_TO_SERVE_VALUE_FLAG = new Map([
   ['--port', '--serve-port'],
   ['--pairing-address', '--serve-pairing-address'],
+  ['--pair-name', '--serve-pair-name'],
   ['--project-root', '--serve-project-root']
 ])
 
@@ -30,6 +31,7 @@ const VALUE_TAKING_FLAGS = new Set([
   ...CLI_TO_SERVE_VALUE_FLAG.keys(),
   '--serve-port',
   '--serve-pairing-address',
+  '--serve-pair-name',
   '--serve-project-root',
   '--user-data-dir',
   '--environment',
@@ -101,6 +103,42 @@ export function findServeSubcommandIndex(argv: readonly string[]): number {
     i = indexAfterToken(argv, i)
   }
   return -1
+}
+
+/**
+ * Every value of a repeated `--serve-*` flag, in argv order, accepting the `=` form that the rewrite
+ * above splits only for CLI-form flags and leaves intact on an Electron-form launch.
+ *
+ * Why it lives beside the rewrite: the two must agree about what a value is. It deliberately accepts a
+ * single-dash token (`--serve-pair-name -Ana`) that `isFlagToken` refuses — the rewrite leaves such a
+ * token adjacent rather than consuming it, so reading it here is what makes both launch forms deliver
+ * the same name. `dropped` counts occurrences that carried no value at all, so a caller can report the
+ * request it cannot satisfy instead of losing it silently.
+ */
+export function readServeFlagValues(
+  argv: readonly string[],
+  flag: string
+): { values: string[]; dropped: number } {
+  const values: string[] = []
+  let dropped = 0
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]!
+    if (token.startsWith(`${flag}=`)) {
+      values.push(token.slice(flag.length + 1))
+      continue
+    }
+    if (token !== flag) {
+      continue
+    }
+    const value = argv[i + 1]
+    if (value === undefined || value.startsWith('--')) {
+      dropped += 1
+      continue
+    }
+    values.push(value)
+    i += 1
+  }
+  return { values, dropped }
 }
 
 /** True when argv already has `--serve` or a bare `serve` CLI subcommand. */

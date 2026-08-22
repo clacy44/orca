@@ -3034,6 +3034,12 @@
           "TerminalQuickCommandsSubmenu": {
             "3ccc7981bb": "Host unavailable",
             "54f29b7c0d": "Loading host…"
+          },
+          "TerminalPresenceChip": {
+            "ca8b0b4bc6": "{{value0}} is typing",
+            "13c1a5839d": "{{value0}} is writing",
+            "b9ac6c07ca": "{{value0}} is typing — press again",
+            "d7e5962e29": "In use by {{value0}}"
           }
         }
       },
@@ -3268,6 +3274,17 @@
           "TabBarQuickCommandHostLoadStatus": {
             "82e294f3ca": "Host unavailable",
             "7c129b08ff": "Loading host…"
+          },
+          "terminal": {
+            "tab": {
+              "presence": {
+                "badge": {
+                  "2561fd4563": "{{value0}} is typing in this tab",
+                  "407e0165e2": "{{value0}} is writing in this tab",
+                  "4f7a82c1d5": "{{value0}} is using this tab"
+                }
+              }
+            }
           }
         }
       },
@@ -3701,6 +3718,14 @@
             "onDescription": "Keep this computer awake continuously",
             "autoDescription": "Stay awake while an agent is working",
             "offDescription": "Allow normal system sleep behavior"
+          },
+          "RuntimePresenceStatusRows": {
+            "77ee51bf9b": "{{value0}} (host)",
+            "3241616dae": "{{value0}} (you)",
+            "ce809af553": "Attached",
+            "97fd835cd3": "Idle",
+            "faa72294ac": "People",
+            "4f4b1f6a3c": "More people not shown"
           }
         }
       },
@@ -7256,7 +7281,10 @@
           "localLinkHelp": "This link only works in a browser or Orca client running on this computer.",
           "noExternalAddress": "No address for another device was found. Connect this computer to a LAN or Tailscale, refresh, or choose Custom address.",
           "staleAddress": "The connection address changed. Generate a new link for {{address}}.",
-          "customInvalid": "Enter a valid host, host:port, IPv6 address, or ws(s):// URL."
+          "customInvalid": "Enter a valid host, host:port, IPv6 address, or ws(s):// URL.",
+          "deviceNameLabel": "Who is this link for?",
+          "deviceNamePlaceholder": "A person or device name",
+          "deviceNameHelp": "Each named link gets its own revocable grant, so two people never share one identity. Leave blank for an unnamed link."
         },
         "Settings": {
           "3bf149e873": "Project Settings > {{value0}}",

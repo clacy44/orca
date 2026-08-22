@@ -2,6 +2,7 @@ import { app, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import type { RuntimeAccessGrant } from '../../shared/runtime-access-grants'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
 import { classifyRemotePairingHostname } from '../../shared/remote-pairing-address'
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
 import type { DeviceEntry } from '../runtime/device-registry'
 import { NETWORK_EXPOSURE_FAILED_GUIDANCE } from '../runtime/network-exposure-guidance'
@@ -147,7 +148,10 @@ export function registerMobileHandlers(
 
   ipcMain.handle(
     'mobile:getRuntimePairingUrl',
-    async (_event, args?: { address?: string; rotate?: boolean; reach?: RuntimePairingReach }) => {
+    async (
+      _event,
+      args?: { address?: string; rotate?: boolean; reach?: RuntimePairingReach; name?: string }
+    ) => {
       const ip = args?.address ?? (await getDefaultPairingAddress(getDefaultRouteInterfaceNames))
       if (!ip) {
         return { available: false as const }
@@ -179,10 +183,16 @@ export function registerMobileHandlers(
 
       // Why: web/desktop runtime clients need full runtime access, not the
       // mobile allowlist used by phone QR pairing.
+      const deviceName = normalizePairingDeviceName(args?.name)
       const offer = rpcServer.createPairingOffer({
         address: ip,
         rotate: args?.rotate,
-        name: `Runtime ${new Date().toLocaleDateString()}`,
+        // Why: a named link is handed to one person, so it gets its own revocable grant instead of
+        // coalescing onto the shared pending row — two named links are two distinct devices. Both keys
+        // are omitted when blank so an unnamed link makes exactly today's call.
+        ...(deviceName
+          ? { name: deviceName, mint: 'always' as const }
+          : { name: `Runtime ${new Date().toLocaleDateString()}` }),
         scope: 'runtime',
         // Why: a grant that only ever pointed at loopback must not make the next launch bind every
         // interface when its local client reconnects (that would restore the exposure one restart later).

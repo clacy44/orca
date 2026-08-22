@@ -18,6 +18,7 @@ import {
 } from '../../../../shared/execution-host'
 import { isUserManagedRuntimeEnvironment } from '../../../../shared/runtime-environments'
 import { RuntimeHostStatusRow } from './RuntimeHostStatusRow'
+import { RuntimePresenceStatusRows } from './RuntimePresenceStatusRows'
 import {
   connectedHostCountLabel,
   connectingHostsLabel,
@@ -292,6 +293,7 @@ export function SshStatusSegment({
             syncStatus={t.syncStatus}
           />
         ))}
+        <RuntimePresenceStatusRows />
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={() => {

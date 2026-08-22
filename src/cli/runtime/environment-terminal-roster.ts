@@ -17,6 +17,10 @@ export type RosterTerminal = {
   handle: string
   title: string | null
   worktreePath?: string | null
+  // Why three states: undefined means the peer never published presence (a pre-presence host), while
+  // null or empty means it did and nobody is attached. Collapsing the two would print "nobody" for
+  // "unknown" on every older peer in the roster.
+  presence?: string | null
 }
 
 export type RosterProbeResponse = {
@@ -41,6 +45,7 @@ export type RosterRow = {
   title: string | null
   agent: string | null
   worktreePath: string | null
+  presence?: string | null
 }
 
 export type EnvironmentTerminalRoster = {
@@ -147,6 +152,9 @@ function toRosterRows(runtime: ProbedRuntime): RosterRow[] {
     reason: runtime.reason
   }
   if (runtime.terminals.length === 0) {
+    // Why no presence key at all: this row is what an unreachable peer, a peer missing the method and a
+    // reachable idle peer all produce, and the capability answer is per terminal — with no terminal
+    // there is nothing to have read one from, so the column must say "unknown", never "nobody".
     return [{ ...tags, terminal: null, title: null, agent: null, worktreePath: null }]
   }
   return runtime.terminals.map((terminal) => ({
@@ -155,6 +163,9 @@ function toRosterRows(runtime: ProbedRuntime): RosterRow[] {
     title: terminal.title ?? null,
     // Why: terminal.list already carries the title, so the agent column costs no extra RPC.
     agent: terminal.title ? getAgentLabel(terminal.title) : null,
-    worktreePath: terminal.worktreePath ?? null
+    worktreePath: terminal.worktreePath ?? null,
+    // Why spread-conditional: an absent key must survive to the formatter as absent, and writing
+    // `presence: terminal.presence` would turn a pre-presence peer into an explicit undefined.
+    ...('presence' in terminal ? { presence: terminal.presence ?? null } : {})
   }))
 }

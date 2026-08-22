@@ -48,6 +48,8 @@ import {
 import { resolvePaneAgentOwner } from '../../../shared/pane-agent-owner'
 import { resolveTerminalLayoutRoot } from './remote-terminal-layout-resolution'
 import { toRuntimeWorktreeSelector } from './runtime-worktree-selector'
+import { setPresenceSelectionsForEnvironment } from '@/lib/pane-manager/terminal-presence-state'
+import { toTerminalPresenceSelections } from './session-tabs-device-selections'
 import {
   clearWebSessionFocusIntent,
   clearWebSessionFocusIntentsForOwner,
@@ -4337,7 +4339,12 @@ export function useWebSessionTabsSync(): void {
             {
               selector: environmentId,
               method: 'session.tabs.subscribe',
-              params: { worktree: toRuntimeWorktreeSelector(activeWorktreeId) },
+              params: {
+                worktree: toRuntimeWorktreeSelector(activeWorktreeId),
+                // Why here and not on subscribeAll: W9 is opt-in per selector and only list/subscribe
+                // carry the param, so this is the one lane that can feed the who-is-where roster.
+                includeDeviceSelections: true
+              },
               timeoutMs: 15_000,
               expectedEnvironmentPairingRevision
             },
@@ -4361,6 +4368,10 @@ export function useWebSessionTabsSync(): void {
                 if (event.type !== 'snapshot' && event.type !== 'updated') {
                   return
                 }
+                setPresenceSelectionsForEnvironment(
+                  environmentId,
+                  toTerminalPresenceSelections(event)
+                )
                 const receivedFrame = recordReceivedWebSessionTabsSnapshot(environmentId, event)
                 recordVisibilityResumeSnapshotReceiptRef.current(
                   environmentId,
@@ -4402,7 +4413,12 @@ export function useWebSessionTabsSync(): void {
       }
     ])
 
-    return disposeSubscription
+    return () => {
+      // Why cleared here: selections are joined against THIS worktree's tab titles, so carrying them
+      // past the subscription that produced them renders a peer on a tab they are not on.
+      setPresenceSelectionsForEnvironment(environmentId, [])
+      disposeSubscription()
+    }
   }, [
     activeWorktreeId,
     activeWorktreeRuntimeEnvironmentId,

@@ -66,6 +66,7 @@ import {
 } from '@/runtime/agent-session-create-operation'
 import { replaceFitOverridePtyId, setFitOverride } from '@/lib/pane-manager/mobile-fit-overrides'
 import { replaceDriverPtyId, setDriverForPty } from '@/lib/pane-manager/mobile-driver-state'
+import { clearPresenceForPty, setPresenceForPty } from '@/lib/pane-manager/terminal-presence-state'
 import { isWebTerminalSurfaceTabId, toHostSessionTabId } from '@/runtime/web-terminal-surface-id'
 import { listRemoteRuntimeSessionTabsDeduped } from '@/runtime/remote-runtime-session-tabs-inflight'
 import { subscribeAcceptedWebSessionTerminalHandle } from '@/runtime/web-session-terminal-handle-events'
@@ -1821,6 +1822,12 @@ export function createRemoteRuntimePtyTransport(
             return
           }
           outputProcessor.clearAccumulatedState()
+          // Why cleared here and on transport close: presence has no terminal frame the way the driver
+          // lane's `idle` is, so a stream that goes away mid-TTL would leave the last chip standing on
+          // this pane for good (§2.7 — a pane whose own stream is down shows nothing).
+          if (subscribedPtyId) {
+            clearPresenceForPty(subscribedPtyId)
+          }
           if (tabId && isWebTerminalSurfaceTabId(tabId)) {
             setAttachmentReady(false)
             multiplexedStream = null
@@ -1864,6 +1871,13 @@ export function createRemoteRuntimePtyTransport(
             setDriverForPty(subscribedPtyId, driver)
           }
         },
+        // Why the pane's own stream and not the runtime-wide roster: this lane is authoritative for this
+        // PTY, so it stays correct while shared-control is down and the roster is silent.
+        onPresenceChanged: (presence) => {
+          if (isCurrentSubscription() && subscribedPtyId) {
+            setPresenceForPty(subscribedPtyId, presence)
+          }
+        },
         onWriteUnavailable: () => {
           if (isCurrentSubscription()) {
             notifyWriteUnavailable()
@@ -1883,6 +1897,9 @@ export function createRemoteRuntimePtyTransport(
           multiplexedStream = null
           multiplexedStreamHandle = null
           setAttachmentReady(false)
+          if (subscribedPtyId) {
+            clearPresenceForPty(subscribedPtyId)
+          }
           resetSameHandleEndReuse()
           if (recoverable) {
             if (retryWithBackoff) {

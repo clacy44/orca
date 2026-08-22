@@ -64,16 +64,21 @@ function expectJourneyActuallyRan(record: JourneyRecord): void {
   expect(record.missingRuntimeMethods).toEqual([])
 }
 
-function expectWireCompatible(record: JourneyRecord): void {
+function expectWireCompatible(
+  record: JourneyRecord,
+  expectedCapabilities: Record<string, 1> = { outputPause: 1 }
+): void {
   // Rule 2 — no frame may be refused by the receiving build's decoder. An opcode
   // the peer does not know is dropped silently, so this is the only signal.
   expect(record.rejected).toEqual([])
   expect(record.clientErrors).toEqual([])
 
   // The subscribe handshake still negotiates the optional output-pause opcode,
-  // which is what keeps opcode 16 legal to send on this pairing.
+  // which is what keeps opcode 16 legal to send on this pairing. Presence rides
+  // the same echo, so only the same-version pairing negotiates it: one side of a
+  // skew always strips the advertisement or never sends it.
   for (const event of record.subscribedEvents) {
-    expect(event.capabilities).toEqual({ outputPause: 1 })
+    expect(event.capabilities).toEqual(expectedCapabilities)
   }
 
   // Input reached the process, before and after the reconnect.
@@ -119,7 +124,7 @@ describe('cross-version remote terminal wire', () => {
     async () => {
       const record = await runTerminalSkewJourney({ hostBuild: current, clientBuild: current })
       expectJourneyActuallyRan(record)
-      expectWireCompatible(record)
+      expectWireCompatible(record, { outputPause: 1, presence: 1 })
     },
     SUITE_TIMEOUT_MS
   )

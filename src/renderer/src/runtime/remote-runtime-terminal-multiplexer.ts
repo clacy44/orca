@@ -1,5 +1,9 @@
 /* eslint-disable max-lines -- Why: the remote terminal multiplexer owns one bridged subscription, stream lifecycle, binary frame parsing, and remote lock events as a single transport contract. */
 import type { RuntimeRpcResponse } from '../../../shared/runtime-rpc-envelope'
+import type {
+  RuntimeTerminalStreamPresenceArbitration,
+  RuntimeTerminalStreamPresenceParticipant
+} from '../../../shared/runtime-types'
 import { isRecoverableRemoteRuntimeConnectionError } from '../../../shared/remote-runtime-client-error-classification'
 import {
   TerminalStreamOpcode,
@@ -57,6 +61,14 @@ type TerminalMultiplexEvent =
       streamId: number
       driver: { kind: 'idle' } | { kind: 'desktop' } | { kind: 'mobile'; clientId: string }
     }
+  | {
+      type: 'terminal-presence'
+      streamId: number
+      participants: RuntimeTerminalStreamPresenceParticipant[]
+      arbitration?: RuntimeTerminalStreamPresenceArbitration
+    }
+  // Why kept: an unknown JSON stream event must stay structurally tolerable, which is what lets the host
+  // publish a new one without a version bump.
   | { type: string; streamId?: number; [key: string]: unknown }
 
 export type RemoteRuntimeMultiplexedTerminalCallbacks = {
@@ -81,6 +93,10 @@ export type RemoteRuntimeMultiplexedTerminalCallbacks = {
   onDriverChanged?: (
     driver: { kind: 'idle' } | { kind: 'desktop' } | { kind: 'mobile'; clientId: string }
   ) => void
+  onPresenceChanged?: (presence: {
+    participants: RuntimeTerminalStreamPresenceParticipant[]
+    arbitration: RuntimeTerminalStreamPresenceArbitration | null
+  }) => void
   onWriteUnavailable?: () => void
   onTransportClose?: (event: { recoverable: boolean; retryWithBackoff?: boolean }) => void
 }
@@ -521,6 +537,9 @@ class RemoteRuntimeTerminalMultiplexer {
             ackOutputSourceRanges: 1,
             outputPause: 1,
             writeUnavailable: 1,
+            // Why: unconditional like every sibling — gating this on a status.get probe would make the
+            // same-version cross-version pairing negotiate nothing and pass vacuously.
+            presence: 1,
             ...(args.client.type === 'desktop' ? { desktopViewportClaims: 1 } : {})
           }
         })
@@ -716,6 +735,19 @@ class RemoteRuntimeTerminalMultiplexer {
         return
       }
       stream.callbacks.onDriverChanged?.(event.driver)
+    } else if (event.type === 'terminal-presence') {
+      // Why drop the whole event on a bad row rather than filter: a payload this pane cannot fully read
+      // is not a roster, and a partial one would render somebody as alone who is not.
+      if (
+        !Array.isArray(event.participants) ||
+        !event.participants.every(isTerminalStreamPresenceParticipant)
+      ) {
+        return
+      }
+      const arbitration = isTerminalStreamPresenceArbitration(event.arbitration)
+        ? event.arbitration
+        : null
+      stream.callbacks.onPresenceChanged?.({ participants: event.participants, arbitration })
     }
   }
 
@@ -1591,6 +1623,34 @@ function classifySnapshotAvailability(
     return { kind: 'unknown-legacy-host' }
   }
   return { kind: 'snapshot' }
+}
+
+function isTerminalStreamPresenceParticipant(
+  value: unknown
+): value is RuntimeTerminalStreamPresenceParticipant {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const row = value as Record<string, unknown>
+  return (
+    typeof row.participantId === 'string' &&
+    typeof row.label === 'string' &&
+    (row.kind === 'runtime' || row.kind === 'mobile' || row.kind === 'host') &&
+    typeof row.self === 'boolean' &&
+    typeof row.typing === 'boolean' &&
+    typeof row.writing === 'boolean' &&
+    typeof row.since === 'number'
+  )
+}
+
+function isTerminalStreamPresenceArbitration(
+  value: unknown
+): value is RuntimeTerminalStreamPresenceArbitration {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const notice = value as Record<string, unknown>
+  return typeof notice.heldFor === 'string' && typeof notice.until === 'number'
 }
 
 function isTerminalDriverState(

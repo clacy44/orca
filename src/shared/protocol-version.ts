@@ -72,6 +72,9 @@ export const BROWSER_TAB_CREATE_KNOWN_ID_RUNTIME_CAPABILITY =
 // floor-taking input. Mobile must not forward replies unless advertised.
 export const TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY =
   'terminal.query-reply-input.v1' as const
+// Why: shared presence is negotiated per terminal stream too; this advertises that the host tracks
+// participants at all, so a client can probe it the way shared-control is probed.
+export const TERMINAL_PRESENCE_RUNTIME_CAPABILITY = 'terminal.presence.v1' as const
 // Why: paired clients may unmount xterm only when the host can return a
 // bounded, sequenced scrollback snapshot for lossless reveal.
 export const TERMINAL_PAIRED_PARKING_RUNTIME_CAPABILITY = 'terminal.paired-parking.v1' as const
@@ -125,6 +128,7 @@ export const RUNTIME_CAPABILITIES = [
   AI_VAULT_SESSION_TITLES_RUNTIME_CAPABILITY,
   TERMINAL_QUERY_REPLY_INPUT_RUNTIME_CAPABILITY,
   TERMINAL_PAIRED_PARKING_RUNTIME_CAPABILITY,
+  TERMINAL_PRESENCE_RUNTIME_CAPABILITY,
   TERMINAL_QUICK_COMMANDS_RUNTIME_CAPABILITY,
   WORKTREE_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY,
   TERMINAL_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY,

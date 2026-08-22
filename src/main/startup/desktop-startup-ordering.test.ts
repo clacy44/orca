@@ -156,7 +156,7 @@ describe('startup ordering', () => {
     // Why: the barrier fails open, so the serve-ready payload must carry the
     // reconciliation state and the bounded wait must be traceable via a milestone.
     const readyStart = source.indexOf('await serveReadinessPublisher.publish(')
-    const readyEnd = source.indexOf('pairing: pairing.available', readyStart)
+    const readyEnd = source.indexOf('\n      pairing,', readyStart)
     const readyPayload = source.slice(readyStart, readyEnd)
 
     // Why: unbounded, a renamed pairing key slices to EOF and the status only has to survive

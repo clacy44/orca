@@ -338,12 +338,51 @@ export type RuntimeMobileSessionTabsSnapshot = {
   tabs: RuntimeMobileSessionSnapshotTab[]
 }
 
+/** W4's per-terminal presence row, as it rides the `terminal-presence` stream event. Live-only: both
+ *  activity flags are TTL'd host-side, so nothing here is durable and nothing may be keyed on
+ *  `participantId` at rest. `self` is resolved per emitting stream, never once per payload. */
+export type RuntimeTerminalStreamPresenceParticipant = {
+  participantId: string
+  label: string
+  kind: 'runtime' | 'mobile' | 'host'
+  self: boolean
+  /** A live interactive stream stamped a keystroke; outranks `writing` because it is the stamp that can hold a peer. */
+  typing: boolean
+  /** A grant wrote through `terminal.send` — true of an agent driving a human's grant, hence the wording split. */
+  writing: boolean
+  since: number
+  /** Mobile only: the phone has no bounded reap horizon, so a silent row is marked, never removed (S7). */
+  stale?: boolean
+}
+
+/** Q2's soft hold, published on the held stream alone. Declared with the row so the renderer state lane
+ *  carries the slot from the start; S6 is what fills it. */
+export type RuntimeTerminalStreamPresenceArbitration = {
+  /** The participant whose typing armed the hold — the name the held client is asked to yield to. */
+  heldFor: string
+  until: number
+}
+
+/** Live-only per-device navigation, published only when a caller asks for it. Never persisted and never
+ *  part of a durable snapshot, so a reconnect can neither replay nor inherit somebody else's selection.
+ *  `kind` mirrors the presence roster's; nothing here may ever be keyed on `participantId` at rest. */
+export type RuntimeSessionTabDeviceSelection = {
+  participantId: string
+  label: string
+  kind: 'runtime' | 'mobile' | 'host'
+  self: boolean
+  activeTabId: string
+  activeTabType: 'terminal' | 'markdown' | 'file' | 'browser'
+}
+
 export type RuntimeMobileSessionTabsResult = {
   worktree: string
   publicationEpoch: string
   snapshotVersion: number
   /** Live-only targeted command; omitted from durable/list snapshots so reconnect cannot replay navigation. */
   navigationIntent?: 'follow'
+  /** Live-only, opt-in via `includeDeviceSelections`; absent means the caller never asked or the host predates it. */
+  deviceSelections?: RuntimeSessionTabDeviceSelection[]
   activeGroupId: string | null
   activeTabId: string | null
   activeTabType: 'terminal' | 'markdown' | 'file' | 'browser' | null
@@ -448,6 +487,35 @@ export type RuntimeFileReadChunkResult = {
   eof: boolean
 }
 
+// Why declared here rather than imported: shared/ must not reach into the main process, and the wire
+// needs the same three members the host's projection carries — the assignment at the list boundary is
+// what keeps the two declarations from drifting apart.
+export type RuntimeTerminalPresenceKind = 'runtime' | 'mobile' | 'host'
+
+// Why `self?: true` and never `self: false`: only a caller the host can identify owns a row, and an
+// anonymous local caller must publish no claim about which row is its own.
+export type RuntimeTerminalPresenceParticipant = {
+  participantId: string
+  label: string
+  // Why on the wire: nothing else distinguishes the local human from a peer device named after a
+  // machine, or a phone from a desktop — and both distinctions are display rules a client owns.
+  kind: RuntimeTerminalPresenceKind
+  typing: boolean
+  writing: boolean
+  self?: true
+}
+
+/** Presence on one terminal row of `terminal.list`, populated only for a caller that asked with
+ *  `includePresence`. Absent key = the host is pre-presence (or the caller never asked); present with
+ *  an empty participants list = the host is capable and nobody is attached. The CLI roster column
+ *  depends on that distinction to print `presence?` rather than `-`. */
+export type RuntimeTerminalPresence = {
+  // Why: aggregated participants, never connections — one peer attached from two windows counts once,
+  // so this can never disagree with the per-terminal presence roster beside it.
+  attachedCount: number
+  participants: RuntimeTerminalPresenceParticipant[]
+}
+
 export type RuntimeTerminalSummary = {
   handle: string
   ptyId: string | null
@@ -463,6 +531,7 @@ export type RuntimeTerminalSummary = {
   writable: boolean
   lastOutputAt: number | null
   preview: string
+  presence?: RuntimeTerminalPresence
 }
 
 export type RuntimeTerminalVisualTerminalNode = {

@@ -86,6 +86,7 @@ import {
 } from './runtime/runtime-rpc-startup-failure'
 import { resolveAdvertisedPairingEndpoint } from './runtime/pairing-endpoint'
 import { ServeReadinessPublisher } from './server/serve-readiness'
+import { resolveServePairingOffers } from './server/serve-pairing-offers'
 import { reserveServeStdoutForReadiness } from './server/serve-stdout-boundary'
 import { DesktopRelayService } from './runtime/relay/desktop-relay-service'
 import type { RelayBrokerStatus } from './runtime/relay/relay-session-broker'
@@ -133,7 +134,11 @@ import {
   installUnhandledRejectionLogging
 } from './startup/main-process-error-guards'
 import { enableRendererHeapHeadroom } from './startup/renderer-heap-headroom'
-import { argvRequestsServeMode, normalizeServeModeArgv } from './startup/serve-mode-argv'
+import {
+  argvRequestsServeMode,
+  normalizeServeModeArgv,
+  readServeFlagValues
+} from './startup/serve-mode-argv'
 import { ensureVirtualDisplayForHeadlessServe } from './startup/ensure-virtual-display'
 import {
   readActiveGpuFallbackMarker,
@@ -1815,6 +1820,9 @@ type ServeOptions = {
   json: boolean
   wsPort?: number
   pairingAddress: string | null
+  // Why: one entry per `--pair-name`, in flag order — each becomes its own revocable grant so two people
+  // handed two links are two distinct pairedDeviceIds on this runtime.
+  pairNames: string[]
   noPairing: boolean
   mobilePairing: boolean
   recipeJson: boolean
@@ -1830,6 +1838,14 @@ function getServeOptions(argv = process.argv): ServeOptions {
     const value = argv[index + 1]
     return value && !value.startsWith('--') ? value : null
   }
+  const pairNames = readServeFlagValues(argv, '--serve-pair-name')
+  if (pairNames.dropped > 0) {
+    // Why: silently starting with fewer named grants than the operator asked for reintroduces the shared
+    // link this flag exists to replace, so make the dropped request visible.
+    console.warn(
+      `[serve] Ignored ${pairNames.dropped} --serve-pair-name occurrence(s) with no name.`
+    )
+  }
   const rawPort = valueAfter('--serve-port')
   let wsPort: number | undefined
   if (rawPort) {
@@ -1843,6 +1859,7 @@ function getServeOptions(argv = process.argv): ServeOptions {
     json: argv.includes('--serve-json'),
     ...(wsPort !== undefined ? { wsPort } : {}),
     pairingAddress: valueAfter('--serve-pairing-address'),
+    pairNames: pairNames.values,
     noPairing: argv.includes('--serve-no-pairing'),
     mobilePairing: argv.includes('--serve-mobile-pairing'),
     recipeJson: argv.includes('--serve-recipe-json'),
@@ -1895,21 +1912,18 @@ async function printServeReady(options: ServeOptions): Promise<void> {
   const advertised = boundEndpoint
     ? resolveAdvertisedPairingEndpoint(boundEndpoint, options.pairingAddress)
     : null
-  const pairing = options.noPairing
-    ? ({
-        available: false,
-        reason: 'disabled_by_operator',
-        guidance: 'Restart without --no-pairing to create a client pairing offer.'
-      } as const)
-    : runtimeRpc.createPairingOffer({
-        address: options.pairingAddress,
-        name: `${options.mobilePairing ? 'Mobile' : 'CLI'} ${new Date().toLocaleDateString()}`,
-        scope: options.mobilePairing ? 'mobile' : 'runtime'
-      })
-  const pairingQr =
-    pairing.available && options.mobilePairing
-      ? await renderTerminalPairingQr(pairing.pairingUrl)
-      : null
+  const { pairing, namedPairings } = await resolveServePairingOffers(
+    {
+      pairingAddress: options.pairingAddress,
+      pairNames: options.pairNames,
+      noPairing: options.noPairing,
+      mobilePairing: options.mobilePairing
+    },
+    {
+      createPairingOffer: (args) => runtimeRpc!.createPairingOffer(args),
+      renderPairingQr: renderTerminalPairingQr
+    }
+  )
   await serveReadinessPublisher.publish(
     {
       runtimeId: runtime.getRuntimeId(),
@@ -1917,17 +1931,9 @@ async function printServeReady(options: ServeOptions): Promise<void> {
       advertisedEndpoint: advertised?.ok ? advertised.endpoint : null,
       // Why: the WSL reconciliation barrier fails open, so 'pending' warns a WSL PTY launch may still race a repair.
       managedWslCliReconciliation: managedWslCliReconciliationStatus,
-      pairing: pairing.available
-        ? {
-            available: true,
-            url: pairing.pairingUrl,
-            endpoint: pairing.endpoint,
-            deviceId: pairing.deviceId,
-            webClientUrl: pairing.webClientUrl,
-            scope: options.mobilePairing ? 'mobile' : 'runtime',
-            qr: pairingQr
-          }
-        : pairing
+      pairing,
+      // Why: key omitted when unused so an unnamed serve publishes exactly today's payload.
+      ...(namedPairings ? { namedPairings } : {})
     },
     options.recipeJson
       ? { mode: 'recipe-json', projectRoot: options.projectRoot! }

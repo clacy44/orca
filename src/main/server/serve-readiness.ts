@@ -18,12 +18,21 @@ export type ServePairingReadiness =
       guidance: string
     }
 
+export type ServeNamedPairingReadiness = {
+  name: string
+  pairing: ServePairingReadiness
+}
+
 export type ServeReadiness = {
   runtimeId: string
   boundEndpoint: string | null
   advertisedEndpoint: string | null
   managedWslCliReconciliation: 'pending' | 'settled' | 'failed'
   pairing: ServePairingReadiness
+  // Why: one entry per `--pair-name`, each a separately revocable grant. Absent when no name was given,
+  // so an unnamed serve emits exactly the payload it always has. The first entry is also `pairing`, so
+  // every reader that only knows about `pairing` still sees a real offer.
+  namedPairings?: readonly ServeNamedPairingReadiness[]
 }
 
 export type ServeReadinessOutput =
@@ -77,7 +86,9 @@ export function renderServeReadiness(
       boundEndpoint: readiness.boundEndpoint,
       advertisedEndpoint: readiness.advertisedEndpoint,
       managedWslCliReconciliation: readiness.managedWslCliReconciliation,
-      pairing: readiness.pairing
+      pairing: readiness.pairing,
+      // Why: key omitted when unused so an unnamed serve's JSON line is byte-identical to today's.
+      ...(readiness.namedPairings ? { namedPairings: readiness.namedPairings } : {})
     })
   }
   return renderHumanReadiness(readiness)
@@ -89,19 +100,33 @@ function renderHumanReadiness(readiness: ServeReadiness): string {
     `Bound endpoint: ${readiness.boundEndpoint ?? 'websocket unavailable'}`,
     `Advertised endpoint: ${readiness.advertisedEndpoint ?? 'unavailable'}`
   ]
-  if (readiness.pairing.available) {
-    if (readiness.pairing.webClientUrl) {
-      lines.push(`Web client URL: ${readiness.pairing.webClientUrl}`)
-    }
-    if (readiness.pairing.scope === 'mobile' && readiness.pairing.qr) {
-      lines.push(`Mobile pairing QR:\n${readiness.pairing.qr}`)
-    }
-    lines.push(`Pairing URL: ${readiness.pairing.url}`)
-  } else {
-    lines.push(`Pairing unavailable: ${readiness.pairing.reason}`)
-    lines.push(`Pairing guidance: ${readiness.pairing.guidance}`)
+  // Why: an unnamed serve renders one unlabelled block, exactly as before; a named one renders a block
+  // per person so each human can be handed their own line rather than all of them one link.
+  const blocks: readonly { name: string | null; pairing: ServePairingReadiness }[] =
+    readiness.namedPairings ?? [{ name: null, pairing: readiness.pairing }]
+  for (const block of blocks) {
+    lines.push(...renderPairingLines(block.pairing, block.name))
   }
   return lines.join('\n')
+}
+
+function renderPairingLines(pairing: ServePairingReadiness, name: string | null): string[] {
+  const suffix = name === null ? '' : ` (${name})`
+  if (!pairing.available) {
+    return [
+      `Pairing unavailable${suffix}: ${pairing.reason}`,
+      `Pairing guidance${suffix}: ${pairing.guidance}`
+    ]
+  }
+  const lines: string[] = []
+  if (pairing.webClientUrl) {
+    lines.push(`Web client URL${suffix}: ${pairing.webClientUrl}`)
+  }
+  if (pairing.scope === 'mobile' && pairing.qr) {
+    lines.push(`Mobile pairing QR${suffix}:\n${pairing.qr}`)
+  }
+  lines.push(`Pairing URL${suffix}: ${pairing.url}`)
+  return lines
 }
 
 function writeStdout(output: string): Promise<void> {

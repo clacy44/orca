@@ -23,6 +23,7 @@ import type { WebSocket } from 'ws'
 import { DeviceRegistry, type DeviceEntry, type DeviceScope } from './device-registry'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from './e2ee-keypair'
 import { UnpairedDeviceAuthThrottle } from './rpc/unpaired-device-auth-throttle'
+import { terminalPresenceRegistry } from './terminal-presence-registry'
 import {
   MobileSocketWiring,
   type AuthenticatedMobileSocket,
@@ -47,6 +48,7 @@ import type {
   PairingProvisionRelayParams
 } from '../../shared/mobile-relay-credential-contract'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import { resolveAdvertisedPairingEndpoint } from './pairing-endpoint'
 import {
   decodeTerminalStreamFrame,
@@ -640,6 +642,7 @@ export class OrcaRuntimeRpcServer {
     }
     this.mobileRelayPairingProvider?.onDemandStateChanged?.()
     this.runtime.forgetClientNavigationState(deviceId)
+    terminalPresenceRegistry.forgetGrant(deviceId)
     this.mobileSocketWiring?.terminateDeviceConnections(device.token)
     return true
   }
@@ -650,6 +653,9 @@ export class OrcaRuntimeRpcServer {
       return false
     }
     this.runtime.forgetClientNavigationState(deviceId)
+    // Why: the participantId mapping is keyed on the durable grant, so only revoking the grant may
+    // drop it — otherwise it is the one presence map no lifecycle event can ever remove an entry from.
+    terminalPresenceRegistry.forgetGrant(deviceId)
     this.mobileSocketWiring?.terminateDeviceConnections(device.token)
     return true
   }
@@ -663,6 +669,10 @@ export class OrcaRuntimeRpcServer {
     address?: string | null
     name?: string
     rotate?: boolean
+    // Why: opt-in per-human invites. 'reuse' is the default so every existing caller keeps coalescing
+    // onto one pending grant; only a caller that knows it is naming one person asks for 'always'. Named
+    // rather than boolean so the three-way mint/rotate/reuse resolution reads at the call site (B1 §2.5).
+    mint?: 'always' | 'reuse'
     scope?: DeviceScope
     // Why: STA-2370 — recorded on the grant so a "This computer only" client reconnecting cannot make the
     // next launch bind every interface. Defaults to network reach, which is what every other caller means.
@@ -699,14 +709,23 @@ export class OrcaRuntimeRpcServer {
       return pairingUnavailable(advertised.reason, advertised.guidance)
     }
     const endpoint = advertised.endpoint
-    const deviceName = args.name ?? `CLI ${new Date().toLocaleDateString()}`
+    // Why here: this is the one boundary every naming entry point crosses, so a name that arrives
+    // unbounded or carrying control characters is normalized once for the registry, the serve banner and
+    // every later presence label. A name that normalizes away is treated as unnamed.
+    const deviceName =
+      normalizePairingDeviceName(args.name) || `CLI ${new Date().toLocaleDateString()}`
     const scope = args.scope ?? 'runtime'
     let device: DeviceEntry
     try {
       const reach = args.reach ?? 'network'
-      device = args.rotate
-        ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
-        : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
+      // Why: mint wins over rotate — rotate drops every sibling pending row, which would silently kill a
+      // co-worker's un-scanned invite the moment a second named one is created.
+      device =
+        args.mint === 'always'
+          ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach)
+          : args.rotate
+            ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
+            : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
     } catch (error) {
       console.error('[runtime] Failed to persist pairing credential:', error)
       return pairingUnavailable('device_registry_unavailable', DEVICE_REGISTRY_UNAVAILABLE_GUIDANCE)
@@ -1321,7 +1340,18 @@ export class OrcaRuntimeRpcServer {
         )
       },
       onBinary: (socket, bytes) => this.handleWebSocketBinaryMessage(bytes, socket.ws),
-      onReady: () => {
+      onReady: (socket) => {
+        // Why: created for ANY authenticated socket, not only a terminal stream, or a peer connected
+        // with no terminal open would never appear; the kind is host-observed (device.scope), never a
+        // client-declared field. E2EEAuthenticatedDevice carries no name, so the label is fetched from
+        // the registry here — and an unnamed grant ships none rather than an English literal a peer
+        // could not translate.
+        terminalPresenceRegistry.registerConnection({
+          connectionId: socket.connectionId,
+          pairedDeviceId: socket.device.deviceId,
+          label: deviceRegistry.getDevice(socket.device.deviceId)?.name ?? '',
+          kind: socket.device.scope
+        })
         // Why: first authenticated mobile/remote client (direct WS and
         // cloud relay both attach here) starts path-candidate tracking.
         // Activation is a local-host concern: candidate buffers live on the
@@ -1337,6 +1367,9 @@ export class OrcaRuntimeRpcServer {
         this.abortWebSocketDispatches(socket.ws)
         // Why: subscriptions and binary streams are socket-scoped, but disconnect state is device-scoped across transports.
         this.runtime.cleanupSubscriptionsForConnection(socket.connectionId)
+        // Why: per-connection, never onClientDisconnected — that fires only when the device has no
+        // other socket, so a two-window peer would never clear.
+        terminalPresenceRegistry.releaseConnection(socket.connectionId)
         this.runtime.cancelMobileDictationForConnection(socket.connectionId)
         this.binaryStreamHandlers.delete(socket.connectionId)
         if (!hasOtherConnections) {

@@ -1,0 +1,128 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { RuntimeClientEvent } from '../../shared/runtime-client-events'
+import { OrcaRuntimeService } from './orca-runtime'
+import { terminalPresenceRegistry } from './terminal-presence-registry'
+
+type Capture = { events: RuntimeClientEvent[] }
+
+function hostRow(runtime: OrcaRuntimeService) {
+  const event = runtime.getTerminalPresenceClientEventSnapshot(null).at(0)
+  return event?.type === 'terminalPresence'
+    ? event.participants.find((row) => row.kind === 'host')
+    : null
+}
+
+function presenceRows(capture: Capture) {
+  const event = capture.events.findLast((entry) => entry.type === 'terminalPresence')
+  return event?.type === 'terminalPresence' ? event : null
+}
+
+describe('terminalPresence fan-out', () => {
+  let runtime: OrcaRuntimeService
+  const unsubscribes: (() => void)[] = []
+
+  beforeEach(() => {
+    terminalPresenceRegistry.reset()
+    runtime = new OrcaRuntimeService()
+  })
+
+  afterEach(() => {
+    unsubscribes.splice(0).forEach((unsubscribe) => unsubscribe())
+    terminalPresenceRegistry.reset()
+  })
+
+  function listen(options?: { participantId?: string | null }): Capture {
+    const events: RuntimeClientEvent[] = []
+    unsubscribes.push(runtime.onClientEvent((event) => events.push(event), options))
+    return { events }
+  }
+
+  function connectEstablished(connectionId: string, pairedDeviceId: string, label: string): string {
+    runtime.registerSubscriptionCleanup(`sub-${connectionId}`, () => {}, connectionId)
+    return terminalPresenceRegistry.registerConnection({
+      connectionId,
+      pairedDeviceId,
+      label,
+      kind: 'runtime'
+    }).participantId
+  }
+
+  // §4.3: a single shared payload would prove the per-listener resolution was skipped, so the
+  // assertion is that ONE emitClientEvent leaves two listeners holding different `self` rows.
+  it('gives two listeners different self rows from one emit', () => {
+    const anaId = connectEstablished('conn-a', 'grant-a', 'Ana laptop')
+    const benId = connectEstablished('conn-b', 'grant-b', 'Ben laptop')
+    const ana = listen({ participantId: anaId })
+    const ben = listen({ participantId: benId })
+
+    // A third grant joining is the membership change both listeners are told about.
+    connectEstablished('conn-c', 'grant-c', 'Cara laptop')
+    runtime.flushTerminalPresenceRosterPublish()
+
+    const anaEvent = presenceRows(ana)
+    const benEvent = presenceRows(ben)
+    expect(
+      anaEvent?.participants.filter((row) => row.self).map((row) => row.participantId)
+    ).toEqual([anaId])
+    expect(
+      benEvent?.participants.filter((row) => row.self).map((row) => row.participantId)
+    ).toEqual([benId])
+    // Not the same object: one stamped payload shared by both listeners is the failure this catches.
+    expect(anaEvent).not.toBe(benEvent)
+  })
+
+  // The negative control for the fan-out default: no identity means nobody, never "the first row".
+  it('marks nothing self for a listener registered without a participantId', () => {
+    const anonymous = listen({ participantId: null })
+    connectEstablished('conn-a', 'grant-a', 'Ana laptop')
+    runtime.flushTerminalPresenceRosterPublish()
+
+    const event = presenceRows(anonymous)
+    expect(event?.participants.length).toBeGreaterThan(1)
+    expect(event?.participants.every((row) => !row.self)).toBe(true)
+  })
+
+  // §2.1: the host row's attachedTerminals is the authoritative window's active terminal. The headless
+  // half is what the pre-existing "always carries the host row" test already covered, so the half that
+  // makes it non-vacuous is a desktop-hosted runtime whose human has a terminal open.
+  it('carries the authoritative window active terminal on the host row', () => {
+    const desktop = listen({ participantId: null })
+    // Headless first: no graph has ever synced, so the host row is honestly empty.
+    expect(hostRow(runtime)?.attachedTerminals).toEqual([])
+
+    const handle = runtime.preAllocateHandleForPty('pty-host')
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        { tabId: 'tab-1', worktreeId: 'wt-1', title: null, activeLeafId: 'leaf-1', layout: null }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'wt-1',
+          leafId: 'leaf-1',
+          paneRuntimeId: 1,
+          ptyId: 'pty-host'
+        }
+      ]
+    })
+
+    expect(hostRow(runtime)?.attachedTerminals).toEqual([handle])
+    // The cadence half: a graph sync is the only lane that moves this row, so it must also publish.
+    runtime.flushTerminalPresenceRosterPublish()
+    expect(
+      presenceRows(desktop)?.participants.find((row) => row.kind === 'host')?.attachedTerminals
+    ).toEqual([handle])
+  })
+
+  // Q5: the fan-out has no receiver class it suppresses, so a listener registered with nothing but an
+  // identity still receives the roster. The inverse of this was the pre-reversal mobile control.
+  it('fans the roster to every listener regardless of kind', () => {
+    const phone = listen({ participantId: 'p-phone' })
+    const desktop = listen({ participantId: 'p-desktop' })
+    connectEstablished('conn-a', 'grant-a', 'Ana laptop')
+    runtime.flushTerminalPresenceRosterPublish()
+
+    expect(presenceRows(phone)).not.toBeNull()
+    expect(presenceRows(desktop)).not.toBeNull()
+  })
+})
