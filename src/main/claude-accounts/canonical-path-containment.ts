@@ -26,16 +26,65 @@ export function canonicalizePathForContainment(candidatePath: string): Canonical
   }
 }
 
-/** Whether a canonical path IS `rootPath` or sits under it. Case-folds Windows-shaped paths only. */
-export function isCanonicalPathWithinRoot(rootPath: string, canonicalPath: string): boolean {
-  return isPathInsideOrEqual(canonicalizeRoot(rootPath), canonicalPath)
+/**
+ * Whether a canonical path IS `rootPath` or sits under it.
+ *
+ * `isPathInsideOrEqual` folds case by path SYNTAX, which keeps macOS case-sensitive on
+ * purpose — right for an ALLOW check, where a case mismatch fails closed, and wrong here,
+ * where it would fail OPEN on a case-insensitive APFS volume whose `realpath(3)` preserved
+ * the caller's casing. So a deny check folds on darwin too.
+ */
+export function isCanonicalPathWithinRoot(
+  rootPath: string,
+  canonicalPath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  const root = canonicalizeRoot(rootPath)
+  if (isPathInsideOrEqual(root, canonicalPath)) {
+    return true
+  }
+  return (
+    platform === 'darwin' && isPathInsideOrEqual(root.toLowerCase(), canonicalPath.toLowerCase())
+  )
+}
+
+/**
+ * Deny-direction containment for a path that need not exist and may be a symlink.
+ *
+ * Unlike `assertCaptureSourceOutsideClaudeLanes`, which refuses a symlink outright because
+ * its owner can re-point it between the check and the read, this one has no read to protect:
+ * it decides whether a launch value addresses the lane root at all. So it denies on EITHER
+ * the plainly resolved path (the lane may not be provisioned yet, so realpath would fail) or
+ * the fully canonical one (a symlink into a lane must not launder its way past).
+ */
+export function isPathWithinRootForDenial(
+  rootPath: string,
+  candidatePath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!candidatePath) {
+    return false
+  }
+  if (isCanonicalPathWithinRoot(rootPath, resolve(candidatePath), platform)) {
+    return true
+  }
+  try {
+    return isCanonicalPathWithinRoot(
+      rootPath,
+      realpathSync.native(resolve(candidatePath)),
+      platform
+    )
+  } catch {
+    return false
+  }
 }
 
 export function isCanonicalPathWithinAnyRoot(
   rootPaths: readonly string[],
-  canonicalPath: string
+  canonicalPath: string,
+  platform: NodeJS.Platform = process.platform
 ): boolean {
-  return rootPaths.some((rootPath) => isCanonicalPathWithinRoot(rootPath, canonicalPath))
+  return rootPaths.some((rootPath) => isCanonicalPathWithinRoot(rootPath, canonicalPath, platform))
 }
 
 function canonicalizeRoot(rootPath: string): string {
