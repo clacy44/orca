@@ -288,6 +288,73 @@ describe('terminal.list presence caller scope', () => {
     ])
   })
 
+  it('counts one participant for a peer attached from two connections', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-shared', REPO_WORKTREE_ID)
+    const participantId = attachParticipant('pty-shared', {
+      connectionId: 'conn-ana-window-1',
+      pairedDeviceId: 'device-ana',
+      label: 'Ana'
+    })
+    attachParticipant('pty-shared', {
+      connectionId: 'conn-ana-window-2',
+      pairedDeviceId: 'device-ana',
+      label: 'Ana'
+    })
+
+    const result = await runtime.listTerminals(undefined, undefined, {
+      presence: { selfParticipantId: null }
+    })
+
+    // Why asserted on the count and the rows together: a count taken over connections would read 2 here
+    // and disagree with the per-terminal roster beside it, which aggregates by participant.
+    expect(rowFor(result, 'pty-shared').presence).toEqual({
+      attachedCount: 1,
+      participants: [{ participantId, label: 'Ana', typing: true, writing: false }]
+    })
+  })
+
+  it('gives a remote caller the host row unmarked when its own connection is untracked', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-local', REPO_WORKTREE_ID)
+    terminalPresenceRegistry.recordHostInteractiveInput('pty-local')
+
+    const result = await listOverRemoteSocket(
+      runtime,
+      { connectionId: 'conn-unknown', pairedDeviceId: 'device-unknown', clientKind: 'runtime' },
+      { includePresence: true }
+    )
+
+    // Why this is the guard that matters: the anonymous fallback resolves to the host row, so a remote
+    // caller the registry cannot place must fall through to NO self rather than inherit the local human's.
+    expect(rowFor(result, 'pty-local').presence?.participants).toEqual([
+      {
+        participantId: HOST_PARTICIPANT_ID,
+        label: expect.any(String),
+        typing: true,
+        writing: false
+      }
+    ])
+  })
+
+  it('populates for a runtime-scope caller in the fixture the mobile caller is refused', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-shared', REPO_WORKTREE_ID)
+    attachParticipant('pty-shared', {
+      connectionId: 'conn-ana',
+      pairedDeviceId: 'device-ana',
+      label: 'Ana'
+    })
+
+    const result = await listOverRemoteSocket(
+      runtime,
+      { connectionId: 'conn-desktop', pairedDeviceId: 'device-desktop', clientKind: 'runtime' },
+      { includePresence: true }
+    )
+
+    expect(rowFor(result, 'pty-shared').presence?.attachedCount).toBe(1)
+  })
+
   it('populates nothing for a mobile-scope caller', async () => {
     const runtime = makeRuntime()
     spawnPty(runtime, 'pty-shared', REPO_WORKTREE_ID)
