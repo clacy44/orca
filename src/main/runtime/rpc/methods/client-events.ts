@@ -19,11 +19,9 @@ export const CLIENT_EVENT_METHODS: readonly RpcAnyMethod[] = [
     name: 'runtime.clientEvents.subscribe',
     params: null,
     handler: async (_params, { runtime, connectionId, clientKind, pairedDeviceId }, emit) => {
-      // Why computed once and read twice: the roster reaches a client on two independent paths — the
-      // fan-out branch inside emitClientEvent and the listener-first snapshot loop below, which bypasses
-      // that branch entirely. Two hand-copied `clientKind !== 'mobile'` tests are exactly how one path
-      // keeps filtering after the other stops.
-      const consumesPresence = clientKind !== 'mobile'
+      // Why no mobile gate on presence (Q5): phones are participants and may see the roster, so the
+      // roster crosses both paths for every client kind. The 32/64 caps and the membership-only
+      // cadence bound what that costs on the relay — a filter is not what bounds it.
       // Why resolved here rather than at fan-out: the snapshot never enters emitClientEvent, so it
       // answers "which row is you" from the socket that is asking. A caller with no grant gets null,
       // and every row it receives reads self:false.
@@ -39,7 +37,6 @@ export const CLIENT_EVENT_METHODS: readonly RpcAnyMethod[] = [
           },
           {
             consumesTerminalSideEffects: clientKind !== 'mobile',
-            consumesPresence,
             participantId
           }
         )
@@ -56,13 +53,10 @@ export const CLIENT_EVENT_METHODS: readonly RpcAnyMethod[] = [
           connectionId
         )
 
-        // Why the same flag and not a second literal: this loop is the path the fan-out filter cannot
-        // see, so the phone gate has to be applied again, here, from the one value computed above.
-        if (consumesPresence) {
-          for (const event of runtime.getTerminalPresenceClientEventSnapshot?.(participantId) ??
-            []) {
-            emit(event)
-          }
+        // Why unconditional: this loop is the path the fan-out branch cannot see, and the two are kept
+        // in sync by neither of them having a condition to drift on.
+        for (const event of runtime.getTerminalPresenceClientEventSnapshot?.(participantId) ?? []) {
+          emit(event)
         }
         // Why: listener-first snapshotting closes the subscribe race while restoring state missed during disconnects.
         for (const event of runtime.getTerminalSleepClientEventSnapshot?.() ?? []) {

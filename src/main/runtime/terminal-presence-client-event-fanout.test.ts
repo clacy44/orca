@@ -31,10 +31,7 @@ describe('terminalPresence fan-out', () => {
     terminalPresenceRegistry.reset()
   })
 
-  function listen(options?: {
-    consumesPresence?: boolean
-    participantId?: string | null
-  }): Capture {
+  function listen(options?: { participantId?: string | null }): Capture {
     const events: RuntimeClientEvent[] = []
     unsubscribes.push(runtime.onClientEvent((event) => events.push(event), options))
     return { events }
@@ -117,13 +114,15 @@ describe('terminalPresence fan-out', () => {
     ).toEqual([handle])
   })
 
-  it('drops terminalPresence for a listener that does not consume presence', () => {
-    const phone = listen({ consumesPresence: false, participantId: 'p-phone' })
-    const desktop = listen({ consumesPresence: true, participantId: 'p-desktop' })
+  // Q5: the fan-out has no receiver class it suppresses, so a listener registered with nothing but an
+  // identity still receives the roster. The inverse of this was the pre-reversal mobile control.
+  it('fans the roster to every listener regardless of kind', () => {
+    const phone = listen({ participantId: 'p-phone' })
+    const desktop = listen({ participantId: 'p-desktop' })
     connectEstablished('conn-a', 'grant-a', 'Ana laptop')
     runtime.flushTerminalPresenceRosterPublish()
 
-    expect(presenceRows(phone)).toBeNull()
+    expect(presenceRows(phone)).not.toBeNull()
     expect(presenceRows(desktop)).not.toBeNull()
   })
 })

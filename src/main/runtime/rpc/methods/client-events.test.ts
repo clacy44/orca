@@ -18,11 +18,7 @@ function makeRuntime(): {
   const onClientEvent = vi.fn(
     (
       _listener: (event: RuntimeClientEvent) => void,
-      _options?: {
-        consumesTerminalSideEffects?: boolean
-        consumesPresence?: boolean
-        participantId?: string | null
-      }
+      _options?: { consumesTerminalSideEffects?: boolean; participantId?: string | null }
     ) =>
       () => {}
   )
@@ -47,7 +43,6 @@ describe('runtime.clientEvents.subscribe', () => {
 
     expect(onClientEvent).toHaveBeenCalledWith(expect.any(Function), {
       consumesTerminalSideEffects: false,
-      consumesPresence: false,
       participantId: null
     })
     cleanups.forEach((cleanup) => cleanup())
@@ -65,7 +60,6 @@ describe('runtime.clientEvents.subscribe', () => {
 
     expect(onClientEvent).toHaveBeenCalledWith(expect.any(Function), {
       consumesTerminalSideEffects: true,
-      consumesPresence: true,
       participantId: null
     })
     cleanups.forEach((cleanup) => cleanup())

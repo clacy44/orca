@@ -5197,11 +5197,11 @@ export class OrcaRuntimeService {
     }
   }
 
-  // Why per listener and not per event: `self` and the mobile filter are both properties of the
-  // RECEIVER, and this bus has exactly one payload for every receiver.
-  private clientEventPresenceByListener = new Map<
+  // Why per listener and not per event: `self` is a property of the RECEIVER, and this bus builds
+  // exactly one payload for every receiver.
+  private clientEventParticipantByListener = new Map<
     (event: RuntimeClientEvent) => void,
-    { consumesPresence: boolean; participantId: string | null }
+    string | null
   >()
   private terminalPresenceRoster: TerminalPresenceRosterPublisher | null = null
 
@@ -5209,7 +5209,6 @@ export class OrcaRuntimeService {
     listener: (event: RuntimeClientEvent) => void,
     options?: {
       consumesTerminalSideEffects?: boolean
-      consumesPresence?: boolean
       participantId?: string | null
     }
   ): () => void {
@@ -5219,17 +5218,14 @@ export class OrcaRuntimeService {
     } else {
       this.terminalSideEffectTitleGateKeysByClientEventListener.set(listener, new Map())
     }
-    this.clientEventPresenceByListener.set(listener, {
-      consumesPresence: options?.consumesPresence !== false,
-      participantId: options?.participantId ?? null
-    })
+    this.clientEventParticipantByListener.set(listener, options?.participantId ?? null)
     this.ensureTerminalPresenceRoster()
     this.refreshTerminalSideEffectConsumerAvailability()
     return () => {
       this.clientEventListeners.delete(listener)
       this.terminalSideEffectExcludedClientEventListeners.delete(listener)
       this.terminalSideEffectTitleGateKeysByClientEventListener.delete(listener)
-      this.clientEventPresenceByListener.delete(listener)
+      this.clientEventParticipantByListener.delete(listener)
       this.disposeTerminalPresenceRosterWhenUnwatched()
       this.refreshTerminalSideEffectConsumerAvailability()
     }
@@ -5449,12 +5445,13 @@ export class OrcaRuntimeService {
         }
         if (event.type === 'terminalPresence') {
           // Why here and not at the emit site: one payload is built per membership change and every
-          // listener reads it, so both the phone filter and `self` have to be applied on this branch.
-          const presence = this.clientEventPresenceByListener.get(listener)
-          if (presence?.consumesPresence === false) {
-            return
-          }
-          listener(stampTerminalPresenceSelf(event, presence?.participantId ?? null))
+          // listener reads it, so `self` has to be resolved on this branch, per receiver.
+          listener(
+            stampTerminalPresenceSelf(
+              event,
+              this.clientEventParticipantByListener.get(listener) ?? null
+            )
+          )
           return
         }
         listener(event)

@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeClientEvent } from '../../../../shared/runtime-client-events'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import { terminalPresenceRegistry } from '../../terminal-presence-registry'
+import {
+  TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS,
+  TERMINAL_PRESENCE_MAX_PARTICIPANTS
+} from '../../terminal-presence-snapshot'
 import { isStreamingMethod, type RpcContext, type RpcStreamingMethod } from '../core'
 // Why via the index: importing client-events directly trips its module-init cycle through ipc/ssh.
 import { ALL_RPC_METHODS } from './index'
@@ -23,6 +27,25 @@ const ROSTER: RuntimeClientEvent = {
       self: false
     }
   ]
+}
+
+// The worst case the caps admit: every participant slot filled, every handle slot filled.
+function cappedRoster(): RuntimeClientEvent {
+  return {
+    type: 'terminalPresence',
+    seq: 7,
+    participants: Array.from({ length: TERMINAL_PRESENCE_MAX_PARTICIPANTS }, (_, index) => ({
+      participantId: `participant-${index}-0000000000000000000000`,
+      label: `A very long device label ${index}`,
+      kind: 'mobile' as const,
+      attachedTerminals: Array.from(
+        { length: TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS },
+        (_unused, handleIndex) => `terminal_${index}_${handleIndex}`
+      ),
+      self: false
+    })),
+    truncated: true
+  }
 }
 
 type Harness = {
@@ -71,30 +94,45 @@ describe('runtime.clientEvents.subscribe presence gating', () => {
     terminalPresenceRegistry.reset()
   })
 
-  // §4.2 negative, on the path the fan-out filter cannot see: the subscribe snapshot emits directly,
-  // so a phone gated only in emitClientEvent would still be handed the whole roster on every
-  // (re)subscribe — the exact frames the filter exists to keep off the relay.
-  it('sends a mobile listener no presence on either path', async () => {
+  // §4.2 under Q5, the inverse of the earlier mobile control: a phone is a participant and may see the
+  // roster, so it receives it on BOTH paths — the fan-out branch and this direct snapshot loop, which
+  // bypasses that branch entirely. A gate reinstated on either one alone would show up right here.
+  it('sends a mobile listener the roster on both paths', async () => {
     const harness = makeHarness()
     await subscribe(harness, { clientKind: 'mobile' })
 
     expect(harness.onClientEvent).toHaveBeenCalledWith(expect.any(Function), {
       consumesTerminalSideEffects: false,
-      consumesPresence: false,
       participantId: null
     })
-    expect(harness.presenceSnapshot).not.toHaveBeenCalled()
-    expect(presenceEntries(harness)).toEqual([])
+    expect(harness.presenceSnapshot).toHaveBeenCalledWith(null)
+    expect(presenceEntries(harness)).toEqual([ROSTER])
   })
 
-  // The positive control that makes the test above non-vacuous.
+  // What bounds the relay cost is the caps, not a filter — so measure the worst case the caps allow.
+  it('keeps a capped roster snapshot inside its serialized budget', async () => {
+    const harness = makeHarness()
+    harness.presenceSnapshot.mockReturnValue([cappedRoster()])
+    await subscribe(harness, { clientKind: 'mobile' })
+
+    const [snapshot] = presenceEntries(harness)
+    const bytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8')
+    expect((snapshot as typeof ROSTER).participants).toHaveLength(
+      TERMINAL_PRESENCE_MAX_PARTICIPANTS
+    )
+    // Why an upper bound and not an exact size: this is a relay budget — "one (re)subscribe cannot
+    // cost a phone more than this" — not the byte count of today's field names. The fixture measures
+    // ~38 KB, so the ceiling leaves room for a field without leaving room for an uncapped list.
+    expect(bytes).toBeLessThan(64 * 1024)
+  })
+
+  // The other kind, asserted the same way, so neither branch can start depending on clientKind again.
   it('sends a runtime listener the roster snapshot listener-first', async () => {
     const harness = makeHarness()
     await subscribe(harness, { clientKind: 'runtime' })
 
     expect(harness.onClientEvent).toHaveBeenCalledWith(expect.any(Function), {
       consumesTerminalSideEffects: true,
-      consumesPresence: true,
       participantId: null
     })
     expect(harness.presenceSnapshot).toHaveBeenCalledWith(null)
@@ -120,7 +158,6 @@ describe('runtime.clientEvents.subscribe presence gating', () => {
 
     expect(harness.onClientEvent).toHaveBeenCalledWith(expect.any(Function), {
       consumesTerminalSideEffects: true,
-      consumesPresence: true,
       participantId: participant.participantId
     })
     expect(harness.presenceSnapshot).toHaveBeenCalledWith(participant.participantId)
