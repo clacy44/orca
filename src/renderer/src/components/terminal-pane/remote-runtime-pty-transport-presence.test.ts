@@ -148,6 +148,36 @@ describe('remote runtime pty transport presence lane', () => {
     expect(presenceFor(ptyId).arbitration).toEqual({ heldFor: 'p-peer', until: 5000 })
   })
 
+  it('drops the hold on the first emit that omits the notice', async () => {
+    // Why this is the whole clearing contract: the host retires a hold by OMITTING the field on its next
+    // emit — once the re-press lands or the 5 s window closes — so a lane that only ever wrote a present
+    // notice would strand "press again" on a pane whose keystrokes are landing again.
+    const { presenceFor, ptyId, streamId } = await attachedTransport()
+    const participants = [
+      {
+        participantId: 'p-peer',
+        label: 'Ana laptop',
+        kind: 'runtime',
+        self: false,
+        typing: true,
+        writing: false,
+        since: 20
+      }
+    ]
+
+    emitStreamEvent({
+      type: 'terminal-presence',
+      streamId,
+      participants,
+      arbitration: { heldFor: 'p-peer', until: 5000 }
+    })
+    expect(presenceFor(ptyId).arbitration).not.toBeNull()
+
+    emitStreamEvent({ type: 'terminal-presence', streamId, participants })
+    expect(presenceFor(ptyId).arbitration).toBeNull()
+    expect(presenceFor(ptyId).participants).toHaveLength(1)
+  })
+
   it('drops a malformed presence payload rather than rendering a partial roster', async () => {
     // Negative control for the decoder guard: an unusable row must leave the lane untouched, not
     // publish the rows that happened to parse.
