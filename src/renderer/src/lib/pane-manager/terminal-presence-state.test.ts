@@ -86,6 +86,12 @@ describe('terminal presence pane lane', () => {
     expect(getPeerPresenceForPty('pty-1').map((row) => row.participantId)).toEqual(['p-peer'])
   })
 
+  // Why identity and not emptiness: the tab-badge selector calls this for every pty of every tab on
+  // every store write, and the solo-desktop answer must cost nothing to produce.
+  it('allocates nothing for a pane nobody is on', () => {
+    expect(getPeerPresenceForPty('pty-absent')).toBe(getPeerPresenceForPty('pty-also-absent'))
+  })
+
   it('never lets a roster write reach a pane the stream asserted', () => {
     // The authority rule: shared-control can be down while a pane's own multiplex stream is live, so a
     // roster that names nobody must not clear that pane's chip.

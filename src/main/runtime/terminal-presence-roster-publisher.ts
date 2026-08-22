@@ -36,7 +36,8 @@ export type TerminalPresenceRosterPublisher = {
   schedule: () => void
   // Fire a pending publish now (tests and teardown; a real change still has to pass the diff).
   flush: () => void
-  // The current roster as a subscribe-time snapshot. Does not publish and does not advance `seq`.
+  // The current roster as a subscribe-time snapshot. Does not publish and does not advance `seq` —
+  // see the broadcast-only contract on the RuntimeClientEvent declaration; nothing may order on it.
   snapshot: () => RuntimeTerminalPresenceClientEvent
   dispose: () => void
 }

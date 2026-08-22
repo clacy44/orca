@@ -14,11 +14,20 @@ export type RuntimePresenceRosterRow = {
   activeTabTitle: string | null
 }
 
+export type RuntimePresenceRoster = {
+  rows: RuntimePresenceRosterRow[]
+  // Why carried out rather than read off a row: the host caps the payload, so "there are more" is a
+  // property of the roster, and a client that cannot say it silently claims a truncated list is whole.
+  truncated: boolean
+}
+
 export function buildRuntimePresenceRosterRows(
   entries: Iterable<[string, TerminalPresenceRosterEntry]>
-): RuntimePresenceRosterRow[] {
+): RuntimePresenceRoster {
   const rows: RuntimePresenceRosterRow[] = []
+  let truncated = false
   for (const [environmentId, entry] of entries) {
+    truncated ||= entry.truncated
     const titleByParticipantId = new Map(
       entry.selections.map((selection) => [selection.participantId, selection.activeTabTitle])
     )
@@ -36,10 +45,11 @@ export function buildRuntimePresenceRosterRows(
   }
   // Why the host first: it is the machine everyone else is paired into, so it anchors the list rather
   // than sorting into it by name.
-  return rows.sort(
+  rows.sort(
     (left, right) =>
       Number(right.kind === 'host') - Number(left.kind === 'host') ||
       left.label.localeCompare(right.label) ||
       left.participantId.localeCompare(right.participantId)
   )
+  return { rows, truncated }
 }

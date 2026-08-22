@@ -68,6 +68,44 @@ describe('RuntimePresenceStatusRows', () => {
     expect(markup.indexOf('devbox (host)')).toBeLessThan(markup.indexOf('Ana laptop'))
   })
 
+  // §2.2's stated purpose for the flag: a client must be able to say "there are more" rather than
+  // present a capped list as a complete one.
+  it('says so when the host capped the roster', () => {
+    setPresenceRosterForEnvironment('env-1', {
+      participants: [
+        {
+          participantId: 'p-ana',
+          label: 'Ana laptop',
+          kind: 'runtime',
+          attachedTerminals: [],
+          self: false
+        }
+      ],
+      truncated: true
+    })
+
+    expect(renderToStaticMarkup(<RuntimePresenceStatusRows />)).toContain('More people not shown')
+  })
+
+  // The negative control: an uncapped roster must claim nothing of the sort.
+  it('says nothing about overflow while the roster fits', () => {
+    setPresenceRosterForEnvironment('env-1', {
+      participants: [
+        {
+          participantId: 'p-ana',
+          label: 'Ana laptop',
+          kind: 'runtime',
+          attachedTerminals: [],
+          self: false
+        }
+      ]
+    })
+
+    expect(renderToStaticMarkup(<RuntimePresenceStatusRows />)).not.toContain(
+      'More people not shown'
+    )
+  })
+
   it('marks the reader rather than rendering them as their own peer', () => {
     setPresenceRosterForEnvironment('env-1', {
       participants: [

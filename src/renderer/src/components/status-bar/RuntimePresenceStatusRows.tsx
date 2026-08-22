@@ -50,7 +50,7 @@ export function RuntimePresenceStatusRows(): ReactElement | null {
   // Why a counter: the roster lives outside the store so a keystroke-rate lane cannot fan out through it.
   const [, setRosterTick] = useState(0)
   useEffect(() => onPresenceRosterChange(() => setRosterTick((n) => n + 1)), [])
-  const rows = buildRuntimePresenceRosterRows(rosterEntries())
+  const { rows, truncated } = buildRuntimePresenceRosterRows(rosterEntries())
   if (rows.length === 0) {
     // A solo desktop with no pairings renders no section at all.
     return null
@@ -73,6 +73,14 @@ export function RuntimePresenceStatusRows(): ReactElement | null {
           </div>
         </div>
       ))}
+      {truncated ? (
+        <div className="px-2 pb-1.5 text-[10px] text-muted-foreground">
+          {translate(
+            'auto.components.status.bar.RuntimePresenceStatusRows.4f4b1f6a3c',
+            'More people not shown'
+          )}
+        </div>
+      ) : null}
     </>
   )
 }

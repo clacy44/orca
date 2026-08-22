@@ -47,6 +47,10 @@ export type RuntimeClientEvent =
   // roster that carried them would republish this broadcast on every keystroke, to every client.
   | {
       type: 'terminalPresence'
+      /** Broadcast-only, and NOT an ordering or dedupe key. The publisher is created lazily and torn
+       *  down with the last subscriber, so it restarts at 0 across a subscriber gap, and a subscribe
+       *  snapshot reuses the current value without advancing it. A consumer that needs ordering must
+       *  compare the payload, which is exactly what the publisher itself does. */
       seq: number
       participants: RuntimeTerminalPresenceParticipant[]
       // Why present-only-when-true: the participant cap is a bound, and a client must be able to say

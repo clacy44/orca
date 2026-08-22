@@ -62,10 +62,20 @@ export function getPresenceForPty(ptyId: string): TerminalPanePresence {
   return presenceByPtyId.get(ptyId) ?? EMPTY_PANE_PRESENCE
 }
 
+// Why a shared frozen array: the tab-badge selector below calls the reader for every pty of every tab
+// on every store write, and the overwhelmingly common answer is "nobody". Filtering an already-empty
+// list into a fresh array on that path is the allocation churn the activity-status precedent memoizes
+// away (docs/reference/renderer-agent-status-performance.md).
+const NO_PEER_PRESENCE: readonly TerminalPresenceParticipant[] = Object.freeze([])
+
 /** Everyone on this PTY who is not the reader. `self` is host-resolved per stream, so this never
  *  renders a user as their own peer. */
-export function getPeerPresenceForPty(ptyId: string): TerminalPresenceParticipant[] {
-  return getPresenceForPty(ptyId).participants.filter((participant) => !participant.self)
+export function getPeerPresenceForPty(ptyId: string): readonly TerminalPresenceParticipant[] {
+  const presence = presenceByPtyId.get(ptyId)
+  if (!presence) {
+    return NO_PEER_PRESENCE
+  }
+  return presence.participants.filter((participant) => !participant.self)
 }
 
 export type TerminalPresenceSelection = RuntimeSessionTabDeviceSelection & {

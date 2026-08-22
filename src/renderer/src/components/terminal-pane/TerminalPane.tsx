@@ -3258,6 +3258,13 @@ function TerminalPane(
         if (!ptyId) {
           return null
         }
+        // Why the same surface decision as the driver overlay above: a chat-replaced pane hides every
+        // piece of presence chrome, and a chip in its top-left is exactly what that rule excludes.
+        const paneSurface =
+          effectiveChatViewMode && pane.leafId === chatLeafId ? 'chat' : 'terminal'
+        if (shouldChatTakeOverMobileSurface(paneSurface)) {
+          return null
+        }
         // Why beside the driver overlay and not in the pane header: the header renders only with titles
         // or always-on headers enabled, so a chip mounted there is invisible to most panes.
         const presence = resolveTerminalPresenceChipState(getPresenceForPty(ptyId))
