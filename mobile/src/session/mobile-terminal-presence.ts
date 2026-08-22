@@ -1,6 +1,7 @@
 // Read-only presence for the phone: who else is on this terminal, and whether they are typing. The
 // phone is never held and never arbitrates (§3), so there is nothing here but a decoder and one line
 // of text — anything more would put a take-back affordance on the one client that can never use it.
+import { terminalPresenceLastSeenMinutes } from '../../../src/shared/terminal-presence-last-seen'
 
 /** The subset of the host's W4 row this screen renders. Extra keys are ignored by construction, which
  *  is what lets a newer host add fields without a mobile release. */
@@ -75,12 +76,12 @@ export function summarizeMobileTerminalPresence(
   const others = peers.length > 1 ? ` +${peers.length - 1}` : ''
   if (loudest.stale) {
     // Why plain "attached" without the stamp rather than a fabricated one: this phone does not know how
-    // long the silence has run, and inventing "1m ago" for it is the one thing staleness copy exists to
-    // prevent. Floor of 1 with it: `lastSeenAt` is the host's clock and this phone's may trail it.
+    // long the silence has run, and inventing a duration for it is the one thing staleness copy exists
+    // to prevent. With it, the host's shared helper owns the floor — the stamp is on the host's clock.
     if (loudest.lastSeenAt === undefined) {
       return `${label} attached${others}`
     }
-    const minutes = Math.max(1, Math.round((now - loudest.lastSeenAt) / 60_000))
+    const minutes = terminalPresenceLastSeenMinutes(loudest.lastSeenAt, now)
     return `${label} attached, last seen ${minutes}m ago${others}`
   }
   if (loudest.typing) {
