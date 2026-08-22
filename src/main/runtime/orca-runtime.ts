@@ -5023,8 +5023,13 @@ export class OrcaRuntimeService {
       dispatchId,
       recordFederationRelaySyncOutcome({
         db: this.getOrchestrationDb(),
+        runtime: this,
         dispatchId,
-        previous: this.orchestrationFederationSyncHealth.get(dispatchId),
+        // Why the persisted reading rather than only the Map: a sync can also be driven by a send
+        // path, or by a relay this process has not armed yet, and a `previous` of undefined would
+        // restart the failure count at 1 — walking the persisted count backwards and re-announcing
+        // an outage this Run has already been told about.
+        previous: this.getOrchestrationFederationSyncHealth(dispatchId) ?? undefined,
         outcome
       })
     )
@@ -5034,15 +5039,9 @@ export class OrcaRuntimeService {
     if (this.orchestrationFederationRelays.has(dispatchId)) {
       return
     }
-    // Why seeded before the first tick: the interval scheduled after that tick reads
-    // consecutiveFailures, so a relay resumed against an already-dead peer has to start from the
-    // backoff level it had reached rather than re-dialing it every second.
-    if (!this.orchestrationFederationSyncHealth.has(dispatchId)) {
-      const persisted = this.getOrchestrationDb().getFederatedDispatchSyncHealth(dispatchId)
-      if (persisted) {
-        this.orchestrationFederationSyncHealth.set(dispatchId, persisted)
-      }
-    }
+    // Why nothing is seeded here: the first tick settles against the persisted health, so the
+    // interval scheduled after it already reflects the backoff level the peer had earned rather
+    // than re-dialing an already-dead peer every second.
     this.orchestrationFederationRelays.add(dispatchId)
     this.tickOrchestrationFederationRelay(dispatchId)
   }

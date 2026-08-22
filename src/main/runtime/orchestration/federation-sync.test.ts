@@ -8,6 +8,7 @@ import {
   type FederationAckIdentity
 } from './federation-ack-checkpoints'
 import { parseRelayedMessage, syncFederatedDispatch } from './federation-sync'
+import type { FederationSyncHealth } from './federation-sync-health'
 import { OrchestrationError } from './orchestration-error'
 
 function createIdleSyncHarness() {
@@ -23,8 +24,17 @@ function createIdleSyncHarness() {
     to_home_imported_sequence: 2,
     to_home_acknowledged_sequence: 0
   }
+  // Why the fake persists the health: the runtime settles the Map and the row together and reads the
+  // row back as the previous value, so a fake that drops the write would answer a different history
+  // than the one the backoff is computed from.
+  let syncHealth: FederationSyncHealth | null = null
   const createDb = () =>
     ({
+      getFederatedDispatchSyncHealth: () => syncHealth,
+      recordFederatedDispatchSyncHealth: (_dispatchId: string, health: FederationSyncHealth) => {
+        syncHealth = health
+      },
+      getFederatedRelayNoticeTarget: () => undefined,
       getFederatedDispatch: () => federated,
       getDispatchContextById: () => ({ run_id: 'run_home', task_id: 'task_home' }),
       getWorkerDispatch: () => ({ state: 'ready' }),

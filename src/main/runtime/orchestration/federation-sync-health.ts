@@ -3,6 +3,33 @@ import { OrchestrationError } from './orchestration-error'
 export const FEDERATION_RELAY_BASE_INTERVAL_MS = 1_000
 export const FEDERATION_RELAY_MAX_INTERVAL_MS = 60_000
 
+// Why five and not one or twenty: the retry interval doubles from 1s per consecutive failure, so the
+// fifth is the first failure the home waited ~32s to make — one doubling short of the 60s cap, after
+// roughly half a minute of real re-dialing. Escalating earlier would name outages that end before
+// the coordinator reads the mail; later adds nothing, because every failure past the cap is the same
+// 60s wait. Tune it by passing a threshold rather than by editing call sites.
+export const FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD = 5
+
+export type FederationRelayHealthTransition = 'unreachable' | 'recovered' | null
+
+// Why an edge and not a level: the notice is one per outage, so it fires on the crossing and stays
+// silent for every failure after it until a success resets the count. The recovery notice is gated
+// on the same threshold — a coordinator never told the transport died is not told it came back.
+export function classifyFederationRelayHealthTransition(
+  previous: FederationSyncHealth | undefined,
+  next: FederationSyncHealth,
+  threshold: number = FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD
+): FederationRelayHealthTransition {
+  const before = previous?.consecutiveFailures ?? 0
+  if (before < threshold && next.consecutiveFailures >= threshold) {
+    return 'unreachable'
+  }
+  if (before >= threshold && next.consecutiveFailures === 0) {
+    return 'recovered'
+  }
+  return null
+}
+
 // Why: worker-show reads these to answer "is the relay still pulling, and why not"
 // without the coordinator having to tail runtime logs.
 export type FederationSyncHealth = {

@@ -13,9 +13,17 @@ const COORDINATOR_PANE_KEY = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 describe('federated relay health persistence', () => {
   let db: OrchestrationDb
   let runId: string
+  let notified: { handle: string; type: string | undefined }[]
+  let runtime: { notifyMessageArrived: (handle: string, type?: string) => void }
 
   beforeEach(() => {
     db = new OrchestrationDb(':memory:')
+    notified = []
+    runtime = {
+      notifyMessageArrived: (handle, type) => {
+        notified.push({ handle, type })
+      }
+    }
     runId = db.createRun({
       objective: 'Relay health',
       coordinatorHandle: 'term_coord',
@@ -56,6 +64,7 @@ describe('federated relay health persistence', () => {
 
     const healthy = recordFederationRelaySyncOutcome({
       db,
+      runtime,
       dispatchId,
       previous: undefined,
       outcome: { kind: 'success', at: '2026-08-22T00:00:00.000Z' }
@@ -78,6 +87,7 @@ describe('federated relay health persistence', () => {
     const dispatchId = startFederatedDispatch()
     let health = recordFederationRelaySyncOutcome({
       db,
+      runtime,
       dispatchId,
       previous: undefined,
       outcome: { kind: 'success', at: '2026-08-22T00:00:00.000Z' }
@@ -86,6 +96,7 @@ describe('federated relay health persistence', () => {
     for (let failure = 0; failure < 3; failure += 1) {
       health = recordFederationRelaySyncOutcome({
         db,
+        runtime,
         dispatchId,
         previous: health,
         outcome: {
@@ -100,6 +111,8 @@ describe('federated relay health persistence', () => {
       lastError: 'runtime_unreachable: Peer refused the connection.',
       consecutiveFailures: 3
     })
+    // Three failures is below the threshold, so nothing was announced yet.
+    expect(notified).toEqual([])
   })
 
   it('reports null for a federated Dispatch the relay has never settled on', () => {
@@ -121,6 +134,7 @@ describe('federated relay health persistence', () => {
 
     recordFederationRelaySyncOutcome({
       db,
+      runtime,
       dispatchId,
       previous: undefined,
       outcome: { kind: 'failure', error: new Error('socket hang up') }
@@ -143,6 +157,7 @@ describe('federated relay health persistence', () => {
     expect(
       recordFederationRelaySyncOutcome({
         db,
+        runtime,
         dispatchId,
         previous: undefined,
         outcome: { kind: 'success', at: '2026-08-22T00:00:00.000Z' }
