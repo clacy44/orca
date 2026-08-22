@@ -162,7 +162,9 @@ function terminalPresenceStreamEvent(
     participants: buildTerminalPresenceActivityRows({
       registry: terminalPresenceRegistry,
       ptyId,
-      now: Date.now(),
+      // Why read off the registry: the stamps, the falling edge and this evaluation are one clock domain,
+      // and a literal Date.now() here would drift from a registry built with an injected clock.
+      now: terminalPresenceRegistry.now(),
       selfParticipantId: participant?.participantId ?? null
     })
   }

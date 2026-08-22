@@ -32,7 +32,9 @@ export function createTerminalPresenceChangeNotifier(
   options: TerminalPresenceChangeNotifierOptions
 ): TerminalPresenceChangeNotifier {
   const { registry } = options
-  const now = options.now ?? ((): number => Date.now())
+  // Why the registry's clock by default: the falling edge exists to expire stamps this registry wrote,
+  // so reading a second clock would arm timers against timestamps from a different domain.
+  const now = options.now ?? ((): number => registry.now())
   const listenersByPty = new Map<string, Set<() => void>>()
   const fallingEdgeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 

@@ -46,7 +46,7 @@ export class TerminalPresenceRegistry {
   private readonly grantWrites = new Map<string, Map<string, number>>()
   private readonly participantIds = new Map<string, string>()
   private readonly changeListeners = new Set<TerminalPresenceChangeListener>()
-  private readonly now: () => number
+  private readonly clock: () => number
   // Why: the synthesized host row's `since`, taken from the injected clock rather than module import,
   // so it is the one presence stamp a test can drive alongside every other one.
   startedAt: number
@@ -54,8 +54,14 @@ export class TerminalPresenceRegistry {
   constructor(options: TerminalPresenceRegistryOptions = {}) {
     // Why read through rather than capture Date.now: one clock must drive the remote stamp sites and the
     // host's IPC writers alike, and a captured reference would ignore a test's injected clock.
-    this.now = options.now ?? ((): number => Date.now())
+    this.clock = options.now ?? ((): number => Date.now())
     this.startedAt = this.now()
+  }
+
+  // Why exposed: every reader that evaluates a TTL must compare against the clock that wrote the stamps,
+  // and a caller reaching for Date.now() re-opens the mixed-domain hazard one level above the registry.
+  now(): number {
+    return this.clock()
   }
 
   onChange(listener: TerminalPresenceChangeListener): () => void {

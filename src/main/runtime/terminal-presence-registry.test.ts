@@ -309,6 +309,14 @@ describe('terminal presence stamp provenance', () => {
     expect(clocked.grantWritesOf('pty-1').size).toBe(0)
   })
 
+  it('hands its own clock to every reader', () => {
+    clock = 7_000
+    // Why exposed at all: the stream emit evaluates the TTL against this, so a reader calling Date.now()
+    // itself would compare an injected registry's stamps to wall time and read as never or always typing.
+    expect(clocked.now()).toBe(7_000)
+    expect(new TerminalPresenceRegistry({ now: () => 11 }).startedAt).toBe(11)
+  })
+
   it('publishes one change per host keystroke', () => {
     const changed: string[] = []
     const stopWatching = clocked.onChange((ptyId) => changed.push(ptyId))
