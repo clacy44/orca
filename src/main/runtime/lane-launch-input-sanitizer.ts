@@ -1,4 +1,8 @@
-import { CLAUDE_AUTH_ENV_VARS } from '../claude-accounts/environment'
+import {
+  ANTHROPIC_CUSTOM_HEADERS_ENV_KEY,
+  CLAUDE_AUTH_ENV_VARS,
+  isAuthLikeCustomHeaders
+} from '../claude-accounts/environment'
 import {
   canonicalizePathForContainment,
   isCanonicalPathWithinAnyRoot
@@ -36,8 +40,10 @@ export type LaneLaunchEnvResult =
 /**
  * Strips `CLAUDE_CONFIG_DIR` silently from all three env surfaces — including the deletion
  * list, since a deletion drops the lane back onto the shared `~/.claude` just as effectively
- * as an override — and refuses any `CLAUDE_AUTH_ENV_VARS` key loudly, because those outrank
- * a stored login and would repoint the launch at an attacker's API key.
+ * as an override — and refuses any `CLAUDE_AUTH_ENV_VARS` key, plus an auth-bearing
+ * `ANTHROPIC_CUSTOM_HEADERS`, loudly: those outrank a stored login and would repoint the
+ * launch at an attacker's API key. A custom-headers value the tree's own predicate does not
+ * read as auth passes, matching what `stripAuthEnv` itself does with it.
  *
  * The refusal covers `env` and `agentEnv` only. *Defining* an auth var is the attack;
  * *deleting* one is the safe direction and is what pty.ts already asks for on every lane pane
@@ -48,9 +54,17 @@ export type LaneLaunchEnvResult =
  */
 export function sanitizeLaneLaunchEnv(input: LaneLaunchEnvInput): LaneLaunchEnvResult {
   const platform = input.platform ?? process.platform
-  const refusedIn = (surface: string, keys: readonly string[]): LaneLaunchRefusal | null => {
-    const offender = keys.find((key) =>
-      CLAUDE_AUTH_ENV_VARS.some((authKey) => envKeysMatch(key, authKey, platform))
+  const refusedIn = (
+    surface: string,
+    env: Record<string, string> | null | undefined
+  ): LaneLaunchRefusal | null => {
+    const offender = Object.keys(env ?? {}).find(
+      (key) =>
+        CLAUDE_AUTH_ENV_VARS.some((authKey) => envKeysMatch(key, authKey, platform)) ||
+        // Why value-gated, unlike the auth tuple: ANTHROPIC_CUSTOM_HEADERS is auth-bearing
+        // only when it carries a credential, and the tree already models that predicate.
+        (envKeysMatch(key, ANTHROPIC_CUSTOM_HEADERS_ENV_KEY, platform) &&
+          isAuthLikeCustomHeaders(env?.[key]))
     )
     return offender
       ? {
@@ -59,9 +73,7 @@ export function sanitizeLaneLaunchEnv(input: LaneLaunchEnvInput): LaneLaunchEnvR
         }
       : null
   }
-  const refusal =
-    refusedIn('env', Object.keys(input.env ?? {})) ??
-    refusedIn('launchConfig.agentEnv', Object.keys(input.agentEnv ?? {}))
+  const refusal = refusedIn('env', input.env) ?? refusedIn('launchConfig.agentEnv', input.agentEnv)
   if (refusal) {
     return { ok: false, refusal }
   }
@@ -90,14 +102,23 @@ export function sanitizeLaneLaunchEnv(input: LaneLaunchEnvInput): LaneLaunchEnvR
  */
 export const REFUSED_LANE_LAUNCH_FLAGS = ['--settings', '--setting-sources', '--bare'] as const
 
+/** An inline `KEY=value` prefix reaches the child as an env var, so it gets guard 1's list. */
+const REFUSED_LANE_LAUNCH_ASSIGNMENTS: readonly string[] = [
+  CLAUDE_CONFIG_DIR_ENV_KEY,
+  ...CLAUDE_AUTH_ENV_VARS,
+  ANTHROPIC_CUSTOM_HEADERS_ENV_KEY
+]
+
 export type LaneLaunchCommandInput = {
   agentCommand?: string | null
   agentArgs?: string | null
+  platform?: NodeJS.Platform
 }
 
 export type LaneLaunchCommandResult = { ok: true } | { ok: false; refusal: LaneLaunchRefusal }
 
 export function sanitizeLaneLaunchCommand(input: LaneLaunchCommandInput): LaneLaunchCommandResult {
+  const platform = input.platform ?? process.platform
   const tokens = [
     ...tokenizeLaunchString(input.agentCommand),
     ...tokenizeLaunchString(input.agentArgs)
@@ -113,10 +134,13 @@ export function sanitizeLaneLaunchCommand(input: LaneLaunchCommandInput): LaneLa
         }
       }
     }
+    // Why the same fold as the env half: `claude_config_dir=C:\\victim\\auth claude` is one
+    // variable to a Windows child, and an exact-case match here reopens the hole one
+    // function down from where the env surfaces close it (§2m(5)).
     const assignedKey = parseEnvAssignment(token)
     if (
-      assignedKey === CLAUDE_CONFIG_DIR_ENV_KEY ||
-      (assignedKey !== null && (CLAUDE_AUTH_ENV_VARS as readonly string[]).includes(assignedKey))
+      assignedKey !== null &&
+      REFUSED_LANE_LAUNCH_ASSIGNMENTS.some((key) => envKeysMatch(assignedKey, key, platform))
     ) {
       return {
         ok: false,

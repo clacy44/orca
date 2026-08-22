@@ -188,3 +188,81 @@ describe('assertLaneResumePathsContained', () => {
     expect(assertLaneResumePathsContained({}, [root])).toEqual({ ok: true })
   })
 })
+
+describe('sanitizeLaneLaunchEnv — ANTHROPIC_CUSTOM_HEADERS', () => {
+  it('refuses an auth-bearing custom-headers value', () => {
+    const result = sanitizeLaneLaunchEnv({
+      env: { ANTHROPIC_CUSTOM_HEADERS: 'x-api-key: sk-ant-attacker' }
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.refusal.code).toBe('terminal.agent_env_refused')
+  })
+
+  it('refuses it in agentEnv, and in a lower-cased key on win32', () => {
+    expect(
+      sanitizeLaneLaunchEnv({
+        agentEnv: { ANTHROPIC_CUSTOM_HEADERS: 'Authorization: Bearer sk' }
+      }).ok
+    ).toBe(false)
+    expect(
+      sanitizeLaneLaunchEnv({
+        env: { anthropic_custom_headers: 'x-api-key: sk' },
+        platform: 'win32'
+      }).ok
+    ).toBe(false)
+  })
+
+  // Negative control: a header value that carries no credential is not an auth override, and
+  // `stripAuthEnv` leaves it alone too — refusing it would refuse legitimate launches.
+  it('passes a custom-headers value that carries no credential', () => {
+    const result = sanitizeLaneLaunchEnv({ env: { ANTHROPIC_CUSTOM_HEADERS: 'x-trace-id: 42' } })
+
+    expect(result.ok).toBe(true)
+    expect(result.ok === true && result.env).toEqual({ ANTHROPIC_CUSTOM_HEADERS: 'x-trace-id: 42' })
+  })
+
+  // Negative control for the fold: on POSIX the lower-cased key is a different variable.
+  it('passes a lower-cased custom-headers key on linux', () => {
+    expect(
+      sanitizeLaneLaunchEnv({
+        env: { anthropic_custom_headers: 'x-api-key: sk' },
+        platform: 'linux'
+      }).ok
+    ).toBe(true)
+  })
+})
+
+describe('sanitizeLaneLaunchCommand — inline env assignments', () => {
+  it('refuses a lower-cased config-dir assignment on win32', () => {
+    const result = sanitizeLaneLaunchCommand({
+      agentArgs: 'claude_config_dir=C:\\victim\\auth claude',
+      platform: 'win32'
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.refusal.code).toBe('terminal.agent_args_refused')
+  })
+
+  it('refuses a lower-cased auth-var assignment on win32', () => {
+    expect(
+      sanitizeLaneLaunchCommand({ agentArgs: 'anthropic_api_key=sk claude', platform: 'win32' }).ok
+    ).toBe(false)
+  })
+
+  it('refuses an ANTHROPIC_CUSTOM_HEADERS assignment', () => {
+    expect(sanitizeLaneLaunchCommand({ agentArgs: 'ANTHROPIC_CUSTOM_HEADERS=x claude' }).ok).toBe(
+      false
+    )
+  })
+
+  // Negative control: on POSIX the lower-cased name is a different variable the CLI never reads.
+  it('passes a lower-cased assignment on linux', () => {
+    expect(
+      sanitizeLaneLaunchCommand({
+        agentArgs: 'claude_config_dir=/tmp/victim claude',
+        platform: 'linux'
+      }).ok
+    ).toBe(true)
+  })
+})
