@@ -70,6 +70,18 @@ export function enforceClaudeConfigDirLaunchScope(
     platform
   )
   if (hostConfigDir) {
+    // Why an assertion and not a repair: both paths build the env as
+    // `{ ...clientEnv, ...claudeAuth.envPatch }`, so the host value already won here — a
+    // surviving *different* value could only come from a step between that merge and this
+    // anchor, which is the invariant clause (b) exists to catch. Absent is the ordinary
+    // case (the client asked for its deletion and `deleteRequestedEnvKeys` obliged), and a
+    // non-canonical casing on win32 is a client key, so both are repaired silently below.
+    const merged = env?.[CLAUDE_CONFIG_DIR_ENV_KEY]
+    if (merged !== undefined && merged !== hostConfigDir) {
+      throw new Error(
+        'Refusing to spawn: the merged env carries a Claude config directory the host did not compute.'
+      )
+    }
     return {
       env: withEnvKeyCollapsed(env, CLAUDE_CONFIG_DIR_ENV_KEY, hostConfigDir, platform),
       envToDelete: scrubbedEnvToDelete,

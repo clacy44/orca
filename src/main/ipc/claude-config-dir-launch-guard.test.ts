@@ -41,6 +41,31 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
     expect(result.envToDelete).toEqual([])
   })
 
+  it('refuses a merged env whose config dir is not the host-computed one', () => {
+    // Why reachable only from a future regression: both spawn paths spread the auth patch
+    // over the client env, so an unequal value means something rewrote it after the merge.
+    expect(() =>
+      enforceClaudeConfigDirLaunchScope({
+        env: { CLAUDE_CONFIG_DIR: '/tmp/somewhere-else' },
+        envToDelete: undefined,
+        hostConfigDir: '/home/me/.orca-claude/acct-1',
+        connectionId: null
+      })
+    ).toThrow(/the host did not compute/)
+  })
+
+  it('repairs, rather than refuses, a client key in a non-canonical casing on win32', () => {
+    const result = enforceClaudeConfigDirLaunchScope({
+      env: { claude_config_dir: 'C:\\victim' },
+      envToDelete: undefined,
+      hostConfigDir: 'C:\\host\\lane',
+      connectionId: null,
+      platform: 'win32'
+    })
+
+    expect(result.env).toEqual({ CLAUDE_CONFIG_DIR: 'C:\\host\\lane' })
+  })
+
   it('leaves a remote pane env untouched', () => {
     const env = { CLAUDE_CONFIG_DIR: '/home/remote/.claude-work' }
     const envToDelete = ['CLAUDE_CONFIG_DIR']
