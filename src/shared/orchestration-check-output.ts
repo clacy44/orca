@@ -37,6 +37,10 @@ export type OrchestrationCheckOutput = {
   formatted?: string
   deliveryId?: string | null
   runId?: string
+  // Why optional: an older host sends neither, and a replay that renders as fresh mail is the
+  // starvation this pair exists to expose.
+  replayed?: boolean
+  pendingBehind?: number
   timedOut?: boolean
   cancelled?: boolean
   connectionLost?: boolean
@@ -117,7 +121,9 @@ export function formatOrchestrationCheckText(
         )} [${message.type ?? 'status'}] from=${message.from_handle} "${message.subject}"`
     )
     .join('\n')
-  const output = prepared.deliveryId ? `Delivery ${prepared.deliveryId}\n${rendered}` : rendered
+  const output = prepared.deliveryId
+    ? `Delivery ${prepared.deliveryId}${formatDeliveryReplayTag(prepared)}\n${rendered}`
+    : rendered
   return `${legacyHeader}${output}${deliveryNotice}`
 }
 
@@ -139,6 +145,18 @@ export function prepareOrchestrationCheckOutput<T extends OrchestrationCheckOutp
     ...result,
     formatted: formatLegacyAwareCheckMessages(result.messages, checkedTerminal, compatibilityActive)
   }
+}
+
+// Why: a replayed Delivery is byte-identical to fresh mail, so a coordinator that never acks
+// re-reads the same batch forever while everything newer stays invisible behind it.
+function formatDeliveryReplayTag(result: OrchestrationCheckOutput): string {
+  if (result.replayed !== true) {
+    return ''
+  }
+  const acknowledge = `acknowledge with --ack ${result.deliveryId}`
+  return typeof result.pendingBehind === 'number' && result.pendingBehind > 0
+    ? ` [REPLAY — ${result.pendingBehind} newer messages are blocked behind it; ${acknowledge}]`
+    : ` [REPLAY — ${acknowledge}]`
 }
 
 function formatMessagePriorityTag(message: OrchestrationMessageSummary): string {

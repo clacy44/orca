@@ -101,3 +101,48 @@ describe('formatOrchestrationCheckText waitInterrupted', () => {
     )
   })
 })
+
+describe('formatOrchestrationCheckText delivery replay', () => {
+  const delivered = (extra: Partial<OrchestrationCheckOutput>): OrchestrationCheckOutput => ({
+    deliveryId: 'delivery_1',
+    count: 1,
+    messages: [
+      {
+        id: 'msg_1',
+        run_id: 'run_1',
+        delivery_contract: 'current_delivery',
+        from_handle: 'term_worker',
+        to_handle: 'run:run_1',
+        subject: 'progress',
+        type: 'status'
+      }
+    ],
+    ...extra
+  })
+
+  it('names how many newer messages a replay is blocking', () => {
+    expect(
+      formatOrchestrationCheckText(delivered({ replayed: true, pendingBehind: 3 }), 'term_coord')
+    ).toContain(
+      'Delivery delivery_1 [REPLAY — 3 newer messages are blocked behind it; acknowledge with --ack delivery_1]'
+    )
+  })
+
+  it('still marks a replay that is blocking nothing', () => {
+    expect(
+      formatOrchestrationCheckText(delivered({ replayed: true, pendingBehind: 0 }), 'term_coord')
+    ).toContain('Delivery delivery_1 [REPLAY — acknowledge with --ack delivery_1]')
+  })
+
+  it('leaves a fresh Delivery line exactly as it was', () => {
+    expect(
+      formatOrchestrationCheckText(delivered({ replayed: false, pendingBehind: 0 }), 'term_coord')
+    ).toContain('Delivery delivery_1\n')
+  })
+
+  it('renders an older host with no replay fields exactly as before', () => {
+    expect(formatOrchestrationCheckText(delivered({}), 'term_coord')).toContain(
+      'Delivery delivery_1\n'
+    )
+  })
+})

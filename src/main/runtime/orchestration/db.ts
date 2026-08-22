@@ -2681,12 +2681,29 @@ export class OrchestrationDb {
     )
   }
 
+  // Why: message_ids is frozen at creation, so mail that arrives after an outstanding Delivery
+  // never joins it and is invisible until the Delivery is acknowledged. Count what is stuck.
+  private countUnreadRunMessagesOutsideDelivery(runId: string, deliveredIds: string[]): number {
+    const exclusion =
+      deliveredIds.length > 0 ? ` AND id NOT IN (${deliveredIds.map(() => '?').join(',')})` : ''
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM messages
+         WHERE run_id = ? AND to_handle = ? AND read = 0
+           AND delivery_contract = 'current_delivery'${exclusion}`
+      )
+      .get(runId, `run:${runId}`, ...deliveredIds) as { count: number } | undefined
+    return row?.count ?? 0
+  }
+
   getOrCreateRunDelivery(params: {
     runId: string
     consumerGeneration: number
     limit?: number
     wakeTypes?: MessageType[]
-  }): { delivery: DeliveryRow; messages: MessageRow[]; replayed: boolean } | undefined {
+  }):
+    | { delivery: DeliveryRow; messages: MessageRow[]; replayed: boolean; pendingBehind: number }
+    | undefined {
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 50)
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -2702,8 +2719,17 @@ export class OrchestrationDb {
           )
         }
         const messages = this.getDeliveryMessages(existing)
+        const pendingBehind = this.countUnreadRunMessagesOutsideDelivery(
+          params.runId,
+          JSON.parse(existing.message_ids) as string[]
+        )
         this.db.exec('COMMIT')
-        return { delivery: exposeDeliveryTimestamps(existing), messages, replayed: true }
+        return {
+          delivery: exposeDeliveryTimestamps(existing),
+          messages,
+          replayed: true,
+          pendingBehind
+        }
       }
 
       const address = `run:${params.runId}`
@@ -2751,8 +2777,19 @@ export class OrchestrationDb {
           JSON.stringify(messages.map((message) => message.id))
         )
       const delivery = this.getDeliveryRaw(deliveryId) as DeliveryRow
+      // Why counted here too: a fresh batch is capped at `limit`, so an overflowing mailbox
+      // strands the remainder behind this Delivery from the moment it is created.
+      const pendingBehind = this.countUnreadRunMessagesOutsideDelivery(
+        params.runId,
+        messages.map((message) => message.id)
+      )
       this.db.exec('COMMIT')
-      return { delivery: exposeDeliveryTimestamps(delivery), messages, replayed: false }
+      return {
+        delivery: exposeDeliveryTimestamps(delivery),
+        messages,
+        replayed: false,
+        pendingBehind
+      }
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error

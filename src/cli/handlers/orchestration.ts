@@ -711,6 +711,8 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       formatted?: string
       deliveryId?: string | null
       runId?: string
+      replayed?: boolean
+      pendingBehind?: number
       timedOut?: boolean
       cancelled?: boolean
       connectionLost?: boolean
