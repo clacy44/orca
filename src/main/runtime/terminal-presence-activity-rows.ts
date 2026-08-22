@@ -12,6 +12,7 @@ import {
   TERMINAL_PRESENCE_MAX_PARTICIPANTS,
   resolveHostPresenceLabel
 } from './terminal-presence-snapshot'
+import { resolveMobilePresenceStaleness } from './terminal-presence-staleness'
 
 // Why: one window for both activity flags. Long enough to bridge the gap between keystrokes in a burst,
 // short enough that a chip clears while the reader still remembers pressing the key.
@@ -24,6 +25,9 @@ export type TerminalPresenceActivityRow = RuntimeTerminalStreamPresenceParticipa
 export type TerminalPresenceParticipantIndex = {
   byConnection: ReadonlyMap<string, TerminalPresenceParticipant>
   byGrant: ReadonlyMap<string, TerminalPresenceParticipant>
+  // Why hoisted with the rest: staleness is per participant, not per attachment, so a phone holding two
+  // sockets must be judged on the newest frame either of them delivered.
+  mobileLastInbound: ReadonlyMap<string, number>
 }
 
 export type TerminalPresenceActivityRowsOptions = {
@@ -45,14 +49,26 @@ export function buildTerminalPresenceParticipantIndex(
 ): TerminalPresenceParticipantIndex {
   const byConnection = new Map<string, TerminalPresenceParticipant>()
   const byGrant = new Map<string, TerminalPresenceParticipant>()
+  const mobileLastInbound = new Map<string, number>()
+  // Why one walk and not three: this index is hoisted across a whole `terminal.list` response, so every
+  // extra pass over the connections is paid once per row of the largest payload presence has.
   for (const [connectionId, participant] of registry.connections()) {
     byConnection.set(connectionId, participant)
     const known = byGrant.get(participant.pairedDeviceId)
     if (!known || participant.connectedAt < known.connectedAt) {
       byGrant.set(participant.pairedDeviceId, participant)
     }
+    if (participant.kind === 'mobile') {
+      const newest = mobileLastInbound.get(participant.participantId)
+      mobileLastInbound.set(
+        participant.participantId,
+        newest === undefined
+          ? participant.lastInboundAt
+          : Math.max(newest, participant.lastInboundAt)
+      )
+    }
   }
-  return { byConnection, byGrant }
+  return { byConnection, byGrant, mobileLastInbound }
 }
 
 type ActivityDraft = Omit<TerminalPresenceActivityRow, 'self'>
@@ -63,7 +79,8 @@ export function buildTerminalPresenceActivityRows(
   options: TerminalPresenceActivityRowsOptions
 ): TerminalPresenceActivityRow[] {
   const { registry, ptyId, now } = options
-  const { byConnection, byGrant } = options.index ?? buildTerminalPresenceParticipantIndex(registry)
+  const { byConnection, byGrant, mobileLastInbound } =
+    options.index ?? buildTerminalPresenceParticipantIndex(registry)
   const drafts = new Map<string, ActivityDraft>()
   const upsert = (draft: ActivityDraft): ActivityDraft => {
     const existing = drafts.get(draft.participantId)
@@ -112,13 +129,24 @@ export function buildTerminalPresenceActivityRows(
         left.since - right.since || left.participantId.localeCompare(right.participantId)
     )
     .slice(0, TERMINAL_PRESENCE_MAX_PARTICIPANTS)
-    .map((draft) => ({
-      ...draft,
-      // Why: typing outranks writing — the interactive stamp is the one that can hold a peer's keystroke,
-      // so a participant doing both reads as the state with consequences.
-      writing: draft.writing && !draft.typing,
-      self: options.selfParticipantId === draft.participantId
-    }))
+    .map((draft) => {
+      const staleness = resolveMobilePresenceStaleness(
+        draft.kind,
+        mobileLastInbound.get(draft.participantId),
+        now
+      )
+      return {
+        ...draft,
+        // Why: typing outranks writing — the interactive stamp is the one that can hold a peer's keystroke,
+        // so a participant doing both reads as the state with consequences.
+        writing: draft.writing && !draft.typing,
+        // Why forced false rather than trusted: a phone silent for two minutes cannot be inside a 3 s
+        // activity window, so a stale row that still claimed either flag would be reporting a stamp that
+        // no longer proves anybody is there.
+        ...(staleness ? { typing: false, writing: false, ...staleness } : {}),
+        self: options.selfParticipantId === draft.participantId
+      }
+    })
 }
 
 // Why exported: the change notifier arms its falling edge off the same freshness test the rows read,

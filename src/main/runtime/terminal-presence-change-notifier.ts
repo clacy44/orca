@@ -11,6 +11,7 @@ import {
   TERMINAL_PRESENCE_ACTIVITY_TTL_MS,
   isTerminalPresenceActivityFresh
 } from './terminal-presence-activity-rows'
+import { nextMobilePresenceStaleAt } from './terminal-presence-staleness'
 
 // Why: a keystroke burst must publish at human speed, not at PTY speed. 750 ms is below the 3 s activity
 // TTL so a chip lights well inside its own window, and the 3x max-wait keeps a sustained typist visible.
@@ -62,6 +63,16 @@ export function createTerminalPresenceChangeNotifier(
     return earliest
   }
 
+  const earliestOf = (deadlines: readonly (number | null)[]): number | null => {
+    let earliest: number | null = null
+    for (const deadline of deadlines) {
+      if (deadline !== null && (earliest === null || deadline < earliest)) {
+        earliest = deadline
+      }
+    }
+    return earliest
+  }
+
   // Why the hold gets a deadline of its own: the re-press window (5 s) outlives the activity TTL (3 s)
   // that raised it, so a falling edge armed on stamps alone stops emitting while the "press again" notice
   // is still on the wire — and two humans who simply stop typing strand it forever (§2.6).
@@ -73,10 +84,11 @@ export function createTerminalPresenceChangeNotifier(
     // Why re-tested against this clock: an already-met hold deadline must arm nothing, or the emit that
     // met it would arm the same deadline again on every pass.
     const publishableHoldExpiry = holdExpiry !== null && holdExpiry > at ? holdExpiry : null
-    if (activityExpiry === null || publishableHoldExpiry === null) {
-      return activityExpiry ?? publishableHoldExpiry
-    }
-    return Math.min(activityExpiry, publishableHoldExpiry)
+    // Why a phone earns a deadline of its own: going stale is the one presence change caused by nothing
+    // happening, so with no timer behind it a silent phone stays rendered as freshly attached forever.
+    // It expires a FLAG on a row that stays — never the row (§2.1).
+    const staleExpiry = nextMobilePresenceStaleAt(registry, at, ptyId)
+    return earliestOf([activityExpiry, publishableHoldExpiry, staleExpiry])
   }
 
   const clearFallingEdge = (ptyId: string): void => {

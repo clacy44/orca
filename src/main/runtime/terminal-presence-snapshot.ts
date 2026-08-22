@@ -10,6 +10,7 @@ import {
   type TerminalPresenceParticipant,
   type TerminalPresenceRegistry
 } from './terminal-presence-registry'
+import { resolveMobilePresenceStaleness } from './terminal-presence-staleness'
 
 export type TerminalPresenceKind = 'runtime' | 'mobile' | 'host'
 
@@ -114,6 +115,10 @@ export type TerminalPresenceRow = {
   // Why: handles, never ptyIds — ptyId is an internal runtime identifier no presence surface publishes.
   attachedTerminals: string[]
   since: number
+  // Why only ever set, never cleared by a sweep: a silent phone is marked and kept (§2.1) — removal is
+  // lifecycle-driven, so nothing on this path may drop a row for saying nothing.
+  stale?: true
+  lastSeenAt?: number
 }
 
 export type TerminalPresenceRowsOptions = {
@@ -140,6 +145,9 @@ type Aggregate = {
   connectedAt: number
   established: boolean
   attachedPtyIds: Set<string>
+  // Why the newest across the grant's sockets: any inbound frame on any of them proves the phone is
+  // alive, so the earliest one would mark a phone that is still polling on its other socket.
+  lastInboundAt: number
 }
 
 function collectAggregates(
@@ -155,13 +163,15 @@ function collectAggregates(
     if (existing) {
       existing.connectedAt = Math.min(existing.connectedAt, participant.connectedAt)
       existing.established ||= established
+      existing.lastInboundAt = Math.max(existing.lastInboundAt, participant.lastInboundAt)
       continue
     }
     byParticipant.set(participant.participantId, {
       participant,
       connectedAt: participant.connectedAt,
       established,
-      attachedPtyIds: new Set()
+      attachedPtyIds: new Set(),
+      lastInboundAt: participant.lastInboundAt
     })
   }
   for (const [ptyId, byKey] of registry.attachmentsSnapshot()) {
@@ -181,7 +191,11 @@ function boundTerminals(handles: Iterable<string>): string[] {
   return Array.from(handles).slice(0, TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS)
 }
 
-function toRow(aggregate: Aggregate, options: TerminalPresenceRowsOptions): TerminalPresenceRow {
+function toRow(
+  aggregate: Aggregate,
+  options: TerminalPresenceRowsOptions,
+  now: number
+): TerminalPresenceRow {
   const handles: string[] = []
   for (const ptyId of aggregate.attachedPtyIds) {
     const handle = options.resolveTerminalHandle(ptyId)
@@ -189,13 +203,19 @@ function toRow(aggregate: Aggregate, options: TerminalPresenceRowsOptions): Term
       handles.push(handle)
     }
   }
+  const staleness = resolveMobilePresenceStaleness(
+    aggregate.participant.kind,
+    aggregate.lastInboundAt,
+    now
+  )
   return {
     participantId: aggregate.participant.participantId,
     label: aggregate.participant.label,
     kind: aggregate.participant.kind,
     self: options.selfParticipantId === aggregate.participant.participantId,
     attachedTerminals: boundTerminals(handles),
-    since: aggregate.connectedAt
+    since: aggregate.connectedAt,
+    ...staleness
   }
 }
 
@@ -204,9 +224,9 @@ function toRow(aggregate: Aggregate, options: TerminalPresenceRowsOptions): Term
 export function buildTerminalPresenceRows(
   options: TerminalPresenceRowsOptions
 ): TerminalPresenceRows {
-  // Why: kind 'mobile' rows reach here as soon as a phone authenticates, but a phone has no bounded
-  // reap horizon — S7 owes them the `stale` suffix before any surface publishes them, or the two
-  // liveness contracts blend silently.
+  // Why mobile rows are safe to publish here: a phone has no bounded reap horizon, so `toRow` marks a
+  // silent one `stale` rather than letting it read as freshly attached — the two liveness contracts stay
+  // visibly different instead of blending.
   const aggregates = Array.from(
     collectAggregates(options.registry, options.hasEstablishedSubscription).values()
   ).filter((aggregate) => aggregate.established)
@@ -226,9 +246,12 @@ export function buildTerminalPresenceRows(
     since: options.registry.startedAt
   }
   const capacity = TERMINAL_PRESENCE_MAX_PARTICIPANTS - 1
+  // Why one read for the whole payload: two rows of one roster must never straddle a staleness boundary
+  // and disagree about what "now" was.
+  const now = options.registry.now()
   const participants = [
     hostRow,
-    ...aggregates.slice(0, capacity).map((aggregate) => toRow(aggregate, options))
+    ...aggregates.slice(0, capacity).map((aggregate) => toRow(aggregate, options, now))
   ]
   return aggregates.length > capacity ? { participants, truncated: true } : { participants }
 }
@@ -252,6 +275,11 @@ export function buildTerminalPresenceRosterParticipants(
     label: row.label,
     kind: row.kind,
     attachedTerminals: row.attachedTerminals,
+    // Why staleness rides membership while typing does not: it changes at most once per phone per
+    // silence, so it cannot republish this broadcast at keystroke rate the way an activity flag would.
+    ...(row.stale && row.lastSeenAt !== undefined
+      ? { stale: true as const, lastSeenAt: row.lastSeenAt }
+      : {}),
     // Why false here and stamped later: this payload is built ONCE per change and read by every
     // listener, so the only honest default is "nobody" until a listener identity is applied.
     self: false

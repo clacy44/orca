@@ -12,6 +12,7 @@ import {
   TERMINAL_PRESENCE_COALESCE_WINDOW_MS
 } from './terminal-presence-change-notifier'
 import type { TerminalPresenceRegistry } from './terminal-presence-registry'
+import { nextMobilePresenceStaleAt } from './terminal-presence-staleness'
 
 // Why one key: this bus is runtime-wide, so the coalescer that guards it has exactly one stream to
 // guard. Keeping the keyed contract (rather than hand-rolling a single timer) is what buys the
@@ -64,6 +65,29 @@ export function createTerminalPresenceRosterPublisher(
   // have seen — and every later emit is a real change.
   let lastPublished: string | null = JSON.stringify(options.buildMembership())
 
+  // Why this bus needs its own: a phone going quiet changes the roster while producing no registry
+  // mutation at all, so the fingerprint above would keep publishing nothing and the status bar would
+  // name a dead phone as freshly attached. Marks a row; never removes one.
+  let staleTimer: ReturnType<typeof setTimeout> | null = null
+  const armStaleEdge = (): void => {
+    if (staleTimer) {
+      clearTimeout(staleTimer)
+      staleTimer = null
+    }
+    const at = options.registry.now()
+    const deadline = nextMobilePresenceStaleAt(options.registry, at)
+    if (deadline === null) {
+      return
+    }
+    staleTimer = setTimeout(() => {
+      staleTimer = null
+      emit()
+    }, deadline - at)
+    if (typeof staleTimer.unref === 'function') {
+      staleTimer.unref()
+    }
+  }
+
   // Why compare the serialized payload rather than watch specific mutators: every field on a W8 row is
   // one a keystroke cannot move, so "the payload is byte-identical" IS "membership did not change" —
   // and a future field that a keystroke CAN move would light this bus up in a test rather than in
@@ -71,6 +95,7 @@ export function createTerminalPresenceRosterPublisher(
   const emit = (): void => {
     const membership = options.buildMembership()
     const fingerprint = JSON.stringify(membership)
+    armStaleEdge()
     if (fingerprint === lastPublished) {
       return
     }
@@ -92,6 +117,9 @@ export function createTerminalPresenceRosterPublisher(
   // and reaches the membership feed. Subscribing to one alone leaves half the roster stale.
   const unsubscribeChange = options.registry.onChange(schedule)
   const unsubscribeMembership = options.registry.onMembershipChange(schedule)
+  // Why armed at construction and not only after the first publish: the seeded baseline above may
+  // already contain a phone, whose staleness would otherwise wait for somebody else to move.
+  armStaleEdge()
 
   return {
     schedule,
@@ -108,6 +136,10 @@ export function createTerminalPresenceRosterPublisher(
       unsubscribeChange()
       unsubscribeMembership()
       coalescer.dispose()
+      if (staleTimer) {
+        clearTimeout(staleTimer)
+        staleTimer = null
+      }
       lastPublished = null
     }
   }
