@@ -178,6 +178,36 @@ describe('worker-show and worker-list liveness fields', () => {
     expect(shown.dispatchMailbox).toEqual({ unread: 0, deliverable: true })
   })
 
+  it('leaves the unread count intact when the worker only peeks', async () => {
+    const { run, dispatchId } = createReadyWorker()
+    db.insertMessage({
+      from: 'term_coord',
+      to: `dispatch:${dispatchId}`,
+      subject: 'follow-up',
+      runId: run.id
+    })
+
+    const peeked = (await call('orchestration.check', {
+      terminal: 'term_worker',
+      peek: true,
+      unread: false
+    })) as { count: number }
+    const afterPeek = (await call('orchestration.workerShow', {
+      dispatch: dispatchId
+    })) as WorkerShowLiveness
+
+    expect(peeked.count).toBe(1)
+    expect(afterPeek.dispatchMailbox).toEqual({ unread: 1, deliverable: true })
+
+    // Positive control: an ordinary check consumes what the peek deliberately left behind.
+    await call('orchestration.check', { terminal: 'term_worker' })
+    const afterRead = (await call('orchestration.workerShow', {
+      dispatch: dispatchId
+    })) as WorkerShowLiveness
+
+    expect(afterRead.dispatchMailbox).toEqual({ unread: 0, deliverable: true })
+  })
+
   it('carries the same age on worker-list rows', async () => {
     const { run, dispatchId } = createReadyWorker()
     db.recordHeartbeat(dispatchId, new Date(Date.now() - 60_000).toISOString())
@@ -197,5 +227,114 @@ describe('worker-show and worker-list liveness fields', () => {
 
     expect(row).not.toHaveProperty('lastHeartbeatAt')
     expect(row).not.toHaveProperty('heartbeatAgeMs')
+  })
+})
+
+describe('federated worker-show result shape', () => {
+  const databases: OrchestrationDb[] = []
+  const runtimes: OrcaRuntimeService[] = []
+
+  afterEach(() => {
+    for (const runtime of runtimes.splice(0)) {
+      runtime.stopOrchestrationFederationRelay()
+    }
+    for (const db of databases.splice(0)) {
+      db.close()
+    }
+  })
+
+  function createFederatedDispatch() {
+    const db = new OrchestrationDb(':memory:')
+    const runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb(db)
+    databases.push(db)
+    runtimes.push(runtime)
+    const run = db.createRun({
+      objective: 'Federated liveness',
+      coordinatorHandle: 'term_coord',
+      coordinatorPaneKey: 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    })
+    const task = db.createTask({ spec: 'remote work', runId: run.id })
+    const started = db.createStartingWorkerDispatch({
+      taskId: task.id,
+      startOptions: {},
+      runtimeEpoch: runtime.getRuntimeId(),
+      federation: {
+        environmentId: 'environment_peer',
+        environmentName: 'peer',
+        peerFingerprint: 'peer_fingerprint',
+        protocolVersion: 1
+      }
+    })
+    db.markWorkerDispatchReady(started.dispatch.id)
+    vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockReturnValue({
+      environmentId: 'environment_peer',
+      name: 'peer',
+      peerFingerprint: 'peer_fingerprint'
+    })
+    vi.spyOn(runtime, 'callOrchestrationWorkerServer').mockResolvedValue({
+      runtimeEpoch: 'peer_epoch',
+      attachment: {
+        state: 'ready',
+        stage: 'input_accepted',
+        last_error: null,
+        worktree_id: 'repo::remote-worktree',
+        terminal_handle: 'term_remote_worker',
+        setup_state: 'not_applicable',
+        effects: [],
+        residualResources: []
+      },
+      terminal: { handle: 'term_remote_worker', connected: true },
+      observation: { status: 'running', exactWorker: true }
+    })
+    return { db, runtime, dispatchId: started.dispatch.id }
+  }
+
+  function workerShow(runtime: OrcaRuntimeService, dispatchId: string) {
+    const method = ORCHESTRATION_METHODS.find((entry) => entry.name === 'orchestration.workerShow')
+    if (!method) {
+      throw new Error('workerShow method is not registered')
+    }
+    return method.handler(method.params!.parse({ dispatch: dispatchId }), { runtime } as never)
+  }
+
+  it('keeps every pre-tranche key and adds the liveness fields only when they exist', async () => {
+    const { runtime, dispatchId } = createFederatedDispatch()
+
+    const shown = (await workerShow(runtime, dispatchId)) as Record<string, unknown>
+
+    expect(Object.keys(shown).sort()).toEqual([
+      'dispatch',
+      'observation',
+      'remoteRuntimeEpoch',
+      'server',
+      'sync',
+      'terminal',
+      'worker',
+      'workerMail'
+    ])
+    expect(shown).not.toHaveProperty('lastHeartbeatAt')
+    expect(shown).not.toHaveProperty('heartbeatAgeMs')
+  })
+
+  it('adds only the two liveness keys once the Dispatch has heartbeated', async () => {
+    const { db, runtime, dispatchId } = createFederatedDispatch()
+    db.recordHeartbeat(dispatchId, new Date(Date.now() - 60_000).toISOString())
+
+    const shown = (await workerShow(runtime, dispatchId)) as Record<string, unknown>
+
+    expect(Object.keys(shown).sort()).toEqual([
+      'dispatch',
+      'heartbeatAgeMs',
+      'lastHeartbeatAt',
+      'observation',
+      'remoteRuntimeEpoch',
+      'server',
+      'sync',
+      'terminal',
+      'worker',
+      'workerMail'
+    ])
+    expect(shown.observation).toEqual({ status: 'running', exactWorker: true })
   })
 })
