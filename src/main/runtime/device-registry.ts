@@ -67,6 +67,9 @@ export class DeviceRegistry {
   private readonly registryPath: string
   private devices: DeviceEntry[] = []
   private pendingLastSeenFlush: NodeJS.Timeout | null = null
+  // Why: a failed load yields zero devices, which any "delete what no device claims" sweep
+  // would read as "delete everything". Only a completed read/normalize sets this.
+  private registryLoadSucceeded = false
 
   constructor(userDataPath: string) {
     this.registryPath = join(userDataPath, DEVICE_REGISTRY_FILENAME)
@@ -331,9 +334,16 @@ export class DeviceRegistry {
     }
   }
 
+  /** Whether the on-disk registry was actually read; false after a load failure. */
+  get loadSucceeded(): boolean {
+    return this.registryLoadSucceeded
+  }
+
   private load(): void {
     if (!existsSync(this.registryPath)) {
+      // Why: no file is an authoritative empty registry, not a failed read.
       this.devices = []
+      this.registryLoadSucceeded = true
       return
     }
     try {
@@ -360,8 +370,10 @@ export class DeviceRegistry {
       // Why: sweep in memory only — the next mutation persists the pruned array, and rewriting here would
       // pay a secure-file write (two synchronous PowerShell ACL spawns on Windows) on every construction.
       this.devices = retainUnexpiredPendingDevices(loaded, Date.now())
+      this.registryLoadSucceeded = true
     } catch {
       this.devices = []
+      this.registryLoadSucceeded = false
     }
   }
 

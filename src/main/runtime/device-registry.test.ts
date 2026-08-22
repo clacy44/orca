@@ -319,3 +319,54 @@ describe('DeviceRegistry pending grants', () => {
     expect(readRegistryFile()[0]).not.toHaveProperty('pendingExpiresAt')
   })
 })
+
+describe('DeviceRegistry load provenance', () => {
+  let userDataPath: string
+
+  beforeEach(() => {
+    userDataPath = mkdtempSync(join(tmpdir(), 'orca-device-registry-load-'))
+  })
+
+  afterEach(() => {
+    rmSync(userDataPath, { recursive: true, force: true })
+  })
+
+  const registryFilePath = (): string => join(userDataPath, DEVICE_REGISTRY_FILENAME)
+
+  it('reports success for a readable registry', () => {
+    writeFileSync(
+      registryFilePath(),
+      JSON.stringify([
+        {
+          deviceId: 'phone-1',
+          name: 'Phone',
+          token: 'token-1',
+          scope: 'mobile',
+          pairedAt: 1,
+          lastSeenAt: 1
+        }
+      ]),
+      'utf-8'
+    )
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.loadSucceeded).toBe(true)
+    expect(registry.validateToken('token-1')?.deviceId).toBe('phone-1')
+  })
+
+  it('reports success for a registry that does not exist yet', () => {
+    expect(new DeviceRegistry(userDataPath).loadSucceeded).toBe(true)
+  })
+
+  it('reports failure when the registry cannot be parsed', () => {
+    writeFileSync(registryFilePath(), '{ not json', 'utf-8')
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    // The gate: zero devices here means "unknown", not "none paired" — a later sweep must not
+    // read it as permission to delete every lane on the host.
+    expect(registry.loadSucceeded).toBe(false)
+    expect(registry.listDevices()).toEqual([])
+  })
+})
