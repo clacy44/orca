@@ -3034,6 +3034,12 @@
           "TerminalQuickCommandsSubmenu": {
             "3ccc7981bb": "Host unavailable",
             "54f29b7c0d": "Loading host…"
+          },
+          "TerminalPresenceChip": {
+            "ca8b0b4bc6": "{{value0}} is typing",
+            "13c1a5839d": "{{value0}} is writing",
+            "b9ac6c07ca": "{{value0}} is typing — press again",
+            "d7e5962e29": "In use by {{value0}}"
           }
         }
       },

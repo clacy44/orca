@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { onDriverChange } from '@/lib/pane-manager/mobile-driver-state'
+import { onPresenceChange } from '@/lib/pane-manager/terminal-presence-state'
 import { onOverrideChange } from '@/lib/pane-manager/mobile-fit-overrides'
 import type { ManagedPane, PaneManager } from '@/lib/pane-manager/pane-manager'
 import { safeFit } from '@/lib/pane-manager/pane-tree-ops'
@@ -146,6 +147,20 @@ export function useMobileOverlayTicks({ managerRef, paneTransportsRef }: MobileO
           return
         }
         setDriverTick((n) => n + 1)
+      }),
+    [paneTransportsRef]
+  )
+
+  // Why: presence lives in a module Map for the same reason the driver does; this counter re-renders the
+  // in-use chip on a peer's typing edge without putting per-keystroke state in the store.
+  const [, setPresenceTick] = useState(0)
+  useEffect(
+    () =>
+      onPresenceChange((event) => {
+        if (!isPtyMountedInTab(paneTransportsRef.current, event.ptyId)) {
+          return
+        }
+        setPresenceTick((n) => n + 1)
       }),
     [paneTransportsRef]
   )
