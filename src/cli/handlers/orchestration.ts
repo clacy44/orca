@@ -10,6 +10,11 @@ import {
 import { RuntimeClientError } from '../runtime-client'
 import { requireWorkerDoneSettlement } from './orchestration-worker-settlement'
 import {
+  formatHeartbeatAge,
+  formatOrchestrationWorkerShow,
+  type OrchestrationWorkerShowResult
+} from './orchestration-worker-show-format'
+import {
   negotiateRemoteRunMailbox,
   withRemoteRunMailboxDegradation
 } from './orchestration-remote-run-mailbox'
@@ -996,27 +1001,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   },
 
   'orchestration worker-show': async ({ flags, client, json }) => {
-    const result = await client.call<{
-      dispatch: { id: string; task_id: string; status: string }
-      worker: { state: string; stage: string; agent_terminal_handle: string | null }
-      sync?: {
-        lastSyncAt: string | null
-        lastError: string | null
-        consecutiveFailures: number
-      } | null
-    }>('orchestration.workerShow', {
+    const result = await client.call<OrchestrationWorkerShowResult>('orchestration.workerShow', {
       dispatch: getRequiredStringFlag(flags, 'dispatch')
     })
-    printResult(result, json, (value) => {
-      const base = `${value.dispatch.id} task=${value.dispatch.task_id} [${value.worker.state}] stage=${value.worker.stage}`
-      if (!value.sync) {
-        return base
-      }
-      const sync = `sync: lastSyncAt=${value.sync.lastSyncAt ?? 'never'} consecutiveFailures=${value.sync.consecutiveFailures}`
-      return value.sync.lastError
-        ? `${base}\n${sync} lastError=${value.sync.lastError}`
-        : `${base}\n${sync}`
-    })
+    printResult(result, json, formatOrchestrationWorkerShow)
   },
 
   'orchestration worker-read': async ({ flags, client, json }) => {
@@ -1130,6 +1118,8 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         agentTerminalHandle: string | null
         terminalState: string | null
         resource: unknown
+        lastHeartbeatAt?: string
+        heartbeatAgeMs?: number
       }[]
       counts: Record<string, number>
     }>('orchestration.workerList', {
@@ -1143,7 +1133,13 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       const rows = r.workers
         .map(
           (w) =>
-            `${w.dispatchId} task=${w.taskId} [${w.workerState}] terminal=${w.terminalState ?? 'none'}`
+            // Why appended only when known: a never-heartbeated worker gets no token at all, so
+            // absence never renders as a fresh-looking age.
+            `${w.dispatchId} task=${w.taskId} [${w.workerState}] terminal=${w.terminalState ?? 'none'}${
+              w.heartbeatAgeMs === undefined
+                ? ''
+                : ` heartbeat=${formatHeartbeatAge(w.heartbeatAgeMs)}`
+            }`
         )
         .join('\n')
       const counts = Object.entries(r.counts)

@@ -1,0 +1,95 @@
+export type OrchestrationWorkerShowResult = {
+  dispatch: { id: string; task_id: string; status: string }
+  worker: { state: string; stage: string; agent_terminal_handle: string | null }
+  // Why loose: the federated branch relays the peer's projection verbatim, so only the fields
+  // this formatter reads can be relied on.
+  terminal?: { lastOutputAt?: number | null } | null
+  observation?: {
+    status: string
+    exactWorker: boolean
+    agentStatus?: string
+    blockedSince?: string
+  }
+  lastHeartbeatAt?: string
+  heartbeatAgeMs?: number
+  dispatchMailbox?: { unread: number; deliverable: boolean }
+  workerMail?: { pending: number; deliverable: boolean }
+  sync?: {
+    lastSyncAt: string | null
+    lastError: string | null
+    consecutiveFailures: number
+  } | null
+}
+
+export function formatOrchestrationWorkerShow(value: OrchestrationWorkerShowResult): string {
+  const lines = [
+    `${value.dispatch.id} task=${value.dispatch.task_id} [${value.worker.state}] stage=${value.worker.stage}`
+  ]
+  const terminal = formatWorkerTerminalLine(value)
+  if (terminal) {
+    lines.push(terminal)
+  }
+  lines.push(formatWorkerLivenessLine(value))
+  const mail = formatWorkerMailLine(value)
+  if (mail) {
+    lines.push(mail)
+  }
+  if (value.sync) {
+    const sync = `sync: lastSyncAt=${value.sync.lastSyncAt ?? 'never'} consecutiveFailures=${value.sync.consecutiveFailures}`
+    lines.push(value.sync.lastError ? `${sync} lastError=${value.sync.lastError}` : sync)
+  }
+  return lines.join('\n')
+}
+
+export function formatHeartbeatAge(ageMs: number): string {
+  const minutes = Math.floor(ageMs / 60_000)
+  const hours = Math.floor(minutes / 60)
+  return hours > 0 ? `${hours}h${minutes % 60}m` : `${minutes}m`
+}
+
+function formatWorkerTerminalLine(value: OrchestrationWorkerShowResult): string | null {
+  // Why exact only: a non-exact observation describes some other process, so its terminal
+  // timestamps would be a report about the wrong worker.
+  if (!value.observation?.exactWorker) {
+    return null
+  }
+  const lastOutputAt = value.terminal?.lastOutputAt
+  const parts = [
+    `terminal: status=${value.observation.status}`,
+    `lastOutputAt=${lastOutputAt ? new Date(lastOutputAt).toISOString() : 'never'}`,
+    // Why unknown on absence: an older host or peer simply does not compute the verdict, and
+    // guessing one here is how a healthy worker gets reported stuck.
+    `agent=${value.observation.agentStatus ?? 'unknown'}`
+  ]
+  if (value.observation.blockedSince) {
+    parts.push(`blockedSince=${value.observation.blockedSince}`)
+  }
+  return parts.join(' ')
+}
+
+function formatWorkerLivenessLine(value: OrchestrationWorkerShowResult): string {
+  if (!value.lastHeartbeatAt) {
+    return 'liveness: lastHeartbeat=never'
+  }
+  const age =
+    value.heartbeatAgeMs === undefined ? 'unknown' : formatHeartbeatAge(value.heartbeatAgeMs)
+  return `liveness: lastHeartbeat=${value.lastHeartbeatAt} age=${age}`
+}
+
+function formatWorkerMailLine(value: OrchestrationWorkerShowResult): string | null {
+  // Why two shapes: the local count is unread mailbox rows, the federated one is relay-queue
+  // depth — different questions, so they keep different words.
+  const mail = value.dispatchMailbox
+    ? { label: 'unread', count: value.dispatchMailbox.unread, ...value.dispatchMailbox }
+    : value.workerMail
+      ? { label: 'pending', count: value.workerMail.pending, ...value.workerMail }
+      : null
+  // Why silent at zero: a healthy result must stay terse or coordinators stop reading it.
+  if (!mail || mail.count === 0) {
+    return null
+  }
+  const line = `mail: ${mail.label}=${mail.count} deliverable=${mail.deliverable}`
+  return mail.deliverable
+    ? line
+    : `${line} — STRANDED: this mail is queued for a Dispatch whose worker no longer reads it`
+}
