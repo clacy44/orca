@@ -5,6 +5,10 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../../shared/protocol-version'
 import type { OrchestrationCompatibilityEvidence } from '../../../shared/orchestration-compatibility-evidence'
+import {
+  formatOrchestrationCheckText,
+  type OrchestrationCheckOutput
+} from '../../../shared/orchestration-check-output'
 import Database from '../../sqlite/sync-database'
 import { OrcaRuntimeService } from '../orca-runtime'
 import { OrchestrationDb } from '../orchestration/db'
@@ -465,7 +469,8 @@ describe('legacy coordinator takeover races', () => {
     settleLegacyWorkerAndTakeOver(harness, 'settled during acknowledged wait')
     resolveWait?.()
 
-    await expect(pending).resolves.toMatchObject({
+    const interrupted = await pending
+    expect(interrupted).toMatchObject({
       ok: true,
       result: {
         acknowledged: deliveryId,
@@ -474,6 +479,16 @@ describe('legacy coordinator takeover races', () => {
         mutation: { requestId: 'check-ack-takeover', replayed: false }
       }
     })
+    // Why render the producer's own object: the fence is success-shaped, so producer and renderer
+    // must agree here or the coordinator is told "No messages." and keeps looping.
+    expect(
+      formatOrchestrationCheckText(
+        (interrupted as { result: OrchestrationCheckOutput }).result,
+        COORDINATOR_HANDLE
+      )
+    ).toBe(
+      `Wait ended: this mailbox consumer was replaced. Rebind with: orca orchestration run-use --id ${harness.adoptedRunId}`
+    )
     const sqlite = (harness.db as unknown as { db: Database.Database }).db
     expect(sqlite.prepare('SELECT state FROM mutation_receipts').get()).toEqual({
       state: 'completed'

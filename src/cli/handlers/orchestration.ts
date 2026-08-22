@@ -714,6 +714,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       timedOut?: boolean
       cancelled?: boolean
       connectionLost?: boolean
+      waitInterrupted?: 'consumer_fenced' | 'outcome_unknown' | 'waiter_exists'
       legacyCompatibility?: LegacyCompatibilityResult
     }
     let result: Awaited<ReturnType<typeof client.call<CheckResult>>>
@@ -777,6 +778,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       result: prepareOrchestrationCheckOutput(result.result, terminal, flags.has('format'))
     }
     printResult(result, json, (r) => formatOrchestrationCheckText(r, terminal))
+    if (result.result.waitInterrupted === 'consumer_fenced') {
+      // Why non-zero: a scripted rolling check loop must fail loudly rather than spin against a
+      // mailbox it no longer owns.
+      process.exitCode = 1
+    }
     const compatibilityAck = result.result.legacyCompatibility?.ackMessageIds
     if (compatibilityAck && compatibilityAck.length > 0) {
       await flushStdout()

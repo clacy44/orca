@@ -36,9 +36,13 @@ export type OrchestrationCheckOutput = {
   count: number
   formatted?: string
   deliveryId?: string | null
+  runId?: string
   timedOut?: boolean
   cancelled?: boolean
   connectionLost?: boolean
+  // Why optional: an acknowledged wait that gets fenced returns success-shaped, so this is the
+  // only signal that the mailbox changed hands. An older host never sends it.
+  waitInterrupted?: 'consumer_fenced' | 'outcome_unknown' | 'waiter_exists'
   legacyCompatibility?: LegacyCompatibilityResult
 }
 
@@ -92,6 +96,15 @@ export function formatOrchestrationCheckText(
         ? 'Wait cancelled because the connection closed; no messages were consumed.'
         : 'Wait cancelled; no messages were consumed.'
       return `${legacyHeader}${cancelled}${deliveryNotice}`
+    }
+    // Why before the fallback: an interrupted acknowledged wait is success-shaped with count 0,
+    // so without this it reads as an empty mailbox and the coordinator keeps looping on a Run
+    // it no longer owns.
+    if (prepared.waitInterrupted === 'consumer_fenced') {
+      return `${legacyHeader}Wait ended: this mailbox consumer was replaced. Rebind with: orca orchestration run-use --id ${prepared.runId ?? '<runId>'}${deliveryNotice}`
+    }
+    if (prepared.waitInterrupted === 'waiter_exists') {
+      return `${legacyHeader}Wait ended: another actionable waiter already owns this Run's mailbox; only one can block on it at a time.${deliveryNotice}`
     }
     return `${legacyHeader}No messages.${deliveryNotice}`
   }
