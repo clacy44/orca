@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -227,5 +227,37 @@ describe('federated relay health migration', () => {
     // Why null and not a zeroed reading: a Dispatch that predates the columns has not "synced
     // never" in a way anyone measured, and `sync` may only widen from what it reports today.
     expect(db.getFederatedDispatchSyncHealth('ctx_migrated')).toBeNull()
+  })
+})
+
+// Read the guide source rather than the bundle it generates: `src/cli` is outside this tsconfig
+// project, and `verify:bundled-skill-guides` already pins the bundle to this file.
+const ORCHESTRATION_GUIDE = readFileSync(
+  new URL('../../../../skill-guides/orchestration.md', import.meta.url),
+  'utf8'
+)
+
+describe('relay health vocabulary in the bundled guide', () => {
+  it('names the sync fields a coordinator has to read', () => {
+    // Why pinned: A1 section 9 measured zero hits for all three in the bundled guide, so the signal
+    // existed and no coordinator had been told it was there.
+    for (const field of ['lastSyncAt', 'lastError', 'consecutiveFailures', 'syncHealth']) {
+      expect(ORCHESTRATION_GUIDE).toContain(field)
+    }
+  })
+
+  it('names both relay notices and keeps them off the release ladder', () => {
+    expect(ORCHESTRATION_GUIDE).toContain('relay_unreachable')
+    expect(ORCHESTRATION_GUIDE).toContain('relay_recovered')
+    expect(ORCHESTRATION_GUIDE).toContain('Never fail or release a worker over `relay_unreachable`')
+  })
+
+  it('no longer offers tui-idle as the liveness checkpoint', () => {
+    // Negative control for the correction: the sentence must still tell a coordinator what to do
+    // when a wait window returns nothing, just not with the test that reads a gated agent as idle.
+    expect(ORCHESTRATION_GUIDE).not.toContain(
+      'or `terminal wait --for tui-idle` as a liveness checkpoint'
+    )
+    expect(ORCHESTRATION_GUIDE).toContain('`tui-idle` is not one')
   })
 })
