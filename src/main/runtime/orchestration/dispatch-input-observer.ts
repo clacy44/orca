@@ -36,10 +36,16 @@ async function probeDispatchInput(
   runtime: OrcaRuntimeService,
   terminalHandle: string,
   processIncarnation: string | null,
-  hostScope: string | null
+  hostScope: string | null,
+  // Why skippable: once the worker has spoken, the only verdict still reachable is
+  // worker_process_gone, and neither the agent gate nor the tail can change it — but the gate probe
+  // can reach getForegroundProcess, an SSH round trip every 45s for the life of the Dispatch.
+  probeAgentEvidence = true
 ): Promise<DispatchInputObserverProbe> {
-  const gate = await observeWorkerAgentGate(runtime, terminalHandle)
-  const evidence = runtime.getTerminalWaitEvidence(terminalHandle)
+  const gate = probeAgentEvidence
+    ? await observeWorkerAgentGate(runtime, terminalHandle)
+    : { agentStatus: undefined, blockedSince: undefined }
+  const evidence = probeAgentEvidence ? runtime.getTerminalWaitEvidence(terminalHandle) : null
   const processLiveness = processIncarnation
     ? await runtime
         .inspectTerminalProcessIncarnationLiveness(processIncarnation, hostScope)
@@ -139,16 +145,18 @@ async function observeDispatchInputTarget(args: {
     return null
   }
   const resource = args.db.getWorkerTerminalResourceByOwner(target.dispatch_id)
+  const heartbeated = target.last_heartbeat_at !== null
   const probe = await probeDispatchInput(
     args.runtime,
     target.agent_terminal_handle,
     target.process_incarnation,
-    resource?.host_scope ?? null
+    resource?.host_scope ?? null,
+    !heartbeated
   )
   return evaluateDispatchInputObservation({
     now: args.now,
     submittedAt: resolveSubmittedAt(target.input_evidence),
-    heartbeated: target.last_heartbeat_at !== null,
+    heartbeated,
     taskSpec: target.spec,
     ...probe
   })
@@ -180,17 +188,19 @@ export async function tickFederatedDispatchInputObserver(args: {
   ) {
     return { disarm: false, observation: null, exitedSince: null }
   }
+  const heartbeated = args.db.hasFederatedWorkerSpoken(args.target.dispatchId)
   const probe = await probeDispatchInput(
     args.runtime,
     args.target.terminalHandle,
     args.target.processIncarnation,
-    null
+    null,
+    !heartbeated
   )
   const { observation, exitedSince } = holdBackTransientProcessGone(
     evaluateDispatchInputObservation({
       now,
       submittedAt: args.target.submittedAt,
-      heartbeated: args.db.hasFederatedWorkerSpoken(args.target.dispatchId),
+      heartbeated,
       taskSpec: args.target.taskSpec,
       ...probe
     }),

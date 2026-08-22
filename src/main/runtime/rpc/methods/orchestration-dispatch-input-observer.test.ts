@@ -365,6 +365,23 @@ describe('post-ready dispatch input observer', () => {
       expect(observerMail()).toHaveLength(0)
     })
 
+    // Why an assertion about probes and not only about mail: the gate probe can reach
+    // getForegroundProcess, and paying an SSH round trip every 45s for a worker that has already
+    // proved it consumed its prompt is cost with no reachable verdict behind it.
+    it('stops probing the agent gate and the tail once the worker has heartbeated', async () => {
+      mockProbes()
+      const { dispatchId } = startWorker()
+      db.recordHeartbeat(dispatchId, new Date().toISOString())
+      const agentStatus = vi.spyOn(runtime, 'getTerminalAgentStatus')
+      const tail = vi.spyOn(runtime, 'getTerminalWaitEvidence')
+
+      await runtime.tickDispatchInputObserver(dispatchId, afterDwell(60 * MINUTE_MS))
+
+      expect(agentStatus).not.toHaveBeenCalled()
+      expect(tail).not.toHaveBeenCalled()
+      expect(observerMail()).toHaveLength(0)
+    })
+
     it('says nothing about a manual-permission agent awaiting approval after a heartbeat', async () => {
       mockProbes({
         agentStatus: 'permission',
