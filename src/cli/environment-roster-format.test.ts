@@ -180,6 +180,26 @@ describe('environment roster output', () => {
     ).toBe("Ben's phone (attached · last seen 4m ago)")
   })
 
+  // The two fields are independent optionals on the wire. One reading on every surface: the flag alone
+  // still drops the activity markers, and only the stamp unlocks the "how long" clause.
+  it('prints a stale row plain when it carries no stamp', () => {
+    expect(
+      formatTerminalPresence({
+        attachedCount: 1,
+        participants: [
+          {
+            participantId: 'p-2',
+            label: "Ben's phone",
+            kind: 'mobile',
+            typing: true,
+            writing: true,
+            stale: true
+          }
+        ]
+      })
+    ).toBe("Ben's phone")
+  })
+
   // Negative control: a runtime peer is heartbeat-bounded, so nothing on this path may print it stale.
   it('leaves a peer that published no staleness exactly as before', () => {
     expect(

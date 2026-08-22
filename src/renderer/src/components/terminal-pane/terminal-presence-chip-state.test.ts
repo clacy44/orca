@@ -123,6 +123,18 @@ describe('resolveTerminalPresenceChipState', () => {
     ).toBe('stale')
   })
 
+  // The two fields are independent optionals on the wire, so a future or third-party host may send the
+  // flag without the stamp. One reading on every surface: `stale` alone means "render no activity flag",
+  // and only the stamp unlocks the "how long" clause — never a fabricated or zero-based duration.
+  it('falls back to plain attached for a stale row that carries no stamp', () => {
+    expect(
+      resolveTerminalPresenceChipState({
+        participants: [peer({ kind: 'mobile', label: "Ben's phone", typing: true, stale: true })],
+        arbitration: null
+      })
+    ).toEqual({ label: "Ben's phone", activity: 'attached' })
+  })
+
   it('lets a peer who is actually here outrank a stale phone', () => {
     expect(
       resolveTerminalPresenceChipState({

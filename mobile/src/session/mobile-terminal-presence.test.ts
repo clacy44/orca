@@ -96,4 +96,15 @@ describe('summarizeMobileTerminalPresence', () => {
       )
     ).toBe("Ben's phone attached, last seen 4m ago")
   })
+
+  // The two fields are independent optionals on the wire, and the phone has no liveness signal of its
+  // own — so a flag with no stamp reads as plain "attached" rather than a duration this build invented.
+  it('says plain attached for a stale row that carries no stamp', () => {
+    expect(
+      summarizeMobileTerminalPresence(
+        [row({ participantId: 'p-ben', label: "Ben's phone", kind: 'mobile', stale: true })],
+        1_000 + 4 * 60_000
+      )
+    ).toBe("Ben's phone attached")
+  })
 })

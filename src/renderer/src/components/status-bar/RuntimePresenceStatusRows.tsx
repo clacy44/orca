@@ -41,12 +41,15 @@ function rowLabel(row: RuntimePresenceRosterRow): string {
 function rowDetail(row: RuntimePresenceRosterRow): string {
   // Why staleness outranks the tab title: what that phone last selected is not news once the host has
   // stopped hearing from it, and the reader needs to know the row is old before they trust anything on it.
-  if (row.lastSeenAt !== null) {
-    return translate(
-      'auto.components.status.bar.RuntimePresenceStatusRows.stale',
-      'Attached · last seen {{value0}}m ago',
-      { value0: terminalPresenceLastSeenMinutes(row.lastSeenAt, Date.now()) }
-    )
+  // Without the stamp the row still drops the title — it just cannot say how long.
+  if (row.stale) {
+    return row.lastSeenAt === null
+      ? translate('auto.components.status.bar.RuntimePresenceStatusRows.ce809af553', 'Attached')
+      : translate(
+          'auto.components.status.bar.RuntimePresenceStatusRows.stale',
+          'Attached · last seen {{value0}}m ago',
+          { value0: terminalPresenceLastSeenMinutes(row.lastSeenAt, Date.now()) }
+        )
   }
   if (row.activeTabTitle) {
     return row.activeTabTitle
@@ -75,7 +78,7 @@ export function RuntimePresenceStatusRows(): ReactElement | null {
           key={`${row.environmentId}:${row.participantId}`}
           className="flex items-center gap-2.5 px-2 py-1.5"
           data-presence-kind={row.kind}
-          data-presence-stale={row.lastSeenAt !== null ? 'true' : undefined}
+          data-presence-stale={row.stale ? 'true' : undefined}
         >
           <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" />
           <div className="min-w-0 flex-1">

@@ -30,10 +30,14 @@ function formatParticipant(participant: RuntimeTerminalPresenceParticipant): str
 }
 
 function formatActivityMarkers(participant: RuntimeTerminalPresenceParticipant): string[] {
-  if (participant.stale && participant.lastSeenAt !== undefined) {
-    return [
-      `attached · last seen ${terminalPresenceLastSeenMinutes(participant.lastSeenAt, Date.now())}m ago`
-    ]
+  // Why on `stale` alone: the host has heard nothing from this row, so no activity flag on it is worth
+  // printing. The stamp only decides whether the column can say how long — without it, no marker at all.
+  if (participant.stale) {
+    return participant.lastSeenAt === undefined
+      ? []
+      : [
+          `attached · last seen ${terminalPresenceLastSeenMinutes(participant.lastSeenAt, Date.now())}m ago`
+        ]
   }
   if (participant.typing) {
     return ['typing']

@@ -38,7 +38,7 @@ function chipCopy(state: TerminalPresenceChipState): string {
         '{{value0}} attached · last seen {{value1}}m ago',
         {
           value0: state.label,
-          value1: terminalPresenceLastSeenMinutes(state.lastSeenAt ?? 0, Date.now())
+          value1: terminalPresenceLastSeenMinutes(state.lastSeenAt, Date.now())
         }
       )
     case 'attached':

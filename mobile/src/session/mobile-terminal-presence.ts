@@ -74,9 +74,13 @@ export function summarizeMobileTerminalPresence(
   const label = loudest.label.length > 0 ? loudest.label : UNNAMED_LABEL
   const others = peers.length > 1 ? ` +${peers.length - 1}` : ''
   if (loudest.stale) {
-    // Why the floor of 1: `lastSeenAt` is the host's clock and this phone's may trail it, and "last seen
-    // 0m ago" on a row the host only marks past two minutes would read as a bug.
-    const minutes = Math.max(1, Math.round((now - (loudest.lastSeenAt ?? now)) / 60_000))
+    // Why plain "attached" without the stamp rather than a fabricated one: this phone does not know how
+    // long the silence has run, and inventing "1m ago" for it is the one thing staleness copy exists to
+    // prevent. Floor of 1 with it: `lastSeenAt` is the host's clock and this phone's may trail it.
+    if (loudest.lastSeenAt === undefined) {
+      return `${label} attached${others}`
+    }
+    const minutes = Math.max(1, Math.round((now - loudest.lastSeenAt) / 60_000))
     return `${label} attached, last seen ${minutes}m ago${others}`
   }
   if (loudest.typing) {

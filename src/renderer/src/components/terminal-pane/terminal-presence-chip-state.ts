@@ -8,12 +8,11 @@ import type {
 
 export type TerminalPresenceChipActivity = 'attached' | 'stale' | 'writing' | 'typing' | 'held'
 
-export type TerminalPresenceChipState = {
-  label: string
-  activity: TerminalPresenceChipActivity
-  /** Host-clock stamp behind the staleness copy; carried only for `stale`. */
-  lastSeenAt?: number
-}
+/** A discriminated union rather than an optional stamp: the staleness copy counts minutes from
+ *  `lastSeenAt`, so the one state that renders it is the one state that must carry it. */
+export type TerminalPresenceChipState =
+  | { label: string; activity: Exclude<TerminalPresenceChipActivity, 'stale'> }
+  | { label: string; activity: 'stale'; lastSeenAt: number }
 
 // Why typing outranks writing: the interactive stamp is the one that can hold your keystroke, so a
 // participant doing both must read as the state with consequences.
@@ -62,10 +61,13 @@ export function resolveTerminalPresenceChipState(
   if (!peer) {
     return null
   }
-  // Why ahead of both flags rather than trusting them to be false: a stale row is one the host has heard
-  // nothing from, so rendering it as typing would report a stamp that no longer proves anybody is there.
-  if (peer.stale && peer.lastSeenAt !== undefined) {
-    return { label: peer.label, activity: 'stale', lastSeenAt: peer.lastSeenAt }
+  // Why on `stale` alone and not on both fields: a stale row is one the host has heard nothing from, so
+  // rendering it as typing would report a stamp that no longer proves anybody is there. The stamp only
+  // decides whether the copy can say HOW long — without it the row falls back to plain "attached".
+  if (peer.stale) {
+    return peer.lastSeenAt === undefined
+      ? { label: peer.label, activity: 'attached' }
+      : { label: peer.label, activity: 'stale', lastSeenAt: peer.lastSeenAt }
   }
   if (peer.typing) {
     return { label: peer.label, activity: 'typing' }

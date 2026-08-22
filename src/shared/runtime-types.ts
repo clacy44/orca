@@ -351,8 +351,10 @@ export type RuntimeTerminalStreamPresenceParticipant = {
   /** A grant wrote through `terminal.send` — true of an agent driving a human's grant, hence the wording split. */
   writing: boolean
   since: number
-  /** Mobile only: the phone has no bounded reap horizon, so a silent row is marked, never removed (S7). */
-  stale?: boolean
+  /** Mobile only: the phone has no bounded reap horizon, so a silent row is marked, never removed (S7).
+   *  `true` or absent, never `false` — the two sibling payload types say the same, so no reader has to
+   *  decide what a `false` on a row the host stopped hearing from would mean. */
+  stale?: true
   /** Host-clock stamp of the phone's last inbound frame, present only on a stale row. Same domain as
    *  `lastOutputAt`: the client renders elapsed minutes from it, so a stale row can say how stale. */
   lastSeenAt?: number
