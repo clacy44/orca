@@ -229,6 +229,23 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       ).toThrow(/credential lane on a remote pane/)
     })
 
+    it('ignores a relative value, which would otherwise resolve against main cwd', () => {
+      // Why cwd as the root: that is precisely the accident the filter prevents — a relative
+      // value is measured against main's working directory, which is neither the client's
+      // nor the remote's, so it must never be read as addressing a lane.
+      const env = { ORCA_SOMETHING: 'src' }
+
+      const result = enforceClaudeConfigDirLaunchScope({
+        env,
+        envToDelete: undefined,
+        hostConfigDir: null,
+        connectionId: 'ssh-1',
+        laneRoot: process.cwd()
+      })
+
+      expect(result.env).toBe(env)
+    })
+
     it('still allows a remote config dir that is not a lane path', () => {
       const env = { CLAUDE_CONFIG_DIR: '/home/remote-dev/.claude-work', TERM: 'xterm-256color' }
 

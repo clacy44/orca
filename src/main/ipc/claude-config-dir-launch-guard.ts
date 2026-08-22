@@ -4,6 +4,7 @@ import {
   withoutEnvKeyDeletion
 } from '../../shared/lane-env-key-case'
 import { isPathWithinRootForDenial } from '../claude-accounts/canonical-path-containment'
+import { isWindowsAbsolutePathLike } from '../../shared/cross-platform-path'
 
 // S9 §2a guard 3: the post-merge CLAUDE_CONFIG_DIR scope assertion both pty.ts spawn
 // paths run after their deletion list is applied. Exploitable before lanes exist —
@@ -108,10 +109,16 @@ function assertNoLanePathInRemoteEnv(
     return
   }
   for (const [key, value] of Object.entries(env)) {
-    if (isPathWithinRootForDenial(laneRoot, value)) {
+    // Why absolute only: a lane path is always absolute, and resolving a relative value
+    // would measure it against main's cwd, which is neither the client's nor the remote's.
+    if (isAbsolutePathLike(value) && isPathWithinRootForDenial(laneRoot, value)) {
       throw new Error(
         `Refusing to spawn: ${key} points inside a host Claude credential lane on a remote pane.`
       )
     }
   }
+}
+
+function isAbsolutePathLike(value: string): boolean {
+  return value.startsWith('/') || isWindowsAbsolutePathLike(value)
 }
