@@ -30,10 +30,14 @@ describe('mobile native-chat terminal stream lifecycle', () => {
     ).toBe('pause')
     expect(isTerminalCoveredByNativeChat(true, 'pty-1', 'pty-1')).toBe(true)
     expect(mobileNativeChatTerminalCapabilities(true)).toEqual({
+      presence: 1,
       terminalBinaryStream: 1,
       mobileInputLeaseOnly: 1
     })
-    expect(mobileNativeChatTerminalCapabilities(false)).toEqual({ terminalBinaryStream: 1 })
+    expect(mobileNativeChatTerminalCapabilities(false)).toEqual({
+      terminalBinaryStream: 1,
+      presence: 1
+    })
   })
 
   it('omits the viewport from a covered lease subscribe so the host keeps desktop dims', () => {

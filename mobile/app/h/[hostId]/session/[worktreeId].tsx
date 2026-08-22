@@ -240,6 +240,11 @@ import {
 import { useMobileNativeChatTerminalStream } from '../../../../src/session/use-mobile-native-chat-terminal-stream'
 import { subscribeMobileTerminalSafely } from '../../../../src/session/mobile-terminal-stream-subscribe'
 import {
+  decodeMobileTerminalPresence,
+  summarizeMobileTerminalPresence
+} from '../../../../src/session/mobile-terminal-presence'
+import { MobileTerminalPresenceBanner } from '../../../../src/session/MobileTerminalPresenceBanner'
+import {
   TerminalViewportResubscribeBudget,
   readTerminalViewportDims,
   runTerminalViewportFitPass
@@ -1232,9 +1237,31 @@ export default function SessionScreen() {
     return handle ? terminalRefs.current.get(handle) : undefined
   }, [])
 
+  // Read-only: who else is on each terminal. Empty for an older host, which echoes no presence at all.
+  const [presenceByHandle, setPresenceByHandle] = useState<Record<string, string>>({})
+  const applyPresenceSummary = useCallback((handle: string, summary: string | null) => {
+    setPresenceByHandle((previous) => {
+      if ((previous[handle] ?? null) === summary) {
+        return previous
+      }
+      const next = { ...previous }
+      if (summary === null) {
+        delete next[handle]
+      } else {
+        next[handle] = summary
+      }
+      return next
+    })
+  }, [])
+  const applyPresenceSummaryRef = useRef(applyPresenceSummary)
+  applyPresenceSummaryRef.current = applyPresenceSummary
+
   const unsubscribeTerminal = useCallback(
     (handle: string) => {
       terminalUnsubsRef.current.get(handle)?.()
+      // Why cleared with the stream: presence is live-only, so a roster that outlived its subscription
+      // would keep naming people on a terminal this phone is no longer attached to.
+      applyPresenceSummaryRef.current(handle, null)
       terminalUnsubsRef.current.delete(handle)
       subscribingHandlesRef.current.delete(handle)
       leaseOnlyHandlesRef.current.delete(handle)
@@ -1370,6 +1397,14 @@ export default function SessionScreen() {
           }
           if (data.type === 'subscribed') {
             markNativeChatInputLeaseReady(handle)
+            return
+          }
+          // Why ahead of the covered gate: presence changes no xterm state, and an older host simply
+          // never sends this event — the decoder returns null for everything else, including a type
+          // this build has never heard of.
+          const presenceRows = decodeMobileTerminalPresence(data)
+          if (presenceRows) {
+            applyPresenceSummaryRef.current(handle, summarizeMobileTerminalPresence(presenceRows))
             return
           }
           // Why: keep the subscription as the input-floor lease but don't mutate covered xterm state; return-to-terminal resubscribes.
@@ -4633,6 +4668,9 @@ export default function SessionScreen() {
                     onOpenUrl={handleTerminalOpenUrl}
                   />
                 ))}
+                <MobileTerminalPresenceBanner
+                  summary={activeHandle ? (presenceByHandle[activeHandle] ?? null) : null}
+                />
                 <MobileNativeChatOverlay
                   controller={nativeChatController}
                   onOpenFile={handleNativeChatFileTap}

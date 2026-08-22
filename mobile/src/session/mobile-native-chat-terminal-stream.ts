@@ -43,13 +43,17 @@ export function isTerminalCoveredByNativeChat(
   return showNativeChat && activeHandle === handle
 }
 
+// Why `presence` is advertised on both branches and never probed first: the host answers an unknown
+// capability by stripping it, so an unconditional advertisement is what makes same-version negotiation
+// real — gating it on a probe would leave the same-version case negotiating nothing.
 export function mobileNativeChatTerminalCapabilities(covered: boolean): {
   terminalBinaryStream: 1
+  presence: 1
   mobileInputLeaseOnly?: 1
 } {
   return covered
-    ? { terminalBinaryStream: 1, mobileInputLeaseOnly: 1 }
-    : { terminalBinaryStream: 1 }
+    ? { terminalBinaryStream: 1, presence: 1, mobileInputLeaseOnly: 1 }
+    : { terminalBinaryStream: 1, presence: 1 }
 }
 
 // Why: a covered subscribe is only an input lease — carrying phone dims would make the host phone-fit a PTY native chat never renders.
