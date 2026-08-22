@@ -1906,8 +1906,8 @@ describe('ClaudeAccountService.addAccountFromConfigDir', () => {
     expect(deps.runtimeAuth.clearLastWrittenCredentialsJson).toHaveBeenCalledWith(accounts[0].id)
   })
 
-  it('refuses a config dir inside the claude-grants root', async () => {
-    const laneDir = join(managedRoot, 'claude-grants', 'grant-a')
+  it('refuses a config dir inside the claude-lanes root', async () => {
+    const laneDir = join(managedRoot, 'claude-lanes', 'principal-a')
     mkdirSync(laneDir, { recursive: true })
     writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"t"}}\n')
 
@@ -1920,13 +1920,13 @@ describe('ClaudeAccountService.addAccountFromConfigDir', () => {
     )
 
     await expect(service.addAccountFromConfigDir(laneDir)).rejects.toThrow(
-      /per-grant credential storage/
+      /per-principal credential lane storage/
     )
     expect(deps.getSettings().claudeManagedAccounts).toHaveLength(0)
   })
 
-  it('refuses a decoy symlink whose realpath lands inside claude-grants', async () => {
-    const laneDir = join(managedRoot, 'claude-grants', 'grant-a')
+  it('refuses a decoy symlink whose realpath lands inside claude-lanes', async () => {
+    const laneDir = join(managedRoot, 'claude-lanes', 'principal-a')
     mkdirSync(laneDir, { recursive: true })
     writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"t"}}\n')
     sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-decoy-'))
@@ -1942,14 +1942,14 @@ describe('ClaudeAccountService.addAccountFromConfigDir', () => {
     )
 
     await expect(service.addAccountFromConfigDir(decoy)).rejects.toThrow(
-      /symbolic link|per-grant credential storage/
+      /symbolic link|per-principal credential lane storage/
     )
     expect(deps.getSettings().claudeManagedAccounts).toHaveLength(0)
   })
 
-  it('allows a config dir whose path merely contains claude-grants as text', async () => {
-    sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-grants-lookalike-'))
-    const configDir = join(sourceDir, 'claude-grants-archive')
+  it('allows a config dir whose path merely contains claude-lanes as text', async () => {
+    sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-lanes-lookalike-'))
+    const configDir = join(sourceDir, 'claude-lanes-archive')
     mkdirSync(configDir, { recursive: true })
     writeFileSync(
       join(configDir, '.credentials.json'),

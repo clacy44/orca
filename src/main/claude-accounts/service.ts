@@ -31,7 +31,7 @@ import {
 } from './keychain'
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from './live-pty-gate'
 import { findDuplicateClaudeAccount } from './claude-duplicate-account'
-import { assertCaptureSourceOutsideClaudeGrants } from './managed-capture-containment'
+import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-containment'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
@@ -211,7 +211,7 @@ export class ClaudeAccountService {
     if (!trimmed) {
       throw new Error('A Claude config directory path is required.')
     }
-    assertCaptureSourceOutsideClaudeGrants(trimmed, 'claude-config-dir')
+    assertCaptureSourceOutsideClaudeLanes(trimmed, 'claude-config-dir')
     const resolvedDir = resolve(trimmed)
     // Why: macOS keeps Claude credentials in the Keychain rather than a file, so
     // only require `.credentials.json` off-darwin; captureAuthFromConfigDir reads

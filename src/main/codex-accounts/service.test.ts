@@ -3883,8 +3883,8 @@ describe('CodexAccountService.addAccountFromHome', () => {
     }
   })
 
-  it('refuses a sourceHome inside the claude-grants root, symlinked or not', async () => {
-    const laneHome = join(testState.userDataDir, 'claude-grants', 'grant-a')
+  it('refuses a sourceHome inside the claude-lanes root, symlinked or not', async () => {
+    const laneHome = join(testState.userDataDir, 'claude-lanes', 'principal-a')
     mkdirSync(laneHome, { recursive: true })
     writeFileSync(
       join(laneHome, 'auth.json'),
@@ -3906,10 +3906,10 @@ describe('CodexAccountService.addAccountFromHome', () => {
       )
 
       await expect(service.addAccountFromHome(laneHome)).rejects.toThrow(
-        /per-grant credential storage/
+        /per-principal credential lane storage/
       )
       await expect(service.addAccountFromHome(decoy)).rejects.toThrow(
-        /symbolic link|per-grant credential storage/
+        /symbolic link|per-principal credential lane storage/
       )
       expect(store.getSettings().codexManagedAccounts).toHaveLength(0)
     } finally {
