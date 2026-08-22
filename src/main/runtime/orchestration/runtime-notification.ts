@@ -30,5 +30,12 @@ export function postRuntimeNotification(args: {
     priority: 'high',
     payload: JSON.stringify({ origin: RUNTIME_NOTIFICATION_SENDER, ...args.payload })
   })
-  args.runtime.notifyMessageArrived(message.to_handle, message.type)
+  try {
+    args.runtime.notifyMessageArrived(message.to_handle, message.type)
+  } catch (error) {
+    // Why swallowed here rather than by every caller: the row is already in the mailbox, so a failed
+    // wake costs a parked waiter its latency, not the notice — and rethrowing would make a caller
+    // roll back a report it did in fact deliver.
+    console.warn('[orchestration] runtime notification wake failed', error)
+  }
 }

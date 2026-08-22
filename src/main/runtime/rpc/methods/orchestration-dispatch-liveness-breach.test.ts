@@ -274,6 +274,48 @@ describe('per-dispatch liveness window', () => {
     expect(breachMail()).toHaveLength(2)
   })
 
+  // Why these two: the fence is claimed before the notice is posted, so a post that throws would
+  // otherwise take that Dispatch's breach with it — a silent regression to the "printed into a
+  // void" shape A1 §12 exists to remove — and abandon every later candidate in the sweep.
+  describe('a failing escalation', () => {
+    it('hands the fence back and keeps sweeping the rest', () => {
+      const first = startWorker()
+      const second = startWorker()
+      const insert = vi.spyOn(db, 'insertMessage').mockImplementationOnce(() => {
+        throw new Error('database is locked')
+      })
+
+      const emitted = sweep(minutesFromNow(31))
+
+      expect(insert).toHaveBeenCalledTimes(2)
+      expect(emitted).toHaveLength(1)
+      expect(breachMail()).toHaveLength(1)
+      const survivor = emitted[0].dispatchId
+      const dropped = survivor === first.dispatchId ? second.dispatchId : first.dispatchId
+      expect(db.getDispatchContextById(dropped)?.liveness_breached_at).toBeNull()
+
+      insert.mockRestore()
+      expect(sweep(minutesFromNow(32)).map((breach) => breach.dispatchId)).toEqual([dropped])
+      expect(breachMail()).toHaveLength(2)
+    })
+
+    it('keeps a stored notice when only the waiter wake fails', () => {
+      const { dispatchId } = startWorker()
+      notify.mockImplementation(() => {
+        throw new Error('waiter registry is gone')
+      })
+
+      expect(sweep(minutesFromNow(31))).toHaveLength(1)
+      expect(breachMail()).toHaveLength(1)
+      // The row reached the mailbox, so re-reporting it would be a duplicate, not a recovery.
+      expect(db.getDispatchContextById(dispatchId)?.liveness_breached_at).toEqual(
+        expect.any(String)
+      )
+      expect(sweep(minutesFromNow(60))).toEqual([])
+      expect(breachMail()).toHaveLength(1)
+    })
+  })
+
   describe('negative controls', () => {
     it('says nothing about a worker heartbeating on the taught cadence', () => {
       const { dispatchId } = startWorker()

@@ -34,29 +34,41 @@ export function sweepDispatchLivenessBreaches(args: {
     if (!args.db.markDispatchLivenessBreached(breach.dispatchId, breachedAt)) {
       continue
     }
-    const syncHealth = args.runtime.getOrchestrationFederationSyncHealth(breach.dispatchId)
-    postRuntimeNotification({
-      db: args.db,
-      runtime: args.runtime,
-      runId: breach.runId,
-      subject: `Worker ${breach.dispatchId} missed its liveness window`,
-      body:
-        `No heartbeat from Dispatch ${breach.dispatchId} on task ${breach.taskId} for ` +
-        `${Math.round(breach.effectiveSilenceMs / 60_000)} min against a ` +
-        `${Math.round(breach.windowMs / 60_000)} min window. The Dispatch is untouched; ` +
-        `read the worker before deciding.`,
-      payload: {
-        kind: 'liveness_breach',
-        dispatchId: breach.dispatchId,
-        taskId: breach.taskId,
-        lastHeartbeatAt: breach.lastHeartbeatAt,
-        windowMs: breach.windowMs,
-        // Why only when federated: it is the discriminator between "the worker went silent" and
-        // "the transport did" (A1 §9), and a local Dispatch has no transport to blame.
-        ...(syncHealth ? { syncHealth } : {})
+    // Why per breach and not once around the loop: a claim with no notice behind it drops that
+    // Dispatch's breach until the worker comes back, and a throw shared with the loop would drop
+    // every later candidate in the same sweep too.
+    try {
+      const syncHealth = args.runtime.getOrchestrationFederationSyncHealth(breach.dispatchId)
+      postRuntimeNotification({
+        db: args.db,
+        runtime: args.runtime,
+        runId: breach.runId,
+        subject: `Worker ${breach.dispatchId} missed its liveness window`,
+        body:
+          `No heartbeat from Dispatch ${breach.dispatchId} on task ${breach.taskId} for ` +
+          `${Math.round(breach.effectiveSilenceMs / 60_000)} min against a ` +
+          `${Math.round(breach.windowMs / 60_000)} min window. The Dispatch is untouched; ` +
+          `read the worker before deciding.`,
+        payload: {
+          kind: 'liveness_breach',
+          dispatchId: breach.dispatchId,
+          taskId: breach.taskId,
+          lastHeartbeatAt: breach.lastHeartbeatAt,
+          windowMs: breach.windowMs,
+          // Why only when federated: it is the discriminator between "the worker went silent" and
+          // "the transport did" (A1 §9), and a local Dispatch has no transport to blame.
+          ...(syncHealth ? { syncHealth } : {})
+        }
+      })
+      emitted.push(breach)
+    } catch (error) {
+      try {
+        args.db.releaseDispatchLivenessBreach(breach.dispatchId, breachedAt)
+      } catch {
+        // Why swallowed: a fence that could not be handed back is still better than a dead sweep.
       }
-    })
-    emitted.push(breach)
+      console.warn('[orchestration] dispatch liveness escalation failed', error)
+    }
   }
   return emitted
 }

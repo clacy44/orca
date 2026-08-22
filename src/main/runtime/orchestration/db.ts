@@ -7079,6 +7079,16 @@ export class OrchestrationDb {
       .get(dispatchId)
   }
 
+  // Why releasable: the claim is only honest if a notice actually followed it, so a post that threw
+  // hands the fence back and the next sweep re-reports instead of losing the breach forever.
+  releaseDispatchLivenessBreach(dispatchId: string, at: string): void {
+    this.db
+      .prepare(
+        'UPDATE dispatch_contexts SET liveness_breached_at = NULL WHERE id = ? AND liveness_breached_at = ?'
+      )
+      .run(dispatchId, at)
+  }
+
   // Why claim-before-emit: the column is the once-per-breach fence, so the writer that flips it is
   // the only one allowed to insert the escalation. Returns false when someone else already did.
   markDispatchLivenessBreached(dispatchId: string, at: string): boolean {
