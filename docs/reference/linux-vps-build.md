@@ -80,6 +80,11 @@ version. A passing build prints:
 [verify-linux-glibc-floor] OK — 18 bundled native binaries all load on Ubuntu 20.04 (glibc 2.31 / libstdc++ GLIBCXX_3.4.28)
 ```
 
+That gate has since passed on a **glibc 2.43** build host. 2.43 re-versioned
+nothing node-pty calls — `cfsetospeed`/`cfsetispeed` still default to
+`GLIBC_2.42`, which the patch already pins — so 2.42 remains the newest release
+that raised the floor.
+
 If a future glibc adds yet another one, the gate fails with the new symbol named;
 add a matching `.symver` line to the patch and regenerate it (see
 [Regenerating the node-pty patch](#regenerating-the-node-pty-patch)).
@@ -179,29 +184,87 @@ pnpm install --frozen-lockfile --lockfile-only --ignore-scripts  # hash matches
 ## Smoke-testing the artifact next to a running server
 
 If the box already runs a production `orca serve`, the CLI will happily talk to
-*it* instead of your new build unless you isolate three things:
+*it* instead of your new build — and worse, the build you launch will boot on the
+production profile. The obvious variable only does half the job.
 
-- **`ORCA_USER_DATA_PATH`.** A shell started from an Orca terminal inherits this
-  (plus a dozen other `ORCA_*` vars) pointing at the production profile, and it
-  outranks `HOME`/`XDG_CONFIG_HOME` in
-  [`src/cli/runtime/metadata.ts`](../../src/cli/runtime/metadata.ts). Scrub all
-  `ORCA_*` vars and set this one explicitly.
+**`ORCA_USER_DATA_PATH` steers the CLI; a packaged app never reads it.** A shell
+started from an Orca terminal inherits it (plus a dozen other `ORCA_*` vars)
+pointing at the production profile, and for the CLI it does outrank
+`HOME`/`XDG_CONFIG_HOME`
+([`src/cli/runtime/metadata.ts:50-69`](../../src/cli/runtime/metadata.ts)). The
+packaged app ignores it in both directions:
+[`configureDevUserDataPath()`](../../src/main/startup/configure-process.ts)
+returns early when `!isDev` (`configure-process.ts:174-176`; the only override it
+honours is `ORCA_DEV_USER_DATA_PATH`, dev-only, `:177`), and
+`configureOrcaUserDataPathEnv()` then *overwrites* `process.env.ORCA_USER_DATA_PATH`
+with `app.getPath('userData')` (`:195-198`). They run in that order at
+[`src/main/index.ts:665-666`](../../src/main/index.ts). Set it alone and you get a
+split brain: your CLI reads the scratch profile while the app it spawned runs on
+production's.
+
+That is not hypothetical. `orca-linux.AppImage serve --port 16799` with only
+`ORCA_USER_DATA_PATH` exported resolved to `~/.config/orca`, contended for
+production's single-instance lock, and exited 3 before writing anything
+([`src/main/index.ts:818-822`](../../src/main/index.ts)). It stayed harmless only
+because the argv said `serve`: `shouldActivateDesktopForSecondInstance()` returns
+false for serve-mode argv, so the live production instance was never promoted to a
+desktop window
+([`src/main/startup/single-instance-lock.ts:18-20`](../../src/main/startup/single-instance-lock.ts)).
+Argv that stops parsing as serve mode — a mistyped subcommand, or `--help`
+anywhere in the line — removes that protection and pokes the running server
+instead.
+
+So isolate four things:
+
+- **`HOME` and `XDG_CONFIG_HOME` — this is what actually moves the app.** Packaged
+  userData resolves to `<appData>/orca`: `$XDG_CONFIG_HOME/orca`, falling back to
+  `$HOME/.config/orca`. That is the same directory
+  [`metadata.ts`](../../src/cli/runtime/metadata.ts) computes for the CLI, so
+  pointing both at one scratch root is what keeps the two halves agreeing.
+- **`ORCA_USER_DATA_PATH`, still — for the CLI.** Scrub the inherited `ORCA_*`
+  vars, then set this to the very path the app will pick.
 - **Path length.** The runtime binds UNIX sockets under the user-data directory;
   a deep scratch path blows past the 107-byte `sun_path` limit and the runtime
   fails to start with `EINVAL`. Use something short like `/tmp/ocsm`.
-- **The sandbox.** Running from an AppImage extracted as a non-root user leaves
-  `chrome-sandbox` without its setuid bit and Electron aborts rather than run
-  unsandboxed. Set `ORCA_APPIMAGE_NO_SANDBOX=1`, which makes the CLI pass
-  `--no-sandbox` to the app it spawns.
+- **The sandbox, in two different places.** An AppImage extracted as a non-root
+  user leaves `chrome-sandbox` without its setuid bit and Electron aborts rather
+  than run unsandboxed; `ORCA_APPIMAGE_NO_SANDBOX=1` makes the CLI pass
+  `--no-sandbox` to the app it spawns
+  ([`src/cli/runtime/launch.ts:90-92`](../../src/cli/runtime/launch.ts)). Do not,
+  though, drive the new build through a *generated* `orca` shim: it execs the
+  outer AppImage under `ELECTRON_RUN_AS_NODE=1`
+  ([`src/main/cli/appimage-cli-wrapper.ts:31`](../../src/main/cli/appimage-cli-wrapper.ts)),
+  AppRun injects `--no-sandbox`, and Node rejects it with `bad option` — F6, still
+  live in 1.4.185. Invoke the extracted tree's own binary, which never goes
+  through AppRun.
 
 ```bash
+./orca-linux.AppImage --appimage-extract >/dev/null   # once, next to the artifact
+EXTRACTED=$PWD/squashfs-root
+
 for v in $(env | sed -n 's/^\(ORCA_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+export HOME=/tmp/ocsm
+export XDG_CONFIG_HOME=/tmp/ocsm/.config
 export ORCA_USER_DATA_PATH=/tmp/ocsm/.config/orca
 export ORCA_APPIMAGE_NO_SANDBOX=1
-orca serve --port 16799 --no-pairing &
-orca status --json          # check appVersion + capabilities
-orca environment roster --json
+mkdir -p "$ORCA_USER_DATA_PATH"
+
+# The artifact's own CLI, bypassing AppRun. out/cli/index.js self-runs under
+# `require.main === module` and main() defaults to process.argv.slice(2), so
+# plain argv works — no `-e` bootstrap needed.
+smoke() {
+  ELECTRON_RUN_AS_NODE=1 "$EXTRACTED/orca-ide" \
+    "$EXTRACTED/resources/app.asar.unpacked/out/cli/index.js" "$@"
+}
+
+smoke serve --port 16799 --no-pairing &
+smoke status --json          # check appVersion + capabilities
+smoke environment roster --json
 ```
 
-Confirm `status --json` reports the runtime ID and `appVersion` of your build,
-not the production one — that is the tell that isolation actually worked.
+Confirm two things, not one: `status --json` reports the runtime ID and
+`appVersion` of your build rather than the production one, **and**
+`orca-runtime.json` has appeared under `/tmp/ocsm/.config/orca`. The second is
+what proves the *app* moved off the production profile — a CLI pointed at a
+scratch directory can report a clean-looking failure while the server it started
+is running on production's.
