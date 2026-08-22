@@ -7,6 +7,7 @@ import {
   HOST_ATTACHMENT_KEY,
   terminalPresenceRegistry,
   type TerminalPresenceAttachment,
+  type TerminalPresenceParticipant,
   type TerminalPresenceRegistry
 } from './terminal-presence-registry'
 import { HOST_PARTICIPANT_ID } from './terminal-presence-snapshot'
@@ -22,6 +23,13 @@ type TerminalPresenceHoldRecord = {
   // mark. Deleting it would let the second consult — the one inside the async claim tail — hold the very
   // keystroke that just earned its way through, and would re-nudge on every keystroke after that.
   released: boolean
+}
+
+// Why the host-observed kind and not the client-declared `client.type` the multiplex branch reads: a
+// phone renders no "press again" copy and its decoder drops the `arbitration` field outright, so holding
+// one is an unexplained dropped keystroke. Mobile ships on its own train, so this rule cannot live there.
+export function isHoldableStreamParticipant(participant: TerminalPresenceParticipant): boolean {
+  return participant.kind !== 'mobile'
 }
 
 type TypingPeer = { participantId: string; stamp: number }
