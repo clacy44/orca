@@ -66,17 +66,12 @@ export type DispatchBlockedMarkerStore = {
   clearDispatchBlocked: (dispatchId: string) => void
 }
 
-// Why opportunistic on both edges: identity resolution is best-effort in the SSH-remote, WSL and
-// remote-run-mailbox shapes, and a liveness hint must never be the reason a worker's `ask` or
-// `check --wait` fails. Both writes carry the dispatchId + status='dispatched' guard in SQL, so a
-// settled, missing or retried Dispatch matches no row instead of being marked.
+// Why opportunistic on both edges: a liveness hint must never be the reason a worker's `ask` or
+// `check --wait` fails, and the SQL guard keeps a settled, missing or retried Dispatch unmarked.
 //
-// FEDERATED ASYMMETRY — pinned by test, deliberately not fixed here: a federated worker runs
-// `ask` / `check` against the PEER, and a peer holds only a remote_dispatch_attachments row, never
-// a dispatch_contexts row for the home's dispatch id, so the peer-side park matches nothing and
-// the home's marker does not move. The home's liveness for a federated Dispatch advances only
-// through relayed heartbeats, so its window must be generous enough to cover a full `ask`. Do not
-// relay this marker: it is a home-local column, not wire state.
+// Why the home marker never moves for a federated worker: the peer holds no dispatch_contexts row
+// for the home's dispatch id (pinned by test; do not relay this column — the federated liveness
+// window is widened instead).
 export async function whileDispatchBlocked<T>(
   store: DispatchBlockedMarkerStore,
   dispatchId: string | undefined,

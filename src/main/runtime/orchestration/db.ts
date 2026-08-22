@@ -7021,12 +7021,9 @@ export class OrchestrationDb {
       .all() as DispatchLivenessCandidateRow[]
   }
 
-  // Why the join to tasks: the observer compares the terminal tail against the task spec it sent,
-  // and reading the spec back from the row is what lets a re-armed observer after a restart ask the
-  // same question as the one that armed at worker-start. Federated Dispatches are excluded — the
-  // home never sees that PTY, so the peer's own observer is the only one that can look at it.
-  // The state, status and release predicates are also the observer's disarm: a settled, stopped or
-  // released worker simply stops being a candidate.
+  // Why the join to tasks: reading the spec back is what lets an observer re-armed after a restart
+  // ask the same question it asked at worker-start. Federated Dispatches are excluded — the home
+  // never sees that PTY — and the state/status/release predicates are also the observer's disarm.
   listDispatchInputObservationTargets(dispatchId?: string): DispatchInputObservationTargetRow[] {
     return this.db
       .prepare(

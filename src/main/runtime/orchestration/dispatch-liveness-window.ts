@@ -8,10 +8,8 @@ import { HEARTBEAT_INTERVAL_MIN } from './preamble'
 // §14's marker is missing (a restart mid-park, an identity that resolved to nothing).
 export const DISPATCH_LIVENESS_DEFAULT_WINDOW_MS = ORCHESTRATION_ASK_MAX_TIMEOUT_MS
 
-// Why wider when federated: the home's blocked_since never moves for a federated worker, so its
-// silence is measured from the last RELAYED heartbeat — up to one cadence before the park began —
-// and the longest legal `ask` on top of that already exceeds the local default. A1 §14 asks for a
-// federated window generous enough to cover a full `ask`; this is that ask plus the cadence.
+// Why wider when federated: the home's marker never moves for a peer-side park, so its silence
+// starts at the last relayed heartbeat — a full cadence before the `ask` did (A1 §14).
 export const DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS =
   ORCHESTRATION_ASK_MAX_TIMEOUT_MS + 2 * HEARTBEAT_INTERVAL_MIN * 60_000
 
@@ -63,11 +61,9 @@ export type DispatchLivenessBreach = {
   effectiveSilenceMs: number
 }
 
-// Why a missed window is positive evidence and silence alone is not: the preamble commits every
-// supervised worker to a 5-minute heartbeat and exempts only the `ask` / `check --wait` park, which
-// §14's blocked_since span subtracts here. What remains is a heartbeat that was EXPECTED and did
-// not arrive across six of its own intervals — not an inference from a quiet terminal, which A1's
-// separability ceiling forbids.
+// Why this is positive evidence and not silence: the preamble commits the worker to a heartbeat
+// cadence and exempts only the park, which is subtracted — what remains is a heartbeat that was
+// EXPECTED and did not arrive, never an inference from a quiet terminal.
 export function selectDispatchLivenessBreaches(
   rows: readonly DispatchLivenessCandidateRow[],
   now: number = Date.now()
