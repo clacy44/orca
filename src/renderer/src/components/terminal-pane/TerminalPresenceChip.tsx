@@ -2,6 +2,7 @@ import type { ReactElement } from 'react'
 import { Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { translate } from '@/i18n/i18n'
+import { useTerminalPresenceLastSeenTick } from '@/hooks/terminal-presence-last-seen-tick'
 import { terminalPresenceLastSeenMinutes } from '../../../../shared/terminal-presence-last-seen'
 import type { TerminalPresenceChipState } from './terminal-presence-chip-state'
 
@@ -57,6 +58,7 @@ export function TerminalPresenceChip({
   state: TerminalPresenceChipState | null
   rootClassName?: string
 }): ReactElement | null {
+  useTerminalPresenceLastSeenTick(state?.activity === 'stale')
   if (!state) {
     return null
   }

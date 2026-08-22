@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactElement } from 'react'
 import { translate } from '@/i18n/i18n'
+import { useTerminalPresenceLastSeenTick } from '@/hooks/terminal-presence-last-seen-tick'
 import { terminalPresenceLastSeenMinutes } from '../../../../shared/terminal-presence-last-seen'
 import {
   getPresenceRosterEnvironmentIds,
@@ -64,6 +65,7 @@ export function RuntimePresenceStatusRows(): ReactElement | null {
   const [, setRosterTick] = useState(0)
   useEffect(() => onPresenceRosterChange(() => setRosterTick((n) => n + 1)), [])
   const { rows, truncated } = buildRuntimePresenceRosterRows(rosterEntries())
+  useTerminalPresenceLastSeenTick(rows.some((row) => row.lastSeenAt !== null))
   if (rows.length === 0) {
     // A solo desktop with no pairings renders no section at all.
     return null
