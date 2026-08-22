@@ -14,6 +14,14 @@ export const WorktreeTabSelector = z.object({
     .pipe(z.string().min(1, 'Missing worktree selector'))
 })
 
+// Why its own schema rather than a field on WorktreeTabSelector: only list and subscribe publish the
+// roster, and the mutation schemas that extend the selector have no business advertising it.
+export const WorktreeTabSelectorWithDeviceSelections = WorktreeTabSelector.extend({
+  // Why absent means omit (and not "include", as `includeVisualLayouts` decided): a pre-presence
+  // caller's payload has to stay byte-identical, and this key names other humans.
+  includeDeviceSelections: OptionalBoolean
+})
+
 export const SessionTabsUnsubscribe = WorktreeTabSelector.extend({
   subscriptionId: z.string().min(1).optional()
 })

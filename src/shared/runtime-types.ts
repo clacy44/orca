@@ -338,12 +338,26 @@ export type RuntimeMobileSessionTabsSnapshot = {
   tabs: RuntimeMobileSessionSnapshotTab[]
 }
 
+/** Live-only per-device navigation, published only when a caller asks for it. Never persisted and never
+ *  part of a durable snapshot, so a reconnect can neither replay nor inherit somebody else's selection.
+ *  `kind` mirrors the presence roster's; nothing here may ever be keyed on `participantId` at rest. */
+export type RuntimeSessionTabDeviceSelection = {
+  participantId: string
+  label: string
+  kind: 'runtime' | 'mobile' | 'host'
+  self: boolean
+  activeTabId: string
+  activeTabType: 'terminal' | 'markdown' | 'file' | 'browser'
+}
+
 export type RuntimeMobileSessionTabsResult = {
   worktree: string
   publicationEpoch: string
   snapshotVersion: number
   /** Live-only targeted command; omitted from durable/list snapshots so reconnect cannot replay navigation. */
   navigationIntent?: 'follow'
+  /** Live-only, opt-in via `includeDeviceSelections`; absent means the caller never asked or the host predates it. */
+  deviceSelections?: RuntimeSessionTabDeviceSelection[]
   activeGroupId: string | null
   activeTabId: string | null
   activeTabType: 'terminal' | 'markdown' | 'file' | 'browser' | null

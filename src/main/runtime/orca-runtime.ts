@@ -609,7 +609,8 @@ import {
   activateClientSessionTabSelection,
   ClientSessionTabSelectionStore,
   deriveClientSessionTabSelection,
-  projectClientSessionTabSelection
+  projectClientSessionTabSelection,
+  type ClientSessionTabSelection
 } from './client-session-tab-selection'
 import type {
   PtyProviderBufferSnapshot,
@@ -5282,6 +5283,12 @@ export class OrcaRuntimeService {
 
   flushTerminalPresenceRosterPublish(): void {
     this.terminalPresenceRoster?.flush()
+  }
+
+  // Why exposed here: W9 joins each device's stored selection against the presence roster, and that
+  // store is private state of this class. Read-only — projecting would rewrite somebody else's row.
+  getClientSessionTabSelections(worktreeId: string): Map<string, ClientSessionTabSelection> {
+    return this.clientSessionTabSelections.selectionsForWorktree(worktreeId)
   }
 
   private countTerminalSideEffectConsumingClientEventListeners(): number {

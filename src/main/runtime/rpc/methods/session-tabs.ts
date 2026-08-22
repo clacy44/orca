@@ -9,28 +9,29 @@ import {
   SessionTabsUnsubscribe,
   SetTabProps,
   UpdatePaneLayout,
-  WorktreeTabSelector
+  WorktreeTabSelectorWithDeviceSelections
 } from './session-tabs-schemas'
 import { SESSION_TAB_CLOSE_METHODS } from './session-tab-close-methods'
-import { projectSessionTabAgentStatus } from './session-tab-agent-status-projection'
+import { projectSessionTabsForClient } from './session-tab-device-selections'
 
 export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'session.tabs.list',
-    params: WorktreeTabSelector,
-    handler: async (params, { runtime, pairedDeviceId, clientKind, clientCapabilities }) =>
-      projectSessionTabAgentStatus(
-        await runtime.listMobileSessionTabs(params.worktree, pairedDeviceId),
-        clientKind,
-        clientCapabilities
+    params: WorktreeTabSelectorWithDeviceSelections,
+    handler: async (params, ctx) =>
+      projectSessionTabsForClient(
+        await ctx.runtime.listMobileSessionTabs(params.worktree, ctx.pairedDeviceId),
+        ctx,
+        params.includeDeviceSelections === true
       )
   }),
   defineMethod({
     name: 'session.tabs.listAll',
     params: null,
-    handler: async (_params, { runtime, pairedDeviceId, clientKind, clientCapabilities }) => ({
-      snapshots: (await runtime.listAllMobileSessionTabs(pairedDeviceId)).map((snapshot) =>
-        projectSessionTabAgentStatus(snapshot, clientKind, clientCapabilities)
+    handler: async (_params, ctx) => ({
+      // Why never here: listAll has no params to opt in with, so it stays byte-identical by construction.
+      snapshots: (await ctx.runtime.listAllMobileSessionTabs(ctx.pairedDeviceId)).map((snapshot) =>
+        projectSessionTabsForClient(snapshot, ctx, false)
       )
     })
   }),
@@ -134,12 +135,9 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
   }),
   defineStreamingMethod({
     name: 'session.tabs.subscribe',
-    params: WorktreeTabSelector,
-    handler: async (
-      params,
-      { runtime, connectionId, requestId, pairedDeviceId, clientKind, clientCapabilities },
-      emit
-    ) => {
+    params: WorktreeTabSelectorWithDeviceSelections,
+    handler: async (params, ctx, emit) => {
+      const { runtime, connectionId, requestId, pairedDeviceId } = ctx
       let subscribedWorktree: string | null = null
       let unsubscribe = (): void => {}
       let closed = false
@@ -169,7 +167,7 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
       }
       emit({
         type: 'snapshot',
-        ...projectSessionTabAgentStatus(initial, clientKind, clientCapabilities)
+        ...projectSessionTabsForClient(initial, ctx, params.includeDeviceSelections === true)
       })
       initialized = true
       if (closed) {
@@ -180,7 +178,7 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
         if (snapshot.worktree === subscribedWorktree) {
           emit({
             type: 'updated',
-            ...projectSessionTabAgentStatus(snapshot, clientKind, clientCapabilities)
+            ...projectSessionTabsForClient(snapshot, ctx, params.includeDeviceSelections === true)
           })
         }
       }, pairedDeviceId)
@@ -210,11 +208,8 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
   defineStreamingMethod({
     name: 'session.tabs.subscribeAll',
     params: null,
-    handler: async (
-      _params,
-      { runtime, connectionId, requestId, pairedDeviceId, clientKind, clientCapabilities },
-      emit
-    ) => {
+    handler: async (_params, ctx, emit) => {
+      const { runtime, connectionId, requestId, pairedDeviceId } = ctx
       let unsubscribe = (): void => {}
       let closed = false
       // Why: initial listAll errors should return one RPC error, not a leaked
@@ -250,9 +245,7 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
       }
       emit({
         type: 'snapshots',
-        snapshots: snapshots.map((snapshot) =>
-          projectSessionTabAgentStatus(snapshot, clientKind, clientCapabilities)
-        )
+        snapshots: snapshots.map((snapshot) => projectSessionTabsForClient(snapshot, ctx, false))
       })
       initialized = true
 
@@ -260,10 +253,7 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
         return
       }
       unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => {
-        emit({
-          type: 'updated',
-          ...projectSessionTabAgentStatus(snapshot, clientKind, clientCapabilities)
-        })
+        emit({ type: 'updated', ...projectSessionTabsForClient(snapshot, ctx, false) })
       }, pairedDeviceId)
     }
   }),
