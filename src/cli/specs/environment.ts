@@ -29,7 +29,7 @@ export const ENVIRONMENT_COMMAND_SPECS: CommandSpec[] = [
     notes: [
       'Polls every runtime in parallel; an unreachable peer degrades to one row carrying its reason instead of failing the roster.',
       'Rows are tagged with the environment (or local), runtimeId, reachability, terminal handle, title, presence, and the agent derived from that title.',
-      'Presence names everyone on that terminal — "<name> (typing)" for a live keystroke, "<name> (writing)" for a chat or scripted write, "-" when nobody is there, and "presence?" when the peer runs a runtime too old to report it.'
+      'Presence names everyone on that terminal — "<name> (typing)" for a live keystroke, "<name> (writing)" for a chat or scripted write, "(host)" on the row of the machine serving that terminal, "-" when nobody is there, and "presence?" when no presence answer arrived at all: a peer running an older runtime, or a row with no terminal to carry one.'
     ],
     examples: ['orca environment roster --json', 'orca environment roster --timeout-ms 3000']
   },

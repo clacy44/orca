@@ -78,8 +78,8 @@ describe('environment roster presence column', () => {
         terminalRow('term_busy', {
           attachedCount: 2,
           participants: [
-            { participantId: 'p-1', label: 'Ana', typing: true, writing: false },
-            { participantId: 'host', label: 'devbox', typing: false, writing: true }
+            { participantId: 'p-1', label: 'Ana', kind: 'runtime', typing: true, writing: false },
+            { participantId: 'host', label: 'devbox', kind: 'host', typing: false, writing: true }
           ]
         })
       ],
@@ -93,7 +93,9 @@ describe('environment roster presence column', () => {
         ?.split('  ')
         .at(-1)
     expect(columnOf('term_idle')).toBe('-')
-    expect(columnOf('term_busy')).toBe('Ana (typing), devbox (writing)')
+    // Why the host marker here too: this is the end-to-end path a user reads, and the local human must
+    // not be printable as a peer device that happens to be named after a machine.
+    expect(columnOf('term_busy')).toBe('Ana (typing), devbox (host, writing)')
   })
 
   // Why a parity test and not a doc read: the notes are the only description of this column a user gets,
@@ -106,14 +108,16 @@ describe('environment roster presence column', () => {
         terminalRow('term_idle', { attachedCount: 0, participants: [] }),
         terminalRow('term_busy', {
           attachedCount: 1,
-          participants: [{ participantId: 'p-1', label: 'Ana', typing: true, writing: false }]
+          participants: [
+            { participantId: 'p-1', label: 'Ana', kind: 'runtime', typing: true, writing: false }
+          ]
         })
       ],
       false
     )
 
     expect(notes).toContain('presence')
-    for (const state of ['presence?', '"-"', '(typing)', '(writing)']) {
+    for (const state of ['presence?', '"-"', '(typing)', '(writing)', '(host)']) {
       expect(notes).toContain(state)
     }
     for (const printed of ['presence?', 'Ana (typing)']) {
