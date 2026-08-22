@@ -125,6 +125,46 @@ describe('orchestration worker-start CLI contract', () => {
     )
   })
 
+  it('forwards a zero liveness window instead of dropping the explicit disable', async () => {
+    callMock.mockResolvedValue({
+      result: {
+        runId: 'run_1',
+        taskId: 'task_1',
+        dispatchId: 'ctx_1',
+        state: 'ready',
+        effects: [],
+        residualResources: []
+      }
+    })
+
+    await invokeWorkerStart(
+      new Map<string, string | boolean>([
+        ['task', 'task_1'],
+        ['agent', 'codex'],
+        ['liveness-window-ms', '0'],
+        ['from', 'term_coord']
+      ])
+    )
+
+    expect(callMock).toHaveBeenCalledWith(
+      'orchestration.workerStart',
+      expect.objectContaining({ livenessWindowMs: 0 })
+    )
+  })
+
+  it('rejects a negative liveness window', async () => {
+    await expect(
+      invokeWorkerStart(
+        new Map<string, string | boolean>([
+          ['task', 'task_1'],
+          ['agent', 'codex'],
+          ['liveness-window-ms', '-1'],
+          ['from', 'term_coord']
+        ])
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+  })
+
   it('fails before worker-start when the runtime would strip launch preferences', async () => {
     callMock.mockResolvedValueOnce({ result: { capabilities: [] } })
 
