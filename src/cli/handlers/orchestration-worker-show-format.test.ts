@@ -199,4 +199,51 @@ describe('formatOrchestrationWorkerShow', () => {
 
     expect(rendered).not.toContain('xxxx')
   })
+
+  it('names the gate that was on screen when the dispatch prompt was written', () => {
+    const rendered = lines({
+      ...BASE,
+      worker: {
+        ...BASE.worker,
+        inputEvidence: {
+          submittedAt: '2026-08-22T12:00:00.000Z',
+          blockedReason: 'codex-trust-workspace'
+        }
+      }
+    })
+
+    expect(rendered).toContain(
+      'input: submittedAt=2026-08-22T12:00:00.000Z blockedReason=codex-trust-workspace — ' +
+        'a gate was already on screen when the dispatch prompt was written'
+    )
+  })
+
+  it('says nothing about a submit that saw no gate', () => {
+    expect(
+      formatOrchestrationWorkerShow({
+        ...BASE,
+        worker: {
+          ...BASE.worker,
+          inputEvidence: { submittedAt: '2026-08-22T12:00:00.000Z' }
+        }
+      })
+    ).not.toContain('input:')
+  })
+
+  // Why: the field crosses the wire from a peer, so a class a newer peer invented must not render
+  // on the home as though the home's own six-value vocabulary had grown.
+  it('drops a blockedReason outside the six shipped values', () => {
+    expect(
+      formatOrchestrationWorkerShow({
+        ...BASE,
+        worker: {
+          ...BASE.worker,
+          inputEvidence: {
+            submittedAt: '2026-08-22T12:00:00.000Z',
+            blockedReason: 'peer-invented-auth-gate'
+          }
+        }
+      })
+    ).not.toContain('input:')
+  })
 })

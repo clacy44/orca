@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { formatOrchestrationWorkerShow } from '../../../../cli/handlers/orchestration-worker-show-format'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
 import { parseDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
@@ -117,7 +116,7 @@ describe('post-write dispatch input evidence', () => {
     )
   })
 
-  it('carries the evidence onto worker-show and renders it in text mode', async () => {
+  it('carries the evidence onto the worker-show projection', async () => {
     vi.spyOn(runtime, 'getTerminalWaitEvidence').mockReturnValue({
       tailText: SYNTHESIZED_TRUST_GATE_TAIL,
       blockedReason: 'codex-trust-workspace'
@@ -127,10 +126,9 @@ describe('post-write dispatch input evidence', () => {
 
     const shown = (await method.handler(method.params!.parse({ dispatch: started.dispatchId }), {
       runtime
-    } as never)) as Parameters<typeof formatOrchestrationWorkerShow>[0]
+    } as never)) as { worker: { inputEvidence?: unknown } }
 
     expect(shown.worker.inputEvidence).toEqual(started.inputEvidence)
-    expect(formatOrchestrationWorkerShow(shown)).toContain('blockedReason=codex-trust-workspace')
   })
 
   describe('negative controls', () => {
@@ -176,20 +174,6 @@ describe('post-write dispatch input evidence', () => {
           })
         )
       ).toEqual({ submittedAt: '2026-08-22T12:00:00.000Z' })
-      expect(
-        formatOrchestrationWorkerShow({
-          dispatch: { id: 'ctx_1', task_id: 'task_1', status: 'dispatched' },
-          worker: {
-            state: 'ready',
-            stage: 'input_accepted',
-            agent_terminal_handle: 'term_worker',
-            inputEvidence: {
-              submittedAt: '2026-08-22T12:00:00.000Z',
-              blockedReason: 'claude-folder-trust'
-            }
-          }
-        })
-      ).not.toContain('blockedReason')
     })
 
     it('reads a malformed or absent column as no evidence at all', () => {
