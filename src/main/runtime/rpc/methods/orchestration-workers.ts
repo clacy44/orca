@@ -102,6 +102,11 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         agent: agent ?? null,
         launch: launch.receipt,
         timeoutMs: params.timeoutMs ?? 60_000,
+        // Why persisted only when asked for: the default belongs to the runtime that evaluates the
+        // window, so an unset row picks up the current default instead of freezing the old one.
+        ...(params.livenessWindowMs === undefined
+          ? {}
+          : { livenessWindowMs: params.livenessWindowMs }),
         setup: createsWorktree ? (params.setup ?? 'run') : 'not_applicable',
         setupSource: createsWorktree
           ? params.setup

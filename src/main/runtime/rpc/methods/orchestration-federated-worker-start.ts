@@ -110,6 +110,12 @@ export async function startFederatedWorker(args: {
       agent: params.agent ?? null,
       launch: requestedLaunch,
       timeoutMs: params.timeoutMs ?? 60_000,
+      // Why the home's copy only, never the federationAttachStart payload below: the window is a
+      // home-local column judged against home-stamped timestamps, and a peer that judged its own
+      // copy would be comparing its clock to the home's. Nothing about it crosses the wire.
+      ...(params.livenessWindowMs === undefined
+        ? {}
+        : { livenessWindowMs: params.livenessWindowMs }),
       setup: setupDecision,
       setupSource: createsWorktree
         ? params.setup
