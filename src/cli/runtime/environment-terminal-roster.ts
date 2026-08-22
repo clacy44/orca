@@ -152,10 +152,10 @@ function toRosterRows(runtime: ProbedRuntime): RosterRow[] {
     reason: runtime.reason
   }
   if (runtime.terminals.length === 0) {
-    // Why null and not undefined: there is no terminal to be unknown about, so this row states "nobody".
-    return [
-      { ...tags, terminal: null, title: null, agent: null, worktreePath: null, presence: null }
-    ]
+    // Why no presence key at all: this row is what an unreachable peer, a peer missing the method and a
+    // reachable idle peer all produce, and the capability answer is per terminal — with no terminal
+    // there is nothing to have read one from, so the column must say "unknown", never "nobody".
+    return [{ ...tags, terminal: null, title: null, agent: null, worktreePath: null }]
   }
   return runtime.terminals.map((terminal) => ({
     ...tags,

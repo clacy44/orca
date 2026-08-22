@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { formatEnvironmentTerminalRoster } from '../environment-roster-format'
 import {
   collectEnvironmentTerminalRoster,
   LOCAL_ROSTER_ENVIRONMENT,
@@ -195,12 +196,33 @@ describe('cross-runtime terminal roster', () => {
     ])
   })
 
-  it('states nobody rather than unknown on the row of a runtime with no terminals', async () => {
+  it('leaves presence unknown on every terminal-less row, reached or not', async () => {
     const roster = await collectEnvironmentTerminalRoster([
+      failing('vps', rpcError('connect_failed', 'Connection refused.')),
+      failing('old-peer', rpcError('method_not_found', 'Unknown method: terminal.list')),
       reachable('idle', 'env_idle', { runtimeId: 'runtime_idle', terminals: [] })
     ])
 
-    expect(roster.rows[0].presence).toBeNull()
+    // Why all three: `terminals: []` is what a failed probe, a peer missing the method and a reachable
+    // idle peer all produce, and none of them carries a presence answer — the row the per-row capability
+    // probe has nothing to read is the one row that must not assert one.
+    expect(roster.rows.map((row) => [row.environment, 'presence' in row])).toEqual([
+      ['vps', false],
+      ['old-peer', false],
+      ['idle', false]
+    ])
+  })
+
+  // Why formatted here and not in the formatter's own suite: that suite builds its rows by hand, so it
+  // can only prove the column reads an absent key — never that this producer leaves one absent.
+  it('renders the unreachable row as unknown presence end to end', async () => {
+    const roster = await collectEnvironmentTerminalRoster([
+      failing('vps', rpcError('connect_failed', 'boom'))
+    ])
+
+    expect(formatEnvironmentTerminalRoster(roster).split('\n')[0]).toBe(
+      'vps  unknown-runtime  unreachable(connect_failed: boom)  (no terminals)  (untitled)  presence?'
+    )
   })
 
   it('reports truncation from any polled runtime', async () => {
