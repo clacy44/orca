@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { formatEnvironmentTerminalRoster } from './environment-roster-format'
+import {
+  formatEnvironmentTerminalRoster,
+  formatTerminalPresence
+} from './environment-roster-format'
 import type { RosterRow } from './runtime/environment-terminal-roster'
 
 function row(overrides: Partial<RosterRow>): RosterRow {
@@ -39,12 +42,60 @@ describe('environment roster output', () => {
       })
     ).toBe(
       [
-        'local  runtime_local  ok  term_a  ✳ Claude Code  [Claude Code]',
-        'vps  unknown-runtime  unreachable(no response within 10000ms)  (no terminals)  (untitled)',
+        'local  runtime_local  ok  term_a  ✳ Claude Code  presence?  [Claude Code]',
+        'vps  unknown-runtime  unreachable(no response within 10000ms)  (no terminals)  (untitled)  presence?',
         '',
         '1/2 runtimes reachable, 1 terminals'
       ].join('\n')
     )
+  })
+
+  it('separates a peer that published no presence from one where nobody is attached', () => {
+    expect(
+      formatEnvironmentTerminalRoster({
+        rows: [
+          row({ terminal: 'term_old' }),
+          row({ terminal: 'term_empty', presence: '' }),
+          row({ terminal: 'term_nobody', presence: null }),
+          row({ terminal: 'term_busy', presence: 'Ana (typing), devbox' })
+        ],
+        runtimeCount: 1,
+        reachableCount: 1,
+        terminalCount: 4,
+        truncated: false
+      })
+        .split('\n')
+        .slice(0, 4)
+        .map((line) => line.split('  ').at(-1))
+    ).toEqual(['presence?', '-', '-', 'Ana (typing), devbox'])
+  })
+
+  it('renders each participant from the flags the host published', () => {
+    expect(
+      formatTerminalPresence({
+        attachedCount: 3,
+        participants: [
+          { participantId: 'p-1', label: 'Ana', typing: true, writing: false, self: true },
+          { participantId: 'p-2', label: "Ben's phone", typing: false, writing: true },
+          { participantId: 'host', label: 'devbox', typing: false, writing: false }
+        ]
+      })
+    ).toBe("Ana (typing), Ben's phone (writing), devbox")
+  })
+
+  // Why asserted here too: the host already suppresses `writing` under `typing`, and this column must
+  // not be the place that starts depending on it — typing is the state a peer's keystroke can collide with.
+  it('prefers typing over writing for a participant carrying both flags', () => {
+    expect(
+      formatTerminalPresence({
+        attachedCount: 1,
+        participants: [{ participantId: 'p-1', label: 'Ana', typing: true, writing: true }]
+      })
+    ).toBe('Ana (typing)')
+  })
+
+  it('formats a capable host with nobody attached as the empty column', () => {
+    expect(formatTerminalPresence({ attachedCount: 0, participants: [] })).toBe('')
   })
 
   it('points at environment add when nothing was polled', () => {

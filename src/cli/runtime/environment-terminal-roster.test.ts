@@ -171,6 +171,38 @@ describe('cross-runtime terminal roster', () => {
     })
   })
 
+  it('keeps a peer that published no presence distinguishable from one where nobody is attached', async () => {
+    const roster = await collectEnvironmentTerminalRoster([
+      reachable('old-host', 'env_old', {
+        runtimeId: 'runtime_old',
+        terminals: [{ handle: 'term_old', title: null }]
+      }),
+      reachable('new-host', 'env_new', {
+        runtimeId: 'runtime_new',
+        terminals: [
+          { handle: 'term_idle', title: null, presence: '' },
+          { handle: 'term_busy', title: null, presence: 'Ana (typing)' }
+        ]
+      })
+    ])
+
+    // Why `in` and not the value: an explicit `presence: undefined` would read as "nobody" at the
+    // formatter, which is the one thing this column must never say about an unknown peer.
+    expect(roster.rows.map((row) => ('presence' in row ? row.presence : 'absent'))).toEqual([
+      'absent',
+      '',
+      'Ana (typing)'
+    ])
+  })
+
+  it('states nobody rather than unknown on the row of a runtime with no terminals', async () => {
+    const roster = await collectEnvironmentTerminalRoster([
+      reachable('idle', 'env_idle', { runtimeId: 'runtime_idle', terminals: [] })
+    ])
+
+    expect(roster.rows[0].presence).toBeNull()
+  })
+
   it('reports truncation from any polled runtime', async () => {
     const roster = await collectEnvironmentTerminalRoster([
       reachable('a', 'env_a', { runtimeId: 'runtime_a', terminals: [], truncated: false }),

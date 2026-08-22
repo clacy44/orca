@@ -28,7 +28,8 @@ export const ENVIRONMENT_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'limit', 'timeout-ms'],
     notes: [
       'Polls every runtime in parallel; an unreachable peer degrades to one row carrying its reason instead of failing the roster.',
-      'Rows are tagged with the environment (or local), runtimeId, reachability, terminal handle, title, and the agent derived from that title.'
+      'Rows are tagged with the environment (or local), runtimeId, reachability, terminal handle, title, presence, and the agent derived from that title.',
+      'Presence names everyone on that terminal — "<name> (typing)" for a live keystroke, "<name> (writing)" for a chat or scripted write, "-" when nobody is there, and "presence?" when the peer runs a runtime too old to report it.'
     ],
     examples: ['orca environment roster --json', 'orca environment roster --timeout-ms 3000']
   },

@@ -1,6 +1,9 @@
 import type { CommandHandler } from '../dispatch'
 import { formatEnvironment, formatEnvironmentList, printResult } from '../format'
-import { formatEnvironmentTerminalRoster } from '../environment-roster-format'
+import {
+  formatEnvironmentTerminalRoster,
+  formatTerminalPresence
+} from '../environment-roster-format'
 import { getOptionalPositiveIntegerFlag } from '../flags'
 import { getDefaultUserDataPath, RuntimeClient, RuntimeClientError } from '../runtime-client'
 import type { RuntimeRpcSuccess } from '../runtime-client'
@@ -99,14 +102,21 @@ async function listRosterTerminals(
 ): Promise<RosterProbeResponse> {
   const response = await client.call<RuntimeTerminalListResult>('terminal.list', {
     limit,
-    includeVisualLayouts: false
+    includeVisualLayouts: false,
+    // Why unconditional and not probed: `TerminalListParams` is non-strict, so a pre-presence peer
+    // strips the key and answers exactly as today — and a capability probe would cost a second call
+    // per peer to learn less than the per-row key already tells us.
+    includePresence: true
   })
   return {
     runtimeId: response._meta.runtimeId,
     terminals: response.result.terminals.map((terminal) => ({
       handle: terminal.handle,
       title: terminal.title,
-      worktreePath: terminal.worktreePath
+      worktreePath: terminal.worktreePath,
+      // Why the `in` check rather than `?? null`: a peer that published no key is unknown, and the
+      // roster column must be able to say so instead of claiming nobody is attached.
+      ...('presence' in terminal ? { presence: formatTerminalPresence(terminal.presence) } : {})
     })),
     truncated: response.result.truncated
   }
