@@ -31,6 +31,33 @@ const SYNTHESIZED_LINUX_APPIMAGE_UNSUBMITTED_TAIL = [
   '╰──────────────────────────────────────────────────────────────╯'
 ].join('\n')
 
+// A TUI that soft-wraps a spec line renders it as two lines, so the wrapped halves do not compare
+// equal to anything in the spec. A1 section 2 asks which way that fails; these two fixtures answer
+// it, and the answer must be a miss (no report), never a report about a healthy worker.
+const SYNTHESIZED_WRAPPED_SPEC_LINE_TAIL = [
+  '╭──────────────────────────────────────╮',
+  '│ > You are a dispatched worker.       │',
+  '│                                      │',
+  '│   === TASK ===                       │',
+  '│   Refactor the dispatch mailbox      │',
+  '│   resolver and add tests.            │',
+  '│   Do not change the wire protocol.   │',
+  '╰──────────────────────────────────────╯'
+].join('\n')
+
+// Some agents print a composer hint under the pasted prompt before they take a turn.
+const SYNTHESIZED_COMPOSER_HINT_TAIL = [
+  '╭──────────────────────────────────────────────────────────────╮',
+  '│ > You are working inside Orca, a multi-agent IDE. You are a  │',
+  '│   dispatched worker.                                         │',
+  '│                                                              │',
+  '│   === TASK ===                                               │',
+  '│   Refactor the dispatch mailbox resolver and add tests.      │',
+  '│   Do not change the wire protocol.                           │',
+  '╰──────────────────────────────────────────────────────────────╯',
+  '  ? for shortcuts                                    Context left: 94%'
+].join('\n')
+
 const SYNTHESIZED_WINDOWS_INSTALLED_SUBMITTED_TAIL = [
   '> You are working inside Orca, a multi-agent IDE. You are a dispatched worker.',
   '',
@@ -209,6 +236,17 @@ describe('dispatch input observation', () => {
 
     it('does not hold when the marker never appears', () => {
       expect(tailStillHoldsUnansweredTask('$ ls\nREADME.md', TASK_SPEC)).toBe(false)
+    })
+
+    // Why these are pinned as misses rather than fixed: recovering them needs a per-agent allowlist
+    // of chrome strings, which eventually mistakes a real transcript for chrome and reports a
+    // healthy worker as stuck — the failure A1's separability ceiling forbids outright.
+    it.each([
+      ['a soft-wrapped spec line', SYNTHESIZED_WRAPPED_SPEC_LINE_TAIL],
+      ['an agent composer hint under the prompt', SYNTHESIZED_COMPOSER_HINT_TAIL]
+    ])('fails toward silence, not a report, for %s', (_label, tailText) => {
+      expect(tailStillHoldsUnansweredTask(tailText, TASK_SPEC)).toBe(false)
+      expect(evaluateDispatchInputObservation(evidence({ tailText }))).toBeNull()
     })
 
     it('reads the last dispatch when a terminal was reused for a second one', () => {
