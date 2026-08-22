@@ -159,6 +159,35 @@ describe('shouldHoldInputForTypingPeer', () => {
     expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toBeNull()
   })
 
+  it('never counters the incumbent typist with the keystroke it just held', () => {
+    // The failure this fences: both handlers stamp BEFORE consulting the gate (§4.5), so a held peer is
+    // still published as typing — and a symmetric predicate reads that stamp as a collision and drops the
+    // incumbent's next keystroke too. Both humans lose a character on every ordinary two-person collision.
+    const anaId = participantIdOf(ANA_GRANT, 'conn-ana', 'Ana laptop')
+    const benId = participantIdOf(BEN_GRANT, 'conn-ben', 'Ben laptop')
+    typeOn('conn-ana', 'stream:ana')
+
+    clock += 10
+    typeOn('conn-ben', 'stream:ben')
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toMatchObject({
+      heldFor: anaId
+    })
+
+    clock += 10
+    registry.recordInteractiveInput(PTY_ID, 'stream:ana')
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, ANA_GRANT)).toBeNull()
+
+    // Non-vacuous: Ben's re-press lands, so his typing is real again and Ana pays her own single bump.
+    clock += 10
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, BEN_GRANT)).toBeNull()
+    registry.recordInteractiveInput(PTY_ID, 'stream:ben')
+    clock += 10
+    registry.recordInteractiveInput(PTY_ID, 'stream:ana')
+    expect(arbitration.shouldHoldInputForTypingPeer(PTY_ID, ANA_GRANT)).toMatchObject({
+      heldFor: benId
+    })
+  })
+
   it('keeps no record for a hold that already lapsed', () => {
     participantIdOf(ANA_GRANT, 'conn-ana', 'Ana laptop')
     typeOn('conn-ana', 'stream:ana')

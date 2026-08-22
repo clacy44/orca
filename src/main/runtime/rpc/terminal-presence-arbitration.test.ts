@@ -12,6 +12,7 @@ import {
   activeTerminalPresenceHoldNotice,
   resetTerminalPresenceArbitrationForTest
 } from '../terminal-presence-arbitration'
+import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from '../terminal-presence-activity-rows'
 import { TERMINAL_PRESENCE_COALESCE_WINDOW_MS } from '../terminal-presence-change-notifier'
 import { HOST_PARTICIPANT_ID } from '../terminal-presence-snapshot'
 import {
@@ -251,6 +252,46 @@ describe('terminal.multiplex soft arbitration', () => {
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
   })
 
+  it('never counters the incumbent typist with the keystroke it just held', async () => {
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    const benParticipantId = registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+    const ben = await startNegotiatedMultiplex(PEER_CONNECTION, PEER_GRANT, {
+      streamId: BEN_STREAM_ID,
+      clientId: 'ben'
+    })
+
+    sendInputFrame(ana.handlers, 7, 'a')
+    await settle(10)
+    sendInputFrame(ben.handlers, BEN_STREAM_ID, 'b')
+    await settle()
+    expect(lastPresence(ben.messages)?.arbitration).toMatchObject({ heldFor: anaParticipantId })
+
+    // Ben's stamp is fresh — §4.5 stamps before the gate — but the keystroke behind it was DROPPED, so
+    // it must not take a character from Ana in return. §2.6 promises the INTERRUPTING party one bump.
+    await settle(10)
+    sendInputFrame(ana.handlers, 7, 'a', 3)
+    await settle(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+    expect(sentTexts(ana.runtime)).toEqual(['a', 'a'])
+    expect(presenceResults(ana.messages).every((event) => !('arbitration' in event))).toBe(true)
+
+    // Non-vacuous: once Ben's re-press lands his typing is real again, and Ana pays her own single bump.
+    await settle(10)
+    sendInputFrame(ben.handlers, BEN_STREAM_ID, 'c', 4)
+    await settle()
+    expect(sentTexts(ben.runtime)).toEqual(['c'])
+    await settle(10)
+    sendInputFrame(ana.handlers, 7, 'a', 5)
+    await settle()
+    expect(sentTexts(ana.runtime)).toEqual(['a', 'a'])
+    expect(lastPresence(ana.messages)?.arbitration).toMatchObject({ heldFor: benParticipantId })
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
+
   it('holds synchronously, before the claim tail it would otherwise schedule', async () => {
     // Why pinned on the sync consult: the tail is where the SECOND consult lives, so a wiring that kept
     // only that one would still pass every other case here — and would hand a held keystroke to the
@@ -303,6 +344,9 @@ describe('terminal.multiplex soft arbitration', () => {
     expect(ben.runtime.sendTerminal).not.toHaveBeenCalled()
     expect(presenceResults(ben.messages).every((event) => !('arbitration' in event))).toBe(true)
 
+    // Why Ben's own stamp is left to expire first: a keystroke parked this long is no longer typing, so
+    // Ana's is an uncontested one — she arms the hold instead of being held for interrupting him.
+    await settle(TERMINAL_PRESENCE_ACTIVITY_TTL_MS + 10)
     sendInputFrame(ana.handlers, 7, 'a')
     releaseClaim()
     await settle()

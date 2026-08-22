@@ -81,6 +81,13 @@ export function createTerminalPresenceArbitration(options: {
       if (!identity || identity.grantKey === grantKey) {
         continue
       }
+      // Why a held peer holds nobody: their own last keystroke was DROPPED, so this stamp is intent that
+      // never reached the PTY (§4.5 stamps before the gate). Counting it takes a character from the
+      // incumbent too, on every ordinary collision. Their re-press releases the record and re-arms them.
+      const held = holdsByPty.get(ptyId)?.get(identity.grantKey)
+      if (held && !held.released && now < held.until) {
+        continue
+      }
       // Why the freshest stamp: with two peers typing, the collision the reader is asked to yield to is
       // the one still happening. Ties break on the id so two of one peer's windows cannot flip the name.
       const isLoudest =
