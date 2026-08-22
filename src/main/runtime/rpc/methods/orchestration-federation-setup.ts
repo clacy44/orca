@@ -79,7 +79,10 @@ export function monitorFederatedSetup(
       args.db.enqueueFederationRelay({
         dispatchId: args.dispatchId,
         direction: 'to_home',
-        kind: 'status',
+        // Why not the message type: the queue is also the peer's evidence that the WORKER has
+        // spoken, and a worker may legitimately send `--type status` itself, so provenance has to
+        // be the discriminator rather than a value the worker also controls.
+        kind: 'runtime_notification',
         payload: JSON.stringify({
           from: `dispatch:${args.dispatchId}`,
           subject: `Setup ${setupState} for worker ${args.dispatchId}`,

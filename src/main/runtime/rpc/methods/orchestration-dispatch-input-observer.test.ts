@@ -543,6 +543,32 @@ describe('post-ready dispatch input observer', () => {
       expect(observerMail()).toHaveLength(0)
     })
 
+    // Why status counts: the worker send path enqueues `kind: type` verbatim, so a worker whose
+    // only outbound traffic so far is `--type status` has demonstrably run the CLI.
+    it('treats a federated worker that sent --type status as having spoken', async () => {
+      mockProbes()
+      const { dispatchId } = attachRemoteWorker()
+      db.enqueueFederationRelay({
+        dispatchId,
+        direction: 'to_home',
+        kind: 'status',
+        payload: JSON.stringify({
+          from: 'term_peer_worker',
+          subject: 'progress',
+          body: 'reading the resolver',
+          type: 'status'
+        })
+      })
+
+      await runtime.tickDispatchInputObserver(dispatchId, afterDwell(60 * MINUTE_MS))
+
+      expect(
+        db
+          .listPendingFederationRelay(dispatchId, 'to_home')
+          .filter((item) => item.kind === 'runtime_notification')
+      ).toHaveLength(0)
+    })
+
     it('says nothing on the peer once the worker has spoken', async () => {
       mockProbes()
       const { dispatchId } = attachRemoteWorker()

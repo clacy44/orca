@@ -7066,14 +7066,15 @@ export class OrchestrationDb {
   }
 
   // Why the peer asks its relay queue and not a heartbeat column: it has none — a federated
-  // worker's heartbeats are queued here and stamped on the home at import. Excluded kinds are the
-  // two this runtime writes itself, so the runtime cannot mistake its own notice for the worker's.
+  // worker's heartbeats are queued here and stamped on the home at import. The one excluded kind is
+  // the one only this runtime writes, so the exclusion is provenance and not a type a worker can
+  // also send (`send --type status` enqueues kind='status' verbatim).
   hasFederatedWorkerSpoken(dispatchId: string): boolean {
     return !!this.db
       .prepare(
         `SELECT 1 FROM federation_relay_items
          WHERE dispatch_id = ? AND direction = 'to_home'
-           AND kind NOT IN ('status', 'runtime_notification')
+           AND kind != 'runtime_notification'
          LIMIT 1`
       )
       .get(dispatchId)
