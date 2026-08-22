@@ -48,6 +48,10 @@ import {
   type TerminalPresenceStreamPresence
 } from '../../terminal-presence-snapshot'
 import { terminalPresenceChangeNotifier } from '../../terminal-presence-change-notifier'
+import {
+  activeTerminalPresenceHoldNotice,
+  shouldHoldInputForTypingPeer
+} from '../../terminal-presence-arbitration'
 import { resolveTerminalListPresenceScope } from '../../terminal-list-presence'
 import { isTuiAgent } from '../../../../shared/tui-agent-config'
 import { isTerminalQueryReply } from '../../../../shared/terminal-query-reply'
@@ -157,6 +161,9 @@ function terminalPresenceStreamEvent(
   ptyId: string,
   participant: TerminalPresenceParticipant | null
 ): Record<string, unknown> {
+  const arbitration = participant
+    ? activeTerminalPresenceHoldNotice(ptyId, participant.pairedDeviceId)
+    : null
   return {
     type: 'terminal-presence',
     streamId,
@@ -167,7 +174,10 @@ function terminalPresenceStreamEvent(
       // and a literal Date.now() here would drift from a registry built with an injected clock.
       now: terminalPresenceRegistry.now(),
       selfParticipantId: participant?.participantId ?? null
-    })
+    }),
+    // Why read per emit rather than captured at hold time: every later emit on this stream must DROP the
+    // notice once the re-press lands or the window closes, which is the only way a chip clears itself.
+    ...(arbitration ? { arbitration } : {})
   }
 }
 
@@ -1815,6 +1825,21 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         }
         sendFrame(stream.streamId, TerminalStreamOpcode.WriteUnavailable)
       }
+      // Why beside notifyStreamWriteUnavailable: a held keystroke is the same "your input did not land"
+      // notice in a different shape, so it reuses that guard — and an un-negotiated stream is never held,
+      // because a client that cannot render the reason would just lose a keystroke (§2.6).
+      const holdInputForTypingPeer = (stream: TerminalMultiplexStream): boolean => {
+        if (!stream.supportsPresence || !stream.participant) {
+          return false
+        }
+        if (!shouldHoldInputForTypingPeer(stream.ptyId, stream.participant.pairedDeviceId)) {
+          return false
+        }
+        if (!closed && streams.get(stream.streamId) === stream) {
+          emit(terminalPresenceStreamEvent(stream.streamId, stream.ptyId, stream.participant))
+        }
+        return true
+      }
       const sendResizedFrame = (
         stream: TerminalMultiplexStream,
         event: { cols: number; rows: number; displayMode: string; reason: string; seq?: number }
@@ -2275,10 +2300,20 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           if (isTerminalInputLockedForClient(runtime, stream.ptyId, stream.client)) {
             return
           }
+          // Why below the mobile lock: a keystroke the phone's driver floor already dropped must not also
+          // ask its author to press again, which would nudge them toward a key that cannot land either.
+          if (holdInputForTypingPeer(stream)) {
+            return
+          }
           // Mobile already has the higher-priority floor, so a rejected desktop claim must not suppress later phone input.
           const inputClaimTail = stream.isMobile ? Promise.resolve(true) : stream.desktopClaimTail
           void inputClaimTail.then(async (claimed) => {
             if (!claimed || isTerminalInputLockedForClient(runtime, stream.ptyId, stream.client)) {
+              return
+            }
+            // Why consulted again in here: the claim tail is async, so a peer can start typing underneath
+            // it — the same reason the lock above is re-read rather than trusted from the sync pass.
+            if (holdInputForTypingPeer(stream)) {
               return
             }
             const outcome = await sendTerminalStreamInput(runtime, {
@@ -3270,6 +3305,9 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
       let unsubscribeFit = (): void => {}
       let unregisterBinaryHandler = (): void => {}
       let unsubscribePresence = (): void => {}
+      // Why null until the negotiated branch below assigns it: negotiation IS the arbitration gate, so a
+      // stream that never advertised presence has no closure to consult and can never be held (§2.6).
+      let holdInputForTypingPeer: (() => boolean) | null = null
       let abortRendererMountWait = (): void => {}
       let lateRendererReadyPromise: Promise<boolean> | null = null
       let outputBatcher: ReturnType<typeof createTerminalOutputBatcher> | null = null
@@ -3348,8 +3386,16 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
             if (isTerminalInputLockedForClient(runtime, ptyId, params.client)) {
               return
             }
+            if (holdInputForTypingPeer?.()) {
+              return
+            }
             void desktopClaimTail.then(async (claimed) => {
               if (!claimed || isTerminalInputLockedForClient(runtime, ptyId, params.client)) {
+                return
+              }
+              // Why twice here too: gap 5 — the phone attaches on this handler, and its claim tail is
+              // just as async as the multiplex one.
+              if (holdInputForTypingPeer?.()) {
                 return
               }
               const outcome = await sendTerminalStreamInput(runtime, {
@@ -3644,6 +3690,17 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
             }
             emit(terminalPresenceStreamEvent(streamId, ptyId, streamParticipant))
           }
+          // Why a resolved participant is required as well as the echo: without one there is no grant to
+          // key the hold on, and self-gating on an unknown grant would hold a peer against themselves.
+          holdInputForTypingPeer = streamParticipant
+            ? (): boolean => {
+                if (!shouldHoldInputForTypingPeer(ptyId, streamParticipant.pairedDeviceId)) {
+                  return false
+                }
+                emitPresence()
+                return true
+              }
+            : null
           unsubscribePresence = terminalPresenceChangeNotifier.subscribe(ptyId, emitPresence)
           emitPresence()
         }
