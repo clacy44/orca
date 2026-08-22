@@ -17,7 +17,10 @@ export type WorkerTerminalObservation = WorkerAgentGateObservation & {
 export async function inspectWorkerTerminal(
   runtime: OrcaRuntimeService,
   db: OrchestrationDb,
-  dispatchId: string
+  dispatchId: string,
+  // Why opt-in: worker-read, worker-stop and release share this helper and drop the verdict, and
+  // the probe can reach getForegroundProcess — an SSH round trip they should not pay for.
+  options?: { probeAgentGate?: boolean }
 ): Promise<WorkerTerminalObservation> {
   const worker = db.getWorkerDispatch(dispatchId)
   if (!worker?.agent_terminal_handle) {
@@ -38,13 +41,15 @@ export async function inspectWorkerTerminal(
     status: exact ? (terminal.connected === false ? 'exited' : 'running') : 'identity_changed',
     // Why: a non-exact handle names some other process, so its status would be a fabricated
     // verdict about this worker; identity_changed stays the whole answer.
-    ...(exact ? await observeWorkerAgentGate(runtime, worker.agent_terminal_handle) : {})
+    ...(exact && options?.probeAgentGate
+      ? await observeWorkerAgentGate(runtime, worker.agent_terminal_handle)
+      : {})
   }
 }
 
 // Why: getTerminalAgentStatus throws for gone/exited/stale handles, and worker-show already
 // succeeds on those — every failure must read as unknown (absent), never propagate.
-async function observeWorkerAgentGate(
+export async function observeWorkerAgentGate(
   runtime: OrcaRuntimeService,
   handle: string
 ): Promise<WorkerAgentGateObservation> {

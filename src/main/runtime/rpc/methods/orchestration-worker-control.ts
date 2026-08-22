@@ -130,7 +130,11 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
           )
         }
       }
-      const observation = await inspectWorkerTerminal(runtime, db, params.dispatch)
+      // Why only here: worker-show is the surface that renders the gate verdict; the other
+      // callers discard it and would pay the probe for nothing.
+      const observation = await inspectWorkerTerminal(runtime, db, params.dispatch, {
+        probeAgentGate: true
+      })
       const resource = db.getWorkerTerminalResourceByOwner(params.dispatch)
       return {
         dispatch,

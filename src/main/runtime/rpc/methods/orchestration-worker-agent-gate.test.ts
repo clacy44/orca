@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
 import { ORCHESTRATION_METHODS } from './orchestration'
+import { inspectWorkerTerminal } from './orchestration-worker-observation'
 
 describe('worker-show agent gate observation', () => {
   let db: OrchestrationDb
@@ -41,6 +42,14 @@ describe('worker-show agent gate observation', () => {
         blockedSince?: string
       }
     }>
+  }
+
+  function callMethod(name: string, params: Record<string, unknown>) {
+    const method = ORCHESTRATION_METHODS.find((candidate) => candidate.name === name)
+    if (!method) {
+      throw new Error(`${name} is not registered`)
+    }
+    return method.handler(method.params!.parse(params), { runtime } as never)
   }
 
   function createReadyWorker() {
@@ -160,6 +169,49 @@ describe('worker-show agent gate observation', () => {
 
     expect(result.observation.status).toBe('identity_changed')
     expect(result.observation).not.toHaveProperty('agentStatus')
+    expect(agentStatus).not.toHaveBeenCalled()
+  })
+
+  it('leaves the shared inspection unprobed unless the caller asks for the gate', async () => {
+    const dispatch = createReadyWorker()
+    const agentStatus = vi.spyOn(runtime, 'getTerminalAgentStatus')
+
+    const observation = await inspectWorkerTerminal(runtime, db, dispatch.id)
+
+    expect(observation.exact).toBe(true)
+    expect(observation).not.toHaveProperty('agentStatus')
+    expect(agentStatus).not.toHaveBeenCalled()
+  })
+
+  it('does not probe the gate for worker-read', async () => {
+    const dispatch = createReadyWorker()
+    const agentStatus = vi.spyOn(runtime, 'getTerminalAgentStatus')
+    vi.spyOn(runtime, 'readTerminal').mockResolvedValue({
+      handle: 'term_worker',
+      status: 'running',
+      tail: ['line'],
+      nextCursor: null
+    } as never)
+
+    const read = (await callMethod('orchestration.workerRead', {
+      dispatch: dispatch.id,
+      source: 'terminal'
+    })) as { source: string }
+
+    expect(read.source).toBe('terminal')
+    expect(agentStatus).not.toHaveBeenCalled()
+  })
+
+  it('does not probe the gate for worker-stop', async () => {
+    const dispatch = createReadyWorker()
+    const agentStatus = vi.spyOn(runtime, 'getTerminalAgentStatus')
+    const close = vi
+      .spyOn(runtime, 'closeTerminal')
+      .mockResolvedValue({ handle: 'term_worker' } as never)
+
+    await callMethod('orchestration.workerStop', { dispatch: dispatch.id })
+
+    expect(close).toHaveBeenCalledWith('term_worker')
     expect(agentStatus).not.toHaveBeenCalled()
   })
 
