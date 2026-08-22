@@ -8112,6 +8112,94 @@ describe('registerPtyHandlers', () => {
         unregisterSshPtyProvider(connectionId)
       }
     })
+
+    // Why: path A is the route terminal.create, worktree.create and terminal.split take, and
+    // deleting the guard call there alone would leave the path-B SSH assertion green.
+    it('keeps an SSH pane CLAUDE_CONFIG_DIR verbatim on a path A spawn', async () => {
+      const connectionId = 'ssh-guard3-path-a'
+      const capturedSpawn = vi.fn(async (options: CapturedSpawn) => ({
+        id: `ssh:${connectionId}@@remote-pty-a`,
+        ...options
+      }))
+      setupCapturingProvider()
+      registerSshPtyProvider(connectionId, {
+        spawn: capturedSpawn,
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn())
+      } as never)
+      const wslManagedAuth = makeWslManagedAuth()
+      const controller = registerController(wslManagedAuth)
+
+      try {
+        await controller.spawn({
+          cols: 80,
+          rows: 24,
+          worktreeId: 'wt-ssh',
+          connectionId,
+          command: 'claude',
+          env: { CLAUDE_CONFIG_DIR: '/home/remote-dev/.claude-work' }
+        })
+
+        const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+        expect(options.env.CLAUDE_CONFIG_DIR).toBe('/home/remote-dev/.claude-work')
+        expect(wslManagedAuth).not.toHaveBeenCalled()
+      } finally {
+        unregisterSshPtyProvider(connectionId)
+      }
+    })
+
+    it('scrubs a client CLAUDE_CONFIG_DIR out of the launchConfig path B persists', async () => {
+      setupCapturingProvider()
+      registerController(makeHostDefaultAuth())
+
+      const response = (await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        worktreeId: 'wt-persist',
+        command: 'claude',
+        launchAgent: 'claude',
+        launchConfig: {
+          agentEnv: {
+            CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/victim/auth',
+            ORCA_TAB_ID: 't1'
+          }
+        }
+      })) as { launchConfig?: { agentEnv?: Record<string, string> } }
+
+      expect(response.launchConfig?.agentEnv).toEqual({ ORCA_TAB_ID: 't1' })
+    })
+
+    it('refuses a path A SSH spawn whose env points into the host lane root', async () => {
+      const connectionId = 'ssh-guard3-lane'
+      setupCapturingProvider()
+      registerSshPtyProvider(connectionId, {
+        spawn: vi.fn(async () => ({ id: `ssh:${connectionId}@@remote-pty-lane` })),
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn())
+      } as never)
+      const controller = registerController(makeHostDefaultAuth())
+
+      try {
+        await expect(
+          controller.spawn({
+            cols: 80,
+            rows: 24,
+            worktreeId: 'wt-ssh',
+            connectionId,
+            command: 'claude',
+            env: { CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-lanes/principal-a' }
+          })
+        ).rejects.toThrow(/credential lane on a remote pane/)
+      } finally {
+        unregisterSshPtyProvider(connectionId)
+      }
+    })
   })
 
   // Why: daemon resize is fire-and-forget, so pty:getSize must report the APPLIED size, not the requested one (Claude-Code split-pane desync).

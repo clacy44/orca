@@ -93,6 +93,7 @@ import {
 import { parseAppSshPtyId, toAppSshPtyId, toRelaySshPtyId } from '../providers/ssh-pty-id'
 import { createPtySpawnTiming } from './pty-spawn-timing'
 import { enforceClaudeConfigDirLaunchScope } from './claude-config-dir-launch-guard'
+import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
   isSafePtySessionId,
   mintPtySessionId,
@@ -4793,7 +4794,10 @@ export function registerPtyHandlers(
         env,
         envToDelete: spawnOptions.envToDelete,
         hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
-        connectionId: args.connectionId
+        connectionId: args.connectionId,
+        // Why only for a remote pane: clause (a) is the only consumer, and this keeps the
+        // userData lookup off every local spawn.
+        laneRoot: args.connectionId ? getClaudeLanesRoot() : null
       })
       env = configDirScope.env
       spawnOptions.env = configDirScope.env
@@ -6460,11 +6464,23 @@ export function registerPtyHandlers(
         const configDirScope = enforceClaudeConfigDirLaunchScope({
           env: spawnEnv,
           envToDelete: combinedEnvToDelete,
+          agentEnv: effectiveLaunchConfig?.agentEnv,
           hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
-          connectionId: args.connectionId
+          connectionId: args.connectionId,
+          laneRoot: args.connectionId ? getClaudeLanesRoot() : null
         })
         const scopedSpawnEnv = configDirScope.env
         combinedEnvToDelete = configDirScope.envToDelete
+        // Why: the record persisted below outlives the spawn, so the client value must not
+        // survive on it even though guard 3 already neutralised it in the spawn env.
+        const scopedAgentEnv = configDirScope.agentEnv
+        if (
+          effectiveLaunchConfig &&
+          scopedAgentEnv &&
+          scopedAgentEnv !== effectiveLaunchConfig.agentEnv
+        ) {
+          effectiveLaunchConfig = { ...effectiveLaunchConfig, agentEnv: scopedAgentEnv }
+        }
         const spawnOptions: PtySpawnOptions = {
           cols: args.cols,
           rows: args.rows,
@@ -6920,7 +6936,7 @@ export function registerPtyHandlers(
         ) {
           const agentLaunchAuthority = admitRendererAgentLaunchAuthority({
             launchToken: args.launchToken,
-            spawnEnv,
+            spawnEnv: scopedSpawnEnv,
             launchAgent: args.launchAgent,
             launchConfig: effectiveLaunchConfig,
             isReattach: result.isReattach === true,
