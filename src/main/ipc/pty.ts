@@ -92,6 +92,7 @@ import {
 } from '../providers/ssh-pty-errors'
 import { parseAppSshPtyId, toAppSshPtyId, toRelaySshPtyId } from '../providers/ssh-pty-id'
 import { createPtySpawnTiming } from './pty-spawn-timing'
+import { enforceClaudeConfigDirLaunchScope } from './claude-config-dir-launch-guard'
 import {
   isSafePtySessionId,
   mintPtySessionId,
@@ -4788,6 +4789,15 @@ export function registerPtyHandlers(
       }
       deleteRequestedEnvKeys(env, spawnOptions.envToDelete)
       promoteAgentTeamsShimPath(env, requestedAgentTeamsPath)
+      const configDirScope = enforceClaudeConfigDirLaunchScope({
+        env,
+        envToDelete: spawnOptions.envToDelete,
+        hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
+        connectionId: args.connectionId
+      })
+      env = configDirScope.env
+      spawnOptions.env = configDirScope.env
+      spawnOptions.envToDelete = configDirScope.envToDelete
       if (launchCommand !== undefined) {
         spawnOptions.command = launchCommand
       }
@@ -6447,12 +6457,20 @@ export function registerPtyHandlers(
         }
         deleteRequestedEnvKeys(spawnEnv, combinedEnvToDelete)
         promoteAgentTeamsShimPath(spawnEnv, requestedAgentTeamsPath)
+        const configDirScope = enforceClaudeConfigDirLaunchScope({
+          env: spawnEnv,
+          envToDelete: combinedEnvToDelete,
+          hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
+          connectionId: args.connectionId
+        })
+        const scopedSpawnEnv = configDirScope.env
+        combinedEnvToDelete = configDirScope.envToDelete
         const spawnOptions: PtySpawnOptions = {
           cols: args.cols,
           rows: args.rows,
           cwd,
           ...(prevalidatedCwd && !isDaemonHostSpawn ? { prevalidatedCwd } : {}),
-          env: spawnEnv,
+          env: scopedSpawnEnv,
           ...(isMintedSessionId ? { isNewSession: true } : {})
         }
         if (!args.connectionId && !isDaemonHostSpawn) {
