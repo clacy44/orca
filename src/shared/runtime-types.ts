@@ -338,6 +338,31 @@ export type RuntimeMobileSessionTabsSnapshot = {
   tabs: RuntimeMobileSessionSnapshotTab[]
 }
 
+/** W4's per-terminal presence row, as it rides the `terminal-presence` stream event. Live-only: both
+ *  activity flags are TTL'd host-side, so nothing here is durable and nothing may be keyed on
+ *  `participantId` at rest. `self` is resolved per emitting stream, never once per payload. */
+export type RuntimeTerminalStreamPresenceParticipant = {
+  participantId: string
+  label: string
+  kind: 'runtime' | 'mobile' | 'host'
+  self: boolean
+  /** A live interactive stream stamped a keystroke; outranks `writing` because it is the stamp that can hold a peer. */
+  typing: boolean
+  /** A grant wrote through `terminal.send` — true of an agent driving a human's grant, hence the wording split. */
+  writing: boolean
+  since: number
+  /** Mobile only: the phone has no bounded reap horizon, so a silent row is marked, never removed (S7). */
+  stale?: boolean
+}
+
+/** Q2's soft hold, published on the held stream alone. Declared with the row so the renderer state lane
+ *  carries the slot from the start; S6 is what fills it. */
+export type RuntimeTerminalStreamPresenceArbitration = {
+  /** The participant whose typing armed the hold — the name the held client is asked to yield to. */
+  heldFor: string
+  until: number
+}
+
 /** Live-only per-device navigation, published only when a caller asks for it. Never persisted and never
  *  part of a durable snapshot, so a reconnect can neither replay nor inherit somebody else's selection.
  *  `kind` mirrors the presence roster's; nothing here may ever be keyed on `participantId` at rest. */

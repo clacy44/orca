@@ -1,6 +1,7 @@
 // Why its own module: this is the per-PTY W4 projection, and the runtime-wide roster, identity and
 // label rules it sits beside are already at the counted-line ceiling with S4's and S5's projections
 // still to land — splitting after they land would be a much larger diff for the same result.
+import type { RuntimeTerminalStreamPresenceParticipant } from '../../shared/runtime-types'
 import {
   HOST_ATTACHMENT_KEY,
   type TerminalPresenceParticipant,
@@ -9,23 +10,16 @@ import {
 import {
   HOST_PARTICIPANT_ID,
   TERMINAL_PRESENCE_MAX_PARTICIPANTS,
-  resolveHostPresenceLabel,
-  type TerminalPresenceKind
+  resolveHostPresenceLabel
 } from './terminal-presence-snapshot'
 
 // Why: one window for both activity flags. Long enough to bridge the gap between keystrokes in a burst,
 // short enough that a chip clears while the reader still remembers pressing the key.
 export const TERMINAL_PRESENCE_ACTIVITY_TTL_MS = 3000
 
-export type TerminalPresenceActivityRow = {
-  participantId: string
-  label: string
-  kind: TerminalPresenceKind
-  typing: boolean
-  writing: boolean
-  since: number
-  self: boolean
-}
+// Why the shared type and not a local twin: this row IS the W4 wire shape, and the renderer decodes it
+// against that declaration — two independent copies would drift on the first field either side adds.
+export type TerminalPresenceActivityRow = RuntimeTerminalStreamPresenceParticipant
 
 export type TerminalPresenceParticipantIndex = {
   byConnection: ReadonlyMap<string, TerminalPresenceParticipant>
