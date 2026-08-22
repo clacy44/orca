@@ -298,8 +298,19 @@ import type {
   SleepingAgentLaunchConfig
 } from '../../shared/agent-session-resume'
 import type { ExactWorkerProviderSession } from '../../shared/orchestration-worker-output'
-import type { RuntimeClientEvent } from '../../shared/runtime-client-events'
+import type {
+  RuntimeClientEvent,
+  RuntimeTerminalPresenceClientEvent
+} from '../../shared/runtime-client-events'
 import { toRuntimeActivateWorktreeEvent } from '../../shared/runtime-client-events'
+import {
+  buildTerminalPresenceRosterParticipants,
+  stampTerminalPresenceSelf
+} from './terminal-presence-snapshot'
+import {
+  createTerminalPresenceRosterPublisher,
+  type TerminalPresenceRosterPublisher
+} from './terminal-presence-roster-publisher'
 import {
   navigationTargetsClients,
   navigationTargetsHost,
@@ -5176,9 +5187,21 @@ export class OrcaRuntimeService {
     }
   }
 
+  // Why per listener and not per event: `self` and the mobile filter are both properties of the
+  // RECEIVER, and this bus has exactly one payload for every receiver.
+  private clientEventPresenceByListener = new Map<
+    (event: RuntimeClientEvent) => void,
+    { consumesPresence: boolean; participantId: string | null }
+  >()
+  private terminalPresenceRoster: TerminalPresenceRosterPublisher | null = null
+
   onClientEvent(
     listener: (event: RuntimeClientEvent) => void,
-    options?: { consumesTerminalSideEffects?: boolean }
+    options?: {
+      consumesTerminalSideEffects?: boolean
+      consumesPresence?: boolean
+      participantId?: string | null
+    }
   ): () => void {
     this.clientEventListeners.add(listener)
     if (options?.consumesTerminalSideEffects === false) {
@@ -5186,17 +5209,94 @@ export class OrcaRuntimeService {
     } else {
       this.terminalSideEffectTitleGateKeysByClientEventListener.set(listener, new Map())
     }
+    this.clientEventPresenceByListener.set(listener, {
+      consumesPresence: options?.consumesPresence !== false,
+      participantId: options?.participantId ?? null
+    })
+    this.ensureTerminalPresenceRoster()
     this.refreshTerminalSideEffectConsumerAvailability()
     return () => {
       this.clientEventListeners.delete(listener)
       this.terminalSideEffectExcludedClientEventListeners.delete(listener)
       this.terminalSideEffectTitleGateKeysByClientEventListener.delete(listener)
+      this.clientEventPresenceByListener.delete(listener)
+      this.disposeTerminalPresenceRosterWhenUnwatched()
       this.refreshTerminalSideEffectConsumerAvailability()
     }
   }
 
+  // Why lazily and why torn down with the last subscriber: the publisher holds registry listeners, so a
+  // runtime with nobody on the bus must hold none — a solo desktop pays nothing, and a test's runtime
+  // cannot keep answering registry changes after its subscribers are gone.
+  private ensureTerminalPresenceRoster(): TerminalPresenceRosterPublisher {
+    this.terminalPresenceRoster ??= createTerminalPresenceRosterPublisher({
+      registry: terminalPresenceRegistry,
+      buildMembership: () => this.buildTerminalPresenceMembership(),
+      publish: (event) => {
+        this.emitClientEvent(event)
+      }
+    })
+    return this.terminalPresenceRoster
+  }
+
+  private disposeTerminalPresenceRosterWhenUnwatched(): void {
+    if (this.clientEventListeners.size > 0) {
+      return
+    }
+    this.terminalPresenceRoster?.dispose()
+    this.terminalPresenceRoster = null
+  }
+
+  private buildTerminalPresenceMembership(): {
+    participants: RuntimeTerminalPresenceClientEvent['participants']
+    truncated?: true
+  } {
+    return buildTerminalPresenceRosterParticipants({
+      registry: terminalPresenceRegistry,
+      hasEstablishedSubscription: (connectionId) => this.hasEstablishedSubscription(connectionId),
+      resolveTerminalHandle: (ptyId) => this.resolveExistingTerminalHandleForPty(ptyId)
+    })
+  }
+
+  // Why read-only: minting a handle while building a broadcast would let a roster mutate the handle
+  // table, and a peer attached to a pane nobody ever addressed by handle is better published with one
+  // fewer entry than with an id invented for the occasion.
+  private resolveExistingTerminalHandleForPty(ptyId: string): string | null {
+    const preAllocated = this.handleByPtyId.get(ptyId)
+    if (preAllocated) {
+      return preAllocated
+    }
+    for (const [handle, record] of this.handles) {
+      if (record.runtimeId === this.runtimeId && record.ptyId === ptyId) {
+        return handle
+      }
+    }
+    return null
+  }
+
+  // Why public: the publication threshold is "holds a live subscription", and that index lives here, so
+  // a grant that becomes (or stops being) established is a membership change only this class can see.
+  scheduleTerminalPresenceRosterPublish(): void {
+    this.terminalPresenceRoster?.schedule()
+  }
+
+  flushTerminalPresenceRosterPublish(): void {
+    this.terminalPresenceRoster?.flush()
+  }
+
   private countTerminalSideEffectConsumingClientEventListeners(): number {
     return this.clientEventListeners.size - this.terminalSideEffectExcludedClientEventListeners.size
+  }
+
+  // Why a snapshot at all: this bus has no replay queue, so a client that reconnects would otherwise
+  // hold whatever roster it had before the transport died until the next join.
+  getTerminalPresenceClientEventSnapshot(participantId?: string | null): RuntimeClientEvent[] {
+    return [
+      stampTerminalPresenceSelf(
+        this.ensureTerminalPresenceRoster().snapshot(),
+        participantId ?? null
+      )
+    ]
   }
 
   getTerminalSleepClientEventSnapshot(): RuntimeClientEvent[] {
@@ -5268,9 +5368,19 @@ export class OrcaRuntimeService {
           if (filtered) {
             listener(filtered)
           }
-        } else {
-          listener(event)
+          return
         }
+        if (event.type === 'terminalPresence') {
+          // Why here and not at the emit site: one payload is built per membership change and every
+          // listener reads it, so both the phone filter and `self` have to be applied on this branch.
+          const presence = this.clientEventPresenceByListener.get(listener)
+          if (presence?.consumesPresence === false) {
+            return
+          }
+          listener(stampTerminalPresenceSelf(event, presence?.participantId ?? null))
+          return
+        }
+        listener(event)
       },
       'client-event'
     )
@@ -12885,6 +12995,9 @@ export class OrcaRuntimeService {
       }
       set.add(subscriptionId)
       this.subscriptionConnectionByEntry.set(subscriptionId, connectionId)
+      // Why: a socket authenticates before it subscribes, so this — not the registry's join — is the
+      // moment a grant crosses the publication threshold and becomes visible to every other client.
+      this.scheduleTerminalPresenceRosterPublish()
     }
   }
 
@@ -12966,6 +13079,7 @@ export class OrcaRuntimeService {
           this.subscriptionsByConnection.delete(connectionId)
         }
       }
+      this.scheduleTerminalPresenceRosterPublish()
     }
   }
 

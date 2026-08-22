@@ -40,12 +40,17 @@ export type TerminalPresenceRegistryOptions = {
 // alternative (each caller remembering to notify) is exactly how a silent presence bug ships.
 export type TerminalPresenceChangeListener = (ptyId: string) => void
 
+// Why its own channel: joining and leaving belong to no ptyId, so the per-PTY feed above cannot carry
+// them — a peer holding only a shared-control socket would otherwise never reach the runtime-wide roster.
+export type TerminalPresenceMembershipListener = () => void
+
 export class TerminalPresenceRegistry {
   private readonly participants = new Map<string, TerminalPresenceParticipant>()
   private readonly attachments = new Map<string, Map<string, TerminalPresenceAttachment>>()
   private readonly grantWrites = new Map<string, Map<string, number>>()
   private readonly participantIds = new Map<string, string>()
   private readonly changeListeners = new Set<TerminalPresenceChangeListener>()
+  private readonly membershipListeners = new Set<TerminalPresenceMembershipListener>()
   private readonly clock: () => number
   // Why: the synthesized host row's `since`, taken from the injected clock rather than module import,
   // so it is the one presence stamp a test can drive alongside every other one.
@@ -71,9 +76,22 @@ export class TerminalPresenceRegistry {
     }
   }
 
+  onMembershipChange(listener: TerminalPresenceMembershipListener): () => void {
+    this.membershipListeners.add(listener)
+    return () => {
+      this.membershipListeners.delete(listener)
+    }
+  }
+
   private notifyChanged(ptyId: string): void {
     for (const listener of this.changeListeners) {
       listener(ptyId)
+    }
+  }
+
+  private notifyMembershipChanged(): void {
+    for (const listener of this.membershipListeners) {
+      listener()
     }
   }
 
@@ -100,6 +118,7 @@ export class TerminalPresenceRegistry {
       lastInboundAt: now
     }
     this.participants.set(connection.connectionId, participant)
+    this.notifyMembershipChanged()
     return participant
   }
 
@@ -107,6 +126,7 @@ export class TerminalPresenceRegistry {
   // drop it (§2.1 wants one id across a peer's reconnects) — revocation is the one event that may.
   forgetGrant(pairedDeviceId: string): void {
     this.participantIds.delete(pairedDeviceId)
+    this.notifyMembershipChanged()
     for (const [connectionId, participant] of this.participants) {
       if (participant.pairedDeviceId === pairedDeviceId) {
         this.releaseConnection(connectionId)
@@ -126,7 +146,9 @@ export class TerminalPresenceRegistry {
   }
 
   releaseConnection(connectionId: string): void {
-    this.participants.delete(connectionId)
+    if (this.participants.delete(connectionId)) {
+      this.notifyMembershipChanged()
+    }
     // Why: leak guard only — every stream teardown already detaches its own key; a socket that dies
     // without running one must not strand a row the rosters would keep showing.
     for (const [ptyId, byKey] of this.attachments) {
@@ -258,6 +280,7 @@ export class TerminalPresenceRegistry {
     this.grantWrites.clear()
     this.participantIds.clear()
     this.startedAt = this.now()
+    this.notifyMembershipChanged()
   }
 }
 

@@ -1,6 +1,10 @@
 // Why: projection layer between the in-memory presence registry and every wire surface — one place
 // owns labels, the aggregation key, the payload caps, and the synthesized host row.
 import { hostname } from 'node:os'
+import type {
+  RuntimeTerminalPresenceClientEvent,
+  RuntimeTerminalPresenceParticipant
+} from '../../shared/runtime-client-events'
 import {
   HOST_ATTACHMENT_KEY,
   type TerminalPresenceParticipant,
@@ -78,17 +82,28 @@ export function toStreamPresence(
 // Why: site (d) is a bare RPC and no host-observed field separates a headless agent's one-shot socket
 // from a human's desktop send — but a grant does: the desktop's grant also holds the shared-control
 // subscription, while the coordinator's holds only the one-shot. Fails dark, never wrong.
+export function resolvePublishedParticipantByGrant(
+  registry: TerminalPresenceRegistry,
+  hasEstablishedSubscription: (connectionId: string) => boolean,
+  pairedDeviceId: string
+): TerminalPresenceParticipant | null {
+  for (const [connectionId, participant] of registry.connections()) {
+    if (participant.pairedDeviceId === pairedDeviceId && hasEstablishedSubscription(connectionId)) {
+      return participant
+    }
+  }
+  return null
+}
+
 export function isPublishedPresenceParticipant(
   registry: TerminalPresenceRegistry,
   hasEstablishedSubscription: (connectionId: string) => boolean,
   pairedDeviceId: string
 ): boolean {
-  for (const [connectionId, participant] of registry.connections()) {
-    if (participant.pairedDeviceId === pairedDeviceId && hasEstablishedSubscription(connectionId)) {
-      return true
-    }
-  }
-  return false
+  return (
+    resolvePublishedParticipantByGrant(registry, hasEstablishedSubscription, pairedDeviceId) !==
+    null
+  )
 }
 
 export type TerminalPresenceRow = {
@@ -216,4 +231,95 @@ export function buildTerminalPresenceRows(
     ...aggregates.slice(0, capacity).map((aggregate) => toRow(aggregate, options))
   ]
   return aggregates.length > capacity ? { participants, truncated: true } : { participants }
+}
+
+// Why a projection of the same rows rather than a second aggregation: the runtime-wide roster and the
+// CLI column must never disagree about who is here, and one builder is the only way to guarantee it.
+// `since` is dropped deliberately — W8 is membership, and every field it carries must be one a
+// keystroke cannot move, which is what makes the publisher's no-change suppression exact.
+export function buildTerminalPresenceRosterParticipants(
+  options: Omit<TerminalPresenceRowsOptions, 'selfParticipantId'>
+): { participants: RuntimeTerminalPresenceParticipant[]; truncated?: true } {
+  const rows = buildTerminalPresenceRows(options)
+  const participants = rows.participants.map((row) => ({
+    participantId: row.participantId,
+    label: row.label,
+    kind: row.kind,
+    attachedTerminals: row.attachedTerminals,
+    // Why false here and stamped later: this payload is built ONCE per change and read by every
+    // listener, so the only honest default is "nobody" until a listener identity is applied.
+    self: false
+  }))
+  return rows.truncated ? { participants, truncated: true } : { participants }
+}
+
+// Why a fresh event per listener: `self` is the one field that differs between two readers of the same
+// membership, and mutating the shared payload in place would hand the second listener the first one's row.
+export function stampTerminalPresenceSelf(
+  event: RuntimeTerminalPresenceClientEvent,
+  selfParticipantId: string | null
+): RuntimeTerminalPresenceClientEvent {
+  return {
+    ...event,
+    participants: event.participants.map((participant) => ({
+      ...participant,
+      // Why not `?? false`: a listener with no participantId (an in-process or unidentified subscriber)
+      // is nobody, so every row reads false rather than defaulting to the first match.
+      self: selfParticipantId !== null && participant.participantId === selfParticipantId
+    }))
+  }
+}
+
+export type TerminalPresenceGrantSelection = {
+  pairedDeviceId: string
+  activeTabId: string
+  activeTabType: 'terminal' | 'markdown' | 'file' | 'browser'
+}
+
+export type TerminalPresenceDeviceSelection = {
+  participantId: string
+  label: string
+  kind: TerminalPresenceKind
+  self: boolean
+  activeTabId: string
+  activeTabType: 'terminal' | 'markdown' | 'file' | 'browser'
+}
+
+export type TerminalPresenceDeviceSelectionsOptions = {
+  registry: TerminalPresenceRegistry
+  hasEstablishedSubscription: (connectionId: string) => boolean
+  selections: readonly TerminalPresenceGrantSelection[]
+  // Why resolved from the caller's own grant: W9 rides a per-device projection, so the reader's row is
+  // known from its RpcContext without the fan-out's per-listener pass.
+  selfPairedDeviceId?: string | null
+}
+
+// Why the presence registry and not the selection store decides who appears: a selection outlives the
+// device that made it (it is hydrated from disk), so publishing straight from the store would name
+// people who are not here. Joining on a PUBLISHED participant is what makes W9 live-only in fact.
+export function buildTerminalPresenceDeviceSelections(
+  options: TerminalPresenceDeviceSelectionsOptions
+): TerminalPresenceDeviceSelection[] {
+  const rows = new Map<string, TerminalPresenceDeviceSelection>()
+  for (const selection of options.selections) {
+    const participant = resolvePublishedParticipantByGrant(
+      options.registry,
+      options.hasEstablishedSubscription,
+      selection.pairedDeviceId
+    )
+    if (!participant || rows.has(participant.participantId)) {
+      continue
+    }
+    rows.set(participant.participantId, {
+      participantId: participant.participantId,
+      label: participant.label,
+      kind: participant.kind,
+      self: options.selfPairedDeviceId === selection.pairedDeviceId,
+      activeTabId: selection.activeTabId,
+      activeTabType: selection.activeTabType
+    })
+  }
+  return Array.from(rows.values())
+    .sort((left, right) => left.participantId.localeCompare(right.participantId))
+    .slice(0, TERMINAL_PRESENCE_MAX_PARTICIPANTS)
 }
