@@ -6,7 +6,10 @@ import {
   terminalPresenceRegistry,
   type TerminalPresenceRegistry
 } from './terminal-presence-registry'
-import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from './terminal-presence-activity-rows'
+import {
+  TERMINAL_PRESENCE_ACTIVITY_TTL_MS,
+  isTerminalPresenceActivityFresh
+} from './terminal-presence-activity-rows'
 
 // Why: a keystroke burst must publish at human speed, not at PTY speed. 750 ms is below the 3 s activity
 // TTL so a chip lights well inside its own window, and the 3x max-wait keeps a sustained typist visible.
@@ -33,15 +36,23 @@ export function createTerminalPresenceChangeNotifier(
   const listenersByPty = new Map<string, Set<() => void>>()
   const fallingEdgeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  const latestActivityAt = (ptyId: string): number => {
-    let latest = 0
+  // Why the earliest and not the latest: each participant's flag expires on its own stamp, so arming off
+  // the freshest one leaves everybody who typed earlier published as typing until the newest stamp dies —
+  // up to a full TTL late. Already-expired stamps are skipped; the re-arm after each emit collapses the rest.
+  const earliestFreshActivityAt = (ptyId: string, at: number): number | null => {
+    let earliest: number | null = null
+    const consider = (stamp: number): void => {
+      if (isTerminalPresenceActivityFresh(stamp, at) && (earliest === null || stamp < earliest)) {
+        earliest = stamp
+      }
+    }
     for (const attachment of registry.attachmentsOf(ptyId).values()) {
-      latest = Math.max(latest, attachment.lastInteractiveInputAt)
+      consider(attachment.lastInteractiveInputAt)
     }
     for (const lastGrantWriteAt of registry.grantWritesOf(ptyId).values()) {
-      latest = Math.max(latest, lastGrantWriteAt)
+      consider(lastGrantWriteAt)
     }
-    return latest
+    return earliest
   }
 
   const clearFallingEdge = (ptyId: string): void => {
@@ -53,12 +64,14 @@ export function createTerminalPresenceChangeNotifier(
   }
 
   // Why: activity expiry is a state change no mutator reports, so the last published payload would keep a
-  // dead "typing" on screen forever. Armed off the freshest stamp, it fires exactly once per burst.
+  // dead "typing" on screen forever.
   function armFallingEdge(ptyId: string): void {
-    const remaining = latestActivityAt(ptyId) + TERMINAL_PRESENCE_ACTIVITY_TTL_MS - now()
-    if (remaining <= 0) {
+    const at = now()
+    const earliest = earliestFreshActivityAt(ptyId, at)
+    if (earliest === null) {
       return
     }
+    const remaining = earliest + TERMINAL_PRESENCE_ACTIVITY_TTL_MS - at
     const timer = setTimeout(() => {
       fallingEdgeTimers.delete(ptyId)
       emit(ptyId)
@@ -103,6 +116,12 @@ export function createTerminalPresenceChangeNotifier(
         listenersByPty.set(ptyId, listeners)
       }
       listeners.add(listener)
+      // Why on join and not only on emit: both handlers publish their first payload themselves, and a
+      // stamp landed while this PTY had no subscriber schedules nothing — so a stream opening inside
+      // somebody's TTL would render them typing with no expiry emit behind it, forever. Cleared first:
+      // arming twice would strand the older timer and double every expiry emit.
+      clearFallingEdge(ptyId)
+      armFallingEdge(ptyId)
       return () => {
         const current = listenersByPty.get(ptyId)
         if (!current?.delete(listener) || current.size > 0) {
