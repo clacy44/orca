@@ -3,7 +3,11 @@
 // which also keeps the shared snapshot module free for the runtime-wide roster.
 import type { RuntimeTerminalPresence, RuntimeTerminalSummary } from '../../shared/runtime-types'
 import type { TerminalPresenceRegistry } from './terminal-presence-registry'
-import { buildTerminalPresenceActivityRows } from './terminal-presence-activity-rows'
+import {
+  buildTerminalPresenceActivityRows,
+  buildTerminalPresenceParticipantIndex,
+  type TerminalPresenceParticipantIndex
+} from './terminal-presence-activity-rows'
 import {
   HOST_PARTICIPANT_ID,
   resolveStreamParticipant,
@@ -49,9 +53,12 @@ export function applyTerminalListPresence(
   // Why one clock read for the whole pass: two rows of one response must never disagree about who is
   // typing, and the registry owns presence's single clock domain.
   const now = options.registry.now()
+  // Why hoisted for the same reason: the index is over connections, not over the PTY, so rebuilding it
+  // per row would make one response O(rows x connections) — and this is the one fan-out path.
+  const index = buildTerminalPresenceParticipantIndex(options.registry)
   for (const terminal of terminals) {
     terminal.presence = terminal.ptyId
-      ? buildTerminalPresence(terminal.ptyId, now, options)
+      ? buildTerminalPresence(terminal.ptyId, now, index, options)
       : { attachedCount: 0, participants: [] }
   }
 }
@@ -59,6 +66,7 @@ export function applyTerminalListPresence(
 function buildTerminalPresence(
   ptyId: string,
   now: number,
+  index: TerminalPresenceParticipantIndex,
   options: TerminalListPresenceOptions
 ): RuntimeTerminalPresence {
   // Why the same builder the stream event uses: a column that disagreed with the roster beside it would
@@ -67,6 +75,7 @@ function buildTerminalPresence(
     registry: options.registry,
     ptyId,
     now,
+    index,
     selfParticipantId: options.selfParticipantId
   }).map((row) => ({
     participantId: row.participantId,

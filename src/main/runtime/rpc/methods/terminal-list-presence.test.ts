@@ -233,6 +233,35 @@ describe('terminal.list presence boundary pass', () => {
     })
   })
 
+  // Why asserted on the walk and not on a timing: the participant index is keyed by connection, not by
+  // PTY, so rebuilding it per row makes one `terminal.list` O(rows x connections) — and terminal.list is
+  // both the path the roster fans out per peer and the one with a payload-size budget.
+  it('walks the connections once for a whole response, not once per row', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-a', REPO_WORKTREE_ID)
+    spawnPty(runtime, 'pty-b', REPO_WORKTREE_ID)
+    spawnPty(runtime, 'pty-c', FOLDER_WORKSPACE_ID)
+    attachParticipant('pty-a', {
+      connectionId: 'conn-ana',
+      pairedDeviceId: 'device-ana',
+      label: 'Ana'
+    })
+    const connections = vi.spyOn(terminalPresenceRegistry, 'connections')
+    try {
+      const result = await runtime.listTerminals(undefined, undefined, {
+        presence: { selfParticipantId: null }
+      })
+
+      expect(result.terminals).toHaveLength(3)
+      expect(connections).toHaveBeenCalledTimes(1)
+      // Why the rows too: a hoisted index that dropped a participant would satisfy the count alone.
+      expect(rowFor(result, 'pty-a').presence?.attachedCount).toBe(1)
+      expect(rowFor(result, 'pty-b').presence?.attachedCount).toBe(0)
+    } finally {
+      connections.mockRestore()
+    }
+  })
+
   it('carries the column on a folder workspace with no branch and on an SSH-scoped terminal', async () => {
     const runtime = makeRuntime()
     spawnPty(runtime, 'pty-folder', FOLDER_WORKSPACE_ID)

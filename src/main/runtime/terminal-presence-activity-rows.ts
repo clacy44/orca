@@ -27,12 +27,38 @@ export type TerminalPresenceActivityRow = {
   self: boolean
 }
 
+export type TerminalPresenceParticipantIndex = {
+  byConnection: ReadonlyMap<string, TerminalPresenceParticipant>
+  byGrant: ReadonlyMap<string, TerminalPresenceParticipant>
+}
+
 export type TerminalPresenceActivityRowsOptions = {
   registry: TerminalPresenceRegistry
   ptyId: string
   now: number
   // Why: resolved per emitting stream — nothing else lets a client learn which row is itself.
   selfParticipantId?: string | null
+  // Why optional and not required: the per-stream emit builds one PTY's rows and has nothing to hoist,
+  // while `terminal.list` builds every row of a response and would otherwise re-walk every connection
+  // once per row. Same reason its single clock read is hoisted.
+  index?: TerminalPresenceParticipantIndex
+}
+
+// Why keyed two ways: an attachment names a connection while a grant write names the durable grant, and
+// the earliest connection of a grant is the one whose `since` the aggregate keeps.
+export function buildTerminalPresenceParticipantIndex(
+  registry: TerminalPresenceRegistry
+): TerminalPresenceParticipantIndex {
+  const byConnection = new Map<string, TerminalPresenceParticipant>()
+  const byGrant = new Map<string, TerminalPresenceParticipant>()
+  for (const [connectionId, participant] of registry.connections()) {
+    byConnection.set(connectionId, participant)
+    const known = byGrant.get(participant.pairedDeviceId)
+    if (!known || participant.connectedAt < known.connectedAt) {
+      byGrant.set(participant.pairedDeviceId, participant)
+    }
+  }
+  return { byConnection, byGrant }
 }
 
 type ActivityDraft = Omit<TerminalPresenceActivityRow, 'self'>
@@ -43,15 +69,7 @@ export function buildTerminalPresenceActivityRows(
   options: TerminalPresenceActivityRowsOptions
 ): TerminalPresenceActivityRow[] {
   const { registry, ptyId, now } = options
-  const byConnection = new Map<string, TerminalPresenceParticipant>()
-  const byGrant = new Map<string, TerminalPresenceParticipant>()
-  for (const [connectionId, participant] of registry.connections()) {
-    byConnection.set(connectionId, participant)
-    const known = byGrant.get(participant.pairedDeviceId)
-    if (!known || participant.connectedAt < known.connectedAt) {
-      byGrant.set(participant.pairedDeviceId, participant)
-    }
-  }
+  const { byConnection, byGrant } = options.index ?? buildTerminalPresenceParticipantIndex(registry)
   const drafts = new Map<string, ActivityDraft>()
   const upsert = (draft: ActivityDraft): ActivityDraft => {
     const existing = drafts.get(draft.participantId)
