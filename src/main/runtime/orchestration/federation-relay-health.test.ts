@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
+import { resolveOrchestrationMigrationStartVersion } from './orchestration-schema-version-skew'
 import { recordFederationRelaySyncOutcome } from './federation-relay-health'
 import {
   FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD,
@@ -217,6 +218,29 @@ describe('federated relay health migration', () => {
     db?.close()
     if (tempDir) {
       rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  // Why every v31 column and not two of the three: the skew table is what decides a database is
+  // complete, so a column it does not list is one the repair would never restore.
+  it('judges a database claiming v31 incomplete when any v31 column is missing', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'orca-relay-health-skew-'))
+    const dbPath = join(tempDir, 'orchestration.db')
+    db = new OrchestrationDb(dbPath)
+    db.close()
+    db = undefined
+
+    for (const column of ['last_sync_at', 'last_error', 'consecutive_failures']) {
+      const raw = new Database(dbPath)
+      expect(resolveOrchestrationMigrationStartVersion(raw, 31, 31)).toBe(31)
+      raw.exec(`ALTER TABLE federated_dispatches DROP COLUMN ${column}`)
+      expect(resolveOrchestrationMigrationStartVersion(raw, 31, 31)).toBe(6)
+      raw.exec(
+        `ALTER TABLE federated_dispatches ADD COLUMN ${column} ${
+          column === 'consecutive_failures' ? 'INTEGER NOT NULL DEFAULT 0' : 'TEXT'
+        }`
+      )
+      raw.close()
     }
   })
 
