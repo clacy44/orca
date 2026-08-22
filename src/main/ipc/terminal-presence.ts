@@ -1,11 +1,6 @@
-// Why an IPC lane and not a wire surface (gap 9): the host's own renderer receives no presence today —
-// it subscribes to runtime.clientEvents per REMOTE environment, and a local PTY has no multiplex stream
-// for the per-PTY event to ride. So the host's human publishes presence to every peer and sees none.
-//
-// Why it is NOT sourced from runtime.onClientEvent: that bus (W8) is membership-only, carries no
-// typing/writing flag, and lists attached terminals as handles rather than the ptyId the renderer keys
-// panes by. Sourced from there the host's chip could never flip. This subscribes to the presence
-// registry's per-ptyId coalescer instead — the same pre-serialization feed W4 serializes onto a stream.
+// Why an IPC lane, not a wire surface (gap 9): no wire channel reaches the host's own renderer.
+// Why the presence registry's per-ptyId coalescer and NOT runtime.onClientEvent: that bus is
+// membership-only and handle-keyed, so the host's chip could never flip.
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type {
   TerminalPresenceLocalHost,

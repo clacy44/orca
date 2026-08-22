@@ -1,12 +1,10 @@
-// Why shared: the local presence lane crosses main → preload → renderer, and a payload type copied per
-// layer drifts on the first field any of the three adds. It is Electron IPC, not a wire surface: no
-// capability, no negotiation, and nothing here is ever published to a paired client.
+// Why shared: this payload crosses main → preload → renderer, and a copy per layer drifts on the first
+// field any of the three adds. Electron IPC only — nothing here is ever published to a paired client.
 import type { RuntimeTerminalStreamPresenceParticipant } from './runtime-types'
 
 export type TerminalPresenceLocalTerminal = {
-  // Why both ids: `ptyId` is what the renderer keys panes by, so the pane lane joins on it with no
-  // reverse lookup; `handle` is the runtime-wide display token the roster row shows, and main already
-  // holds the two together. Null when the PTY has no live handle — never a handle minted for this push.
+  // Why both: the pane lane joins on `ptyId`, the roster row displays `handle`. Null when the PTY has
+  // no live handle — a read-only surface must never mint one.
   ptyId: string
   handle: string | null
   participants: RuntimeTerminalStreamPresenceParticipant[]
@@ -21,8 +19,7 @@ export type TerminalPresenceLocalHost = {
   self: true
 }
 
-// Why the host row rides the snapshot and not every push: it is static for the process, while a push is
-// one PTY's roster. Hydration is the one round trip that can carry it without repeating it per keystroke.
+// Why on the snapshot and not every push: it is static for the process, and a push is one PTY's roster.
 export type TerminalPresenceLocalSnapshot = {
   host: TerminalPresenceLocalHost
   terminals: TerminalPresenceLocalTerminal[]
