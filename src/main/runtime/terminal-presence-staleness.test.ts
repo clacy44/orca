@@ -4,8 +4,10 @@ import { TerminalPresenceRegistry } from './terminal-presence-registry'
 import { buildTerminalPresenceActivityRows } from './terminal-presence-activity-rows'
 import { buildTerminalPresenceRosterParticipants } from './terminal-presence-snapshot'
 import { createTerminalPresenceRosterPublisher } from './terminal-presence-roster-publisher'
-import { createTerminalPresenceChangeNotifier } from './terminal-presence-change-notifier'
-import { TERMINAL_PRESENCE_COALESCE_WINDOW_MS } from './terminal-presence-change-notifier'
+import {
+  createTerminalPresenceChangeNotifier,
+  TERMINAL_PRESENCE_COALESCE_WINDOW_MS
+} from './terminal-presence-change-notifier'
 import { MOBILE_PRESENCE_STALE_MS } from './terminal-presence-staleness'
 
 const PTY_ID = 'pty-1'
