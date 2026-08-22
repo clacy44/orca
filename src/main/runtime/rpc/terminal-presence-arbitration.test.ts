@@ -404,7 +404,7 @@ describe('terminal.multiplex soft arbitration', () => {
   it('is a silent no-op while two humans share one grant, and bites once they do not', async () => {
     // Why this is the fence on the slice ordering: before S1 every peer of a runtime shared one pending
     // grant, so the self-check would swallow the gate and Q2 would look implemented while doing nothing.
-    registerGrant(CONNECTION, GRANT, 'Shared link')
+    const sharedParticipantId = registerGrant(CONNECTION, GRANT, 'Shared link')
     registerGrant(SECOND_WINDOW_CONNECTION, GRANT, 'Shared link')
     const first = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'first' })
     const second = await startNegotiatedMultiplex(SECOND_WINDOW_CONNECTION, GRANT, {
@@ -419,7 +419,7 @@ describe('terminal.multiplex soft arbitration', () => {
     expect(sentTexts(second.runtime)).toEqual(['b'])
 
     // The same two keystrokes on two distinct grants — S1's always-mint world — are held.
-    const distinctParticipantId = registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
     const ben = await startNegotiatedMultiplex(PEER_CONNECTION, PEER_GRANT, {
       streamId: 11,
       clientId: 'ben'
@@ -429,8 +429,11 @@ describe('terminal.multiplex soft arbitration', () => {
     sendInputFrame(ben.handlers, 11, 'b')
     await settle()
     expect(ben.runtime.sendTerminal).not.toHaveBeenCalled()
-    expect(lastPresence(ben.messages)?.arbitration).toMatchObject({
-      heldFor: expect.not.stringMatching(distinctParticipantId)
+    // Why the positive id and not "not Ben's own": the shared grant is what the ordering depends on, so
+    // naming any other participant would pass the negative form while proving nothing about the holder.
+    expect(lastPresence(ben.messages)?.arbitration).toEqual({
+      heldFor: sharedParticipantId,
+      until: expect.any(Number)
     })
 
     vi.useRealTimers()
@@ -571,6 +574,41 @@ describe('terminal.multiplex soft arbitration', () => {
     ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
     await ben.dispatchPromise
   })
+
+  it('never holds a stream whose socket resolves to no participant', async () => {
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    // Why Ben's grant is never registered: this is the OTHER arm of the held-side guard — the stream
+    // negotiated presence and still resolves to no participant, the same rejection resolveStreamParticipant
+    // makes when the socket's grant and the dispatch envelope disagree. Self-gating on a grant nobody can
+    // name would hold this client against an unknown key.
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+    const ben = await startNegotiatedMultiplex(PEER_CONNECTION, PEER_GRANT, {
+      streamId: BEN_STREAM_ID,
+      clientId: 'ben'
+    })
+
+    sendInputFrame(ana.handlers, 7, 'a')
+    await settle(10)
+    sendInputFrame(ben.handlers, BEN_STREAM_ID, 'b')
+    await settle(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    // Why non-vacuous: the holder is provably typing on this PTY over this window, so the pass below is
+    // the participant arm rather than an absent collision.
+    expect(
+      participantRows(ana.messages).find((row) => row.participantId === anaParticipantId)
+    ).toMatchObject({ typing: true })
+    expect(sentTexts(ben.runtime)).toEqual(['b'])
+    // Told who is typing, never gated against itself: the negotiation arm would have emitted nothing.
+    expect(presenceResults(ben.messages).length).toBeGreaterThan(0)
+    expect(presenceResults(ben.messages).every((event) => !('arbitration' in event))).toBe(true)
+    expect(activeTerminalPresenceHoldNotice(PRESENCE_PTY_ID, PEER_GRANT)).toBeNull()
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
+
   it('spends no hold on a stream that can no longer receive the notice', async () => {
     registerGrant(CONNECTION, GRANT, 'Ana laptop')
     registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
