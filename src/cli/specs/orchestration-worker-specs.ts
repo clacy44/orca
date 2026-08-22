@@ -42,7 +42,12 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'worker-show'],
     summary: 'Inspect one supervised worker Dispatch',
     usage: 'orca orchestration worker-show --dispatch <dispatch_id> [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'dispatch']
+    allowedFlags: [...GLOBAL_FLAGS, 'dispatch'],
+    notes: [
+      'The terminal line reports the agent-gate verdict: permission at an interactive gate, working mid-turn, idle at a ready prompt, and unknown when the runtime or peer has no verdict. It is never a stall verdict.',
+      'The liveness line reports the last heartbeat and its age, and renders never rather than an age of zero for a Dispatch that has not heartbeated.',
+      'A mail line appears only when mail is waiting: unread counts the local dispatch mailbox, pending counts the federated relay queue, and deliverable false means the worker no longer reads it.'
+    ]
   },
   {
     path: ['orchestration', 'worker-read'],
@@ -105,7 +110,8 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       'orca orchestration worker-list [--run <run_id>] [--terminal-state <active|reclaimable|retained|release_pending|release_unknown|released>] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'run', 'terminal-state'],
     notes: [
-      'Terminal state is process accounting and is reported separately from Task status; a completed Task can still own a live terminal.'
+      'Terminal state is process accounting and is reported separately from Task status; a completed Task can still own a live terminal.',
+      "A heartbeat= token carries each row's heartbeat age. A worker that has never heartbeated gets no token at all, so absence never reads as a fresh age."
     ]
   }
 ]
