@@ -72,6 +72,21 @@ function sendClaimViewportFrame(handlers: BinaryStreamHandlers, streamId: number
   )
 }
 
+// Why a raw frame: detaching mid-keystroke is the only way to reach the second consult with the stream
+// already gone, which is exactly where an arm-then-check ordering spends a nudge nobody can read.
+function sendUnsubscribeFrame(handlers: BinaryStreamHandlers, streamId: number): void {
+  handlers.get(streamId)?.(
+    decodeTerminalStreamFrame(
+      encodeTerminalStreamFrame({
+        opcode: TerminalStreamOpcode.Unsubscribe,
+        streamId,
+        seq: 2,
+        payload: new Uint8Array()
+      })
+    )!
+  )
+}
+
 function registerGrant(
   connectionId: string,
   pairedDeviceId: string,
@@ -556,6 +571,48 @@ describe('terminal.multiplex soft arbitration', () => {
     ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
     await ben.dispatchPromise
   })
+  it('spends no hold on a stream that can no longer receive the notice', async () => {
+    registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    let releaseClaim = (): void => {}
+    const claimed = new Promise<boolean>((resolve) => {
+      releaseClaim = () => resolve(true)
+    })
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+    const ben = await startNegotiatedMultiplex(PEER_CONNECTION, PEER_GRANT, {
+      streamId: BEN_STREAM_ID,
+      clientId: 'ben',
+      runtimeOverrides: {
+        updateRemoteDesktopViewer: vi.fn(
+          (_ptyId: string, _key: string, _client: string, cols: number) =>
+            cols === CLAIM_COLS ? claimed : Promise.resolve(true)
+        ) as unknown as OrcaRuntimeService['updateRemoteDesktopViewer']
+      }
+    })
+
+    sendClaimViewportFrame(ben.handlers, BEN_STREAM_ID)
+    sendInputFrame(ben.handlers, BEN_STREAM_ID, 'b')
+    await settle()
+    // The sibling case above is this one with the stream left alive: same park, same collision, held.
+    await settle(TERMINAL_PRESENCE_ACTIVITY_TTL_MS + 10)
+    sendInputFrame(ana.handlers, 7, 'a')
+    sendUnsubscribeFrame(ben.handlers, BEN_STREAM_ID)
+    releaseClaim()
+    await settle()
+
+    // The second consult found the stream detached, so the notice provably cannot land: nothing is held
+    // and — the part an arm-then-check ordering got wrong — nothing is armed, so Ben's one nudge is still
+    // his to spend on a stream that can render it.
+    expect(activeTerminalPresenceHoldNotice(PRESENCE_PTY_ID, PEER_GRANT)).toBeNull()
+    expect(presenceResults(ben.messages).every((event) => !('arbitration' in event))).toBe(true)
+    // Fails open, as the gate does everywhere it cannot explain itself: the parked keystroke lands.
+    expect(sentTexts(ben.runtime)).toEqual(['b'])
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    ben.cleanups.get(`terminal-multiplex:${PEER_CONNECTION}`)?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
 })
 
 describe('terminal.subscribe soft arbitration', () => {
@@ -608,6 +665,54 @@ describe('terminal.subscribe soft arbitration', () => {
     vi.useRealTimers()
     ana.cleanups.get('terminal-1:ana')?.()
     ben.cleanups.get('terminal-1:ben')?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
+
+  it('spends no hold once its own stream is closed', async () => {
+    registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    const ana = await startNegotiatedSubscribe(CONNECTION, GRANT, 'ana')
+    let releaseClaim = (): void => {}
+    const claimed = new Promise<boolean>((resolve) => {
+      releaseClaim = () => resolve(true)
+    })
+    const ben = startSubscribe(
+      { connectionId: PEER_CONNECTION, pairedDeviceId: PEER_GRANT, clientKind: 'runtime' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'ben', type: 'desktop' },
+        viewport: { cols: 120, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1, desktopViewportClaims: 1 }
+      },
+      new Map(),
+      {
+        updateRemoteDesktopViewer: vi.fn(
+          (_ptyId: string, _key: string, _client: string, cols: number) =>
+            cols === CLAIM_COLS ? claimed : Promise.resolve(true)
+        ) as unknown as OrcaRuntimeService['updateRemoteDesktopViewer']
+      }
+    )
+    const subscribed = await awaitSubscribed(ben.messages)
+    const benStreamId = subscribed.streamId as number
+
+    sendClaimViewportFrame(ben.binaryHandlers, benStreamId)
+    sendInputFrame(ben.binaryHandlers, benStreamId, 'b')
+    await settle()
+    // Why Ben's own stamp is left to expire: a keystroke parked this long is no longer typing, so Ana's
+    // is the uncontested one and the second consult is the only thing standing between it and a hold.
+    await settle(TERMINAL_PRESENCE_ACTIVITY_TTL_MS + 10)
+    sendInputFrame(ana.binaryHandlers, ana.streamId, 'a')
+    ben.cleanups.get('terminal-1:ben')?.()
+    releaseClaim()
+    await settle()
+
+    // Same rule as the multiplex helper: a stream that can no longer emit is never held and never arms,
+    // so the nudge stays unspent instead of disarming the next stream this grant opens.
+    expect(activeTerminalPresenceHoldNotice(PRESENCE_PTY_ID, PEER_GRANT)).toBeNull()
+    expect(presenceResults(ben.messages).every((event) => !('arbitration' in event))).toBe(true)
+
+    vi.useRealTimers()
+    ana.cleanups.get('terminal-1:ana')?.()
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
   })
 })

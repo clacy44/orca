@@ -1832,12 +1832,16 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         if (!stream.supportsPresence || !stream.participant) {
           return false
         }
+        // Why deliverability is tested BEFORE the predicate and not after: consulting it ARMS the record,
+        // so a hold spent on a stream that can no longer emit nudges nobody — and the next stream this
+        // grant opens on this PTY finds that record and walks its first colliding keystroke through.
+        if (closed || streams.get(stream.streamId) !== stream) {
+          return false
+        }
         if (!shouldHoldInputForTypingPeer(stream.ptyId, stream.participant.pairedDeviceId)) {
           return false
         }
-        if (!closed && streams.get(stream.streamId) === stream) {
-          emit(terminalPresenceStreamEvent(stream.streamId, stream.ptyId, stream.participant))
-        }
+        emit(terminalPresenceStreamEvent(stream.streamId, stream.ptyId, stream.participant))
         return true
       }
       const sendResizedFrame = (
@@ -3694,6 +3698,11 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           // key the hold on, and self-gating on an unknown grant would hold a peer against themselves.
           holdInputForTypingPeer = streamParticipant
             ? (): boolean => {
+                // Why deliverability first, as on the multiplex helper: the predicate ARMS the record, so
+                // a hold spent after this stream closed nudges nobody and disarms the next collision.
+                if (closed) {
+                  return false
+                }
                 if (!shouldHoldInputForTypingPeer(ptyId, streamParticipant.pairedDeviceId)) {
                   return false
                 }
