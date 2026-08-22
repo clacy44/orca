@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS } from '../../../../shared/runtime-types'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
 import { parseDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
@@ -163,6 +164,18 @@ describe('post-write dispatch input evidence', () => {
     it('reads a handle that names nothing as unknown rather than throwing', () => {
       // No mock: the real zero-IO reader must survive a handle with no PTY behind it.
       expect(runtime.getTerminalWaitEvidence('term_does_not_exist')).toBeNull()
+    })
+
+    // Why the whole tuple: the persister keeps its own whitelist, so this is what proves it accepts
+    // exactly the published vocabulary rather than a copy that drifted from it.
+    it('accepts every shipped blockedReason', () => {
+      for (const blockedReason of RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS) {
+        expect(
+          parseDispatchInputEvidence(
+            JSON.stringify({ submittedAt: '2026-08-22T12:00:00.000Z', blockedReason })
+          )
+        ).toEqual({ submittedAt: '2026-08-22T12:00:00.000Z', blockedReason })
+      }
     })
 
     it('drops a blockedReason outside the six shipped values instead of widening the union', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS } from '../../shared/runtime-types'
 import {
   formatHeartbeatAge,
   formatOrchestrationWorkerShow,
@@ -228,6 +229,22 @@ describe('formatOrchestrationWorkerShow', () => {
         }
       })
     ).not.toContain('input:')
+  })
+
+  // Why every shipped value and not one sample: the formatter keeps its own whitelist, so this is
+  // what proves it renders exactly the published vocabulary rather than a copy that drifted.
+  it('renders every shipped blockedReason', () => {
+    for (const blockedReason of RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS) {
+      expect(
+        formatOrchestrationWorkerShow({
+          ...BASE,
+          worker: {
+            ...BASE.worker,
+            inputEvidence: { submittedAt: '2026-08-22T12:00:00.000Z', blockedReason }
+          }
+        })
+      ).toContain(`blockedReason=${blockedReason}`)
+    }
   })
 
   // Why: the field crosses the wire from a peer, so a class a newer peer invented must not render

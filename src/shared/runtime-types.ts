@@ -720,13 +720,21 @@ export type RuntimeTerminalClose = {
 }
 
 export type RuntimeTerminalWaitCondition = 'exit' | 'tui-idle'
+// Why a tuple the union derives from: this vocabulary is published on `terminal.wait` and is pinned
+// at six values (A1 §3 — finer classes go in a sibling field), and the persister and the CLI
+// formatter each keep their own whitelist. Deriving all three from here makes a future widening
+// fail loudly instead of being silently dropped by both.
+export const RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS = [
+  'codex-update-prompt',
+  'codex-trust-workspace',
+  'codex-cwd-prompt',
+  'codex-model-migration-prompt',
+  'codex-hooks-review-prompt',
+  'codex-interactive-prompt'
+] as const
+
 export type RuntimeTerminalWaitBlockedReason =
-  | 'codex-update-prompt'
-  | 'codex-trust-workspace'
-  | 'codex-cwd-prompt'
-  | 'codex-model-migration-prompt'
-  | 'codex-hooks-review-prompt'
-  | 'codex-interactive-prompt'
+  (typeof RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS)[number]
 
 export type RuntimeTerminalWait = {
   handle: string

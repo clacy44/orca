@@ -1,3 +1,5 @@
+import { RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS } from '../../shared/runtime-types'
+
 export type OrchestrationWorkerShowResult = {
   dispatch: { id: string; task_id: string; status: string }
   worker: {
@@ -30,14 +32,7 @@ export type OrchestrationWorkerShowResult = {
 // verdict would render on the home as though the home computed it, and any newline in it would
 // forge an extra line in the coordinator's terminal.
 const RENDERABLE_AGENT_STATUSES = ['working', 'permission', 'idle']
-const RENDERABLE_BLOCKED_REASONS = [
-  'codex-update-prompt',
-  'codex-trust-workspace',
-  'codex-cwd-prompt',
-  'codex-model-migration-prompt',
-  'codex-hooks-review-prompt',
-  'codex-interactive-prompt'
-]
+const RENDERABLE_BLOCKED_REASONS: readonly string[] = RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS
 const RENDERABLE_TERMINAL_STATUSES = [
   'unattached',
   'missing',

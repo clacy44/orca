@@ -1,4 +1,7 @@
-import type { RuntimeTerminalWaitBlockedReason } from '../../../shared/runtime-types'
+import {
+  RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS,
+  type RuntimeTerminalWaitBlockedReason
+} from '../../../shared/runtime-types'
 
 // Why deliberately partial: this is one regex pass over the tail already in memory at the instant
 // the prompt was submitted, so it can only name a gate that was already rendered by then (A1
@@ -56,7 +59,7 @@ export function parseDispatchInputEvidence(value: unknown): DispatchInputEvidenc
     return null
   }
   return typeof candidate.blockedReason === 'string' &&
-    DISPATCH_INPUT_BLOCKED_REASONS.includes(
+    RUNTIME_TERMINAL_WAIT_BLOCKED_REASONS.includes(
       candidate.blockedReason as RuntimeTerminalWaitBlockedReason
     )
     ? {
@@ -65,15 +68,3 @@ export function parseDispatchInputEvidence(value: unknown): DispatchInputEvidenc
       }
     : { submittedAt: candidate.submittedAt }
 }
-
-// Why pinned here rather than widened at the source: RuntimeTerminalWaitBlockedReason is published
-// on terminal.wait to paired clients, so A1 section 3 keeps it at the six shipped values and puts
-// any finer class in a sibling field instead of growing this union.
-const DISPATCH_INPUT_BLOCKED_REASONS: readonly RuntimeTerminalWaitBlockedReason[] = [
-  'codex-update-prompt',
-  'codex-trust-workspace',
-  'codex-cwd-prompt',
-  'codex-model-migration-prompt',
-  'codex-hooks-review-prompt',
-  'codex-interactive-prompt'
-]
