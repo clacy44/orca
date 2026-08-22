@@ -34,13 +34,16 @@ export type TerminalPresenceStreamIdentity = {
   clientKind?: 'mobile' | 'runtime'
 }
 
-// Why: host-observed gate. A connection that maps to no tracked runtime-scope participant resolves to
-// null, and callers omit the presence key entirely rather than emitting an uncorroborated placeholder.
+// Why: host-observed gate. A connection that maps to no tracked participant resolves to null, and
+// callers omit the presence key entirely rather than emitting an uncorroborated placeholder. Kind is
+// deliberately NOT read here: the activity rows are built from every tracked connection regardless of
+// scope, so a phone refused a participant here would receive its own row marked as somebody else's —
+// the "rendered as their own peer" failure. Scope gates what W2 publishes, at that emit alone.
 export function resolveStreamParticipant(
   registry: TerminalPresenceRegistry,
   identity: TerminalPresenceStreamIdentity
 ): TerminalPresenceParticipant | null {
-  if (!identity.connectionId || identity.clientKind !== 'runtime') {
+  if (!identity.connectionId) {
     return null
   }
   const participant = registry.getParticipantByConnection(identity.connectionId)

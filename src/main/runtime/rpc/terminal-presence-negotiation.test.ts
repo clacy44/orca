@@ -95,8 +95,9 @@ describe('terminal.multiplex presence negotiation', () => {
 
   it('refuses a participant when the socket grant and the dispatch envelope disagree', async () => {
     // Why: the registry row is host-observed and so is the envelope; if they ever disagree the safe
-    // answer is to publish nothing. A mobile-scope envelope lands here too — no phone is a tracked
-    // participant in this slice, so no phone stream may carry a participantId.
+    // answer is to publish nothing. A mobile-scope envelope lands here too: the phone resolves as a
+    // participant (its W4 `self` depends on it) but W2's own-identity object stays runtime-scope
+    // until S7 gives mobile rows their staleness contract.
     registerDesktopGrant()
     const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'mobile' })
     await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
@@ -256,8 +257,9 @@ describe('terminal.subscribe presence negotiation', () => {
   })
 
   it('refuses a subscribe participant to a tracked mobile grant', async () => {
-    // Why: a phone IS tracked (the registry takes every authenticated socket), so only the kind gate
-    // withholds the participantId — this slice publishes presence to runtime peers alone.
+    // Why: a phone IS tracked (the registry takes every authenticated socket) and now resolves a
+    // participant, so only W2's scope gate withholds the object here — the phone's own `self` row
+    // still resolves on the W4 mirror, asserted in the stream suite.
     terminalPresenceRegistry.registerConnection({
       connectionId: CONNECTION,
       pairedDeviceId: GRANT,

@@ -388,6 +388,41 @@ describe('terminal.subscribe presence events', () => {
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
   })
 
+  it('marks exactly one self row on a mobile-scope negotiated subscribe', async () => {
+    useOnePresenceClock()
+    const desktopParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    const phoneParticipantId = registerGrant(CHAT_CONNECTION, CHAT_GRANT, 'Ana phone', 'mobile')
+    const desktop = await startNegotiatedSubscribe(CONNECTION, GRANT, 'ana')
+    // Why a real mobile-scope subscribe: the roster rows are built from every tracked connection with no
+    // kind filter, so a phone whose self cannot resolve receives its own row rendered as a peer's.
+    const phone = startSubscribe(
+      { connectionId: CHAT_CONNECTION, pairedDeviceId: CHAT_GRANT, clientKind: 'mobile' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'phone-1', type: 'mobile' },
+        viewport: { cols: 90, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1 }
+      }
+    )
+    const subscribed = await awaitSubscribed(phone.messages)
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    expect(lastPresence(phone.messages).filter((row) => row.self)).toEqual([
+      expect.objectContaining({ participantId: phoneParticipantId, kind: 'mobile' })
+    ])
+    expect(lastPresence(desktop.messages).filter((row) => row.self)).toEqual([
+      expect.objectContaining({ participantId: desktopParticipantId })
+    ])
+    // Why still withheld: W2's own-identity object stays runtime-scope until S7 gives mobile rows their
+    // staleness contract — the two gates are separate, and only this one is scoped by kind.
+    expect('presence' in subscribed).toBe(false)
+
+    vi.useRealTimers()
+    desktop.cleanups.get('terminal-1:ana')?.()
+    phone.cleanups.get('terminal-1:phone-1')?.()
+    await Promise.all([desktop.dispatchPromise, phone.dispatchPromise])
+  })
+
   it('stops emitting once the subscription is torn down', async () => {
     useOnePresenceClock()
     registerGrant(CONNECTION, GRANT, 'Ana laptop')
