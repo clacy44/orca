@@ -66,6 +66,7 @@ import {
 } from '@/runtime/agent-session-create-operation'
 import { replaceFitOverridePtyId, setFitOverride } from '@/lib/pane-manager/mobile-fit-overrides'
 import { replaceDriverPtyId, setDriverForPty } from '@/lib/pane-manager/mobile-driver-state'
+import { setPresenceForPty } from '@/lib/pane-manager/terminal-presence-state'
 import { isWebTerminalSurfaceTabId, toHostSessionTabId } from '@/runtime/web-terminal-surface-id'
 import { listRemoteRuntimeSessionTabsDeduped } from '@/runtime/remote-runtime-session-tabs-inflight'
 import { subscribeAcceptedWebSessionTerminalHandle } from '@/runtime/web-session-terminal-handle-events'
@@ -1862,6 +1863,13 @@ export function createRemoteRuntimePtyTransport(
         onDriverChanged: (driver) => {
           if (isCurrentSubscription() && subscribedPtyId) {
             setDriverForPty(subscribedPtyId, driver)
+          }
+        },
+        // Why the pane's own stream and not the runtime-wide roster: this lane is authoritative for this
+        // PTY, so it stays correct while shared-control is down and the roster is silent.
+        onPresenceChanged: (presence) => {
+          if (isCurrentSubscription() && subscribedPtyId) {
+            setPresenceForPty(subscribedPtyId, presence)
           }
         },
         onWriteUnavailable: () => {
