@@ -1050,6 +1050,7 @@ import {
 } from './mobile-session-tabs-agent-status-heartbeat'
 import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-coalescer'
 import { terminalPresenceRegistry } from './terminal-presence-registry'
+import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import {
   appendRecentPtyPathCandidates,
   recentTerminalOutputIncludesPath,
@@ -15706,6 +15707,9 @@ export class OrcaRuntimeService {
       handles?: readonly string[]
       requireFreshPtyLiveness?: boolean
       includeVisualLayouts?: boolean
+      // Why one object rather than a boolean plus an id: presence is opt-in AND caller-scoped, so an
+      // absent object is the single state that omits the key from every row.
+      presence?: TerminalListPresenceScope
     } = {}
   ): Promise<RuntimeTerminalListResult> {
     if (!Number.isInteger(limit) || limit <= 0) {
@@ -15830,6 +15834,14 @@ export class OrcaRuntimeService {
       ? terminals.filter((terminal) => requestedHandles.has(terminal.handle))
       : terminals
     const listedTerminals = matchingTerminals.slice(0, limit)
+    // Why here and not in a summary builder: this array is fed by the renderer-graph loop AND the PTY
+    // fallback loop, so only a boundary pass makes the key appear on every returned row.
+    if (opts.presence) {
+      applyTerminalListPresence(listedTerminals, {
+        registry: terminalPresenceRegistry,
+        selfParticipantId: opts.presence.selfParticipantId
+      })
+    }
     // Why: undefined (pre-flag client) must still get layouts; only an explicit
     // `false` opts out.
     const visualLayouts =

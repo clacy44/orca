@@ -448,6 +448,27 @@ export type RuntimeFileReadChunkResult = {
   eof: boolean
 }
 
+// Why `self?: true` and never `self: false`: only a caller the host can identify owns a row, and an
+// anonymous local caller must publish no claim about which row is its own.
+export type RuntimeTerminalPresenceParticipant = {
+  participantId: string
+  label: string
+  typing: boolean
+  writing: boolean
+  self?: true
+}
+
+/** Presence on one terminal row of `terminal.list`, populated only for a caller that asked with
+ *  `includePresence`. Absent key = the host is pre-presence (or the caller never asked); present with
+ *  an empty participants list = the host is capable and nobody is attached. The CLI roster column
+ *  depends on that distinction to print `presence?` rather than `-`. */
+export type RuntimeTerminalPresence = {
+  // Why: aggregated participants, never connections — one peer attached from two windows counts once,
+  // so this can never disagree with the per-terminal presence roster beside it.
+  attachedCount: number
+  participants: RuntimeTerminalPresenceParticipant[]
+}
+
 export type RuntimeTerminalSummary = {
   handle: string
   ptyId: string | null
@@ -463,6 +484,7 @@ export type RuntimeTerminalSummary = {
   writable: boolean
   lastOutputAt: number | null
   preview: string
+  presence?: RuntimeTerminalPresence
 }
 
 export type RuntimeTerminalVisualTerminalNode = {

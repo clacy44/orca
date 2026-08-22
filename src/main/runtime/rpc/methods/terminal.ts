@@ -48,6 +48,7 @@ import {
   type TerminalPresenceStreamPresence
 } from '../../terminal-presence-snapshot'
 import { terminalPresenceChangeNotifier } from '../../terminal-presence-change-notifier'
+import { resolveTerminalListPresenceScope } from '../../terminal-list-presence'
 import { isTuiAgent } from '../../../../shared/tui-agent-config'
 import { isTerminalQueryReply } from '../../../../shared/terminal-query-reply'
 import {
@@ -895,7 +896,11 @@ const TerminalListParams = z.object({
   requireFreshPtyLiveness: z.boolean().optional(),
   // Why: layouts are ~31% of a large listing and only the human CLI formatter
   // reads them. Absent means "include" so pre-flag clients keep rendering them.
-  includeVisualLayouts: z.boolean().optional()
+  includeVisualLayouts: z.boolean().optional(),
+  // Why the INVERSE default of the flag above: a caller that never asked must get the byte-identical
+  // pre-presence payload, so absent means "omit the key from every row". This object is non-strict, so
+  // a pre-presence host strips the key and answers exactly as today.
+  includePresence: z.boolean().optional()
 })
 
 const TerminalResolveActive = z.object({
@@ -1192,12 +1197,22 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.list',
     params: TerminalListParams,
-    handler: async (params, { runtime }) =>
-      runtime.listTerminals(params.worktree, params.limit, {
+    handler: async (params, { runtime, connectionId, pairedDeviceId, clientKind }) => {
+      const presence =
+        params.includePresence === true
+          ? resolveTerminalListPresenceScope(terminalPresenceRegistry, {
+              ...(connectionId ? { connectionId } : {}),
+              ...(pairedDeviceId ? { pairedDeviceId } : {}),
+              ...(clientKind ? { clientKind } : {})
+            })
+          : null
+      return await runtime.listTerminals(params.worktree, params.limit, {
         handles: params.handles,
         requireFreshPtyLiveness: params.requireFreshPtyLiveness,
-        includeVisualLayouts: params.includeVisualLayouts
+        includeVisualLayouts: params.includeVisualLayouts,
+        ...(presence ? { presence } : {})
       })
+    }
   }),
   defineMethod({
     name: 'terminal.resolveActive',
