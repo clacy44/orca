@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type Database from '../../../sqlite/sync-database'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
 import { sweepDispatchLivenessBreaches } from '../../orchestration/dispatch-liveness-monitor'
@@ -7,6 +8,10 @@ import { ORCHESTRATION_METHODS } from './orchestration'
 const WORKER_PANE_KEY = 'tab_worker:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const COORDINATOR_PANE_KEY = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PROCESS_INCARNATION = 'runtime:pty:1'
+
+function sqliteFor(db: OrchestrationDb): Database.Database {
+  return (db as unknown as { db: Database.Database }).db
+}
 
 function findMethod(name: string) {
   const method = ORCHESTRATION_METHODS.find((candidate) => candidate.name === name)
@@ -132,6 +137,56 @@ describe('dispatch blocked_since marker', () => {
     // marker's contract is per-park — this ends the loop without a second reply round trip.
     disconnect.abort()
     park.release()
+    await pending
+    expect(blockedSince(dispatchId)).toBeNull()
+  })
+
+  // Why this control: waitForMessage wakes on ANY mail in the worker's dispatch mailbox, so a
+  // coordinator follow-up mid-ask re-enters the loop. A marker re-stamped there would hand back
+  // only the last sub-park and breach a worker parked exactly as the preamble instructs.
+  it('holds the ask marker across parks woken by unrelated mail', async () => {
+    const { dispatchId, capability } = startWorker()
+    db.recordHeartbeat(dispatchId, new Date(Date.now() - 35 * 60_000).toISOString())
+    const disconnect = new AbortController()
+    let release: (result: 'notified' | 'timed_out') => void = () => {}
+    let entered = Promise.resolve()
+    const armPark = () => {
+      entered = new Promise<void>((resolve) => {
+        vi.spyOn(runtime, 'waitForMessage').mockImplementation(() => {
+          const parked = new Promise<'notified' | 'timed_out'>((settle) => {
+            release = settle
+          })
+          resolve()
+          return parked as ReturnType<OrcaRuntimeService['waitForMessage']>
+        })
+      })
+    }
+    armPark()
+
+    const pending = call(
+      'orchestration.ask',
+      { from: 'term_worker', question: 'which branch?', timeoutMs: 1_800_000 },
+      { capability, signal: disconnect.signal }
+    )
+    await entered
+    // Backdate the stamp so a re-stamp on the next wake is unmistakable.
+    const parkedAt = new Date(Date.now() - 34 * 60_000).toISOString()
+    sqliteFor(db)
+      .prepare('UPDATE dispatch_contexts SET blocked_since = ? WHERE id = ?')
+      .run(parkedAt, dispatchId)
+
+    for (let wake = 0; wake < 3; wake += 1) {
+      const wakeCurrentPark = release
+      armPark()
+      wakeCurrentPark('notified')
+      await entered
+    }
+
+    expect(blockedSince(dispatchId)).toBe(parkedAt)
+    expect(sweepDispatchLivenessBreaches({ db, runtime })).toEqual([])
+
+    disconnect.abort()
+    release('notified')
     await pending
     expect(blockedSince(dispatchId)).toBeNull()
   })

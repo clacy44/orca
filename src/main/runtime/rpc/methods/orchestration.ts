@@ -1670,58 +1670,59 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         timeoutMs
       })
       const deadline = Date.now() + timeoutMs
-      while (true) {
-        const current = db.getQuestion(questionId)
-        if (!current || current.status === 'closed') {
-          throw new OrchestrationError(
-            'dispatch_inactive',
-            `Question ${questionId} closed because its Dispatch is inactive.`
-          )
-        }
-        if (current.status === 'answered') {
-          return {
-            answer: current.answer_body,
-            messageId: questionId,
-            answerMessageId: current.answer_message_id,
-            threadId: questionId,
-            timedOut: false,
-            cancelled: false,
-            connectionLost: false,
-            timeoutMs
+      // Why the marker spans the whole verb and not each park: waitForMessage wakes on ANY mail
+      // in the worker's dispatch mailbox, so an unrelated coordinator follow-up re-enters this
+      // loop, and a marker re-stamped per park would hand back only the last sub-park (A1 §14).
+      return whileDispatchBlocked(db, activeDispatch.id, async () => {
+        while (true) {
+          const current = db.getQuestion(questionId)
+          if (!current || current.status === 'closed') {
+            throw new OrchestrationError(
+              'dispatch_inactive',
+              `Question ${questionId} closed because its Dispatch is inactive.`
+            )
           }
-        }
-        if (signal?.aborted) {
-          return {
-            answer: null,
-            messageId: questionId,
-            threadId: questionId,
-            timedOut: false,
-            cancelled: true,
-            connectionLost: true,
-            timeoutMs
+          if (current.status === 'answered') {
+            return {
+              answer: current.answer_body,
+              messageId: questionId,
+              answerMessageId: current.answer_message_id,
+              threadId: questionId,
+              timedOut: false,
+              cancelled: false,
+              connectionLost: false,
+              timeoutMs
+            }
           }
-        }
-        const remainingMs = deadline - Date.now()
-        if (remainingMs <= 0) {
-          return {
-            answer: null,
-            messageId: questionId,
-            threadId: questionId,
-            timedOut: true,
-            cancelled: false,
-            connectionLost: false,
-            timeoutMs
+          if (signal?.aborted) {
+            return {
+              answer: null,
+              messageId: questionId,
+              threadId: questionId,
+              timedOut: false,
+              cancelled: true,
+              connectionLost: true,
+              timeoutMs
+            }
           }
-        }
-        // Why around the park only: the marker means "blocked inside the call", which is exactly
-        // the interval the preamble tells this worker not to heartbeat through (A1 §14).
-        await whileDispatchBlocked(db, activeDispatch.id, () =>
-          runtime.waitForMessage(`dispatch:${activeDispatch.id}`, {
+          const remainingMs = deadline - Date.now()
+          if (remainingMs <= 0) {
+            return {
+              answer: null,
+              messageId: questionId,
+              threadId: questionId,
+              timedOut: true,
+              cancelled: false,
+              connectionLost: false,
+              timeoutMs
+            }
+          }
+          await runtime.waitForMessage(`dispatch:${activeDispatch.id}`, {
             timeoutMs: remainingMs,
             signal
           })
-        )
-      }
+        }
+      })
     }
   }),
 
@@ -1825,57 +1826,57 @@ async function askRemoteRunHome(args: {
     timeoutMs
   })
   const deadline = Date.now() + timeoutMs
-  while (true) {
-    const question = db.getRemoteQuestion(questionId)
-    if (!question || question.status === 'closed') {
-      throw new OrchestrationError(
-        'dispatch_inactive',
-        `Question ${questionId} closed because its remote Dispatch is inactive.`
-      )
-    }
-    if (question.status === 'answered') {
-      return {
-        answer: question.answer_body,
-        messageId: questionId,
-        answerMessageId: question.answer_message_id,
-        threadId: questionId,
-        timedOut: false,
-        cancelled: false,
-        connectionLost: false,
-        timeoutMs
+  // Why the same marker on the peer, and once around the whole verb: a park is a park, and a
+  // wake from unrelated mail must not shorten it. The peer holds no dispatch_contexts row for the
+  // home's id, so this writes nothing there — the asymmetry is pinned by test, not fixed here.
+  return whileDispatchBlocked(db, args.dispatchId, async () => {
+    while (true) {
+      const question = db.getRemoteQuestion(questionId)
+      if (!question || question.status === 'closed') {
+        throw new OrchestrationError(
+          'dispatch_inactive',
+          `Question ${questionId} closed because its remote Dispatch is inactive.`
+        )
       }
-    }
-    if (args.signal?.aborted) {
-      return {
-        answer: null,
-        messageId: questionId,
-        threadId: questionId,
-        timedOut: false,
-        cancelled: true,
-        connectionLost: true,
-        timeoutMs
+      if (question.status === 'answered') {
+        return {
+          answer: question.answer_body,
+          messageId: questionId,
+          answerMessageId: question.answer_message_id,
+          threadId: questionId,
+          timedOut: false,
+          cancelled: false,
+          connectionLost: false,
+          timeoutMs
+        }
       }
-    }
-    const remainingMs = deadline - Date.now()
-    if (remainingMs <= 0) {
-      return {
-        answer: null,
-        messageId: questionId,
-        threadId: questionId,
-        timedOut: true,
-        cancelled: false,
-        connectionLost: false,
-        timeoutMs
+      if (args.signal?.aborted) {
+        return {
+          answer: null,
+          messageId: questionId,
+          threadId: questionId,
+          timedOut: false,
+          cancelled: true,
+          connectionLost: true,
+          timeoutMs
+        }
       }
-    }
-    // Why the same marker on the peer: a park is a park. The peer holds no dispatch_contexts row
-    // for the home's id, so this writes nothing and the home's marker stays put — the federated
-    // asymmetry dispatch-blocked-window.ts documents, pinned by test rather than fixed here.
-    await whileDispatchBlocked(db, args.dispatchId, () =>
-      args.runtime.waitForMessage(`dispatch:${args.dispatchId}`, {
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        return {
+          answer: null,
+          messageId: questionId,
+          threadId: questionId,
+          timedOut: true,
+          cancelled: false,
+          connectionLost: false,
+          timeoutMs
+        }
+      }
+      await args.runtime.waitForMessage(`dispatch:${args.dispatchId}`, {
         timeoutMs: remainingMs,
         signal: args.signal
       })
-    )
-  }
+    }
+  })
 }
