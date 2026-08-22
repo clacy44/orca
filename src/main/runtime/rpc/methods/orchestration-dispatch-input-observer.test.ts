@@ -3,7 +3,8 @@ import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
 import {
   DISPATCH_INPUT_OBSERVATION_DWELL_MS,
-  DISPATCH_INPUT_OBSERVER_INTERVAL_MS
+  DISPATCH_INPUT_OBSERVER_INTERVAL_MS,
+  DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS
 } from '../../orchestration/dispatch-input-observation'
 import { syncFederatedDispatch } from '../../orchestration/federation-sync'
 import { ORCHESTRATION_METHODS } from './orchestration'
@@ -48,6 +49,21 @@ const SYNTHESIZED_TRUST_GATE_TAIL = [
   '    2. No, exit'
 ].join('\n')
 
+// Why every runtime in this file gets it: the observer refuses to say anything about a handle that
+// does not name this Dispatch's process, so a runtime with no identity reading observes nothing.
+function mockWorkerIdentity(runtime: OrcaRuntimeService) {
+  vi.spyOn(runtime, 'getTerminalPaneKey').mockImplementation((handle) =>
+    handle === 'term_coord'
+      ? COORDINATOR_PANE_KEY
+      : handle === 'term_worker' || handle === 'term_peer_worker'
+        ? WORKER_PANE_KEY
+        : null
+  )
+  vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockImplementation((handle) =>
+    handle === 'term_worker' || handle === 'term_peer_worker' ? PROCESS_INCARNATION : null
+  )
+}
+
 function findMethod(name: string) {
   const method = ORCHESTRATION_METHODS.find((candidate) => candidate.name === name)
   if (!method) {
@@ -66,16 +82,7 @@ describe('post-ready dispatch input observer', () => {
     db = new OrchestrationDb(':memory:')
     runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
-    vi.spyOn(runtime, 'getTerminalPaneKey').mockImplementation((handle) =>
-      handle === 'term_coord'
-        ? COORDINATOR_PANE_KEY
-        : handle === 'term_worker'
-          ? WORKER_PANE_KEY
-          : null
-    )
-    vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockImplementation((handle) =>
-      handle === 'term_worker' ? PROCESS_INCARNATION : null
-    )
+    mockWorkerIdentity(runtime)
     notify = vi.spyOn(runtime, 'notifyMessageArrived')
     runId = db.createRun({
       objective: 'Observe',
@@ -270,6 +277,7 @@ describe('post-ready dispatch input observer', () => {
     expect(observerMail()).toHaveLength(1)
 
     const restarted = new OrcaRuntimeService()
+    mockWorkerIdentity(restarted)
     vi.spyOn(restarted, 'getTerminalWaitEvidence').mockReturnValue({
       tailText: SYNTHESIZED_LINUX_APPIMAGE_UNSUBMITTED_TAIL,
       blockedReason: null
@@ -291,6 +299,7 @@ describe('post-ready dispatch input observer', () => {
     runtime.stopDispatchInputObservers()
     const armings = vi.spyOn(globalThis, 'setInterval')
     const restarted = new OrcaRuntimeService()
+    mockWorkerIdentity(restarted)
     vi.spyOn(restarted, 'getTerminalWaitEvidence').mockReturnValue({
       tailText: SYNTHESIZED_LINUX_APPIMAGE_UNSUBMITTED_TAIL,
       blockedReason: null
@@ -416,6 +425,80 @@ describe('post-ready dispatch input observer', () => {
       await runtime.tickDispatchInputObserver(dispatchId, afterDwell(60 * MINUTE_MS))
 
       expect(observerMail()).toHaveLength(0)
+    })
+
+    // Why this control: `connected` is `ptyId !== null`, so it goes false for a renderer graph
+    // rebuild and for the 30s SSH pane recovery grace the runtime keeps for a re-dialing transport.
+    it('says nothing while a disconnected pane is inside its recovery grace', async () => {
+      mockProbes({ connected: false, tailText: SYNTHESIZED_WINDOWS_INSTALLED_SUBMITTED_TAIL })
+      const { dispatchId } = startWorker()
+      const disconnectedAt = Date.now()
+
+      await runtime.tickDispatchInputObserver(dispatchId, disconnectedAt)
+      await runtime.tickDispatchInputObserver(
+        dispatchId,
+        disconnectedAt + DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS - 1_000
+      )
+      expect(observerMail()).toHaveLength(0)
+
+      // A pane that reconnects inside the grace clears the sighting rather than banking it.
+      mockProbes({ connected: true, tailText: SYNTHESIZED_WINDOWS_INSTALLED_SUBMITTED_TAIL })
+      await runtime.tickDispatchInputObserver(
+        dispatchId,
+        disconnectedAt + DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS + 1_000
+      )
+      expect(observerMail()).toHaveLength(0)
+    })
+
+    it('reports a pane that is still disconnected past the recovery grace', async () => {
+      mockProbes({ connected: false, tailText: SYNTHESIZED_WINDOWS_INSTALLED_SUBMITTED_TAIL })
+      const { dispatchId } = startWorker()
+      const disconnectedAt = Date.now()
+
+      await runtime.tickDispatchInputObserver(dispatchId, disconnectedAt)
+      await runtime.tickDispatchInputObserver(
+        dispatchId,
+        disconnectedAt + DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS + 1_000
+      )
+
+      expect(JSON.parse(observerMail()[0].payload as string)).toMatchObject({
+        kind: 'worker_process_gone',
+        terminalStatus: 'exited'
+      })
+    })
+
+    // Why this control: a re-minted pane answers on the same handle, so without the identity gate a
+    // gate belonging to some other agent is reported as this worker's — and the report is
+    // once-per-Dispatch, so the false one also consumes the budget for the real one.
+    it('says nothing when the handle no longer names this worker', async () => {
+      mockProbes({ connected: false })
+      const { dispatchId } = startWorker()
+      vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockReturnValue('pty_worker:incarnation-b')
+
+      for (let tick = 1; tick <= 6; tick += 1) {
+        await runtime.tickDispatchInputObserver(dispatchId, afterDwell(tick * MINUTE_MS))
+      }
+
+      expect(observerMail()).toHaveLength(0)
+      expect(db.getWorkerDispatch(dispatchId)?.input_observed_at ?? null).toBeNull()
+    })
+
+    it('says nothing on the peer when its pane was re-minted', async () => {
+      mockProbes({ connected: false })
+      const { dispatchId } = attachRemoteWorker()
+      vi.spyOn(runtime, 'getTerminalPaneKey').mockReturnValue(
+        'tab_worker:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+      )
+
+      for (let tick = 1; tick <= 6; tick += 1) {
+        await runtime.tickDispatchInputObserver(dispatchId, afterDwell(tick * MINUTE_MS))
+      }
+
+      expect(
+        db
+          .listPendingFederationRelay(dispatchId, 'to_home')
+          .filter((item) => item.kind === 'runtime_notification')
+      ).toHaveLength(0)
     })
 
     it('says nothing when the terminal tail could not be read', async () => {

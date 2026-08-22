@@ -2807,6 +2807,9 @@ export class OrcaRuntimeService {
     {
       timer: ReturnType<typeof setInterval>
       federated?: FederatedDispatchInputObserverTarget
+      // Why kept here: the observer functions are stateless, and a disconnected pane only counts
+      // once the reading has outlived the runtime's own SSH recovery grace.
+      exitedSince?: number | null
     }
   >()
   private orchestrationTerminalHistoryRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -4060,19 +4063,25 @@ export class OrcaRuntimeService {
       return
     }
     try {
+      const exitedSince = observer?.exitedSince ?? null
       const result = observer?.federated
         ? await runFederatedDispatchInputObserverTick({
             runtime: this,
             db,
             target: observer.federated,
+            exitedSince,
             ...(now === undefined ? {} : { now })
           })
         : await runDispatchInputObserverTick({
             runtime: this,
             db,
             dispatchId,
+            exitedSince,
             ...(now === undefined ? {} : { now })
           })
+      if (observer) {
+        observer.exitedSince = result.exitedSince
+      }
       if (result.disarm) {
         this.stopDispatchInputObserver(dispatchId)
       }

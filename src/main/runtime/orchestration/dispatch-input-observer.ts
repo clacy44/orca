@@ -4,17 +4,13 @@ import type { OrchestrationDb } from './db'
 import { parseOrchestrationTimestampMs } from './dispatch-heartbeat-age'
 import { parseDispatchInputEvidence } from './dispatch-input-evidence'
 import {
+  DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS,
   evaluateDispatchInputObservation,
   type DispatchInputObservation,
   type DispatchInputObservationTargetRow
 } from './dispatch-input-observation'
+import { postRuntimeNotification } from './runtime-notification'
 import { RUNTIME_NOTIFICATION_MESSAGE_TYPE } from './types'
-
-// Why the same sender the liveness breach uses: A1 section 12 puts runtime-generated notices on the
-// escalation channel workers also raise on, so the coordinator must be able to see at a glance that
-// the runtime said this. On the federated leg the home rewrites the sender to the Dispatch, which
-// is why payload.origin carries the same claim for a machine reader.
-export const DISPATCH_INPUT_OBSERVATION_SENDER = 'runtime'
 
 export type FederatedDispatchInputObserverTarget = {
   dispatchId: string
@@ -54,11 +50,36 @@ async function probeDispatchInput(
     agentStatus: gate.agentStatus ?? null,
     blockedSince: parseOrchestrationTimestampMs(gate.blockedSince),
     // Why only these two of the five observation states: `missing` and `identity_changed` say the
-    // handle no longer names this worker, which is a fact about the handle, not a dead process.
+    // handle no longer names this worker, and the caller has already refused those by identity.
     terminalStatus: terminal ? (terminal.connected === false ? 'exited' : 'running') : null,
     processLiveness,
     tailText: evidence?.tailText ?? null
   }
+}
+
+// Why the disconnected reading gets a dwell and the dead one does not: `dead` is a probed verdict
+// about the process, while `connected === false` is `ptyId !== null` and goes false for a graph
+// rebuild or an SSH blip the runtime itself expects to recover (A1 section 2's precision rule).
+function holdBackTransientProcessGone(
+  observation: DispatchInputObservation | null,
+  now: number,
+  exitedSince: number | null
+): { observation: DispatchInputObservation | null; exitedSince: number | null } {
+  if (observation?.terminalStatus !== 'exited') {
+    return { observation, exitedSince: null }
+  }
+  const since = exitedSince ?? now
+  return now - since >= DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS
+    ? { observation, exitedSince: since }
+    : { observation: null, exitedSince: since }
+}
+
+export type DispatchInputObserverTickResult = {
+  disarm: boolean
+  observation: DispatchInputObservation | null
+  // Why carried out and back in: the dwell on a disconnected pane needs a first sighting, and the
+  // observer is a stateless function whose only memory is the runtime's armed record.
+  exitedSince: number | null
 }
 
 export async function tickDispatchInputObserver(args: {
@@ -66,36 +87,36 @@ export async function tickDispatchInputObserver(args: {
   db: OrchestrationDb
   dispatchId: string
   now?: number
-}): Promise<{ disarm: boolean; observation: DispatchInputObservation | null }> {
+  exitedSince?: number | null
+}): Promise<DispatchInputObserverTickResult> {
   const now = args.now ?? Date.now()
   const [target] = args.db.listDispatchInputObservationTargets(args.dispatchId)
   // Why disarm rather than retry: the row leaves this set on settlement, on worker-release and on
   // the claim this observer itself makes, so its absence is the self-disarm A1 section 2 asks for.
   if (!target) {
-    return { disarm: true, observation: null }
+    return { disarm: true, observation: null, exitedSince: null }
   }
-  const observation = await observeDispatchInputTarget({ ...args, target, now })
+  const { observation, exitedSince } = holdBackTransientProcessGone(
+    await observeDispatchInputTarget({ ...args, target, now }),
+    now,
+    args.exitedSince ?? null
+  )
   if (!observation) {
-    return { disarm: false, observation: null }
+    return { disarm: false, observation: null, exitedSince }
   }
   if (!args.db.claimDispatchInputObservation(target.dispatch_id, new Date(now).toISOString())) {
-    return { disarm: true, observation: null }
+    return { disarm: true, observation: null, exitedSince }
   }
   const notice = describeDispatchInputObservation(observation, target.dispatch_id)
-  const message = args.db.insertMessage({
+  postRuntimeNotification({
+    db: args.db,
+    runtime: args.runtime,
     runId: target.run_id,
-    from: DISPATCH_INPUT_OBSERVATION_SENDER,
-    to: `run:${target.run_id}`,
     subject: notice.subject,
     body: notice.body,
-    type: RUNTIME_NOTIFICATION_MESSAGE_TYPE,
-    priority: 'high',
-    payload: JSON.stringify(
-      buildDispatchInputObservationPayload(observation, target.dispatch_id, target.task_id)
-    )
+    payload: { dispatchId: target.dispatch_id, taskId: target.task_id, ...observation }
   })
-  args.runtime.notifyMessageArrived(message.to_handle, message.type)
-  return { disarm: true, observation }
+  return { disarm: true, observation, exitedSince }
 }
 
 async function observeDispatchInputTarget(args: {
@@ -105,6 +126,18 @@ async function observeDispatchInputTarget(args: {
   now: number
 }): Promise<DispatchInputObservation | null> {
   const { target } = args
+  // Why identity first: a re-minted pane answers on the same handle, and Tranche 3's precedent
+  // (inspectWorkerTerminal) refuses to attach any verdict to a handle that names another process —
+  // "Worker <id> is gone" about a working agent also burns the once-per-Dispatch budget.
+  if (
+    !args.db.isDispatchProcessCurrent({
+      dispatchId: target.dispatch_id,
+      paneKey: args.runtime.getTerminalPaneKey(target.agent_terminal_handle),
+      processIncarnation: args.runtime.getTerminalProcessIncarnation(target.agent_terminal_handle)
+    })
+  ) {
+    return null
+  }
   const resource = args.db.getWorkerTerminalResourceByOwner(target.dispatch_id)
   const probe = await probeDispatchInput(
     args.runtime,
@@ -129,11 +162,23 @@ export async function tickFederatedDispatchInputObserver(args: {
   db: OrchestrationDb
   target: FederatedDispatchInputObserverTarget
   now?: number
-}): Promise<{ disarm: boolean; observation: DispatchInputObservation | null }> {
+  exitedSince?: number | null
+}): Promise<DispatchInputObserverTickResult> {
   const now = args.now ?? Date.now()
   const attachment = args.db.getRemoteDispatchAttachment(args.target.dispatchId)
   if (attachment?.state !== 'ready') {
-    return { disarm: true, observation: null }
+    return { disarm: true, observation: null, exitedSince: null }
+  }
+  // Why the peer runs the same identity refusal: its pane can be re-minted exactly like the home's,
+  // and the attachment row is the peer's own record of which process this Dispatch owns.
+  if (
+    !args.db.isRemoteAttachmentProcessCurrent({
+      dispatchId: args.target.dispatchId,
+      paneKey: args.runtime.getTerminalPaneKey(args.target.terminalHandle),
+      processIncarnation: args.runtime.getTerminalProcessIncarnation(args.target.terminalHandle)
+    })
+  ) {
+    return { disarm: false, observation: null, exitedSince: null }
   }
   const probe = await probeDispatchInput(
     args.runtime,
@@ -141,15 +186,19 @@ export async function tickFederatedDispatchInputObserver(args: {
     args.target.processIncarnation,
     null
   )
-  const observation = evaluateDispatchInputObservation({
+  const { observation, exitedSince } = holdBackTransientProcessGone(
+    evaluateDispatchInputObservation({
+      now,
+      submittedAt: args.target.submittedAt,
+      heartbeated: args.db.hasFederatedWorkerSpoken(args.target.dispatchId),
+      taskSpec: args.target.taskSpec,
+      ...probe
+    }),
     now,
-    submittedAt: args.target.submittedAt,
-    heartbeated: args.db.hasFederatedWorkerSpoken(args.target.dispatchId),
-    taskSpec: args.target.taskSpec,
-    ...probe
-  })
+    args.exitedSince ?? null
+  )
   if (!observation) {
-    return { disarm: false, observation: null }
+    return { disarm: false, observation: null, exitedSince }
   }
   const notice = describeDispatchInputObservation(observation, args.target.dispatchId)
   args.db.enqueueFederationRelay({
@@ -174,7 +223,7 @@ export async function tickFederatedDispatchInputObserver(args: {
       )
     })
   })
-  return { disarm: true, observation }
+  return { disarm: true, observation, exitedSince }
 }
 
 function resolveSubmittedAt(inputEvidence: string | null): number | null {

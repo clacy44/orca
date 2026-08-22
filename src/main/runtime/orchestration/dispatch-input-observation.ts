@@ -9,6 +9,11 @@ export const DISPATCH_INPUT_OBSERVER_INTERVAL_MS = 45_000
 // report every slower-booting agent as stuck. A1 section 2's caveat names this exact trap.
 export const DISPATCH_INPUT_OBSERVATION_DWELL_MS = 90_000
 
+// Why a dwell on the disconnected reading: `connected` is `ptyId !== null`, which also goes false
+// during a renderer graph rebuild and for the length of the runtime's own SSH pane recovery grace
+// (SSH_PANE_RECOVERY_GRACE_MS, 30s). A dead incarnation is a probed fact and keeps firing at once.
+export const DISPATCH_INPUT_TERMINAL_EXITED_DWELL_MS = 30_000
+
 export type DispatchInputObservationKind =
   | 'blocked_on_gate'
   | 'input_not_consumed'
