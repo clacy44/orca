@@ -8,10 +8,12 @@ import {
   LOCAL_PRESENCE_ENVIRONMENT_ID,
   applyLocalTerminalPresence,
   hydrateLocalTerminalPresence,
+  markLocalTerminalPresenceUnavailable,
   resetLocalTerminalPresence
 } from './terminal-presence-local-lane'
 import {
   getPeerPresenceForPty,
+  getPresenceForPty,
   getPresenceRosterForEnvironment,
   resetTerminalPresenceStateForTest
 } from './terminal-presence-state'
@@ -103,7 +105,11 @@ describe('local terminal presence lane', () => {
 
     applyLocalTerminalPresence(terminal([hostParticipant({ typing: true }), participant()]))
 
-    // Site (c)'s reserved-key stamp reached the lane; `self` is what keeps it out of the peer list.
+    // Site (c)'s reserved-key stamp reached the renderer, on the row the renderer resolved as itself.
+    // Why asserted here and not on Surface 3: W8's row shape carries no activity flag by design (§2.2),
+    // and the roster row S5 owns mirrors it, so the status bar cannot render the host as typing.
+    expect(getPresenceForPty(PTY_ID).participants.find((row) => row.self)?.typing).toBe(true)
+    // And `self` is what keeps that same row out of the pane chip's peer list.
     expect(getPeerPresenceForPty(PTY_ID).map((row) => row.typing)).toEqual([false])
     expect(rosterRows()[0]).toMatchObject({ participantId: 'host', self: true })
   })
@@ -144,6 +150,27 @@ describe('local terminal presence lane', () => {
     hydrateLocalTerminalPresence({ host: HOST, terminals: [terminal([hostParticipant()])] })
 
     expect(getPeerPresenceForPty(PTY_ID)[0]?.typing).toBe(true)
+  })
+
+  it('voids what it buffered once hydration is declared impossible', () => {
+    applyLocalTerminalPresence(terminal([hostParticipant(), participant()]))
+
+    markLocalTerminalPresenceUnavailable()
+    expect(getPeerPresenceForPty(PTY_ID)).toEqual([])
+
+    // Voided, not merely bypassed: a hydration arriving after the fact cannot resurrect it.
+    hydrateLocalTerminalPresence({ host: HOST, terminals: [] })
+    expect(getPeerPresenceForPty(PTY_ID)).toEqual([])
+  })
+
+  it('writes later pushes straight through once hydration is declared impossible', () => {
+    markLocalTerminalPresenceUnavailable()
+
+    applyLocalTerminalPresence(terminal([hostParticipant(), participant()]))
+
+    // Non-vacuity for the terminal state: a lane still waiting to hydrate appends this to a buffer
+    // nothing will ever drain, and stays dark for the life of the mount.
+    expect(getPeerPresenceForPty(PTY_ID).map((row) => row.label)).toEqual(['Ana laptop'])
   })
 
   it('drops every local row on reset so a remount re-hydrates', () => {
