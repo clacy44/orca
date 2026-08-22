@@ -1,6 +1,7 @@
 // Why: shared-presence state ticks per keystroke, so it lives in memory only — the device registry
 // rewrites its whole secure file per mutation and is the wrong store for anything with a TTL.
 import { randomUUID } from 'node:crypto'
+import { MOBILE_PRESENCE_STALE_MS } from '../../shared/terminal-presence-last-seen'
 
 export type TerminalPresenceParticipantKind = 'runtime' | 'mobile'
 
@@ -176,11 +177,42 @@ export class TerminalPresenceRegistry {
     return this.participants
   }
 
+  // Why edge-triggered: this runs on EVERY inbound frame, so an unconditional notify would fan the
+  // runtime-wide roster out at the phone's 2-3 s polling rate. Only crossing back over the horizon
+  // changes what a surface renders — and nothing else will republish it, because the falling edge that
+  // raised the flag is spent and re-arms nothing while the row stays stale.
   stampInbound(connectionId: string): void {
     const participant = this.participants.get(connectionId)
-    if (participant) {
-      participant.lastInboundAt = this.now()
+    if (!participant) {
+      return
     }
+    const now = this.now()
+    const wasStale =
+      participant.kind === 'mobile' && now - participant.lastInboundAt >= MOBILE_PRESENCE_STALE_MS
+    participant.lastInboundAt = now
+    if (!wasStale) {
+      return
+    }
+    // Why per connection and not per participant: a connection past the horizon is the only one that can
+    // flip the aggregate, so this never misses a recovery — and a phone whose second socket stayed fresh
+    // republishes a payload the roster's fingerprint diff drops.
+    this.notifyMembershipChanged()
+    for (const ptyId of this.ptyIdsAttachedTo(connectionId)) {
+      this.notifyChanged(ptyId)
+    }
+  }
+
+  private ptyIdsAttachedTo(connectionId: string): string[] {
+    const ptyIds: string[] = []
+    for (const [ptyId, byKey] of this.attachments) {
+      for (const attachment of byKey.values()) {
+        if (attachment.connectionId === connectionId) {
+          ptyIds.push(ptyId)
+          break
+        }
+      }
+    }
+    return ptyIds
   }
 
   private attachmentsFor(ptyId: string): Map<string, TerminalPresenceAttachment> {

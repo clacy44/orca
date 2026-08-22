@@ -5,12 +5,12 @@
 // backgrounded. Silence is therefore normal for a LIVE phone, and removal stays lifecycle-driven.
 import type { TerminalPresenceKind } from './terminal-presence-snapshot'
 import { HOST_ATTACHMENT_KEY, type TerminalPresenceRegistry } from './terminal-presence-registry'
+import { MOBILE_PRESENCE_STALE_MS } from '../../shared/terminal-presence-last-seen'
 
-// Why 120 s and not the ~60 s a runtime-scope heartbeat bounds: the phone's only inbound traffic while a
-// screen is open is foreground- and screen-scoped polling, so a shorter window would mark a phone the
-// user is holding. Long enough to outlive a backgrounded tab switch, short enough that a dead phone stops
-// reading as "here" while the reader still cares.
-export const MOBILE_PRESENCE_STALE_MS = 120_000
+// Why the horizon lives in shared and not here: the registry needs it to spot the recovery edge, and an
+// import back from there would be a value cycle through this module. Re-exported so every reader of the
+// staleness rule still finds it beside the rule.
+export { MOBILE_PRESENCE_STALE_MS }
 
 /** Present only on a stale row: `stale` is the flag every surface branches on, `lastSeenAt` is the host
  *  clock stamp the copy counts minutes from — the same domain `lastOutputAt` already publishes in. */

@@ -200,6 +200,119 @@ describe('mobile presence staleness falling edges', () => {
     publisher.dispose()
   })
 
+  // The falling edge is spent once it fires, so nothing but this stamp will ever republish the row —
+  // a live phone would otherwise stay rendered as "last seen Nm ago" for as long as the window is open.
+  it('republishes the row as fresh when a stale phone speaks again', () => {
+    const registry = createRegistry()
+    const published: RuntimeTerminalPresenceClientEvent[] = []
+    const publisher = createTerminalPresenceRosterPublisher({
+      registry,
+      buildMembership: () =>
+        buildTerminalPresenceRosterParticipants({
+          registry,
+          hasEstablishedSubscription: () => true,
+          resolveTerminalHandle: () => 'term_1'
+        }),
+      publish: (event) => published.push(event)
+    })
+    attachPhone(registry)
+    advance(MOBILE_PRESENCE_STALE_MS)
+    expect(published.at(-1)?.participants.find((row) => row.kind === 'mobile')).toMatchObject({
+      stale: true
+    })
+    const afterStale = published.length
+
+    registry.stampInbound(PHONE_CONNECTION)
+    advance(TERMINAL_PRESENCE_COALESCE_WINDOW_MS + 1)
+
+    expect(published.length).toBe(afterStale + 1)
+    const row = published.at(-1)?.participants.find((candidate) => candidate.kind === 'mobile')
+    expect(row).toBeDefined()
+    expect('stale' in (row ?? {})).toBe(false)
+    expect('lastSeenAt' in (row ?? {})).toBe(false)
+
+    // And the next horizon is armed again, or one recovery would disarm staleness for good.
+    advance(MOBILE_PRESENCE_STALE_MS)
+    expect(
+      published.at(-1)?.participants.find((candidate) => candidate.kind === 'mobile')
+    ).toMatchObject({ stale: true })
+
+    publisher.dispose()
+  })
+
+  // The guard that makes the edge trigger safe: the phone polls every 2-3 s while foregrounded, so a
+  // stamp that published unconditionally would fan both buses out at poll rate. Asserted on the per-PTY
+  // feed as well as the roster, because the roster's fingerprint diff would absorb it and pass anyway.
+  it('publishes nothing on either bus for stamps that never cross the horizon', () => {
+    const registry = createRegistry()
+    const published: RuntimeTerminalPresenceClientEvent[] = []
+    const publisher = createTerminalPresenceRosterPublisher({
+      registry,
+      buildMembership: () =>
+        buildTerminalPresenceRosterParticipants({
+          registry,
+          hasEstablishedSubscription: () => true,
+          resolveTerminalHandle: () => 'term_1'
+        }),
+      publish: (event) => published.push(event)
+    })
+    const notifier = createTerminalPresenceChangeNotifier({
+      registry,
+      now: () => clock,
+      holdExpiryAt: () => null
+    })
+    attachPhone(registry)
+    let paneEmits = 0
+    const unsubscribe = notifier.subscribe(PTY_ID, () => {
+      paneEmits += 1
+    })
+    advance(TERMINAL_PRESENCE_COALESCE_WINDOW_MS + 1)
+    const afterJoin = published.length
+    const paneEmitsAfterJoin = paneEmits
+
+    for (let poll = 0; poll < 20; poll += 1) {
+      advance(3000)
+      registry.stampInbound(PHONE_CONNECTION)
+    }
+    advance(TERMINAL_PRESENCE_COALESCE_WINDOW_MS + 1)
+
+    expect(published.length).toBe(afterJoin)
+    expect(paneEmits).toBe(paneEmitsAfterJoin)
+
+    unsubscribe()
+    notifier.dispose()
+    publisher.dispose()
+  })
+
+  it('emits the per-PTY un-stale flip exactly once', () => {
+    const registry = createRegistry()
+    const notifier = createTerminalPresenceChangeNotifier({
+      registry,
+      now: () => clock,
+      holdExpiryAt: () => null
+    })
+    attachPhone(registry)
+    const emits: (boolean | undefined)[] = []
+    const unsubscribe = notifier.subscribe(PTY_ID, () => {
+      emits.push(phoneRow(registry)?.stale)
+    })
+
+    advance(MOBILE_PRESENCE_STALE_MS)
+    expect(emits).toEqual([true])
+
+    registry.stampInbound(PHONE_CONNECTION)
+    advance(TERMINAL_PRESENCE_COALESCE_WINDOW_MS + 1)
+    expect(emits).toEqual([true, undefined])
+
+    // A second frame inside the horizon crosses nothing, so it schedules nothing.
+    registry.stampInbound(PHONE_CONNECTION)
+    advance(TERMINAL_PRESENCE_COALESCE_WINDOW_MS + 1)
+    expect(emits).toEqual([true, undefined])
+
+    unsubscribe()
+    notifier.dispose()
+  })
+
   // §4.4: the phone re-subscribes inside orca-runtime's 250 ms absorber on every reconnect, and the
   // trailing-edge window (750 ms) is wider, so no intermediate payload is ever built.
   it('never flickers a mobile row across a re-subscribe inside the soft-leave grace', () => {
