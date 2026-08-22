@@ -74,6 +74,7 @@ function buildTerminalPresence(
   }).map((row) => ({
     participantId: row.participantId,
     label: row.label,
+    kind: row.kind,
     typing: row.typing,
     writing: row.writing,
     ...(row.self ? { self: true as const } : {})

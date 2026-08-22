@@ -129,7 +129,7 @@ describe('terminal.list presence boundary pass', () => {
     expect(row.orphaned).toBe(true)
     expect(row.presence).toEqual({
       attachedCount: 1,
-      participants: [{ participantId, label: 'Ana', typing: true, writing: false }]
+      participants: [{ participantId, label: 'Ana', kind: 'runtime', typing: true, writing: false }]
     })
   })
 
@@ -231,10 +231,22 @@ describe('terminal.list presence boundary pass', () => {
     // Why asserted: a folder workspace has no branch at all, and the column must not depend on one.
     expect(folderRow.branch).toBe('')
     expect(folderRow.presence?.participants).toEqual([
-      { participantId: expect.any(String), label: 'Ana', typing: true, writing: false }
+      {
+        participantId: expect.any(String),
+        label: 'Ana',
+        kind: 'runtime',
+        typing: true,
+        writing: false
+      }
     ])
     expect(rowFor(result, SSH_PTY_ID).presence?.participants).toEqual([
-      { participantId: expect.any(String), label: 'Ben', typing: false, writing: true }
+      {
+        participantId: expect.any(String),
+        label: 'Ben',
+        kind: 'runtime',
+        typing: false,
+        writing: true
+      }
     ])
   })
 })
@@ -263,7 +275,14 @@ describe('terminal.list presence caller scope', () => {
     const participants = rowFor(result, 'pty-shared').presence?.participants ?? []
     expect(participants).toHaveLength(2)
     expect(participants.filter((participant) => participant.self === true)).toEqual([
-      { participantId: anaParticipantId, label: 'Ana', typing: true, writing: false, self: true }
+      {
+        participantId: anaParticipantId,
+        label: 'Ana',
+        kind: 'runtime',
+        typing: true,
+        writing: false,
+        self: true
+      }
     ])
     expect(participants.find((participant) => participant.label === 'Ben')).not.toHaveProperty(
       'self'
@@ -281,6 +300,7 @@ describe('terminal.list presence caller scope', () => {
       {
         participantId: HOST_PARTICIPANT_ID,
         label: expect.any(String),
+        kind: 'host',
         typing: true,
         writing: false,
         self: true
@@ -310,7 +330,7 @@ describe('terminal.list presence caller scope', () => {
     // and disagree with the per-terminal roster beside it, which aggregates by participant.
     expect(rowFor(result, 'pty-shared').presence).toEqual({
       attachedCount: 1,
-      participants: [{ participantId, label: 'Ana', typing: true, writing: false }]
+      participants: [{ participantId, label: 'Ana', kind: 'runtime', typing: true, writing: false }]
     })
   })
 
@@ -331,6 +351,7 @@ describe('terminal.list presence caller scope', () => {
       {
         participantId: HOST_PARTICIPANT_ID,
         label: expect.any(String),
+        kind: 'host',
         typing: true,
         writing: false
       }

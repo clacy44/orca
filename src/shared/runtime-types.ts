@@ -448,11 +448,19 @@ export type RuntimeFileReadChunkResult = {
   eof: boolean
 }
 
+// Why declared here rather than imported: shared/ must not reach into the main process, and the wire
+// needs the same three members the host's projection carries — the assignment at the list boundary is
+// what keeps the two declarations from drifting apart.
+export type RuntimeTerminalPresenceKind = 'runtime' | 'mobile' | 'host'
+
 // Why `self?: true` and never `self: false`: only a caller the host can identify owns a row, and an
 // anonymous local caller must publish no claim about which row is its own.
 export type RuntimeTerminalPresenceParticipant = {
   participantId: string
   label: string
+  // Why on the wire: nothing else distinguishes the local human from a peer device named after a
+  // machine, or a phone from a desktop — and both distinctions are display rules a client owns.
+  kind: RuntimeTerminalPresenceKind
   typing: boolean
   writing: boolean
   self?: true
