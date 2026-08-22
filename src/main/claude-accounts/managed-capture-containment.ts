@@ -1,7 +1,7 @@
 import {
   canonicalizePathForContainment,
   isCanonicalPathWithinRoot
-} from './canonical-path-containment'
+} from '../../shared/lane-path-containment'
 import { getClaudeLanesRoot } from './claude-lanes-root'
 
 export type CaptureSourceKind = 'claude-config-dir' | 'codex-home'

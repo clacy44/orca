@@ -3,7 +3,7 @@ import {
   withoutEnvKey,
   withoutEnvKeyDeletion
 } from '../../shared/lane-env-key-case'
-import { isPathWithinRootForDenial } from '../claude-accounts/canonical-path-containment'
+import { isPathWithinRootForDenial } from '../../shared/lane-path-containment'
 import { isWindowsAbsolutePathLike } from '../../shared/cross-platform-path'
 
 // S9 §2a guard 3: the post-merge CLAUDE_CONFIG_DIR scope assertion both pty.ts spawn

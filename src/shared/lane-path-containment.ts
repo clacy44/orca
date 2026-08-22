@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { isPathInsideOrEqual } from '../../shared/cross-platform-path'
+import { isPathInsideOrEqual } from './cross-platform-path'
 
 export type CanonicalPathResult =
   | { kind: 'canonical'; path: string }
@@ -51,7 +51,7 @@ export function isCanonicalPathWithinRoot(
 /**
  * Deny-direction containment for a path that need not exist and may be a symlink.
  *
- * Unlike `assertCaptureSourceOutsideClaudeLanes`, which refuses a symlink outright because
+ * Unlike the capture-source assertion, which refuses a symlink outright because
  * its owner can re-point it between the check and the read, this one has no read to protect:
  * it decides whether a launch value addresses the lane root at all. So it denies on EITHER
  * the plainly resolved path (the lane may not be provisioned yet, so realpath would fail) or

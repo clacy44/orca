@@ -2,7 +2,7 @@ import { CLAUDE_AUTH_ENV_VARS } from '../claude-accounts/environment'
 import {
   canonicalizePathForContainment,
   isCanonicalPathWithinAnyRoot
-} from '../claude-accounts/canonical-path-containment'
+} from '../../shared/lane-path-containment'
 import { envKeysMatch, withoutEnvKey, withoutEnvKeyDeletion } from '../../shared/lane-env-key-case'
 
 // NOT WIRED: no spawn calls this yet — lanes do not exist; this is the allowlist/scrub half

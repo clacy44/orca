@@ -6,7 +6,7 @@ import {
   canonicalizePathForContainment,
   isCanonicalPathWithinRoot,
   isPathWithinRootForDenial
-} from './canonical-path-containment'
+} from './lane-path-containment'
 
 describe('isCanonicalPathWithinRoot', () => {
   it('accepts the root itself and a descendant', () => {
