@@ -5,9 +5,11 @@ import { RpcDispatcher } from '../dispatcher'
 import { TERMINAL_METHODS } from './terminal'
 import { terminalPresenceRegistry } from '../../terminal-presence-registry'
 import { HOST_PARTICIPANT_ID } from '../../terminal-presence-snapshot'
+import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from '../../terminal-presence-activity-rows'
 import type { RpcResponse } from '../core'
 import type {
   RuntimeTerminalListResult,
+  RuntimeTerminalShow,
   RuntimeTerminalSummary
 } from '../../../../shared/runtime-types'
 
@@ -72,23 +74,43 @@ function rowFor(result: RuntimeTerminalListResult, ptyId: string | null): Runtim
   return row
 }
 
-async function listOverRemoteSocket(
+type RemoteIdentity = {
+  connectionId?: string
+  pairedDeviceId?: string
+  clientKind?: 'mobile' | 'runtime'
+}
+
+async function dispatchOverRemoteSocket<TResult>(
   runtime: OrcaRuntimeService,
-  identity: { connectionId?: string; pairedDeviceId?: string; clientKind?: 'mobile' | 'runtime' },
+  method: string,
+  identity: RemoteIdentity,
   params: Record<string, unknown>
-): Promise<RuntimeTerminalListResult> {
+): Promise<TResult> {
   const dispatcher = new RpcDispatcher({ runtime, methods: TERMINAL_METHODS })
   const replies: string[] = []
   await dispatcher.dispatchStreaming(
-    { id: 'req-list', authToken: 'tok', method: 'terminal.list', params },
+    { id: 'req-1', authToken: 'tok', method, params },
     (message) => replies.push(message),
     identity
   )
   const response = JSON.parse(replies[0]!) as RpcResponse
   if (!('result' in response)) {
-    throw new Error(`terminal.list failed: ${replies[0]}`)
+    throw new Error(`${method} failed: ${replies[0]}`)
   }
-  return response.result as RuntimeTerminalListResult
+  return response.result as TResult
+}
+
+async function listOverRemoteSocket(
+  runtime: OrcaRuntimeService,
+  identity: RemoteIdentity,
+  params: Record<string, unknown>
+): Promise<RuntimeTerminalListResult> {
+  return await dispatchOverRemoteSocket<RuntimeTerminalListResult>(
+    runtime,
+    'terminal.list',
+    identity,
+    params
+  )
 }
 
 async function listOverLocalSocket(
@@ -313,6 +335,40 @@ describe('terminal.list presence caller scope', () => {
     ])
   })
 
+  // Why the asymmetry is pinned: §2.1 declares the anonymous local caller and the renderer bridge one
+  // participant, while host TYPING is finer because only the two guarded IPC writers stamp it — and the
+  // reserved 'host' key is swept by no teardown, so not-typing is the row's ordinary state.
+  it('marks the host row self for an anonymous local caller while it is not typing', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-local', REPO_WORKTREE_ID)
+    const stampedAt = Date.now()
+    // Why Date.now and not fake timers: listTerminals reads the module singleton registry, whose clock
+    // is not injectable at this boundary, and freezing the timer loop would stall the dispatch itself.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(stampedAt)
+    try {
+      terminalPresenceRegistry.recordHostInteractiveInput('pty-local')
+      now.mockReturnValue(stampedAt + TERMINAL_PRESENCE_ACTIVITY_TTL_MS + 1)
+
+      const result = await listOverLocalSocket(runtime, { includePresence: true })
+
+      expect(rowFor(result, 'pty-local').presence).toEqual({
+        attachedCount: 1,
+        participants: [
+          {
+            participantId: HOST_PARTICIPANT_ID,
+            label: expect.any(String),
+            kind: 'host',
+            typing: false,
+            writing: false,
+            self: true
+          }
+        ]
+      })
+    } finally {
+      now.mockRestore()
+    }
+  })
+
   it('counts one participant for a peer attached from two connections', async () => {
     const runtime = makeRuntime()
     spawnPty(runtime, 'pty-shared', REPO_WORKTREE_ID)
@@ -421,6 +477,91 @@ describe('terminal.list presence caller scope', () => {
         self: true
       }
     ])
+  })
+})
+
+describe('terminal.list presence default direction', () => {
+  // Why dispatched and not called on the runtime: `runtime.listTerminals` reads `opts.presence`, while
+  // the guard that implements W6's default direction is `params.includePresence === true` in the
+  // handler — and the adjacent `includeVisualLayouts` defaults the other way, so an inverted gate here
+  // would ship presence to every pre-flag caller with the runtime-level control still green.
+  it('leaves the whole dispatched payload byte-identical when the caller does not ask', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-orphan', REPO_WORKTREE_ID)
+    attachParticipant('pty-orphan', {
+      connectionId: 'conn-ana',
+      pairedDeviceId: 'device-ana',
+      label: 'Ana'
+    })
+    const identity: RemoteIdentity = {
+      connectionId: 'conn-ana',
+      pairedDeviceId: 'device-ana',
+      clientKind: 'runtime'
+    }
+    const prePresencePayload = {
+      terminals: [
+        {
+          handle: expect.stringMatching(/^term_/),
+          ptyId: 'pty-orphan',
+          incarnationId: 'inc-pty-orphan',
+          orphaned: true,
+          worktreeId: REPO_WORKTREE_ID,
+          worktreePath: '',
+          branch: '',
+          tabId: 'pty:pty-orphan',
+          leafId: 'pty:pty-orphan',
+          title: null,
+          connected: true,
+          writable: true,
+          lastOutputAt: null,
+          preview: ''
+        }
+      ],
+      topologyRevisions: { [REPO_WORKTREE_ID]: 0 },
+      totalCount: 1,
+      truncated: false
+    }
+
+    // Why the whole object and not `'presence' in terminal`: the assertion has to fail on a key the
+    // pre-flag shape never had, wherever the boundary pass decided to put it.
+    expect(await listOverRemoteSocket(runtime, identity, {})).toEqual(prePresencePayload)
+    expect(
+      await listOverRemoteSocket(runtime, identity, {
+        includeVisualLayouts: false,
+        includePresence: false
+      })
+    ).toEqual(prePresencePayload)
+  })
+
+  // Why here at all: `terminal.show` builds from the same two summary builders `terminal.list` does, so
+  // moving population into a builder behind an option would keep every list-side control green while
+  // show started publishing labels to callers that negotiated for nothing (§2.2 W6).
+  it('never carries the key out of terminal.show, asked or not', async () => {
+    const runtime = makeRuntime()
+    spawnPty(runtime, 'pty-shown', REPO_WORKTREE_ID)
+    attachParticipant('pty-shown', {
+      connectionId: 'conn-ana',
+      pairedDeviceId: 'device-ana',
+      label: 'Ana'
+    })
+    const identity: RemoteIdentity = {
+      connectionId: 'conn-ana',
+      pairedDeviceId: 'device-ana',
+      clientKind: 'runtime'
+    }
+    const listed = await listOverRemoteSocket(runtime, identity, { includePresence: true })
+    const terminal = rowFor(listed, 'pty-shown').handle
+    expect(rowFor(listed, 'pty-shown').presence?.attachedCount).toBe(1)
+
+    for (const params of [{ terminal }, { terminal, includePresence: true }]) {
+      const shown = await dispatchOverRemoteSocket<{ terminal: RuntimeTerminalShow }>(
+        runtime,
+        'terminal.show',
+        identity,
+        params
+      )
+      expect('presence' in shown.terminal).toBe(false)
+    }
   })
 })
 
