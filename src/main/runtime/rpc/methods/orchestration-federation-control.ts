@@ -5,6 +5,11 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { RemoteDispatchAttachmentRow } from '../../orchestration/types'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, requiredString } from '../schemas'
+import {
+  exposeWorkerObservation,
+  observeWorkerAgentGate,
+  type WorkerTerminalObservation
+} from './orchestration-worker-observation'
 import { readExactWorkerOutput } from './orchestration-worker-output'
 
 const FederationDispatchParams = z.object({
@@ -30,13 +35,17 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
         params.dispatchId,
         authenticatedCallerFingerprint
       )
-      const observation = await inspectRemoteAttachment(runtime, params.dispatchId)
+      // Why probed here: the home renders the gate verdict for a federated worker from this
+      // projection, so without it worker-show reports unknown for every federated Dispatch.
+      const observation = await inspectRemoteAttachment(runtime, params.dispatchId, {
+        probeAgentGate: true
+      })
       return {
         dispatchId: params.dispatchId,
         runtimeEpoch: runtime.getRuntimeId(),
         attachment: exposeRemoteAttachment(attachment),
         terminal: observation.exact ? observation.terminal : null,
-        observation: { status: observation.status, exactWorker: observation.exact }
+        observation: exposeWorkerObservation(observation)
       }
     }
   }),
@@ -172,7 +181,13 @@ function requireHomeAttachment(
   return attachment
 }
 
-async function inspectRemoteAttachment(runtime: OrcaRuntimeService, dispatchId: string) {
+async function inspectRemoteAttachment(
+  runtime: OrcaRuntimeService,
+  dispatchId: string,
+  // Why opt-in: federationRead shares this helper and drops the verdict, so only federationShow
+  // pays for a probe that can reach the peer's foreground-process check.
+  options?: { probeAgentGate?: boolean }
+): Promise<WorkerTerminalObservation> {
   const db = runtime.getOrchestrationDb()
   const attachment = db.getRemoteDispatchAttachment(dispatchId)
   if (!attachment?.terminal_handle) {
@@ -194,7 +209,12 @@ async function inspectRemoteAttachment(runtime: OrcaRuntimeService, dispatchId: 
       ? terminal.connected === false
         ? ('exited' as const)
         : ('running' as const)
-      : ('identity_changed' as const)
+      : ('identity_changed' as const),
+    // Why exact only: a non-exact handle names some other process, so its verdict would describe
+    // the wrong worker.
+    ...(exact && options?.probeAgentGate
+      ? await observeWorkerAgentGate(runtime, attachment.terminal_handle)
+      : {})
   }
 }
 
