@@ -271,6 +271,12 @@ function makeOrchestrationDbStub(toHandle: () => string) {
       getCurrentRunForPane: () => undefined,
       // Consulted by onPtyExit's dispatch-failure path.
       getActiveDispatchForTerminal: () => null,
+      // This leaf is a plain terminal, so no Dispatch owns it: the idle edge finds
+      // neither a local assignee nor a peer attachment to announce mail on, and the
+      // observer resume has nothing to re-arm.
+      getActiveDispatchForIdentity: () => undefined,
+      findActiveRemoteAttachmentForPane: () => undefined,
+      listDispatchInputObservationTargets: () => [],
       markAsDelivered,
       close: () => {}
     }
