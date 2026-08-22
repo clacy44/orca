@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SshProviderEpoch } from '../../../shared/ssh-types'
-import { subscribeRuntimeClientEvents } from './runtime-client-events'
+import {
+  isAdmittedRuntimeClientEventType,
+  subscribeRuntimeClientEvents
+} from './runtime-client-events'
 import { replaceRuntimeEnvironmentRevisions } from './runtime-environment-revision'
 
 describe('subscribeRuntimeClientEvents', () => {
@@ -164,10 +167,9 @@ describe('subscribeRuntimeClientEvents', () => {
     ])
   })
 
-  // W8 is Rule 3: the host starts sending a frame on an existing path, and every client shipped today
-  // drops it here. Asserting the drop — silently, with no onError — is what makes "behaviorally inert"
-  // a checked claim rather than a note in the design doc.
-  it('drops a terminalPresence frame the shipped allowlist does not admit', async () => {
+  // W8 is Rule 3: the host starts sending a frame on an existing path. This decoder now admits it, and
+  // the frozen pre-change copy below is what keeps "old clients drop it, silently" a checked claim.
+  it('admits a terminalPresence frame and still drops an unknown type', async () => {
     let capturedOnResponse: ((response: unknown) => void) | undefined
     const subscribe = vi.fn(async (_args, nextCallbacks) => {
       capturedOnResponse = (nextCallbacks as { onResponse: (response: unknown) => void }).onResponse
@@ -181,29 +183,50 @@ describe('subscribeRuntimeClientEvents', () => {
     if (!capturedOnResponse) {
       throw new Error('Expected subscription callbacks')
     }
-    capturedOnResponse({
-      ok: true,
-      result: {
-        type: 'terminalPresence',
-        seq: 2,
-        participants: [
-          {
-            participantId: 'p-1',
-            label: 'Ana laptop',
-            kind: 'runtime',
-            attachedTerminals: ['term_1'],
-            self: false
-          }
-        ]
-      }
-    })
-    // The positive control beside it: a known type on the same channel still lands, so the drop above
-    // is the allowlist and not a dead decoder.
+    const roster = {
+      type: 'terminalPresence',
+      seq: 2,
+      participants: [
+        {
+          participantId: 'p-1',
+          label: 'Ana laptop',
+          kind: 'runtime',
+          attachedTerminals: ['term_1'],
+          self: false
+        }
+      ]
+    }
+    capturedOnResponse({ ok: true, result: roster })
+    // The negative control beside it: a type nobody declared must still fall through unrendered, so the
+    // admission above is one entry and not a widened decoder.
+    capturedOnResponse({ ok: true, result: { type: 'terminalTelepathy', seq: 3 } })
     capturedOnResponse({ ok: true, result: { type: 'worktreesChanged', repoId: 'repo-1' } })
 
-    expect(onEvent).toHaveBeenCalledTimes(1)
-    expect(onEvent).toHaveBeenCalledWith({ type: 'worktreesChanged', repoId: 'repo-1' })
+    expect(onEvent).toHaveBeenCalledTimes(2)
+    expect(onEvent).toHaveBeenNthCalledWith(1, roster)
+    expect(onEvent).toHaveBeenNthCalledWith(2, { type: 'worktreesChanged', repoId: 'repo-1' })
     expect(onError).not.toHaveBeenCalled()
+  })
+
+  // Hand-rolled skew where the cross-version harness covers nothing: the pre-change predicate, frozen as
+  // data, is the only thing that proves an old client drops the roster instead of erroring on it.
+  it('is dropped by a frozen pre-presence copy of the allowlist', () => {
+    const preChangeAllowlist = new Set([
+      'reposChanged',
+      'worktreesChanged',
+      'nativeChatLaunchDraftResolved',
+      'terminalSideEffects',
+      'sshStateChanged',
+      'linearLinkedIssueUpdated',
+      'activateWorktree',
+      'worktreeTerminalSleepState'
+    ])
+
+    expect(preChangeAllowlist.has('terminalPresence')).toBe(false)
+    for (const type of preChangeAllowlist) {
+      expect(isAdmittedRuntimeClientEventType(type)).toBe(true)
+    }
+    expect(isAdmittedRuntimeClientEventType('terminalPresence')).toBe(true)
   })
 
   it('preserves full SSH authority in retained snapshots and live client events', async () => {

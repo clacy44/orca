@@ -95,6 +95,7 @@ import { attachMobileMarkdownBridge } from '@/runtime/mobile-markdown-bridge'
 import { closeMobileSessionTabInStore } from '@/runtime/mobile-session-tab-close'
 import { createWorktreeChangeRefreshQueue } from './worktree-change-refresh-queue'
 import { subscribeRuntimeClientEvents } from '@/runtime/runtime-client-events'
+import { setPresenceRosterForEnvironment } from '@/lib/pane-manager/terminal-presence-state'
 import { applyNativeChatLaunchDraftResolved } from '@/runtime/native-chat-launch-draft-runtime-resolution'
 import { toRemoteRuntimePtyId } from '@/runtime/runtime-terminal-stream'
 import { dispatchTerminalSideEffectBatch } from '@/components/terminal-pane/terminal-side-effect-facts-handler'
@@ -971,6 +972,15 @@ export function useIpcEvents(): void {
     ): void => {
       if (event.type === 'worktreeTerminalSleepState') {
         applyHostWorktreeTerminalSleepState(environmentId, event)
+        return
+      }
+      if (event.type === 'terminalPresence') {
+        // Why keyed by environment and never merged into the pane lane: this bus is membership-only and
+        // can be a debounce interval stale, so it feeds Surface 3 alone.
+        setPresenceRosterForEnvironment(environmentId, {
+          participants: event.participants,
+          truncated: event.truncated
+        })
         return
       }
       if (event.type === 'terminalSideEffects') {

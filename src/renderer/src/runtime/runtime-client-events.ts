@@ -80,17 +80,28 @@ function handleRuntimeClientEventResponse(
   }
 }
 
+// Why an allowlist and not a shape check: unknown event types must fall through silently, which is what
+// lets the host publish a new one without a protocol bump. `terminalPresence` (W8) is Rule 3 — every
+// client that predates this entry drops the roster right here.
+const ADMITTED_CLIENT_EVENT_TYPES = new Set<RuntimeClientEvent['type']>([
+  'reposChanged',
+  'worktreesChanged',
+  'nativeChatLaunchDraftResolved',
+  'terminalSideEffects',
+  'sshStateChanged',
+  'linearLinkedIssueUpdated',
+  'activateWorktree',
+  'worktreeTerminalSleepState',
+  'terminalPresence'
+])
+
+/** Exported so a skew test can hold the shipped set against a frozen pre-change copy of it. */
+export function isAdmittedRuntimeClientEventType(type: string): boolean {
+  return ADMITTED_CLIENT_EVENT_TYPES.has(type as RuntimeClientEvent['type'])
+}
+
 function isRuntimeClientEvent(
   message: RuntimeClientEventStreamMessage
 ): message is RuntimeClientEvent {
-  return (
-    message.type === 'reposChanged' ||
-    message.type === 'worktreesChanged' ||
-    message.type === 'nativeChatLaunchDraftResolved' ||
-    message.type === 'terminalSideEffects' ||
-    message.type === 'sshStateChanged' ||
-    message.type === 'linearLinkedIssueUpdated' ||
-    message.type === 'activateWorktree' ||
-    message.type === 'worktreeTerminalSleepState'
-  )
+  return isAdmittedRuntimeClientEventType(message.type)
 }
