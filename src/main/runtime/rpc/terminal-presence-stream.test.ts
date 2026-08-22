@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { OrcaRuntimeService } from '../orca-runtime'
 import { terminalPresenceRegistry } from '../terminal-presence-registry'
 import {
   TERMINAL_PRESENCE_COALESCE_MAX_WAIT_MS,
@@ -66,9 +67,18 @@ function useOnePresenceClock(): void {
 async function startNegotiatedMultiplex(
   connectionId: string,
   pairedDeviceId: string,
-  options: { streamId?: number; clientId?: string; presence?: boolean } = {}
+  options: {
+    streamId?: number
+    clientId?: string
+    presence?: boolean
+    runtimeOverrides?: Partial<OrcaRuntimeService>
+  } = {}
 ) {
-  const harness = startMultiplex({ connectionId, pairedDeviceId, clientKind: 'runtime' })
+  const harness = startMultiplex(
+    { connectionId, pairedDeviceId, clientKind: 'runtime' },
+    new Map(),
+    options.runtimeOverrides
+  )
   await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
   sendSubscribeFrame(harness.handlers, options.presence === false ? {} : { presence: 1 }, {
     streamId: options.streamId ?? 7,
@@ -82,7 +92,8 @@ async function startNegotiatedSubscribe(
   connectionId: string,
   pairedDeviceId: string,
   clientId: string,
-  presence = true
+  presence = true,
+  runtimeOverrides: Partial<OrcaRuntimeService> = {}
 ) {
   const harness = startSubscribe(
     { connectionId, pairedDeviceId, clientKind: 'runtime' },
@@ -91,7 +102,9 @@ async function startNegotiatedSubscribe(
       client: { id: clientId, type: 'desktop' },
       viewport: { cols: 120, rows: 40 },
       capabilities: { terminalBinaryStream: 1, ...(presence ? { presence: 1 } : {}) }
-    }
+    },
+    new Map(),
+    runtimeOverrides
   )
   const subscribed = await awaitSubscribed(harness.messages)
   return { ...harness, streamId: subscribed.streamId as number, clientId }
@@ -230,6 +243,32 @@ describe('terminal.multiplex presence events', () => {
     await ana.dispatchPromise
   })
 
+  it('flips typing on an input the mobile driver lock drops', async () => {
+    useOnePresenceClock()
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    // Why a mobile driver against a desktop client: that is the one combination
+    // isTerminalInputLockedForClient rejects, and the whole suite otherwise runs on an idle driver, so
+    // the stamp could sit below the gate and every assertion here would still pass.
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, {
+      clientId: 'ana',
+      runtimeOverrides: { getDriver: vi.fn().mockReturnValue({ kind: 'mobile' }) }
+    })
+
+    sendInputFrame(ana.handlers, 7, 'x')
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    expect(
+      lastPresence(ana.messages).find((row) => row.participantId === anaParticipantId)
+    ).toMatchObject({ typing: true, writing: false })
+    // Why non-vacuous: the keystroke provably never reached the PTY, so the row above is reporting
+    // human intent and not a write that landed anyway.
+    expect(ana.runtime.sendTerminal).not.toHaveBeenCalled()
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    await ana.dispatchPromise
+  })
+
   it('keeps a terminal.send burst out of the interactive map and off the typing flag', async () => {
     useOnePresenceClock()
     const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
@@ -303,6 +342,26 @@ describe('terminal.subscribe presence events', () => {
     expect(lastPresence(harness.messages)).toEqual([
       expect.objectContaining({ participantId: selfParticipantId, typing: true, self: true })
     ])
+
+    vi.useRealTimers()
+    harness.cleanups.get('terminal-1:ana')?.()
+    await harness.dispatchPromise
+  })
+
+  it('flips typing on an input the mobile driver lock drops', async () => {
+    useOnePresenceClock()
+    const selfParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    const harness = await startNegotiatedSubscribe(CONNECTION, GRANT, 'ana', true, {
+      getDriver: vi.fn().mockReturnValue({ kind: 'mobile' })
+    })
+
+    sendInputFrame(harness.binaryHandlers, harness.streamId, 'x')
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    expect(lastPresence(harness.messages)).toEqual([
+      expect.objectContaining({ participantId: selfParticipantId, typing: true, writing: false })
+    ])
+    expect(harness.runtime.sendTerminal).not.toHaveBeenCalled()
 
     vi.useRealTimers()
     harness.cleanups.get('terminal-1:ana')?.()
