@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeTerminalPresenceClientEvent } from '../../shared/runtime-client-events'
+import type { DeviceEntry } from './device-registry'
 import { TerminalPresenceRegistry } from './terminal-presence-registry'
 import {
   HOST_PARTICIPANT_ID,
@@ -15,6 +16,17 @@ import {
 import { createTerminalPresenceRosterPublisher } from './terminal-presence-roster-publisher'
 
 const PTY_ID = 'pty-1'
+
+// Why a whole registry row: the disclosure control is only real if the secret exists in the data the
+// projection is derived from, mapped exactly as runtime-rpc.ts's onReady consumer maps it.
+const ANA_DEVICE: DeviceEntry = {
+  deviceId: 'device-ana',
+  name: 'Ana laptop',
+  token: 'token-ana-secret',
+  scope: 'runtime',
+  pairedAt: 1,
+  lastSeenAt: 2
+}
 
 type Harness = {
   registry: TerminalPresenceRegistry
@@ -154,6 +166,39 @@ describe('terminal presence roster publisher', () => {
     expect(rows[0]?.attachedTerminals.toSorted()).toEqual(['term_a', 'term_b'])
   })
 
+  // §4.3, on the payload S5 introduces: the registry's deviceId is the relay binding identity and the
+  // on-disk navigation key, and the token is a credential. Neither may ride a broadcast.
+  it('publishes neither the registry deviceId nor the device token', () => {
+    harness.established.add('conn-terminal')
+    harness.registry.registerConnection({
+      connectionId: 'conn-terminal',
+      pairedDeviceId: ANA_DEVICE.deviceId,
+      label: ANA_DEVICE.name,
+      kind: ANA_DEVICE.scope
+    })
+    harness.handles.set(PTY_ID, 'term_1')
+    harness.registry.attach(PTY_ID, 'multiplex:conn-terminal:1', 'conn-terminal')
+    settle()
+
+    const fanOut = JSON.stringify(harness.published.at(-1))
+    const snapshot = JSON.stringify(harness.publisher.snapshot())
+    for (const serialized of [fanOut, snapshot]) {
+      expect(serialized).not.toContain(ANA_DEVICE.deviceId)
+      expect(serialized).not.toContain(ANA_DEVICE.token)
+    }
+    // Why the key set too: a substring check only catches what this fixture happens to name, and the
+    // failure mode is a newly threaded field, not a renamed one.
+    for (const row of harness.publisher.snapshot().participants) {
+      expect(Object.keys(row).toSorted()).toEqual([
+        'attachedTerminals',
+        'kind',
+        'label',
+        'participantId',
+        'self'
+      ])
+    }
+  })
+
   it('always carries the synthesized host row, even with nobody connected', () => {
     const snapshot = harness.publisher.snapshot()
     expect(snapshot.participants).toHaveLength(1)
@@ -207,6 +252,9 @@ describe('terminal presence roster caps', () => {
     const membership = membershipWith(1, TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS + 3)
     const peer = membership.participants.find((row) => row.kind === 'runtime')
     expect(peer?.attachedTerminals).toHaveLength(TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS)
+    // Why asserted here: `truncated` has two producers and means "more PEOPLE", so a handle-only
+    // overflow that set it would tell every client somebody is missing from the roster.
+    expect(membership.truncated).toBeUndefined()
   })
 })
 

@@ -47,6 +47,13 @@ function selfLabels(event: RuntimeTerminalPresenceClientEvent | undefined): stri
   return (event?.participants ?? []).filter((row) => row.self).map((row) => row.label)
 }
 
+function peerLabels(event: RuntimeTerminalPresenceClientEvent | undefined): string[] {
+  return (event?.participants ?? [])
+    .filter((row) => row.kind !== 'host')
+    .map((row) => row.label)
+    .toSorted()
+}
+
 describe('terminalPresence roster over a real socket', () => {
   const cleanups: (() => void | Promise<void>)[] = []
 
@@ -134,11 +141,10 @@ describe('terminalPresence roster over a real socket', () => {
       await waitFor(() => benEvents.some((event) => event.type === 'ready'))
 
       const benSnapshot = presenceOf(benEvents).at(0)
-      expect(benSnapshot?.participants.map((row) => row.label).toSorted()).toEqual([
-        'Ana laptop',
-        'Ben laptop',
-        expect.any(String)
-      ])
+      // Why partitioned by kind rather than sorted as one list: the host row's label is this machine's
+      // hostname, so a sorted-position assertion passes or fails on what the build agent is called.
+      expect(peerLabels(benSnapshot)).toEqual(['Ana laptop', 'Ben laptop'])
+      expect(benSnapshot?.participants.filter((row) => row.kind === 'host')).toHaveLength(1)
       expect(benSnapshot?.participants.some((row) => row.label === 'coordinator')).toBe(false)
       expect(selfLabels(benSnapshot)).toEqual(['Ben laptop'])
 
@@ -146,9 +152,8 @@ describe('terminalPresence roster over a real socket', () => {
       // different `self` — resolved per listener, and the one-shot is absent from that payload too.
       await waitFor(() => presenceOf(anaEvents).length > 1)
       const anaFanOut = presenceOf(anaEvents).at(-1)
-      expect(anaFanOut?.participants.map((row) => row.label).toSorted()).toEqual(
-        benSnapshot?.participants.map((row) => row.label).toSorted()
-      )
+      expect(peerLabels(anaFanOut)).toEqual(['Ana laptop', 'Ben laptop'])
+      expect(anaFanOut?.participants.filter((row) => row.kind === 'host')).toHaveLength(1)
       expect(selfLabels(anaFanOut)).toEqual(['Ana laptop'])
       expect(anaFanOut?.seq).toBeGreaterThan(0)
     }

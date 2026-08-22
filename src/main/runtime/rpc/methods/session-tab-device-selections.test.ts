@@ -3,6 +3,7 @@ import type {
   RuntimeMobileSessionClientTab,
   RuntimeMobileSessionTabsResult
 } from '../../../../shared/runtime-types'
+import type { DeviceEntry } from '../../device-registry'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import { ClientSessionTabSelectionStore } from '../../client-session-tab-selection'
 import { terminalPresenceRegistry } from '../../terminal-presence-registry'
@@ -12,6 +13,17 @@ import {
 } from './session-tab-device-selections'
 
 const WORKTREE = 'wt-1'
+
+// Why a whole registry row: the control is only real if the secret is present in the data the
+// projection derives from, mapped exactly as runtime-rpc.ts's onReady consumer maps it.
+const ANA_DEVICE: DeviceEntry = {
+  deviceId: 'device-ana',
+  name: 'Ana laptop',
+  token: 'token-ana-secret',
+  scope: 'runtime',
+  pairedAt: 1,
+  lastSeenAt: 2
+}
 
 function tab(id: string, title: string): RuntimeMobileSessionClientTab {
   return {
@@ -186,6 +198,20 @@ describe('session.tabs device selections', () => {
 
     const afterReconnect = projectSessionTabsForClient(snapshot(), ctx, true).deviceSelections ?? []
     expect(afterReconnect.map((row) => row.label)).toEqual(['Ben laptop'])
+  })
+
+  // §4.3, on W9: the grant id is threaded through TerminalPresenceGrantSelection one spread away from
+  // the wire, so the payload is asserted against a fixture whose deviceId and token are both known.
+  it('publishes neither the registry deviceId nor the device token', () => {
+    connect(established, 'conn-a', ANA_DEVICE.deviceId, ANA_DEVICE.name)
+    selectTab(store, ANA_DEVICE.deviceId, 'tab-a')
+    const ctx = makeCtx({ established, store, pairedDeviceId: ANA_DEVICE.deviceId })
+
+    const serialized = JSON.stringify(projectSessionTabsForClient(snapshot(), ctx, true))
+
+    expect(serialized).toContain('deviceSelections')
+    expect(serialized).not.toContain(ANA_DEVICE.deviceId)
+    expect(serialized).not.toContain(ANA_DEVICE.token)
   })
 
   // §4.11(c): asserted on the serialized artifact, because that is what actually reaches disk.
