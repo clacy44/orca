@@ -334,7 +334,15 @@ export class DeviceRegistry {
     }
   }
 
-  /** Whether the on-disk registry was actually read; false after a load failure. */
+  /**
+   * Whether the on-disk registry was actually read; false after a load failure.
+   *
+   * NOT sufficient on its own to authorize a destructive sweep. §2a gates orphan
+   * reconciliation on this flag AND a non-empty registry, because a missing file also
+   * reports true — which a transient existsSync miss during a secure-file replace can
+   * produce. Read it as "the zero devices below are not the result of a caught throw",
+   * never as "the device list is authoritative".
+   */
   get loadSucceeded(): boolean {
     return this.registryLoadSucceeded
   }
