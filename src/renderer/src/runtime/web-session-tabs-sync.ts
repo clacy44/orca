@@ -4413,7 +4413,12 @@ export function useWebSessionTabsSync(): void {
       }
     ])
 
-    return disposeSubscription
+    return () => {
+      // Why cleared here: selections are joined against THIS worktree's tab titles, so carrying them
+      // past the subscription that produced them renders a peer on a tab they are not on.
+      setPresenceSelectionsForEnvironment(environmentId, [])
+      disposeSubscription()
+    }
   }, [
     activeWorktreeId,
     activeWorktreeRuntimeEnvironmentId,
