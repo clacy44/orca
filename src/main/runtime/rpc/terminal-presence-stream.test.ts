@@ -142,6 +142,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 describe('terminal.multiplex presence events', () => {
@@ -318,6 +319,28 @@ describe('terminal.multiplex presence events', () => {
     // Why non-vacuous: the keystroke provably never reached the PTY, so the row above is reporting
     // human intent and not a write that landed anyway.
     expect(ana.runtime.sendTerminal).not.toHaveBeenCalled()
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    await ana.dispatchPromise
+  })
+
+  it('reads the TTL off the clock the registry wrote the stamps with', async () => {
+    useOnePresenceClock()
+    const selfParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    // Why the registry's clock is pointed away from wall time: the emit resolves `now` through the one
+    // process-wide registry, so this is the only place a test can separate the two domains. A Date.now()
+    // literal in the emit would compare these stamps against a clock that never wrote one, and the row
+    // would read idle the instant it was typed.
+    vi.spyOn(terminalPresenceRegistry, 'now').mockReturnValue(5_000)
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+
+    sendInputFrame(ana.handlers, 7, 'x')
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    expect(
+      lastPresence(ana.messages).find((row) => row.participantId === selfParticipantId)
+    ).toMatchObject({ typing: true })
 
     vi.useRealTimers()
     ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
