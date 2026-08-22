@@ -5255,8 +5255,31 @@ export class OrcaRuntimeService {
     return buildTerminalPresenceRosterParticipants({
       registry: terminalPresenceRegistry,
       hasEstablishedSubscription: (connectionId) => this.hasEstablishedSubscription(connectionId),
-      resolveTerminalHandle: (ptyId) => this.resolveExistingTerminalHandleForPty(ptyId)
+      resolveTerminalHandle: (ptyId) => this.resolveExistingTerminalHandleForPty(ptyId),
+      hostAttachedTerminals: this.resolveHostActiveTerminalHandles()
     })
+  }
+
+  // Why a synchronous, non-minting mirror of `resolveActiveTerminal`'s graph-ready branch rather than a
+  // call to it: membership is rebuilt on the coalescer's trailing edge, which cannot await, and issuing
+  // a handle while building a broadcast would let the roster mutate the handle table. A headless
+  // `orca serve` never reaches graph-ready, so its host row stays empty — correct, not a gap.
+  private resolveHostActiveTerminalHandles(): string[] {
+    if (this.graphStatus !== 'ready') {
+      return []
+    }
+    const activeWorktreeId = this.store?.getWorkspaceSession?.()?.activeWorktreeId ?? null
+    for (const tab of this.tabs.values()) {
+      if ((activeWorktreeId && tab.worktreeId !== activeWorktreeId) || !tab.activeLeafId) {
+        continue
+      }
+      const leaf = this.leaves.get(this.getLeafKey(tab.tabId, tab.activeLeafId))
+      const handle = leaf?.ptyId ? this.resolveExistingTerminalHandleForPty(leaf.ptyId) : null
+      if (handle) {
+        return [handle]
+      }
+    }
+    return []
   }
 
   // Why read-only: minting a handle while building a broadcast would let a roster mutate the handle
@@ -6068,6 +6091,11 @@ export class OrcaRuntimeService {
     for (const cb of [...this.graphSyncCallbacks]) {
       cb()
     }
+
+    // Why here: the host row's attachedTerminals is the authoritative window's active terminal, and a
+    // graph sync is the only lane that moves it (W8's "active-tab change" cadence for that row). The
+    // publisher's byte-identical diff absorbs every sync that did not actually change it.
+    this.scheduleTerminalPresenceRosterPublish()
 
     const agentOrchestrationByPaneKey = this.buildAgentOrchestrationByPaneKey()
     const nativeChatLaunchDraftResolutions =

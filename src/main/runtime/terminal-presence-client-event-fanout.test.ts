@@ -5,6 +5,13 @@ import { terminalPresenceRegistry } from './terminal-presence-registry'
 
 type Capture = { events: RuntimeClientEvent[] }
 
+function hostRow(runtime: OrcaRuntimeService) {
+  const event = runtime.getTerminalPresenceClientEventSnapshot(null).at(0)
+  return event?.type === 'terminalPresence'
+    ? event.participants.find((row) => row.kind === 'host')
+    : null
+}
+
 function presenceRows(capture: Capture) {
   const event = capture.events.findLast((entry) => entry.type === 'terminalPresence')
   return event?.type === 'terminalPresence' ? event : null
@@ -76,6 +83,38 @@ describe('terminalPresence fan-out', () => {
     const event = presenceRows(anonymous)
     expect(event?.participants.length).toBeGreaterThan(1)
     expect(event?.participants.every((row) => !row.self)).toBe(true)
+  })
+
+  // §2.1: the host row's attachedTerminals is the authoritative window's active terminal. The headless
+  // half is what the pre-existing "always carries the host row" test already covered, so the half that
+  // makes it non-vacuous is a desktop-hosted runtime whose human has a terminal open.
+  it('carries the authoritative window active terminal on the host row', () => {
+    const desktop = listen({ participantId: null })
+    // Headless first: no graph has ever synced, so the host row is honestly empty.
+    expect(hostRow(runtime)?.attachedTerminals).toEqual([])
+
+    const handle = runtime.preAllocateHandleForPty('pty-host')
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        { tabId: 'tab-1', worktreeId: 'wt-1', title: null, activeLeafId: 'leaf-1', layout: null }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'wt-1',
+          leafId: 'leaf-1',
+          paneRuntimeId: 1,
+          ptyId: 'pty-host'
+        }
+      ]
+    })
+
+    expect(hostRow(runtime)?.attachedTerminals).toEqual([handle])
+    // The cadence half: a graph sync is the only lane that moves this row, so it must also publish.
+    runtime.flushTerminalPresenceRosterPublish()
+    expect(
+      presenceRows(desktop)?.participants.find((row) => row.kind === 'host')?.attachedTerminals
+    ).toEqual([handle])
   })
 
   it('drops terminalPresence for a listener that does not consume presence', () => {
