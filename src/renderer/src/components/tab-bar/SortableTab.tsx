@@ -18,6 +18,7 @@ import {
 } from './drop-indicator'
 import { preventMiddleButtonDefault } from './middle-button-default-guard'
 import { useSortableTabRename } from './use-sortable-tab-rename'
+import { TerminalTabPresenceBadge } from './terminal-tab-presence-badge'
 import { SortableTabContextMenu } from './SortableTabContextMenu'
 import { translate } from '@/i18n/i18n'
 import { TAB_CONTAINER_WIDTH_CLASSES, TAB_LABEL_WIDTH_CLASSES } from './tab-width-rules'
@@ -295,6 +296,7 @@ export default function SortableTab({
           style={{ backgroundColor: tab.color }}
         />
       )}
+      {!isEditing && <TerminalTabPresenceBadge tabId={tab.id} />}
       {isExpanded && !isEditing && (
         <button
           className={`mr-1 flex items-center justify-center w-4 h-4 rounded-sm shrink-0 ${
