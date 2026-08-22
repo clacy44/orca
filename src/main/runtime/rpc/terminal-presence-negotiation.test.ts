@@ -93,19 +93,28 @@ describe('terminal.multiplex presence negotiation', () => {
     await harness.dispatchPromise
   })
 
-  it('refuses a participant when the socket grant and the dispatch envelope disagree', async () => {
-    // Why: the registry row is host-observed and so is the envelope; if they ever disagree the safe
-    // answer is to publish nothing. A mobile-scope envelope lands here too: the phone resolves as a
-    // participant (its W4 `self` depends on it) but W2's own-identity object stays runtime-scope
-    // until S7 gives mobile rows their staleness contract.
-    registerDesktopGrant()
+  it('publishes its own identity to a mobile-scope envelope (S7)', async () => {
+    // Why no scope gate any more: a phone is a participant, and withholding its own row left it unable
+    // to tell itself apart from a peer on the mirror it now receives.
+    const participantId = terminalPresenceRegistry.registerConnection({
+      connectionId: CONNECTION,
+      pairedDeviceId: GRANT,
+      label: "Ben's phone",
+      kind: 'mobile'
+    }).participantId
     const harness = startMultiplex({ pairedDeviceId: GRANT, clientKind: 'mobile' })
     await vi.waitFor(() => expect(harness.handlers.has(0)).toBe(true))
     sendSubscribeFrame(harness.handlers, { outputPause: 1, presence: 1 })
 
     const subscribed = await awaitSubscribed(harness.messages)
     expect(subscribed.capabilities).toEqual({ outputPause: 1, presence: 1 })
-    expect('presence' in subscribed).toBe(false)
+    expect(subscribed.presence).toEqual({
+      participantId,
+      label: "Ben's phone",
+      kind: 'mobile',
+      self: true
+    })
+    expect(JSON.stringify(subscribed)).not.toContain(GRANT)
 
     harness.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
     await harness.dispatchPromise
@@ -277,16 +286,15 @@ describe('terminal.subscribe presence negotiation', () => {
     await harness.dispatchPromise
   })
 
-  it('refuses a subscribe participant to a tracked mobile grant', async () => {
-    // Why: a phone IS tracked (the registry takes every authenticated socket) and now resolves a
-    // participant, so only W2's scope gate withholds the object here — the phone's own `self` row
-    // still resolves on the W4 mirror, asserted in the stream suite.
-    terminalPresenceRegistry.registerConnection({
+  it('publishes its own identity to a tracked mobile grant (S7)', async () => {
+    // Why: the phone's own subscribe path is where it learns its participantId, which is what lets it
+    // filter itself out of the read-only indication it renders from the W4 mirror.
+    const participantId = terminalPresenceRegistry.registerConnection({
       connectionId: CONNECTION,
       pairedDeviceId: GRANT,
       label: 'Ana phone',
       kind: 'mobile'
-    })
+    }).participantId
     const harness = startSubscribe(
       { pairedDeviceId: GRANT, clientKind: 'mobile' },
       {
@@ -299,7 +307,12 @@ describe('terminal.subscribe presence negotiation', () => {
 
     const subscribed = await awaitSubscribed(harness.messages)
     expect(subscribed.capabilities).toEqual({ presence: 1 })
-    expect('presence' in subscribed).toBe(false)
+    expect(subscribed.presence).toEqual({
+      participantId,
+      label: 'Ana phone',
+      kind: 'mobile',
+      self: true
+    })
 
     harness.cleanups.get('terminal-1:desktop-1')?.()
     await harness.dispatchPromise

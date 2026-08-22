@@ -514,9 +514,13 @@ describe('terminal.subscribe presence events', () => {
     expect(lastPresence(desktop.messages).filter((row) => row.self)).toEqual([
       expect.objectContaining({ participantId: desktopParticipantId })
     ])
-    // Why still withheld: W2's own-identity object stays runtime-scope until S7 gives mobile rows their
-    // staleness contract — the two gates are separate, and only this one is scoped by kind.
-    expect('presence' in subscribed).toBe(false)
+    // And W2 names the same participant, so the two gates cannot disagree about who this phone is.
+    expect(subscribed.presence).toEqual({
+      participantId: phoneParticipantId,
+      label: 'Ana phone',
+      kind: 'mobile',
+      self: true
+    })
 
     vi.useRealTimers()
     desktop.cleanups.get('terminal-1:ana')?.()

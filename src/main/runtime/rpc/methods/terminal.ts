@@ -141,17 +141,14 @@ type TerminalViewportClient = {
 }
 
 // Why: both stream handlers share one gate so the negotiated/host-resolved pair cannot drift apart;
-// a null result means OMIT the key, never emit a placeholder participantId. The runtime-scope rule is
-// W2's alone — S7 owes mobile rows a staleness contract before a phone renders its own identity, while
-// W4's `self` must resolve for every tracked participant or one of them reads as their own peer.
+// a null result means OMIT the key, never emit a placeholder participantId. No scope gate any more:
+// S7 gives mobile rows their staleness contract, so a phone is a participant like any other and may
+// learn which row on its own mirror is itself.
 function negotiatedStreamPresence(
   supportsPresence: boolean,
-  participant: TerminalPresenceParticipant | null,
-  clientKind: 'mobile' | 'runtime' | undefined
+  participant: TerminalPresenceParticipant | null
 ): TerminalPresenceStreamPresence | null {
-  return supportsPresence && participant && clientKind === 'runtime'
-    ? toStreamPresence(participant)
-    : null
+  return supportsPresence && participant ? toStreamPresence(participant) : null
 }
 
 // Why one builder for both handlers: `self` is resolved per emitting stream, so the two paths differ in
@@ -2799,8 +2796,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           const snapshotOutputSeq = serialized?.seq
           const streamPresence = negotiatedStreamPresence(
             stream.supportsPresence,
-            stream.participant,
-            clientKind
+            stream.participant
           )
           emit({
             type: 'subscribed',
@@ -3675,11 +3671,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           pairedDeviceId,
           clientKind
         })
-        const streamPresence = negotiatedStreamPresence(
-          supportsPresence,
-          streamParticipant,
-          clientKind
-        )
+        const streamPresence = negotiatedStreamPresence(supportsPresence, streamParticipant)
         emit({
           type: 'subscribed',
           streamId,
