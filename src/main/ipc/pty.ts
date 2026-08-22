@@ -7180,10 +7180,6 @@ export function registerPtyHandlers(
     !(typeof mainWebContents.isDestroyed === 'function' && mainWebContents.isDestroyed())
 
   const writePtyInput = (args: PtyWritePayload): boolean | Promise<boolean> => {
-    // Why first: this is the local human's keystroke, and presence reports intent, not PTY effect — every
-    // guard below can drop the write, and a peer whose input is blocked must still read as typing. Its
-    // Date.now() stamp lives in the presence registry alone; lastInputAtByPty stays performance.now().
-    terminalPresenceRegistry.recordHostInteractiveInput(args.id)
     // Why: mobile-presence-lock defense-in-depth — the renderer's onData guard can let one keystroke slip during the state-flip lag, so catch it server-side. See docs/mobile-presence-lock.md.
     if (runtime?.getDriver(args.id).kind === 'mobile') {
       return false
@@ -7206,9 +7202,6 @@ export function registerPtyHandlers(
   }
 
   const writePtyInputAccepted = (args: PtyWritePayload): boolean | Promise<boolean> => {
-    // Why first: same intent-not-effect rule as writePtyInput — the driver, ownership and provider checks
-    // below each return false on a keystroke the human really typed.
-    terminalPresenceRegistry.recordHostInteractiveInput(args.id)
     if (runtime?.getDriver(args.id).kind === 'mobile') {
       return false
     }
@@ -7235,10 +7228,20 @@ export function registerPtyHandlers(
 
   const hostViewportClaimTails = new Map<string, Promise<boolean>>()
 
+  // Why here and not inside the writers: this is the local human's keystroke, and presence reports
+  // intent, not PTY effect. The claim tail below drops the write entirely when a prior viewport claim
+  // lost — the contested moment a peer most needs the host to read as typing — and every guard inside
+  // the writers can drop it too. Its Date.now() stamp lives in the presence registry alone;
+  // lastInputAtByPty stays performance.now().
+  const stampHostInput = (args: PtyWritePayload): void => {
+    terminalPresenceRegistry.recordHostInteractiveInput(args.id)
+  }
+
   ipcMain.on('pty:write', (event, args: unknown) => {
     if (!isPtyWriteEventFromMainWindow(event, mainWindow.webContents) || !isPtyWritePayload(args)) {
       return
     }
+    stampHostInput(args)
     const claimTail = hostViewportClaimTails.get(args.id)
     if (claimTail) {
       void claimTail.then((claimed) => (claimed ? writePtyInput(args) : false))
@@ -7250,6 +7253,7 @@ export function registerPtyHandlers(
     if (!isPtyWriteEventFromMainWindow(event, mainWindow.webContents) || !isPtyWritePayload(args)) {
       return false
     }
+    stampHostInput(args)
     const claimTail = hostViewportClaimTails.get(args.id)
     return claimTail
       ? claimTail.then((claimed) => (claimed ? writePtyInputAccepted(args) : false))

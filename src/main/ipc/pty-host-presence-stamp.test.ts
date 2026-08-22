@@ -76,7 +76,10 @@ const mainWindow = {
 }
 const mainWindowIpcEvent = { sender: mainWindow.webContents }
 
-function setup(driverKind: 'idle' | 'mobile' = 'idle'): void {
+function setup(
+  driverKind: 'idle' | 'mobile' = 'idle',
+  runtimeOverrides: Record<string, unknown> = {}
+): void {
   handlers.clear()
   handleMock.mockReset()
   onMock.mockReset()
@@ -88,7 +91,8 @@ function setup(driverKind: 'idle' | 'mobile' = 'idle'): void {
   const runtime = {
     getDriver: () => ({ kind: driverKind }),
     setPtyController: vi.fn(),
-    handleMobileUnsubscribe: vi.fn()
+    handleMobileUnsubscribe: vi.fn(),
+    ...runtimeOverrides
   } as unknown as OrcaRuntimeService
   registerPtyHandlers(mainWindow as never, runtime)
 }
@@ -110,6 +114,37 @@ function writeFromMainWindow(data = 'x'): void {
     id: PTY_ID,
     data
   })
+}
+
+function writeAcceptedFromMainWindow(data = 'x'): Promise<boolean> | boolean {
+  return (
+    handlers.get('pty:writeAccepted') as (
+      event: unknown,
+      args: unknown
+    ) => Promise<boolean> | boolean
+  )(mainWindowIpcEvent, { id: PTY_ID, data })
+}
+
+function claimViewportFromMainWindow(): void {
+  ;(handlers.get('pty:claimViewport') as (event: unknown, args: unknown) => void)(
+    mainWindowIpcEvent,
+    { id: PTY_ID, cols: 120, rows: 40 }
+  )
+}
+
+// Why deferred: the claim tail is what makes the write asynchronous, so a stamp that rides it would
+// still pass an assertion taken after the promise settles. Holding it open pins the stamp to the
+// keystroke itself.
+function setupWithPendingViewportClaim(): (claimed: boolean) => void {
+  let settleClaim: (claimed: boolean) => void = () => {}
+  const claim = new Promise<boolean>((resolve) => {
+    settleClaim = resolve
+  })
+  setup('idle', { claimRemoteDesktopHost: vi.fn().mockReturnValue(claim) })
+  claimViewportFromMainWindow()
+  return (claimed: boolean) => {
+    settleClaim(claimed)
+  }
 }
 
 beforeEach(() => {
@@ -147,13 +182,36 @@ describe('host presence stamp (site c)', () => {
 
   it('stamps on writePtyInputAccepted, which rejects even earlier on ownership', async () => {
     setup()
-    const accepted = handlers.get('pty:writeAccepted') as (
-      event: unknown,
-      args: unknown
-    ) => Promise<boolean> | boolean
 
-    await accepted(mainWindowIpcEvent, { id: PTY_ID, data: 'y' })
+    await writeAcceptedFromMainWindow('y')
 
+    expect(hostRows()).toEqual([expect.objectContaining({ kind: 'host', typing: true })])
+  })
+
+  it('stamps a write a lost viewport claim drops before the writer ever runs', async () => {
+    const settleClaim = setupWithPendingViewportClaim()
+
+    writeFromMainWindow()
+    // Why asserted while the claim is still in flight: the write itself is queued behind the tail, so a
+    // stamp inside the writer would read false here — the window where a remote desktop viewer owns the
+    // width and the local human is reclaiming it is exactly when a peer must see the host typing.
+    expect(hostRows()).toEqual([expect.objectContaining({ kind: 'host', typing: true })])
+
+    settleClaim(false)
+    await Promise.resolve()
+    expect(hostRows()).toEqual([expect.objectContaining({ kind: 'host', typing: true })])
+  })
+
+  it('stamps an accepted write the lost claim answers false', async () => {
+    const settleClaim = setupWithPendingViewportClaim()
+
+    const accepted = writeAcceptedFromMainWindow()
+    expect(hostRows()).toEqual([expect.objectContaining({ kind: 'host', typing: true })])
+
+    settleClaim(false)
+    // Why the return value is asserted: it proves the keystroke really was dropped, so the row above is
+    // reporting intent rather than a write that quietly landed anyway.
+    await expect(accepted).resolves.toBe(false)
     expect(hostRows()).toEqual([expect.objectContaining({ kind: 'host', typing: true })])
   })
 
