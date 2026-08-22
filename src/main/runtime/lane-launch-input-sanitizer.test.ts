@@ -28,9 +28,8 @@ describe('sanitizeLaneLaunchEnv', () => {
 
   it.each([
     ['env', { env: { ANTHROPIC_API_KEY: 'x' } }],
-    ['agentEnv', { agentEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'x' } }],
-    ['envToDelete', { envToDelete: ['ANTHROPIC_AUTH_TOKEN'] }]
-  ])('refuses an auth env var in %s', (_surface, input) => {
+    ['agentEnv', { agentEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'x' } }]
+  ])('refuses an auth env var defined in %s', (_surface, input) => {
     const result = sanitizeLaneLaunchEnv(input)
 
     expect(result.ok).toBe(false)
@@ -38,6 +37,49 @@ describe('sanitizeLaneLaunchEnv', () => {
       return
     }
     expect(result.refusal.code).toBe('terminal.agent_env_refused')
+  })
+
+  it('allows auth vars in envToDelete, which every lane pane already asks for', () => {
+    // Why: pty.ts builds authEnvToDelete as CLAUDE_AUTH_ENV_VARS + ANTHROPIC_CUSTOM_HEADERS
+    // whenever stripAuthEnv is set, and §2a arms that on every lane pane. Refusing the
+    // deletion list would refuse every lane launch. Defining is the attack; deleting is not.
+    const envToDelete = [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'AWS_BEARER_TOKEN_BEDROCK',
+      'ANTHROPIC_CUSTOM_HEADERS'
+    ]
+
+    const result = sanitizeLaneLaunchEnv({ envToDelete })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      return
+    }
+    expect(result.envToDelete).toEqual(envToDelete)
+  })
+
+  it('folds env-key case on win32 for both the refusal and the config-dir strip', () => {
+    expect(sanitizeLaneLaunchEnv({ env: { anthropic_api_key: 'x' }, platform: 'win32' }).ok).toBe(
+      false
+    )
+    expect(sanitizeLaneLaunchEnv({ env: { anthropic_api_key: 'x' }, platform: 'linux' }).ok).toBe(
+      true
+    )
+
+    const win32 = sanitizeLaneLaunchEnv({
+      env: { claude_config_dir: 'C:\\victim' },
+      envToDelete: ['Claude_Config_Dir'],
+      platform: 'win32'
+    })
+
+    expect(win32.ok).toBe(true)
+    if (!win32.ok) {
+      return
+    }
+    expect(win32.env).toEqual({})
+    expect(win32.envToDelete).toEqual([])
   })
 
   it('leaves absent surfaces absent', () => {

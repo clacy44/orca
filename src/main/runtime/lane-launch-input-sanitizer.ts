@@ -3,6 +3,7 @@ import {
   canonicalizePathForContainment,
   isCanonicalPathWithinAnyRoot
 } from '../claude-accounts/canonical-path-containment'
+import { envKeysMatch, withoutEnvKey, withoutEnvKeyDeletion } from '../../shared/lane-env-key-case'
 
 // NOT WIRED: no spawn calls this yet — lanes do not exist; this is the allowlist/scrub half
 // of S9's computeLaneLaunch, landed early so the later slices have one tested place to call.
@@ -18,8 +19,9 @@ export type LaneLaunchRefusal = { code: LaneLaunchRefusalCode; message: string }
 
 export type LaneLaunchEnvInput = {
   env?: Record<string, string> | null
-  envToDelete?: readonly string[] | null
+  envToDelete?: string[] | null
   agentEnv?: Record<string, string> | null
+  platform?: NodeJS.Platform
 }
 
 export type LaneLaunchEnvResult =
@@ -36,10 +38,20 @@ export type LaneLaunchEnvResult =
  * list, since a deletion drops the lane back onto the shared `~/.claude` just as effectively
  * as an override — and refuses any `CLAUDE_AUTH_ENV_VARS` key loudly, because those outrank
  * a stored login and would repoint the launch at an attacker's API key.
+ *
+ * The refusal covers `env` and `agentEnv` only. *Defining* an auth var is the attack;
+ * *deleting* one is the safe direction and is what pty.ts already asks for on every lane pane
+ * (`authEnvToDelete` under `stripAuthEnv`), so refusing it would refuse every lane launch.
+ *
+ * Key comparison folds case on win32, where `anthropic_api_key` and `ANTHROPIC_API_KEY` are
+ * one variable to the child process and two keys to this record (S9 §2m(5)).
  */
 export function sanitizeLaneLaunchEnv(input: LaneLaunchEnvInput): LaneLaunchEnvResult {
+  const platform = input.platform ?? process.platform
   const refusedIn = (surface: string, keys: readonly string[]): LaneLaunchRefusal | null => {
-    const offender = keys.find((key) => (CLAUDE_AUTH_ENV_VARS as readonly string[]).includes(key))
+    const offender = keys.find((key) =>
+      CLAUDE_AUTH_ENV_VARS.some((authKey) => envKeysMatch(key, authKey, platform))
+    )
     return offender
       ? {
           code: 'terminal.agent_env_refused',
@@ -49,17 +61,21 @@ export function sanitizeLaneLaunchEnv(input: LaneLaunchEnvInput): LaneLaunchEnvR
   }
   const refusal =
     refusedIn('env', Object.keys(input.env ?? {})) ??
-    refusedIn('launchConfig.agentEnv', Object.keys(input.agentEnv ?? {})) ??
-    refusedIn('envToDelete', [...(input.envToDelete ?? [])])
+    refusedIn('launchConfig.agentEnv', Object.keys(input.agentEnv ?? {}))
   if (refusal) {
     return { ok: false, refusal }
   }
   return {
     ok: true,
-    ...(input.env ? { env: withoutClaudeConfigDir(input.env) } : {}),
-    ...(input.agentEnv ? { agentEnv: withoutClaudeConfigDir(input.agentEnv) } : {}),
+    ...(input.env ? { env: withoutEnvKey(input.env, CLAUDE_CONFIG_DIR_ENV_KEY, platform) } : {}),
+    ...(input.agentEnv
+      ? { agentEnv: withoutEnvKey(input.agentEnv, CLAUDE_CONFIG_DIR_ENV_KEY, platform) }
+      : {}),
     ...(input.envToDelete
-      ? { envToDelete: input.envToDelete.filter((key) => key !== CLAUDE_CONFIG_DIR_ENV_KEY) }
+      ? {
+          envToDelete:
+            withoutEnvKeyDeletion(input.envToDelete, CLAUDE_CONFIG_DIR_ENV_KEY, platform) ?? []
+        }
       : {})
   }
 }
@@ -148,12 +164,6 @@ export function assertLaneResumePathsContained(
     }
   }
   return { ok: true }
-}
-
-function withoutClaudeConfigDir(env: Record<string, string>): Record<string, string> {
-  const next = { ...env }
-  delete next[CLAUDE_CONFIG_DIR_ENV_KEY]
-  return next
 }
 
 /**
