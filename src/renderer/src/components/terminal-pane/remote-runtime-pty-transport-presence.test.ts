@@ -174,6 +174,33 @@ describe('remote runtime pty transport presence lane', () => {
     expect(presenceFor(ptyId).participants).toEqual([])
   })
 
+  // §2.7's "multiplex reconnecting" row: the pane's own stream is the only authority for its chip, so
+  // when that stream dies the chip goes with it rather than freezing on the last frame it saw.
+  it('clears the pane chip when its own stream ends mid-TTL', async () => {
+    const { presenceFor, ptyId, streamId } = await attachedTransport()
+
+    emitStreamEvent({
+      type: 'terminal-presence',
+      streamId,
+      participants: [
+        {
+          participantId: 'p-peer',
+          label: 'Ana laptop',
+          kind: 'runtime',
+          self: false,
+          typing: true,
+          writing: false,
+          since: 20
+        }
+      ]
+    })
+    expect(presenceFor(ptyId).participants).toHaveLength(1)
+
+    emitStreamEvent({ type: 'end', streamId })
+
+    expect(presenceFor(ptyId).participants).toEqual([])
+  })
+
   it('ignores an unparseable arbitration notice while keeping the roster', async () => {
     const { presenceFor, ptyId, streamId } = await attachedTransport()
 
