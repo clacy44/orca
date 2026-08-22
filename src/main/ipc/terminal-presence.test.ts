@@ -121,6 +121,32 @@ function driveW4StreamListener(): number[] {
   return emits
 }
 
+/** Re-registers the lane behind a notifier that records what it subscribed and how many of those
+ *  subscriptions are still live, because a subscription the lane never releases is otherwise silent. */
+function trackNotifierSubscriptions(): {
+  subscribed: string[]
+  liveCount: (ptyId: string) => number
+} {
+  const subscribed: string[] = []
+  const live = new Map<string, number>()
+  dispose()
+  const inner = notifier
+  notifier = {
+    subscribe: (ptyId, listener) => {
+      subscribed.push(ptyId)
+      live.set(ptyId, (live.get(ptyId) ?? 0) + 1)
+      const unsubscribe = inner.subscribe(ptyId, listener)
+      return () => {
+        live.set(ptyId, (live.get(ptyId) ?? 0) - 1)
+        unsubscribe()
+      }
+    },
+    dispose: () => inner.dispose()
+  }
+  register()
+  return { subscribed, liveCount: (ptyId) => live.get(ptyId) ?? 0 }
+}
+
 function peerRow(payload: TerminalPresenceLocalTerminal) {
   return payload.participants.find((row) => row.participantId !== 'host')
 }
@@ -259,17 +285,7 @@ describe('local terminal presence IPC lane', () => {
   })
 
   it('stops re-arming a watch once a peer grant write has expired', () => {
-    const subscribed: string[] = []
-    dispose()
-    const inner = notifier
-    notifier = {
-      subscribe: (ptyId, listener) => {
-        subscribed.push(ptyId)
-        return inner.subscribe(ptyId, listener)
-      },
-      dispose: () => inner.dispose()
-    }
-    register()
+    const { subscribed } = trackNotifierSubscriptions()
     registry.registerConnection({
       connectionId: 'conn-ben',
       pairedDeviceId: 'grant-ben',
@@ -291,6 +307,21 @@ describe('local terminal presence IPC lane', () => {
     // life. Reading the projected rows instead is what keeps a solo desktop paying nothing.
     expect(subscribed).toEqual([])
     expect(stub.sends).toEqual([])
+  })
+
+  it('releases its notifier subscription once the last peer leaves', () => {
+    const notifierSubscriptions = trackNotifierSubscriptions()
+    attachPeer()
+    expect(notifierSubscriptions.liveCount(PTY_ID)).toBe(1)
+
+    registry.detach(PTY_ID, PEER_KEY)
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    // Why asserted on the notifier and not on the send spy: a leaked subscription is invisible there —
+    // publish() bails on a peerless PTY — but it keeps the notifier's coalescer scheduling and its TTL
+    // timer re-arming on every host keystroke for the rest of the PTY's life. A solo desktop that once
+    // had a guest must go back to paying nothing.
+    expect(notifierSubscriptions.liveCount(PTY_ID)).toBe(0)
   })
 
   it('leaves a W4 stream listener on the same PTY exactly as it found it', () => {
