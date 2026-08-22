@@ -22,12 +22,9 @@ export function resolveTerminalListPresenceScope(
   registry: TerminalPresenceRegistry,
   identity: TerminalPresenceStreamIdentity
 ): TerminalListPresenceScope | null {
-  // Why the gate is per-caller and never per-row: the roster's `'presence' in terminal` probe is only
-  // sound while a response carries the key on every row or on none. A phone renders no presence surface
-  // today, so it is served the byte-identical pre-presence payload instead of a roster it would drop.
-  if (identity.clientKind === 'mobile') {
-    return null
-  }
+  // Why no mobile gate: under Q5 a phone is a participant, not a suppressed class — §2.7 has it appear
+  // in W6 payloads AND receive them. A key-less response is also the one shape §2.4's per-row capability
+  // probe misreads, so refusing a phone here would make a capable host look pre-presence forever.
   const participant = resolveStreamParticipant(registry, identity)
   if (participant) {
     return { selfParticipantId: participant.participantId }

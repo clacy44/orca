@@ -45,13 +45,18 @@ function spawnPty(runtime: OrcaRuntimeService, ptyId: string, worktreeId: string
 
 function attachParticipant(
   ptyId: string,
-  participant: { connectionId: string; pairedDeviceId: string; label: string }
+  participant: {
+    connectionId: string
+    pairedDeviceId: string
+    label: string
+    kind?: 'runtime' | 'mobile'
+  }
 ): string {
   const registered = terminalPresenceRegistry.registerConnection({
     connectionId: participant.connectionId,
     pairedDeviceId: participant.pairedDeviceId,
     label: participant.label,
-    kind: 'runtime'
+    kind: participant.kind ?? 'runtime'
   })
   const subscriptionKey = `terminal-multiplex:${participant.connectionId}`
   terminalPresenceRegistry.attach(ptyId, subscriptionKey, participant.connectionId)
@@ -358,7 +363,7 @@ describe('terminal.list presence caller scope', () => {
     ])
   })
 
-  it('populates for a runtime-scope caller in the fixture the mobile caller is refused', async () => {
+  it('populates every row for a remote caller that is not itself attached', async () => {
     const runtime = makeRuntime()
     spawnPty(runtime, 'pty-shared', REPO_WORKTREE_ID)
     attachParticipant('pty-shared', {
@@ -376,13 +381,23 @@ describe('terminal.list presence caller scope', () => {
     expect(rowFor(result, 'pty-shared').presence?.attachedCount).toBe(1)
   })
 
-  it('populates nothing for a mobile-scope caller', async () => {
+  // Why the Q5 control: §2.7 makes mobile a participant, not a suppressed class — it appears in W6
+  // payloads AND receives them. Refusing the key would hand a phone the one shape §2.4's per-row
+  // capability probe misreads, leaving a capable host looking pre-presence forever.
+  it('serves a mobile-scope caller the key on every row and marks its own', async () => {
     const runtime = makeRuntime()
     spawnPty(runtime, 'pty-shared', REPO_WORKTREE_ID)
+    spawnPty(runtime, 'pty-idle', EMPTY_WORKTREE_ID)
     attachParticipant('pty-shared', {
       connectionId: 'conn-ana',
       pairedDeviceId: 'device-ana',
       label: 'Ana'
+    })
+    const phoneParticipantId = attachParticipant('pty-shared', {
+      connectionId: 'conn-phone',
+      pairedDeviceId: 'device-phone',
+      label: "Ben's phone",
+      kind: 'mobile'
     })
 
     const result = await listOverRemoteSocket(
@@ -391,10 +406,21 @@ describe('terminal.list presence caller scope', () => {
       { includePresence: true }
     )
 
-    // Why every row and not just this one: the gate is per-caller, so a phone must never see a response
-    // where some rows carry the key — that is the shape the roster's capability probe would misread.
-    expect(result.terminals).toHaveLength(1)
-    expect(result.terminals.every((terminal) => !('presence' in terminal))).toBe(true)
+    expect(result.terminals.map((terminal) => 'presence' in terminal)).toEqual([true, true])
+    expect(
+      rowFor(result, 'pty-shared').presence?.participants.filter(
+        (participant) => participant.self === true
+      )
+    ).toEqual([
+      {
+        participantId: phoneParticipantId,
+        label: "Ben's phone",
+        kind: 'mobile',
+        typing: true,
+        writing: false,
+        self: true
+      }
+    ])
   })
 })
 
