@@ -85,6 +85,17 @@ describe('formatOrchestrationCheckText waitInterrupted', () => {
     )
   })
 
+  it('says the acknowledgement landed but the outcome is unknown', () => {
+    expect(
+      formatOrchestrationCheckText(
+        interrupted({ waitInterrupted: 'outcome_unknown' }),
+        'term_coord'
+      )
+    ).toBe(
+      "Wait ended: this check acknowledged its Delivery but the wait's outcome is unknown. Re-run check to see the current mailbox."
+    )
+  })
+
   it('still prints exactly No messages. for a genuinely empty mailbox', () => {
     expect(formatOrchestrationCheckText(interrupted(), 'term_coord')).toBe('No messages.')
   })

@@ -79,6 +79,22 @@ describe('orchestration check waitInterrupted', () => {
     expect(process.exitCode).toBeUndefined()
   })
 
+  it('names an applied acknowledgement whose wait outcome is unknown without failing', async () => {
+    const rendered = await runCheck({
+      messages: [],
+      count: 0,
+      runId: 'run_7',
+      acknowledged: 'delivery_1',
+      timedOut: false,
+      cancelled: false,
+      waitInterrupted: 'outcome_unknown'
+    })
+
+    expect(rendered).toContain("acknowledged its Delivery but the wait's outcome is unknown")
+    expect(rendered).not.toBe('No messages.')
+    expect(process.exitCode).toBeUndefined()
+  })
+
   it('leaves an ordinary empty mailbox exactly as it was', async () => {
     const rendered = await runCheck({
       messages: [],

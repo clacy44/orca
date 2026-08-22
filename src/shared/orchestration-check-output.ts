@@ -110,6 +110,12 @@ export function formatOrchestrationCheckText(
     if (prepared.waitInterrupted === 'waiter_exists') {
       return `${legacyHeader}Wait ended: another actionable waiter already owns this Run's mailbox; only one can block on it at a time.${deliveryNotice}`
     }
+    // Why its own branch: this value is the stored receipt a retried request replays, so reading
+    // it as an empty mailbox tells the coordinator nothing arrived on a call whose --ack already
+    // consumed a batch.
+    if (prepared.waitInterrupted === 'outcome_unknown') {
+      return `${legacyHeader}Wait ended: this check acknowledged its Delivery but the wait's outcome is unknown. Re-run check to see the current mailbox.${deliveryNotice}`
+    }
     return `${legacyHeader}No messages.${deliveryNotice}`
   }
   const rendered = prepared.messages
