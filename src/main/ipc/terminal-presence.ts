@@ -21,7 +21,6 @@ import {
   type TerminalPresenceChangeNotifier
 } from '../runtime/terminal-presence-change-notifier'
 import {
-  HOST_ATTACHMENT_KEY,
   terminalPresenceRegistry,
   type TerminalPresenceRegistry
 } from '../runtime/terminal-presence-registry'
@@ -81,15 +80,10 @@ export function registerTerminalPresenceHandlers(
   })
 
   // Why the reserved host key is not a peer: the local human is the reader of this channel, so a PTY
-  // holding only that key has nobody to announce.
-  const hasPeerPresence = (ptyId: string): boolean => {
-    for (const key of registry.attachmentsOf(ptyId).keys()) {
-      if (key !== HOST_ATTACHMENT_KEY) {
-        return true
-      }
-    }
-    return registry.grantWritesOf(ptyId).size > 0
-  }
+  // holding only that key has nobody to announce. Read off the projected rows and not the raw maps, so
+  // this and publish() cannot disagree — an expired grant write still occupies its map but is no row.
+  const hasPeer = (participants: TerminalPresenceActivityRow[]): boolean =>
+    participants.some((row) => row.participantId !== HOST_PARTICIPANT_ID)
 
   const dropWatch = (ptyId: string): void => {
     watchedPtyIds.get(ptyId)?.()
@@ -105,7 +99,7 @@ export function registerTerminalPresenceHandlers(
 
   const publish = (ptyId: string): void => {
     const participants = rowsFor(ptyId)
-    const peers = participants.some((row) => row.participantId !== HOST_PARTICIPANT_ID)
+    const peers = hasPeer(participants)
     // Why both halves of the guard: a solo desktop stamps the reserved host key on every keystroke, so
     // "no peers" must stay silent — but the one payload that CLEARS a chip is also a no-peer payload.
     if (!peers && !publishedPtyIds.has(ptyId)) {
@@ -121,7 +115,7 @@ export function registerTerminalPresenceHandlers(
     send(toTerminal(ptyId, participants))
   }
 
-  const ensureWatch = (ptyId: string): void => {
+  const watch = (ptyId: string): void => {
     if (watchedPtyIds.has(ptyId)) {
       return
     }
@@ -129,6 +123,13 @@ export function registerTerminalPresenceHandlers(
       ptyId,
       notifier.subscribe(ptyId, () => publish(ptyId))
     )
+  }
+
+  const ensureWatch = (ptyId: string): void => {
+    if (watchedPtyIds.has(ptyId)) {
+      return
+    }
+    watch(ptyId)
     // Why immediately and not through the coalescer: the notifier schedules only for PTYs it already
     // watches, so the change that created this watch reached nobody — and that change is a peer
     // arriving, the one event a chip should not wait a window for.
@@ -137,22 +138,34 @@ export function registerTerminalPresenceHandlers(
 
   const unsubscribeRegistry = registry.onChange((ptyId) => {
     // Why gated on peers rather than watching every PTY: a watch arms a coalescer and a TTL timer, and
-    // the host's own keystrokes stamp every local PTY. A solo desktop must pay nothing.
-    if (hasPeerPresence(ptyId)) {
-      ensureWatch(ptyId)
+    // the host's own keystrokes stamp every local PTY. A solo desktop must pay nothing — and a PTY
+    // already watched pays nothing here either, because the notifier drives it from now on.
+    if (watchedPtyIds.has(ptyId) || !hasPeer(rowsFor(ptyId))) {
+      return
     }
+    ensureWatch(ptyId)
   })
 
-  const snapshot = (): TerminalPresenceLocalSnapshot => {
+  // Why not named `snapshot`: it also arms a watch per PTY it returns, because hydration is the only
+  // way a pre-registration peer reaches the renderer and the only chance to arm what retracts it.
+  const hydrate = (): TerminalPresenceLocalSnapshot => {
     // Why the watch set too: attachments name every PTY somebody is streaming, and a grant-write-only
     // writer (the phone's chat composer) has no attachment to enumerate.
     const ptyIds = new Set([...registry.attachmentsSnapshot().keys(), ...watchedPtyIds.keys()])
     const terminals: TerminalPresenceLocalTerminal[] = []
     for (const ptyId of ptyIds) {
       const participants = rowsFor(ptyId)
-      if (participants.length > 0) {
-        terminals.push(toTerminal(ptyId, participants))
+      // Why the same peer test publish() uses: the host row rides `snapshot.host`, so a host-only PTY
+      // would seed a row the renderer can never retract — no push is ever sent for a peerless PTY.
+      if (!hasPeer(participants)) {
+        continue
       }
+      // Why hydration arms the watch: a peer attached before these handlers registered reaches the
+      // renderer only through here, and the payload that CLEARS its chip is a peerless one — which the
+      // change gate above never arms a watch for. Watch-only: this response IS the first publish.
+      watch(ptyId)
+      publishedPtyIds.add(ptyId)
+      terminals.push(toTerminal(ptyId, participants))
     }
     return { host: hostRow(), terminals }
   }
@@ -169,7 +182,7 @@ export function registerTerminalPresenceHandlers(
     if (!isMainWindowSender(event)) {
       return { host: hostRow(), terminals: [] }
     }
-    return snapshot()
+    return hydrate()
   })
 
   const dispose = (): void => {

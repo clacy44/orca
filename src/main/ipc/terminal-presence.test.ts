@@ -15,6 +15,7 @@ import type {
   TerminalPresenceLocalTerminal
 } from '../../shared/terminal-presence-ipc'
 import { TerminalPresenceRegistry } from '../runtime/terminal-presence-registry'
+import { TERMINAL_PRESENCE_ACTIVITY_TTL_MS } from '../runtime/terminal-presence-activity-rows'
 import {
   TERMINAL_PRESENCE_COALESCE_WINDOW_MS,
   createTerminalPresenceChangeNotifier,
@@ -99,6 +100,25 @@ function attachPeer(): void {
     kind: 'runtime'
   })
   registry.attach(PTY_ID, PEER_KEY, 'conn-ana')
+}
+
+/** The full arm/publish/clear/drop cycle as a W4 stream listener on the same notifier key would see it,
+ *  as offsets from the start so two runs at different clock positions stay comparable. The host types
+ *  before the peer leaves on purpose: that stamp outlives the lane's dropWatch, so the last entry here
+ *  is a falling edge the lane could only deliver by not disturbing the key it shares. */
+function driveW4StreamListener(): number[] {
+  const startedAt = Date.now()
+  const emits: number[] = []
+  const unsubscribe = notifier.subscribe(PTY_ID, () => emits.push(Date.now() - startedAt))
+  attachPeer()
+  vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+  registry.recordInteractiveInput(PTY_ID, PEER_KEY)
+  vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+  registry.recordHostInteractiveInput(PTY_ID)
+  registry.detach(PTY_ID, PEER_KEY)
+  vi.advanceTimersByTime(TERMINAL_PRESENCE_ACTIVITY_TTL_MS * 2)
+  unsubscribe()
+  return emits
 }
 
 function peerRow(payload: TerminalPresenceLocalTerminal) {
@@ -209,6 +229,84 @@ describe('local terminal presence IPC lane', () => {
 
     // Negative control for the sender gate: presence names the humans on this machine.
     expect(invokeGet({ id: 'someone-else' }).terminals).toEqual([])
+  })
+
+  it('clears a chip for a peer that was already attached when the handlers registered', () => {
+    // Reachable on headless `orca serve` then desktop activation, and on macOS close-window/reopen.
+    // Hydration is the only way this peer reaches the renderer, so it must arm the watch too: the
+    // payload that retracts the chip is a peerless one, and the change gate never arms one for those.
+    dispose()
+    attachPeer()
+    register()
+    stub.sends.length = 0
+    expect(invokeGet(stub.sender).terminals).toHaveLength(1)
+
+    registry.detach(PTY_ID, PEER_KEY)
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    expect(stub.sends).toHaveLength(1)
+    expect(stub.sends[0]?.ptyId).toBe(PTY_ID)
+    expect(peerRow(stub.sends[0]!)).toBeUndefined()
+  })
+
+  it('hydrates nothing for a solo desktop that has typed in several PTYs', () => {
+    registry.recordHostInteractiveInput(PTY_ID)
+    registry.recordHostInteractiveInput('pty-local-2')
+
+    // Negative control for the suppression rule: the host row rides `snapshot.host`, so a host-only
+    // terminal here is a row the renderer would seed and no later push could ever clear.
+    expect(invokeGet(stub.sender).terminals).toEqual([])
+  })
+
+  it('stops re-arming a watch once a peer grant write has expired', () => {
+    const subscribed: string[] = []
+    dispose()
+    const inner = notifier
+    notifier = {
+      subscribe: (ptyId, listener) => {
+        subscribed.push(ptyId)
+        return inner.subscribe(ptyId, listener)
+      },
+      dispose: () => inner.dispose()
+    }
+    register()
+    registry.registerConnection({
+      connectionId: 'conn-ben',
+      pairedDeviceId: 'grant-ben',
+      label: "Ben's phone",
+      kind: 'mobile'
+    })
+    registry.recordGrantWrite(PTY_ID, 'grant-ben')
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_ACTIVITY_TTL_MS * 2)
+    registry.releaseConnection('conn-ben')
+    subscribed.length = 0
+    stub.sends.length = 0
+
+    registry.recordHostInteractiveInput(PTY_ID)
+    registry.recordHostInteractiveInput(PTY_ID)
+    registry.recordHostInteractiveInput(PTY_ID)
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS * 4)
+
+    // Nothing sweeps grant writes on disconnect, so the raw map still names Ben for this PTY's whole
+    // life. Reading the projected rows instead is what keeps a solo desktop paying nothing.
+    expect(subscribed).toEqual([])
+    expect(stub.sends).toEqual([])
+  })
+
+  it('leaves a W4 stream listener on the same PTY exactly as it found it', () => {
+    const withLane = driveW4StreamListener()
+
+    // Companion run with no registerTerminalPresenceHandlers at all: a renderer that never registers
+    // the channel must leave publication to peers byte-identical.
+    dispose()
+    notifier.dispose()
+    registry = new TerminalPresenceRegistry()
+    notifier = createTerminalPresenceChangeNotifier({ registry })
+    const withoutLane = driveW4StreamListener()
+
+    // Non-vacuity: three coalesced emits plus the falling edge that outlives the lane's own teardown.
+    expect(withLane).toHaveLength(4)
+    expect(withoutLane).toEqual(withLane)
   })
 
   it('stops publishing and removes its handler once the window closes', () => {
