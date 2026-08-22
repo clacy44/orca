@@ -93,6 +93,7 @@ import {
 import { parseAppSshPtyId, toAppSshPtyId, toRelaySshPtyId } from '../providers/ssh-pty-id'
 import { createPtySpawnTiming } from './pty-spawn-timing'
 import { enforceClaudeConfigDirLaunchScope } from './claude-config-dir-launch-guard'
+import { deleteEnvKeyVariants } from '../../shared/lane-env-key-case'
 import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
   isSafePtySessionId,
@@ -109,7 +110,10 @@ import {
 } from '../daemon/daemon-errors'
 import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-auth-service'
 import type { ClaudeAccountSelectionTarget } from '../claude-accounts/runtime-selection'
-import { CLAUDE_AUTH_ENV_VARS, hasClaudeAuthEnvConflict } from '../claude-accounts/environment'
+import {
+  hasClaudeAuthEnvConflict,
+  resolveClaudeAuthEnvDeletions
+} from '../claude-accounts/environment'
 import {
   isClaudeAuthSwitchInProgress,
   markClaudePtyExited,
@@ -1182,12 +1186,8 @@ function deleteRequestedEnvKeys(
   env: Record<string, string> | undefined,
   keys: string[] | undefined
 ): void {
-  if (!env || !keys) {
-    return
-  }
-  for (const key of keys) {
-    delete env[key]
-  }
+  // Delegating: on win32 a requested key names every casing of one variable (§2m(5)).
+  deleteEnvKeyVariants(env, keys ?? [])
 }
 
 function shouldSkipCodexHomeEnvForWindowsShell(
@@ -4737,7 +4737,7 @@ export function registerPtyHandlers(
       }
 
       const authEnvToDelete = claudeAuth?.stripAuthEnv
-        ? [...CLAUDE_AUTH_ENV_VARS, 'ANTHROPIC_CUSTOM_HEADERS']
+        ? resolveClaudeAuthEnvDeletions([env, process.env])
         : undefined
       const spawnOptions: PtySpawnOptions = {
         cols: args.cols,
@@ -6441,7 +6441,7 @@ export function registerPtyHandlers(
           ? { ...env, ORCA_TERMINAL_HANDLE: preAllocatedHandle }
           : env
         const envToDelete = claudeAuth?.stripAuthEnv
-          ? [...CLAUDE_AUTH_ENV_VARS, 'ANTHROPIC_CUSTOM_HEADERS']
+          ? resolveClaudeAuthEnvDeletions([spawnEnv, process.env])
           : undefined
         let combinedEnvToDelete = mergePtyEnvDeletions(
           envToDelete,

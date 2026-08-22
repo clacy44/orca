@@ -8200,6 +8200,122 @@ describe('registerPtyHandlers', () => {
         unregisterSshPtyProvider(connectionId)
       }
     })
+
+    // Why: §2m(5) — the live auth-var refusal and the launch scrub are the two production
+    // sites that decide whether a differently-cased auth key reaches the child. On Windows
+    // `anthropic_api_key` IS `ANTHROPIC_API_KEY` to the process, and it outranks the stored
+    // OAuth login, so an exact-case comparison here is the whole injection.
+    describe('win32 auth env key case', () => {
+      const withPlatform = async (platform: string, run: () => Promise<void>): Promise<void> => {
+        const originalPlatform = process.platform
+        Object.defineProperty(process, 'platform', { configurable: true, value: platform })
+        try {
+          await run()
+        } finally {
+          Object.defineProperty(process, 'platform', {
+            configurable: true,
+            value: originalPlatform
+          })
+        }
+      }
+
+      it('refuses a lower-cased auth var on a managed path A launch', async () => {
+        setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+
+        await withPlatform('win32', async () => {
+          await expect(
+            controller.spawn({
+              cols: 80,
+              rows: 24,
+              worktreeId: 'wt-case',
+              command: 'claude',
+              env: { anthropic_api_key: 'sk-ant-attacker' }
+            })
+          ).rejects.toThrow(/Anthropic auth environment variables/)
+        })
+      })
+
+      it('refuses a lower-cased auth var on a managed path B launch', async () => {
+        setupCapturingProvider()
+        registerController(makeWslManagedAuth())
+
+        await withPlatform('win32', async () => {
+          await expect(
+            handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+              cols: 80,
+              rows: 24,
+              command: 'claude',
+              env: { anthropic_api_key: 'sk-ant-attacker' }
+            })
+          ).rejects.toThrow(/Anthropic auth environment variables/)
+        })
+      })
+
+      // Negative control: on POSIX the lower-cased name is a different variable the CLI never
+      // reads, so the same launch must still be served.
+      it('serves the same launch on linux, where the key is a different variable', async () => {
+        const capturedSpawn = setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+
+        await withPlatform('linux', async () => {
+          await controller.spawn({
+            cols: 80,
+            rows: 24,
+            worktreeId: 'wt-case',
+            command: 'claude',
+            env: { anthropic_api_key: 'sk-ant-attacker' }
+          })
+        })
+
+        expect(capturedSpawn).toHaveBeenCalled()
+      })
+
+      it('names the inherited casing in the deletion list the provider replays', async () => {
+        const capturedSpawn = setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+        process.env.anthropic_api_key = 'sk-ant-inherited'
+
+        try {
+          await withPlatform('win32', async () => {
+            await controller.spawn({
+              cols: 80,
+              rows: 24,
+              worktreeId: 'wt-case',
+              command: 'claude'
+            })
+          })
+
+          const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+          expect(options.envToDelete ?? []).toContain('anthropic_api_key')
+        } finally {
+          delete process.env.anthropic_api_key
+        }
+      })
+
+      it('leaves the deletion list exact-case on linux', async () => {
+        const capturedSpawn = setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+        process.env.anthropic_api_key = 'sk-ant-inherited'
+
+        try {
+          await withPlatform('linux', async () => {
+            await controller.spawn({
+              cols: 80,
+              rows: 24,
+              worktreeId: 'wt-case',
+              command: 'claude'
+            })
+          })
+
+          const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+          expect(options.envToDelete ?? []).not.toContain('anthropic_api_key')
+          expect(options.envToDelete ?? []).toContain('ANTHROPIC_API_KEY')
+        } finally {
+          delete process.env.anthropic_api_key
+        }
+      })
+    })
   })
 
   // Why: daemon resize is fire-and-forget, so pty:getSize must report the APPLIED size, not the requested one (Claude-Code split-pane desync).

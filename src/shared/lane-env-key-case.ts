@@ -67,3 +67,71 @@ export function withoutEnvKeyDeletion(
   }
   return envToDelete.filter((key) => !envKeysMatch(key, envKey, platform))
 }
+
+/** Deletes every casing of each key from `env`, in place. */
+export function deleteEnvKeyVariants(
+  env: Record<string, string> | undefined,
+  envKeys: readonly string[],
+  platform: NodeJS.Platform = process.platform
+): void {
+  if (!env) {
+    return
+  }
+  for (const envKey of envKeys) {
+    for (const key of findEnvKeyVariants(env, envKey, platform)) {
+      delete env[key]
+    }
+  }
+}
+
+/** The value stored under any casing of `envKey`; the canonical casing wins a tie. */
+export function readEnvKey(
+  env: Record<string, string | undefined> | undefined,
+  envKey: string,
+  platform: NodeJS.Platform = process.platform
+): string | undefined {
+  if (env?.[envKey] !== undefined) {
+    return env[envKey]
+  }
+  const variant = findEnvKeyVariants(env as Record<string, string> | undefined, envKey, platform)[0]
+  return variant === undefined ? undefined : env?.[variant]
+}
+
+/** In-place `withEnvKeyCollapsed`, for the patch appliers that mutate their base env. */
+export function setEnvKeyCollapsed(
+  env: Record<string, string>,
+  envKey: string,
+  value: string,
+  platform: NodeJS.Platform = process.platform
+): void {
+  deleteEnvKeyVariants(env, [envKey], platform)
+  env[envKey] = value
+}
+
+/**
+ * `envKeys` widened with every other casing of them that any of `envs` actually carries.
+ *
+ * The deletion list is replayed by the pty provider and by the daemon with an exact-case
+ * `delete finalEnv[key]` over an env this process never sees assembled — `{ ...process.env,
+ * ...args.env }`. Folding case at the deletion site therefore cannot reach the twin; naming
+ * it in the list can. A no-op off win32, where two casings really are two variables.
+ */
+export function expandEnvKeyDeletions(
+  envKeys: readonly string[],
+  envs: readonly (Record<string, string | undefined> | undefined)[],
+  platform: NodeJS.Platform = process.platform
+): string[] {
+  const deletions = [...envKeys]
+  if (platform !== 'win32') {
+    return deletions
+  }
+  for (const env of envs) {
+    for (const key of Object.keys(env ?? {})) {
+      const canonical = envKeys.find((envKey) => envKeysMatch(key, envKey, platform))
+      if (canonical !== undefined && !deletions.includes(key)) {
+        deletions.push(key)
+      }
+    }
+  }
+  return deletions
+}
