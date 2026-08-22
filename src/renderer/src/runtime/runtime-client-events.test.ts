@@ -164,6 +164,48 @@ describe('subscribeRuntimeClientEvents', () => {
     ])
   })
 
+  // W8 is Rule 3: the host starts sending a frame on an existing path, and every client shipped today
+  // drops it here. Asserting the drop — silently, with no onError — is what makes "behaviorally inert"
+  // a checked claim rather than a note in the design doc.
+  it('drops a terminalPresence frame the shipped allowlist does not admit', async () => {
+    let capturedOnResponse: ((response: unknown) => void) | undefined
+    const subscribe = vi.fn(async (_args, nextCallbacks) => {
+      capturedOnResponse = (nextCallbacks as { onResponse: (response: unknown) => void }).onResponse
+      return { unsubscribe: vi.fn(), sendBinary: vi.fn() }
+    })
+    const onEvent = vi.fn()
+    const onError = vi.fn()
+    vi.stubGlobal('window', { api: { runtimeEnvironments: { subscribe } } })
+
+    await subscribeRuntimeClientEvents('env-1', onEvent, onError)
+    if (!capturedOnResponse) {
+      throw new Error('Expected subscription callbacks')
+    }
+    capturedOnResponse({
+      ok: true,
+      result: {
+        type: 'terminalPresence',
+        seq: 2,
+        participants: [
+          {
+            participantId: 'p-1',
+            label: 'Ana laptop',
+            kind: 'runtime',
+            attachedTerminals: ['term_1'],
+            self: false
+          }
+        ]
+      }
+    })
+    // The positive control beside it: a known type on the same channel still lands, so the drop above
+    // is the allowlist and not a dead decoder.
+    capturedOnResponse({ ok: true, result: { type: 'worktreesChanged', repoId: 'repo-1' } })
+
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    expect(onEvent).toHaveBeenCalledWith({ type: 'worktreesChanged', repoId: 'repo-1' })
+    expect(onError).not.toHaveBeenCalled()
+  })
+
   it('preserves full SSH authority in retained snapshots and live client events', async () => {
     let capturedOnResponse: ((response: unknown) => void) | undefined
     const subscribe = vi.fn(async (_args, nextCallbacks) => {
