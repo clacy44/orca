@@ -257,6 +257,9 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           setupReceipt,
           effects
         })
+        // Why armed here and not at the tui-idle wait above: that wait ran before the prompt was
+        // written, and everything this observer can recognize only becomes visible afterwards.
+        runtime.armDispatchInputObserver(started.dispatch.id)
         return {
           runId: run.id,
           taskId: task.id,

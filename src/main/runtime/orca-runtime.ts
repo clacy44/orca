@@ -123,6 +123,12 @@ import {
   DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
   sweepDispatchLivenessBreaches
 } from './orchestration/dispatch-liveness-monitor'
+import { DISPATCH_INPUT_OBSERVER_INTERVAL_MS } from './orchestration/dispatch-input-observation'
+import {
+  tickDispatchInputObserver as runDispatchInputObserverTick,
+  tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
+  type FederatedDispatchInputObserverTarget
+} from './orchestration/dispatch-input-observer'
 import { resolveDispatchMailboxTerminalHandle } from './orchestration/dispatch-mailbox-terminal'
 import { reconcileRequestedWorkerTerminalReleases } from './orchestration/worker-terminal-release-reconciliation'
 import {
@@ -2794,6 +2800,13 @@ export class OrcaRuntimeService {
   private readonly orchestrationFederationRelays = new Set<string>()
   private readonly orchestrationFederationTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private orchestrationDispatchLivenessTimer: ReturnType<typeof setInterval> | null = null
+  private dispatchInputObservers = new Map<
+    string,
+    {
+      timer: ReturnType<typeof setInterval>
+      federated?: FederatedDispatchInputObserverTarget
+    }
+  >()
   private orchestrationTerminalHistoryRecoveryTimer: ReturnType<typeof setTimeout> | null = null
   private orchestrationTerminalHistoryRecoveryInFlight: Promise<void> | null = null
   private orchestrationTerminalRecoveryRowId = 0
@@ -3951,6 +3964,7 @@ export class OrcaRuntimeService {
       this._orchestrationDb = new OrchestrationDb(dbPath)
       this.ensureOrchestrationFederationRelay()
       this.ensureDispatchLivenessMonitor()
+      this.resumeDispatchInputObservers()
       this.scheduleRestoredMessageRepoints()
     }
     return this._orchestrationDb
@@ -3959,12 +3973,14 @@ export class OrcaRuntimeService {
   setOrchestrationDb(db: OrchestrationDb): void {
     this.stopOrchestrationFederationRelay()
     this.stopDispatchLivenessMonitor()
+    this.stopDispatchInputObservers()
     this.mailPointerRepointScheduler.clear()
     this.lastPointedMessageSequenceByHandle.clear()
     this.pointedMessageIdsByHandle.clear()
     this._orchestrationDb = db
     this.ensureOrchestrationFederationRelay()
     this.ensureDispatchLivenessMonitor()
+    this.resumeDispatchInputObservers()
     this.scheduleRestoredMessageRepoints()
   }
 
@@ -3987,6 +4003,79 @@ export class OrcaRuntimeService {
     if (this.orchestrationDispatchLivenessTimer) {
       clearInterval(this.orchestrationDispatchLivenessTimer)
       this.orchestrationDispatchLivenessTimer = null
+    }
+  }
+
+  // Why armed per Dispatch and not as one sweep like the liveness window: this observer reads a
+  // terminal, so it costs a probe per armed worker rather than one indexed query, and only a
+  // Dispatch whose prompt was just written has anything to watch (A1 section 2).
+  armDispatchInputObserver(dispatchId: string, federated?: FederatedDispatchInputObserverTarget) {
+    if (this.dispatchInputObservers.has(dispatchId)) {
+      return
+    }
+    const timer = setInterval(
+      () => void this.tickDispatchInputObserver(dispatchId),
+      DISPATCH_INPUT_OBSERVER_INTERVAL_MS
+    )
+    timer.unref?.()
+    this.dispatchInputObservers.set(dispatchId, { timer, ...(federated ? { federated } : {}) })
+  }
+
+  // Why re-armed from the database: the once-per-Dispatch fence is a column, so a runtime that
+  // restarts mid-dispatch resumes watching without re-reporting what it already reported.
+  resumeDispatchInputObservers(): void {
+    const db = this._orchestrationDb
+    if (!db) {
+      return
+    }
+    try {
+      for (const target of db.listDispatchInputObservationTargets()) {
+        this.armDispatchInputObserver(target.dispatch_id)
+      }
+    } catch (error) {
+      console.warn('[orchestration] failed to resume dispatch input observers', error)
+    }
+  }
+
+  stopDispatchInputObserver(dispatchId: string): void {
+    const observer = this.dispatchInputObservers.get(dispatchId)
+    if (observer) {
+      clearInterval(observer.timer)
+      this.dispatchInputObservers.delete(dispatchId)
+    }
+  }
+
+  stopDispatchInputObservers(): void {
+    for (const dispatchId of [...this.dispatchInputObservers.keys()]) {
+      this.stopDispatchInputObserver(dispatchId)
+    }
+  }
+
+  async tickDispatchInputObserver(dispatchId: string, now?: number): Promise<void> {
+    const db = this._orchestrationDb
+    const observer = this.dispatchInputObservers.get(dispatchId)
+    if (!db) {
+      return
+    }
+    try {
+      const result = observer?.federated
+        ? await runFederatedDispatchInputObserverTick({
+            runtime: this,
+            db,
+            target: observer.federated,
+            ...(now === undefined ? {} : { now })
+          })
+        : await runDispatchInputObserverTick({
+            runtime: this,
+            db,
+            dispatchId,
+            ...(now === undefined ? {} : { now })
+          })
+      if (result.disarm) {
+        this.stopDispatchInputObserver(dispatchId)
+      }
+    } catch (error) {
+      console.warn('[orchestration] dispatch input observation failed', error)
     }
   }
 

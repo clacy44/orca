@@ -43,6 +43,7 @@ import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { OrchestrationError } from './orchestration-error'
 import { resolveOrchestrationMigrationStartVersion } from './orchestration-schema-version-skew'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
+import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
 import {
   deriveWorkerTerminalListState,
@@ -6953,6 +6954,64 @@ export class OrchestrationDb {
          WHERE d.status = 'dispatched' AND d.liveness_breached_at IS NULL`
       )
       .all() as DispatchLivenessCandidateRow[]
+  }
+
+  // Why the join to tasks: the observer compares the terminal tail against the task spec it sent,
+  // and reading the spec back from the row is what lets a re-armed observer after a restart ask the
+  // same question as the one that armed at worker-start. Federated Dispatches are excluded — the
+  // home never sees that PTY, so the peer's own observer is the only one that can look at it.
+  // The state, status and release predicates are also the observer's disarm: a settled, stopped or
+  // released worker simply stops being a candidate.
+  listDispatchInputObservationTargets(dispatchId?: string): DispatchInputObservationTargetRow[] {
+    return this.db
+      .prepare(
+        `SELECT w.dispatch_id, d.run_id, d.task_id, w.agent_terminal_handle,
+                d.process_incarnation, w.input_evidence, d.last_heartbeat_at, t.spec
+         FROM worker_dispatches w
+         JOIN dispatch_contexts d ON d.id = w.dispatch_id
+         JOIN tasks t ON t.id = d.task_id
+         WHERE w.state = 'ready' AND d.status = 'dispatched'
+           AND w.input_observed_at IS NULL
+           AND w.agent_terminal_handle IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM federated_dispatches f WHERE f.dispatch_id = w.dispatch_id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM worker_terminal_resources r
+             WHERE r.owner_dispatch_id = w.dispatch_id
+               AND r.release_state IN ('requested', 'releasing', 'released')
+           )
+           AND (? IS NULL OR w.dispatch_id = ?)`
+      )
+      .all(dispatchId ?? null, dispatchId ?? null) as DispatchInputObservationTargetRow[]
+  }
+
+  // Why claim-before-emit and once per Dispatch rather than once per kind: the report exists to
+  // hand the decision to a coordinator, and a second machine-written escalation about the same
+  // worker adds no decision — the liveness window still covers whatever happens after it.
+  claimDispatchInputObservation(dispatchId: string, at: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE worker_dispatches SET input_observed_at = ?, updated_at = datetime('now')
+           WHERE dispatch_id = ? AND state = 'ready' AND input_observed_at IS NULL`
+        )
+        .run(at, dispatchId).changes > 0
+    )
+  }
+
+  // Why the peer asks its relay queue and not a heartbeat column: it has none — a federated
+  // worker's heartbeats are queued here and stamped on the home at import. Excluded kinds are the
+  // two this runtime writes itself, so the runtime cannot mistake its own notice for the worker's.
+  hasFederatedWorkerSpoken(dispatchId: string): boolean {
+    return !!this.db
+      .prepare(
+        `SELECT 1 FROM federation_relay_items
+         WHERE dispatch_id = ? AND direction = 'to_home'
+           AND kind NOT IN ('status', 'runtime_notification')
+         LIMIT 1`
+      )
+      .get(dispatchId)
   }
 
   // Why claim-before-emit: the column is the once-per-breach fence, so the writer that flips it is

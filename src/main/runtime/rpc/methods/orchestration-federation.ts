@@ -250,6 +250,16 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
         })
         const attachment = db.markRemoteAttachmentReady(params.dispatchId, effects)
         monitorFederatedSetup({ ...setupStage, runtime })
+        // Why the peer arms it: the home has no way to look at this terminal, so an observation
+        // about it can only be made here and reaches the coordinator through the relay queue.
+        runtime.armDispatchInputObserver(params.dispatchId, {
+          dispatchId: params.dispatchId,
+          taskId: params.taskId,
+          terminalHandle,
+          taskSpec: params.taskSpec,
+          submittedAt: Date.parse(inputEvidence.submittedAt),
+          processIncarnation
+        })
         return {
           dispatchId: params.dispatchId,
           state: attachment.state,

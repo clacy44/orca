@@ -39,6 +39,11 @@ export type PreambleParams = {
 // cadence tuning is a single-line change (Q1 in DESIGN_DOC_PREAMBLE_FIX.md).
 const HEARTBEAT_INTERVAL_MIN = 5
 
+// Why exported: the post-ready observer looks for this marker in the terminal tail to tell a prompt
+// that is still sitting unsubmitted from one the agent has already answered (A1 section 2), and a
+// silent divergence between the two spellings would turn that check off without failing anything.
+export const DISPATCH_PREAMBLE_TASK_MARKER = '=== TASK ==='
+
 // Why: the dispatch preamble teaches agents about Orca's CLI commands for
 // structured communication. Behavioral rules (body summary, heartbeat cadence,
 // no-AskUserQuestion) live as inline comments above the relevant CLI example,
@@ -148,7 +153,7 @@ ${postDoneInstructions}`
 
   return `${header}${drift}
 
-=== TASK ===
+${DISPATCH_PREAMBLE_TASK_MARKER}
 ${params.taskSpec}`
 }
 
