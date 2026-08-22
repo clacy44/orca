@@ -4794,6 +4794,7 @@ export function registerPtyHandlers(
         env,
         envToDelete: spawnOptions.envToDelete,
         hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
+        hasHostClaudeAuth: claudeAuth !== null,
         connectionId: args.connectionId,
         // Why only for a remote pane: clause (a) is the only consumer, and this keeps the
         // userData lookup off every local spawn.
@@ -6466,6 +6467,7 @@ export function registerPtyHandlers(
           envToDelete: combinedEnvToDelete,
           agentEnv: effectiveLaunchConfig?.agentEnv,
           hostConfigDir: claudeAuth?.envPatch.CLAUDE_CONFIG_DIR ?? null,
+          hasHostClaudeAuth: claudeAuth !== null,
           connectionId: args.connectionId,
           laneRoot: args.connectionId ? getClaudeLanesRoot() : null
         })

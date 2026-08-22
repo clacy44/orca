@@ -17,6 +17,13 @@ export type ClaudeConfigDirLaunchScope = {
   envToDelete: string[] | undefined
   /** CLAUDE_CONFIG_DIR the host auth patch computed for this spawn, or null. */
   hostConfigDir: string | null
+  /**
+   * Whether a host Claude credential preparation exists at all — NOT whether it carried a
+   * config dir. The WSL and system preparations return an empty `envPatch` with
+   * `stripAuthEnv: true`, so `hostConfigDir === null` cannot stand in for this: clause (a)
+   * would stop asserting the moment a preparation without a config dir reaches a remote pane.
+   */
+  hasHostClaudeAuth: boolean
   connectionId: string | null | undefined
   /** `launchConfig.agentEnv`, which path B persists onto the sleeping-agent record. */
   agentEnv?: Record<string, string> | undefined
@@ -35,9 +42,11 @@ export type ClaudeConfigDirLaunchResult = {
  * Two clauses, branching on `connectionId`:
  *
  * - set (SSH/relay pane): the client's own value names a config dir on the REMOTE
- *   host and is left verbatim; a host auth patch here, or any env value pointing at a
- *   host credential lane, would be a host credential crossing to another machine, so
- *   both are hard invariant violations.
+ *   host and is left verbatim; a host credential preparation here, or any env value
+ *   pointing at a host credential lane, would be a host credential crossing to another
+ *   machine, so both are hard invariant violations. The preparation is asserted by its
+ *   existence, not by whether it produced a config dir — `stripAuthEnv` alone would arm
+ *   the auth-var deletion list against a remote host's environment.
  * - absent: a host-computed config dir wins over any client value AND over a client
  *   deletion request; with no host value, no client-supplied one may survive — it is
  *   stripped silently from the env, the deletion list and the persisted `agentEnv`.
@@ -53,12 +62,12 @@ export type ClaudeConfigDirLaunchResult = {
 export function enforceClaudeConfigDirLaunchScope(
   scope: ClaudeConfigDirLaunchScope
 ): ClaudeConfigDirLaunchResult {
-  const { env, envToDelete, hostConfigDir, connectionId, agentEnv } = scope
+  const { env, envToDelete, hostConfigDir, hasHostClaudeAuth, connectionId, agentEnv } = scope
   const platform = scope.platform ?? process.platform
   if (connectionId) {
-    if (hostConfigDir) {
+    if (hasHostClaudeAuth) {
       throw new Error(
-        'Refusing to spawn: a host Claude config directory was computed for a remote pane.'
+        'Refusing to spawn: a host Claude credential preparation was computed for a remote pane.'
       )
     }
     assertNoLanePathInRemoteEnv(env, scope.laneRoot ?? null)

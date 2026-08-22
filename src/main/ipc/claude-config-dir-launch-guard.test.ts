@@ -10,6 +10,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       env: { PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/x/auth' },
       envToDelete: ['TERM_PROGRAM'],
       hostConfigDir: null,
+      hasHostClaudeAuth: false,
       connectionId: null
     })
 
@@ -23,6 +24,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       env: { PATH: '/usr/bin' },
       envToDelete: ['CLAUDE_CONFIG_DIR', 'TERM_PROGRAM'],
       hostConfigDir: null,
+      hasHostClaudeAuth: false,
       connectionId: null
     })
 
@@ -34,6 +36,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       env: { PATH: '/usr/bin' },
       envToDelete: ['CLAUDE_CONFIG_DIR'],
       hostConfigDir: '/home/me/.orca-claude/acct-1',
+      hasHostClaudeAuth: true,
       connectionId: null
     })
 
@@ -49,6 +52,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env: { CLAUDE_CONFIG_DIR: '/tmp/somewhere-else' },
         envToDelete: undefined,
         hostConfigDir: '/home/me/.orca-claude/acct-1',
+        hasHostClaudeAuth: true,
         connectionId: null
       })
     ).toThrow(/the host did not compute/)
@@ -59,6 +63,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       env: { claude_config_dir: 'C:\\victim' },
       envToDelete: undefined,
       hostConfigDir: 'C:\\host\\lane',
+      hasHostClaudeAuth: true,
       connectionId: null,
       platform: 'win32'
     })
@@ -74,6 +79,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       env,
       envToDelete,
       hostConfigDir: null,
+      hasHostClaudeAuth: false,
       connectionId: 'ssh-1'
     })
 
@@ -87,9 +93,42 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env: {},
         envToDelete: undefined,
         hostConfigDir: '/home/me/.orca-claude/acct-1',
+        hasHostClaudeAuth: true,
         connectionId: 'ssh-1'
       })
     ).toThrow(/remote pane/)
+  })
+
+  // Why this is the clause the design states and not `hostConfigDir === null`: the WSL and
+  // system preparations return an empty envPatch with stripAuthEnv: true, which arms the
+  // auth-var deletion list against the REMOTE host's environment. Today `isClaudeLaunch`
+  // excludes remote panes so the two forms coincide; S9a's own next edit decouples them.
+  it('refuses a host preparation that computed no config dir on a remote pane', () => {
+    expect(() =>
+      enforceClaudeConfigDirLaunchScope({
+        env: {},
+        envToDelete: undefined,
+        hostConfigDir: null,
+        hasHostClaudeAuth: true,
+        connectionId: 'ssh-1'
+      })
+    ).toThrow(/credential preparation was computed for a remote pane/)
+  })
+
+  // Negative control: a remote pane with no host preparation at all is the ordinary case and
+  // must still be served, or every SSH launch breaks.
+  it('serves a remote pane that has no host preparation', () => {
+    const env = { CLAUDE_CONFIG_DIR: '/home/remote/.claude' }
+
+    const result = enforceClaudeConfigDirLaunchScope({
+      env,
+      envToDelete: undefined,
+      hostConfigDir: null,
+      hasHostClaudeAuth: false,
+      connectionId: 'ssh-1'
+    })
+
+    expect(result.env).toBe(env)
   })
 
   it('leaves an absent env and deletion list absent', () => {
@@ -97,6 +136,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       env: undefined,
       envToDelete: undefined,
       hostConfigDir: null,
+      hasHostClaudeAuth: false,
       connectionId: undefined
     })
 
@@ -112,6 +152,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       envToDelete: undefined,
       agentEnv: { CLAUDE_CONFIG_DIR: '/tmp/victim', ORCA_TAB_ID: 't1' },
       hostConfigDir: null,
+      hasHostClaudeAuth: false,
       connectionId: null
     })
 
@@ -126,6 +167,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
       envToDelete: undefined,
       agentEnv,
       hostConfigDir: null,
+      hasHostClaudeAuth: false,
       connectionId: 'ssh-1'
     })
 
@@ -138,6 +180,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env: { PATH: 'C:\\Windows', claude_config_dir: 'C:\\victim\\auth' },
         envToDelete: undefined,
         hostConfigDir: null,
+        hasHostClaudeAuth: false,
         connectionId: null,
         platform: 'win32'
       })
@@ -150,6 +193,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env: { claude_config_dir: 'C:\\victim\\auth' },
         envToDelete: ['Claude_Config_Dir'],
         hostConfigDir: 'C:\\host\\lane',
+        hasHostClaudeAuth: true,
         connectionId: null,
         platform: 'win32'
       })
@@ -164,6 +208,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         envToDelete: undefined,
         agentEnv: { Claude_Config_Dir: 'C:\\victim\\auth' },
         hostConfigDir: null,
+        hasHostClaudeAuth: false,
         connectionId: null,
         platform: 'win32'
       })
@@ -176,6 +221,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env: { claude_config_dir: '/tmp/victim' },
         envToDelete: undefined,
         hostConfigDir: null,
+        hasHostClaudeAuth: false,
         connectionId: null,
         platform: 'linux'
       })
@@ -206,6 +252,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
           env: { ORCA_SOMETHING: join(laneRoot(), 'principal-a') },
           envToDelete: undefined,
           hostConfigDir: null,
+          hasHostClaudeAuth: false,
           connectionId: 'ssh-1',
           laneRoot: laneRoot()
         })
@@ -223,6 +270,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
           env: { CLAUDE_CONFIG_DIR: decoy },
           envToDelete: undefined,
           hostConfigDir: null,
+          hasHostClaudeAuth: false,
           connectionId: 'ssh-1',
           laneRoot: laneRoot()
         })
@@ -239,6 +287,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env,
         envToDelete: undefined,
         hostConfigDir: null,
+        hasHostClaudeAuth: false,
         connectionId: 'ssh-1',
         laneRoot: process.cwd()
       })
@@ -253,6 +302,7 @@ describe('enforceClaudeConfigDirLaunchScope', () => {
         env,
         envToDelete: undefined,
         hostConfigDir: null,
+        hasHostClaudeAuth: false,
         connectionId: 'ssh-1',
         laneRoot: laneRoot()
       })
