@@ -70,17 +70,64 @@ describe('environment roster output', () => {
     ).toEqual(['presence?', '-', '-', 'Ana (typing), devbox'])
   })
 
-  it('renders each participant from the flags the host published', () => {
+  it('renders each participant from the kind and flags the host published', () => {
     expect(
       formatTerminalPresence({
         attachedCount: 3,
         participants: [
-          { participantId: 'p-1', label: 'Ana', typing: true, writing: false, self: true },
-          { participantId: 'p-2', label: "Ben's phone", typing: false, writing: true },
-          { participantId: 'host', label: 'devbox', typing: false, writing: false }
+          {
+            participantId: 'p-1',
+            label: 'Ana',
+            kind: 'runtime',
+            typing: true,
+            writing: false,
+            self: true
+          },
+          {
+            participantId: 'p-2',
+            label: "Ben's phone",
+            kind: 'mobile',
+            typing: false,
+            writing: true
+          },
+          { participantId: 'host', label: 'devbox', kind: 'host', typing: false, writing: false }
         ]
       })
-    ).toBe("Ana (typing), Ben's phone (writing), devbox")
+      // Why the host marker: the host publishes the bare machine name so each surface can compose its
+      // own, and without it the local human is indistinguishable from a peer device named after a box.
+    ).toBe("Ana (typing), Ben's phone (writing), devbox (host)")
+  })
+
+  it('keeps the host marker and the activity marker in one parenthetical', () => {
+    expect(
+      formatTerminalPresence({
+        attachedCount: 1,
+        participants: [
+          { participantId: 'host', label: 'devbox', kind: 'host', typing: true, writing: false }
+        ]
+      })
+    ).toBe('devbox (host, typing)')
+  })
+
+  // Why: `registerConnection` labels an unnamed grant '' (runtime-rpc.ts), so an attached participant
+  // can format to the empty string — and an empty column is how this formatter says "nobody attached".
+  it('names an unnamed participant rather than collapsing the column to nobody', () => {
+    expect(
+      formatTerminalPresence({
+        attachedCount: 1,
+        participants: [
+          { participantId: 'p-1', label: '', kind: 'runtime', typing: false, writing: false }
+        ]
+      })
+    ).toBe('unnamed device')
+    expect(
+      formatTerminalPresence({
+        attachedCount: 1,
+        participants: [
+          { participantId: 'p-1', label: '', kind: 'runtime', typing: true, writing: false }
+        ]
+      })
+    ).toBe('unnamed device (typing)')
   })
 
   // Why asserted here too: the host already suppresses `writing` under `typing`, and this column must
@@ -89,7 +136,9 @@ describe('environment roster output', () => {
     expect(
       formatTerminalPresence({
         attachedCount: 1,
-        participants: [{ participantId: 'p-1', label: 'Ana', typing: true, writing: true }]
+        participants: [
+          { participantId: 'p-1', label: 'Ana', kind: 'runtime', typing: true, writing: true }
+        ]
       })
     ).toBe('Ana (typing)')
   })
