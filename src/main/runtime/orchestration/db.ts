@@ -298,7 +298,7 @@ type RunListCursor = {
 }
 
 // Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments.
-const SCHEMA_VERSION = 27
+const SCHEMA_VERSION = 28
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -585,7 +585,8 @@ export class OrchestrationDb {
         dispatched_at       TEXT,
         completed_at        TEXT,
         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-        last_heartbeat_at   TEXT
+        last_heartbeat_at   TEXT,
+        blocked_since       TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch_contexts(task_id);
@@ -1011,6 +1012,9 @@ export class OrchestrationDb {
         this.db.exec(
           'ALTER TABLE federated_dispatches ADD COLUMN to_home_acknowledged_sequence INTEGER NOT NULL DEFAULT 0'
         )
+      }
+      if (current < 28 && !this.hasColumn('dispatch_contexts', 'blocked_since')) {
+        this.db.exec('ALTER TABLE dispatch_contexts ADD COLUMN blocked_since TEXT')
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -6878,6 +6882,24 @@ export class OrchestrationDb {
       )
       .get(taskId) as DispatchContextRow | undefined
     return active ? this.failDispatch(active.id, error) : undefined
+  }
+
+  // Why the same guard as recordHeartbeat: a park recorded against a settled or retried Dispatch
+  // would hand a liveness window an exemption the live worker never earned (A1 §14).
+  markDispatchBlocked(dispatchId: string, at: string): void {
+    this.db
+      .prepare(
+        "UPDATE dispatch_contexts SET blocked_since = ? WHERE id = ? AND status = 'dispatched'"
+      )
+      .run(at, dispatchId)
+  }
+
+  clearDispatchBlocked(dispatchId: string): void {
+    this.db
+      .prepare(
+        "UPDATE dispatch_contexts SET blocked_since = NULL WHERE id = ? AND status = 'dispatched'"
+      )
+      .run(dispatchId)
   }
 
   // Why: only bump status='dispatched' — a zombie heartbeat from a finished dispatch would mask a hung retry from the stale detector (§5.3.4).

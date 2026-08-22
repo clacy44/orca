@@ -33,6 +33,7 @@ import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
+import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { RunRow } from '../../orchestration/types'
@@ -1010,11 +1011,16 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               : {})
           }
         }
-        const waitResult = await runtime.waitForMessage(address, {
-          typeFilter: typeFilter as string[] | undefined,
-          timeoutMs: params.timeoutMs ?? undefined,
-          signal
-        })
+        // Why here and not at the top of the branch: everything above returns without parking —
+        // --peek, --all and a mailbox that already had mail are reads, and the preamble exempts
+        // only a worker actually blocked inside the call (A1 §14).
+        const waitResult = await whileDispatchBlocked(db, workerMailbox.dispatchId, () =>
+          runtime.waitForMessage(address, {
+            typeFilter: typeFilter as string[] | undefined,
+            timeoutMs: params.timeoutMs ?? undefined,
+            signal
+          })
+        )
         if (waitResult === 'timed_out' || waitResult === 'cancelled') {
           return {
             ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
@@ -1707,10 +1713,14 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             timeoutMs
           }
         }
-        await runtime.waitForMessage(`dispatch:${activeDispatch.id}`, {
-          timeoutMs: remainingMs,
-          signal
-        })
+        // Why around the park only: the marker means "blocked inside the call", which is exactly
+        // the interval the preamble tells this worker not to heartbeat through (A1 §14).
+        await whileDispatchBlocked(db, activeDispatch.id, () =>
+          runtime.waitForMessage(`dispatch:${activeDispatch.id}`, {
+            timeoutMs: remainingMs,
+            signal
+          })
+        )
       }
     }
   }),
@@ -1858,9 +1868,14 @@ async function askRemoteRunHome(args: {
         timeoutMs
       }
     }
-    await args.runtime.waitForMessage(`dispatch:${args.dispatchId}`, {
-      timeoutMs: remainingMs,
-      signal: args.signal
-    })
+    // Why the same marker on the peer: a park is a park. The peer holds no dispatch_contexts row
+    // for the home's id, so this writes nothing and the home's marker stays put — the federated
+    // asymmetry dispatch-blocked-window.ts documents, pinned by test rather than fixed here.
+    await whileDispatchBlocked(db, args.dispatchId, () =>
+      args.runtime.waitForMessage(`dispatch:${args.dispatchId}`, {
+        timeoutMs: remainingMs,
+        signal: args.signal
+      })
+    )
   }
 }
