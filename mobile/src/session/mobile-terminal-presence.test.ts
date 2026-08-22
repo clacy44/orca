@@ -48,6 +48,18 @@ describe('decodeMobileTerminalPresence', () => {
     expect(decodeMobileTerminalPresence({ type: 'terminal-presence' })).toBeNull()
   })
 
+  // The comment above the decoder says extra keys are tolerated so a newer host can add fields without a
+  // mobile release. A new `kind` VALUE has to degrade the same way, or the all-or-nothing rule turns an
+  // additive host change into a blank banner on a phone that cannot be respun to catch up.
+  it('renders a row whose kind this build has never heard of', () => {
+    const decoded = decodeMobileTerminalPresence({
+      type: 'terminal-presence',
+      participants: [row(), { ...row({ participantId: 'p-new', label: 'kiosk' }), kind: 'kiosk' }]
+    })
+    expect(decoded).toHaveLength(2)
+    expect(summarizeMobileTerminalPresence(decoded ?? [])).toBe('Ana laptop attached +1')
+  })
+
   it('keeps fields a newer host adds', () => {
     const decoded = decodeMobileTerminalPresence({
       type: 'terminal-presence',

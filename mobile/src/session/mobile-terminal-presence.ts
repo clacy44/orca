@@ -8,7 +8,9 @@ import { terminalPresenceLastSeenMinutes } from '../../../src/shared/terminal-pr
 export type MobileTerminalPresenceRow = {
   participantId: string
   label: string
-  kind: 'runtime' | 'mobile' | 'host'
+  /** The union is a rendering hint, not a gate: a newer host may add a kind, and this phone cannot be
+   *  respun to catch up with it. An unfamiliar one decodes as an ordinary peer. */
+  kind: 'runtime' | 'mobile' | 'host' | (string & {})
   self: boolean
   typing: boolean
   writing: boolean
@@ -26,7 +28,7 @@ function isPresenceRow(value: unknown): value is MobileTerminalPresenceRow {
   return (
     typeof row.participantId === 'string' &&
     typeof row.label === 'string' &&
-    (row.kind === 'runtime' || row.kind === 'mobile' || row.kind === 'host') &&
+    typeof row.kind === 'string' &&
     typeof row.self === 'boolean' &&
     typeof row.typing === 'boolean' &&
     typeof row.writing === 'boolean'
@@ -43,7 +45,9 @@ export function decodeMobileTerminalPresence(event: unknown): MobileTerminalPres
   if (data.type !== 'terminal-presence' || !Array.isArray(data.participants)) {
     return null
   }
-  // Why all-or-nothing: a partly readable roster would show somebody as alone who is not.
+  // Why all-or-nothing over the STRUCTURAL fields only: a partly readable roster would show somebody as
+  // alone who is not. A new `kind` VALUE is not that — rejecting one would blank the banner on every row
+  // of a roster the phone can otherwise read in full, which is the opposite of degrading.
   return data.participants.every(isPresenceRow)
     ? (data.participants as MobileTerminalPresenceRow[])
     : null
