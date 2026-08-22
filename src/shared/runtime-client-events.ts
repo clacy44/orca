@@ -24,6 +24,11 @@ export type RuntimeTerminalPresenceParticipant = {
   // Why: resolved per LISTENER at fan-out. Nothing else lets a client learn its own participantId, so a
   // single shared payload would render one of the two readers as their own peer.
   self: boolean
+  // Why marked and not dropped: there is no host-side liveness on a phone's relay data socket and an
+  // idle phone sends nothing, so reaping on silence would delete a live participant. Mobile rows only.
+  stale?: true
+  // Host-clock stamp of that phone's last inbound frame; present only on a stale row.
+  lastSeenAt?: number
 }
 
 export type RuntimeClientEvent =

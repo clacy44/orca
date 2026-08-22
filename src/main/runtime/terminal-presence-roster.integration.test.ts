@@ -158,4 +158,81 @@ describe('terminalPresence roster over a real socket', () => {
       expect(anaFanOut?.seq).toBeGreaterThan(0)
     }
   )
+
+  it(
+    'names a phone as a first-class row and stamps its liveness from real inbound frames',
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-presence-mobile-'))
+      cleanups.push(() => rmSync(userDataPath, { recursive: true, force: true }))
+      const runtime = new OrcaRuntimeService()
+      const server = new OrcaRuntimeRpcServer({
+        runtime,
+        userDataPath,
+        enableWebSocket: true,
+        wsPort: 0
+      })
+      cleanups.push(() => server.stop())
+      await server.start()
+
+      const phoneOffer = server.createPairingOffer({
+        name: "Ben's phone",
+        scope: 'mobile',
+        mint: 'always'
+      })
+      if (!phoneOffer.available) {
+        throw new Error('pairing_unavailable')
+      }
+
+      const phoneEvents: RuntimeClientEventStreamMessage[] = []
+      const phoneSubscription =
+        await subscribeRemoteRuntimeRequest<RuntimeClientEventStreamMessage>(
+          pairingFor(phoneOffer.pairingUrl),
+          'runtime.clientEvents.subscribe',
+          undefined,
+          REQUEST_TIMEOUT_MS,
+          {
+            onResponse: (response) => {
+              if (response.ok) {
+                phoneEvents.push(response.result)
+              }
+            },
+            onError: () => {}
+          }
+        )
+      cleanups.push(() => phoneSubscription.close())
+      await waitFor(() => phoneEvents.some((event) => event.type === 'ready'))
+
+      // Q5: the phone is a participant, not a suppressed class — it appears AND it receives.
+      const snapshot = presenceOf(phoneEvents).at(0)
+      const phoneRow = snapshot?.participants.find((row) => row.kind === 'mobile')
+      expect(phoneRow?.label).toBe("Ben's phone")
+      expect(phoneRow?.self).toBe(true)
+      // Fresh sockets are never stale, so the suffix stays off a phone that just spoke.
+      expect(phoneRow?.stale).toBeUndefined()
+
+      // The stamp is wired to every inbound frame, not to terminal traffic: a SECOND request on an
+      // ALREADY-registered socket must move it, which registration alone can never do.
+      const before = new Set(terminalPresenceRegistry.connections().keys())
+      const phoneRequest = new RemoteRuntimeRequestConnection(pairingFor(phoneOffer.pairingUrl))
+      cleanups.push(() => phoneRequest.close())
+      await phoneRequest.request('status.get', {}, REQUEST_TIMEOUT_MS)
+      await waitFor(() =>
+        Array.from(terminalPresenceRegistry.connections().keys()).some((id) => !before.has(id))
+      )
+      const requestConnectionId = Array.from(terminalPresenceRegistry.connections().keys()).find(
+        (id) => !before.has(id)
+      )!
+      const stampedAt =
+        terminalPresenceRegistry.getParticipantByConnection(requestConnectionId)?.lastInboundAt
+      expect(stampedAt).toBeGreaterThan(0)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      await phoneRequest.request('status.get', {}, REQUEST_TIMEOUT_MS)
+      await waitFor(
+        () =>
+          (terminalPresenceRegistry.getParticipantByConnection(requestConnectionId)
+            ?.lastInboundAt ?? 0) > stampedAt!
+      )
+    }
+  )
 })

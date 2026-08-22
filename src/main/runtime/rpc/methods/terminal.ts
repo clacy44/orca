@@ -50,6 +50,7 @@ import {
 import { terminalPresenceChangeNotifier } from '../../terminal-presence-change-notifier'
 import {
   activeTerminalPresenceHoldNotice,
+  isHoldableStreamParticipant,
   shouldHoldInputForTypingPeer
 } from '../../terminal-presence-arbitration'
 import { resolveTerminalListPresenceScope } from '../../terminal-list-presence'
@@ -141,17 +142,14 @@ type TerminalViewportClient = {
 }
 
 // Why: both stream handlers share one gate so the negotiated/host-resolved pair cannot drift apart;
-// a null result means OMIT the key, never emit a placeholder participantId. The runtime-scope rule is
-// W2's alone — S7 owes mobile rows a staleness contract before a phone renders its own identity, while
-// W4's `self` must resolve for every tracked participant or one of them reads as their own peer.
+// a null result means OMIT the key, never emit a placeholder participantId. No scope gate any more:
+// S7 gives mobile rows their staleness contract, so a phone is a participant like any other and may
+// learn which row on its own mirror is itself.
 function negotiatedStreamPresence(
   supportsPresence: boolean,
-  participant: TerminalPresenceParticipant | null,
-  clientKind: 'mobile' | 'runtime' | undefined
+  participant: TerminalPresenceParticipant | null
 ): TerminalPresenceStreamPresence | null {
-  return supportsPresence && participant && clientKind === 'runtime'
-    ? toStreamPresence(participant)
-    : null
+  return supportsPresence && participant ? toStreamPresence(participant) : null
 }
 
 // Why one builder for both handlers: `self` is resolved per emitting stream, so the two paths differ in
@@ -1832,6 +1830,11 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         if (!stream.supportsPresence || !stream.participant) {
           return false
         }
+        // Why ahead of the predicate: consulting it ARMS the record, so a phone must be turned away
+        // before it can spend a nudge it could never read.
+        if (!isHoldableStreamParticipant(stream.participant)) {
+          return false
+        }
         // Why deliverability is tested BEFORE the predicate and not after: consulting it ARMS the record,
         // so a hold spent on a stream that can no longer emit nudges nobody — and the next stream this
         // grant opens on this PTY finds that record and walks its first colliding keystroke through.
@@ -2799,8 +2802,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           const snapshotOutputSeq = serialized?.seq
           const streamPresence = negotiatedStreamPresence(
             stream.supportsPresence,
-            stream.participant,
-            clientKind
+            stream.participant
           )
           emit({
             type: 'subscribed',
@@ -3675,11 +3677,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           pairedDeviceId,
           clientKind
         })
-        const streamPresence = negotiatedStreamPresence(
-          supportsPresence,
-          streamParticipant,
-          clientKind
-        )
+        const streamPresence = negotiatedStreamPresence(supportsPresence, streamParticipant)
         emit({
           type: 'subscribed',
           streamId,
@@ -3702,20 +3700,23 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           }
           // Why a resolved participant is required as well as the echo: without one there is no grant to
           // key the hold on, and self-gating on an unknown grant would hold a peer against themselves.
-          holdInputForTypingPeer = streamParticipant
-            ? (): boolean => {
-                // Why deliverability first, as on the multiplex helper: the predicate ARMS the record, so
-                // a hold spent after this stream closed nudges nobody and disarms the next collision.
-                if (closed) {
-                  return false
+          // Why the host-observed kind and not `supportsPresence` alone: S7 has every phone advertising
+          // `presence: 1`, and a phone renders no hold copy — gap 5's handler must say so itself.
+          holdInputForTypingPeer =
+            streamParticipant && isHoldableStreamParticipant(streamParticipant)
+              ? (): boolean => {
+                  // Why deliverability first, as on the multiplex helper: the predicate ARMS the record, so
+                  // a hold spent after this stream closed nudges nobody and disarms the next collision.
+                  if (closed) {
+                    return false
+                  }
+                  if (!shouldHoldInputForTypingPeer(ptyId, streamParticipant.pairedDeviceId)) {
+                    return false
+                  }
+                  emitPresence()
+                  return true
                 }
-                if (!shouldHoldInputForTypingPeer(ptyId, streamParticipant.pairedDeviceId)) {
-                  return false
-                }
-                emitPresence()
-                return true
-              }
-            : null
+              : null
           unsubscribePresence = terminalPresenceChangeNotifier.subscribe(ptyId, emitPresence)
           emitPresence()
         }

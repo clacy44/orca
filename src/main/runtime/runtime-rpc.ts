@@ -1329,6 +1329,10 @@ export class OrcaRuntimeRpcServer {
       deviceRegistry,
       e2eeKeypair,
       onText: (socket, plaintext, reply, sendBinary) => {
+        // Why every inbound frame and not the terminal ones: this stamp is the ONLY liveness signal a
+        // relay data socket has, so a phone polling its worktree list proves it is alive just as much as
+        // a keystroke does. It renders staleness; it never reaps (§2.1).
+        terminalPresenceRegistry.stampInbound(socket.connectionId)
         void this.handleWebSocketMessage(
           plaintext,
           reply,
@@ -1339,7 +1343,12 @@ export class OrcaRuntimeRpcServer {
           socket
         )
       },
-      onBinary: (socket, bytes) => this.handleWebSocketBinaryMessage(bytes, socket.ws),
+      onBinary: (socket, bytes) => {
+        // Why here too: the phone's terminal input is a binary frame, so a text-only stamp would mark a
+        // phone stale while its owner was typing on it.
+        terminalPresenceRegistry.stampInbound(socket.connectionId)
+        this.handleWebSocketBinaryMessage(bytes, socket.ws)
+      },
       onReady: (socket) => {
         // Why: created for ANY authenticated socket, not only a terminal stream, or a peer connected
         // with no terminal open would never appear; the kind is host-observed (device.scope), never a

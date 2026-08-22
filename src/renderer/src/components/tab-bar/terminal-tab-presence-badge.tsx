@@ -12,7 +12,10 @@ import {
 const DOT_CLASSES: Record<TerminalTabPresenceBadgeState, string> = {
   typing: 'bg-foreground',
   writing: 'bg-muted-foreground',
-  attached: 'bg-muted-foreground/50'
+  attached: 'bg-muted-foreground/50',
+  // Why dimmer still: the host has heard nothing from this phone for two minutes, so the dot must not
+  // read as loud as somebody who is answering.
+  stale: 'bg-muted-foreground/30'
 }
 
 function badgeTitle(state: TerminalTabPresenceBadgeState, label: string): string {
@@ -33,6 +36,12 @@ function badgeTitle(state: TerminalTabPresenceBadgeState, label: string): string
       return translate(
         'auto.components.tab.bar.terminal.tab.presence.badge.4f7a82c1d5',
         '{{value0}} is using this tab',
+        { value0: label }
+      )
+    case 'stale':
+      return translate(
+        'auto.components.tab.bar.terminal.tab.presence.badge.stale',
+        '{{value0}} is attached to this tab but has not been seen recently',
         { value0: label }
       )
   }

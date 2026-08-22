@@ -489,6 +489,51 @@ describe('terminal.subscribe presence events', () => {
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
   })
 
+  // Skew control, S7: a phone shipping from an older mobile train advertises no presence, and must get
+  // back exactly the bytes it gets today — no echo, no mirror, not even while a desktop peer types.
+  it('leaves an un-advertising phone byte-identical while a peer types', async () => {
+    useOnePresenceClock()
+    registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(CHAT_CONNECTION, CHAT_GRANT, "Ben's phone", 'mobile')
+    const desktop = await startNegotiatedSubscribe(CONNECTION, GRANT, 'ana')
+    const oldPhone = startSubscribe(
+      { connectionId: CHAT_CONNECTION, pairedDeviceId: CHAT_GRANT, clientKind: 'mobile' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'phone-1', type: 'mobile' },
+        viewport: { cols: 90, rows: 40 },
+        capabilities: { terminalBinaryStream: 1 }
+      }
+    )
+    const subscribed = await awaitSubscribed(oldPhone.messages)
+    expect(subscribed).toEqual({
+      type: 'subscribed',
+      streamId: expect.any(Number),
+      lines: [],
+      truncated: false,
+      cols: 120,
+      rows: 40,
+      displayMode: 'auto',
+      seq: 1
+    })
+
+    sendInputFrame(desktop.binaryHandlers, desktop.streamId, 'x')
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS + TERMINAL_PRESENCE_ACTIVITY_TTL_MS)
+
+    expect(presenceEvents(oldPhone.messages)).toEqual([])
+    // And the phone is still counted by everyone else: attachment is host-observed, not negotiated.
+    expect(
+      lastPresence(desktop.messages)
+        .map((row) => row.kind)
+        .toSorted()
+    ).toEqual(['mobile', 'runtime'])
+
+    vi.useRealTimers()
+    desktop.cleanups.get('terminal-1:ana')?.()
+    oldPhone.cleanups.get('terminal-1:phone-1')?.()
+    await Promise.all([desktop.dispatchPromise, oldPhone.dispatchPromise])
+  })
+
   it('marks exactly one self row on a mobile-scope negotiated subscribe', async () => {
     useOnePresenceClock()
     const desktopParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
@@ -514,9 +559,13 @@ describe('terminal.subscribe presence events', () => {
     expect(lastPresence(desktop.messages).filter((row) => row.self)).toEqual([
       expect.objectContaining({ participantId: desktopParticipantId })
     ])
-    // Why still withheld: W2's own-identity object stays runtime-scope until S7 gives mobile rows their
-    // staleness contract — the two gates are separate, and only this one is scoped by kind.
-    expect('presence' in subscribed).toBe(false)
+    // And W2 names the same participant, so the two gates cannot disagree about who this phone is.
+    expect(subscribed.presence).toEqual({
+      participantId: phoneParticipantId,
+      label: 'Ana phone',
+      kind: 'mobile',
+      self: true
+    })
 
     vi.useRealTimers()
     desktop.cleanups.get('terminal-1:ana')?.()

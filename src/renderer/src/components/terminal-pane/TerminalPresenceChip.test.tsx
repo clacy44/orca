@@ -57,4 +57,18 @@ describe('TerminalPresenceChip', () => {
   it('renders nothing when the reader is the only participant', () => {
     expect(renderChip([peer({ participantId: 'p-self', self: true, typing: true })])).toBe('')
   })
+
+  it('renders the staleness copy with elapsed minutes', () => {
+    const markup = renderChip([
+      peer({
+        kind: 'mobile',
+        label: "Ben's phone",
+        stale: true,
+        lastSeenAt: Date.now() - 4 * 60_000
+      })
+    ])
+    expect(markup).toContain('Ben&#x27;s phone attached · last seen 4m ago')
+    expect(markup).toContain('data-presence-activity="stale"')
+    expect(markup).not.toContain('typing')
+  })
 })

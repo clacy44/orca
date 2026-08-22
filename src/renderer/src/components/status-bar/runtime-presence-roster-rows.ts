@@ -12,6 +12,12 @@ export type RuntimePresenceRosterRow = {
   self: boolean
   attachedCount: number
   activeTabTitle: string | null
+  // Why carried instead of derived: only the host knows a phone stopped answering, so the row states it
+  // and the surface phrases it — a renderer that guessed would need a liveness signal it does not have.
+  stale: boolean
+  // Why separate from the flag: the flag says the row is old, the stamp says how old. A host may send
+  // the first without the second, and the copy then says the part it knows.
+  lastSeenAt: number | null
 }
 
 export type RuntimePresenceRoster = {
@@ -39,7 +45,9 @@ export function buildRuntimePresenceRosterRows(
         kind: participant.kind,
         self: participant.self,
         attachedCount: participant.attachedTerminals.length,
-        activeTabTitle: titleByParticipantId.get(participant.participantId) ?? null
+        activeTabTitle: titleByParticipantId.get(participant.participantId) ?? null,
+        stale: participant.stale === true,
+        lastSeenAt: participant.stale ? (participant.lastSeenAt ?? null) : null
       })
     }
   }

@@ -88,4 +88,36 @@ describe('resolveTerminalTabPresenceLabel', () => {
   it('has no name to give when nobody but the reader is there', () => {
     expect(resolveTerminalTabPresenceLabel({ tabId: 'tab-1', ptyIdsByTabId: PTY_IDS })).toBeNull()
   })
+
+  it('marks a stale phone without letting it outrank anyone who is here', () => {
+    setPresenceForPty('pty-1', {
+      participants: [
+        peer({
+          participantId: 'p-phone',
+          label: "Ben's phone",
+          kind: 'mobile',
+          stale: true,
+          lastSeenAt: 1_000
+        })
+      ],
+      arbitration: null
+    })
+    expect(resolveTerminalTabPresenceBadge({ tabId: 'tab-1', ptyIdsByTabId: PTY_IDS })).toBe(
+      'stale'
+    )
+    expect(resolveTerminalTabPresenceLabel({ tabId: 'tab-1', ptyIdsByTabId: PTY_IDS })).toBe(
+      "Ben's phone"
+    )
+
+    setPresenceForPty('pty-2', {
+      participants: [peer({ participantId: 'p-ana', label: 'Ana laptop' })],
+      arbitration: null
+    })
+    expect(resolveTerminalTabPresenceBadge({ tabId: 'tab-1', ptyIdsByTabId: PTY_IDS })).toBe(
+      'attached'
+    )
+    expect(resolveTerminalTabPresenceLabel({ tabId: 'tab-1', ptyIdsByTabId: PTY_IDS })).toBe(
+      'Ana laptop'
+    )
+  })
 })

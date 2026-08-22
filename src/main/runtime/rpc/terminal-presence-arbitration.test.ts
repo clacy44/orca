@@ -474,6 +474,47 @@ describe('terminal.multiplex soft arbitration', () => {
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
   })
 
+  // The multiplex branch already skips the W4 emit for `client.type: 'mobile'`, but that field is
+  // client-declared: a mobile-scope grant declaring 'desktop' negotiates presence and would be armed.
+  // The hold has to answer to `device.scope`, the same host-observed fact the roster's kind comes from.
+  it('never holds a mobile-scope multiplex stream that declares itself a desktop', async () => {
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(CHAT_CONNECTION, CHAT_GRANT, "Ben's phone", 'mobile')
+    const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+    const phone = startMultiplex({
+      connectionId: CHAT_CONNECTION,
+      pairedDeviceId: CHAT_GRANT,
+      clientKind: 'mobile'
+    })
+    await vi.waitFor(() => expect(phone.handlers.has(0)).toBe(true))
+    sendSubscribeFrame(
+      phone.handlers,
+      { presence: 1 },
+      {
+        streamId: BEN_STREAM_ID,
+        clientId: 'phone-1'
+      }
+    )
+    await awaitSubscribed(phone.messages)
+
+    sendInputFrame(ana.handlers, 7, 'a')
+    await settle(10)
+    sendInputFrame(phone.handlers, BEN_STREAM_ID, 'p')
+    await settle(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    // Non-vacuous: Ana is provably typing over this window, so the delivery below is the kind gate.
+    expect(
+      participantRows(ana.messages).find((row) => row.participantId === anaParticipantId)
+    ).toMatchObject({ typing: true })
+    expect(sentTexts(phone.runtime)).toEqual(['p'])
+    expect(presenceResults(phone.messages).some((event) => 'arbitration' in event)).toBe(false)
+
+    vi.useRealTimers()
+    ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
+    phone.cleanups.get(`terminal-multiplex:${CHAT_CONNECTION}`)?.()
+    await Promise.all([ana.dispatchPromise, phone.dispatchPromise])
+  })
+
   it('delivers a chat send while a desktop peer is typing', async () => {
     registerGrant(CONNECTION, GRANT, 'Ana laptop')
     registerGrant(CHAT_CONNECTION, CHAT_GRANT, 'Ben phone', 'mobile')
@@ -704,6 +745,54 @@ describe('terminal.subscribe soft arbitration', () => {
     ana.cleanups.get('terminal-1:ana')?.()
     ben.cleanups.get('terminal-1:ben')?.()
     await Promise.all([ana.dispatchPromise, ben.dispatchPromise])
+  })
+
+  // S7 makes every phone advertise `presence: 1`, so negotiation alone can no longer stand in for "this
+  // client can render the reason". The phone's decoder drops `arbitration` and its banner has no
+  // "press again" copy, so a held keystroke would vanish with nothing rendered — and the phone cannot be
+  // respun to catch up with a host that started holding it.
+  it('never holds a mobile-scope stream, while the desktop peer beside it still is', async () => {
+    const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
+    registerGrant(PEER_CONNECTION, PEER_GRANT, 'Ben laptop')
+    registerGrant(CHAT_CONNECTION, CHAT_GRANT, "Ben's phone", 'mobile')
+    const ana = await startNegotiatedSubscribe(CONNECTION, GRANT, 'ana')
+    const phone = startSubscribe(
+      { connectionId: CHAT_CONNECTION, pairedDeviceId: CHAT_GRANT, clientKind: 'mobile' },
+      {
+        terminal: 'terminal-1',
+        client: { id: 'phone-1', type: 'mobile' },
+        viewport: { cols: 390, rows: 40 },
+        capabilities: { terminalBinaryStream: 1, presence: 1 }
+      }
+    )
+    const phoneSubscribed = await awaitSubscribed(phone.messages)
+    const ben = await startNegotiatedSubscribe(PEER_CONNECTION, PEER_GRANT, 'ben')
+
+    sendInputFrame(ana.binaryHandlers, ana.streamId, 'a')
+    await settle(10)
+
+    // Non-vacuity first: the same typing stamp holds the desktop peer in this very test.
+    sendInputFrame(ben.binaryHandlers, ben.streamId, 'b')
+    await settle()
+    expect(lastPresence(ben.messages)?.arbitration).toEqual({
+      heldFor: anaParticipantId,
+      until: expect.any(Number)
+    })
+    expect(ben.runtime.sendTerminal).not.toHaveBeenCalled()
+
+    sendInputFrame(phone.binaryHandlers, phoneSubscribed.streamId as number, 'p')
+    await settle(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+
+    expect(sentTexts(phone.runtime)).toEqual(['p'])
+    // The mirror still reaches the phone (Q5 keeps the roster read-only, not absent) — with no hold on it.
+    expect(presenceResults(phone.messages).length).toBeGreaterThan(0)
+    expect(presenceResults(phone.messages).some((event) => 'arbitration' in event)).toBe(false)
+
+    vi.useRealTimers()
+    ana.cleanups.get('terminal-1:ana')?.()
+    ben.cleanups.get('terminal-1:ben')?.()
+    phone.cleanups.get('terminal-1:phone-1')?.()
+    await Promise.all([ana.dispatchPromise, ben.dispatchPromise, phone.dispatchPromise])
   })
 
   it('spends no hold once its own stream is closed', async () => {

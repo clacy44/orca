@@ -14,6 +14,7 @@ import {
   TERMINAL_PRESENCE_COALESCE_WINDOW_MS
 } from './terminal-presence-change-notifier'
 import { createTerminalPresenceRosterPublisher } from './terminal-presence-roster-publisher'
+import { MOBILE_PRESENCE_STALE_MS } from './terminal-presence-staleness'
 
 const PTY_ID = 'pty-1'
 
@@ -255,6 +256,62 @@ describe('terminal presence roster caps', () => {
     // Why asserted here: `truncated` has two producers and means "more PEOPLE", so a handle-only
     // overflow that set it would tell every client somebody is missing from the roster.
     expect(membership.truncated).toBeUndefined()
+  })
+})
+
+// §4.2 / §2.7 "Relay transport": under Q5 this snapshot crosses the relay to every phone on every
+// (re)subscribe, and S7 adds `stale`/`lastSeenAt` to it. The caps above count ROWS; this counts BYTES,
+// which is what the relay actually carries. Measured at both caps with every row stale: ~30 KB, almost
+// all of it the 64 handles per row. A budget, not a snapshot — it is here to fail when a future field
+// multiplies the payload, not to pin the serializer's every character.
+const MOBILE_ROSTER_SNAPSHOT_BYTE_BUDGET = 40 * 1024
+
+describe('terminal presence roster relay cost', () => {
+  it('keeps the fully stale mobile snapshot inside its relay byte budget at both caps', () => {
+    let clock = 1_000_000
+    const registry = new TerminalPresenceRegistry({ now: () => clock })
+    const established = new Set<string>()
+    const handles = new Map<string, string>()
+    // One row is the synthesized host, so the connections that fit are one fewer than the cap.
+    for (let index = 0; index < TERMINAL_PRESENCE_MAX_PARTICIPANTS - 1; index += 1) {
+      const connectionId = `conn-mobile-${index}`
+      established.add(connectionId)
+      registry.registerConnection({
+        connectionId,
+        pairedDeviceId: `grant-mobile-${index}`,
+        // A long, plausible device name — the label is the one field a human sizes.
+        label: `Ben's iPhone 17 Pro Max (personal) ${index}`,
+        kind: 'mobile'
+      })
+      for (let handle = 0; handle < TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS; handle += 1) {
+        const ptyId = `pty-${index}-${handle}`
+        handles.set(ptyId, `term_${index}_${handle}`)
+        registry.attach(ptyId, `lease:${connectionId}:${handle}`, connectionId)
+      }
+    }
+    // Every phone past the horizon, so every row carries both staleness fields.
+    clock += MOBILE_PRESENCE_STALE_MS
+
+    const membership = buildTerminalPresenceRosterParticipants({
+      registry,
+      hasEstablishedSubscription: (connectionId) => established.has(connectionId),
+      resolveTerminalHandle: (ptyId) => handles.get(ptyId) ?? null
+    })
+    const snapshot = stampTerminalPresenceSelf(
+      { type: 'terminalPresence', seq: 1, ...membership },
+      'p-listener'
+    )
+
+    // Non-vacuous: the rows really are at both caps and really are stale.
+    expect(snapshot.participants).toHaveLength(TERMINAL_PRESENCE_MAX_PARTICIPANTS)
+    const mobileRows = snapshot.participants.filter((row) => row.kind === 'mobile')
+    expect(mobileRows).toHaveLength(TERMINAL_PRESENCE_MAX_PARTICIPANTS - 1)
+    expect(mobileRows.every((row) => row.stale === true && row.lastSeenAt !== undefined)).toBe(true)
+    expect(mobileRows[0]?.attachedTerminals).toHaveLength(TERMINAL_PRESENCE_MAX_ATTACHED_TERMINALS)
+
+    expect(Buffer.byteLength(JSON.stringify(snapshot), 'utf8')).toBeLessThan(
+      MOBILE_ROSTER_SNAPSHOT_BYTE_BUDGET
+    )
   })
 })
 

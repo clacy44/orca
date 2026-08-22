@@ -97,4 +97,53 @@ describe('resolveTerminalPresenceChipState', () => {
       })
     ).toEqual({ label: 'Ana laptop', activity: 'writing' })
   })
+
+  // S7: a phone the host has not heard from in two minutes reads as attached-but-silent, never as typing.
+  it('renders a stale phone as its own state and keeps the copy stamp', () => {
+    expect(
+      resolveTerminalPresenceChipState({
+        participants: [
+          peer({ kind: 'mobile', label: "Ben's phone", stale: true, lastSeenAt: 1_000 })
+        ],
+        arbitration: null
+      })
+    ).toEqual({ label: "Ben's phone", activity: 'stale', lastSeenAt: 1_000 })
+  })
+
+  // The negative control that matters: `stale` wins even if an activity flag somehow survived, because
+  // a row nobody has heard from cannot honestly claim a keystroke.
+  it('never renders a stale row as typing', () => {
+    expect(
+      resolveTerminalPresenceChipState({
+        participants: [
+          peer({ kind: 'mobile', typing: true, writing: true, stale: true, lastSeenAt: 1_000 })
+        ],
+        arbitration: null
+      })?.activity
+    ).toBe('stale')
+  })
+
+  // The two fields are independent optionals on the wire, so a future or third-party host may send the
+  // flag without the stamp. One reading on every surface: `stale` alone means "render no activity flag",
+  // and only the stamp unlocks the "how long" clause — never a fabricated or zero-based duration.
+  it('falls back to plain attached for a stale row that carries no stamp', () => {
+    expect(
+      resolveTerminalPresenceChipState({
+        participants: [peer({ kind: 'mobile', label: "Ben's phone", typing: true, stale: true })],
+        arbitration: null
+      })
+    ).toEqual({ label: "Ben's phone", activity: 'attached' })
+  })
+
+  it('lets a peer who is actually here outrank a stale phone', () => {
+    expect(
+      resolveTerminalPresenceChipState({
+        participants: [
+          peer({ participantId: 'p-phone', kind: 'mobile', stale: true, lastSeenAt: 1_000 }),
+          peer({ participantId: 'p-ana', label: 'Ana laptop' })
+        ],
+        arbitration: null
+      })
+    ).toEqual({ label: 'Ana laptop', activity: 'attached' })
+  })
 })

@@ -83,7 +83,12 @@ function buildTerminalPresence(
     kind: row.kind,
     typing: row.typing,
     writing: row.writing,
-    ...(row.self ? { self: true as const } : {})
+    ...(row.self ? { self: true as const } : {}),
+    // Why carried through rather than recomputed: one builder decides staleness, so the CLI column and
+    // the chip beside it can never disagree about whether a phone is still answering.
+    ...(row.stale && row.lastSeenAt !== undefined
+      ? { stale: true as const, lastSeenAt: row.lastSeenAt }
+      : {})
   }))
   return { attachedCount: participants.length, participants }
 }

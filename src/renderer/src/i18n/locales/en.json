@@ -3039,7 +3039,8 @@
             "ca8b0b4bc6": "{{value0}} is typing",
             "13c1a5839d": "{{value0}} is writing",
             "b9ac6c07ca": "{{value0}} is typing — press again",
-            "d7e5962e29": "In use by {{value0}}"
+            "d7e5962e29": "In use by {{value0}}",
+            "stale": "{{value0}} attached · last seen {{value1}}m ago"
           }
         }
       },
@@ -3281,7 +3282,8 @@
                 "badge": {
                   "2561fd4563": "{{value0}} is typing in this tab",
                   "407e0165e2": "{{value0}} is writing in this tab",
-                  "4f7a82c1d5": "{{value0}} is using this tab"
+                  "4f7a82c1d5": "{{value0}} is using this tab",
+                  "stale": "{{value0}} is attached to this tab but has not been seen recently"
                 }
               }
             }
@@ -3725,7 +3727,8 @@
             "ce809af553": "Attached",
             "97fd835cd3": "Idle",
             "faa72294ac": "People",
-            "4f4b1f6a3c": "More people not shown"
+            "4f4b1f6a3c": "More people not shown",
+            "stale": "Attached · last seen {{value0}}m ago"
           }
         }
       },

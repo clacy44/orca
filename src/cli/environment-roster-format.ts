@@ -2,6 +2,7 @@ import type {
   RuntimeTerminalPresence,
   RuntimeTerminalPresenceParticipant
 } from '../shared/runtime-types'
+import { terminalPresenceLastSeenMinutes } from '../shared/terminal-presence-last-seen'
 import type { EnvironmentTerminalRoster, RosterRow } from './runtime/environment-terminal-roster'
 
 // Why a literal and not an empty string: `registerConnection` labels a grant the device registry no
@@ -20,11 +21,28 @@ function formatParticipant(participant: RuntimeTerminalPresenceParticipant): str
   const label = participant.label.length > 0 ? participant.label : UNNAMED_PARTICIPANT_LABEL
   // Why composed here: the host publishes the bare machine name so each surface owns its own marker,
   // and typing wins over writing because it is the stamp a peer's next keystroke can collide with.
+  // A stale phone reports neither: the host has heard nothing from it, so the only honest marker is when.
   const markers = [
     ...(participant.kind === 'host' ? ['host'] : []),
-    ...(participant.typing ? ['typing'] : participant.writing ? ['writing'] : [])
+    ...formatActivityMarkers(participant)
   ]
   return markers.length > 0 ? `${label} (${markers.join(', ')})` : label
+}
+
+function formatActivityMarkers(participant: RuntimeTerminalPresenceParticipant): string[] {
+  // Why on `stale` alone: the host has heard nothing from this row, so no activity flag on it is worth
+  // printing. The stamp only decides whether the column can say how long — without it, no marker at all.
+  if (participant.stale) {
+    return participant.lastSeenAt === undefined
+      ? []
+      : [
+          `attached · last seen ${terminalPresenceLastSeenMinutes(participant.lastSeenAt, Date.now())}m ago`
+        ]
+  }
+  if (participant.typing) {
+    return ['typing']
+  }
+  return participant.writing ? ['writing'] : []
 }
 
 export function formatEnvironmentTerminalRoster(roster: EnvironmentTerminalRoster): string {
