@@ -103,6 +103,13 @@ export function hydrateLocalTerminalPresence(snapshot: TerminalPresenceLocalSnap
   publishRoster()
 }
 
+/** No snapshot will ever arrive on this mount. Ends the buffering state rather than leaving the lane
+ *  dark with a queue nothing drains — later pushes still feed the pane surfaces, minus the host row. */
+export function markLocalTerminalPresenceUnavailable(): void {
+  pendingTerminals.length = 0
+  hydrated = true
+}
+
 /** Drops every local row. The hub calls this when its effect tears down: the lane is process-global,
  *  so a remount must re-hydrate rather than inherit what the previous mount left behind. */
 export function resetLocalTerminalPresence(): void {

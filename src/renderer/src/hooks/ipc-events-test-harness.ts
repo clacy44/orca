@@ -230,6 +230,14 @@ export async function loadIpcEventsHarness(
           onTerminalDriverChanged: () => () => {},
           onBrowserDriverChanged: () => () => {}
         },
+        terminalPresence: {
+          get: () =>
+            Promise.resolve({
+              host: { participantId: 'host', label: 'this device', kind: 'host', self: true },
+              terminals: []
+            }),
+          onChanged: () => () => {}
+        },
         ssh: {
           listTargets: () => Promise.resolve([]),
           listPortForwards: () => Promise.resolve([]),

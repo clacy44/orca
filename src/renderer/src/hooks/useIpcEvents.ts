@@ -102,6 +102,7 @@ import {
 import {
   applyLocalTerminalPresence,
   hydrateLocalTerminalPresence,
+  markLocalTerminalPresenceUnavailable,
   resetLocalTerminalPresence
 } from '@/lib/pane-manager/terminal-presence-local-lane'
 import { applyNativeChatLaunchDraftResolved } from '@/runtime/native-chat-launch-draft-runtime-resolution'
@@ -3809,24 +3810,37 @@ export function useIpcEvents(): void {
     // Subscribed before the snapshot round trip for the same reason as the block below — the lane
     // buffers pushes until hydration so an older snapshot cannot overwrite a newer one.
     let localPresenceHydrationDisposed = false
-    unsubs.push(
-      window.api.terminalPresence.onChanged((terminal) => {
-        applyLocalTerminalPresence(terminal)
-      })
-    )
-    void window.api.terminalPresence
-      .get()
-      .then((snapshot) => {
-        // Why the snapshot guard: the web client has no local runtime at all, and its preload fallback
-        // answers an unknown namespace with `undefined` rather than a roster. No host, no local lane.
-        if (localPresenceHydrationDisposed || !snapshot) {
-          return
-        }
-        hydrateLocalTerminalPresence(snapshot)
-      })
-      .catch((error: unknown) => {
-        console.error('Failed to hydrate local terminal presence:', error)
-      })
+    // Why bound and guarded rather than reached into twice: every renderer that mounts this hub with an
+    // api stub lacking the namespace would otherwise throw here and skip every listener below it.
+    const localPresence = window.api.terminalPresence
+    if (localPresence) {
+      unsubs.push(
+        localPresence.onChanged((terminal) => {
+          applyLocalTerminalPresence(terminal)
+        })
+      )
+      // Why Promise.resolve and not `.then` on the return value: a stub or fallback that answers a
+      // non-thenable must not take the rest of the hub down with it.
+      void Promise.resolve(localPresence.get())
+        .then((snapshot) => {
+          if (localPresenceHydrationDisposed) {
+            return
+          }
+          // Why the snapshot guard: the web client has no local runtime at all, and its preload fallback
+          // answers an unknown namespace with `undefined` rather than a roster. No host, no local lane —
+          // and the lane must be told, or it buffers every later push waiting for a hydration that is
+          // never coming.
+          if (!snapshot?.terminals) {
+            markLocalTerminalPresenceUnavailable()
+            return
+          }
+          hydrateLocalTerminalPresence(snapshot)
+        })
+        .catch((error: unknown) => {
+          markLocalTerminalPresenceUnavailable()
+          console.error('Failed to hydrate local terminal presence:', error)
+        })
+    }
 
     // Why: subscribe before the snapshot round trip and buffer live events; otherwise an older snapshot could overwrite a newer live lock and hide the overlay.
     if (!isRuntimeEnvironmentActive()) {
