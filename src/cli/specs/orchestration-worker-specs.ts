@@ -36,7 +36,7 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       '--on federates the worker onto a separate paired runtime (the worker server); the Run and this command remain on the current Orca server. The value is a saved environment (`orca environment add`), not a live socket, and the peer must advertise the federation capability.',
       'Remote current and new-child are invalid; discover an exact remote selector or use new-top-level.',
       '--retry-of links the replacement attempt but does not inherit placement; repeat the intended --on/worktree and --agent/terminal choices.',
-      '--liveness-window-ms sizes the silence after which the runtime posts one escalation into the Run mailbox naming this worker; it defaults to 30 minutes, subtracts time the worker spent blocked in ask or check --wait, and never touches the Dispatch. Pass 0 to disable it.',
+      '--liveness-window-ms sizes the silence after which the runtime posts one escalation into the Run mailbox naming this worker; it never touches the Dispatch, and 0 disables it. A local worker defaults to 30 minutes and has the time it spent blocked in ask or check --wait subtracted. A federated worker parks on the peer, which the home cannot observe, so it defaults to 40 minutes with no subtraction.',
       'The call exits 0 only for ready. Failed or outcome_unknown exits 1 and JSON includes stage/failedStage, setup, effects, residualResources, and recovery commands when needed.'
     ]
   },

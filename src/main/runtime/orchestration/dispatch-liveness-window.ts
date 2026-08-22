@@ -1,31 +1,43 @@
 import { ORCHESTRATION_ASK_MAX_TIMEOUT_MS } from '../../../shared/orchestration-ask-timeout'
 import { evaluateDispatchLiveness } from './dispatch-blocked-window'
 import { summarizeDispatchHeartbeat } from './dispatch-heartbeat-age'
+import { HEARTBEAT_INTERVAL_MIN } from './preamble'
 
-// Why this size and not coordinator.ts's 10 minutes: the preamble buys a worker a legal 30-minute
-// silence — `ask` clamps to ORCHESTRATION_ASK_MAX_TIMEOUT_MS and the same preamble tells the worker
-// to stop heartbeating for the whole park — so a shorter default breaches on healthy blocked
-// workers wherever §14's marker is missing (a restart mid-park, an identity that resolved to
-// nothing). Matching the longest legal `ask` makes the window generous by construction.
+// Why the longest legal `ask` and not coordinator.ts's 10 minutes: the preamble tells a parked
+// worker to stop heartbeating, so a shorter default breaches on healthy blocked workers wherever
+// §14's marker is missing (a restart mid-park, an identity that resolved to nothing).
 export const DISPATCH_LIVENESS_DEFAULT_WINDOW_MS = ORCHESTRATION_ASK_MAX_TIMEOUT_MS
+
+// Why wider when federated: the home's blocked_since never moves for a federated worker, so its
+// silence is measured from the last RELAYED heartbeat — up to one cadence before the park began —
+// and the longest legal `ask` on top of that already exceeds the local default. A1 §14 asks for a
+// federated window generous enough to cover a full `ask`; this is that ask plus the cadence.
+export const DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS =
+  ORCHESTRATION_ASK_MAX_TIMEOUT_MS + 2 * HEARTBEAT_INTERVAL_MIN * 60_000
 
 // Why default-on rather than opt-in: the runs this catches are precisely the ones nobody would
 // have opted in for, so an opt-in liveness contract is discipline wearing a flag (A1 §3).
-export function resolveDispatchLivenessWindowMs(startOptions: string | null | undefined): number {
+export function resolveDispatchLivenessWindowMs(
+  startOptions: string | null | undefined,
+  options?: { federated?: boolean }
+): number {
+  const fallback = options?.federated
+    ? DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS
+    : DISPATCH_LIVENESS_DEFAULT_WINDOW_MS
   if (!startOptions) {
-    return DISPATCH_LIVENESS_DEFAULT_WINDOW_MS
+    return fallback
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(startOptions)
   } catch {
-    return DISPATCH_LIVENESS_DEFAULT_WINDOW_MS
+    return fallback
   }
   const requested = (parsed as { livenessWindowMs?: unknown } | null)?.livenessWindowMs
   // Why 0 survives this guard: it is the explicit disable, not a missing value.
   return typeof requested === 'number' && Number.isFinite(requested) && requested >= 0
     ? requested
-    : DISPATCH_LIVENESS_DEFAULT_WINDOW_MS
+    : fallback
 }
 
 export type DispatchLivenessCandidateRow = {
@@ -36,6 +48,9 @@ export type DispatchLivenessCandidateRow = {
   last_heartbeat_at: string | null
   blocked_since: string | null
   start_options: string | null
+  // Why on the row and not a second query: the peer-side park is invisible here, so the window has
+  // to know which half of the asymmetry it is judging.
+  federated: number
 }
 
 export type DispatchLivenessBreach = {
@@ -59,7 +74,9 @@ export function selectDispatchLivenessBreaches(
 ): DispatchLivenessBreach[] {
   const breaches: DispatchLivenessBreach[] = []
   for (const row of rows) {
-    const windowMs = resolveDispatchLivenessWindowMs(row.start_options)
+    const windowMs = resolveDispatchLivenessWindowMs(row.start_options, {
+      federated: Boolean(row.federated)
+    })
     const verdict = evaluateDispatchLiveness({
       lastHeartbeatAt: row.last_heartbeat_at,
       dispatchedAt: row.dispatched_at,

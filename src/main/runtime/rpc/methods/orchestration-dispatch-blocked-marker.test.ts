@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
+import { sweepDispatchLivenessBreaches } from '../../orchestration/dispatch-liveness-monitor'
 import { ORCHESTRATION_METHODS } from './orchestration'
 
 const WORKER_PANE_KEY = 'tab_worker:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -232,6 +233,7 @@ describe('dispatch blocked_since marker', () => {
 // only through relayed heartbeats (A1 §14 asymmetry).
 describe('federated blocked_since asymmetry', () => {
   let homeDb: OrchestrationDb
+  let homeRuntime: OrcaRuntimeService
   let peerDb: OrchestrationDb
   let peerRuntime: OrcaRuntimeService
   let dispatchId: string
@@ -239,7 +241,7 @@ describe('federated blocked_since asymmetry', () => {
 
   beforeEach(() => {
     homeDb = new OrchestrationDb(':memory:')
-    const homeRuntime = new OrcaRuntimeService()
+    homeRuntime = new OrcaRuntimeService()
     homeRuntime.setOrchestrationDb(homeDb)
     const run = homeDb.createRun({
       objective: 'Federated asymmetry',
@@ -294,10 +296,16 @@ describe('federated blocked_since asymmetry', () => {
   })
 
   afterEach(() => {
+    homeRuntime.stopDispatchLivenessMonitor()
+    homeRuntime.stopOrchestrationFederationRelay()
     vi.restoreAllMocks()
     homeDb.close()
     peerDb.close()
   })
+
+  function homeHeartbeat(): string | null {
+    return homeDb.getDispatchContextById(dispatchId)?.last_heartbeat_at ?? null
+  }
 
   function callOnPeer(name: string, params: Record<string, unknown>, signal?: AbortSignal) {
     const method = findMethod(name)
@@ -324,19 +332,53 @@ describe('federated blocked_since asymmetry', () => {
   it('leaves the home marker untouched for a peer-side ask', async () => {
     const park = parkOnDemand(peerRuntime)
     const disconnect = new AbortController()
+    const relayedAt = new Date(Date.now() - 5 * 60_000).toISOString()
+    homeDb.recordHeartbeat(dispatchId, relayedAt)
 
     const pending = callOnPeer(
       'orchestration.ask',
-      { from: 'term_worker', question: 'which branch?', timeoutMs: 600_000 },
+      { from: 'term_worker', question: 'which branch?', timeoutMs: 1_800_000 },
       disconnect.signal
     )
     await park.entered
     expect(homeDb.getDispatchContextById(dispatchId)?.blocked_since ?? null).toBeNull()
     expect(peerDb.getDispatchContextById(dispatchId)).toBeUndefined()
+    // Why last_heartbeat_at and not only the marker: it is the column the liveness window reads,
+    // so pinning it is what makes the asymmetry deliberate rather than accidental (A1 §14).
+    expect(homeHeartbeat()).toBe(relayedAt)
 
     disconnect.abort()
     park.release()
     await pending
     expect(homeDb.getDispatchContextById(dispatchId)?.blocked_since ?? null).toBeNull()
+    expect(homeHeartbeat()).toBe(relayedAt)
+  })
+
+  // Why paired with the pin: the asymmetry is only safe if the federated window absorbs it, so the
+  // longest legal peer-side `ask` on top of a full cadence gap must still produce no escalation.
+  it('does not breach the federated window across a full-length peer-side ask', async () => {
+    const park = parkOnDemand(peerRuntime)
+    const disconnect = new AbortController()
+    const relayedAt = Date.now() - 5 * 60_000
+    homeDb.recordHeartbeat(dispatchId, new Date(relayedAt).toISOString())
+
+    const pending = callOnPeer(
+      'orchestration.ask',
+      { from: 'term_worker', question: 'which branch?', timeoutMs: 1_800_000 },
+      disconnect.signal
+    )
+    await park.entered
+
+    expect(
+      sweepDispatchLivenessBreaches({
+        db: homeDb,
+        runtime: homeRuntime,
+        now: relayedAt + 35 * 60_000
+      })
+    ).toEqual([])
+
+    disconnect.abort()
+    park.release()
+    await pending
   })
 })

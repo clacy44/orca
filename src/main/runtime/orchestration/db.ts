@@ -7012,7 +7012,8 @@ export class OrchestrationDb {
     return this.db
       .prepare(
         `SELECT d.id, d.run_id, d.task_id, d.dispatched_at, d.last_heartbeat_at, d.blocked_since,
-                w.start_options
+                w.start_options,
+                EXISTS (SELECT 1 FROM federated_dispatches f WHERE f.dispatch_id = d.id) AS federated
          FROM dispatch_contexts d
          JOIN worker_dispatches w ON w.dispatch_id = d.id
          WHERE d.status = 'dispatched' AND d.liveness_breached_at IS NULL`

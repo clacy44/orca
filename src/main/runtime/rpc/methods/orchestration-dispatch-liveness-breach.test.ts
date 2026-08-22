@@ -6,7 +6,10 @@ import {
   DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
   sweepDispatchLivenessBreaches
 } from '../../orchestration/dispatch-liveness-monitor'
-import { DISPATCH_LIVENESS_DEFAULT_WINDOW_MS } from '../../orchestration/dispatch-liveness-window'
+import {
+  DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS,
+  DISPATCH_LIVENESS_DEFAULT_WINDOW_MS
+} from '../../orchestration/dispatch-liveness-window'
 import { syncFederatedDispatch } from '../../orchestration/federation-sync'
 import { ORCHESTRATION_METHODS } from './orchestration'
 
@@ -77,6 +80,23 @@ describe('per-dispatch liveness window', () => {
       worktreeId: 'repo::worktree',
       setupState: 'not_applicable',
       effects: [{ kind: 'terminal', action: 'created', id: 'term_worker' }]
+    })
+    db.markWorkerDispatchReady(started.dispatch.id)
+    return { dispatchId: started.dispatch.id, taskId }
+  }
+
+  function startFederatedWorker(options: { startOptions?: Record<string, unknown> } = {}) {
+    const taskId = db.createTask({ spec: 'remote refactor', runId }).id
+    const started = db.createStartingWorkerDispatch({
+      taskId,
+      startOptions: options.startOptions ?? {},
+      runtimeEpoch: runtime.getRuntimeId(),
+      federation: {
+        environmentId: 'environment_peer',
+        environmentName: 'peer',
+        peerFingerprint: 'peer_fingerprint',
+        protocolVersion: 1
+      }
     })
     db.markWorkerDispatchReady(started.dispatch.id)
     return { dispatchId: started.dispatch.id, taskId }
@@ -159,7 +179,7 @@ describe('per-dispatch liveness window', () => {
       consecutiveFailures: 9
     })
 
-    sweep(minutesFromNow(31))
+    sweep(minutesFromNow(41))
 
     expect(JSON.parse(breachMail()[0].payload as string)).toMatchObject({
       syncHealth: { lastError: 'ECONNREFUSED', consecutiveFailures: 9 }
@@ -306,6 +326,47 @@ describe('per-dispatch liveness window', () => {
       release('timed_out')
       await pending
       expect(sweep(minutesFromNow(45))).toHaveLength(1)
+    })
+
+    // Why this control and not the local one above: a federated worker's park writes nothing on the
+    // home — the peer holds no dispatch_contexts row — so the wider window is the ONLY thing
+    // standing between a compliant peer-side `ask` and an escalation about a healthy worker.
+    it('says nothing about a federated worker parked in a full-length peer-side ask', () => {
+      const federated = startFederatedWorker()
+      db.recordHeartbeat(federated.dispatchId, new Date().toISOString())
+
+      // 5 minutes of pre-park cadence gap plus the longest legal `ask`, with no home-side marker.
+      expect(sweep(minutesFromNow(35))).toEqual([])
+      expect(breachMail()).toHaveLength(0)
+      expect(db.getDispatchContextById(federated.dispatchId)?.blocked_since).toBeNull()
+
+      // The same silence on a local Dispatch does breach, so the federated width — not a window
+      // wide enough to hide everything — is what kept this one quiet.
+      const local = startWorker()
+      db.recordHeartbeat(local.dispatchId, new Date().toISOString())
+      expect(sweep(minutesFromNow(35))).toHaveLength(1)
+    })
+
+    it('says nothing about a federated worker heartbeating on the taught cadence', () => {
+      const { dispatchId } = startFederatedWorker()
+
+      for (let minute = 5; minute <= 120; minute += 5) {
+        db.recordHeartbeat(dispatchId, new Date(minutesFromNow(minute)).toISOString())
+        sweep(minutesFromNow(minute) + 1_000)
+      }
+
+      expect(breachMail()).toHaveLength(0)
+    })
+
+    it('still reports a federated worker that outlasts the wider window', () => {
+      const { dispatchId } = startFederatedWorker()
+      db.recordHeartbeat(dispatchId, new Date().toISOString())
+
+      expect(sweep(minutesFromNow(41))).toHaveLength(1)
+      expect(JSON.parse(breachMail()[0].payload as string)).toMatchObject({
+        dispatchId,
+        windowMs: DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS
+      })
     })
 
     it('says nothing about a Dispatch younger than its window', () => {
@@ -495,8 +556,8 @@ describe('per-dispatch liveness window', () => {
         db.getDispatchContextById(started.dispatch.id)?.last_heartbeat_at as string
       )
       expect(Math.abs(heartbeatAt - importedAt)).toBeLessThan(5_000)
-      expect(sweep(importedAt + 29 * MINUTE_MS)).toEqual([])
-      expect(sweep(importedAt + 31 * MINUTE_MS)).toHaveLength(1)
+      expect(sweep(importedAt + 39 * MINUTE_MS)).toEqual([])
+      expect(sweep(importedAt + 41 * MINUTE_MS)).toHaveLength(1)
     })
   })
 })

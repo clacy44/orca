@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ORCHESTRATION_ASK_MAX_TIMEOUT_MS } from '../../../shared/orchestration-ask-timeout'
 import {
+  DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS,
   DISPATCH_LIVENESS_DEFAULT_WINDOW_MS,
   resolveDispatchLivenessWindowMs,
   selectDispatchLivenessBreaches,
@@ -19,6 +20,7 @@ function candidate(overrides: Partial<DispatchLivenessCandidateRow> = {}) {
     last_heartbeat_at: null,
     blocked_since: null,
     start_options: '{}',
+    federated: 0,
     ...overrides
   } satisfies DispatchLivenessCandidateRow
 }
@@ -36,6 +38,35 @@ describe('dispatch liveness window', () => {
     ['a negative value', '{"livenessWindowMs":-1}']
   ])('falls back to the default window for %s', (_label, startOptions) => {
     expect(resolveDispatchLivenessWindowMs(startOptions)).toBe(DISPATCH_LIVENESS_DEFAULT_WINDOW_MS)
+  })
+
+  // Why 40 and not 30: the home's silence clock for a federated worker starts at the last relayed
+  // heartbeat, which is up to one cadence older than the park it is exempting.
+  it('widens the federated default past the longest legal ask so a peer-side park cannot breach', () => {
+    expect(DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS).toBe(
+      ORCHESTRATION_ASK_MAX_TIMEOUT_MS + 10 * MINUTE_MS
+    )
+    expect(resolveDispatchLivenessWindowMs(null, { federated: true })).toBe(
+      DISPATCH_FEDERATED_LIVENESS_DEFAULT_WINDOW_MS
+    )
+    expect(
+      selectDispatchLivenessBreaches(
+        [
+          candidate({
+            federated: 1,
+            last_heartbeat_at: new Date(NOW - 35 * MINUTE_MS).toISOString()
+          })
+        ],
+        NOW
+      )
+    ).toEqual([])
+  })
+
+  it('lets a coordinator size a federated window below the wider default', () => {
+    expect(
+      resolveDispatchLivenessWindowMs('{"livenessWindowMs":600000}', { federated: true })
+    ).toBe(600_000)
+    expect(resolveDispatchLivenessWindowMs('{"livenessWindowMs":0}', { federated: true })).toBe(0)
   })
 
   it('keeps 0 as the explicit disable rather than treating it as missing', () => {

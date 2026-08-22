@@ -37,7 +37,7 @@ export type PreambleParams = {
 // check (threshold 10 min) catches a hung worker within one tick, and
 // infrequent enough to avoid inbox spam on long tasks. One constant so
 // cadence tuning is a single-line change (Q1 in DESIGN_DOC_PREAMBLE_FIX.md).
-const HEARTBEAT_INTERVAL_MIN = 5
+export const HEARTBEAT_INTERVAL_MIN = 5
 
 // Why exported: the post-ready observer looks for this marker in the terminal tail to tell a prompt
 // that is still sitting unsubmitted from one the agent has already answered (A1 section 2), and a
