@@ -76,14 +76,28 @@ function cleanupRecordingRuntime(
   cleanups: Map<string, () => void>,
   overrides: Partial<OrcaRuntimeService>
 ): OrcaRuntimeService {
+  const subscriptionsByConnection = new Map<string, Set<string>>()
   return stubRuntime({
-    registerSubscriptionCleanup: vi.fn((id: string, cleanup: () => void) => {
-      cleanups.set(id, cleanup)
+    registerSubscriptionCleanup: vi.fn((id: string, cleanup: () => void, connectionId?: string) => {
+      const registered = connectionId ? subscriptionsByConnection.get(connectionId) : undefined
+      if (connectionId && !registered) {
+        subscriptionsByConnection.set(connectionId, new Set([id]))
+      }
+      registered?.add(id)
+      cleanups.set(id, () => {
+        subscriptionsByConnection.get(connectionId ?? '')?.delete(id)
+        cleanup()
+      })
     }),
     cleanupSubscription: vi.fn((id: string) => {
       cleanups.get(id)?.()
       cleanups.delete(id)
     }),
+    // Why the real index rather than a blanket true: this predicate IS site (d)'s discriminator, so a
+    // stub lets a control that is supposed to hang off a live lease pass with no lease at all.
+    hasEstablishedSubscription: vi.fn(
+      (connectionId: string) => (subscriptionsByConnection.get(connectionId)?.size ?? 0) > 0
+    ),
     ...overrides
   })
 }

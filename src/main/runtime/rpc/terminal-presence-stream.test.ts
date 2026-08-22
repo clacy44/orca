@@ -112,6 +112,30 @@ async function startNegotiatedSubscribe(
   return { ...harness, streamId: subscribed.streamId as number, clientId }
 }
 
+// Why a real lease: §4.6 builds the phone's write control on a client whose only stream is a lease-only
+// subscribe, and the harness's own subscription index is what tells that apart from a headless one-shot.
+async function startLeaseOnlySubscribe() {
+  const harness = startSubscribe(
+    { connectionId: CHAT_CONNECTION, pairedDeviceId: CHAT_GRANT, clientKind: 'mobile' },
+    {
+      terminal: 'terminal-1',
+      client: { id: 'phone-1', type: 'mobile' },
+      capabilities: { terminalBinaryStream: 1, mobileInputLeaseOnly: 1 }
+    }
+  )
+  await awaitSubscribed(harness.messages)
+  return harness
+}
+
+function chatSend(runtime: OrcaRuntimeService): Promise<Record<string, unknown>[]> {
+  return dispatchWithIdentity(
+    'terminal.send',
+    { terminal: 'terminal-1', text: 'hello' },
+    { connectionId: CHAT_CONNECTION, pairedDeviceId: CHAT_GRANT, clientKind: 'mobile' },
+    runtime
+  )
+}
+
 beforeEach(() => {
   terminalPresenceRegistry.reset()
 })
@@ -305,14 +329,11 @@ describe('terminal.multiplex presence events', () => {
     const anaParticipantId = registerGrant(CONNECTION, GRANT, 'Ana laptop')
     const chatParticipantId = registerGrant(CHAT_CONNECTION, CHAT_GRANT, 'Ana phone', 'mobile')
     const ana = await startNegotiatedMultiplex(CONNECTION, GRANT, { clientId: 'ana' })
+    const phone = await startLeaseOnlySubscribe()
 
     sendInputFrame(ana.handlers, 7, 'x')
     for (let index = 0; index < 5; index += 1) {
-      await dispatchWithIdentity(
-        'terminal.send',
-        { terminal: 'terminal-1', text: 'hello' },
-        { connectionId: CHAT_CONNECTION, pairedDeviceId: CHAT_GRANT, clientKind: 'mobile' }
-      )
+      await chatSend(phone.runtime)
     }
     vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
 
@@ -331,20 +352,46 @@ describe('terminal.multiplex presence events', () => {
       writing: true,
       self: false
     })
-    // Why: site (d) writes the grant map alone — the interactive map is what arms a hold, so a chat
-    // composer landing there would let automation swallow a human's keystroke (§2.6).
+    // Why keyed on the stamp and not on membership: the phone IS in the interactive map — its lease is
+    // an attachment its peers must see — so the control that matters is that five chat sends never
+    // stamped it. A composer landing there would let automation swallow a human's keystroke (§2.6).
     expect(
-      Array.from(terminalPresenceRegistry.attachmentsOf(PRESENCE_PTY_ID).values()).map(
-        (attachment) => attachment.connectionId
+      Array.from(terminalPresenceRegistry.attachmentsOf(PRESENCE_PTY_ID).entries()).map(
+        ([key, attachment]) => [key, attachment.lastInteractiveInputAt > 0]
       )
-    ).toEqual([CONNECTION])
+    ).toEqual([
+      [`multiplex:${CONNECTION}:7`, true],
+      [`lease:${CHAT_CONNECTION}:phone-1`, false]
+    ])
     expect(Array.from(terminalPresenceRegistry.grantWritesOf(PRESENCE_PTY_ID).keys())).toEqual([
       CHAT_GRANT
     ])
 
     vi.useRealTimers()
     ana.cleanups.get(`terminal-multiplex:${CONNECTION}`)?.()
-    await ana.dispatchPromise
+    phone.cleanups.get('terminal-1:phone-1')?.()
+    await Promise.all([ana.dispatchPromise, phone.dispatchPromise])
+  })
+
+  it('stops stamping a phone whose lease-only subscription is gone', async () => {
+    useOnePresenceClock()
+    registerGrant(CHAT_CONNECTION, CHAT_GRANT, 'Ana phone', 'mobile')
+    const phone = await startLeaseOnlySubscribe()
+    await chatSend(phone.runtime)
+    const stampedAt = terminalPresenceRegistry.grantWritesOf(PRESENCE_PTY_ID).get(CHAT_GRANT)
+    expect(stampedAt).toBeGreaterThan(0)
+
+    phone.cleanups.get('terminal-1:phone-1')?.()
+    await phone.dispatchPromise
+    vi.advanceTimersByTime(TERMINAL_PRESENCE_COALESCE_WINDOW_MS)
+    await chatSend(phone.runtime)
+
+    // Why the same socket and the same grant: with the lease torn down this connection holds no
+    // subscription, which is the only thing separating a phone's chat send from a headless agent's
+    // one-shot — so the second send must leave the earlier stamp exactly where it was.
+    expect(terminalPresenceRegistry.grantWritesOf(PRESENCE_PTY_ID).get(CHAT_GRANT)).toBe(stampedAt)
+
+    vi.useRealTimers()
   })
 })
 
