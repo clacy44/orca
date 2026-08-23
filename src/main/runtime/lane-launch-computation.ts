@@ -53,12 +53,16 @@ export type PaneLaneLaunch<TLaunchConfig extends LaneLaunchConfigInput = LaneLau
       containmentRoots?: readonly string[]
     } & LaneLaunchInputs<TLaunchConfig>)
 
-export type LaneLaunchComputation<
-  TSpawn extends LaneLaunchSpawnShape,
-  TLaunchConfig extends LaneLaunchConfigInput
-> = {
+/**
+ * Only the spawn options: the anchor governs the PROCESS.
+ *
+ * The launch config is an INPUT here — guard 2's allowlist, the `agentEnv` auth refusal and §2g's
+ * containment read it — and the record built from it is scrubbed of `CLAUDE_CONFIG_DIR` upstream
+ * on both paths by guard 3's `scopeLaunchConfigClaudeConfigDir`, so handing a second scrubbed copy
+ * back would advertise a delivery this function has no caller for.
+ */
+export type LaneLaunchComputation<TSpawn extends LaneLaunchSpawnShape> = {
   spawnOptions: TSpawn
-  launchConfig: TLaunchConfig | null | undefined
 }
 
 const OPENCLAUDE_COMMAND_RE = buildAgentNameRe('openclaude')
@@ -144,12 +148,9 @@ export function laneScopedAgentLaunchInputs(args: {
 export function computeLaneLaunch<
   TSpawn extends LaneLaunchSpawnShape,
   TLaunchConfig extends LaneLaunchConfigInput
->(
-  paneLane: PaneLaneLaunch<TLaunchConfig>,
-  spawnOptions: TSpawn
-): LaneLaunchComputation<TSpawn, TLaunchConfig> {
+>(paneLane: PaneLaneLaunch<TLaunchConfig>, spawnOptions: TSpawn): LaneLaunchComputation<TSpawn> {
   if (paneLane.kind === 'shared') {
-    return { spawnOptions, launchConfig: paneLane.launchConfig }
+    return { spawnOptions }
   }
   const platform = paneLane.platform ?? process.platform
   assertLanePaneIsLocal(paneLane.connectionId)
@@ -191,10 +192,7 @@ export function computeLaneLaunch<
       env: laneEnv,
       ...(env.envToDelete ? { envToDelete: env.envToDelete } : {}),
       credentialLane: { principalId: paneLane.principalId }
-    },
-    launchConfig: paneLane.launchConfig
-      ? { ...paneLane.launchConfig, ...(env.agentEnv ? { agentEnv: env.agentEnv } : {}) }
-      : paneLane.launchConfig
+    }
   }
 }
 

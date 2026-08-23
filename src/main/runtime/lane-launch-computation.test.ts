@@ -100,13 +100,26 @@ describe('computeLaneLaunch', () => {
     expect(result.spawnOptions.env?.CLAUDE_CONFIG_DIR).toBe(LANE_DIR)
   })
 
-  it('scrubs launchConfig.agentEnv and hands the scrubbed config back', () => {
+  // The config-dir half of `agentEnv` is scrubbed upstream by guard 3, which owns the record;
+  // what the anchor adds is the loud half, over the same object.
+  it('refuses an auth env var defined in launchConfig.agentEnv', () => {
+    expect(
+      refusalCodeOf(() =>
+        computeLaneLaunch(
+          laneOf({ launchConfig: { agentEnv: { ANTHROPIC_AUTH_TOKEN: 'x' } } }),
+          spawn({ env: {} })
+        )
+      )
+    ).toBe('terminal.agent_env_refused')
+  })
+
+  it('passes a benign launchConfig.agentEnv through without touching the spawn env', () => {
     const result = computeLaneLaunch(
-      laneOf({ launchConfig: { agentEnv: { CLAUDE_CONFIG_DIR: '/tmp/x', FOO: '1' } } }),
+      laneOf({ launchConfig: { agentEnv: { FOO: '1' } } }),
       spawn({ env: {} })
     )
 
-    expect(result.launchConfig?.agentEnv).toEqual({ FOO: '1' })
+    expect(result.spawnOptions.env).toEqual(PATCH)
   })
 
   it('refuses an auth env var defined by the launch', () => {

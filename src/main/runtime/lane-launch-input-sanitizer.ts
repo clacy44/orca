@@ -9,8 +9,8 @@ import {
 } from '../../shared/lane-path-containment'
 import { envKeysMatch, withoutEnvKey, withoutEnvKeyDeletion } from '../../shared/lane-env-key-case'
 
-// NOT WIRED: no spawn calls this yet — lanes do not exist; this is the allowlist/scrub half
-// of S9's computeLaneLaunch, landed early so the later slices have one tested place to call.
+// The allowlist/scrub half of `computeLaneLaunch`, which calls all three of these at the spawn
+// anchor on every fresh lane spawn (`runtime/lane-launch-computation.ts`).
 
 export const CLAUDE_CONFIG_DIR_ENV_KEY = 'CLAUDE_CONFIG_DIR'
 
