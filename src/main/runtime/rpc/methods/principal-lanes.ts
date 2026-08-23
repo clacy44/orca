@@ -113,8 +113,8 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
     name: 'accounts.lane.deprovision',
     params: PrincipalParams,
     handler: async (params, ctx) =>
-      withConsent(ctx.clientKind, (service, consent) => ({
-        deprovisioned: service.deprovisionLane(consent, params.principalId)
+      withConsent(ctx.clientKind, async (service, consent) => ({
+        deprovisioned: await service.deprovisionLane(consent, params.principalId)
       }))
   })
 ]

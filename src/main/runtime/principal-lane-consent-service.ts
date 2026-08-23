@@ -116,12 +116,13 @@ export class PrincipalLaneConsentService {
     seedFreshLaneConfig(laneDir, hostConfigPath)
   }
 
-  deprovisionLane(consent: HostConsent, principalId: string): boolean {
+  /** Async only because §2f's wipe reaches the lane's macOS Keychain item, not just its files. */
+  async deprovisionLane(consent: HostConsent, principalId: string): Promise<boolean> {
     void consent
     const laneDir = resolveOwnedPrincipalLaneDir(principalId)
     if (laneDir) {
       // Why: wipe before removing the tree, so a failed rmdir still leaves no credential at rest.
-      wipeLaneCredentials(laneDir)
+      await wipeLaneCredentials(laneDir, { platform: this.platform })
     }
     return deprovisionPrincipalLane(principalId)
   }

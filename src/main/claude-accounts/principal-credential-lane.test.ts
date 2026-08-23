@@ -25,6 +25,7 @@ import {
 } from './principal-credential-lane'
 import {
   isLaneLoaded,
+  LANE_KEYCHAIN_ITEM,
   sweepLaneCredentialTempArtifacts,
   wipeLaneCredentials
 } from './principal-lane-credential-sweep'
@@ -215,7 +216,7 @@ describe('principal credential lane', () => {
       writeFileSync(join(laneDir, 'projects', 'transcript.jsonl'), '{}')
     }
 
-    it('wipes the credential and every tmp sibling while keeping settings and transcripts', () => {
+    it('wipes the credential and every tmp sibling while keeping settings and transcripts', async () => {
       const lane = provisionPrincipalLane(PRINCIPAL_A, options())
       plantArtifacts(lane.laneDir)
       writeFileSync(
@@ -223,7 +224,7 @@ describe('principal credential lane', () => {
         JSON.stringify({ oauthAccount: { emailAddress: 'a@example.com' }, theme: 'dark' })
       )
 
-      const removed = wipeLaneCredentials(lane.laneDir)
+      const removed = await wipeLaneCredentials(lane.laneDir, { platform: 'linux' })
 
       expect(existsSync(join(lane.laneDir, '.credentials.json'))).toBe(false)
       expect(removed.filter((name) => name.endsWith('.tmp'))).toHaveLength(2)
@@ -235,6 +236,53 @@ describe('principal credential lane', () => {
       expect('oauthAccount' in config).toBe(false)
       expect(config.theme).toBe('dark')
       expect(isLaneLoaded(lane.laneDir)).toBe(false)
+    })
+
+    it('deletes the lane-scoped Keychain item on darwin, and only the scoped one', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+      const deleted: string[] = []
+
+      const removed = await wipeLaneCredentials(lane.laneDir, {
+        platform: 'darwin',
+        deleteKeychainItem: async (configDir) => {
+          deleted.push(configDir)
+        }
+      })
+
+      // Scoped BY the lane dir: the strict deleter derives `Claude Code-credentials-<sha8>` from
+      // it, so a lane never reaches the host-wide unsuffixed service.
+      expect(deleted).toEqual([lane.laneDir])
+      expect(removed).toContain(LANE_KEYCHAIN_ITEM)
+      expect(isLaneLoaded(lane.laneDir)).toBe(false)
+    })
+
+    it('refuses to report a wipe the Keychain would not accept', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+
+      await expect(
+        wipeLaneCredentials(lane.laneDir, {
+          platform: 'darwin',
+          deleteKeychainItem: async () => {
+            throw new Error('keychain access denied')
+          }
+        })
+      ).rejects.toThrow('keychain access denied')
+    })
+
+    it('touches no Keychain on the other platforms', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+      const deleteKeychainItem = vi.fn(async () => {})
+
+      const removed = await wipeLaneCredentials(lane.laneDir, {
+        platform: 'linux',
+        deleteKeychainItem
+      })
+
+      expect(deleteKeychainItem).not.toHaveBeenCalled()
+      expect(removed).not.toContain(LANE_KEYCHAIN_ITEM)
     })
 
     it('sweeps a planted tmp blob on the next lane open while leaving the credential', () => {

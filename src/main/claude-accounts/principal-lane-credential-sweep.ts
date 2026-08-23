@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { deleteActiveClaudeKeychainCredentialsStrict } from './keychain'
 
 export const LANE_CREDENTIALS_FILENAME = '.credentials.json'
 export const LANE_CONFIG_FILENAME = '.claude.json'
@@ -25,14 +26,40 @@ export function sweepLaneCredentialTempArtifacts(laneDir: string): string[] {
   return removed
 }
 
+/** What the darwin arm removed, named for the caller's log rather than for the Keychain. */
+export const LANE_KEYCHAIN_ITEM = 'keychain#lane-scoped'
+
+export type LaneCredentialWipeOptions = {
+  platform?: NodeJS.Platform
+  /** Injected so the darwin arm is observable on every platform, and faked in tests. */
+  deleteKeychainItem?: (configDir: string) => Promise<void>
+}
+
 /**
- * The §2f wipe: every credential artifact, then the lane's `oauthAccount` identity.
+ * The §2f wipe: the lane's scoped Keychain item, every credential artifact, then its identity.
+ *
+ * The Keychain goes FIRST because on darwin it is what a Claude Code 2.1+ launched with this
+ * lane's `CLAUDE_CONFIG_DIR` actually resolves — a file-only wipe leaves the credential at rest
+ * and makes §2a's "a lane launch fails closed when the lane is unloaded" false. Strictly SCOPED,
+ * never the unsuffixed service: that one is host-wide, and a lane that deleted it would sign every
+ * other lane's older CLI out. A refusal it cannot ignore throws rather than reporting a wipe that
+ * did not happen.
  *
  * `settings.json`, the mirrored user content and the lane's transcripts survive — they are not
  * secrets, and destroying transcripts on dropped Wi-Fi would be hostile.
  */
-export function wipeLaneCredentials(laneDir: string): string[] {
-  const removed = sweepLaneCredentialTempArtifacts(laneDir)
+export async function wipeLaneCredentials(
+  laneDir: string,
+  options: LaneCredentialWipeOptions = {}
+): Promise<string[]> {
+  const removed: string[] = []
+  if ((options.platform ?? process.platform) === 'darwin') {
+    const deleteKeychainItem =
+      options.deleteKeychainItem ?? deleteActiveClaudeKeychainCredentialsStrict
+    await deleteKeychainItem(laneDir)
+    removed.push(LANE_KEYCHAIN_ITEM)
+  }
+  removed.push(...sweepLaneCredentialTempArtifacts(laneDir))
   const credentialsPath = join(laneDir, LANE_CREDENTIALS_FILENAME)
   if (existsSync(credentialsPath)) {
     rmSync(credentialsPath, { force: true })
