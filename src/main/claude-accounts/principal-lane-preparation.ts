@@ -1,5 +1,6 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { hasLiveClaudePtys } from './live-pty-gate'
+import type { NormalizedClaudeAccountSelectionTarget } from './runtime-selection'
 import { openPrincipalLane, type PrincipalLaneOptions } from './principal-credential-lane'
 import { isLaneLoaded } from './principal-lane-credential-sweep'
 import { ensureLaneProvenanceLabel, formatLaneProvenance } from './principal-lane-provenance'
@@ -49,5 +50,26 @@ export function prepareLaneLaunch(input: LanePreparationInput): ClaudeRuntimeAut
     stripAuthEnv: true,
     managedRefreshDeferredByLivePty: isDeferred(),
     provenance: formatLaneProvenance(ensureLaneProvenanceLabel(laneDir))
+  }
+}
+
+/**
+ * A lane-pinned launch runs on the host runtime or it does not run (S9 §2a branch order, §2n).
+ *
+ * A lane is a host-side `<userData>/claude-lanes/<principalId>` path, so handing it to a
+ * Linux-side `claude` would create a fresh empty config dir sitting at a login prompt — which is
+ * why the WSL arms are evaluated first. Falling THROUGH them, though, runs a lane-pinned pane on
+ * the shared WSL config dir while presence renders it as this person's lane and usage bills it to
+ * the lane owner. A WSL-visible lane is S9e, and S9e is deferred, so the honest answer is a
+ * refusal.
+ */
+export function assertLaneLaunchRuntimeSupported(
+  target: NormalizedClaudeAccountSelectionTarget
+): void {
+  if (target.runtime !== 'host') {
+    throw new ClaudeLaneRefusal(
+      'terminal.lane_wsl_unsupported',
+      'This terminal runs in a personal Claude credential lane, and lanes are not available inside WSL yet, so Orca did not start it. Open this terminal with a Windows Claude account selected, or use a terminal that is not pinned to a personal lane.'
+    )
   }
 }

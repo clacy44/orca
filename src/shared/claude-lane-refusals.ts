@@ -20,7 +20,8 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.lane_path_not_contained',
   'accounts.lane.lane_root_not_local',
   'accounts.lane.consent_caller_not_local',
-  'terminal.lane_not_loaded'
+  'terminal.lane_not_loaded',
+  'terminal.lane_wsl_unsupported'
 ] as const
 
 export type ClaudeLaneRefusalCode = (typeof CLAUDE_LANE_REFUSAL_CODES)[number]

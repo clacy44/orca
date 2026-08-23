@@ -4015,22 +4015,31 @@ describe('ClaudeRuntimeAuthService lane preparation', () => {
     )
   })
 
-  it('leaves a WSL target on the WSL branch even for a lane-holding caller', async () => {
+  it('refuses a lane-pinned launch on a WSL target instead of falling through to the shared dir', async () => {
     await provisionLoadedLane()
     const store = createStore(createSettings())
     const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
     const service = new ClaudeRuntimeAuthService(store as never)
 
-    const preparation = await service.prepareForClaudeLaunch(
-      { runtime: 'wsl', wslDistro: 'Ubuntu' },
-      PRINCIPAL
-    )
+    // The fall-through would hand this pane the distro's shared `~/.claude` while presence still
+    // renders it as this person's lane — a lane-pinned pane on someone else's credential.
+    await expect(
+      service.prepareForClaudeLaunch({ runtime: 'wsl', wslDistro: 'Ubuntu' }, PRINCIPAL)
+    ).rejects.toThrow(/not available inside WSL yet/)
+  })
+
+  it('leaves a WSL target on the WSL branch when no lane is named', async () => {
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch({
+      runtime: 'wsl',
+      wslDistro: 'Ubuntu'
+    })
 
     expect(preparation.runtime).toBe('wsl')
     expect(preparation.provenance).not.toMatch(/^lane:/)
-    expect(preparation.envPatch.CLAUDE_CONFIG_DIR).not.toBe(
-      join(testState.userDataDir, 'claude-lanes', PRINCIPAL)
-    )
   })
 
   it('leaves the host branch unchanged when no lane is named', async () => {

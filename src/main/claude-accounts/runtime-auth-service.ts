@@ -28,7 +28,7 @@ import {
   writeActiveClaudeKeychainCredentialsForRuntime,
   writeManagedClaudeKeychainCredentials
 } from './keychain'
-import { prepareLaneLaunch } from './principal-lane-preparation'
+import { assertLaneLaunchRuntimeSupported, prepareLaneLaunch } from './principal-lane-preparation'
 import {
   getSelectedClaudeAccountIdForTarget,
   normalizeClaudeAccountSelectionTarget,
@@ -614,6 +614,12 @@ export class ClaudeRuntimeAuthService {
     )
     const activeAccountId = getSelectedClaudeAccountIdForTarget(settings, normalizedTarget)
     const activeAccount = this.getActiveAccount(settings.claudeManagedAccounts, activeAccountId)
+    if (lanePrincipalId) {
+      // Why before the WSL arms rather than after them: falling through leaves a lane-pinned pane
+      // on the shared WSL config dir, which is the silent misattribution the lane exists to close.
+      assertLaneLaunchRuntimeSupported(normalizeClaudeAccountSelectionTarget(normalizedTarget))
+      return prepareLaneLaunch({ principalId: lanePrincipalId })
+    }
     if (
       normalizeClaudeAccountSelectionTarget(normalizedTarget).runtime === 'wsl' &&
       activeAccount?.managedAuthRuntime === 'wsl' &&
@@ -656,11 +662,6 @@ export class ClaudeRuntimeAuthService {
         stripAuthEnv: true,
         provenance: `wsl:${normalizeClaudeAccountSelectionTarget(normalizedTarget).wslDistro ?? '__default__'}:system`
       }
-    }
-    // Why after the WSL classifier and before the host branch: a lane path is a host-side path, so
-    // handing it to a Linux-side `claude` would create a fresh empty config dir at a login prompt.
-    if (lanePrincipalId) {
-      return prepareLaneLaunch({ principalId: lanePrincipalId })
     }
     return {
       configDir: paths.configDir,
