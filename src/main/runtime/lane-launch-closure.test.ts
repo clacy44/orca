@@ -205,12 +205,12 @@ type StartupBuilders = {
 const REPO = { id: 'repo-1', path: '/repo', connectionId: null } as never
 
 /** The mobile create/materialize pair, stubbed at the host create so the launch is observable. */
-function createMobileRuntime(): {
+function createMobileRuntime(settings: object = PEER_SETTINGS): {
   runtime: OrcaRuntimeService
   hostCreate: ReturnType<typeof vi.fn>
 } {
   const store = {
-    getSettings: () => PEER_SETTINGS,
+    getSettings: () => settings,
     getRepo: () => undefined
   } as unknown as ConstructorParameters<typeof OrcaRuntimeService>[0]
   const runtime = new OrcaRuntimeService(store)
@@ -277,6 +277,34 @@ describe('a peer’s host-wide launch settings against the builders that bypass 
     expect(lane?.startup.env?.ANTHROPIC_API_KEY).toBeUndefined()
     expect(shared?.startup.command).toContain('--settings')
     expect(shared?.startup.env?.ANTHROPIC_API_KEY).toBe('peer-key')
+  })
+
+  // The behavioural half of the narrowing pair: the lane must not re-acquire the flag the local
+  // human cleared, and the control below shows the assertion is not vacuous.
+  it('carries the host’s cleared permission flag into the worktree startup builder', () => {
+    const { runtime } = createMobileRuntime({ agentDefaultArgs: { claude: '' } })
+    const builders = runtime as unknown as StartupBuilders
+
+    const lane = builders.buildStartupForAgent(REPO, 'claude', 'hi', {
+      kind: 'principal',
+      principalId: PRINCIPAL_A
+    })
+    const shared = builders.buildStartupForAgent(REPO, 'claude', 'hi', { kind: 'shared' })
+
+    expect(lane?.startup.command).not.toContain('--dangerously-skip-permissions')
+    expect(shared?.startup.command).not.toContain('--dangerously-skip-permissions')
+  })
+
+  it('still gives both panes Orca’s own default when the host set nothing', () => {
+    const { runtime } = createMobileRuntime({})
+    const builders = runtime as unknown as StartupBuilders
+
+    const lane = builders.buildStartupForAgent(REPO, 'claude', 'hi', {
+      kind: 'principal',
+      principalId: PRINCIPAL_A
+    })
+
+    expect(lane?.startup.command).toContain('--dangerously-skip-permissions')
   })
 
   it('reaches no lane launch through the worktree startup-draft builder', async () => {
