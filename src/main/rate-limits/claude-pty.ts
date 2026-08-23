@@ -9,6 +9,7 @@ import { applyClaudeEnvPatch } from '../claude-accounts/environment'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
 import { cleanupHiddenRateLimitPty, registerHiddenRateLimitPty } from './hidden-pty-cleanup'
 import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
+import { removeInheritedAgentHookEnv } from '../../shared/agent-hook-identity-env'
 import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
 import { extractClaudePtyResetMetadata } from './claude-pty-reset-parser'
 import {
@@ -261,6 +262,10 @@ export async function fetchViaPty(options?: {
     // this lane's usage on another principal's row. Without the second, an inherited
     // `Claude_Config_Dir` outranks the lane's own key on Win32 (S9 §2k, §2m(5)).
     removeUnspecifiedPaneIdentityEnv(spawnEnv)
+    // The third inherited-env scrub §2k names beside the other two: this probe's `claude` runs the
+    // LANE's managed statusline, and inherited hook coordinates would post the lane's config dir —
+    // and with it the host-minted principal id — to ANOTHER Orca, under a token that authenticates.
+    removeInheritedAgentHookEnv(spawnEnv)
     collapseLaneEnvKeys(spawnEnv, options?.authPreparation?.envPatch)
     const authPreparation = options?.authPreparation
     const wslConfig =

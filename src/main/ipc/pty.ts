@@ -19,6 +19,7 @@ import { terminalPresenceRegistry } from '../runtime/terminal-presence-registry'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { TuiAgent } from '../../shared/tui-agent'
 import { toSshExecutionHostId } from '../../shared/execution-host'
+import { AGENT_HOOK_RUNTIME_ENV_KEYS } from '../../shared/agent-hook-identity-env'
 import { normalizeRuntimePathForComparison } from '../../shared/cross-platform-path'
 import { terminalOutputBacklogCapChars } from '../../shared/terminal-scrollback-policy'
 import type {
@@ -300,16 +301,6 @@ const KEEP_HISTORY_STOP_POLL_MS = 100
 const ptyPaneKey = new Map<string, string>()
 // Why: reverse of ptyPaneKey — callers with a paneKey from outside the PTY lifecycle (e.g. agent-hook status routing) need the ptyId; kept in lock-step via the same sites.
 const paneKeyPtyId = new Map<string, string>()
-
-const AGENT_HOOK_RUNTIME_ENV_KEYS = [
-  'ORCA_AGENT_HOOK_PORT',
-  'ORCA_AGENT_HOOK_TOKEN',
-  'ORCA_AGENT_HOOK_ENV',
-  'ORCA_AGENT_HOOK_VERSION',
-  'ORCA_AGENT_HOOK_ENDPOINT',
-  // Why: PR 2778 briefly exported this path; keep deleting stale inherited values so older PTYs can't leak the reverted path.
-  'ORCA_CLAUDE_AGENT_STATUS_SETTINGS'
-] as const
 
 // Why: Orca never sets these, so an inherited value means a pty host launched from inside a Claude session — Claude reads it as a nested child and silently stops persisting the transcript.
 const CLAUDE_CHILD_SESSION_STAMP_ENV_KEYS = [
