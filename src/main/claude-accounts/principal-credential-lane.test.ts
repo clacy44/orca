@@ -334,7 +334,7 @@ describe('principal credential lane', () => {
       expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
     })
 
-    it('leaves an existing lane in place when a re-provision cannot verify its DACL', () => {
+    it('disables an existing lane whose re-provision cannot verify its DACL, and restores it on a verified one', () => {
       const lane = provisionPrincipalLane(PRINCIPAL_A, options())
       writeFileSync(join(lane.laneDir, '.credentials.json'), '{"claudeAiOauth":{}}')
 
@@ -345,7 +345,19 @@ describe('principal credential lane', () => {
           restrictWindowsPath: () => false
         })
       ).toThrow(/could not verify this credential lane/)
+
+      // The content survives for recovery, but nothing resolves the lane while it is unverified.
       expect(existsSync(join(lane.laneDir, '.credentials.json'))).toBe(true)
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options())).toBeNull()
+      expect(openPrincipalLane(PRINCIPAL_A, options())).toBeNull()
+
+      provisionPrincipalLane(PRINCIPAL_A, {
+        lanesRoot,
+        platform: 'win32',
+        restrictWindowsPath: () => true
+      })
+
+      expect(openPrincipalLane(PRINCIPAL_A, options())).toBe(realpathOf(lane.laneDir))
     })
 
     it('refuses a lane root on a remote UNC share before it writes anything', () => {

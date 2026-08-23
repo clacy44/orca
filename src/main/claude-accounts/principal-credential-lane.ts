@@ -69,7 +69,9 @@ export function getPrincipalLaneDir(
  * the mode bit is inert, so the lane takes the SYNCHRONOUS ACL arm and its boolean is CHECKED —
  * the ordinary directory-hardening path is async, best-effort and caches the path as hardened
  * whether or not the ACL landed (`secure-file.ts:59-73`), which is not good enough for the
- * directory a credential is about to land in. A lane whose DACL cannot be verified does not exist.
+ * directory a credential is about to land in. A lane whose DACL cannot be verified does not exist:
+ * a re-provision that fails the read-back drops the ownership marker, so the launch path stops
+ * resolving that lane until a provisioning verifies it again.
  *
  * A native lane root must be a LOCAL drive path: a remote UNC share's ACLs are set by a machine
  * this design has said nothing about, so it is refused here rather than hardened (§2m(4)).
@@ -94,6 +96,19 @@ export function provisionPrincipalLane(
   mkdirSync(laneDir, { recursive: true, mode: 0o700 })
   try {
     hardenLaneDirectory(laneDir, options)
+  } catch (error) {
+    // Why the marker rather than the tree, for a lane that already existed: a lane whose DACL no
+    // longer verifies must stop resolving — every reader proves ownership through the marker —
+    // while its credential and settings survive a re-provision that does verify. A creation that
+    // fails leaves nothing behind at all.
+    if (existedBefore) {
+      rmSync(join(laneDir, LANE_MARKER_FILENAME), { force: true })
+    } else {
+      rmSync(laneDir, { recursive: true, force: true })
+    }
+    throw error
+  }
+  try {
     writeLaneMarker(laneDir, principalId)
   } catch (error) {
     // Why: no lane may exist unverified; only remove what this call created.
