@@ -432,7 +432,8 @@ describe('SshRelaySession reconnect incarnation ordering', () => {
     expect(runtime.registerPty).toHaveBeenCalledWith(APP_PTY_ID, 'worktree-1', 'target-1', {
       tabId: 'tab-1',
       leafId: INCARNATION_LEAF_ID,
-      incarnationId
+      incarnationId,
+      isReattach: true
     })
     expect(runtime.onPtySpawned).not.toHaveBeenCalled()
     expect(mockStore.persistPtyBinding).toHaveBeenCalledWith({
@@ -545,7 +546,8 @@ describe('SshRelaySession reconnect incarnation ordering', () => {
     expect(runtime.registerPty).toHaveBeenCalledWith(APP_PTY_ID, 'worktree-1', 'target-1', {
       tabId: 'tab-1',
       leafId: INCARNATION_LEAF_ID,
-      incarnationId: currentIncarnationId
+      incarnationId: currentIncarnationId,
+      isReattach: true
     })
     expect(setPtyOwnership).toHaveBeenCalledWith(APP_PTY_ID, 'target-1')
     expect(mockStore.persistPtyBinding).toHaveBeenCalledWith(
@@ -585,7 +587,8 @@ describe('SshRelaySession reconnect incarnation ordering', () => {
     expect(runtime.registerPty).toHaveBeenCalledWith(APP_PTY_ID, 'worktree-1', 'target-1', {
       tabId: 'tab-1',
       leafId: INCARNATION_LEAF_ID,
-      incarnationId
+      incarnationId,
+      isReattach: true
     })
     expect(mockStore.markSshRemotePtyLeasesAttachedAsync).toHaveBeenCalledWith('target-1', [
       'pty-live'

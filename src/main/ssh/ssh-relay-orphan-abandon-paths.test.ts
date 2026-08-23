@@ -232,7 +232,8 @@ describe('SshRelaySession abandoned remote PTYs', () => {
     expect(runtime.registerPty).toHaveBeenCalledWith(APP_PTY_ID, 'worktree-1', 'target-1', {
       tabId: 'tab-1',
       leafId: LEAF_ID,
-      incarnationId: 'incarnation-1'
+      incarnationId: 'incarnation-1',
+      isReattach: true
     })
     expect(deps.mockStore.markSshRemotePtyLease).not.toHaveBeenCalledWith(
       'target-1',
