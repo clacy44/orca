@@ -198,6 +198,29 @@ describe('lane sync driver', () => {
     ).toThrow(/older than what this host already holds/)
   })
 
+  it("attributes a partly published rotation to Orca, never to the lane's own claude", async () => {
+    putLaneFiles('rt-1')
+    store.recordPushedLaneCredentials(LANE_A, credentials('rt-1'), { accountUuid: ACCOUNT_X })
+    receipts = []
+    // darwin's Keychain refusal (and win32's unverified published DACL) throw over a lane file
+    // that ALREADY holds the rotated blob.
+    vi.spyOn(store.writer, 'writeCredentials').mockImplementationOnce(async () => {
+      writeFileSync(join(lanesRoot, LANE_A, '.credentials.json'), credentials('rt-rotated', 9_000))
+      throw new Error('keychain refused')
+    })
+    const lost = await driver.syncLane(LANE_A, 'launch')
+    expect(lost.rotationLost).toBe(true)
+    expect(store.getLaneState(LANE_A)).toBe('reauth-required')
+
+    const second = await driver.syncLane(LANE_A, 'launch')
+    // Orca's own write is not a foreign one, so no receipt lifts the hold it just set.
+    expect(second.observedForeignChange).toBe(false)
+    expect(receipts).toEqual([])
+    expect(second.laneState).toBe('reauth-required')
+    expect(store.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-rotated'))
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps a transient refresh failure out of the reauth-required state', async () => {
     putLaneFiles('rt-1')
     store.recordPushedLaneCredentials(LANE_A, credentials('rt-1'), { accountUuid: ACCOUNT_X })

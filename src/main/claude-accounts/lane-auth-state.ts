@@ -37,7 +37,14 @@ export type LaneRotationOutcome =
   | { status: 'lane-unavailable' }
   /** The lane file no longer holds the blob we were asked to rotate; nothing was spent. */
   | { status: 'input-superseded' }
-  /** The token WAS spent and the lane could not receive it — never a refresh failure. */
+  /**
+   * The token WAS spent and the lane could not be published — never a refresh failure.
+   *
+   * Deliberately the outcome of a PARTIAL publish too — a darwin Keychain refusal after the file
+   * landed, a win32 DACL that would not verify after the rename — where the lane may hold a
+   * working blob the host cannot vouch for. Failing closed and asking for a push is the safe
+   * direction; `publishRotation` still records who wrote what is on disk.
+   */
   | { status: 'lane-write-lost'; credentialsJson: string }
 
 export type LaneAuthStateOptions = {
@@ -210,6 +217,13 @@ export class LaneAuthState {
       // moves to the rotated sha and the lane holds at reauth-required. Otherwise the desktop's
       // cached pre-rotation blob passes the freshness check and replays a revoked credential.
       console.warn(`[claude-lane] rotation could not reach lane ${laneId}:`, error)
+      // The bytes may still have LANDED — this arm covers a partial publish as well as a lost
+      // one. Attributing that write to us is what stops the next `syncLane` reading Orca's own
+      // rotation as the lane CLI's, publishing a `cli-observed` receipt for it, and lifting the
+      // hold this line is about to set.
+      if (this.laneFileHolds(laneId, refreshed)) {
+        state.lastWrittenCredentialsJson = refreshed
+      }
       this.options.store.recordUnwritableRotation(laneId, refreshed)
       return { status: 'lane-write-lost', credentialsJson: refreshed }
     }
@@ -217,6 +231,12 @@ export class LaneAuthState {
     state.lastSyncedAccountUuid = accountUuid
     state.hasMaterializedLaneAuth = true
     return { status: 'rotated', credentialsJson: refreshed }
+  }
+
+  /** Whether the lane file ended up holding this blob after all, however the write reported. */
+  private laneFileHolds(laneId: string, credentialsJson: string): boolean {
+    const onDisk = this.options.store.readLaneCredentials(laneId)
+    return onDisk !== null && compareRefreshTokens(onDisk, credentialsJson) === 'same'
   }
 }
 
