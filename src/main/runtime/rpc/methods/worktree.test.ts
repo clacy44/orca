@@ -24,6 +24,8 @@ function makeRequest(method: string, params?: unknown): RpcRequest {
 const passthroughDedupe = <T>(_repo: string, _id: string | undefined, run: () => Promise<T>) =>
   run()
 
+const laneStub = { resolveCallerCredentialLane: () => ({ kind: 'shared' as const }) }
+
 describe('worktree RPC methods', () => {
   it('routes mobile session-only activation without notifying desktop clients', async () => {
     const runtime = {
@@ -99,6 +101,7 @@ describe('worktree RPC methods', () => {
 
   it('routes create options to the runtime server', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -129,6 +132,7 @@ describe('worktree RPC methods', () => {
     )
 
     expect(runtime.createManagedWorktree).toHaveBeenCalledWith({
+      credentialLane: { kind: 'shared' },
       repoSelector: 'repo-1',
       name: 'feature',
       branchNameOverride: 'feature/something',
@@ -170,6 +174,7 @@ describe('worktree RPC methods', () => {
   it('mints automation provenance from a valid dispatch request on worktree creation', async () => {
     const dispatchToken = createAutomationDispatchToken('automation-1', 'run-1')
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -259,6 +264,7 @@ describe('worktree RPC methods', () => {
       kind: 'git' as const
     }
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(runtimeLocalRepo),
@@ -317,6 +323,7 @@ describe('worktree RPC methods', () => {
   it('validates and stamps automation provenance from the dispatching run snapshot', async () => {
     const dispatchToken = createAutomationDispatchToken('automation-edited', 'run-edited')
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -381,6 +388,7 @@ describe('worktree RPC methods', () => {
   it('allows the same automation provenance request to retry after a failed create attempt', async () => {
     const dispatchToken = createAutomationDispatchToken('automation-retry', 'run-retry')
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -488,6 +496,7 @@ describe('worktree RPC methods', () => {
 
   it('forwards startup command and env to runtime worktree creation', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -542,6 +551,7 @@ describe('worktree RPC methods', () => {
 
   it('drops invalid startup launch config env at the runtime RPC boundary', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -577,6 +587,7 @@ describe('worktree RPC methods', () => {
 
   it('forwards task startup drafts to runtime worktree creation', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),
@@ -630,6 +641,7 @@ describe('worktree RPC methods', () => {
 
   it('maps unknown telemetry sources to the runtime default instead of rejecting create', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       dedupeWorktreeCreate: passthroughDedupe,
       showRepo: vi.fn().mockResolvedValue(repo),

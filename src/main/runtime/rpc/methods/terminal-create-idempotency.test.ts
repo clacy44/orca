@@ -32,7 +32,11 @@ describe('terminal.create RPC idempotency', () => {
         }
       },
       {
-        runtime: { createTerminal, dedupeTerminalCreate },
+        runtime: {
+          createTerminal,
+          dedupeTerminalCreate,
+          resolveCallerCredentialLane: () => ({ kind: 'shared' as const })
+        },
         pairedDeviceId: 'device-a',
         clientId: 'bearer-token'
       } as unknown as RpcContext,
@@ -49,6 +53,7 @@ describe('terminal.create RPC idempotency', () => {
     expect(createTerminal).toHaveBeenCalledWith(
       'id:worktree-1',
       expect.objectContaining({
+        credentialLane: { kind: 'shared' },
         command: 'pwsh',
         preAllocatedHandle: 'term_stable',
         resumeProviderSession: {

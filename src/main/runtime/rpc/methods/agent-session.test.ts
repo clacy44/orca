@@ -206,7 +206,8 @@ describe('agent session RPC methods', () => {
     const runtime = {
       getRuntimeId: () => 'runtime-1',
       createTerminal,
-      dedupeTerminalCreate
+      dedupeTerminalCreate,
+      resolveCallerCredentialLane: () => ({ kind: 'shared' as const })
     }
     const dispatcher = new RpcDispatcher({
       runtime: runtime as unknown as OrcaRuntimeService,
@@ -230,6 +231,7 @@ describe('agent session RPC methods', () => {
       expect.any(Function)
     )
     expect(createTerminal).toHaveBeenCalledWith('id:worktree-1', {
+      credentialLane: { kind: 'shared' },
       command: 'codex resume provider-session-1',
       startupCommandDelivery: undefined,
       env: undefined,

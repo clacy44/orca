@@ -72,7 +72,7 @@ describe('resolveInheritedLane', () => {
     ).toBe('terminal.lane_not_owned')
   })
 
-  it('fails closed on a restored pane that carries no lane', () => {
+  it('fails closed for a lane holder inheriting a pane that carries no lane', () => {
     expect(
       refusalCode(() =>
         resolveInheritedLane(registry.lookup('wt1', 'legacy:pane', true), {
@@ -81,11 +81,18 @@ describe('resolveInheritedLane', () => {
         })
       )
     ).toBe('terminal.lane_source_unknown')
+  })
+
+  it('keeps today’s shared behaviour for a lane-less caller over an unattributed pane', () => {
     expect(
-      refusalCode(() =>
-        resolveInheritedLane(registry.lookup('wt1', 'legacy:pane', true), { callerLane: shared })
-      )
-    ).toBe('terminal.lane_source_unknown')
+      resolveInheritedLane(registry.lookup('wt1', 'legacy:pane', true), { callerLane: shared })
+    ).toEqual(shared)
+    expect(
+      resolveInheritedLane(registry.lookup('wt1', 'legacy:pane', true), {
+        pairedDeviceId: 'grant-b',
+        callerLane: shared
+      })
+    ).toEqual(shared)
   })
 
   it('carries a complete human sentence on every refusal', () => {

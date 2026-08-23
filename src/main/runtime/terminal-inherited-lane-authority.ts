@@ -30,18 +30,22 @@ export function resolveInheritedLane(
   source: PaneCredentialLaneLookup,
   caller: InheritedLaneCaller
 ): PaneCredentialLane {
-  if (source.kind !== 'bound') {
-    // Why: a pane restored from a pre-lane state is never attributed, so inheriting from it would
-    // have to guess — split, recovery and resume of it fail closed instead (§2h).
-    throw new ClaudeLaneRefusal(
-      'terminal.lane_source_unknown',
-      'Orca cannot tell which Claude credential this terminal is using, so it will not open another pane from it. Create a new terminal instead.'
-    )
-  }
   const anonymous =
     caller.pairedDeviceId === undefined ||
     caller.pairedDeviceId === null ||
     caller.pairedDeviceId.length === 0
+  if (source.kind !== 'bound') {
+    // Why: an unattributed pane (pre-lane state, or a row a renderer session write dropped) can
+    // never hand out a lane. A lane holder is refused rather than silently downgraded; a caller
+    // that holds no lane keeps today's shared behaviour, which is what its pane already runs on.
+    if (!anonymous && caller.callerLane.kind === 'principal') {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_source_unknown',
+        'Orca cannot tell which Claude credential this terminal is using, so it will not open another pane from it in your lane. Create a new terminal instead.'
+      )
+    }
+    return { kind: 'shared' }
+  }
   // (ii) an anonymous local caller is today's behaviour, and it is the path an agent inside the
   // pane takes when it runs `orca worker-start --from <its own pane>`.
   if (anonymous) {

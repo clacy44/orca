@@ -2520,6 +2520,8 @@ describe('orchestration RPC methods', () => {
       // Why: dispatching a worker is background work — surfaceOwner:false adopts
       // the tab without scrolling the sidebar to the worker's workspace.
       expect(runtime.createTerminal).toHaveBeenCalledWith('id:repo::worktree', {
+        // Why: the coordinator pane carries no lane in this fixture, so the worker inherits shared.
+        credentialLane: { kind: 'shared' },
         startupAgent: 'codex',
         title: `worker-${task.id}`,
         surfaceOwner: false

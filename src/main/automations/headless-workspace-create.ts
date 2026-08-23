@@ -33,6 +33,9 @@ export function buildHeadlessAutomationWorktreeCreateArgs({
   createdAt?: number
 }): RuntimeCreateManagedWorktreeArgs {
   return {
+    // Why: an automation has no pane to inherit and no grant — it says shared rather than
+    // falling through to it (S9 §2a, row 33).
+    credentialLane: { kind: 'shared' },
     repoSelector: repo.id,
     name: buildHeadlessAutomationWorkspaceName(run.title, run.scheduledFor),
     baseBranch: automation.baseBranch ?? undefined,

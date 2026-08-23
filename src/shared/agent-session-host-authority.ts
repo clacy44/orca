@@ -140,6 +140,9 @@ export type RuntimeCreateAgentSessionResult = {
 }
 
 export type RuntimeAgentSessionRpcCaller = {
+  // Why: `callerContext` collapses identity into `pairedDeviceId ?? clientId`, which cannot key a
+  // lane; the funnel resolver needs the grant itself (S9 §2a).
+  pairedDeviceId?: string
   clientId?: string
   clientKind?: 'mobile' | 'runtime'
   signal?: AbortSignal

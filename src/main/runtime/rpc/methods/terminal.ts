@@ -1239,11 +1239,12 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.recoverPane',
     params: TerminalRecoverPane,
-    handler: async (params, { runtime }) => ({
+    handler: async (params, { runtime, pairedDeviceId }) => ({
       terminal: await runtime.recoverTerminalPane(
         params.paneKey,
         params.worktreeId,
-        params.expectedTerminal
+        params.expectedTerminal,
+        pairedDeviceId ? { pairedDeviceId } : {}
       )
     })
   }),
@@ -1534,6 +1535,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         params.reconcileExisting === true,
         (canonicalWorktreeSelector, preAllocatedHandle) =>
           runtime.createTerminal(canonicalWorktreeSelector, {
+            credentialLane: runtime.resolveCallerCredentialLane(pairedDeviceId),
             command: params.command,
             startupCommandDelivery: params.startupCommandDelivery,
             env: params.env,
@@ -1562,8 +1564,9 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.split',
     params: TerminalSplit,
-    handler: async (params, { runtime }) => ({
+    handler: async (params, { runtime, pairedDeviceId }) => ({
       split: await runtime.splitTerminal(params.terminal, {
+        ...(pairedDeviceId ? { pairedDeviceId } : {}),
         direction: params.direction,
         command: params.command,
         env: params.env,
@@ -1654,8 +1657,11 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'agentTeams.tmuxCompat',
     params: AgentTeamsTmuxCompat,
-    handler: async (params, { runtime }) => ({
-      tmux: await runtime.handleAgentTeamsTmuxCompat(params)
+    handler: async (params, { runtime, pairedDeviceId }) => ({
+      tmux: await runtime.handleAgentTeamsTmuxCompat(
+        params,
+        pairedDeviceId ? { pairedDeviceId } : {}
+      )
     })
   }),
   defineMethod({

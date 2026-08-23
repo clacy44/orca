@@ -22,8 +22,8 @@ export type CoordinatorRuntime = {
     terminals: { handle: string; worktreeId: string; connected: boolean; writable: boolean }[]
   }>
   createTerminal(
-    worktreeSelector?: string,
-    opts?: { command?: string; title?: string }
+    worktreeSelector: string | undefined,
+    opts: { credentialLane: { kind: 'shared' }; command?: string; title?: string }
   ): Promise<{ handle: string; worktreeId: string }>
   waitForTerminal(
     handle: string,
@@ -373,6 +373,9 @@ export class Coordinator {
       // Why: create at most one terminal per tick to avoid spawning many at once.
       try {
         const created = await this.runtime.createTerminal(this.opts.worktree, {
+          // Why: the coordinator loop is host-internal and anonymous — always case (ii) of the
+          // ownership predicate, so it states the shared lane rather than inheriting one (§2a).
+          credentialLane: { kind: 'shared' },
           title: `Worker: ${readyTasks[0].spec.slice(0, 40)}`
         })
         terminals.push(created.handle)

@@ -1,5 +1,6 @@
 import type { AgentLaunchPreferences } from '../../../../shared/agent-session-host-authority'
 import type { TuiAgent } from '../../../../shared/tui-agent'
+import type { PaneCredentialLane } from '../../pane-credential-lane-registry'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationDb } from '../../orchestration/db'
 
@@ -55,6 +56,7 @@ export function requireWorkerAuthority(runtime: OrcaRuntimeService, terminalHand
 
 export async function createExistingWorktreeWorkerTerminal(args: {
   runtime: OrcaRuntimeService
+  credentialLane: PaneCredentialLane
   worktreeId: string
   agent: TuiAgent
   launchPreferences?: AgentLaunchPreferences
@@ -62,6 +64,7 @@ export async function createExistingWorktreeWorkerTerminal(args: {
   effects: WorkerEffect[]
 }): Promise<{ handle: string; warning?: string }> {
   const terminal = await args.runtime.createTerminal(`id:${args.worktreeId}`, {
+    credentialLane: args.credentialLane,
     // Why: the agent id is not a shell command — `cursor` resolves to the Cursor
     // desktop app while its CLI is `cursor-agent`. Let the runtime build the
     // configured launcher instead of executing the raw id.
@@ -105,6 +108,7 @@ export function applyWaitForSetupOutcome(
 }
 
 export async function createWorkerWorktree(args: {
+  credentialLane: PaneCredentialLane
   runtime: OrcaRuntimeService
   db: OrchestrationDb
   dispatchId: string
@@ -131,6 +135,9 @@ export async function createWorkerWorktree(args: {
   const setupDecision = params.setup ?? 'run'
   db.recordWorkerStage({ dispatchId, stage: 'worktree_creating', effects })
   const created = await runtime.createManagedWorktree({
+    // Why: this path carries no caller identity of its own — the lane comes from the coordinator
+    // pane `params.from` names, through the ownership predicate (§2a).
+    credentialLane: args.credentialLane,
     repoSelector: params.repo ?? coordinatorWorktree.repoId,
     name: params.name as string,
     baseBranch: params.baseBranch,

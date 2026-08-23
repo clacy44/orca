@@ -23,6 +23,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'terminal.lane_not_loaded',
   'terminal.lane_wsl_unsupported',
   'terminal.lane_not_owned',
+  'terminal.lane_unspecified',
   'terminal.lane_pane_unbound',
   'terminal.lane_source_unknown',
   'terminal.lane_requires_workspace',

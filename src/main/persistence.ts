@@ -73,6 +73,7 @@ import type {
   TerminalTab
 } from '../shared/terminal-tab-types'
 import type {
+  PersistedPaneCredentialLane,
   WorkspaceSessionPatch,
   WorkspaceSessionState
 } from '../shared/workspace-session-state-types'
@@ -102,6 +103,7 @@ import type { MigrationUnsupportedPtyEntry } from '../shared/agent-status-types'
 import { MOBILE_PAIRING_USERDATA_FILES } from './runtime/mobile-pairing-files'
 import { normalizePersistedMobileClientTabSelections } from './runtime/client-session-tab-selection-persistence'
 import { sanitizeWorkspaceSessionTerminalRetirements } from './runtime/mobile-session-terminal-persistence-retirement'
+import { mergePersistedPaneCredentialLanes } from './runtime/persisted-pane-credential-lane-rows'
 import {
   removeRepoFromHostWorkspaceSessions,
   removeRepoFromWorkspaceSession
@@ -2650,6 +2652,15 @@ function deleteScannedSessionFieldsForOwners(
         const separator = paneKey.lastIndexOf(':')
         return separator < 1 || !removedTabIds.has(paneKey.slice(0, separator))
       })
+    )
+  }
+  if (next.terminalCredentialLanesByPaneKey) {
+    next.terminalCredentialLanesByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalCredentialLanesByPaneKey).filter(
+        ([paneKey, lane]) =>
+          !isRemovedOwner(lane.worktreeId) &&
+          !removedTabIds.has(paneKey.slice(0, paneKey.lastIndexOf(':')))
+      )
     )
   }
   if (next.terminalSurfaceTombstonesByPaneKey) {
@@ -6563,6 +6574,9 @@ export class Store {
       pruneLocalTerminalScrollbackBuffers(session, this.state.repos)
     )
 
+    // Why: the pane lane is host-owned; a renderer session write that omits it must not orphan
+    // live panes into `unknown` (S9 §2h).
+    session = mergePersistedPaneCredentialLanes(session, prior)
     // Why (Issue #217): merge existing bindings when the incoming binding is empty, so a stale pre-spawn snapshot can't overwrite the durable PTY binding.
     const normalized = normalizeWorkspaceSessionPaneIdentities(
       session,
@@ -6895,6 +6909,40 @@ export class Store {
   private getConnectionIdForWorktree(worktreeId: string): string | null {
     const repoId = getRepoIdFromWorktreeId(worktreeId)
     return this.state.repos.find((repo) => repo.id === repoId)?.connectionId ?? null
+  }
+
+  // Why: the pane's lane is bound at the paneKey mint, before any launch input is assembled, and
+  // is write-once — a respawn into a bound pane runs on the row's lane (S9 §2a).
+  persistPaneCredentialLane(
+    args: { worktreeId: string; tabId: string; leafId: string; principalId?: string },
+    hostId?: string | null
+  ): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const paneKey = `${args.tabId}:${args.leafId}`
+    if (session.terminalCredentialLanesByPaneKey?.[paneKey]) {
+      return
+    }
+    session.terminalCredentialLanesByPaneKey = {
+      ...session.terminalCredentialLanesByPaneKey,
+      [paneKey]: {
+        worktreeId: args.worktreeId,
+        ...(args.principalId ? { principalId: args.principalId } : {})
+      }
+    }
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.scheduleSave()
+  }
+
+  getPaneCredentialLanes(hostId?: string | null): Record<string, PersistedPaneCredentialLane> {
+    return {
+      ...this.getWorkspaceSession(this.resolveHostId(hostId)).terminalCredentialLanesByPaneKey
+    }
   }
 
   // Why: sync-flush the pty binding before pty:spawn returns to close the spawn/persist SIGKILL race (Issue #217).

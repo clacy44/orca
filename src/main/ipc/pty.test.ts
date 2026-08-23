@@ -19132,6 +19132,7 @@ describe('registerPtyHandlers', () => {
     } as never)
 
     const created = await runtime.createTerminal(`id:${worktreeId}`, {
+      credentialLane: { kind: 'shared' },
       presentation: 'background'
     })
     expect(created.ptyId).toBe(ptyId)
