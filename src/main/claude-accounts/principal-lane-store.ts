@@ -158,6 +158,22 @@ export class PrincipalLaneStore {
     }
   }
 
+  /**
+   * A host rotation whose blob never reached the lane: the old token is spent either way.
+   *
+   * The watermark moves to the ROTATED sha so the desktop's cached pre-rotation blob cannot pass
+   * the sha arm on reconnect, and the lane holds at `reauth-required` until a push lands. No
+   * receipt: the lane does not hold this credential, and §2e's three causes all assert it does.
+   */
+  recordUnwritableRotation(
+    laneId: string,
+    rotatedCredentialsJson: string,
+    oauthAccount?: unknown
+  ): void {
+    this.writeWatermark(laneId, rotatedCredentialsJson, oauthAccount)
+    this.reauthRequiredLanes.add(laneId)
+  }
+
   onRotationReceipt(listener: (receipt: LaneRotationReceipt) => void): () => void {
     this.receiptListeners.add(listener)
     return () => this.receiptListeners.delete(listener)

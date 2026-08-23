@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
@@ -18,6 +18,11 @@ const ACCOUNT_Y = 'account-y'
 
 const credentials = (refreshToken: string, expiresAt = 0): string =>
   JSON.stringify({ claudeAiOauth: { accessToken: 'at', refreshToken, expiresAt } })
+
+/** Rotation reads the lane before it spends the token, so every fixture must load the lane. */
+const seedLane = (lanesRoot: string, laneId: string, credentialsJson: string): void => {
+  writeFileSync(join(lanesRoot, laneId, '.credentials.json'), credentialsJson, { mode: 0o600 })
+}
 
 describe('lane auth state', () => {
   let userData = ''
@@ -67,6 +72,8 @@ describe('lane auth state', () => {
   })
 
   it('defers the rotation of the account the live lane holds, and not another account', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
+    seedLane(lanesRoot, LANE_B, credentials('rt-y'))
     residency.setLaneRow(LANE_A, credentials('rt-x'), { accountUuid: ACCOUNT_X })
     residency.setLaneRow(LANE_B, credentials('rt-y'), { accountUuid: ACCOUNT_Y })
     laneLivePtys.add(LANE_A)
@@ -95,6 +102,7 @@ describe('lane auth state', () => {
   })
 
   it('over-defers while any live pty is unattributed', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
     residency.setLaneRow(LANE_A, credentials('rt-x'), { accountUuid: ACCOUNT_X })
     unattributedLivePtys = true
     const authState = makeState(async () => credentials('rt-rotated'))
@@ -109,6 +117,7 @@ describe('lane auth state', () => {
   })
 
   it('persists a rotation into the lane file and nowhere else', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
     const authState = makeState(async () => credentials('rt-rotated'))
     await authState.rotateLaneCredentials({
       laneId: LANE_A,
@@ -122,7 +131,71 @@ describe('lane auth state', () => {
     expect(store.readLaneCredentials(LANE_B)).toBeNull()
   })
 
+  it('spends nothing when the lane went away before the call', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
+    const refresh = vi.fn(async () => credentials('rt-rotated'))
+    const authState = makeState(refresh)
+    rmSync(join(lanesRoot, LANE_A), { recursive: true, force: true })
+    await expect(
+      authState.rotateLaneCredentials({
+        laneId: LANE_A,
+        accountUuid: ACCOUNT_X,
+        refreshTokenSha256: hashRefreshToken('rt-x'),
+        credentialsJson: credentials('rt-x')
+      })
+    ).resolves.toEqual({ status: 'lane-unavailable' })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('spends nothing on a blob the lane has already moved past', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-newer'))
+    const refresh = vi.fn(async () => credentials('rt-rotated'))
+    const authState = makeState(refresh)
+    await expect(
+      authState.rotateLaneCredentials({
+        laneId: LANE_A,
+        accountUuid: ACCOUNT_X,
+        refreshTokenSha256: hashRefreshToken('rt-x'),
+        credentialsJson: credentials('rt-x')
+      })
+    ).resolves.toEqual({ status: 'input-superseded' })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('reports a spent token the lane could not receive, and refuses the replay it enables', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x', 1_000))
+    store.recordSyncedLaneCredentials(LANE_A, credentials('rt-x', 1_000))
+    const refresh = vi.fn(async () => {
+      // The close-wipe lands during the token round trip, which is a real network call.
+      rmSync(join(lanesRoot, LANE_A), { recursive: true, force: true })
+      return credentials('rt-rotated', 5_000)
+    })
+    const authState = makeState(refresh)
+    await expect(
+      authState.rotateLaneCredentials({
+        laneId: LANE_A,
+        accountUuid: ACCOUNT_X,
+        refreshTokenSha256: hashRefreshToken('rt-x'),
+        credentialsJson: credentials('rt-x', 1_000)
+      })
+    ).resolves.toEqual({
+      status: 'lane-write-lost',
+      credentialsJson: credentials('rt-rotated', 5_000)
+    })
+    expect(refresh).toHaveBeenCalledTimes(1)
+    // The watermark moved to the SPENT token's successor, so the desktop's cached copy is stale.
+    expect(store.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-rotated'))
+    expect(() =>
+      store.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: credentials('rt-x', 1_000),
+        basedOnRefreshTokenSha256: hashRefreshToken('rt-x')
+      })
+    ).toThrow(/older than what this host already holds/)
+  })
+
   it('refuses to treat a malformed refresh response as a rotation', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
     const authState = makeState(async () =>
       JSON.stringify({ claudeAiOauth: { refreshToken: 'r' } })
     )
@@ -130,14 +203,15 @@ describe('lane auth state', () => {
       authState.rotateLaneCredentials({
         laneId: LANE_A,
         accountUuid: ACCOUNT_X,
-        refreshTokenSha256: null,
+        refreshTokenSha256: hashRefreshToken('rt-x'),
         credentialsJson: credentials('rt-x')
       })
     ).resolves.toEqual({ status: 'refresh-failed' })
-    expect(store.readLaneCredentials(LANE_A)).toBeNull()
+    expect(store.readLaneCredentials(LANE_A)).toBe(credentials('rt-x'))
   })
 
   it('does not rotate a credential that is not expiring', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
     const refresh = vi.fn(async () => credentials('rt-rotated'))
     const authState = new LaneAuthState({
       store,
@@ -151,7 +225,7 @@ describe('lane auth state', () => {
       authState.rotateLaneCredentials({
         laneId: LANE_A,
         accountUuid: ACCOUNT_X,
-        refreshTokenSha256: null,
+        refreshTokenSha256: hashRefreshToken('rt-x'),
         credentialsJson: credentials('rt-x')
       })
     ).resolves.toEqual({ status: 'not-expiring' })
@@ -180,8 +254,12 @@ describe('lane auth state', () => {
   })
 
   it('serializes two lanes rotating the same account, one after the other', async () => {
+    seedLane(lanesRoot, LANE_A, credentials('rt-1'))
+    seedLane(lanesRoot, LANE_B, credentials('rt-2'))
     const active: string[] = []
+    const seen: string[] = []
     const authState = makeState(async (credentialsJson) => {
+      seen.push(credentialsJson)
       active.push(credentialsJson)
       expect(active).toHaveLength(1)
       await Promise.resolve()
@@ -192,17 +270,19 @@ describe('lane auth state', () => {
       authState.rotateLaneCredentials({
         laneId: LANE_A,
         accountUuid: ACCOUNT_X,
-        refreshTokenSha256: null,
+        refreshTokenSha256: hashRefreshToken('rt-1'),
         credentialsJson: credentials('rt-1')
       }),
       authState.rotateLaneCredentials({
         laneId: LANE_B,
         accountUuid: ACCOUNT_X,
-        refreshTokenSha256: null,
+        refreshTokenSha256: hashRefreshToken('rt-2'),
         credentialsJson: credentials('rt-2')
       })
     ])
     expect(active).toEqual([])
+    // The queue is only proved by a refresh that actually ran in both lanes.
+    expect(seen).toEqual([credentials('rt-1'), credentials('rt-2')])
   })
 
   it('keys its rows by lane AND account, so no lane reads another one row', () => {

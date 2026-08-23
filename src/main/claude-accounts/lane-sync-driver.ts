@@ -6,7 +6,7 @@ import {
   readIdentityFromOauthAccount,
   readRefreshTokenSha256
 } from './claude-credential-identity'
-import type { LaneAuthState } from './lane-auth-state'
+import type { LaneAuthState, LaneRotationOutcome } from './lane-auth-state'
 import {
   resolveLaneIdentity,
   type LaneRotationCause,
@@ -37,6 +37,8 @@ export type LaneSyncOutcome = {
   /** The lane's own CLI moved the token behind Orca's back. */
   observedForeignChange: boolean
   rotated: boolean
+  /** The token was spent and the lane could not receive it: the lane needs a fresh login. */
+  rotationLost: boolean
 }
 
 /**
@@ -83,7 +85,8 @@ export class LaneSyncDriver {
         trigger,
         laneState: store.getLaneState(laneId),
         observedForeignChange: false,
-        rotated: false
+        rotated: false,
+        rotationLost: false
       }
     }
     const oauthAccount = store.readLaneOauthAccount(laneId)
@@ -103,10 +106,11 @@ export class LaneSyncDriver {
         trigger,
         laneState: store.getLaneState(laneId),
         observedForeignChange,
-        rotated: false
+        rotated: false,
+        rotationLost: false
       }
     }
-    const rotated = await this.rotate(laneId, {
+    const outcome = await this.rotate(laneId, {
       accountUuid,
       credentialsJson,
       oauthAccount,
@@ -117,7 +121,8 @@ export class LaneSyncDriver {
       trigger,
       laneState: store.getLaneState(laneId),
       observedForeignChange,
-      rotated
+      rotated: outcome === 'rotated',
+      rotationLost: outcome === 'lane-write-lost'
     }
   }
 
@@ -152,7 +157,7 @@ export class LaneSyncDriver {
       oauthAccount: unknown
       observedForeignChange: boolean
     }
-  ): Promise<boolean> {
+  ): Promise<LaneRotationOutcome['status']> {
     const outcome = await this.options.authState.rotateLaneCredentials({
       laneId,
       accountUuid: input.accountUuid,
@@ -162,14 +167,15 @@ export class LaneSyncDriver {
     if (outcome.status === 'rotated') {
       this.publishReceipt(laneId, outcome.credentialsJson, input.oauthAccount, 'host')
       this.options.residency.setLaneRow(laneId, outcome.credentialsJson, input.oauthAccount)
-      return true
+      return outcome.status
     }
     // A refresh that fails on a token something else already moved is not transient: that copy
-    // is spent, and only a fresh login recovers the lane.
+    // is spent, and only a fresh login recovers the lane. A lane that went away or moved on
+    // before the call spent nothing, so neither is a foreign rotation.
     if (outcome.status === 'refresh-failed' && input.observedForeignChange) {
       this.publishReceipt(laneId, input.credentialsJson, input.oauthAccount, 'foreign-rotation')
     }
-    return false
+    return outcome.status
   }
 
   private publishReceipt(

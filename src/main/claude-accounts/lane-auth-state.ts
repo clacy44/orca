@@ -1,4 +1,5 @@
 import type { AccountResidencyIndex } from './account-residency-index'
+import { compareRefreshTokens } from './claude-credential-identity'
 import { hasClaudeOauthAccessToken } from './lane-credential-writer'
 import { hasLiveClaudePtysInLane, hasUnattributedLiveClaudePtys } from './live-pty-gate'
 import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
@@ -32,6 +33,12 @@ export type LaneRotationOutcome =
   | { status: 'deferred' }
   | { status: 'not-expiring' }
   | { status: 'refresh-failed' }
+  /** The lane went away (or its marker stopped validating) BEFORE the token was spent. */
+  | { status: 'lane-unavailable' }
+  /** The lane file no longer holds the blob we were asked to rotate; nothing was spent. */
+  | { status: 'input-superseded' }
+  /** The token WAS spent and the lane could not receive it — never a refresh failure. */
+  | { status: 'lane-write-lost'; credentialsJson: string }
 
 export type LaneAuthStateOptions = {
   store: PrincipalLaneStore
@@ -128,6 +135,11 @@ export class LaneAuthState {
    * Never through managed storage: `writeManagedCredentials` requires a `ClaudeManagedAccount`
    * and an Orca-owned `claude-accounts/<id>/auth` path, and a lane account has no managed record
    * on this host — the desktop never pushed one (§2b).
+   *
+   * The refresh endpoint SPENDS the single-use token, so everything that can refuse the write is
+   * evaluated before it: a close-wipe landing during the round trip must not turn a spent token
+   * into a silent `refresh-failed`, which is the `invalid_grant`-everywhere failure §2c opens by
+   * describing, produced by the code that exists to prevent it.
    */
   async rotateLaneCredentials(input: {
     laneId: string
@@ -146,21 +158,59 @@ export class LaneAuthState {
         return { status: 'deferred' }
       }
       state.refreshDeferredByLivePtyAccountUuid = null
+      const preflight = this.assertLaneStillHolds(input.laneId, input.credentialsJson)
+      if (preflight) {
+        return preflight
+      }
       const refresh = this.options.refreshCredentials ?? refreshClaudeOauthCredentials
       const refreshed = await refresh(input.credentialsJson)
       if (!refreshed || !hasClaudeOauthAccessToken(refreshed)) {
         return { status: 'refresh-failed' }
       }
-      const laneDir = this.options.store.resolveLaneDir(input.laneId)
+      return this.publishRotation(input.laneId, input.accountUuid, refreshed, state)
+    })
+  }
+
+  /** Re-reads the lane immediately before the token is spent; null means the rotation may run. */
+  private assertLaneStillHolds(
+    laneId: string,
+    credentialsJson: string
+  ): LaneRotationOutcome | null {
+    if (!this.options.store.resolveLaneDir(laneId)) {
+      return { status: 'lane-unavailable' }
+    }
+    const onDisk = this.options.store.readLaneCredentials(laneId)
+    if (onDisk === null || compareRefreshTokens(onDisk, credentialsJson) !== 'same') {
+      return { status: 'input-superseded' }
+    }
+    return null
+  }
+
+  private publishRotation(
+    laneId: string,
+    accountUuid: string | null,
+    refreshed: string,
+    state: LaneAccountAuthState
+  ): LaneRotationOutcome {
+    // The await above is a real network call, so the lane is re-resolved rather than trusted.
+    const laneDir = this.options.store.resolveLaneDir(laneId)
+    try {
       if (!laneDir) {
-        return { status: 'refresh-failed' }
+        throw new Error('lane directory is no longer owned by Orca')
       }
       this.options.store.writer.writeCredentials(laneDir, refreshed)
-      state.lastWrittenCredentialsJson = refreshed
-      state.lastSyncedAccountUuid = input.accountUuid
-      state.hasMaterializedLaneAuth = true
-      return { status: 'rotated', credentialsJson: refreshed }
-    })
+    } catch (error) {
+      // Loud, and never `refresh-failed`: the old token is revoked either way, so the watermark
+      // moves to the rotated sha and the lane holds at reauth-required. Otherwise the desktop's
+      // cached pre-rotation blob passes the freshness check and replays a revoked credential.
+      console.warn(`[claude-lane] rotation could not reach lane ${laneId}:`, error)
+      this.options.store.recordUnwritableRotation(laneId, refreshed)
+      return { status: 'lane-write-lost', credentialsJson: refreshed }
+    }
+    state.lastWrittenCredentialsJson = refreshed
+    state.lastSyncedAccountUuid = accountUuid
+    state.hasMaterializedLaneAuth = true
+    return { status: 'rotated', credentialsJson: refreshed }
   }
 }
 
