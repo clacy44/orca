@@ -145,6 +145,31 @@ describe('lane sync driver', () => {
     expect(store.getLaneState(LANE_A)).toBe('reauth-required')
   })
 
+  it('reports a spent token the wiped lane could not receive, and calls it no foreign rotation', async () => {
+    putLaneFiles('rt-1')
+    store.recordPushedLaneCredentials(LANE_A, credentials('rt-1'), { accountUuid: ACCOUNT_X })
+    receipts = []
+    refresh.mockImplementation(async () => {
+      // S9c's close-wipe lands inside the token round trip.
+      rmSync(join(lanesRoot, LANE_A), { recursive: true, force: true })
+      return credentials('rt-rotated', 9_000)
+    })
+    const outcome = await driver.syncLane(LANE_A, 'launch')
+    expect(outcome.rotated).toBe(false)
+    expect(outcome.rotationLost).toBe(true)
+    // Not a receipt: the lane does not hold this credential, and every cause asserts it does.
+    expect(receipts).toEqual([])
+    // The watermark still moved, so the desktop's cached pre-rotation blob cannot come back.
+    expect(store.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-rotated'))
+    expect(() =>
+      store.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: credentials('rt-1'),
+        basedOnRefreshTokenSha256: hashRefreshToken('rt-1')
+      })
+    ).toThrow(/older than what this host already holds/)
+  })
+
   it('keeps a transient refresh failure out of the reauth-required state', async () => {
     putLaneFiles('rt-1')
     store.recordPushedLaneCredentials(LANE_A, credentials('rt-1'), { accountUuid: ACCOUNT_X })
