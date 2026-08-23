@@ -28394,6 +28394,14 @@ export class OrcaRuntimeService {
     }
     this.assertGraphReady()
     const { leaf } = this.getLiveLeafForHandle(handle)
+    // Why: this branch re-enters through the anonymous renderer path, which mints a pane the host
+    // cannot pin to a lane — so a lane pane's split fails closed here rather than producing a
+    // shared-credential child of it (§2a, §3's degradation row). The predicate still runs, so a
+    // cross-lane split is refused `lane_not_owned` before this.
+    this.paneLanes.assertRendererSplittable(
+      { worktreeId: leaf.worktreeId, tabId: leaf.tabId, leafId: leaf.leafId },
+      { pairedDeviceId: opts.pairedDeviceId }
+    )
     const direction = opts.direction ?? 'horizontal'
 
     // Snapshot current leaf keys so the post-split graph-sync delta reveals the new pane.

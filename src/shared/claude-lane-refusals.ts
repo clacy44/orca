@@ -26,6 +26,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'terminal.lane_unspecified',
   'terminal.lane_pane_unbound',
   'terminal.lane_source_unknown',
+  'terminal.lane_renderer_split_unsupported',
   'terminal.lane_requires_workspace',
   'terminal.lane_link_unbound',
   'worktree.wake_refused_not_owned'

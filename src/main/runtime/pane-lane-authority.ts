@@ -208,6 +208,23 @@ export class PaneLaneAuthority {
   }
 
   /**
+   * The renderer-notified split re-enters through the anonymous renderer path, which mints a pane
+   * the host cannot pin to a lane. A lane pane's split therefore fails closed here (§2a, §3) —
+   * after the ownership predicate, so a cross-lane split is still refused `lane_not_owned`.
+   */
+  assertRendererSplittable(
+    pane: { worktreeId: string; tabId: string; leafId: string },
+    caller: { pairedDeviceId?: string | null }
+  ): void {
+    if (this.inheritedLaneOfPane(pane, caller).kind === 'principal') {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_renderer_split_unsupported',
+        'That terminal is pinned to your Claude credential lane and its process has already exited, so Orca cannot split it without moving the new pane onto the shared credential. Open a new terminal in your lane instead.'
+      )
+    }
+  }
+
+  /**
    * A federated create has no source pane and no `pairedDeviceId`: it binds the link's principal
    * or fails closed. Never a grant — the union has no such case — and never an implicit shared.
    */
