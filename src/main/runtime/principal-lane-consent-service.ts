@@ -11,9 +11,26 @@ import { seedFreshLaneConfig } from '../claude-accounts/principal-lane-config-se
 import { writeLaneSettings } from '../claude-accounts/principal-lane-settings'
 import { mirrorHostUserContentIntoLane } from '../claude-accounts/principal-lane-user-content-mirror'
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { HostConsent } from './principal-consent-authority'
 import type { PrincipalRegistry } from './principal-registry'
 import type { PrincipalRecord } from './principal-registry-store'
+
+/**
+ * §6's S9a merge gates (i) and (ii), in code rather than in a note.
+ *
+ * Provisioning stays OFF on these platforms until the named §5 live probe establishes that the
+ * platform's Claude CLI keeps no credential state outside `CLAUDE_CONFIG_DIR` — the failure class
+ * is every lane collapsing onto one credential, which no test in this repo can observe. Gate (iii)
+ * — a native Windows lane's DACL verifying at creation — is enforced per lane in
+ * `principal-credential-lane.ts`. Opening a gate is the deletion of its row, beside its evidence.
+ */
+const PROVISIONING_GATED_PLATFORMS: Partial<
+  Record<NodeJS.Platform, { label: string; probe: string }>
+> = {
+  darwin: { label: 'macOS', probe: 'step (8)' },
+  win32: { label: 'Windows', probe: 'step (10)' }
+}
 
 export type LaneHostSources = {
   /** The shared lane's config dir and `.claude.json`; the mirror and the seed read these. */
@@ -31,7 +48,8 @@ export type LaneHostSources = {
 export class PrincipalLaneConsentService {
   constructor(
     private readonly registry: PrincipalRegistry,
-    private readonly hostSources: () => LaneHostSources = defaultHostSources
+    private readonly hostSources: () => LaneHostSources = defaultHostSources,
+    private readonly platform: NodeJS.Platform = process.platform
   ) {}
 
   createPrincipal(consent: HostConsent, displayName: string): PrincipalRecord {
@@ -66,6 +84,7 @@ export class PrincipalLaneConsentService {
   /** Provisioning is an event: bound grant, designated pusher, then the lane and its content. */
   provisionLane(consent: HostConsent, principalId: string): ProvisionedPrincipalLane {
     void consent
+    assertProvisioningPlatformCleared(this.platform)
     this.registry.assertLaneProvisionable(principalId)
     const lane = provisionPrincipalLane(principalId)
     this.refreshLaneContent(lane.laneDir)
@@ -111,6 +130,16 @@ export function attachPrincipalLaneConsentService(
 
 export function getPrincipalLaneConsentService(): PrincipalLaneConsentService | null {
   return attachedSurface
+}
+
+function assertProvisioningPlatformCleared(platform: NodeJS.Platform): void {
+  const gate = PROVISIONING_GATED_PLATFORMS[platform]
+  if (gate) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.provisioning_platform_gated',
+      `Per-person Claude credential lanes are not enabled on ${gate.label} yet: Orca has not yet confirmed that the Claude CLI keeps every credential inside the folder each lane names on this platform (S9 §5 live probe ${gate.probe}). Until it does, run per-person lanes on a Linux host.`
+    )
+  }
 }
 
 function defaultHostSources(): LaneHostSources {

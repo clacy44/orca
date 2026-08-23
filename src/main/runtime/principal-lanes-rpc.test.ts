@@ -164,6 +164,30 @@ describe('principal lane consent RPC', () => {
     expect(laneConfig.oauthAccount).toBeNull()
   })
 
+  it('refuses provisioning on a platform whose §6 gate has not been cleared', async () => {
+    grants.add('desktop')
+    const { principalId } = (await call('accounts.lane.createPrincipal', {
+      displayName: 'Ana'
+    })) as { principalId: string }
+    await call('accounts.lane.bindGrant', { deviceId: 'desktop', principalId })
+    await call('accounts.lane.designatePusher', { principalId, deviceId: 'desktop' })
+
+    for (const platform of ['darwin', 'win32'] as const) {
+      attachPrincipalLaneConsentService(
+        new PrincipalLaneConsentService(
+          new PrincipalRegistry(state.userDataDir, grants),
+          () => ({ hostConfigDir, hostConfigPath }),
+          platform
+        )
+      )
+
+      await expect(call('accounts.lane.provision', { principalId })).rejects.toThrow(
+        /not enabled on (macOS|Windows) yet/
+      )
+    }
+    expect(existsSync(join(state.userDataDir, 'claude-lanes', principalId))).toBe(false)
+  })
+
   it('refuses provisioning for a principal with no designated pusher', async () => {
     grants.add('desktop')
     const { principalId } = (await call('accounts.lane.createPrincipal', {
