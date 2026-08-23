@@ -108,12 +108,15 @@ export class AccountResidencyIndex {
    * The host row is re-derived first, not because the shared lane can hold a LANE, but because
    * the same call is what keeps that row honest for the push check below.
    *
-   * NOT YET CALLED FROM PRODUCTION — S9b's push RPC and the two `accounts.ts` gates are 3b's, and
-   * BOTH `selectClaude` and `removeClaude` are owed, not only the push. Until then L1 is
-   * unenforced, and the lane rotation gate rests on it: `isRefreshDeferredByLivePty` resolves
-   * liveness through `findLaneResidency`, which never reports the shared lane, so a live
-   * shared-lane `claude` holding the same account would not defer a lane's rotation. Unreachable
-   * only because no lane can be loaded without a push RPC.
+   * All three call sites are wired — `doSelectAccount` and `doRemoveAccount` through
+   * `assertManagedClaudeAccountNotLaneResident`, and the push through the authority. What is still
+   * deferred is the PRODUCTION attach of `LaneWireService`: with nothing attached the guard is
+   * inert, which is a pre-lane host behaving exactly as it does today.
+   *
+   * One residual while that stands: `isRefreshDeferredByLivePty` resolves liveness through
+   * `findLaneResidency`, which never reports the shared lane, so a live shared-lane `claude`
+   * holding the same account would not defer a lane's rotation — closed by the host row that
+   * `assertAccountNotResidentElsewhere` refuses a colliding push against.
    */
   assertNotLaneResident(account: ResidencyCandidateAccount): void {
     this.refreshHostRow()

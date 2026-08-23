@@ -190,6 +190,8 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'accounts.lane.requestSwitch',
   'accounts.lane.statusSubscribe',
   'accounts.lane.statusUnsubscribe',
+  // Deliberately absent, and pinned by a negative control in `mobile-rpc-allowlist.test.ts`:
+  // `push`, `pullRotated`, `clear`, `setDelegableAccounts`, `status`.
   'aiVault.listSessions',
   'aiVault.resolveSessionTitles',
   'aiVault.prepareSessionResume',

@@ -141,4 +141,20 @@ describe('mobile RPC allowlist', () => {
       )
     ).toEqual([])
   })
+
+  // S9 §2l: a phone can never push. `assertDelegatedPusher` refuses a non-designated grant too,
+  // so this is the outer of the two gates — the one that keeps a credential-bearing lane method
+  // from ever reaching dispatch on a mobile-scoped token.
+  it('does not grant mobile credentials any credential-bearing lane method', () => {
+    const allowed = mobileRpcAllowlist()
+    expect(
+      [
+        'accounts.lane.push',
+        'accounts.lane.pullRotated',
+        'accounts.lane.clear',
+        'accounts.lane.setDelegableAccounts',
+        'accounts.lane.status'
+      ].filter((method) => allowed.has(method))
+    ).toEqual([])
+  })
 })
