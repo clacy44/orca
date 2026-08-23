@@ -35,7 +35,7 @@ const HOST_SETTINGS = {
   awsCredentialExport: 'aws export',
   statusLine: { type: 'command', command: '/home/dev/my-statusline.sh' },
   hooks: {
-    Stop: [{ hooks: [{ type: 'command', command: '/home/dev/my-hook.sh' }] }]
+    Stop: [{ hooks: [{ type: 'command' as const, command: '/home/dev/my-hook.sh' }] }]
   }
 }
 
