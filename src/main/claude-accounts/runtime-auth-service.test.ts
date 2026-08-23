@@ -1049,7 +1049,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, refreshedCredentials, 'utf-8')
       await service.syncForCurrentSelection()
@@ -1088,7 +1088,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, conflictingCredentials, 'utf-8')
       await service.syncForCurrentSelection()
@@ -1135,7 +1135,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, wipedCredentials, 'utf-8')
       await service.syncForCurrentSelection()
@@ -2984,7 +2984,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, unverifiedLiveCredentials, 'utf-8')
       settings.activeClaudeManagedAccountId = 'account-2'
@@ -3895,7 +3895,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
     const service = new ClaudeRuntimeAuthService(store as never)
 
-    markClaudePtySpawned('pty-live-1')
+    markClaudePtySpawned('pty-live-1', null)
     try {
       const preparation = await service.prepareForRateLimitFetch()
       // A live Claude owns the credentials; refreshing here would race its

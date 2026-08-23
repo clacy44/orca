@@ -1,8 +1,18 @@
 const liveClaudePtyIds = new Set<string>()
+
+/**
+ * The shared lane's reserved key, mirroring `terminal-presence-registry.ts`'s attachment key.
+ *
+ * A principal id is a v4 UUID, so nothing can collide with it (S9 §2f).
+ */
+export const SHARED_CLAUDE_LANE_KEY = 'host'
+
 // Why: which credential lane each live pty was pinned to. A pty absent from this map is
-// UNATTRIBUTED — seeded from persistence, or a shared-lane spawn — and defers every account's
+// UNATTRIBUTED — seeded from persistence and not yet reconciled — and defers every account's
 // rotation, because over-deferring costs a delayed refresh while under-deferring revokes a
-// single-use token out from under a running CLI (S9 §2e).
+// single-use token out from under a running CLI (S9 §2e). A SPAWN is never in that class: it is
+// pinned to a lane or to the shared one, and L1 forbids a lane's account also being the shared
+// one, so a shared-lane `claude` defers nobody's lane.
 const lanePrincipalIdByPtyId = new Map<string, string>()
 // Why: ids restored from persistence at startup, not yet confirmed against the
 // daemon. They keep the OAuth refresh gate closed so an early managed refresh
@@ -73,12 +83,11 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
   notifyDrainedOnTransition(hadLivePtys)
 }
 
-export function markClaudePtySpawned(ptyId: string, lanePrincipalId?: string | null): void {
+/** The lane is required, not optional: an omitted one silently deferred every lane's rotation. */
+export function markClaudePtySpawned(ptyId: string, lanePrincipalId: string | null): void {
   liveClaudePtyIds.add(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
-  if (lanePrincipalId) {
-    lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId)
-  }
+  lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId || SHARED_CLAUDE_LANE_KEY)
   persistence?.addClaudeLivePtySessionId(ptyId)
 }
 
@@ -105,7 +114,7 @@ export function hasLiveClaudePtysInLane(lanePrincipalId: string): boolean {
   return false
 }
 
-/** Live ptys this process cannot attribute to a lane; they defer every account's rotation. */
+/** Seeded ids this process has not reconciled yet; they defer every account's rotation. */
 export function hasUnattributedLiveClaudePtys(): boolean {
   for (const ptyId of liveClaudePtyIds) {
     if (!lanePrincipalIdByPtyId.has(ptyId)) {

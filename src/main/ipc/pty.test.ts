@@ -2084,7 +2084,7 @@ describe('registerPtyHandlers', () => {
     })
 
     it('clears Claude live-PTY tracking from shared provider teardown', () => {
-      markClaudePtySpawned('ssh-claude-pty')
+      markClaudePtySpawned('ssh-claude-pty', null)
       expect(hasLiveClaudePtys()).toBe(true)
 
       clearProviderPtyState('ssh-claude-pty')

@@ -6,6 +6,7 @@ import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-wat
 import { AccountResidencyIndex } from './account-residency-index'
 import { hashRefreshToken } from './claude-credential-identity'
 import { LaneAuthState, laneAccountKey } from './lane-auth-state'
+import { markClaudePtyExited, markClaudePtySpawned } from './live-pty-gate'
 import { PrincipalLaneStore } from './principal-lane-store'
 import { provisionPrincipalLane } from './principal-credential-lane'
 
@@ -99,6 +100,44 @@ describe('lane auth state', () => {
       ACCOUNT_X
     )
     expect(authState.getState(LANE_B, ACCOUNT_Y).refreshDeferredByLivePtyAccountUuid).toBeNull()
+  })
+
+  it('lets a lane rotate while an ordinary shared-lane claude is live', async () => {
+    // Through the REAL gate: the defect lived in the wiring, not in either module alone.
+    seedLane(lanesRoot, LANE_A, credentials('rt-x'))
+    residency.setLaneRow(LANE_A, credentials('rt-x'), { accountUuid: ACCOUNT_X })
+    markClaudePtySpawned('shared-lane-pty', null)
+    const authState = new LaneAuthState({
+      store,
+      residency,
+      refreshCredentials: async () => credentials('rt-rotated'),
+      isExpiring: () => true
+    })
+    try {
+      await expect(
+        authState.rotateLaneCredentials({
+          laneId: LANE_A,
+          accountUuid: ACCOUNT_X,
+          refreshTokenSha256: hashRefreshToken('rt-x'),
+          credentialsJson: credentials('rt-x')
+        })
+      ).resolves.toMatchObject({ status: 'rotated' })
+      // Negative control: a live pty IN the lane still defers that lane's account.
+      seedLane(lanesRoot, LANE_B, credentials('rt-y'))
+      residency.setLaneRow(LANE_B, credentials('rt-y'), { accountUuid: ACCOUNT_Y })
+      markClaudePtySpawned('lane-b-pty', LANE_B)
+      await expect(
+        authState.rotateLaneCredentials({
+          laneId: LANE_B,
+          accountUuid: ACCOUNT_Y,
+          refreshTokenSha256: hashRefreshToken('rt-y'),
+          credentialsJson: credentials('rt-y')
+        })
+      ).resolves.toEqual({ status: 'deferred' })
+    } finally {
+      markClaudePtyExited('shared-lane-pty')
+      markClaudePtyExited('lane-b-pty')
+    }
   })
 
   it('over-defers while any live pty is unattributed', async () => {

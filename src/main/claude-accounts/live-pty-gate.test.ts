@@ -11,7 +11,8 @@ import {
   markClaudePtyExited,
   markClaudePtySpawned,
   onLiveClaudePtysDrained,
-  seedLiveClaudePtysFromPersistence
+  seedLiveClaudePtysFromPersistence,
+  SHARED_CLAUDE_LANE_KEY
 } from './live-pty-gate'
 
 describe('Claude live PTY gate', () => {
@@ -28,7 +29,7 @@ describe('Claude live PTY gate', () => {
   })
 
   it('allows switching while Claude PTYs are live', () => {
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
 
     beginClaudeAuthSwitch()
 
@@ -76,7 +77,7 @@ describe('Claude live PTY gate', () => {
 
   it('keeps a seeded id confirmed by a real spawn out of later pruning', () => {
     seedLiveClaudePtysFromPersistence(['seeded-pty-1'])
-    markClaudePtySpawned('seeded-pty-1')
+    markClaudePtySpawned('seeded-pty-1', null)
 
     confirmSeededClaudeLivePtys([])
 
@@ -87,8 +88,8 @@ describe('Claude live PTY gate', () => {
     const onDrained = vi.fn()
     const unsubscribe = onLiveClaudePtysDrained(onDrained)
     try {
-      markClaudePtySpawned('live-claude-pty')
-      markClaudePtySpawned('seeded-pty-1')
+      markClaudePtySpawned('live-claude-pty', null)
+      markClaudePtySpawned('seeded-pty-1', null)
 
       markClaudePtyExited('live-claude-pty')
       expect(onDrained).not.toHaveBeenCalled()
@@ -124,7 +125,7 @@ describe('Claude live PTY gate', () => {
     const unsubscribe = onLiveClaudePtysDrained(onDrained)
     unsubscribe()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     markClaudePtyExited('live-claude-pty')
 
     expect(onDrained).not.toHaveBeenCalled()
@@ -138,7 +139,7 @@ describe('Claude live PTY gate', () => {
       removeClaudeLivePtySessionId
     })
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     expect(addClaudeLivePtySessionId).toHaveBeenCalledWith('live-claude-pty')
 
     markClaudePtyExited('live-claude-pty')
@@ -159,12 +160,18 @@ describe('Claude live PTY gate', () => {
     expect(hasLiveClaudePtysInLane('lane-b')).toBe(true)
   })
 
-  it('reports a shared-lane spawn and a seeded id as unattributed', () => {
-    markClaudePtySpawned('shared-pty')
-    expect(hasUnattributedLiveClaudePtys()).toBe(true)
+  it('attributes a shared-lane spawn to the host lane rather than to nobody', () => {
+    markClaudePtySpawned('shared-pty', null)
+    // L1 forbids a lane's account also being the shared one, so this defers no lane's rotation.
+    expect(hasUnattributedLiveClaudePtys()).toBe(false)
+    expect(hasLiveClaudePtysInLane(SHARED_CLAUDE_LANE_KEY)).toBe(true)
+    // Negative control: it answers for the shared lane and for no provisioned lane.
     expect(hasLiveClaudePtysInLane('lane-a')).toBe(false)
     markClaudePtyExited('shared-pty')
+    expect(hasLiveClaudePtysInLane(SHARED_CLAUDE_LANE_KEY)).toBe(false)
+  })
 
+  it('reports only a seeded, unreconciled id as unattributed', () => {
     seedLiveClaudePtysFromPersistence(['seeded-pty-1'])
     // A restored id carries no lane, so it must defer every account's rotation.
     expect(hasUnattributedLiveClaudePtys()).toBe(true)
