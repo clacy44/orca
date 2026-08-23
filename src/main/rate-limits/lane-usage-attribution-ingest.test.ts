@@ -93,6 +93,13 @@ beforeEach(() => {
 describe('ingestLiveClaudeRateLimits — lane attribution', () => {
   it("attributes a post carrying lane A's paneKey to lane A, not to the shared bar", async () => {
     const service = await serviceWithLaneA()
+    // The shared account's own numbers, as a fetch would have left them.
+    service.ingestLiveClaudeRateLimits({
+      configDir: SHARED_DIR,
+      paneKey: null,
+      fiveHour: { used_percentage: 5 },
+      sevenDay: null
+    })
 
     service.ingestLiveClaudeRateLimits({
       // The stale inherited config dir names the SHARED lane; the pane binding still wins.
@@ -102,9 +109,54 @@ describe('ingestLiveClaudeRateLimits — lane attribution', () => {
       sevenDay: null
     })
 
+    const lane = service.laneStatuslineUsageOf(LANE_A)
+    expect(lane?.session?.usedPercent).toBe(61)
+    expect(lane?.usageMetadata?.authProvenance).toBe(`lane:${LABEL_A}`)
+    // The host-wide bar is peer-published; lane A's numbers must not have replaced it (§2d).
     const claude = service.getState().claude
-    expect(claude?.session?.usedPercent).toBe(61)
-    expect(claude?.usageMetadata?.authProvenance).toBe(`lane:${LABEL_A}`)
+    expect(claude?.session?.usedPercent).toBe(5)
+    expect(claude?.usageMetadata?.authProvenance).toBe('managed:acct-shared:host')
+  })
+
+  // Negative control: the shared lane's own post still drives the host-wide bar.
+  it('writes the host-wide bar for a post attributed to the shared lane', async () => {
+    const service = await serviceWithLaneA()
+
+    service.ingestLiveClaudeRateLimits({
+      configDir: SHARED_DIR,
+      paneKey: null,
+      fiveHour: { used_percentage: 31 },
+      sevenDay: null
+    })
+
+    expect(service.getState().claude?.session?.usedPercent).toBe(31)
+    expect(service.laneStatuslineUsageOf(LANE_A)).toBeNull()
+  })
+
+  it('keeps the other window when a lane post carries only one, and forgets a wiped lane', async () => {
+    const service = await serviceWithLaneA()
+
+    service.ingestLiveClaudeRateLimits({
+      configDir: LANE_A_DIR,
+      paneKey: PANE_A,
+      fiveHour: { used_percentage: 61 },
+      sevenDay: { used_percentage: 12 }
+    })
+    service.ingestLiveClaudeRateLimits({
+      configDir: LANE_A_DIR,
+      paneKey: PANE_A,
+      fiveHour: { used_percentage: 70 },
+      sevenDay: null
+    })
+
+    expect(service.laneStatuslineUsageOf(LANE_A)?.session?.usedPercent).toBe(70)
+    expect(service.laneStatuslineUsageOf(LANE_A)?.weekly?.usedPercent).toBe(12)
+
+    // The lane is wiped: its attribution row disappears on the next tick, and so does its usage.
+    service.setClaudeLaneAttributionResolver(() => [])
+    await (service as unknown as { fetchAll: () => Promise<void> }).fetchAll()
+
+    expect(service.laneStatuslineUsageOf(LANE_A)).toBeNull()
   })
 
   it('publishes no principal id, device id or lane path on the peer-readable row', async () => {
@@ -129,7 +181,7 @@ describe('ingestLiveClaudeRateLimits — lane attribution', () => {
       sevenDay: null
     })
 
-    const provenance = service.getState().claude?.usageMetadata?.authProvenance
+    const provenance = service.laneStatuslineUsageOf(LANE_A)?.usageMetadata?.authProvenance
     expect(provenance).toBe(REDACTED_LANE_PROVENANCE)
     expect(provenance).not.toContain(LANE_A)
     expect(provenance).not.toContain(LANE_A_DIR)
@@ -158,6 +210,9 @@ describe('ingestLiveClaudeRateLimits — lane attribution', () => {
       sevenDay: null
     })
 
-    expect(service.getState().claude?.usageMetadata?.authProvenance).toBe(`lane:${LABEL_A}`)
+    expect(service.laneStatuslineUsageOf(LANE_A)?.usageMetadata?.authProvenance).toBe(
+      `lane:${LABEL_A}`
+    )
+    expect(service.getState().claude?.session).toBeNull()
   })
 })

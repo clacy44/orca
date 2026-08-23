@@ -197,6 +197,7 @@ import {
   settleServeDesktopActivation as settleServeDesktopActivationGate
 } from './startup/serve-desktop-activation'
 import { RateLimitService } from './rate-limits/service'
+import { pickFresherLaneUsage } from './rate-limits/lane-statusline-usage'
 import { readMiniMaxSessionCookie } from './minimax/minimax-cookie-store'
 import { getInitialClaudeRateLimitTarget } from './rate-limits/claude-rate-limit-target'
 import { getInitialCodexRateLimitTarget } from './rate-limits/codex-rate-limit-target'
@@ -2574,7 +2575,11 @@ void app.whenReady().then(async () => {
   })
   runtimeService.setLaneAccountRowResolvers({
     laneUsageOf: (principalId) => {
-      const usage = claudeRuntimeAuth?.laneUsageFor(principalId) ?? null
+      // Two feeds, fresher wins: the per-lane probe and the lane's own statusline posts (§2k).
+      const usage = pickFresherLaneUsage(
+        claudeRuntimeAuth?.laneUsageFor(principalId) ?? null,
+        rateLimits?.laneStatuslineUsageOf(principalId) ?? null
+      )
       return usage ? { session: usage.session, weekly: usage.weekly } : null
     }
   })

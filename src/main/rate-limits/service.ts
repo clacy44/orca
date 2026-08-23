@@ -26,6 +26,7 @@ import {
   type ClaudeLaneUsageAttribution,
   type ClaudeUsagePaneLane
 } from './claude-usage-attribution'
+import { LaneStatuslineUsageStore } from './lane-statusline-usage'
 import { fetchKimiRateLimits } from './kimi-fetcher'
 import type { KimiHomeResolution } from '../kimi/kimi-runtime-home'
 import { fetchGrokRateLimits } from './grok-fetcher'
@@ -215,6 +216,8 @@ export class RateLimitService {
   private claudeFetchGeneration = 0
   // Why: statusline ingest must attribute live windows to the selected account without re-running the side-effectful auth sync per post. Keyed by config dir since S9b, so a lane's post lands on the lane's own row instead of being dropped against one host-wide dir.
   private readonly claudeAttribution = new ClaudeUsageAttributionMap()
+  // Why a second sink and not `state.claude`: that object is the host-wide, peer-published bar.
+  private readonly laneStatuslineUsage = new LaneStatuslineUsageStore()
   private claudeLaneAttributionResolver: (() => readonly ClaudeLaneUsageAttribution[]) | null = null
   private opencodeFetchGeneration = 0
   private minimaxFetchGeneration = 0
@@ -287,6 +290,11 @@ export class RateLimitService {
     resolver: (() => readonly ClaudeLaneUsageAttribution[]) | null
   ): void {
     this.claudeLaneAttributionResolver = resolver
+  }
+
+  /** The lane's own statusline-derived row, for the terminal join. Never peer-published (§2d). */
+  laneStatuslineUsageOf(laneId: string): ProviderRateLimits | null {
+    return this.laneStatuslineUsage.get(laneId)
   }
 
   /** The pane→lane join the posted paneKey unlocks; absent, the config-dir map answers alone. */
@@ -1483,7 +1491,11 @@ export class RateLimitService {
     )
     // Why on the same tick: §2c's `syncLane` is what makes a lane's row current, and the shared
     // fetch is the only thing that runs on every tick — a lane row read later would be stale.
-    this.claudeAttribution.rememberLanes(this.claudeLaneAttributionResolver?.() ?? [])
+    const laneRows = this.claudeLaneAttributionResolver?.() ?? []
+    this.claudeAttribution.rememberLanes(laneRows)
+    // Why here: a wiped lane loses its attribution row on this same tick, and a row that can no
+    // longer attract a post must not keep serving the bar it last posted (§2d).
+    this.laneStatuslineUsage.retainLanes(laneRows.map((row) => row.laneId))
   }
 
   /** Live usage windows forwarded from a Claude session's statusLine command. */
@@ -1503,6 +1515,17 @@ export class RateLimitService {
     const freshSession = mapClaudeUsageWindow(event.fiveHour ?? undefined, 300)
     const freshWeekly = mapClaudeUsageWindow(event.sevenDay ?? undefined, 10080)
     if (!freshSession && !freshWeekly) {
+      return
+    }
+    if (attribution.laneId !== null) {
+      // Why a different sink and not this bar with a provenance stamp: `state.claude` is host-wide
+      // and peer-published, so writing a lane's numbers here shows one developer's usage on the
+      // other's bar — the inversion of §2d. The lane's own row reads the map instead (§2k).
+      this.laneStatuslineUsage.ingest(attribution.laneId, {
+        session: freshSession,
+        weekly: freshWeekly,
+        authProvenance: publishedAuthProvenance(attribution)
+      })
       return
     }
     const previous = this.state.claude
