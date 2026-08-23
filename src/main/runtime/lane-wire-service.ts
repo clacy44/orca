@@ -63,6 +63,9 @@ export class LaneWireService {
       delegation: this.delegation,
       stream: this.stream
     })
+    // A residency refusal must name the HOLDER, not merely refuse, so the label resolver is bound
+    // here — the registry that knows people's names is attached after the coordinator exists.
+    options.coordinator.setPresenceLabelResolver((laneId) => this.labelOf(laneId))
     // Both L1 edges arm together: `selectClaude` and `removeClaude` share one predicate, and a
     // build that armed only one would re-create the double residency L1 exists to prevent.
     this.residencyGuard = options.accounts
@@ -75,6 +78,17 @@ export class LaneWireService {
     this.disposeReceipts = options.coordinator.store.onRotationReceipt((receipt) => {
       this.stream.publishReceipt(receipt)
     })
+  }
+
+  labelOf(principalId: string): string | null {
+    const named = this.principals.labelOf?.(principalId)
+    if (named) {
+      return named
+    }
+    return (
+      this.principals.listPrincipals?.().find((row) => row.principalId === principalId)?.label ??
+      null
+    )
   }
 
   /** The principals a projection may enumerate; with no lookup it shows the caller's lane only. */
