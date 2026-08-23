@@ -191,6 +191,17 @@ export class PrincipalLaneStore {
     this.writeWatermark(laneId, rotatedCredentialsJson, oauthAccount, true)
   }
 
+  /**
+   * The ONLY caller is §2f's revoke arm: the principal's last grant is gone, so the chain the
+   * watermark heads has no owner left. Every other wipe keeps it — that is what refuses a replay
+   * of a blob the lane's own CLI has since rotated.
+   */
+  removeWatermark(laneId: string): void {
+    this.persistence.setClaudeLaneCredentialWatermarks(
+      this.persistence.getClaudeLaneCredentialWatermarks().filter((row) => row.laneId !== laneId)
+    )
+  }
+
   onRotationReceipt(listener: (receipt: LaneRotationReceipt) => void): () => void {
     this.receiptListeners.add(listener)
     return () => this.receiptListeners.delete(listener)

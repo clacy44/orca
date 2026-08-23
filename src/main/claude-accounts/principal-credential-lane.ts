@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
   type Stats
@@ -19,7 +20,7 @@ import { restrictWindowsPathSync } from '../../shared/secure-path-windows-acl'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { getClaudeLanesRoot } from './claude-lanes-root'
 import { ensureLaneProvenanceLabel } from './principal-lane-provenance'
-import { sweepLaneCredentialTempArtifacts } from './principal-lane-credential-sweep'
+import { isLaneLoaded, sweepLaneCredentialTempArtifacts } from './principal-lane-credential-sweep'
 
 const LANE_MARKER_FILENAME = '.orca-principal-lane'
 
@@ -272,6 +273,29 @@ function lstatOrNull(path: string): Stats | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Every provisioned lane that currently HOLDS a credential — the startup wipe's input (S9 §2f).
+ *
+ * Ownership-proved per entry, so a foreign directory named as a v4 UUID is never swept as a lane.
+ */
+export function listResidentPrincipalLaneIds(options: PrincipalLaneOptions = {}): string[] {
+  const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
+  if (!existsSync(lanesRoot)) {
+    return []
+  }
+  const resident: string[] = []
+  for (const entry of readdirSync(lanesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !isPrincipalId(entry.name)) {
+      continue
+    }
+    const laneDir = resolveOwnedPrincipalLaneDir(entry.name, options)
+    if (laneDir && isLaneLoaded(laneDir)) {
+      resident.push(entry.name)
+    }
+  }
+  return resident
 }
 
 /** Deprovisioning removes the lane whatever the grant count — the same consent UI as provisioning. */

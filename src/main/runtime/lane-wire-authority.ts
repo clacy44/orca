@@ -8,6 +8,7 @@ import {
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { parseLanePushRequest, type LanePushRequest } from '../claude-accounts/lane-push-envelope'
 import { wipeLaneCredentials } from '../claude-accounts/principal-lane-credential-sweep'
+import { isLaneWipePending } from '../claude-accounts/lane-wipe-pending'
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from '../claude-accounts/live-pty-gate'
 import type { LaneDelegationDirectory } from './lane-delegation-directory'
 
@@ -36,8 +37,8 @@ export type LaneSwitchGate = {
 
 export type LaneWireCaller = { deviceId: string; principalId: string }
 
-/** A push ANSWERS an outstanding switch request; a clear leaves it unanswered (§2l). */
-export type LaneChangeCause = 'push' | 'clear'
+/** A push ANSWERS an outstanding switch request; a clear or a lifecycle wipe does not (§2l). */
+export type LaneChangeCause = 'push' | 'clear' | 'wipe'
 
 export type LaneWireAuthorityOptions = {
   principals: LaneWirePrincipals
@@ -174,6 +175,9 @@ export class LaneWireAuthority {
     return {
       laneId: caller.principalId,
       laneState: store.getLaneState(caller.principalId),
+      // Additive and only ever TRUE: `absent` is what launches key on, and this is the separate
+      // property the residency claim reads — while it is set, nothing may say the lane is empty.
+      ...(isLaneWipePending(caller.principalId) ? { laneWipePending: true } : {}),
       delegatedGrantId,
       callerIsDelegatedGrant: delegatedGrantId === caller.deviceId,
       delegationCleared: row.delegationCleared === true,

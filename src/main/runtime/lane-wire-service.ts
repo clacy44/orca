@@ -71,6 +71,9 @@ export class LaneWireService {
     // A residency refusal must name the HOLDER, not merely refuse, so the label resolver is bound
     // here — the registry that knows people's names is attached after the coordinator exists.
     options.coordinator.setPresenceLabelResolver((laneId) => this.labelOf(laneId))
+    // §2f's lifecycle wipes run below the wire; the lane's own grants still have to learn that
+    // their credential stopped being resident, and a pending switch has to be refused by name.
+    options.coordinator.setLaneWipedListener((laneId) => this.onLaneChanged(laneId, 'wipe'))
     // Both L1 edges arm together: `selectClaude` and `removeClaude` share one predicate, and a
     // build that armed only one would re-create the double residency L1 exists to prevent.
     this.residencyGuard = options.accounts
@@ -102,10 +105,16 @@ export class LaneWireService {
     return this.principals.listPrincipals?.() ?? []
   }
 
-  /** A push answers the pending switch requests on its lane; a clear refuses them by name. */
+  /** A push answers the pending switch requests on its lane; a clear or wipe refuses them by name. */
   private onLaneChanged(laneId: string, cause: LaneChangeCause): void {
     if (cause === 'push') {
       this.switches.settleForLane(laneId)
+    } else if (cause === 'wipe') {
+      this.switches.failForLane(
+        laneId,
+        'accounts.lane.switch_lane_cleared',
+        'The Claude account stopped being loaded on the host while this switch was still waiting, so nothing was switched. Reconnect the device that loads accounts for you, then try again.'
+      )
     } else {
       this.switches.failForLane(
         laneId,
@@ -124,6 +133,7 @@ export class LaneWireService {
   dispose(): void {
     this.disposeReceipts?.()
     this.disposeReceipts = null
+    this.coordinator.setLaneWipedListener(null)
   }
 }
 

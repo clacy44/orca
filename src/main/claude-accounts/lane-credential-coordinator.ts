@@ -6,6 +6,8 @@ import {
   type LaneUsagePullOutcome
 } from '../rate-limits/lane-usage-pull'
 import { isLaneWipePending } from './lane-wipe-pending'
+import { PrincipalLaneLifecycle, type LaneWipeOutcome } from './principal-lane-lifecycle'
+import { listResidentPrincipalLaneIds } from './principal-credential-lane'
 import {
   isClaudeAuthSwitchInProgress,
   listLanesWithLiveClaudePtys,
@@ -45,8 +47,10 @@ export class LaneCredentialCoordinator {
   readonly authState: LaneAuthState
   readonly syncDriver: LaneSyncDriver
   readonly usagePull: LaneUsagePull
+  readonly lifecycle: PrincipalLaneLifecycle
   private presenceLabelResolver: ((laneId: string) => string | null) | null = null
   private laneUsageInvalidated: ((laneId: string) => void) | null = null
+  private laneWiped: ((laneId: string) => void) | null = null
   // Why populated from `syncLane` rather than from a lane listing: "loaded" is a fact the sync
   // establishes, and a lane that has never synced has no row to attribute usage to (S9 §2k).
   private readonly usageAttributions = new Map<string, ClaudeLaneUsageAttribution>()
@@ -78,6 +82,35 @@ export class LaneCredentialCoordinator {
         await this.syncLane(laneId, 'rate-limit-tick')
       }
     })
+    this.lifecycle = new PrincipalLaneLifecycle({
+      resolveLaneDir: (laneId) => this.store.resolveLaneDir(laneId),
+      serializeLaneWrite: (laneId, run) => this.authState.serializeLaneWrite(laneId, run),
+      invalidateProbes: (laneId) => this.invalidateLaneUsageProbes(laneId),
+      clearResidencyRow: (laneId) => this.residency.clearLaneRow(laneId),
+      removeWatermark: (laneId) => this.store.removeWatermark(laneId),
+      syncLaneObserveOnly: async (laneId) => {
+        await this.syncLane(laneId, 'startup')
+      },
+      ...(options.laneOptions?.platform ? { platform: options.laneOptions.platform } : {}),
+      onLaneWiped: (laneId) => this.laneWiped?.(laneId)
+    })
+  }
+
+  /** Late-bound: the lane wire that republishes a lane's status outlives this constructor. */
+  setLaneWipedListener(listener: ((laneId: string) => void) | null): void {
+    this.laneWiped = listener
+  }
+
+  /**
+   * §2f's startup order, minus the seed: observe-only sync per resident lane, then the wipe.
+   *
+   * Callers must run this BEFORE `seedLiveClaudePtysFromPersistence`, which is why it does not
+   * seed itself — the seed's own ordering invariant lives at the call site in `index.ts`.
+   */
+  wipeResidentLanesAtStartup(): Promise<LaneWipeOutcome[]> {
+    return this.lifecycle.wipeResidentLanesAtStartup(
+      listResidentPrincipalLaneIds(this.options.laneOptions ?? {})
+    )
   }
 
   /** Trigger 2's SECOND arm: one probe per loaded lane, then a sync over each lane probed. */
