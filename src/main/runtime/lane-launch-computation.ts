@@ -59,6 +59,44 @@ export type LaneLaunchComputation<
 
 const OPENCLAUDE_COMMAND_RE = buildAgentNameRe('openclaude')
 
+/** The three host-wide launch-customization settings, as the startup-plan builder reads them. */
+export type HostWideAgentLaunchSettings = {
+  agentCmdOverrides?: Partial<Record<TuiAgent, string>> | null
+  agentDefaultArgs?: Partial<Record<TuiAgent, string>> | null
+  agentDefaultEnv?: Partial<Record<TuiAgent, Record<string, string>>> | null
+}
+
+export type LaneScopedAgentLaunchSettings = {
+  cmdOverrides: Partial<Record<TuiAgent, string>>
+  agentDefaultArgs: Partial<Record<TuiAgent, string>> | undefined
+  agentDefaultEnv: Partial<Record<TuiAgent, Record<string, string>>> | undefined
+}
+
+/**
+ * Host-wide launch customization, dropped for a lane launch (S9 §2 rows 13, 14 and 17).
+ *
+ * `agentDefaultArgs` and `agentDefaultEnv` are writable by ANY paired grant and ungated, so one
+ * developer's `settings.update` would otherwise shape the other's lane launch — and a lane's arg
+ * overrides belong in that lane's own settings, written only by that principal's push. Emptied
+ * rather than filtered: what remains is Orca's own per-agent default, which is host-computed and
+ * lane-safe. This is the one site where the host RE-DERIVES a launch from settings inside the
+ * spawn path; a value a renderer pre-baked into `launchConfig.agentArgs` upstream is row 8's
+ * allowlist instead, and the anchor is where that one is judged.
+ */
+export function laneScopedAgentLaunchSettings(
+  lane: { kind: 'principal' | 'shared' },
+  settings: HostWideAgentLaunchSettings
+): LaneScopedAgentLaunchSettings {
+  if (lane.kind === 'principal') {
+    return { cmdOverrides: {}, agentDefaultArgs: undefined, agentDefaultEnv: undefined }
+  }
+  return {
+    cmdOverrides: settings.agentCmdOverrides ?? {},
+    agentDefaultArgs: settings.agentDefaultArgs ?? undefined,
+    agentDefaultEnv: settings.agentDefaultEnv ?? undefined
+  }
+}
+
 /**
  * The closure principle's single computation point (S9 §2a, §2 preamble).
  *

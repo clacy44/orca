@@ -1083,6 +1083,7 @@ import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-co
 import { terminalPresenceRegistry } from './terminal-presence-registry'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
+import { laneScopedAgentLaunchSettings } from './lane-launch-computation'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import {
   appendRecentPtyPathCandidates,
@@ -26012,7 +26013,8 @@ export class OrcaRuntimeService {
 
   private async resolveAgentTerminalCreateOptions(
     workspace: TerminalWorkspaceLaunchScope,
-    opts: TerminalCreateOptions
+    opts: TerminalCreateOptions,
+    credentialLane: PaneCredentialLane
   ): Promise<TerminalCreateOptions> {
     // Why: raw shell commands like `codex exec` must remain user-authored shell.
     // Only unmanaged, repo-backed, bare agent launches get Settings defaults.
@@ -26064,12 +26066,15 @@ export class OrcaRuntimeService {
     }
 
     const sessionOptions = this.toAgentSessionOptions(opts.launchPreferences)
+    // Why here and not at the spawn anchor: this is the one place the host rebuilds a launch FROM
+    // settings, so it is the only place `ignored for lane launches` can be exact (S9 §2 row 13).
+    const laneScoped = laneScopedAgentLaunchSettings(credentialLane, settings)
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: resolveTuiAgentLaunchArgs(agent, laneScoped.agentDefaultArgs),
+      agentEnv: resolveTuiAgentLaunchEnv(agent, laneScoped.agentDefaultEnv),
       sessionOptions,
       sessionOptionsOverrideAgentArgs: Boolean(sessionOptions),
       platform,
@@ -26575,7 +26580,11 @@ export class OrcaRuntimeService {
         throw new Error('runtime_unavailable')
       }
       const workspace = await this.resolveTerminalWorkspaceLaunchScope(worktreeSelector)
-      const launchOpts = await this.resolveAgentTerminalCreateOptions(workspace, opts)
+      const launchOpts = await this.resolveAgentTerminalCreateOptions(
+        workspace,
+        opts,
+        credentialLane
+      )
       let ptySpawnCommitReported = false
       const reportPtySpawnCommitted = (): void => {
         if (ptySpawnCommitReported) {
@@ -26944,7 +26953,7 @@ export class OrcaRuntimeService {
       ? await this.resolveTerminalWorkspaceLaunchScope(worktreeSelector)
       : null
     const launchOpts = workspace
-      ? await this.resolveAgentTerminalCreateOptions(workspace, opts)
+      ? await this.resolveAgentTerminalCreateOptions(workspace, opts, credentialLane)
       : opts
     const worktreeId = workspace?.id
     const cwd = workspace
