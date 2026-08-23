@@ -133,7 +133,9 @@ export class LaneWireService {
   dispose(): void {
     this.disposeReceipts?.()
     this.disposeReceipts = null
-    this.coordinator.setLaneWipedListener(null)
+    // The wipe listener is deliberately NOT cleared here: `attachLaneWireService` disposes the
+    // outgoing service AFTER the incoming one's constructor has already registered its own, so
+    // clearing would unregister the live listener. The constructor is the single writer.
   }
 }
 
