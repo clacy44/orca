@@ -38,6 +38,8 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.delegated_elsewhere',
   'accounts.lane.local_clear_locked',
   'accounts.lane.clear_incomplete',
+  'accounts.lane.probe_not_confirmed_dead',
+  'accounts.lane.wipe_in_progress',
   'terminal.lane_not_loaded',
   'terminal.lane_wsl_unsupported',
   'terminal.lane_wsl_shell_unsupported',

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { ProviderRateLimits } from '../../shared/rate-limit-types'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-auth-service'
 import type { ClaudeLaneUsageAttribution } from './claude-usage-attribution'
+import { HIDDEN_PTY_KILL_UNCONFIRMED_ERROR } from './hidden-pty-exit'
 
 /**
  * The per-lane usage PULL (S9 §2k, Q7).
@@ -78,7 +80,12 @@ export function buildLaneUsageAuthPreparation(
 }
 
 /** One probe the module can still reach: its abort handle, and when its `claude` is gone. */
-type InFlightProbe = { controller: AbortController; settled: Promise<void> }
+type InFlightProbe = {
+  controller: AbortController
+  settled: Promise<void>
+  /** False when the fetch settled without its hidden `claude` confirmed dead (§2f's fence). */
+  killConfirmed: boolean
+}
 
 export class LaneUsagePull {
   private readonly inFlight = new Map<string, Set<InFlightProbe>>()
@@ -107,8 +114,8 @@ export class LaneUsagePull {
   /**
    * A push or a close-wipe marks every probe in flight in that lane stale and kills it (§2f/§2k).
    *
-   * Awaited to the probe's own settlement, which is where `fetchViaPty`'s abort path has already
-   * run `cleanupHiddenRateLimitPty(…, { kill: true })`: the caller is about to replace or sweep
+   * Awaited to the probe's own settlement, which `fetchViaPty`'s abort path reaches only once the
+   * hidden `claude` has EXITED (`hidden-pty-exit.ts`): the caller is about to replace or sweep
    * `.credentials.json`, and a `claude` still holding the PRE-push single-use refresh token would
    * post usage for the old account and rotate a credential the lane no longer holds. It does NOT
    * wait for the probe's post-probe `syncLane`, which takes the lane write queue the caller holds.
@@ -126,6 +133,14 @@ export class LaneUsagePull {
       probe.controller.abort()
     }
     await Promise.all(probes.map((probe) => probe.settled))
+    if (probes.some((probe) => !probe.killConfirmed)) {
+      // Refused rather than returned: the caller's next step is the sweep, and a lane swept while
+      // a `claude` it could not confirm dead is still rotating reports a wipe that did not happen.
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.probe_not_confirmed_dead',
+        "Orca could not confirm that the hidden Claude process it uses to read this lane's usage had exited, so it left the lane's credential alone. Stop any Claude session still running in that lane on the host machine, then try again."
+      )
+    }
   }
 
   /**
@@ -223,7 +238,8 @@ export class LaneUsagePull {
       controller,
       settled: new Promise<void>((resolve) => {
         markSettled = resolve
-      })
+      }),
+      killConfirmed: true
     }
     const probes = this.inFlight.get(lane.laneId) ?? new Set<InFlightProbe>()
     probes.add(probe)
@@ -247,6 +263,8 @@ export class LaneUsagePull {
       // Release before the sync: the sync's own trigger reads the live-PTY set, and the probe
       // must not still be counted as the lane's live claude while it runs.
       this.deps.markProbeExited(gateId)
+      // Set BEFORE the settlement it gates: `invalidateLane` reads it the tick this resolves.
+      probe.killConfirmed = usage?.error !== HIDDEN_PTY_KILL_UNCONFIRMED_ERROR
       probes.delete(probe)
       if (probes.size === 0) {
         this.inFlight.delete(lane.laneId)

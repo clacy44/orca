@@ -1,15 +1,17 @@
-type HiddenPty = {
-  kill: (signal?: string) => void
-  destroy?: () => void
+export type PtyDisposable = {
+  dispose: () => void
 }
 
-type Disposable = {
-  dispose: () => void
+export type HiddenPty = {
+  kill: (signal?: string) => void
+  destroy?: () => void
+  /** Read by the close-wipe fence, which resolves on the child's exit rather than on the signal. */
+  onExit?: (listener: () => void) => PtyDisposable | undefined | void
 }
 
 const activeHiddenRateLimitPtys = new Set<HiddenPty>()
 
-export function registerHiddenRateLimitPty(term: HiddenPty): Disposable {
+export function registerHiddenRateLimitPty(term: HiddenPty): PtyDisposable {
   activeHiddenRateLimitPtys.add(term)
   return {
     dispose: () => {
@@ -24,7 +26,7 @@ export function getActiveHiddenRateLimitPtyCount(): number {
 
 export function cleanupHiddenRateLimitPty(
   term: HiddenPty,
-  disposables: Disposable[],
+  disposables: PtyDisposable[],
   options: { kill: boolean }
 ): void {
   for (const disposable of disposables.splice(0)) {

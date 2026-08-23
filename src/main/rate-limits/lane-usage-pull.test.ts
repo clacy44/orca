@@ -11,6 +11,7 @@ import {
   type LaneUsagePullDeps
 } from './lane-usage-pull'
 import type { ClaudeLaneUsageAttribution } from './claude-usage-attribution'
+import { HIDDEN_PTY_KILL_UNCONFIRMED_ERROR } from './hidden-pty-exit'
 
 const LANE_A = '11111111-1111-4111-8111-111111111111'
 const LANE_B = '22222222-2222-4222-8222-222222222222'
@@ -318,6 +319,56 @@ describe('lane usage row eviction', () => {
     await h.pull.invalidateLane(LANE_A)
 
     expect(h.pull.laneUsage(LANE_A)).toBeNull()
+  })
+
+  it('refuses the invalidation when the probe settled without its claude confirmed dead', async () => {
+    // §2f: the caller's next step is the sweep, so an unconfirmed kill must not read as a dead
+    // probe — the lane would be reported wiped while a rotating CLI writes the credential back.
+    const h = harness({
+      fetchUsage: ({ signal }) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () =>
+            resolve({
+              provider: 'claude',
+              session: null,
+              weekly: null,
+              updatedAt: Date.now(),
+              error: HIDDEN_PTY_KILL_UNCONFIRMED_ERROR,
+              status: 'error'
+            })
+          )
+        })
+    })
+    const tick = h.pull.run()
+    await Promise.resolve()
+
+    await expect(h.pull.invalidateLane(LANE_A)).rejects.toMatchObject({
+      code: 'accounts.lane.probe_not_confirmed_dead'
+    })
+    await tick
+  })
+
+  it('resolves the invalidation for a probe whose claude was confirmed gone', async () => {
+    const h = harness({
+      fetchUsage: ({ signal }) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () =>
+            resolve({
+              provider: 'claude',
+              session: null,
+              weekly: null,
+              updatedAt: Date.now(),
+              error: 'Rate-limit fetch aborted',
+              status: 'error'
+            })
+          )
+        })
+    })
+    const tick = h.pull.run()
+    await Promise.resolve()
+
+    await expect(h.pull.invalidateLane(LANE_A)).resolves.toBeUndefined()
+    await tick
   })
 
   // Negative control: invalidating one lane must not blank the other developer's bar.

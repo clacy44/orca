@@ -8,6 +8,10 @@ import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-au
 import { applyClaudeEnvPatch } from '../claude-accounts/environment'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
 import { cleanupHiddenRateLimitPty, registerHiddenRateLimitPty } from './hidden-pty-cleanup'
+import {
+  HIDDEN_PTY_KILL_UNCONFIRMED_ERROR,
+  killHiddenRateLimitPtyAwaitingExit
+} from './hidden-pty-exit'
 import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
 import { removeInheritedAgentHookEnv } from '../../shared/agent-hook-identity-env'
 import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
@@ -204,13 +208,14 @@ function describeClaudeUsageFailure(output: string): string {
   return 'Claude usage is unavailable right now.'
 }
 
-function abortedClaudeUsageResult(): ProviderRateLimits {
+function abortedClaudeUsageResult(killConfirmed = true): ProviderRateLimits {
   return {
     provider: 'claude',
     session: null,
     weekly: null,
     updatedAt: Date.now(),
-    error: 'Rate-limit fetch aborted',
+    // The two are distinct to the lane fence: only a confirmed-dead probe lets a wipe report done.
+    error: killConfirmed ? 'Rate-limit fetch aborted' : HIDDEN_PTY_KILL_UNCONFIRMED_ERROR,
     status: 'error'
   }
 }
@@ -342,8 +347,11 @@ export async function fetchViaPty(options?: {
         timeout = null
       }
       clearFollowupTimers()
-      cleanupHiddenRateLimitPty(term, termDisposables, { kill: true })
-      resolve(abortedClaudeUsageResult())
+      // §2f's fence settles on the probe's `claude` being GONE, not on the signal being posted: a
+      // still-rotating CLI writes `.credentials.json` back into the lane the sweep just read clean.
+      void killHiddenRateLimitPtyAwaitingExit(term, termDisposables).then((outcome) => {
+        resolve(abortedClaudeUsageResult(outcome === 'exited'))
+      })
     }
 
     if (options?.signal) {
