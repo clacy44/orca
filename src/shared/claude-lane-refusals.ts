@@ -21,7 +21,13 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.lane_root_not_local',
   'accounts.lane.consent_caller_not_local',
   'terminal.lane_not_loaded',
-  'terminal.lane_wsl_unsupported'
+  'terminal.lane_wsl_unsupported',
+  'terminal.lane_not_owned',
+  'terminal.lane_pane_unbound',
+  'terminal.lane_source_unknown',
+  'terminal.lane_requires_workspace',
+  'terminal.lane_link_unbound',
+  'worktree.wake_refused_not_owned'
 ] as const
 
 export type ClaudeLaneRefusalCode = (typeof CLAUDE_LANE_REFUSAL_CODES)[number]
