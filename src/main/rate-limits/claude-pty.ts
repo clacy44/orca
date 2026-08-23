@@ -8,6 +8,8 @@ import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-au
 import { applyClaudeEnvPatch } from '../claude-accounts/environment'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
 import { cleanupHiddenRateLimitPty, registerHiddenRateLimitPty } from './hidden-pty-cleanup'
+import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
+import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
 import { extractClaudePtyResetMetadata } from './claude-pty-reset-parser'
 import {
   getHiddenRateLimitWslCwdSetupCommands,
@@ -252,6 +254,14 @@ export async function fetchViaPty(options?: {
     // risking rate-limit/geo signals on the account. Falls back to {} when unset.
     const proxyEnv = buildConfiguredProxyEnv(options?.networkProxySettings)
     Object.assign(spawnEnv, proxyEnv)
+    // Why here and nowhere upstream: this probe never reaches a PtyProvider, so neither the
+    // provider's pane-identity scrub nor its win32 lane-key collapse runs over it. Without the
+    // first, an Orca launched from an Orca terminal hands the probe's `claude` a STALE
+    // ORCA_PANE_KEY, which the statusline posts and the new pane→lane join then trusts — landing
+    // this lane's usage on another principal's row. Without the second, an inherited
+    // `Claude_Config_Dir` outranks the lane's own key on Win32 (S9 §2k, §2m(5)).
+    removeUnspecifiedPaneIdentityEnv(spawnEnv)
+    collapseLaneEnvKeys(spawnEnv, options?.authPreparation?.envPatch)
     const authPreparation = options?.authPreparation
     const wslConfig =
       authPreparation?.runtime === 'wsl' &&

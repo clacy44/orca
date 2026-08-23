@@ -19,6 +19,16 @@ const lanePrincipalIdByPtyId = new Map<string, string>()
 // cannot rotate the single-use refresh token out from under a Claude CLI that
 // survived the app restart inside the daemon.
 const seededUnconfirmedPtyIds = new Set<string>()
+/**
+ * Gate members that must NOT be persisted (S9 §2k).
+ *
+ * The lane usage probe never reaches `provider.spawn`, so it has no id in the daemon's namespace
+ * at all — it mints a synthetic, lane-scoped one. `markClaudePtySpawned` persists every id it is
+ * handed, so a synthetic id would land in `claudeLivePtySessionIds`, be seeded back at the next
+ * startup, and defer that account's rotation until the daemon reconciliation dropped it as
+ * unknown. It self-heals, but only after the startup pass §2e had to make observe-only.
+ */
+const ephemeralPtyIds = new Set<string>()
 let switchInProgress = false
 
 export type ClaudeLivePtyPersistence = {
@@ -89,6 +99,31 @@ export function markClaudePtySpawned(ptyId: string, lanePrincipalId: string | nu
   seededUnconfirmedPtyIds.delete(ptyId)
   lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId || SHARED_CLAUDE_LANE_KEY)
   persistence?.addClaudeLivePtySessionId(ptyId)
+}
+
+/**
+ * The lane usage probe's arm: same deferral, never persisted, never seeded back.
+ *
+ * A probe in lane L defers rotation of L's account exactly as a user's `claude` does — the probe
+ * IS a live claude holding that lane's single-use refresh token.
+ */
+export function markEphemeralClaudePtySpawned(ptyId: string, lanePrincipalId: string): void {
+  liveClaudePtyIds.add(ptyId)
+  ephemeralPtyIds.add(ptyId)
+  lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId)
+}
+
+export function markEphemeralClaudePtyExited(ptyId: string): void {
+  const hadLivePtys = liveClaudePtyIds.size > 0
+  ephemeralPtyIds.delete(ptyId)
+  liveClaudePtyIds.delete(ptyId)
+  lanePrincipalIdByPtyId.delete(ptyId)
+  notifyDrainedOnTransition(hadLivePtys)
+}
+
+/** Test seam: a synthetic id must never reach `persistence.addClaudeLivePtySessionId`. */
+export function isEphemeralClaudePty(ptyId: string): boolean {
+  return ephemeralPtyIds.has(ptyId)
 }
 
 export function markClaudePtyExited(ptyId: string): void {

@@ -8,8 +8,12 @@ import {
   hasLiveClaudePtysInLane,
   hasUnattributedLiveClaudePtys,
   isClaudeAuthSwitchInProgress,
+  isEphemeralClaudePty,
+  listLanesWithLiveClaudePtys,
   markClaudePtyExited,
   markClaudePtySpawned,
+  markEphemeralClaudePtyExited,
+  markEphemeralClaudePtySpawned,
   onLiveClaudePtysDrained,
   seedLiveClaudePtysFromPersistence,
   SHARED_CLAUDE_LANE_KEY
@@ -177,5 +181,47 @@ describe('Claude live PTY gate', () => {
     expect(hasUnattributedLiveClaudePtys()).toBe(true)
     confirmSeededClaudeLivePtys([])
     expect(hasUnattributedLiveClaudePtys()).toBe(false)
+  })
+
+  describe("the lane usage probe's synthetic gate id (S9 §2k)", () => {
+    const GATE_ID = 'lane-usage-probe:lane-a:abc'
+
+    it("defers its own lane's rotation and no other lane's", () => {
+      markEphemeralClaudePtySpawned(GATE_ID, 'lane-a')
+
+      expect(hasLiveClaudePtys()).toBe(true)
+      expect(hasLiveClaudePtysInLane('lane-a')).toBe(true)
+      expect(hasLiveClaudePtysInLane('lane-b')).toBe(false)
+      expect(listLanesWithLiveClaudePtys()).toEqual(['lane-a'])
+
+      markEphemeralClaudePtyExited(GATE_ID)
+      expect(hasLiveClaudePtys()).toBe(false)
+    })
+
+    // Mutation-proof anchor: registering through the PERSISTING arm would seed the synthetic id
+    // back at the next startup and defer that account's rotation until reconciliation dropped it.
+    it('never reaches the persisted live-PTY session list', () => {
+      const addClaudeLivePtySessionId = vi.fn()
+      const removeClaudeLivePtySessionId = vi.fn()
+      attachClaudeLivePtyPersistence({ addClaudeLivePtySessionId, removeClaudeLivePtySessionId })
+
+      markEphemeralClaudePtySpawned(GATE_ID, 'lane-a')
+      expect(isEphemeralClaudePty(GATE_ID)).toBe(true)
+      expect(addClaudeLivePtySessionId).not.toHaveBeenCalled()
+
+      markEphemeralClaudePtyExited(GATE_ID)
+      expect(removeClaudeLivePtySessionId).not.toHaveBeenCalled()
+      expect(isEphemeralClaudePty(GATE_ID)).toBe(false)
+    })
+
+    it('notifies the drain listeners when the probe was the last live claude', () => {
+      const drained = vi.fn()
+      const stop = onLiveClaudePtysDrained(drained)
+      markEphemeralClaudePtySpawned(GATE_ID, 'lane-a')
+      markEphemeralClaudePtyExited(GATE_ID)
+      stop()
+
+      expect(drained).toHaveBeenCalledTimes(1)
+    })
   })
 })

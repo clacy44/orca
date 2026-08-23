@@ -94,13 +94,7 @@ import {
   expandWindowsEnvironmentVariables,
   expandWindowsPathEnvironmentVariables
 } from '../../shared/windows-environment-expansion'
-
-const PANE_IDENTITY_ENV_KEYS = [
-  'ORCA_PANE_KEY',
-  'ORCA_TAB_ID',
-  'ORCA_WORKTREE_ID',
-  'ORCA_AGENT_LAUNCH_TOKEN'
-] as const
+import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
 
 let ptyCounter = 0
 const ptyProcesses = new Map<string, pty.IPty>()
@@ -161,20 +155,6 @@ const startupIngressByPty = new Map<string, PtyStartupIngress>()
  */
 function getDefaultCwd(): string {
   return resolveSafePtyDefaultCwd()
-}
-
-/**
- * Removes inherited pane identity unless this PTY explicitly supplies it.
- */
-function removeUnspecifiedPaneIdentityEnv(
-  env: Record<string, string>,
-  explicitEnv: Record<string, string> | undefined
-): void {
-  for (const key of PANE_IDENTITY_ENV_KEYS) {
-    if (!explicitEnv || !Object.hasOwn(explicitEnv, key)) {
-      delete env[key]
-    }
-  }
 }
 
 /**

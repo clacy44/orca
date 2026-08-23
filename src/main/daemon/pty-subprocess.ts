@@ -81,13 +81,8 @@ import {
 } from '../../shared/windows-environment-expansion'
 import { forceKillPosixPtyProcessGroups } from '../pty/posix-pty-process-groups'
 import { readPtySlavePath } from '../../shared/pty-slave-line-discipline-echo'
+import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
 
-const PANE_IDENTITY_ENV_KEYS = [
-  'ORCA_PANE_KEY',
-  'ORCA_TAB_ID',
-  'ORCA_WORKTREE_ID',
-  'ORCA_AGENT_LAUNCH_TOKEN'
-] as const
 const WINDOWS_PATH_ENV_KEY_RE = /^path$/i
 const FOREGROUND_AGENT_CACHE_TTL_MS = 1000
 const SHELL_FOREGROUND_REFRESH_RETRY_MS = 5_000
@@ -162,20 +157,6 @@ function deleteRequestedDaemonEnvKeys(
  */
 function getDefaultCwd(): string {
   return resolveSafePtyDefaultCwd()
-}
-
-/**
- * Removes pane identity inherited from the daemon parent unless explicitly set.
- */
-function removeUnspecifiedPaneIdentityEnv(
-  env: Record<string, string>,
-  explicitEnv: Record<string, string> | undefined
-): void {
-  for (const key of PANE_IDENTITY_ENV_KEYS) {
-    if (!explicitEnv || !Object.hasOwn(explicitEnv, key)) {
-      delete env[key]
-    }
-  }
 }
 
 /** Removes the second PATH key only when the daemon's env merge created it. */
