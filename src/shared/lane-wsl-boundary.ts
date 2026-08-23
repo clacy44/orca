@@ -49,9 +49,13 @@ export function assertNoLanePathCrossesWsl(
   }
   const offender = Object.entries(env).find(([, value]) => hasClaudeLaneSegment(value))
   if (offender) {
+    // Why the second sentence: the daemon arm has no lane field, so the test is the DIRECTORY
+    // NAME — a folder of your own called `claude-lanes` trips this, and the message has to say
+    // so or the refusal is unexplainable from the outside (§2a, and the fail-closed reading of
+    // `hasClaudeLaneSegment`).
     throw new ClaudeLaneRefusal(
       'terminal.lane_wsl_shell_unsupported',
-      `Orca did not start this terminal: ${offender[0]} points at a Windows Claude credential lane that a WSL distribution cannot read. Open this terminal with a Windows shell instead.`
+      `Orca did not start this terminal: ${offender[0]} points inside a "claude-lanes" directory, which is where this machine keeps personal Claude credential lanes and which a WSL distribution cannot read. If that path is your own directory that happens to carry the name, rename it; otherwise open this terminal with a Windows shell instead.`
     )
   }
 }
