@@ -12,7 +12,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import {
   assertPrincipalId,
   deprovisionPrincipalLane,
@@ -78,7 +78,9 @@ describe('principal credential lane', () => {
     it('creates <lanesRoot>/<principalId> at 0700 with an owning marker', () => {
       const lane = provisionPrincipalLane(PRINCIPAL_A, options())
 
-      expect(lane.laneDir).toBe(join(lanesRoot, PRINCIPAL_A))
+      // The canonical form, which is what the read path returns: one lane, one string.
+      expect(lane.laneDir).toBe(realpathOf(join(lanesRoot, PRINCIPAL_A)))
+      expect(lane.laneDir).toBe(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options()))
       expect(statSync(lane.laneDir).mode & 0o777).toBe(0o700)
       expect(readFileSync(join(lane.laneDir, '.orca-principal-lane'), 'utf-8').trim()).toBe(
         PRINCIPAL_A
@@ -124,6 +126,26 @@ describe('principal credential lane', () => {
       expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
         /Something other than this person/
       )
+    })
+
+    it('refuses to provision through a symlinked lanes root, on a first provisioning', () => {
+      const outside = join(userData, 'evil')
+      mkdirSync(outside, { recursive: true })
+      symlinkSync(outside, lanesRoot)
+
+      // The case with nothing at the lane path to lstat: the ROOT is what has to be proved.
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /keeps credential lanes in is its own/
+      )
+      expect(existsSync(join(outside, PRINCIPAL_A))).toBe(false)
+      expect(readdirSync(outside)).toEqual([])
+    })
+
+    it('refuses a lanes root that is not a full path rather than resolving it against the cwd', () => {
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, { lanesRoot: 'relative-lanes', platform: 'linux' })
+      ).toThrow(/not a full path/)
+      expect(existsSync(resolve('relative-lanes'))).toBe(false)
     })
 
     it('refuses a lane directory carrying another principal’s marker', () => {
@@ -320,7 +342,8 @@ describe('principal credential lane', () => {
           }
         })
       ).toThrow(/could not verify this credential lane/)
-      expect(attempted).toEqual([[join(lanesRoot, PRINCIPAL_A), true]])
+      // The lane itself is gone by now, so canonicalize the root the hardening was handed.
+      expect(attempted).toEqual([[join(realpathOf(lanesRoot), PRINCIPAL_A), true]])
       expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(false)
     })
 
@@ -370,7 +393,9 @@ describe('principal credential lane', () => {
           restrictWindowsPath: () => true
         })
       ).toThrow(/network share/)
-      expect(existsSync(join(share, PRINCIPAL_A))).toBe(false)
+      // Why resolved: that literal is not absolute on POSIX, so the only place a guard-less run
+      // could write is under the runner's cwd — which is where this asserts nothing landed.
+      expect(existsSync(resolve(share))).toBe(false)
     })
 
     it('provisions a local drive root and skips the refusal for the WSL redirector', () => {

@@ -8,7 +8,7 @@ import {
   writeFileSync,
   type Stats
 } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import {
   canonicalizePathForContainment,
@@ -69,9 +69,11 @@ export function getPrincipalLaneDir(
  * the mode bit is inert, so the lane takes the SYNCHRONOUS ACL arm and its boolean is CHECKED —
  * the ordinary directory-hardening path is async, best-effort and caches the path as hardened
  * whether or not the ACL landed (`secure-file.ts:59-73`), which is not good enough for the
- * directory a credential is about to land in. A lane whose DACL cannot be verified does not exist:
- * a re-provision that fails the read-back drops the ownership marker, so the launch path stops
- * resolving that lane until a provisioning verifies it again.
+ * directory a credential is about to land in. A lane whose DACL cannot be verified stops EXISTING
+ * to every reader: a re-provision that fails the read-back drops the ownership marker, so nothing
+ * resolves that lane until a provisioning verifies it again. Its `.credentials.json` is deliberately
+ * preserved for recovery rather than wiped, so it stays at rest under an access list this call
+ * could not read back — the recovery is a verified re-provision, or a deprovision, which wipes.
  *
  * A native lane root must be a LOCAL drive path: a remote UNC share's ACLs are set by a machine
  * this design has said nothing about, so it is refused here rather than hardened (§2m(4)).
@@ -79,48 +81,109 @@ export function getPrincipalLaneDir(
  * A `\\wsl.localhost\…` root skips the DACL step entirely rather than failing on it: that lane's
  * isolation control is S9e's in-distro `chmod 0700/0600` read-back, and `restrictWindowsPathSync`
  * returns FALSE (not a no-op) on a path it cannot set a DACL on.
+ *
+ * The ROOT is proved before the first `mkdirSync`, not only the lane: a symlinked lanes root would
+ * otherwise be written straight through on a lane's FIRST provisioning — the case with nothing at
+ * the lane path to lstat — and the read path, which does canonicalize the root, would then never
+ * resolve what this call reported as created.
  */
 export function provisionPrincipalLane(
   principalId: string,
   options: PrincipalLaneOptions = {}
 ): ProvisionedPrincipalLane {
+  assertPrincipalId(principalId)
   const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
-  const laneDir = getPrincipalLaneDir(principalId, options)
-  if (isRemoteUncLanePath(laneDir, options.platform ?? process.platform)) {
+  if (isRemoteUncLanePath(lanesRoot, options.platform ?? process.platform)) {
     throw new ClaudeLaneRefusal(
       'accounts.lane.lane_root_not_local',
       "This person's credential lane would sit on a network share, whose permissions are set by a machine Orca cannot check, so Orca refused to create it. Point Orca's data folder at a local drive and provision the lane again."
     )
   }
-  const existedBefore = assertLaneDirectoryWritable(lanesRoot, laneDir)
+  const canonicalRoot = prepareContainedLanesRoot(lanesRoot)
+  const laneDir = join(canonicalRoot, principalId)
+  const existedBefore = assertLaneDirectoryWritable(canonicalRoot, laneDir)
   mkdirSync(laneDir, { recursive: true, mode: 0o700 })
-  try {
-    hardenLaneDirectory(laneDir, options)
-  } catch (error) {
-    // Why the marker rather than the tree, for a lane that already existed: a lane whose DACL no
-    // longer verifies must stop resolving — every reader proves ownership through the marker —
-    // while its credential and settings survive a re-provision that does verify. A creation that
-    // fails leaves nothing behind at all.
-    if (existedBefore) {
-      rmSync(join(laneDir, LANE_MARKER_FILENAME), { force: true })
-    } else {
+  // Why re-proved after the mkdir: the pre-check has nothing to lstat on a first provisioning, so
+  // this is the first moment the created path itself can be canonicalized — and it closes the
+  // window between that lstat and this mkdir. Defence in depth: every input that reaches here has
+  // already been proved, so no test can reach the refusal below.
+  const canonicalLane = resolveContainedLaneDir(canonicalRoot, laneDir)
+  if (!canonicalLane) {
+    if (!existedBefore) {
       rmSync(laneDir, { recursive: true, force: true })
+    }
+    throw laneNotContainedRefusal()
+  }
+  try {
+    hardenLaneDirectory(canonicalLane, options)
+  } catch (error) {
+    // Why the marker rather than the tree, for a lane that already existed: the lane stops
+    // RESOLVING — every reader proves ownership through the marker — while its credential and
+    // settings are preserved for recovery, at rest under the access list this call could not read
+    // back. A creation that fails leaves nothing behind at all.
+    if (existedBefore) {
+      rmSync(join(canonicalLane, LANE_MARKER_FILENAME), { force: true })
+    } else {
+      rmSync(canonicalLane, { recursive: true, force: true })
     }
     throw error
   }
   try {
-    writeLaneMarker(laneDir, principalId)
+    writeLaneMarker(canonicalLane, principalId)
   } catch (error) {
     // Why: no lane may exist unverified; only remove what this call created.
     if (!existedBefore) {
-      rmSync(laneDir, { recursive: true, force: true })
+      rmSync(canonicalLane, { recursive: true, force: true })
     }
     throw error
   }
   // Why: a re-provision must not inherit a staged credential blob from a crashed write. A loaded
   // lane's own `.credentials.json` is left alone — provisioning is idempotent, not a wipe.
-  sweepLaneCredentialTempArtifacts(laneDir)
-  return { laneDir, provenanceLabel: ensureLaneProvenanceLabel(laneDir) }
+  sweepLaneCredentialTempArtifacts(canonicalLane)
+  // Why the canonical form: the read path returns `realpathSync.native`, and one lane addressed by
+  // two strings is a residency-index and `CLAUDE_CONFIG_DIR` mismatch waiting to happen.
+  return { laneDir: canonicalLane, provenanceLabel: ensureLaneProvenanceLabel(canonicalLane) }
+}
+
+/**
+ * Creates the lanes root if it is absent and proves it is Orca's own before anything is written
+ * under it (§2m(4)).
+ *
+ * A relative root is refused rather than resolved: `resolve()` would silently anchor a credential
+ * directory at whatever the process cwd happens to be.
+ */
+function prepareContainedLanesRoot(lanesRoot: string): string {
+  if (!isAbsolute(lanesRoot)) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.lane_path_not_contained',
+      "Orca was given a credential-lanes folder that is not a full path, so it refused to create a lane there. Point Orca's data folder at an absolute path and provision the lane again."
+    )
+  }
+  const planted = lstatOrNull(lanesRoot)
+  if (!planted) {
+    mkdirSync(lanesRoot, { recursive: true, mode: 0o700 })
+  } else if (planted.isSymbolicLink() || !planted.isDirectory()) {
+    throw laneRootNotContainedRefusal()
+  }
+  const canonicalRoot = canonicalizePathForContainment(lanesRoot)
+  if (canonicalRoot.kind !== 'canonical') {
+    throw laneRootNotContainedRefusal()
+  }
+  return canonicalRoot.path
+}
+
+function laneRootNotContainedRefusal(): ClaudeLaneRefusal {
+  return new ClaudeLaneRefusal(
+    'accounts.lane.lane_path_not_contained',
+    "Orca could not prove that the folder it keeps credential lanes in is its own — it is a link, or something other than a real folder — so no lane was created. Remove whatever sits at Orca's claude-lanes path and provision the lane again."
+  )
+}
+
+function laneNotContainedRefusal(): ClaudeLaneRefusal {
+  return new ClaudeLaneRefusal(
+    'accounts.lane.lane_path_not_contained',
+    "Something other than this person's own credential lane already sits at that path — a link, a file, or a directory that resolves outside Orca's lanes folder — so Orca refused to write to it. Remove it by hand and provision the lane again."
+  )
 }
 
 /**
@@ -198,10 +261,7 @@ function assertLaneDirectoryWritable(lanesRoot: string, laneDir: string): boolea
     !planted.isDirectory() ||
     !resolveContainedLaneDir(lanesRoot, laneDir)
   ) {
-    throw new ClaudeLaneRefusal(
-      'accounts.lane.lane_path_not_contained',
-      "Something other than this person's own credential lane already sits at that path — a link, a file, or a directory that resolves outside Orca's lanes folder — so Orca refused to write to it. Remove it by hand and provision the lane again."
-    )
+    throw laneNotContainedRefusal()
   }
   return true
 }
