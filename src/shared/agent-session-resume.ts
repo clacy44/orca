@@ -64,6 +64,10 @@ export type SleepingAgentSessionRecord = {
   /** Prevents provider-session relaunch while main reconciles a durable
    *  orchestration assignment against authoritative PTY inventory. */
   automaticResumeBlockedBy?: 'legacy-orchestration-worker'
+  /** The Claude credential lane the slept pane was bound to (S9 §2a/§2h). Present only on a
+   *  lane-bound pane: the renderer wake mints a fresh, unbound pane, so a record carrying this
+   *  is never woken by it — it resumes only through the host create path, for its owner. */
+  lanePrincipalId?: string
   /** Set on a finished pane captured by an explicit workspace sleep. Its
    *  `--resume` is issued by the pane's own cold restore when its tab is
    *  opened, so a mobile wake must not background-mount every such tab and

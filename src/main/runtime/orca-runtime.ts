@@ -22140,14 +22140,16 @@ export class OrcaRuntimeService {
       // unaffected. Headless serve has no renderer to wake anything, so report
       // that explicitly instead of letting mobile assume the agents resumed.
       if (opts.clientKind === 'mobile') {
-        if (this.laneBoundSleepingPaneKeys(repo, worktree.id).length > 0) {
-          // Why: the renderer wake does not reuse the slept pane — it mints a fresh, unbound one,
-          // which under §2a resolves to the shared `~/.claude`. A lane record is therefore never
-          // handed to it; it is resumed only through the host create path, for its owner (§2a).
-          sleepingAgentWake = 'wake_refused_not_owned'
-        } else if (this.getAvailableAuthoritativeWindow()) {
+        // Why: the renderer wake does not reuse the slept pane — it mints a fresh, unbound one,
+        // which under §2a resolves to the shared `~/.claude`. A lane record is therefore withheld
+        // from it and resumes only through the host create path, for its owner — but *only* the
+        // lane records are: the shared-lane records beside them wake as they always did (§3).
+        const withheldLaneRecords = this.laneBoundSleepingPaneKeys(repo, worktree.id).length > 0
+        if (this.getAvailableAuthoritativeWindow()) {
           this.notifier?.resumeSleepingAgents?.(worktree.id)
-          sleepingAgentWake = 'requested'
+          sleepingAgentWake = withheldLaneRecords ? 'wake_refused_not_owned' : 'requested'
+        } else if (withheldLaneRecords) {
+          sleepingAgentWake = 'wake_refused_not_owned'
         } else if (
           // Why: sleeping records are partitioned by execution host; reading
           // only the local partition would miss slept agents on SSH-host

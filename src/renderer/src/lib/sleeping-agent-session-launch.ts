@@ -14,6 +14,7 @@ import {
   resolveTuiAgentLaunchEnv
 } from '../../../shared/tui-agent-launch-defaults'
 import type { SleepingAgentSessionRecord } from '../../../shared/agent-session-resume'
+import { isLaneBoundSleepingRecord } from '@/lib/sleeping-agent-session-lane'
 import { translate } from '@/i18n/i18n'
 
 export type ResumeSleepingAgentSessionsOptions = {
@@ -66,6 +67,11 @@ export function launchSleepingAgentSession(
   record: SleepingAgentSessionRecord,
   options?: ResumeSleepingAgentSessionsOptions
 ): boolean {
+  if (isLaneBoundSleepingRecord(record)) {
+    // Why: this builder mints a fresh, unbound tab, which resolves to the shared `~/.claude` — the
+    // other person's credential. The record stays asleep and uncleared for the host create path.
+    return false
+  }
   const state = useAppStore.getState()
   const launchConfig = record.launchConfig
   const resumeTarget = getResumeLaunchTarget(record.worktreeId)

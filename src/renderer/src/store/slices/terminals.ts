@@ -164,6 +164,7 @@ import {
   type TerminalTabCloseReason,
   type TerminalTabRetirementPlan
 } from './terminal-tab-retirement'
+import { stampSleepingAgentSessionLanes } from '@/lib/sleeping-agent-session-lane'
 
 function getNextTerminalOrdinal(tabs: TerminalTab[]): number {
   const usedOrdinals = new Set<number>()
@@ -3909,6 +3910,12 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
           )
         )
       }
+      // Why: the host owns the pane→lane rows and the renderer never reads them again; carry them
+      // onto the records the wake reads so a lane pane is not resumed into a shared one (S9 §3).
+      sleepingAgentSessionsByPaneKey = stampSleepingAgentSessionLanes(
+        sleepingAgentSessionsByPaneKey,
+        session.terminalCredentialLanesByPaneKey
+      )
       const fallbackActiveWorktreeId =
         !session.activeWorktreeId && session.activeRepoId && knownRepoIds.has(session.activeRepoId)
           ? (runtimeSessionPlaceholders.worktreesByRepo[session.activeRepoId]?.find(

@@ -22,7 +22,12 @@ function spyOnInternal(runtime: OrcaRuntimeService, name: string) {
   return vi.spyOn(runtime as unknown as InternalMethods, name)
 }
 
-function createRuntime(paneLane: { worktreeId: string; principalId?: string } | null): {
+const SHARED_PANE_KEY = 'tab-2:leaf-2'
+
+function createRuntime(
+  paneLane: { worktreeId: string; principalId?: string } | null,
+  extraRecords: Record<string, unknown> = {}
+): {
   runtime: OrcaRuntimeService
   resumeSleepingAgents: ReturnType<typeof vi.fn>
 } {
@@ -32,7 +37,8 @@ function createRuntime(paneLane: { worktreeId: string; principalId?: string } | 
     setWorktreeMeta: () => undefined,
     getWorkspaceSession: () => ({
       sleepingAgentSessionsByPaneKey: {
-        [PANE_KEY]: { paneKey: PANE_KEY, worktreeId: WORKTREE, agent: 'claude' }
+        [PANE_KEY]: { paneKey: PANE_KEY, worktreeId: WORKTREE, agent: 'claude' },
+        ...extraRecords
       }
     }),
     getPaneCredentialLanes: () => (paneLane ? { [PANE_KEY]: paneLane } : {})
@@ -60,10 +66,7 @@ function createRuntime(paneLane: { worktreeId: string; principalId?: string } | 
 
 describe('worktree.activate — the sleeping-agent wake', () => {
   it('leaves a lane-bound record asleep instead of waking it through the renderer', async () => {
-    const { runtime, resumeSleepingAgents } = createRuntime({
-      worktreeId: WORKTREE,
-      principalId: PRINCIPAL_A
-    })
+    const { runtime } = createRuntime({ worktreeId: WORKTREE, principalId: PRINCIPAL_A })
 
     const result = await runtime.activateManagedWorktree(`id:${WORKTREE}`, {
       clientKind: 'mobile',
@@ -72,7 +75,26 @@ describe('worktree.activate — the sleeping-agent wake', () => {
     })
 
     expect(result.sleepingAgentWake).toBe('wake_refused_not_owned')
-    expect(resumeSleepingAgents).not.toHaveBeenCalled()
+  })
+
+  it('still asks for the wake so the shared-lane records beside it are not withheld too', async () => {
+    const { runtime, resumeSleepingAgents } = createRuntime(
+      { worktreeId: WORKTREE, principalId: PRINCIPAL_A },
+      {
+        [SHARED_PANE_KEY]: { paneKey: SHARED_PANE_KEY, worktreeId: WORKTREE, agent: 'claude' }
+      }
+    )
+
+    const result = await runtime.activateManagedWorktree(`id:${WORKTREE}`, {
+      clientKind: 'mobile',
+      notifyClients: false,
+      pairedDeviceId: 'device-b'
+    })
+
+    // The lane record is withheld by the renderer builder itself; the refusal names that, and the
+    // shared-lane record in the same worktree still wakes.
+    expect(result.sleepingAgentWake).toBe('wake_refused_not_owned')
+    expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE)
   })
 
   it('still wakes a record whose pane is on the shared lane', async () => {
