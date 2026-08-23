@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
 import type { LaneRotationReceipt } from '../claude-accounts/principal-lane-store'
-import type { LaneWireCaller } from './lane-wire-authority'
+import type { LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
 
 /**
  * The lane status stream (S9 §2c/§2l), and the liveness precondition that reads it.
@@ -14,6 +14,11 @@ import type { LaneWireCaller } from './lane-wire-authority'
  *
  * Every frame here is secretless: `laneState`, a rotation receipt carrying a sha256 and never a
  * token, the designation, and the delegable list's opaque tokens.
+ *
+ * A subscriber is filed by its GRANT, and the principal is re-resolved on every delivery — the
+ * same per-emit resolve `accounts.subscribe`'s projection makes. Snapshotting the caller at
+ * subscribe time survived an unbind and a re-bind, neither of which touches the socket, so a grant
+ * moved to another person kept receiving the first person's identity, sha and delegable list.
  */
 
 export type LaneStatusFrame =
@@ -32,12 +37,15 @@ export type LaneStatusFrame =
 
 export type LaneStatusSubscriber = {
   subscriptionId: string
-  caller: LaneWireCaller
+  /** The grant, never the principal: the binding it resolves through can move under the socket. */
+  deviceId: string
   emit: (frame: LaneStatusFrame) => void
 }
 
 export class LaneStatusStream {
   private readonly subscribers = new Map<string, LaneStatusSubscriber>()
+
+  constructor(private readonly principals: Pick<LaneWirePrincipals, 'principalOf'>) {}
 
   subscribe(
     caller: LaneWireCaller,
@@ -45,9 +53,15 @@ export class LaneStatusStream {
     emit: (frame: LaneStatusFrame) => void
   ): LaneStatusSubscriber {
     const subscriptionId = `lane-status-${connectionId ?? 'inproc'}-${randomUUID()}`
-    const subscriber: LaneStatusSubscriber = { subscriptionId, caller, emit }
+    const subscriber: LaneStatusSubscriber = { subscriptionId, deviceId: caller.deviceId, emit }
     this.subscribers.set(subscriptionId, subscriber)
     return subscriber
+  }
+
+  /** The caller a delivery is FOR, re-resolved now; null once the grant is unbound. */
+  callerOf(subscriber: LaneStatusSubscriber): LaneWireCaller | null {
+    const principalId = this.principals.principalOf(subscriber.deviceId)
+    return principalId ? { deviceId: subscriber.deviceId, principalId } : null
   }
 
   unsubscribe(subscriptionId: string): void {
@@ -64,8 +78,8 @@ export class LaneStatusStream {
   hasSubscriptionForGrant(principalId: string, deviceId: string): boolean {
     for (const subscriber of this.subscribers.values()) {
       if (
-        subscriber.caller.principalId === principalId &&
-        subscriber.caller.deviceId === deviceId
+        subscriber.deviceId === deviceId &&
+        this.callerOf(subscriber)?.principalId === principalId
       ) {
         return true
       }
@@ -75,7 +89,7 @@ export class LaneStatusStream {
 
   subscribersOf(principalId: string): LaneStatusSubscriber[] {
     return [...this.subscribers.values()].filter(
-      (subscriber) => subscriber.caller.principalId === principalId
+      (subscriber) => this.callerOf(subscriber)?.principalId === principalId
     )
   }
 

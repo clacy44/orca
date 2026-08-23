@@ -39,7 +39,7 @@ export type LaneWireServiceOptions = {
 }
 
 export class LaneWireService {
-  readonly stream = new LaneStatusStream()
+  readonly stream: LaneStatusStream
   readonly delegation: LaneDelegationDirectory
   readonly authority: LaneWireAuthority
   readonly switches: LaneDelegatedSwitchService
@@ -51,6 +51,7 @@ export class LaneWireService {
   constructor(options: LaneWireServiceOptions) {
     this.coordinator = options.coordinator
     this.principals = options.principals
+    this.stream = new LaneStatusStream(options.principals)
     this.delegation = new LaneDelegationDirectory(options.persistence)
     this.authority = new LaneWireAuthority({
       principals: options.principals,
@@ -104,7 +105,10 @@ export class LaneWireService {
   private onLaneChanged(laneId: string): void {
     this.switches.settleForLane(laneId)
     for (const subscriber of this.stream.subscribersOf(laneId)) {
-      subscriber.emit({ type: 'status', status: this.authority.statusOf(subscriber.caller) })
+      const caller = this.stream.callerOf(subscriber)
+      if (caller) {
+        subscriber.emit({ type: 'status', status: this.authority.statusOf(caller) })
+      }
     }
   }
 

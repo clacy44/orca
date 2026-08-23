@@ -26,7 +26,7 @@ function makeHarness(options: { designatedGrantId?: string | null } = {}) {
     [LANE_A, options.designatedGrantId === undefined ? 'desktop-a' : options.designatedGrantId],
     [LANE_B, 'desktop-b']
   ])
-  const stream = new LaneStatusStream()
+  const stream = new LaneStatusStream({ principalOf: (deviceId) => bindings.get(deviceId) ?? null })
   const authority = {
     requireCaller: (pairedDeviceId?: string | null): LaneWireCaller => {
       const principalId = pairedDeviceId ? bindings.get(pairedDeviceId) : undefined
