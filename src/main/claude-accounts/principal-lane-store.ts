@@ -132,7 +132,15 @@ export class PrincipalLaneStore {
     return this.writeWatermark(laneId, credentialsJson, oauthAccount)
   }
 
-  /** Writer 3: a rotation, host-initiated or merely observed, and the receipt it publishes. */
+  /**
+   * Writer 3: a rotation, host-initiated or merely observed, and the receipt it publishes.
+   *
+   * DEVIATION from §2c, which names only `host` and `cli-observed` as writer 3: a
+   * `foreign-rotation` moves the watermark too. Leaving it pinned would keep the SPENT sha as the
+   * chain head, so the desktop's cached pre-rotation blob would pass the sha arm and be replayed
+   * into a lane only a fresh login can recover. Moving it forces `reauthenticated: true`, which is
+   * exactly what recovery is.
+   */
   recordRotationReceipt(receipt: LaneRotationReceipt): void {
     if (receipt.cause === 'foreign-rotation') {
       this.reauthRequiredLanes.add(receipt.laneId)
