@@ -6550,10 +6550,11 @@ export class Store {
   /** Persist a non-'local' host partition; remote hosts skip setLocalWorkspaceSession's local-daemon PTY-binding race guards. */
   private setHostWorkspaceSession(hostId: ExecutionHostId, session: WorkspaceSessionState): void {
     // Why: each partition owns its topology fence; renderer writes omit it and must rebase locally.
-    session = sanitizeWorkspaceSessionTerminalRetirements(
-      session,
-      this.state.workspaceSessionsByHostId?.[hostId]
-    )
+    const prior = this.state.workspaceSessionsByHostId?.[hostId]
+    session = sanitizeWorkspaceSessionTerminalRetirements(session, prior)
+    // Why: pane lanes are host-owned in *every* partition, not just the local one — binding rows
+    // are written per execution host, so a renderer write here must not orphan them either (§2h).
+    session = mergePersistedPaneCredentialLanes(session, prior)
     const pruned = pruneWorkspaceSessionBrowserHistory(
       pruneLocalTerminalScrollbackBuffers(session, this.state.repos)
     )

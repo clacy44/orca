@@ -119,6 +119,23 @@ describe('pane credential lane binding rows', () => {
     })
   })
 
+  it('preserves the lane in a non-local host partition too', async () => {
+    const store = await createStore()
+    const hostId = 'ssh:conn-1'
+    store.persistPaneCredentialLane(
+      { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF, principalId: PRINCIPAL_A },
+      hostId
+    )
+    const session = store.getWorkspaceSession(hostId)
+
+    store.setWorkspaceSession({ ...session, terminalCredentialLanesByPaneKey: undefined }, hostId)
+
+    expect(store.getPaneCredentialLanes(hostId)[PANE_KEY]).toEqual({
+      worktreeId: WORKTREE,
+      principalId: PRINCIPAL_A
+    })
+  })
+
   it('preserves the lane across a renderer session write that carries no lane rows', async () => {
     const store = await createStore()
     store.persistPaneCredentialLane({
