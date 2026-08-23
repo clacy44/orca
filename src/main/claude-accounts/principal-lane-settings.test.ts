@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -137,6 +146,22 @@ describe('lane user content mirror', () => {
       expect(existsSync(join(laneDir, entry)), `${entry} must be mirrored`).toBe(true)
     }
     expect(readFileSync(join(laneDir, 'commands', 'entry.md'), 'utf-8')).toBe('commands')
+  })
+
+  it('gives mirrored content the lane’s own modes rather than the host’s', () => {
+    const hostConfigDir = join(userData, '.claude')
+    const laneDir = join(userData, 'lane')
+    writeFileSync(ensureDir(hostConfigDir, 'CLAUDE.md'), '# house rules', { mode: 0o644 })
+    writeFileSync(ensureDir(join(hostConfigDir, 'commands'), 'entry.md'), 'commands', {
+      mode: 0o644
+    })
+    chmodSync(join(hostConfigDir, 'commands'), 0o755)
+
+    mirrorHostUserContentIntoLane(hostConfigDir, laneDir, { platform: 'linux' })
+
+    expect(statSync(join(laneDir, 'CLAUDE.md')).mode & 0o777).toBe(0o600)
+    expect(statSync(join(laneDir, 'commands')).mode & 0o777).toBe(0o700)
+    expect(statSync(join(laneDir, 'commands', 'entry.md')).mode & 0o777).toBe(0o600)
   })
 
   it('does not mirror transcripts', () => {
