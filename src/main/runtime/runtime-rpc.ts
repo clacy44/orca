@@ -185,6 +185,11 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'accounts.selectCodexForTarget',
   'accounts.subscribe',
   'accounts.unsubscribe',
+  // S9 §2l: the phone asks its own desktop to switch; it never pushes and never reads a
+  // credential — `requestSwitch` names an opaque token, and the stream carries lane STATE.
+  'accounts.lane.requestSwitch',
+  'accounts.lane.statusSubscribe',
+  'accounts.lane.statusUnsubscribe',
   'aiVault.listSessions',
   'aiVault.resolveSessionTitles',
   'aiVault.prepareSessionResume',
