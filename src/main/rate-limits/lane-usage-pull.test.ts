@@ -271,3 +271,36 @@ describe('a throwing probe', () => {
     expect(h.pull.laneUsage(LANE_A)?.session?.usedPercent).toBe(42)
   })
 })
+
+/**
+ * §2k budgets N hidden `claude` processes per tick. The rate-limit cycle reads the auth
+ * preparation resolver twice, so the tick has to be idempotent within a cycle.
+ */
+describe('one tick at a time', () => {
+  it('collapses two overlapping ticks into a single probe per lane', async () => {
+    let probes = 0
+    const h = harness({
+      fetchUsage: async () => {
+        probes += 1
+        await Promise.resolve()
+        return okUsage(3)
+      }
+    })
+
+    const [a, b] = await Promise.all([h.pull.run(), h.pull.run()])
+
+    expect(probes).toBe(1)
+    expect(a).toBe(b)
+    expect(h.synced).toEqual([LANE_A])
+  })
+
+  // Negative control: the guard is per-tick, not once-ever — the next cycle probes again.
+  it('probes again on the next tick', async () => {
+    const h = harness()
+
+    await h.pull.run()
+    await h.pull.run()
+
+    expect(h.probedPreparations).toHaveLength(2)
+  })
+})

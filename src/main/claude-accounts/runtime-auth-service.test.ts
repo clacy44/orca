@@ -3872,6 +3872,31 @@ describe('ClaudeRuntimeAuthService', () => {
     vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(null)
   })
 
+  // §2k budgets the pull as a tick, not as a blocker: `prepareForRateLimitFetch` is the FIRST
+  // await of the rate-limit cycle and precedes codex/gemini/kimi/minimax/grok dispatch.
+  it('does not block the rate-limit fetch on the lane usage pull', async () => {
+    const settings = createSettings({})
+    const store = createStore(settings)
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+    let releaseTick = (): void => {}
+    vi.spyOn(service.laneCredentials, 'pullLaneUsage').mockReturnValue(
+      new Promise((resolve) => {
+        releaseTick = () => resolve({ probed: [], skipped: [], failed: [], disabled: false })
+      })
+    )
+    try {
+      const outcome = await Promise.race([
+        service.prepareForRateLimitFetch().then(() => 'prepared'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked-on-the-pull'), 50))
+      ])
+
+      expect(outcome).toBe('prepared')
+    } finally {
+      releaseTick()
+    }
+  })
+
   it('does not refresh the active account while a Claude PTY is live', async () => {
     const expired = createClaudeCredentialsJson('one@example.com', 'one-expired', null, 1_000)
     const managedAuthPath1 = createManagedClaudeAuth(testState.userDataDir, 'account-1', expired)

@@ -169,7 +169,9 @@ export class ClaudeRuntimeAuthService {
     // Trigger 2: a lane whose own claude is live may have rotated since the last tick, and each
     // loaded lane gets its own usage probe — which itself syncs the lane it probed (S9 §2c/§2k).
     await this.laneCredentials.syncLanesWithLivePtys()
-    await this.laneCredentials.pullLaneUsage()
+    // Started, not awaited: this resolver is read twice per cycle and precedes every other
+    // provider's fetch, and a probe is a real `claude` bounded by a 25 s PTY timeout (§2k).
+    this.laneCredentials.startLaneUsagePull()
     await this.syncForCurrentSelection(effectiveTarget)
     return this.getPreparation(effectiveTarget)
   }

@@ -83,6 +83,7 @@ type InFlightProbe = { controller: AbortController; settled: Promise<void> }
 export class LaneUsagePull {
   private readonly inFlight = new Map<string, Set<InFlightProbe>>()
   private readonly usageByLane = new Map<string, ProviderRateLimits>()
+  private running: Promise<LaneUsagePullOutcome> | null = null
 
   constructor(private readonly deps: LaneUsagePullDeps) {}
 
@@ -120,7 +121,24 @@ export class LaneUsagePull {
     await Promise.all(probes.map((probe) => probe.settled))
   }
 
-  async run(): Promise<LaneUsagePullOutcome> {
+  /**
+   * One tick at a time (§2k's budget is `N` hidden `claude` processes per tick, not `2N`).
+   *
+   * `claudeAuthPreparationResolver` is awaited twice per rate-limit cycle — once to capture the
+   * pre-fetch preparation and once to detect a switch that happened during the fetch — and both
+   * reads reach `prepareForRateLimitFetch`. Without this the second read spawns a second round of
+   * probes, doubling the hidden processes and deferring each lane's rotation twice.
+   */
+  run(): Promise<LaneUsagePullOutcome> {
+    if (!this.running) {
+      this.running = this.runTick().finally(() => {
+        this.running = null
+      })
+    }
+    return this.running
+  }
+
+  private async runTick(): Promise<LaneUsagePullOutcome> {
     const outcome: LaneUsagePullOutcome = {
       probed: [],
       skipped: [],

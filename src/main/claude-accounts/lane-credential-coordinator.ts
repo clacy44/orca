@@ -87,6 +87,20 @@ export class LaneCredentialCoordinator {
     return this.usagePull.run()
   }
 
+  /**
+   * The same tick, NOT awaited — the pull must not sit on the rate-limit cycle's critical path.
+   *
+   * Each probe is a real hidden `claude` bounded by a 25 s PTY timeout and the lanes are probed in
+   * series, so awaiting it would put up to `N × 25 s` in front of the codex/gemini/kimi/minimax/
+   * grok dispatch, none of which has anything to do with a lane. The pull re-entrancy guard
+   * collapses the cycle's two resolver reads into one tick.
+   */
+  startLaneUsagePull(): void {
+    void this.pullLaneUsage().catch((error: unknown) => {
+      console.warn('[lane-usage-pull] lane usage tick failed:', error)
+    })
+  }
+
   /** The usage row a terminal's lane join reads; null while the pull is disabled or unrun. */
   laneUsage(laneId: string): ProviderRateLimits | null {
     return this.usagePull.laneUsage(laneId)
