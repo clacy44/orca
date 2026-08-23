@@ -1690,8 +1690,7 @@ export class ClaudeRuntimeAuthService {
   private writeRuntimeCredentials(contents: string): void {
     this.lastWrittenCredentialsJson = writeCredentialsFileAtomically(
       this.pathResolver.getRuntimePaths().credentialsPath,
-      contents,
-      this.lastWrittenCredentialsJson
+      contents
     )
   }
 

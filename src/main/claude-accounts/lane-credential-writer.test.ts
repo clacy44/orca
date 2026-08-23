@@ -44,7 +44,7 @@ describe('lane credential writer', () => {
 
   it('creates missing parents and writes credentials owner-only', () => {
     const target = join(root, 'nested', 'lane', '.credentials.json')
-    expect(writeCredentialsFileAtomically(target, CREDENTIALS, null)).toBe(CREDENTIALS)
+    expect(writeCredentialsFileAtomically(target, CREDENTIALS)).toBe(CREDENTIALS)
     expect(readFileSync(target, 'utf-8')).toBe(CREDENTIALS)
     if (process.platform !== 'win32') {
       expect(statSync(target).mode & 0o777).toBe(0o600)
@@ -53,27 +53,23 @@ describe('lane credential writer', () => {
 
   it('restores owner-only mode on an unchanged rewrite', () => {
     const target = join(root, '.credentials.json')
-    writeCredentialsFileAtomically(target, CREDENTIALS, null)
+    writeCredentialsFileAtomically(target, CREDENTIALS)
     if (process.platform !== 'win32') {
       writeFileSync(target, CREDENTIALS, { mode: 0o644 })
-      writeCredentialsFileAtomically(target, CREDENTIALS, CREDENTIALS)
+      writeCredentialsFileAtomically(target, CREDENTIALS)
       expect(statSync(target).mode & 0o777).toBe(0o600)
     }
   })
 
-  it('keeps one last-written cache per lane', () => {
+  it('writes identical bytes into every lane it is given', () => {
     const writer = new LaneCredentialWriter()
     const laneA = mkdtempSync(join(root, 'a-'))
     const laneB = mkdtempSync(join(root, 'b-'))
     writer.writeCredentials(laneA, CREDENTIALS)
-    // Negative control: identical bytes in another lane are NOT remembered as written there.
-    expect(writer.lastWrittenCredentials(laneA)).toBe(CREDENTIALS)
-    expect(writer.lastWrittenCredentials(laneB)).toBeNull()
+    // Negative control: an identical earlier write in lane A must not suppress lane B's.
     writer.writeCredentials(laneB, CREDENTIALS)
+    expect(readFileSync(join(laneA, '.credentials.json'), 'utf-8')).toBe(CREDENTIALS)
     expect(readFileSync(join(laneB, '.credentials.json'), 'utf-8')).toBe(CREDENTIALS)
-    writer.forget(laneA)
-    expect(writer.lastWrittenCredentials(laneA)).toBeNull()
-    expect(writer.lastWrittenCredentials(laneB)).toBe(CREDENTIALS)
   })
 
   it('merges and deletes oauthAccount without erasing the rest of the config', () => {

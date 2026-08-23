@@ -28,19 +28,12 @@ export function hasClaudeOauthAccessToken(credentialsJson: string): boolean {
 /**
  * Writes credentials at `0600`, returning the value the caller should remember as last-written.
  *
- * Skips unchanged rewrites to dodge Windows EPERM contention (#1507), re-verifying the file
- * because another Claude may have rewritten it behind us.
+ * Skips unchanged rewrites to dodge Windows EPERM contention (#1507). The file itself is the only
+ * comparand: an in-memory last-written value can only agree with it or be wrong about it, since
+ * another Claude may have rewritten the file behind us.
  */
-export function writeCredentialsFileAtomically(
-  targetPath: string,
-  contents: string,
-  lastWritten: string | null
-): string {
+export function writeCredentialsFileAtomically(targetPath: string, contents: string): string {
   mkdirSync(dirname(targetPath), { recursive: true })
-  if (lastWritten === contents && fileContentsEqual(targetPath, contents)) {
-    ensureOwnerOnlyMode(targetPath)
-    return contents
-  }
   if (fileContentsEqual(targetPath, contents)) {
     ensureOwnerOnlyMode(targetPath)
     return contents
@@ -90,34 +83,20 @@ export function writeOauthAccountIntoConfigFile(
 }
 
 /**
- * The lane-scoped writer: one last-written cache PER LANE.
+ * The lane-scoped writer: it takes the lane directory and remembers nothing.
  *
- * A single shared cache would let lane A's blob suppress lane B's identical write — and worse,
- * report B as written when the bytes only ever reached A.
+ * It carried a per-lane last-written cache until review round 1 proved the cache inert — the
+ * on-disk comparison above subsumes it — so the §2f wipe has nothing here to invalidate. What a
+ * lane last wrote lives in `LaneAuthState`, keyed by (lane, account), where the sync driver
+ * reads it.
  */
 export class LaneCredentialWriter {
-  private readonly lastWrittenByLane = new Map<string, string>()
-
   writeCredentials(laneDir: string, credentialsJson: string): void {
-    const written = writeCredentialsFileAtomically(
-      join(laneDir, LANE_CREDENTIALS_FILENAME),
-      credentialsJson,
-      this.lastWrittenByLane.get(laneDir) ?? null
-    )
-    this.lastWrittenByLane.set(laneDir, written)
+    writeCredentialsFileAtomically(join(laneDir, LANE_CREDENTIALS_FILENAME), credentialsJson)
   }
 
   writeOauthAccount(laneDir: string, oauthAccount: unknown): boolean {
     return writeOauthAccountIntoConfigFile(join(laneDir, LANE_CONFIG_FILENAME), oauthAccount)
-  }
-
-  lastWrittenCredentials(laneDir: string): string | null {
-    return this.lastWrittenByLane.get(laneDir) ?? null
-  }
-
-  /** Called by the §2f wipe: what is no longer on disk must not be remembered as written. */
-  forget(laneDir: string): void {
-    this.lastWrittenByLane.delete(laneDir)
   }
 }
 
