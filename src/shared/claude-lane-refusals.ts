@@ -22,6 +22,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.delegable_list_invalid',
   'accounts.lane.desktop_unavailable',
   'accounts.lane.switch_timed_out',
+  'accounts.lane.switch_lane_cleared',
   'accounts.selection_out_of_scope',
   'accounts.lane.push_write_failed',
   'accounts.lane.push_write_locked',

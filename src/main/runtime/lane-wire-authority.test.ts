@@ -83,7 +83,9 @@ function makeHarness(options: { designatedGrantId?: string | null; provision?: s
     end: (laneId) => gateCalls.push(`end:${laneId}`)
   }
   const delegation = new LaneDelegationDirectory(persistence)
+  const laneChanges: string[] = []
   const authority = new LaneWireAuthority({
+    onLaneChanged: (laneId, cause) => laneChanges.push(`${cause}:${laneId}`),
     principals: {
       principalOf: (deviceId) => bindings.get(deviceId) ?? null,
       delegatedGrantIdOf: (principalId) => designations.get(principalId) ?? null,
@@ -99,6 +101,7 @@ function makeHarness(options: { designatedGrantId?: string | null; provision?: s
     coordinator,
     delegation,
     gateCalls,
+    laneChanges,
     designations,
     bindings,
     userData,
@@ -350,6 +353,14 @@ describe('lane wire authority — pull, clear and status', () => {
       delegationCleared: true,
       delegatedGrantId: 'device-a'
     })
+  })
+
+  // A pending phone request is settled WITHOUT a frame on a push and refused BY NAME on a clear,
+  // so the cause has to reach the switch service — a clear leaves no timer to save the request.
+  it('names the cause of every lane change, so a clear is not mistaken for a push', async () => {
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    await harness.authority.clear('device-a')
+    expect(harness.laneChanges).toEqual([`push:${LANE_A}`, `clear:${LANE_A}`])
   })
 
   it('un-marks the clear on the next push, so the lease is taken again', async () => {

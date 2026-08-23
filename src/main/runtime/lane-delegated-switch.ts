@@ -76,6 +76,27 @@ export class LaneDelegatedSwitchService {
     this.supersedeForLane(laneId)
   }
 
+  /**
+   * A lane change that is NOT a push — today `accounts.lane.clear` — cancels the request without
+   * answering it. §2l promises no request is left pending against nobody, and the timer is already
+   * gone by then, so the terminal frame has to be emitted here or the phone pins at `pending`.
+   */
+  failForLane(laneId: string, code: 'accounts.lane.switch_lane_cleared', message: string): void {
+    for (const request of this.pending.values()) {
+      if (request.laneId !== laneId) {
+        continue
+      }
+      request.cancel()
+      this.pending.delete(request.requestId)
+      this.options.stream.publish(laneId, {
+        type: 'switch-failed',
+        requestId: request.requestId,
+        code,
+        message
+      })
+    }
+  }
+
   private supersedeForLane(laneId: string): void {
     for (const request of this.pending.values()) {
       if (request.laneId === laneId) {

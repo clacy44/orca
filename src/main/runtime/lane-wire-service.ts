@@ -14,6 +14,7 @@ import { LaneDelegatedSwitchService } from './lane-delegated-switch'
 import { LaneStatusStream } from './lane-status-stream'
 import {
   LaneWireAuthority,
+  type LaneChangeCause,
   type LaneSwitchGate,
   type LaneWirePrincipals
 } from './lane-wire-authority'
@@ -59,7 +60,7 @@ export class LaneWireService {
       delegation: this.delegation,
       switchGate: options.switchGate,
       platform: options.platform,
-      onLaneChanged: (laneId) => this.onLaneChanged(laneId)
+      onLaneChanged: (laneId, cause) => this.onLaneChanged(laneId, cause)
     })
     this.switches = new LaneDelegatedSwitchService({
       authority: this.authority,
@@ -101,9 +102,17 @@ export class LaneWireService {
     return this.principals.listPrincipals?.() ?? []
   }
 
-  /** A push answers the pending switch requests on its lane, then republishes lane status. */
-  private onLaneChanged(laneId: string): void {
-    this.switches.settleForLane(laneId)
+  /** A push answers the pending switch requests on its lane; a clear refuses them by name. */
+  private onLaneChanged(laneId: string, cause: LaneChangeCause): void {
+    if (cause === 'push') {
+      this.switches.settleForLane(laneId)
+    } else {
+      this.switches.failForLane(
+        laneId,
+        'accounts.lane.switch_lane_cleared',
+        'The Claude account was released on the host while this switch was still waiting, so nothing was switched. Load an account on the desktop that owns them, then try again.'
+      )
+    }
     for (const subscriber of this.stream.subscribersOf(laneId)) {
       const caller = this.stream.callerOf(subscriber)
       if (caller) {

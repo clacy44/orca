@@ -68,6 +68,11 @@ function makeHarness(options: { designatedGrantId?: string | null } = {}) {
   return { service, delegation, stream, designations, frames, attach, timers }
 }
 
+function mintToken(harness: ReturnType<typeof makeHarness>): string {
+  return harness.delegation.setDelegableAccounts(LANE_A, [{ clientRef: 'ref-1' }])[0]
+    .delegatedAccountId
+}
+
 function refusalCode(run: () => unknown): string {
   try {
     run()
@@ -223,5 +228,44 @@ describe('lane status stream scoping', () => {
     stream.subscribe({ deviceId: 'phone-a', principalId: LANE_A }, 'c2', vi.fn())
     stream.unsubscribe(first.subscriptionId)
     expect(stream.subscribersOf(LANE_A)).toHaveLength(1)
+  })
+})
+
+describe('a lane change that is not a push', () => {
+  it('refuses the outstanding request by name instead of dropping it silently', () => {
+    const harness = makeHarness()
+    harness.attach('desktop-a')
+    harness.attach('phone-a')
+    const { requestId } = harness.service.requestSwitch('phone-a', mintToken(harness))
+
+    harness.service.failForLane(
+      LANE_A,
+      'accounts.lane.switch_lane_cleared',
+      'The Claude account was released on the host while this switch was still waiting.'
+    )
+
+    expect(harness.frames.get('phone-a')?.at(-1)).toMatchObject({
+      type: 'switch-failed',
+      requestId,
+      code: 'accounts.lane.switch_lane_cleared'
+    })
+    expect(harness.service.hasPendingFor(LANE_A)).toBe(false)
+    expect(harness.timers).toHaveLength(0)
+  })
+
+  // Negative control: a PUSH still settles silently — the phone reads a `switch-failed` for a
+  // superseded id as the failure of its current request.
+  it('leaves a push settling silently', () => {
+    const harness = makeHarness()
+    harness.attach('desktop-a')
+    harness.attach('phone-a')
+    harness.service.requestSwitch('phone-a', mintToken(harness))
+
+    harness.service.settleForLane(LANE_A)
+
+    expect(harness.frames.get('phone-a')?.some((frame) => frame.type === 'switch-failed')).toBe(
+      false
+    )
+    expect(harness.service.hasPendingFor(LANE_A)).toBe(false)
   })
 })

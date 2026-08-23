@@ -39,13 +39,16 @@ export type LaneSwitchGate = {
 
 export type LaneWireCaller = { deviceId: string; principalId: string }
 
+/** A push ANSWERS an outstanding switch request; a clear leaves it unanswered (§2l). */
+export type LaneChangeCause = 'push' | 'clear'
+
 export type LaneWireAuthorityOptions = {
   principals: LaneWirePrincipals
   coordinator: LaneCredentialCoordinator
   delegation: LaneDelegationDirectory
   switchGate?: LaneSwitchGate
   platform?: NodeJS.Platform
-  onLaneChanged?: (laneId: string) => void
+  onLaneChanged?: (laneId: string, cause: LaneChangeCause) => void
 }
 
 export type LanePushResult = {
@@ -157,7 +160,7 @@ export class LaneWireAuthority {
         }
       }
     )
-    this.options.onLaneChanged?.(caller.principalId)
+    this.options.onLaneChanged?.(caller.principalId, 'clear')
     return { cleared }
   }
 
@@ -272,7 +275,7 @@ export class LaneWireAuthority {
       displayName: request.envelope.displayName,
       email: identity.email
     })
-    this.options.onLaneChanged?.(laneId)
+    this.options.onLaneChanged?.(laneId, 'push')
     return {
       laneState: coordinator.store.getLaneState(laneId),
       refreshTokenSha256: watermark.refreshTokenSha256,
