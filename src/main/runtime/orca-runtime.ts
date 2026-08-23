@@ -1082,6 +1082,8 @@ import {
 import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-coalescer'
 import { terminalPresenceRegistry } from './terminal-presence-registry'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
+import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
+import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import {
   appendRecentPtyPathCandidates,
   recentTerminalOutputIncludesPath,
@@ -16284,6 +16286,19 @@ export class OrcaRuntimeService {
         selfParticipantId: opts.presence.selfParticipantId
       })
     }
+    // Why after presence and not inside it: these are properties of the TERMINAL, published on
+    // every row, while the owner label they add lands on the participants presence just built.
+    applyTerminalCredentialLaneRows(listedTerminals, {
+      laneOf: (worktreeId, paneKey) => this.paneLanes.laneOf(worktreeId, paneKey),
+      connectionIdOf: (ptyId) => this.ptysById.get(ptyId)?.connectionId,
+      wslDistroOf: (ptyId) => this.ptysById.get(ptyId)?.wslDistro,
+      observedAgentTypesOf: (paneKey) =>
+        (this.getAgentProviderSessionSnapshotFn?.() ?? [])
+          .filter((row) => row.paneKey === paneKey)
+          .map((row) => row.agentType),
+      laneStateOf: (principalId) => resolveLaneResidencyState(principalId),
+      principalOfParticipant: (participantId) => this.principalOfPresenceParticipant(participantId)
+    })
     // Why: undefined (pre-flag client) must still get layouts; only an explicit
     // `false` opts out.
     const visualLayouts =
@@ -26486,6 +26501,16 @@ export class OrcaRuntimeService {
   /** The lane the pane RECORD carries, read back by pane identity at every spawn edge (§2a). */
   credentialLaneOfPane(worktreeId: string, paneKey: string): PaneCredentialLane | null {
     return this.paneLanes.laneOf(worktreeId, paneKey)
+  }
+
+  /** The person behind a presence participant, for the owner label's third hop (§2h). */
+  principalOfPresenceParticipant(participantId: string): string | null {
+    for (const [, participant] of terminalPresenceRegistry.connections()) {
+      if (participant.participantId === participantId) {
+        return this.paneLanes.principalOfGrant(participant.pairedDeviceId)
+      }
+    }
+    return null
   }
 
   /** The lane a handle-addressed inherit edge resolves to, through the same ownership predicate. */

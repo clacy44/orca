@@ -492,6 +492,22 @@ export type RuntimeFileReadChunkResult = {
   eof: boolean
 }
 
+/** How a terminal resolves its Claude credential (S9 §2h). Display strings, Rule-1 additive: an
+ *  older client that has no case for one simply renders nothing. `'grant'` keeps its rev-10 name
+ *  and reads "pinned to a principal's lane"; `'shared-runtime'` is the OpenClaude downgrade — a
+ *  lane pane observed running a runtime the lane cannot isolate. */
+export type RuntimeTerminalCredentialLane =
+  | 'grant'
+  | 'host'
+  | 'remote'
+  | 'wsl'
+  | 'shared-runtime'
+  | 'unknown'
+
+/** Whether the lane's credential is on this host right now. `'absent'` is what launches key on, so
+ *  it is also the fail-closed value while the host cannot make a residency claim (S9 §2f, §2h). */
+export type RuntimeTerminalLaneState = 'loaded' | 'absent' | 'reauth-required'
+
 // Why declared here rather than imported: shared/ must not reach into the main process, and the wire
 // needs the same three members the host's projection carries — the assignment at the list boundary is
 // what keeps the two declarations from drifting apart.
@@ -502,6 +518,9 @@ export type RuntimeTerminalPresenceKind = 'runtime' | 'mobile' | 'host'
 export type RuntimeTerminalPresenceParticipant = {
   participantId: string
   label: string
+  // Why on the participant and not on the row: one person connected from a desktop AND a phone is ONE
+  // owner label over two participants, which is what a principal-keyed lane means on screen (S9 §2h).
+  credentialLaneOwner?: true
   // Why on the wire: nothing else distinguishes the local human from a peer device named after a
   // machine, or a phone from a desktop — and both distinctions are display rules a client owns.
   kind: RuntimeTerminalPresenceKind
@@ -541,6 +560,8 @@ export type RuntimeTerminalSummary = {
   lastOutputAt: number | null
   preview: string
   presence?: RuntimeTerminalPresence
+  credentialLane?: RuntimeTerminalCredentialLane
+  laneState?: RuntimeTerminalLaneState
 }
 
 export type RuntimeTerminalVisualTerminalNode = {

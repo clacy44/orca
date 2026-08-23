@@ -387,6 +387,11 @@ export class PaneLaneAuthority {
     record.lanePrincipalId = this.principalIdOf(worktreeId, paneKey)
   }
 
+  /** The person behind a grant, for the presence row's three-hop owner join (§2h). */
+  principalOfGrant(pairedDeviceId: string | null | undefined): string | null {
+    return pairedDeviceId ? (this.principals?.principalOf(pairedDeviceId) ?? null) : null
+  }
+
   /** The principal a pane's row names, for the pty record that must not disagree with it (§2h). */
   principalIdOf(worktreeId: string, paneKey: string): string | null {
     const lane = this.laneOf(worktreeId, paneKey)
