@@ -26809,6 +26809,10 @@ export class OrcaRuntimeService {
         this.registerPty(result.id, workspace.id, workspace.connectionId, {
           tabId,
           leafId,
+          // Why: the adopt above already decided this pane's lane — a row, or a deliberate
+          // non-attribution for a pane the host knew but never attributed (§2h). Minting the
+          // shared row here would undo that decision one statement later.
+          isReattach: true,
           ...(result.incarnationId ? { incarnationId: result.incarnationId } : {})
         })
         const pty = this.getOrCreatePtyWorktreeRecord(result.id)

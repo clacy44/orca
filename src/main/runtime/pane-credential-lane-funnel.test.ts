@@ -227,6 +227,58 @@ describe('createTerminal funnel — the adopt gate', () => {
   })
 })
 
+describe('createTerminal funnel — a pane the host knows but never attributed', () => {
+  const UNBOUND_TAB = 'legacy-tab'
+  const UNBOUND_LEAF = '44444444-4444-4444-8444-444444444444'
+
+  function runtimeWithKnownUnboundPane(): {
+    runtime: OrcaRuntimeService
+    spawn: ReturnType<typeof vi.fn>
+  } {
+    const { runtime, spawn } = createRuntime()
+    vi.spyOn(
+      runtime as unknown as { getWorkspaceSessionForWorktree: (id: string) => unknown },
+      'getWorkspaceSessionForWorktree'
+    ).mockReturnValue({
+      terminalPtyIncarnationsByPaneKey: { [`${UNBOUND_TAB}:${UNBOUND_LEAF}`]: 'inc-1' }
+    })
+    return { runtime, spawn }
+  }
+
+  it('reads it as unbound rather than unknown', () => {
+    const { runtime } = runtimeWithKnownUnboundPane()
+
+    expect(runtime.paneCredentialLaneLookup('wt-1', UNBOUND_TAB, UNBOUND_LEAF)).toEqual({
+      kind: 'unbound'
+    })
+  })
+
+  it('leaves it unattributed when a lane-less caller reopens it, end to end', async () => {
+    const { runtime } = runtimeWithKnownUnboundPane()
+
+    await runtime.createTerminal('id:wt-1', {
+      credentialLane: { kind: 'shared' },
+      tabId: UNBOUND_TAB,
+      leafId: UNBOUND_LEAF
+    })
+
+    // §2h: the pane renders `unknown`, never attributed to a person — and a lane holder is still
+    // refused, with the refusal that names the real state.
+    expect(runtime.paneCredentialLaneLookup('wt-1', UNBOUND_TAB, UNBOUND_LEAF)).toEqual({
+      kind: 'unbound'
+    })
+    expect(
+      await refusalCodeOf(() =>
+        runtime.createTerminal('id:wt-1', {
+          credentialLane: runtime.resolveCallerCredentialLane('device-a'),
+          tabId: UNBOUND_TAB,
+          leafId: UNBOUND_LEAF
+        })
+      )
+    ).toBe('terminal.lane_pane_unbound')
+  })
+})
+
 describe('splitPtyBackedTerminal — the ownership predicate', () => {
   it('refuses grant B splitting grant A’s lane pane, and spawns nothing', async () => {
     const { runtime, spawn } = createRuntime()
