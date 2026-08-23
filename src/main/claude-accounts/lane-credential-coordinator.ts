@@ -88,9 +88,6 @@ export class LaneCredentialCoordinator {
       invalidateProbes: (laneId) => this.invalidateLaneUsageProbes(laneId),
       clearResidencyRow: (laneId) => this.residency.clearLaneRow(laneId),
       removeWatermark: (laneId) => this.store.removeWatermark(laneId),
-      syncLaneObserveOnly: async (laneId) => {
-        await this.syncLane(laneId, 'startup')
-      },
       ...(options.laneOptions?.platform ? { platform: options.laneOptions.platform } : {}),
       onLaneWiped: (laneId) => this.laneWiped?.(laneId)
     })

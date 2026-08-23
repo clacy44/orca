@@ -194,7 +194,6 @@ describe('the principal lane lifecycle wipe', () => {
       invalidateProbes: () => new Promise<void>(() => {}),
       clearResidencyRow: (laneId) => swept.push(laneId),
       removeWatermark: () => {},
-      syncLaneObserveOnly: async () => {},
       platform: 'linux',
       probeDeathTimeoutMs: 5
     })
@@ -253,7 +252,6 @@ describe('the principal lane lifecycle wipe', () => {
       invalidateProbes: () => new Promise<void>(() => {}),
       clearResidencyRow: () => {},
       removeWatermark: () => {},
-      syncLaneObserveOnly: async () => {},
       platform: 'linux',
       probeDeathTimeoutMs: 5,
       onLaneWiped: (laneId) => changed.push(laneId)
@@ -265,6 +263,25 @@ describe('the principal lane lifecycle wipe', () => {
     // The listener refuses outstanding switch requests by name and republishes the status: the
     // give-up arm is where a waiting switch would otherwise hang to its own timeout.
     expect(changed).toEqual([LANE_A])
+  })
+
+  it('starts no lane wipe once the startup pass has spent its budget', async () => {
+    const outcomes = await wipeResidentLanesAtStartup({
+      persistence: {
+        getClaudeLaneCredentialWatermarks: () => watermarks.slice(),
+        setClaudeLaneCredentialWatermarks: (rows) => {
+          watermarks = [...rows]
+        }
+      },
+      laneOptions: { lanesRoot, platform: 'linux' },
+      budgetMs: 0
+    })
+
+    // Bounded because this pass is awaited in front of the app window; the lanes it could not
+    // reach stay wipe-pending rather than being reported wiped.
+    expect(outcomes.every((row) => row.completed)).toBe(false)
+    expect(existsSync(credentialsPath(LANE_A))).toBe(true)
+    expect(isLaneWipePending(LANE_A)).toBe(true)
   })
 
   it('sweeps a lane that crashed holding only a staged .tmp credential blob', async () => {
@@ -290,7 +307,6 @@ describe('the principal lane lifecycle wipe', () => {
       invalidateProbes: () => new Promise<void>(() => {}),
       clearResidencyRow: () => {},
       removeWatermark: () => {},
-      syncLaneObserveOnly: async () => {},
       platform: 'linux',
       probeDeathTimeoutMs: 5
     })
@@ -346,7 +362,6 @@ describe('the principal lane lifecycle wipe', () => {
       invalidateProbes: () => Promise.resolve(),
       clearResidencyRow: () => {},
       removeWatermark: () => queue.push('watermark-removed'),
-      syncLaneObserveOnly: async () => {},
       platform: 'linux'
     })
 

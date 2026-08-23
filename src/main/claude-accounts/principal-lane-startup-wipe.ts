@@ -26,6 +26,8 @@ import { PrincipalLaneStore, type LaneWatermarkPersistence } from './principal-l
 export async function wipeResidentLanesAtStartup(input: {
   persistence: LaneWatermarkPersistence
   laneOptions?: PrincipalLaneOptions
+  /** Total budget across every lane: this pass is awaited in front of the app window. */
+  budgetMs?: number
 }): Promise<LaneWipeOutcome[]> {
   const laneOptions = input.laneOptions ?? {}
   const store = new PrincipalLaneStore(input.persistence, laneOptions)
@@ -37,10 +39,12 @@ export async function wipeResidentLanesAtStartup(input: {
     invalidateProbes: () => Promise.resolve(),
     clearResidencyRow: () => {},
     removeWatermark: (laneId) => store.removeWatermark(laneId),
-    syncLaneObserveOnly: (laneId) => Promise.resolve(recordStartupWatermark(store, laneId)),
     ...(laneOptions.platform ? { platform: laneOptions.platform } : {})
   })
-  return lifecycle.wipeResidentLanesAtStartup(listResidentPrincipalLaneIds(laneOptions))
+  return lifecycle.wipeResidentLanesAtStartup(listResidentPrincipalLaneIds(laneOptions), {
+    syncLaneObserveOnly: (laneId) => Promise.resolve(recordStartupWatermark(store, laneId)),
+    ...(input.budgetMs === undefined ? {} : { budgetMs: input.budgetMs })
+  })
 }
 
 /**

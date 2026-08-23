@@ -23,6 +23,13 @@ import { wipeLaneCredentials } from './principal-lane-credential-sweep'
 
 export type LaneWipeReason = 'last-connection-close' | 'startup' | 'grant-revoked'
 
+export type StartupLaneWipeOptions = {
+  /** Trigger 4: observe, record the watermark, never rotate. Owned by the startup pass alone. */
+  syncLaneObserveOnly(laneId: string): Promise<void>
+  /** Total deadline across every lane — this pass is awaited in front of the app window. */
+  budgetMs?: number
+}
+
 export type LaneWipeOutcome = {
   laneId: string
   reason: LaneWipeReason
@@ -50,8 +57,6 @@ export type PrincipalLaneLifecycleDeps = {
   invalidateProbes(laneId: string): Promise<void>
   clearResidencyRow(laneId: string): void
   removeWatermark(laneId: string): void
-  /** Trigger 4: observe, record the watermark, never rotate. */
-  syncLaneObserveOnly(laneId: string): Promise<void>
   platform?: NodeJS.Platform
   /**
    * Fired on BOTH arms: it says the lane CHANGED, not that the wipe succeeded (§2h).
@@ -65,11 +70,20 @@ export type PrincipalLaneLifecycleDeps = {
   probeDeathTimeoutMs?: number
   /** Injected so the retry arm is assertable without real timers. */
   wait?(ms: number): Promise<void>
+  now?(): number
 }
 
 /** A wipe that cannot confirm the fence is retried, never reported done (§2f). */
 const WIPE_ATTEMPTS = 3
 const PROBE_DEATH_TIMEOUT_MS = 10_000
+/**
+ * The whole startup pass's budget, because it is awaited in front of the app window.
+ *
+ * Each darwin attempt awaits a STRICT Keychain delete bounded only by its own 3 s command
+ * timeout, so three lanes against a locked or prompting Keychain is ~27 s of black screen. A lane
+ * the budget cuts short is left wipe-pending, which fails its launches closed until a push.
+ */
+const STARTUP_WIPE_BUDGET_MS = 15_000
 
 export class PrincipalLaneLifecycle {
   constructor(private readonly deps: PrincipalLaneLifecycleDeps) {}
@@ -86,11 +100,22 @@ export class PrincipalLaneLifecycle {
    * empty; taking it after would watermark nothing and let an older desktop blob land under a
    * daemon session that has since rotated.
    */
-  async wipeResidentLanesAtStartup(laneIds: readonly string[]): Promise<LaneWipeOutcome[]> {
+  async wipeResidentLanesAtStartup(
+    laneIds: readonly string[],
+    options: StartupLaneWipeOptions
+  ): Promise<LaneWipeOutcome[]> {
+    const now = this.deps.now ?? Date.now
+    const deadlineAt = now() + (options.budgetMs ?? STARTUP_WIPE_BUDGET_MS)
     const outcomes: LaneWipeOutcome[] = []
     for (const laneId of laneIds) {
-      await this.deps.syncLaneObserveOnly(laneId)
-      outcomes.push(await this.wipe(laneId, 'startup'))
+      if (now() >= deadlineAt) {
+        outcomes.push(
+          this.refuseWipe(laneId, 'startup', 'the startup wipe ran out of its total budget')
+        )
+        continue
+      }
+      await options.syncLaneObserveOnly(laneId)
+      outcomes.push(await this.wipe(laneId, 'startup', { deadlineAt }))
     }
     return outcomes
   }
@@ -121,7 +146,7 @@ export class PrincipalLaneLifecycle {
   private async wipe(
     laneId: string,
     reason: LaneWipeReason,
-    options: { finalize?: (laneDir: string) => void } = {}
+    options: { finalize?: (laneDir: string) => void; deadlineAt?: number } = {}
   ): Promise<LaneWipeOutcome> {
     const laneDir = this.deps.resolveLaneDir(laneId)
     if (!laneDir) {
@@ -145,9 +170,11 @@ export class PrincipalLaneLifecycle {
         this.deps.onLaneWiped?.(laneId)
         return { laneId, reason, removed, completed: true, laneRemoved: false }
       }
-      if (attempt < WIPE_ATTEMPTS) {
+      if (attempt < WIPE_ATTEMPTS && !this.pastDeadline(options.deadlineAt)) {
         await (this.deps.wait?.(0) ?? Promise.resolve())
+        continue
       }
+      break
     }
     // The mark stays set: launches keep failing closed and no surface may say the lane is empty.
     // The SEQUENCE ends here though, so a later push into the lane can void the mark rather than
@@ -170,6 +197,10 @@ export class PrincipalLaneLifecycle {
     console.warn(`[principal-lane] Lane not wiped: ${why}; leaving it wipe-pending`)
     this.deps.onLaneWiped?.(laneId)
     return { laneId, reason, removed: [], completed: false, laneRemoved: false }
+  }
+
+  private pastDeadline(deadlineAt: number | undefined): boolean {
+    return deadlineAt !== undefined && (this.deps.now ?? Date.now)() >= deadlineAt
   }
 
   /** One pass of the fence. `null` = the wipe is not confirmed; the mark must stay set. */
