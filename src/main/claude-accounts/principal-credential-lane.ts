@@ -29,6 +29,8 @@ const PRINCIPAL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-
 export type PrincipalLaneOptions = {
   lanesRoot?: string
   platform?: NodeJS.Platform
+  /** Injectable so the fail-closed arm is observable off Windows; production passes the real ACL call. */
+  restrictWindowsPath?: (targetPath: string, isDirectory: boolean) => boolean
 }
 
 export type ProvisionedPrincipalLane = {
@@ -76,11 +78,10 @@ export function provisionPrincipalLane(
   options: PrincipalLaneOptions = {}
 ): ProvisionedPrincipalLane {
   const laneDir = getPrincipalLaneDir(principalId, options)
-  const platform = options.platform ?? process.platform
   const existedBefore = existsSync(laneDir)
   mkdirSync(laneDir, { recursive: true, mode: 0o700 })
   try {
-    hardenLaneDirectory(laneDir, platform)
+    hardenLaneDirectory(laneDir, options)
     writeLaneMarker(laneDir, principalId)
   } catch (error) {
     // Why: no lane may exist unverified; only remove what this call created.
@@ -156,15 +157,31 @@ export function deprovisionPrincipalLane(
   return true
 }
 
-function hardenLaneDirectory(laneDir: string, platform: NodeJS.Platform): void {
+/**
+ * Whether this lane's isolation rests on a verified Windows DACL.
+ *
+ * False for a `\\wsl.localhost\…` root: that lane is written through the WSL redirector, whose
+ * far side carries Linux modes rather than a DACL, and `restrictWindowsPathSync` returns FALSE
+ * there — so an unscoped rule would refuse every S9e lane instead of skipping the step (§2m(1)).
+ */
+export function requiresVerifiedWindowsDacl(
+  laneDir: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return platform === 'win32' && !parseWslUncPath(laneDir)
+}
+
+function hardenLaneDirectory(laneDir: string, options: PrincipalLaneOptions): void {
+  const platform = options.platform ?? process.platform
   if (platform !== 'win32') {
     chmodSync(laneDir, 0o700)
     return
   }
-  if (parseWslUncPath(laneDir)) {
+  if (!requiresVerifiedWindowsDacl(laneDir, platform)) {
     return
   }
-  if (!restrictWindowsPathSync(laneDir, true)) {
+  const restrictPath = options.restrictWindowsPath ?? restrictWindowsPathSync
+  if (!restrictPath(laneDir, true)) {
     throw new ClaudeLaneRefusal(
       'accounts.lane.provision_dacl_unverified',
       "Orca could not verify this credential lane's Windows permissions, so the lane was not created. Check that PowerShell is available to Orca and try again; a lane whose access list cannot be read back is never used."

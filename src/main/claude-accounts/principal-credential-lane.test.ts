@@ -19,6 +19,7 @@ import {
   isPrincipalId,
   openPrincipalLane,
   provisionPrincipalLane,
+  requiresVerifiedWindowsDacl,
   resolveOwnedPrincipalLaneDir
 } from './principal-credential-lane'
 import {
@@ -279,32 +280,65 @@ describe('principal credential lane', () => {
     })
   })
 
-  describe.runIf(process.platform === 'win32')('win32 lane hardening', () => {
-    it('fails provisioning closed when the DACL cannot be verified', async () => {
-      const acl = await import('../../shared/secure-path-windows-acl')
-      const restrict = vi.spyOn(acl, 'restrictWindowsPathSync').mockReturnValue(false)
-
-      expect(() => provisionPrincipalLane(PRINCIPAL_A, { lanesRoot, platform: 'win32' })).toThrow(
-        /could not verify this credential lane/
-      )
-      expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(false)
-
-      restrict.mockRestore()
-    })
-
-    it('skips the DACL step for a wsl.localhost lane root instead of failing on it', async () => {
-      const acl = await import('../../shared/secure-path-windows-acl')
-      const restrict = vi.spyOn(acl, 'restrictWindowsPathSync').mockReturnValue(false)
-      const wslRoot = '\\\\wsl.localhost\\Ubuntu\\home\\dev\\.local\\share\\orca\\claude-lanes'
-      mkdirSync(join(wslRoot, PRINCIPAL_A), { recursive: true })
+  describe('win32 lane hardening', () => {
+    it('fails provisioning closed when the DACL cannot be verified', () => {
+      const attempted: [string, boolean][] = []
 
       expect(() =>
-        provisionPrincipalLane(PRINCIPAL_A, { lanesRoot: wslRoot, platform: 'win32' })
-      ).not.toThrow()
-      expect(restrict).not.toHaveBeenCalled()
+        provisionPrincipalLane(PRINCIPAL_A, {
+          lanesRoot,
+          platform: 'win32',
+          restrictWindowsPath: (target, isDirectory) => {
+            attempted.push([target, isDirectory])
+            return false
+          }
+        })
+      ).toThrow(/could not verify this credential lane/)
+      expect(attempted).toEqual([[join(lanesRoot, PRINCIPAL_A), true]])
+      expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(false)
+    })
 
-      restrict.mockRestore()
-      rmSync(join(wslRoot, PRINCIPAL_A), { recursive: true, force: true })
+    it('provisions when the DACL verifies', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, {
+        lanesRoot,
+        platform: 'win32',
+        restrictWindowsPath: () => true
+      })
+
+      expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
+    })
+
+    it('leaves an existing lane in place when a re-provision cannot verify its DACL', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      writeFileSync(join(lane.laneDir, '.credentials.json'), '{"claudeAiOauth":{}}')
+
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, {
+          lanesRoot,
+          platform: 'win32',
+          restrictWindowsPath: () => false
+        })
+      ).toThrow(/could not verify this credential lane/)
+      expect(existsSync(join(lane.laneDir, '.credentials.json'))).toBe(true)
+    })
+
+    it('skips the DACL step for a wsl.localhost lane root and requires it for a local drive', () => {
+      expect(
+        requiresVerifiedWindowsDacl(
+          '\\\\wsl.localhost\\Ubuntu\\home\\dev\\.local\\share\\orca\\claude-lanes\\lane',
+          'win32'
+        )
+      ).toBe(false)
+      expect(requiresVerifiedWindowsDacl('C:\\Users\\dev\\claude-lanes\\lane', 'win32')).toBe(true)
+      expect(requiresVerifiedWindowsDacl('C:\\Users\\dev\\claude-lanes\\lane', 'linux')).toBe(false)
+    })
+  })
+
+  describe.runIf(process.platform === 'win32')('win32 lane hardening, real ACL', () => {
+    it('provisions a lane whose DACL the real call verifies', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_B, { lanesRoot, platform: 'win32' })
+
+      expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
     })
   })
 })

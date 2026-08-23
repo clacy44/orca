@@ -1,3 +1,4 @@
+import { chmodSync } from 'node:fs'
 import { writeHooksJson, type HooksConfig } from '../agent-hooks/installer-utils'
 import { isPlainObject, readHooksJson } from '../agent-hooks/hooks-json-read'
 import {
@@ -84,7 +85,13 @@ export function writeLaneSettings(
 ): HooksConfig {
   const hostConfigPath = options.hostConfigPath ?? getConfigPath(CLAUDE_HOOK_SETTINGS)
   const laneSettings = buildLaneSettings(readHooksJson(hostConfigPath), options)
-  writeHooksJson(getConfigPath(CLAUDE_HOOK_SETTINGS, laneDir), laneSettings)
+  const laneConfigPath = getConfigPath(CLAUDE_HOOK_SETTINGS, laneDir)
+  writeHooksJson(laneConfigPath, laneSettings)
+  if (process.platform !== 'win32') {
+    // Why: the lane's files are 0600 (§2a); writeHooksJson leaves a new file at the default mode,
+    // and on win32 the mode bit is inert — the lane directory's verified DACL is the control there.
+    chmodSync(laneConfigPath, 0o600)
+  }
   return laneSettings
 }
 
