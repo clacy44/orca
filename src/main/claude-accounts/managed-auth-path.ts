@@ -1,6 +1,10 @@
-import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { app } from 'electron'
+import {
+  canonicalizePathForContainment,
+  isCanonicalPathWithinRoot
+} from '../../shared/lane-path-containment'
 import { writeFileAtomically } from '../codex-accounts/fs-utils'
 
 const MANAGED_AUTH_MARKER = '.orca-managed-claude-auth'
@@ -20,14 +24,19 @@ export function resolveOwnedClaudeManagedAuthPath(
     return null
   }
   try {
-    if (lstatSync(resolvedCandidate).isSymbolicLink()) {
+    // Why the shared check: this store is §2a's live pre-lane injection target, and a plain
+    // `realpathSync` + case-sensitive `startsWith` is defeated on win32 by an 8.3 short name or a
+    // drive-letter case flip (§2m(4)). The symlink refusal is inside it, still ordered first.
+    const candidate = canonicalizePathForContainment(resolvedCandidate)
+    const root = canonicalizePathForContainment(rootPath)
+    if (candidate.kind !== 'canonical' || root.kind !== 'canonical') {
       return null
     }
-    const canonicalCandidate = realpathSync(resolvedCandidate)
-    const canonicalRoot = realpathSync(rootPath)
+    const canonicalCandidate = candidate.path
+    const canonicalRoot = root.path
     if (
       canonicalCandidate === canonicalRoot ||
-      !canonicalCandidate.startsWith(canonicalRoot + sep)
+      !isCanonicalPathWithinRoot(canonicalRoot, canonicalCandidate)
     ) {
       return null
     }
@@ -106,7 +115,14 @@ function isOwnedChildFile(managedAuthPath: string, filePath: string): boolean {
   ) {
     return false
   }
-  const canonicalAuthPath = realpathSync(managedAuthPath)
-  const canonicalFilePath = realpathSync(filePath)
-  return canonicalFilePath.startsWith(canonicalAuthPath + sep)
+  // Same containment rule as the store's own check above, for the same win32 reason.
+  const canonicalAuthPath = canonicalizePathForContainment(managedAuthPath)
+  const canonicalFilePath = canonicalizePathForContainment(filePath)
+  if (canonicalAuthPath.kind !== 'canonical' || canonicalFilePath.kind !== 'canonical') {
+    return false
+  }
+  return (
+    canonicalFilePath.path !== canonicalAuthPath.path &&
+    isCanonicalPathWithinRoot(canonicalAuthPath.path, canonicalFilePath.path)
+  )
 }
