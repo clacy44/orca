@@ -147,7 +147,13 @@ describe('principal lane consent RPC', () => {
 
     const laneDir = join(state.userDataDir, 'claude-lanes', principalId)
     expect(provisioned.provenanceLabel).toMatch(/^[0-9a-f]{32}$/)
-    expect(existsSync(join(laneDir, 'settings.json'))).toBe(true)
+    const laneSettings = JSON.parse(
+      readFileSync(join(laneDir, 'settings.json'), 'utf-8')
+    ) as Record<string, unknown>
+    expect(laneSettings.model, 'the lane mirrors the host config dir it was told to read').toBe(
+      'claude-opus-4'
+    )
+    expect(JSON.stringify(laneSettings.hooks)).toMatch(/claude-hook/)
     expect(existsSync(join(laneDir, 'CLAUDE.md'))).toBe(true)
     const laneConfig = JSON.parse(readFileSync(join(laneDir, '.claude.json'), 'utf-8')) as Record<
       string,

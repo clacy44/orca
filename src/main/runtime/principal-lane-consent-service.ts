@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { ClaudeRuntimePathResolver } from '../claude-accounts/runtime-paths'
 import {
   deprovisionPrincipalLane,
@@ -74,7 +75,9 @@ export class PrincipalLaneConsentService {
   /** Recomputed at creation and on hook refresh (S9 §2a); never merged with lane-side edits. */
   refreshLaneContent(laneDir: string): void {
     const { hostConfigDir, hostConfigPath } = this.hostSources()
-    writeLaneSettings(laneDir)
+    // Why derived from the config dir rather than defaulted: the lane's settings must mirror the
+    // same shared lane the memory and MCP mirror read, not whatever homedir() resolves to.
+    writeLaneSettings(laneDir, { hostConfigPath: join(hostConfigDir, 'settings.json') })
     mirrorHostUserContentIntoLane(hostConfigDir, laneDir)
     seedFreshLaneConfig(laneDir, hostConfigPath)
   }
