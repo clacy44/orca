@@ -32,6 +32,7 @@ import {
   isOauthTokenExpiring,
   refreshClaudeOauthCredentials
 } from '../claude-accounts/oauth-refresh'
+import { isClaudeAccountDelegatedToLane } from '../claude-accounts/lane-delegation-lease'
 import { createOAuthUsageError, OAuthUsageError } from './claude-oauth-usage-error'
 import { mapClaudeUsageWindow, type ClaudeUsageWindowInput } from './claude-usage-window'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
@@ -1150,6 +1151,12 @@ async function fetchManagedUsagePanelSupplement(input: {
   if (input.signal?.aborted) {
     return null
   }
+  // S9 §2e rule (ii): this supplement launches a real `claude` under the account's own managed
+  // config dir, and that CLI rotates and writes `.credentials.json` back. A delegated account's
+  // token belongs to the host lane holding it, so no managed launch under it happens here.
+  if (isClaudeAccountDelegatedToLane(input.account.id)) {
+    return null
+  }
   const authPreparation = getManagedUsagePanelAuthPreparation(input.account, input.location)
   if (!authPreparation) {
     return null
@@ -1202,8 +1209,11 @@ export async function fetchManagedAccountUsage(
   }
 
   // Why: refresh+persist an expiring token now so inactive accounts' single-use refresh tokens stay fresh for a later switch-in (persist failure is non-fatal).
+  // S9 §2e rule (i): a delegated account is EXACTLY the ordinary inactive one — rule (iv) takes it
+  // out of the desktop's active selection — and rotating here would burn the single-use refresh
+  // token the host lane's live `claude` holds. Rotation belongs to the host, keyed by account.
   let token = parseOAuthCredentialsJson(credentialsJson, 'credentials-file').token
-  if (isOauthTokenExpiring(credentialsJson)) {
+  if (!isClaudeAccountDelegatedToLane(account.id) && isOauthTokenExpiring(credentialsJson)) {
     const refreshed = await refreshClaudeOauthCredentials(credentialsJson)
     if (options.signal?.aborted) {
       return abortedClaudeRateLimitResult()
