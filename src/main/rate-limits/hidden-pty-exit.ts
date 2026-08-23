@@ -66,17 +66,25 @@ export function killHiddenRateLimitPtyAwaitingExit(
       finish('exited')
       return
     }
+    // Unref'd: a pending escalation must not hold the process open at quit.
     timers.push(
-      setTimeout(() => {
-        // node-pty's Windows kill ignores the signal and takes the whole tree, so it is never
-        // re-issued there — the double kill is the ConPTY double-close this module avoids.
-        if (platform !== 'win32') {
-          killQuietly(term, 'SIGKILL')
-        }
-      }, graceMs)
+      unref(
+        setTimeout(() => {
+          // node-pty's Windows kill ignores the signal and takes the whole tree, so it is never
+          // re-issued there — the double kill is the ConPTY double-close this module avoids.
+          if (platform !== 'win32') {
+            killQuietly(term, 'SIGKILL')
+          }
+        }, graceMs)
+      )
     )
-    timers.push(setTimeout(() => finish('timed-out'), graceMs + escalatedGraceMs))
+    timers.push(unref(setTimeout(() => finish('timed-out'), graceMs + escalatedGraceMs)))
   })
+}
+
+function unref(timer: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
+  timer.unref?.()
+  return timer
 }
 
 function subscribeExit(term: HiddenPty, onExit: () => void): PtyDisposable | undefined {
