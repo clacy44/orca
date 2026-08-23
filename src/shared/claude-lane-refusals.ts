@@ -16,6 +16,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.link_fingerprint_unbindable',
   'accounts.lane.provision_dacl_unverified',
   'accounts.lane.lane_not_owned_by_orca',
+  'accounts.lane.lane_path_not_contained',
   'accounts.lane.consent_caller_not_local',
   'terminal.lane_not_loaded'
 ] as const

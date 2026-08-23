@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -98,6 +99,31 @@ describe('principal credential lane', () => {
       const second = provisionPrincipalLane(PRINCIPAL_A, options())
 
       expect(second.provenanceLabel).toBe(first.provenanceLabel)
+    })
+
+    it('refuses to write through a symlink planted at the lane path', () => {
+      const victim = join(userData, 'victim')
+      mkdirSync(victim, { recursive: true })
+      writeFileSync(join(victim, 'settings.json'), '{"model":"host"}')
+      mkdirSync(lanesRoot, { recursive: true })
+      symlinkSync(victim, join(lanesRoot, PRINCIPAL_A))
+
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /Something other than this person/
+      )
+      // Nothing was written through the link: no marker, no provenance, no mode change.
+      expect(existsSync(join(victim, '.orca-principal-lane'))).toBe(false)
+      expect(readdirSync(victim)).toEqual(['settings.json'])
+      expect(statSync(victim).mode & 0o777).not.toBe(0o700)
+    })
+
+    it('refuses to write through a lane path that is a file', () => {
+      mkdirSync(lanesRoot, { recursive: true })
+      writeFileSync(join(lanesRoot, PRINCIPAL_A), 'not a lane')
+
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /Something other than this person/
+      )
     })
 
     it('refuses a lane directory carrying another principal’s marker', () => {

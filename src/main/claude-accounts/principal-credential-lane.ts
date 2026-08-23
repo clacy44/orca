@@ -5,7 +5,8 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
-  writeFileSync
+  writeFileSync,
+  type Stats
 } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
@@ -77,8 +78,9 @@ export function provisionPrincipalLane(
   principalId: string,
   options: PrincipalLaneOptions = {}
 ): ProvisionedPrincipalLane {
+  const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
   const laneDir = getPrincipalLaneDir(principalId, options)
-  const existedBefore = existsSync(laneDir)
+  const existedBefore = assertLaneDirectoryWritable(lanesRoot, laneDir)
   mkdirSync(laneDir, { recursive: true, mode: 0o700 })
   try {
     hardenLaneDirectory(laneDir, options)
@@ -122,7 +124,15 @@ export function resolveOwnedPrincipalLaneDir(
 ): string | null {
   assertPrincipalId(principalId)
   const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
-  const laneDir = join(lanesRoot, principalId)
+  const canonicalLane = resolveContainedLaneDir(lanesRoot, join(lanesRoot, principalId))
+  if (!canonicalLane) {
+    return null
+  }
+  return isLaneMarkerValid(canonicalLane, principalId) ? canonicalLane : null
+}
+
+/** The canonical lane path when it is a real, non-link, one-segment child of the lanes root. */
+function resolveContainedLaneDir(lanesRoot: string, laneDir: string): string | null {
   if (!existsSync(laneDir) || !existsSync(lanesRoot)) {
     return null
   }
@@ -141,7 +151,42 @@ export function resolveOwnedPrincipalLaneDir(
   if (relativeParts.length !== 1 || !isPrincipalId(relativeParts[0] ?? '')) {
     return null
   }
-  return isLaneMarkerValid(laneDir, principalId) ? canonicalLane.path : null
+  return canonicalLane.path
+}
+
+/**
+ * Proves a pre-existing lane path is Orca's own before provisioning writes through it, and
+ * reports whether it existed (§2a, §2m(4)).
+ *
+ * The symlink/junction refusal is ordered FIRST because a Windows junction reports as both a
+ * symlink and a directory, and it needs no privilege to plant — so it is the cheap escape a
+ * `--config-dir` capture would use. `lstatSync` rather than `existsSync`: a DANGLING link is not
+ * an absent path, and `mkdirSync` would follow it.
+ */
+function assertLaneDirectoryWritable(lanesRoot: string, laneDir: string): boolean {
+  const planted = lstatOrNull(laneDir)
+  if (!planted) {
+    return false
+  }
+  if (
+    planted.isSymbolicLink() ||
+    !planted.isDirectory() ||
+    !resolveContainedLaneDir(lanesRoot, laneDir)
+  ) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.lane_path_not_contained',
+      "Something other than this person's own credential lane already sits at that path — a link, a file, or a directory that resolves outside Orca's lanes folder — so Orca refused to write to it. Remove it by hand and provision the lane again."
+    )
+  }
+  return true
+}
+
+function lstatOrNull(path: string): Stats | null {
+  try {
+    return lstatSync(path)
+  } catch {
+    return null
+  }
 }
 
 /** Deprovisioning removes the lane whatever the grant count — the same consent UI as provisioning. */
