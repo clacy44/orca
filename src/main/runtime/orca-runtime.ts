@@ -1079,7 +1079,7 @@ import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-co
 import { terminalPresenceRegistry } from './terminal-presence-registry'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
-import { laneScopedAgentLaunchInputs } from './lane-launch-computation'
+import { assertLaneAgentArgsAllowed, laneScopedAgentLaunchInputs } from './lane-launch-computation'
 import { createPresenceParticipantPrincipalResolver } from './presence-participant-principal'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import {
@@ -26229,6 +26229,11 @@ export class OrcaRuntimeService {
     // Why resolved here and not at the createTerminal call below: the launch is BUILT here, and
     // a peer's host-wide defaults may not shape this principal's lane (§2 rows 13/14).
     const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+    assertLaneAgentArgsAllowed({
+      lane: credentialLane,
+      agentArgs: request.agentArgs,
+      platform
+    })
     const laneScoped = laneScopedAgentLaunchInputs({
       lane: credentialLane,
       settings,
@@ -26397,6 +26402,11 @@ export class OrcaRuntimeService {
         terminalWindowsShell: settings.terminalWindowsShell
       })
       const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+      assertLaneAgentArgsAllowed({
+        lane: credentialLane,
+        agentArgs: request.agentArgs,
+        platform
+      })
       const laneScoped = laneScopedAgentLaunchInputs({
         lane: credentialLane,
         settings,

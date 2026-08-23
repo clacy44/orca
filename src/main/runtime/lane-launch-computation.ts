@@ -145,6 +145,26 @@ export function laneScopedAgentLaunchInputs(args: {
 }
 
 /**
+ * Guard 2 for the two agent-session RPCs, where the anchor cannot reach it (§2 row 8).
+ *
+ * `createAgentSession`/`ensureAgentSession` bake `request.agentArgs` into the launch COMMAND via
+ * the startup-plan builder, and `computeLaneLaunch` parses `launchConfig`, never
+ * `spawnOptions.command` — so a lane caller's `--settings` would arrive already spelled into a
+ * string no downstream guard reads. Runs before the plan is built; a lane-less caller is
+ * untouched, since guard 2 exists only to keep a lane's credential resolution where the lane put it.
+ */
+export function assertLaneAgentArgsAllowed(args: {
+  lane: { kind: 'principal' | 'shared' }
+  agentArgs: string | null | undefined
+  platform: NodeJS.Platform
+}): void {
+  if (args.lane.kind !== 'principal') {
+    return
+  }
+  unrefused(sanitizeLaneLaunchCommand({ agentArgs: args.agentArgs, platform: args.platform }))
+}
+
+/**
  * The closure principle's single computation point (S9 §2a, §2 preamble).
  *
  * A lane launch is *computed*, not customized: every client- and settings-supplied launch input
