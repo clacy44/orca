@@ -172,6 +172,21 @@ describe('assertLaneResumePathsContained', () => {
     expect(result.refusal.code).toBe('terminal.resume_path_refused')
   })
 
+  // §2a(iii)/§2g: the client has no string table, so the refusal itself has to carry the remedy.
+  it('names the offending field and the shared-lane pane in the refusal message', () => {
+    const result = assertLaneResumePathsContained({ ompResumeFilePath: join(outside, 'b.jsonl') }, [
+      root
+    ])
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.refusal.message).toContain('ompResumeFilePath')
+    expect(result.refusal.message).toContain('shared-lane pane')
+    expect(result.refusal.message).toMatch(/\.$/)
+  })
+
   it('refuses a symlink that escapes the root', () => {
     expect(
       assertLaneResumePathsContained({ transcriptPath: join(root, 'escape.jsonl') }, [root]).ok

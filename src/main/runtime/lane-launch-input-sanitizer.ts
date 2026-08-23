@@ -161,7 +161,13 @@ export type LaneResumePathInput = {
 
 export type LaneResumePathResult = { ok: true } | { ok: false; refusal: LaneLaunchRefusal }
 
-/** Both resume paths must canonically sit inside a root the lane owns. Fails closed. */
+/**
+ * Both resume paths must canonically sit inside a root the lane owns. Fails closed.
+ *
+ * The message names the shared-lane pane because the commonest refusals here are legitimate: any
+ * pre-lane Claude session's `transcriptPath` and every `~/.omp` resume file sit outside both roots
+ * by construction, and the shared-lane pane is where §2a(iii)/§2g say to resume them.
+ */
 export function assertLaneResumePathsContained(
   input: LaneResumePathInput,
   allowedRoots: readonly string[]
@@ -182,7 +188,7 @@ export function assertLaneResumePathsContained(
         ok: false,
         refusal: {
           code: 'terminal.resume_path_refused',
-          message: `${field} points outside this lane's own files.`
+          message: `Orca did not start this terminal: ${field} points to a file outside your personal Claude credential lane and outside this workspace, and a lane can only resume a session that lives in its own files. Open that session from a shared-lane pane — a terminal that is not pinned to your lane — to resume it there.`
         }
       }
     }

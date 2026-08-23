@@ -381,7 +381,7 @@ describe('the launch config on the host spawn path', () => {
       hostSpawn(controller, {
         launchConfig: { ompResumeFilePath: '/tmp/other-lane/sessions/resume.jsonl' }
       })
-    ).rejects.toThrow(/outside this lane/)
+    ).rejects.toThrow(/outside your personal Claude credential lane[\s\S]*shared-lane pane/)
     expect(spawnCalls).toHaveLength(0)
   })
 
