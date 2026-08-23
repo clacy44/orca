@@ -26625,7 +26625,9 @@ export class OrcaRuntimeService {
     laneAccountLabelOf?: (principalId: string) => RuntimeTerminalLaneAccountLabel | null
     laneUsageOf?: (principalId: string) => RuntimeTerminalLaneUsage | null
   }): void {
-    this.laneAccountRowResolvers = resolvers
+    // Merged, not replaced: the usage source and the label source are attached at different
+    // points in host startup — the credential service early, the principal registry with pairing.
+    this.laneAccountRowResolvers = { ...this.laneAccountRowResolvers, ...resolvers }
   }
 
   /** The lane a posted paneKey names — the usage attribution join's first hop (§2k). */

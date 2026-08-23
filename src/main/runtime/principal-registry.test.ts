@@ -21,8 +21,9 @@ vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
 
 const RUNTIME_AUTH_TOKEN = 'a'.repeat(48)
 
-// Why type-only: the registry takes the device registry as its grant source, and nothing else in
-// this slice wires the two together yet — this keeps the shapes from drifting apart in the meantime.
+// Why type-only beside the real wiring: `principal-lane-host-wiring.ts` now hands the device
+// registry in as the grant source, and this assertion is what fails at compile time if either
+// shape drifts out from under that call.
 type Assert<T extends true> = T
 export type DeviceRegistryIsAGrantSource = Assert<
   DeviceRegistry extends PrincipalGrantSource ? true : false

@@ -21,6 +21,7 @@ import { WebSocketTransport } from './rpc/ws-transport'
 import { readWsFallbackPort, writeWsFallbackPort } from './rpc/ws-fallback-port-store'
 import type { WebSocket } from 'ws'
 import { DeviceRegistry, type DeviceEntry, type DeviceScope } from './device-registry'
+import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from './e2ee-keypair'
 import { UnpairedDeviceAuthThrottle } from './rpc/unpaired-device-auth-throttle'
 import { terminalPresenceRegistry } from './terminal-presence-registry'
@@ -1203,10 +1204,20 @@ export class OrcaRuntimeRpcServer {
         this.deviceRegistry = null
         this.e2eeKeypair = null
         this.pairingInitializationFailure = pairingIdentity.failure
+        // Without grant rows nothing can resolve to a principal; fall back to pre-S9 behaviour.
+        detachPrincipalLaneHost(this.runtime)
       } else {
         this.deviceRegistry = pairingIdentity.deviceRegistry
         this.e2eeKeypair = pairingIdentity.e2eeKeypair
         this.pairingInitializationFailure = null
+        // Why here and not at construction: the registry's grant rows ARE the pairing registry,
+        // and attaching it is what arms `terminal.lane_link_unbound` (S9 §2a, §6).
+        attachPrincipalLaneHost({
+          userDataPath: this.userDataPath,
+          grants: pairingIdentity.deviceRegistry,
+          runtimeAuthToken: this.authToken,
+          runtime: this.runtime
+        })
         try {
           const host = this.resolveInitialWebSocketBindHost()
           const { transport, endpoint } = await this.startWebSocketTransport({
