@@ -7,29 +7,44 @@
  * the host has already reported wiped — `laneState: 'absent'` while a live credential sits at
  * rest.
  *
- * The writers are declared here and left unwired: S9c's `principal-lane-lifecycle.ts` is what
- * marks and clears a wipe, and until it lands nothing in production calls them. The reader is
- * wired now, so the fence is complete the moment the lifecycle arrives rather than being
- * retrofitted onto a pull that has already shipped without it.
+ * `principal-lane-lifecycle.ts` is the only writer: it marks before it aborts anything and clears
+ * only on the post-sweep clean read-back. The marks are keyed by a per-wipe sequence because two
+ * wipes can run on one lane — a revoke and a last-close fire independently — and an unkeyed clear
+ * would let the first to finish open the second's fence mid-sweep.
  */
 const wipePendingLaneIds = new Set<string>()
-const wipesInFlightLaneIds = new Set<string>()
+/** Per lane, the sequence ids of the wipes still running — two can overlap on one lane. */
+const wipeSequencesInFlight = new Map<string, Set<number>>()
+let nextWipeSequence = 1
 
 /** S9c: set before the sweep aborts in-flight probes, not after it finishes. */
-export function markLaneWipePending(laneId: string): void {
+export function markLaneWipePending(laneId: string): number {
   wipePendingLaneIds.add(laneId)
-  wipesInFlightLaneIds.add(laneId)
+  const sequence = nextWipeSequence
+  nextWipeSequence += 1
+  const inFlight = wipeSequencesInFlight.get(laneId) ?? new Set<number>()
+  inFlight.add(sequence)
+  wipeSequencesInFlight.set(laneId, inFlight)
+  return sequence
 }
 
-/** S9c: cleared only on §2f's clean post-sweep read-back. */
-export function clearLaneWipePending(laneId: string): void {
-  wipePendingLaneIds.delete(laneId)
-  wipesInFlightLaneIds.delete(laneId)
+/**
+ * S9c: cleared only on §2f's clean post-sweep read-back, and only by the wipe that took the mark.
+ *
+ * A revoke and a last-close can both be wiping one lane — `removeLaneOnRevoke` and
+ * `wipeLaneOnSocketClose` are fired independently — and an unkeyed clear would let the first to
+ * finish drop the second's fence while it is still sweeping.
+ */
+export function clearLaneWipePending(laneId: string, sequence: number): void {
+  releaseWipeSequence(laneId, sequence)
+  if (!wipeSequencesInFlight.has(laneId)) {
+    wipePendingLaneIds.delete(laneId)
+  }
 }
 
 /** The sequence gave up without a clean read-back: the mark stays, the sequence does not. */
-export function releaseUnconfirmedLaneWipe(laneId: string): void {
-  wipesInFlightLaneIds.delete(laneId)
+export function releaseUnconfirmedLaneWipe(laneId: string, sequence: number): void {
+  releaseWipeSequence(laneId, sequence)
 }
 
 /**
@@ -41,7 +56,7 @@ export function releaseUnconfirmedLaneWipe(laneId: string): void {
  * whatever is there, and its fence must not be opened underneath it.
  */
 export function clearLaneWipePendingOnCredentialLoaded(laneId: string): boolean {
-  if (wipesInFlightLaneIds.has(laneId)) {
+  if (isLaneWipeInFlight(laneId)) {
     return false
   }
   return wipePendingLaneIds.delete(laneId)
@@ -51,8 +66,21 @@ export function isLaneWipePending(laneId: string): boolean {
   return wipePendingLaneIds.has(laneId)
 }
 
+/** A sweep is running on this lane right now — the state a push must not write into (§2f). */
+export function isLaneWipeInFlight(laneId: string): boolean {
+  return wipeSequencesInFlight.has(laneId)
+}
+
+function releaseWipeSequence(laneId: string, sequence: number): void {
+  const inFlight = wipeSequencesInFlight.get(laneId)
+  if (!inFlight?.delete(sequence) || inFlight.size > 0) {
+    return
+  }
+  wipeSequencesInFlight.delete(laneId)
+}
+
 /** Test seam only — production never clears the whole set. */
 export function resetLaneWipePendingForTests(): void {
   wipePendingLaneIds.clear()
-  wipesInFlightLaneIds.clear()
+  wipeSequencesInFlight.clear()
 }

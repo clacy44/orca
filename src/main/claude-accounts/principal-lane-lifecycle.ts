@@ -113,7 +113,7 @@ export class PrincipalLaneLifecycle {
     }
     // Set BEFORE anything is aborted: the start-side fence has to be closed for the whole
     // sequence, or the tick a millisecond later spawns a probe into the lane being swept.
-    markLaneWipePending(laneId)
+    const sequence = markLaneWipePending(laneId)
     const removed: string[] = []
     for (let attempt = 1; attempt <= WIPE_ATTEMPTS; attempt += 1) {
       const swept = await this.attemptWipe(laneId, laneDir, finalize)
@@ -123,7 +123,7 @@ export class PrincipalLaneLifecycle {
         }
       }
       if (swept) {
-        clearLaneWipePending(laneId)
+        clearLaneWipePending(laneId, sequence)
         this.deps.onLaneWiped?.(laneId)
         return { laneId, reason, removed, completed: true, laneRemoved: false }
       }
@@ -134,7 +134,7 @@ export class PrincipalLaneLifecycle {
     // The mark stays set: launches keep failing closed and no surface may say the lane is empty.
     // The SEQUENCE ends here though, so a later push into the lane can void the mark rather than
     // inheriting a latch that would skip this lane's usage probe for the rest of the process.
-    releaseUnconfirmedLaneWipe(laneId)
+    releaseUnconfirmedLaneWipe(laneId, sequence)
     console.warn(`[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending`)
     return { laneId, reason, removed, completed: false, laneRemoved: false }
   }
