@@ -333,7 +333,8 @@ function writeLaneMarker(laneDir: string, principalId: string): void {
   writeFileSync(markerPath, `${principalId}\n`, { encoding: 'utf-8', mode: 0o600, flag: 'wx' })
 }
 
-function isLaneMarkerValid(laneDir: string, principalId: string): boolean {
+/** Whether this directory carries THIS principal's own Orca ownership marker (§2a). */
+export function isLaneMarkerValid(laneDir: string, principalId: string): boolean {
   const markerPath = join(laneDir, LANE_MARKER_FILENAME)
   try {
     if (!existsSync(markerPath)) {

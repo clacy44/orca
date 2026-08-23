@@ -313,6 +313,22 @@ describe('principal credential lane', () => {
       expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(true)
     })
 
+    it('leaves a UUID-named directory that carries no Orca marker alone', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      const impostor = join(lanesRoot, PRINCIPAL_B)
+      mkdirSync(impostor, { recursive: true })
+      writeFileSync(join(impostor, 'notes.txt'), 'not a lane')
+
+      const result = reconcileOrphanPrincipalLanes({
+        boundPrincipalIds: [PRINCIPAL_A],
+        registryLoadSucceeded: true,
+        lanesRoot
+      })
+
+      expect(result.deletedPrincipalIds).toEqual([])
+      expect(existsSync(impostor)).toBe(true)
+    })
+
     it('leaves a foreign directory under the lanes root alone', () => {
       provisionPrincipalLane(PRINCIPAL_A, options())
       const foreign = join(lanesRoot, 'not-a-lane')

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { getClaudeLanesRoot } from './claude-lanes-root'
-import { isPrincipalId } from './principal-credential-lane'
+import { isLaneMarkerValid, isPrincipalId } from './principal-credential-lane'
 
 export type OrphanLaneReconciliationInput = {
   /** Principals that still hold at least one surviving bound grant. */
@@ -46,7 +46,14 @@ export function reconcileOrphanPrincipalLanes(
     if (!entry.isDirectory() || !isPrincipalId(entry.name) || bound.has(entry.name)) {
       continue
     }
-    rmSync(join(lanesRoot, entry.name), { recursive: true, force: true })
+    const laneDir = join(lanesRoot, entry.name)
+    // Why the marker too: a foreign directory NAMED as a v4 UUID passes the check above, and every
+    // other lane operation proves ownership before acting. Cost, stated: a lane whose marker a
+    // failed DACL verification dropped is left in place for a re-provision to recover.
+    if (!isLaneMarkerValid(laneDir, entry.name)) {
+      continue
+    }
+    rmSync(laneDir, { recursive: true, force: true })
     deletedPrincipalIds.push(entry.name)
   }
   return { deletedPrincipalIds, skipped: null }
