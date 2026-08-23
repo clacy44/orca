@@ -1,4 +1,9 @@
 const liveClaudePtyIds = new Set<string>()
+// Why: which credential lane each live pty was pinned to. A pty absent from this map is
+// UNATTRIBUTED — seeded from persistence, or a shared-lane spawn — and defers every account's
+// rotation, because over-deferring costs a delayed refresh while under-deferring revokes a
+// single-use token out from under a running CLI (S9 §2e).
+const lanePrincipalIdByPtyId = new Map<string, string>()
 // Why: ids restored from persistence at startup, not yet confirmed against the
 // daemon. They keep the OAuth refresh gate closed so an early managed refresh
 // cannot rotate the single-use refresh token out from under a Claude CLI that
@@ -60,6 +65,7 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
   for (const sessionId of seededUnconfirmedPtyIds) {
     if (!alive.has(sessionId)) {
       liveClaudePtyIds.delete(sessionId)
+      lanePrincipalIdByPtyId.delete(sessionId)
       persistence?.removeClaudeLivePtySessionId(sessionId)
     }
   }
@@ -67,15 +73,19 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
   notifyDrainedOnTransition(hadLivePtys)
 }
 
-export function markClaudePtySpawned(ptyId: string): void {
+export function markClaudePtySpawned(ptyId: string, lanePrincipalId?: string | null): void {
   liveClaudePtyIds.add(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
+  if (lanePrincipalId) {
+    lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId)
+  }
   persistence?.addClaudeLivePtySessionId(ptyId)
 }
 
 export function markClaudePtyExited(ptyId: string): void {
   const hadLivePtys = liveClaudePtyIds.size > 0
   liveClaudePtyIds.delete(ptyId)
+  lanePrincipalIdByPtyId.delete(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
   persistence?.removeClaudeLivePtySessionId(ptyId)
   notifyDrainedOnTransition(hadLivePtys)
@@ -83,6 +93,26 @@ export function markClaudePtyExited(ptyId: string): void {
 
 export function hasLiveClaudePtys(): boolean {
   return liveClaudePtyIds.size > 0
+}
+
+/** Whether a pty pinned to THIS lane is live — the query the lane's rotation gate asks. */
+export function hasLiveClaudePtysInLane(lanePrincipalId: string): boolean {
+  for (const [ptyId, laneId] of lanePrincipalIdByPtyId) {
+    if (laneId === lanePrincipalId && liveClaudePtyIds.has(ptyId)) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Live ptys this process cannot attribute to a lane; they defer every account's rotation. */
+export function hasUnattributedLiveClaudePtys(): boolean {
+  for (const ptyId of liveClaudePtyIds) {
+    if (!lanePrincipalIdByPtyId.has(ptyId)) {
+      return true
+    }
+  }
+  return false
 }
 
 export function beginClaudeAuthSwitch(): void {

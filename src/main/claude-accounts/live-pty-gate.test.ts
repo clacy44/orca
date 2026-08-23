@@ -5,6 +5,8 @@ import {
   confirmSeededClaudeLivePtys,
   endClaudeAuthSwitch,
   hasLiveClaudePtys,
+  hasLiveClaudePtysInLane,
+  hasUnattributedLiveClaudePtys,
   isClaudeAuthSwitchInProgress,
   markClaudePtyExited,
   markClaudePtySpawned,
@@ -14,6 +16,9 @@ import {
 
 describe('Claude live PTY gate', () => {
   afterEach(() => {
+    markClaudePtyExited('lane-a-pty')
+    markClaudePtyExited('lane-b-pty')
+    markClaudePtyExited('shared-pty')
     markClaudePtyExited('live-claude-pty')
     markClaudePtyExited('seeded-pty-1')
     markClaudePtyExited('seeded-pty-2')
@@ -138,5 +143,32 @@ describe('Claude live PTY gate', () => {
 
     markClaudePtyExited('live-claude-pty')
     expect(removeClaudeLivePtySessionId).toHaveBeenCalledWith('live-claude-pty')
+  })
+  it('answers the lane liveness query per lane, and forgets it on exit', () => {
+    markClaudePtySpawned('lane-a-pty', 'lane-a')
+    markClaudePtySpawned('lane-b-pty', 'lane-b')
+
+    expect(hasLiveClaudePtysInLane('lane-a')).toBe(true)
+    expect(hasLiveClaudePtysInLane('lane-b')).toBe(true)
+    // Negative control: a lane nobody spawned into holds nothing.
+    expect(hasLiveClaudePtysInLane('lane-c')).toBe(false)
+    expect(hasUnattributedLiveClaudePtys()).toBe(false)
+
+    markClaudePtyExited('lane-a-pty')
+    expect(hasLiveClaudePtysInLane('lane-a')).toBe(false)
+    expect(hasLiveClaudePtysInLane('lane-b')).toBe(true)
+  })
+
+  it('reports a shared-lane spawn and a seeded id as unattributed', () => {
+    markClaudePtySpawned('shared-pty')
+    expect(hasUnattributedLiveClaudePtys()).toBe(true)
+    expect(hasLiveClaudePtysInLane('lane-a')).toBe(false)
+    markClaudePtyExited('shared-pty')
+
+    seedLiveClaudePtysFromPersistence(['seeded-pty-1'])
+    // A restored id carries no lane, so it must defer every account's rotation.
+    expect(hasUnattributedLiveClaudePtys()).toBe(true)
+    confirmSeededClaudeLivePtys([])
+    expect(hasUnattributedLiveClaudePtys()).toBe(false)
   })
 })

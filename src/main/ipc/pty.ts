@@ -5370,7 +5370,7 @@ export function registerPtyHandlers(
         // Why the lane arm: the human can type `claude` at any lane prompt, so every lane-pinned
         // pane joins the lane's "may hold lane credentials" set (S9 §2a consequence 2).
         if ((isClaudeLaunch || lanePinned) && !stablePaneOwner) {
-          markClaudePtySpawned(result.id)
+          markClaudePtySpawned(result.id, lanePrincipalId)
         }
         if (args.telemetry && !stablePaneOwner) {
           const agentKindParse = agentKindSchema.safeParse(args.telemetry.agent_kind)
@@ -7018,7 +7018,7 @@ export function registerPtyHandlers(
         }
         // Why the lane arm: see path A — a lane pane may become a Claude pane at the prompt.
         if ((isClaudeLaunch || lanePinned) && !stablePaneOwner) {
-          markClaudePtySpawned(result.id)
+          markClaudePtySpawned(result.id, lanePrincipalId)
         }
         // Why: record the paneKey mapping so clearProviderPtyState can clear the agent-hooks server's per-paneKey caches on exit.
         // Why: args.env is untrusted IPC JSON (type unenforced); bound the paneKey so malformed/oversized values can't pollute ptyPaneKey or clearPaneState.
