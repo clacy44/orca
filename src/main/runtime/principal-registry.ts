@@ -10,6 +10,7 @@ import {
 } from './principal-link-fingerprint-binding'
 import {
   loadPrincipalRegistryState,
+  PRINCIPAL_AUDIT_MAX_ROWS,
   PRINCIPAL_DISPLAY_NAME_MAX_LENGTH,
   PRINCIPAL_REGISTRY_FILENAME,
   savePrincipalRegistryState,
@@ -354,7 +355,9 @@ export class PrincipalRegistry {
   private commit(nextState: PrincipalRegistryState, row: Omit<PrincipalAuditRow, 'at'>): void {
     const committed: PrincipalRegistryState = {
       ...nextState,
-      audit: [...nextState.audit, { at: this.now(), ...row }]
+      // Why capped here and not only in the store: an in-memory trail that outgrew the file would
+      // make `listAudit()` disagree with what a restart reads back, and grow without bound.
+      audit: [...nextState.audit, { at: this.now(), ...row }].slice(-PRINCIPAL_AUDIT_MAX_ROWS)
     }
     // Why: persist before the memory swap, so a failed write cannot leave an authority decision
     // live in-process and absent from disk.

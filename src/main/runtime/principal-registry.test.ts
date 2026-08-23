@@ -10,7 +10,7 @@ import {
 } from './principal-registry'
 import type { DeviceRegistry } from './device-registry'
 import { authorizeHostConsent } from './principal-consent-authority'
-import { PRINCIPAL_REGISTRY_FILENAME } from './principal-registry-store'
+import { PRINCIPAL_AUDIT_MAX_ROWS, PRINCIPAL_REGISTRY_FILENAME } from './principal-registry-store'
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
 import {
   deprovisionPrincipalLane,
@@ -203,6 +203,17 @@ describe('PrincipalRegistry', () => {
       ])
       expect(store.listAudit().at(1)).toMatchObject({ direction: 'bind', deviceId: 'device-a' })
       expect(store.listAudit().at(2)).toMatchObject({ direction: 'unbind' })
+    })
+
+    it('caps the in-memory audit trail at the bound the store writes', () => {
+      const store = registry()
+      for (let index = 0; index <= PRINCIPAL_AUDIT_MAX_ROWS; index += 1) {
+        store.createPrincipal(consent, `Ana ${index}`)
+      }
+
+      expect(store.listAudit()).toHaveLength(PRINCIPAL_AUDIT_MAX_ROWS)
+      expect(registry().listAudit()).toHaveLength(PRINCIPAL_AUDIT_MAX_ROWS)
+      expect(store.listAudit().at(-1)?.principalId).toBe(store.listPrincipals().at(-1)?.principalId)
     })
 
     it('refuses a display name that is over-long or carries control characters', () => {
