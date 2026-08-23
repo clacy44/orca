@@ -1,3 +1,4 @@
+import type { ClaudeLivePtySessionLane } from './claude-live-pty-session-lane'
 import type { ExecutionHostId } from './execution-host'
 import type {
   RemovedSshTargetTombstone,
@@ -91,6 +92,8 @@ export type PersistedState = {
   sshPtyConsumerRecoveries?: SshPtyConsumerRecovery[]
   /** Live local Claude daemon session ids; seeds the live-PTY gate so early OAuth refresh can't rotate the single-use refresh token out from under a running daemon. */
   claudeLivePtySessionIds?: string[]
+  /** The lane each of those ids was pinned to; absent on a pre-S9c state (S9 §2f). */
+  claudeLivePtySessionLanes?: ClaudeLivePtySessionLane[]
   /** Secretless per-lane credential watermark; carries a sha256, never a refresh token. */
   claudeLaneCredentialWatermarks?: ClaudeLaneCredentialWatermark[]
   /** Per-lane delegable-account tokens and the held account's owner-authored name (S9 §2l). */

@@ -11894,12 +11894,14 @@ describe('Store', () => {
   })
 
   describe('claudeLivePtySessionIds', () => {
+    const LANE_ID = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+
     it('persists added ids across reloads and removes them durably', async () => {
       const store = await createStore()
 
-      store.addClaudeLivePtySessionId('claude-session-1')
-      store.addClaudeLivePtySessionId('claude-session-2')
-      store.addClaudeLivePtySessionId('claude-session-1')
+      store.addClaudeLivePtySessionId('claude-session-1', LANE_ID)
+      store.addClaudeLivePtySessionId('claude-session-2', 'host')
+      store.addClaudeLivePtySessionId('claude-session-1', LANE_ID)
 
       expect(store.getClaudeLivePtySessionIds()).toEqual(['claude-session-1', 'claude-session-2'])
 
@@ -11914,6 +11916,37 @@ describe('Store', () => {
 
       const reloadedAgain = await createStore()
       expect(reloadedAgain.getClaudeLivePtySessionIds()).toEqual(['claude-session-2'])
+      // §2f/§3 row 6: the lane row follows the id, so the seed can attribute the account.
+      expect(reloadedAgain.getClaudeLivePtySessions()).toEqual([
+        { sessionId: 'claude-session-2', laneId: 'host' }
+      ])
+    })
+
+    it('carries the lane beside each id, and reports null on a pre-S9c state', async () => {
+      const store = await createStore()
+      store.addClaudeLivePtySessionId('claude-session-1', LANE_ID)
+      store.flush()
+
+      const reloaded = await createStore()
+      expect(reloaded.getClaudeLivePtySessions()).toEqual([
+        { sessionId: 'claude-session-1', laneId: LANE_ID }
+      ])
+
+      writeDataFile({ schemaVersion: 1, claudeLivePtySessionIds: ['legacy-id'] })
+      const legacy = await createStore()
+
+      expect(legacy.getClaudeLivePtySessions()).toEqual([{ sessionId: 'legacy-id', laneId: null }])
+    })
+
+    it('drops a lane row whose id the cap evicted', async () => {
+      const store = await createStore()
+      for (let index = 0; index < 205; index += 1) {
+        store.addClaudeLivePtySessionId(`claude-session-${index}`, LANE_ID)
+      }
+
+      const sessions = store.getClaudeLivePtySessions()
+      expect(sessions).toHaveLength(200)
+      expect(sessions.every((row) => row.laneId === LANE_ID)).toBe(true)
     })
 
     it('drops malformed persisted entries on load', async () => {
@@ -11944,7 +11977,7 @@ describe('Store', () => {
     it('caps the persisted id list', async () => {
       const store = await createStore()
       for (let index = 0; index < 205; index += 1) {
-        store.addClaudeLivePtySessionId(`claude-session-${index}`)
+        store.addClaudeLivePtySessionId(`claude-session-${index}`, 'host')
       }
 
       const ids = store.getClaudeLivePtySessionIds()

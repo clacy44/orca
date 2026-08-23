@@ -2246,11 +2246,11 @@ void app.whenReady().then(async () => {
   onLiveClaudePtysDrained(() => {
     void rateLimits?.refreshAfterClaudeLivePtysDrained()
   })
-  const persistedClaudePtyIds = store.getClaudeLivePtySessionIds()
-  seedLiveClaudePtysFromPersistence(persistedClaudePtyIds)
-  if (persistedClaudePtyIds.length > 0) {
+  const persistedClaudePtySessions = store.getClaudeLivePtySessions()
+  seedLiveClaudePtysFromPersistence(persistedClaudePtySessions)
+  if (persistedClaudePtySessions.length > 0) {
     console.log(
-      `[claude-live-pty] Seeded ${persistedClaudePtyIds.length} persisted Claude session id(s) into the refresh gate`
+      `[claude-live-pty] Seeded ${persistedClaudePtySessions.length} persisted Claude session id(s) into the refresh gate`
     )
   }
   applyAppIcon(store.getSettings().appIcon)

@@ -32,6 +32,7 @@ describe('Claude live PTY gate', () => {
     markClaudePtyExited('seeded-pty-2')
     confirmSeededClaudeLivePtys([])
     attachClaudeLivePtyPersistence(null)
+    markClaudePtyExited('seeded-lane-pty')
     endClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
     endClaudeAuthSwitch(LANE_A)
     endClaudeAuthSwitch(LANE_B)
@@ -67,7 +68,10 @@ describe('Claude live PTY gate', () => {
   })
 
   it('counts seeded session ids as live until confirmed dead', () => {
-    seedLiveClaudePtysFromPersistence(['seeded-pty-1', 'seeded-pty-2'])
+    seedLiveClaudePtysFromPersistence([
+      { sessionId: 'seeded-pty-1', laneId: null },
+      { sessionId: 'seeded-pty-2', laneId: null }
+    ])
 
     expect(hasLiveClaudePtys()).toBe(true)
 
@@ -90,7 +94,10 @@ describe('Claude live PTY gate', () => {
       addClaudeLivePtySessionId: vi.fn(),
       removeClaudeLivePtySessionId
     })
-    seedLiveClaudePtysFromPersistence(['seeded-pty-1', 'seeded-pty-2'])
+    seedLiveClaudePtysFromPersistence([
+      { sessionId: 'seeded-pty-1', laneId: null },
+      { sessionId: 'seeded-pty-2', laneId: null }
+    ])
 
     confirmSeededClaudeLivePtys(['seeded-pty-2'])
 
@@ -100,7 +107,7 @@ describe('Claude live PTY gate', () => {
   })
 
   it('keeps a seeded id confirmed by a real spawn out of later pruning', () => {
-    seedLiveClaudePtysFromPersistence(['seeded-pty-1'])
+    seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-pty-1', laneId: null }])
     markClaudePtySpawned('seeded-pty-1', null)
 
     confirmSeededClaudeLivePtys([])
@@ -134,7 +141,7 @@ describe('Claude live PTY gate', () => {
     const onDrained = vi.fn()
     const unsubscribe = onLiveClaudePtysDrained(onDrained)
     try {
-      seedLiveClaudePtysFromPersistence(['seeded-pty-1'])
+      seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-pty-1', laneId: null }])
 
       confirmSeededClaudeLivePtys([])
 
@@ -164,7 +171,13 @@ describe('Claude live PTY gate', () => {
     })
 
     markClaudePtySpawned('live-claude-pty', null)
-    expect(addClaudeLivePtySessionId).toHaveBeenCalledWith('live-claude-pty')
+    expect(addClaudeLivePtySessionId).toHaveBeenCalledWith(
+      'live-claude-pty',
+      SHARED_CLAUDE_LANE_KEY
+    )
+
+    markClaudePtySpawned('lane-a-pty', LANE_A)
+    expect(addClaudeLivePtySessionId).toHaveBeenCalledWith('lane-a-pty', LANE_A)
 
     markClaudePtyExited('live-claude-pty')
     expect(removeClaudeLivePtySessionId).toHaveBeenCalledWith('live-claude-pty')
@@ -196,7 +209,7 @@ describe('Claude live PTY gate', () => {
   })
 
   it('reports only a seeded, unreconciled id as unattributed', () => {
-    seedLiveClaudePtysFromPersistence(['seeded-pty-1'])
+    seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-pty-1', laneId: null }])
     // A restored id carries no lane, so it must defer every account's rotation.
     expect(hasUnattributedLiveClaudePtys()).toBe(true)
     confirmSeededClaudeLivePtys([])
@@ -243,5 +256,32 @@ describe('Claude live PTY gate', () => {
 
       expect(drained).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+// §2f/§3 row 6: a seed that names its lane defers only that lane; one without names defers all.
+describe('seeding the gate from persistence', () => {
+  afterEach(() => {
+    markClaudePtyExited('seeded-lane-pty')
+    markClaudePtyExited('seeded-legacy-pty')
+    confirmSeededClaudeLivePtys([])
+  })
+
+  it('attributes a seeded id that carries a lane', () => {
+    seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-lane-pty', laneId: LANE_A }])
+
+    expect(hasLiveClaudePtysInLane(LANE_A)).toBe(true)
+    expect(hasLiveClaudePtysInLane(LANE_B)).toBe(false)
+    expect(hasUnattributedLiveClaudePtys()).toBe(false)
+  })
+
+  it('defers every account for a pre-S9c seed with no lane', () => {
+    seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-legacy-pty', laneId: null }])
+
+    expect(hasUnattributedLiveClaudePtys()).toBe(true)
+
+    confirmSeededClaudeLivePtys([])
+
+    expect(hasUnattributedLiveClaudePtys()).toBe(false)
   })
 })

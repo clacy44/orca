@@ -24,6 +24,10 @@ import {
   type ClaudeLaneCredentialWatermark
 } from '../shared/claude-lane-watermark'
 import {
+  normalizeClaudeLivePtySessionLanes,
+  type ClaudeLivePtySessionLane
+} from '../shared/claude-live-pty-session-lane'
+import {
   normalizeClaudeLaneDelegationRows,
   type ClaudeLaneDelegationRow
 } from '../shared/claude-lane-delegation'
@@ -3832,6 +3836,9 @@ export class Store {
             .filter((lease): lease is SshRemotePtyLease => lease !== null),
           sshPtyConsumerRecoveries: parsed.sshPtyConsumerRecoveries,
           claudeLivePtySessionIds: normalizeClaudeLivePtySessionIds(parsed.claudeLivePtySessionIds),
+          claudeLivePtySessionLanes: normalizeClaudeLivePtySessionLanes(
+            parsed.claudeLivePtySessionLanes
+          ),
           claudeLaneCredentialWatermarks: normalizeClaudeLaneWatermarks(
             parsed.claudeLaneCredentialWatermarks
           ),
@@ -7229,7 +7236,18 @@ export class Store {
     return [...(this.state.claudeLivePtySessionIds ?? [])]
   }
 
-  addClaudeLivePtySessionId(sessionId: string): void {
+  /** Each seeded id with the lane it was pinned to; `laneId: null` on a pre-S9c state (S9 §2f). */
+  getClaudeLivePtySessions(): { sessionId: string; laneId: string | null }[] {
+    const lanes = new Map(
+      (this.state.claudeLivePtySessionLanes ?? []).map((row) => [row.sessionId, row.laneId])
+    )
+    return this.getClaudeLivePtySessionIds().map((sessionId) => ({
+      sessionId,
+      laneId: lanes.get(sessionId) ?? null
+    }))
+  }
+
+  addClaudeLivePtySessionId(sessionId: string, laneId: string): void {
     if (sessionId.length === 0 || sessionId.length > 512) {
       return
     }
@@ -7239,8 +7257,20 @@ export class Store {
     }
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
     this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+    this.state.claudeLivePtySessionLanes = this.retainLivePtySessionLanes([
+      ...(this.state.claudeLivePtySessionLanes ?? []).filter((row) => row.sessionId !== sessionId),
+      { sessionId, laneId }
+    ])
     // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
     this.flush()
+  }
+
+  /** The lane rows follow the capped id list; an orphan row would out-live its seed forever. */
+  private retainLivePtySessionLanes(
+    rows: readonly ClaudeLivePtySessionLane[]
+  ): ClaudeLivePtySessionLane[] {
+    const kept = new Set(this.state.claudeLivePtySessionIds ?? [])
+    return rows.filter((row) => kept.has(row.sessionId))
   }
 
   getClaudeLaneDelegationLeases(): ClaudeLaneDelegationLease[] {
@@ -7279,6 +7309,9 @@ export class Store {
       return
     }
     this.state.claudeLivePtySessionIds = ids.filter((id) => id !== sessionId)
+    this.state.claudeLivePtySessionLanes = (this.state.claudeLivePtySessionLanes ?? []).filter(
+      (row) => row.sessionId !== sessionId
+    )
     this.scheduleSave()
   }
 

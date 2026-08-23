@@ -39,8 +39,14 @@ const ephemeralPtyIds = new Set<string>()
 const switchesInProgressByLane = new Set<string>()
 
 export type ClaudeLivePtyPersistence = {
-  addClaudeLivePtySessionId(sessionId: string): void
+  addClaudeLivePtySessionId(sessionId: string, laneId: string): void
   removeClaudeLivePtySessionId(sessionId: string): void
+}
+
+/** One persisted seed: the daemon session id, and the lane it was pinned to if the state has one. */
+export type SeededClaudeLivePtySession = {
+  sessionId: string
+  laneId: string | null
 }
 
 let persistence: ClaudeLivePtyPersistence | null = null
@@ -69,10 +75,22 @@ function notifyDrainedOnTransition(hadLivePtys: boolean): void {
   }
 }
 
-export function seedLiveClaudePtysFromPersistence(sessionIds: readonly string[]): void {
-  for (const sessionId of sessionIds) {
+/**
+ * A seed WITH a lane defers only that lane; one without defers every account (S9 §2f, §3 row 6).
+ *
+ * A pre-S9c state carries ids and no lanes, so its seeds stay unattributed until the daemon
+ * reconciliation drops the dead ones — over-deferring costs a delayed refresh, while guessing the
+ * shared lane would revoke a single-use token out from under a lane's surviving CLI.
+ */
+export function seedLiveClaudePtysFromPersistence(
+  sessions: readonly SeededClaudeLivePtySession[]
+): void {
+  for (const { sessionId, laneId } of sessions) {
     liveClaudePtyIds.add(sessionId)
     seededUnconfirmedPtyIds.add(sessionId)
+    if (laneId) {
+      lanePrincipalIdByPtyId.set(sessionId, laneId)
+    }
   }
 }
 
@@ -104,8 +122,9 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
 export function markClaudePtySpawned(ptyId: string, lanePrincipalId: string | null): void {
   liveClaudePtyIds.add(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
-  lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId || SHARED_CLAUDE_LANE_KEY)
-  persistence?.addClaudeLivePtySessionId(ptyId)
+  const laneId = lanePrincipalId || SHARED_CLAUDE_LANE_KEY
+  lanePrincipalIdByPtyId.set(ptyId, laneId)
+  persistence?.addClaudeLivePtySessionId(ptyId, laneId)
 }
 
 /**
