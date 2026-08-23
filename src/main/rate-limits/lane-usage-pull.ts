@@ -75,8 +75,11 @@ export function buildLaneUsageAuthPreparation(
   }
 }
 
+/** One probe the module can still reach: its abort handle, and when its `claude` is gone. */
+type InFlightProbe = { controller: AbortController; settled: Promise<void> }
+
 export class LaneUsagePull {
-  private readonly inFlight = new Map<string, Set<AbortController>>()
+  private readonly inFlight = new Map<string, Set<InFlightProbe>>()
   private readonly usageByLane = new Map<string, ProviderRateLimits>()
 
   constructor(private readonly deps: LaneUsagePullDeps) {}
@@ -98,11 +101,21 @@ export class LaneUsagePull {
     return this.usageByLane.get(laneId) ?? null
   }
 
-  /** A push or a close-wipe marks every probe in flight in that lane stale and kills it. */
-  invalidateLane(laneId: string): void {
-    for (const controller of this.inFlight.get(laneId) ?? []) {
-      controller.abort()
+  /**
+   * A push or a close-wipe marks every probe in flight in that lane stale and kills it (§2f/§2k).
+   *
+   * Awaited to the probe's own settlement, which is where `fetchViaPty`'s abort path has already
+   * run `cleanupHiddenRateLimitPty(…, { kill: true })`: the caller is about to replace or sweep
+   * `.credentials.json`, and a `claude` still holding the PRE-push single-use refresh token would
+   * post usage for the old account and rotate a credential the lane no longer holds. It does NOT
+   * wait for the probe's post-probe `syncLane`, which takes the lane write queue the caller holds.
+   */
+  async invalidateLane(laneId: string): Promise<void> {
+    const probes = [...(this.inFlight.get(laneId) ?? [])]
+    for (const probe of probes) {
+      probe.controller.abort()
     }
+    await Promise.all(probes.map((probe) => probe.settled))
   }
 
   async run(): Promise<LaneUsagePullOutcome> {
@@ -146,9 +159,16 @@ export class LaneUsagePull {
   private async probeLane(lane: ClaudeLaneUsageAttribution): Promise<boolean> {
     const controller = new AbortController()
     const gateId = `lane-usage-probe:${lane.laneId}:${(this.deps.newGateId ?? randomUUID)()}`
-    const controllers = this.inFlight.get(lane.laneId) ?? new Set<AbortController>()
-    controllers.add(controller)
-    this.inFlight.set(lane.laneId, controllers)
+    let markSettled = (): void => {}
+    const probe: InFlightProbe = {
+      controller,
+      settled: new Promise<void>((resolve) => {
+        markSettled = resolve
+      })
+    }
+    const probes = this.inFlight.get(lane.laneId) ?? new Set<InFlightProbe>()
+    probes.add(probe)
+    this.inFlight.set(lane.laneId, probes)
     this.deps.markProbeSpawned(gateId, lane.laneId)
     let usage: ProviderRateLimits | null = null
     try {
@@ -160,10 +180,11 @@ export class LaneUsagePull {
       // Release before the sync: the sync's own trigger reads the live-PTY set, and the probe
       // must not still be counted as the lane's live claude while it runs.
       this.deps.markProbeExited(gateId)
-      controllers.delete(controller)
-      if (controllers.size === 0) {
+      probes.delete(probe)
+      if (probes.size === 0) {
         this.inFlight.delete(lane.laneId)
       }
+      markSettled()
     }
     // A stale probe posts no usage row, emits no receipt and moves no watermark; the sync still
     // runs, because its own CLI may have rotated before the kill landed.

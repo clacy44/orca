@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { ClaudeLaneDelegationRow } from '../../shared/claude-lane-delegation'
 import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
-import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
+import {
+  LaneCredentialCoordinator,
+  type LaneCredentialCoordinatorOptions
+} from '../claude-accounts/lane-credential-coordinator'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
 import { LaneDelegationDirectory } from './lane-delegation-directory'
 import { LaneWireAuthority, type LaneSwitchGate } from './lane-wire-authority'
@@ -22,6 +25,13 @@ function credentials(refreshToken: string, expiresAt = Date.now() + 3_600_000): 
   return JSON.stringify({
     claudeAiOauth: { accessToken: `at-${refreshToken}`, refreshToken, expiresAt }
   })
+}
+
+function refreshTokenOnDisk(credentialsJson: string | null): string | null {
+  return credentialsJson
+    ? ((JSON.parse(credentialsJson) as { claudeAiOauth: { refreshToken: string } }).claudeAiOauth
+        .refreshToken ?? null)
+    : null
 }
 
 function sha(refreshToken: string): string {
@@ -40,7 +50,13 @@ afterEach(() => {
   }
 })
 
-function makeHarness(options: { designatedGrantId?: string | null; provision?: string[] } = {}) {
+function makeHarness(
+  options: {
+    designatedGrantId?: string | null
+    provision?: string[]
+    fetchLaneUsage?: LaneCredentialCoordinatorOptions['fetchLaneUsage']
+  } = {}
+) {
   const userData = mkdtempSync(join(tmpdir(), 'orca-lane-wire-'))
   createdUserDataDirs.push(userData)
   const lanesRoot = join(userData, 'claude-lanes')
@@ -66,7 +82,8 @@ function makeHarness(options: { designatedGrantId?: string | null; provision?: s
       readCredentials: () => sharedCredentials,
       readOauthAccount: () => null
     },
-    laneOptions: { lanesRoot, platform: 'linux' }
+    laneOptions: { lanesRoot, platform: 'linux' },
+    ...(options.fetchLaneUsage ? { fetchLaneUsage: options.fetchLaneUsage } : {})
   })
   const designations = new Map<string, string | null>([
     [LANE_A, options.designatedGrantId === undefined ? 'device-a' : options.designatedGrantId],
@@ -396,5 +413,88 @@ describe('lane wire authority — pull, clear and status', () => {
     expect(await refusalCode(() => harness.authority.clear(undefined))).toBe(
       'accounts.lane.caller_unidentified'
     )
+  })
+})
+
+/**
+ * §2f/§2k's fence, the kill half: the probe is a live `claude` holding the lane's PRE-change
+ * single-use refresh token, so a push or a wipe must end it before it replaces or sweeps the file.
+ */
+describe('LaneWireAuthority — the in-flight lane usage probe', () => {
+  function probeHarness() {
+    let announceProbe = (): void => {}
+    const probeRunning = new Promise<void>((resolve) => {
+      announceProbe = resolve
+    })
+    // What the lane's credential file held at the instant the probe was killed.
+    const credentialsAtKill: (string | null)[] = []
+    let readLaneCredentials = (): string | null => null
+    const harness = makeHarness({
+      fetchLaneUsage: ({ signal }) =>
+        new Promise((resolve) => {
+          announceProbe()
+          signal.addEventListener(
+            'abort',
+            () => {
+              credentialsAtKill.push(readLaneCredentials())
+              resolve({
+                provider: 'claude',
+                session: null,
+                weekly: null,
+                updatedAt: Date.now(),
+                error: 'aborted',
+                status: 'error'
+              })
+            },
+            { once: true }
+          )
+        })
+    })
+    readLaneCredentials = () => refreshTokenOnDisk(harness.laneCredentialsOnDisk(LANE_A))
+    return { ...harness, probeRunning, credentialsAtKill }
+  }
+
+  it('kills the probe before a push replaces the credential it is holding', async () => {
+    const harness = probeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    // The tick's own sync is what publishes the lane's attribution row the pull iterates.
+    await harness.coordinator.syncLane(LANE_A, 'rate-limit-tick')
+    const pull = harness.coordinator.pullLaneUsage()
+    await harness.probeRunning
+
+    await harness.authority.push(
+      'device-a',
+      pushParams('rt-2', { basedOnRefreshTokenSha256: sha('rt-1') })
+    )
+
+    // Killed, and killed while the PRE-push blob was still on disk.
+    expect(harness.credentialsAtKill).toEqual(['rt-1'])
+    expect(refreshTokenOnDisk(harness.laneCredentialsOnDisk(LANE_A))).toBe('rt-2')
+    const outcome = await pull
+    expect(outcome.skipped).toEqual([{ laneId: LANE_A, reason: 'stale-probe' }])
+  })
+
+  it('kills the probe before a clear sweeps the lane', async () => {
+    const harness = probeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    await harness.coordinator.syncLane(LANE_A, 'rate-limit-tick')
+    const pull = harness.coordinator.pullLaneUsage()
+    await harness.probeRunning
+
+    await harness.authority.clear('device-a')
+
+    expect(harness.credentialsAtKill).toEqual(['rt-1'])
+    expect(harness.laneCredentialsOnDisk(LANE_A)).toBeNull()
+    await pull
+  })
+
+  // Negative control: with no probe in flight the fence changes nothing about a push.
+  it('pushes normally when no probe is running', async () => {
+    const harness = probeHarness()
+
+    await harness.authority.push('device-a', pushParams('rt-1'))
+
+    expect(harness.credentialsAtKill).toEqual([])
+    expect(refreshTokenOnDisk(harness.laneCredentialsOnDisk(LANE_A))).toBe('rt-1')
   })
 })

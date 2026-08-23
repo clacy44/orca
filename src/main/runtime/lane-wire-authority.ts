@@ -145,11 +145,10 @@ export class LaneWireAuthority {
   async clear(pairedDeviceId: string | null | undefined): Promise<{ cleared: string[] }> {
     const caller = this.requireCaller(pairedDeviceId)
     const laneDir = this.requireProvisionedLaneDir(caller.principalId)
-    const gate = this.options.switchGate ?? HOST_WIDE_SWITCH_GATE
     const cleared = await this.options.coordinator.authState.serializeLaneWrite(
       caller.principalId,
       async () => {
-        gate.begin(caller.principalId)
+        const gate = await this.beginLaneSwitch(caller.principalId)
         try {
           const removed = await wipeLaneCredentials(laneDir, { platform: this.options.platform })
           this.options.coordinator.residency.clearLaneRow(caller.principalId)
@@ -235,6 +234,20 @@ export class LaneWireAuthority {
     )
   }
 
+  /**
+   * Closes the lane's switch gate and then kills what the change is about to invalidate (§2k).
+   *
+   * Order is the fence: the gate stops the NEXT probe from starting, the invalidation ends the one
+   * already running — which is holding the pre-change single-use refresh token and would otherwise
+   * post usage for the old account and rotate a credential the lane no longer holds.
+   */
+  private async beginLaneSwitch(laneId: string): Promise<LaneSwitchGate> {
+    const gate = this.options.switchGate ?? HOST_WIDE_SWITCH_GATE
+    gate.begin(laneId)
+    await this.options.coordinator.invalidateLaneUsageProbes(laneId)
+    return gate
+  }
+
   private async applyPush(
     laneId: string,
     laneDir: string,
@@ -257,8 +270,7 @@ export class LaneWireAuthority {
       oauthAccount: request.oauthAccount,
       reauthenticated: request.reauthenticated
     })
-    const gate = this.options.switchGate ?? HOST_WIDE_SWITCH_GATE
-    gate.begin(laneId)
+    const gate = await this.beginLaneSwitch(laneId)
     try {
       await coordinator.store.writer.writeCredentials(laneDir, request.envelope.credentialsJson)
       coordinator.store.writer.writeOauthAccount(laneDir, request.oauthAccount)

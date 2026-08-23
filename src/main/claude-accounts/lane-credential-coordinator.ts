@@ -1,6 +1,10 @@
 import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
 import { fetchViaPty } from '../rate-limits/claude-pty'
-import { LaneUsagePull, type LaneUsagePullOutcome } from '../rate-limits/lane-usage-pull'
+import {
+  LaneUsagePull,
+  type LaneUsagePullDeps,
+  type LaneUsagePullOutcome
+} from '../rate-limits/lane-usage-pull'
 import { isLaneWipePending } from './lane-wipe-pending'
 import {
   isClaudeAuthSwitchInProgress,
@@ -32,6 +36,8 @@ export type LaneCredentialCoordinatorOptions = {
   laneOptions?: PrincipalLaneOptions
   /** Injected so the tick arm is observable without the module-global pty gate. */
   listLanesWithLivePtys?: () => string[]
+  /** Injected so the probe's fence is assertable without spawning a real hidden `claude`. */
+  fetchLaneUsage?: LaneUsagePullDeps['fetchUsage']
 }
 
 export class LaneCredentialCoordinator {
@@ -67,7 +73,7 @@ export class LaneCredentialCoordinator {
       // DEVIATION, recorded: `isClaudeAuthSwitchInProgress` is still host-global in this tree —
       // §2f's lane scoping is S9c. Over-skipping is the safe direction for a usage tick.
       isSwitchInProgress: () => isClaudeAuthSwitchInProgress(),
-      fetchUsage: (input) => fetchViaPty(input),
+      fetchUsage: options.fetchLaneUsage ?? ((input) => fetchViaPty(input)),
       markProbeSpawned: markEphemeralClaudePtySpawned,
       markProbeExited: markEphemeralClaudePtyExited,
       syncProbedLane: async (laneId) => {
@@ -84,6 +90,16 @@ export class LaneCredentialCoordinator {
   /** The usage row a terminal's lane join reads; null while the pull is disabled or unrun. */
   laneUsage(laneId: string): ProviderRateLimits | null {
     return this.usagePull.laneUsage(laneId)
+  }
+
+  /**
+   * The kill half of §2f/§2k's fence: a push or a wipe invalidates this lane's probes first.
+   *
+   * Awaited, so the caller replaces or sweeps `.credentials.json` only once the `claude` holding
+   * the pre-change token is gone.
+   */
+  invalidateLaneUsageProbes(laneId: string): Promise<void> {
+    return this.usagePull.invalidateLane(laneId)
   }
 
   /** True where no probe can run (§2k Fact 2): the row says why rather than showing no bar. */
