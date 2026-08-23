@@ -11,13 +11,21 @@ export type ClaudeLivePtySessionLane = {
   laneId: string
 }
 
+/**
+ * The cap the id list this array shadows already carries: a corrupt or hand-edited state file
+ * must not be held in memory unbounded until the next spawn prunes it.
+ */
+export const MAX_CLAUDE_LIVE_PTY_SESSION_LANES = 200
+
 /** Drops anything that is not a `{ sessionId, laneId }` pair of bounded, non-empty strings. */
 export function normalizeClaudeLivePtySessionLanes(value: unknown): ClaudeLivePtySessionLane[] {
   if (!Array.isArray(value)) {
     return []
   }
+  // Newest-first, matching how the id list evicts: the cap keeps the most recent rows.
   const rows = new Map<string, ClaudeLivePtySessionLane>()
-  for (const entry of value) {
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    const entry = value[index]
     if (!entry || typeof entry !== 'object') {
       continue
     }
@@ -32,7 +40,12 @@ export function normalizeClaudeLivePtySessionLanes(value: unknown): ClaudeLivePt
     ) {
       continue
     }
-    rows.set(sessionId, { sessionId, laneId })
+    if (!rows.has(sessionId)) {
+      rows.set(sessionId, { sessionId, laneId })
+    }
+    if (rows.size >= MAX_CLAUDE_LIVE_PTY_SESSION_LANES) {
+      break
+    }
   }
-  return [...rows.values()]
+  return [...rows.values()].toReversed()
 }

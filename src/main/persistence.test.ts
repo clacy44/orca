@@ -11949,6 +11949,19 @@ describe('Store', () => {
       expect(sessions.every((row) => row.laneId === LANE_ID)).toBe(true)
     })
 
+    it('backfills the lane row when a pre-S9c id is marked spawned again', async () => {
+      writeDataFile({ schemaVersion: 1, claudeLivePtySessionIds: ['legacy-id'] })
+      const store = await createStore()
+
+      store.addClaudeLivePtySessionId('legacy-id', LANE_ID)
+
+      // Why it matters: a seeded id with no lane attribution defers EVERY account's rotation.
+      expect(store.getClaudeLivePtySessions()).toEqual([
+        { sessionId: 'legacy-id', laneId: LANE_ID }
+      ])
+      expect(store.getClaudeLivePtySessionIds()).toEqual(['legacy-id'])
+    })
+
     it('drops malformed persisted entries on load', async () => {
       writeDataFile({
         schemaVersion: 1,

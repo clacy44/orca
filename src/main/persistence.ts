@@ -7252,13 +7252,21 @@ export class Store {
       return
     }
     const ids = this.state.claudeLivePtySessionIds ?? []
-    if (ids.includes(sessionId)) {
+    const laneRows = this.state.claudeLivePtySessionLanes ?? []
+    // Why the lane is compared too: a pre-S9c id re-marked spawned would otherwise keep its
+    // missing lane row forever, and a seed with no lane attribution defers EVERY account.
+    if (
+      ids.includes(sessionId) &&
+      laneRows.some((row) => row.sessionId === sessionId && row.laneId === laneId)
+    ) {
       return
     }
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
-    this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+    this.state.claudeLivePtySessionIds = ids.includes(sessionId)
+      ? ids
+      : [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
     this.state.claudeLivePtySessionLanes = this.retainLivePtySessionLanes([
-      ...(this.state.claudeLivePtySessionLanes ?? []).filter((row) => row.sessionId !== sessionId),
+      ...laneRows.filter((row) => row.sessionId !== sessionId),
       { sessionId, laneId }
     ])
     // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
