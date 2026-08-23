@@ -88,7 +88,7 @@ describe('PrincipalRegistry', () => {
       )
     })
 
-    it('admits the local socket and the host renderer', () => {
+    it('admits the local socket', () => {
       expect(authorizeHostConsent({}).source).toBe('local-socket')
     })
   })
