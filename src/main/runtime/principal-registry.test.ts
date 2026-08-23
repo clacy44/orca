@@ -3,7 +3,12 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PrincipalRegistry, type PrincipalGrantRow } from './principal-registry'
+import {
+  PrincipalRegistry,
+  type PrincipalGrantRow,
+  type PrincipalGrantSource
+} from './principal-registry'
+import type { DeviceRegistry } from './device-registry'
 import { authorizeHostConsent } from './principal-consent-authority'
 import { PRINCIPAL_REGISTRY_FILENAME } from './principal-registry-store'
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
@@ -15,6 +20,13 @@ import {
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
 
 const RUNTIME_AUTH_TOKEN = 'a'.repeat(48)
+
+// Why type-only: the registry takes the device registry as its grant source, and nothing else in
+// this slice wires the two together yet — this keeps the shapes from drifting apart in the meantime.
+type Assert<T extends true> = T
+export type DeviceRegistryIsAGrantSource = Assert<
+  DeviceRegistry extends PrincipalGrantSource ? true : false
+>
 
 class FakeGrants {
   private rows: PrincipalGrantRow[] = []
