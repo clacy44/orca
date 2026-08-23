@@ -500,10 +500,6 @@ import {
   isTuiAgentEnabled,
   pickTuiAgent
 } from '../../shared/tui-agent-selection'
-import {
-  resolveTuiAgentLaunchArgs,
-  resolveTuiAgentLaunchEnv
-} from '../../shared/tui-agent-launch-defaults'
 import { resolveLocalWindowsAgentStartupShell } from '../../shared/windows-terminal-shell'
 import {
   getTuiAgentLaunchCommand,
@@ -1083,7 +1079,7 @@ import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-co
 import { terminalPresenceRegistry } from './terminal-presence-registry'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
-import { laneScopedAgentLaunchSettings } from './lane-launch-computation'
+import { laneScopedAgentLaunchInputs } from './lane-launch-computation'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import {
   appendRecentPtyPathCandidates,
@@ -8156,10 +8152,14 @@ export class OrcaRuntimeService {
         let agentStartup: Awaited<
           ReturnType<OrcaRuntimeService['resolveMobileSessionTerminalCommand']>
         > = {}
+        // Why hoisted: the re-resolved launch below is built against this lane, and the
+        // materialize must not resolve the caller's lane twice and shape one from the other.
+        const materializeLane = this.resolveCallerCredentialLane(opts.pairedDeviceId)
         if (tab.launchAgent) {
           try {
             const workspace = await this.resolveTerminalWorkspaceLaunchScope(`id:${worktreeId}`)
             agentStartup = await this.resolveMobileSessionTerminalCommand(workspace, {
+              credentialLane: materializeLane,
               agent: tab.launchAgent
             })
           } catch {
@@ -8169,7 +8169,7 @@ export class OrcaRuntimeService {
         }
         try {
           await this.createRuntimeOwnedMobileSessionTerminal(worktreeId, targetsHost, undefined, {
-            credentialLane: this.resolveCallerCredentialLane(opts.pairedDeviceId),
+            credentialLane: materializeLane,
             // Why: this call site is not a create — it reattaches or respawns the pane the tapped
             // tab already names, so §2a(i)'s identity drop never reaches it.
             identity: {
@@ -22205,6 +22205,8 @@ export class OrcaRuntimeService {
   private async buildStartupForDraft(
     repo: Repo,
     draft: string,
+    /** The lane the panes this startup launches will carry (§2 rows 13/14). */
+    credentialLane: PaneCredentialLane,
     requestedAgent?: TuiAgent
   ): Promise<{
     agent: TuiAgent
@@ -22255,12 +22257,13 @@ export class OrcaRuntimeService {
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
     })
+    const laneScoped = laneScopedAgentLaunchInputs({ lane: credentialLane, settings, agent })
     const draftLaunchPlan = buildAgentDraftLaunchPlan({
       agent,
       draft: content,
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       platform: agentLaunchPlatform,
       shell: queuedShell,
       isRemote
@@ -22282,9 +22285,9 @@ export class OrcaRuntimeService {
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       platform: agentLaunchPlatform,
       shell: queuedShell,
       isRemote,
@@ -22311,6 +22314,8 @@ export class OrcaRuntimeService {
     repo: Repo,
     agent: TuiAgent,
     prompt: string | undefined,
+    /** The lane the panes this startup launches will carry (§2 rows 13/14). */
+    credentialLane: PaneCredentialLane,
     launchPreferences?: AgentLaunchPreferences
   ): { agent: TuiAgent; startup: WorktreeStartupLaunch; followup?: WorktreeStartupFollowup } {
     if (!this.store) {
@@ -22330,12 +22335,13 @@ export class OrcaRuntimeService {
       terminalWindowsShell: settings.terminalWindowsShell
     })
     const sessionOptions = this.toAgentSessionOptions(launchPreferences)
+    const laneScoped = laneScopedAgentLaunchInputs({ lane: credentialLane, settings, agent })
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: prompt ?? '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       sessionOptions,
       sessionOptionsOverrideAgentArgs: Boolean(sessionOptions),
       platform: agentLaunchPlatform,
@@ -22829,12 +22835,13 @@ export class OrcaRuntimeService {
             repo,
             args.startupAgent,
             args.startupPrompt,
+            credentialLane,
             args.startupLaunchPreferences
           )
         : null
     const draftStartup =
       !args.startup && !agentStartup && args.startupDraft
-        ? await this.buildStartupForDraft(repo, args.startupDraft, requestedAgent)
+        ? await this.buildStartupForDraft(repo, args.startupDraft, credentialLane, requestedAgent)
         : null
     const effectiveStartup = args.startup ?? agentStartup?.startup ?? draftStartup?.startup
     const effectiveStartupFollowup = agentStartup?.followup
@@ -26068,13 +26075,13 @@ export class OrcaRuntimeService {
     const sessionOptions = this.toAgentSessionOptions(opts.launchPreferences)
     // Why here and not at the spawn anchor: this is the one place the host rebuilds a launch FROM
     // settings, so it is the only place `ignored for lane launches` can be exact (S9 §2 row 13).
-    const laneScoped = laneScopedAgentLaunchSettings(credentialLane, settings)
+    const laneScoped = laneScopedAgentLaunchInputs({ lane: credentialLane, settings, agent })
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: '',
       cmdOverrides: laneScoped.cmdOverrides,
-      agentArgs: resolveTuiAgentLaunchArgs(agent, laneScoped.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, laneScoped.agentDefaultEnv),
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       sessionOptions,
       sessionOptionsOverrideAgentArgs: Boolean(sessionOptions),
       platform,
@@ -26211,15 +26218,20 @@ export class OrcaRuntimeService {
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
     })
+    // Why resolved here and not at the createTerminal call below: the launch is BUILT here, and
+    // a peer's host-wide defaults may not shape this principal's lane (§2 rows 13/14).
+    const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+    const laneScoped = laneScopedAgentLaunchInputs({
+      lane: credentialLane,
+      settings,
+      agent: request.agent
+    })
     const startup = buildAgentResumeStartupPlan({
       agent: request.agent,
       providerSession: identity.providerSession,
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs:
-        request.agentArgs !== undefined
-          ? request.agentArgs
-          : resolveTuiAgentLaunchArgs(request.agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(request.agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: request.agentArgs !== undefined ? request.agentArgs : laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       ompResumeFilePath: request.ompResumeFilePath,
       sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
       platform,
@@ -26242,7 +26254,7 @@ export class OrcaRuntimeService {
       throw new Error('client_disconnected')
     }
     const terminal = await this.createTerminal(`id:${workspace.id}`, {
-      credentialLane: this.resolveCallerCredentialLane(caller.pairedDeviceId),
+      credentialLane,
       command: startup.launchCommand,
       env: startup.env,
       launchConfig: startup.launchConfig,
@@ -26376,14 +26388,17 @@ export class OrcaRuntimeService {
         isRemote,
         terminalWindowsShell: settings.terminalWindowsShell
       })
+      const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+      const laneScoped = laneScopedAgentLaunchInputs({
+        lane: credentialLane,
+        settings,
+        agent: request.agent
+      })
       const startupArgs = {
         agent: request.agent,
-        cmdOverrides: settings.agentCmdOverrides ?? {},
-        agentArgs:
-          request.agentArgs !== undefined
-            ? request.agentArgs
-            : resolveTuiAgentLaunchArgs(request.agent, settings.agentDefaultArgs),
-        agentEnv: resolveTuiAgentLaunchEnv(request.agent, settings.agentDefaultEnv),
+        cmdOverrides: laneScoped.cmdOverrides,
+        agentArgs: request.agentArgs !== undefined ? request.agentArgs : laneScoped.agentArgs,
+        agentEnv: laneScoped.agentEnv,
         sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
         platform,
         shell,
@@ -26427,7 +26442,7 @@ export class OrcaRuntimeService {
       const operationHandle = `term_${deterministicAgentSessionUuid(`${executionOperationId}:handle`)}`
       try {
         terminal = await this.createTerminal(`id:${workspace.id}`, {
-          credentialLane: this.resolveCallerCredentialLane(caller.pairedDeviceId),
+          credentialLane,
           command: startup.launchCommand,
           env: startup.env,
           launchConfig: startup.launchConfig,
@@ -27147,7 +27162,8 @@ export class OrcaRuntimeService {
     if (!repo) {
       throw new Error('Repository for the selected workspace is no longer available.')
     }
-    const startup = this.buildStartupForAgent(repo, opts.agent, opts.prompt)
+    // Why shared here too: this is the local-IPC launch below, which keeps today's `~/.claude`.
+    const startup = this.buildStartupForAgent(repo, opts.agent, opts.prompt, SHARED_CREDENTIAL_LANE)
     if (repo.connectionId) {
       await this.markRemoteWorkspaceTrustedForAgent(opts.agent, repo.connectionId, worktree.path)
     } else {
@@ -27498,6 +27514,8 @@ export class OrcaRuntimeService {
   private async resolveMobileSessionTerminalCommand(
     workspace: TerminalWorkspaceLaunchScope,
     opts: {
+      /** Required: this builder pre-bakes a launch, so the lane must reach it (§2 rows 13/14). */
+      credentialLane: PaneCredentialLane
       command?: string
       env?: Record<string, string>
       envToDelete?: string[]
@@ -27541,12 +27559,17 @@ export class OrcaRuntimeService {
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
     })
+    const laneScoped = laneScopedAgentLaunchInputs({
+      lane: opts.credentialLane,
+      settings,
+      agent: opts.agent
+    })
     const startupPlan = buildAgentStartupPlan({
       agent: opts.agent,
       prompt: opts.agentPrompt ?? '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(opts.agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(opts.agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       platform,
       shell: queuedShell,
       isRemote,

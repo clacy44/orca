@@ -3,6 +3,10 @@ import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { setEnvKeyCollapsed } from '../../shared/lane-env-key-case'
 import type { TuiAgent } from '../../shared/tui-agent'
 import {
+  resolveTuiAgentLaunchArgs,
+  resolveTuiAgentLaunchEnv
+} from '../../shared/tui-agent-launch-defaults'
+import {
   assertLaneResumePathsContained,
   sanitizeLaneLaunchCommand,
   sanitizeLaneLaunchEnv,
@@ -94,6 +98,35 @@ export function laneScopedAgentLaunchSettings(
     cmdOverrides: settings.agentCmdOverrides ?? {},
     agentDefaultArgs: settings.agentDefaultArgs ?? undefined,
     agentDefaultEnv: settings.agentDefaultEnv ?? undefined
+  }
+}
+
+/** The three inputs a host-side builder feeds an agent launch plan, already lane-scoped. */
+export type LaneScopedAgentLaunchInputs = {
+  cmdOverrides: Partial<Record<TuiAgent, string>>
+  agentArgs: string
+  agentEnv: Record<string, string>
+}
+
+/**
+ * `laneScopedAgentLaunchSettings` as a builder consumes it — one call for the three reads.
+ *
+ * Every host-side builder that hands `createTerminal` a PRE-BAKED launch takes this instead of
+ * reading `settings.agentCmdOverrides` / `agentDefaultArgs` / `agentDefaultEnv` itself: those
+ * builders bypass `resolveAgentTerminalCreateOptions` (a caller-supplied `env`/`launchConfig`
+ * returns `opts` untouched), so the exclusion has to travel with the lane to each of them or
+ * §2 rows 13/14 hold on one site only.
+ */
+export function laneScopedAgentLaunchInputs(args: {
+  lane: { kind: 'principal' | 'shared' }
+  settings: HostWideAgentLaunchSettings
+  agent: TuiAgent
+}): LaneScopedAgentLaunchInputs {
+  const scoped = laneScopedAgentLaunchSettings(args.lane, args.settings)
+  return {
+    cmdOverrides: scoped.cmdOverrides,
+    agentArgs: resolveTuiAgentLaunchArgs(args.agent, scoped.agentDefaultArgs),
+    agentEnv: resolveTuiAgentLaunchEnv(args.agent, scoped.agentDefaultEnv)
   }
 }
 
