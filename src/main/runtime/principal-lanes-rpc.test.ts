@@ -98,6 +98,7 @@ describe('principal lane consent RPC', () => {
 
   it('refuses every consent write from an identified socket', async () => {
     grants.add('desktop')
+    // Every mutator on the surface, including the two destructive ones (§2a rule (iii)).
     const principalId = (await call('accounts.lane.createPrincipal', { displayName: 'Ana' })) as {
       principalId: string
     }
@@ -114,9 +115,26 @@ describe('principal lane consent RPC', () => {
         )
       ).rejects.toThrow(/decisions made at the host machine/)
       await expect(
+        call('accounts.lane.unbindGrant', { deviceId: 'desktop' }, { clientKind })
+      ).rejects.toThrow(/decisions made at the host machine/)
+      await expect(
+        call(
+          'accounts.lane.rebindGrant',
+          { deviceId: 'desktop', principalId: principalId.principalId },
+          { clientKind }
+        )
+      ).rejects.toThrow(/decisions made at the host machine/)
+      await expect(
         call(
           'accounts.lane.designatePusher',
           { principalId: principalId.principalId, deviceId: 'desktop' },
+          { clientKind }
+        )
+      ).rejects.toThrow(/decisions made at the host machine/)
+      await expect(
+        call(
+          'accounts.lane.bindFederatedLink',
+          { homePeerFingerprint: 'f'.repeat(64) },
           { clientKind }
         )
       ).rejects.toThrow(/decisions made at the host machine/)
