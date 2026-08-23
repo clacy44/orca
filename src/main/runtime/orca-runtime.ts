@@ -26536,6 +26536,11 @@ export class OrcaRuntimeService {
     return this.paneLanes.lookup(worktreeId, tabId, leafId)
   }
 
+  /** The lane a posted paneKey names — the usage attribution join's first hop (§2k). */
+  credentialLaneOfPaneKey(paneKey: string): PaneCredentialLane | null {
+    return this.paneLanes.laneOfPaneKey(paneKey)
+  }
+
   /** The lane the pane RECORD carries, read back by pane identity at every spawn edge (§2a). */
   credentialLaneOfPane(worktreeId: string, paneKey: string): PaneCredentialLane | null {
     return this.paneLanes.laneOf(worktreeId, paneKey)

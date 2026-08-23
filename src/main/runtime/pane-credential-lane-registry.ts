@@ -89,6 +89,26 @@ export class PaneCredentialLaneRegistry {
     return paneExists ? { kind: 'unbound' } : { kind: 'unknown' }
   }
 
+  /**
+   * The statusline posts a paneKey and no worktree, so the join has to address by key alone.
+   *
+   * Ambiguity answers `null`, not a guess: two worktrees can hold the same client-supplied tabId,
+   * and attributing to the wrong one is the cross-principal misattribution the key exists to fix.
+   */
+  laneOfPaneKeyAcrossWorktrees(paneKey: string): PaneCredentialLane | null {
+    let found: PaneCredentialLane | null = null
+    for (const [key, value] of this.lanes) {
+      if (key.slice(value.worktreeId.length + LANE_KEY_SEPARATOR.length) !== paneKey) {
+        continue
+      }
+      if (found && !laneEquals(found, value.lane)) {
+        return null
+      }
+      found = value.lane
+    }
+    return found
+  }
+
   forget(worktreeId: string, paneKey: string): void {
     this.lanes.delete(laneKey(worktreeId, paneKey))
   }

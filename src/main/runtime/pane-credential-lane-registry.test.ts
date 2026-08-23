@@ -166,4 +166,33 @@ describe('assertPaneAdoptableByCaller', () => {
       }
     }
   })
+
+  describe('laneOfPaneKeyAcrossWorktrees — the statusline join (§2k)', () => {
+    it('answers the lane when exactly one worktree holds that pane key', () => {
+      const registry = new PaneCredentialLaneRegistry()
+      registry.bind('wt1', 'tab-1:pane', laneA)
+      registry.bind('wt2', 'tab-2:pane', laneB)
+
+      expect(registry.laneOfPaneKeyAcrossWorktrees('tab-1:pane')).toEqual(laneA)
+    })
+
+    // Negative control: a client-supplied tabId can repeat across worktrees, and guessing which
+    // one posted is the cross-principal misattribution the paneKey key exists to remove.
+    it('answers null when two worktrees disagree about the same pane key', () => {
+      const registry = new PaneCredentialLaneRegistry()
+      registry.bind('wt1', 'tab-1:pane', laneA)
+      registry.bind('wt2', 'tab-1:pane', laneB)
+
+      expect(registry.laneOfPaneKeyAcrossWorktrees('tab-1:pane')).toBeNull()
+    })
+
+    it('answers the lane when two worktrees agree, and null for an unknown key', () => {
+      const registry = new PaneCredentialLaneRegistry()
+      registry.bind('wt1', 'tab-1:pane', laneA)
+      registry.bind('wt2', 'tab-1:pane', { kind: 'principal', principalId: PRINCIPAL_A })
+
+      expect(registry.laneOfPaneKeyAcrossWorktrees('tab-1:pane')).toEqual(laneA)
+      expect(registry.laneOfPaneKeyAcrossWorktrees('tab-9:pane')).toBeNull()
+    })
+  })
 })

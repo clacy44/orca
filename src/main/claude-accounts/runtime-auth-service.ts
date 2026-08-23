@@ -44,6 +44,7 @@ import {
   writeManagedClaudeKeychainCredentials
 } from './keychain'
 import { LaneCredentialCoordinator } from './lane-credential-coordinator'
+import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
 import {
   assertClaudeLaunchNotDelegatedToLane,
   isClaudeAccountDelegatedToLane
@@ -143,6 +144,11 @@ export class ClaudeRuntimeAuthService {
     }
     await this.syncForCurrentSelection(effectiveTarget)
     return this.getPreparation(effectiveTarget, lanePrincipalId)
+  }
+
+  /** The lane rows the statusline attribution map keys by config dir (S9 §2k). */
+  listLaneUsageAttributions(): ClaudeLaneUsageAttribution[] {
+    return this.laneCredentials.laneUsageAttributions()
   }
 
   async prepareForRateLimitFetch(

@@ -387,6 +387,17 @@ export class PaneLaneAuthority {
     record.lanePrincipalId = this.principalIdOf(worktreeId, paneKey)
   }
 
+  /**
+   * The lane a statusline post's paneKey names, for the usage attribution join (§2k).
+   *
+   * Rehydrates first: a post can arrive before any create in this process has touched the
+   * registry, and an empty table would drop every restored pane's usage onto the config-dir map.
+   */
+  laneOfPaneKey(paneKey: string): PaneCredentialLane | null {
+    this.ensureRehydrated()
+    return this.registry.laneOfPaneKeyAcrossWorktrees(paneKey)
+  }
+
   /** The person behind a grant, for the presence row's three-hop owner join (§2h). */
   principalOfGrant(pairedDeviceId: string | null | undefined): string | null {
     return pairedDeviceId ? (this.principals?.principalOf(pairedDeviceId) ?? null) : null

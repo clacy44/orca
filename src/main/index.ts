@@ -2430,6 +2430,9 @@ void app.whenReady().then(async () => {
   rateLimits.setClaudeAuthPreparationResolver((target) =>
     claudeRuntimeAuth!.prepareForRateLimitFetch(target)
   )
+  // Why beside it: the shared fetch is the tick, and the lane rows must be re-read on the same
+  // one or a lane's statusline post is attributed against a stale config dir (S9 §2k).
+  rateLimits.setClaudeLaneAttributionResolver(() => claudeRuntimeAuth!.listLaneUsageAttributions())
   // Why: live Claude sessions stream usage windows through their statusLine command; feeding them here avoids OAuth usage-endpoint polling (and its 429s).
   agentHookServer.setClaudeStatusLineListener((event) => {
     rateLimits?.ingestLiveClaudeRateLimits(event)
@@ -2562,6 +2565,13 @@ void app.whenReady().then(async () => {
     orchestrationEnvironmentTransport
   })
   runtime = runtimeService
+  // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
+  // which is constructed after them. A post arriving before this lands falls back to the
+  // config-dir map, which is the pre-S9b behaviour (S9 §2k).
+  rateLimits?.setClaudeUsagePaneLaneLookup((paneKey) => {
+    const lane = runtimeService.credentialLaneOfPaneKey(paneKey)
+    return lane ? { laneId: lane.kind === 'principal' ? lane.principalId : null } : null
+  })
   runtimeService.prepareLegacyWorkerTerminalRecovery()
   // Why: federated mail queued before the restart resumes here instead of waiting for
   // an RPC to touch the Run.

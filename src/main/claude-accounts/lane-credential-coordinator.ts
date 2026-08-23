@@ -1,9 +1,13 @@
+import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
 import { AccountResidencyIndex, type SharedLaneCredentialReader } from './account-residency-index'
+import { readIdentityFromOauthAccount } from './claude-credential-identity'
+import { ensureLaneProvenanceLabel, formatLaneProvenance } from './principal-lane-provenance'
 import { LaneAuthState } from './lane-auth-state'
 import { listLanesWithLiveClaudePtys } from './live-pty-gate'
 import { LaneSyncDriver, type LaneSyncOutcome, type LaneSyncTrigger } from './lane-sync-driver'
 import { PrincipalLaneStore, type LaneWatermarkPersistence } from './principal-lane-store'
 import type { PrincipalLaneOptions } from './principal-credential-lane'
+import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 
 /**
  * The one host-side owner of the lane credential machinery (S9 §2c/§2e).
@@ -27,6 +31,9 @@ export class LaneCredentialCoordinator {
   readonly authState: LaneAuthState
   readonly syncDriver: LaneSyncDriver
   private presenceLabelResolver: ((laneId: string) => string | null) | null = null
+  // Why populated from `syncLane` rather than from a lane listing: "loaded" is a fact the sync
+  // establishes, and a lane that has never synced has no row to attribute usage to (S9 §2k).
+  private readonly usageAttributions = new Map<string, ClaudeLaneUsageAttribution>()
 
   constructor(private readonly options: LaneCredentialCoordinatorOptions) {
     this.store = new PrincipalLaneStore(options.persistence, options.laneOptions ?? {})
@@ -49,8 +56,32 @@ export class LaneCredentialCoordinator {
     this.presenceLabelResolver = resolve
   }
 
-  syncLane(laneId: string, trigger: LaneSyncTrigger): Promise<LaneSyncOutcome> {
-    return this.syncDriver.syncLane(laneId, trigger)
+  async syncLane(laneId: string, trigger: LaneSyncTrigger): Promise<LaneSyncOutcome> {
+    const outcome = await this.syncDriver.syncLane(laneId, trigger)
+    this.recordUsageAttribution(laneId, outcome.laneState)
+    return outcome
+  }
+
+  /** One entry per LOADED lane, for the statusline attribution map (S9 §2k). */
+  laneUsageAttributions(): ClaudeLaneUsageAttribution[] {
+    return [...this.usageAttributions.values()]
+  }
+
+  private recordUsageAttribution(laneId: string, laneState: RuntimeTerminalLaneState): void {
+    const laneDir = laneState === 'loaded' ? this.store.resolveLaneDir(laneId) : null
+    if (!laneDir) {
+      // Why dropped rather than kept stale: a wiped or reauth-held lane must stop attracting
+      // posts, and §2d omits a peer's lane usage rather than showing a stale bar.
+      this.usageAttributions.delete(laneId)
+      return
+    }
+    this.usageAttributions.set(laneId, {
+      laneId,
+      configDir: laneDir,
+      // Why the opaque label and not the lane path: `provenance` is published on the usage row.
+      provenance: formatLaneProvenance(ensureLaneProvenanceLabel(laneDir)),
+      identity: readIdentityFromOauthAccount(this.store.readLaneOauthAccount(laneId))
+    })
   }
 
   /**
