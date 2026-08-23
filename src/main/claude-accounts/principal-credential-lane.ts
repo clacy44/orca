@@ -1,0 +1,203 @@
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
+import { join, relative, sep } from 'node:path'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import {
+  canonicalizePathForContainment,
+  isCanonicalPathWithinRoot
+} from '../../shared/lane-path-containment'
+import { restrictWindowsPathSync } from '../../shared/secure-path-windows-acl'
+import { parseWslUncPath } from '../../shared/wsl-paths'
+import { getClaudeLanesRoot } from './claude-lanes-root'
+import { ensureLaneProvenanceLabel } from './principal-lane-provenance'
+import { sweepLaneCredentialTempArtifacts } from './principal-lane-credential-sweep'
+
+const LANE_MARKER_FILENAME = '.orca-principal-lane'
+
+// The exact shape `randomUUID()` mints, which is what the device registry mints its ids in
+// (`device-registry.ts:92`). Validated AT CREATION so no principal id ever reaches path.join
+// unvalidated; containment below is defence-in-depth, not the primary check.
+const PRINCIPAL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+export type PrincipalLaneOptions = {
+  lanesRoot?: string
+  platform?: NodeJS.Platform
+}
+
+export type ProvisionedPrincipalLane = {
+  laneDir: string
+  provenanceLabel: string
+}
+
+export function isPrincipalId(value: string): boolean {
+  return PRINCIPAL_ID_PATTERN.test(value)
+}
+
+export function assertPrincipalId(value: string): void {
+  if (!isPrincipalId(value)) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.principal_id_invalid',
+      'That principal id is not in the host-minted UUID shape Orca requires for a credential lane. Mint the principal through the pairing consent surface instead of naming one by hand.'
+    )
+  }
+}
+
+/** `<userData>/claude-lanes/<principalId>/`, used verbatim as that principal's CLAUDE_CONFIG_DIR. */
+export function getPrincipalLaneDir(
+  principalId: string,
+  options: PrincipalLaneOptions = {}
+): string {
+  assertPrincipalId(principalId)
+  return join(options.lanesRoot ?? getClaudeLanesRoot(), principalId)
+}
+
+/**
+ * Creates the lane and hardens it, failing closed rather than degrading (S9 §2a, §2m(1)).
+ *
+ * POSIX gets `0700` on the directory (files are written `0600` by their own writers). On win32
+ * the mode bit is inert, so the lane takes the SYNCHRONOUS ACL arm and its boolean is CHECKED —
+ * the ordinary directory-hardening path is async, best-effort and caches the path as hardened
+ * whether or not the ACL landed (`secure-file.ts:59-73`), which is not good enough for the
+ * directory a credential is about to land in. A lane whose DACL cannot be verified does not exist.
+ *
+ * A `\\wsl.localhost\…` root skips the DACL step entirely rather than failing on it: that lane's
+ * isolation control is S9e's in-distro `chmod 0700/0600` read-back, and `restrictWindowsPathSync`
+ * returns FALSE (not a no-op) on a path it cannot set a DACL on.
+ */
+export function provisionPrincipalLane(
+  principalId: string,
+  options: PrincipalLaneOptions = {}
+): ProvisionedPrincipalLane {
+  const laneDir = getPrincipalLaneDir(principalId, options)
+  const platform = options.platform ?? process.platform
+  const existedBefore = existsSync(laneDir)
+  mkdirSync(laneDir, { recursive: true, mode: 0o700 })
+  try {
+    hardenLaneDirectory(laneDir, platform)
+    writeLaneMarker(laneDir, principalId)
+  } catch (error) {
+    // Why: no lane may exist unverified; only remove what this call created.
+    if (!existedBefore) {
+      rmSync(laneDir, { recursive: true, force: true })
+    }
+    throw error
+  }
+  // Why: a re-provision must not inherit a staged credential blob from a crashed write. A loaded
+  // lane's own `.credentials.json` is left alone — provisioning is idempotent, not a wipe.
+  sweepLaneCredentialTempArtifacts(laneDir)
+  return { laneDir, provenanceLabel: ensureLaneProvenanceLabel(laneDir) }
+}
+
+/**
+ * Opens a provisioned lane for use: proves Orca owns it, then sweeps stray credential temps.
+ *
+ * Ownership is `managed-auth-path.ts:12-57`'s discipline re-parameterised for this key rather
+ * than borrowed as-is — that check hardcodes a two-segment `<accountId>/auth` shape, and a lane
+ * is one segment under the lanes root.
+ */
+export function openPrincipalLane(
+  principalId: string,
+  options: PrincipalLaneOptions = {}
+): string | null {
+  const laneDir = resolveOwnedPrincipalLaneDir(principalId, options)
+  if (!laneDir) {
+    return null
+  }
+  sweepLaneCredentialTempArtifacts(laneDir)
+  return laneDir
+}
+
+/** The canonical lane directory, or null when anything about its ownership fails to prove out. */
+export function resolveOwnedPrincipalLaneDir(
+  principalId: string,
+  options: PrincipalLaneOptions = {}
+): string | null {
+  assertPrincipalId(principalId)
+  const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
+  const laneDir = join(lanesRoot, principalId)
+  if (!existsSync(laneDir) || !existsSync(lanesRoot)) {
+    return null
+  }
+  const canonicalLane = canonicalizePathForContainment(laneDir)
+  const canonicalRoot = canonicalizePathForContainment(lanesRoot)
+  if (canonicalLane.kind !== 'canonical' || canonicalRoot.kind !== 'canonical') {
+    return null
+  }
+  if (
+    canonicalLane.path === canonicalRoot.path ||
+    !isCanonicalPathWithinRoot(canonicalRoot.path, canonicalLane.path)
+  ) {
+    return null
+  }
+  const relativeParts = relative(canonicalRoot.path, canonicalLane.path).split(sep)
+  if (relativeParts.length !== 1 || !isPrincipalId(relativeParts[0] ?? '')) {
+    return null
+  }
+  return isLaneMarkerValid(laneDir, principalId) ? canonicalLane.path : null
+}
+
+/** Deprovisioning removes the lane whatever the grant count — the same consent UI as provisioning. */
+export function deprovisionPrincipalLane(
+  principalId: string,
+  options: PrincipalLaneOptions = {}
+): boolean {
+  const laneDir = resolveOwnedPrincipalLaneDir(principalId, options)
+  if (!laneDir) {
+    return false
+  }
+  rmSync(laneDir, { recursive: true, force: true })
+  return true
+}
+
+function hardenLaneDirectory(laneDir: string, platform: NodeJS.Platform): void {
+  if (platform !== 'win32') {
+    chmodSync(laneDir, 0o700)
+    return
+  }
+  if (parseWslUncPath(laneDir)) {
+    return
+  }
+  if (!restrictWindowsPathSync(laneDir, true)) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.provision_dacl_unverified',
+      "Orca could not verify this credential lane's Windows permissions, so the lane was not created. Check that PowerShell is available to Orca and try again; a lane whose access list cannot be read back is never used."
+    )
+  }
+}
+
+function writeLaneMarker(laneDir: string, principalId: string): void {
+  const markerPath = join(laneDir, LANE_MARKER_FILENAME)
+  if (isLaneMarkerValid(laneDir, principalId)) {
+    return
+  }
+  if (existsSync(markerPath)) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.lane_not_owned_by_orca',
+      "That credential lane directory already exists and is not marked as this person's Orca lane. Remove it by hand and provision the lane again."
+    )
+  }
+  writeFileSync(markerPath, `${principalId}\n`, { encoding: 'utf-8', mode: 0o600, flag: 'wx' })
+}
+
+function isLaneMarkerValid(laneDir: string, principalId: string): boolean {
+  const markerPath = join(laneDir, LANE_MARKER_FILENAME)
+  try {
+    if (!existsSync(markerPath)) {
+      return false
+    }
+    const stats = lstatSync(markerPath)
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      return false
+    }
+    return readFileSync(markerPath, 'utf-8').trim() === principalId
+  } catch {
+    return false
+  }
+}
