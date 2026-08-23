@@ -78,7 +78,13 @@ export class AccountResidencyIndex {
     return row ? { ...row } : null
   }
 
-  /** The lane holding this account, or null. Never reports the shared lane. */
+  /**
+   * The lane holding this account, or null. Never reports the shared lane.
+   *
+   * Single-valued only because of L1, which §2d's two `accounts.ts` gates have yet to enforce. The
+   * shared-lane omission is deliberate — the shared lane is not a lane to be refused into — and it
+   * is exactly why `assertAccountNotResidentElsewhere` consults the host row separately.
+   */
   findLaneResidency(
     keys: AccountResidencyKeys,
     excludeLaneId?: string
@@ -101,6 +107,13 @@ export class AccountResidencyIndex {
    *
    * The host row is re-derived first, not because the shared lane can hold a LANE, but because
    * the same call is what keeps that row honest for the push check below.
+   *
+   * NOT YET CALLED FROM PRODUCTION — S9b's push RPC and the two `accounts.ts` gates are 3b's, and
+   * BOTH `selectClaude` and `removeClaude` are owed, not only the push. Until then L1 is
+   * unenforced, and the lane rotation gate rests on it: `isRefreshDeferredByLivePty` resolves
+   * liveness through `findLaneResidency`, which never reports the shared lane, so a live
+   * shared-lane `claude` holding the same account would not defer a lane's rotation. Unreachable
+   * only because no lane can be loaded without a push RPC.
    */
   assertNotLaneResident(account: ResidencyCandidateAccount): void {
     this.refreshHostRow()

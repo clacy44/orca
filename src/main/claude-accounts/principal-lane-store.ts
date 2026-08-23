@@ -202,6 +202,16 @@ export class PrincipalLaneStore {
    * `reauthenticated` is a client assertion — a fresh login legitimately breaks the sha chain —
    * so it excuses a mismatched `basedOn` and nothing else: a strictly older blob is refused under
    * it, because otherwise one flag replays a revoked credential back into the lane.
+   *
+   * WHAT THIS RULE DOES NOT DEFEND AGAINST, stated where the gate lives: every input below is
+   * client-asserted. `basedOn` is a claim rather than a derivation, and the identity comes from
+   * the pushed `oauth-account.json`, which §2b grades explicitly client-asserted — a pusher can
+   * put any email in it. A pusher that names a different `accountUuid` therefore takes the
+   * account-switch return below and replays an arbitrarily old blob of the SAME account past both
+   * arms, which makes §2e rule (1)'s expiry backstop as advisory as the flag it was introduced to
+   * back. §4 does not defend against a hostile pusher and this is inside that limit; what the
+   * push handler owes it is that `oauthAccount` be the VALIDATED envelope member and nothing
+   * re-derived after the fact.
    */
   assertPushIsFresh(input: LanePushFreshnessInput): void {
     const watermark = this.getWatermark(input.laneId)
