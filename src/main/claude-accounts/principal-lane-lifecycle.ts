@@ -1,6 +1,10 @@
 import { rmSync } from 'node:fs'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import { clearLaneWipePending, markLaneWipePending } from './lane-wipe-pending'
+import {
+  clearLaneWipePending,
+  markLaneWipePending,
+  releaseUnconfirmedLaneWipe
+} from './lane-wipe-pending'
 import { wipeLaneCredentials } from './principal-lane-credential-sweep'
 
 /**
@@ -84,17 +88,25 @@ export class PrincipalLaneLifecycle {
    * removed the secrets rather than leaving them under a lane nothing claims.
    */
   async removeLaneOnLastGrantRevoked(laneId: string): Promise<LaneWipeOutcome> {
-    const outcome = await this.wipe(laneId, 'grant-revoked')
-    const laneDir = this.deps.resolveLaneDir(laneId)
-    if (!outcome.completed || !laneDir) {
-      return outcome
-    }
-    rmSync(laneDir, { recursive: true, force: true })
-    this.deps.removeWatermark(laneId)
-    return { ...outcome, laneRemoved: true }
+    let laneRemoved = false
+    // Removed INSIDE the sweep's own serialized write and under the still-set wipe mark: a push
+    // that entered the lane's queue between the two would otherwise be told it succeeded and then
+    // have its whole lane directory — marker, provenance, settings, transcripts — removed under it.
+    const outcome = await this.wipe(laneId, 'grant-revoked', (laneDir) => {
+      rmSync(laneDir, { recursive: true, force: true })
+      this.deps.removeWatermark(laneId)
+      laneRemoved = true
+    })
+    // A wipe that never confirmed empty leaves the directory, the watermark AND the credential in
+    // place: the mark stays set, so the lane keeps failing launches closed until a wipe confirms.
+    return { ...outcome, laneRemoved }
   }
 
-  private async wipe(laneId: string, reason: LaneWipeReason): Promise<LaneWipeOutcome> {
+  private async wipe(
+    laneId: string,
+    reason: LaneWipeReason,
+    finalize?: (laneDir: string) => void
+  ): Promise<LaneWipeOutcome> {
     const laneDir = this.deps.resolveLaneDir(laneId)
     if (!laneDir) {
       return { laneId, reason, removed: [], completed: true, laneRemoved: false }
@@ -104,7 +116,7 @@ export class PrincipalLaneLifecycle {
     markLaneWipePending(laneId)
     const removed: string[] = []
     for (let attempt = 1; attempt <= WIPE_ATTEMPTS; attempt += 1) {
-      const swept = await this.attemptWipe(laneId, laneDir)
+      const swept = await this.attemptWipe(laneId, laneDir, finalize)
       for (const name of swept ?? []) {
         if (!removed.includes(name)) {
           removed.push(name)
@@ -120,12 +132,19 @@ export class PrincipalLaneLifecycle {
       }
     }
     // The mark stays set: launches keep failing closed and no surface may say the lane is empty.
+    // The SEQUENCE ends here though, so a later push into the lane can void the mark rather than
+    // inheriting a latch that would skip this lane's usage probe for the rest of the process.
+    releaseUnconfirmedLaneWipe(laneId)
     console.warn(`[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending`)
     return { laneId, reason, removed, completed: false, laneRemoved: false }
   }
 
   /** One pass of the fence. `null` = the wipe is not confirmed; the mark must stay set. */
-  private async attemptWipe(laneId: string, laneDir: string): Promise<string[] | null> {
+  private async attemptWipe(
+    laneId: string,
+    laneDir: string,
+    finalize?: (laneDir: string) => void
+  ): Promise<string[] | null> {
     return this.deps.serializeLaneWrite(laneId, async () => {
       if (!(await this.confirmProbesDead(laneId))) {
         return null
@@ -136,6 +155,7 @@ export class PrincipalLaneLifecycle {
           this.deps.platform ? { platform: this.deps.platform } : {}
         )
         this.deps.clearResidencyRow(laneId)
+        finalize?.(laneDir)
         return removed
       } catch (error) {
         // `clear_incomplete` is the sweep refusing to report a wipe over a directory that kept

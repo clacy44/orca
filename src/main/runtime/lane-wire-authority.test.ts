@@ -11,6 +11,7 @@ import {
   type LaneCredentialCoordinatorOptions
 } from '../claude-accounts/lane-credential-coordinator'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
+import { resetLaneWipePendingForTests } from '../claude-accounts/lane-wipe-pending'
 import { LaneDelegationDirectory } from './lane-delegation-directory'
 import {
   isClaudeAuthSwitchInProgress,
@@ -49,6 +50,8 @@ function oauthAccount(accountUuid: string, email = 'ana@example.com'): string {
 const createdUserDataDirs: string[] = []
 
 afterEach(() => {
+  // The wipe mark is module-global: a case that leaves one set would fail every later lane read.
+  resetLaneWipePendingForTests()
   for (const dir of createdUserDataDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -586,6 +589,50 @@ describe('a lane the close-wipe emptied', () => {
     expect(status.laneWipePending).toBeUndefined()
     // The watermark is kept, so the row still names what the lane last held.
     expect(status.refreshTokenSha256).toBe(sha('rt-1'))
+  })
+
+  it('lets a re-push void a wipe that never confirmed the lane empty', async () => {
+    const harness = makeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    // The probe cannot be confirmed dead, so the sweep never runs and the mark stays set.
+    const fence = vi
+      .spyOn(harness.coordinator, 'invalidateLaneUsageProbes')
+      .mockRejectedValue(new Error('probe kill failed'))
+
+    const outcome = await harness.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    expect(outcome.completed).toBe(false)
+    expect(harness.authority.status('device-a').laneWipePending).toBe(true)
+    fence.mockRestore()
+
+    await harness.authority.push(
+      'device-a',
+      pushParams('rt-2', { basedOnRefreshTokenSha256: sha('rt-1') })
+    )
+
+    // Without this the mark is a one-way latch: the lane's usage probe is skipped for the rest of
+    // the process and its status publishes `laneWipePending` over a demonstrably loaded lane.
+    const status = harness.authority.status('device-a')
+    expect(status.laneWipePending).toBeUndefined()
+    expect(status.laneState).toBe('loaded')
+  })
+
+  it('releases the lane switch gate when the probe invalidation throws', async () => {
+    const harness = makeHarness({ realSwitchGate: true })
+    const fence = vi
+      .spyOn(harness.coordinator, 'invalidateLaneUsageProbes')
+      .mockRejectedValue(new Error('probe kill failed'))
+
+    await expect(harness.authority.push('device-a', pushParams('rt-1'))).rejects.toThrow(
+      'probe kill failed'
+    )
+    // The gate is taken before the caller's `finally` can be entered, and `begin` throws on a lane
+    // already gated — so a leak here refuses every spawn AND every push in this lane forever.
+    expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(false)
+    fence.mockRestore()
+
+    await harness.authority.push('device-a', pushParams('rt-1'))
+
+    expect(refreshTokenOnDisk(harness.laneCredentialsOnDisk(LANE_A))).toBe('rt-1')
   })
 
   it("accepts the reconnecting desktop's re-push and refuses its stale one", async () => {

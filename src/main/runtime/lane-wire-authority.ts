@@ -8,7 +8,10 @@ import {
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { parseLanePushRequest, type LanePushRequest } from '../claude-accounts/lane-push-envelope'
 import { wipeLaneCredentials } from '../claude-accounts/principal-lane-credential-sweep'
-import { isLaneWipePending } from '../claude-accounts/lane-wipe-pending'
+import {
+  clearLaneWipePendingOnCredentialLoaded,
+  isLaneWipePending
+} from '../claude-accounts/lane-wipe-pending'
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from '../claude-accounts/live-pty-gate'
 import type { LaneDelegationDirectory } from './lane-delegation-directory'
 
@@ -245,7 +248,15 @@ export class LaneWireAuthority {
   private async beginLaneSwitch(laneId: string): Promise<LaneSwitchGate> {
     const gate = this.options.switchGate ?? LANE_SWITCH_GATE
     gate.begin(laneId)
-    await this.options.coordinator.invalidateLaneUsageProbes(laneId)
+    try {
+      await this.options.coordinator.invalidateLaneUsageProbes(laneId)
+    } catch (error) {
+      // The caller's `finally { gate.end(…) }` is not entered yet, and `begin` throws on a lane
+      // that is already gated — so a rejection here would leave this lane refusing every spawn and
+      // every push for the process lifetime rather than for this push.
+      gate.end(laneId)
+      throw error
+    }
     return gate
   }
 
@@ -275,6 +286,10 @@ export class LaneWireAuthority {
     try {
       await coordinator.store.writer.writeCredentials(laneDir, request.envelope.credentialsJson)
       coordinator.store.writer.writeOauthAccount(laneDir, request.oauthAccount)
+      // An accepted push is a credential deliberately loaded into this lane, so an earlier wipe
+      // that never confirmed empty has nothing left to claim — and its mark would otherwise skip
+      // this lane's usage probe and misreport its residency for the rest of the process.
+      clearLaneWipePendingOnCredentialLoaded(laneId)
     } finally {
       gate.end(laneId)
     }

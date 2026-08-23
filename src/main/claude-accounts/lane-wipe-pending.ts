@@ -13,15 +13,38 @@
  * retrofitted onto a pull that has already shipped without it.
  */
 const wipePendingLaneIds = new Set<string>()
+const wipesInFlightLaneIds = new Set<string>()
 
 /** S9c: set before the sweep aborts in-flight probes, not after it finishes. */
 export function markLaneWipePending(laneId: string): void {
   wipePendingLaneIds.add(laneId)
+  wipesInFlightLaneIds.add(laneId)
 }
 
 /** S9c: cleared only on §2f's clean post-sweep read-back. */
 export function clearLaneWipePending(laneId: string): void {
   wipePendingLaneIds.delete(laneId)
+  wipesInFlightLaneIds.delete(laneId)
+}
+
+/** The sequence gave up without a clean read-back: the mark stays, the sequence does not. */
+export function releaseUnconfirmedLaneWipe(laneId: string): void {
+  wipesInFlightLaneIds.delete(laneId)
+}
+
+/**
+ * A credential deliberately loaded into the lane voids an UNCONFIRMED wipe's mark.
+ *
+ * Without this the mark is a one-way latch: one Keychain error or one probe that never confirmed
+ * dead would skip that lane's usage probe and publish `laneWipePending` over a demonstrably
+ * loaded lane for the rest of the process. A wipe still IN FLIGHT wins — it is about to sweep
+ * whatever is there, and its fence must not be opened underneath it.
+ */
+export function clearLaneWipePendingOnCredentialLoaded(laneId: string): boolean {
+  if (wipesInFlightLaneIds.has(laneId)) {
+    return false
+  }
+  return wipePendingLaneIds.delete(laneId)
 }
 
 export function isLaneWipePending(laneId: string): boolean {
@@ -31,4 +54,5 @@ export function isLaneWipePending(laneId: string): boolean {
 /** Test seam only — production never clears the whole set. */
 export function resetLaneWipePendingForTests(): void {
   wipePendingLaneIds.clear()
+  wipesInFlightLaneIds.clear()
 }
