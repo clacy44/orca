@@ -91,6 +91,10 @@ export class LaneDelegationLeaseStore {
    * A status carrying a designation AND an identity this desktop recognises takes (or renews) the
    * lease. A status carrying NO designation is the revoke/unbind case and releases. A status whose
    * lane simply holds a different account releases only that account's lease — the lane moved on.
+   *
+   * `delegationCleared` is the third of §2e's exactly three releases. It cannot be inferred: a
+   * clear keeps the watermark AND the designation on purpose, so without the flag a post-clear
+   * status still resolves an identity and RENEWS the lease the owner just asked to give back.
    */
   applyPublishedStatus(
     hostId: string,
@@ -99,7 +103,7 @@ export class LaneDelegationLeaseStore {
   ): void {
     const held = status.heldIdentity
     const accountId = held ? resolveLocalAccountId(held) : null
-    if (!status.delegatedGrantId) {
+    if (status.delegationCleared === true || !status.delegatedGrantId) {
       this.releaseForPrincipal(hostId, status.laneId)
       return
     }

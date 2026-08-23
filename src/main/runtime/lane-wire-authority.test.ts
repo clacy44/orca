@@ -345,6 +345,21 @@ describe('lane wire authority — pull, clear and status', () => {
     expect(harness.laneCredentialsOnDisk(LANE_A)).toBeNull()
     expect(harness.coordinator.store.getWatermark(LANE_A)?.refreshTokenSha256).toBe(sha('rt-1'))
     expect(harness.coordinator.store.getLaneState(LANE_A)).toBe('absent')
+    // The release signal §2e's lease reads: the watermark and the designation both still stand.
+    expect(harness.authority.status('device-a')).toMatchObject({
+      delegationCleared: true,
+      delegatedGrantId: 'device-a'
+    })
+  })
+
+  it('un-marks the clear on the next push, so the lease is taken again', async () => {
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    await harness.authority.clear('device-a')
+    await harness.authority.push(
+      'device-a',
+      pushParams('rt-2', { basedOnRefreshTokenSha256: sha('rt-1') })
+    )
+    expect(harness.authority.status('device-a').delegationCleared).toBe(false)
   })
 
   it('publishes the designation and the held name on status, and nothing about another lane', async () => {

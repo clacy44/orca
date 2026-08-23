@@ -136,7 +136,8 @@ export class LaneWireAuthority {
    * §2f's wipe, addressed to the caller's OWN lane: files, identity and residency row.
    *
    * The watermark is kept on purpose — a re-push after a clear is still judged against what the
-   * lane last held, which is what refuses a replay of a blob the lane's CLI has since rotated.
+   * lane last held, which is what refuses a replay of a blob the lane's CLI has since rotated. The
+   * released delegation therefore rides its own published flag, not the absence of either.
    */
   async clear(pairedDeviceId: string | null | undefined): Promise<{ cleared: string[] }> {
     const caller = this.requireCaller(pairedDeviceId)
@@ -149,7 +150,7 @@ export class LaneWireAuthority {
         try {
           const removed = await wipeLaneCredentials(laneDir, { platform: this.options.platform })
           this.options.coordinator.residency.clearLaneRow(caller.principalId)
-          this.options.delegation.clearHeldDisplayName(caller.principalId)
+          this.options.delegation.markLaneCleared(caller.principalId)
           return removed
         } finally {
           gate.end(caller.principalId)
@@ -176,6 +177,7 @@ export class LaneWireAuthority {
       laneState: store.getLaneState(caller.principalId),
       delegatedGrantId,
       callerIsDelegatedGrant: delegatedGrantId === caller.deviceId,
+      delegationCleared: row.delegationCleared === true,
       heldDisplayName: row.heldDisplayName,
       heldIdentity: watermark?.identity ?? null,
       refreshTokenSha256: watermark?.refreshTokenSha256 ?? null,

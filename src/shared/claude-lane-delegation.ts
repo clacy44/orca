@@ -34,6 +34,8 @@ export type ClaudeLaneDelegationRow = {
   laneId: string
   /** The owner-authored name of the account the lane currently holds (§2b's third member). */
   heldDisplayName: string | null
+  /** §2e: an explicit `accounts.lane.clear` happened and no push has landed since. */
+  delegationCleared?: boolean
   delegable: ClaudeLaneDelegableAccount[]
 }
 
@@ -45,6 +47,12 @@ export type ClaudeLaneStatus = {
   laneWipePending?: boolean
   /** §2e: every bound desktop reads this to suppress its OWN rotation, the holder included. */
   delegatedGrantId: string | null
+  /**
+   * Additive (Rule 1): one of §2e's exactly three lease releases. `laneState: 'absent'` cannot
+   * carry it — §2f's close-wipe is absent too and must NOT release — and `clear` deliberately
+   * keeps both the watermark and the designation, so nothing else in this row changes on a clear.
+   */
+  delegationCleared?: boolean
   /** Whether the caller's own grant is the designated pusher. */
   callerIsDelegatedGrant: boolean
   heldDisplayName: string | null
@@ -98,6 +106,7 @@ export function normalizeClaudeLaneDelegationRow(value: unknown): ClaudeLaneDele
   return {
     laneId,
     heldDisplayName: normalizeLaneDisplayName(record?.heldDisplayName),
+    ...(record?.delegationCleared === true ? { delegationCleared: true } : {}),
     delegable: normalizeDelegableAccounts(record?.delegable)
   }
 }

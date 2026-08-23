@@ -53,13 +53,24 @@ export class LaneDelegationDirectory {
     )
   }
 
+  /** A landed push is what un-does a clear: the lane holds a credential again. */
   setHeldDisplayName(laneId: string, displayName: string | null): void {
     const row = this.getRow(laneId)
-    this.putRow({ ...row, heldDisplayName: normalizeLaneDisplayName(displayName) })
+    this.putRow({
+      ...row,
+      heldDisplayName: normalizeLaneDisplayName(displayName),
+      delegationCleared: false
+    })
   }
 
-  clearHeldDisplayName(laneId: string): void {
-    this.putRow({ ...this.getRow(laneId), heldDisplayName: null })
+  /**
+   * §2e's clear arm, published so every bound desktop RELEASES its lease.
+   *
+   * A cleared lane keeps its watermark and its designation on purpose, so a status frame after a
+   * clear is otherwise indistinguishable from one after §2f's close-wipe — which must not release.
+   */
+  markLaneCleared(laneId: string): void {
+    this.putRow({ ...this.getRow(laneId), heldDisplayName: null, delegationCleared: true })
   }
 
   /** Mints or re-uses one opaque token per entry, in the order the desktop listed them. */

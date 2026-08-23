@@ -82,9 +82,17 @@ describe('lane delegation directory', () => {
     directory.setHeldDisplayName(LANE_A, 'Work')
     expect(directory.getRow(LANE_A).heldDisplayName).toBe('Work')
     expect(directory.getRow(LANE_A).delegable).toHaveLength(1)
-    directory.clearHeldDisplayName(LANE_A)
+    directory.markLaneCleared(LANE_A)
     expect(directory.getRow(LANE_A).heldDisplayName).toBeNull()
     expect(directory.getRow(LANE_A).delegable).toHaveLength(1)
+  })
+
+  it('marks the lane cleared, and a later push un-marks it', () => {
+    const directory = makeDirectory()
+    directory.markLaneCleared(LANE_A)
+    expect(directory.getRow(LANE_A).delegationCleared).toBe(true)
+    directory.setHeldDisplayName(LANE_A, 'Work')
+    expect(directory.getRow(LANE_A).delegationCleared).toBe(false)
   })
 
   it('answers an unknown lane with an empty row rather than throwing', () => {

@@ -118,6 +118,32 @@ describe('desktop delegation lease', () => {
     expect(harness.store.isDelegated('acct-1')).toBe(false)
   })
 
+  // §2e names exactly three releases; this is the `accounts.lane.clear` one. A clear KEEPS the
+  // watermark and the designation, so the flag is the only thing that distinguishes it.
+  it('is released by an explicit lane clear even though the watermark and designation stand', () => {
+    const harness = makeStore()
+    harness.store.applyPublishedStatus('host-1', status(), () => 'acct-1')
+    expect(harness.store.isDelegated('acct-1')).toBe(true)
+    harness.store.applyPublishedStatus(
+      'host-1',
+      status({ laneState: 'absent', delegationCleared: true }),
+      () => 'acct-1'
+    )
+    expect(harness.store.isDelegated('acct-1')).toBe(false)
+  })
+
+  // Negative control: §2f's close-wipe reads `absent` too and must NOT un-suppress the rotator.
+  it('keeps the lease through a close-wipe, which is absent without being cleared', () => {
+    const harness = makeStore()
+    harness.store.applyPublishedStatus('host-1', status(), () => 'acct-1')
+    harness.store.applyPublishedStatus(
+      'host-1',
+      status({ laneState: 'absent', delegationCleared: false }),
+      () => 'acct-1'
+    )
+    expect(harness.store.isDelegated('acct-1')).toBe(true)
+  })
+
   it('keeps the lease when the published identity is one this desktop cannot resolve', () => {
     const harness = makeStore()
     harness.store.applyPublishedStatus('host-1', status(), () => 'acct-1')
