@@ -135,13 +135,22 @@ export class LaneWireService {
     this.disposeReceipts = null
     // The wipe listener is deliberately NOT cleared here: `attachLaneWireService` disposes the
     // outgoing service AFTER the incoming one's constructor has already registered its own, so
-    // clearing would unregister the live listener. The constructor is the single writer.
+    // clearing would unregister the live listener. The constructor is the single writer, and a
+    // detach with no incoming service calls `detachLaneWipedListener` instead.
+  }
+
+  /** Detach only: with nothing incoming, the coordinator would keep calling a disposed service. */
+  detachLaneWipedListener(): void {
+    this.coordinator.setLaneWipedListener(null)
   }
 }
 
 let attachedLaneWire: LaneWireService | null = null
 
 export function attachLaneWireService(service: LaneWireService | null): void {
+  if (!service) {
+    attachedLaneWire?.detachLaneWipedListener()
+  }
   attachedLaneWire?.dispose()
   attachedLaneWire = service
   attachManagedAccountResidencyGuard(service?.residencyGuard ?? null)

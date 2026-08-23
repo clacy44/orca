@@ -143,6 +143,24 @@ describe('lane change routing through the lane wire service', () => {
     expect(harness.service.switches.hasPendingFor(LANE_A)).toBe(false)
   })
 
+  it('routes a lifecycle wipe to the attached service and to no detached one', async () => {
+    const harness = makeHarness()
+    await harness.push('rt-1')
+    harness.attach('desktop-a')
+    const attached = harness.frames.get('desktop-a') ?? []
+
+    await harness.service.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const framesWhileAttached = attached.length
+    // `dispose()` deliberately keeps the wipe listener for the SWAP case, so a detach with nothing
+    // incoming has to unregister it — or the coordinator keeps calling a disposed service.
+    attachLaneWireService(null)
+    await harness.push('rt-2')
+    await harness.service.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(framesWhileAttached).toBeGreaterThan(0)
+    expect(attached).toHaveLength(framesWhileAttached + 1)
+  })
+
   // Negative control: the OTHER cause still settles silently, because the phone reads a
   // `switch-failed` as the failure of the request it is holding — and a push is its success.
   it('settles an outstanding switch with no terminal frame when the caller pushes', async () => {
