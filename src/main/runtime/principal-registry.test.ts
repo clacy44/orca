@@ -172,6 +172,23 @@ describe('PrincipalRegistry', () => {
       ])
     })
 
+    it('drops the designation when the designated grant is re-bound to the same principal', () => {
+      const store = registry()
+      const ana = store.createPrincipal(consent, 'Ana')
+      grants.add({ deviceId: 'desktop' })
+      store.bindGrant(consent, 'desktop', ana.principalId)
+      store.designatePusher(consent, ana.principalId, 'desktop')
+
+      store.rebindGrant(consent, 'desktop', ana.principalId)
+
+      // Re-bind is unbind-then-bind, and unbind clears the designation it named (§2a rule (iii)).
+      expect(store.principalOf('desktop')).toBe(ana.principalId)
+      expect(store.delegatedGrantIdOf(ana.principalId)).toBeNull()
+      expect(() => store.assertLaneProvisionable(ana.principalId)).toThrow(
+        /No grant has been designated/
+      )
+    })
+
     it('never resolves a principal by the free-form pairing name', () => {
       const store = registry()
       const ana = store.createPrincipal(consent, 'Ana')

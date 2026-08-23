@@ -176,6 +176,10 @@ export class PrincipalRegistry {
     // Why the target is validated BEFORE the unbind leg: unbinding commits the removal and clears
     // the designation with it, so a re-bind refused on its second leg would leave a working grant
     // unbound and its principal unpushable. A refused re-bind changes nothing.
+    //
+    // A SUCCESSFUL re-bind, including one back to the same principal, still drops the designation
+    // with the unbind leg — §2a's "never a rewrite in place". The principal is left unpushable
+    // until a human re-ticks, which fails closed; S9d's surface must re-prompt for it.
     this.assertBindable(deviceId, principalId)
     this.unbindGrant(consent, deviceId)
     this.bindGrant(consent, deviceId, principalId)
