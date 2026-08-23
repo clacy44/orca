@@ -124,7 +124,13 @@ type Harness = {
 
 function setup(
   laneOfPane: () => { kind: 'principal'; principalId: string } | null,
-  options: { daemonBacked?: boolean; settings?: Record<string, unknown>; realLocal?: boolean } = {}
+  options: {
+    daemonBacked?: boolean
+    settings?: Record<string, unknown>
+    realLocal?: boolean
+    /** The lane holds no credential — what §2f's wipe leaves behind until the desktop re-pushes. */
+    laneUnloaded?: boolean
+  } = {}
 ): Harness {
   handlers.clear()
   handleMock.mockReset()
@@ -136,12 +142,16 @@ function setup(
   onMock.mockImplementation(register)
   const provider = createProvider(options.daemonBacked)
   setLocalPtyProvider((options.realLocal ? new LocalPtyProvider() : provider) as never)
+  const laneLoaded = options.laneUnloaded !== true
   const prepareClaudeAuth = vi.fn(async (_target: unknown, lanePrincipalId?: string) => ({
     configDir: lanePrincipalId ? LANE_DIR : SHARED_DIR,
     runtime: 'host' as const,
     wslDistro: null,
     wslLinuxConfigDir: null,
-    envPatch: { CLAUDE_CONFIG_DIR: lanePrincipalId ? LANE_DIR : SHARED_DIR },
+    envPatch:
+      lanePrincipalId && !laneLoaded
+        ? {}
+        : { CLAUDE_CONFIG_DIR: lanePrincipalId ? LANE_DIR : SHARED_DIR },
     stripAuthEnv: true,
     provenance: lanePrincipalId ? 'lane:label' : 'host'
   }))
@@ -256,6 +266,29 @@ describe('a lane pane launched as a plain shell', () => {
 
 // S9 §2f/§5 S9c: a push into lane A holds lane A's gate. It refuses lane A's spawns — a plain
 // shell too, because a lane pane carries lane credentials whatever it runs — and nothing else.
+// S9 §2a consequence 2 / §5 S9c: after the close-wipe the lane holds no credential, and EVERY
+// lane pane fails closed — a plain shell too, because it carries the lane's credentials as well.
+describe('a launch into a lane the wipe emptied', () => {
+  it.each([
+    ['a claude command', { command: 'claude' }],
+    ['a plain shell', { command: 'bash -l' }],
+    ['no command at all', {}]
+  ])('fails closed for %s', async (_case, args) => {
+    setup(inLane, { laneUnloaded: true })
+
+    await expect(rendererSpawn(args)).rejects.toThrow(/not loaded on this host/)
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('leaves a shared-lane pane launching', async () => {
+    setup(() => null, { laneUnloaded: true })
+
+    await rendererSpawn({ command: 'claude' })
+
+    expect(spawnCalls).toHaveLength(1)
+  })
+})
+
 describe('the per-lane account switch gate', () => {
   const OTHER_PRINCIPAL_ID = '99999999-8888-4777-8666-555555555555'
 
