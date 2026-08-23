@@ -30,7 +30,8 @@ function pendingSnapshot(): RuntimeMobileSessionTabsSnapshot {
         title: 'agent',
         parentTabId: TAB,
         leafId: LEAF,
-        ptyId: null
+        ptyId: null,
+        isActive: false
       }
     ]
   }
