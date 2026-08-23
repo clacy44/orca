@@ -31,6 +31,7 @@ export async function wipeResidentLanesAtStartup(input: {
   const store = new PrincipalLaneStore(input.persistence, laneOptions)
   const lifecycle = new PrincipalLaneLifecycle({
     resolveLaneDir: (laneId) => store.resolveLaneDir(laneId),
+    laneDirExists: (laneId) => store.hasLaneDirectory(laneId),
     // Nothing else runs against a lane this early, so the queue would only be a queue of one.
     serializeLaneWrite: (_laneId, run) => run(),
     invalidateProbes: () => Promise.resolve(),

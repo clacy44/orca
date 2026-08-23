@@ -13,6 +13,7 @@ import {
 import { LaneCredentialWriter, readJsonObjectFile } from './lane-credential-writer'
 import { isLaneWipePending } from './lane-wipe-pending'
 import {
+  getPrincipalLaneDir,
   resolveOwnedPrincipalLaneDir,
   type PrincipalLaneOptions
 } from './principal-credential-lane'
@@ -68,6 +69,16 @@ export class PrincipalLaneStore {
 
   resolveLaneDir(laneId: string): string | null {
     return resolveOwnedPrincipalLaneDir(laneId, this.laneOptions)
+  }
+
+  /** Something is at the lane's path, ownership unproved — what "nothing to wipe" is judged by. */
+  hasLaneDirectory(laneId: string): boolean {
+    try {
+      return existsSync(getPrincipalLaneDir(laneId, this.laneOptions))
+    } catch {
+      // A malformed principal id names no lane path at all.
+      return false
+    }
   }
 
   /**

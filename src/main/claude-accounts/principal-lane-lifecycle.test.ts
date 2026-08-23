@@ -188,6 +188,7 @@ describe('the principal lane lifecycle wipe', () => {
     const swept: string[] = []
     const lifecycle = new PrincipalLaneLifecycle({
       resolveLaneDir: (laneId) => laneDir(laneId),
+      laneDirExists: (laneId) => existsSync(laneDir(laneId)),
       serializeLaneWrite: (_laneId, run) => run(),
       // The probe's process never dies: the fence must hold rather than sweep past it.
       invalidateProbes: () => new Promise<void>(() => {}),
@@ -204,6 +205,66 @@ describe('the principal lane lifecycle wipe', () => {
     expect(swept).toEqual([])
     expect(existsSync(credentialsPath(LANE_A))).toBe(true)
     expect(isLaneWipePending(LANE_A)).toBe(true)
+  })
+
+  it('reports the wipe NOT done for a lane directory it cannot prove it owns', async () => {
+    // A lost or unreadable ownership marker is the shape a failed Windows DACL verification and an
+    // interrupted provision both leave behind — and the directory still holds a full credential.
+    const lanes = makeCoordinator()
+    await lanes.syncLane(LANE_A, 'startup')
+    rmSync(join(laneDir(LANE_A), '.orca-principal-lane'))
+
+    const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(outcome.completed).toBe(false)
+    expect(existsSync(credentialsPath(LANE_A))).toBe(true)
+    // Latched, so every launch into that lane keeps failing closed rather than reading `absent`
+    // for an unrelated reason.
+    expect(isLaneWipePending(LANE_A)).toBe(true)
+  })
+
+  it('leaves an unprovable lane on disk and says the revoke removed nothing', async () => {
+    const lanes = makeCoordinator()
+    await lanes.syncLane(LANE_A, 'startup')
+    rmSync(join(laneDir(LANE_A), '.orca-principal-lane'))
+
+    const outcome = await lanes.lifecycle.removeLaneOnLastGrantRevoked(LANE_A)
+
+    expect(outcome).toMatchObject({ completed: false, laneRemoved: false })
+    expect(existsSync(credentialsPath(LANE_A))).toBe(true)
+  })
+
+  it('reports nothing to wipe for a principal that has no lane directory', async () => {
+    const lanes = makeCoordinator()
+    rmSync(laneDir(LANE_A), { recursive: true, force: true })
+
+    const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(outcome.completed).toBe(true)
+    expect(isLaneWipePending(LANE_A)).toBe(false)
+  })
+
+  it('publishes the lane change on the give-up arm too, so switches are refused', async () => {
+    const changed: string[] = []
+    const lifecycle = new PrincipalLaneLifecycle({
+      resolveLaneDir: (laneId) => laneDir(laneId),
+      laneDirExists: (laneId) => existsSync(laneDir(laneId)),
+      serializeLaneWrite: (_laneId, run) => run(),
+      invalidateProbes: () => new Promise<void>(() => {}),
+      clearResidencyRow: () => {},
+      removeWatermark: () => {},
+      syncLaneObserveOnly: async () => {},
+      platform: 'linux',
+      probeDeathTimeoutMs: 5,
+      onLaneWiped: (laneId) => changed.push(laneId)
+    })
+
+    const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(outcome.completed).toBe(false)
+    // The listener refuses outstanding switch requests by name and republishes the status: the
+    // give-up arm is where a waiting switch would otherwise hang to its own timeout.
+    expect(changed).toEqual([LANE_A])
   })
 
   it('sweeps a lane that crashed holding only a staged .tmp credential blob', async () => {
@@ -224,6 +285,7 @@ describe('the principal lane lifecycle wipe', () => {
   it('fails a lane launch closed while the wipe is pending, credential still on disk', async () => {
     const lifecycle = new PrincipalLaneLifecycle({
       resolveLaneDir: (laneId) => laneDir(laneId),
+      laneDirExists: (laneId) => existsSync(laneDir(laneId)),
       serializeLaneWrite: (_laneId, run) => run(),
       invalidateProbes: () => new Promise<void>(() => {}),
       clearResidencyRow: () => {},
@@ -272,6 +334,7 @@ describe('the principal lane lifecycle wipe', () => {
     const queue: string[] = []
     const lifecycle = new PrincipalLaneLifecycle({
       resolveLaneDir: (laneId) => laneDir(laneId),
+      laneDirExists: (laneId) => existsSync(laneDir(laneId)),
       serializeLaneWrite: async (_laneId, run) => {
         queue.push('enter')
         try {

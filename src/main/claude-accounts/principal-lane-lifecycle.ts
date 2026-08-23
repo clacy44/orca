@@ -36,6 +36,14 @@ export type LaneWipeOutcome = {
 
 export type PrincipalLaneLifecycleDeps = {
   resolveLaneDir(laneId: string): string | null
+  /**
+   * Whether ANYTHING sits at the lane's path, ownership unproved.
+   *
+   * `resolveLaneDir` answers null for four reasons and only one of them — nothing there — means
+   * there is nothing to wipe; a lost marker, an EACCES on the path or a planted link all name a
+   * directory that may be holding `.credentials.json` right now.
+   */
+  laneDirExists(laneId: string): boolean
   /** The lane's write queue, so a wipe cannot interleave with a push into the same lane. */
   serializeLaneWrite<T>(laneId: string, run: () => Promise<T>): Promise<T>
   /** Aborts the lane's probes and resolves once each probe's `claude` is gone (§2k's kill half). */
@@ -45,7 +53,13 @@ export type PrincipalLaneLifecycleDeps = {
   /** Trigger 4: observe, record the watermark, never rotate. */
   syncLaneObserveOnly(laneId: string): Promise<void>
   platform?: NodeJS.Platform
-  /** Published so subscribers re-read `laneState`/`laneWipePending` (§2h). */
+  /**
+   * Fired on BOTH arms: it says the lane CHANGED, not that the wipe succeeded (§2h).
+   *
+   * The give-up arm is where outstanding switch requests most need their refusal — every launch
+   * into that lane now fails closed — and where subscribers need to re-read the sticky
+   * `laneWipePending` the give-up just left set.
+   */
   onLaneWiped?(laneId: string): void
   /** How long the fence waits for a probe's process to be confirmed dead. */
   probeDeathTimeoutMs?: number
@@ -92,10 +106,12 @@ export class PrincipalLaneLifecycle {
     // Removed INSIDE the sweep's own serialized write and under the still-set wipe mark: a push
     // that entered the lane's queue between the two would otherwise be told it succeeded and then
     // have its whole lane directory — marker, provenance, settings, transcripts — removed under it.
-    const outcome = await this.wipe(laneId, 'grant-revoked', (laneDir) => {
-      rmSync(laneDir, { recursive: true, force: true })
-      this.deps.removeWatermark(laneId)
-      laneRemoved = true
+    const outcome = await this.wipe(laneId, 'grant-revoked', {
+      finalize: (laneDir) => {
+        rmSync(laneDir, { recursive: true, force: true })
+        this.deps.removeWatermark(laneId)
+        laneRemoved = true
+      }
     })
     // A wipe that never confirmed empty leaves the directory, the watermark AND the credential in
     // place: the mark stays set, so the lane keeps failing launches closed until a wipe confirms.
@@ -105,18 +121,20 @@ export class PrincipalLaneLifecycle {
   private async wipe(
     laneId: string,
     reason: LaneWipeReason,
-    finalize?: (laneDir: string) => void
+    options: { finalize?: (laneDir: string) => void } = {}
   ): Promise<LaneWipeOutcome> {
     const laneDir = this.deps.resolveLaneDir(laneId)
     if (!laneDir) {
-      return { laneId, reason, removed: [], completed: true, laneRemoved: false }
+      return this.deps.laneDirExists(laneId)
+        ? this.refuseWipe(laneId, reason, 'Orca could not prove it owns that lane directory')
+        : { laneId, reason, removed: [], completed: true, laneRemoved: false }
     }
     // Set BEFORE anything is aborted: the start-side fence has to be closed for the whole
     // sequence, or the tick a millisecond later spawns a probe into the lane being swept.
     const sequence = markLaneWipePending(laneId)
     const removed: string[] = []
     for (let attempt = 1; attempt <= WIPE_ATTEMPTS; attempt += 1) {
-      const swept = await this.attemptWipe(laneId, laneDir, finalize)
+      const swept = await this.attemptWipe(laneId, laneDir, options.finalize)
       for (const name of swept ?? []) {
         if (!removed.includes(name)) {
           removed.push(name)
@@ -136,7 +154,22 @@ export class PrincipalLaneLifecycle {
     // inheriting a latch that would skip this lane's usage probe for the rest of the process.
     releaseUnconfirmedLaneWipe(laneId, sequence)
     console.warn(`[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending`)
+    this.deps.onLaneWiped?.(laneId)
     return { laneId, reason, removed, completed: false, laneRemoved: false }
+  }
+
+  /**
+   * A lane nothing swept, reported as NOT wiped and latched wipe-pending.
+   *
+   * The directory may hold a full credential — that is exactly why it is not reported done — so
+   * `laneState` keeps reading `absent` and every launch into it keeps failing closed.
+   */
+  private refuseWipe(laneId: string, reason: LaneWipeReason, why: string): LaneWipeOutcome {
+    const sequence = markLaneWipePending(laneId)
+    releaseUnconfirmedLaneWipe(laneId, sequence)
+    console.warn(`[principal-lane] Lane not wiped: ${why}; leaving it wipe-pending`)
+    this.deps.onLaneWiped?.(laneId)
+    return { laneId, reason, removed: [], completed: false, laneRemoved: false }
   }
 
   /** One pass of the fence. `null` = the wipe is not confirmed; the mark must stay set. */

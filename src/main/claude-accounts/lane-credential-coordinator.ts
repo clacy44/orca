@@ -83,6 +83,7 @@ export class LaneCredentialCoordinator {
     })
     this.lifecycle = new PrincipalLaneLifecycle({
       resolveLaneDir: (laneId) => this.store.resolveLaneDir(laneId),
+      laneDirExists: (laneId) => this.store.hasLaneDirectory(laneId),
       serializeLaneWrite: (laneId, run) => this.authState.serializeLaneWrite(laneId, run),
       invalidateProbes: (laneId) => this.invalidateLaneUsageProbes(laneId),
       clearResidencyRow: (laneId) => this.residency.clearLaneRow(laneId),
