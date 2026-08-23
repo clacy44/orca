@@ -42,11 +42,27 @@ export async function wipeResidentLanesAtStartup(input: {
   return lifecycle.wipeResidentLanesAtStartup(listResidentPrincipalLaneIds(laneOptions))
 }
 
-/** Writer 1 with no rotation arm: what the lane holds right now, and nothing else. */
+/**
+ * Writer 1 with no rotation arm: what the lane holds right now, and nothing else.
+ *
+ * Deliberately unlike `LaneSyncDriver.doSyncLane`, which does NOT advance the watermark over an
+ * observed foreign change: advancing it here is exactly what refuses the desktop's cached
+ * pre-restart blob into the lane this pass is about to empty, and keeping the old one would
+ * ACCEPT that blob. No `cli-observed` receipt is emitted either — nothing is connected this early
+ * to receive one, and the desktop learns of a rotation from `pullRotated`'s sha compare instead.
+ *
+ * A watermark that cannot be persisted must not skip the wipe: the credential at rest is the
+ * failure §2f exists to remove, and the stale-push window it leaves needs a surviving daemon
+ * session to matter.
+ */
 function recordStartupWatermark(store: PrincipalLaneStore, laneId: string): void {
   const credentialsJson = store.readLaneCredentials(laneId)
   if (credentialsJson === null) {
     return
   }
-  store.recordSyncedLaneCredentials(laneId, credentialsJson, store.readLaneOauthAccount(laneId))
+  try {
+    store.recordSyncedLaneCredentials(laneId, credentialsJson, store.readLaneOauthAccount(laneId))
+  } catch (error) {
+    console.warn('[claude-lane] Could not record the startup watermark for a lane:', error)
+  }
 }

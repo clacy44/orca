@@ -2251,7 +2251,15 @@ void app.whenReady().then(async () => {
   // → wipe → seed the live-PTY gate → bind listeners. A crash never ran the close handler, so a
   // lane's credential is still at rest; watermarking BEFORE the wipe is what refuses the
   // reconnecting desktop's cached pre-restart blob into the lane this just emptied.
-  const laneStartupWipes = await wipeResidentLanesAtStartup({ persistence: store })
+  // Why guarded: this `whenReady` chain has no `.catch`, and everything below — the window, the
+  // runtime RPC server, the rest of boot — is downstream of this await. A missed lane wipe is
+  // recoverable at the next start; a host that never opens a window is not.
+  const laneStartupWipes = await wipeResidentLanesAtStartup({ persistence: store }).catch(
+    (error: unknown) => {
+      console.warn('[claude-lane] Startup lane wipe failed:', error)
+      return []
+    }
+  )
   if (laneStartupWipes.length > 0) {
     console.log(
       `[claude-lane] Wiped ${laneStartupWipes.filter((row) => row.completed).length}/${laneStartupWipes.length} resident Claude credential lane(s) at startup`
