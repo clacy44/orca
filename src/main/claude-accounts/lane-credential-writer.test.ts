@@ -61,6 +61,20 @@ describe('lane credential writer', () => {
     }
   })
 
+  it('leaves the file in place on an unchanged rewrite and replaces it on a changed one', () => {
+    const target = join(root, '.credentials.json')
+    writeCredentialsFileAtomically(target, CREDENTIALS)
+    const originalInode = statSync(target).ino
+    writeCredentialsFileAtomically(target, CREDENTIALS)
+    // The skip is what keeps a live Claude's open handle from meeting a rename (#1507).
+    expect(statSync(target).ino).toBe(originalInode)
+    // Negative control: different bytes must publish through the atomic rename.
+    const changed = JSON.stringify({ claudeAiOauth: { accessToken: 'at2', refreshToken: 'rt2' } })
+    writeCredentialsFileAtomically(target, changed)
+    expect(readFileSync(target, 'utf-8')).toBe(changed)
+    expect(statSync(target).ino).not.toBe(originalInode)
+  })
+
   it('writes identical bytes into every lane it is given', () => {
     const writer = new LaneCredentialWriter()
     const laneA = mkdtempSync(join(root, 'a-'))
