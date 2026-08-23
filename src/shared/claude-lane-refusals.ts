@@ -19,6 +19,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.not_provisioned',
   'accounts.lane.caller_unidentified',
   'accounts.lane.delegable_account_unknown',
+  'accounts.lane.delegable_list_invalid',
   'accounts.lane.desktop_unavailable',
   'accounts.lane.switch_timed_out',
   'accounts.selection_out_of_scope',

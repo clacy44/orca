@@ -26,12 +26,16 @@ export class LaneCredentialCoordinator {
   readonly residency: AccountResidencyIndex
   readonly authState: LaneAuthState
   readonly syncDriver: LaneSyncDriver
+  private presenceLabelResolver: ((laneId: string) => string | null) | null = null
 
   constructor(private readonly options: LaneCredentialCoordinatorOptions) {
     this.store = new PrincipalLaneStore(options.persistence, options.laneOptions ?? {})
     this.residency = new AccountResidencyIndex({
       sharedLane: options.sharedLane,
-      resolvePresenceLabel: options.resolvePresenceLabel
+      // Late-bound: the principal registry that names lane holders is attached after this service
+      // is constructed, and a residency refusal has to name the HOLDER, not just refuse.
+      resolvePresenceLabel: (laneId) =>
+        this.presenceLabelResolver?.(laneId) ?? options.resolvePresenceLabel?.(laneId) ?? null
     })
     this.authState = new LaneAuthState({ store: this.store, residency: this.residency })
     this.syncDriver = new LaneSyncDriver({
@@ -39,6 +43,10 @@ export class LaneCredentialCoordinator {
       residency: this.residency,
       authState: this.authState
     })
+  }
+
+  setPresenceLabelResolver(resolve: ((laneId: string) => string | null) | null): void {
+    this.presenceLabelResolver = resolve
   }
 
   syncLane(laneId: string, trigger: LaneSyncTrigger): Promise<LaneSyncOutcome> {
