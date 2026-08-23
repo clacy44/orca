@@ -197,7 +197,7 @@ import {
   settleServeDesktopActivation as settleServeDesktopActivationGate
 } from './startup/serve-desktop-activation'
 import { RateLimitService } from './rate-limits/service'
-import { pickFresherLaneUsage } from './rate-limits/lane-statusline-usage'
+import { resolveLaneUsageRow } from './rate-limits/lane-statusline-usage'
 import { readMiniMaxSessionCookie } from './minimax/minimax-cookie-store'
 import { getInitialClaudeRateLimitTarget } from './rate-limits/claude-rate-limit-target'
 import { getInitialCodexRateLimitTarget } from './rate-limits/codex-rate-limit-target'
@@ -2574,14 +2574,12 @@ void app.whenReady().then(async () => {
     return lane ? { laneId: lane.kind === 'principal' ? lane.principalId : null } : null
   })
   runtimeService.setLaneAccountRowResolvers({
-    laneUsageOf: (principalId) => {
-      // Two feeds, fresher wins: the per-lane probe and the lane's own statusline posts (§2k).
-      const usage = pickFresherLaneUsage(
-        claudeRuntimeAuth?.laneUsageFor(principalId) ?? null,
-        rateLimits?.laneStatuslineUsageOf(principalId) ?? null
-      )
-      return usage ? { session: usage.session, weekly: usage.weekly } : null
-    }
+    laneUsageOf: (principalId) =>
+      resolveLaneUsageRow({
+        pulled: claudeRuntimeAuth?.laneUsageFor(principalId) ?? null,
+        posted: rateLimits?.laneStatuslineUsageOf(principalId) ?? null,
+        pullDisabled: claudeRuntimeAuth?.isLaneUsagePullDisabled() === true
+      })
   })
   runtimeService.prepareLegacyWorkerTerminalRecovery()
   // Why: federated mail queued before the restart resumes here instead of waiting for

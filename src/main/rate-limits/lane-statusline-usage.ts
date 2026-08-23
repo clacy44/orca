@@ -1,4 +1,5 @@
 import type { ProviderRateLimits, RateLimitWindow } from '../../shared/rate-limit-types'
+import type { RuntimeTerminalLaneUsage } from '../../shared/runtime-types'
 
 /**
  * The per-lane sink for statusline-derived usage (S9 §2d/§2k).
@@ -74,6 +75,27 @@ export class LaneStatuslineUsageStore {
  * post is a live session, and on `win32` the probe never runs at all, so a fixed precedence would
  * either freeze the bar behind a stale tick or discard the only feed that host has.
  */
+/**
+ * The whole of one terminal row's `laneUsage` field (§2k).
+ *
+ * Where no feed answered AND no probe can run, the row states the CONDITION rather than rendering
+ * a bar-less label: `unavailableReason` is a code, because the host does not know the viewer's
+ * locale and the sentence belongs to the client.
+ */
+export function resolveLaneUsageRow(input: {
+  pulled: ProviderRateLimits | null
+  posted: ProviderRateLimits | null
+  pullDisabled: boolean
+}): RuntimeTerminalLaneUsage | null {
+  const usage = pickFresherLaneUsage(input.pulled, input.posted)
+  if (usage) {
+    return { session: usage.session, weekly: usage.weekly }
+  }
+  return input.pullDisabled
+    ? { session: null, weekly: null, unavailableReason: 'pull-unsupported-on-host' }
+    : null
+}
+
 export function pickFresherLaneUsage(
   pulled: ProviderRateLimits | null,
   posted: ProviderRateLimits | null

@@ -152,6 +152,11 @@ export class ClaudeRuntimeAuthService {
     return this.laneCredentials.laneUsage(laneId)
   }
 
+  /** Where the probe cannot run, the row carries a reason code instead of a bar (S9 §2k). */
+  isLaneUsagePullDisabled(): boolean {
+    return this.laneCredentials.isLaneUsagePullDisabled()
+  }
+
   /** The lane rows the statusline attribution map keys by config dir (S9 §2k). */
   listLaneUsageAttributions(): ClaudeLaneUsageAttribution[] {
     return this.laneCredentials.laneUsageAttributions()

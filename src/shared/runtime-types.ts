@@ -562,10 +562,16 @@ export type RuntimeTerminalLaneAccountLabel = {
  * about", omission reads as "not yours" (§2d). `unavailable` is the win32 arm, where the per-lane
  * pull is disabled and a stale bar would be worse than none.
  */
+/**
+ * Why a code and not a sentence: the host does not know the viewer's locale, and this row is read
+ * by desktop, phone and peer clients alike. The host names the CONDITION; the client says it.
+ */
+export type RuntimeTerminalLaneUsageUnavailableReason = 'pull-unsupported-on-host'
+
 export type RuntimeTerminalLaneUsage = {
   session: RateLimitWindow | null
   weekly: RateLimitWindow | null
-  unavailableReason?: string
+  unavailableReason?: RuntimeTerminalLaneUsageUnavailableReason
 }
 
 export type RuntimeTerminalSummary = {

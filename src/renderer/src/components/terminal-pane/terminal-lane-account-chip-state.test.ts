@@ -46,10 +46,10 @@ describe('resolveTerminalLaneAccountChipState', () => {
         laneUsage: {
           session: window(90),
           weekly: null,
-          unavailableReason: 'usage unavailable on this host'
+          unavailableReason: 'pull-unsupported-on-host'
         }
       })
-    ).toEqual({ label: 'Ana', unavailableReason: 'usage unavailable on this host' })
+    ).toEqual({ label: 'Ana', unavailableReason: 'pull-unsupported-on-host' })
   })
 
   it('renders nothing at all for a row with no lane owner', () => {

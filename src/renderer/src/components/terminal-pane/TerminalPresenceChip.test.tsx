@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { TerminalPresenceParticipant } from '@/lib/pane-manager/terminal-presence-state'
+import { i18n } from '@/i18n/i18n'
+import { PSEUDO_LOCALIZATION_LOCALE } from '@/i18n/pseudo-localization'
 import { TerminalPresenceChip } from './TerminalPresenceChip'
 import { resolveTerminalPresenceChipState } from './terminal-presence-chip-state'
 
@@ -94,11 +96,35 @@ describe('TerminalPresenceChip', () => {
       const markup = renderToStaticMarkup(
         <TerminalPresenceChip
           state={null}
-          lane={{ label: 'Ana', unavailableReason: 'usage unavailable on this host' }}
+          lane={{ label: 'Ana', unavailableReason: 'pull-unsupported-on-host' }}
         />
       )
 
       expect(markup).toContain('Ana · usage unavailable on this host')
+    })
+
+    // The host sends a CODE; the sentence is this client's. Under the pseudo locale a string that
+    // skipped `translate` stays bare ASCII, so this discriminates the two implementations.
+    it('routes both lane strings through i18n rather than interpolating them raw', async () => {
+      const previous = i18n.language
+      await i18n.changeLanguage(PSEUDO_LOCALIZATION_LOCALE)
+      try {
+        expect(
+          renderToStaticMarkup(
+            <TerminalPresenceChip
+              state={null}
+              lane={{ label: 'Ana', unavailableReason: 'pull-unsupported-on-host' }}
+            />
+          )
+        ).toContain('[Ana · usage unavailable on this host]')
+        expect(
+          renderToStaticMarkup(
+            <TerminalPresenceChip state={null} lane={{ label: 'Ana', usedPercent: 61 }} />
+          )
+        ).toContain('[Ana · 61%]')
+      } finally {
+        await i18n.changeLanguage(previous)
+      }
     })
 
     it('still renders nothing when neither presence nor a lane row is present', () => {

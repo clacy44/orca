@@ -3,7 +3,8 @@
 // rather than a stale one — and the rules must be assertable without a DOM (S9 §2h/§2k).
 import type {
   RuntimeTerminalLaneAccountLabel,
-  RuntimeTerminalLaneUsage
+  RuntimeTerminalLaneUsage,
+  RuntimeTerminalLaneUsageUnavailableReason
 } from '../../../../shared/runtime-types'
 
 export type TerminalLaneAccountChipState = {
@@ -11,8 +12,8 @@ export type TerminalLaneAccountChipState = {
   label: string
   /** The tighter of the two windows, as a whole percent; absent for a peer's row (§2d). */
   usedPercent?: number
-  /** Why there is no bar, where the host cannot pull it (§2k Fact 2). */
-  unavailableReason?: string
+  /** Why there is no bar, where the host cannot pull it — a code the chip translates (§2k Fact 2). */
+  unavailableReason?: RuntimeTerminalLaneUsageUnavailableReason
 }
 
 export function resolveTerminalLaneAccountChipState(source: {

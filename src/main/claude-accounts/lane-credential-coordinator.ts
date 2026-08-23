@@ -86,6 +86,11 @@ export class LaneCredentialCoordinator {
     return this.usagePull.laneUsage(laneId)
   }
 
+  /** True where no probe can run (§2k Fact 2): the row says why rather than showing no bar. */
+  isLaneUsagePullDisabled(): boolean {
+    return this.usagePull.isDisabled()
+  }
+
   setPresenceLabelResolver(resolve: ((laneId: string) => string | null) | null): void {
     this.presenceLabelResolver = resolve
   }

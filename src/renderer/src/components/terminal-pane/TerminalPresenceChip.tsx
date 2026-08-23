@@ -56,9 +56,21 @@ function chipCopy(state: TerminalPresenceChipState): string {
 // the same awareness question presence answers, and two ambient pills in one corner is noise.
 function laneCopy(lane: TerminalLaneAccountChipState): string {
   if (lane.unavailableReason) {
-    return `${lane.label} · ${lane.unavailableReason}`
+    // The host names the condition, never the sentence: it does not know this client's locale.
+    return translate(
+      'auto.components.terminal.pane.TerminalPresenceChip.laneUsageUnavailable',
+      '{{value0}} · usage unavailable on this host',
+      { value0: lane.label }
+    )
   }
-  return lane.usedPercent === undefined ? lane.label : `${lane.label} · ${lane.usedPercent}%`
+  if (lane.usedPercent === undefined) {
+    return lane.label
+  }
+  return translate(
+    'auto.components.terminal.pane.TerminalPresenceChip.laneUsagePercent',
+    '{{value0}} · {{value1}}%',
+    { value0: lane.label, value1: lane.usedPercent }
+  )
 }
 
 export function TerminalPresenceChip({

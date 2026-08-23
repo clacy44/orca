@@ -3,7 +3,11 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { ProviderRateLimits } from '../../shared/rate-limit-types'
-import { LaneStatuslineUsageStore, pickFresherLaneUsage } from './lane-statusline-usage'
+import {
+  LaneStatuslineUsageStore,
+  pickFresherLaneUsage,
+  resolveLaneUsageRow
+} from './lane-statusline-usage'
 
 const LANE_A = '11111111-1111-4111-8111-111111111111'
 const LANE_B = '22222222-2222-4222-8222-222222222222'
@@ -82,5 +86,39 @@ describe('pickFresherLaneUsage', () => {
     expect(pickFresherLaneUsage(null, usageAt(200, 2))?.session?.usedPercent).toBe(2)
     expect(pickFresherLaneUsage(usageAt(100, 1), null)?.session?.usedPercent).toBe(1)
     expect(pickFresherLaneUsage(null, null)).toBeNull()
+  })
+})
+
+describe('resolveLaneUsageRow', () => {
+  it('renders the fresher feed as the row', () => {
+    const row = resolveLaneUsageRow({
+      pulled: usageAt(100, 1),
+      posted: usageAt(200, 2),
+      pullDisabled: false
+    })
+
+    expect(row).toEqual({ session: window(2, 300), weekly: null })
+  })
+
+  // §2k Fact 2: on win32 no probe can run, so the row says why rather than showing nothing.
+  it('states the condition when no feed answered and no probe can run', () => {
+    const row = resolveLaneUsageRow({ pulled: null, posted: null, pullDisabled: true })
+
+    expect(row).toEqual({
+      session: null,
+      weekly: null,
+      unavailableReason: 'pull-unsupported-on-host'
+    })
+  })
+
+  // Negative control: a pull that CAN run has simply not run yet — that is not "unavailable".
+  it('omits the row entirely while the pull is enabled and unrun', () => {
+    expect(resolveLaneUsageRow({ pulled: null, posted: null, pullDisabled: false })).toBeNull()
+  })
+
+  it('prefers a real feed over the reason even where the probe is off', () => {
+    const row = resolveLaneUsageRow({ pulled: null, posted: usageAt(200, 7), pullDisabled: true })
+
+    expect(row).toEqual({ session: window(7, 300), weekly: null })
   })
 })

@@ -6,7 +6,6 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ProviderRateLimits } from '../../shared/rate-limit-types'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import {
-  LANE_USAGE_UNAVAILABLE_ON_HOST,
   LaneUsagePull,
   buildLaneUsageAuthPreparation,
   type LaneUsagePullDeps
@@ -202,9 +201,5 @@ describe('the win32 arm — disabled, not failed (§2k Fact 2)', () => {
     expect(outcome.probed).toEqual([])
     expect(spy).not.toHaveBeenCalled()
     expect(h.pull.laneUsage(LANE_A)).toBeNull()
-  })
-
-  it('names the row string a terminal shows instead of a stale bar', () => {
-    expect(LANE_USAGE_UNAVAILABLE_ON_HOST).toBe('usage unavailable on this host')
   })
 })

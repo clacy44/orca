@@ -15,9 +15,6 @@ import type { ClaudeLaneUsageAttribution } from './claude-usage-attribution'
  * while the very next tick re-loads the lane it just watched being wiped.
  */
 
-/** What a terminal row shows instead of a stale bar where the pull cannot run (§2k Fact 2). */
-export const LANE_USAGE_UNAVAILABLE_ON_HOST = 'usage unavailable on this host'
-
 export type LaneUsageSkipReason =
   | 'wipe-pending'
   | 'lane-absent'
