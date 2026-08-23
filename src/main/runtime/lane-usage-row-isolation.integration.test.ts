@@ -138,7 +138,9 @@ describe('terminal.list projects the lane usage bar for the calling socket only'
 
     await request(clientA, 'terminal.list')
     // B asks while naming A's grant in the params: the schema is non-strict, so the field is
-    // simply not read — the socket's own identity is the only source (§2d).
+    // simply not read — the socket's own identity is the only source (§2d). The falsifiable half
+    // of that guarantee is the schema itself, asserted in `terminal-list-params-identity.test.ts`;
+    // this case pins the end-to-end behaviour over two real E2EE-paired sockets.
     await request(clientB, 'terminal.list', { pairedDeviceId: offerA.deviceId })
 
     expect(seen).toEqual([offerA.deviceId, offerB.deviceId])

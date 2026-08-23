@@ -894,7 +894,9 @@ const TerminalFocus = TerminalHandle.extend({
   navigation: z.enum(['caller', 'host']).optional()
 })
 
-const TerminalListParams = z.object({
+// Exported for §2d's negative control: the schema carries NO caller-identity field, so a client
+// naming another grant's `pairedDeviceId` has it stripped before the handler runs.
+export const TerminalListParams = z.object({
   worktree: OptionalString,
   limit: OptionalFiniteNumber,
   handles: z
