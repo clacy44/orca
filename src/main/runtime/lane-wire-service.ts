@@ -3,7 +3,8 @@ import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credenti
 import {
   ManagedAccountResidencyGuard,
   attachManagedAccountResidencyGuard,
-  type ManagedAccountLookup
+  type ManagedAccountLookup,
+  type ResidencyUnverifiableReason
 } from '../claude-accounts/managed-account-lane-residency'
 import {
   LaneDelegationDirectory,
@@ -31,6 +32,8 @@ export type LaneWireServiceOptions = {
   persistence: LaneDelegationPersistence
   /** The managed store L1's second edge resolves an account id through (§2d). */
   accounts?: ManagedAccountLookup
+  /** Where L1's second edge reports that it could NOT answer for an account (§2d fails open). */
+  onResidencyUnverifiable?: (accountId: string, reason: ResidencyUnverifiableReason) => void
   switchGate?: LaneSwitchGate
   platform?: NodeJS.Platform
 }
@@ -71,7 +74,8 @@ export class LaneWireService {
     this.residencyGuard = options.accounts
       ? new ManagedAccountResidencyGuard({
           residency: options.coordinator.residency,
-          accounts: options.accounts
+          accounts: options.accounts,
+          onResidencyUnverifiable: options.onResidencyUnverifiable
         })
       : null
     // Every rotation the host observes is published to that lane's own grants — and only those.

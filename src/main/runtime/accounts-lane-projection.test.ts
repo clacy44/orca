@@ -7,7 +7,10 @@ import type { ClaudeLaneDelegationRow } from '../../shared/claude-lane-delegatio
 import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
-import { assertManagedClaudeAccountNotLaneResident } from '../claude-accounts/managed-account-lane-residency'
+import {
+  ManagedAccountResidencyGuard,
+  assertManagedClaudeAccountNotLaneResident
+} from '../claude-accounts/managed-account-lane-residency'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
 import { assertClaudeSelectionInScope, projectAccountsSnapshot } from './accounts-lane-projection'
 import { attachLaneWireService, LaneWireService } from './lane-wire-service'
@@ -277,6 +280,38 @@ describe('managed account residency guard', () => {
         })
       )
     ).toBe('no_refusal')
+  })
+
+  // The edge fails open when the account's own auth files cannot be read — §2d states the refusal
+  // with no exemption, so the gap is at least observable rather than silent.
+  it('reports rather than silently passing an account whose managed store it cannot read', async () => {
+    const harness = attachService({ managedAccounts: [account] })
+    await pushInto(harness.service, 'device-a', LANE_A, 'rt-1')
+    const reported: { accountId: string; reason: string }[] = []
+    const guard = new ManagedAccountResidencyGuard({
+      residency: harness.service.coordinator.residency,
+      accounts: { findAccount: () => account },
+      resolveManagedAuthPath: (_accountId, candidatePath) => candidatePath,
+      readManagedAuthFile: () => null,
+      onResidencyUnverifiable: (accountId, reason) => reported.push({ accountId, reason })
+    })
+    expect(refusalCode(() => guard.assertNotLaneResident('acct-1'))).toBe('no_refusal')
+    expect(reported).toEqual([{ accountId: 'acct-1', reason: 'auth-files-unreadable' }])
+  })
+
+  it('reports an unresolvable managed auth path, and stays silent for an unmanaged account', () => {
+    const harness = attachService({ managedAccounts: [account] })
+    const reported: string[] = []
+    const guard = new ManagedAccountResidencyGuard({
+      residency: harness.service.coordinator.residency,
+      accounts: { findAccount: (accountId) => (accountId === 'acct-1' ? account : null) },
+      resolveManagedAuthPath: () => null,
+      onResidencyUnverifiable: (_accountId, reason) => reported.push(reason)
+    })
+    guard.assertNotLaneResident('acct-1')
+    // Negative control: an account Orca does not manage is out of scope, not an unverified one.
+    guard.assertNotLaneResident('acct-unmanaged')
+    expect(reported).toEqual(['auth-path-unresolved'])
   })
 
   it('arms and disarms with the lane wire, so both edges move together', () => {

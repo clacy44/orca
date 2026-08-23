@@ -30,12 +30,23 @@ export type ManagedAccountResidencyGuardOptions = {
     managedAuthPath: string,
     fileName: '.credentials.json' | 'oauth-account.json'
   ) => string | null
+  /** L1's second edge cannot answer for an account whose store it cannot read (below). */
+  onResidencyUnverifiable?: (accountId: string, reason: ResidencyUnverifiableReason) => void
 }
+
+/** Never a path and never a token: an id and why the keys could not be derived. */
+export type ResidencyUnverifiableReason = 'auth-path-unresolved' | 'auth-files-unreadable'
 
 export class ManagedAccountResidencyGuard {
   constructor(private readonly options: ManagedAccountResidencyGuardOptions) {}
 
-  /** Refuses `accounts.lane.account_resident_elsewhere`, naming the holding principal's label. */
+  /**
+   * Refuses `accounts.lane.account_resident_elsewhere`, naming the holding principal's label.
+   *
+   * An account Orca does not manage is genuinely out of scope and returns silently. An account it
+   * DOES manage whose auth files it cannot read is a different thing — the edge fails OPEN, and
+   * §2d states the refusal with no exemption — so that case is reported rather than merely passing.
+   */
   assertNotLaneResident(accountId: string): void {
     const account = this.options.accounts.findAccount(accountId)
     if (!account) {
@@ -44,17 +55,33 @@ export class ManagedAccountResidencyGuard {
     const resolvePath = this.options.resolveManagedAuthPath ?? resolveOwnedClaudeManagedAuthPath
     const managedAuthPath = resolvePath(account.id, account.managedAuthPath)
     if (!managedAuthPath) {
+      this.reportUnverifiable(accountId, 'auth-path-unresolved')
       return
     }
     const read = this.options.readManagedAuthFile ?? readClaudeManagedAuthFile
     const credentialsJson = read(managedAuthPath, '.credentials.json')
     const oauthAccountJson = read(managedAuthPath, 'oauth-account.json')
+    if (credentialsJson === null && oauthAccountJson === null) {
+      this.reportUnverifiable(accountId, 'auth-files-unreadable')
+      return
+    }
     this.options.residency.assertNotLaneResident({
       accountId,
       accountUuid: readIdentityFromOauthAccount(parseJson(oauthAccountJson)).accountUuid,
       refreshTokenSha256: credentialsJson ? readRefreshTokenSha256(credentialsJson) : null
     })
   }
+
+  private reportUnverifiable(accountId: string, reason: ResidencyUnverifiableReason): void {
+    const report = this.options.onResidencyUnverifiable ?? warnResidencyUnverifiable
+    report(accountId, reason)
+  }
+}
+
+function warnResidencyUnverifiable(accountId: string, reason: ResidencyUnverifiableReason): void {
+  console.warn(
+    `[claude-accounts] Could not check lane residency for managed account ${accountId} (${reason}); L1's second edge did not run for it.`
+  )
 }
 
 let attachedGuard: ManagedAccountResidencyGuard | null = null
