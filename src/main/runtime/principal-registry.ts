@@ -134,32 +134,7 @@ export class PrincipalRegistry {
   }
 
   bindGrant(_consent: HostConsent, deviceId: string, principalId: string): void {
-    this.requirePrincipal(principalId)
-    const device = this.grants.getDevice(deviceId)
-    if (!device) {
-      throw new ClaudeLaneRefusal(
-        'accounts.lane.grant_unknown',
-        'That device is no longer paired with this host, so it cannot be bound to a person. Pair it again and bind the new invite.'
-      )
-    }
-    // Why: the ordinary regenerate-QR link COALESCES, so two humans can land on one row and one
-    // token. `pendingExpiresAt` is the durable per-person discriminator, written at mint.
-    if (device.pendingExpiresAt === undefined) {
-      throw new ClaudeLaneRefusal(
-        'accounts.lane.grant_not_per_person',
-        'That pairing was made with a shared invite link, so Orca cannot tell whether it belongs to one person or several. Re-pair the device with its own named invite before binding it to someone.'
-      )
-    }
-    // Why: rule (i) — binding answers *whose device is this*, so it is confined to the moment the
-    // human is present for one specific device: at mint, or inside the window of the named invite
-    // that produced this row. Offered later it is precisely the free-form "bind any row to any
-    // person" list §2a forbids. Designation and provisioning are deliberately NOT bounded this way.
-    if (device.pendingExpiresAt <= this.now()) {
-      throw new ClaudeLaneRefusal(
-        'accounts.lane.grant_binding_window_closed',
-        'That pairing invite has expired, so Orca will not bind that device to a person any more — a device is bound to a person at the moment it is paired, with the device in hand. Pair it again with its own named invite and bind it then.'
-      )
-    }
+    this.assertBindable(deviceId, principalId)
     if (this.principalOf(deviceId)) {
       throw new ClaudeLaneRefusal(
         'accounts.lane.grant_already_bound',
@@ -197,8 +172,42 @@ export class PrincipalRegistry {
   }
 
   rebindGrant(consent: HostConsent, deviceId: string, principalId: string): void {
+    // Why the target is validated BEFORE the unbind leg: unbinding commits the removal and clears
+    // the designation with it, so a re-bind refused on its second leg would leave a working grant
+    // unbound and its principal unpushable. A refused re-bind changes nothing.
+    this.assertBindable(deviceId, principalId)
     this.unbindGrant(consent, deviceId)
     this.bindGrant(consent, deviceId, principalId)
+  }
+
+  /** Everything a bind requires of its target and its row, minus the already-bound check. */
+  private assertBindable(deviceId: string, principalId: string): void {
+    this.requirePrincipal(principalId)
+    const device = this.grants.getDevice(deviceId)
+    if (!device) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.grant_unknown',
+        'That device is no longer paired with this host, so it cannot be bound to a person. Pair it again and bind the new invite.'
+      )
+    }
+    // Why: the ordinary regenerate-QR link COALESCES, so two humans can land on one row and one
+    // token. `pendingExpiresAt` is the durable per-person discriminator, written at mint.
+    if (device.pendingExpiresAt === undefined) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.grant_not_per_person',
+        'That pairing was made with a shared invite link, so Orca cannot tell whether it belongs to one person or several. Re-pair the device with its own named invite before binding it to someone.'
+      )
+    }
+    // Why: rule (i) — binding answers *whose device is this*, so it is confined to the moment the
+    // human is present for one specific device: at mint, or inside the window of the named invite
+    // that produced this row. Offered later it is precisely the free-form "bind any row to any
+    // person" list §2a forbids. Designation and provisioning are deliberately NOT bounded this way.
+    if (device.pendingExpiresAt <= this.now()) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.grant_binding_window_closed',
+        'That pairing invite has expired, so Orca will not bind that device to a person any more — a device is bound to a person at the moment it is paired, with the device in hand. Pair it again with its own named invite and bind it then.'
+      )
+    }
   }
 
   /**

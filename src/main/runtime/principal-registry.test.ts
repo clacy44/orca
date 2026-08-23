@@ -142,6 +142,28 @@ describe('PrincipalRegistry', () => {
       expect(store.principalOf('device-a')).toBe(bo.principalId)
     })
 
+    it('leaves the binding and the designation untouched when a re-bind is refused', () => {
+      const store = registry()
+      const ana = store.createPrincipal(consent, 'Ana')
+      grants.add({ deviceId: 'desktop' })
+      store.bindGrant(consent, 'desktop', ana.principalId)
+      store.designatePusher(consent, ana.principalId, 'desktop')
+
+      expect(() =>
+        store.rebindGrant(consent, 'desktop', '00000000-0000-4000-8000-000000000000')
+      ).toThrow(/no record of that person/)
+
+      expect(store.principalOf('desktop')).toBe(ana.principalId)
+      expect(store.delegatedGrantIdOf(ana.principalId)).toBe('desktop')
+      expect(store.boundDeviceIds(ana.principalId)).toEqual(['desktop'])
+      expect(() => store.assertLaneProvisionable(ana.principalId)).not.toThrow()
+      expect(store.listAudit().map((row) => row.action)).toEqual([
+        'create-principal',
+        'bind',
+        'designate'
+      ])
+    })
+
     it('never resolves a principal by the free-form pairing name', () => {
       const store = registry()
       const ana = store.createPrincipal(consent, 'Ana')
