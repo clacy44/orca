@@ -23,6 +23,16 @@ import {
 } from '../../../src/components/AccountUsage'
 import { useCodexResetCreditAction } from '../../../src/components/use-codex-reset-credit-action'
 import { ProviderAccountSection } from '../../../src/accounts/ProviderAccountSection'
+import { useHostStatusGates } from '../../../src/transport/host-status-gates'
+import {
+  IDLE_SWITCH_STATE,
+  NO_LANE,
+  readLaneProjection,
+  reduceSwitchRequest,
+  resolveClaudeSwitchCall,
+  type MobileLaneProjection,
+  type SwitchRequestState
+} from '../../../src/accounts/lane-delegated-switch-request'
 
 export default function AccountsScreen() {
   const router = useRouter()
@@ -37,9 +47,15 @@ export default function AccountsScreen() {
   const [refreshing, setRefreshing] = useState(false)
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
   const [clockEnabled, setClockEnabled] = useState(false)
+  // §2l: the phone's lane is whatever the host publishes for THIS caller; an old host publishes
+  // none and every branch below stays on today's behaviour.
+  const [lane, setLane] = useState<MobileLaneProjection>(NO_LANE)
+  const [switchState, setSwitchState] = useState<SwitchRequestState>(IDLE_SWITCH_STATE)
+  const { hostCapabilities } = useHostStatusGates({ hostId, client, connState })
 
-  const acceptSnapshot = useCallback((nextSnapshot: AccountsSnapshot) => {
+  const acceptSnapshot = useCallback((nextSnapshot: AccountsSnapshot, raw?: unknown) => {
     setSnapshot(nextSnapshot)
+    setLane(readLaneProjection(raw))
     setError(null)
   }, [])
   const rejectInvalidSnapshot = useCallback(() => {
@@ -108,7 +124,7 @@ export default function AccountsScreen() {
       const evt = payload as { type?: string; snapshot?: unknown }
       if (evt.type === 'ready' || evt.type === 'snapshot') {
         try {
-          acceptSnapshot(decodeAccountsSnapshot(evt.snapshot))
+          acceptSnapshot(decodeAccountsSnapshot(evt.snapshot), evt.snapshot)
         } catch {
           rejectInvalidSnapshot()
         }
@@ -116,6 +132,47 @@ export default function AccountsScreen() {
     })
     return unsubscribe
   }, [acceptSnapshot, client, connState, rejectInvalidSnapshot])
+
+  // §2l step 4: the switch outcome arrives on this stream. The `pending` reply is not an outcome.
+  useEffect(() => {
+    if (!client || connState !== 'connected' || !lane.holdsLane) {
+      return
+    }
+    return client.subscribe('accounts.lane.statusSubscribe', null, (frame) => {
+      setSwitchState((state) => reduceSwitchRequest(state, { type: 'lane-frame', frame }))
+    })
+  }, [client, connState, lane.holdsLane])
+
+  const requestLaneSwitch = useCallback(
+    async (delegatedAccountId: string | null) => {
+      const call = resolveClaudeSwitchCall({
+        lane,
+        accountId: null,
+        delegatedAccountId,
+        hostCapabilities
+      })
+      if (!client || call.method !== 'accounts.lane.requestSwitch') {
+        Alert.alert(
+          'Could not switch account',
+          call.method === null && call.reason === 'unsupported-host'
+            ? 'This host is too old to switch your own Claude account from here. Update Orca on the host.'
+            : 'That account is not offered for switching from this device yet. Tick it in Orca on your desktop.'
+        )
+        return
+      }
+      const res = await client.sendRequest(call.method, call.params)
+      const requestId = res.ok ? ((res.result as { requestId?: string }).requestId ?? null) : null
+      setSwitchState((state) =>
+        reduceSwitchRequest(
+          state,
+          res.ok
+            ? { type: 'requested', requestId, delegatedAccountId: call.params.delegatedAccountId }
+            : { type: 'refused', message: res.error.message }
+        )
+      )
+    },
+    [client, hostCapabilities, lane]
+  )
 
   const refresh = useCallback(async () => {
     if (!client) {
@@ -125,7 +182,7 @@ export default function AccountsScreen() {
     try {
       const res = await client.sendRequest('accounts.list')
       if (res.ok) {
-        acceptSnapshot(decodeAccountsSnapshot(res.result))
+        acceptSnapshot(decodeAccountsSnapshot(res.result), res.result)
       } else {
         setError(res.error.message)
       }
@@ -143,6 +200,15 @@ export default function AccountsScreen() {
   const selectAccount = useCallback(
     async (provider: ProviderKey, accountId: string | null) => {
       if (!client) {
+        return
+      }
+      // §2d refuses this caller's `selectClaude` outright once it holds a lane, so the phone must
+      // not send one: its own account moves through the delegated list below instead.
+      if (provider === 'claude' && lane.holdsLane) {
+        Alert.alert(
+          'Switch in your own lane',
+          "This host keeps your Claude account separate from everyone else's. Pick one of your own accounts below."
+        )
         return
       }
       const codexTarget = provider === 'codex' ? snapshot?.rateLimits.codexTarget : null
@@ -176,7 +242,7 @@ export default function AccountsScreen() {
         setBusyAccountId(null)
       }
     },
-    [client, refresh, snapshot]
+    [client, lane, refresh, requestLaneSwitch, snapshot]
   )
 
   return (
@@ -249,6 +315,55 @@ export default function AccountsScreen() {
                 confirmCodexReset={confirmCodexReset}
               />
             ))}
+            {lane.holdsLane ? (
+              <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionHeading}>Your Claude accounts</Text>
+                </View>
+                <View style={styles.card}>
+                  {lane.delegable.map((entry, index) => (
+                    <View key={entry.delegatedAccountId}>
+                      {index > 0 ? <View style={styles.separator} /> : null}
+                      <Pressable
+                        style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+                        onPress={() => void requestLaneSwitch(entry.delegatedAccountId)}
+                        disabled={switchState.status === 'pending' || connState !== 'connected'}
+                      >
+                        <View style={styles.rowMain}>
+                          <Text style={styles.rowTitle} numberOfLines={1}>
+                            {entry.displayName ?? entry.email ?? 'Claude account'}
+                          </Text>
+                          <Text style={styles.rowSubtitle}>
+                            {lane.heldDisplayName === entry.displayName
+                              ? 'Loaded on this host'
+                              : 'Switch through your desktop'}
+                          </Text>
+                        </View>
+                      </Pressable>
+                    </View>
+                  ))}
+                  {lane.delegable.length === 0 ? (
+                    <View style={styles.row}>
+                      <Text style={styles.rowSubtitle}>
+                        No accounts offered yet. Tick the ones you want on your desktop.
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+            ) : null}
+            {switchState.status === 'pending' ? (
+              <View style={styles.footerHint}>
+                <Text style={styles.footerHintText}>
+                  Asking your desktop to switch this account…
+                </Text>
+              </View>
+            ) : null}
+            {switchState.status === 'failed' ? (
+              <View style={styles.footerHint}>
+                <Text style={styles.errorText}>{switchState.message}</Text>
+              </View>
+            ) : null}
             <View style={styles.footerHint}>
               <User size={14} color={colors.textMuted} />
               <Text style={styles.footerHintText}>
