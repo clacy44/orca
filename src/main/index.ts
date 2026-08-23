@@ -2572,6 +2572,12 @@ void app.whenReady().then(async () => {
     const lane = runtimeService.credentialLaneOfPaneKey(paneKey)
     return lane ? { laneId: lane.kind === 'principal' ? lane.principalId : null } : null
   })
+  runtimeService.setLaneAccountRowResolvers({
+    laneUsageOf: (principalId) => {
+      const usage = claudeRuntimeAuth?.laneUsageFor(principalId) ?? null
+      return usage ? { session: usage.session, weekly: usage.weekly } : null
+    }
+  })
   runtimeService.prepareLegacyWorkerTerminalRecovery()
   // Why: federated mail queued before the restart resumes here instead of waiting for
   // an RPC to touch the Run.

@@ -12,6 +12,7 @@ import type {
   BrowserSessionProfile,
   BrowserSessionProfileSource
 } from './browser-workspace-types'
+import type { RateLimitWindow } from './rate-limit-types'
 import type { BaseRefSearchResult, Repo } from './repo-types'
 import type { TabGroupLayoutNode } from './tab-types'
 import type { TerminalColorOverrides } from './terminal-color-overrides'
@@ -544,6 +545,29 @@ export type RuntimeTerminalPresence = {
   participants: RuntimeTerminalPresenceParticipant[]
 }
 
+/**
+ * Q3's two labels on one row (S9 §2h/§2k). `owner` is the host-observed principal label — a join
+ * the projection makes, not spoofable; `accountName` is the owner-authored per-account name the
+ * desktop pushed (§2b's third envelope member), so it is client-asserted and absent when unset.
+ */
+export type RuntimeTerminalLaneAccountLabel = {
+  owner: string
+  accountName?: string
+}
+
+/**
+ * The usage of the account this terminal's lane holds RIGHT NOW (S9 §2k, Q7).
+ *
+ * OMITTED, never zeroed, for a grant of another principal: zero reads as "no usage left to worry
+ * about", omission reads as "not yours" (§2d). `unavailable` is the win32 arm, where the per-lane
+ * pull is disabled and a stale bar would be worse than none.
+ */
+export type RuntimeTerminalLaneUsage = {
+  session: RateLimitWindow | null
+  weekly: RateLimitWindow | null
+  unavailableReason?: string
+}
+
 export type RuntimeTerminalSummary = {
   handle: string
   ptyId: string | null
@@ -562,6 +586,9 @@ export type RuntimeTerminalSummary = {
   presence?: RuntimeTerminalPresence
   credentialLane?: RuntimeTerminalCredentialLane
   laneState?: RuntimeTerminalLaneState
+  /** Additive (Rule 1); peer-visible, which `laneUsage` deliberately is not (§2k). */
+  laneAccountLabel?: RuntimeTerminalLaneAccountLabel
+  laneUsage?: RuntimeTerminalLaneUsage
 }
 
 export type RuntimeTerminalVisualTerminalNode = {

@@ -147,4 +147,74 @@ describe('applyTerminalCredentialLaneRows', () => {
     expect(seen).toEqual([PRINCIPAL_ID])
     expect(rows[1]).toMatchObject({ laneState: 'loaded' })
   })
+
+  describe("laneAccountLabel and laneUsage — Q7's per-row join (§2k)", () => {
+    const USAGE = {
+      session: { usedPercent: 61, windowMinutes: 300, resetsAt: null, resetDescription: null },
+      weekly: null
+    }
+    const LABEL = { owner: 'Ana', accountName: 'work' }
+
+    it("surfaces both for the lane's own principal", () => {
+      const rows = [terminalRow()]
+
+      applyTerminalCredentialLaneRows(rows, {
+        laneOf: () => LANE,
+        laneStateOf: () => 'loaded',
+        laneAccountLabelOf: () => LABEL,
+        laneUsageOf: () => USAGE,
+        callerPrincipalId: PRINCIPAL_ID
+      })
+
+      expect(rows[0]?.laneAccountLabel).toEqual(LABEL)
+      expect(rows[0]?.laneUsage).toEqual(USAGE)
+    })
+
+    // §2d: zero reads as "no usage left to worry about"; omission reads as "not yours".
+    it('shows a peer the label and OMITS the bar, never zeroes it', () => {
+      const rows = [terminalRow()]
+
+      applyTerminalCredentialLaneRows(rows, {
+        laneOf: () => LANE,
+        laneStateOf: () => 'loaded',
+        laneAccountLabelOf: () => LABEL,
+        laneUsageOf: () => USAGE,
+        callerPrincipalId: 'other-principal'
+      })
+
+      expect(rows[0]?.laneAccountLabel).toEqual(LABEL)
+      expect(rows[0]).not.toHaveProperty('laneUsage')
+    })
+
+    it('omits the bar for an anonymous caller with no principal at all', () => {
+      const rows = [terminalRow()]
+
+      applyTerminalCredentialLaneRows(rows, {
+        laneOf: () => LANE,
+        laneStateOf: () => 'loaded',
+        laneUsageOf: () => USAGE
+      })
+
+      expect(rows[0]).not.toHaveProperty('laneUsage')
+    })
+
+    // Negative control: a row that is not running on the lane carries no claim about it.
+    it('adds neither field to a shared, remote or OpenClaude-downgraded row', () => {
+      const rows = [terminalRow(), terminalRow({ handle: 'term_2', tabId: 'tab-2' })]
+
+      applyTerminalCredentialLaneRows(rows, {
+        laneOf: (_worktreeId, paneKey) => (paneKey.startsWith('tab-2') ? LANE : SHARED),
+        observedAgentTypesOf: () => ['openclaude'],
+        laneStateOf: () => 'loaded',
+        laneAccountLabelOf: () => LABEL,
+        laneUsageOf: () => USAGE,
+        callerPrincipalId: PRINCIPAL_ID
+      })
+
+      expect(rows[0]).not.toHaveProperty('laneAccountLabel')
+      expect(rows[1]?.credentialLane).toBe('shared-runtime')
+      expect(rows[1]).not.toHaveProperty('laneAccountLabel')
+      expect(rows[1]).not.toHaveProperty('laneUsage')
+    })
+  })
 })

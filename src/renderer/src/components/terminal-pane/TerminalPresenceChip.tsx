@@ -5,6 +5,7 @@ import { translate } from '@/i18n/i18n'
 import { useTerminalPresenceLastSeenTick } from '@/hooks/terminal-presence-last-seen-tick'
 import { terminalPresenceLastSeenMinutes } from '../../../../shared/terminal-presence-last-seen'
 import type { TerminalPresenceChipState } from './terminal-presence-chip-state'
+import type { TerminalLaneAccountChipState } from './terminal-lane-account-chip-state'
 
 // Why the LockChip pill geometry with no button: presence is awareness, not a lock, so the chip must
 // read as ambient. Top-LEFT because the phone-driver chip owns top-right and both can be live at once.
@@ -51,21 +52,41 @@ function chipCopy(state: TerminalPresenceChipState): string {
   }
 }
 
+// Why on the presence chip and not a chip of its own: whose credential this terminal runs on is
+// the same awareness question presence answers, and two ambient pills in one corner is noise.
+function laneCopy(lane: TerminalLaneAccountChipState): string {
+  if (lane.unavailableReason) {
+    return `${lane.label} · ${lane.unavailableReason}`
+  }
+  return lane.usedPercent === undefined ? lane.label : `${lane.label} · ${lane.usedPercent}%`
+}
+
 export function TerminalPresenceChip({
   state,
+  lane,
   rootClassName
 }: {
   state: TerminalPresenceChipState | null
+  /** S9 §2k's two additive row fields, already resolved. Absent on a non-lane pane. */
+  lane?: TerminalLaneAccountChipState | null
   rootClassName?: string
 }): ReactElement | null {
   useTerminalPresenceLastSeenTick(state?.activity === 'stale')
-  if (!state) {
+  if (!state && !lane) {
     return null
   }
   return (
-    <div className={cn(CHIP_CLASSES, rootClassName)} data-presence-activity={state.activity}>
+    <div
+      className={cn(CHIP_CLASSES, rootClassName)}
+      {...(state ? { 'data-presence-activity': state.activity } : {})}
+    >
       <Users className="size-3 text-muted-foreground" aria-hidden="true" />
-      <span>{chipCopy(state)}</span>
+      {state ? <span>{chipCopy(state)}</span> : null}
+      {lane ? (
+        <span className="text-muted-foreground" data-terminal-lane-account>
+          {laneCopy(lane)}
+        </span>
+      ) : null}
     </div>
   )
 }

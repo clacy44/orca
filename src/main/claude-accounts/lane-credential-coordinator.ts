@@ -1,4 +1,12 @@
 import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
+import { fetchViaPty } from '../rate-limits/claude-pty'
+import { LaneUsagePull, type LaneUsagePullOutcome } from '../rate-limits/lane-usage-pull'
+import { isLaneWipePending } from './lane-wipe-pending'
+import {
+  isClaudeAuthSwitchInProgress,
+  markEphemeralClaudePtyExited,
+  markEphemeralClaudePtySpawned
+} from './live-pty-gate'
 import { AccountResidencyIndex, type SharedLaneCredentialReader } from './account-residency-index'
 import { readIdentityFromOauthAccount } from './claude-credential-identity'
 import { ensureLaneProvenanceLabel, formatLaneProvenance } from './principal-lane-provenance'
@@ -8,6 +16,7 @@ import { LaneSyncDriver, type LaneSyncOutcome, type LaneSyncTrigger } from './la
 import { PrincipalLaneStore, type LaneWatermarkPersistence } from './principal-lane-store'
 import type { PrincipalLaneOptions } from './principal-credential-lane'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
+import type { ProviderRateLimits } from '../../shared/rate-limit-types'
 
 /**
  * The one host-side owner of the lane credential machinery (S9 §2c/§2e).
@@ -30,6 +39,7 @@ export class LaneCredentialCoordinator {
   readonly residency: AccountResidencyIndex
   readonly authState: LaneAuthState
   readonly syncDriver: LaneSyncDriver
+  readonly usagePull: LaneUsagePull
   private presenceLabelResolver: ((laneId: string) => string | null) | null = null
   // Why populated from `syncLane` rather than from a lane listing: "loaded" is a fact the sync
   // establishes, and a lane that has never synced has no row to attribute usage to (S9 §2k).
@@ -50,6 +60,30 @@ export class LaneCredentialCoordinator {
       residency: this.residency,
       authState: this.authState
     })
+    this.usagePull = new LaneUsagePull({
+      listLoadedLanes: () => this.laneUsageAttributions(),
+      laneStateOf: (laneId) => this.store.getLaneState(laneId),
+      isWipePending: isLaneWipePending,
+      // DEVIATION, recorded: `isClaudeAuthSwitchInProgress` is still host-global in this tree —
+      // §2f's lane scoping is S9c. Over-skipping is the safe direction for a usage tick.
+      isSwitchInProgress: () => isClaudeAuthSwitchInProgress(),
+      fetchUsage: (input) => fetchViaPty(input),
+      markProbeSpawned: markEphemeralClaudePtySpawned,
+      markProbeExited: markEphemeralClaudePtyExited,
+      syncProbedLane: async (laneId) => {
+        await this.syncLane(laneId, 'rate-limit-tick')
+      }
+    })
+  }
+
+  /** Trigger 2's SECOND arm: one probe per loaded lane, then a sync over each lane probed. */
+  pullLaneUsage(): Promise<LaneUsagePullOutcome> {
+    return this.usagePull.run()
+  }
+
+  /** The usage row a terminal's lane join reads; null while the pull is disabled or unrun. */
+  laneUsage(laneId: string): ProviderRateLimits | null {
+    return this.usagePull.laneUsage(laneId)
   }
 
   setPresenceLabelResolver(resolve: ((laneId: string) => string | null) | null): void {

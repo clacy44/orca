@@ -398,6 +398,8 @@ import {
   type RuntimeSpeechModelSummary,
   type RuntimeSpeechSetupState,
   type RuntimeTerminalShow,
+  type RuntimeTerminalLaneAccountLabel,
+  type RuntimeTerminalLaneUsage,
   type RuntimeTerminalSummary,
   type RuntimeTerminalVisualGroupNode,
   type RuntimeTerminalVisualLayout,
@@ -16158,6 +16160,8 @@ export class OrcaRuntimeService {
       // Why one object rather than a boolean plus an id: presence is opt-in AND caller-scoped, so an
       // absent object is the single state that omits the key from every row.
       presence?: TerminalListPresenceScope
+      /** The caller's grant, for the lane-usage projection rule of §2d. */
+      pairedDeviceId?: string | null
     } = {}
   ): Promise<RuntimeTerminalListResult> {
     if (!Number.isInteger(limit) || limit <= 0) {
@@ -16301,6 +16305,14 @@ export class OrcaRuntimeService {
           .filter((row) => row.paneKey === paneKey)
           .map((row) => row.agentType),
       laneStateOf: (principalId) => resolveLaneResidencyState(principalId),
+      ...(this.laneAccountRowResolvers.laneAccountLabelOf
+        ? { laneAccountLabelOf: this.laneAccountRowResolvers.laneAccountLabelOf }
+        : {}),
+      ...(this.laneAccountRowResolvers.laneUsageOf
+        ? { laneUsageOf: this.laneAccountRowResolvers.laneUsageOf }
+        : {}),
+      // §2d: a peer sees the label and NOT the bar, so the caller's own principal is the gate.
+      callerPrincipalId: this.paneLanes.principalOfGrant(opts.pairedDeviceId),
       // Why a resolver and not a lookup: the join is a scan of the connection map, and this
       // one is asked per participant per row (§2h).
       principalOfParticipant: createPresenceParticipantPrincipalResolver({
@@ -26520,6 +26532,11 @@ export class OrcaRuntimeService {
   }
 
   /** Lanes reach the funnel only through the host consent surface; with no lookup all is shared. */
+  private laneAccountRowResolvers: {
+    laneAccountLabelOf?: (principalId: string) => RuntimeTerminalLaneAccountLabel | null
+    laneUsageOf?: (principalId: string) => RuntimeTerminalLaneUsage | null
+  } = {}
+
   setPrincipalLaneLookup(lookup: PrincipalLookup | null): void {
     this.paneLanes.setPrincipalLookup(lookup)
   }
@@ -26534,6 +26551,14 @@ export class OrcaRuntimeService {
     leafId: string
   ): PaneCredentialLaneLookup {
     return this.paneLanes.lookup(worktreeId, tabId, leafId)
+  }
+
+  /** Q3's row labels and the lane's usage row; unset until the host wires their sources (§2k). */
+  setLaneAccountRowResolvers(resolvers: {
+    laneAccountLabelOf?: (principalId: string) => RuntimeTerminalLaneAccountLabel | null
+    laneUsageOf?: (principalId: string) => RuntimeTerminalLaneUsage | null
+  }): void {
+    this.laneAccountRowResolvers = resolvers
   }
 
   /** The lane a posted paneKey names — the usage attribution join's first hop (§2k). */

@@ -45,6 +45,7 @@ import {
 } from './keychain'
 import { LaneCredentialCoordinator } from './lane-credential-coordinator'
 import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
+import type { ProviderRateLimits } from '../../shared/rate-limit-types'
 import {
   assertClaudeLaunchNotDelegatedToLane,
   isClaudeAccountDelegatedToLane
@@ -146,6 +147,11 @@ export class ClaudeRuntimeAuthService {
     return this.getPreparation(effectiveTarget, lanePrincipalId)
   }
 
+  /** The lane's own usage row, for the terminal join `laneId → account → usage` (S9 §2k). */
+  laneUsageFor(laneId: string): ProviderRateLimits | null {
+    return this.laneCredentials.laneUsage(laneId)
+  }
+
   /** The lane rows the statusline attribution map keys by config dir (S9 §2k). */
   listLaneUsageAttributions(): ClaudeLaneUsageAttribution[] {
     return this.laneCredentials.laneUsageAttributions()
@@ -155,8 +161,10 @@ export class ClaudeRuntimeAuthService {
     target?: ClaudeAccountSelectionTarget
   ): Promise<ClaudeRuntimeAuthPreparation> {
     const effectiveTarget = target ?? this.getDefaultAccountSelectionTarget()
-    // Trigger 2: a lane whose own claude is live may have rotated since the last tick.
+    // Trigger 2: a lane whose own claude is live may have rotated since the last tick, and each
+    // loaded lane gets its own usage probe — which itself syncs the lane it probed (S9 §2c/§2k).
     await this.laneCredentials.syncLanesWithLivePtys()
+    await this.laneCredentials.pullLaneUsage()
     await this.syncForCurrentSelection(effectiveTarget)
     return this.getPreparation(effectiveTarget)
   }

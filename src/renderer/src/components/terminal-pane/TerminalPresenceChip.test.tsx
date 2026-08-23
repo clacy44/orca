@@ -71,4 +71,38 @@ describe('TerminalPresenceChip', () => {
     expect(markup).toContain('data-presence-activity="stale"')
     expect(markup).not.toContain('typing')
   })
+
+  describe('the lane account segment (S9 §2k)', () => {
+    it('renders the owner, the account name and the bar beside the presence copy', () => {
+      const markup = renderToStaticMarkup(
+        <TerminalPresenceChip state={null} lane={{ label: 'Ana · work', usedPercent: 74 }} />
+      )
+
+      expect(markup).toContain('Ana · work · 74%')
+    })
+
+    it('renders the label with no percentage when the bar is omitted for a peer', () => {
+      const markup = renderToStaticMarkup(
+        <TerminalPresenceChip state={null} lane={{ label: 'Ana · work' }} />
+      )
+
+      expect(markup).toContain('Ana · work')
+      expect(markup).not.toContain('%')
+    })
+
+    it('says why the bar is missing rather than rendering a stale one', () => {
+      const markup = renderToStaticMarkup(
+        <TerminalPresenceChip
+          state={null}
+          lane={{ label: 'Ana', unavailableReason: 'usage unavailable on this host' }}
+        />
+      )
+
+      expect(markup).toContain('Ana · usage unavailable on this host')
+    })
+
+    it('still renders nothing when neither presence nor a lane row is present', () => {
+      expect(renderToStaticMarkup(<TerminalPresenceChip state={null} />)).toBe('')
+    })
+  })
 })

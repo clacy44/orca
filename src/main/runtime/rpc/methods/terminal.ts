@@ -1218,6 +1218,9 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         handles: params.handles,
         requireFreshPtyLiveness: params.requireFreshPtyLiveness,
         includeVisualLayouts: params.includeVisualLayouts,
+        // Why unconditional, unlike presence: §2d gates the lane's usage bar on the caller's own
+        // principal, and a caller that asks for no presence still gets its own lane's row.
+        ...(pairedDeviceId ? { pairedDeviceId } : {}),
         ...(presence ? { presence } : {})
       })
     }

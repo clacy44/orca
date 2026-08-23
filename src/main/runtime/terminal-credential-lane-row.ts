@@ -3,7 +3,9 @@ import { isTerminalLeafId, makePaneKey } from '../../shared/stable-pane-id'
 import { isValidTerminalTabId } from '../../shared/terminal-tab-id'
 import type {
   RuntimeTerminalCredentialLane,
+  RuntimeTerminalLaneAccountLabel,
   RuntimeTerminalLaneState,
+  RuntimeTerminalLaneUsage,
   RuntimeTerminalSummary
 } from '../../shared/runtime-types'
 import type { PaneCredentialLane } from './pane-credential-lane-registry'
@@ -77,6 +79,15 @@ export type TerminalCredentialLaneRowOptions = {
    * principal, so neither map can answer this alone (§2h).
    */
   principalOfParticipant?(participantId: string): string | null
+  /** Q3's two labels for one lane: the host-observed owner plus the pushed account name (§2h). */
+  laneAccountLabelOf?(principalId: string): RuntimeTerminalLaneAccountLabel | null
+  /** The lane's current account's usage row (§2k). */
+  laneUsageOf?(principalId: string): RuntimeTerminalLaneUsage | null
+  /**
+   * The principal behind the CALLER's grant. §2d's projection rule applies to this row too: a
+   * peer looking at another principal's terminal sees `laneUsage` omitted, never zeroed.
+   */
+  callerPrincipalId?: string | null
 }
 
 /**
@@ -119,6 +130,12 @@ export function applyTerminalCredentialLaneRows(
     if (row.laneState) {
       terminal.laneState = row.laneState
     }
+    // Why gated on the projected row and not on `lane` alone: an OpenClaude downgrade, a remote
+    // pane and a WSL pane are not running on the lane, so a label or a bar about that lane's
+    // account would say nothing true about this row's credential.
+    if (row.credentialLane === 'grant' && lane?.kind === 'principal') {
+      applyLaneAccountRow(terminal, lane.principalId, options)
+    }
     markCredentialLaneOwners(terminal, lane, options)
   }
 }
@@ -141,5 +158,23 @@ function markCredentialLaneOwners(
     if (options.principalOfParticipant(participant.participantId) === lane.principalId) {
       participant.credentialLaneOwner = true
     }
+  }
+}
+
+function applyLaneAccountRow(
+  terminal: RuntimeTerminalSummary,
+  principalId: string,
+  options: TerminalCredentialLaneRowOptions
+): void {
+  const label = options.laneAccountLabelOf?.(principalId)
+  if (label) {
+    terminal.laneAccountLabel = label
+  }
+  if (options.callerPrincipalId !== principalId) {
+    return
+  }
+  const usage = options.laneUsageOf?.(principalId)
+  if (usage) {
+    terminal.laneUsage = usage
   }
 }
