@@ -32,6 +32,7 @@ import {
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from './live-pty-gate'
 import { findDuplicateClaudeAccount } from './claude-duplicate-account'
 import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-containment'
+import { assertManagedClaudeAccountNotLaneResident } from './managed-account-lane-residency'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
@@ -409,6 +410,8 @@ export class ClaudeAccountService {
   }
 
   private async doRemoveAccount(accountId: string): Promise<ClaudeRateLimitAccountsState> {
+    // L1: deleting an account a lane is running on would strand that lane (§2d).
+    assertManagedClaudeAccountNotLaneResident(accountId)
     const account = this.requireAccount(accountId)
     const settings = this.store.getSettings()
     const nextAccounts = settings.claudeManagedAccounts.filter((entry) => entry.id !== accountId)
@@ -463,6 +466,9 @@ export class ClaudeAccountService {
     accountId: string | null,
     target?: ClaudeAccountSelectionTarget
   ): Promise<ClaudeRateLimitAccountsState> {
+    // L1's second edge, and it is here rather than at the RPC because it must hold for EVERY
+    // caller class — the renderer and the anonymous local socket carry no `pairedDeviceId` (§2d).
+    assertManagedClaudeAccountNotLaneResident(accountId)
     let effectiveTarget = target
     if (accountId !== null) {
       const account = this.requireAccount(accountId)
