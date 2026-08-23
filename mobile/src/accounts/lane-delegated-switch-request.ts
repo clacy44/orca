@@ -96,6 +96,23 @@ export function resolveClaudeSwitchCall(args: {
   }
 }
 
+/**
+ * Whether to open `accounts.lane.statusSubscribe` — gated on the SAME host capability its sibling
+ * `requestSwitch` is gated on, so an old host produces "update the host" and not a raw
+ * `method_not_found` from a stream that never rides.
+ */
+export function shouldSubscribeToLaneStatus(args: {
+  lane: MobileLaneProjection
+  hostCapabilities: readonly string[]
+  connected: boolean
+}): boolean {
+  return (
+    args.connected &&
+    args.lane.holdsLane &&
+    args.hostCapabilities.includes(AGENT_IDENTITY_LANES_CAPABILITY)
+  )
+}
+
 export type SwitchRequestState =
   | { status: 'idle' }
   | { status: 'pending'; requestId: string | null; delegatedAccountId: string }

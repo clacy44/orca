@@ -7,6 +7,7 @@ import {
   readLaneProjection,
   reduceSwitchRequest,
   resolveClaudeSwitchCall,
+  shouldSubscribeToLaneStatus,
   type SwitchRequestState
 } from './lane-delegated-switch-request'
 
@@ -225,5 +226,42 @@ describe('the pending → outcome state machine', () => {
 
   it('ignores a malformed frame rather than throwing at the render', () => {
     expect(reduceSwitchRequest(pending, { type: 'lane-frame', frame: 'nope' })).toEqual(pending)
+  })
+})
+
+describe('lane status subscription gate', () => {
+  const lane = { ...NO_LANE, holdsLane: true }
+
+  it('subscribes against a lanes-capable host', () => {
+    expect(
+      shouldSubscribeToLaneStatus({
+        lane,
+        hostCapabilities: [AGENT_IDENTITY_LANES_CAPABILITY],
+        connected: true
+      })
+    ).toBe(true)
+  })
+
+  it('does not subscribe against a host that does not advertise lanes', () => {
+    expect(
+      shouldSubscribeToLaneStatus({ lane, hostCapabilities: ['other.v1'], connected: true })
+    ).toBe(false)
+  })
+
+  it('does not subscribe with no lane, or while disconnected', () => {
+    expect(
+      shouldSubscribeToLaneStatus({
+        lane: NO_LANE,
+        hostCapabilities: [AGENT_IDENTITY_LANES_CAPABILITY],
+        connected: true
+      })
+    ).toBe(false)
+    expect(
+      shouldSubscribeToLaneStatus({
+        lane,
+        hostCapabilities: [AGENT_IDENTITY_LANES_CAPABILITY],
+        connected: false
+      })
+    ).toBe(false)
   })
 })

@@ -31,6 +31,7 @@ import {
   readLaneProjection,
   reduceSwitchRequest,
   resolveClaudeSwitchCall,
+  shouldSubscribeToLaneStatus,
   type MobileLaneProjection,
   type SwitchRequestState
 } from '../../../src/accounts/lane-delegated-switch-request'
@@ -135,14 +136,19 @@ export default function AccountsScreen() {
   }, [acceptSnapshot, client, connState, rejectInvalidSnapshot])
 
   // §2l step 4: the switch outcome arrives on this stream. The `pending` reply is not an outcome.
+  const subscribeToLane = shouldSubscribeToLaneStatus({
+    lane,
+    hostCapabilities,
+    connected: connState === 'connected'
+  })
   useEffect(() => {
-    if (!client || connState !== 'connected' || !lane.holdsLane) {
+    if (!client || !subscribeToLane) {
       return
     }
     return client.subscribe('accounts.lane.statusSubscribe', null, (frame) => {
       setSwitchState((state) => reduceSwitchRequest(state, { type: 'lane-frame', frame }))
     })
-  }, [client, connState, lane.holdsLane])
+  }, [client, subscribeToLane])
 
   const requestLaneSwitch = useCallback(
     async (delegatedAccountId: string | null) => {
