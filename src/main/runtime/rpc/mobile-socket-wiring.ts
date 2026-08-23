@@ -122,6 +122,19 @@ export class MobileSocketWiring {
     return this.connectionIds.size
   }
 
+  /**
+   * The device ids with an authenticated socket right now (S9 §2f's close predicate).
+   *
+   * `deviceId`, not `deviceToken`: the lane is keyed by the principal a grant is bound to, and
+   * `principalOf` takes the id. Read AFTER `handleClose` has removed the closing socket, so it is
+   * exactly the set of survivors.
+   */
+  connectedDeviceIds(): string[] {
+    return [
+      ...new Set([...this.authenticatedSockets.values()].map((socket) => socket.device.deviceId))
+    ]
+  }
+
   terminateDeviceConnections(deviceToken: string): number {
     let terminated = 0
     for (const transport of this.transports) {

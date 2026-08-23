@@ -22,6 +22,12 @@ import { readWsFallbackPort, writeWsFallbackPort } from './rpc/ws-fallback-port-
 import type { WebSocket } from 'ws'
 import { DeviceRegistry, type DeviceEntry, type DeviceScope } from './device-registry'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
+import {
+  createPrincipalLaneConnectionJoin,
+  removeLaneOnGrantRevoked,
+  wipeLaneOnConnectionClose,
+  type PrincipalGrantBindings
+} from './principal-lane-connection-lifecycle'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from './e2ee-keypair'
 import { UnpairedDeviceAuthThrottle } from './rpc/unpaired-device-auth-throttle'
 import { terminalPresenceRegistry } from './terminal-presence-registry'
@@ -518,6 +524,9 @@ export class OrcaRuntimeRpcServer {
   private transports: RuntimeTransportMetadata[] = []
   private metadataOwnershipWatch: RuntimeMetadataOwnershipWatch | null = null
   private mobileSocketWiring: MobileSocketWiring | null = null
+  // S9 §2f: the same registry the lane funnel resolves through, held so a close and a revoke can
+  // ask `principalOf` and the survivor query. Null on a host with no pairing transport.
+  private principalGrantBindings: PrincipalGrantBindings | null = null
   // Why: detaches the current WebSocketTransport from the session wiring so a pairing rebind can swap
   // transports under the SAME wiring (see ensureMobileSocketWiring) instead of orphaning relay sockets.
   private detachWebSocketWiring: (() => void) | null = null
@@ -645,9 +654,12 @@ export class OrcaRuntimeRpcServer {
         return false
       }
     }
+    // Captured BEFORE the row goes: afterwards nothing can tell a last grant from a first (§2f).
+    const revokedPrincipalId = this.principalGrantBindings?.principalOf(deviceId) ?? null
     if (!this.deviceRegistry?.removeDevice(deviceId)) {
       return false
     }
+    void this.removeLaneOnRevoke(revokedPrincipalId)
     this.mobileRelayPairingProvider?.onDemandStateChanged?.()
     this.runtime.forgetClientNavigationState(deviceId)
     terminalPresenceRegistry.forgetGrant(deviceId)
@@ -657,15 +669,48 @@ export class OrcaRuntimeRpcServer {
 
   revokeRuntimeAccess(deviceId: string): boolean {
     const device = this.deviceRegistry?.getDevice(deviceId)
+    const revokedPrincipalId = this.principalGrantBindings?.principalOf(deviceId) ?? null
     if (device?.scope !== 'runtime' || !this.deviceRegistry?.removeDevice(deviceId)) {
       return false
     }
+    void this.removeLaneOnRevoke(revokedPrincipalId)
     this.runtime.forgetClientNavigationState(deviceId)
     // Why: the participantId mapping is keyed on the durable grant, so only revoking the grant may
     // drop it — otherwise it is the one presence map no lifecycle event can ever remove an entry from.
     terminalPresenceRegistry.forgetGrant(deviceId)
     this.mobileSocketWiring?.terminateDeviceConnections(device.token)
     return true
+  }
+
+  /** The lane's own grants keep it alive; a wipe reported here is a failure worth logging. */
+  private async wipeLaneOnSocketClose(deviceId: string): Promise<void> {
+    const join = createPrincipalLaneConnectionJoin({
+      bindings: this.principalGrantBindings,
+      connectedDeviceIds: () => this.mobileSocketWiring?.connectedDeviceIds() ?? []
+    })
+    if (!join) {
+      return
+    }
+    try {
+      await wipeLaneOnConnectionClose(join, deviceId)
+    } catch (error) {
+      console.warn('[runtime] Lane wipe on last connection close failed:', error)
+    }
+  }
+
+  private async removeLaneOnRevoke(revokedPrincipalId: string | null): Promise<void> {
+    const join = createPrincipalLaneConnectionJoin({
+      bindings: this.principalGrantBindings,
+      connectedDeviceIds: () => this.mobileSocketWiring?.connectedDeviceIds() ?? []
+    })
+    if (!join) {
+      return
+    }
+    try {
+      await removeLaneOnGrantRevoked(join, revokedPrincipalId)
+    } catch (error) {
+      console.warn('[runtime] Lane removal on grant revoke failed:', error)
+    }
   }
 
   getWebSocketEndpoint(): string | null {
@@ -1199,6 +1244,7 @@ export class OrcaRuntimeRpcServer {
       // Stated rather than left implicit: with no pairing transport there are no grant rows, so the
       // registry is detached on purpose. `PaneLaneAuthority` still refuses a federated link on a
       // host whose persisted binding rows name a principal (S9 §2a).
+      this.principalGrantBindings = null
       detachPrincipalLaneHost(this.runtime)
     }
     // Why: WebSocket uses per-device tokens + E2EE (tweetnacl) instead of TLS since React Native can't pin self-signed certs.
@@ -1210,6 +1256,7 @@ export class OrcaRuntimeRpcServer {
         this.deviceRegistry = null
         this.e2eeKeypair = null
         this.pairingInitializationFailure = pairingIdentity.failure
+        this.principalGrantBindings = null
         // Without grant rows nothing can resolve to a principal; fall back to pre-S9 behaviour.
         detachPrincipalLaneHost(this.runtime)
       } else {
@@ -1218,12 +1265,14 @@ export class OrcaRuntimeRpcServer {
         this.pairingInitializationFailure = null
         // Why here and not at construction: the registry's grant rows ARE the pairing registry,
         // and attaching it is what arms `terminal.lane_link_unbound` (S9 §2a, §6).
-        attachPrincipalLaneHost({
+        // Held: S9c's close and revoke wipes need `principalOf` and the survivor query, and both
+        // must be asked of the SAME registry the lane funnel resolves through (§2f).
+        this.principalGrantBindings = attachPrincipalLaneHost({
           userDataPath: this.userDataPath,
           grants: pairingIdentity.deviceRegistry,
           runtimeAuthToken: this.authToken,
           runtime: this.runtime
-        })
+        }).registry
         try {
           const host = this.resolveInitialWebSocketBindHost()
           const { transport, endpoint } = await this.startWebSocketTransport({
@@ -1408,6 +1457,10 @@ export class OrcaRuntimeRpcServer {
         if (!hasOtherConnections) {
           this.runtime.onClientDisconnected(socket.device.deviceToken)
         }
+        // S9 §2f, and deliberately NOT under `hasOtherConnections`: that predicate is the GRANT's,
+        // and the lane's is the principal's — every grant of the person, counted after this socket
+        // has already left the registry.
+        void this.wipeLaneOnSocketClose(socket.device.deviceId)
       },
       // Why: relay attempts are authorized upstream; only direct failures should prompt local re-pairing.
       onUnpairedDeviceAuthFailure: (metadata) => {
