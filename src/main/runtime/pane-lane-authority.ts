@@ -324,18 +324,22 @@ export class PaneLaneAuthority {
    */
   federatedLinkLane(homePeerFingerprint: string | undefined): PaneCredentialLane {
     if (!this.principals) {
-      // Why: with no principal registry wired there are no lanes on this host, so `shared` is not
-      // a downgrade — it is the only lane. The refusal below arms with the registry.
-      return SHARED_CREDENTIAL_LANE
+      // With no principal registry wired `shared` is USUALLY the only lane there is — but the
+      // persisted binding rows outlive the registry, and a start that never attaches one (the
+      // WebSocket transport disabled, a pairing-init failure) still rehydrates
+      // `{kind:'principal'}` rows. On such a host `shared` IS a downgrade, so the presence of any
+      // lane-bound pane arms the refusal on its own rather than waiting for a registry (§2a).
+      this.ensureRehydrated()
+      if (!this.registry.entries().some((row) => row.lane.kind === 'principal')) {
+        return SHARED_CREDENTIAL_LANE
+      }
+      throw laneLinkUnbound()
     }
     const principalId = homePeerFingerprint
       ? (this.principals.linkPrincipalOf(homePeerFingerprint) ?? null)
       : null
     if (!principalId) {
-      throw new ClaudeLaneRefusal(
-        'terminal.lane_link_unbound',
-        'This federated link is not tied to a person on this host, so Orca will not create a workspace or terminal for it. Approve the link on the host and retry.'
-      )
+      throw laneLinkUnbound()
     }
     return { kind: 'principal', principalId }
   }
@@ -421,4 +425,11 @@ export class PaneLaneAuthority {
       this.deps.forgetPersistedLane({ worktreeId, tabId: parsed.tabId, leafId: parsed.leafId })
     }
   }
+}
+
+function laneLinkUnbound(): ClaudeLaneRefusal {
+  return new ClaudeLaneRefusal(
+    'terminal.lane_link_unbound',
+    'This federated link is not tied to a person on this host, so Orca will not create a workspace or terminal for it. Approve the link on the host and retry.'
+  )
 }

@@ -1195,6 +1195,12 @@ export class OrcaRuntimeRpcServer {
     const activeTransports: RpcTransport[] = [socketTransport]
     const transportsMeta: RuntimeTransportMetadata[] = [transportMeta]
 
+    if (!this.enableWebSocket) {
+      // Stated rather than left implicit: with no pairing transport there are no grant rows, so the
+      // registry is detached on purpose. `PaneLaneAuthority` still refuses a federated link on a
+      // host whose persisted binding rows name a principal (S9 §2a).
+      detachPrincipalLaneHost(this.runtime)
+    }
     // Why: WebSocket uses per-device tokens + E2EE (tweetnacl) instead of TLS since React Native can't pin self-signed certs.
     if (this.enableWebSocket) {
       // Why: land any deferred lastSeen write before a replacement registry reads the same file.

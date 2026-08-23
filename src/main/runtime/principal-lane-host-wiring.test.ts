@@ -46,14 +46,17 @@ class FakeGrants implements PrincipalGrantSource {
   }
 }
 
-function laneAuthority(lookup: PrincipalLookup | null): PaneLaneAuthority {
+function laneAuthority(
+  lookup: PrincipalLookup | null,
+  persistedLanes: Record<string, { worktreeId: string; principalId?: string }> | null = null
+): PaneLaneAuthority {
   const authority = new PaneLaneAuthority({
     rendererLeafExists: () => false,
     livePtyPaneKeys: () => [],
     workspaceSessionOf: () => null,
     mobileSessionTabsOf: () => null,
     paneOfPty: () => null,
-    readPersistedLanes: () => null,
+    readPersistedLanes: () => persistedLanes,
     persistLane: () => undefined,
     forgetPersistedLane: () => undefined,
     killPty: () => undefined
@@ -89,7 +92,7 @@ describe('attachPrincipalLaneHost', () => {
 
   it('installs a lookup, the host consent surface and the row label resolver', () => {
     const labelResolvers: {
-      laneAccountLabelOf?: (principalId: string) => { owner: string } | null
+      laneAccountLabelOf?: ((principalId: string) => { owner: string } | null) | null
     }[] = []
     const { registry, lookup } = attachPrincipalLaneHost({
       userDataPath,
@@ -189,5 +192,58 @@ describe('attachPrincipalLaneHost', () => {
 
     expect(lookups.at(-1)).toBeNull()
     expect(getPrincipalLaneConsentService()).toBeNull()
+  })
+
+  // The label is PEER-VISIBLE, so a resolver closed over a registry whose grant source is gone
+  // must stop answering rather than keep minting owner names nothing can revoke (§2h).
+  it('unsets the row label resolver on detach', () => {
+    const labelResolvers: {
+      laneAccountLabelOf?: ((principalId: string) => { owner: string } | null) | null
+    }[] = []
+    const hostRuntime = {
+      setPrincipalLaneLookup: (next: PrincipalLookup | null) => lookups.push(next),
+      setLaneAccountRowResolvers: (resolvers: {
+        laneAccountLabelOf?: ((principalId: string) => { owner: string } | null) | null
+      }) => labelResolvers.push(resolvers)
+    }
+    attachPrincipalLaneHost({
+      userDataPath,
+      grants: new FakeGrants(),
+      runtimeAuthToken: RUNTIME_AUTH_TOKEN,
+      runtime: hostRuntime
+    })
+    expect(labelResolvers.at(-1)?.laneAccountLabelOf).toBeTypeOf('function')
+
+    detachPrincipalLaneHost(hostRuntime)
+
+    expect(labelResolvers.at(-1)?.laneAccountLabelOf).toBeNull()
+  })
+
+  /**
+   * The pre-S9 fallback is conditioned on the host having no lanes, and the persisted binding rows
+   * outlive the registry: a start that never attaches one (WebSocket transport disabled, or a
+   * pairing-init failure) still rehydrates `{kind:'principal'}` rows, and on THAT host `shared` is
+   * the §2a downgrade rather than the only lane.
+   */
+  it('refuses a federated link on a host that has lane-bound panes but no registry', () => {
+    const authority = laneAuthority(null, {
+      'tab-a:44444444-4444-4444-8444-444444444444': {
+        worktreeId: 'repo-1::/dev/wt',
+        principalId: '55555555-5555-4555-8555-555555555555'
+      }
+    })
+
+    expect(refusalCodeOf(() => authority.federatedLinkLane(fingerprintOf(PEER_TOKEN)))).toBe(
+      'terminal.lane_link_unbound'
+    )
+  })
+
+  // Negative control: a host whose persisted panes are all shared keeps the pre-S9 fallback.
+  it('still answers shared when no persisted pane is lane-bound', () => {
+    const authority = laneAuthority(null, {
+      'tab-a:44444444-4444-4444-8444-444444444444': { worktreeId: 'repo-1::/dev/wt' }
+    })
+
+    expect(authority.federatedLinkLane(fingerprintOf(PEER_TOKEN))).toEqual({ kind: 'shared' })
   })
 })

@@ -26574,8 +26574,8 @@ export class OrcaRuntimeService {
 
   /** Lanes reach the funnel only through the host consent surface; with no lookup all is shared. */
   private laneAccountRowResolvers: {
-    laneAccountLabelOf?: (principalId: string) => RuntimeTerminalLaneAccountLabel | null
-    laneUsageOf?: (principalId: string) => RuntimeTerminalLaneUsage | null
+    laneAccountLabelOf?: ((principalId: string) => RuntimeTerminalLaneAccountLabel | null) | null
+    laneUsageOf?: ((principalId: string) => RuntimeTerminalLaneUsage | null) | null
   } = {}
 
   setPrincipalLaneLookup(lookup: PrincipalLookup | null): void {
@@ -26596,8 +26596,9 @@ export class OrcaRuntimeService {
 
   /** Q3's row labels and the lane's usage row; unset until the host wires their sources (§2k). */
   setLaneAccountRowResolvers(resolvers: {
-    laneAccountLabelOf?: (principalId: string) => RuntimeTerminalLaneAccountLabel | null
-    laneUsageOf?: (principalId: string) => RuntimeTerminalLaneUsage | null
+    /** `null` UNSETS it: a detached registry must stop minting peer-visible owner labels. */
+    laneAccountLabelOf?: ((principalId: string) => RuntimeTerminalLaneAccountLabel | null) | null
+    laneUsageOf?: ((principalId: string) => RuntimeTerminalLaneUsage | null) | null
   }): void {
     // Merged, not replaced: the usage source and the label source are attached at different
     // points in host startup — the credential service early, the principal registry with pairing.

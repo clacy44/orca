@@ -10,12 +10,14 @@ import { getLaneWireService } from './lane-wire-service'
 /**
  * Where the principal registry becomes the host's live authority (S9 §2a, §6).
  *
- * Until this runs, `PaneLaneAuthority` holds no lookup at all, which means three things at once:
- * no grant resolves to a lane, every pane is `shared`, and — the one that is not merely inert —
- * a federated create falls through to `shared` instead of being refused, because a host with no
- * lanes has no downgrade to prevent. Attaching the registry is therefore what ARMS
- * `terminal.lane_link_unbound`, so an unticked federated link fails closed rather than creating
- * a worktree, a startup terminal and a setup pane on whoever's credential the host holds.
+ * Until this runs, `PaneLaneAuthority` holds no lookup at all: no grant resolves to a lane and
+ * every pane is `shared`. Attaching the registry is what ARMS `terminal.lane_link_unbound` for a
+ * link whose fingerprint is unticked, so it fails closed rather than creating a worktree, a
+ * startup terminal and a setup pane on whoever's credential the host holds. It is not the ONLY
+ * thing that arms it: the persisted binding rows outlive the registry — a start that never
+ * attaches one (WebSocket transport disabled, pairing init failed) still rehydrates
+ * `{kind:'principal'}` rows — so `PaneLaneAuthority` refuses on those rows alone rather than
+ * falling through to `shared`, which on such a host is the downgrade and not the only lane.
  *
  * It is bound to the pairing registry's lifetime: the grant rows are the registry's own input
  * (a revoked grant stops resolving immediately), and the runtime's shared `authToken` is the
@@ -34,7 +36,7 @@ export type PrincipalLaneHostAttachment = {
 export type PrincipalLaneHostRuntime = {
   setPrincipalLaneLookup?(lookup: PrincipalLookup | null): void
   setLaneAccountRowResolvers?(resolvers: {
-    laneAccountLabelOf?: (principalId: string) => RuntimeTerminalLaneAccountLabel | null
+    laneAccountLabelOf?: ((principalId: string) => RuntimeTerminalLaneAccountLabel | null) | null
   }): void
 }
 
@@ -91,4 +93,7 @@ function laneAccountLabel(
 export function detachPrincipalLaneHost(runtime: PrincipalLaneHostRuntime): void {
   attachPrincipalLaneConsentService(null)
   runtime.setPrincipalLaneLookup?.(null)
+  // The label resolver closes over the registry whose grant source is gone: left attached, the
+  // host keeps minting PEER-VISIBLE owner labels from rows nothing can revoke any more (§2h).
+  runtime.setLaneAccountRowResolvers?.({ laneAccountLabelOf: null })
 }
