@@ -157,6 +157,18 @@ function createReader(session: PairedSession): Reader {
 
 let requestSeq = 0
 
+/** Streaming methods answer many frames under ONE id, so the id has to outlive the first read. */
+function send(session: PairedSession, method: string, params?: unknown): string {
+  const id = `req-${++requestSeq}`
+  session.ws.send(
+    encrypt(
+      JSON.stringify({ id, method, ...(params === undefined ? {} : { params }) }),
+      session.sharedKey
+    )
+  )
+  return id
+}
+
 function request(
   session: PairedSession,
   reader: Reader,
@@ -323,7 +335,20 @@ describe('per-principal credential lanes over two paired sockets', () => {
       })
     vi.spyOn(runtime, 'getAccountsSnapshot').mockReturnValue(HOST_SNAPSHOT as never)
     vi.spyOn(runtime, 'refreshAccountsForMobile').mockResolvedValue(undefined)
+    vi.spyOn(runtime, 'refreshAccountsForMobileSubscriber').mockResolvedValue(undefined)
+    // `onAccountsChanged` rides the rate-limit service this harness has no account services for;
+    // capturing the listener is what lets the test drive the FAN-OUT emit point, not only `ready`.
+    const accountsListeners: ((snapshot: unknown) => void)[] = []
+    vi.spyOn(runtime, 'onAccountsChanged').mockImplementation((listener) => {
+      accountsListeners.push(listener as (snapshot: unknown) => void)
+      return () => {}
+    })
     return {
+      emitAccountsChanged: (): void => {
+        for (const listener of accountsListeners) {
+          listener(HOST_SNAPSHOT)
+        }
+      },
       runtime,
       service,
       clientA,
@@ -512,6 +537,37 @@ describe('per-principal credential lanes over two paired sockets', () => {
       refreshUsage: false
     })
     expect(JSON.stringify(own.result)).toContain('ana@corp.test')
+  })
+
+  // §5's S9b bullet names `accounts.list` AND BOTH `subscribe` emit points. Without this, both
+  // projections could be reverted to the raw snapshot and the whole suite stayed green.
+  it('never shows B A lane behind either accounts.subscribe emit point', async () => {
+    const harness = await startHarness()
+    await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
+    const subscriptionId = send(harness.clientB, 'accounts.subscribe')
+    const ready = await harness.readerB.next(subscriptionId)
+    expect((ready.result as { type: string }).type).toBe('ready')
+    harness.emitAccountsChanged()
+    const fanOut = await harness.readerB.next(subscriptionId)
+    expect((fanOut.result as { type: string }).type).toBe('snapshot')
+
+    for (const frame of [ready, fanOut]) {
+      const serialized = JSON.stringify((frame.result as { snapshot: unknown }).snapshot)
+      expect(serialized).not.toContain('ana@corp.test')
+      expect(serialized).not.toContain(LANE_ACCOUNT_UUID)
+      expect(serialized).toContain('"scope":"peer"')
+      expect(serialized).toContain('Ana work')
+    }
+  })
+
+  it('gives A own lane identity back on its own subscribe, so the projection is per connection', async () => {
+    const harness = await startHarness()
+    await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
+    const subscriptionId = send(harness.clientA, 'accounts.subscribe')
+    const ready = await harness.readerA.next(subscriptionId)
+    const serialized = JSON.stringify((ready.result as { snapshot: unknown }).snapshot)
+    expect(serialized).toContain('"scope":"self"')
+    expect(serialized).toContain('ana@corp.test')
   })
 
   it('partitions the phone switch refusals: unknown token, then desktop_unavailable', async () => {
