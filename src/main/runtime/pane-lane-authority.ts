@@ -44,6 +44,21 @@ export type PaneLaneAuthorityDeps = {
 }
 
 /**
+ * An SSH/relay pane is `remote` and never lane-bound, so `connectionId` is a condition of the
+ * lane *value* and not merely of where its row is filed (§2a).
+ *
+ * Without it a lane holder's `terminal.create` against an SSH-backed workspace stamps their
+ * principal onto a pane whose process can only ever run on the remote host: the spawn anchor then
+ * either refuses a legitimate remote terminal or exports a host lane path into an SSH env.
+ */
+export function laneForPaneConnection(
+  lane: PaneCredentialLane,
+  connectionId?: string | null
+): PaneCredentialLane {
+  return connectionId ? SHARED_CREDENTIAL_LANE : lane
+}
+
+/**
  * Every pane→lane decision the runtime makes, in one place (S9 §2a/§2h).
  *
  * It owns the binding table, the pane-surface probe the adopt gate reads, the `inherit` edges and
@@ -119,10 +134,15 @@ export class PaneLaneAuthority {
     connectionId?: string | null
   ): PaneCredentialLane {
     this.ensureRehydrated()
-    const bound = this.registry.bind(worktreeId, makePaneKey(tabId, leafId), lane)
+    const bound = this.registry.bind(
+      worktreeId,
+      makePaneKey(tabId, leafId),
+      laneForPaneConnection(lane, connectionId)
+    )
     if (connectionId) {
-      // Why: an SSH/relay pane is `credentialLane: 'remote'` and never lane-bound, and its row
-      // belongs to that host's session partition — do not write it into the local one.
+      // Why: a remote pane's lane is `shared` by construction, so its row carries nothing a
+      // restart cannot re-derive — and it belongs to that host's session partition, not the local
+      // one that `persistLane` writes.
       return bound
     }
     this.deps.persistLane({
@@ -157,11 +177,19 @@ export class PaneLaneAuthority {
     return this.registry.lookup(pane.worktreeId, pane.paneKey, true)
   }
 
-  /** The lane an `inherit` edge resolves to, through the ownership predicate. */
+  /**
+   * The lane an `inherit` edge resolves to, through the ownership predicate.
+   *
+   * A source pane on a remote connection is exempt: it carries no lane by construction, so no
+   * credential is at stake and the predicate would only refuse a legitimate remote split (§2a).
+   */
   inheritedLaneOfPty(
     ptyId: string,
     caller: { pairedDeviceId?: string | null }
   ): PaneCredentialLane {
+    if (this.deps.paneOfPty(ptyId)?.connectionId) {
+      return SHARED_CREDENTIAL_LANE
+    }
     return resolveInheritedLane(this.laneOfPty(ptyId), {
       pairedDeviceId: caller.pairedDeviceId,
       callerLane: this.callerLane(caller.pairedDeviceId)
