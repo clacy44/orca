@@ -199,16 +199,11 @@ export class PrincipalRegistry {
         'That pairing was made with a shared invite link, so Orca cannot tell whether it belongs to one person or several. Re-pair the device with its own named invite before binding it to someone.'
       )
     }
-    // Why: rule (i) — binding answers *whose device is this*, so it is confined to the moment the
-    // human is present for one specific device: at mint, or inside the window of the named invite
-    // that produced this row. Offered later it is precisely the free-form "bind any row to any
-    // person" list §2a forbids. Designation and provisioning are deliberately NOT bounded this way.
-    if (device.pendingExpiresAt <= this.now()) {
-      throw new ClaudeLaneRefusal(
-        'accounts.lane.grant_binding_window_closed',
-        'That pairing invite has expired, so Orca will not bind that device to a person any more — a device is bound to a person at the moment it is paired, with the device in hand. Pair it again with its own named invite and bind it then.'
-      )
-    }
+    // Why no deadline check here: §2a rule (i) constrains the SURFACE that offers a bind — at mint,
+    // or at the named invite that produced the row — not the row's own clock. `pendingExpiresAt` is
+    // the durable mint discriminator read above; as a deadline it is meaningful only while the row
+    // is an un-scanned invite (`device-registry-pending-grants.ts`), and those rows are pruned at
+    // load — so a wall-clock refusal here could only ever reach real, already-scanned pairings.
   }
 
   /**

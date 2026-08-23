@@ -28,7 +28,7 @@ class FakeGrants {
         token: `token-${deviceId}`,
         pairedAt: 1,
         lastSeenAt: 0,
-        // A live invite window: binding is confined to it (§2a rule (i)).
+        // Present because a bind requires the mint discriminator; its value is not a precondition.
         pendingExpiresAt: Date.now() + 60_000
       }
     ]

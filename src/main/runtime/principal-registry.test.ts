@@ -38,8 +38,8 @@ class FakeGrants {
       token: `token-${row.deviceId}`,
       pairedAt: 1_000,
       lastSeenAt: 0,
-      // Why a live deadline: binding is offered only inside the named invite's own window (§2a
-      // rule (i)), so a fixture with an expired one would be testing the refusal, not the bind.
+      // Why present: `pendingExpiresAt` is the mint discriminator a bind requires (§2a). Its VALUE
+      // is not a bind precondition — a scanned pairing keeps a long-past deadline and still binds.
       pendingExpiresAt: Date.now() + 60_000,
       ...row
     }
@@ -116,15 +116,23 @@ describe('PrincipalRegistry', () => {
       expect(store.principalOf('coalesced')).toBeNull()
     })
 
-    it('refuses a bind once the named invite that produced the row has expired', () => {
+    it('binds a scanned pairing whose invite deadline is long past', () => {
       const store = registry()
       const person = store.createPrincipal(consent, 'Ana')
-      grants.add({ deviceId: 'stale', pendingExpiresAt: Date.now() - 1 })
+      // The shape every real pairing has on disk: the invite was consumed (`lastSeenAt > 0`) and
+      // its 24h deadline went by. Only un-scanned rows expire, and `DeviceRegistry.load` prunes
+      // those — so refusing on the deadline here would make every paired device unbindable.
+      grants.add({
+        deviceId: 'paired-desktop',
+        lastSeenAt: Date.now() - 60_000,
+        pendingExpiresAt: Date.now() - 25 * 60 * 60 * 1000
+      })
 
-      expect(() => store.bindGrant(consent, 'stale', person.principalId)).toThrow(
-        /pairing invite has expired/
-      )
-      expect(store.principalOf('stale')).toBeNull()
+      store.bindGrant(consent, 'paired-desktop', person.principalId)
+
+      expect(store.principalOf('paired-desktop')).toBe(person.principalId)
+      store.designatePusher(consent, person.principalId, 'paired-desktop')
+      expect(() => store.assertLaneProvisionable(person.principalId)).not.toThrow()
     })
 
     it('refuses binding onto an already-bound row and re-binds as unbind-then-bind', () => {
