@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,15 +75,59 @@ describe('lane credential writer', () => {
     expect(statSync(target).ino).not.toBe(originalInode)
   })
 
-  it('writes identical bytes into every lane it is given', () => {
+  it('writes identical bytes into every lane it is given', async () => {
     const writer = new LaneCredentialWriter()
     const laneA = mkdtempSync(join(root, 'a-'))
     const laneB = mkdtempSync(join(root, 'b-'))
-    writer.writeCredentials(laneA, CREDENTIALS)
+    await writer.writeCredentials(laneA, CREDENTIALS)
     // Negative control: an identical earlier write in lane A must not suppress lane B's.
-    writer.writeCredentials(laneB, CREDENTIALS)
+    await writer.writeCredentials(laneB, CREDENTIALS)
     expect(readFileSync(join(laneA, '.credentials.json'), 'utf-8')).toBe(CREDENTIALS)
     expect(readFileSync(join(laneB, '.credentials.json'), 'utf-8')).toBe(CREDENTIALS)
+  })
+
+  describe('the darwin Keychain arm', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+
+    const setPlatform = (platform: NodeJS.Platform): void => {
+      Object.defineProperty(process, 'platform', { configurable: true, value: platform })
+    }
+
+    afterEach(() => {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform)
+      }
+    })
+
+    it('pairs the lane-scoped Keychain item with the lane file', async () => {
+      setPlatform('darwin')
+      const keychain = vi.fn(async () => {})
+      const laneDir = mkdtempSync(join(root, 'lane-'))
+      await new LaneCredentialWriter(keychain).writeCredentials(laneDir, CREDENTIALS)
+      // Scoped by the LANE dir: the CLI reads that service, and the file alone leaves the
+      // Keychain item on the revoked token.
+      expect(keychain).toHaveBeenCalledWith(CREDENTIALS, laneDir)
+      expect(readFileSync(join(laneDir, '.credentials.json'), 'utf-8')).toBe(CREDENTIALS)
+    })
+
+    it('surfaces a failed Keychain write instead of reporting the lane written', async () => {
+      setPlatform('darwin')
+      const laneDir = mkdtempSync(join(root, 'lane-'))
+      const writer = new LaneCredentialWriter(async () => {
+        throw new Error('keychain refused')
+      })
+      await expect(writer.writeCredentials(laneDir, CREDENTIALS)).rejects.toThrow(
+        'keychain refused'
+      )
+    })
+
+    it('writes no Keychain item on the other platforms', async () => {
+      setPlatform('linux')
+      const keychain = vi.fn(async () => {})
+      const laneDir = mkdtempSync(join(root, 'lane-'))
+      await new LaneCredentialWriter(keychain).writeCredentials(laneDir, CREDENTIALS)
+      expect(keychain).not.toHaveBeenCalled()
+    })
   })
 
   it('merges and deletes oauthAccount without erasing the rest of the config', () => {

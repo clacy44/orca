@@ -119,6 +119,9 @@ describe('Claude Keychain credentials', () => {
       '-w',
       'credentials-json'
     ])
+    // A lane writes through this one, never the runtime pair below: the unsuffixed service is
+    // host-wide, so a lane that wrote it would publish its credential to every other lane.
+    expect(execFileMock).toHaveBeenCalledTimes(1)
   })
 
   it('writes runtime credentials to scoped and legacy services for old Claude Code compatibility', async () => {

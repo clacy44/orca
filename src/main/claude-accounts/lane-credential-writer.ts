@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { writeFileAtomically } from '../codex-accounts/fs-utils'
+import { writeActiveClaudeKeychainCredentials } from './keychain'
 import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './principal-lane-credential-sweep'
 
 /**
@@ -82,6 +83,9 @@ export function writeOauthAccountIntoConfigFile(
   return true
 }
 
+/** Injected so the darwin arm is observable on every platform, and faked in tests. */
+export type LaneKeychainWriter = (contents: string, configDir: string) => Promise<void>
+
 /**
  * The lane-scoped writer: it takes the lane directory and remembers nothing.
  *
@@ -91,8 +95,23 @@ export function writeOauthAccountIntoConfigFile(
  * reads it.
  */
 export class LaneCredentialWriter {
-  writeCredentials(laneDir: string, credentialsJson: string): void {
+  constructor(
+    private readonly writeKeychain: LaneKeychainWriter = writeActiveClaudeKeychainCredentials
+  ) {}
+
+  /**
+   * File plus, on darwin, the lane's CONFIG-DIR-SCOPED Keychain item — the pair every host
+   * credential write in this tree already makes (`runtime-auth-service.ts` :447-452, :571-577).
+   *
+   * Deliberately not the runtime writer's `[scoped, legacy]` pair: the unsuffixed service is
+   * host-wide, so writing it would publish one lane's credential to every other lane's older CLI.
+   * A failed Keychain write throws rather than leaving the item on the revoked token (§2i).
+   */
+  async writeCredentials(laneDir: string, credentialsJson: string): Promise<void> {
     writeCredentialsFileAtomically(join(laneDir, LANE_CREDENTIALS_FILENAME), credentialsJson)
+    if (process.platform === 'darwin') {
+      await this.writeKeychain(credentialsJson, laneDir)
+    }
   }
 
   writeOauthAccount(laneDir: string, oauthAccount: unknown): boolean {

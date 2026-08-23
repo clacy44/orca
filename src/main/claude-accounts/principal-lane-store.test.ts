@@ -65,7 +65,9 @@ describe('principal lane store', () => {
     if (!laneDir) {
       throw new Error('lane not resolvable')
     }
-    store.writer.writeCredentials(laneDir, credentialsJson)
+    // The file write inside is synchronous; only darwin's Keychain arm awaits, and it is pinned
+    // in lane-credential-writer.test.ts rather than here.
+    void store.writer.writeCredentials(laneDir, credentialsJson)
     store.recordPushedLaneCredentials(laneId, credentialsJson)
   }
 

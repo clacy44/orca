@@ -167,7 +167,7 @@ export class LaneAuthState {
       if (!refreshed || !hasClaudeOauthAccessToken(refreshed)) {
         return { status: 'refresh-failed' }
       }
-      return this.publishRotation(input.laneId, input.accountUuid, refreshed, state)
+      return await this.publishRotation(input.laneId, input.accountUuid, refreshed, state)
     })
   }
 
@@ -186,19 +186,19 @@ export class LaneAuthState {
     return null
   }
 
-  private publishRotation(
+  private async publishRotation(
     laneId: string,
     accountUuid: string | null,
     refreshed: string,
     state: LaneAccountAuthState
-  ): LaneRotationOutcome {
+  ): Promise<LaneRotationOutcome> {
     // The await above is a real network call, so the lane is re-resolved rather than trusted.
     const laneDir = this.options.store.resolveLaneDir(laneId)
     try {
       if (!laneDir) {
         throw new Error('lane directory is no longer owned by Orca')
       }
-      this.options.store.writer.writeCredentials(laneDir, refreshed)
+      await this.options.store.writer.writeCredentials(laneDir, refreshed)
     } catch (error) {
       // Loud, and never `refresh-failed`: the old token is revoked either way, so the watermark
       // moves to the rotated sha and the lane holds at reauth-required. Otherwise the desktop's
