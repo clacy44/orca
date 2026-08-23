@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import {
   canonicalizePathForContainment,
   isCanonicalPathWithinRoot,
-  isPathWithinRootForDenial
+  isPathWithinRootForDenial,
+  isRemoteUncLanePath
 } from './lane-path-containment'
 
 describe('isCanonicalPathWithinRoot', () => {
@@ -144,5 +145,24 @@ describe.runIf(process.platform === 'win32')('win32 containment', () => {
     expect(
       canonical.kind === 'canonical' && isCanonicalPathWithinRoot(lanesRoot(), canonical.path)
     ).toBe(true)
+  })
+})
+
+describe('isRemoteUncLanePath', () => {
+  it('refuses a remote share and its extended-length spelling', () => {
+    expect(isRemoteUncLanePath('\\\\fileserver\\team\\claude-lanes\\p', 'win32')).toBe(true)
+    expect(isRemoteUncLanePath('\\\\?\\UNC\\fileserver\\team\\claude-lanes\\p', 'win32')).toBe(true)
+  })
+
+  it('carves out the WSL redirector forms and nothing else', () => {
+    expect(isRemoteUncLanePath('\\\\wsl.localhost\\Ubuntu\\home\\dev\\lanes', 'win32')).toBe(false)
+    expect(isRemoteUncLanePath('\\\\wsl$\\Ubuntu\\home\\dev\\lanes', 'win32')).toBe(false)
+    expect(isRemoteUncLanePath('\\\\wsl.localhost.evil.test\\share\\lanes', 'win32')).toBe(true)
+  })
+
+  it('leaves a local drive path and every POSIX platform alone', () => {
+    expect(isRemoteUncLanePath('C:\\Users\\dev\\claude-lanes\\p', 'win32')).toBe(false)
+    expect(isRemoteUncLanePath('\\\\?\\C:\\Users\\dev\\claude-lanes\\p', 'win32')).toBe(false)
+    expect(isRemoteUncLanePath('\\\\fileserver\\team\\lanes', 'linux')).toBe(false)
   })
 })

@@ -1,6 +1,7 @@
 import { lstatSync, realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { isPathInsideOrEqual } from './cross-platform-path'
+import { parseWslUncPath } from './wsl-paths'
 
 export type CanonicalPathResult =
   | { kind: 'canonical'; path: string }
@@ -95,4 +96,34 @@ function canonicalizeRoot(rootPath: string): string {
     // Why: the root may not exist yet (no lane provisioned); its resolved form still bounds it.
     return resolved
   }
+}
+
+/**
+ * Whether a lane path sits on a REMOTE UNC share (§2m(4)).
+ *
+ * Such a root's ACLs are set by a machine this design has said nothing about, so a native lane is
+ * required to be a local drive path and this is refused at provisioning. The carve-out is the WSL
+ * redirector forms and nothing else: `\\wsl.localhost\<distro>\…` is served for this Windows user
+ * on this machine, and its far side carries Linux modes whose control is §2n(i)'s in-distro
+ * `chmod` read-back rather than a DACL.
+ */
+export function isRemoteUncLanePath(
+  candidatePath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (platform !== 'win32') {
+    return false
+  }
+  const normalized = normalizeWindowsUncForm(candidatePath)
+  return normalized.startsWith('//') && !parseWslUncPath(normalized)
+}
+
+/** `\\?\UNC\server\share` and `\\server\share` are one path; so are `\\?\C:\x` and `C:\x`. */
+function normalizeWindowsUncForm(candidatePath: string): string {
+  const slashed = candidatePath.replace(/\\/g, '/')
+  if (!slashed.startsWith('//?/')) {
+    return slashed
+  }
+  const stripped = slashed.slice(4)
+  return /^UNC\//i.test(stripped) ? `//${stripped.slice(4)}` : stripped
 }

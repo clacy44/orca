@@ -348,6 +348,33 @@ describe('principal credential lane', () => {
       expect(existsSync(join(lane.laneDir, '.credentials.json'))).toBe(true)
     })
 
+    it('refuses a lane root on a remote UNC share before it writes anything', () => {
+      const share = '\\\\fileserver\\team\\claude-lanes'
+
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, {
+          lanesRoot: share,
+          platform: 'win32',
+          restrictWindowsPath: () => true
+        })
+      ).toThrow(/network share/)
+      expect(existsSync(join(share, PRINCIPAL_A))).toBe(false)
+    })
+
+    it('provisions a local drive root and skips the refusal for the WSL redirector', () => {
+      // The local-root arm: the same win32 provisioning call over a non-UNC root still succeeds.
+      const lane = provisionPrincipalLane(PRINCIPAL_A, {
+        lanesRoot,
+        platform: 'win32',
+        restrictWindowsPath: () => true
+      })
+
+      expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
+      expect(
+        requiresVerifiedWindowsDacl('\\\\wsl.localhost\\Ubuntu\\home\\dev\\lanes\\p', 'win32')
+      ).toBe(false)
+    })
+
     it('skips the DACL step for a wsl.localhost lane root and requires it for a local drive', () => {
       expect(
         requiresVerifiedWindowsDacl(

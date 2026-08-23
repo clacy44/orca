@@ -12,7 +12,8 @@ import { join, relative, sep } from 'node:path'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import {
   canonicalizePathForContainment,
-  isCanonicalPathWithinRoot
+  isCanonicalPathWithinRoot,
+  isRemoteUncLanePath
 } from '../../shared/lane-path-containment'
 import { restrictWindowsPathSync } from '../../shared/secure-path-windows-acl'
 import { parseWslUncPath } from '../../shared/wsl-paths'
@@ -70,6 +71,9 @@ export function getPrincipalLaneDir(
  * whether or not the ACL landed (`secure-file.ts:59-73`), which is not good enough for the
  * directory a credential is about to land in. A lane whose DACL cannot be verified does not exist.
  *
+ * A native lane root must be a LOCAL drive path: a remote UNC share's ACLs are set by a machine
+ * this design has said nothing about, so it is refused here rather than hardened (§2m(4)).
+ *
  * A `\\wsl.localhost\…` root skips the DACL step entirely rather than failing on it: that lane's
  * isolation control is S9e's in-distro `chmod 0700/0600` read-back, and `restrictWindowsPathSync`
  * returns FALSE (not a no-op) on a path it cannot set a DACL on.
@@ -80,6 +84,12 @@ export function provisionPrincipalLane(
 ): ProvisionedPrincipalLane {
   const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
   const laneDir = getPrincipalLaneDir(principalId, options)
+  if (isRemoteUncLanePath(laneDir, options.platform ?? process.platform)) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.lane_root_not_local',
+      "This person's credential lane would sit on a network share, whose permissions are set by a machine Orca cannot check, so Orca refused to create it. Point Orca's data folder at a local drive and provision the lane again."
+    )
+  }
   const existedBefore = assertLaneDirectoryWritable(lanesRoot, laneDir)
   mkdirSync(laneDir, { recursive: true, mode: 0o700 })
   try {
