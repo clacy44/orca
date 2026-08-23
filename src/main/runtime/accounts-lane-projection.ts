@@ -13,7 +13,9 @@ import type { LaneWireService } from './lane-wire-service'
  * rows the caller may see. The caller's own lane is shown with its identity and its delegable
  * list; another principal's lane is an opaque `occupied` boolean, the owner's presence label and
  * — because Q3 is about the label the other developer sees — the account's `displayName` when its
- * owner set one. No account id, no email, no usage, no sha, no lane path.
+ * owner set one. No account id, no email, no usage, no sha, no lane path, and no `laneState`:
+ * §2d's enumeration is closed, and `reauth-required` tells a peer the other person's account is
+ * in a broken-auth state, which is strictly more than `occupied` carries.
  *
  * With zero lanes the projection returns the SAME OBJECT it was handed, so a pre-lane host is
  * byte-identical to today and not merely equal-looking.
@@ -21,7 +23,8 @@ import type { LaneWireService } from './lane-wire-service'
 
 export type ClaudeLaneProjectionRow = {
   scope: 'self' | 'peer'
-  laneState: RuntimeTerminalLaneState
+  /** SELF only. A peer gets `occupied` alone — `laneState` would leak `reauth-required` (§2d). */
+  laneState?: RuntimeTerminalLaneState
   occupied: boolean
   ownerLabel: string | null
   /** The one deliberate peer-visible widening (§2b/§2k): an owner-authored name, never an email. */
@@ -109,7 +112,6 @@ function projectLaneRows(
     const laneState = service.coordinator.store.getLaneState(lane.principalId)
     rows.push({
       scope: 'peer',
-      laneState,
       occupied: laneState !== 'absent',
       ownerLabel: lane.label,
       displayName: service.delegation.getRow(lane.principalId).heldDisplayName

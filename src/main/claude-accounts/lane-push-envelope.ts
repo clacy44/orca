@@ -22,7 +22,9 @@ import { hasClaudeOauthAccessToken } from './lane-credential-writer'
 /** §2b: each file member is bounded at 64 KiB, measured in UTF-8 bytes, not characters. */
 export const LANE_PUSH_MEMBER_MAX_BYTES = 64 * 1024
 
-const BoundedFileMember = z.string().min(1)
+// `.max()` counts CHARACTERS, so it only moves the rejection earlier; the UTF-8 byte check below
+// is still the bound §2b states.
+const BoundedFileMember = z.string().min(1).max(LANE_PUSH_MEMBER_MAX_BYTES)
 
 const PushEnvelopeSchema = z
   .object({

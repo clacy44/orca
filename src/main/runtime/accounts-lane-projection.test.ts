@@ -151,9 +151,10 @@ describe('accounts snapshot projection', () => {
       claudeLanes: Record<string, unknown>[]
     }
     const peerRow = projected.claudeLanes.find((row) => row.scope === 'peer')
+    // §2d's peer enumeration is closed, and `laneState` is not on it: `reauth-required` would
+    // tell a peer the other person's account is in a broken-auth state.
     expect(peerRow).toEqual({
       scope: 'peer',
-      laneState: 'loaded',
       occupied: true,
       ownerLabel: 'Ana',
       displayName: 'Ana work'

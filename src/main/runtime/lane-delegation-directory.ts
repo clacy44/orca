@@ -44,18 +44,32 @@ const EMPTY_ROW = (laneId: string): ClaudeLaneDelegationRow => ({
   delegable: []
 })
 
-/** Email first — it is the identity the push actually carries; the name is the owner's label. */
+/**
+ * Email first — it is the identity the push actually carries; the name is the owner's label.
+ *
+ * Both keys must be UNAMBIGUOUS: nothing stops an owner labelling two accounts "Work", and a
+ * `find` on that would mark the first row "Loaded on this host" whichever one is really loaded.
+ */
 function matchDelegable(
   delegable: readonly ClaudeLaneDelegableAccount[],
   held: { displayName: string | null; email: string | null }
 ): string | null {
-  const byEmail = held.email ? delegable.find((account) => account.email === held.email) : undefined
+  const byEmail = held.email
+    ? uniqueMatch(delegable, (account) => account.email === held.email)
+    : null
   if (byEmail) {
-    return byEmail.delegatedAccountId
+    return byEmail
   }
   const name = normalizeLaneDisplayName(held.displayName)
-  const byName = name ? delegable.find((account) => account.displayName === name) : undefined
-  return byName?.delegatedAccountId ?? null
+  return name ? uniqueMatch(delegable, (account) => account.displayName === name) : null
+}
+
+function uniqueMatch(
+  delegable: readonly ClaudeLaneDelegableAccount[],
+  predicate: (account: ClaudeLaneDelegableAccount) => boolean
+): string | null {
+  const matches = delegable.filter(predicate)
+  return matches.length === 1 ? matches[0].delegatedAccountId : null
 }
 
 export class LaneDelegationDirectory {

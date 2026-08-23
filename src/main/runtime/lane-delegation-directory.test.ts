@@ -177,4 +177,31 @@ describe('delegable list bounds', () => {
       'accounts.lane.delegable_list_invalid'
     )
   })
+
+  // Two accounts can carry one owner-authored name; the loaded marker must abstain rather than
+  // point at whichever was listed first.
+  it('marks no row loaded when the held name is ambiguous', () => {
+    const directory = makeDirectory()
+    directory.setDelegableAccounts(LANE_A, [
+      { clientRef: 'ref-1', displayName: 'Work' },
+      { clientRef: 'ref-2', displayName: 'Work' }
+    ])
+
+    directory.setHeldAccount(LANE_A, { displayName: 'Work', email: null })
+
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).toBeNull()
+  })
+
+  // Negative control: an UNambiguous name still resolves, so the guard is not simply off.
+  it('still marks the row when only one account carries the held name', () => {
+    const directory = makeDirectory()
+    const [work] = directory.setDelegableAccounts(LANE_A, [
+      { clientRef: 'ref-1', displayName: 'Work' },
+      { clientRef: 'ref-2', displayName: 'Personal' }
+    ])
+
+    directory.setHeldAccount(LANE_A, { displayName: 'Work', email: null })
+
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).toBe(work.delegatedAccountId)
+  })
 })
