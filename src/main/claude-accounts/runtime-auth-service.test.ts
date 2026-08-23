@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getDefaultSettings } from '../../shared/constants'
+import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
@@ -159,9 +160,20 @@ function createSettings(overrides: Partial<GlobalSettings> = {}): GlobalSettings
   }
 }
 
+function createLaneWatermarkStoreStub() {
+  let laneWatermarks: ClaudeLaneCredentialWatermark[] = []
+  return {
+    getClaudeLaneCredentialWatermarks: vi.fn(() => laneWatermarks.slice()),
+    setClaudeLaneCredentialWatermarks: vi.fn((rows: readonly ClaudeLaneCredentialWatermark[]) => {
+      laneWatermarks = rows.slice()
+    })
+  }
+}
+
 function createStore(settings: GlobalSettings) {
   return {
     getSettings: vi.fn(() => settings),
+    ...createLaneWatermarkStoreStub(),
     updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
       settings = {
         ...settings,
@@ -477,6 +489,8 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
+      ...createLaneWatermarkStoreStub(),
+      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -532,6 +546,8 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
+      ...createLaneWatermarkStoreStub(),
+      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -599,6 +615,8 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
+      ...createLaneWatermarkStoreStub(),
+      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -4040,6 +4058,52 @@ describe('ClaudeRuntimeAuthService lane preparation', () => {
 
     expect(preparation.runtime).toBe('wsl')
     expect(preparation.provenance).not.toMatch(/^lane:/)
+  })
+
+  it('records the lane watermark on a launch and leaves the shared identity alone', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    await service.prepareForClaudeLaunch(undefined, PRINCIPAL)
+
+    const [rows] = store.setClaudeLaneCredentialWatermarks.mock.calls.at(-1) ?? []
+    expect(rows).toEqual([
+      expect.objectContaining({ laneId: PRINCIPAL, refreshTokenSha256: expect.any(String) })
+    ])
+    // The lane's account must never reach the host's own `.claude.json` identity.
+    const hostConfigPath = join(testState.fakeHomeDir, '.claude', '.claude.json')
+    expect(existsSync(hostConfigPath) ? readFileSync(hostConfigPath, 'utf-8') : '').not.toContain(
+      'lane@example.com'
+    )
+    expect((await service.prepareForClaudeLaunch()).provenance).toBe('system')
+  })
+
+  it('defers the lane refresh for a pty in THAT lane and not for one in another', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const { markClaudePtyExited, markClaudePtySpawned } = await import('./live-pty-gate')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    expect(
+      (await service.prepareForClaudeLaunch(undefined, PRINCIPAL)).managedRefreshDeferredByLivePty
+    ).toBe(false)
+
+    // Negative control: another principal's lane pty says nothing about this account.
+    markClaudePtySpawned('other-lane-pty', '11112222-3333-4444-8555-666677778888')
+    expect(
+      (await service.prepareForClaudeLaunch(undefined, PRINCIPAL)).managedRefreshDeferredByLivePty
+    ).toBe(false)
+
+    markClaudePtySpawned('lane-pty', PRINCIPAL)
+    expect(
+      (await service.prepareForClaudeLaunch(undefined, PRINCIPAL)).managedRefreshDeferredByLivePty
+    ).toBe(true)
+
+    markClaudePtyExited('lane-pty')
+    markClaudePtyExited('other-lane-pty')
   })
 
   it('leaves the host branch unchanged when no lane is named', async () => {

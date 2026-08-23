@@ -43,6 +43,7 @@ import {
   writeActiveClaudeKeychainCredentialsForRuntime,
   writeManagedClaudeKeychainCredentials
 } from './keychain'
+import { LaneCredentialCoordinator } from './lane-credential-coordinator'
 import { assertLaneLaunchRuntimeSupported, prepareLaneLaunch } from './principal-lane-preparation'
 import {
   getSelectedClaudeAccountIdForTarget,
@@ -113,8 +114,16 @@ export class ClaudeRuntimeAuthService {
   private lastWrittenOauthAccount: unknown = null
   private skipNextReadBackForAccountId: string | null = null
   private managedRefreshDeferredByLivePtyAccountId: string | null = null
+  readonly laneCredentials: LaneCredentialCoordinator
 
   constructor(private readonly store: Store) {
+    this.laneCredentials = new LaneCredentialCoordinator({
+      persistence: store,
+      sharedLane: {
+        readCredentials: () => this.readSharedLaneCredentialsBestEffort(),
+        readOauthAccount: () => this.readRuntimeOauthAccount()
+      }
+    })
     this.initializeLastSyncedState()
     void this.safeSyncForCurrentSelection()
   }
@@ -124,6 +133,10 @@ export class ClaudeRuntimeAuthService {
     lanePrincipalId?: string
   ): Promise<ClaudeRuntimeAuthPreparation> {
     const effectiveTarget = target ?? this.getDefaultAccountSelectionTarget()
+    if (lanePrincipalId) {
+      // Trigger 1: a lane-pinned launch must see whatever the lane's own claude rotated.
+      await this.laneCredentials.syncLane(lanePrincipalId, 'launch')
+    }
     await this.syncForCurrentSelection(effectiveTarget)
     return this.getPreparation(effectiveTarget, lanePrincipalId)
   }
@@ -195,6 +208,9 @@ export class ClaudeRuntimeAuthService {
       this.lastSyncedAccountId
     )
     this.managedRefreshDeferredByLivePtyAccountId = null
+    // The `host` residency row is derived from the shared lane's FILES, so it is re-derived here
+    // rather than seeded once: a `claude login` between two syncs is otherwise unobserved.
+    this.laneCredentials.refreshHostResidencyRow()
     const previousManagedCredentialsJson = previousAccount
       ? await this.readManagedCredentials(previousAccount)
       : null
@@ -626,7 +642,11 @@ export class ClaudeRuntimeAuthService {
       // Why before the WSL arms rather than after them: falling through leaves a lane-pinned pane
       // on the shared WSL config dir, which is the silent misattribution the lane exists to close.
       assertLaneLaunchRuntimeSupported(normalizeClaudeAccountSelectionTarget(normalizedTarget))
-      return prepareLaneLaunch({ principalId: lanePrincipalId })
+      return prepareLaneLaunch({
+        principalId: lanePrincipalId,
+        isRefreshDeferredByLivePty: () =>
+          this.laneCredentials.isLaneRefreshDeferredByLivePty(lanePrincipalId)
+      })
     }
     if (
       normalizeClaudeAccountSelectionTarget(normalizedTarget).runtime === 'wsl' &&
@@ -1348,6 +1368,16 @@ export class ClaudeRuntimeAuthService {
   private readRuntimeCredentialsFile(): string | null {
     const credentialsPath = this.pathResolver.getRuntimePaths().credentialsPath
     return existsSync(credentialsPath) ? readFileSync(credentialsPath, 'utf-8') : null
+  }
+
+  // Why swallow: the residency index reads this on every check, and an unreadable shared file
+  // must not turn a `selectClaude` into a crash.
+  private readSharedLaneCredentialsBestEffort(): string | null {
+    try {
+      return this.readRuntimeCredentialsFile()
+    } catch {
+      return null
+    }
   }
 
   private runtimeCredentialsBelongToAccount(
