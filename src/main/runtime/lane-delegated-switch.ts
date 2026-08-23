@@ -55,6 +55,11 @@ export class LaneDelegatedSwitchService {
       delegatedAccountId
     )
     this.assertDelegatedDesktopSubscribed(caller)
+    // One outstanding ask per lane: a re-tap supersedes the previous one rather than stacking a
+    // timer and a fan-out frame per tap. The superseded request gets no terminal frame on purpose
+    // — the phone tracks one request at a time and would read a `switch-failed` for the OLD id as
+    // the failure of the NEW one.
+    this.supersedeForLane(caller.principalId)
     const requestId = randomUUID()
     this.options.stream.publish(caller.principalId, {
       type: 'switch-requested',
@@ -68,6 +73,10 @@ export class LaneDelegatedSwitchService {
 
   /** A push into the lane answers every request outstanding on it. */
   settleForLane(laneId: string): void {
+    this.supersedeForLane(laneId)
+  }
+
+  private supersedeForLane(laneId: string): void {
     for (const request of this.pending.values()) {
       if (request.laneId === laneId) {
         request.cancel()

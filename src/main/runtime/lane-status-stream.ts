@@ -6,10 +6,11 @@ import type { LaneWireCaller } from './lane-wire-authority'
 /**
  * The lane status stream (S9 §2c/§2l), and the liveness precondition that reads it.
  *
- * Subscriber bookkeeping is the stream's OWN per-connection state, keyed by `connectionId` —
- * the same join `accounts.subscribe` already makes — and torn down by the same `handleClose` that
- * deletes the socket record. No new registry, and no way to address another principal's stream:
- * a subscriber is filed under the principal its grant resolved to.
+ * Teardown has exactly ONE path: `registerSubscriptionCleanup(..., ctx.connectionId)` calls
+ * `unsubscribe`, and `cleanupSubscriptionsForConnection` runs it on close — the same join
+ * `accounts.subscribe` already makes. A second connection-keyed sweep here would be a divergent
+ * teardown, so there is none. No way to address another principal's stream either: a subscriber
+ * is filed under the principal its grant resolved to.
  *
  * Every frame here is secretless: `laneState`, a rotation receipt carrying a sha256 and never a
  * token, the designation, and the delegable list's opaque tokens.
@@ -32,7 +33,6 @@ export type LaneStatusFrame =
 export type LaneStatusSubscriber = {
   subscriptionId: string
   caller: LaneWireCaller
-  connectionId: string | null
   emit: (frame: LaneStatusFrame) => void
 }
 
@@ -45,22 +45,13 @@ export class LaneStatusStream {
     emit: (frame: LaneStatusFrame) => void
   ): LaneStatusSubscriber {
     const subscriptionId = `lane-status-${connectionId ?? 'inproc'}-${randomUUID()}`
-    const subscriber: LaneStatusSubscriber = { subscriptionId, caller, connectionId, emit }
+    const subscriber: LaneStatusSubscriber = { subscriptionId, caller, emit }
     this.subscribers.set(subscriptionId, subscriber)
     return subscriber
   }
 
   unsubscribe(subscriptionId: string): void {
     this.subscribers.delete(subscriptionId)
-  }
-
-  /** Torn down by the same close that deletes the socket record; sockets outlive no stream. */
-  dropConnection(connectionId: string): void {
-    for (const [subscriptionId, subscriber] of this.subscribers) {
-      if (subscriber.connectionId === connectionId) {
-        this.subscribers.delete(subscriptionId)
-      }
-    }
   }
 
   /**

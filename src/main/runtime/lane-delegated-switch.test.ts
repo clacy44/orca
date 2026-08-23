@@ -174,6 +174,22 @@ describe('delegated switch requests', () => {
   })
 })
 
+describe('lane delegated switch bounds', () => {
+  it('keeps one outstanding request per lane however many times the phone taps', () => {
+    const harness = makeHarness()
+    harness.attach('desktop-a')
+    harness.attach('phone-a')
+    const [account] = harness.delegation.setDelegableAccounts(LANE_A, [{ clientRef: 'ref-1' }])
+    const first = harness.service.requestSwitch('phone-a', account?.delegatedAccountId ?? '')
+    const second = harness.service.requestSwitch('phone-a', account?.delegatedAccountId ?? '')
+    expect(second.requestId).not.toBe(first.requestId)
+    expect(harness.timers).toHaveLength(1)
+    harness.service.settleForLane(LANE_A)
+    expect(harness.service.hasPendingFor(LANE_A)).toBe(false)
+    expect(harness.timers).toHaveLength(0)
+  })
+})
+
 describe('lane status stream scoping', () => {
   it('answers the liveness precondition per grant, not per principal', () => {
     const harness = makeHarness()
@@ -182,13 +198,6 @@ describe('lane status stream scoping', () => {
     expect(harness.stream.hasSubscriptionForGrant(LANE_A, 'phone-a')).toBe(true)
     harness.attach('desktop-a')
     expect(harness.stream.hasSubscriptionForGrant(LANE_A, 'desktop-a')).toBe(true)
-  })
-
-  it('drops a connection subscriptions when its socket closes', () => {
-    const harness = makeHarness()
-    harness.attach('desktop-a')
-    harness.stream.dropConnection('conn-desktop-a')
-    expect(harness.stream.hasSubscriptionForGrant(LANE_A, 'desktop-a')).toBe(false)
   })
 
   it('publishes a receipt to the lane principal and to nobody else', () => {
