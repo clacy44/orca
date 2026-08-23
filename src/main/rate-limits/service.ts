@@ -297,6 +297,17 @@ export class RateLimitService {
     return this.laneStatuslineUsage.get(laneId)
   }
 
+  /**
+   * The lane's credential changed hands, so the row its OLD account posted is dropped (S9 §2d).
+   *
+   * The tick-level `retainLanes` above only sees lanes that left the loaded set; a push keeps the
+   * lane loaded and merely re-points it, and between the push and the next post the row would
+   * otherwise show the outgoing account's numbers under the incoming account's label.
+   */
+  forgetLaneStatuslineUsage(laneId: string): void {
+    this.laneStatuslineUsage.forget(laneId)
+  }
+
   /** The pane→lane join the posted paneKey unlocks; absent, the config-dir map answers alone. */
   setClaudeUsagePaneLaneLookup(
     lookup: ((paneKey: string) => ClaudeUsagePaneLane | null) | null

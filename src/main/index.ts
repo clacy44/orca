@@ -2434,6 +2434,11 @@ void app.whenReady().then(async () => {
   // Why beside it: the shared fetch is the tick, and the lane rows must be re-read on the same
   // one or a lane's statusline post is attributed against a stale config dir (S9 §2k).
   rateLimits.setClaudeLaneAttributionResolver(() => claudeRuntimeAuth!.listLaneUsageAttributions())
+  // Why the same seam feeds both sinks: a push or a clear changes which account the lane holds,
+  // and the row the DISPLACED account posted must not survive under the new label (S9 §2d/§2k).
+  claudeRuntimeAuth.laneCredentials.setLaneUsageInvalidationListener((laneId) => {
+    rateLimits?.forgetLaneStatuslineUsage(laneId)
+  })
   // Why: live Claude sessions stream usage windows through their statusLine command; feeding them here avoids OAuth usage-endpoint polling (and its 429s).
   agentHookServer.setClaudeStatusLineListener((event) => {
     rateLimits?.ingestLiveClaudeRateLimits(event)

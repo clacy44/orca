@@ -498,3 +498,42 @@ describe('LaneWireAuthority — the in-flight lane usage probe', () => {
     expect(refreshTokenOnDisk(harness.laneCredentialsOnDisk(LANE_A))).toBe('rt-1')
   })
 })
+
+/**
+ * §2d/§2k — a lane's usage row survives no credential change. The PULL half evicts itself; the
+ * statusline half is a different sink and is invalidated through the same seam, which is the only
+ * feed a lane has on `win32` where no probe runs at all.
+ */
+describe('both usage feeds are invalidated by a credential change', () => {
+  it('reports the pushed lane to the usage invalidation listener', async () => {
+    const harness = makeHarness()
+    const invalidated: string[] = []
+    harness.coordinator.setLaneUsageInvalidationListener((laneId) => invalidated.push(laneId))
+
+    await harness.authority.push('device-a', pushParams('rt-1'))
+
+    expect(invalidated).toEqual([LANE_A])
+  })
+
+  it('reports the cleared lane to the usage invalidation listener', async () => {
+    const harness = makeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    const invalidated: string[] = []
+    harness.coordinator.setLaneUsageInvalidationListener((laneId) => invalidated.push(laneId))
+
+    await harness.authority.clear('device-a')
+
+    expect(invalidated).toEqual([LANE_A])
+  })
+
+  // Negative control: one lane's push must not blank the other developer's bar.
+  it('reports only the lane that changed', async () => {
+    const harness = makeHarness()
+    const invalidated: string[] = []
+    harness.coordinator.setLaneUsageInvalidationListener((laneId) => invalidated.push(laneId))
+
+    await harness.authority.push('device-a', pushParams('rt-1'))
+
+    expect(invalidated).not.toContain(LANE_B)
+  })
+})

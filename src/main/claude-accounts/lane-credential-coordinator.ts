@@ -46,6 +46,7 @@ export class LaneCredentialCoordinator {
   readonly syncDriver: LaneSyncDriver
   readonly usagePull: LaneUsagePull
   private presenceLabelResolver: ((laneId: string) => string | null) | null = null
+  private laneUsageInvalidated: ((laneId: string) => void) | null = null
   // Why populated from `syncLane` rather than from a lane listing: "loaded" is a fact the sync
   // establishes, and a lane that has never synced has no row to attribute usage to (S9 §2k).
   private readonly usageAttributions = new Map<string, ClaudeLaneUsageAttribution>()
@@ -111,8 +112,16 @@ export class LaneCredentialCoordinator {
    * Awaited, so the caller replaces or sweeps `.credentials.json` only once the `claude` holding
    * the pre-change token is gone.
    */
-  invalidateLaneUsageProbes(laneId: string): Promise<void> {
-    return this.usagePull.invalidateLane(laneId)
+  async invalidateLaneUsageProbes(laneId: string): Promise<void> {
+    await this.usagePull.invalidateLane(laneId)
+    // BOTH feeds, not just the probe's: the statusline row was posted by the session the change
+    // is displacing, and on `win32` — where no probe runs at all — it is the only feed there is.
+    this.laneUsageInvalidated?.(laneId)
+  }
+
+  /** Late-bound: the rate-limit service that owns the statusline sink outlives this constructor. */
+  setLaneUsageInvalidationListener(listener: ((laneId: string) => void) | null): void {
+    this.laneUsageInvalidated = listener
   }
 
   /** True where no probe can run (§2k Fact 2): the row says why rather than showing no bar. */
