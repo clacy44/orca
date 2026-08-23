@@ -24,7 +24,7 @@ export type LaneWirePrincipals = {
   delegatedGrantIdOf(principalId: string): string | null
   /** The presence label a refusal names as the remedy's address; never a device name. */
   labelOf?(principalId: string): string | null
-  /** Every person with a lane on this host, for §2d's projection. Absent = self only. */
+  /** §2d's PEER rows only. Absent = the caller still gets their own lane row, from `resolveCaller`. */
   listPrincipals?(): readonly { principalId: string; label: string | null }[]
 }
 

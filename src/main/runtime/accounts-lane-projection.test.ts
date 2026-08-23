@@ -42,7 +42,12 @@ function credentials(refreshToken: string): string {
 }
 
 function attachService(
-  options: { provision?: string[]; managedAccounts?: ClaudeManagedAccount[] } = {}
+  options: {
+    provision?: string[]
+    managedAccounts?: ClaudeManagedAccount[]
+    /** The optional enumerator §2d's PEER rows use; the self row must not depend on it. */
+    listPrincipals?: false
+  } = {}
 ) {
   const userData = mkdtempSync(join(tmpdir(), 'orca-lane-projection-'))
   createdDirs.push(userData)
@@ -79,11 +84,16 @@ function attachService(
     principals: {
       principalOf: (deviceId) => bindings.get(deviceId) ?? null,
       delegatedGrantIdOf: (principalId) => (principalId === LANE_A ? 'device-a' : 'device-b'),
-      listPrincipals: () =>
-        (options.provision ?? [LANE_A, LANE_B]).map((principalId) => ({
-          principalId,
-          label: labels.get(principalId) ?? null
-        }))
+      labelOf: (principalId) => labels.get(principalId) ?? null,
+      ...(options.listPrincipals === false
+        ? {}
+        : {
+            listPrincipals: () =>
+              (options.provision ?? [LANE_A, LANE_B]).map((principalId) => ({
+                principalId,
+                label: labels.get(principalId) ?? null
+              }))
+          })
     },
     coordinator,
     persistence,
@@ -175,6 +185,30 @@ describe('accounts snapshot projection', () => {
       claudeLanes: Record<string, unknown>[]
     }
     expect(projected.claudeLanes.every((row) => row.scope === 'peer')).toBe(true)
+  })
+
+  // The self row and the caller-scope refusal must read "does this caller hold a lane" from ONE
+  // source. When they disagreed, the phone read `holdsLane: false`, sent `accounts.selectClaude`,
+  // and was refused out of scope with no delegated route — §2l's "never degrades", broken.
+  it('still shows the caller own lane when the peer enumerator is absent', async () => {
+    const harness = attachService({ listPrincipals: false })
+    await pushInto(harness.service, 'device-a', LANE_A, 'rt-1')
+    const projected = projectAccountsSnapshot(SNAPSHOT, 'device-a') as {
+      claudeLanes: Record<string, unknown>[]
+    }
+    expect(projected.claudeLanes).toHaveLength(1)
+    expect(projected.claudeLanes[0]).toMatchObject({ scope: 'self', ownerLabel: 'Ana' })
+    // The same answer the refusal gives, from the same source.
+    expect(refusalCode(() => assertClaudeSelectionInScope('device-a'))).toBe(
+      'accounts.selection_out_of_scope'
+    )
+  })
+
+  // Negative control: no enumerator does not invent a lane for a grant that holds none.
+  it('gives a grant with no provisioned lane no self row and no refusal', () => {
+    attachService({ provision: [LANE_B], listPrincipals: false })
+    expect(projectAccountsSnapshot(SNAPSHOT, 'device-a')).toBe(SNAPSHOT)
+    expect(refusalCode(() => assertClaudeSelectionInScope('device-a'))).toBe('no_refusal')
   })
 
   it('keeps the host account rows untouched beside the lane rows', async () => {

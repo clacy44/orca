@@ -68,39 +68,48 @@ export function projectAccountsSnapshot<T extends object>(
   return rows.length === 0 ? snapshot : { ...snapshot, claudeLanes: rows }
 }
 
+/**
+ * The self row comes from `resolveCaller` + `resolveLaneDir` — the SAME source the caller-scope
+ * refusal reads — and `listPrincipals` enumerates peers only. Deriving the self row from the
+ * enumeration instead let an absent or incomplete `listPrincipals` drop the caller's own row while
+ * `assertClaudeSelectionInScope` still refused them, which is §3's forbidden degradation: the
+ * phone would read `holdsLane: false`, send `accounts.selectClaude`, and be refused out of scope
+ * with no delegated route offered.
+ */
 function projectLaneRows(
   service: LaneWireService,
   pairedDeviceId: string | null | undefined
 ): ClaudeLaneProjectionRow[] {
   const caller = pairedDeviceId ? service.authority.resolveCaller(pairedDeviceId) : null
   const rows: ClaudeLaneProjectionRow[] = []
+  if (caller && hasProvisionedLane(service, caller.principalId)) {
+    const status = service.authority.statusOf(caller)
+    rows.push({
+      scope: 'self',
+      laneState: status.laneState,
+      occupied: status.laneState !== 'absent',
+      ownerLabel: service.labelOf(caller.principalId),
+      displayName: status.heldDisplayName,
+      delegatedGrantId: status.delegatedGrantId,
+      callerIsDelegatedGrant: status.callerIsDelegatedGrant,
+      identity: status.heldIdentity,
+      delegable: status.delegable
+    })
+  }
   for (const lane of service.listLanes()) {
-    if (!hasProvisionedLane(service, lane.principalId)) {
+    if (
+      lane.principalId === caller?.principalId ||
+      !hasProvisionedLane(service, lane.principalId)
+    ) {
       continue
     }
     const laneState = service.coordinator.store.getLaneState(lane.principalId)
-    const delegationRow = service.delegation.getRow(lane.principalId)
-    if (caller && caller.principalId === lane.principalId) {
-      const status = service.authority.statusOf(caller)
-      rows.push({
-        scope: 'self',
-        laneState,
-        occupied: laneState !== 'absent',
-        ownerLabel: lane.label,
-        displayName: status.heldDisplayName,
-        delegatedGrantId: status.delegatedGrantId,
-        callerIsDelegatedGrant: status.callerIsDelegatedGrant,
-        identity: status.heldIdentity,
-        delegable: status.delegable
-      })
-      continue
-    }
     rows.push({
       scope: 'peer',
       laneState,
       occupied: laneState !== 'absent',
       ownerLabel: lane.label,
-      displayName: delegationRow.heldDisplayName
+      displayName: service.delegation.getRow(lane.principalId).heldDisplayName
     })
   }
   return rows
