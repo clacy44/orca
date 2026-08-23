@@ -1080,6 +1080,7 @@ import { terminalPresenceRegistry } from './terminal-presence-registry'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
 import { laneScopedAgentLaunchInputs } from './lane-launch-computation'
+import { createPresenceParticipantPrincipalResolver } from './presence-participant-principal'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import {
   appendRecentPtyPathCandidates,
@@ -16300,7 +16301,12 @@ export class OrcaRuntimeService {
           .filter((row) => row.paneKey === paneKey)
           .map((row) => row.agentType),
       laneStateOf: (principalId) => resolveLaneResidencyState(principalId),
-      principalOfParticipant: (participantId) => this.principalOfPresenceParticipant(participantId)
+      // Why a resolver and not a lookup: the join is a scan of the connection map, and this
+      // one is asked per participant per row (§2h).
+      principalOfParticipant: createPresenceParticipantPrincipalResolver({
+        connections: () => terminalPresenceRegistry.connections(),
+        principalOfGrant: (pairedDeviceId) => this.paneLanes.principalOfGrant(pairedDeviceId)
+      })
     })
     // Why: undefined (pre-flag client) must still get layouts; only an explicit
     // `false` opts out.
@@ -26523,16 +26529,6 @@ export class OrcaRuntimeService {
   /** The lane the pane RECORD carries, read back by pane identity at every spawn edge (§2a). */
   credentialLaneOfPane(worktreeId: string, paneKey: string): PaneCredentialLane | null {
     return this.paneLanes.laneOf(worktreeId, paneKey)
-  }
-
-  /** The person behind a presence participant, for the owner label's third hop (§2h). */
-  principalOfPresenceParticipant(participantId: string): string | null {
-    for (const [, participant] of terminalPresenceRegistry.connections()) {
-      if (participant.participantId === participantId) {
-        return this.paneLanes.principalOfGrant(participant.pairedDeviceId)
-      }
-    }
-    return null
   }
 
   /** The lane a handle-addressed inherit edge resolves to, through the same ownership predicate. */
