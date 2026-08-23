@@ -219,6 +219,19 @@ describe('principal lane consent RPC', () => {
     expect(existsSync(join(state.userDataDir, 'claude-lanes', principalId))).toBe(false)
   })
 
+  it('refuses a content refresh for a principal whose lane it cannot prove it owns', async () => {
+    const service = new PrincipalLaneConsentService(
+      new PrincipalRegistry(state.userDataDir, grants),
+      () => ({ hostConfigDir, hostConfigPath })
+    )
+    const principalId = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+
+    // Called with anything but a provisioned lane, the mirror would create the directory and fill
+    // it with the host's memory, agents and commands — no marker, no hardening.
+    expect(() => service.refreshLaneContent(principalId)).toThrow(/could not prove/)
+    expect(existsSync(join(state.userDataDir, 'claude-lanes', principalId))).toBe(false)
+  })
+
   it('wipes the credential when a lane is deprovisioned', async () => {
     grants.add('desktop')
     const { principalId } = (await call('accounts.lane.createPrincipal', {

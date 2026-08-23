@@ -86,18 +86,33 @@ export class PrincipalLaneConsentService {
     void consent
     assertProvisioningPlatformCleared(this.platform)
     this.registry.assertLaneProvisionable(principalId)
-    const lane = provisionPrincipalLane(principalId)
-    this.refreshLaneContent(lane.laneDir)
+    // Why the platform is threaded rather than left to `process.platform`: one call must not read
+    // two platform answers — the UNC refusal, the DACL arm and the gate above are one decision.
+    const lane = provisionPrincipalLane(principalId, { platform: this.platform })
+    this.refreshLaneContent(principalId)
     return lane
   }
 
-  /** Recomputed at creation and on hook refresh (S9 §2a); never merged with lane-side edits. */
-  refreshLaneContent(laneDir: string): void {
+  /**
+   * Recomputed at creation and on hook refresh (S9 §2a); never merged with lane-side edits.
+   *
+   * Keyed by principal rather than by path: the mirror creates its target directory and fills it
+   * with the host's memory, agents, commands and skills, so a raw path from a later caller — §2a
+   * names hook refresh as the second one — would produce an unmarked, unhardened lane look-alike.
+   */
+  refreshLaneContent(principalId: string): void {
+    const laneDir = resolveOwnedPrincipalLaneDir(principalId, { platform: this.platform })
+    if (!laneDir) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.lane_not_owned_by_orca',
+        "Orca could not prove that this person's credential lane is its own, so it did not write to it. Provision the lane again from Orca on the host machine."
+      )
+    }
     const { hostConfigDir, hostConfigPath } = this.hostSources()
     // Why derived from the config dir rather than defaulted: the lane's settings must mirror the
     // same shared lane the memory and MCP mirror read, not whatever homedir() resolves to.
     writeLaneSettings(laneDir, { hostConfigPath: join(hostConfigDir, 'settings.json') })
-    mirrorHostUserContentIntoLane(hostConfigDir, laneDir)
+    mirrorHostUserContentIntoLane(hostConfigDir, laneDir, { platform: this.platform })
     seedFreshLaneConfig(laneDir, hostConfigPath)
   }
 
