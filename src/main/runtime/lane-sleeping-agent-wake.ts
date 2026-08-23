@@ -1,6 +1,7 @@
 import type { RuntimeEnsureAgentSessionRequest } from '../../shared/agent-session-host-authority'
 import type { SleepingAgentSessionRecord } from '../../shared/agent-session-resume'
 import type { PaneCredentialLane } from './pane-credential-lane-registry'
+import { runtimeWorktreeIdsEqual } from './runtime-worktree-id-equality'
 
 /**
  * How `worktree.activate`'s wake is partitioned host-side (S9 §2a, blocker 2's pane half).
@@ -34,7 +35,11 @@ export function partitionLaneBoundSleepingRecords(input: {
     refusedForeign: false
   }
   for (const record of Object.values(input.records)) {
-    if (record.worktreeId !== input.worktreeId) {
+    // Runtime identity, not string identity: `clearSleepingAgentRecord` consumes these very
+    // records through the same comparison, and a record this partition misses on a path-spelling
+    // difference falls through to the renderer wake, which mints an UNBOUND pane on the shared
+    // credential — the §2a downgrade the partition exists to prevent.
+    if (!runtimeWorktreeIdsEqual(record.worktreeId, input.worktreeId)) {
       continue
     }
     const lane = input.laneOf(record.worktreeId, record.paneKey)

@@ -7,6 +7,7 @@ import type { SleepingAgentSessionRecord } from '../../shared/agent-session-resu
 import type { RuntimeEnsureAgentSessionRequest } from '../../shared/agent-session-host-authority'
 import {
   buildLaneWakeAgentSessionRequest,
+  partitionLaneBoundSleepingRecords,
   resumeLaneBoundSleepingRecords,
   withoutSleepingAgentRecord
 } from './lane-sleeping-agent-wake'
@@ -126,5 +127,62 @@ describe('withoutSleepingAgentRecord', () => {
     expect(withoutSleepingAgentRecord(records, 'p-1', () => false)).toBeNull()
     expect(withoutSleepingAgentRecord(records, 'p-9', () => true)).toBeNull()
     expect(withoutSleepingAgentRecord(undefined, 'p-1', () => true)).toBeNull()
+  })
+})
+
+/**
+ * S9 §2a blocker 2 — the partition decides whether the HOST resumes a lane record, so it compares
+ * worktree ids the way the runtime does. A Windows id spelled with the other separator, or with a
+ * trailing slash, names the same workspace: missed here, the record falls through to the renderer
+ * wake and comes back as an unbound pane on the shared credential.
+ */
+describe('partitionLaneBoundSleepingRecords', () => {
+  const PRINCIPAL = 'principal-1'
+  const STORED = 'repo-1::C:\\dev\\wt'
+  const REQUESTED = 'repo-1::C:/dev/wt/'
+
+  const laneOf = (): { kind: 'principal'; principalId: string } => ({
+    kind: 'principal',
+    principalId: PRINCIPAL
+  })
+
+  it('withholds and owns a record whose id differs only in path spelling', () => {
+    const stored = record('p-1', { worktreeId: STORED })
+
+    const partition = partitionLaneBoundSleepingRecords({
+      records: { 'p-1': stored },
+      worktreeId: REQUESTED,
+      laneOf,
+      callerPrincipalId: PRINCIPAL
+    })
+
+    expect(partition.withheldPaneKeys).toEqual(['p-1'])
+    expect(partition.ownedRecords).toEqual([stored])
+  })
+
+  // Negative control: a genuinely different workspace is still skipped, spelling or not.
+  it('skips a record from another worktree', () => {
+    const partition = partitionLaneBoundSleepingRecords({
+      records: { 'p-2': record('p-2', { worktreeId: 'repo-1::C:/dev/other' }) },
+      worktreeId: REQUESTED,
+      laneOf,
+      callerPrincipalId: PRINCIPAL
+    })
+
+    expect(partition).toEqual({ withheldPaneKeys: [], ownedRecords: [], refusedForeign: false })
+  })
+
+  // Negative control: matching the worktree does not grant ownership of someone else's lane.
+  it('withholds a foreign lane record without resuming it', () => {
+    const partition = partitionLaneBoundSleepingRecords({
+      records: { 'p-3': record('p-3', { worktreeId: STORED }) },
+      worktreeId: REQUESTED,
+      laneOf,
+      callerPrincipalId: 'principal-2'
+    })
+
+    expect(partition.withheldPaneKeys).toEqual(['p-3'])
+    expect(partition.ownedRecords).toEqual([])
+    expect(partition.refusedForeign).toBe(true)
   })
 })

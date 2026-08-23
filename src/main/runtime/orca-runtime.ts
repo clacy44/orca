@@ -1147,6 +1147,7 @@ import {
   resumeLaneBoundSleepingRecords,
   withoutSleepingAgentRecord
 } from './lane-sleeping-agent-wake'
+import { runtimePathsEqual, runtimeWorktreeIdsEqual } from './runtime-worktree-id-equality'
 import {
   SHARED_CREDENTIAL_LANE,
   assertCredentialLaneSupplied,
@@ -38828,26 +38829,6 @@ function getPtyTerminalState(pty: RuntimePtyWorktreeRecord): RuntimeTerminalStat
 function branchSelectorMatches(branch: string, selector: string): boolean {
   // Why: Git can report a local branch as `refs/heads/foo` or `foo` depending on the plumbing path; accept either.
   return normalizeLocalBranchName(branch) === normalizeLocalBranchName(selector)
-}
-
-function runtimePathsEqual(left: string, right: string): boolean {
-  return normalizeRuntimePathForComparison(left) === normalizeRuntimePathForComparison(right)
-}
-
-/**
- * Why: runtime identity is per *workspace*, not per checkout dir. Folder projects back
- * several independent workspaces with one directory, separated only by the
- * `::workspace:<uuid>` suffix that filesystem callers must strip; stripping it here
- * instead lets one session steal a sibling's PTYs. Normalize only path spelling, so
- * Windows/WSL/SSH ids still match themselves across hosts.
- */
-function runtimeWorktreeIdsEqual(left: string, right: string): boolean {
-  const parsedLeft = splitWorktreeId(left)
-  const parsedRight = splitWorktreeId(right)
-  return parsedLeft && parsedRight
-    ? parsedLeft.repoId === parsedRight.repoId &&
-        runtimePathsEqual(parsedLeft.worktreePath, parsedRight.worktreePath)
-    : left === right
 }
 
 function runtimeWorktreeIdentityKey(worktreeId: string): string {
