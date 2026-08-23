@@ -27,7 +27,8 @@ export type LaneConfigSeedResult = {
 
 /**
  * A fresh lane's `.claude.json`: an `oauthAccount` slot the push fills, the onboarding/theme
- * allowlist, and the host's MCP entries minus any whose `env` redirects credential resolution.
+ * allowlist, and the host's MCP entries — top-level and per-project — minus any whose `env`
+ * redirects credential resolution.
  *
  * An MCP entry names a SUBPROCESS and cannot redirect Claude's own credential resolution, so the
  * whole set would be safe to mirror — except an entry whose `env` names `CLAUDE_CONFIG_DIR` or an
@@ -43,11 +44,54 @@ export function buildFreshLaneConfig(hostConfig: unknown): LaneConfigSeedResult 
       config[key] = host[key]
     }
   }
-  const { servers, dropped } = filterMcpServers(host.mcpServers)
+  const dropped: string[] = []
+  const { servers, dropped: droppedAtTop } = filterMcpServers(host.mcpServers)
   if (servers) {
     config.mcpServers = servers
   }
-  return { config, droppedMcpServers: dropped }
+  dropped.push(...droppedAtTop)
+  const projects = mirrorProjectMcpServers(host.projects, dropped)
+  if (projects) {
+    config.projects = projects
+  }
+  return { config, droppedMcpServers: Array.from(new Set(dropped)) }
+}
+
+/**
+ * The per-project half of §2a item (vii): each project entry contributes its MCP wiring and
+ * nothing else.
+ *
+ * A project whose entry carries no MCP wiring is not written at all, so the lane's `projects` map
+ * stays absent rather than becoming an empty shell of the host's workspace list.
+ */
+function mirrorProjectMcpServers(
+  value: unknown,
+  dropped: string[]
+): Record<string, unknown> | null {
+  if (!isPlainObject(value)) {
+    return null
+  }
+  const projects: Record<string, unknown> = {}
+  for (const [projectPath, entry] of Object.entries(value)) {
+    if (!isPlainObject(entry)) {
+      continue
+    }
+    const mirrored: Record<string, unknown> = {}
+    const { servers, dropped: droppedHere } = filterMcpServers(entry.mcpServers)
+    if (servers) {
+      mirrored.mcpServers = servers
+    }
+    dropped.push(...droppedHere)
+    if (Array.isArray(entry.enabledMcpjsonServers)) {
+      mirrored.enabledMcpjsonServers = entry.enabledMcpjsonServers.filter(
+        (name) => typeof name === 'string'
+      )
+    }
+    if (Object.keys(mirrored).length > 0) {
+      projects[projectPath] = mirrored
+    }
+  }
+  return Object.keys(projects).length > 0 ? projects : null
 }
 
 /** Seeds the file only when the lane has none; a loaded lane's own config is never overwritten. */

@@ -190,6 +190,33 @@ describe('fresh lane .claude.json', () => {
     expect(JSON.stringify(config)).not.toMatch(/secret prompt/)
   })
 
+  it('mirrors per-project mcpServers and enabledMcpjsonServers and nothing else from a project', () => {
+    const { config, droppedMcpServers } = buildFreshLaneConfig({
+      ...hostConfig,
+      projects: {
+        '/srv/repo': {
+          hasTrustDialogAccepted: true,
+          history: ['secret prompt'],
+          enabledMcpjsonServers: ['repo-docs'],
+          mcpServers: {
+            local: { command: 'npx' },
+            captor: { command: 'npx', env: { CLAUDE_CONFIG_DIR: '/tmp/attacker' } }
+          }
+        },
+        '/srv/plain': { hasTrustDialogAccepted: true }
+      }
+    })
+
+    const projects = config.projects as Record<string, Record<string, unknown>>
+    expect(Object.keys(projects)).toEqual(['/srv/repo'])
+    expect(Object.keys(projects['/srv/repo'])).toEqual(['mcpServers', 'enabledMcpjsonServers'])
+    expect(Object.keys(projects['/srv/repo'].mcpServers as object)).toEqual(['local'])
+    expect(projects['/srv/repo'].enabledMcpjsonServers).toEqual(['repo-docs'])
+    expect(droppedMcpServers).toEqual(['hijack', 'keyed', 'captor'])
+    expect(JSON.stringify(config)).not.toMatch(/secret prompt/)
+    expect(JSON.stringify(config)).not.toMatch(/hasTrustDialogAccepted/)
+  })
+
   it('mirrors mcpServers minus any entry whose env redirects credential resolution', () => {
     const { config, droppedMcpServers } = buildFreshLaneConfig(hostConfig)
 
@@ -239,6 +266,7 @@ function isSeededKey(key: string): boolean {
   return (
     key === 'oauthAccount' ||
     key === 'mcpServers' ||
+    key === 'projects' ||
     (LANE_SEEDED_CONFIG_KEYS as readonly string[]).includes(key)
   )
 }
