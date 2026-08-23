@@ -104,15 +104,23 @@ export class ClaudeUsageAttributionMap {
    */
   attribute(post: ClaudeStatusLinePost): ClaudeUsageAttribution | null {
     const pane = post.paneKey ? this.paneLaneLookup?.(post.paneKey) : null
-    if (pane) {
-      return pane.laneId === null ? this.shared : (this.laneAttribution(pane.laneId) ?? null)
+    if (pane?.laneId != null) {
+      return this.laneAttribution(pane.laneId) ?? null
     }
     const configDir = normalizeClaudeConfigDir(post.configDir)
-    // Why `null === null` counts: a system-default session posts no config dir at all, and that
-    // is exactly the shared lane's own key — the compare this map replaces matched it that way.
+    // Why the shared arm keeps its config-dir compare while a LANE's paneKey overrides one: a lane
+    // is single-account by construction, and the shared lane is not — `rememberSharedLane` is
+    // rewritten per fetch target, so a shared pane whose session runs under a different target's
+    // dir would write `state.claude`, the host-wide, peer-published bar. Dropped instead, exactly
+    // as the pre-S9b `!==` dropped it.
     if (this.shared && this.sharedConfigDir === configDir) {
+      // Why `null === null` counts: a system-default session posts no config dir at all, and that
+      // is exactly the shared lane's own key — the compare this map replaces matched it that way.
       return this.shared
     }
-    return configDir ? (this.laneRows.get(configDir) ?? null) : null
+    // A pane the host knows to be shared never falls through to the lane rows: whatever dir it
+    // posted, it is not that lane's, and a lane row minted from it would misattribute across
+    // principals.
+    return pane || !configDir ? null : (this.laneRows.get(configDir) ?? null)
   }
 }

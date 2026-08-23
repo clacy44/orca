@@ -52,7 +52,30 @@ describe('ClaudeUsageAttributionMap', () => {
   })
 
   it('attributes a shared-lane pane to the shared row', () => {
-    expect(mapWithTwoLanes().attribute({ paneKey: PANE_B, configDir: null })?.laneId).toBeNull()
+    const attributed = mapWithTwoLanes().attribute({
+      paneKey: PANE_B,
+      configDir: '/home/dev/.claude'
+    })
+
+    expect(attributed?.laneId).toBeNull()
+    expect(attributed?.provenance).toBe('managed:acct-1:host')
+  })
+
+  // The shared lane is not single-account: `rememberSharedLane` is rewritten per fetch target, so
+  // a shared pane running under ANOTHER target's dir must not write the host-wide, peer-published
+  // bar just because its paneKey resolved. Dropped, exactly as the pre-S9b `!==` dropped it.
+  it("drops a shared-lane pane's post that names a different target's config dir", () => {
+    const map = mapWithTwoLanes()
+
+    expect(map.attribute({ paneKey: PANE_B, configDir: '/home/dev/.claude-other' })).toBeNull()
+    expect(map.attribute({ paneKey: PANE_B, configDir: null })).toBeNull()
+  })
+
+  // ...and it does not become a LANE post either: the pane is shared, whatever dir it posted.
+  it("drops a shared-lane pane's post that names a lane's config dir", () => {
+    expect(
+      mapWithTwoLanes().attribute({ paneKey: PANE_B, configDir: `/data/claude-lanes/${LANE_A}` })
+    ).toBeNull()
   })
 
   it('falls back to the config-dir map when the paneKey names no known pane', () => {

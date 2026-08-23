@@ -39,6 +39,11 @@ const PANE_A = 'tab-a:33333333-3333-4333-8333-333333333333'
 const LANE_A_DIR = `/data/claude-lanes/${LANE_A}`
 const LABEL_A = 'a'.repeat(32)
 const SHARED_DIR = '/home/dev/.claude'
+// §2m(4): on the Windows host the CLI's `%CLAUDE_CONFIG_DIR%` and Orca's stored lane path can
+// legitimately differ in DRIVE-LETTER CASE, which `normalizeClaudeConfigDir` deliberately does not
+// fold ("preserve Linux case sensitivity"). This is the pair that motivates the paneKey key.
+const WIN_LANE_DIR = `C:\\ProgramData\\orca\\claude-lanes\\${LANE_A}`
+const WIN_POSTED_DIR = `c:\\ProgramData\\orca\\claude-lanes\\${LANE_A}`
 
 function unavailable(provider: string) {
   return {
@@ -51,7 +56,7 @@ function unavailable(provider: string) {
   }
 }
 
-async function serviceWithLaneA(): Promise<RateLimitService> {
+async function serviceWithLaneA(laneDir: string = LANE_A_DIR): Promise<RateLimitService> {
   const service = new RateLimitService()
   service.setClaudeAuthPreparationResolver(async () => ({
     configDir: SHARED_DIR,
@@ -62,7 +67,7 @@ async function serviceWithLaneA(): Promise<RateLimitService> {
   service.setClaudeLaneAttributionResolver(() => [
     {
       laneId: LANE_A,
-      configDir: LANE_A_DIR,
+      configDir: laneDir,
       provenance: `lane:${LABEL_A}`
     }
   ])
@@ -115,6 +120,38 @@ describe('ingestLiveClaudeRateLimits — lane attribution', () => {
     const claude = service.getState().claude
     expect(claude?.session?.usedPercent).toBe(5)
     expect(claude?.usageMetadata?.authProvenance).toBe('managed:acct-shared:host')
+  })
+
+  // §5's named Windows fixture for the paneKey join: the posted dir and the stored lane dir spell
+  // the same directory and differ only in drive-letter case, so the config-dir compare drops the
+  // post (§2m(4)) and only the paneKey arm places it. This is the drop the key exists to remove.
+  it('attributes a Windows-cased lane post by paneKey, where the config-dir compare cannot', async () => {
+    const service = await serviceWithLaneA(WIN_LANE_DIR)
+
+    service.ingestLiveClaudeRateLimits({
+      configDir: WIN_POSTED_DIR,
+      paneKey: PANE_A,
+      fiveHour: { used_percentage: 61 },
+      sevenDay: null
+    })
+
+    expect(service.laneStatuslineUsageOf(LANE_A)?.session?.usedPercent).toBe(61)
+  })
+
+  // Negative control for the same fixture: with no paneKey there is nothing but the case-sensitive
+  // compare, and the post is dropped rather than guessed onto a bar.
+  it('drops the same Windows-cased post when it carries no paneKey', async () => {
+    const service = await serviceWithLaneA(WIN_LANE_DIR)
+
+    service.ingestLiveClaudeRateLimits({
+      configDir: WIN_POSTED_DIR,
+      paneKey: null,
+      fiveHour: { used_percentage: 61 },
+      sevenDay: null
+    })
+
+    expect(service.laneStatuslineUsageOf(LANE_A)).toBeNull()
+    expect(service.getState().claude?.session?.usedPercent).not.toBe(61)
   })
 
   // Negative control: the shared lane's own post still drives the host-wide bar.
