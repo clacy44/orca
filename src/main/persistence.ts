@@ -2656,11 +2656,15 @@ function deleteScannedSessionFieldsForOwners(
   }
   if (next.terminalCredentialLanesByPaneKey) {
     next.terminalCredentialLanesByPaneKey = Object.fromEntries(
-      Object.entries(next.terminalCredentialLanesByPaneKey).filter(
-        ([paneKey, lane]) =>
-          !isRemovedOwner(lane.worktreeId) &&
-          !removedTabIds.has(paneKey.slice(0, paneKey.lastIndexOf(':')))
-      )
+      Object.entries(next.terminalCredentialLanesByPaneKey).filter(([paneKey, lane]) => {
+        if (isRemovedOwner(lane.worktreeId)) {
+          return false
+        }
+        // Why: an unseparated key yields -1, and `slice(0, -1)` would drop a character and match a
+        // tabId no caller ever wrote — the same guard its incarnation sibling above carries.
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTabIds.has(paneKey.slice(0, separator))
+      })
     )
   }
   if (next.terminalSurfaceTombstonesByPaneKey) {
@@ -6920,7 +6924,7 @@ export class Store {
   ): void {
     const resolvedHostId = this.resolveHostId(hostId)
     const session = this.getWorkspaceSession(resolvedHostId)
-    const paneKey = `${args.tabId}:${args.leafId}`
+    const paneKey = makePaneKey(args.tabId, args.leafId)
     if (session.terminalCredentialLanesByPaneKey?.[paneKey]) {
       return
     }
@@ -6931,6 +6935,30 @@ export class Store {
         ...(args.principalId ? { principalId: args.principalId } : {})
       }
     }
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.scheduleSave()
+  }
+
+  // Why: the row is the durable authority, so a create whose pane was refused after it minted one
+  // must drop it here too — otherwise the released binding comes back on the next rehydrate.
+  forgetPaneCredentialLane(
+    args: { worktreeId: string; tabId: string; leafId: string },
+    hostId?: string | null
+  ): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const paneKey = makePaneKey(args.tabId, args.leafId)
+    const existing = session.terminalCredentialLanesByPaneKey?.[paneKey]
+    if (!existing || existing.worktreeId !== args.worktreeId) {
+      return
+    }
+    const { [paneKey]: _removed, ...rest } = session.terminalCredentialLanesByPaneKey ?? {}
+    session.terminalCredentialLanesByPaneKey = rest
     if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
       this.state.workspaceSessionsByHostId = {
         ...this.state.workspaceSessionsByHostId,

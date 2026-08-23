@@ -21,7 +21,7 @@ const PRINCIPAL_A = '11111111-1111-4111-8111-111111111111'
 const PRINCIPAL_B = '22222222-2222-4222-8222-222222222222'
 const WORKTREE = 'repo-1::wt-1'
 const TAB = 'tab-1'
-const LEAF = 'leaf-1'
+const LEAF = '11111111-1111-4111-8111-1111111111bb'
 const PANE_KEY = `${TAB}:${LEAF}`
 
 async function createStore() {
@@ -152,5 +152,67 @@ describe('pane credential lane binding rows', () => {
       worktreeId: WORKTREE,
       principalId: PRINCIPAL_A
     })
+  })
+
+  it('refuses a paneKey the rest of the tree could never have written', async () => {
+    const store = await createStore()
+
+    // Why: this is a public Store method and the row it writes is the durable lane authority, so
+    // it funnels through the same validation every other paneKey construction does.
+    expect(() =>
+      store.persistPaneCredentialLane({ worktreeId: WORKTREE, tabId: 'a:b', leafId: LEAF })
+    ).toThrow()
+    expect(() =>
+      store.persistPaneCredentialLane({ worktreeId: WORKTREE, tabId: TAB, leafId: 'leaf-1' })
+    ).toThrow()
+    expect(store.getPaneCredentialLanes()).toEqual({})
+  })
+
+  it('drops a released row and does not resurrect it from the store', async () => {
+    const store = await createStore()
+    store.persistPaneCredentialLane({
+      worktreeId: WORKTREE,
+      tabId: TAB,
+      leafId: LEAF,
+      principalId: PRINCIPAL_A
+    })
+
+    store.forgetPaneCredentialLane({ worktreeId: WORKTREE, tabId: TAB, leafId: LEAF })
+
+    expect(store.getPaneCredentialLanes()[PANE_KEY]).toBeUndefined()
+  })
+
+  it('leaves another worktree’s row alone when the release names a different owner', async () => {
+    const store = await createStore()
+    store.persistPaneCredentialLane({
+      worktreeId: WORKTREE,
+      tabId: TAB,
+      leafId: LEAF,
+      principalId: PRINCIPAL_A
+    })
+
+    store.forgetPaneCredentialLane({ worktreeId: 'repo-1::wt-2', tabId: TAB, leafId: LEAF })
+
+    expect(store.getPaneCredentialLanes()[PANE_KEY]).toEqual({
+      worktreeId: WORKTREE,
+      principalId: PRINCIPAL_A
+    })
+  })
+
+  it('keeps a separator-less lane row when another worktree’s tabs are pruned', async () => {
+    const store = await createStore()
+    const removedWorktree = 'repo-1::wt-removed'
+    const session = store.getWorkspaceSession()
+    store.setWorkspaceSession({
+      ...session,
+      tabsByWorktree: { [removedWorktree]: [{ id: 'nose', title: 'x' }] },
+      // Why: `slice(0, lastIndexOf(':'))` on a key with no ':' yields 'nose' and would match the
+      // removed tab, dropping a row whose tabId no caller ever wrote.
+      terminalCredentialLanesByPaneKey: { nosep: { worktreeId: WORKTREE } }
+    } as never)
+
+    store.removeWorkspaceSessionStateForWorktree(removedWorktree)
+
+    expect(store.getPaneCredentialLanes().nosep).toEqual({ worktreeId: WORKTREE })
   })
 })
