@@ -25,6 +25,21 @@ function refusalCode(run: () => void): string {
 }
 
 describe('PaneCredentialLaneRegistry', () => {
+  it('keeps two pairs whose components differ only by a space in distinct rows', () => {
+    const registry = new PaneCredentialLaneRegistry()
+    // Why: worktreeIds embed filesystem paths and a client-supplied tabId only forbids ':', so a
+    // space separator would alias `('repo::wt a', 'b:leaf')` onto `('repo::wt', 'a b:leaf')`.
+    registry.bind('repo::wt a', 'b:leaf', laneA)
+    registry.bind('repo::wt', 'a b:leaf', laneB)
+
+    expect(registry.laneOf('repo::wt a', 'b:leaf')).toEqual(laneA)
+    expect(registry.laneOf('repo::wt', 'a b:leaf')).toEqual(laneB)
+    expect(registry.entries()).toEqual([
+      { worktreeId: 'repo::wt a', paneKey: 'b:leaf', lane: laneA },
+      { worktreeId: 'repo::wt', paneKey: 'a b:leaf', lane: laneB }
+    ])
+  })
+
   it('binds a pane once and never rewrites the row', () => {
     const registry = new PaneCredentialLaneRegistry()
     expect(registry.bind('wt1', 'tab:leaf', laneA)).toEqual(laneA)
