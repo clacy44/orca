@@ -255,6 +255,7 @@ import { getDefaultWslDistro } from './wsl'
 import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './worktree-trash'
 import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
+import { wipeResidentLanesAtStartup } from './claude-accounts/principal-lane-startup-wipe'
 import {
   attachClaudeLivePtyPersistence,
   onLiveClaudePtysDrained,
@@ -2246,6 +2247,16 @@ void app.whenReady().then(async () => {
   onLiveClaudePtysDrained(() => {
     void rateLimits?.refreshAfterClaudeLivePtysDrained()
   })
+  // S9 §2f, and the ordering is the point: observe-only lane sync (which records the watermark)
+  // → wipe → seed the live-PTY gate → bind listeners. A crash never ran the close handler, so a
+  // lane's credential is still at rest; watermarking BEFORE the wipe is what refuses the
+  // reconnecting desktop's cached pre-restart blob into the lane this just emptied.
+  const laneStartupWipes = await wipeResidentLanesAtStartup({ persistence: store })
+  if (laneStartupWipes.length > 0) {
+    console.log(
+      `[claude-lane] Wiped ${laneStartupWipes.filter((row) => row.completed).length}/${laneStartupWipes.length} resident Claude credential lane(s) at startup`
+    )
+  }
   const persistedClaudePtySessions = store.getClaudeLivePtySessions()
   seedLiveClaudePtysFromPersistence(persistedClaudePtySessions)
   if (persistedClaudePtySessions.length > 0) {

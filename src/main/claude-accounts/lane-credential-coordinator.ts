@@ -6,8 +6,7 @@ import {
   type LaneUsagePullOutcome
 } from '../rate-limits/lane-usage-pull'
 import { isLaneWipePending } from './lane-wipe-pending'
-import { PrincipalLaneLifecycle, type LaneWipeOutcome } from './principal-lane-lifecycle'
-import { listResidentPrincipalLaneIds } from './principal-credential-lane'
+import { PrincipalLaneLifecycle } from './principal-lane-lifecycle'
 import {
   isClaudeAuthSwitchInProgress,
   listLanesWithLiveClaudePtys,
@@ -99,18 +98,6 @@ export class LaneCredentialCoordinator {
   /** Late-bound: the lane wire that republishes a lane's status outlives this constructor. */
   setLaneWipedListener(listener: ((laneId: string) => void) | null): void {
     this.laneWiped = listener
-  }
-
-  /**
-   * §2f's startup order, minus the seed: observe-only sync per resident lane, then the wipe.
-   *
-   * Callers must run this BEFORE `seedLiveClaudePtysFromPersistence`, which is why it does not
-   * seed itself — the seed's own ordering invariant lives at the call site in `index.ts`.
-   */
-  wipeResidentLanesAtStartup(): Promise<LaneWipeOutcome[]> {
-    return this.lifecycle.wipeResidentLanesAtStartup(
-      listResidentPrincipalLaneIds(this.options.laneOptions ?? {})
-    )
   }
 
   /** Trigger 2's SECOND arm: one probe per loaded lane, then a sync over each lane probed. */

@@ -10,6 +10,7 @@ import {
   PrincipalLaneLifecycle,
   principalHasRemainingConnections
 } from './principal-lane-lifecycle'
+import { wipeResidentLanesAtStartup } from './principal-lane-startup-wipe'
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
 
@@ -28,6 +29,17 @@ describe('the principal lane lifecycle wipe', () => {
 
   const laneDir = (laneId: string): string => join(lanesRoot, laneId)
   const credentialsPath = (laneId: string): string => join(laneDir(laneId), '.credentials.json')
+
+  const runStartupPass = () =>
+    wipeResidentLanesAtStartup({
+      persistence: {
+        getClaudeLaneCredentialWatermarks: () => watermarks.slice(),
+        setClaudeLaneCredentialWatermarks: (rows) => {
+          watermarks = [...rows]
+        }
+      },
+      laneOptions: { lanesRoot, platform: 'linux' }
+    })
 
   const makeCoordinator = (): LaneCredentialCoordinator =>
     new LaneCredentialCoordinator({
@@ -208,7 +220,7 @@ describe('the principal lane lifecycle wipe', () => {
     const staleBlob = readFileSync(credentialsPath(LANE_A), 'utf-8')
     const lanes = makeCoordinator()
 
-    await lanes.wipeResidentLanesAtStartup()
+    await runStartupPass()
 
     // The daemon-survival case: the lane is empty, so only the watermark can refuse the desktop's
     // cached pre-restart blob. Mutation proof: watermarking AFTER the wipe leaves this green-free
@@ -232,7 +244,7 @@ describe('the principal lane lifecycle wipe', () => {
     const lanes = makeCoordinator()
     const rotate = vi.spyOn(lanes.authState, 'rotateLaneCredentials')
 
-    await lanes.wipeResidentLanesAtStartup()
+    await runStartupPass()
 
     expect(rotate).not.toHaveBeenCalled()
   })
@@ -241,7 +253,7 @@ describe('the principal lane lifecycle wipe', () => {
     const lanes = makeCoordinator()
     const rotate = vi.spyOn(lanes.authState, 'rotateLaneCredentials')
 
-    const outcomes = await lanes.wipeResidentLanesAtStartup()
+    const outcomes = await runStartupPass()
 
     expect(outcomes.map((row) => row.laneId).sort()).toEqual([LANE_A, LANE_B].sort())
     expect(outcomes.every((row) => row.completed)).toBe(true)
