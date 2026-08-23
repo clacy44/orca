@@ -1,6 +1,9 @@
 // Why a pure resolver beside the chip: what the two lane fields MEAN on screen is the part with
 // rules — a peer sees the account label and no bar, a Windows host shows why there is no bar
 // rather than a stale one — and the rules must be assertable without a DOM (S9 §2h/§2k).
+//
+// Its production caller is DEFERRED TO S9d with the chip's own `lane` prop: the desktop renderer
+// has no per-pane feed of the `terminal.list` lane fields, and building one is the S9d slice.
 import type {
   RuntimeTerminalLaneAccountLabel,
   RuntimeTerminalLaneUsage,

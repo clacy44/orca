@@ -79,7 +79,13 @@ export function TerminalPresenceChip({
   rootClassName
 }: {
   state: TerminalPresenceChipState | null
-  /** S9 §2k's two additive row fields, already resolved. Absent on a non-lane pane. */
+  /**
+   * S9 §2k's two additive row fields, already resolved. Absent on a non-lane pane.
+   *
+   * DEFERRED TO S9d, not dead by accident: no desktop call site passes it yet, because the
+   * renderer has no per-pane feed of the `terminal.list` lane fields at all — building one is the
+   * desktop-UI slice (§6, S9d), which also moves the presence rows onto the owner-label join.
+   */
   lane?: TerminalLaneAccountChipState | null
   rootClassName?: string
 }): ReactElement | null {
