@@ -65,9 +65,12 @@ const record: SleepingAgentSessionRecord = {
   updatedAt: 1
 }
 
-async function launch(target: SleepingAgentSessionRecord): Promise<boolean> {
+async function launch(
+  target: SleepingAgentSessionRecord,
+  withheldPaneKeys?: ReadonlySet<string>
+): Promise<boolean> {
   const { launchSleepingAgentSession } = await import('./sleeping-agent-session-launch')
-  return launchSleepingAgentSession(target)
+  return launchSleepingAgentSession(target, withheldPaneKeys ? { withheldPaneKeys } : undefined)
 }
 
 describe('launchSleepingAgentSession — lane-bound records', () => {
@@ -82,6 +85,21 @@ describe('launchSleepingAgentSession — lane-bound records', () => {
     expect(mockCreateTab).not.toHaveBeenCalled()
     expect(mockQueueTabStartupCommand).not.toHaveBeenCalled()
     expect(mockClearSleepingAgentSession).not.toHaveBeenCalled()
+  })
+
+  it('refuses a record the host withheld even though the record carries no lane field', async () => {
+    // Why: `lanePrincipalId` is written only by hydration, so a record captured live in this same
+    // renderer run has none — the host's partition is the authority the wake must obey (§2a).
+    expect(await launch(record, new Set([PANE_KEY]))).toBe(false)
+
+    expect(mockCreateTab).not.toHaveBeenCalled()
+    expect(mockClearSleepingAgentSession).not.toHaveBeenCalled()
+  })
+
+  it('wakes a record the host did not withhold', async () => {
+    expect(await launch(record, new Set(['other-tab:other-leaf']))).toBe(true)
+
+    expect(mockCreateTab).toHaveBeenCalledTimes(1)
   })
 
   it('wakes a record with no lane exactly as before', async () => {

@@ -494,7 +494,11 @@ function registerRuntimeWindowLifecycle(
     closeTerminal: (tabId, paneRuntimeId) => send('ui:closeTerminal', { tabId, paneRuntimeId }),
     closeTerminalTab: (tabId) => requestTerminalTabCloseFromRenderer(mainWindow, tabId),
     sleepWorktree: (worktreeId) => send('ui:sleepWorktree', { worktreeId }),
-    resumeSleepingAgents: (worktreeId) => send('ui:resumeSleepingAgents', { worktreeId }),
+    resumeSleepingAgents: (worktreeId, withheldPaneKeys) =>
+      send('ui:resumeSleepingAgents', {
+        worktreeId,
+        ...(withheldPaneKeys ? { withheldPaneKeys: [...withheldPaneKeys] } : {})
+      }),
     terminalFitOverrideChanged: (ptyId, mode, cols, rows) =>
       send('runtime:terminalFitOverrideChanged', { ptyId, mode, cols, rows }),
     terminalDriverChanged: (ptyId, driver) =>

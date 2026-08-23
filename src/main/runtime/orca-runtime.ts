@@ -2066,7 +2066,10 @@ type RuntimeNotifier = {
   // renderer to run its own navigation-free wake (experimental agent sleep);
   // the runtime has no in-memory sleeping records or wake authority. Optional to
   // match the many renderer-backed notifier methods only the real bridge wires.
-  resumeSleepingAgents?(worktreeId: string): void
+  // Why (S9 §2a): the wake is partitioned host-side, so the withheld paneKeys travel with it —
+  // the renderer's own record field is written only at hydration and is absent on a record
+  // captured live, which would let a lane pane wake onto the shared credential.
+  resumeSleepingAgents?(worktreeId: string, withheldPaneKeys?: readonly string[]): void
   terminalFitOverrideChanged(
     ptyId: string,
     mode: 'mobile-fit' | 'remote-desktop-fit' | 'desktop-fit',
@@ -22152,9 +22155,10 @@ export class OrcaRuntimeService {
         // which under §2a resolves to the shared `~/.claude`. A lane record is therefore withheld
         // from it and resumes only through the host create path, for its owner — but *only* the
         // lane records are: the shared-lane records beside them wake as they always did (§3).
-        const withheldLaneRecords = this.laneBoundSleepingPaneKeys(repo, worktree.id).length > 0
+        const withheldPaneKeys = this.laneBoundSleepingPaneKeys(repo, worktree.id)
+        const withheldLaneRecords = withheldPaneKeys.length > 0
         if (this.getAvailableAuthoritativeWindow()) {
-          this.notifier?.resumeSleepingAgents?.(worktree.id)
+          this.notifier?.resumeSleepingAgents?.(worktree.id, withheldPaneKeys)
           sleepingAgentWake = withheldLaneRecords ? 'wake_refused_not_owned' : 'requested'
         } else if (withheldLaneRecords) {
           sleepingAgentWake = 'wake_refused_not_owned'

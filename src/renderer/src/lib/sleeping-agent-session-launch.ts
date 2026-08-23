@@ -24,6 +24,8 @@ export type ResumeSleepingAgentSessionsOptions = {
    *  cleared only after the in-place spawn succeeds, so the generic resume
    *  must neither launch nor clear them here. */
   skipClaimKeys?: ReadonlySet<string>
+  /** paneKeys the host withheld from this wake: lane-bound slept panes (S9 §2a). */
+  withheldPaneKeys?: ReadonlySet<string>
   /** Called with the tab id of each freshly launched resume tab, so
    *  navigation-suppressed callers can background-mount exactly those tabs. */
   onSessionLaunched?: (tabId: string) => void
@@ -67,9 +69,11 @@ export function launchSleepingAgentSession(
   record: SleepingAgentSessionRecord,
   options?: ResumeSleepingAgentSessionsOptions
 ): boolean {
-  if (isLaneBoundSleepingRecord(record)) {
+  if (options?.withheldPaneKeys?.has(record.paneKey) || isLaneBoundSleepingRecord(record)) {
     // Why: this builder mints a fresh, unbound tab, which resolves to the shared `~/.claude` — the
     // other person's credential. The record stays asleep and uncleared for the host create path.
+    // The host's withheld set is the authority: `lanePrincipalId` is written only at hydration, so
+    // a record captured live in this same renderer run carries none.
     return false
   }
   const state = useAppStore.getState()

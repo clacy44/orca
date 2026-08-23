@@ -91,10 +91,10 @@ describe('worktree.activate — the sleeping-agent wake', () => {
       pairedDeviceId: 'device-b'
     })
 
-    // The lane record is withheld by the renderer builder itself; the refusal names that, and the
-    // shared-lane record in the same worktree still wakes.
+    // The host names the withheld panes on the wake itself; the shared-lane record beside them
+    // still wakes, and the refusal reports the partition that actually happened.
     expect(result.sleepingAgentWake).toBe('wake_refused_not_owned')
-    expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE)
+    expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE, [PANE_KEY])
   })
 
   it('still wakes a record whose pane is on the shared lane', async () => {
@@ -106,6 +106,6 @@ describe('worktree.activate — the sleeping-agent wake', () => {
     })
 
     expect(result.sleepingAgentWake).toBe('requested')
-    expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE)
+    expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE, [])
   })
 })

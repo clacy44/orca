@@ -4126,9 +4126,13 @@ const api = {
       ipcRenderer.on('ui:sleepWorktree', listener)
       return () => ipcRenderer.removeListener('ui:sleepWorktree', listener)
     },
-    onResumeSleepingAgents: (callback: (data: { worktreeId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, data: { worktreeId: string }) =>
-        callback(data)
+    onResumeSleepingAgents: (
+      callback: (data: { worktreeId: string; withheldPaneKeys?: string[] }) => void
+    ): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        data: { worktreeId: string; withheldPaneKeys?: string[] }
+      ) => callback(data)
       ipcRenderer.on('ui:resumeSleepingAgents', listener)
       return () => ipcRenderer.removeListener('ui:resumeSleepingAgents', listener)
     },

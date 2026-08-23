@@ -16,7 +16,7 @@ import {
 type BackgroundSleepingAgentWakeDispatcherOptions = {
   isWorkspaceSessionReady?: () => boolean
   subscribeToStore?: (listener: () => void) => () => void
-  wake?: (worktreeId: string) => void
+  wake?: (worktreeId: string, withheldPaneKeys?: readonly string[]) => void
 }
 
 /**
@@ -26,8 +26,13 @@ type BackgroundSleepingAgentWakeDispatcherOptions = {
  */
 export function createBackgroundSleepingAgentWakeDispatcher(
   options: BackgroundSleepingAgentWakeDispatcherOptions = {}
-): { request: (worktreeId: string) => void; dispose: () => void } {
-  const pendingWorktreeIds = new Set<string>()
+): {
+  request: (worktreeId: string, withheldPaneKeys?: readonly string[]) => void
+  dispose: () => void
+} {
+  // Why: the host's withheld set must survive the buffering — a wake that arrives before workspace
+  // hydration and is flushed without it would mint fresh panes for lane-bound records (§2a).
+  const pendingWorktreeIds = new Map<string, readonly string[]>()
   const isWorkspaceSessionReady =
     options.isWorkspaceSessionReady ?? (() => useAppStore.getState().workspaceSessionReady)
   const subscribeToStore =
@@ -40,25 +45,28 @@ export function createBackgroundSleepingAgentWakeDispatcher(
     if (disposed || !isWorkspaceSessionReady()) {
       return
     }
-    const worktreeIds = [...pendingWorktreeIds]
+    const pending = [...pendingWorktreeIds]
     pendingWorktreeIds.clear()
     unsubscribeReadiness?.()
     unsubscribeReadiness = null
-    for (const worktreeId of worktreeIds) {
-      wake(worktreeId)
+    for (const [worktreeId, withheldPaneKeys] of pending) {
+      wake(worktreeId, withheldPaneKeys)
     }
   }
 
   return {
-    request(worktreeId) {
+    request(worktreeId, withheldPaneKeys) {
       if (disposed || !worktreeId) {
         return
       }
       if (isWorkspaceSessionReady()) {
-        wake(worktreeId)
+        wake(worktreeId, withheldPaneKeys)
         return
       }
-      pendingWorktreeIds.add(worktreeId)
+      pendingWorktreeIds.set(worktreeId, [
+        ...(pendingWorktreeIds.get(worktreeId) ?? []),
+        ...(withheldPaneKeys ?? [])
+      ])
       unsubscribeReadiness ??= subscribeToStore(flushWhenReady)
     },
     dispose() {
@@ -164,7 +172,12 @@ function getCanonicalPassiveWakeRecords(
  * Woken PTYs auto-publish to mobile via the renderer graph republish, so no
  * spawn is awaited.
  */
-export function wakeSleepingAgentsForWorktreeInBackground(worktreeId: string): void {
+export function wakeSleepingAgentsForWorktreeInBackground(
+  worktreeId: string,
+  /** The host's own partition: slept panes bound to a person's lane (S9 §2a). */
+  withheldPaneKeys?: readonly string[]
+): void {
+  const withheld = new Set(withheldPaneKeys ?? [])
   const worktreeRecords = Object.values(
     useAppStore.getState().sleepingAgentSessionsByPaneKey
   ).filter((record) => record.worktreeId === worktreeId)
@@ -213,6 +226,9 @@ export function wakeSleepingAgentsForWorktreeInBackground(worktreeId: string): v
   resumeSleepingAgentSessionsForWorktree(worktreeId, {
     suppressNavigation: true,
     skipClaimKeys: wokenClaimKeys,
+    // Why: steps (a) and (b) respawn the *same* pane, so its persisted lane resolves at
+    // `pty:spawn`; only this step mints a fresh, unbound pane, so only it is partitioned.
+    withheldPaneKeys: withheld,
     onSessionLaunched: (tabId) => launchedTabIds.push(tabId)
   })
   if (launchedTabIds.length > 0) {

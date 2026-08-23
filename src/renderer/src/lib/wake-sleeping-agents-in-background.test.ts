@@ -126,10 +126,33 @@ describe('createBackgroundSleepingAgentWakeDispatcher', () => {
 
     expect(unsubscribe).toHaveBeenCalledOnce()
     expect(wake).toHaveBeenCalledOnce()
-    expect(wake).toHaveBeenCalledWith('wt-cold')
+    expect(wake).toHaveBeenCalledWith('wt-cold', [])
 
     dispatcher.request('wt-ready')
-    expect(wake).toHaveBeenLastCalledWith('wt-ready')
+    expect(wake).toHaveBeenLastCalledWith('wt-ready', undefined)
+    dispatcher.dispose()
+  })
+
+  it('carries the host’s withheld paneKeys through the buffer', () => {
+    let workspaceSessionReady = false
+    let readinessListener: (() => void) | null = null
+    const wake = vi.fn()
+    const dispatcher = createBackgroundSleepingAgentWakeDispatcher({
+      isWorkspaceSessionReady: () => workspaceSessionReady,
+      subscribeToStore: (listener) => {
+        readinessListener = listener
+        return vi.fn()
+      },
+      wake
+    })
+
+    // Why: a wake buffered before hydration and flushed without its partition would mint fresh,
+    // unbound panes for exactly the lane-bound records the host withheld (§2a).
+    dispatcher.request('wt-cold', ['tab-a:leaf-1'])
+    workspaceSessionReady = true
+    ;(readinessListener as unknown as () => void)()
+
+    expect(wake).toHaveBeenCalledWith('wt-cold', ['tab-a:leaf-1'])
     dispatcher.dispose()
   })
 })
@@ -153,6 +176,18 @@ describe('wakeSleepingAgentsForWorktreeInBackground', () => {
     expect(resumeSpy).toHaveBeenCalledWith(
       'wt-1',
       expect.objectContaining({ suppressNavigation: true })
+    )
+  })
+
+  it('hands the host’s withheld paneKeys to the step that mints fresh panes', () => {
+    sleepingRecords = { k1: { worktreeId: 'wt-1', paneKey: 'tab-a:leaf-1', tabId: 'tab-a' } }
+    isPassiveSpy.mockReturnValue(false)
+
+    wakeSleepingAgentsForWorktreeInBackground('wt-1', ['tab-a:leaf-1'])
+
+    expect(resumeSpy).toHaveBeenCalledWith(
+      'wt-1',
+      expect.objectContaining({ withheldPaneKeys: new Set(['tab-a:leaf-1']) })
     )
   })
 
