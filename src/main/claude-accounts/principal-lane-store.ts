@@ -11,6 +11,7 @@ import {
   type ClaudeCredentialIdentity
 } from './claude-credential-identity'
 import { LaneCredentialWriter, readJsonObjectFile } from './lane-credential-writer'
+import { isLaneWipePending } from './lane-wipe-pending'
 import {
   resolveOwnedPrincipalLaneDir,
   type PrincipalLaneOptions
@@ -73,10 +74,14 @@ export class PrincipalLaneStore {
    * `reauth-required` is sticky until a credential lands: it is the outcome of a rotation the lane
    * could not receive, which no file-presence check can see, so it must not be recomputed away by
    * one — and it is read off the PERSISTED row, so a restart does not lift it either.
+   *
+   * A wipe-pending lane reads `absent` whatever is on disk (§2f): this is the value LAUNCHES key
+   * on, and failing them closed is the right direction while the host is trying to empty the lane.
+   * The residency claim rides the separate `laneWipePending` flag, which is why the two exist.
    */
   getLaneState(laneId: string): RuntimeTerminalLaneState {
     const laneDir = this.resolveLaneDir(laneId)
-    if (!laneDir || !isLaneLoaded(laneDir)) {
+    if (!laneDir || isLaneWipePending(laneId) || !isLaneLoaded(laneDir)) {
       return 'absent'
     }
     return this.isHeldForReauth(laneId) ? 'reauth-required' : 'loaded'

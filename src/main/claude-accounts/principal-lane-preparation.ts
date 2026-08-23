@@ -1,5 +1,6 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { hasLiveClaudePtys } from './live-pty-gate'
+import { isLaneWipePending } from './lane-wipe-pending'
 import type { NormalizedClaudeAccountSelectionTarget } from './runtime-selection'
 import { openPrincipalLane, type PrincipalLaneOptions } from './principal-credential-lane'
 import { isLaneLoaded } from './principal-lane-credential-sweep'
@@ -30,6 +31,14 @@ export function prepareLaneLaunch(input: LanePreparationInput): ClaudeRuntimeAut
     throw new ClaudeLaneRefusal(
       'terminal.lane_not_loaded',
       'This terminal runs in a personal Claude credential lane, and that lane is not set up on this host. Provision it from Orca on the host machine, then open the terminal again.'
+    )
+  }
+  // §2f: a wipe that has not confirmed the lane empty still leaves the credential on disk, so a
+  // file-presence check would hand this pane the very blob the host has declared wipe-pending.
+  if (isLaneWipePending(input.principalId)) {
+    throw new ClaudeLaneRefusal(
+      'terminal.lane_not_loaded',
+      'Orca is clearing your Claude account out of its credential lane on this host, so this terminal was not started in it. Wait for that to finish, reconnect the device that pushes your account, then try again.'
     )
   }
   // Why fail closed: falling back to the shared config dir would silently run this pane on the
