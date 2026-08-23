@@ -70,7 +70,6 @@ export type PrincipalLaneLifecycleDeps = {
   probeDeathTimeoutMs?: number
   /** Injected so the retry arm is assertable without real timers. */
   wait?(ms: number): Promise<void>
-  now?(): number
 }
 
 /** A wipe that cannot confirm the fence is retried, never reported done (§2f). */
@@ -104,11 +103,10 @@ export class PrincipalLaneLifecycle {
     laneIds: readonly string[],
     options: StartupLaneWipeOptions
   ): Promise<LaneWipeOutcome[]> {
-    const now = this.deps.now ?? Date.now
-    const deadlineAt = now() + (options.budgetMs ?? STARTUP_WIPE_BUDGET_MS)
+    const deadlineAt = Date.now() + (options.budgetMs ?? STARTUP_WIPE_BUDGET_MS)
     const outcomes: LaneWipeOutcome[] = []
     for (const laneId of laneIds) {
-      if (now() >= deadlineAt) {
+      if (Date.now() >= deadlineAt) {
         outcomes.push(
           this.refuseWipe(laneId, 'startup', 'the startup wipe ran out of its total budget')
         )
@@ -200,7 +198,7 @@ export class PrincipalLaneLifecycle {
   }
 
   private pastDeadline(deadlineAt: number | undefined): boolean {
-    return deadlineAt !== undefined && (this.deps.now ?? Date.now)() >= deadlineAt
+    return deadlineAt !== undefined && Date.now() >= deadlineAt
   }
 
   /** One pass of the fence. `null` = the wipe is not confirmed; the mark must stay set. */
