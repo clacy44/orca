@@ -357,19 +357,6 @@ export class PaneLaneAuthority {
   }
 
   /**
-   * The slept panes in this worktree that are bound to a principal's lane.
-   *
-   * The record's lane is the *pane's* row, read by the same paneKey the record carries — one
-   * authority, and it survives a restart with the binding row (§2a, §2h).
-   */
-  laneBoundSleepingPaneKeys(
-    records: Readonly<Record<string, SleepingAgentSessionRecord>>,
-    worktreeId: string
-  ): string[] {
-    return this.partitionSleepingWake(records, worktreeId, null).withheldPaneKeys
-  }
-
-  /**
    * The same partition, split by whether the CALLER's principal owns each record (§2a).
    *
    * The record's lane is the *pane's* row, read by the same paneKey the record carries — one
