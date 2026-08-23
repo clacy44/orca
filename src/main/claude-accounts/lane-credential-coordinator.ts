@@ -4,6 +4,7 @@ import { LaneUsagePull, type LaneUsagePullOutcome } from '../rate-limits/lane-us
 import { isLaneWipePending } from './lane-wipe-pending'
 import {
   isClaudeAuthSwitchInProgress,
+  listLanesWithLiveClaudePtys,
   markEphemeralClaudePtyExited,
   markEphemeralClaudePtySpawned
 } from './live-pty-gate'
@@ -11,7 +12,6 @@ import { AccountResidencyIndex, type SharedLaneCredentialReader } from './accoun
 import { readIdentityFromOauthAccount } from './claude-credential-identity'
 import { ensureLaneProvenanceLabel, formatLaneProvenance } from './principal-lane-provenance'
 import { LaneAuthState } from './lane-auth-state'
-import { listLanesWithLiveClaudePtys } from './live-pty-gate'
 import { LaneSyncDriver, type LaneSyncOutcome, type LaneSyncTrigger } from './lane-sync-driver'
 import { PrincipalLaneStore, type LaneWatermarkPersistence } from './principal-lane-store'
 import type { PrincipalLaneOptions } from './principal-credential-lane'
