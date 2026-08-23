@@ -119,7 +119,12 @@ describe('agent session RPC methods', () => {
       expect(replies[0]).toMatchObject({ ok: true })
       expect(runtime[testCase.runtimeMethod]).toHaveBeenCalledWith(
         { ...testCase.params, presentation: 'background' },
-        { clientId: `paired-${clientKind}`, clientKind }
+        // Why: the collapsed `clientId` cannot key a lane, so the grant travels beside it (§2a).
+        {
+          pairedDeviceId: `paired-${clientKind}`,
+          clientId: `paired-${clientKind}`,
+          clientKind
+        }
       )
     }
   })
