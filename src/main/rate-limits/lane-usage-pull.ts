@@ -25,6 +25,8 @@ export type LaneUsagePullOutcome = {
   /** Lanes whose probe ran to a result that was attributed. */
   probed: string[]
   skipped: { laneId: string; reason: LaneUsageSkipReason }[]
+  /** Lanes whose probe threw. Isolated: the tick goes on, and the lane is still synced. */
+  failed: string[]
   /** True on `win32`, where the pull is off and the statusline path feeds the bars alone. */
   disabled: boolean
 }
@@ -119,7 +121,12 @@ export class LaneUsagePull {
   }
 
   async run(): Promise<LaneUsagePullOutcome> {
-    const outcome: LaneUsagePullOutcome = { probed: [], skipped: [], disabled: this.isDisabled() }
+    const outcome: LaneUsagePullOutcome = {
+      probed: [],
+      skipped: [],
+      failed: [],
+      disabled: this.isDisabled()
+    }
     if (outcome.disabled) {
       return outcome
     }
@@ -129,9 +136,13 @@ export class LaneUsagePull {
         outcome.skipped.push({ laneId: lane.laneId, reason: skip })
         continue
       }
-      const stale = await this.probeLane(lane)
-      if (stale) {
+      // `probeLane` is total by construction — see its own guards. A rejection here would skip
+      // every LATER lane and reject the caller, which is the rate-limit cycle's first await.
+      const result = await this.probeLane(lane)
+      if (result === 'stale') {
         outcome.skipped.push({ laneId: lane.laneId, reason: 'stale-probe' })
+      } else if (result === 'failed') {
+        outcome.failed.push(lane.laneId)
       } else {
         outcome.probed.push(lane.laneId)
       }
@@ -156,7 +167,10 @@ export class LaneUsagePull {
     return this.deps.isSwitchInProgress(laneId) ? 'switch-in-progress' : null
   }
 
-  private async probeLane(lane: ClaudeLaneUsageAttribution): Promise<boolean> {
+  /** Total: every await inside is guarded, so one lane's failure cannot end the tick. */
+  private async probeLane(
+    lane: ClaudeLaneUsageAttribution
+  ): Promise<'probed' | 'stale' | 'failed'> {
     const controller = new AbortController()
     const gateId = `lane-usage-probe:${lane.laneId}:${(this.deps.newGateId ?? randomUUID)()}`
     let markSettled = (): void => {}
@@ -171,11 +185,19 @@ export class LaneUsagePull {
     this.inFlight.set(lane.laneId, probes)
     this.deps.markProbeSpawned(gateId, lane.laneId)
     let usage: ProviderRateLimits | null = null
+    let failed = false
     try {
       usage = await this.deps.fetchUsage({
         authPreparation: buildLaneUsageAuthPreparation(lane),
         signal: controller.signal
       })
+    } catch (error) {
+      // Why caught rather than propagated: `pty.spawn` is unguarded inside the fetch's executor,
+      // so a missing `claude`, a bad cwd or a node-pty failure rejects here. Unhandled, that
+      // would skip the post-probe sync — the very watermark move §2c trigger 2's second arm
+      // exists for — and reject the whole rate-limit cycle in front of every other provider.
+      failed = true
+      console.warn('[lane-usage-pull] lane usage probe failed:', error)
     } finally {
       // Release before the sync: the sync's own trigger reads the live-PTY set, and the probe
       // must not still be counted as the lane's live claude while it runs.
@@ -187,12 +209,20 @@ export class LaneUsagePull {
       markSettled()
     }
     // A stale probe posts no usage row, emits no receipt and moves no watermark; the sync still
-    // runs, because its own CLI may have rotated before the kill landed.
+    // runs, because its own CLI may have rotated before the kill landed — and so does a FAILED
+    // one, which may have rotated before it threw.
     const stale = controller.signal.aborted
-    if (!stale && usage) {
+    if (!stale && !failed && usage) {
       this.usageByLane.set(lane.laneId, usage)
     }
-    await this.deps.syncProbedLane(lane.laneId)
-    return stale
+    try {
+      await this.deps.syncProbedLane(lane.laneId)
+    } catch (error) {
+      console.warn('[lane-usage-pull] post-probe lane sync failed:', error)
+    }
+    if (failed) {
+      return 'failed'
+    }
+    return stale ? 'stale' : 'probed'
   }
 }
