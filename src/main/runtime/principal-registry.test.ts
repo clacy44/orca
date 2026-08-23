@@ -38,7 +38,9 @@ class FakeGrants {
       token: `token-${row.deviceId}`,
       pairedAt: 1_000,
       lastSeenAt: 0,
-      pendingExpiresAt: 2_000,
+      // Why a live deadline: binding is offered only inside the named invite's own window (§2a
+      // rule (i)), so a fixture with an expired one would be testing the refusal, not the bind.
+      pendingExpiresAt: Date.now() + 60_000,
       ...row
     }
     this.rows = [...this.rows.filter((entry) => entry.deviceId !== full.deviceId), full]
@@ -112,6 +114,17 @@ describe('PrincipalRegistry', () => {
         /shared invite link/
       )
       expect(store.principalOf('coalesced')).toBeNull()
+    })
+
+    it('refuses a bind once the named invite that produced the row has expired', () => {
+      const store = registry()
+      const person = store.createPrincipal(consent, 'Ana')
+      grants.add({ deviceId: 'stale', pendingExpiresAt: Date.now() - 1 })
+
+      expect(() => store.bindGrant(consent, 'stale', person.principalId)).toThrow(
+        /pairing invite has expired/
+      )
+      expect(store.principalOf('stale')).toBeNull()
     })
 
     it('refuses binding onto an already-bound row and re-binds as unbind-then-bind', () => {

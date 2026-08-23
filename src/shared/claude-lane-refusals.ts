@@ -9,6 +9,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.grant_unknown',
   'accounts.lane.grant_not_bound',
   'accounts.lane.grant_not_per_person',
+  'accounts.lane.grant_binding_window_closed',
   'accounts.lane.grant_already_bound',
   'accounts.lane.principal_unknown',
   'accounts.lane.principal_id_invalid',

@@ -28,7 +28,8 @@ class FakeGrants {
         token: `token-${deviceId}`,
         pairedAt: 1,
         lastSeenAt: 0,
-        pendingExpiresAt: 2
+        // A live invite window: binding is confined to it (§2a rule (i)).
+        pendingExpiresAt: Date.now() + 60_000
       }
     ]
   }
