@@ -14,6 +14,8 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.principal_id_invalid',
   'accounts.lane.display_name_invalid',
   'accounts.lane.push_stale',
+  'accounts.lane.push_write_failed',
+  'accounts.lane.push_write_locked',
   'accounts.lane.account_resident_elsewhere',
   'accounts.lane.link_fingerprint_unbindable',
   'accounts.lane.provision_dacl_unverified',

@@ -1,6 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { writeFileAtomically } from '../codex-accounts/fs-utils'
+import { ClaudeLaneRefusal, isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import { restrictWindowsPathSync } from '../../shared/secure-path-windows-acl'
+import { renameFileWithWindowsRetry, writeFileAtomically } from '../codex-accounts/fs-utils'
 import { writeActiveClaudeKeychainCredentials } from './keychain'
 import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './principal-lane-credential-sweep'
 
@@ -86,6 +89,18 @@ export function writeOauthAccountIntoConfigFile(
 /** Injected so the darwin arm is observable on every platform, and faked in tests. */
 export type LaneKeychainWriter = (contents: string, configDir: string) => Promise<void>
 
+/** The two `win32` primitives §2m(2) combines; injected so the sequence is testable anywhere. */
+export type WindowsLanePublishOps = {
+  restrictPath: (targetPath: string, isDirectory: boolean) => boolean
+  publish: (source: string, target: string) => void
+}
+
+export type LaneCredentialWriterOptions = {
+  writeKeychain?: LaneKeychainWriter
+  platform?: NodeJS.Platform
+  windows?: WindowsLanePublishOps
+}
+
 /**
  * The lane-scoped writer: it takes the lane directory and remembers nothing.
  *
@@ -95,9 +110,7 @@ export type LaneKeychainWriter = (contents: string, configDir: string) => Promis
  * reads it.
  */
 export class LaneCredentialWriter {
-  constructor(
-    private readonly writeKeychain: LaneKeychainWriter = writeActiveClaudeKeychainCredentials
-  ) {}
+  constructor(private readonly options: LaneCredentialWriterOptions = {}) {}
 
   /**
    * File plus, on darwin, the lane's CONFIG-DIR-SCOPED Keychain item — the pair every host
@@ -108,15 +121,80 @@ export class LaneCredentialWriter {
    * A failed Keychain write throws rather than leaving the item on the revoked token (§2i).
    */
   async writeCredentials(laneDir: string, credentialsJson: string): Promise<void> {
-    writeCredentialsFileAtomically(join(laneDir, LANE_CREDENTIALS_FILENAME), credentialsJson)
-    if (process.platform === 'darwin') {
-      await this.writeKeychain(credentialsJson, laneDir)
+    const platform = this.options.platform ?? process.platform
+    const targetPath = join(laneDir, LANE_CREDENTIALS_FILENAME)
+    if (platform === 'win32') {
+      publishLaneCredentialsOnWindows(targetPath, credentialsJson, this.options.windows)
+    } else {
+      writeCredentialsFileAtomically(targetPath, credentialsJson)
+    }
+    if (platform === 'darwin') {
+      const writeKeychain = this.options.writeKeychain ?? writeActiveClaudeKeychainCredentials
+      await writeKeychain(credentialsJson, laneDir)
     }
   }
 
   writeOauthAccount(laneDir: string, oauthAccount: unknown): boolean {
     return writeOauthAccountIntoConfigFile(join(laneDir, LANE_CONFIG_FILENAME), oauthAccount)
   }
+}
+
+/**
+ * The `win32` lane publish of §2m(2): neither existing primitive is sufficient alone.
+ *
+ * `writeFileAtomically` has the rename retry and no ACL work; `writeSecureFile` has the ACL work
+ * and a bare `renameSync`. A lane needs both — a mode bit is inert on Windows, and a live `claude`
+ * holding the target open makes a bare rename throw where the retry would have won.
+ */
+function publishLaneCredentialsOnWindows(
+  targetPath: string,
+  contents: string,
+  ops: WindowsLanePublishOps = {
+    restrictPath: restrictWindowsPathSync,
+    publish: renameFileWithWindowsRetry
+  }
+): void {
+  mkdirSync(dirname(targetPath), { recursive: true })
+  if (!fileContentsEqual(targetPath, contents)) {
+    const tmpPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(tmpPath, contents, { encoding: 'utf-8', mode: 0o600 })
+      // Before the rename: a credential must never be briefly published under inherited ACEs.
+      assertLaneDaclVerified(ops.restrictPath(tmpPath, false))
+      ops.publish(tmpPath, targetPath)
+    } catch (error) {
+      rmSync(tmpPath, { force: true })
+      throw asLaneWriteRefusal(error)
+    }
+  }
+  // Re-asserted and VERIFIED on the published path. A failed verification fails the push: the
+  // bytes have landed, so the caller must treat the lane as unpublished and retry.
+  assertLaneDaclVerified(ops.restrictPath(targetPath, false))
+}
+
+function assertLaneDaclVerified(verified: boolean): void {
+  if (verified) {
+    return
+  }
+  throw new ClaudeLaneRefusal(
+    'accounts.lane.push_write_failed',
+    "Orca could not confirm that this lane's credential file is restricted to your Windows account, so it refused the push rather than leave a Claude credential readable by others on this machine. Check that the lane folder is on a local drive and push again."
+  )
+}
+
+/** The exhausted retry rethrows a raw `EBUSY`, which no client has any string for (§3 Rule 3). */
+function asLaneWriteRefusal(error: unknown): unknown {
+  if (isClaudeLaneRefusal(error)) {
+    return error
+  }
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') {
+    return error
+  }
+  return new ClaudeLaneRefusal(
+    'accounts.lane.push_write_locked',
+    "A Claude session on the host is holding this lane's credential file open, so Orca could not replace it. Nothing was changed — close that session or retry in a moment."
+  )
 }
 
 function fileContentsEqual(targetPath: string, contents: string): boolean {
