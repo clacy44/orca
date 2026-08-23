@@ -3,6 +3,7 @@ import {
   AGENT_IDENTITY_LANES_CAPABILITY,
   IDLE_SWITCH_STATE,
   NO_LANE,
+  isLaneAccountLoaded,
   readLaneProjection,
   reduceSwitchRequest,
   resolveClaudeSwitchCall,
@@ -39,6 +40,7 @@ describe('reading the lane projection', () => {
       holdsLane: true,
       laneState: 'absent',
       heldDisplayName: 'Work',
+      heldDelegatedAccountId: null,
       delegable: [
         { delegatedAccountId: 'token-1', displayName: 'Work', email: null },
         { delegatedAccountId: 'token-2', displayName: null, email: null }
@@ -51,6 +53,44 @@ describe('reading the lane projection', () => {
       claudeLanes: [{ ...SELF_ROW, delegable: [{ displayName: 'Work' }, SELF_ROW.delegable[0]] }]
     })
     expect(projection.delegable).toHaveLength(1)
+  })
+})
+
+describe('marking the loaded account', () => {
+  const loaded = readLaneProjection({
+    claudeLanes: [{ ...SELF_ROW, laneState: 'loaded', heldDelegatedAccountId: 'token-2' }]
+  })
+
+  it('marks exactly the token the host says the lane holds', () => {
+    expect(isLaneAccountLoaded(loaded, 'token-2')).toBe(true)
+    expect(isLaneAccountLoaded(loaded, 'token-1')).toBe(false)
+  })
+
+  // The bug this replaces: with no display name anywhere, `null === null` marked EVERY row.
+  it('marks nothing when the host names no held token, however null the names are', () => {
+    const nameless = readLaneProjection({
+      claudeLanes: [
+        {
+          ...SELF_ROW,
+          laneState: 'loaded',
+          displayName: null,
+          delegable: [
+            { delegatedAccountId: 'token-1', displayName: null, email: null },
+            { delegatedAccountId: 'token-2', displayName: null, email: null }
+          ]
+        }
+      ]
+    })
+    expect(
+      nameless.delegable.map((entry) => isLaneAccountLoaded(nameless, entry.delegatedAccountId))
+    ).toEqual([false, false])
+  })
+
+  it('marks nothing while the lane is absent, even if a token is still named', () => {
+    const absent = readLaneProjection({
+      claudeLanes: [{ ...SELF_ROW, heldDelegatedAccountId: 'token-2' }]
+    })
+    expect(isLaneAccountLoaded(absent, 'token-2')).toBe(false)
   })
 })
 

@@ -27,6 +27,7 @@ import { useHostStatusGates } from '../../../src/transport/host-status-gates'
 import {
   IDLE_SWITCH_STATE,
   NO_LANE,
+  isLaneAccountLoaded,
   readLaneProjection,
   reduceSwitchRequest,
   resolveClaudeSwitchCall,
@@ -334,7 +335,7 @@ export default function AccountsScreen() {
                             {entry.displayName ?? entry.email ?? 'Claude account'}
                           </Text>
                           <Text style={styles.rowSubtitle}>
-                            {lane.heldDisplayName === entry.displayName
+                            {isLaneAccountLoaded(lane, entry.delegatedAccountId)
                               ? 'Loaded on this host'
                               : 'Switch through your desktop'}
                           </Text>

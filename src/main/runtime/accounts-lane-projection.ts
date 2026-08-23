@@ -30,6 +30,8 @@ export type ClaudeLaneProjectionRow = {
   delegatedGrantId?: string | null
   callerIsDelegatedGrant?: boolean
   identity?: ClaudeCredentialIdentity | null
+  /** Self only: which delegable token the lane holds, so a client marks it by id, not by name. */
+  heldDelegatedAccountId?: string | null
   delegable?: ClaudeLaneDelegableAccount[]
 }
 
@@ -93,6 +95,7 @@ function projectLaneRows(
       delegatedGrantId: status.delegatedGrantId,
       callerIsDelegatedGrant: status.callerIsDelegatedGrant,
       identity: status.heldIdentity,
+      heldDelegatedAccountId: status.heldDelegatedAccountId ?? null,
       delegable: status.delegable
     })
   }

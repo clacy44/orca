@@ -26,6 +26,8 @@ export type MobileLaneProjection = {
   holdsLane: boolean
   laneState: 'loaded' | 'absent' | 'reauth-required' | null
   heldDisplayName: string | null
+  /** Which delegable token the lane holds. Comparing display names marked every row when null. */
+  heldDelegatedAccountId: string | null
   delegable: MobileDelegableAccount[]
 }
 
@@ -33,6 +35,7 @@ export const NO_LANE: MobileLaneProjection = {
   holdsLane: false,
   laneState: null,
   heldDisplayName: null,
+  heldDelegatedAccountId: null,
   delegable: []
 }
 
@@ -56,6 +59,7 @@ export function readLaneProjection(snapshot: unknown): MobileLaneProjection {
     holdsLane: true,
     laneState: readLaneState(self.laneState),
     heldDisplayName: readString(self.displayName),
+    heldDelegatedAccountId: readString(self.heldDelegatedAccountId),
     delegable: readDelegable(self.delegable)
   }
 }
@@ -172,4 +176,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return null
   }
   return value as Record<string, unknown>
+}
+
+/**
+ * Whether THIS delegable row is the one the lane holds.
+ *
+ * Keyed on the stable token the host publishes, never on the two nullable owner-authored names:
+ * with no display names set, `null === null` marked the whole list "Loaded on this host".
+ */
+export function isLaneAccountLoaded(
+  lane: MobileLaneProjection,
+  delegatedAccountId: string
+): boolean {
+  return lane.laneState === 'loaded' && lane.heldDelegatedAccountId === delegatedAccountId
 }

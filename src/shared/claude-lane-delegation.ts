@@ -36,6 +36,8 @@ export type ClaudeLaneDelegationRow = {
   heldDisplayName: string | null
   /** §2e: an explicit `accounts.lane.clear` happened and no push has landed since. */
   delegationCleared?: boolean
+  /** Which delegable token the lane actually holds — a stable id, never a comparable name. */
+  heldDelegatedAccountId?: string | null
   delegable: ClaudeLaneDelegableAccount[]
 }
 
@@ -56,6 +58,11 @@ export type ClaudeLaneStatus = {
   /** Whether the caller's own grant is the designated pusher. */
   callerIsDelegatedGrant: boolean
   heldDisplayName: string | null
+  /**
+   * Additive (Rule 1): the delegable token the lane holds, so a client can mark the loaded row
+   * without comparing two nullable owner-authored names — `null === null` marked every row.
+   */
+  heldDelegatedAccountId?: string | null
   heldIdentity: ClaudeCredentialIdentity | null
   refreshTokenSha256: string | null
   expiresAt: number | null
@@ -103,10 +110,16 @@ export function normalizeClaudeLaneDelegationRow(value: unknown): ClaudeLaneDele
   if (typeof laneId !== 'string' || laneId.length === 0 || laneId.length > 128) {
     return null
   }
+  const heldDelegatedAccountId = record?.heldDelegatedAccountId
   return {
     laneId,
     heldDisplayName: normalizeLaneDisplayName(record?.heldDisplayName),
     ...(record?.delegationCleared === true ? { delegationCleared: true } : {}),
+    ...(typeof heldDelegatedAccountId === 'string' &&
+    heldDelegatedAccountId.length > 0 &&
+    heldDelegatedAccountId.length <= 128
+      ? { heldDelegatedAccountId }
+      : {}),
     delegable: normalizeDelegableAccounts(record?.delegable)
   }
 }

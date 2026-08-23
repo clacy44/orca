@@ -179,6 +179,7 @@ export class LaneWireAuthority {
       callerIsDelegatedGrant: delegatedGrantId === caller.deviceId,
       delegationCleared: row.delegationCleared === true,
       heldDisplayName: row.heldDisplayName,
+      heldDelegatedAccountId: row.heldDelegatedAccountId ?? null,
       heldIdentity: watermark?.identity ?? null,
       refreshTokenSha256: watermark?.refreshTokenSha256 ?? null,
       expiresAt: watermark?.expiresAt ?? null,
@@ -267,7 +268,10 @@ export class LaneWireAuthority {
       request.oauthAccount
     )
     coordinator.residency.setLaneRow(laneId, request.envelope.credentialsJson, request.oauthAccount)
-    this.options.delegation.setHeldDisplayName(laneId, request.envelope.displayName)
+    this.options.delegation.setHeldAccount(laneId, {
+      displayName: request.envelope.displayName,
+      email: identity.email
+    })
     this.options.onLaneChanged?.(laneId)
     return {
       laneState: coordinator.store.getLaneState(laneId),

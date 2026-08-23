@@ -40,8 +40,23 @@ export type DelegableAccountInput = {
 const EMPTY_ROW = (laneId: string): ClaudeLaneDelegationRow => ({
   laneId,
   heldDisplayName: null,
+  heldDelegatedAccountId: null,
   delegable: []
 })
+
+/** Email first — it is the identity the push actually carries; the name is the owner's label. */
+function matchDelegable(
+  delegable: readonly ClaudeLaneDelegableAccount[],
+  held: { displayName: string | null; email: string | null }
+): string | null {
+  const byEmail = held.email ? delegable.find((account) => account.email === held.email) : undefined
+  if (byEmail) {
+    return byEmail.delegatedAccountId
+  }
+  const name = normalizeLaneDisplayName(held.displayName)
+  const byName = name ? delegable.find((account) => account.displayName === name) : undefined
+  return byName?.delegatedAccountId ?? null
+}
 
 export class LaneDelegationDirectory {
   constructor(private readonly persistence: LaneDelegationPersistence) {}
@@ -53,12 +68,18 @@ export class LaneDelegationDirectory {
     )
   }
 
-  /** A landed push is what un-does a clear: the lane holds a credential again. */
-  setHeldDisplayName(laneId: string, displayName: string | null): void {
+  /**
+   * A landed push is what un-does a clear: the lane holds a credential again.
+   *
+   * It also resolves WHICH delegable token the lane now holds, so a client marks the loaded row by
+   * a stable id. Matching by name alone marked every row when no account had one.
+   */
+  setHeldAccount(laneId: string, held: { displayName: string | null; email: string | null }): void {
     const row = this.getRow(laneId)
     this.putRow({
       ...row,
-      heldDisplayName: normalizeLaneDisplayName(displayName),
+      heldDisplayName: normalizeLaneDisplayName(held.displayName),
+      heldDelegatedAccountId: matchDelegable(row.delegable, held),
       delegationCleared: false
     })
   }
@@ -70,7 +91,12 @@ export class LaneDelegationDirectory {
    * clear is otherwise indistinguishable from one after §2f's close-wipe — which must not release.
    */
   markLaneCleared(laneId: string): void {
-    this.putRow({ ...this.getRow(laneId), heldDisplayName: null, delegationCleared: true })
+    this.putRow({
+      ...this.getRow(laneId),
+      heldDisplayName: null,
+      heldDelegatedAccountId: null,
+      delegationCleared: true
+    })
   }
 
   /** Mints or re-uses one opaque token per entry, in the order the desktop listed them. */
@@ -95,7 +121,14 @@ export class LaneDelegationDirectory {
         email: normalizeDelegableEmail(entry.email)
       })
     }
-    this.putRow({ ...this.getRow(laneId), delegable })
+    const row = this.getRow(laneId)
+    // A token the desktop stopped offering is spent; the held marker must not outlive it.
+    const heldDelegatedAccountId = delegable.some(
+      (account) => account.delegatedAccountId === row.heldDelegatedAccountId
+    )
+      ? row.heldDelegatedAccountId
+      : null
+    this.putRow({ ...row, delegable, heldDelegatedAccountId })
     return delegable
   }
 

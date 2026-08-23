@@ -79,7 +79,7 @@ describe('lane delegation directory', () => {
   it('keeps the held display name separate from the delegable list', () => {
     const directory = makeDirectory()
     directory.setDelegableAccounts(LANE_A, [{ clientRef: 'ref-1' }])
-    directory.setHeldDisplayName(LANE_A, 'Work')
+    directory.setHeldAccount(LANE_A, { displayName: 'Work', email: null })
     expect(directory.getRow(LANE_A).heldDisplayName).toBe('Work')
     expect(directory.getRow(LANE_A).delegable).toHaveLength(1)
     directory.markLaneCleared(LANE_A)
@@ -87,11 +87,42 @@ describe('lane delegation directory', () => {
     expect(directory.getRow(LANE_A).delegable).toHaveLength(1)
   })
 
+  it('resolves which delegable token the lane holds, by email then by name', () => {
+    const directory = makeDirectory()
+    directory.setDelegableAccounts(LANE_A, [
+      { clientRef: 'ref-1', displayName: 'Work', email: 'ana@corp.test' },
+      { clientRef: 'ref-2', displayName: 'Personal' }
+    ])
+    const [work, personal] = directory.getRow(LANE_A).delegable
+    directory.setHeldAccount(LANE_A, { displayName: 'Anything', email: 'ana@corp.test' })
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).toBe(work?.delegatedAccountId)
+    directory.setHeldAccount(LANE_A, { displayName: 'Personal', email: null })
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).toBe(personal?.delegatedAccountId)
+  })
+
+  // Negative control: with no name and no email on either side, NOTHING is marked as held —
+  // the old value compare marked every row, because `null === null`.
+  it('marks nothing held when neither side carries a name or an email', () => {
+    const directory = makeDirectory()
+    directory.setDelegableAccounts(LANE_A, [{ clientRef: 'ref-1' }, { clientRef: 'ref-2' }])
+    directory.setHeldAccount(LANE_A, { displayName: null, email: null })
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).toBeNull()
+  })
+
+  it('drops the held marker when the desktop stops offering that account', () => {
+    const directory = makeDirectory()
+    directory.setDelegableAccounts(LANE_A, [{ clientRef: 'ref-1', displayName: 'Work' }])
+    directory.setHeldAccount(LANE_A, { displayName: 'Work', email: null })
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).not.toBeNull()
+    directory.setDelegableAccounts(LANE_A, [{ clientRef: 'ref-2', displayName: 'Personal' }])
+    expect(directory.getRow(LANE_A).heldDelegatedAccountId).toBeNull()
+  })
+
   it('marks the lane cleared, and a later push un-marks it', () => {
     const directory = makeDirectory()
     directory.markLaneCleared(LANE_A)
     expect(directory.getRow(LANE_A).delegationCleared).toBe(true)
-    directory.setHeldDisplayName(LANE_A, 'Work')
+    directory.setHeldAccount(LANE_A, { displayName: 'Work', email: null })
     expect(directory.getRow(LANE_A).delegationCleared).toBe(false)
   })
 
@@ -99,6 +130,7 @@ describe('lane delegation directory', () => {
     expect(makeDirectory().getRow(LANE_A)).toEqual({
       laneId: LANE_A,
       heldDisplayName: null,
+      heldDelegatedAccountId: null,
       delegable: []
     })
   })
