@@ -24,8 +24,17 @@ export type PrincipalLaneConnectionJoin = {
   removeLane(laneId: string): Promise<LaneWipeOutcome>
 }
 
-export type LaneCloseWipeResult = 'wiped' | 'not-wiped-other-connections' | 'not-wiped-no-lane'
-export type LaneRevokeWipeResult = 'removed' | 'not-removed-grants-survive' | 'not-removed-no-lane'
+/** `…-incomplete` is the only arm that means the credential may still be at rest (§2f). */
+export type LaneCloseWipeResult =
+  | 'wiped'
+  | 'not-wiped-other-connections'
+  | 'not-wiped-no-lane'
+  | 'not-wiped-incomplete'
+export type LaneRevokeWipeResult =
+  | 'removed'
+  | 'not-removed-grants-survive'
+  | 'not-removed-no-lane'
+  | 'not-removed-incomplete'
 
 /**
  * A connection closed: wipe the lane only if it was the PRINCIPAL's last authenticated socket.
@@ -51,8 +60,10 @@ export async function wipeLaneOnConnectionClose(
   ) {
     return 'not-wiped-other-connections'
   }
-  await join.wipeLane(principalId)
-  return 'wiped'
+  const outcome = await join.wipeLane(principalId)
+  // `completed` is the only field that separates a swept lane from three failed attempts over a
+  // credential still on disk, and this enum is the only channel a caller has for the difference.
+  return outcome.completed ? 'wiped' : 'not-wiped-incomplete'
 }
 
 /**
@@ -72,8 +83,8 @@ export async function removeLaneOnGrantRevoked(
   if (join.boundDeviceIds(revokedPrincipalId).length > 0) {
     return 'not-removed-grants-survive'
   }
-  await join.removeLane(revokedPrincipalId)
-  return 'removed'
+  const outcome = await join.removeLane(revokedPrincipalId)
+  return outcome.completed && outcome.laneRemoved ? 'removed' : 'not-removed-incomplete'
 }
 
 /** The grant rows the two joins read; `PrincipalRegistry` satisfies it. */

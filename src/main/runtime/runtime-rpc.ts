@@ -692,7 +692,10 @@ export class OrcaRuntimeRpcServer {
       return
     }
     try {
-      await wipeLaneOnConnectionClose(join, deviceId)
+      const result = await wipeLaneOnConnectionClose(join, deviceId)
+      if (result === 'not-wiped-incomplete') {
+        console.warn(`[runtime] Lane wipe on last connection close did not confirm the lane empty`)
+      }
     } catch (error) {
       console.warn('[runtime] Lane wipe on last connection close failed:', error)
     }
@@ -707,7 +710,10 @@ export class OrcaRuntimeRpcServer {
       return
     }
     try {
-      await removeLaneOnGrantRevoked(join, revokedPrincipalId)
+      const result = await removeLaneOnGrantRevoked(join, revokedPrincipalId)
+      if (result === 'not-removed-incomplete') {
+        console.warn(`[runtime] Lane removal on grant revoke did not confirm the lane empty`)
+      }
     } catch (error) {
       console.warn('[runtime] Lane removal on grant revoke failed:', error)
     }
