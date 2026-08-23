@@ -10,6 +10,8 @@ import {
   PrincipalLaneLifecycle,
   principalHasRemainingConnections
 } from './principal-lane-lifecycle'
+import { prepareLaneLaunch } from './principal-lane-preparation'
+import { PrincipalLaneStore } from './principal-lane-store'
 import { wipeResidentLanesAtStartup } from './principal-lane-startup-wipe'
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
@@ -202,6 +204,95 @@ describe('the principal lane lifecycle wipe', () => {
     expect(swept).toEqual([])
     expect(existsSync(credentialsPath(LANE_A))).toBe(true)
     expect(isLaneWipePending(LANE_A)).toBe(true)
+  })
+
+  it('sweeps a lane that crashed holding only a staged .tmp credential blob', async () => {
+    // `writeFileAtomically` stages at `<target>.<pid>.<uuid>.tmp` and unlinks it only on a THROWN
+    // error, so a crash between the write and the rename leaves a full credential at 0600 under a
+    // name no `.credentials.json` predicate selects — and that lane is never swept at all.
+    rmSync(credentialsPath(LANE_A))
+    const staged = join(laneDir(LANE_A), '.credentials.json.9.abcd.tmp')
+    writeFileSync(staged, credentials('rt-staged'))
+
+    const outcomes = await runStartupPass()
+
+    expect(outcomes.map((row) => row.laneId)).toContain(LANE_A)
+    expect(outcomes.every((row) => row.completed)).toBe(true)
+    expect(existsSync(staged)).toBe(false)
+  })
+
+  it('fails a lane launch closed while the wipe is pending, credential still on disk', async () => {
+    const lifecycle = new PrincipalLaneLifecycle({
+      resolveLaneDir: (laneId) => laneDir(laneId),
+      serializeLaneWrite: (_laneId, run) => run(),
+      invalidateProbes: () => new Promise<void>(() => {}),
+      clearResidencyRow: () => {},
+      removeWatermark: () => {},
+      syncLaneObserveOnly: async () => {},
+      platform: 'linux',
+      probeDeathTimeoutMs: 5
+    })
+    const store = new PrincipalLaneStore(
+      {
+        getClaudeLaneCredentialWatermarks: () => watermarks.slice(),
+        setClaudeLaneCredentialWatermarks: (rows) => {
+          watermarks = [...rows]
+        }
+      },
+      { lanesRoot, platform: 'linux' }
+    )
+
+    const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(outcome.completed).toBe(false)
+    expect(existsSync(credentialsPath(LANE_A))).toBe(true)
+    // §2f separates the two properties: launches key on `laneState`, so it reads `absent` here…
+    expect(store.getLaneState(LANE_A)).toBe('absent')
+    // …and the launch itself must not be handed the blob the host has declared wipe-pending.
+    expect(() => prepareLaneLaunch({ principalId: LANE_A, lanesRoot, platform: 'linux' })).toThrow(
+      /clearing your Claude account/i
+    )
+  })
+
+  it.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
+    'returns empty rather than throwing when the lanes root cannot be read',
+    async () => {
+      // The startup wipe is AWAITED inside `whenReady`, whose chain has no `.catch`: an EACCES or
+      // a Windows Protected-DACL EPERM here would take the window and the RPC server with it.
+      chmodSync(lanesRoot, 0o000)
+
+      const outcomes = await runStartupPass()
+      chmodSync(lanesRoot, 0o700)
+
+      expect(outcomes).toEqual([])
+    }
+  )
+
+  it('removes the revoked lane inside the same write queue the sweep took', async () => {
+    const queue: string[] = []
+    const lifecycle = new PrincipalLaneLifecycle({
+      resolveLaneDir: (laneId) => laneDir(laneId),
+      serializeLaneWrite: async (_laneId, run) => {
+        queue.push('enter')
+        try {
+          return await run()
+        } finally {
+          queue.push(existsSync(laneDir(LANE_A)) ? 'exit:lane-present' : 'exit:lane-removed')
+        }
+      },
+      invalidateProbes: () => Promise.resolve(),
+      clearResidencyRow: () => {},
+      removeWatermark: () => queue.push('watermark-removed'),
+      syncLaneObserveOnly: async () => {},
+      platform: 'linux'
+    })
+
+    const outcome = await lifecycle.removeLaneOnLastGrantRevoked(LANE_A)
+
+    expect(outcome.laneRemoved).toBe(true)
+    // A push that entered the queue between the sweep and the removal would otherwise be told it
+    // succeeded and then have its whole lane directory taken out from under it.
+    expect(queue).toEqual(['enter', 'watermark-removed', 'exit:lane-removed'])
   })
 
   it('removes the directory and the watermark only on the last-grant revoke', async () => {

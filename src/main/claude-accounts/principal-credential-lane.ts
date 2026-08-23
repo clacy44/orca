@@ -7,6 +7,7 @@ import {
   readdirSync,
   rmSync,
   writeFileSync,
+  type Dirent,
   type Stats
 } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
@@ -20,7 +21,10 @@ import { restrictWindowsPathSync } from '../../shared/secure-path-windows-acl'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { getClaudeLanesRoot } from './claude-lanes-root'
 import { ensureLaneProvenanceLabel } from './principal-lane-provenance'
-import { isLaneLoaded, sweepLaneCredentialTempArtifacts } from './principal-lane-credential-sweep'
+import {
+  listLaneCredentialArtifacts,
+  sweepLaneCredentialTempArtifacts
+} from './principal-lane-credential-sweep'
 
 const LANE_MARKER_FILENAME = '.orca-principal-lane'
 
@@ -276,22 +280,35 @@ function lstatOrNull(path: string): Stats | null {
 }
 
 /**
- * Every provisioned lane that currently HOLDS a credential — the startup wipe's input (S9 §2f).
+ * Every provisioned lane that still holds a credential ARTIFACT — the startup wipe's input (§2f).
+ *
+ * Artifacts, not `.credentials.json`: `writeFileAtomically` stages a full-credential blob at
+ * `${target}.${pid}.${uuid}.tmp` and unlinks it only on a thrown error, so a crash between the
+ * write and the rename leaves one at rest under a name a filename-scoped predicate never selects
+ * — and a lane holding only that would never be swept at all.
  *
  * Ownership-proved per entry, so a foreign directory named as a v4 UUID is never swept as a lane.
+ * The listing itself is fault-tolerant: an unreadable lanes root must not take down app boot.
  */
 export function listResidentPrincipalLaneIds(options: PrincipalLaneOptions = {}): string[] {
   const lanesRoot = options.lanesRoot ?? getClaudeLanesRoot()
   if (!existsSync(lanesRoot)) {
     return []
   }
+  let entries: Dirent[] = []
+  try {
+    entries = readdirSync(lanesRoot, { withFileTypes: true })
+  } catch (error) {
+    console.warn('[claude-lane] Could not read the lanes root to list resident lanes:', error)
+    return []
+  }
   const resident: string[] = []
-  for (const entry of readdirSync(lanesRoot, { withFileTypes: true })) {
+  for (const entry of entries) {
     if (!entry.isDirectory() || !isPrincipalId(entry.name)) {
       continue
     }
     const laneDir = resolveOwnedPrincipalLaneDir(entry.name, options)
-    if (laneDir && isLaneLoaded(laneDir)) {
+    if (laneDir && listLaneCredentialArtifacts(laneDir).length > 0) {
       resident.push(entry.name)
     }
   }
