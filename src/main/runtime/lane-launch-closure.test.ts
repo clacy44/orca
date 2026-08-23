@@ -115,8 +115,45 @@ describe('laneScopedAgentLaunchSettings', () => {
   })
 })
 
+// §2a's anchor judges `agentArgs`, `agentEnv` and `ompResumeFilePath` off the launch config the
+// PANE's spawn carries, and a lane create is served here — so the host create must hand the one
+// it built to `ptyController.spawn` or all three guards run over an empty object.
+describe('the launch config the host create built', () => {
+  it('reaches the spawn anchor, scrubbed of the client’s CLAUDE_CONFIG_DIR', async () => {
+    const { runtime, spawn } = createRuntime()
+
+    await runtime.createTerminal('id:wt-1', {
+      credentialLane: runtime.resolveCallerCredentialLane('device-a'),
+      command: 'claude',
+      launchConfig: {
+        agentCommand: 'claude',
+        agentArgs: '--model sonnet',
+        agentEnv: { CLAUDE_CONFIG_DIR: '/tmp/attacker', FOO: '1' },
+        ompResumeFilePath: '/repo/app/.orca/resume.jsonl'
+      }
+    })
+
+    const spawned = spawn.mock.calls[0][0] as {
+      launchConfig?: { agentArgs?: string; agentEnv?: Record<string, string> }
+    }
+    expect(spawned.launchConfig?.agentArgs).toBe('--model sonnet')
+    expect(spawned.launchConfig?.agentEnv).toEqual({ FOO: '1' })
+  })
+})
+
 type Internals = Record<string, unknown>
 type InternalMethods = Record<string, (...args: never[]) => unknown>
+type LaneArg = { kind: 'principal'; principalId: string } | { kind: 'shared' }
+type BuiltStartup = { startup: { command: string; env?: Record<string, string> } }
+type StartupBuilders = {
+  buildStartupForAgent(
+    repo: never,
+    agent: string,
+    prompt: string,
+    lane: LaneArg
+  ): BuiltStartup | null
+  buildStartupForDraft(repo: never, draft: string, lane: LaneArg): Promise<BuiltStartup | null>
+}
 
 const REPO = { id: 'repo-1', path: '/repo', connectionId: null } as never
 
@@ -181,33 +218,32 @@ describe('a peer’s host-wide launch settings against the builders that bypass 
 
   it('reaches no lane launch through the worktree startup builder', () => {
     const { runtime } = createMobileRuntime()
-    const build = (runtime as unknown as InternalMethods).buildStartupForAgent.bind(runtime)
+    const builders = runtime as unknown as StartupBuilders
 
-    const laneStartup = build(REPO, 'claude', 'hi', { kind: 'principal', principalId: PRINCIPAL_A })
-    const sharedStartup = build(REPO, 'claude', 'hi', { kind: 'shared' })
+    const lane = builders.buildStartupForAgent(REPO, 'claude', 'hi', {
+      kind: 'principal',
+      principalId: PRINCIPAL_A
+    })
+    const shared = builders.buildStartupForAgent(REPO, 'claude', 'hi', { kind: 'shared' })
 
-    const lane = laneStartup as { startup: { command: string; env?: Record<string, string> } }
-    const shared = sharedStartup as { startup: { command: string; env?: Record<string, string> } }
-    expect(lane.startup.command).not.toContain('--settings')
-    expect(lane.startup.env?.ANTHROPIC_API_KEY).toBeUndefined()
-    expect(shared.startup.command).toContain('--settings')
-    expect(shared.startup.env?.ANTHROPIC_API_KEY).toBe('peer-key')
+    expect(lane?.startup.command).not.toContain('--settings')
+    expect(lane?.startup.env?.ANTHROPIC_API_KEY).toBeUndefined()
+    expect(shared?.startup.command).toContain('--settings')
+    expect(shared?.startup.env?.ANTHROPIC_API_KEY).toBe('peer-key')
   })
 
   it('reaches no lane launch through the worktree startup-draft builder', async () => {
     const { runtime } = createMobileRuntime()
-    const build = (runtime as unknown as InternalMethods).buildStartupForDraft.bind(runtime)
+    const builders = runtime as unknown as StartupBuilders
 
-    const laneDraft = (await build(REPO, 'fix the bug', {
+    const lane = await builders.buildStartupForDraft(REPO, 'fix the bug', {
       kind: 'principal',
       principalId: PRINCIPAL_A
-    })) as { startup: { command: string } } | null
-    const sharedDraft = (await build(REPO, 'fix the bug', { kind: 'shared' })) as {
-      startup: { command: string }
-    } | null
+    })
+    const shared = await builders.buildStartupForDraft(REPO, 'fix the bug', { kind: 'shared' })
 
-    expect(laneDraft?.startup.command).not.toContain('--settings')
-    expect(sharedDraft?.startup.command).toContain('--settings')
+    expect(lane?.startup.command).not.toContain('--settings')
+    expect(shared?.startup.command).toContain('--settings')
   })
 })
 

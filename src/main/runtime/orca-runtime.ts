@@ -1768,6 +1768,8 @@ type RuntimePtyController = {
     rows: number
     cwd?: string
     command?: string
+    /** The launch the record will carry: guard 2 and §2g's containment check read it (§2a). */
+    launchConfig?: SleepingAgentLaunchConfig
     launchAgent?: TuiAgent
     commandDelivery?: 'renderer' | 'provider'
     startupCommandDelivery?: WorktreeStartupLaunch['startupCommandDelivery']
@@ -26767,6 +26769,9 @@ export class OrcaRuntimeService {
             command: sequencedStartupCommand
               ? launchOpts.command
               : (agentTeamsPlan?.command ?? launchOpts.command),
+            // Why the anchor needs it: `computeLaneLaunch` reads the agentArgs allowlist and the
+            // resume-path containment off this object, and this branch serves every lane create.
+            ...(effectiveLaunchConfig ? { launchConfig: effectiveLaunchConfig } : {}),
             launchAgent: launchOpts.launchAgent,
             commandDelivery: 'provider',
             startupCommandDelivery: launchOpts.startupCommandDelivery,

@@ -174,6 +174,22 @@ const inLane = (): { kind: 'principal'; principalId: string } => ({
   principalId: PRINCIPAL_ID
 })
 
+/** The host branch — every lane create takes it, because `laneCreate` forces it (§2a). */
+async function hostSpawn(
+  controller: Harness['controller'],
+  args: Record<string, unknown> = {}
+): Promise<unknown> {
+  return await controller.spawn({
+    cols: 80,
+    rows: 24,
+    cwd: '/tmp/worktree',
+    worktreeId: WORKTREE_ID,
+    tabId: TAB_ID,
+    leafId: LEAF_ID,
+    ...args
+  })
+}
+
 async function rendererSpawn(args: Record<string, unknown> = {}): Promise<void> {
   await handlers.get('pty:spawn')!(null, {
     cols: 80,
@@ -333,5 +349,53 @@ describe('a peer turning agent status hooks off host-wide', () => {
     await rendererSpawn({})
 
     expect(nodePtySpawnMock.mock.calls.at(-1)?.[2].env.ORCA_HOOKS_MARKER).toBeUndefined()
+  })
+})
+
+// §2a routes every lane create through the HOST branch (`shouldCreateInBackground` includes
+// `laneCreate`), so guard 2 and the resume containment are only real if the launch config the
+// runtime built reaches this edge — the renderer edge is the one a lane create never takes.
+describe('the launch config on the host spawn path', () => {
+  it('refuses a settings-redirecting agentArgs', async () => {
+    const { controller } = setup(inLane)
+
+    await expect(
+      hostSpawn(controller, { launchConfig: { agentArgs: '--settings /tmp/attacker.json' } })
+    ).rejects.toThrow(/settings/i)
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('refuses an auth env var defined in launchConfig.agentEnv', async () => {
+    const { controller } = setup(inLane)
+
+    await expect(
+      hostSpawn(controller, { launchConfig: { agentEnv: { ANTHROPIC_API_KEY: 'attacker' } } })
+    ).rejects.toThrow(/ANTHROPIC_API_KEY/)
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('refuses an ompResumeFilePath outside the lane and the workspace', async () => {
+    const { controller } = setup(inLane)
+
+    await expect(
+      hostSpawn(controller, {
+        launchConfig: { ompResumeFilePath: '/tmp/other-lane/sessions/resume.jsonl' }
+      })
+    ).rejects.toThrow(/outside this lane/)
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it('leaves the same launch config alone on a shared-lane pane', async () => {
+    const { controller } = setup(() => null)
+
+    await hostSpawn(controller, {
+      launchConfig: {
+        agentArgs: '--settings /tmp/attacker.json',
+        ompResumeFilePath: '/tmp/other-lane/sessions/resume.jsonl'
+      }
+    })
+
+    expect(spawnCalls).toHaveLength(1)
+    expect(spawnCalls[0]?.credentialLane).toBeUndefined()
   })
 })

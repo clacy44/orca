@@ -4819,6 +4819,7 @@ export function registerPtyHandlers(
         lanePrincipalId,
         envPatch: claudeAuth?.envPatch,
         workspacePath: cwd,
+        launchConfig: args.launchConfig,
         transcriptPath: args.resumeProviderSession?.transcriptPath,
         connectionId: args.connectionId
       })
