@@ -12,9 +12,9 @@ vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
 const LANE_A = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
 const LANE_B = '11112222-3333-4444-8555-666677778888'
 
-const credentials = (refreshToken: string, expiresAt: number): string =>
+const credentials = (refreshToken: string, expiresAt: number, accountId = 'acc-1'): string =>
   JSON.stringify({
-    claudeAiOauth: { accessToken: 'at', refreshToken, expiresAt, accountId: 'acc-1' }
+    claudeAiOauth: { accessToken: 'at', refreshToken, expiresAt, accountId }
   })
 
 class FakeWatermarkPersistence {
@@ -102,6 +102,54 @@ describe('principal lane store', () => {
         reauthenticated: true
       })
     ).toThrow(/older than what this host already holds/)
+  })
+
+  it('lets an ordinary account switch push a target whose own token is older', () => {
+    applyPush(LANE_A, credentials('rt-x', 8_000), null)
+    // R2: account Y's desktop-stored token was last refreshed earlier than X's, and the push
+    // names the watermark's sha correctly, so nothing about it is stale.
+    expect(() =>
+      applyPush(LANE_A, credentials('rt-y', 4_000, 'acc-2'), hashRefreshToken('rt-x'))
+    ).not.toThrow()
+    expect(store.getWatermark(LANE_A)?.identity.accountUuid).toBe('acc-2')
+    // And the second switch, to a third account, applies too (§5 live step 3b).
+    expect(() =>
+      applyPush(LANE_A, credentials('rt-z', 2_000, 'acc-3'), hashRefreshToken('rt-y'))
+    ).not.toThrow()
+  })
+
+  it('still refuses an older blob of the SAME account, sha chain intact', () => {
+    applyPush(LANE_A, credentials('rt-x', 8_000), null)
+    // Negative control for the switch case above: same account, so the backstop applies.
+    expect(() =>
+      applyPush(LANE_A, credentials('rt-replay', 4_000), hashRefreshToken('rt-x'))
+    ).toThrow(/older than what this host already holds/)
+  })
+
+  it('keeps the backstop when neither side can be identified', () => {
+    const anonymous = (refreshToken: string, expiresAt: number): string =>
+      JSON.stringify({ claudeAiOauth: { accessToken: 'at', refreshToken, expiresAt } })
+    applyPush(LANE_A, anonymous('rt-x', 8_000), null)
+    expect(() =>
+      store.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: anonymous('rt-y', 4_000),
+        basedOnRefreshTokenSha256: hashRefreshToken('rt-x')
+      })
+    ).toThrow(/older than what this host already holds/)
+  })
+
+  it('treats a watermark with no refresh-token sha as an unconditional mismatch', () => {
+    const noRefreshToken = JSON.stringify({
+      claudeAiOauth: { accessToken: 'at', expiresAt: 2_000, accountId: 'acc-1' }
+    })
+    applyPush(LANE_A, noRefreshToken, null)
+    expect(store.getWatermark(LANE_A)?.refreshTokenSha256).toBeNull()
+    // A null sha matches nothing, so a later push must carry the reauthentication flag.
+    expect(() => applyPush(LANE_A, credentials('rt-2', 9_000), null)).toThrow(
+      /older than what this host already holds/
+    )
+    expect(() => applyPush(LANE_A, credentials('rt-2', 9_000), null, true)).not.toThrow()
   })
 
   it('lets a reauthenticated push break the sha chain when it is not older', () => {

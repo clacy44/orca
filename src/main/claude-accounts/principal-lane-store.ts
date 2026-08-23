@@ -41,6 +41,8 @@ export type LanePushFreshnessInput = {
   laneId: string
   credentialsJson: string
   basedOnRefreshTokenSha256: string | null
+  /** The pushed `oauth-account.json`, read through the same identity reader the watermark uses. */
+  oauthAccount?: unknown
   /** Client-asserted and therefore advisory: it excuses a stale sha, never an older blob. */
   reauthenticated?: boolean
 }
@@ -167,10 +169,19 @@ export class PrincipalLaneStore {
     }
     if (
       !input.reauthenticated &&
-      watermark.refreshTokenSha256 !== null &&
-      input.basedOnRefreshTokenSha256 !== watermark.refreshTokenSha256
+      !matchesWatermarkSha(input.basedOnRefreshTokenSha256, watermark)
     ) {
       throw stalePushRefusal()
+    }
+    // The expiry arm backs the advisory flag WITHIN one token chain. An account switch is R2
+    // itself, and the target account's own last refresh is legitimately older than the lane's.
+    if (
+      isKnownDifferentAccount(
+        resolveLaneIdentity(input.credentialsJson, input.oauthAccount),
+        watermark.identity
+      )
+    ) {
+      return
     }
     const pushedExpiresAt = readFreshnessFromCredentials(input.credentialsJson)
     if (
@@ -203,6 +214,36 @@ export class PrincipalLaneStore {
       .filter((existing) => existing.laneId !== row.laneId)
     this.persistence.setClaudeLaneCredentialWatermarks([...rows, row])
   }
+}
+
+/**
+ * A null-sha watermark is a MISMATCH, never a wildcard.
+ *
+ * A blob carrying an access token and no refresh token watermarks a null sha; treating that as
+ * "nothing to match" would let every later push name any `basedOn` at all.
+ */
+function matchesWatermarkSha(
+  basedOnRefreshTokenSha256: string | null,
+  watermark: ClaudeLaneCredentialWatermark
+): boolean {
+  return (
+    watermark.refreshTokenSha256 !== null &&
+    basedOnRefreshTokenSha256 === watermark.refreshTokenSha256
+  )
+}
+
+/** Only a POSITIVELY different account skips the expiry backstop; an unknown identity keeps it. */
+export function isKnownDifferentAccount(
+  left: ClaudeCredentialIdentity,
+  right: ClaudeCredentialIdentity
+): boolean {
+  if (left.accountUuid !== null && right.accountUuid !== null) {
+    return left.accountUuid !== right.accountUuid
+  }
+  if (left.email !== null && right.email !== null) {
+    return left.email !== right.email
+  }
+  return false
 }
 
 /** The pushed `oauth-account.json` is the richer identity; the blob's own is the fallback. */
