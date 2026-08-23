@@ -114,11 +114,36 @@ export class LaneUsagePull {
    * wait for the probe's post-probe `syncLane`, which takes the lane write queue the caller holds.
    */
   async invalidateLane(laneId: string): Promise<void> {
+    // Why the stored row goes too, and not only the in-flight probe's result: the caller is about
+    // to replace or sweep this lane's credential, so the numbers already on the row belong to an
+    // account the lane will not be holding. A push re-points `laneAccountLabel` immediately (§2k),
+    // and a row left in place would put the OUTGOING account's bar under the INCOMING account's
+    // name until the next tick — the misattribution §2k exists to remove. A wiped lane would keep
+    // it forever, asserting a live credential while §2f says the lane is empty.
+    this.usageByLane.delete(laneId)
     const probes = [...(this.inFlight.get(laneId) ?? [])]
     for (const probe of probes) {
       probe.controller.abort()
     }
     await Promise.all(probes.map((probe) => probe.settled))
+  }
+
+  /**
+   * Every lane that can no longer attract a probe loses its row (§2d/§2f).
+   *
+   * `invalidateLane` covers the changes that come THROUGH this module; a lane can also leave the
+   * loaded set with nothing passing through it — swept at the principal's last close, held for
+   * reauth, or removed with its principal's last grant — and the row must go with it. Same rule,
+   * same list and same tick as the statusline half (`LaneStatuslineUsageStore.retainLanes`).
+   */
+  private retainLanes(lanes: readonly ClaudeLaneUsageAttribution[]): void {
+    const kept = new Set(lanes.map((lane) => lane.laneId))
+    // Deleting the current key mid-iteration is defined for a Map; no copy needed.
+    for (const laneId of this.usageByLane.keys()) {
+      if (!kept.has(laneId)) {
+        this.usageByLane.delete(laneId)
+      }
+    }
   }
 
   /**
@@ -148,7 +173,9 @@ export class LaneUsagePull {
     if (outcome.disabled) {
       return outcome
     }
-    for (const lane of this.deps.listLoadedLanes()) {
+    const lanes = this.deps.listLoadedLanes()
+    this.retainLanes(lanes)
+    for (const lane of lanes) {
       const skip = this.startSideRefusal(lane.laneId)
       if (skip) {
         outcome.skipped.push({ laneId: lane.laneId, reason: skip })

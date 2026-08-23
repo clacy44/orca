@@ -303,3 +303,56 @@ describe('one tick at a time', () => {
     expect(h.probedPreparations).toHaveLength(2)
   })
 })
+
+/**
+ * §2d/§2f/§2k — a lane's usage row is evicted with the lane, because `laneAccountLabel` re-points
+ * at the push while `laneUsage` would otherwise still hold the outgoing account's numbers, and a
+ * swept lane would keep asserting a live credential the host has reported gone.
+ */
+describe('lane usage row eviction', () => {
+  it('drops the stored row when a push or a wipe invalidates the lane', async () => {
+    const h = harness()
+    await h.pull.run()
+    expect(h.pull.laneUsage(LANE_A)?.session?.usedPercent).toBe(42)
+
+    await h.pull.invalidateLane(LANE_A)
+
+    expect(h.pull.laneUsage(LANE_A)).toBeNull()
+  })
+
+  // Negative control: invalidating one lane must not blank the other developer's bar.
+  it("leaves every other lane's row in place", async () => {
+    const h = harness({}, [laneRow(LANE_A), laneRow(LANE_B)])
+    await h.pull.run()
+
+    await h.pull.invalidateLane(LANE_A)
+
+    expect(h.pull.laneUsage(LANE_A)).toBeNull()
+    expect(h.pull.laneUsage(LANE_B)?.session?.usedPercent).toBe(42)
+  })
+
+  it('drops the row of a lane that left the loaded set with no invalidation', async () => {
+    let lanes: ClaudeLaneUsageAttribution[] = [laneRow(LANE_A)]
+    const h = harness({
+      listLoadedLanes: () => lanes,
+      laneStateOf: () => (lanes.length === 0 ? 'absent' : 'loaded')
+    })
+    await h.pull.run()
+    expect(h.pull.laneUsage(LANE_A)?.session?.usedPercent).toBe(42)
+
+    lanes = []
+    await h.pull.run()
+
+    expect(h.pull.laneUsage(LANE_A)).toBeNull()
+  })
+
+  // Negative control: the retain is against the loaded set, not a blanket clear per tick.
+  it("keeps a still-loaded lane's row across ticks", async () => {
+    const h = harness()
+
+    await h.pull.run()
+    await h.pull.run()
+
+    expect(h.pull.laneUsage(LANE_A)?.session?.usedPercent).toBe(42)
+  })
+})
