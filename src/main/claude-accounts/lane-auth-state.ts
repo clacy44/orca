@@ -85,7 +85,13 @@ export class LaneAuthState {
     }
   }
 
-  /** One queue per lane: lane A's slow write does not delay lane B's. */
+  /**
+   * One queue per lane: lane A's slow write does not delay lane B's.
+   *
+   * §2c's ordering — validate, freshness-check, write, watermark — holds only for callers that
+   * enter through here. `LaneSyncDriver.syncLane` does; the push handler must too, and it cannot
+   * nest inside a sync's turn, which is why this is not folded into the store's writer.
+   */
   serializeLaneWrite<T>(laneId: string, fn: () => Promise<T>): Promise<T> {
     const next = (this.writeQueueByLane.get(laneId) ?? Promise.resolve()).then(fn, fn)
     this.writeQueueByLane.set(

@@ -56,6 +56,7 @@ export type LanePushFreshnessInput = {
  * (S9 §2c).
  */
 export class PrincipalLaneStore {
+  /** Writing through this directly skips §2c's ordering: take `serializeLaneWrite` around it. */
   readonly writer = new LaneCredentialWriter()
   private readonly reauthRequiredLanes = new Set<string>()
   private readonly receiptListeners = new Set<(receipt: LaneRotationReceipt) => void>()
