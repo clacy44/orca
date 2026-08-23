@@ -10087,7 +10087,13 @@ export class OrcaRuntimeService {
       // Why: a pane minted by the renderer or a relay reattach is an anonymous local create, so it
       // states the shared lane rather than staying unattributed. Write-once, so a pane the funnel
       // already bound to a principal — and every rehydrated row — keeps its lane (§2a).
-      this.bindPaneCredentialLane(worktreeId, binding.tabId, binding.leafId, SHARED_CREDENTIAL_LANE)
+      this.bindPaneCredentialLane(
+        worktreeId,
+        binding.tabId,
+        binding.leafId,
+        SHARED_CREDENTIAL_LANE,
+        connectionId
+      )
     }
     const pty = this.recordPtyWorktree(ptyId, worktreeId, {
       connected: true,
@@ -26508,10 +26514,16 @@ export class OrcaRuntimeService {
     worktreeId: string,
     tabId: string,
     leafId: string,
-    lane: PaneCredentialLane
+    lane: PaneCredentialLane,
+    connectionId?: string | null
   ): PaneCredentialLane {
     this.ensurePaneCredentialLanesRehydrated()
     const bound = this.paneCredentialLanes.bind(worktreeId, makePaneKey(tabId, leafId), lane)
+    if (connectionId) {
+      // Why: an SSH/relay pane is `credentialLane: 'remote'` and never lane-bound, and its row
+      // belongs to that host's session partition — do not write it into the local one.
+      return bound
+    }
     this.store?.persistPaneCredentialLane?.({
       worktreeId,
       tabId,
@@ -26648,7 +26660,13 @@ export class OrcaRuntimeService {
         this.paneCredentialLaneLookup(workspace.id, tabId, leafId),
         credentialLane
       )
-      let paneLane = this.bindPaneCredentialLane(workspace.id, tabId, leafId, credentialLane)
+      let paneLane = this.bindPaneCredentialLane(
+        workspace.id,
+        tabId,
+        leafId,
+        credentialLane,
+        workspace.connectionId
+      )
       const claimedStablePaneCreate = this.ptyController.claimStablePaneCreate?.({
         worktreeId: workspace.id,
         connectionId: workspace.connectionId,
@@ -26848,7 +26866,13 @@ export class OrcaRuntimeService {
         if (this.paneCredentialLanes.laneOf(workspace.id, paneKey) === null) {
           // Why: the spawn can land on a canonical/stable owner pane rather than the minted one;
           // the lane follows the pane the process actually lives in, still write-once.
-          paneLane = this.bindPaneCredentialLane(workspace.id, tabId, leafId, credentialLane)
+          paneLane = this.bindPaneCredentialLane(
+            workspace.id,
+            tabId,
+            leafId,
+            credentialLane,
+            workspace.connectionId
+          )
         }
         try {
           this.assertPtyDidNotExitBeforeRegistration(result.id, result.incarnationId)
@@ -28495,7 +28519,13 @@ export class OrcaRuntimeService {
     const leafId = randomUUID()
     const preAllocatedHandle = this.createPreAllocatedTerminalHandle()
     const paneKey = makePaneKey(parentTabId, leafId)
-    this.bindPaneCredentialLane(workspace.id, parentTabId, leafId, inheritedLane)
+    this.bindPaneCredentialLane(
+      workspace.id,
+      parentTabId,
+      leafId,
+      inheritedLane,
+      workspace.connectionId
+    )
     const result = await this.ptyController.spawn({
       cols: 120,
       rows: 40,
