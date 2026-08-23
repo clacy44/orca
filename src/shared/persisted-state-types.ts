@@ -8,6 +8,7 @@ import type {
 import type { Automation, AutomationRun } from './automations-types'
 import type { MigrationUnsupportedPtyEntry } from './agent-status-types'
 import type { ClaudeLaneCredentialWatermark } from './claude-lane-watermark'
+import type { ClaudeLaneDelegationRow } from './claude-lane-delegation'
 import type { FeatureInteractionTelemetryBucketState } from './feature-interactions'
 import type { CodexResetCreditAttemptLedger } from './codex-reset-credit-attempt-ledger'
 import type { DiffComment } from './diff-comment-types'
@@ -91,6 +92,8 @@ export type PersistedState = {
   claudeLivePtySessionIds?: string[]
   /** Secretless per-lane credential watermark; carries a sha256, never a refresh token. */
   claudeLaneCredentialWatermarks?: ClaudeLaneCredentialWatermark[]
+  /** Per-lane delegable-account tokens and the held account's owner-authored name (S9 §2l). */
+  claudeLaneDelegationRows?: ClaudeLaneDelegationRow[]
   migrationUnsupportedPtyEntries: MigrationUnsupportedPtyEntry[]
   legacyPaneKeyAliasEntries: LegacyPaneKeyAliasEntry[]
   automations: Automation[]

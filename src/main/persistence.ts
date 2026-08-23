@@ -23,6 +23,10 @@ import {
   normalizeClaudeLaneWatermarks,
   type ClaudeLaneCredentialWatermark
 } from '../shared/claude-lane-watermark'
+import {
+  normalizeClaudeLaneDelegationRows,
+  type ClaudeLaneDelegationRow
+} from '../shared/claude-lane-delegation'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
@@ -7232,6 +7236,16 @@ export class Store {
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
     this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
     // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
+    this.flush()
+  }
+
+  getClaudeLaneDelegationRows(): ClaudeLaneDelegationRow[] {
+    return normalizeClaudeLaneDelegationRows(this.state.claudeLaneDelegationRows)
+  }
+
+  setClaudeLaneDelegationRows(rows: readonly ClaudeLaneDelegationRow[]): void {
+    this.state.claudeLaneDelegationRows = normalizeClaudeLaneDelegationRows(rows)
+    // Why: flush sync — a lost delegable list refuses the phone's next switch by name.
     this.flush()
   }
 
