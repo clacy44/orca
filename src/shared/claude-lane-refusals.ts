@@ -37,6 +37,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.not_enabled',
   'accounts.lane.delegated_elsewhere',
   'accounts.lane.local_clear_locked',
+  'accounts.lane.clear_incomplete',
   'terminal.lane_not_loaded',
   'terminal.lane_wsl_unsupported',
   'terminal.lane_wsl_shell_unsupported',

@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { deleteActiveClaudeKeychainCredentialsStrict } from './keychain'
 
 export const LANE_CREDENTIALS_FILENAME = '.credentials.json'
@@ -33,6 +34,27 @@ export type LaneCredentialWipeOptions = {
   platform?: NodeJS.Platform
   /** Injected so the darwin arm is observable on every platform, and faked in tests. */
   deleteKeychainItem?: (configDir: string) => Promise<void>
+  /**
+   * Injected so the re-read is observable: only a process OUTSIDE this call — the mid-rotation
+   * `claude` §2f names — can put a credential back between two synchronous passes.
+   */
+  onSweptPass?: (pass: number) => void
+}
+
+/** How many times a lane that keeps re-growing a credential is swept before the wipe refuses. */
+const LANE_SWEEP_PASSES = 3
+
+/** Every credential artifact still at rest in the lane: the file, plus any staged `.tmp` copy. */
+export function listLaneCredentialArtifacts(laneDir: string): string[] {
+  if (!existsSync(laneDir)) {
+    return []
+  }
+  return readdirSync(laneDir, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isFile() && (entry.name === LANE_CREDENTIALS_FILENAME || entry.name.endsWith('.tmp'))
+    )
+    .map((entry) => entry.name)
 }
 
 /**
@@ -59,14 +81,37 @@ export async function wipeLaneCredentials(
     await deleteKeychainItem(laneDir)
     removed.push(LANE_KEYCHAIN_ITEM)
   }
-  removed.push(...sweepLaneCredentialTempArtifacts(laneDir))
+  // §2f: the sweep RE-READS before it reports. A precondition is a check, not a proof — a probe
+  // that slipped the start-side fence can write `.credentials.json` back after the pass that
+  // removed it, and "a wipe reported over an unread directory is the same failure as one that
+  // never ran". Reported only after a clean read-back; refused, never reported done, otherwise.
+  for (let pass = 1; pass <= LANE_SWEEP_PASSES; pass += 1) {
+    for (const name of sweepOneLanePass(laneDir)) {
+      if (!removed.includes(name)) {
+        removed.push(name)
+      }
+    }
+    options.onSweptPass?.(pass)
+    if (listLaneCredentialArtifacts(laneDir).length === 0) {
+      if (dropLaneOauthAccount(laneDir)) {
+        removed.push(`${LANE_CONFIG_FILENAME}#oauthAccount`)
+      }
+      return removed
+    }
+  }
+  throw new ClaudeLaneRefusal(
+    'accounts.lane.clear_incomplete',
+    'Orca swept this Claude credential lane but a credential file kept reappearing in it, so the lane is not confirmed empty and the release was not completed. Stop any Claude session still running in that lane on the host machine, then release the account again.'
+  )
+}
+
+/** One pass: every staged `.tmp` sibling, then the credential file itself. */
+function sweepOneLanePass(laneDir: string): string[] {
+  const removed = sweepLaneCredentialTempArtifacts(laneDir)
   const credentialsPath = join(laneDir, LANE_CREDENTIALS_FILENAME)
   if (existsSync(credentialsPath)) {
     rmSync(credentialsPath, { force: true })
     removed.push(LANE_CREDENTIALS_FILENAME)
-  }
-  if (dropLaneOauthAccount(laneDir)) {
-    removed.push(`${LANE_CONFIG_FILENAME}#oauthAccount`)
   }
   return removed
 }
