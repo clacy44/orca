@@ -8,7 +8,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
-import { laneScopedAgentLaunchSettings } from './lane-launch-computation'
+import {
+  laneScopedAgentLaunchInputs,
+  laneScopedAgentLaunchSettings
+} from './lane-launch-computation'
 import type { PrincipalLookup } from './terminal-credential-lane-resolution'
 
 vi.mock('electron', () => ({
@@ -101,9 +104,53 @@ describe('laneScopedAgentLaunchSettings', () => {
   it('empties all three for a lane, leaving Orca’s own per-agent default', () => {
     expect(laneScopedAgentLaunchSettings({ kind: 'principal' }, PEER_SETTINGS)).toEqual({
       cmdOverrides: {},
-      agentDefaultArgs: undefined,
-      agentDefaultEnv: undefined
+      agentDefaultArgs: {},
+      agentDefaultEnv: {}
     })
+  })
+
+  // The exclusion has to tell a peer's widening from the local human's narrowing: emptying the
+  // record turns AgentsPane's "manual" opt-out back into Orca's YOLO default for the lane only.
+  it('keeps the host’s cleared permission flag for a lane, as the shared pane does', () => {
+    const settings = { agentDefaultArgs: { claude: '' }, agentDefaultEnv: { goose: {} } }
+
+    const lane = laneScopedAgentLaunchInputs({
+      lane: { kind: 'principal' },
+      settings,
+      agent: 'claude'
+    })
+    const shared = laneScopedAgentLaunchInputs({
+      lane: { kind: 'shared' },
+      settings,
+      agent: 'claude'
+    })
+
+    expect(lane.agentArgs).toBe('')
+    expect(shared.agentArgs).toBe('')
+  })
+
+  it('keeps the host’s cleared permission env for a lane, as the shared pane does', () => {
+    const settings = { agentDefaultEnv: { goose: {} } }
+
+    expect(
+      laneScopedAgentLaunchInputs({ lane: { kind: 'principal' }, settings, agent: 'goose' })
+        .agentEnv
+    ).toEqual({})
+    expect(
+      laneScopedAgentLaunchInputs({ lane: { kind: 'shared' }, settings, agent: 'goose' }).agentEnv
+    ).toEqual({})
+  })
+
+  it('still drops a peer’s widened args for a lane and keeps them shared', () => {
+    const settings = { agentDefaultArgs: { claude: '--settings /tmp/b.json' } }
+
+    expect(
+      laneScopedAgentLaunchInputs({ lane: { kind: 'principal' }, settings, agent: 'claude' })
+        .agentArgs
+    ).toBe('--dangerously-skip-permissions')
+    expect(
+      laneScopedAgentLaunchInputs({ lane: { kind: 'shared' }, settings, agent: 'claude' }).agentArgs
+    ).toBe('--settings /tmp/b.json')
   })
 
   it('passes all three through for a shared-lane launch', () => {

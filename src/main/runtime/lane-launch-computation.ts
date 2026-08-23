@@ -7,6 +7,10 @@ import {
   resolveTuiAgentLaunchEnv
 } from '../../shared/tui-agent-launch-defaults'
 import {
+  laneNarrowedAgentDefaultArgs,
+  laneNarrowedAgentDefaultEnv
+} from './lane-permission-narrowing'
+import {
   assertLaneResumePathsContained,
   sanitizeLaneLaunchCommand,
   sanitizeLaneLaunchEnv,
@@ -85,18 +89,24 @@ export type LaneScopedAgentLaunchSettings = {
  *
  * `agentDefaultArgs` and `agentDefaultEnv` are writable by ANY paired grant and ungated, so one
  * developer's `settings.update` would otherwise shape the other's lane launch — and a lane's arg
- * overrides belong in that lane's own settings, written only by that principal's push. Emptied
- * rather than filtered: what remains is Orca's own per-agent default, which is host-computed and
- * lane-safe. This is the one site where the host RE-DERIVES a launch from settings inside the
- * spawn path; a value a renderer pre-baked into `launchConfig.agentArgs` upstream is row 8's
- * allowlist instead, and the anchor is where that one is judged.
+ * overrides belong in that lane's own settings, written only by that principal's push. What
+ * remains is Orca's own per-agent default, which is host-computed and lane-safe — except that
+ * default is the YOLO flag, so dropping the record wholesale would re-widen a lane the local
+ * human had narrowed; `lane-permission-narrowing.ts` is what keeps that one direction. This is
+ * the one site where the host RE-DERIVES a launch from settings inside the spawn path; a value a
+ * renderer pre-baked into `launchConfig.agentArgs` upstream is row 8's allowlist instead, and the
+ * anchor is where that one is judged.
  */
 export function laneScopedAgentLaunchSettings(
   lane: { kind: 'principal' | 'shared' },
   settings: HostWideAgentLaunchSettings
 ): LaneScopedAgentLaunchSettings {
   if (lane.kind === 'principal') {
-    return { cmdOverrides: {}, agentDefaultArgs: undefined, agentDefaultEnv: undefined }
+    return {
+      cmdOverrides: {},
+      agentDefaultArgs: laneNarrowedAgentDefaultArgs(settings.agentDefaultArgs),
+      agentDefaultEnv: laneNarrowedAgentDefaultEnv(settings.agentDefaultEnv)
+    }
   }
   return {
     cmdOverrides: settings.agentCmdOverrides ?? {},
