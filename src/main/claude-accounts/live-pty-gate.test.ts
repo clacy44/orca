@@ -19,6 +19,9 @@ import {
   SHARED_CLAUDE_LANE_KEY
 } from './live-pty-gate'
 
+const LANE_A = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+const LANE_B = '11112222-3333-4444-8555-666677778888'
+
 describe('Claude live PTY gate', () => {
   afterEach(() => {
     markClaudePtyExited('lane-a-pty')
@@ -29,21 +32,38 @@ describe('Claude live PTY gate', () => {
     markClaudePtyExited('seeded-pty-2')
     confirmSeededClaudeLivePtys([])
     attachClaudeLivePtyPersistence(null)
-    endClaudeAuthSwitch()
+    endClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
+    endClaudeAuthSwitch(LANE_A)
+    endClaudeAuthSwitch(LANE_B)
   })
 
   it('allows switching while Claude PTYs are live', () => {
     markClaudePtySpawned('live-claude-pty', null)
 
-    beginClaudeAuthSwitch()
+    beginClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
 
-    expect(isClaudeAuthSwitchInProgress()).toBe(true)
+    expect(isClaudeAuthSwitchInProgress(SHARED_CLAUDE_LANE_KEY)).toBe(true)
   })
 
-  it('still rejects overlapping account switches', () => {
-    beginClaudeAuthSwitch()
+  it('still rejects overlapping account switches in the same lane', () => {
+    beginClaudeAuthSwitch(LANE_A)
 
-    expect(() => beginClaudeAuthSwitch()).toThrow('already in progress')
+    expect(() => beginClaudeAuthSwitch(LANE_A)).toThrow('already in progress')
+  })
+
+  it('leaves another lane, and the shared lane, un-gated by a lane switch (S9 §2f)', () => {
+    beginClaudeAuthSwitch(LANE_A)
+
+    expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(true)
+    expect(isClaudeAuthSwitchInProgress(LANE_B)).toBe(false)
+    expect(isClaudeAuthSwitchInProgress(SHARED_CLAUDE_LANE_KEY)).toBe(false)
+  })
+
+  it('leaves every principal lane un-gated by a HOST switch (S9 §5 S9c)', () => {
+    beginClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
+
+    expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(false)
+    expect(isClaudeAuthSwitchInProgress(LANE_B)).toBe(false)
   })
 
   it('counts seeded session ids as live until confirmed dead', () => {

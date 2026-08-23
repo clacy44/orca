@@ -1,4 +1,7 @@
-import { isClaudeAuthSwitchInProgress } from '../claude-accounts/live-pty-gate'
+import {
+  isClaudeAuthSwitchInProgress,
+  SHARED_CLAUDE_LANE_KEY
+} from '../claude-accounts/live-pty-gate'
 import { isTerminalLeafId, makePaneKey } from '../../shared/stable-pane-id'
 import { isValidTerminalTabId } from '../../shared/terminal-tab-id'
 import {
@@ -116,15 +119,19 @@ export function laneScopedAgentStatusHooksEnabled(
 /**
  * The spawn-side arm of the account-switch gate, on the two conditions that arm it.
  *
- * S9c keys the gate by lane; until then a lane pane joins the host-wide gate, which over-refuses
- * a lane spawn during an unrelated shared-lane switch rather than under-refusing its own.
+ * Read against THIS spawn's lane (S9 §2f): a push into lane A refuses lane A's spawns — a plain
+ * shell included, which is why `lanePinned` arms it alongside `isClaudeLaunch` — and leaves lane
+ * B and the shared lane alone.
  */
 export function assertClaudeAuthSwitchNotInProgress(scope: {
   isClaudeLaunch: boolean
   lanePinned: boolean
   lanePrincipalId?: string | null
 }): void {
-  if ((scope.isClaudeLaunch || scope.lanePinned) && isClaudeAuthSwitchInProgress()) {
+  if (!scope.isClaudeLaunch && !scope.lanePinned) {
+    return
+  }
+  if (isClaudeAuthSwitchInProgress(scope.lanePrincipalId || SHARED_CLAUDE_LANE_KEY)) {
     throw new Error('A Claude account switch is in progress. Try again after it finishes.')
   }
 }

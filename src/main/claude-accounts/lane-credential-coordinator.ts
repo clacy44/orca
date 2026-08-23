@@ -70,9 +70,7 @@ export class LaneCredentialCoordinator {
       listLoadedLanes: () => this.laneUsageAttributions(),
       laneStateOf: (laneId) => this.store.getLaneState(laneId),
       isWipePending: isLaneWipePending,
-      // DEVIATION, recorded: `isClaudeAuthSwitchInProgress` is still host-global in this tree —
-      // §2f's lane scoping is S9c. Over-skipping is the safe direction for a usage tick.
-      isSwitchInProgress: () => isClaudeAuthSwitchInProgress(),
+      isSwitchInProgress: (laneId) => isClaudeAuthSwitchInProgress(laneId),
       fetchUsage: options.fetchLaneUsage ?? ((input) => fetchViaPty(input)),
       markProbeSpawned: markEphemeralClaudePtySpawned,
       markProbeExited: markEphemeralClaudePtyExited,

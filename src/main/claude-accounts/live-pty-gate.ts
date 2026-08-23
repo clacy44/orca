@@ -29,7 +29,14 @@ const seededUnconfirmedPtyIds = new Set<string>()
  * unknown. It self-heals, but only after the startup pass §2e had to make observe-only.
  */
 const ephemeralPtyIds = new Set<string>()
-let switchInProgress = false
+/**
+ * The account-switch gate, keyed by LANE (S9 §2f).
+ *
+ * One module-global boolean made one developer's push block the other developer's spawns, and
+ * made the shared lane's own switch block every lane pane on the host. The key is the pane's
+ * lane principal, or `SHARED_CLAUDE_LANE_KEY` for the shared one.
+ */
+const switchesInProgressByLane = new Set<string>()
 
 export type ClaudeLivePtyPersistence = {
   addClaudeLivePtySessionId(sessionId: string): void
@@ -175,17 +182,18 @@ export function hasUnattributedLiveClaudePtys(): boolean {
   return false
 }
 
-export function beginClaudeAuthSwitch(): void {
-  if (switchInProgress) {
+/** The lane id is required: an omitted one silently gated every lane behind the shared one. */
+export function beginClaudeAuthSwitch(laneId: string): void {
+  if (switchesInProgressByLane.has(laneId)) {
     throw new Error('A Claude account switch is already in progress.')
   }
-  switchInProgress = true
+  switchesInProgressByLane.add(laneId)
 }
 
-export function endClaudeAuthSwitch(): void {
-  switchInProgress = false
+export function endClaudeAuthSwitch(laneId: string): void {
+  switchesInProgressByLane.delete(laneId)
 }
 
-export function isClaudeAuthSwitchInProgress(): boolean {
-  return switchInProgress
+export function isClaudeAuthSwitchInProgress(laneId: string): boolean {
+  return switchesInProgressByLane.has(laneId)
 }

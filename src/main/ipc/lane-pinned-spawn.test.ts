@@ -57,7 +57,13 @@ import {
   setLocalPtyProvider,
   unregisterSshPtyProvider
 } from './pty'
-import { hasLiveClaudePtys, markClaudePtyExited } from '../claude-accounts/live-pty-gate'
+import {
+  beginClaudeAuthSwitch,
+  endClaudeAuthSwitch,
+  hasLiveClaudePtys,
+  markClaudePtyExited,
+  SHARED_CLAUDE_LANE_KEY
+} from '../claude-accounts/live-pty-gate'
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 
 const LANE_DIR = '/tmp/orca-test-userdata/claude-lanes/11111111-2222-4333-8444-555555555555'
@@ -245,6 +251,56 @@ describe('a lane pane launched as a plain shell', () => {
     expect(spawnCalls[0]?.env?.CLAUDE_CONFIG_DIR).toBe(LANE_DIR)
     expect(spawnCalls[0]?.credentialLane).toEqual({ principalId: PRINCIPAL_ID })
     expect(hasLiveClaudePtys()).toBe(true)
+  })
+})
+
+// S9 §2f/§5 S9c: a push into lane A holds lane A's gate. It refuses lane A's spawns — a plain
+// shell too, because a lane pane carries lane credentials whatever it runs — and nothing else.
+describe('the per-lane account switch gate', () => {
+  const OTHER_PRINCIPAL_ID = '99999999-8888-4777-8666-555555555555'
+
+  afterEach(() => {
+    endClaudeAuthSwitch(PRINCIPAL_ID)
+    endClaudeAuthSwitch(OTHER_PRINCIPAL_ID)
+    endClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
+  })
+
+  it.each([
+    ['a claude command', { command: 'claude' }],
+    ['a plain shell', { command: 'bash -l' }]
+  ])('refuses %s spawning in the lane being pushed to', async (_case, args) => {
+    setup(inLane)
+    beginClaudeAuthSwitch(PRINCIPAL_ID)
+
+    await expect(rendererSpawn(args)).rejects.toThrow('account switch is in progress')
+    expect(spawnCalls).toHaveLength(0)
+  })
+
+  it("leaves another principal's lane spawning during that push", async () => {
+    setup(() => ({ kind: 'principal', principalId: OTHER_PRINCIPAL_ID }))
+    beginClaudeAuthSwitch(PRINCIPAL_ID)
+
+    await rendererSpawn({ command: 'claude' })
+
+    expect(spawnCalls).toHaveLength(1)
+  })
+
+  it('leaves a shared-lane claude spawning during a lane push', async () => {
+    setup(() => null)
+    beginClaudeAuthSwitch(PRINCIPAL_ID)
+
+    await rendererSpawn({ command: 'claude' })
+
+    expect(spawnCalls).toHaveLength(1)
+  })
+
+  it('still refuses a shared-lane claude during the HOST switch', async () => {
+    setup(() => null)
+    beginClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
+
+    await expect(rendererSpawn({ command: 'claude' })).rejects.toThrow(
+      'account switch is in progress'
+    )
   })
 })
 

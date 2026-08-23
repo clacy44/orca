@@ -12,6 +12,10 @@ import {
 } from '../claude-accounts/lane-credential-coordinator'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
 import { LaneDelegationDirectory } from './lane-delegation-directory'
+import {
+  isClaudeAuthSwitchInProgress,
+  SHARED_CLAUDE_LANE_KEY
+} from '../claude-accounts/live-pty-gate'
 import { LaneWireAuthority, type LaneSwitchGate } from './lane-wire-authority'
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
@@ -55,6 +59,8 @@ function makeHarness(
     designatedGrantId?: string | null
     provision?: string[]
     fetchLaneUsage?: LaneCredentialCoordinatorOptions['fetchLaneUsage']
+    /** Omits the fake gate so the push takes `live-pty-gate`'s real per-lane pair. */
+    realSwitchGate?: boolean
   } = {}
 ) {
   const userData = mkdtempSync(join(tmpdir(), 'orca-lane-wire-'))
@@ -110,7 +116,7 @@ function makeHarness(
     },
     coordinator,
     delegation,
-    switchGate,
+    ...(options.realSwitchGate ? {} : { switchGate }),
     platform: 'linux'
   })
   return {
@@ -535,5 +541,29 @@ describe('both usage feeds are invalidated by a credential change', () => {
     await harness.authority.push('device-a', pushParams('rt-1'))
 
     expect(invalidated).not.toContain(LANE_B)
+  })
+})
+
+// §5 S9c's gate arm at its own site: the push's default gate is the real per-lane pair, so the
+// spawn paths reading `isClaudeAuthSwitchInProgress(laneId)` see lane A closed and lane B open.
+describe('the push takes the real per-lane switch gate', () => {
+  it('holds only its own lane, and only while the lane write runs', async () => {
+    const harness = makeHarness({ realSwitchGate: true })
+    const writer = harness.coordinator.store.writer
+    const realWrite = writer.writeCredentials.bind(writer)
+    let observed: Record<string, boolean> = {}
+    vi.spyOn(writer, 'writeCredentials').mockImplementation(async (laneDir, credentialsJson) => {
+      observed = {
+        laneA: isClaudeAuthSwitchInProgress(LANE_A),
+        laneB: isClaudeAuthSwitchInProgress(LANE_B),
+        host: isClaudeAuthSwitchInProgress(SHARED_CLAUDE_LANE_KEY)
+      }
+      await realWrite(laneDir, credentialsJson)
+    })
+
+    await harness.authority.push('device-a', pushParams('rt-real-gate'))
+
+    expect(observed).toEqual({ laneA: true, laneB: false, host: false })
+    expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(false)
   })
 })

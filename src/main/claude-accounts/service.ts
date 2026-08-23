@@ -29,7 +29,7 @@ import {
   writeActiveClaudeKeychainCredentials,
   writeManagedClaudeKeychainCredentials
 } from './keychain'
-import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from './live-pty-gate'
+import { beginClaudeAuthSwitch, endClaudeAuthSwitch, SHARED_CLAUDE_LANE_KEY } from './live-pty-gate'
 import { findDuplicateClaudeAccount } from './claude-duplicate-account'
 import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-containment'
 import { assertManagedClaudeAccountNotLaneResident } from './managed-account-lane-residency'
@@ -573,11 +573,13 @@ export class ClaudeAccountService {
     target?: ClaudeAccountSelectionTarget,
     operation?: () => Promise<void>
   ): Promise<void> {
-    beginClaudeAuthSwitch()
+    // The HOST switch path: it moves the shared lane's credential and nothing else, so it takes
+    // the shared lane's key and leaves every principal lane's spawns running (S9 §2f).
+    beginClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
     try {
       await (operation ? operation() : this.runtimeAuth.syncForCurrentSelection(target))
     } finally {
-      endClaudeAuthSwitch()
+      endClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
     }
   }
 

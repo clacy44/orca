@@ -28,10 +28,7 @@ export type LaneWirePrincipals = {
   listPrincipals?(): readonly { principalId: string; label: string | null }[]
 }
 
-/**
- * The lane's switch gate. S9c keys `begin/endClaudeAuthSwitch` per lane; until then this seam
- * takes the host-wide pair, so the push already holds the gate the spawn paths read.
- */
+/** The lane's switch gate: `begin/endClaudeAuthSwitch`, keyed by the lane being written. */
 export type LaneSwitchGate = {
   begin(laneId: string): void
   end(laneId: string): void
@@ -66,9 +63,9 @@ export type LanePullRotatedResult =
       refreshTokenSha256: string | null
     }
 
-const HOST_WIDE_SWITCH_GATE: LaneSwitchGate = {
-  begin: () => beginClaudeAuthSwitch(),
-  end: () => endClaudeAuthSwitch()
+const LANE_SWITCH_GATE: LaneSwitchGate = {
+  begin: (laneId) => beginClaudeAuthSwitch(laneId),
+  end: (laneId) => endClaudeAuthSwitch(laneId)
 }
 
 export class LaneWireAuthority {
@@ -242,7 +239,7 @@ export class LaneWireAuthority {
    * post usage for the old account and rotate a credential the lane no longer holds.
    */
   private async beginLaneSwitch(laneId: string): Promise<LaneSwitchGate> {
-    const gate = this.options.switchGate ?? HOST_WIDE_SWITCH_GATE
+    const gate = this.options.switchGate ?? LANE_SWITCH_GATE
     gate.begin(laneId)
     await this.options.coordinator.invalidateLaneUsageProbes(laneId)
     return gate
