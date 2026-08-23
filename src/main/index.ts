@@ -1470,7 +1470,7 @@ function openMainWindow(options: { revealOnDidFinishLoad?: boolean } = {}): Brow
     store,
     runtime,
     prepareCodexRuntimeHomeForLaunch,
-    (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target),
+    (target, lanePrincipalId) => claudeRuntimeAuth!.prepareForClaudeLaunch(target, lanePrincipalId),
     {
       prepareCodexSessionResume: prepareCodexSessionResumeForLaunch,
       awaitLocalPtyStartup: () => localPtyStartupReady,
@@ -3042,7 +3042,8 @@ void app.whenReady().then(async () => {
       runtime,
       prepareCodexRuntimeHomeForLaunch,
       () => store!.getSettings(),
-      (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target),
+      (target, lanePrincipalId) =>
+        claudeRuntimeAuth!.prepareForClaudeLaunch(target, lanePrincipalId),
       store,
       prepareCodexSessionResumeForLaunch,
       {

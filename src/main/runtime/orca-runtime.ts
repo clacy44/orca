@@ -26483,6 +26483,11 @@ export class OrcaRuntimeService {
     return this.paneLanes.lookup(worktreeId, tabId, leafId)
   }
 
+  /** The lane the pane RECORD carries, read back by pane identity at every spawn edge (§2a). */
+  credentialLaneOfPane(worktreeId: string, paneKey: string): PaneCredentialLane | null {
+    return this.paneLanes.laneOf(worktreeId, paneKey)
+  }
+
   /** The lane a handle-addressed inherit edge resolves to, through the same ownership predicate. */
   resolveInheritedCredentialLaneForHandle(
     handle: string,

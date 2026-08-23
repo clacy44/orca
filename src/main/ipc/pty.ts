@@ -93,6 +93,15 @@ import {
 import { parseAppSshPtyId, toAppSshPtyId, toRelaySshPtyId } from '../providers/ssh-pty-id'
 import { createPtySpawnTiming } from './pty-spawn-timing'
 import { enforceClaudeConfigDirLaunchScope } from './claude-config-dir-launch-guard'
+import {
+  assertClaudeAuthSwitchNotInProgress,
+  laneScopedAgentStatusHooksEnabled,
+  paneKeyForLaneLookup,
+  paneLaneLaunchFor,
+  resolveLanePinnedSpawn,
+  spawnWithLane
+} from './lane-pinned-spawn'
+import type { PaneLaneLaunch } from '../runtime/lane-launch-computation'
 import { deleteEnvKeyVariants } from '../../shared/lane-env-key-case'
 import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
@@ -114,11 +123,7 @@ import {
   hasClaudeAuthEnvConflict,
   resolveClaudeAuthEnvDeletions
 } from '../claude-accounts/environment'
-import {
-  isClaudeAuthSwitchInProgress,
-  markClaudePtyExited,
-  markClaudePtySpawned
-} from '../claude-accounts/live-pty-gate'
+import { markClaudePtyExited, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
 import { ensureLinuxTerminalOrcaCliShimDir } from '../cli/linux-terminal-orca-cli-shim'
 import {
   isLegacyTerminalShimPathEntry,
@@ -909,7 +914,8 @@ async function attachStablePaneOwner(
 }
 
 async function spawnForStablePane(
-  args: StablePaneSpawnContext
+  /** `paneLane` is the pane RECORD's lane; the attach below never needs one (S9 §2 preamble). */
+  args: StablePaneSpawnContext & { paneLane: PaneLaneLaunch }
 ): Promise<{ result: PtySpawnResult; owner: StablePaneOwner | null }> {
   if (args.owner) {
     const attached = await attachStablePaneOwner({ ...args, owner: args.owner })
@@ -917,7 +923,7 @@ async function spawnForStablePane(
       return attached
     }
   }
-  const result = await args.provider.spawn(args.spawnOptions)
+  const result = await spawnWithLane(args.provider, args.spawnOptions, args.paneLane)
   args.onFreshSpawn?.(result)
   return { result, owner: null }
 }
@@ -1265,7 +1271,9 @@ export type CodexHomePtySpawnedLifecycleArgs = {
 let ptyLifecycleSequence = 0
 
 type PrepareClaudeAuth = (
-  target?: ClaudeAccountSelectionTarget
+  target?: ClaudeAccountSelectionTarget,
+  /** The pane's lane, when it has one: the preparation returns that lane's own config dir. */
+  lanePrincipalId?: string
 ) => Promise<ClaudeRuntimeAuthPreparation>
 
 function getCodexSelectionTargetForPty(
@@ -4514,9 +4522,15 @@ export function registerPtyHandlers(
       }
       const isClaudeLaunch =
         !preAdoptedStablePane && !args.connectionId && isClaudeLaunchCommand(args.command)
-      if (isClaudeLaunch && isClaudeAuthSwitchInProgress()) {
-        throw new Error('A Claude account switch is in progress. Try again after it finishes.')
-      }
+      // Why read before the command predicate is spent: the lane env is command-independent, so
+      // every launch input below has to be assembled against the pane's lane (S9 §2a).
+      const { lanePrincipalId, lanePinned } = resolveLanePinnedSpawn({
+        laneOfPane: (id, key) => runtime?.credentialLaneOfPane?.(id, key) ?? null,
+        worktreeId: args.worktreeId,
+        paneKey: paneKeyForLaneLookup(args),
+        connectionId: args.connectionId
+      })
+      assertClaudeAuthSwitchNotInProgress({ isClaudeLaunch, lanePinned, lanePrincipalId })
       // Why: runtime-created terminals carry no renderer-computed projectRuntime; resolve from worktreeId to honor the project's Windows runtime.
       const terminalRuntimeOptions =
         process.platform === 'win32' && !args.connectionId
@@ -4579,10 +4593,10 @@ export function registerPtyHandlers(
       // notifyResumeUnavailable — runtime/relay panes start fresh without the notice.
       const launchCommand = codexResumeLaunch.command
       const claudeAuth =
-        isClaudeLaunch && prepareClaudeAuth ? await prepareClaudeAuth(codexSelectionTarget) : null
-      if (isClaudeLaunch && isClaudeAuthSwitchInProgress()) {
-        throw new Error('A Claude account switch is in progress. Try again after it finishes.')
-      }
+        (isClaudeLaunch || lanePinned) && prepareClaudeAuth
+          ? await prepareClaudeAuth(codexSelectionTarget, lanePrincipalId ?? undefined)
+          : null
+      assertClaudeAuthSwitchNotInProgress({ isClaudeLaunch, lanePinned, lanePrincipalId })
       if (claudeAuth?.stripAuthEnv && hasClaudeAuthEnvConflict(args.env)) {
         throw new Error(
           'This Claude launch defines explicit Anthropic auth environment variables. Remove those overrides before using a managed Claude account.'
@@ -4715,7 +4729,10 @@ export function registerPtyHandlers(
           launchAgent: isTuiAgent(args.launchAgent) ? args.launchAgent : undefined,
           isWsl: shouldSkipCodexHomeEnvForWindowsShell(daemonShellOverride, cwd),
           wslDistro: codexSelectionTarget.runtime === 'wsl' ? expectedWslDistro : null,
-          agentStatusHooksEnabled: isAgentStatusHooksEnabled(ptySettings),
+          agentStatusHooksEnabled: laneScopedAgentStatusHooksEnabled(
+            lanePinned,
+            isAgentStatusHooksEnabled(ptySettings)
+          ),
           codexStatusHooksEnabled: isCodexStatusHooksEnabled(ptySettings),
           networkProxySettings: ptySettings,
           deferGitConfigGuardToDaemon: provider.supportsGitCredentialGuardHost?.(sessionId) === true
@@ -4795,6 +4812,13 @@ export function registerPtyHandlers(
       env = configDirScope.env
       spawnOptions.env = configDirScope.env
       spawnOptions.envToDelete = configDirScope.envToDelete
+      const paneLane = paneLaneLaunchFor({
+        lanePrincipalId,
+        envPatch: claudeAuth?.envPatch,
+        workspacePath: cwd,
+        transcriptPath: args.resumeProviderSession?.transcriptPath,
+        connectionId: args.connectionId
+      })
       if (launchCommand !== undefined) {
         spawnOptions.command = launchCommand
       }
@@ -4997,7 +5021,7 @@ export function registerPtyHandlers(
               surface: args.agentSessionEnsure.surface,
               spawn: async () => {
                 assertClientStillConnected()
-                providerResult = await provider.spawn(spawnOptions)
+                providerResult = await spawnWithLane(provider, spawnOptions, paneLane)
                 rejectedRegistrationCandidate = providerResult
                 // Why: a successful lower-owner return proves physical work committed even if admission sees an early exit.
                 reportPtySpawnCommitted()
@@ -5049,6 +5073,7 @@ export function registerPtyHandlers(
                   store,
                   provider,
                   spawnOptions,
+                  paneLane,
                   owner: stablePaneOwnerCandidate,
                   worktreeId: args.worktreeId,
                   connectionId: args.connectionId,
@@ -5338,7 +5363,9 @@ export function registerPtyHandlers(
         if (!stablePaneOwner) {
           runtime?.noteTerminalSpawnCommand?.(result.id, launchCommand ?? null)
         }
-        if (isClaudeLaunch && !stablePaneOwner) {
+        // Why the lane arm: the human can type `claude` at any lane prompt, so every lane-pinned
+        // pane joins the lane's "may hold lane credentials" set (S9 §2a consequence 2).
+        if ((isClaudeLaunch || lanePinned) && !stablePaneOwner) {
           markClaudePtySpawned(result.id)
         }
         if (args.telemetry && !stablePaneOwner) {
@@ -6130,9 +6157,15 @@ export function registerPtyHandlers(
         }
         const isClaudeLaunch =
           !preAdoptedStablePane && !args.connectionId && isClaudeLaunchCommand(args.command)
-        if (isClaudeLaunch && isClaudeAuthSwitchInProgress()) {
-          throw new Error('A Claude account switch is in progress. Try again after it finishes.')
-        }
+        // Why here rather than beside the paneKey derivations below: the lane decides whether a
+        // Claude preparation is computed at all, and that decision precedes them (S9 §2a).
+        const { lanePrincipalId, lanePinned } = resolveLanePinnedSpawn({
+          laneOfPane: (id, key) => runtime?.credentialLaneOfPane?.(id, key) ?? null,
+          worktreeId: args.worktreeId,
+          paneKey: paneKeyForLaneLookup(args),
+          connectionId: args.connectionId
+        })
+        assertClaudeAuthSwitchNotInProgress({ isClaudeLaunch, lanePinned, lanePrincipalId })
         const terminalRuntimeOptions =
           process.platform === 'win32' && !args.connectionId
             ? resolveLocalWindowsTerminalRuntimeOptions({
@@ -6175,13 +6208,11 @@ export function registerPtyHandlers(
           expectedWslDistro
         )
         const claudeAuth =
-          isClaudeLaunch && prepareClaudeAuth
-            ? await prepareClaudeAuth(initialSelectionTarget)
+          (isClaudeLaunch || lanePinned) && prepareClaudeAuth
+            ? await prepareClaudeAuth(initialSelectionTarget, lanePrincipalId ?? undefined)
             : null
         spawnTiming.mark('auth')
-        if (isClaudeLaunch && isClaudeAuthSwitchInProgress()) {
-          throw new Error('A Claude account switch is in progress. Try again after it finishes.')
-        }
+        assertClaudeAuthSwitchNotInProgress({ isClaudeLaunch, lanePinned, lanePrincipalId })
         if (claudeAuth?.stripAuthEnv && hasClaudeAuthEnvConflict(args.env)) {
           throw new Error(
             'This Claude launch defines explicit Anthropic auth environment variables. Remove those overrides before using a managed Claude account.'
@@ -6411,7 +6442,10 @@ export function registerPtyHandlers(
               launchAgent: isTuiAgent(args.launchAgent) ? args.launchAgent : undefined,
               isWsl: shouldSkipCodexHomeEnvForWindowsShell(effectiveShellOverride, cwd),
               wslDistro: codexSelectionTarget.runtime === 'wsl' ? expectedWslDistro : null,
-              agentStatusHooksEnabled: isAgentStatusHooksEnabled(ptySettings),
+              agentStatusHooksEnabled: laneScopedAgentStatusHooksEnabled(
+                lanePinned,
+                isAgentStatusHooksEnabled(ptySettings)
+              ),
               codexStatusHooksEnabled: isCodexStatusHooksEnabled(ptySettings),
               networkProxySettings: ptySettings,
               deferGitConfigGuardToDaemon:
@@ -6470,6 +6504,14 @@ export function registerPtyHandlers(
         const scopedSpawnEnv = configDirScope.env
         combinedEnvToDelete = configDirScope.envToDelete
         effectiveLaunchConfig = configDirScope.launchConfig
+        const paneLane = paneLaneLaunchFor({
+          lanePrincipalId,
+          envPatch: claudeAuth?.envPatch,
+          workspacePath: cwd,
+          launchConfig: effectiveLaunchConfig,
+          transcriptPath: args.resumeProviderSession?.transcriptPath,
+          connectionId: args.connectionId
+        })
         const spawnOptions: PtySpawnOptions = {
           cols: args.cols,
           rows: args.rows,
@@ -6611,6 +6653,7 @@ export function registerPtyHandlers(
                 store,
                 provider,
                 spawnOptions,
+                paneLane,
                 owner: stablePaneOwnerCandidate,
                 worktreeId: args.worktreeId,
                 connectionId: args.connectionId,
@@ -6969,7 +7012,8 @@ export function registerPtyHandlers(
             typeof launchCommand === 'string' ? launchCommand : null
           )
         }
-        if (isClaudeLaunch && !stablePaneOwner) {
+        // Why the lane arm: see path A — a lane pane may become a Claude pane at the prompt.
+        if ((isClaudeLaunch || lanePinned) && !stablePaneOwner) {
           markClaudePtySpawned(result.id)
         }
         // Why: record the paneKey mapping so clearProviderPtyState can clear the agent-hooks server's per-paneKey caches on exit.
