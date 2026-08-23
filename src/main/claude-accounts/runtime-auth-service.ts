@@ -6,6 +6,16 @@ import { app } from 'electron'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import type { Store } from '../persistence'
 import {
+  asJsonRecord,
+  compareRefreshTokens,
+  normalizeIdentityField,
+  readFreshnessFromCredentials,
+  readIdentityFromCredentials,
+  readIdentityFromOauthAccount,
+  type ClaudeCredentialIdentity,
+  type ClaudeRefreshTokenComparison
+} from './claude-credential-identity'
+import {
   hasClaudeOauthAccessToken,
   writeCredentialsFileAtomically,
   writeJsonFileAtomically,
@@ -64,12 +74,6 @@ type ClaudeSystemDefaultSnapshot = {
   capturedAt: number
 }
 
-type ClaudeAuthIdentity = {
-  accountUuid: string | null
-  email: string | null
-  organizationUuid: string | null
-}
-
 type ClaudeReadBackResult =
   | { status: 'unchanged' | 'persisted' }
   | {
@@ -87,7 +91,6 @@ type ClaudeKeychainReadResult =
 type ClaudeKeychainSnapshotValue =
   | { status: 'captured'; credentialsJson: string | null }
   | { status: 'unknown' }
-type ClaudeRefreshTokenComparison = 'same' | 'different' | 'missing'
 type ClaudeRuntimeCredentialCandidate = {
   credentialsJson: string
   runtimeOauthAccount: unknown
@@ -865,23 +868,8 @@ export class ClaudeRuntimeAuthService {
     )
   }
 
-  private readIdentityFromCredentials(credentialsJson: string): ClaudeAuthIdentity | null {
-    let parsed: Record<string, unknown>
-    try {
-      parsed = JSON.parse(credentialsJson) as Record<string, unknown>
-    } catch {
-      return null
-    }
-    const oauth = this.asRecord(parsed.claudeAiOauth)
-    return {
-      accountUuid: this.normalizeField(
-        this.readString(oauth, 'accountUuid') ?? this.readString(oauth, 'accountId')
-      ),
-      email: this.normalizeField(this.readString(oauth, 'email')),
-      organizationUuid: this.normalizeField(
-        this.readString(oauth, 'organizationUuid') ?? this.readString(oauth, 'organizationId')
-      )
-    }
+  private readIdentityFromCredentials(credentialsJson: string): ClaudeCredentialIdentity | null {
+    return readIdentityFromCredentials(credentialsJson)
   }
 
   private isValidCredentialsJsonObject(credentialsJson: string): boolean {
@@ -933,88 +921,26 @@ export class ClaudeRuntimeAuthService {
   }
 
   private readFreshnessFromCredentials(credentialsJson: string): number | null {
-    let parsed: Record<string, unknown>
-    try {
-      parsed = JSON.parse(credentialsJson) as Record<string, unknown>
-    } catch {
-      return null
-    }
-    const oauth = this.asRecord(parsed.claudeAiOauth)
-    return (
-      this.readNumber(oauth, 'expiresAt') ??
-      this.readNumber(oauth, 'expires_at') ??
-      this.readNumber(oauth, 'expiry') ??
-      this.readNumber(oauth, 'expires')
-    )
+    return readFreshnessFromCredentials(credentialsJson)
   }
 
   private compareRefreshTokens(
     runtimeCredentialsJson: string,
     managedCredentialsJson: string
   ): ClaudeRefreshTokenComparison {
-    const runtimeRefreshToken = this.readRefreshTokenFromCredentials(runtimeCredentialsJson)
-    const managedRefreshToken = this.readRefreshTokenFromCredentials(managedCredentialsJson)
-    if (!runtimeRefreshToken || !managedRefreshToken) {
-      return 'missing'
-    }
-    return runtimeRefreshToken === managedRefreshToken ? 'same' : 'different'
+    return compareRefreshTokens(runtimeCredentialsJson, managedCredentialsJson)
   }
 
-  private readRefreshTokenFromCredentials(credentialsJson: string): string | null {
-    try {
-      const parsed = JSON.parse(credentialsJson) as Record<string, unknown>
-      const oauth = this.asRecord(parsed.claudeAiOauth)
-      return this.normalizeField(this.readString(oauth, 'refreshToken'))
-    } catch {
-      return null
-    }
-  }
-
-  private readIdentityFromOauthAccount(oauthAccount: unknown): ClaudeAuthIdentity {
-    const oauth = this.asRecord(oauthAccount)
-    return {
-      accountUuid: this.normalizeField(
-        this.readString(oauth, 'accountUuid') ?? this.readString(oauth, 'accountId')
-      ),
-      email: this.normalizeField(
-        this.readString(oauth, 'emailAddress') ?? this.readString(oauth, 'email')
-      ),
-      organizationUuid: this.normalizeField(
-        this.readString(oauth, 'organizationUuid') ?? this.readString(oauth, 'organizationId')
-      )
-    }
+  private readIdentityFromOauthAccount(oauthAccount: unknown): ClaudeCredentialIdentity {
+    return readIdentityFromOauthAccount(oauthAccount)
   }
 
   private asRecord(value: unknown): Record<string, unknown> | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return null
-    }
-    return value as Record<string, unknown>
-  }
-
-  private readString(value: Record<string, unknown> | null, key: string): string | null {
-    const candidate = value?.[key]
-    return typeof candidate === 'string' ? candidate : null
-  }
-
-  private readNumber(value: Record<string, unknown> | null, key: string): number | null {
-    const candidate = value?.[key]
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
-      return candidate
-    }
-    if (typeof candidate === 'string') {
-      const parsed = Number(candidate)
-      return Number.isFinite(parsed) ? parsed : null
-    }
-    return null
+    return asJsonRecord(value)
   }
 
   private normalizeField(value: string | null | undefined): string | null {
-    if (!value) {
-      return null
-    }
-    const trimmed = value.trim()
-    return trimmed === '' ? null : trimmed
+    return normalizeIdentityField(value)
   }
 
   private async readManagedCredentials(account: ClaudeManagedAccount): Promise<string | null> {
