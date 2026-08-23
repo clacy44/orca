@@ -567,3 +567,41 @@ describe('the push takes the real per-lane switch gate', () => {
     expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(false)
   })
 })
+
+// §5 S9c: what the lane wire shows and accepts on either side of a lifecycle wipe.
+describe('a lane the close-wipe emptied', () => {
+  it('publishes laneWipePending while the wipe is marked, and absent afterwards', async () => {
+    const harness = makeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    const marks: (boolean | undefined)[] = []
+    vi.spyOn(harness.coordinator.residency, 'clearLaneRow').mockImplementation(() => {
+      marks.push(harness.authority.status('device-a').laneWipePending)
+    })
+
+    await harness.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(marks).toEqual([true])
+    const status = harness.authority.status('device-a')
+    expect(status.laneState).toBe('absent')
+    expect(status.laneWipePending).toBeUndefined()
+    // The watermark is kept, so the row still names what the lane last held.
+    expect(status.refreshTokenSha256).toBe(sha('rt-1'))
+  })
+
+  it("accepts the reconnecting desktop's re-push and refuses its stale one", async () => {
+    const harness = makeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    await harness.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+    expect(await refusalCode(() => harness.authority.push('device-a', pushParams('rt-old')))).toBe(
+      'accounts.lane.push_stale'
+    )
+    await harness.authority.push(
+      'device-a',
+      pushParams('rt-2', { basedOnRefreshTokenSha256: sha('rt-1') })
+    )
+
+    expect(refreshTokenOnDisk(harness.laneCredentialsOnDisk(LANE_A))).toBe('rt-2')
+    expect(harness.authority.status('device-a').laneState).toBe('loaded')
+  })
+})
