@@ -10,6 +10,7 @@ import { parseLanePushRequest, type LanePushRequest } from '../claude-accounts/l
 import { wipeLaneCredentials } from '../claude-accounts/principal-lane-credential-sweep'
 import {
   clearLaneWipePendingOnCredentialLoaded,
+  isLaneWipeInFlight,
   isLaneWipePending
 } from '../claude-accounts/lane-wipe-pending'
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from '../claude-accounts/live-pty-gate'
@@ -104,6 +105,16 @@ export class LaneWireAuthority {
     const caller = this.requireCallerForPush(pairedDeviceId)
     this.assertDelegatedPusher(caller)
     const laneDir = this.requireProvisionedLaneDir(caller.principalId)
+    // §2f: `laneState` reads `absent` for the whole sweep, and a client with no string for the
+    // additive `laneWipePending` reads that as "the lane went empty, re-push". Refused by name
+    // rather than raced on the lane's write queue, where the losing order tells the desktop its
+    // push succeeded and then sweeps the credential it just wrote.
+    if (isLaneWipeInFlight(caller.principalId)) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.wipe_in_progress',
+        'Orca is clearing this credential lane on the host right now, so it did not load the account into it. Wait for that to finish, then push the account again.'
+      )
+    }
     const request = parseLanePushRequest(params)
     await this.options.coordinator.syncLane(caller.principalId, 'pre-push')
     return this.options.coordinator.authState.serializeLaneWrite(caller.principalId, () =>

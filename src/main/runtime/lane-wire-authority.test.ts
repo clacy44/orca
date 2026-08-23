@@ -591,6 +591,37 @@ describe('a lane the close-wipe emptied', () => {
     expect(status.refreshTokenSha256).toBe(sha('rt-1'))
   })
 
+  it('refuses a push that arrives while the sweep is still running', async () => {
+    const harness = makeHarness()
+    await harness.authority.push('device-a', pushParams('rt-1'))
+    let releaseFence = (): void => {}
+    const fence = vi.spyOn(harness.coordinator, 'invalidateLaneUsageProbes').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFence = () => resolve()
+        })
+    )
+    const wipe = harness.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    await Promise.resolve()
+
+    // An old client reads only `laneState`, sees `absent` mid-wipe and re-pushes; refused by name
+    // rather than raced on the lane's write queue, where the push would be told it succeeded and
+    // then swept.
+    expect(
+      await refusalCode(() =>
+        harness.authority.push(
+          'device-a',
+          pushParams('rt-2', { basedOnRefreshTokenSha256: sha('rt-1') })
+        )
+      )
+    ).toBe('accounts.lane.wipe_in_progress')
+
+    releaseFence()
+    fence.mockRestore()
+    await wipe
+    expect(harness.laneCredentialsOnDisk(LANE_A)).toBeNull()
+  })
+
   it('lets a re-push void a wipe that never confirmed the lane empty', async () => {
     const harness = makeHarness()
     await harness.authority.push('device-a', pushParams('rt-1'))
