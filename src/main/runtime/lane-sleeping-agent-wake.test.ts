@@ -18,7 +18,7 @@ function record(paneKey: string, overrides: Partial<SleepingAgentSessionRecord> 
     paneKey,
     worktreeId: WORKTREE,
     agent: 'claude',
-    providerSession: { sessionId: `s-${paneKey}` },
+    providerSession: { key: 'session_id', id: `s-${paneKey}` },
     prompt: '',
     state: 'idle',
     capturedAt: 1,
@@ -33,7 +33,7 @@ describe('buildLaneWakeAgentSessionRequest', () => {
       kind: 'explicit',
       worktree: `id:${WORKTREE}`,
       agent: 'claude',
-      providerSession: { sessionId: 's-p-1' },
+      providerSession: { key: 'session_id', id: 's-p-1' },
       presentation: 'background'
     })
   })
@@ -41,7 +41,7 @@ describe('buildLaneWakeAgentSessionRequest', () => {
   it('carries the launch config a record had', () => {
     const request = buildLaneWakeAgentSessionRequest(
       record('p-1', {
-        launchConfig: { agentArgs: '--resume', ompResumeFilePath: '/tmp/omp.json' }
+        launchConfig: { agentArgs: '--resume', agentEnv: {}, ompResumeFilePath: '/tmp/omp.json' }
       }),
       WORKTREE
     )
@@ -84,7 +84,7 @@ describe('resumeLaneBoundSleepingRecords', () => {
   // One unresumable agent must not withhold the others, and its record stays asleep.
   it('leaves a failed record asleep and resumes the rest', async () => {
     const h = harness(async (request) => {
-      if (request.kind === 'explicit' && request.providerSession.sessionId === 's-p-1') {
+      if (request.kind === 'explicit' && request.providerSession.id === 's-p-1') {
         throw new Error('spawn failed')
       }
       return undefined

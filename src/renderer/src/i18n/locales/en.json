@@ -3040,7 +3040,9 @@
             "13c1a5839d": "{{value0}} is writing",
             "b9ac6c07ca": "{{value0}} is typing — press again",
             "d7e5962e29": "In use by {{value0}}",
-            "stale": "{{value0}} attached · last seen {{value1}}m ago"
+            "stale": "{{value0}} attached · last seen {{value1}}m ago",
+            "laneUsageUnavailable": "{{value0}} · usage unavailable on this host",
+            "laneUsagePercent": "{{value0}} · {{value1}}%"
           }
         }
       },
