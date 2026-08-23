@@ -75,6 +75,31 @@ Treat these as wire changes even though nothing in the codec moves:
 If old clients cannot interpret the new projection correctly, gate it behind a
 runtime capability the same way Rule 2 gates an opcode.
 
+## Case 4 — a new RPC *method* fails loudly, and still needs a capability gate
+
+The three rules above do not cover adding an RPC **method**. Rule 2 is about stream
+opcodes, and its rationale is that an unknown opcode vanishes. New methods do the
+opposite: `dispatcher.ts` answers an unknown method with `method_not_found`, so the
+caller learns immediately.
+
+That makes the failure loud but not *useful*: the person sees an error where they
+expected a feature. So a new method is still capability-gated **client-side**, on a
+capability the host advertises in `status.get`:
+
+- add the capability to `RUNTIME_CAPABILITIES` beside its siblings
+  (`src/shared/protocol-version.ts`);
+- have the client read `status.get`'s `capabilities` and check it before the first
+  call, the way `src/cli/handlers/account.ts` does for account import;
+- when it is absent, keep the old behavior and say "update the host" — never call and
+  render the dispatcher's error.
+
+`agent.identity-lanes.v1` is the S9 example: the desktop's lane push client checks it
+before its first `accounts.lane.*` call and otherwise keeps host-wide switching, and
+the phone keeps sending `accounts.selectClaude` on a host that does not advertise it.
+The capability says one thing only — *this host has lanes*. It carries no per-grant
+meaning: which grant may push into a lane is a persisted host-side designation, never
+a string a client asserts about itself.
+
 ## Enforcement
 
 `tests/e2e/cross-version-wire/cross-version-terminal-wire.unit.test.ts` runs the real
