@@ -44,6 +44,10 @@ import {
   writeManagedClaudeKeychainCredentials
 } from './keychain'
 import { LaneCredentialCoordinator } from './lane-credential-coordinator'
+import {
+  assertClaudeLaunchNotDelegatedToLane,
+  isClaudeAccountDelegatedToLane
+} from './lane-delegation-lease'
 import { assertLaneLaunchRuntimeSupported, prepareLaneLaunch } from './principal-lane-preparation'
 import {
   getSelectedClaudeAccountIdForTarget,
@@ -436,7 +440,10 @@ export class ClaudeRuntimeAuthService {
     if (liveClaudePtys && isOauthTokenExpiring(credentialsJson)) {
       this.managedRefreshDeferredByLivePtyAccountId = activeAccount.id
     }
-    if (!liveClaudePtys) {
+    // §2e (i): a delegated account's rotation belongs to the HOST, keyed by account. Every bound
+    // desktop suppresses — the named `delegatedGrantId` included, because it is the PUSHING
+    // desktop and its unsuppressed rotator sits on the token the lane's live claude holds.
+    if (!liveClaudePtys && !isClaudeAccountDelegatedToLane(activeAccount.id)) {
       const refreshed = await this.refreshManagedAccountTokenIfNeeded(
         activeAccount,
         credentialsJson
@@ -640,6 +647,8 @@ export class ClaudeRuntimeAuthService {
     )
     const activeAccountId = getSelectedClaudeAccountIdForTarget(settings, normalizedTarget)
     const activeAccount = this.getActiveAccount(settings.claudeManagedAccounts, activeAccountId)
+    // §2e (ii): this machine's own managed launch under an account delegated to a host lane.
+    assertClaudeLaunchNotDelegatedToLane(activeAccount?.id)
     if (lanePrincipalId) {
       // Why before the WSL arms rather than after them: falling through leaves a lane-pinned pane
       // on the shared WSL config dir, which is the silent misattribution the lane exists to close.

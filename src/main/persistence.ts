@@ -27,6 +27,10 @@ import {
   normalizeClaudeLaneDelegationRows,
   type ClaudeLaneDelegationRow
 } from '../shared/claude-lane-delegation'
+import {
+  normalizeClaudeLaneLeases,
+  type ClaudeLaneDelegationLease
+} from '../shared/claude-lane-lease'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
@@ -7236,6 +7240,16 @@ export class Store {
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
     this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
     // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
+    this.flush()
+  }
+
+  getClaudeLaneDelegationLeases(): ClaudeLaneDelegationLease[] {
+    return normalizeClaudeLaneLeases(this.state.claudeLaneDelegationLeases)
+  }
+
+  setClaudeLaneDelegationLeases(rows: readonly ClaudeLaneDelegationLease[]): void {
+    this.state.claudeLaneDelegationLeases = normalizeClaudeLaneLeases(rows)
+    // Why: flush sync — a lost lease un-suppresses a rotator the host lane is depending on.
     this.flush()
   }
 

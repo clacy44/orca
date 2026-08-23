@@ -9,6 +9,7 @@ import type { Automation, AutomationRun } from './automations-types'
 import type { MigrationUnsupportedPtyEntry } from './agent-status-types'
 import type { ClaudeLaneCredentialWatermark } from './claude-lane-watermark'
 import type { ClaudeLaneDelegationRow } from './claude-lane-delegation'
+import type { ClaudeLaneDelegationLease } from './claude-lane-lease'
 import type { FeatureInteractionTelemetryBucketState } from './feature-interactions'
 import type { CodexResetCreditAttemptLedger } from './codex-reset-credit-attempt-ledger'
 import type { DiffComment } from './diff-comment-types'
@@ -94,6 +95,8 @@ export type PersistedState = {
   claudeLaneCredentialWatermarks?: ClaudeLaneCredentialWatermark[]
   /** Per-lane delegable-account tokens and the held account's owner-authored name (S9 §2l). */
   claudeLaneDelegationRows?: ClaudeLaneDelegationRow[]
+  /** Desktop-side cache of the delegation leases a host publishes (S9 §2e); never a credential. */
+  claudeLaneDelegationLeases?: ClaudeLaneDelegationLease[]
   migrationUnsupportedPtyEntries: MigrationUnsupportedPtyEntry[]
   legacyPaneKeyAliasEntries: LegacyPaneKeyAliasEntry[]
   automations: Automation[]

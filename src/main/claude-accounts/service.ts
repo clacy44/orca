@@ -33,6 +33,7 @@ import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from './live-pty-gate'
 import { findDuplicateClaudeAccount } from './claude-duplicate-account'
 import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-containment'
 import { assertManagedClaudeAccountNotLaneResident } from './managed-account-lane-residency'
+import { assertClaudeAccountNotDelegatedToLane } from './lane-delegation-lease'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
@@ -469,6 +470,9 @@ export class ClaudeAccountService {
     // L1's second edge, and it is here rather than at the RPC because it must hold for EVERY
     // caller class — the renderer and the anonymous local socket carry no `pairedDeviceId` (§2d).
     assertManagedClaudeAccountNotLaneResident(accountId)
+    // §2e rule (iv)'s local twin: on the DELEGATING desktop, whose runtime file the host's index
+    // cannot see. Selecting here would materialize the third copy a plain `claude` then rotates.
+    assertClaudeAccountNotDelegatedToLane(accountId)
     let effectiveTarget = target
     if (accountId !== null) {
       const account = this.requireAccount(accountId)
