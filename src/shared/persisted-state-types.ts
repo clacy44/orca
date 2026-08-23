@@ -7,6 +7,7 @@ import type {
 } from './ssh-types'
 import type { Automation, AutomationRun } from './automations-types'
 import type { MigrationUnsupportedPtyEntry } from './agent-status-types'
+import type { ClaudeLaneCredentialWatermark } from './claude-lane-watermark'
 import type { FeatureInteractionTelemetryBucketState } from './feature-interactions'
 import type { CodexResetCreditAttemptLedger } from './codex-reset-credit-attempt-ledger'
 import type { DiffComment } from './diff-comment-types'
@@ -88,6 +89,8 @@ export type PersistedState = {
   sshPtyConsumerRecoveries?: SshPtyConsumerRecovery[]
   /** Live local Claude daemon session ids; seeds the live-PTY gate so early OAuth refresh can't rotate the single-use refresh token out from under a running daemon. */
   claudeLivePtySessionIds?: string[]
+  /** Secretless per-lane credential watermark; carries a sha256, never a refresh token. */
+  claudeLaneCredentialWatermarks?: ClaudeLaneCredentialWatermark[]
   migrationUnsupportedPtyEntries: MigrationUnsupportedPtyEntry[]
   legacyPaneKeyAliasEntries: LegacyPaneKeyAliasEntry[]
   automations: Automation[]

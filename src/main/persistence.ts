@@ -19,6 +19,10 @@ import {
   writeFileDurableSync
 } from './durable-file-write'
 import { join, dirname, isAbsolute, resolve, sep } from 'node:path'
+import {
+  normalizeClaudeLaneWatermarks,
+  type ClaudeLaneCredentialWatermark
+} from '../shared/claude-lane-watermark'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
@@ -3820,6 +3824,9 @@ export class Store {
             .filter((lease): lease is SshRemotePtyLease => lease !== null),
           sshPtyConsumerRecoveries: parsed.sshPtyConsumerRecoveries,
           claudeLivePtySessionIds: normalizeClaudeLivePtySessionIds(parsed.claudeLivePtySessionIds),
+          claudeLaneCredentialWatermarks: normalizeClaudeLaneWatermarks(
+            parsed.claudeLaneCredentialWatermarks
+          ),
           migrationUnsupportedPtyEntries: normalizeMigrationUnsupportedPtyEntries(
             parsed.migrationUnsupportedPtyEntries
           ),
@@ -7225,6 +7232,16 @@ export class Store {
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
     this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
     // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
+    this.flush()
+  }
+
+  getClaudeLaneCredentialWatermarks(): ClaudeLaneCredentialWatermark[] {
+    return normalizeClaudeLaneWatermarks(this.state.claudeLaneCredentialWatermarks)
+  }
+
+  setClaudeLaneCredentialWatermarks(rows: readonly ClaudeLaneCredentialWatermark[]): void {
+    this.state.claudeLaneCredentialWatermarks = normalizeClaudeLaneWatermarks(rows)
+    // Why: flush sync — a force-quit that loses a watermark makes the next push read as stale.
     this.flush()
   }
 

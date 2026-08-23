@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
 
 /**
  * The identity and refresh-token readers `runtime-auth-service.ts` already used privately,
@@ -7,11 +8,7 @@ import { createHash } from 'node:crypto'
  * miss — the exact double-residency L1 exists to prevent.
  */
 
-export type ClaudeCredentialIdentity = {
-  accountUuid: string | null
-  email: string | null
-  organizationUuid: string | null
-}
+export type { ClaudeCredentialIdentity }
 
 export type ClaudeRefreshTokenComparison = 'same' | 'different' | 'missing'
 
