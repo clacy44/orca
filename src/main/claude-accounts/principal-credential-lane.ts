@@ -280,7 +280,8 @@ function lstatOrNull(path: string): Stats | null {
 }
 
 /**
- * Every provisioned lane that still holds a credential ARTIFACT — the startup wipe's input (§2f).
+ * Every lane the startup wipe has to sweep: one holding a credential ARTIFACT, or any owned lane
+ * on darwin (§2f).
  *
  * Artifacts, not `.credentials.json`: `writeFileAtomically` stages a full-credential blob at
  * `${target}.${pid}.${uuid}.tmp` and unlinks it only on a thrown error, so a crash between the
@@ -302,13 +303,18 @@ export function listResidentPrincipalLaneIds(options: PrincipalLaneOptions = {})
     console.warn('[claude-lane] Could not read the lanes root to list resident lanes:', error)
     return []
   }
+  // On darwin a lane's credential is a PAIR — the file AND the config-dir-scoped Keychain item —
+  // so a lane whose file is gone while the Keychain half persists reads empty to a file-only
+  // predicate and would survive crash+restart untouched. A sweep over an already-empty lane is
+  // cheap and idempotent, so there every owned lane is selected.
+  const sweepEveryOwnedLane = (options.platform ?? process.platform) === 'darwin'
   const resident: string[] = []
   for (const entry of entries) {
     if (!entry.isDirectory() || !isPrincipalId(entry.name)) {
       continue
     }
     const laneDir = resolveOwnedPrincipalLaneDir(entry.name, options)
-    if (laneDir && listLaneCredentialArtifacts(laneDir).length > 0) {
+    if (laneDir && (sweepEveryOwnedLane || listLaneCredentialArtifacts(laneDir).length > 0)) {
       resident.push(entry.name)
     }
   }

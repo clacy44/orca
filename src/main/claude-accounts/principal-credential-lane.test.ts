@@ -18,6 +18,7 @@ import {
   deprovisionPrincipalLane,
   getPrincipalLaneDir,
   isPrincipalId,
+  listResidentPrincipalLaneIds,
   openPrincipalLane,
   provisionPrincipalLane,
   requiresVerifiedWindowsDacl,
@@ -314,6 +315,35 @@ describe('principal credential lane', () => {
 
       expect(deprovisionPrincipalLane(PRINCIPAL_A, options())).toBe(false)
       expect(existsSync(laneDir)).toBe(true)
+    })
+  })
+
+  describe('the startup wipe input', () => {
+    it('selects only the lanes holding a credential artifact', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      provisionPrincipalLane(PRINCIPAL_B, options())
+      writeFileSync(join(lanesRoot, PRINCIPAL_A, '.credentials.json'), '{}')
+
+      expect(listResidentPrincipalLaneIds(options())).toEqual([PRINCIPAL_A])
+    })
+
+    it('selects every owned lane on darwin, where the Keychain holds the other half', () => {
+      // Claude Code 2.1+ can leave the lane's credential ONLY in the config-dir-scoped Keychain
+      // item, which no file predicate sees — and the sweep's darwin arm is what removes it.
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      provisionPrincipalLane(PRINCIPAL_B, options())
+
+      expect(listResidentPrincipalLaneIds({ lanesRoot, platform: 'darwin' }).sort()).toEqual(
+        [PRINCIPAL_A, PRINCIPAL_B].sort()
+      )
+    })
+
+    it('never selects a directory it cannot prove it owns, on either platform', () => {
+      mkdirSync(join(lanesRoot, PRINCIPAL_A), { recursive: true })
+      writeFileSync(join(lanesRoot, PRINCIPAL_A, '.credentials.json'), '{}')
+
+      expect(listResidentPrincipalLaneIds(options())).toEqual([])
+      expect(listResidentPrincipalLaneIds({ lanesRoot, platform: 'darwin' })).toEqual([])
     })
   })
 
