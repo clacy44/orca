@@ -114,6 +114,22 @@ export function hasLiveClaudePtysInLane(lanePrincipalId: string): boolean {
   return false
 }
 
+/**
+ * The PERSONAL lanes a live `claude` is running in, deduplicated (S9 §2c trigger 2, first arm).
+ *
+ * The shared lane is excluded by its reserved key: it has no lane file to sync, and its rotation
+ * is `doSyncForCurrentSelection`'s business.
+ */
+export function listLanesWithLiveClaudePtys(): string[] {
+  const laneIds = new Set<string>()
+  for (const [ptyId, laneId] of lanePrincipalIdByPtyId) {
+    if (laneId !== SHARED_CLAUDE_LANE_KEY && liveClaudePtyIds.has(ptyId)) {
+      laneIds.add(laneId)
+    }
+  }
+  return [...laneIds]
+}
+
 /** Seeded ids this process has not reconciled yet; they defer every account's rotation. */
 export function hasUnattributedLiveClaudePtys(): boolean {
   for (const ptyId of liveClaudePtyIds) {

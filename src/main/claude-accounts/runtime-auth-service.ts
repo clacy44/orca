@@ -145,6 +145,8 @@ export class ClaudeRuntimeAuthService {
     target?: ClaudeAccountSelectionTarget
   ): Promise<ClaudeRuntimeAuthPreparation> {
     const effectiveTarget = target ?? this.getDefaultAccountSelectionTarget()
+    // Trigger 2: a lane whose own claude is live may have rotated since the last tick.
+    await this.laneCredentials.syncLanesWithLivePtys()
     await this.syncForCurrentSelection(effectiveTarget)
     return this.getPreparation(effectiveTarget)
   }

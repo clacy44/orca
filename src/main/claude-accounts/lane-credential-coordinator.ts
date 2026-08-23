@@ -1,5 +1,6 @@
 import { AccountResidencyIndex, type SharedLaneCredentialReader } from './account-residency-index'
 import { LaneAuthState } from './lane-auth-state'
+import { listLanesWithLiveClaudePtys } from './live-pty-gate'
 import { LaneSyncDriver, type LaneSyncOutcome, type LaneSyncTrigger } from './lane-sync-driver'
 import { PrincipalLaneStore, type LaneWatermarkPersistence } from './principal-lane-store'
 import type { PrincipalLaneOptions } from './principal-credential-lane'
@@ -16,6 +17,8 @@ export type LaneCredentialCoordinatorOptions = {
   sharedLane: SharedLaneCredentialReader
   resolvePresenceLabel?: (laneId: string) => string | null
   laneOptions?: PrincipalLaneOptions
+  /** Injected so the tick arm is observable without the module-global pty gate. */
+  listLanesWithLivePtys?: () => string[]
 }
 
 export class LaneCredentialCoordinator {
@@ -24,7 +27,7 @@ export class LaneCredentialCoordinator {
   readonly authState: LaneAuthState
   readonly syncDriver: LaneSyncDriver
 
-  constructor(options: LaneCredentialCoordinatorOptions) {
+  constructor(private readonly options: LaneCredentialCoordinatorOptions) {
     this.store = new PrincipalLaneStore(options.persistence, options.laneOptions ?? {})
     this.residency = new AccountResidencyIndex({
       sharedLane: options.sharedLane,
@@ -40,6 +43,23 @@ export class LaneCredentialCoordinator {
 
   syncLane(laneId: string, trigger: LaneSyncTrigger): Promise<LaneSyncOutcome> {
     return this.syncDriver.syncLane(laneId, trigger)
+  }
+
+  /**
+   * Trigger 2's FIRST arm: every lane a live `claude` is running in, at each rate-limit tick.
+   *
+   * Its own CLI may have rotated the single-use token since the last tick, and a lane whose
+   * writer "does nothing else" would never see it. The second arm — one sync per lane the usage
+   * pull PROBED, whether or not that lane still has live PTYs — is evaluated after the probe
+   * exits and belongs to the per-lane usage pull, not here.
+   */
+  async syncLanesWithLivePtys(): Promise<LaneSyncOutcome[]> {
+    const listLanes = this.options.listLanesWithLivePtys ?? listLanesWithLiveClaudePtys
+    const outcomes: LaneSyncOutcome[] = []
+    for (const laneId of listLanes()) {
+      outcomes.push(await this.syncLane(laneId, 'rate-limit-tick'))
+    }
+    return outcomes
   }
 
   /** Called from the shared lane's own sync so the `host` residency row never goes stale. */
