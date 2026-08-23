@@ -1,5 +1,6 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { makePaneKey } from '../../shared/stable-pane-id'
+import type { RuntimeMobileSessionTabsSnapshot } from '../../shared/runtime-types'
 import type {
   PersistedPaneCredentialLane,
   WorkspaceSessionState
@@ -32,6 +33,8 @@ export type PaneLaneAuthorityDeps = {
   livePtyPaneKeys(): Iterable<string>
   /** The persisted session partition a worktree belongs to, before any pane spawns. */
   workspaceSessionOf(worktreeId: string): WorkspaceSessionState | null
+  /** The published mobile-session snapshot: a pending tab lives only here until it spawns. */
+  mobileSessionTabsOf(worktreeId: string): RuntimeMobileSessionTabsSnapshot | null
   /** The pane a live PTY runs in, for the `inherit` edges that name a PTY. */
   paneOfPty(ptyId: string): PaneLaneSurface | null
   readPersistedLanes(): Record<string, PersistedPaneCredentialLane> | null
@@ -94,7 +97,12 @@ export class PaneLaneAuthority {
     this.registry.rehydrate(rows)
   }
 
-  /** Does the host know a pane under this key at all? */
+  /**
+   * Does the host know a pane under this key at all?
+   *
+   * A pending tab that has never spawned lives only in the mobile-session snapshot, and answering
+   * `unknown` for it would let the adopt gate treat a tap on it as a fresh mint (§2a, §3).
+   */
   private paneSurfaceExists(worktreeId: string, tabId: string, leafId: string): boolean {
     if (this.deps.rendererLeafExists(tabId, leafId)) {
       return true
@@ -105,9 +113,14 @@ export class PaneLaneAuthority {
         return true
       }
     }
-    return (
+    if (
       this.deps.workspaceSessionOf(worktreeId)?.terminalPtyIncarnationsByPaneKey?.[paneKey] !==
       undefined
+    ) {
+      return true
+    }
+    return (this.deps.mobileSessionTabsOf(worktreeId)?.tabs ?? []).some(
+      (tab) => tab.type === 'terminal' && makePaneKey(tab.parentTabId, tab.leafId) === paneKey
     )
   }
 
@@ -155,16 +168,24 @@ export class PaneLaneAuthority {
   }
 
   /**
-   * A pane minted by the renderer or a relay reattach is an anonymous local create, so it states
-   * the shared lane rather than staying unattributed. Write-once, so a pane the funnel already
-   * bound to a principal — and every rehydrated row — keeps its lane (§2a).
+   * A pane the renderer mints is an anonymous local create, so it states the shared lane rather
+   * than staying unattributed. Write-once, so a pane the funnel already bound to a principal — and
+   * every rehydrated row — keeps its lane (§2a).
+   *
+   * A *reattach* attributes nothing: a pane restored from a pre-lane state carries no lane and
+   * must keep rendering `unknown`, which is what makes its split, recovery and resume fail closed
+   * rather than quietly reading as the shared credential (§2h).
    */
   bindMintedPane(
     worktreeId: string,
     tabId: string,
     leafId: string,
-    connectionId?: string | null
+    connectionId?: string | null,
+    isReattach?: boolean
   ): void {
+    if (isReattach && this.laneOf(worktreeId, makePaneKey(tabId, leafId)) === null) {
+      return
+    }
     this.bind(worktreeId, tabId, leafId, SHARED_CREDENTIAL_LANE, connectionId)
   }
 

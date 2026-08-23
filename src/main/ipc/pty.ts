@@ -5193,7 +5193,8 @@ export function registerPtyHandlers(
           runtime?.registerPty(result.id, owner.surface.worktreeId, args.connectionId ?? null, {
             tabId: owner.surface.tabId,
             leafId: owner.surface.leafId,
-            ...(result.incarnationId ? { incarnationId: result.incarnationId } : {})
+            ...(result.incarnationId ? { incarnationId: result.incarnationId } : {}),
+            isReattach: true
           })
           if (!args.connectionId) {
             options?.onCodexHomePtySpawned?.({
@@ -5319,7 +5320,8 @@ export function registerPtyHandlers(
               ? {
                   tabId: args.tabId,
                   leafId: metadataLeafId,
-                  ...(result.incarnationId ? { incarnationId: result.incarnationId } : {})
+                  ...(result.incarnationId ? { incarnationId: result.incarnationId } : {}),
+                  isReattach: result.isReattach === true
                 }
               : undefined,
             !args.connectionId
@@ -6943,7 +6945,8 @@ export function registerPtyHandlers(
                   tabId: args.tabId,
                   leafId: metadataLeafId,
                   ...(result.incarnationId ? { incarnationId: result.incarnationId } : {}),
-                  ...(agentLaunchAuthority ? { agentLaunchAuthority } : {})
+                  ...(agentLaunchAuthority ? { agentLaunchAuthority } : {}),
+                  isReattach: result.isReattach === true
                 }
               : undefined,
             !args.connectionId

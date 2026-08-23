@@ -2844,6 +2844,7 @@ export class OrcaRuntimeService {
         (paneKey): paneKey is string => typeof paneKey === 'string'
       ),
     workspaceSessionOf: (worktreeId) => this.getWorkspaceSessionForWorktree(worktreeId),
+    mobileSessionTabsOf: (worktreeId) => this.mobileSessionTabsByWorktree.get(worktreeId) ?? null,
     paneOfPty: (ptyId) => {
       const pty = this.ptysById.get(ptyId)
       return pty?.paneKey
@@ -10082,6 +10083,8 @@ export class OrcaRuntimeService {
       leafId: string
       incarnationId?: PtyIncarnationId
       agentLaunchAuthority?: { launchToken: string; launchAgent: TuiAgent }
+      /** A reattach adopts an existing pane, so it attributes no lane to one that has none (§2h). */
+      isReattach?: boolean
     },
     isWsl?: boolean
   ): void {
@@ -10094,7 +10097,13 @@ export class OrcaRuntimeService {
         ? makePaneKey(binding.tabId, binding.leafId)
         : null
     if (paneKey && binding) {
-      this.paneLanes.bindMintedPane(worktreeId, binding.tabId, binding.leafId, connectionId)
+      this.paneLanes.bindMintedPane(
+        worktreeId,
+        binding.tabId,
+        binding.leafId,
+        connectionId,
+        binding.isReattach
+      )
     }
     const pty = this.recordPtyWorktree(ptyId, worktreeId, {
       connected: true,
