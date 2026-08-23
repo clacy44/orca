@@ -1,11 +1,16 @@
 /* eslint-disable max-lines -- Why: keeps file/Keychain/snapshot/env-patch auth semantics together so PTY launch and quota-fetch paths can't drift. */
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { app } from 'electron'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import type { Store } from '../persistence'
-import { writeFileAtomically } from '../codex-accounts/fs-utils'
+import {
+  hasClaudeOauthAccessToken,
+  writeCredentialsFileAtomically,
+  writeJsonFileAtomically,
+  writeOauthAccountIntoConfigFile
+} from './lane-credential-writer'
 import type { ClaudeEnvPatch } from './environment'
 import {
   readClaudeManagedAuthFile,
@@ -880,13 +885,7 @@ export class ClaudeRuntimeAuthService {
   }
 
   private isValidCredentialsJsonObject(credentialsJson: string): boolean {
-    try {
-      const parsed = this.asRecord(JSON.parse(credentialsJson))
-      const oauth = this.asRecord(parsed?.claudeAiOauth)
-      return this.normalizeField(this.readString(oauth, 'accessToken')) !== null
-    } catch {
-      return false
-    }
+    return hasClaudeOauthAccessToken(credentialsJson)
   }
 
   private runtimeCredentialsAreFresher(
@@ -1222,7 +1221,7 @@ export class ClaudeRuntimeAuthService {
       legacyKeychainCredentialsCaptured: legacyKeychainCredentialsJson.status === 'captured',
       capturedAt: Date.now()
     }
-    this.writeJson(snapshotPath, snapshot)
+    writeJsonFileAtomically(snapshotPath, snapshot)
   }
 
   private async restoreSystemDefaultSnapshot(
@@ -1585,18 +1584,10 @@ export class ClaudeRuntimeAuthService {
   }
 
   private writeRuntimeOauthAccount(oauthAccount: unknown): boolean {
-    const configPath = this.pathResolver.getRuntimePaths().configPath
-    const existing = this.readJsonObject(configPath)
-    if (existing === null) {
-      return false
-    }
-    if (oauthAccount === null || oauthAccount === undefined) {
-      delete existing.oauthAccount
-    } else {
-      existing.oauthAccount = oauthAccount
-    }
-    this.writeJson(configPath, existing)
-    return true
+    return writeOauthAccountIntoConfigFile(
+      this.pathResolver.getRuntimePaths().configPath,
+      oauthAccount
+    )
   }
 
   private jsonValuesEqual(left: unknown, right: unknown): boolean {
@@ -1741,68 +1732,11 @@ export class ClaudeRuntimeAuthService {
   }
 
   private writeRuntimeCredentials(contents: string): void {
-    const credentialsPath = this.pathResolver.getRuntimePaths().credentialsPath
-    mkdirSync(dirname(credentialsPath), { recursive: true })
-    // Why: skip unchanged rewrites to dodge Windows EPERM contention (#1507); re-verify the file since another Claude may have rewritten it.
-    if (
-      this.lastWrittenCredentialsJson === contents &&
-      this.fileContentsEqual(credentialsPath, contents)
-    ) {
-      this.ensureOwnerOnlyMode(credentialsPath)
-      return
-    }
-    if (this.fileContentsEqual(credentialsPath, contents)) {
-      this.ensureOwnerOnlyMode(credentialsPath)
-      this.lastWrittenCredentialsJson = contents
-      return
-    }
-    writeFileAtomically(credentialsPath, contents, { mode: 0o600 })
-    this.lastWrittenCredentialsJson = contents
-  }
-
-  private writeJson(targetPath: string, value: unknown): void {
-    const serialized = `${JSON.stringify(value, null, 2)}\n`
-    mkdirSync(dirname(targetPath), { recursive: true })
-    // Why: same Windows contention reason as writeRuntimeCredentials.
-    if (this.fileContentsEqual(targetPath, serialized)) {
-      return
-    }
-    writeFileAtomically(targetPath, serialized, { mode: 0o600 })
-  }
-
-  private fileContentsEqual(targetPath: string, contents: string): boolean {
-    try {
-      return existsSync(targetPath) && readFileSync(targetPath, 'utf-8') === contents
-    } catch {
-      return false
-    }
-  }
-
-  private ensureOwnerOnlyMode(targetPath: string): void {
-    if (process.platform === 'win32') {
-      return
-    }
-    try {
-      chmodSync(targetPath, 0o600)
-    } catch {
-      /* Best effort: the next atomic write will set the restrictive mode. */
-    }
-  }
-
-  private readJsonObject(targetPath: string): Record<string, unknown> | null {
-    if (!existsSync(targetPath)) {
-      return {}
-    }
-    try {
-      const parsed = JSON.parse(readFileSync(targetPath, 'utf-8')) as unknown
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>
-      }
-    } catch {
-      // Why: invalid config is unknown external state; return null so we don't erase user or Claude-owned settings.
-      return null
-    }
-    return null
+    this.lastWrittenCredentialsJson = writeCredentialsFileAtomically(
+      this.pathResolver.getRuntimePaths().credentialsPath,
+      contents,
+      this.lastWrittenCredentialsJson
+    )
   }
 
   private getRuntimeMetadataDir(): string {
