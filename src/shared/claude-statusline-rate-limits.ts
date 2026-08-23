@@ -1,3 +1,5 @@
+import { parsePaneKey } from './stable-pane-id'
+
 // Why: Claude Code (>=2.1.80) pipes `rate_limits` to the statusLine command on every
 // turn — piggybacked on Messages API responses, so reading it costs no usage-endpoint
 // budget (the endpoint 429s under Orca's polling; see rate-limits/service.ts).
@@ -20,9 +22,19 @@ export type ClaudeStatusLineWindow = {
 export type ClaudeStatusLineRateLimits = {
   /** CLAUDE_CONFIG_DIR of the reporting session; null for system-default sessions. */
   configDir: string | null
+  /**
+   * The pane the reporting session runs in — posted by the managed statusline since it shipped
+   * and parsed away until S9b. It is the attribution key a lane needs: exact, case-free, and the
+   * same identifier the pane's lane is bound to, where `configDir` is a path this design spent a
+   * decision making opaque and which Windows can spell two ways (S9 §2k).
+   */
+  paneKey?: string | null
   fiveHour: ClaudeStatusLineWindow | null
   sevenDay: ClaudeStatusLineWindow | null
 }
+
+/** Bounds an untrusted loopback field before it is parsed; a real paneKey is far shorter. */
+const PANE_KEY_MAX_LENGTH = 256
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -61,7 +73,7 @@ export function parseClaudeStatusLineBody(body: unknown): ClaudeStatusLineRateLi
   if (typeof body !== 'object' || body === null) {
     return null
   }
-  const fields = body as { payload?: unknown; configDir?: unknown }
+  const fields = body as { payload?: unknown; configDir?: unknown; paneKey?: unknown }
   if (typeof fields.payload !== 'string' || !fields.payload) {
     return null
   }
@@ -84,5 +96,25 @@ export function parseClaudeStatusLineBody(body: unknown): ClaudeStatusLineRateLi
     return null
   }
   const configDir = typeof fields.configDir === 'string' ? fields.configDir.trim() : ''
-  return { configDir: configDir || null, fiveHour, sevenDay }
+  return {
+    configDir: configDir || null,
+    paneKey: parsePostedPaneKey(fields.paneKey),
+    fiveHour,
+    sevenDay
+  }
+}
+
+/**
+ * A posted paneKey is kept only when it parses as one; anything else is dropped to `null` so the
+ * ingest falls back to the config-dir map rather than joining on a string it cannot address.
+ */
+function parsePostedPaneKey(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > PANE_KEY_MAX_LENGTH || !parsePaneKey(trimmed)) {
+    return null
+  }
+  return trimmed
 }

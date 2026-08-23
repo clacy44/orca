@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { parseClaudeStatusLineBody } from './claude-statusline-rate-limits'
 
-function formBody(payload: unknown, configDir?: string): Record<string, string> {
+function formBody(payload: unknown, configDir?: string, paneKey?: string): Record<string, string> {
   return {
     payload: JSON.stringify(payload),
-    ...(configDir !== undefined ? { configDir } : {})
+    ...(configDir !== undefined ? { configDir } : {}),
+    ...(paneKey !== undefined ? { paneKey } : {})
   }
 }
 
@@ -22,6 +23,7 @@ describe('parseClaudeStatusLineBody', () => {
       )
     )
     expect(parsed).toEqual({
+      paneKey: null,
       configDir: '/home/dev/.config/managed-claude',
       fiveHour: { used_percentage: 23.5, resets_at: 1738425600 },
       sevenDay: { used_percentage: 41.2, resets_at: 1712059200 }
@@ -82,5 +84,35 @@ describe('parseClaudeStatusLineBody', () => {
         formBody({ rate_limits: { five_hour: { used_percentage: 'NaN' } } })
       )
     ).toBeNull()
+  })
+
+  describe("the posted paneKey — S9 §2k's attribution key", () => {
+    const windows = { rate_limits: { five_hour: { used_percentage: 4 } } }
+
+    const PANE_KEY = 'tab-1:11111111-1111-4111-8111-111111111111'
+
+    it('keeps a paneKey the pane addresser can parse', () => {
+      expect(parseClaudeStatusLineBody(formBody(windows, '/lane', PANE_KEY))?.paneKey).toBe(
+        PANE_KEY
+      )
+    })
+
+    // Negative control: an unparseable or oversized key must not reach the pane→lane join, or a
+    // post could be attributed by a string no binding row can answer for.
+    it('drops a paneKey that is not a pane key', () => {
+      for (const posted of [
+        '',
+        '   ',
+        'no-colon',
+        `a:b:${PANE_KEY}`,
+        `:${PANE_KEY.slice(6)}`,
+        'tab-1:',
+        'tab-1:not-a-uuid',
+        'x'.repeat(400)
+      ]) {
+        expect(parseClaudeStatusLineBody(formBody(windows, '/lane', posted))?.paneKey).toBeNull()
+      }
+      expect(parseClaudeStatusLineBody(formBody(windows, '/lane'))?.paneKey).toBeNull()
+    })
   })
 })
