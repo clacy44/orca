@@ -10117,6 +10117,9 @@ export class OrcaRuntimeService {
       ...(binding && paneKey ? { tabId: binding.tabId, paneKey } : {}),
       ...(binding?.incarnationId ? { incarnationId: binding.incarnationId } : {})
     })
+    if (paneKey) {
+      this.paneLanes.stampPaneLane(pty, worktreeId, paneKey)
+    }
     const agentLaunchAuthority = binding?.agentLaunchAuthority
     if (
       agentLaunchAuthority &&
@@ -16484,6 +16487,7 @@ export class OrcaRuntimeService {
       for (const { claim, pty, paneKey } of validated) {
         pty.tabId = claim.tabId
         pty.paneKey = paneKey
+        this.paneLanes.stampPaneLane(pty, workspace.id, paneKey)
       }
       return {
         adopted: false,
@@ -16801,6 +16805,7 @@ export class OrcaRuntimeService {
     for (const { claim, pty, paneKey } of validated) {
       pty.tabId = claim.tabId
       pty.paneKey = paneKey
+      this.paneLanes.stampPaneLane(pty, workspace.id, paneKey)
     }
     this.hydrateHeadlessMobileSessionTabsFromWorkspaceSession(workspace.id, {
       force: true,
@@ -26577,7 +26582,6 @@ export class OrcaRuntimeService {
         { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
         credentialLane
       )
-      let paneLane = paneAdoption.lane
       const claimedStablePaneCreate = this.ptyController.claimStablePaneCreate?.({
         worktreeId: workspace.id,
         connectionId: workspace.connectionId,
@@ -26776,10 +26780,10 @@ export class OrcaRuntimeService {
           paneKey = makePaneKey(tabId, leafId)
         }
         // Why: the spawn can land on a canonical/stable owner pane rather than the minted one, so
-        // the gate that ran at the mint has not seen this pane — re-run it, and read the lane back
-        // off the pane the process actually lives in so the record can never disagree with the row
-        // (§2a, §5).
-        paneLane = this.paneLanes.adoptRedirected(
+        // the gate that ran at the mint has not seen this pane — re-run it against the pane the
+        // process actually lives in. The record below then reads its lane off that pane's row, so
+        // the two can never disagree (§2a, §5).
+        this.paneLanes.adoptRedirected(
           { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
           {
             callerLane: credentialLane,
@@ -26809,7 +26813,7 @@ export class OrcaRuntimeService {
         })
         const pty = this.getOrCreatePtyWorktreeRecord(result.id)
         if (pty) {
-          pty.lanePrincipalId = paneLane.kind === 'principal' ? paneLane.principalId : null
+          this.paneLanes.stampPaneLane(pty, workspace.id, paneKey)
 
           if (persistHostSessionBinding) {
             pty.runtimeSessionOwned = true
@@ -28486,6 +28490,7 @@ export class OrcaRuntimeService {
     if (createdPty) {
       createdPty.tabId = parentTabId
       createdPty.paneKey = paneKey
+      this.paneLanes.stampPaneLane(createdPty, workspace.id, paneKey)
       createdPty.runtimeSessionOwned = pty.runtimeSessionOwned
       this.setPairedRendererSessionOwnership(
         createdPty.ptyId,

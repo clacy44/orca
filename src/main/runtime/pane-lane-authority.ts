@@ -372,6 +372,21 @@ export class PaneLaneAuthority {
       .map((record) => record.paneKey)
   }
 
+  /**
+   * Keeps a live pty record's lane equal to its pane's row, wherever the pane identity is set.
+   *
+   * The create funnel is not the only writer: the split, every reattach and the cold restore all
+   * set `paneKey` on a record too, and a record that disagreed with the row is exactly what the
+   * redirect adopt exists to prevent (§2h).
+   */
+  stampPaneLane(
+    record: { lanePrincipalId?: string | null },
+    worktreeId: string,
+    paneKey: string
+  ): void {
+    record.lanePrincipalId = this.principalIdOf(worktreeId, paneKey)
+  }
+
   /** The principal a pane's row names, for the pty record that must not disagree with it (§2h). */
   principalIdOf(worktreeId: string, paneKey: string): string | null {
     const lane = this.laneOf(worktreeId, paneKey)

@@ -259,6 +259,24 @@ describe('splitPtyBackedTerminal — the ownership predicate', () => {
     })
   })
 
+  it('stamps the split pane’s own lane onto its pty record, not the funnel’s only', async () => {
+    const { runtime, spawn } = createRuntime()
+    const created = await runtime.createTerminal('id:wt-1', {
+      credentialLane: runtime.resolveCallerCredentialLane('device-a')
+    })
+    spawn.mockClear()
+
+    await runtime.splitTerminal(created.handle, { pairedDeviceId: 'device-a' })
+
+    // Why: the record and the binding row must agree on every edge, not only in the funnel —
+    // a record left null there mis-resolves once the spawn anchor reads it (§2h).
+    const { tabId, leafId } = spawn.mock.calls[0][0]
+    const record = (
+      runtime as unknown as { ptysById: Map<string, { lanePrincipalId?: string | null }> }
+    ).ptysById.get(`pty-${tabId}-${leafId}`)
+    expect(record?.lanePrincipalId).toBe(PRINCIPAL_A)
+  })
+
   it('carries the caller into the split from agentTeams.tmuxCompat, the second door into it', async () => {
     const { runtime } = createRuntime()
     const splitTerminal = vi.spyOn(runtime, 'splitTerminal').mockResolvedValue({
