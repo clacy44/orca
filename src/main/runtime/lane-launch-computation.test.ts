@@ -50,6 +50,36 @@ describe('computeLaneLaunch', () => {
     })
   })
 
+  // Why a second key: the config-dir assertions above hold under EITHER write order, because the
+  // sanitizer strips that one key from the client env anyway. Only a lane key the sanitizer does
+  // not touch separates "written last" from "written at all" — and the lane preparation is free
+  // to return one (§2 preamble, part 1 of the post-anchor invariant).
+  it('writes every lane env key last, not only the one the sanitizer strips', () => {
+    const result = computeLaneLaunch(
+      laneOf({ envPatch: { ...PATCH, ORCA_LANE_MARKER: 'lane' } }),
+      spawn({ env: { ORCA_LANE_MARKER: 'client', PATH: '/usr/bin' } })
+    )
+
+    expect(result.spawnOptions.env).toEqual({
+      CLAUDE_CONFIG_DIR: LANE_DIR,
+      ORCA_LANE_MARKER: 'lane',
+      PATH: '/usr/bin'
+    })
+  })
+
+  it('collapses a win32 case variant of any lane key, keeping the lane’s value', () => {
+    const result = computeLaneLaunch(
+      laneOf({ platform: 'win32', envPatch: { ...PATCH, ORCA_LANE_MARKER: 'lane' } }),
+      spawn({ env: { Orca_Lane_Marker: 'client' } })
+    )
+
+    expect(Object.keys(result.spawnOptions.env ?? {}).sort()).toEqual([
+      'CLAUDE_CONFIG_DIR',
+      'ORCA_LANE_MARKER'
+    ])
+    expect(result.spawnOptions.env?.ORCA_LANE_MARKER).toBe('lane')
+  })
+
   it('strips a CLAUDE_CONFIG_DIR deletion request so the provider replay cannot drop the lane', () => {
     const result = computeLaneLaunch(
       laneOf(),
