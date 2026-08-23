@@ -52,8 +52,7 @@ describe('the lane usage probe env', () => {
         authPreparation: buildLaneUsageAuthPreparation({
           laneId: LANE_A,
           configDir: LANE_DIR,
-          provenance: `lane:${'a'.repeat(32)}`,
-          identity: null
+          provenance: `lane:${'a'.repeat(32)}`
         }),
         signal: controller.signal
       })
@@ -95,8 +94,7 @@ describe.runIf(process.platform === 'win32')('the win32 lane-key collapse (§2m(
         authPreparation: buildLaneUsageAuthPreparation({
           laneId: LANE_A,
           configDir: LANE_DIR,
-          provenance: `lane:${'a'.repeat(32)}`,
-          identity: null
+          provenance: `lane:${'a'.repeat(32)}`
         }),
         signal: controller.signal
       })

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
@@ -92,5 +92,80 @@ describe('the lane sync trigger 2 arm', () => {
     // left alone until its own launch syncs it.
     expect(await lanes.syncLanesWithLivePtys()).toEqual([])
     expect(rows).toEqual([])
+  })
+})
+
+/**
+ * The usage-attribution post-step runs AFTER the sync has already produced an outcome, and its
+ * label is a filesystem WRITE — so it must not be able to turn a successful sync into a failure.
+ */
+describe('the usage attribution post-step', () => {
+  let userData = ''
+  let lanesRoot = ''
+  const rows: ClaudeLaneCredentialWatermark[] = []
+
+  const coordinator = (): LaneCredentialCoordinator =>
+    new LaneCredentialCoordinator({
+      persistence: {
+        getClaudeLaneCredentialWatermarks: () => rows.slice(),
+        setClaudeLaneCredentialWatermarks: (next) => {
+          rows.length = 0
+          rows.push(...next)
+        }
+      },
+      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
+      laneOptions: { lanesRoot, platform: 'linux' }
+    })
+
+  beforeEach(() => {
+    userData = mkdtempSync(join(tmpdir(), 'orca-lane-attribution-'))
+    lanesRoot = join(userData, 'claude-lanes')
+    rows.length = 0
+    provisionPrincipalLane(LANE_A, { lanesRoot, platform: 'linux' })
+    // Far-future expiry: an expiring blob makes the sync try to ROTATE, which is not what these
+    // cases are about.
+    writeFileSync(
+      join(lanesRoot, LANE_A, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'at',
+          refreshToken: 'rt-a',
+          expiresAt: Date.now() + 3_600_000
+        }
+      })
+    )
+  })
+
+  afterEach(() => {
+    rmSync(userData, { recursive: true, force: true })
+  })
+
+  it('publishes one attribution row per loaded lane', async () => {
+    const lanes = coordinator()
+
+    await lanes.syncLane(LANE_A, 'launch')
+
+    expect(lanes.laneUsageAttributions()).toEqual([
+      {
+        laneId: LANE_A,
+        configDir: join(lanesRoot, LANE_A),
+        provenance: expect.stringMatching(/^lane:[0-9a-f]{32}$/) as unknown as string
+      }
+    ])
+  })
+
+  it('still resolves the sync when the provenance label cannot be established', async () => {
+    // A label path that is a DIRECTORY: reading and minting both throw, exactly as a lane dir
+    // swept between the sync and this post-step would.
+    const labelPath = join(lanesRoot, LANE_A, '.orca-lane-provenance')
+    rmSync(labelPath, { force: true })
+    mkdirSync(labelPath)
+    const lanes = coordinator()
+
+    const outcome = await lanes.syncLane(LANE_A, 'launch')
+
+    expect(outcome.laneState).toBe('loaded')
+    // Fail closed: no row, so the lane attracts no statusline posts until it can be labelled.
+    expect(lanes.laneUsageAttributions()).toEqual([])
   })
 })

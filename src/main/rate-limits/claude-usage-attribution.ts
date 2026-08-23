@@ -1,8 +1,7 @@
-import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
 import { LANE_PROVENANCE_PREFIX } from '../claude-accounts/principal-lane-provenance'
 
 /**
- * `normalizedConfigDir → { provenance, laneId, identity }` (S9 §2k).
+ * `normalizedConfigDir → { provenance, laneId }` (S9 §2k).
  *
  * The host-wide single snapshot dropped every lane terminal's statusline post, because it held
  * ONE config dir and compared the posted one against it. A map fixes attribution; the pane→lane
@@ -15,7 +14,6 @@ export type ClaudeUsageAttribution = {
   provenance: string
   /** The principal lane this row belongs to; `null` is the shared lane. */
   laneId: string | null
-  identity: ClaudeCredentialIdentity | null
 }
 
 export type ClaudeLaneUsageAttribution = ClaudeUsageAttribution & {
@@ -69,7 +67,7 @@ export class ClaudeUsageAttributionMap {
   /** The shared-lane fetch's own entry — cleared on an account switch, as it always was. */
   rememberSharedLane(configDir: string | null, provenance: string): void {
     this.sharedConfigDir = normalizeClaudeConfigDir(configDir)
-    this.shared = { provenance, laneId: null, identity: null }
+    this.shared = { provenance, laneId: null }
   }
 
   clearSharedLane(): void {

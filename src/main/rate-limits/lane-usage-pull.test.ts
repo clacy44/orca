@@ -19,8 +19,7 @@ function laneRow(laneId: string): ClaudeLaneUsageAttribution {
   return {
     laneId,
     configDir: `/data/claude-lanes/${laneId}`,
-    provenance: `lane:${'a'.repeat(32)}`,
-    identity: null
+    provenance: `lane:${'a'.repeat(32)}`
   }
 }
 

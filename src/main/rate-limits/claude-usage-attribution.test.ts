@@ -21,8 +21,7 @@ function laneRow(laneId: string, configDir: string, label: string): ClaudeLaneUs
   return {
     laneId,
     configDir,
-    provenance: `lane:${label}`,
-    identity: { accountUuid: `acct-${laneId}`, email: null, organizationUuid: null }
+    provenance: `lane:${label}`
   }
 }
 
@@ -117,15 +116,15 @@ describe('publishedAuthProvenance', () => {
       `managed:${LANE_A}:inactive-preview`,
       'lane:'
     ]) {
-      const published = publishedAuthProvenance({ provenance, laneId: LANE_A, identity: null })
+      const published = publishedAuthProvenance({ provenance, laneId: LANE_A })
       expect(published).toBe(REDACTED_LANE_PROVENANCE)
       expect(published).not.toContain(LANE_A)
     }
   })
 
   it('leaves the shared lane provenance alone', () => {
-    expect(
-      publishedAuthProvenance({ provenance: 'managed:acct-1:host', laneId: null, identity: null })
-    ).toBe('managed:acct-1:host')
+    expect(publishedAuthProvenance({ provenance: 'managed:acct-1:host', laneId: null })).toBe(
+      'managed:acct-1:host'
+    )
   })
 })

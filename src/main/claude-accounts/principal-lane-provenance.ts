@@ -26,6 +26,23 @@ export function ensureLaneProvenanceLabel(laneDir: string): string {
   return label
 }
 
+/**
+ * The same label, or `null` when it could not be established.
+ *
+ * Minting is a filesystem WRITE, and the callers that need a label sit AFTER a sync has already
+ * succeeded — including inside §2f's wipe window, where the lane directory can disappear between
+ * the read and the write. A row that cannot be labelled is dropped, which fails closed (the lane
+ * attracts no posts) instead of turning a successful sync into a rejection for every caller.
+ */
+export function ensureLaneProvenanceLabelOrNull(laneDir: string): string | null {
+  try {
+    return ensureLaneProvenanceLabel(laneDir)
+  } catch (error) {
+    console.warn('[lane-provenance] could not establish a lane provenance label:', error)
+    return null
+  }
+}
+
 export function readLaneProvenanceLabel(laneDir: string): string | null {
   const labelPath = join(laneDir, LANE_PROVENANCE_FILENAME)
   if (!existsSync(labelPath)) {

@@ -63,8 +63,7 @@ async function serviceWithLaneA(): Promise<RateLimitService> {
     {
       laneId: LANE_A,
       configDir: LANE_A_DIR,
-      provenance: `lane:${LABEL_A}`,
-      identity: { accountUuid: 'acct-a', email: 'a@example.com', organizationUuid: null }
+      provenance: `lane:${LABEL_A}`
     }
   ])
   service.setClaudeUsagePaneLaneLookup((paneKey) =>
@@ -169,7 +168,7 @@ describe('ingestLiveClaudeRateLimits — lane attribution', () => {
     }))
     // A lane row whose provenance leaked its principal id — the shape §2a forbids on the wire.
     service.setClaudeLaneAttributionResolver(() => [
-      { laneId: LANE_A, configDir: LANE_A_DIR, provenance: `lane:${LANE_A}`, identity: null }
+      { laneId: LANE_A, configDir: LANE_A_DIR, provenance: `lane:${LANE_A}` }
     ])
     service.setClaudeUsagePaneLaneLookup(() => ({ laneId: LANE_A }))
     await (service as unknown as { fetchAll: () => Promise<void> }).fetchAll()

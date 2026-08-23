@@ -13,8 +13,7 @@ import {
   markEphemeralClaudePtySpawned
 } from './live-pty-gate'
 import { AccountResidencyIndex, type SharedLaneCredentialReader } from './account-residency-index'
-import { readIdentityFromOauthAccount } from './claude-credential-identity'
-import { ensureLaneProvenanceLabel, formatLaneProvenance } from './principal-lane-provenance'
+import { ensureLaneProvenanceLabelOrNull, formatLaneProvenance } from './principal-lane-provenance'
 import { LaneAuthState } from './lane-auth-state'
 import { LaneSyncDriver, type LaneSyncOutcome, type LaneSyncTrigger } from './lane-sync-driver'
 import { PrincipalLaneStore, type LaneWatermarkPersistence } from './principal-lane-store'
@@ -144,12 +143,18 @@ export class LaneCredentialCoordinator {
       this.usageAttributions.delete(laneId)
       return
     }
+    // Why nullable and not thrown: minting the label is a WRITE, and this runs after the sync has
+    // already succeeded — a swept lane dir must not turn that success into a rejection.
+    const label = ensureLaneProvenanceLabelOrNull(laneDir)
+    if (!label) {
+      this.usageAttributions.delete(laneId)
+      return
+    }
     this.usageAttributions.set(laneId, {
       laneId,
       configDir: laneDir,
       // Why the opaque label and not the lane path: `provenance` is published on the usage row.
-      provenance: formatLaneProvenance(ensureLaneProvenanceLabel(laneDir)),
-      identity: readIdentityFromOauthAccount(this.store.readLaneOauthAccount(laneId))
+      provenance: formatLaneProvenance(label)
     })
   }
 
