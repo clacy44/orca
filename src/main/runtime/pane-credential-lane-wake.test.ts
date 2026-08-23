@@ -30,20 +30,35 @@ function createRuntime(
 ): {
   runtime: OrcaRuntimeService
   resumeSleepingAgents: ReturnType<typeof vi.fn>
+  ensureAgentSession: ReturnType<typeof vi.fn>
+  remainingSleepingPaneKeys: () => string[]
 } {
+  let session = {
+    sleepingAgentSessionsByPaneKey: {
+      [PANE_KEY]: {
+        paneKey: PANE_KEY,
+        worktreeId: WORKTREE,
+        agent: 'claude',
+        providerSession: { key: 'session_id', id: 'sess-1' }
+      },
+      ...extraRecords
+    } as Record<string, unknown>
+  }
   const store = {
     getRepo: () => ({ id: 'repo-1', path: '/repo', displayName: 'repo' }),
     getWorktreeMeta: () => undefined,
     setWorktreeMeta: () => undefined,
-    getWorkspaceSession: () => ({
-      sleepingAgentSessionsByPaneKey: {
-        [PANE_KEY]: { paneKey: PANE_KEY, worktreeId: WORKTREE, agent: 'claude' },
-        ...extraRecords
-      }
-    }),
+    getWorkspaceSession: () => session,
+    setWorkspaceSession: (next: typeof session) => {
+      session = next
+    },
     getPaneCredentialLanes: () => (paneLane ? { [PANE_KEY]: paneLane } : {})
   }
   const runtime = new OrcaRuntimeService(store as never)
+  runtime.setPrincipalLaneLookup({
+    principalOf: (deviceId) => (deviceId === 'device-a' ? PRINCIPAL_A : null),
+    linkPrincipalOf: () => null
+  })
   spyOnInternal(runtime, 'assertGraphReady').mockReturnValue(undefined as never)
   spyOnInternal(runtime, 'resolveWorktreeSelector').mockResolvedValue({
     id: WORKTREE,
@@ -59,9 +74,17 @@ function createRuntime(
     runtime as unknown as { getAvailableAuthoritativeWindow: () => unknown },
     'getAvailableAuthoritativeWindow'
   ).mockReturnValue({ webContents: { send: vi.fn(), isDestroyed: () => false } })
+  spyOnInternal(runtime, 'flushWorkspaceSessionOrThrowAsync').mockResolvedValue(undefined as never)
+  const ensureAgentSession = vi.fn().mockResolvedValue({ terminal: {}, disposition: 'created' })
+  ;(runtime as unknown as Record<string, unknown>).ensureAgentSession = ensureAgentSession
   const resumeSleepingAgents = vi.fn()
   runtime.setNotifier({ resumeSleepingAgents } as never)
-  return { runtime, resumeSleepingAgents }
+  return {
+    runtime,
+    resumeSleepingAgents,
+    ensureAgentSession,
+    remainingSleepingPaneKeys: () => Object.keys(session.sleepingAgentSessionsByPaneKey)
+  }
 }
 
 describe('worktree.activate — the sleeping-agent wake', () => {
@@ -107,5 +130,65 @@ describe('worktree.activate — the sleeping-agent wake', () => {
 
     expect(result.sleepingAgentWake).toBe('requested')
     expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE, [])
+  })
+
+  it("resumes the owner's own lane record through the host create path", async () => {
+    const { runtime, ensureAgentSession, resumeSleepingAgents, remainingSleepingPaneKeys } =
+      createRuntime({ worktreeId: WORKTREE, principalId: PRINCIPAL_A })
+
+    const result = await runtime.activateManagedWorktree(`id:${WORKTREE}`, {
+      clientKind: 'mobile',
+      notifyClients: false,
+      pairedDeviceId: 'device-a'
+    })
+
+    expect(result.sleepingAgentWake).toBe('requested')
+    expect(ensureAgentSession).toHaveBeenCalledTimes(1)
+    const [request, caller] = ensureAgentSession.mock.calls[0] as [
+      Record<string, unknown>,
+      Record<string, unknown>
+    ]
+    // The host path is what resolves the lane, drops a peer's host-wide launch settings and binds
+    // the minted paneKey before the spawn — so the request carries no settings-derived launch.
+    expect(request).toMatchObject({ kind: 'explicit', agent: 'claude', presentation: 'background' })
+    expect(request).not.toHaveProperty('agentArgs')
+    expect(caller).toEqual({ pairedDeviceId: 'device-a' })
+    // No second tab: the renderer is told to skip the pane the host just resumed, and the record
+    // is consumed so a later renderer wake cannot mint an unbound pane for it.
+    expect(resumeSleepingAgents).toHaveBeenCalledWith(WORKTREE, [PANE_KEY])
+    expect(remainingSleepingPaneKeys()).not.toContain(PANE_KEY)
+  })
+
+  it("leaves the record asleep and unconsumed when another person's grant activates", async () => {
+    const { runtime, ensureAgentSession, remainingSleepingPaneKeys } = createRuntime({
+      worktreeId: WORKTREE,
+      principalId: PRINCIPAL_A
+    })
+
+    const result = await runtime.activateManagedWorktree(`id:${WORKTREE}`, {
+      clientKind: 'mobile',
+      notifyClients: false,
+      pairedDeviceId: 'device-b'
+    })
+
+    expect(result.sleepingAgentWake).toBe('wake_refused_not_owned')
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+    expect(remainingSleepingPaneKeys()).toContain(PANE_KEY)
+  })
+
+  // Negative control: having NO principal is not ownership.
+  it('refuses an anonymous activate rather than treating no principal as a match', async () => {
+    const { runtime, ensureAgentSession } = createRuntime({
+      worktreeId: WORKTREE,
+      principalId: PRINCIPAL_A
+    })
+
+    const result = await runtime.activateManagedWorktree(`id:${WORKTREE}`, {
+      clientKind: 'mobile',
+      notifyClients: false
+    })
+
+    expect(result.sleepingAgentWake).toBe('wake_refused_not_owned')
+    expect(ensureAgentSession).not.toHaveBeenCalled()
   })
 })

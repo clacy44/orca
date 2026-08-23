@@ -22105,13 +22105,73 @@ export class OrcaRuntimeService {
     )
   }
 
-  /** The slept panes of this worktree the renderer wake may not mint a fresh pane for (§2a). */
-  private laneBoundSleepingPaneKeys(repo: Repo, worktreeId: string): string[] {
-    return this.paneLanes.laneBoundSleepingPaneKeys(
-      this.store?.getWorkspaceSession?.(getRepoExecutionHostId(repo))
-        .sleepingAgentSessionsByPaneKey ?? {},
-      worktreeId
+  /**
+   * The wake's owner half: a lane record resumes through the HOST create path, for its owner only.
+   *
+   * `ensureAgentSession` is that path — it resolves the caller's own lane, refuses a lane launch
+   * whose args would repoint credential resolution, drops the host-wide `agentDefaultArgs` /
+   * `agentDefaultEnv` / `agentCmdOverrides` a peer may have written, and reaches `createTerminal`
+   * with the lane, which mints the paneKey and binds it before the spawn. The renderer builder is
+   * never asked, so no second tab appears beside the resumed one.
+   */
+  private async resumeOwnedLaneSleepingAgents(
+    repo: Repo,
+    worktreeId: string,
+    pairedDeviceId: string | undefined
+  ): Promise<{ withheldPaneKeys: string[]; refusedForeign: boolean; resumed: number }> {
+    const hostId = getRepoExecutionHostId(repo)
+    const partition = this.paneLanes.partitionSleepingWake(
+      this.store?.getWorkspaceSession?.(hostId).sleepingAgentSessionsByPaneKey ?? {},
+      worktreeId,
+      pairedDeviceId
     )
+    let resumed = 0
+    for (const record of partition.ownedRecords) {
+      try {
+        await this.ensureAgentSession(
+          {
+            kind: 'explicit',
+            worktree: `id:${worktreeId}`,
+            agent: record.agent,
+            providerSession: record.providerSession,
+            ...(record.launchConfig ? { agentArgs: record.launchConfig.agentArgs } : {}),
+            ...(record.launchConfig?.ompResumeFilePath
+              ? { ompResumeFilePath: record.launchConfig.ompResumeFilePath }
+              : {}),
+            presentation: 'background'
+          },
+          { ...(pairedDeviceId ? { pairedDeviceId } : {}) }
+        )
+      } catch (error) {
+        // Why swallowed per record: one unresumable agent must not withhold the others, and the
+        // record stays asleep so the next activate retries it.
+        console.warn('[lane-wake] failed to resume a lane-bound agent session:', error)
+        continue
+      }
+      this.clearSleepingAgentRecord(hostId, worktreeId, record.paneKey)
+      resumed += 1
+    }
+    if (resumed > 0) {
+      await this.flushWorkspaceSessionOrThrowAsync()
+    }
+    return {
+      withheldPaneKeys: partition.withheldPaneKeys,
+      refusedForeign: partition.refusedForeign,
+      resumed
+    }
+  }
+
+  /** Consumed: the host resumed this record, so the renderer must not wake it again. */
+  private clearSleepingAgentRecord(hostId: string, worktreeId: string, paneKey: string): void {
+    const store = this.store
+    const session = store?.getWorkspaceSession?.(hostId)
+    const record = session?.sleepingAgentSessionsByPaneKey?.[paneKey]
+    if (!store || !session || !record || !runtimeWorktreeIdsEqual(record.worktreeId, worktreeId)) {
+      return
+    }
+    const sleepingAgentSessionsByPaneKey = { ...session.sleepingAgentSessionsByPaneKey }
+    delete sleepingAgentSessionsByPaneKey[paneKey]
+    store.setWorkspaceSession?.({ ...session, sleepingAgentSessionsByPaneKey }, hostId)
   }
 
   async sleepManagedWorktree(worktreeSelector: string): Promise<{ worktreeId: string }> {
@@ -22196,13 +22256,20 @@ export class OrcaRuntimeService {
         // which under §2a resolves to the shared `~/.claude`. A lane record is therefore withheld
         // from it and resumes only through the host create path, for its owner — but *only* the
         // lane records are: the shared-lane records beside them wake as they always did (§3).
-        const withheldPaneKeys = this.laneBoundSleepingPaneKeys(repo, worktree.id)
-        const withheldLaneRecords = withheldPaneKeys.length > 0
+        const wake = await this.resumeOwnedLaneSleepingAgents(
+          repo,
+          worktree.id,
+          opts.pairedDeviceId
+        )
+        const withheldPaneKeys = wake.withheldPaneKeys
         if (this.getAvailableAuthoritativeWindow()) {
           this.notifier?.resumeSleepingAgents?.(worktree.id, withheldPaneKeys)
-          sleepingAgentWake = withheldLaneRecords ? 'wake_refused_not_owned' : 'requested'
-        } else if (withheldLaneRecords) {
+          sleepingAgentWake = wake.refusedForeign ? 'wake_refused_not_owned' : 'requested'
+        } else if (wake.refusedForeign) {
           sleepingAgentWake = 'wake_refused_not_owned'
+        } else if (wake.resumed > 0) {
+          // The host create path resumed them; no renderer was needed, so this is not degraded.
+          sleepingAgentWake = 'requested'
         } else if (
           // Why: sleeping records are partitioned by execution host; reading
           // only the local partition would miss slept agents on SSH-host

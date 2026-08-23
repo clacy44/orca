@@ -12,6 +12,10 @@ import {
   type PaneCredentialLane,
   type PaneCredentialLaneLookup
 } from './pane-credential-lane-registry'
+import {
+  partitionLaneBoundSleepingRecords,
+  type LaneSleepingWakePartition
+} from './lane-sleeping-agent-wake'
 import { resolveInheritedLane } from './terminal-inherited-lane-authority'
 import {
   SHARED_CREDENTIAL_LANE,
@@ -362,14 +366,27 @@ export class PaneLaneAuthority {
     records: Readonly<Record<string, SleepingAgentSessionRecord>>,
     worktreeId: string
   ): string[] {
+    return this.partitionSleepingWake(records, worktreeId, null).withheldPaneKeys
+  }
+
+  /**
+   * The same partition, split by whether the CALLER's principal owns each record (§2a).
+   *
+   * The record's lane is the *pane's* row, read by the same paneKey the record carries — one
+   * authority, and it survives a restart with the binding row (§2a, §2h).
+   */
+  partitionSleepingWake(
+    records: Readonly<Record<string, SleepingAgentSessionRecord>>,
+    worktreeId: string,
+    pairedDeviceId: string | null | undefined
+  ): LaneSleepingWakePartition {
     this.ensureRehydrated()
-    return Object.values(records)
-      .filter(
-        (record) =>
-          record.worktreeId === worktreeId &&
-          this.registry.laneOf(record.worktreeId, record.paneKey)?.kind === 'principal'
-      )
-      .map((record) => record.paneKey)
+    return partitionLaneBoundSleepingRecords({
+      records,
+      worktreeId,
+      laneOf: (recordWorktreeId, paneKey) => this.registry.laneOf(recordWorktreeId, paneKey),
+      callerPrincipalId: this.principalOfGrant(pairedDeviceId)
+    })
   }
 
   /**
