@@ -58,7 +58,6 @@ export type LanePushFreshnessInput = {
 export class PrincipalLaneStore {
   /** Writing through this directly skips §2c's ordering: take `serializeLaneWrite` around it. */
   readonly writer = new LaneCredentialWriter()
-  private readonly reauthRequiredLanes = new Set<string>()
   private readonly receiptListeners = new Set<(receipt: LaneRotationReceipt) => void>()
 
   constructor(
@@ -71,19 +70,29 @@ export class PrincipalLaneStore {
   }
 
   /**
-   * `reauth-required` is sticky until a credential lands: it is the outcome of a FOREIGN rotation,
-   * which no file-presence check can see, so it must not be recomputed away by one.
+   * `reauth-required` is sticky until a credential lands: it is the outcome of a rotation the lane
+   * could not receive, which no file-presence check can see, so it must not be recomputed away by
+   * one — and it is read off the PERSISTED row, so a restart does not lift it either.
    */
   getLaneState(laneId: string): RuntimeTerminalLaneState {
     const laneDir = this.resolveLaneDir(laneId)
     if (!laneDir || !isLaneLoaded(laneDir)) {
       return 'absent'
     }
-    return this.reauthRequiredLanes.has(laneId) ? 'reauth-required' : 'loaded'
+    return this.isHeldForReauth(laneId) ? 'reauth-required' : 'loaded'
+  }
+
+  /** Whether the host has recorded that the blob in this lane's file can no longer refresh. */
+  isHeldForReauth(laneId: string): boolean {
+    return this.getWatermark(laneId)?.reauthRequired === true
   }
 
   markReauthRequired(laneId: string): void {
-    this.reauthRequiredLanes.add(laneId)
+    const existing = this.getWatermark(laneId)
+    this.putWatermarkRow({
+      ...(existing ?? emptyWatermarkRow(laneId)),
+      reauthRequired: true
+    })
   }
 
   readLaneCredentials(laneId: string): string | null {
@@ -114,13 +123,24 @@ export class PrincipalLaneStore {
     )
   }
 
-  /** Writer 1: what `syncLane` observed on disk, on all four triggers. */
+  /**
+   * Writer 1: what `syncLane` observed on disk, on all four triggers.
+   *
+   * A lane HELD for reauth is skipped, and this is not an optimization. Its file still holds the
+   * blob whose token `recordUnwritableRotation` already spent, so re-recording it would walk the
+   * watermark back onto the SPENT sha and re-admit the exact replay that hold exists to refuse.
+   * Only writer 2 (a push) or writer 3 (a rotation the lane received) lifts it.
+   */
   recordSyncedLaneCredentials(
     laneId: string,
     credentialsJson: string,
     oauthAccount?: unknown
   ): ClaudeLaneCredentialWatermark {
-    return this.writeWatermark(laneId, credentialsJson, oauthAccount)
+    const held = this.getWatermark(laneId)
+    if (held?.reauthRequired === true) {
+      return held
+    }
+    return this.writeWatermark(laneId, credentialsJson, oauthAccount, false)
   }
 
   /** Writer 2: the pushed blob, without which the SECOND push of a lane reads as stale. */
@@ -129,8 +149,7 @@ export class PrincipalLaneStore {
     credentialsJson: string,
     oauthAccount?: unknown
   ): ClaudeLaneCredentialWatermark {
-    this.reauthRequiredLanes.delete(laneId)
-    return this.writeWatermark(laneId, credentialsJson, oauthAccount)
+    return this.writeWatermark(laneId, credentialsJson, oauthAccount, false)
   }
 
   /**
@@ -143,16 +162,14 @@ export class PrincipalLaneStore {
    * exactly what recovery is.
    */
   recordRotationReceipt(receipt: LaneRotationReceipt): void {
-    if (receipt.cause === 'foreign-rotation') {
-      this.reauthRequiredLanes.add(receipt.laneId)
-    } else {
-      this.reauthRequiredLanes.delete(receipt.laneId)
-    }
     this.putWatermarkRow({
       laneId: receipt.laneId,
       identity: receipt.identity,
       refreshTokenSha256: receipt.refreshTokenSha256,
-      expiresAt: receipt.expiresAt
+      expiresAt: receipt.expiresAt,
+      // A `host` or `cli-observed` cause asserts the lane HOLDS this credential, so it lifts the
+      // hold; a foreign rotation asserts the opposite.
+      reauthRequired: receipt.cause === 'foreign-rotation'
     })
     for (const listener of this.receiptListeners) {
       listener(receipt)
@@ -171,8 +188,7 @@ export class PrincipalLaneStore {
     rotatedCredentialsJson: string,
     oauthAccount?: unknown
   ): void {
-    this.writeWatermark(laneId, rotatedCredentialsJson, oauthAccount)
-    this.reauthRequiredLanes.add(laneId)
+    this.writeWatermark(laneId, rotatedCredentialsJson, oauthAccount, true)
   }
 
   onRotationReceipt(listener: (receipt: LaneRotationReceipt) => void): () => void {
@@ -221,13 +237,15 @@ export class PrincipalLaneStore {
   private writeWatermark(
     laneId: string,
     credentialsJson: string,
-    oauthAccount: unknown
+    oauthAccount: unknown,
+    reauthRequired: boolean
   ): ClaudeLaneCredentialWatermark {
     const row: ClaudeLaneCredentialWatermark = {
       laneId,
       identity: resolveLaneIdentity(credentialsJson, oauthAccount),
       refreshTokenSha256: readRefreshTokenSha256(credentialsJson),
-      expiresAt: readFreshnessFromCredentials(credentialsJson)
+      expiresAt: readFreshnessFromCredentials(credentialsJson),
+      reauthRequired
     }
     this.putWatermarkRow(row)
     return row
@@ -238,6 +256,16 @@ export class PrincipalLaneStore {
       .getClaudeLaneCredentialWatermarks()
       .filter((existing) => existing.laneId !== row.laneId)
     this.persistence.setClaudeLaneCredentialWatermarks([...rows, row])
+  }
+}
+
+/** A hold recorded for a lane that has no watermark yet: it matches no `basedOn` at all. */
+function emptyWatermarkRow(laneId: string): ClaudeLaneCredentialWatermark {
+  return {
+    laneId,
+    identity: { accountUuid: null, email: null, organizationUuid: null },
+    refreshTokenSha256: null,
+    expiresAt: null
   }
 }
 

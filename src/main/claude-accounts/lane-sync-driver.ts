@@ -100,7 +100,7 @@ export class LaneSyncDriver {
       store.recordSyncedLaneCredentials(laneId, credentialsJson, oauthAccount)
     }
     authState.getState(laneId, accountUuid).lastWrittenCredentialsJson = credentialsJson
-    if (!isRotatingTrigger(trigger)) {
+    if (!isRotatingTrigger(trigger) || this.isHeldOnASpentBlob(laneId, observedForeignChange)) {
       return {
         laneId,
         trigger,
@@ -124,6 +124,18 @@ export class LaneSyncDriver {
       rotated: outcome === 'rotated',
       rotationLost: outcome === 'lane-write-lost'
     }
+  }
+
+  /**
+   * Whether rotating would only re-spend a token the host already knows is gone.
+   *
+   * A lane held for reauth whose file has not moved since we last read it holds exactly the copy
+   * the last rotation spent, so every launch would buy a network round trip and a refusal with no
+   * path out. A file that HAS moved may carry a token the lane's own CLI just minted, so that arm
+   * still rotates.
+   */
+  private isHeldOnASpentBlob(laneId: string, observedForeignChange: boolean): boolean {
+    return !observedForeignChange && this.options.store.isHeldForReauth(laneId)
   }
 
   /**

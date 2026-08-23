@@ -13,6 +13,14 @@ export type ClaudeLaneCredentialWatermark = {
   identity: ClaudeCredentialIdentity
   refreshTokenSha256: string | null
   expiresAt: number | null
+  /**
+   * The lane's own copy can no longer refresh, so only a fresh login recovers it.
+   *
+   * It lives on the persisted row rather than in memory because it is the half that must outlive
+   * a restart: the sha it holds is the ROTATED one, and a hold that evaporated would let
+   * `syncLane` walk the watermark back onto the spent blob still sitting in the lane file.
+   */
+  reauthRequired?: boolean
 }
 
 // Why: bounds a corrupt/bloated persisted list — one row per provisioned lane, and a host has few.
@@ -69,7 +77,9 @@ export function normalizeClaudeLaneWatermark(value: unknown): ClaudeLaneCredenti
     expiresAt:
       typeof record.expiresAt === 'number' && Number.isFinite(record.expiresAt)
         ? record.expiresAt
-        : null
+        : null,
+    // Anything but a literal `true` is no hold: a corrupt row must not strand a lane.
+    reauthRequired: record.reauthRequired === true
   }
 }
 

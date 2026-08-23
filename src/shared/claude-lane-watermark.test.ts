@@ -19,9 +19,20 @@ describe('claude lane watermark normalization', () => {
         laneId: 'lane-1',
         identity: { accountUuid: 'acc', email: 'a@b.c', organizationUuid: 'org' },
         refreshTokenSha256: sha,
-        expiresAt: 10
+        expiresAt: 10,
+        // Absent on an old row and on every row written before the hold existed: no hold.
+        reauthRequired: false
       }
     ])
+  })
+
+  it('reads the reauth hold only from a literal true, so a corrupt row strands no lane', () => {
+    const rows = normalizeClaudeLaneWatermarks([
+      { laneId: 'held', identity: {}, reauthRequired: true },
+      { laneId: 'truthy', identity: {}, reauthRequired: 'yes' },
+      { laneId: 'absent', identity: {} }
+    ])
+    expect(rows.map((row) => row.reauthRequired)).toEqual([true, false, false])
   })
 
   it('drops a sha that is not one rather than comparing a push against it', () => {

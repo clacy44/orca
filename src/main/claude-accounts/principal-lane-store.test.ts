@@ -222,6 +222,55 @@ describe('principal lane store', () => {
     expect(store.getLaneState(LANE_A)).toBe('loaded')
   })
 
+  it('keeps an unwritable rotation held across a restart and never syncs backward onto it', () => {
+    applyPush(LANE_A, credentials('rt-1', 2_000), null)
+    // The rotated blob never reached the lane, so the file still holds the SPENT rt-1.
+    store.recordUnwritableRotation(LANE_A, credentials('rt-rotated', 9_000))
+    expect(store.getLaneState(LANE_A)).toBe('reauth-required')
+
+    // The hold rides the persisted row, so a fresh store over the same rows still sees it.
+    const reloaded = new PrincipalLaneStore(persistence, { lanesRoot, platform: 'linux' })
+    expect(reloaded.getLaneState(LANE_A)).toBe('reauth-required')
+    reloaded.recordSyncedLaneCredentials(LANE_A, credentials('rt-1', 2_000))
+    expect(reloaded.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-rotated'))
+    expect(() =>
+      reloaded.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: credentials('rt-1', 2_000),
+        basedOnRefreshTokenSha256: hashRefreshToken('rt-1')
+      })
+    ).toThrow(/older than what this host already holds/)
+
+    // Negative control: once a push lifts the hold, writer 1 moves the watermark as before.
+    reloaded.recordPushedLaneCredentials(LANE_A, credentials('rt-2', 9_500))
+    expect(reloaded.getLaneState(LANE_A)).toBe('loaded')
+    reloaded.recordSyncedLaneCredentials(LANE_A, credentials('rt-3', 9_600))
+    expect(reloaded.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-3'))
+  })
+
+  it('records a hold for a lane that has no watermark yet, matching no basedOn at all', () => {
+    applyPush(LANE_A, credentials('rt-1', 2_000), null)
+    persistence.rows = []
+    store.markReauthRequired(LANE_A)
+    expect(store.getLaneState(LANE_A)).toBe('reauth-required')
+    expect(() =>
+      store.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: credentials('rt-1', 2_000),
+        basedOnRefreshTokenSha256: null
+      })
+    ).toThrow(/older than what this host already holds/)
+    // A fresh login still recovers it: the hold row carries no expiry to be older than.
+    expect(() =>
+      store.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: credentials('rt-2', 9_000),
+        basedOnRefreshTokenSha256: null,
+        reauthenticated: true
+      })
+    ).not.toThrow()
+  })
+
   it('stores a sha and an identity, never the refresh token itself', () => {
     applyPush(LANE_A, credentials('super-secret-refresh', 2_000), null)
     expect(JSON.stringify(persistence.rows)).not.toContain('super-secret-refresh')

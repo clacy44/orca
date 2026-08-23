@@ -170,6 +170,34 @@ describe('lane sync driver', () => {
     ).toThrow(/older than what this host already holds/)
   })
 
+  it('never lowers the watermark back onto the spent token of an unwritable rotation', async () => {
+    putLaneFiles('rt-1')
+    store.recordPushedLaneCredentials(LANE_A, credentials('rt-1'), { accountUuid: ACCOUNT_X })
+    receipts = []
+    // A live `claude` holds the target open past the retry arm: unlike the wiped-lane case above,
+    // the lane DIRECTORY survives, so every later sync still reads the spent blob off disk.
+    vi.spyOn(store.writer, 'writeCredentials').mockRejectedValueOnce(new Error('EPERM'))
+    const lost = await driver.syncLane(LANE_A, 'launch')
+    expect(lost.rotationLost).toBe(true)
+    expect(store.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-rotated'))
+
+    // rt-1 was spent by the round trip above, so no later refresh of it can succeed.
+    refresh.mockResolvedValue(null)
+    // The regression: writer 1 must not re-bless the blob the host already knows is spent.
+    const second = await driver.syncLane(LANE_A, 'launch')
+    expect(store.getWatermark(LANE_A)?.refreshTokenSha256).toBe(hashRefreshToken('rt-rotated'))
+    expect(second.laneState).toBe('reauth-required')
+    // And nothing spends another round trip on a token that is already gone.
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(() =>
+      store.assertPushIsFresh({
+        laneId: LANE_A,
+        credentialsJson: credentials('rt-1'),
+        basedOnRefreshTokenSha256: hashRefreshToken('rt-1')
+      })
+    ).toThrow(/older than what this host already holds/)
+  })
+
   it('keeps a transient refresh failure out of the reauth-required state', async () => {
     putLaneFiles('rt-1')
     store.recordPushedLaneCredentials(LANE_A, credentials('rt-1'), { accountUuid: ACCOUNT_X })
