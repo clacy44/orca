@@ -1,0 +1,185 @@
+import { buildAgentNameRe } from '../../shared/agent-name-token-match'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import { setEnvKeyCollapsed } from '../../shared/lane-env-key-case'
+import type { TuiAgent } from '../../shared/tui-agent'
+import {
+  assertLaneResumePathsContained,
+  sanitizeLaneLaunchCommand,
+  sanitizeLaneLaunchEnv,
+  type LaneLaunchEnvResult,
+  type LaneLaunchRefusal
+} from './lane-launch-input-sanitizer'
+
+/** Just enough of `SleepingAgentLaunchConfig` for the computation; callers keep their own type. */
+export type LaneLaunchConfigInput = {
+  agentCommand?: string
+  agentArgs?: string
+  agentEnv?: Record<string, string>
+  ompResumeFilePath?: string
+}
+
+/** Just enough of `PtySpawnOptions`; the anchor hands its own object through unchanged. */
+export type LaneLaunchSpawnShape = {
+  env?: Record<string, string>
+  envToDelete?: string[]
+  command?: string
+  launchAgent?: TuiAgent
+  credentialLane?: { principalId: string }
+}
+
+type LaneLaunchInputs<TLaunchConfig extends LaneLaunchConfigInput> = {
+  launchConfig?: TLaunchConfig | null
+  transcriptPath?: string | null
+  connectionId?: string | null
+  platform?: NodeJS.Platform
+}
+
+/**
+ * The pane's lane as the spawn anchor can see it: the row's own value plus the lane-owned
+ * inputs the launch is computed FROM. Nothing on it comes from the launch request.
+ */
+export type PaneLaneLaunch<TLaunchConfig extends LaneLaunchConfigInput = LaneLaunchConfigInput> =
+  | ({ kind: 'shared' } & LaneLaunchInputs<TLaunchConfig>)
+  | ({
+      kind: 'principal'
+      principalId: string
+      /** The lane preparation's patch. Absent means the lane is not loaded — a refusal. */
+      envPatch?: Record<string, string> | null
+      /** The lane directory and the workspace: the only roots a resume path may sit under. */
+      containmentRoots?: readonly string[]
+    } & LaneLaunchInputs<TLaunchConfig>)
+
+export type LaneLaunchComputation<
+  TSpawn extends LaneLaunchSpawnShape,
+  TLaunchConfig extends LaneLaunchConfigInput
+> = {
+  spawnOptions: TSpawn
+  launchConfig: TLaunchConfig | null | undefined
+}
+
+const OPENCLAUDE_COMMAND_RE = buildAgentNameRe('openclaude')
+
+/**
+ * The closure principle's single computation point (S9 §2a, §2 preamble).
+ *
+ * A lane launch is *computed*, not customized: every client- and settings-supplied launch input
+ * is an input to this function, and the lane's own env is written LAST so nothing host-side can
+ * precede it. Runs at the spawn anchor, on every edge, over the lane the PANE record carries —
+ * never over a lane named by the request.
+ *
+ * A shared-lane pane passes through untouched: guard 3 in `pty.ts` is what covers it, and guard 3
+ * is armed in the zero-lane state where this function has nothing to compute.
+ */
+export function computeLaneLaunch<
+  TSpawn extends LaneLaunchSpawnShape,
+  TLaunchConfig extends LaneLaunchConfigInput
+>(
+  paneLane: PaneLaneLaunch<TLaunchConfig>,
+  spawnOptions: TSpawn
+): LaneLaunchComputation<TSpawn, TLaunchConfig> {
+  if (paneLane.kind === 'shared') {
+    return { spawnOptions, launchConfig: paneLane.launchConfig }
+  }
+  const platform = paneLane.platform ?? process.platform
+  assertLanePaneIsLocal(paneLane.connectionId)
+  assertLaneRuntimeSupported(spawnOptions.command, spawnOptions.launchAgent)
+  assertLaneLoaded(paneLane.envPatch)
+  const env = unrefused(
+    sanitizeLaneLaunchEnv({
+      env: spawnOptions.env,
+      envToDelete: spawnOptions.envToDelete,
+      agentEnv: paneLane.launchConfig?.agentEnv,
+      platform
+    })
+  )
+  unrefused(
+    sanitizeLaneLaunchCommand({
+      agentCommand: paneLane.launchConfig?.agentCommand,
+      agentArgs: paneLane.launchConfig?.agentArgs,
+      platform
+    })
+  )
+  unrefused(
+    assertLaneResumePathsContained(
+      {
+        ompResumeFilePath: paneLane.launchConfig?.ompResumeFilePath,
+        transcriptPath: paneLane.transcriptPath
+      },
+      paneLane.containmentRoots ?? []
+    )
+  )
+  // Why last: the two-part post-anchor invariant rests on the lane keys being the final host-side
+  // write, so a client value that survived every scrub above is still overwritten here.
+  const laneEnv: Record<string, string> = { ...(env.env ?? spawnOptions.env) }
+  for (const [key, value] of Object.entries(paneLane.envPatch ?? {})) {
+    setEnvKeyCollapsed(laneEnv, key, value, platform)
+  }
+  return {
+    spawnOptions: {
+      ...spawnOptions,
+      env: laneEnv,
+      ...(env.envToDelete ? { envToDelete: env.envToDelete } : {}),
+      credentialLane: { principalId: paneLane.principalId }
+    },
+    launchConfig: paneLane.launchConfig
+      ? { ...paneLane.launchConfig, ...(env.agentEnv ? { agentEnv: env.agentEnv } : {}) }
+      : paneLane.launchConfig
+  }
+}
+
+/** The lane preparation must have produced a config dir, or the launch fails closed (§2f). */
+function assertLaneLoaded(envPatch: Record<string, string> | null | undefined): void {
+  if (!envPatch?.CLAUDE_CONFIG_DIR) {
+    throw new ClaudeLaneRefusal(
+      'terminal.lane_not_loaded',
+      'Your Claude account is not loaded on this host right now, so this terminal cannot start in your credential lane. Reconnect the device that pushes your account, then try again.'
+    )
+  }
+}
+
+/**
+ * `connectionId` is an EXPLICIT condition, not the incidental one `isClaudeLaunch` used to give.
+ *
+ * Before the decoupling an SSH pane never reached a Claude preparation because the command
+ * predicate already required `!connectionId`; a lane pane reaches one whatever it runs, so the
+ * exclusion has to be stated or a host lane path crosses to another machine (§2a).
+ */
+function assertLanePaneIsLocal(connectionId: string | null | undefined): void {
+  if (connectionId) {
+    throw new ClaudeLaneRefusal(
+      'terminal.lane_remote_pane',
+      'This terminal runs on a remote host over SSH, so Orca will not start it in your personal Claude credential lane — that lane exists only on this machine. Open the terminal locally, or use the remote host’s own Claude account.'
+    )
+  }
+}
+
+/**
+ * OpenClaude, fail closed (§2a consequence 3).
+ *
+ * Whether the binary honors `CLAUDE_CONFIG_DIR` is unverified, and the tree carries no config-dir
+ * env for it at all — so a lane pane running it would share one credential store across
+ * principals while presence still rendered the row as this person's lane.
+ */
+function assertLaneRuntimeSupported(command: string | undefined, launchAgent?: TuiAgent): void {
+  if (launchAgent === 'openclaude' || (command && OPENCLAUDE_COMMAND_RE.test(command))) {
+    throw new ClaudeLaneRefusal(
+      'terminal.lane_agent_unsupported',
+      'OpenClaude cannot be isolated to a personal Claude credential lane on this host, so Orca did not start it. Launch OpenClaude from a terminal that is not pinned to a lane, or use Claude Code instead.'
+    )
+  }
+}
+
+type LaneLaunchGuardResult =
+  | LaneLaunchEnvResult
+  | { ok: true }
+  | { ok: false; refusal: LaneLaunchRefusal }
+
+/** One throw shape for every guard-1/guard-2 refusal, so callers catch one class. */
+function unrefused<TResult extends LaneLaunchGuardResult>(
+  result: TResult
+): Extract<TResult, { ok: true }> {
+  if (!result.ok) {
+    throw new ClaudeLaneRefusal(result.refusal.code, result.refusal.message)
+  }
+  return result as Extract<TResult, { ok: true }>
+}
