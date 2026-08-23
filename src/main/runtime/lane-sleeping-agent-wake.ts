@@ -1,3 +1,4 @@
+import type { RuntimeEnsureAgentSessionRequest } from '../../shared/agent-session-host-authority'
 import type { SleepingAgentSessionRecord } from '../../shared/agent-session-resume'
 import type { PaneCredentialLane } from './pane-credential-lane-registry'
 
@@ -50,4 +51,83 @@ export function partitionLaneBoundSleepingRecords(input: {
     }
   }
   return partition
+}
+
+/**
+ * The wake's OWNER half: the request that resumes one lane-bound record (S9 §2a).
+ *
+ * `ensureAgentSession` is the host create path — it resolves the caller's own lane, refuses a
+ * lane launch whose args would repoint credential resolution, drops the host-wide
+ * `agentDefaultArgs` / `agentDefaultEnv` / `agentCmdOverrides` a peer may have written, and
+ * reaches `createTerminal` with the lane, which mints the paneKey and binds it before the spawn.
+ * The renderer builder is never asked, so no second tab appears beside the resumed one.
+ */
+export function buildLaneWakeAgentSessionRequest(
+  record: SleepingAgentSessionRecord,
+  worktreeId: string
+): RuntimeEnsureAgentSessionRequest {
+  return {
+    kind: 'explicit',
+    worktree: `id:${worktreeId}`,
+    agent: record.agent,
+    providerSession: record.providerSession,
+    ...(record.launchConfig ? { agentArgs: record.launchConfig.agentArgs } : {}),
+    ...(record.launchConfig?.ompResumeFilePath
+      ? { ompResumeFilePath: record.launchConfig.ompResumeFilePath }
+      : {}),
+    presentation: 'background'
+  }
+}
+
+export type LaneSleepingWakeResumeDeps = {
+  resume(request: RuntimeEnsureAgentSessionRequest): Promise<unknown>
+  /** Consumed: the host resumed this record, so the renderer must not wake it again. */
+  clearRecord(paneKey: string): void
+  flush(): Promise<void>
+}
+
+/** Resumes each owned record through the host path; returns how many actually came back. */
+export async function resumeLaneBoundSleepingRecords(
+  records: readonly SleepingAgentSessionRecord[],
+  worktreeId: string,
+  deps: LaneSleepingWakeResumeDeps
+): Promise<number> {
+  let resumed = 0
+  for (const record of records) {
+    try {
+      await deps.resume(buildLaneWakeAgentSessionRequest(record, worktreeId))
+    } catch (error) {
+      // Why swallowed per record: one unresumable agent must not withhold the others, and the
+      // record stays asleep so the next activate retries it.
+      console.warn('[lane-wake] failed to resume a lane-bound agent session:', error)
+      continue
+    }
+    deps.clearRecord(record.paneKey)
+    resumed += 1
+  }
+  if (resumed > 0) {
+    await deps.flush()
+  }
+  return resumed
+}
+
+/**
+ * The record map without one pane's entry, or `null` when there is nothing to clear.
+ *
+ * `null` rather than an unchanged copy so the caller writes the session back only on a real
+ * change — and the worktree equality is checked here because a stale record naming another
+ * worktree must not be dropped by this worktree's wake.
+ */
+export function withoutSleepingAgentRecord(
+  records: Readonly<Record<string, SleepingAgentSessionRecord>> | undefined,
+  paneKey: string,
+  belongsToWorktree: (record: SleepingAgentSessionRecord) => boolean
+): Record<string, SleepingAgentSessionRecord> | null {
+  const record = records?.[paneKey]
+  if (!records || !record || !belongsToWorktree(record)) {
+    return null
+  }
+  const next = { ...records }
+  delete next[paneKey]
+  return next
 }

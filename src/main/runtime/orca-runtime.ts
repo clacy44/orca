@@ -1144,6 +1144,10 @@ import { createNestedRepoImportTargetResolver } from '../project-groups/nested-r
 import type { PaneCredentialLane, PaneCredentialLaneLookup } from './pane-credential-lane-registry'
 import { PaneLaneAuthority } from './pane-lane-authority'
 import {
+  resumeLaneBoundSleepingRecords,
+  withoutSleepingAgentRecord
+} from './lane-sleeping-agent-wake'
+import {
   SHARED_CREDENTIAL_LANE,
   assertCredentialLaneSupplied,
   type PrincipalLookup,
@@ -22105,15 +22109,7 @@ export class OrcaRuntimeService {
     )
   }
 
-  /**
-   * The wake's owner half: a lane record resumes through the HOST create path, for its owner only.
-   *
-   * `ensureAgentSession` is that path — it resolves the caller's own lane, refuses a lane launch
-   * whose args would repoint credential resolution, drops the host-wide `agentDefaultArgs` /
-   * `agentDefaultEnv` / `agentCmdOverrides` a peer may have written, and reaches `createTerminal`
-   * with the lane, which mints the paneKey and binds it before the spawn. The renderer builder is
-   * never asked, so no second tab appears beside the resumed one.
-   */
+  /** The wake's owner half: lane records resume through the HOST create path (S9 §2a). */
   private async resumeOwnedLaneSleepingAgents(
     repo: Repo,
     worktreeId: string,
@@ -22125,35 +22121,12 @@ export class OrcaRuntimeService {
       worktreeId,
       pairedDeviceId
     )
-    let resumed = 0
-    for (const record of partition.ownedRecords) {
-      try {
-        await this.ensureAgentSession(
-          {
-            kind: 'explicit',
-            worktree: `id:${worktreeId}`,
-            agent: record.agent,
-            providerSession: record.providerSession,
-            ...(record.launchConfig ? { agentArgs: record.launchConfig.agentArgs } : {}),
-            ...(record.launchConfig?.ompResumeFilePath
-              ? { ompResumeFilePath: record.launchConfig.ompResumeFilePath }
-              : {}),
-            presentation: 'background'
-          },
-          { ...(pairedDeviceId ? { pairedDeviceId } : {}) }
-        )
-      } catch (error) {
-        // Why swallowed per record: one unresumable agent must not withhold the others, and the
-        // record stays asleep so the next activate retries it.
-        console.warn('[lane-wake] failed to resume a lane-bound agent session:', error)
-        continue
-      }
-      this.clearSleepingAgentRecord(hostId, worktreeId, record.paneKey)
-      resumed += 1
-    }
-    if (resumed > 0) {
-      await this.flushWorkspaceSessionOrThrowAsync()
-    }
+    const resumed = await resumeLaneBoundSleepingRecords(partition.ownedRecords, worktreeId, {
+      resume: (request) =>
+        this.ensureAgentSession(request, { ...(pairedDeviceId ? { pairedDeviceId } : {}) }),
+      clearRecord: (paneKey) => this.clearSleepingAgentRecord(hostId, worktreeId, paneKey),
+      flush: () => this.flushWorkspaceSessionOrThrowAsync()
+    })
     return {
       withheldPaneKeys: partition.withheldPaneKeys,
       refusedForeign: partition.refusedForeign,
@@ -22161,17 +22134,17 @@ export class OrcaRuntimeService {
     }
   }
 
-  /** Consumed: the host resumed this record, so the renderer must not wake it again. */
   private clearSleepingAgentRecord(hostId: string, worktreeId: string, paneKey: string): void {
-    const store = this.store
-    const session = store?.getWorkspaceSession?.(hostId)
-    const record = session?.sleepingAgentSessionsByPaneKey?.[paneKey]
-    if (!store || !session || !record || !runtimeWorktreeIdsEqual(record.worktreeId, worktreeId)) {
-      return
+    const session = this.store?.getWorkspaceSession?.(hostId)
+    const next = withoutSleepingAgentRecord(session?.sleepingAgentSessionsByPaneKey, paneKey, (r) =>
+      runtimeWorktreeIdsEqual(r.worktreeId, worktreeId)
+    )
+    if (session && next) {
+      this.store?.setWorkspaceSession?.(
+        { ...session, sleepingAgentSessionsByPaneKey: next },
+        hostId
+      )
     }
-    const sleepingAgentSessionsByPaneKey = { ...session.sleepingAgentSessionsByPaneKey }
-    delete sleepingAgentSessionsByPaneKey[paneKey]
-    store.setWorkspaceSession?.({ ...session, sleepingAgentSessionsByPaneKey }, hostId)
   }
 
   async sleepManagedWorktree(worktreeSelector: string): Promise<{ worktreeId: string }> {
