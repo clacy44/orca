@@ -28,6 +28,7 @@ import {
   writeActiveClaudeKeychainCredentialsForRuntime,
   writeManagedClaudeKeychainCredentials
 } from './keychain'
+import { prepareLaneLaunch } from './principal-lane-preparation'
 import {
   getSelectedClaudeAccountIdForTarget,
   normalizeClaudeAccountSelectionTarget,
@@ -111,11 +112,12 @@ export class ClaudeRuntimeAuthService {
   }
 
   async prepareForClaudeLaunch(
-    target?: ClaudeAccountSelectionTarget
+    target?: ClaudeAccountSelectionTarget,
+    lanePrincipalId?: string
   ): Promise<ClaudeRuntimeAuthPreparation> {
     const effectiveTarget = target ?? this.getDefaultAccountSelectionTarget()
     await this.syncForCurrentSelection(effectiveTarget)
-    return this.getPreparation(effectiveTarget)
+    return this.getPreparation(effectiveTarget, lanePrincipalId)
   }
 
   async prepareForRateLimitFetch(
@@ -601,7 +603,10 @@ export class ClaudeRuntimeAuthService {
     return candidates
   }
 
-  private getPreparation(target?: ClaudeAccountSelectionTarget): ClaudeRuntimeAuthPreparation {
+  private getPreparation(
+    target?: ClaudeAccountSelectionTarget,
+    lanePrincipalId?: string
+  ): ClaudeRuntimeAuthPreparation {
     const settings = this.store.getSettings()
     const paths = this.pathResolver.getRuntimePaths()
     const normalizedTarget = this.resolveWslDefaultTarget(
@@ -651,6 +656,11 @@ export class ClaudeRuntimeAuthService {
         stripAuthEnv: true,
         provenance: `wsl:${normalizeClaudeAccountSelectionTarget(normalizedTarget).wslDistro ?? '__default__'}:system`
       }
+    }
+    // Why after the WSL classifier and before the host branch: a lane path is a host-side path, so
+    // handing it to a Linux-side `claude` would create a fresh empty config dir at a login prompt.
+    if (lanePrincipalId) {
+      return prepareLaneLaunch({ principalId: lanePrincipalId })
     }
     return {
       configDir: paths.configDir,

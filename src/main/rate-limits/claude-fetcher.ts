@@ -488,7 +488,9 @@ async function fetchClaudeUsageViaCli(input: {
   )
 }
 
-function isManagedClaudeAuth(authPreparation: ClaudeRuntimeAuthPreparation | undefined): boolean {
+export function isManagedClaudeAuth(
+  authPreparation: ClaudeRuntimeAuthPreparation | undefined
+): boolean {
   return authPreparation?.provenance.startsWith('managed:') === true
 }
 

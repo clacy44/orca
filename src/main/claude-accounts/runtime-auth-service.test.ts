@@ -3930,3 +3930,119 @@ describe('ClaudeRuntimeAuthService', () => {
     expect(readManagedCredentialsForTest('account-1', managedAuthPath1)).toBe(runtimeRotated)
   })
 })
+
+describe('ClaudeRuntimeAuthService lane preparation', () => {
+  const PRINCIPAL = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+
+  beforeEach(() => {
+    setPlatform('linux')
+    vi.resetModules()
+    vi.clearAllMocks()
+    testState.userDataDir = mkdtempSync(join(tmpdir(), 'orca-claude-lane-runtime-'))
+    testState.fakeHomeDir = mkdtempSync(join(tmpdir(), 'orca-claude-lane-home-'))
+    mkdirSync(join(testState.fakeHomeDir, '.claude'), { recursive: true })
+  })
+
+  afterEach(() => {
+    if (originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
+    rmSync(testState.userDataDir, { recursive: true, force: true })
+    rmSync(testState.fakeHomeDir, { recursive: true, force: true })
+  })
+
+  async function provisionLoadedLane(): Promise<string> {
+    const { provisionPrincipalLane } = await import('./principal-credential-lane')
+    const lane = provisionPrincipalLane(PRINCIPAL, { platform: 'linux' })
+    writeFileSync(
+      join(lane.laneDir, '.credentials.json'),
+      createClaudeCredentialsJson('lane@example.com', 'lane-token'),
+      'utf-8'
+    )
+    return lane.laneDir
+  }
+
+  it('returns the lane config dir, envPatch, stripAuthEnv and an unmanaged provenance', async () => {
+    const laneDir = await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch(undefined, PRINCIPAL)
+
+    expect(preparation.configDir).toBe(laneDir)
+    expect(preparation.envPatch).toEqual({ CLAUDE_CONFIG_DIR: laneDir })
+    expect(preparation.stripAuthEnv).toBe(true)
+    expect(preparation.runtime).toBe('host')
+    expect(typeof preparation.managedRefreshDeferredByLivePty).toBe('boolean')
+    expect(preparation.provenance).toMatch(/^lane:[0-9a-f]{32}$/)
+    expect(preparation.provenance).not.toContain(PRINCIPAL)
+  })
+
+  it('mints a provenance the managed-auth predicate refuses', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const { isManagedClaudeAuth } = await import('../rate-limits/claude-fetcher')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch(undefined, PRINCIPAL)
+
+    // Why: `isManagedClaudeAuth` gates CLI usage supplementation, which §2k scopes to the shared
+    // lane — lane usage arrives by the statusline path instead.
+    expect(isManagedClaudeAuth(preparation)).toBe(false)
+  })
+
+  it('fails a lane launch closed when the lane holds no credential', async () => {
+    const { provisionPrincipalLane } = await import('./principal-credential-lane')
+    provisionPrincipalLane(PRINCIPAL, { platform: 'linux' })
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    await expect(service.prepareForClaudeLaunch(undefined, PRINCIPAL)).rejects.toThrow(
+      /not loaded on this host/
+    )
+  })
+
+  it('fails a lane launch closed when the lane was never provisioned', async () => {
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    await expect(service.prepareForClaudeLaunch(undefined, PRINCIPAL)).rejects.toThrow(
+      /not set up on this host/
+    )
+  })
+
+  it('leaves a WSL target on the WSL branch even for a lane-holding caller', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch(
+      { runtime: 'wsl', wslDistro: 'Ubuntu' },
+      PRINCIPAL
+    )
+
+    expect(preparation.runtime).toBe('wsl')
+    expect(preparation.provenance).not.toMatch(/^lane:/)
+    expect(preparation.envPatch.CLAUDE_CONFIG_DIR).not.toBe(
+      join(testState.userDataDir, 'claude-lanes', PRINCIPAL)
+    )
+  })
+
+  it('leaves the host branch unchanged when no lane is named', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch()
+
+    expect(preparation.configDir).toBe(join(testState.fakeHomeDir, '.claude'))
+    expect(preparation.provenance).toBe('system')
+    expect(preparation.stripAuthEnv).toBe(false)
+  })
+})
