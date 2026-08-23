@@ -1139,18 +1139,15 @@ import {
   resolveNestedRepoSelection
 } from '../project-groups/nested-repo-import'
 import { createNestedRepoImportTargetResolver } from '../project-groups/nested-repo-import-target'
-import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import {
-  PaneCredentialLaneRegistry,
   assertPaneAdoptableByCaller,
   type PaneCredentialLane,
   type PaneCredentialLaneLookup
 } from './pane-credential-lane-registry'
-import { resolveInheritedLane } from './terminal-inherited-lane-authority'
+import { PaneLaneAuthority } from './pane-lane-authority'
 import {
   SHARED_CREDENTIAL_LANE,
   assertCredentialLaneSupplied,
-  resolveCallerCredentialLane,
   type PrincipalLookup,
   type TerminalCredentialLaneOption
 } from './terminal-credential-lane-resolution'
@@ -2840,9 +2837,22 @@ export class OrcaRuntimeService {
   private readonly startedAt = Date.now()
   private readonly store: RuntimeStore | null
   // Why: the lane is a property of the pane record, bound at the paneKey mint (S9 §2a).
-  private readonly paneCredentialLanes = new PaneCredentialLaneRegistry()
-  private paneCredentialLanesRehydrated = false
-  private principalLaneLookup: PrincipalLookup | null = null
+  private readonly paneLanes = new PaneLaneAuthority({
+    rendererLeafExists: (tabId, leafId) => this.leaves.has(this.getLeafKey(tabId, leafId)),
+    livePtyPaneKeys: () =>
+      Array.from(this.ptysById.values(), (pty) => pty.paneKey).filter(
+        (paneKey): paneKey is string => typeof paneKey === 'string'
+      ),
+    workspaceSessionOf: (worktreeId) => this.getWorkspaceSessionForWorktree(worktreeId),
+    paneOfPty: (ptyId) => {
+      const pty = this.ptysById.get(ptyId)
+      return pty?.paneKey
+        ? { worktreeId: pty.worktreeId, paneKey: pty.paneKey, connectionId: pty.connectionId }
+        : null
+    },
+    readPersistedLanes: () => this.store?.getPaneCredentialLanes?.() ?? null,
+    persistLane: (row) => this.store?.persistPaneCredentialLane?.(row)
+  })
   private managedHookReconciliationGeneration = 0
   private managedHookReconciliationTail: Promise<void> = Promise.resolve()
   private readonly orchestrationEnvironmentTransport: OrchestrationEnvironmentTransport | null
@@ -10084,16 +10094,7 @@ export class OrcaRuntimeService {
         ? makePaneKey(binding.tabId, binding.leafId)
         : null
     if (paneKey && binding) {
-      // Why: a pane minted by the renderer or a relay reattach is an anonymous local create, so it
-      // states the shared lane rather than staying unattributed. Write-once, so a pane the funnel
-      // already bound to a principal — and every rehydrated row — keeps its lane (§2a).
-      this.bindPaneCredentialLane(
-        worktreeId,
-        binding.tabId,
-        binding.leafId,
-        SHARED_CREDENTIAL_LANE,
-        connectionId
-      )
+      this.paneLanes.bindMintedPane(worktreeId, binding.tabId, binding.leafId, connectionId)
     }
     const pty = this.recordPtyWorktree(ptyId, worktreeId, {
       connected: true,
@@ -22052,21 +22053,12 @@ export class OrcaRuntimeService {
     )
   }
 
-  /**
-   * Does this worktree hold a slept pane bound to a credential lane?
-   *
-   * The record's lane is the *pane's* row, read by the same paneKey the record carries — one
-   * authority, and it survives a restart with the binding row (§2a, §2h).
-   */
-  private hasLaneBoundSleepingRecords(repo: Repo, worktreeId: string): boolean {
-    this.ensurePaneCredentialLanesRehydrated()
-    const records =
+  /** The slept panes of this worktree the renderer wake may not mint a fresh pane for (§2a). */
+  private laneBoundSleepingPaneKeys(repo: Repo, worktreeId: string): string[] {
+    return this.paneLanes.laneBoundSleepingPaneKeys(
       this.store?.getWorkspaceSession?.(getRepoExecutionHostId(repo))
-        .sleepingAgentSessionsByPaneKey ?? {}
-    return Object.values(records).some(
-      (record) =>
-        record.worktreeId === worktreeId &&
-        this.paneCredentialLanes.laneOf(record.worktreeId, record.paneKey)?.kind === 'principal'
+        .sleepingAgentSessionsByPaneKey ?? {},
+      worktreeId
     )
   }
 
@@ -22148,7 +22140,7 @@ export class OrcaRuntimeService {
       // unaffected. Headless serve has no renderer to wake anything, so report
       // that explicitly instead of letting mobile assume the agents resumed.
       if (opts.clientKind === 'mobile') {
-        if (this.hasLaneBoundSleepingRecords(repo, worktree.id)) {
+        if (this.laneBoundSleepingPaneKeys(repo, worktree.id).length > 0) {
           // Why: the renderer wake does not reuse the slept pane — it mints a fresh, unbound one,
           // which under §2a resolves to the shared `~/.claude`. A lane record is therefore never
           // handed to it; it is resumed only through the host create path, for its owner (§2a).
@@ -26457,34 +26449,11 @@ export class OrcaRuntimeService {
 
   /** Lanes reach the funnel only through the host consent surface; with no lookup all is shared. */
   setPrincipalLaneLookup(lookup: PrincipalLookup | null): void {
-    this.principalLaneLookup = lookup
-    this.paneCredentialLanesRehydrated = false
+    this.paneLanes.setPrincipalLookup(lookup)
   }
 
   resolveCallerCredentialLane(pairedDeviceId?: string | null): PaneCredentialLane {
-    return resolveCallerCredentialLane(pairedDeviceId, this.principalLaneLookup)
-  }
-
-  private ensurePaneCredentialLanesRehydrated(): void {
-    if (this.paneCredentialLanesRehydrated || !this.store?.getPaneCredentialLanes) {
-      return
-    }
-    this.paneCredentialLanesRehydrated = true
-    this.paneCredentialLanes.rehydrate(this.store.getPaneCredentialLanes())
-  }
-
-  private hasKnownPaneSurface(worktreeId: string, tabId: string, leafId: string): boolean {
-    const paneKey = makePaneKey(tabId, leafId)
-    if (this.leaves.has(this.getLeafKey(tabId, leafId))) {
-      return true
-    }
-    for (const pty of this.ptysById.values()) {
-      if (pty.paneKey === paneKey) {
-        return true
-      }
-    }
-    const session = this.getWorkspaceSessionForWorktree(worktreeId)
-    return session?.terminalPtyIncarnationsByPaneKey?.[paneKey] !== undefined
+    return this.paneLanes.callerLane(pairedDeviceId)
   }
 
   paneCredentialLaneLookup(
@@ -26492,45 +26461,7 @@ export class OrcaRuntimeService {
     tabId: string,
     leafId: string
   ): PaneCredentialLaneLookup {
-    this.ensurePaneCredentialLanesRehydrated()
-    return this.paneCredentialLanes.lookup(
-      worktreeId,
-      makePaneKey(tabId, leafId),
-      this.hasKnownPaneSurface(worktreeId, tabId, leafId)
-    )
-  }
-
-  private paneCredentialLaneOfPty(ptyId: string): PaneCredentialLaneLookup {
-    this.ensurePaneCredentialLanesRehydrated()
-    const pty = this.ptysById.get(ptyId)
-    if (!pty?.paneKey) {
-      return { kind: 'unknown' }
-    }
-    return this.paneCredentialLanes.lookup(pty.worktreeId, pty.paneKey, true)
-  }
-
-  /** Write-once: a respawn into a bound pane runs on the row's lane, never the caller's. */
-  private bindPaneCredentialLane(
-    worktreeId: string,
-    tabId: string,
-    leafId: string,
-    lane: PaneCredentialLane,
-    connectionId?: string | null
-  ): PaneCredentialLane {
-    this.ensurePaneCredentialLanesRehydrated()
-    const bound = this.paneCredentialLanes.bind(worktreeId, makePaneKey(tabId, leafId), lane)
-    if (connectionId) {
-      // Why: an SSH/relay pane is `credentialLane: 'remote'` and never lane-bound, and its row
-      // belongs to that host's session partition — do not write it into the local one.
-      return bound
-    }
-    this.store?.persistPaneCredentialLane?.({
-      worktreeId,
-      tabId,
-      leafId,
-      ...(bound.kind === 'principal' ? { principalId: bound.principalId } : {})
-    })
-    return bound
+    return this.paneLanes.lookup(worktreeId, tabId, leafId)
   }
 
   /** The lane a handle-addressed inherit edge resolves to, through the same ownership predicate. */
@@ -26539,42 +26470,19 @@ export class OrcaRuntimeService {
     caller: { pairedDeviceId?: string | null } = {}
   ): PaneCredentialLane {
     const ptyId = this.getLivePtyForHandle(handle)?.pty.ptyId
-    return resolveInheritedLane(ptyId ? this.paneCredentialLaneOfPty(ptyId) : { kind: 'unknown' }, {
-      pairedDeviceId: caller.pairedDeviceId,
-      callerLane: this.resolveCallerCredentialLane(caller.pairedDeviceId)
-    })
+    return this.paneLanes.inheritedLaneOfPty(ptyId ?? '', caller)
   }
 
-  /**
-   * A federated create has no source pane and no `pairedDeviceId`: it binds the link's principal
-   * or fails closed. Never a grant — the union has no such case — and never an implicit shared.
-   */
   resolveFederatedLinkCredentialLane(homePeerFingerprint: string | undefined): PaneCredentialLane {
-    if (!this.principalLaneLookup) {
-      // Why: with no principal registry wired there are no lanes on this host, so `shared` is not
-      // a downgrade — it is the only lane. The refusal below arms with the registry.
-      return SHARED_CREDENTIAL_LANE
-    }
-    const principalId = homePeerFingerprint
-      ? (this.principalLaneLookup?.linkPrincipalOf(homePeerFingerprint) ?? null)
-      : null
-    if (!principalId) {
-      throw new ClaudeLaneRefusal(
-        'terminal.lane_link_unbound',
-        'This federated link is not tied to a person on this host, so Orca will not create a workspace or terminal for it. Approve the link on the host and retry.'
-      )
-    }
-    return { kind: 'principal', principalId }
+    return this.paneLanes.federatedLinkLane(homePeerFingerprint)
   }
 
   private resolveCreateCredentialLane(option: TerminalCredentialLaneOption): PaneCredentialLane {
-    if (option.kind !== 'inherit') {
-      return option
-    }
-    return resolveInheritedLane(this.paneCredentialLaneOfPty(option.fromPtyId), {
-      pairedDeviceId: option.pairedDeviceId,
-      callerLane: this.resolveCallerCredentialLane(option.pairedDeviceId)
-    })
+    return option.kind === 'inherit'
+      ? this.paneLanes.inheritedLaneOfPty(option.fromPtyId, {
+          pairedDeviceId: option.pairedDeviceId
+        })
+      : option
   }
 
   async createTerminal(
@@ -26584,15 +26492,8 @@ export class OrcaRuntimeService {
     const credentialLane = this.resolveCreateCredentialLane(
       assertCredentialLaneSupplied(opts?.credentialLane)
     )
-    // Why: presentation is a client preference; pane binding is authority, so a lane create is
-    // never handed to the renderer to mint (S9 §2a(i)) — and that branch requires a selector.
+    this.paneLanes.assertLaneCreateHasWorkspace(credentialLane, worktreeSelector)
     const laneCreate = credentialLane.kind === 'principal'
-    if (laneCreate && worktreeSelector === undefined) {
-      throw new ClaudeLaneRefusal(
-        'terminal.lane_requires_workspace',
-        'Orca needs to know which workspace this terminal belongs to before it can start it in your Claude credential lane. Open a workspace and try again.'
-      )
-    }
     if (opts.startupAgent && worktreeSelector === undefined) {
       // Why: the launch is resolved against a workspace, so with no selector
       // startupAgent is silently dropped and the terminal is a bare shell.
@@ -26660,7 +26561,7 @@ export class OrcaRuntimeService {
         this.paneCredentialLaneLookup(workspace.id, tabId, leafId),
         credentialLane
       )
-      let paneLane = this.bindPaneCredentialLane(
+      let paneLane = this.paneLanes.bind(
         workspace.id,
         tabId,
         leafId,
@@ -26863,10 +26764,10 @@ export class OrcaRuntimeService {
           leafId = result.stablePaneOwner.leafId
           paneKey = makePaneKey(tabId, leafId)
         }
-        if (this.paneCredentialLanes.laneOf(workspace.id, paneKey) === null) {
+        if (this.paneLanes.laneOf(workspace.id, paneKey) === null) {
           // Why: the spawn can land on a canonical/stable owner pane rather than the minted one;
           // the lane follows the pane the process actually lives in, still write-once.
-          paneLane = this.bindPaneCredentialLane(
+          paneLane = this.paneLanes.bind(
             workspace.id,
             tabId,
             leafId,
@@ -28500,9 +28401,8 @@ export class OrcaRuntimeService {
     const direction = opts.direction ?? 'horizontal'
     // Why: refuse before the spawn, and here rather than in the `terminal.split` handler —
     // `agentTeams.tmuxCompat` reaches this same method (§2a).
-    const inheritedLane = resolveInheritedLane(this.paneCredentialLaneOfPty(pty.ptyId), {
-      pairedDeviceId: opts.pairedDeviceId,
-      callerLane: this.resolveCallerCredentialLane(opts.pairedDeviceId)
+    const inheritedLane = this.paneLanes.inheritedLaneOfPty(pty.ptyId, {
+      pairedDeviceId: opts.pairedDeviceId
     })
     const workspace = await this.resolveTerminalWorkspaceLaunchScope(`id:${pty.worktreeId}`)
     const sourceAuthority = this.resolveTerminalSplitSourceAuthority(
@@ -28519,13 +28419,7 @@ export class OrcaRuntimeService {
     const leafId = randomUUID()
     const preAllocatedHandle = this.createPreAllocatedTerminalHandle()
     const paneKey = makePaneKey(parentTabId, leafId)
-    this.bindPaneCredentialLane(
-      workspace.id,
-      parentTabId,
-      leafId,
-      inheritedLane,
-      workspace.connectionId
-    )
+    this.paneLanes.bind(workspace.id, parentTabId, leafId, inheritedLane, workspace.connectionId)
     const result = await this.ptyController.spawn({
       cols: 120,
       rows: 40,
