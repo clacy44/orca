@@ -4,8 +4,8 @@
  * no lane launch, on either branch of `resolveAgentTerminalCreateOptions` and on the six other
  * builders that hand `createTerminal` a pre-baked launch (S9 §2 rows 13/14/17).
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
 import {
@@ -297,15 +297,37 @@ describe('a peer’s host-wide launch settings against the builders that bypass 
 // The resume and agent-session creates are structurally identical to the four above but need a
 // claim signer and an execution owner to reach; this pins their wiring where it is cheap to state.
 // `laneScopedAgentLaunchInputs` is the only lane-aware reader of the three host-wide launch
-// settings, so a builder that resolves them itself again is a site that lost its lane.
+// settings, so a builder that resolves them itself again is a site that lost its lane. Scanned
+// over all of `runtime/` rather than `orca-runtime.ts` alone: §6 pushes new logic OUT of that
+// ratcheted file, so a builder extracted tomorrow would leave those two RPCs uncovered silently.
 describe('the runtime resolves host-wide launch settings only through the lane-scoped helper', () => {
-  const source = readFileSync(join(__dirname, 'orca-runtime.ts'), 'utf8')
+  // The lane-scoped computation itself, and the narrowing predicate it delegates to.
+  const LANE_SCOPED_READERS = ['lane-launch-computation.ts', 'lane-permission-narrowing.ts']
+  const sources = readdirSync(__dirname, { recursive: true, withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name.endsWith('.ts') &&
+        !entry.name.endsWith('.test.ts') &&
+        !LANE_SCOPED_READERS.includes(entry.name)
+    )
+    .map((entry) => join(entry.parentPath, entry.name))
 
+  it('scans every runtime module, not just the one the builders live in today', () => {
+    expect(sources).toContain(join(__dirname, 'orca-runtime.ts'))
+    expect(sources.length).toBeGreaterThan(20)
+  })
+
+  // No trailing `(`: an aliased import (`resolveTuiAgentLaunchArgs as x`) still carries the name.
   it.each([
-    ['resolveTuiAgentLaunchArgs('],
-    ['resolveTuiAgentLaunchEnv('],
+    ['resolveTuiAgentLaunchArgs'],
+    ['resolveTuiAgentLaunchEnv'],
     ['cmdOverrides: settings.agentCmdOverrides']
   ])('has no direct %s left in a launch builder', (read) => {
-    expect(source).not.toContain(read)
+    const offenders = sources
+      .filter((file) => readFileSync(file, 'utf8').includes(read))
+      .map((file) => relative(__dirname, file))
+
+    expect(offenders).toEqual([])
   })
 })
