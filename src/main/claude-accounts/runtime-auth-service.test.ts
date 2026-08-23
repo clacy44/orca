@@ -490,7 +490,6 @@ describe('ClaudeRuntimeAuthService', () => {
     const store = {
       getSettings: vi.fn(() => settings),
       ...createLaneWatermarkStoreStub(),
-      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -546,7 +545,6 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
-      ...createLaneWatermarkStoreStub(),
       ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
@@ -615,7 +613,6 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
-      ...createLaneWatermarkStoreStub(),
       ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
