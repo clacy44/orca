@@ -135,3 +135,38 @@ export function expandEnvKeyDeletions(
   }
   return deletions
 }
+
+/** The lane keys the provider and the daemon collapse after their own env merge (§2m(5)). */
+export const LANE_ENV_KEYS = ['CLAUDE_CONFIG_DIR'] as const
+
+/**
+ * Removes every other casing of a lane key that the env merge itself reinstated (§2m(5)).
+ *
+ * The provider rebuilds the env AFTER the anchor — `{ ...process.env, ...args.env }` — so a
+ * differently-cased `Claude_Config_Dir` inherited by the Orca process lands beside the lane's
+ * canonical key, and Win32 resolves the FIRST case-insensitive key in block order: the inherited
+ * shared-lane path, not the lane's. The rule is the daemon's own PATH rule — a one-key requested
+ * patch is authoritative, two or zero came from inherited state and are left to the guards.
+ */
+export function collapseLaneEnvKeys(
+  env: Record<string, string>,
+  requestedEnv: Record<string, string> | undefined,
+  platform: NodeJS.Platform = process.platform
+): void {
+  if (platform !== 'win32') {
+    return
+  }
+  for (const envKey of LANE_ENV_KEYS) {
+    const present = findEnvKeyVariants(env, envKey, platform)
+    const requested = findEnvKeyVariants(requestedEnv, envKey, platform)
+    const surviving = requested.length === 1 ? requested[0] : undefined
+    if (present.length < 2 || surviving === undefined || env[surviving] === undefined) {
+      continue
+    }
+    for (const key of present) {
+      if (key !== surviving) {
+        delete env[key]
+      }
+    }
+  }
+}

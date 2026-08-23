@@ -42,6 +42,8 @@ import { stripLegacyTerminalShimEnv } from '../pty/legacy-terminal-shim-dir'
 import { resolvePathEnvKey } from '../pty/windows-environment-path'
 import { parseWslPath } from '../wsl'
 import { addWslEnvKeys } from '../wsl-env'
+import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
+import { assertNoLanePathCrossesWsl } from '../../shared/lane-wsl-boundary'
 import {
   gitCredentialPromptGuardEnv,
   mergeGitConfigEnvProtocol
@@ -773,6 +775,9 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
       } else if (env.CODEX_HOME) {
         addWslEnvKeys(env, ['CODEX_HOME', 'ORCA_CODEX_HOME'])
       }
+      // Why asserted here too: the daemon rebuilds its own env in its own process and carries no
+      // lane field, so the invariant is stated over the value about to cross WSLENV (S9 §2a).
+      assertNoLanePathCrossesWsl(env, shellPath)
       if (env.CLAUDE_CONFIG_DIR) {
         // Why: non-default env vars need WSLENV import to cross Windows wsl.exe into the Linux side.
         addWslEnvKeys(env, ['CLAUDE_CONFIG_DIR'])
@@ -845,6 +850,9 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
   expandWindowsPathEnvironmentVariables(env)
   // Why: collapse before promoting so the shim lands on the spelling the child actually inherits.
   collapseWindowsPathEnvKeys(env, requestedEnv)
+  // Why beside the PATH twin: the same merge creates the same duplicate for the lane key, and a
+  // residual casing is a deterministic wrong resolution rather than a coin flip (§2m(5)).
+  collapseLaneEnvKeys(env, requestedEnv)
   const requestedPath = requestedEnv
     ? requestedEnv[resolvePathEnvKey(requestedEnv, process.platform)]
     : undefined

@@ -1,7 +1,8 @@
 import { join } from 'node:path'
 import { app } from 'electron'
+import { CLAUDE_LANES_DIRNAME } from '../../shared/lane-path-containment'
 
-export const CLAUDE_LANES_DIRNAME = 'claude-lanes'
+export { CLAUDE_LANES_DIRNAME }
 
 /**
  * Root of the per-principal Claude credential lanes (S9 §2a: `<userData>/claude-lanes/

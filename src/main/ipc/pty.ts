@@ -2477,7 +2477,10 @@ export function registerPtyHandlers(
           launchAgent: ctx?.launchAgent,
           isWsl: ctx?.isWsl,
           wslDistro: ctx?.wslDistro ?? null,
-          agentStatusHooksEnabled: isAgentStatusHooksEnabled(ptySettings),
+          agentStatusHooksEnabled: laneScopedAgentStatusHooksEnabled(
+            ctx?.credentialLane !== undefined,
+            isAgentStatusHooksEnabled(ptySettings)
+          ),
           codexStatusHooksEnabled: isCodexStatusHooksEnabled(ptySettings),
           networkProxySettings: ptySettings
         })

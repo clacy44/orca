@@ -3,6 +3,24 @@ import { resolve } from 'node:path'
 import { isPathInsideOrEqual } from './cross-platform-path'
 import { parseWslUncPath } from './wsl-paths'
 
+/** The one directory every per-principal lane lives under: `<userData>/claude-lanes/<id>`. */
+export const CLAUDE_LANES_DIRNAME = 'claude-lanes'
+
+/**
+ * Whether a value names a path inside the lanes tree, by SEGMENT rather than by root.
+ *
+ * The lane root needs `userData`, which the forked daemon subprocess has no handle to — and the
+ * one rule that must hold in both processes is the WSLENV invariant, where a path shaped like a
+ * lane is exactly what must not cross into a distro. Segment matching is the fail-closed reading:
+ * a non-lane path that happens to carry the segment is refused, a lane path never slips through.
+ */
+export function hasClaudeLaneSegment(candidatePath: string | undefined): boolean {
+  return (
+    candidatePath !== undefined &&
+    candidatePath.split(/[\\/]+/).some((segment) => segment.toLowerCase() === CLAUDE_LANES_DIRNAME)
+  )
+}
+
 export type CanonicalPathResult =
   | { kind: 'canonical'; path: string }
   | { kind: 'symlink' }

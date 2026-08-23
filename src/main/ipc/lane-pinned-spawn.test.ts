@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { handleMock, onMock, removeHandlerMock, removeAllListenersMock } = vi.hoisted(() => ({
-  handleMock: vi.fn(),
-  onMock: vi.fn(),
-  removeHandlerMock: vi.fn(),
-  removeAllListenersMock: vi.fn()
-}))
+const { handleMock, onMock, removeHandlerMock, removeAllListenersMock, nodePtySpawnMock } =
+  vi.hoisted(() => ({
+    handleMock: vi.fn(),
+    onMock: vi.fn(),
+    removeHandlerMock: vi.fn(),
+    removeAllListenersMock: vi.fn(),
+    nodePtySpawnMock: vi.fn()
+  }))
 
 vi.mock('electron', () => ({
   app: {
@@ -32,26 +34,22 @@ vi.mock('fs', () => ({
   constants: { X_OK: 1 }
 }))
 
-vi.mock('node-pty', () => ({
-  spawn: vi.fn().mockReturnValue({
-    onData: vi.fn(),
-    onExit: vi.fn(),
-    write: vi.fn(),
-    resize: vi.fn(),
-    kill: vi.fn(),
-    process: 'zsh',
-    pid: 12345
-  })
-}))
+vi.mock('node-pty', () => ({ spawn: nodePtySpawnMock }))
 
+// Why this module as the probe: `buildPtyHostEnv` calls it only under `agentStatusHooksEnabled`,
+// so the marker below is a real observable of that flag at each of its three read sites.
 vi.mock('../opencode/hook-service', () => ({
-  openCodeHookService: { buildPtyEnv: () => ({}), clearPty: vi.fn() }
+  openCodeHookService: { buildPtyEnv: () => ({ ORCA_HOOKS_MARKER: 'on' }), clearPty: vi.fn() }
 }))
 
 vi.mock('../pi/titlebar-extension-service', () => ({
   piTitlebarExtensionService: { buildPtyEnv: () => ({}), clearPty: vi.fn() }
 }))
 
+import {
+  LocalPtyProvider,
+  _resetLocalPtyProviderStateForTest
+} from '../providers/local-pty-provider'
 import {
   clearProviderPtyState,
   registerPtyHandlers,
@@ -79,9 +77,9 @@ let spawnedIds: string[] = []
 let spawnCalls: PtySpawnOptions[] = []
 let ptySeq = 0
 
-function createProvider() {
+function createProvider(daemonBacked = false) {
   return {
-    routesFreshSpawnsToLocalProvider: true as const,
+    ...(daemonBacked ? {} : { routesFreshSpawnsToLocalProvider: true as const }),
     spawn: vi.fn(async (options: PtySpawnOptions) => {
       spawnCalls.push(options)
       const id = `pty-lane-${(ptySeq += 1)}`
@@ -118,7 +116,10 @@ type Harness = {
   controller: { spawn(args: Record<string, unknown>): Promise<unknown> }
 }
 
-function setup(laneOfPane: () => { kind: 'principal'; principalId: string } | null): Harness {
+function setup(
+  laneOfPane: () => { kind: 'principal'; principalId: string } | null,
+  options: { daemonBacked?: boolean; settings?: Record<string, unknown>; realLocal?: boolean } = {}
+): Harness {
   handlers.clear()
   handleMock.mockReset()
   onMock.mockReset()
@@ -127,8 +128,8 @@ function setup(laneOfPane: () => { kind: 'principal'; principalId: string } | nu
   }
   handleMock.mockImplementation(register)
   onMock.mockImplementation(register)
-  const provider = createProvider()
-  setLocalPtyProvider(provider as never)
+  const provider = createProvider(options.daemonBacked)
+  setLocalPtyProvider((options.realLocal ? new LocalPtyProvider() : provider) as never)
   const prepareClaudeAuth = vi.fn(async (_target: unknown, lanePrincipalId?: string) => ({
     configDir: lanePrincipalId ? LANE_DIR : SHARED_DIR,
     runtime: 'host' as const,
@@ -161,7 +162,7 @@ function setup(laneOfPane: () => { kind: 'principal'; principalId: string } | nu
     mainWindow as never,
     runtime as never,
     undefined,
-    () => ({}) as never,
+    () => (options.settings ?? {}) as never,
     prepareClaudeAuth as never,
     undefined
   )
@@ -188,9 +189,22 @@ async function rendererSpawn(args: Record<string, unknown> = {}): Promise<void> 
 beforeEach(() => {
   spawnCalls = []
   spawnedIds = []
+  nodePtySpawnMock.mockReset()
+  nodePtySpawnMock.mockReturnValue({
+    onData: vi.fn(() => ({ dispose: vi.fn() })),
+    onExit: vi.fn(() => ({ dispose: vi.fn() })),
+    write: vi.fn(),
+    resize: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    kill: vi.fn(),
+    process: 'zsh',
+    pid: 4242
+  })
 })
 
 afterEach(() => {
+  _resetLocalPtyProviderStateForTest()
   for (const id of spawnedIds) {
     markClaudePtyExited(id)
     clearProviderPtyState(id)
@@ -282,5 +296,42 @@ describe('lane resolution at the spawn anchor', () => {
     // Why the stamp and not just the config dir: path A merges the auth patch into `env` well
     // before the anchor, so only the wrapper's own output proves this edge ran through it.
     expect(spawnCalls[0]?.credentialLane).toEqual({ principalId: PRINCIPAL_ID })
+  })
+})
+
+// Row 16, asserted once per provider mode: the third read is inside the provider's own env build,
+// where a host-wide `agentStatusHooksEnabled: false` used to strip another principal's lane hooks.
+describe('a peer turning agent status hooks off host-wide', () => {
+  it('still leaves the hook env on a lane spawn in daemon mode', async () => {
+    setup(inLane, { daemonBacked: true, settings: { agentStatusHooksEnabled: false } })
+
+    await rendererSpawn({})
+
+    expect(spawnCalls[0]?.env?.ORCA_HOOKS_MARKER).toBe('on')
+  })
+
+  it('strips it from a shared-lane spawn in daemon mode', async () => {
+    setup(() => null, { daemonBacked: true, settings: { agentStatusHooksEnabled: false } })
+
+    await rendererSpawn({})
+
+    expect(spawnCalls[0]?.env?.ORCA_HOOKS_MARKER).toBeUndefined()
+  })
+
+  it('still leaves the hook env on a lane spawn in LocalPtyProvider mode', async () => {
+    setup(inLane, { realLocal: true, settings: { agentStatusHooksEnabled: false } })
+
+    await rendererSpawn({})
+
+    expect(nodePtySpawnMock.mock.calls.at(-1)?.[2].env.ORCA_HOOKS_MARKER).toBe('on')
+    expect(nodePtySpawnMock.mock.calls.at(-1)?.[2].env.CLAUDE_CONFIG_DIR).toBe(LANE_DIR)
+  })
+
+  it('strips it from a shared-lane spawn in LocalPtyProvider mode', async () => {
+    setup(() => null, { realLocal: true, settings: { agentStatusHooksEnabled: false } })
+
+    await rendererSpawn({})
+
+    expect(nodePtySpawnMock.mock.calls.at(-1)?.[2].env.ORCA_HOOKS_MARKER).toBeUndefined()
   })
 })
