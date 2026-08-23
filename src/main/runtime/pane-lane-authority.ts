@@ -1,5 +1,5 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import { makePaneKey } from '../../shared/stable-pane-id'
+import { makePaneKey, parsePaneKey } from '../../shared/stable-pane-id'
 import type { RuntimeMobileSessionTabsSnapshot } from '../../shared/runtime-types'
 import type {
   PersistedPaneCredentialLane,
@@ -8,6 +8,7 @@ import type {
 import type { SleepingAgentSessionRecord } from '../../shared/agent-session-resume'
 import {
   PaneCredentialLaneRegistry,
+  assertPaneAdoptableByCaller,
   type PaneCredentialLane,
   type PaneCredentialLaneLookup
 } from './pane-credential-lane-registry'
@@ -44,7 +45,14 @@ export type PaneLaneAuthorityDeps = {
     leafId: string
     principalId?: string
   }): void
+  /** The durable row is the authority, so releasing a minted binding must drop it too. */
+  forgetPersistedLane(row: { worktreeId: string; tabId: string; leafId: string }): void
+  /** Compensation for a redirect whose adopt is refused: the PTY is already running. */
+  killPty(ptyId: string): void
 }
+
+/** What a create's adopt decided: the lane the pane runs on, and whether this create minted it. */
+export type PaneLaneAdoption = { lane: PaneCredentialLane; mintedRow: boolean }
 
 /**
  * An SSH/relay pane is `remote` and never lane-bound, so `connectionId` is a condition of the
@@ -189,6 +197,67 @@ export class PaneLaneAuthority {
     this.bind(worktreeId, tabId, leafId, SHARED_CREDENTIAL_LANE, connectionId)
   }
 
+  /**
+   * The gate and the bind of a `createTerminal` are one decision, taken on the *pane's* lane.
+   *
+   * `connectionId` corrects the caller's lane before either half reads it: an SSH-backed pane's row
+   * is `shared` by construction (§2a), so a gate that compared the raw caller lane refused a lane
+   * holder their own remote pane — the create, the split's sibling create and every respawn into a
+   * remote paneKey. And a lane-less adopt of a pane the host knows but never attributed writes no
+   * row at all: §2h's `unknown` is that pane's state, and the presence projection decides how it
+   * renders, not this bind.
+   */
+  adoptForCreate(
+    pane: { worktreeId: string; tabId: string; leafId: string; connectionId?: string | null },
+    callerLane: PaneCredentialLane
+  ): PaneLaneAdoption {
+    const lane = laneForPaneConnection(callerLane, pane.connectionId)
+    const lookup = this.lookup(pane.worktreeId, pane.tabId, pane.leafId)
+    assertPaneAdoptableByCaller(lookup, lane)
+    if (lookup.kind === 'unbound') {
+      return { lane, mintedRow: false }
+    }
+    return {
+      lane: this.bind(pane.worktreeId, pane.tabId, pane.leafId, lane, pane.connectionId),
+      mintedRow: lookup.kind === 'unknown'
+    }
+  }
+
+  /**
+   * The spawn can land on a canonical or stable-owner pane rather than the minted one, so the pane
+   * the process actually lives in has never seen the mint-time gate: re-run the adopt against it,
+   * and read the lane back off its row so the record can never disagree with the row (§2a, §5).
+   *
+   * A refusal compensates rather than merely throwing — the PTY is already running on a pane the
+   * caller was just refused, and the row this create minted owns no process.
+   */
+  adoptRedirected(
+    pane: { worktreeId: string; tabId: string; leafId: string; connectionId?: string | null },
+    create: {
+      callerLane: PaneCredentialLane
+      ptyId: string
+      redirected: boolean
+      /** The row this create minted, released when the redirect's adopt is refused. */
+      releaseMintedPaneKey: string | null
+    }
+  ): PaneCredentialLane {
+    if (!create.redirected) {
+      return (
+        this.laneOf(pane.worktreeId, makePaneKey(pane.tabId, pane.leafId)) ??
+        laneForPaneConnection(create.callerLane, pane.connectionId)
+      )
+    }
+    try {
+      return this.adoptForCreate(pane, create.callerLane).lane
+    } catch (error) {
+      this.deps.killPty(create.ptyId)
+      if (create.releaseMintedPaneKey) {
+        this.forget(pane.worktreeId, create.releaseMintedPaneKey)
+      }
+      throw error
+    }
+  }
+
   laneOfPty(ptyId: string): PaneCredentialLaneLookup {
     const pane = this.deps.paneOfPty(ptyId)
     if (!pane) {
@@ -303,7 +372,18 @@ export class PaneLaneAuthority {
       .map((record) => record.paneKey)
   }
 
+  /** The principal a pane's row names, for the pty record that must not disagree with it (§2h). */
+  principalIdOf(worktreeId: string, paneKey: string): string | null {
+    const lane = this.laneOf(worktreeId, paneKey)
+    return lane?.kind === 'principal' ? lane.principalId : null
+  }
+
+  /** Drops the row from memory *and* from the store — `persistLane` has already flushed it. */
   forget(worktreeId: string, paneKey: string): void {
     this.registry.forget(worktreeId, paneKey)
+    const parsed = parsePaneKey(paneKey)
+    if (parsed) {
+      this.deps.forgetPersistedLane({ worktreeId, tabId: parsed.tabId, leafId: parsed.leafId })
+    }
   }
 }

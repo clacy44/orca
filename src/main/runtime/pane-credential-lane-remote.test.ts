@@ -124,6 +124,28 @@ describe('createTerminal — an SSH-backed workspace', () => {
     })
   })
 
+  it('lets a lane holder re-open their own remote pane by its identity', async () => {
+    const { runtime, spawn } = createRuntime('conn-1')
+    const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+      credentialLane: runtime.resolveCallerCredentialLane('device-a')
+    })
+    expect(created.handle).toBeTruthy()
+    const { tabId, leafId } = spawn.mock.calls[0][0]
+
+    // Why: the pane's row is `shared` by design (§2a), so a gate that reads the raw caller lane
+    // refuses the pane's own holder the #11598 wake gesture across their own devices (§3).
+    const refusal = await runtime
+      .createTerminal(`id:${WORKTREE}`, {
+        credentialLane: runtime.resolveCallerCredentialLane('device-a'),
+        tabId,
+        leafId
+      })
+      .then(() => 'no-refusal')
+      .catch((error: unknown) => (isClaudeLaneRefusal(error) ? error.code : String(error)))
+
+    expect(refusal).toBe('no-refusal')
+  })
+
   it('refuses the same split when the parent is a local pane of another principal', async () => {
     const { runtime } = createRuntime(null)
     const created = await runtime.createTerminal(`id:${WORKTREE}`, {

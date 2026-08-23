@@ -18,6 +18,8 @@ vi.mock('electron', () => ({
 const PRINCIPAL_A = '11111111-1111-4111-8111-111111111111'
 const PRINCIPAL_B = '22222222-2222-4222-8222-222222222222'
 const WORKTREE = 'wt-1'
+const HINTED_TAB = 'hinted-tab'
+const HINTED_LEAF = '33333333-3333-4333-8333-333333333333'
 
 const principals: PrincipalLookup = {
   principalOf: (deviceId) =>
@@ -32,9 +34,15 @@ function createRuntime(): {
   runtime: OrcaRuntimeService
   spawn: ReturnType<typeof vi.fn>
   kill: ReturnType<typeof vi.fn>
+  forgetPaneCredentialLane: ReturnType<typeof vi.fn>
   setRedirect: (redirect: Redirect) => void
 } {
-  const runtime = new OrcaRuntimeService()
+  const forgetPaneCredentialLane = vi.fn()
+  const runtime = new OrcaRuntimeService({
+    getPaneCredentialLanes: () => ({}),
+    persistPaneCredentialLane: vi.fn(),
+    forgetPaneCredentialLane
+  } as never)
   vi.spyOn(
     runtime as unknown as { resolveTerminalWorkspaceLaunchScope: () => Promise<unknown> },
     'resolveTerminalWorkspaceLaunchScope'
@@ -62,6 +70,7 @@ function createRuntime(): {
     runtime,
     spawn,
     kill,
+    forgetPaneCredentialLane,
     setRedirect: (next) => {
       redirect = next
     }
@@ -136,6 +145,33 @@ describe('createTerminal — the post-spawn pane redirect', () => {
 
     expect(refusal).toBe('terminal.lane_not_owned')
     expect(kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases the row it minted for a client-hinted identity when the redirect is refused', async () => {
+    const { runtime, spawn, setRedirect, forgetPaneCredentialLane } = createRuntime()
+    const owner = await ownerPane(runtime, spawn)
+    setRedirect({ handle: owner.handle, tabId: owner.tabId, leafId: owner.leafId })
+
+    const refusal = await runtime
+      .createTerminal(`id:${WORKTREE}`, {
+        credentialLane: runtime.resolveCallerCredentialLane('device-b'),
+        tabId: HINTED_TAB,
+        leafId: HINTED_LEAF
+      })
+      .then(() => 'no-refusal')
+      .catch((error: unknown) => (isClaudeLaneRefusal(error) ? error.code : String(error)))
+
+    expect(refusal).toBe('terminal.lane_not_owned')
+    // Why: the funnel minted this row itself at the pre-spawn bind, so a refused redirect must
+    // leave no bound pane behind — in memory or in the store the next rehydrate reads.
+    expect(runtime.paneCredentialLaneLookup(WORKTREE, HINTED_TAB, HINTED_LEAF)).toEqual({
+      kind: 'unknown'
+    })
+    expect(forgetPaneCredentialLane).toHaveBeenCalledWith({
+      worktreeId: WORKTREE,
+      tabId: HINTED_TAB,
+      leafId: HINTED_LEAF
+    })
   })
 
   it('leaves an unredirected create on the lane it bound at the mint', async () => {

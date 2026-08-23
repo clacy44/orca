@@ -1139,11 +1139,7 @@ import {
   resolveNestedRepoSelection
 } from '../project-groups/nested-repo-import'
 import { createNestedRepoImportTargetResolver } from '../project-groups/nested-repo-import-target'
-import {
-  assertPaneAdoptableByCaller,
-  type PaneCredentialLane,
-  type PaneCredentialLaneLookup
-} from './pane-credential-lane-registry'
+import type { PaneCredentialLane, PaneCredentialLaneLookup } from './pane-credential-lane-registry'
 import { PaneLaneAuthority } from './pane-lane-authority'
 import {
   SHARED_CREDENTIAL_LANE,
@@ -1232,6 +1228,7 @@ type RuntimeStore = {
   flushPendingOrThrowAsync?: Store['flushPendingOrThrowAsync']
   persistPtyBinding?: Store['persistPtyBinding']
   persistPaneCredentialLane?: Store['persistPaneCredentialLane']
+  forgetPaneCredentialLane?: Store['forgetPaneCredentialLane']
   getPaneCredentialLanes?: Store['getPaneCredentialLanes']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
@@ -2852,7 +2849,9 @@ export class OrcaRuntimeService {
         : null
     },
     readPersistedLanes: () => this.store?.getPaneCredentialLanes?.() ?? null,
-    persistLane: (row) => this.store?.persistPaneCredentialLane?.(row)
+    persistLane: (row) => this.store?.persistPaneCredentialLane?.(row),
+    forgetPersistedLane: (row) => this.store?.forgetPaneCredentialLane?.(row),
+    killPty: (ptyId) => this.ptyController?.kill?.(ptyId)
   })
   private managedHookReconciliationGeneration = 0
   private managedHookReconciliationTail: Promise<void> = Promise.resolve()
@@ -26488,45 +26487,6 @@ export class OrcaRuntimeService {
     return this.paneLanes.federatedLinkLane(homePeerFingerprint)
   }
 
-  /** The post-spawn redirect is an adopt: it owes the gate a pass and the record the row's lane. */
-  private adoptRedirectedPaneLane(
-    pane: { worktreeId: string; tabId: string; leafId: string; connectionId?: string | null },
-    create: {
-      credentialLane: PaneCredentialLane
-      ptyId: string
-      redirected: boolean
-      /** The row minted for this create, released when the redirect's adopt is refused. */
-      releaseMintedPaneKey: string | null
-    }
-  ): PaneCredentialLane {
-    if (create.redirected) {
-      try {
-        assertPaneAdoptableByCaller(
-          this.paneLanes.lookup(pane.worktreeId, pane.tabId, pane.leafId),
-          create.credentialLane
-        )
-      } catch (error) {
-        // Why: the PTY is already running on someone else's pane; leaving it would publish a
-        // surface the caller was just refused, and the pane it minted owns no process.
-        this.ptyController?.kill?.(create.ptyId)
-        if (create.releaseMintedPaneKey) {
-          this.paneLanes.forget(pane.worktreeId, create.releaseMintedPaneKey)
-        }
-        throw error
-      }
-    }
-    return (
-      this.paneLanes.laneOf(pane.worktreeId, makePaneKey(pane.tabId, pane.leafId)) ??
-      this.paneLanes.bind(
-        pane.worktreeId,
-        pane.tabId,
-        pane.leafId,
-        create.credentialLane,
-        pane.connectionId
-      )
-    )
-  }
-
   private resolveCreateCredentialLane(option: TerminalCredentialLaneOption): PaneCredentialLane {
     return option.kind === 'inherit'
       ? this.paneLanes.inheritedLaneOfPty(option.fromPtyId, {
@@ -26607,17 +26567,13 @@ export class OrcaRuntimeService {
       // Why: the hint validated into a paneKey above; the adopt gate runs here, before
       // adoptStablePane and before any launch input is assembled, and is caller-class
       // independent — a lane-less caller may not adopt a lane-bound pane either (§2a(ii)).
-      assertPaneAdoptableByCaller(
-        this.paneCredentialLaneLookup(workspace.id, tabId, leafId),
+      // The workspace's connection is part of the question, so the gate and the bind take it
+      // together and this one value carries to the post-spawn redirect below.
+      const paneAdoption = this.paneLanes.adoptForCreate(
+        { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
         credentialLane
       )
-      let paneLane = this.paneLanes.bind(
-        workspace.id,
-        tabId,
-        leafId,
-        credentialLane,
-        workspace.connectionId
-      )
+      let paneLane = paneAdoption.lane
       const claimedStablePaneCreate = this.ptyController.claimStablePaneCreate?.({
         worktreeId: workspace.id,
         connectionId: workspace.connectionId,
@@ -26819,13 +26775,15 @@ export class OrcaRuntimeService {
         // the gate that ran at the mint has not seen this pane — re-run it, and read the lane back
         // off the pane the process actually lives in so the record can never disagree with the row
         // (§2a, §5).
-        paneLane = this.adoptRedirectedPaneLane(
+        paneLane = this.paneLanes.adoptRedirected(
           { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
           {
-            credentialLane,
+            callerLane: credentialLane,
             ptyId: result.id,
             redirected: paneKey !== mintedPaneKey,
-            releaseMintedPaneKey: canAdoptPaneIdentity ? null : mintedPaneKey
+            // Why: only a row this create minted may be released — a client-hinted identity whose
+            // row already existed, and a pane left deliberately unattributed, both keep their state.
+            releaseMintedPaneKey: paneAdoption.mintedRow ? mintedPaneKey : null
           }
         )
         try {
@@ -26848,6 +26806,7 @@ export class OrcaRuntimeService {
         const pty = this.getOrCreatePtyWorktreeRecord(result.id)
         if (pty) {
           pty.lanePrincipalId = paneLane.kind === 'principal' ? paneLane.principalId : null
+
           if (persistHostSessionBinding) {
             pty.runtimeSessionOwned = true
           }

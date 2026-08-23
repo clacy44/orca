@@ -4,7 +4,7 @@
  * and only the second may be minted into a caller's lane (S9 §2a(ii), §2h, §3).
  */
 import { describe, expect, it, vi } from 'vitest'
-import { PaneLaneAuthority } from './pane-lane-authority'
+import { PaneLaneAuthority, type PaneLaneAuthorityDeps } from './pane-lane-authority'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { assertPaneAdoptableByCaller } from './pane-credential-lane-registry'
 import type { RuntimeMobileSessionTabsSnapshot } from '../../shared/runtime-types'
@@ -40,6 +40,8 @@ function pendingSnapshot(): RuntimeMobileSessionTabsSnapshot {
 function createAuthority(options: {
   snapshot?: RuntimeMobileSessionTabsSnapshot | null
   session?: WorkspaceSessionState | null
+  persistLane?: PaneLaneAuthorityDeps['persistLane']
+  forgetPersistedLane?: PaneLaneAuthorityDeps['forgetPersistedLane']
 }): PaneLaneAuthority {
   return new PaneLaneAuthority({
     rendererLeafExists: () => false,
@@ -48,7 +50,9 @@ function createAuthority(options: {
     mobileSessionTabsOf: () => options.snapshot ?? null,
     paneOfPty: () => null,
     readPersistedLanes: () => ({}),
-    persistLane: vi.fn()
+    persistLane: options.persistLane ?? vi.fn(),
+    forgetPersistedLane: options.forgetPersistedLane ?? vi.fn(),
+    killPty: vi.fn()
   })
 }
 
@@ -119,6 +123,77 @@ describe('registering a reattached pane', () => {
     expect(authority.lookup(WORKTREE, TAB, LEAF)).toEqual({
       kind: 'bound',
       lane: { kind: 'principal', principalId: PRINCIPAL_A }
+    })
+  })
+})
+
+describe('a create adopting a pane the host knows but never attributed', () => {
+  function knownUnboundPane(persistLane: PaneLaneAuthorityDeps['persistLane']): PaneLaneAuthority {
+    return createAuthority({ snapshot: pendingSnapshot(), persistLane })
+  }
+
+  it('leaves it unattributed rather than writing a shared row for a lane-less caller', () => {
+    const persistLane = vi.fn<PaneLaneAuthorityDeps['persistLane']>()
+    const authority = knownUnboundPane(persistLane)
+
+    const adoption = authority.adoptForCreate(
+      { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF },
+      { kind: 'shared' }
+    )
+
+    expect(adoption).toEqual({ lane: { kind: 'shared' }, mintedRow: false })
+    // §2h: the pane still renders `unknown`, and a lane holder is still refused `lane_pane_unbound`.
+    expect(authority.lookup(WORKTREE, TAB, LEAF)).toEqual({ kind: 'unbound' })
+    expect(persistLane).not.toHaveBeenCalled()
+    expect(
+      refusalOf(() =>
+        authority.adoptForCreate(
+          { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF },
+          { kind: 'principal', principalId: PRINCIPAL_A }
+        )
+      )
+    ).toBe('terminal.lane_pane_unbound')
+  })
+
+  it('still mints a row for a pane nothing knows, and reports that it did', () => {
+    const persistLane = vi.fn<PaneLaneAuthorityDeps['persistLane']>()
+    const authority = createAuthority({ snapshot: null, persistLane })
+
+    const adoption = authority.adoptForCreate(
+      { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF },
+      { kind: 'shared' }
+    )
+
+    expect(adoption).toEqual({ lane: { kind: 'shared' }, mintedRow: true })
+    expect(persistLane).toHaveBeenCalledWith({ worktreeId: WORKTREE, tabId: TAB, leafId: LEAF })
+  })
+
+  it('reports no mint when the row already exists, so the release cannot drop another create’s row', () => {
+    const authority = createAuthority({})
+    authority.bind(WORKTREE, TAB, LEAF, { kind: 'shared' })
+
+    expect(
+      authority.adoptForCreate(
+        { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF },
+        { kind: 'shared' }
+      )
+    ).toEqual({ lane: { kind: 'shared' }, mintedRow: false })
+  })
+})
+
+describe('releasing a minted binding', () => {
+  it('drops the persisted row too, so it cannot come back on the next rehydrate', () => {
+    const forgetPersistedLane = vi.fn<PaneLaneAuthorityDeps['forgetPersistedLane']>()
+    const authority = createAuthority({ forgetPersistedLane })
+    authority.bind(WORKTREE, TAB, LEAF, { kind: 'shared' })
+
+    authority.forget(WORKTREE, `${TAB}:${LEAF}`)
+
+    expect(authority.lookup(WORKTREE, TAB, LEAF)).toEqual({ kind: 'unknown' })
+    expect(forgetPersistedLane).toHaveBeenCalledWith({
+      worktreeId: WORKTREE,
+      tabId: TAB,
+      leafId: LEAF
     })
   })
 })
