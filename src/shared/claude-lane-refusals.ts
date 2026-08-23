@@ -33,6 +33,7 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.lane_path_not_contained',
   'accounts.lane.lane_root_not_local',
   'accounts.lane.consent_caller_not_local',
+  'accounts.lane.not_enabled',
   'terminal.lane_not_loaded',
   'terminal.lane_wsl_unsupported',
   'terminal.lane_wsl_shell_unsupported',
