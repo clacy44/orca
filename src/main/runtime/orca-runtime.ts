@@ -26477,6 +26477,45 @@ export class OrcaRuntimeService {
     return this.paneLanes.federatedLinkLane(homePeerFingerprint)
   }
 
+  /** The post-spawn redirect is an adopt: it owes the gate a pass and the record the row's lane. */
+  private adoptRedirectedPaneLane(
+    pane: { worktreeId: string; tabId: string; leafId: string; connectionId?: string | null },
+    create: {
+      credentialLane: PaneCredentialLane
+      ptyId: string
+      redirected: boolean
+      /** The row minted for this create, released when the redirect's adopt is refused. */
+      releaseMintedPaneKey: string | null
+    }
+  ): PaneCredentialLane {
+    if (create.redirected) {
+      try {
+        assertPaneAdoptableByCaller(
+          this.paneLanes.lookup(pane.worktreeId, pane.tabId, pane.leafId),
+          create.credentialLane
+        )
+      } catch (error) {
+        // Why: the PTY is already running on someone else's pane; leaving it would publish a
+        // surface the caller was just refused, and the pane it minted owns no process.
+        this.ptyController?.kill?.(create.ptyId)
+        if (create.releaseMintedPaneKey) {
+          this.paneLanes.forget(pane.worktreeId, create.releaseMintedPaneKey)
+        }
+        throw error
+      }
+    }
+    return (
+      this.paneLanes.laneOf(pane.worktreeId, makePaneKey(pane.tabId, pane.leafId)) ??
+      this.paneLanes.bind(
+        pane.worktreeId,
+        pane.tabId,
+        pane.leafId,
+        create.credentialLane,
+        pane.connectionId
+      )
+    )
+  }
+
   private resolveCreateCredentialLane(option: TerminalCredentialLaneOption): PaneCredentialLane {
     return option.kind === 'inherit'
       ? this.paneLanes.inheritedLaneOfPty(option.fromPtyId, {
@@ -26752,6 +26791,7 @@ export class OrcaRuntimeService {
           reportPtySpawnCommitted()
         }
         const adoptedStablePane = Boolean(result.stablePaneOwner)
+        const mintedPaneKey = paneKey
         if (result.agentSessionEnsure) {
           const canonicalSurface = result.agentSessionEnsure.owner.surface
           preAllocatedHandle = canonicalSurface.terminalHandle
@@ -26764,17 +26804,19 @@ export class OrcaRuntimeService {
           leafId = result.stablePaneOwner.leafId
           paneKey = makePaneKey(tabId, leafId)
         }
-        if (this.paneLanes.laneOf(workspace.id, paneKey) === null) {
-          // Why: the spawn can land on a canonical/stable owner pane rather than the minted one;
-          // the lane follows the pane the process actually lives in, still write-once.
-          paneLane = this.paneLanes.bind(
-            workspace.id,
-            tabId,
-            leafId,
+        // Why: the spawn can land on a canonical/stable owner pane rather than the minted one, so
+        // the gate that ran at the mint has not seen this pane — re-run it, and read the lane back
+        // off the pane the process actually lives in so the record can never disagree with the row
+        // (§2a, §5).
+        paneLane = this.adoptRedirectedPaneLane(
+          { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
+          {
             credentialLane,
-            workspace.connectionId
-          )
-        }
+            ptyId: result.id,
+            redirected: paneKey !== mintedPaneKey,
+            releaseMintedPaneKey: canAdoptPaneIdentity ? null : mintedPaneKey
+          }
+        )
         try {
           this.assertPtyDidNotExitBeforeRegistration(result.id, result.incarnationId)
         } catch (error) {
