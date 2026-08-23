@@ -84,7 +84,11 @@ export class LaneDelegationPushClient {
       return 'unsupported-host'
     }
     this.unsubscribe ??= await this.options.host.subscribeLaneStatus((frame) => {
-      void this.onFrame(frame)
+      // A throwing frame handler would otherwise surface as an unhandled rejection: rule (iv)'s
+      // clear can lose a win32 race with a live `claude`, and that must be reported, not lost.
+      void this.onFrame(frame).catch((error) => {
+        this.options.onRefused?.('accounts.lane.statusSubscribe', error)
+      })
     })
     await this.publishDelegableAccounts()
     return this.pushSelection()
@@ -107,6 +111,12 @@ export class LaneDelegationPushClient {
     if (!(await this.hostSupportsLanes())) {
       return 'unsupported-host'
     }
+    // `connect` subscribes and pushes without awaiting the ready frame, so on a reconnect the
+    // delegation member would otherwise be two empty strings and the push refused push_malformed.
+    const delegation = await this.resolveDelegation()
+    if (!delegation) {
+      return 'not-delegated'
+    }
     try {
       const result = await this.options.host.call<{ refreshTokenSha256: string | null }>(
         'accounts.lane.push',
@@ -117,12 +127,7 @@ export class LaneDelegationPushClient {
             ...(account.displayName ? { displayName: account.displayName } : {})
           },
           basedOnRefreshTokenSha256: this.lastKnownSha,
-          delegation: {
-            hostId: this.options.host.hostId,
-            principalId: this.principalId ?? '',
-            delegatedGrantId: this.delegatedGrantId ?? '',
-            since: Date.now()
-          }
+          delegation: { hostId: this.options.host.hostId, ...delegation, since: Date.now() }
         }
       )
       this.lastKnownSha = result.refreshTokenSha256
@@ -135,14 +140,41 @@ export class LaneDelegationPushClient {
 
   private delegatedGrantId: string | null = null
 
+  /**
+   * The ready frame, or a one-shot `accounts.lane.status` when it has not landed yet.
+   *
+   * There is nothing to fake here: the host derives the lane from the socket, so a push carrying
+   * placeholder ids is simply a malformed push. A principal with no designated pusher answers
+   * `null` and the push is skipped rather than sent to be refused.
+   */
+  private async resolveDelegation(): Promise<{
+    principalId: string
+    delegatedGrantId: string
+  } | null> {
+    if (this.principalId === null || this.delegatedGrantId === null) {
+      try {
+        this.applyStatus(await this.options.host.call<ClaudeLaneStatus>('accounts.lane.status'))
+      } catch (error) {
+        this.options.onRefused?.('accounts.lane.status', error)
+        return null
+      }
+    }
+    return this.principalId !== null && this.delegatedGrantId !== null
+      ? { principalId: this.principalId, delegatedGrantId: this.delegatedGrantId }
+      : null
+  }
+
   private async onFrame(frame: LaneStatusFrameIn): Promise<void> {
     if (frame.type === 'ready' || frame.type === 'status') {
       this.applyStatus(frame.status)
       return
     }
     if (frame.type === 'receipt') {
+      // The sha the DESKTOP's store holds, captured before the receipt moves the watermark:
+      // passing the receipt's own sha would match every time and never pull the rotation back.
+      const heldByThisDesktop = this.lastKnownSha
       this.lastKnownSha = frame.receipt.refreshTokenSha256
-      await this.pullRotated()
+      await this.pullRotated(heldByThisDesktop)
       return
     }
     if (frame.type === 'switch-requested') {
@@ -155,21 +187,24 @@ export class LaneDelegationPushClient {
 
   /** The host's published value wins: the local lease row is a cache of it, never an authority. */
   private applyStatus(status: ClaudeLaneStatus): void {
-    this.principalId = status.laneId
-    this.delegatedGrantId = status.delegatedGrantId
-    this.lastKnownSha = status.refreshTokenSha256
+    this.principalId = readString(status?.laneId)
+    this.delegatedGrantId = readString(status?.delegatedGrantId)
+    if (this.principalId === null) {
+      return
+    }
+    this.lastKnownSha = status.refreshTokenSha256 ?? null
     this.options.leases.applyPublishedStatus(this.options.host.hostId, status, (identity) =>
       this.options.accounts.resolveLocalAccountId(identity)
     )
   }
 
   /** Q2, on every receipt: a rotation the host performed lands back in the desktop's store. */
-  private async pullRotated(): Promise<void> {
+  private async pullRotated(knownRefreshTokenSha256: string | null): Promise<void> {
     try {
       const pulled = await this.options.host.call<
         | { rotated: false }
         | { rotated: true; credentialsJson: string; oauthAccountJson: string | null }
-      >('accounts.lane.pullRotated', { knownRefreshTokenSha256: null })
+      >('accounts.lane.pullRotated', { knownRefreshTokenSha256 })
       if (!pulled.rotated) {
         return
       }

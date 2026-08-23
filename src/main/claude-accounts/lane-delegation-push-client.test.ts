@@ -33,7 +33,14 @@ const STATUS = (overrides: Partial<ClaudeLaneStatus> = {}): ClaudeLaneStatus => 
 })
 
 function makeClient(
-  options: { capabilities?: string[]; pushResult?: unknown; failPush?: boolean } = {}
+  options: {
+    capabilities?: string[]
+    pushResult?: unknown
+    failPush?: boolean
+    failReadByClientRef?: boolean
+    /** What a one-shot `accounts.lane.status` answers before the ready frame lands. */
+    statusCall?: ClaudeLaneStatus | null
+  } = {}
 ) {
   const calls: { method: string; params: unknown }[] = []
   const refusals: { method: string; error: unknown }[] = []
@@ -65,6 +72,13 @@ function makeClient(
         if (method === 'accounts.lane.pullRotated') {
           return (pulls.shift() ?? { rotated: false }) as never
         }
+        if (method === 'accounts.lane.status') {
+          if (options.statusCall === null) {
+            throw new Error('accounts.lane.not_provisioned')
+          }
+          return (options.statusCall ??
+            STATUS({ refreshTokenSha256: null, heldIdentity: null })) as never
+        }
         return {} as never
       },
       subscribeLaneStatus: async (onFrame) => {
@@ -76,8 +90,12 @@ function makeClient(
     },
     accounts: {
       readSelected: async () => ACCOUNT,
-      readByClientRef: async (clientRef) =>
-        clientRef === 'ref-1' ? { ...ACCOUNT, accountId: 'acct-2' } : null,
+      readByClientRef: async (clientRef) => {
+        if (options.failReadByClientRef) {
+          throw new Error('store_locked')
+        }
+        return clientRef === 'ref-1' ? { ...ACCOUNT, accountId: 'acct-2' } : null
+      },
       listDelegable: async () => [{ clientRef: 'ref-1', displayName: 'Work' }],
       applyRotatedCredentials: async (accountId, credentialsJson) => {
         rotatedWrites.push({ accountId, credentialsJson })
@@ -113,6 +131,7 @@ describe('desktop lane push client', () => {
     expect(await harness.client.connect()).toBe('pushed')
     expect(harness.calls.map((call) => call.method)).toEqual([
       'accounts.lane.setDelegableAccounts',
+      'accounts.lane.status',
       'accounts.lane.push'
     ])
     expect(harness.isSubscribed()).toBe(true)
@@ -133,6 +152,35 @@ describe('desktop lane push client', () => {
       'displayName',
       'oauthAccountJson'
     ])
+    // The delegation member carries real ids, never the empty strings a pre-ready push once sent.
+    expect(push.delegation).toMatchObject({
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+  })
+
+  // Regression: `connect` subscribes and pushes without awaiting `ready`, so a push that raced the
+  // frame sent `principalId: ''` / `delegatedGrantId: ''` and was refused push_malformed.
+  it('asks the host for its lane rather than pushing an empty delegation member', async () => {
+    const harness = makeClient()
+    expect(await harness.client.connect()).toBe('pushed')
+    expect(harness.calls.map((call) => call.method)).toContain('accounts.lane.status')
+    const push = harness.calls.find((call) => call.method === 'accounts.lane.push')
+      ?.params as Record<string, unknown>
+    expect(push.delegation).toMatchObject({ principalId: LANE_A, delegatedGrantId: 'desktop-a' })
+  })
+
+  it('skips the push entirely when the principal has no designated pusher', async () => {
+    const harness = makeClient({ statusCall: STATUS({ delegatedGrantId: null }) })
+    expect(await harness.client.connect()).toBe('not-delegated')
+    expect(harness.calls.map((call) => call.method)).not.toContain('accounts.lane.push')
+  })
+
+  it('reports a refused status read rather than pushing a placeholder', async () => {
+    const harness = makeClient({ statusCall: null })
+    expect(await harness.client.connect()).toBe('not-delegated')
+    expect(harness.refusals.map((entry) => entry.method)).toEqual(['accounts.lane.status'])
   })
 
   it('carries basedOn from the last thing the host said the lane holds', async () => {
@@ -183,6 +231,35 @@ describe('desktop lane push client', () => {
       expect(harness.rotatedWrites).toEqual([
         { accountId: 'acct-1', credentialsJson: '{"claudeAiOauth":{"accessToken":"at-2"}}' }
       ])
+    })
+  })
+
+  // §3 row 2: `pullRotated` returns nothing when the sha matches. Sending a hard-coded null moved
+  // a live refresh token across the wire on EVERY receipt; sending the receipt's own sha would
+  // match every time and never pull the rotation back at all.
+  it('pulls with the sha its own store holds, not null and not the receipt sha', async () => {
+    const harness = makeClient()
+    await harness.client.connect()
+    harness.emit({
+      type: 'receipt',
+      receipt: { laneId: LANE_A, refreshTokenSha256: 'c'.repeat(64) }
+    })
+    await vi.waitFor(() => {
+      expect(harness.calls.some((call) => call.method === 'accounts.lane.pullRotated')).toBe(true)
+    })
+    expect(
+      harness.calls.find((call) => call.method === 'accounts.lane.pullRotated')?.params
+    ).toEqual({ knownRefreshTokenSha256: 'b'.repeat(64) })
+  })
+
+  it('reports a throwing frame handler instead of losing it as an unhandled rejection', async () => {
+    const harness = makeClient({ failReadByClientRef: true })
+    await harness.client.connect()
+    harness.emit({ type: 'switch-requested', requestId: 'req-1', clientRef: 'ref-1' })
+    await vi.waitFor(() => {
+      expect(harness.refusals.map((entry) => entry.method)).toContain(
+        'accounts.lane.statusSubscribe'
+      )
     })
   })
 

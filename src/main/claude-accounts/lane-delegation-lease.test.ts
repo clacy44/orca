@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -23,9 +23,11 @@ afterEach(() => {
   }
 })
 
-function makeStore(options: { now?: () => number; ttlMs?: number } = {}) {
+function makeStore(options: { now?: () => number; ttlMs?: number; failClearTimes?: number } = {}) {
   let rows: ClaudeLaneDelegationLease[] = []
   const cleared: ClaudeLaneDelegationLease[] = []
+  const clearFailures: unknown[] = []
+  let remainingFailures = options.failClearTimes ?? 0
   const store = new LaneDelegationLeaseStore({
     persistence: {
       getClaudeLaneDelegationLeases: () => rows,
@@ -35,9 +37,16 @@ function makeStore(options: { now?: () => number; ttlMs?: number } = {}) {
     },
     now: options.now,
     ttlMs: options.ttlMs,
-    clearRuntimeCredentials: (lease) => cleared.push(lease)
+    clearRuntimeCredentials: (lease) => {
+      if (remainingFailures > 0) {
+        remainingFailures -= 1
+        throw new Error('EBUSY')
+      }
+      cleared.push(lease)
+    },
+    onClearFailed: (_lease, error) => clearFailures.push(error)
   })
-  return { store, cleared, peek: () => rows }
+  return { store, cleared, clearFailures, peek: () => rows }
 }
 
 const status = (overrides: Partial<ClaudeLaneStatus> = {}): ClaudeLaneStatus => ({
@@ -221,6 +230,18 @@ describe('desktop delegation lease', () => {
     expect(refusalCode(() => assertClaudeAccountNotDelegatedToLane('acct-2'))).toBe('no_refusal')
   })
 
+  // A win32 clear can lose the race with a live `claude`. Suppression is the safe direction, so
+  // the lease stands and the NEXT published status retries the (idempotent) clear.
+  it('keeps the lease and reports when rule (iv) clear fails, then retries on the next status', () => {
+    const harness = makeStore({ failClearTimes: 1 })
+    harness.store.applyPublishedStatus('host-1', status(), () => 'acct-1')
+    expect(harness.store.isDelegated('acct-1')).toBe(true)
+    expect(harness.clearFailures).toHaveLength(1)
+    expect(harness.cleared).toHaveLength(0)
+    harness.store.applyPublishedStatus('host-1', status(), () => 'acct-1')
+    expect(harness.cleared).toHaveLength(1)
+  })
+
   it('is inert with no lease store attached', () => {
     expect(isClaudeAccountDelegatedToLane('acct-1')).toBe(false)
     expect(refusalCode(() => assertClaudeAccountNotDelegatedToLane('acct-1'))).toBe('no_refusal')
@@ -290,6 +311,30 @@ describe('rule (iv) runtime credential clearing', () => {
       })
     ).toEqual({ cleared: false, reason: 'absent' })
   })
+
+  // §3's Rule-3 row: a raw EBUSY/EACCES reaches the person as nothing at all.
+  it.runIf(process.platform !== 'win32')(
+    'refuses by name when the runtime credential file cannot be removed',
+    () => {
+      const paths = makeRuntimeDir()
+      writeFileSync(
+        paths.credentialsPath,
+        JSON.stringify({ claudeAiOauth: { accessToken: 'at', accountUuid: 'acct-uuid-1' } })
+      )
+      chmodSync(paths.configDir, 0o500)
+      try {
+        let code = 'no_refusal'
+        try {
+          clearRuntimeCredentialsForDelegatedAccount(paths, delegated, { platform: 'linux' })
+        } catch (error) {
+          code = isClaudeLaneRefusal(error) ? error.code : `untyped:${String(error)}`
+        }
+        expect(code).toBe('accounts.lane.local_clear_locked')
+      } finally {
+        chmodSync(paths.configDir, 0o700)
+      }
+    }
+  )
 
   it('deletes the scoped keychain item on darwin before the file', () => {
     const paths = makeRuntimeDir()

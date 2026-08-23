@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
 import {
   readIdentityFromCredentials,
@@ -59,13 +60,29 @@ export function clearRuntimeCredentialsForDelegatedAccount(
   if ((options.platform ?? process.platform) === 'darwin' && options.deleteKeychainItem) {
     void options.deleteKeychainItem(paths.configDir)
   }
-  if (credentialsJson !== null) {
-    rmSync(paths.credentialsPath, { force: true })
-  }
-  if (configOauthAccount !== null) {
-    writeOauthAccountIntoConfigFile(paths.configPath, null)
+  try {
+    if (credentialsJson !== null) {
+      rmSync(paths.credentialsPath, { force: true })
+    }
+    if (configOauthAccount !== null) {
+      writeOauthAccountIntoConfigFile(paths.configPath, null)
+    }
+  } catch (error) {
+    throw asLocalClearRefusal(error)
   }
   return { cleared: true, reason: 'cleared' }
+}
+
+/** A live `claude` holding the file open is §2m(2)'s case, and no client has a string for EBUSY. */
+function asLocalClearRefusal(error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') {
+    return error
+  }
+  return new ClaudeLaneRefusal(
+    'accounts.lane.local_clear_locked',
+    'A Claude session on this machine is holding its own credential file open, so Orca could not remove the account it just loaded onto a shared host. The account stays signed in here until that session closes — close it and Orca will clear it again.'
+  )
 }
 
 function readFileIfPresent(path: string): string | null {

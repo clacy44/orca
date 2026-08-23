@@ -35,6 +35,8 @@ export type LaneDelegationLeaseOptions = {
   ttlMs?: number
   /** Rule (iv): clears the account out of this machine's own runtime credential file. */
   clearRuntimeCredentials?: (lease: ClaudeLaneDelegationLease) => void
+  /** Reports a clear that lost the win32 race with a live `claude`; the retry is the next status. */
+  onClearFailed?: (lease: ClaudeLaneDelegationLease, error: unknown) => void
 }
 
 export type LaneDelegationLeaseInput = {
@@ -71,7 +73,13 @@ export class LaneDelegationLeaseStore {
       expiresAt: now + (this.options.ttlMs ?? CLAUDE_LANE_LEASE_TTL_MS)
     }
     this.put(lease)
-    this.options.clearRuntimeCredentials?.(lease)
+    try {
+      this.options.clearRuntimeCredentials?.(lease)
+    } catch (error) {
+      // The lease STANDS: suppression is the safe direction, and the clear is idempotent, so the
+      // next published status retries it rather than leaving the third copy silently on disk.
+      this.options.onClearFailed?.(lease, error)
+    }
     return lease
   }
 
