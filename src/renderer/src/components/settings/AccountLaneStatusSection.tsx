@@ -2,8 +2,14 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 import { translate } from '@/i18n/i18n'
 import { Badge } from '../ui/badge'
+import { Button } from '../ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
+import type { ClaudeManagedAccountSummary } from '../../../../shared/managed-account-types'
 import type { RuntimeTerminalLaneState } from '../../../../shared/runtime-types'
-import type { PrincipalLaneStatusRow } from '../../../../shared/principal-lane-status-ipc'
+import type {
+  PrincipalLaneStatusDelegableHost,
+  PrincipalLaneStatusRow
+} from '../../../../shared/principal-lane-status-ipc'
 import { usePrincipalLaneStatus } from './principal-lane-status-store'
 import { acquirePrincipalLaneStatusSubscription } from './principal-lane-status-subscription'
 import { isHostConsentSurfaceAvailable } from './PrincipalConsentSurface'
@@ -78,6 +84,70 @@ function LaneRow({ lane }: { lane: PrincipalLaneStatusRow }): ReactElement {
   )
 }
 
+/** One paired, reachable host this desktop's grant is designated to push onto (B3). */
+function DelegateHostRow({
+  host,
+  accounts,
+  selectedAccountId,
+  onSelectAccount,
+  busy,
+  onDelegate
+}: {
+  host: PrincipalLaneStatusDelegableHost
+  accounts: readonly ClaudeManagedAccountSummary[]
+  selectedAccountId: string | null
+  onSelectAccount: (accountId: string) => void
+  busy: boolean
+  onDelegate: () => void
+}): ReactElement {
+  const badge = laneStateBadge(host.laneState)
+  return (
+    <div
+      className="border-border/60 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2"
+      data-testid="delegate-host-row"
+      data-environment-id={host.environmentId}
+    >
+      <div className="min-w-0 space-y-0.5">
+        <span className="truncate text-sm font-medium">{host.label}</span>
+        <Badge variant={badge.variant} className="shrink-0" data-lane-state={host.laneState}>
+          {badge.label}
+        </Badge>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Select value={selectedAccountId ?? undefined} onValueChange={onSelectAccount}>
+          <SelectTrigger className="h-8 w-[200px]" size="sm">
+            <SelectValue
+              placeholder={translate(
+                'auto.components.settings.AccountLaneStatusSection.delegateAccountPlaceholder',
+                'Choose account…'
+              )}
+            />
+          </SelectTrigger>
+          <SelectContent>
+            {accounts.map((account) => (
+              <SelectItem key={account.id} value={account.id}>
+                {account.email}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || !selectedAccountId}
+          onClick={onDelegate}
+          data-testid="delegate-host-button"
+        >
+          {translate(
+            'auto.components.settings.AccountLaneStatusSection.delegateButton',
+            'Delegate'
+          )}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 /**
  * The AccountsPane per-lane section (S9 §2e/§2h): this desktop's provisioned Claude credential
  * lanes with their live residency, and the delegation leases this desktop holds — each with the
@@ -88,6 +158,8 @@ export function AccountLaneStatusSection(): ReactElement | null {
   const available = isHostConsentSurfaceAvailable()
   const status = usePrincipalLaneStatus()
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
+  const [claudeAccounts, setClaudeAccounts] = useState<readonly ClaudeManagedAccountSummary[]>([])
+  const [selectedAccountByHost, setSelectedAccountByHost] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (!available) {
@@ -95,6 +167,22 @@ export function AccountLaneStatusSection(): ReactElement | null {
     }
     return acquirePrincipalLaneStatusSubscription()
   }, [available])
+
+  const hasDelegableHosts = status.delegableHosts.length > 0
+  useEffect(() => {
+    if (!available || !hasDelegableHosts) {
+      return
+    }
+    let cancelled = false
+    void window.api.claudeAccounts.list().then((state) => {
+      if (!cancelled) {
+        setClaudeAccounts(state.accounts)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [available, hasDelegableHosts])
 
   const personById = useMemo(
     () => new Map(status.lanes.map((lane) => [lane.principalId, lane.displayName])),
@@ -104,7 +192,11 @@ export function AccountLaneStatusSection(): ReactElement | null {
   if (!available) {
     return null
   }
-  if (status.lanes.length === 0 && status.delegationLeases.length === 0) {
+  if (
+    status.lanes.length === 0 &&
+    status.delegationLeases.length === 0 &&
+    status.delegableHosts.length === 0
+  ) {
     return null
   }
 
@@ -177,6 +269,41 @@ export function AccountLaneStatusSection(): ReactElement | null {
                   window.api.principalLaneStatus.releaseLease(lease.accountId)
                 )
               }
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {status.delegableHosts.length > 0 ? (
+        <div className="space-y-2">
+          <h4 className="text-muted-foreground text-xs font-medium">
+            {translate(
+              'auto.components.settings.AccountLaneStatusSection.delegateTitle',
+              'Load an account onto a host'
+            )}
+          </h4>
+          {status.delegableHosts.map((host) => (
+            <DelegateHostRow
+              key={host.environmentId}
+              host={host}
+              accounts={claudeAccounts}
+              selectedAccountId={selectedAccountByHost[host.environmentId] ?? null}
+              onSelectAccount={(accountId) =>
+                setSelectedAccountByHost((prev) => ({ ...prev, [host.environmentId]: accountId }))
+              }
+              busy={busyAccountId === host.environmentId}
+              onDelegate={() => {
+                const accountId = selectedAccountByHost[host.environmentId]
+                if (!accountId) {
+                  return
+                }
+                void runWrite(host.environmentId, () =>
+                  window.api.principalLaneStatus.delegateAccountToHost(
+                    accountId,
+                    host.environmentId
+                  )
+                )
+              }}
             />
           ))}
         </div>

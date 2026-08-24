@@ -45,6 +45,12 @@ function auditSentence(row: ConsentAuditRowView): string {
         'Bound a federated link to {{value0}}',
         { value0: person }
       )
+    case 'provision':
+      return translate(
+        'auto.components.settings.PrincipalConsentAuditList.provision',
+        'Provisioned a credential lane for {{value0}}',
+        { value0: person }
+      )
   }
 }
 

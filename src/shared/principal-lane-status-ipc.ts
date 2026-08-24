@@ -1,6 +1,14 @@
 import type { ClaudeLaneDelegationLease } from './claude-lane-lease'
 import type { RuntimeTerminalLaneState } from './runtime-types'
 
+/** One reachable, connected host lane this desktop's grant is designated to push (B3). */
+export type PrincipalLaneStatusDelegableHost = {
+  environmentId: string
+  label: string
+  laneId: string
+  laneState: RuntimeTerminalLaneState
+}
+
 // The host-only lane-status seam (S9 §2e/§2h, §10(d)). The AccountsPane section reads, for THIS
 // desktop: the residency of each principal lane Orca has provisioned, and the delegation leases
 // this machine holds (the rows that suppress its own rotation of a delegated account). Both are
@@ -22,6 +30,8 @@ export type PrincipalLaneStatusSnapshot = {
   lanes: PrincipalLaneStatusRow[]
   /** The delegation leases THIS desktop persists — one row per account it delegated (§2e). */
   delegationLeases: ClaudeLaneDelegationLease[]
+  /** Additive (Rule 1): paired hosts this desktop can push a Claude account onto right now (B3). */
+  delegableHosts: PrincipalLaneStatusDelegableHost[]
 }
 
 /** Release request: drop THIS desktop's delegation lease for one account (§2e recovery, Q-lease). */
@@ -32,7 +42,12 @@ export type PrincipalLaneStatusReleaseResult = { released: boolean }
 export type PrincipalLaneStatusRenameRequest = { accountId: string; friendlyName: string | null }
 export type PrincipalLaneStatusRenameResult = { renamed: boolean }
 
+/** Delegate request: push one named Claude account onto one paired host lane (B3). */
+export type PrincipalLaneStatusDelegateRequest = { accountId: string; environmentId: string }
+export type PrincipalLaneStatusDelegateResult = { delegated: boolean }
+
 export const PRINCIPAL_LANE_STATUS_GET_CHANNEL = 'principalLaneStatus:get'
 export const PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL = 'principalLaneStatus:changed'
 export const PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL = 'principalLaneStatus:release'
 export const PRINCIPAL_LANE_STATUS_RENAME_CHANNEL = 'principalLaneStatus:rename'
+export const PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL = 'principalLaneStatus:delegate'

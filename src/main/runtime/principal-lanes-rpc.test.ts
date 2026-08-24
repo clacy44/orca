@@ -19,7 +19,7 @@ class FakeGrants {
   private rows: PrincipalGrantRow[] = []
   loadSucceeded = true
 
-  add(deviceId: string): void {
+  add(deviceId: string, lastSeenAt = 1): void {
     this.rows = [
       ...this.rows,
       {
@@ -27,7 +27,8 @@ class FakeGrants {
         name: 'Ana',
         token: `token-${deviceId}`,
         pairedAt: 1,
-        lastSeenAt: 0,
+        // Redeemed by default (M1) — a test exercising the un-redeemed refusal passes 0.
+        lastSeenAt,
         // Present because a bind requires the mint discriminator; its value is not a precondition.
         pendingExpiresAt: Date.now() + 60_000
       }
@@ -167,6 +168,7 @@ describe('principal lane consent RPC', () => {
         label: string
         boundPrincipalId: string | null
         designated: boolean
+        redeemed: boolean
       }[]
       principals: {
         principalId: string
@@ -181,7 +183,8 @@ describe('principal lane consent RPC', () => {
         label: 'Ana',
         perPerson: true,
         boundPrincipalId: principalId,
-        designated: true
+        designated: true,
+        redeemed: true
       }
     ])
     expect(status.principals[0]).toMatchObject({
@@ -236,6 +239,24 @@ describe('principal lane consent RPC', () => {
     expect(laneConfig.oauthAccount).toBeNull()
   })
 
+  // M1 (release-audit): a bind/designate naming an un-redeemed per-person invite refuses, so
+  // whoever redeems it LATER cannot inherit a binding made before they ever opened it.
+  it('refuses to bind or designate an un-redeemed per-person invite', async () => {
+    grants.add('unredeemed', 0)
+    const { principalId } = (await call('accounts.lane.createPrincipal', {
+      displayName: 'Ana'
+    })) as { principalId: string }
+
+    await expect(
+      call('accounts.lane.bindGrant', { deviceId: 'unredeemed', principalId })
+    ).rejects.toThrow(/has not been redeemed yet/)
+
+    const status = (await call('accounts.lane.readStatus', null)) as {
+      grants: { deviceId: string; redeemed: boolean }[]
+    }
+    expect(status.grants.find((row) => row.deviceId === 'unredeemed')?.redeemed).toBe(false)
+  })
+
   it('refuses provisioning on a platform whose §6 gate has not been cleared', async () => {
     grants.add('desktop')
     const { principalId } = (await call('accounts.lane.createPrincipal', {
@@ -256,8 +277,70 @@ describe('principal lane consent RPC', () => {
       await expect(call('accounts.lane.provision', { principalId })).rejects.toThrow(
         /not enabled on (macOS|Windows) yet/
       )
+      await expect(call('accounts.lane.provision', { principalId })).rejects.toThrow(
+        /--accept-unverified-platform/
+      )
     }
     expect(existsSync(join(state.userDataDir, 'claude-lanes', principalId))).toBe(false)
+  })
+
+  // B2: the operator override provisions on a gated platform and records the acceptance.
+  it('provisions on a gated platform with the override and records it in the audit row', async () => {
+    grants.add('desktop')
+    const { principalId } = (await call('accounts.lane.createPrincipal', {
+      displayName: 'Ana'
+    })) as { principalId: string }
+    await call('accounts.lane.bindGrant', { deviceId: 'desktop', principalId })
+    await call('accounts.lane.designatePusher', { principalId, deviceId: 'desktop' })
+
+    // darwin, not win32: win32's actual provisioning runs a real PowerShell DACL probe past the
+    // gate, which this Linux test host cannot satisfy — the gate/override decision under test is
+    // platform-generic, and darwin's harden step is a plain chmod that runs anywhere.
+    attachPrincipalLaneConsentService(
+      new PrincipalLaneConsentService(
+        new PrincipalRegistry(state.userDataDir, grants),
+        () => ({ hostConfigDir, hostConfigPath }),
+        'darwin'
+      )
+    )
+
+    // Default (no flag) is still refused on the gated platform.
+    await expect(call('accounts.lane.provision', { principalId })).rejects.toThrow(
+      /not enabled on macOS yet/
+    )
+
+    const provisioned = (await call('accounts.lane.provision', {
+      principalId,
+      acceptUnverifiedPlatform: true
+    })) as { provenanceLabel: string }
+    expect(provisioned.provenanceLabel).toMatch(/^[0-9a-f]{32}$/)
+    expect(existsSync(join(state.userDataDir, 'claude-lanes', principalId))).toBe(true)
+
+    const audit = (await call('accounts.lane.readAudit', null)) as {
+      audit: { action: string; platformAcceptance?: string }[]
+    }
+    expect(audit.audit.at(-1)).toMatchObject({
+      action: 'provision',
+      platformAcceptance: 'unverified-darwin'
+    })
+  })
+
+  it('records no platformAcceptance on a provision that needed no override', async () => {
+    grants.add('desktop')
+    const { principalId } = (await call('accounts.lane.createPrincipal', {
+      displayName: 'Ana'
+    })) as { principalId: string }
+    await call('accounts.lane.bindGrant', { deviceId: 'desktop', principalId })
+    await call('accounts.lane.designatePusher', { principalId, deviceId: 'desktop' })
+
+    await call('accounts.lane.provision', { principalId })
+
+    const audit = (await call('accounts.lane.readAudit', null)) as {
+      audit: { action: string; platformAcceptance?: string }[]
+    }
+    const provisionRow = audit.audit.at(-1)
+    expect(provisionRow?.action).toBe('provision')
+    expect(provisionRow?.platformAcceptance).toBeUndefined()
   })
 
   it('refuses provisioning for a principal with no designated pusher', async () => {

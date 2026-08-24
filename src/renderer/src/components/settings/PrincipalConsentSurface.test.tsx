@@ -33,14 +33,18 @@ const SNAPSHOT: PrincipalConsentSnapshot = {
     { principalId: 'p-boris', displayName: 'Boris', delegatedGrantId: null }
   ],
   bindings: [{ deviceId: 'dev-ana', principalId: 'p-ana' }],
-  audit: [{ at: 500, action: 'bind', principalId: 'p-ana', deviceId: 'dev-ana', direction: 'bind' }]
+  audit: [
+    { at: 500, action: 'bind', principalId: 'p-ana', deviceId: 'dev-ana', direction: 'bind' }
+  ],
+  provisioningPlatformGate: null
 }
 
 const LANE_SNAPSHOT: PrincipalLaneStatusSnapshot = {
   lanes: [
     { principalId: 'p-ana', displayName: 'Ana', delegatedGrantId: 'dev-ana', laneState: 'loaded' }
   ],
-  delegationLeases: []
+  delegationLeases: [],
+  delegableHosts: []
 }
 
 function makeConsentApi(snapshot = SNAPSHOT): ConsentApi {
@@ -158,7 +162,7 @@ describe('PrincipalConsentSurface', () => {
       ...SNAPSHOT,
       principals: [{ principalId: 'p-ana', displayName: 'Ana', delegatedGrantId: null }]
     })
-    setWindowApi(api, { lanes: [], delegationLeases: [] })
+    setWindowApi(api, { lanes: [], delegationLeases: [], delegableHosts: [] })
     render(<PrincipalConsentSurface grants={GRANTS} />)
     const anaRow = await waitFor(() => {
       const row = screen
@@ -173,7 +177,7 @@ describe('PrincipalConsentSurface', () => {
 
   it('provisions the bound person’s lane when none is provisioned', async () => {
     const api = makeConsentApi()
-    setWindowApi(api, { lanes: [], delegationLeases: [] })
+    setWindowApi(api, { lanes: [], delegationLeases: [], delegableHosts: [] })
     render(<PrincipalConsentSurface grants={GRANTS} />)
     const anaRow = await waitFor(() => {
       const row = screen
@@ -183,7 +187,7 @@ describe('PrincipalConsentSurface', () => {
       return row as HTMLElement
     })
     await userEvent.click(within(anaRow).getByRole('button', { name: 'Provision lane' }))
-    expect(api.provision).toHaveBeenCalledWith('p-ana')
+    expect(api.provision).toHaveBeenCalledWith('p-ana', undefined)
   })
 
   it('deprovisions when the lane is already provisioned', async () => {

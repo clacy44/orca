@@ -33,6 +33,7 @@ type ServiceStub = Pick<
   | 'designatePusher'
   | 'provisionLane'
   | 'deprovisionLane'
+  | 'provisioningPlatformGate'
 >
 
 function makeService(overrides: Partial<ServiceStub> = {}): ServiceStub {
@@ -51,6 +52,7 @@ function makeService(overrides: Partial<ServiceStub> = {}): ServiceStub {
     designatePusher: vi.fn(),
     provisionLane: vi.fn(() => ({ provenanceLabel: 'orca-lane:prin-1' })),
     deprovisionLane: vi.fn(async () => true),
+    provisioningPlatformGate: null,
     ...overrides
   } as ServiceStub
 }
@@ -121,7 +123,12 @@ describe('principal consent bridge', () => {
 
   it('returns an empty snapshot to a non-host sender rather than the roster', () => {
     const snapshot = invoke(PRINCIPAL_CONSENT_SNAPSHOT_CHANNEL, {}) as PrincipalConsentSnapshot
-    expect(snapshot).toEqual({ principals: [], bindings: [], audit: [] })
+    expect(snapshot).toEqual({
+      principals: [],
+      bindings: [],
+      audit: [],
+      provisioningPlatformGate: null
+    })
     expect(service.listPrincipals).not.toHaveBeenCalled()
   })
 
@@ -176,6 +183,19 @@ describe('principal consent bridge', () => {
       principalId: 'prin-1'
     })
     expect(result).toEqual({ provisioned: true, provenanceLabel: 'orca-lane:prin-1' })
-    expect(service.provisionLane).toHaveBeenCalledWith({ source: 'local-socket' }, 'prin-1')
+    expect(service.provisionLane).toHaveBeenCalledWith({ source: 'local-socket' }, 'prin-1', {
+      acceptUnverifiedPlatform: false
+    })
+  })
+
+  // B2: the override flag is forwarded, not swallowed at the bridge.
+  it('forwards the platform-override flag from the host frame', () => {
+    invoke(PRINCIPAL_CONSENT_PROVISION_CHANNEL, stub.sender, {
+      principalId: 'prin-1',
+      acceptUnverifiedPlatform: true
+    })
+    expect(service.provisionLane).toHaveBeenCalledWith({ source: 'local-socket' }, 'prin-1', {
+      acceptUnverifiedPlatform: true
+    })
   })
 })

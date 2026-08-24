@@ -10,7 +10,8 @@ import type { PrincipalConsentSnapshot } from '../../../../shared/principal-cons
 const EMPTY_SNAPSHOT: PrincipalConsentSnapshot = Object.freeze({
   principals: [],
   bindings: [],
-  audit: []
+  audit: [],
+  provisioningPlatformGate: null
 }) as PrincipalConsentSnapshot
 
 let snapshot: PrincipalConsentSnapshot = EMPTY_SNAPSHOT

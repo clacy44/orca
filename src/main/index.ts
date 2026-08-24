@@ -255,6 +255,8 @@ import { getDefaultWslDistro } from './wsl'
 import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './worktree-trash'
 import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
+import { setLaneWireHostDependencies } from './runtime/lane-wire-composition'
+import { startLaneDelegationDesktopService } from './claude-accounts/lane-delegation-desktop-service'
 import { wipeResidentLanesAtStartup } from './claude-accounts/principal-lane-startup-wipe'
 import {
   attachClaudeLivePtyPersistence,
@@ -2429,6 +2431,22 @@ void app.whenReady().then(async () => {
   codexSessionMigration.scheduleInitialRun()
   claudeRuntimeAuth = new ClaudeRuntimeAuthService(store)
   claudeAccounts = new ClaudeAccountService(store, rateLimits, claudeRuntimeAuth)
+  // Why here: release-audit B1 — the lane wire's dependencies exist the instant the coordinator
+  // does, and nothing is attached yet, so no RPC can be served and no rotation can start from
+  // this line. `attachPrincipalLaneHost` composes and attaches the wire itself once a registry
+  // exists (`principal-lane-host-wiring.ts`).
+  setLaneWireHostDependencies({
+    coordinator: claudeRuntimeAuth.laneCredentials,
+    persistence: store,
+    accounts: {
+      findAccount: (accountId) =>
+        store!.getSettings().claudeManagedAccounts.find((account) => account.id === accountId) ??
+        null
+    }
+  })
+  // Why here: release-audit B3 — the desktop side of the same wire, composed the instant its
+  // dependencies exist so §2c's per-selection push and §2e's lease guards are armed from this line.
+  startLaneDelegationDesktopService({ store })
   rateLimits.setCodexHomePathResolver((target) =>
     codexRuntimeHome!.prepareForRateLimitFetch(target)
   )

@@ -35,6 +35,8 @@ const STATUS = (overrides: Partial<ClaudeLaneStatus> = {}): ClaudeLaneStatus => 
 function makeClient(
   options: {
     capabilities?: string[]
+    /** Full control over `getCapabilities()`, e.g. to reject then resolve. Wins over `capabilities`. */
+    getCapabilitiesImpl?: () => Promise<string[]>
     pushResult?: unknown
     failPush?: boolean
     failReadByClientRef?: boolean
@@ -56,11 +58,14 @@ function makeClient(
     }
   })
   const pulls: unknown[] = [{ rotated: false }]
+  const getCapabilities = vi.fn(
+    options.getCapabilitiesImpl ??
+      (async () => options.capabilities ?? [AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY])
+  )
   const client = new LaneDelegationPushClient({
     host: {
       hostId: 'host-1',
-      getCapabilities: async () =>
-        options.capabilities ?? [AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY],
+      getCapabilities,
       call: async (method, params) => {
         calls.push({ method, params })
         if (method === 'accounts.lane.push') {
@@ -112,6 +117,7 @@ function makeClient(
     refusals,
     leases,
     rotatedWrites,
+    getCapabilities,
     queuePull: (value: unknown) => pulls.unshift(value),
     emit: (frame: LaneStatusFrameIn) => emitFrame?.(frame),
     isSubscribed: () => emitFrame !== null
@@ -277,5 +283,118 @@ describe('desktop lane push client', () => {
     const harness = makeClient({ failPush: true })
     expect(await harness.client.connect()).toBe('refused')
     expect(harness.refusals.map((entry) => entry.method)).toEqual(['accounts.lane.push'])
+  })
+
+  // Release-audit B3 follow-up: every ok status probe (settings hydration, the sidebar, opening
+  // the hosts dropdown) calls `connect()` again, not just an actual reconnect.
+  it('does not republish or repush on a second connect while already subscribed', async () => {
+    const harness = makeClient()
+    expect(await harness.client.connect()).toBe('pushed')
+    harness.calls.length = 0
+    expect(await harness.client.connect()).toBe('already-connected')
+    expect(harness.calls).toEqual([])
+    expect(harness.isSubscribed()).toBe(true)
+  })
+
+  it('republishes and repushes after a disconnect, then a fresh connect', async () => {
+    const harness = makeClient()
+    await harness.client.connect()
+    harness.client.disconnect()
+    harness.calls.length = 0
+    expect(await harness.client.connect()).toBe('pushed')
+    // No second `accounts.lane.status`: the delegation resolved by the first connect is cached
+    // and survives a disconnect (only the subscription and `supported` cache are cleared).
+    expect(harness.calls.map((call) => call.method)).toEqual([
+      'accounts.lane.setDelegableAccounts',
+      'accounts.lane.push'
+    ])
+    expect(harness.isSubscribed()).toBe(true)
+  })
+
+  it('coalesces concurrent connect() calls onto one subscribe/publish/push', async () => {
+    const harness = makeClient()
+    const [first, second] = await Promise.all([harness.client.connect(), harness.client.connect()])
+    expect(first).toBe('pushed')
+    expect(second).toBe('pushed')
+    expect(harness.calls.map((call) => call.method)).toEqual([
+      'accounts.lane.setDelegableAccounts',
+      'accounts.lane.status',
+      'accounts.lane.push'
+    ])
+  })
+})
+
+// Chair decision: a failed capability probe (transport error, timeout, non-ok status) must not
+// mark a host `unsupported` — only an ok `status.get` whose capabilities explicitly lack
+// `agent.identity-lanes.v1` may do that. These four cover the state machine end to end through
+// the push client; `lane-delegation-capability-probe.test.ts` covers the backoff/TTL arithmetic
+// directly.
+describe('desktop lane push client: capability-probe stickiness', () => {
+  // Mutation proof: revert `hostSupportsLanes()` to cache a failure as `false` forever (the bug
+  // this stage fixes) and this test goes red — pushSelection() would keep answering
+  // 'unsupported-host' after the backoff window instead of recovering to 'pushed'.
+  it('a failed probe is transient: a later successful probe (after backoff) still pushes', async () => {
+    vi.useFakeTimers()
+    try {
+      const getCapabilitiesImpl = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('ECONNRESET'))
+        .mockResolvedValue([AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY])
+      const harness = makeClient({ getCapabilitiesImpl })
+      expect(await harness.client.connect()).toBe('unsupported-host')
+      expect(harness.calls).toEqual([])
+      // Still inside the initial 5s backoff: no second probe attempt yet.
+      expect(await harness.client.pushSelection()).toBe('unsupported-host')
+      expect(harness.getCapabilities).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(await harness.client.pushSelection()).toBe('pushed')
+      expect(harness.getCapabilities).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an ok probe with the capability explicitly absent marks the host unsupported; no push happens', async () => {
+    const harness = makeClient({ capabilities: ['terminal.presence.v1'] })
+    expect(await harness.client.connect()).toBe('unsupported-host')
+    expect(harness.calls).toEqual([])
+    // Immediately retrying must not re-probe: an explicit absence is sticky until reconnect/TTL.
+    expect(await harness.client.pushSelection()).toBe('unsupported-host')
+    expect(harness.calls).toEqual([])
+    expect(harness.getCapabilities).toHaveBeenCalledTimes(1)
+  })
+
+  it('unsupported clears on a genuine reconnect, ahead of the TTL', async () => {
+    const getCapabilitiesImpl = vi
+      .fn()
+      .mockResolvedValueOnce(['terminal.presence.v1'])
+      .mockResolvedValue([AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY])
+    const harness = makeClient({ getCapabilitiesImpl })
+    expect(await harness.client.connect()).toBe('unsupported-host')
+    harness.client.disconnect()
+    expect(await harness.client.connect()).toBe('pushed')
+    expect(harness.getCapabilities).toHaveBeenCalledTimes(2)
+  })
+
+  it('unsupported clears after the TTL elapses, with no reconnect needed', async () => {
+    vi.useFakeTimers()
+    try {
+      const getCapabilitiesImpl = vi
+        .fn()
+        .mockResolvedValueOnce(['terminal.presence.v1'])
+        .mockResolvedValue([AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY])
+      const harness = makeClient({ getCapabilitiesImpl })
+      expect(await harness.client.connect()).toBe('unsupported-host')
+      // Well under the 10-minute TTL: still cached unsupported, no second probe.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(await harness.client.pushSelection()).toBe('unsupported-host')
+      expect(harness.getCapabilities).toHaveBeenCalledTimes(1)
+      // Past the TTL: the next trigger (a plain selection-change push, no reconnect) re-probes.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+      expect(await harness.client.pushSelection()).toBe('pushed')
+      expect(harness.getCapabilities).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

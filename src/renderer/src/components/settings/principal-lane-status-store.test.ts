@@ -27,6 +27,7 @@ function snapshot(
         expiresAt: null
       }
     ],
+    delegableHosts: [],
     ...overrides
   }
 }
@@ -40,7 +41,11 @@ describe('principal lane status store', () => {
   })
 
   it('starts empty so a section with no lane host renders nothing', () => {
-    expect(getPrincipalLaneStatusSnapshot()).toEqual({ lanes: [], delegationLeases: [] })
+    expect(getPrincipalLaneStatusSnapshot()).toEqual({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: []
+    })
     expect(getPrincipalLaneStatus('prin-1')).toBeNull()
     expect(getDelegationLeases()).toEqual([])
   })
@@ -77,7 +82,11 @@ describe('principal lane status store', () => {
     expect(getPrincipalLaneStatus('prin-1')?.laneState).toBe('absent')
 
     stop()
-    expect(getPrincipalLaneStatusSnapshot()).toEqual({ lanes: [], delegationLeases: [] })
+    expect(getPrincipalLaneStatusSnapshot()).toEqual({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: []
+    })
   })
 
   it('lets a republish that beats the initial read win', async () => {

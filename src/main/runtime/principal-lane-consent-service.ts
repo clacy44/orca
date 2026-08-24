@@ -16,7 +16,11 @@ import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import type { HostConsent } from './principal-consent-authority'
 import type { LaneGrantSummary, PrincipalRegistry } from './principal-registry'
-import type { PrincipalAuditRow, PrincipalRecord } from './principal-registry-store'
+import type {
+  PrincipalAuditRow,
+  PrincipalPlatformAcceptance,
+  PrincipalRecord
+} from './principal-registry-store'
 
 /**
  * §6's S9a merge gates (i) and (ii), in code rather than in a note.
@@ -104,15 +108,36 @@ export class PrincipalLaneConsentService {
   }
 
   /** Provisioning is an event: bound grant, designated pusher, then the lane and its content. */
-  provisionLane(consent: HostConsent, principalId: string): ProvisionedPrincipalLane {
-    void consent
-    assertProvisioningPlatformCleared(this.platform)
+  provisionLane(
+    consent: HostConsent,
+    principalId: string,
+    options: { acceptUnverifiedPlatform?: boolean } = {}
+  ): ProvisionedPrincipalLane {
+    const accepted = options.acceptUnverifiedPlatform === true
+    const gate = PROVISIONING_GATED_PLATFORMS[this.platform]
+    assertProvisioningPlatformCleared(this.platform, accepted)
     this.registry.assertLaneProvisionable(principalId)
     // Why the platform is threaded rather than left to `process.platform`: one call must not read
     // two platform answers — the UNC refusal, the DACL arm and the gate above are one decision.
     const lane = provisionPrincipalLane(principalId, { platform: this.platform })
     this.refreshLaneContent(principalId)
+    // B2: only a cleared gate records an override; an ungated platform (e.g. linux) records none.
+    this.registry.recordLaneProvisioned(
+      consent,
+      principalId,
+      gate && accepted ? platformAcceptanceFor(this.platform) : undefined
+    )
     return lane
+  }
+
+  /** One-line getter the consent bridge reads to decide whether to offer the override checkbox. */
+  get provisioningPlatformGate(): {
+    platform: NodeJS.Platform
+    label: string
+    probe: string
+  } | null {
+    const gate = PROVISIONING_GATED_PLATFORMS[this.platform]
+    return gate ? { platform: this.platform, label: gate.label, probe: gate.probe } : null
   }
 
   /**
@@ -170,14 +195,20 @@ export function getPrincipalLaneConsentService(): PrincipalLaneConsentService | 
   return attachedSurface
 }
 
-function assertProvisioningPlatformCleared(platform: NodeJS.Platform): void {
+function assertProvisioningPlatformCleared(platform: NodeJS.Platform, accepted: boolean): void {
   const gate = PROVISIONING_GATED_PLATFORMS[platform]
-  if (gate) {
-    throw new ClaudeLaneRefusal(
-      'accounts.lane.provisioning_platform_gated',
-      `Per-person Claude credential lanes are not enabled on ${gate.label} yet: Orca has not yet confirmed that the Claude CLI keeps every credential inside the folder each lane names on this platform (S9 §5 live probe ${gate.probe}). Until it does, run per-person lanes on a Linux host.`
-    )
+  if (!gate || accepted) {
+    return
   }
+  throw new ClaudeLaneRefusal(
+    'accounts.lane.provisioning_platform_gated',
+    `Per-person Claude credential lanes are not enabled on ${gate.label} yet: Orca has not yet confirmed that the Claude CLI keeps every credential inside the folder each lane names on this platform (S9 §5 live probe ${gate.probe}). Run per-person lanes on a Linux host, or accept that risk explicitly with \`orca lane provision --person <name> --accept-unverified-platform\`.`
+  )
+}
+
+/** The audit row's shape for a §6 override — the platform name, never a free-form label. */
+function platformAcceptanceFor(platform: NodeJS.Platform): PrincipalPlatformAcceptance {
+  return platform === 'win32' ? 'unverified-win32' : 'unverified-darwin'
 }
 
 function defaultHostSources(): LaneHostSources {

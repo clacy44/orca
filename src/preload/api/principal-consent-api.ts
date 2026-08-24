@@ -3,6 +3,7 @@ import type {
   PrincipalConsentCreatePrincipalResult,
   PrincipalConsentDeprovisionResult,
   PrincipalConsentDesignateResult,
+  PrincipalConsentProvisionRequest,
   PrincipalConsentProvisionResult,
   PrincipalConsentSnapshot,
   PrincipalConsentUnbindResult
@@ -25,7 +26,10 @@ export type PrincipalConsentApi = {
     principalId: string,
     deviceId: string
   ) => Promise<PrincipalConsentDesignateResult>
-  provision: (principalId: string) => Promise<PrincipalConsentProvisionResult>
+  provision: (
+    principalId: string,
+    options?: Omit<PrincipalConsentProvisionRequest, 'principalId'>
+  ) => Promise<PrincipalConsentProvisionResult>
   deprovision: (principalId: string) => Promise<PrincipalConsentDeprovisionResult>
   /** Every write republishes the snapshot; read once on mount and keep it fresh through this. */
   onChanged: (callback: (snapshot: PrincipalConsentSnapshot) => void) => () => void

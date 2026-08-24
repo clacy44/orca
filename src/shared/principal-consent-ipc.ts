@@ -23,7 +23,13 @@ export type ConsentBindingRow = {
 }
 
 /** The registry's audit action set (§2a), mirrored verbatim onto the wire. */
-export type ConsentAuditAction = 'create-principal' | 'bind' | 'unbind' | 'designate' | 'link-bind'
+export type ConsentAuditAction =
+  | 'create-principal'
+  | 'bind'
+  | 'unbind'
+  | 'designate'
+  | 'link-bind'
+  | 'provision'
 
 /** One audit row, the registry row verbatim — the undo trail that keeps a mis-tick reversible. */
 export type ConsentAuditRow = {
@@ -34,6 +40,8 @@ export type ConsentAuditRow = {
   direction?: 'bind' | 'unbind'
   homePeerFingerprint?: string
   designatedGrantId?: string | null
+  /** Only a `provision` row on a §6-gated platform carries this (B2's operator override). */
+  platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
 }
 
 /** What `principalConsent:snapshot` answers and `principalConsent:changed` republishes. */
@@ -41,6 +49,8 @@ export type PrincipalConsentSnapshot = {
   principals: ConsentPrincipalRow[]
   bindings: ConsentBindingRow[]
   audit: ConsentAuditRow[]
+  /** Non-null only on a §6-gated platform (B2) — what the UI needs to offer the override checkbox. */
+  provisioningPlatformGate: { platform: NodeJS.Platform; label: string; probe: string } | null
 }
 
 /**
@@ -52,6 +62,11 @@ export type PrincipalConsentBindRequest = { deviceId: string; principalId: strin
 export type PrincipalConsentUnbindRequest = { deviceId: string }
 export type PrincipalConsentDesignateRequest = { principalId: string; deviceId: string }
 export type PrincipalConsentPrincipalRequest = { principalId: string }
+/** Provision alone gets its own request shape (Rule 1) — deprovision keeps the plain one above. */
+export type PrincipalConsentProvisionRequest = {
+  principalId: string
+  acceptUnverifiedPlatform?: boolean
+}
 
 export type PrincipalConsentCreatePrincipalResult = {
   principalId: string

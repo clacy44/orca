@@ -166,6 +166,7 @@ export function PrincipalConsentSurface({
                     )?.laneState ?? null)
                   : null
               }
+              provisioningPlatformGate={snapshot.provisioningPlatformGate}
               onBind={(principalId) =>
                 runWrite(`bind:${row.deviceId}`, () =>
                   window.api.principalConsent.bind(row.deviceId, principalId)
@@ -186,9 +187,12 @@ export function PrincipalConsentSurface({
                   window.api.principalConsent.designatePusher(principalId, row.deviceId)
                 )
               }
-              onProvision={(principalId) =>
+              onProvision={(principalId, acceptUnverifiedPlatform) =>
                 runWrite(`provision:${principalId}`, () =>
-                  window.api.principalConsent.provision(principalId)
+                  window.api.principalConsent.provision(
+                    principalId,
+                    acceptUnverifiedPlatform ? { acceptUnverifiedPlatform: true } : undefined
+                  )
                 )
               }
               onDeprovision={(principalId) =>
