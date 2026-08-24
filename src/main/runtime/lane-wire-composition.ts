@@ -1,4 +1,3 @@
-import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import type {
   ManagedAccountLookup,
@@ -40,11 +39,6 @@ export function setLaneWireHostDependencies(deps: LaneWireHostDependencies | nul
   hostDependencies = deps
 }
 
-const RESIDENCY_UNVERIFIABLE_MESSAGE =
-  "Orca could not read this Claude account's own credential files, so it could not prove the " +
-  'account is not loaded in someone’s credential lane on this host, and it changed nothing. ' +
-  'Sign the account in again in Orca, or remove its lane holder first.'
-
 /**
  * Returns null when no dependencies are registered — a runtime started before, or without, a
  * `ClaudeRuntimeAuthService` (a test harness, or a remote-host proxy) keeps today's
@@ -74,21 +68,15 @@ export function composeLaneWireForRegistry(registry: PrincipalRegistry): LaneWir
     // switch gate (`LANE_SWITCH_GATE`, lane-wire-authority.ts) and to `process.platform` — the
     // same defaults the coordinator (runtime-auth-service.ts) and the consent service already
     // fall back to. Only tests inject either.
+    // §2d's documented behaviour is fail-OPEN: an account whose auth files this host cannot read
+    // is reported and skipped, never used to block an unrelated removal/deselect. Kept identical
+    // to `managed-account-lane-residency.ts`'s own default so there is one story, not two.
     onResidencyUnverifiable:
       deps.onResidencyUnverifiable ??
       ((accountId, reason) => {
         console.warn(
           `[claude-accounts] Could not check lane residency for managed account ${accountId} (${reason}).`
         )
-        const anyLaneResident = registry
-          .listPrincipals()
-          .some((row) => deps.coordinator.residency.getLaneRowKeys(row.principalId) !== null)
-        if (anyLaneResident) {
-          throw new ClaudeLaneRefusal(
-            'accounts.lane.residency_unverifiable',
-            RESIDENCY_UNVERIFIABLE_MESSAGE
-          )
-        }
       })
   })
 }
