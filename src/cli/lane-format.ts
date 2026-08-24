@@ -16,6 +16,7 @@ export type LaneGrant = {
   perPerson: boolean
   boundPrincipalId: string | null
   designated: boolean
+  redeemed: boolean
 }
 
 export type LaneStatusPrincipal = LanePrincipal & {
@@ -36,6 +37,7 @@ export type LaneAuditRow = {
   direction?: 'bind' | 'unbind'
   homePeerFingerprint?: string
   designatedGrantId?: string | null
+  platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
 }
 
 /**
@@ -141,7 +143,8 @@ export function formatStatus(snapshot: LaneStatusSnapshot): string {
       : 'unbound'
     const marks = [
       grant.perPerson ? 'per-person' : 'shared',
-      ...(grant.designated ? ['pusher'] : [])
+      ...(grant.designated ? ['pusher'] : []),
+      ...(grant.redeemed ? [] : ['invite outstanding'])
     ]
     return `  ${grant.deviceId}  ${grant.label}  ->  ${owner}  [${marks.join(', ')}]`
   })
@@ -176,6 +179,9 @@ export function formatAudit(rows: LaneAuditRow[]): string {
     }
     if (row.homePeerFingerprint) {
       parts.push(`link=${row.homePeerFingerprint}`)
+    }
+    if (row.platformAcceptance) {
+      parts.push(`platform=${row.platformAcceptance}`)
     }
     return `  ${parts.join('  ')}`
   })

@@ -38,7 +38,9 @@ class FakeGrants {
       name: 'Ana',
       token: `token-${row.deviceId}`,
       pairedAt: 1_000,
-      lastSeenAt: 0,
+      // Redeemed by default (M1): most fixtures here stand for an already-paired device. A test
+      // exercising the un-redeemed refusal overrides this back to 0.
+      lastSeenAt: 1_000,
       // Why present: `pendingExpiresAt` is the mint discriminator a bind requires (§2a). Its VALUE
       // is not a bind precondition — a scanned pairing keeps a long-past deadline and still binds.
       pendingExpiresAt: Date.now() + 60_000,
@@ -260,15 +262,36 @@ describe('PrincipalRegistry', () => {
       return person
     }
 
-    it('designates any bound grant, including one that has never connected', () => {
+    it('designates any bound grant, whether or not it is connected right now', () => {
       const store = registry()
       const person = bound(store)
 
       store.designatePusher(consent, person.principalId, 'desktop')
 
       expect(store.delegatedGrantIdOf(person.principalId)).toBe('desktop')
-      expect(grants.getDevice('desktop')?.lastSeenAt).toBe(0)
       expect(() => store.assertLaneProvisionable(person.principalId)).not.toThrow()
+    })
+
+    // M1 (release-audit): binding or designating an invite nobody has redeemed yet would let
+    // whoever redeems it LATER inherit the binding — refused independently at both writes.
+    it('refuses to bind or designate a per-person invite nobody has redeemed', () => {
+      const store = registry()
+      const person = store.createPrincipal(consent, 'Ana')
+      grants.add({ deviceId: 'unredeemed', lastSeenAt: 0 })
+
+      expect(() => store.bindGrant(consent, 'unredeemed', person.principalId)).toThrow(
+        /has not been redeemed yet/
+      )
+      expect(store.principalOf('unredeemed')).toBeNull()
+      expect(store.listGrants().find((row) => row.deviceId === 'unredeemed')?.redeemed).toBe(false)
+
+      // A row bound by an older build can already be unredeemed; designate re-checks on its own.
+      grants.add({ deviceId: 'redeemed-then-reset' })
+      store.bindGrant(consent, 'redeemed-then-reset', person.principalId)
+      grants.add({ deviceId: 'redeemed-then-reset', lastSeenAt: 0 })
+      expect(() =>
+        store.designatePusher(consent, person.principalId, 'redeemed-then-reset')
+      ).toThrow(/has not been redeemed yet/)
     })
 
     it('refuses to designate a grant bound to nobody', () => {

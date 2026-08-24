@@ -24,6 +24,7 @@ import {
   type PrincipalConsentDesignateRequest,
   type PrincipalConsentDesignateResult,
   type PrincipalConsentPrincipalRequest,
+  type PrincipalConsentProvisionRequest,
   type PrincipalConsentProvisionResult,
   type PrincipalConsentSnapshot,
   type PrincipalConsentUnbindRequest,
@@ -36,7 +37,12 @@ import {
   type PrincipalLaneConsentService
 } from '../runtime/principal-lane-consent-service'
 
-const EMPTY_SNAPSHOT: PrincipalConsentSnapshot = { principals: [], bindings: [], audit: [] }
+const EMPTY_SNAPSHOT: PrincipalConsentSnapshot = {
+  principals: [],
+  bindings: [],
+  audit: [],
+  provisioningPlatformGate: null
+}
 
 export type PrincipalConsentBridgeOptions = {
   /** Injected in tests; defaults to the process-wide attached surface. */
@@ -110,7 +116,8 @@ export function registerPrincipalConsentBridge(
           principalId: principal.principalId
         }))
       ),
-      audit: service.listAudit().map((row) => ({ ...row }))
+      audit: service.listAudit().map((row) => ({ ...row })),
+      provisioningPlatformGate: service.provisioningPlatformGate
     }
   }
 
@@ -192,9 +199,11 @@ export function registerPrincipalConsentBridge(
   ipcMain.removeHandler(PRINCIPAL_CONSENT_PROVISION_CHANNEL)
   ipcMain.handle(
     PRINCIPAL_CONSENT_PROVISION_CHANNEL,
-    (event, request: PrincipalConsentPrincipalRequest): PrincipalConsentProvisionResult => {
+    (event, request: PrincipalConsentProvisionRequest): PrincipalConsentProvisionResult => {
       const service = requireService(event)
-      const lane = service.provisionLane(authorizeHostConsent({}), request.principalId)
+      const lane = service.provisionLane(authorizeHostConsent({}), request.principalId, {
+        acceptUnverifiedPlatform: request.acceptUnverifiedPlatform === true
+      })
       broadcastChanged(service)
       notifyPrincipalLaneStatusChanged()
       return { provisioned: true, provenanceLabel: lane.provenanceLabel }

@@ -14,6 +14,7 @@ export type ParsedArgs = {
 export const GLOBAL_FLAGS = ['help', 'json', 'pairing-code', 'environment']
 const GLOBAL_VALUE_FLAGS = new Set(['pairing-code', 'environment'])
 export const BOOLEAN_FLAGS = new Set([
+  'accept-unverified-platform',
   'all',
   'attachments',
   'children',

@@ -11,7 +11,10 @@ export const PENDING_GRANT_TTL_MS = 24 * 60 * 60 * 1000
 export const MAX_LIVE_MINTED_GRANTS = 16
 
 /** A never-connected row carrying its own deadline — i.e. one the always-mint lane created. */
-export function isMintedPendingDevice(device: DeviceEntry): boolean {
+export function isMintedPendingDevice(device: {
+  lastSeenAt: number
+  pendingExpiresAt?: number
+}): boolean {
   return device.lastSeenAt === 0 && device.pendingExpiresAt !== undefined
 }
 

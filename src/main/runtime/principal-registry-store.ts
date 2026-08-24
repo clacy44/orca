@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { hardenExistingSecureFile, writeSecureJsonFile } from '../../shared/secure-file'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 
 export const PRINCIPAL_REGISTRY_FILENAME = 'claude-principals.json'
 
@@ -40,6 +41,10 @@ export type PrincipalAuditAction =
   | 'unbind'
   | 'designate'
   | 'link-bind'
+  | 'provision'
+
+/** §6 gate acceptance recorded on a `provision` audit row (B2's operator override). */
+export type PrincipalPlatformAcceptance = 'unverified-win32' | 'unverified-darwin'
 
 export type PrincipalAuditRow = {
   at: number
@@ -50,6 +55,8 @@ export type PrincipalAuditRow = {
   direction?: 'bind' | 'unbind'
   homePeerFingerprint?: string
   designatedGrantId?: string | null
+  /** Only a `provision` row on a §6-gated platform carries this — the operator's override. */
+  platformAcceptance?: PrincipalPlatformAcceptance
 }
 
 export type PrincipalRegistryState = {
@@ -110,4 +117,20 @@ export function savePrincipalRegistryState(
 
 function normalizeArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : []
+}
+
+/** Moved out of `principal-registry.ts` to hold that file under the line ceiling. */
+export function validatePrincipalDisplayName(displayName: string): string {
+  const trimmed = displayName.trim()
+  const hasControlCharacters = Array.from(trimmed).some((character) => {
+    const code = character.codePointAt(0) ?? 0
+    return code < 0x20 || code === 0x7f
+  })
+  if (!trimmed || trimmed.length > PRINCIPAL_DISPLAY_NAME_MAX_LENGTH || hasControlCharacters) {
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.display_name_invalid',
+      `A person’s name must be 1 to ${PRINCIPAL_DISPLAY_NAME_MAX_LENGTH} printable characters. Pick a shorter, plain-text name.`
+    )
+  }
+  return trimmed
 }

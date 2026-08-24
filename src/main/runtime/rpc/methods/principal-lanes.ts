@@ -23,6 +23,12 @@ const DesignateParams = z
   .strict()
 const LinkParams = z.object({ homePeerFingerprint: z.string().length(64) }).strict()
 const PrincipalParams = z.object({ principalId: PrincipalIdParam }).strict()
+// B2: a dedicated params shape for provision alone (Rule 1 — a new optional field on an existing
+// host-only method), so an older host that has never seen `acceptUnverifiedPlatform` still parses
+// deprovision's identical-looking params unchanged.
+const ProvisionParams = z
+  .object({ principalId: PrincipalIdParam, acceptUnverifiedPlatform: z.boolean().optional() })
+  .strict()
 
 /**
  * Binding a device to a person, designating who pushes, and provisioning a lane are **host-side
@@ -127,10 +133,12 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
   }),
   defineMethod({
     name: 'accounts.lane.provision',
-    params: PrincipalParams,
+    params: ProvisionParams,
     handler: async (params, ctx) =>
       withConsent(ctx.clientKind, (service, consent) => {
-        const lane = service.provisionLane(consent, params.principalId)
+        const lane = service.provisionLane(consent, params.principalId, {
+          acceptUnverifiedPlatform: params.acceptUnverifiedPlatform === true
+        })
         // Why the label and not the path: the response goes back over a socket, and the label is
         // the identifier every other surface is allowed to carry.
         return { provisioned: true as const, provenanceLabel: lane.provenanceLabel }

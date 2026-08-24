@@ -1347,8 +1347,8 @@ const api = {
       ipcRenderer.invoke(PRINCIPAL_CONSENT_REBIND_CHANNEL, { deviceId, principalId }),
     designatePusher: (principalId: string, deviceId: string) =>
       ipcRenderer.invoke(PRINCIPAL_CONSENT_DESIGNATE_CHANNEL, { principalId, deviceId }),
-    provision: (principalId: string) =>
-      ipcRenderer.invoke(PRINCIPAL_CONSENT_PROVISION_CHANNEL, { principalId }),
+    provision: (principalId: string, options?: { acceptUnverifiedPlatform?: boolean }) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_PROVISION_CHANNEL, { principalId, ...options }),
     deprovision: (principalId: string) =>
       ipcRenderer.invoke(PRINCIPAL_CONSENT_DEPROVISION_CHANNEL, { principalId }),
     onChanged: (callback: (snapshot: PrincipalConsentSnapshot) => void): (() => void) => {

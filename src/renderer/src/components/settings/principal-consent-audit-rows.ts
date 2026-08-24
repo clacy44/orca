@@ -5,7 +5,13 @@
 import type { ConsentSurfaceGrant, ConsentSurfacePrincipal } from './principal-consent-surface-rows'
 
 /** The renderer's read-only mirror of the registry's `PrincipalAuditAction` (§2a). */
-export type ConsentAuditAction = 'create-principal' | 'bind' | 'unbind' | 'designate' | 'link-bind'
+export type ConsentAuditAction =
+  | 'create-principal'
+  | 'bind'
+  | 'unbind'
+  | 'designate'
+  | 'link-bind'
+  | 'provision'
 
 /** One audit row as delivered over the host-only IPC seam — the registry row, verbatim. */
 export type ConsentAuditRow = {
@@ -16,6 +22,7 @@ export type ConsentAuditRow = {
   direction?: 'bind' | 'unbind'
   homePeerFingerprint?: string
   designatedGrantId?: string | null
+  platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
 }
 
 export type ConsentAuditRowView = {

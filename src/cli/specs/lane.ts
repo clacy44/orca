@@ -62,10 +62,16 @@ export const LANE_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['lane', 'provision'],
     summary: "Create a person's credential lane (requires a bound, designated device)",
-    usage: 'orca lane provision --person <idOrName> [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'person'],
-    notes: [PERSON_NOTE],
-    examples: ['orca lane provision --person "Ana Ng"']
+    usage: 'orca lane provision --person <idOrName> [--accept-unverified-platform] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'accept-unverified-platform'],
+    notes: [
+      PERSON_NOTE,
+      '--accept-unverified-platform provisions on a platform whose credential-containment probe has not run yet (S9 §5/§6), and records the acceptance in `orca lane audit`.'
+    ],
+    examples: [
+      'orca lane provision --person "Ana Ng"',
+      'orca lane provision --person "Ana Ng" --accept-unverified-platform'
+    ]
   },
   {
     path: ['lane', 'deprovision'],

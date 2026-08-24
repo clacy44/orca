@@ -32,7 +32,8 @@ class FakeGrants implements PrincipalGrantSource {
       name: 'Ana laptop',
       token: PEER_TOKEN,
       pairedAt: 1_000,
-      lastSeenAt: 0,
+      // Redeemed (M1) — this fixture stands for an already-paired device.
+      lastSeenAt: 1_000,
       pendingExpiresAt: Date.now() + 60_000
     }
   ]

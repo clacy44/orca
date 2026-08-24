@@ -27,6 +27,8 @@ export type LaneGrantSummary = {
   boundPrincipalId: string | null
   /** True when this grant is its principal's designated pusher (`delegatedGrantId`). */
   designated: boolean
+  /** False for a per-person invite nobody has opened yet (M1) — `orca lane status`'s precondition. */
+  redeemed: boolean
 }
 
 export type PrincipalRegistryOptions = {

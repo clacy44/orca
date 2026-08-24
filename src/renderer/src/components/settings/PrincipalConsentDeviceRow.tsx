@@ -1,8 +1,9 @@
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 import { Check } from 'lucide-react'
 import { translate } from '@/i18n/i18n'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
+import { Checkbox } from '../ui/checkbox'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import type { RuntimeTerminalLaneState } from '../../../../shared/runtime-types'
 import type { ConsentDeviceRow, ConsentSurfacePrincipal } from './principal-consent-surface-rows'
@@ -33,6 +34,7 @@ export function PrincipalConsentDeviceRow({
   busyKey,
   laneProvisioned,
   laneState,
+  provisioningPlatformGate,
   onBind,
   onRebind,
   onUnbind,
@@ -45,17 +47,20 @@ export function PrincipalConsentDeviceRow({
   busyKey: string | null
   laneProvisioned: boolean
   laneState: RuntimeTerminalLaneState | null
+  /** Non-null only on a §6-gated platform (B2) — offers the override checkbox when set. */
+  provisioningPlatformGate?: { label: string } | null
   onBind: (principalId: string) => void
   onRebind: (principalId: string) => void
   onUnbind: () => void
   onDesignate: (principalId: string) => void
-  onProvision: (principalId: string) => void
+  onProvision: (principalId: string, acceptUnverifiedPlatform: boolean) => void
   onDeprovision: (principalId: string) => void
 }): ReactElement {
   const bindBusy = busyKey === `bind:${row.deviceId}`
   const designateBusy = busyKey === `designate:${row.deviceId}`
   const bound = row.boundPrincipal
   const provisionBusy = bound ? busyKey === `provision:${bound.principalId}` : false
+  const [acceptUnverifiedPlatform, setAcceptUnverifiedPlatform] = useState(false)
 
   return (
     <div
@@ -183,13 +188,29 @@ export function PrincipalConsentDeviceRow({
                   )}
             </Button>
 
+            {!laneProvisioned && provisioningPlatformGate ? (
+              <label className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-xs">
+                <Checkbox
+                  checked={acceptUnverifiedPlatform}
+                  onCheckedChange={(checked) => setAcceptUnverifiedPlatform(checked === true)}
+                />
+                {translate(
+                  'auto.components.settings.PrincipalConsentDeviceRow.acceptUnverifiedPlatform',
+                  'Provision anyway on {{value0}} (unverified)',
+                  { value0: provisioningPlatformGate.label }
+                )}
+              </label>
+            ) : null}
+
             <Button
               type="button"
               variant={laneProvisioned ? 'outline' : 'default'}
               size="sm"
               disabled={provisionBusy}
               onClick={() =>
-                laneProvisioned ? onDeprovision(bound.principalId) : onProvision(bound.principalId)
+                laneProvisioned
+                  ? onDeprovision(bound.principalId)
+                  : onProvision(bound.principalId, acceptUnverifiedPlatform)
               }
             >
               {laneProvisioned

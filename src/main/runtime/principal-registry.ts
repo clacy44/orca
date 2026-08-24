@@ -11,13 +11,15 @@ import {
 import {
   loadPrincipalRegistryState,
   PRINCIPAL_AUDIT_MAX_ROWS,
-  PRINCIPAL_DISPLAY_NAME_MAX_LENGTH,
   PRINCIPAL_REGISTRY_FILENAME,
   savePrincipalRegistryState,
+  validatePrincipalDisplayName,
   type PrincipalAuditRow,
+  type PrincipalPlatformAcceptance,
   type PrincipalRecord,
   type PrincipalRegistryState
 } from './principal-registry-store'
+import { isMintedPendingDevice } from './device-registry-pending-grants'
 
 import type {
   LaneGrantSummary,
@@ -71,7 +73,7 @@ export class PrincipalRegistry {
   createPrincipal(_consent: HostConsent, displayName: string): PrincipalRecord {
     const principal: PrincipalRecord = {
       principalId: randomUUID(),
-      displayName: this.validateDisplayName(displayName),
+      displayName: validatePrincipalDisplayName(displayName),
       createdAt: this.now()
     }
     // Why: validated at creation, so no principal id ever reaches path.join unvalidated.
@@ -118,7 +120,10 @@ export class PrincipalRegistry {
         perPerson: device.pendingExpiresAt !== undefined,
         boundPrincipalId,
         designated:
-          boundPrincipalId !== null && this.delegatedGrantIdOf(boundPrincipalId) === device.deviceId
+          boundPrincipalId !== null &&
+          this.delegatedGrantIdOf(boundPrincipalId) === device.deviceId,
+        // M1: an un-redeemed per-person invite (§9 step 0.2's checkable precondition).
+        redeemed: device.lastSeenAt > 0
       }
     })
   }
@@ -210,11 +215,9 @@ export class PrincipalRegistry {
         'That pairing was made with a shared invite link, so Orca cannot tell whether it belongs to one person or several. Re-pair the device with its own named invite before binding it to someone.'
       )
     }
-    // Why no deadline check here: §2a rule (i) constrains the SURFACE that offers a bind — at mint,
-    // or at the named invite that produced the row — not the row's own clock. `pendingExpiresAt` is
-    // the durable mint discriminator read above; as a deadline it is meaningful only while the row
-    // is an un-scanned invite (`device-registry-pending-grants.ts`), and those rows are pruned at
-    // load — so a wall-clock refusal here could only ever reach real, already-scanned pairings.
+    this.assertGrantRedeemed(device)
+    // Why no deadline check here: §2a rule (i) constrains the surface that offers a bind, not the
+    // row's own clock — `device-registry-pending-grants.ts` prunes an expired unscanned row at load.
   }
 
   /**
@@ -232,7 +235,19 @@ export class PrincipalRegistry {
         'Only a device already bound to this person can be designated as the one that pushes their Claude account. Bind it to them first.'
       )
     }
+    // Re-checked independently of bind (M1): a row bound by an older build can already be unredeemed.
+    this.assertGrantRedeemed(this.grants.getDevice(deviceId))
     this.writeDesignation(consent, principalId, deviceId)
+  }
+
+  /** The provisioning audit write (B2): a `provision` row, carrying the §6 override when used. */
+  recordLaneProvisioned(
+    _consent: HostConsent,
+    principalId: string,
+    platformAcceptance?: PrincipalPlatformAcceptance
+  ): void {
+    // `toEqual`-safe: an explicit `undefined` value serializes away and compares as absent.
+    this.commit(this.state, { action: 'provision', principalId, platformAcceptance })
   }
 
   delegatedGrantIdOf(principalId: string): string | null {
@@ -343,19 +358,14 @@ export class PrincipalRegistry {
     return principal
   }
 
-  private validateDisplayName(displayName: string): string {
-    const trimmed = displayName.trim()
-    const hasControlCharacters = Array.from(trimmed).some((character) => {
-      const code = character.codePointAt(0) ?? 0
-      return code < 0x20 || code === 0x7f
-    })
-    if (!trimmed || trimmed.length > PRINCIPAL_DISPLAY_NAME_MAX_LENGTH || hasControlCharacters) {
+  /** M1: refuses a bind/designation naming an invite nobody redeemed \u2014 else whoever redeems it later inherits the binding. */
+  private assertGrantRedeemed(device: PrincipalGrantRow | null): void {
+    if (device && isMintedPendingDevice(device)) {
       throw new ClaudeLaneRefusal(
-        'accounts.lane.display_name_invalid',
-        `A person\u2019s name must be 1 to ${PRINCIPAL_DISPLAY_NAME_MAX_LENGTH} printable characters. Pick a shorter, plain-text name.`
+        'accounts.lane.grant_not_redeemed',
+        'That invite has not been redeemed yet, so Orca cannot tell which device \u2014 or which person \u2014 will end up holding it, and it was not linked to anyone. Open the invite on the device first, then link it here.'
       )
     }
-    return trimmed
   }
 
   private commit(nextState: PrincipalRegistryState, row: Omit<PrincipalAuditRow, 'at'>): void {

@@ -156,19 +156,20 @@ export const LANE_HANDLERS: Record<string, CommandHandler> = {
   'lane provision': async (ctx) => {
     rejectRemoteSelectionFlags(ctx)
     const personSelector = requireStringFlag(ctx, 'person')
+    const acceptUnverifiedPlatform = ctx.flags.has('accept-unverified-platform')
     await assertLaneSupported(ctx.client)
     const snapshot = await readStatus(ctx.client)
     const principalId = resolvePerson(snapshot.principals, personSelector)
     const result = await ctx.client.call<{ provisioned: true; provenanceLabel: string }>(
       'accounts.lane.provision',
-      { principalId }
+      { principalId, ...(acceptUnverifiedPlatform ? { acceptUnverifiedPlatform: true } : {}) }
     )
-    printResult(
-      result,
-      ctx.json,
-      (value) =>
-        `Provisioned a lane for ${personName(snapshot.principals, principalId)} (${value.provenanceLabel})`
-    )
+    printResult(result, ctx.json, (value) => {
+      const line = `Provisioned a lane for ${personName(snapshot.principals, principalId)} (${value.provenanceLabel})`
+      return acceptUnverifiedPlatform
+        ? `${line}\nAccepted an unverified platform for this lane; the acceptance is recorded in \`orca lane audit\`.`
+        : line
+    })
   },
   'lane deprovision': async (ctx) => {
     rejectRemoteSelectionFlags(ctx)

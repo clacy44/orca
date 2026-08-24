@@ -10768,7 +10768,8 @@
           "unbind": "Unbound {{value0}} from {{value1}}",
           "designate": "Made {{value0}} the pusher for {{value1}}",
           "linkBind": "Bound a federated link to {{value0}}",
-          "title": "Consent history"
+          "title": "Consent history",
+          "provision": "Provisioned a credential lane for {{value0}}"
         },
         "PrincipalConsentDeviceRow": {
           "laneLoaded": "loaded",
@@ -10786,7 +10787,8 @@
           "designate": "Set as pusher",
           "deprovision": "Deprovision lane",
           "provision": "Provision lane",
-          "unbindAction": "Unbind"
+          "unbindAction": "Unbind",
+          "acceptUnverifiedPlatform": "Provision anyway on {{value0}} (unverified)"
         },
         "PrincipalConsentSurface": {
           "writeFailed": "Consent update failed.",

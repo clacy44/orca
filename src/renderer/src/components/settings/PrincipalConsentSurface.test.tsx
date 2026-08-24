@@ -33,7 +33,10 @@ const SNAPSHOT: PrincipalConsentSnapshot = {
     { principalId: 'p-boris', displayName: 'Boris', delegatedGrantId: null }
   ],
   bindings: [{ deviceId: 'dev-ana', principalId: 'p-ana' }],
-  audit: [{ at: 500, action: 'bind', principalId: 'p-ana', deviceId: 'dev-ana', direction: 'bind' }]
+  audit: [
+    { at: 500, action: 'bind', principalId: 'p-ana', deviceId: 'dev-ana', direction: 'bind' }
+  ],
+  provisioningPlatformGate: null
 }
 
 const LANE_SNAPSHOT: PrincipalLaneStatusSnapshot = {
@@ -184,7 +187,7 @@ describe('PrincipalConsentSurface', () => {
       return row as HTMLElement
     })
     await userEvent.click(within(anaRow).getByRole('button', { name: 'Provision lane' }))
-    expect(api.provision).toHaveBeenCalledWith('p-ana')
+    expect(api.provision).toHaveBeenCalledWith('p-ana', undefined)
   })
 
   it('deprovisions when the lane is already provisioned', async () => {
