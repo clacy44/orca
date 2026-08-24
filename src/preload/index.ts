@@ -35,6 +35,7 @@ import {
 } from '../shared/principal-consent-ipc'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
+  PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
   PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
   PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
@@ -1375,7 +1376,9 @@ const api = {
     releaseLease: (accountId: string) =>
       ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL, { accountId }),
     renameLease: (accountId: string, friendlyName: string | null) =>
-      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL, { accountId, friendlyName })
+      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL, { accountId, friendlyName }),
+    delegateAccountToHost: (accountId: string, environmentId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL, { accountId, environmentId })
   } satisfies PreloadApi['principalLaneStatus'],
 
   feedback: {

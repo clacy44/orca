@@ -256,6 +256,7 @@ import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './workt
 import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
 import { setLaneWireHostDependencies } from './runtime/lane-wire-composition'
+import { startLaneDelegationDesktopService } from './claude-accounts/lane-delegation-desktop-service'
 import { wipeResidentLanesAtStartup } from './claude-accounts/principal-lane-startup-wipe'
 import {
   attachClaudeLivePtyPersistence,
@@ -2443,6 +2444,9 @@ void app.whenReady().then(async () => {
         null
     }
   })
+  // Why here: release-audit B3 — the desktop side of the same wire, composed the instant its
+  // dependencies exist so §2c's per-selection push and §2e's lease guards are armed from this line.
+  startLaneDelegationDesktopService({ store })
   rateLimits.setCodexHomePathResolver((target) =>
     codexRuntimeHome!.prepareForRateLimitFetch(target)
   )

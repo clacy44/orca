@@ -11,7 +11,8 @@ import type {
 
 const EMPTY_SNAPSHOT: PrincipalLaneStatusSnapshot = Object.freeze({
   lanes: [],
-  delegationLeases: []
+  delegationLeases: [],
+  delegableHosts: []
 }) as PrincipalLaneStatusSnapshot
 
 let snapshot: PrincipalLaneStatusSnapshot = EMPTY_SNAPSHOT

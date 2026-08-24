@@ -40,7 +40,8 @@ const LANE_SNAPSHOT: PrincipalLaneStatusSnapshot = {
   lanes: [
     { principalId: 'p-ana', displayName: 'Ana', delegatedGrantId: 'dev-ana', laneState: 'loaded' }
   ],
-  delegationLeases: []
+  delegationLeases: [],
+  delegableHosts: []
 }
 
 function makeConsentApi(snapshot = SNAPSHOT): ConsentApi {
@@ -158,7 +159,7 @@ describe('PrincipalConsentSurface', () => {
       ...SNAPSHOT,
       principals: [{ principalId: 'p-ana', displayName: 'Ana', delegatedGrantId: null }]
     })
-    setWindowApi(api, { lanes: [], delegationLeases: [] })
+    setWindowApi(api, { lanes: [], delegationLeases: [], delegableHosts: [] })
     render(<PrincipalConsentSurface grants={GRANTS} />)
     const anaRow = await waitFor(() => {
       const row = screen
@@ -173,7 +174,7 @@ describe('PrincipalConsentSurface', () => {
 
   it('provisions the bound person’s lane when none is provisioned', async () => {
     const api = makeConsentApi()
-    setWindowApi(api, { lanes: [], delegationLeases: [] })
+    setWindowApi(api, { lanes: [], delegationLeases: [], delegableHosts: [] })
     render(<PrincipalConsentSurface grants={GRANTS} />)
     const anaRow = await waitFor(() => {
       const row = screen

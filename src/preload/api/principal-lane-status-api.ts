@@ -1,4 +1,5 @@
 import type {
+  PrincipalLaneStatusDelegateResult,
   PrincipalLaneStatusReleaseResult,
   PrincipalLaneStatusRenameResult,
   PrincipalLaneStatusSnapshot
@@ -20,4 +21,9 @@ export type PrincipalLaneStatusApi = {
     accountId: string,
     friendlyName: string | null
   ) => Promise<PrincipalLaneStatusRenameResult>
+  /** Push one of this desktop's Claude accounts onto one paired host's lane (B3). */
+  delegateAccountToHost: (
+    accountId: string,
+    environmentId: string
+  ) => Promise<PrincipalLaneStatusDelegateResult>
 }

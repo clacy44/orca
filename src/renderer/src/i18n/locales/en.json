@@ -10757,7 +10757,10 @@
           "writeFailed": "Lane update failed.",
           "title": "Per-person credential lanes",
           "operatingRule": "One pusher, one puller: while an account is loaded on a shared host, this desktop will not start a local terminal under it. Release it here to use it locally again.",
-          "leasesTitle": "Accounts you delegated"
+          "leasesTitle": "Accounts you delegated",
+          "delegateTitle": "Load an account onto a host",
+          "delegateAccountPlaceholder": "Choose account…",
+          "delegateButton": "Delegate"
         },
         "PrincipalConsentAuditList": {
           "createPrincipal": "Added {{value0}}",

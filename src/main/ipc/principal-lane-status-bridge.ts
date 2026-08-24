@@ -3,25 +3,37 @@
 // consent and presence lanes are — a non-host frame gets the empty snapshot, never a roster. The
 // desktop's own lanes have no paired-client wire; a REMOTE host's lane status is a separate,
 // pre-existing `accounts.lane.status` RPC path and is not this lane's concern.
-import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
+import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ClaudeLaneDelegationLease } from '../../shared/claude-lane-lease'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
+  PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
   PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
   PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
+  type PrincipalLaneStatusDelegableHost,
+  type PrincipalLaneStatusDelegateRequest,
+  type PrincipalLaneStatusDelegateResult,
   type PrincipalLaneStatusReleaseRequest,
   type PrincipalLaneStatusReleaseResult,
   type PrincipalLaneStatusRenameRequest,
   type PrincipalLaneStatusRenameResult,
   type PrincipalLaneStatusSnapshot
 } from '../../shared/principal-lane-status-ipc'
+import {
+  delegateAccountToLaneHost,
+  listDelegableLaneHosts
+} from '../claude-accounts/lane-delegation-desktop-service'
 import { getLaneDelegationLeaseStore } from '../claude-accounts/lane-delegation-lease'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import { getPrincipalLaneConsentService } from '../runtime/principal-lane-consent-service'
 
-const EMPTY_SNAPSHOT: PrincipalLaneStatusSnapshot = { lanes: [], delegationLeases: [] }
+const EMPTY_SNAPSHOT: PrincipalLaneStatusSnapshot = {
+  lanes: [],
+  delegationLeases: [],
+  delegableHosts: []
+}
 
 export type PrincipalLaneStatusBridgeOptions = {
   /** Injected in tests. Defaults to the attached consent surface's principal list. */
@@ -38,6 +50,10 @@ export type PrincipalLaneStatusBridgeOptions = {
   releaseLease?: (accountId: string) => boolean
   /** Injected in tests. Defaults to persisting the Q3 friendly name on the lease. */
   renameLease?: (accountId: string, friendlyName: string | null) => boolean
+  /** Injected in tests. Defaults to this desktop's connected, designated-pusher hosts. */
+  listDelegableHosts?: () => PrincipalLaneStatusDelegableHost[]
+  /** Injected in tests. Defaults to pushing the named account onto the named host lane. */
+  delegateAccount?: (environmentId: string, accountId: string) => Promise<boolean>
 }
 
 // Why a broadcast set and not one window: provision/deprovision are process-wide events, and every
@@ -73,6 +89,12 @@ export function registerPrincipalLaneStatusBridge(
     options.renameLease ??
     ((accountId: string, friendlyName: string | null) =>
       getLaneDelegationLeaseStore()?.rename(accountId, friendlyName) ?? false)
+  const listDelegableHosts =
+    options.listDelegableHosts ?? (() => listDelegableLaneHosts(app.getPath('userData')))
+  const delegateAccount =
+    options.delegateAccount ??
+    ((environmentId: string, accountId: string) =>
+      delegateAccountToLaneHost(environmentId, accountId))
 
   const isMainWindowSender = (event: IpcMainInvokeEvent): boolean =>
     !mainWindow.isDestroyed() &&
@@ -86,7 +108,8 @@ export function registerPrincipalLaneStatusBridge(
       delegatedGrantId: principal.delegatedGrantId ?? null,
       laneState: resolveLaneState(principal.principalId)
     })),
-    delegationLeases: listDelegationLeases()
+    delegationLeases: listDelegationLeases(),
+    delegableHosts: listDelegableHosts()
   })
 
   const broadcast = (): void => {
@@ -139,6 +162,26 @@ export function registerPrincipalLaneStatusBridge(
     }
   )
 
+  // Why the same sender gate: delegating pushes a credential onto a shared host, exactly as
+  // release/rename mutate the lease view — a foreign sender must never trigger either.
+  ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL)
+  ipcMain.handle(
+    PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
+    async (
+      event,
+      request: PrincipalLaneStatusDelegateRequest
+    ): Promise<PrincipalLaneStatusDelegateResult> => {
+      if (!isMainWindowSender(event)) {
+        return { delegated: false }
+      }
+      const delegated = await delegateAccount(request.environmentId, request.accountId)
+      if (delegated) {
+        broadcast()
+      }
+      return { delegated }
+    }
+  )
+
   const dispose = (): void => {
     if (disposed) {
       return
@@ -149,6 +192,7 @@ export function registerPrincipalLaneStatusBridge(
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_GET_CHANNEL)
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL)
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL)
+      ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL)
     }
   }
 

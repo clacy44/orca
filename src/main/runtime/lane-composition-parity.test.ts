@@ -7,8 +7,8 @@
  * and what will fail loudly the moment another `attach*`/`start*` seam regresses the same way.
  *
  * KNOWN_OPEN_GAPS lists the seams the audit found in this same pass that are NOT yet composed in
- * production (B3 — desktop-side wiring, out of scope for this stage). Removing an entry from that
- * list, rather than adding to it, is the only correct fix for a new failure here.
+ * production. Removing an entry from that list, rather than adding to it, is the only correct fix
+ * for a new failure here. B3 (`attachLaneDelegationLeaseStore`) closed this stage.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -16,8 +16,8 @@ import { describe, expect, it } from 'vitest'
 
 const SRC_MAIN = join(process.cwd(), 'src/main')
 
-/** Tracked, audited gaps (release-audit B3) — composition work for a later stage, not a regression. */
-const KNOWN_OPEN_GAPS = new Set(['attachLaneDelegationLeaseStore'])
+/** Tracked, audited gaps — composition work for a later stage, not a regression. Currently empty. */
+const KNOWN_OPEN_GAPS = new Set<string>()
 
 function listSourceFiles(root: string): string[] {
   const entries = readdirSync(root)

@@ -139,6 +139,12 @@ export class LaneDelegationPushClient {
   }
 
   private delegatedGrantId: string | null = null
+  private lastStatus: ClaudeLaneStatus | null = null
+
+  /** The last status frame this client observed, or null before the first `ready`/`status`. */
+  getLastStatus(): ClaudeLaneStatus | null {
+    return this.lastStatus
+  }
 
   /**
    * The ready frame, or a one-shot `accounts.lane.status` when it has not landed yet.
@@ -187,6 +193,7 @@ export class LaneDelegationPushClient {
 
   /** The host's published value wins: the local lease row is a cache of it, never an authority. */
   private applyStatus(status: ClaudeLaneStatus): void {
+    this.lastStatus = status
     this.principalId = readString(status?.laneId)
     this.delegatedGrantId = readString(status?.delegatedGrantId)
     if (this.principalId === null) {
