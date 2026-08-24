@@ -22,9 +22,9 @@ function toLaneState(
     case 'absent':
     case 'reauth-required':
       return laneState
-    // Why undefined and not a default: the wire type does not yet carry `'restart-required'` (§10(e)),
+    // Why undefined is its own case: the wire type does not yet carry `'restart-required'` (§10(e)),
     // so a lane with no residency state is simply "no extra fact", not a forced restart.
-    default:
+    case undefined:
       return undefined
   }
 }

@@ -5,8 +5,7 @@ import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import type { RuntimeTerminalLaneState } from '../../../../shared/runtime-types'
-import type { ConsentDeviceRow } from './principal-consent-surface-rows'
-import type { ConsentSurfacePrincipal } from './principal-consent-surface-rows'
+import type { ConsentDeviceRow, ConsentSurfacePrincipal } from './principal-consent-surface-rows'
 
 function laneStateLabel(state: RuntimeTerminalLaneState): string {
   switch (state) {
