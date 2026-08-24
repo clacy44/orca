@@ -137,13 +137,8 @@ export class PrincipalRegistry {
 
   /** Principals still claimed by a surviving grant; the orphan lane sweep's input. */
   boundPrincipalIds(): string[] {
-    return Array.from(
-      new Set(
-        this.state.principals
-          .map((principal) => principal.principalId)
-          .filter((principalId) => this.boundDeviceIds(principalId).length > 0)
-      )
-    )
+    const ids = this.state.principals.map((p) => p.principalId)
+    return Array.from(new Set(ids.filter((id) => this.boundDeviceIds(id).length > 0)))
   }
 
   bindGrant(_consent: HostConsent, deviceId: string, principalId: string): void {
@@ -246,11 +241,8 @@ export class PrincipalRegistry {
     principalId: string,
     platformAcceptance?: PrincipalPlatformAcceptance
   ): void {
-    this.commit(this.state, {
-      action: 'provision',
-      principalId,
-      ...(platformAcceptance ? { platformAcceptance } : {})
-    })
+    const platformRow = platformAcceptance ? { platformAcceptance } : {}
+    this.commit(this.state, { action: 'provision', principalId, ...platformRow })
   }
 
   delegatedGrantIdOf(principalId: string): string | null {
