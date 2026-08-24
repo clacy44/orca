@@ -246,8 +246,11 @@ export class PrincipalRegistry {
     principalId: string,
     platformAcceptance?: PrincipalPlatformAcceptance
   ): void {
-    // `toEqual`-safe: an explicit `undefined` value serializes away and compares as absent.
-    this.commit(this.state, { action: 'provision', principalId, platformAcceptance })
+    this.commit(this.state, {
+      action: 'provision',
+      principalId,
+      ...(platformAcceptance ? { platformAcceptance } : {})
+    })
   }
 
   delegatedGrantIdOf(principalId: string): string | null {
