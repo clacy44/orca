@@ -190,15 +190,27 @@ drive the equivalent consent writes from:
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane bind --device <other-desktop> --person "<other developer>"
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane designate --person "<owner>" --device <owner-desktop>
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane designate --person "<other developer>" --device <other-desktop>
-& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<owner>"
-& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<other developer>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<owner>" --accept-unverified-platform
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<other developer>" --accept-unverified-platform
 ```
 
 create-person twice, bind each paired device, designate each person's
 desktop as their lane's pusher, then provision both lanes — in that
 order, since designate is required before provision will succeed
-(`accounts.lane.no_pusher_designated` otherwise). The one remaining
-step, ticking each person's delegable accounts, has no CLI verb and is
-done from each person's own desktop Accounts pane instead. Full verb
-list, refusal codes and rationale: `docs/reference/agent-identity-s9-design.md`
-§9 ("Day-one setup") and §10 item 39.
+(`accounts.lane.no_pusher_designated` otherwise). `provision` carries
+`--accept-unverified-platform` here because Windows is a gated platform
+until the shared box has passed the §9 live-box probes (steps 12 and
+13 — DACL read-back, credential-store isolation); without the flag,
+provisioning refuses `accounts.lane.provisioning_platform_gated`. The
+override is recorded, not silent: it writes `platformAcceptance:
+'unverified-win32'` onto that lane's `provision` audit row, visible
+back via `orca lane audit` as `platform=unverified-win32`. Once steps
+12–13 have actually passed on this box, drop the flag — re-provisioning
+is not required, but a fresh provision no longer needs it either. The
+one remaining step, delegating each person's account onto this box,
+has no CLI verb and is done from each person's own desktop Accounts
+pane instead, via the "Delegate" action under "Load an account onto a
+host." Full verb list, refusal codes and rationale:
+`docs/reference/agent-identity-s9-design.md` §9 ("Day-one setup"),
+§10 item 39, and §10(f) (the 2026-08-24 release audit that added the
+override).
