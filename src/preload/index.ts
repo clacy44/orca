@@ -21,6 +21,23 @@ import type { CodexConfigSyncStatus } from '../shared/codex-config-sync-types'
 import type { TerminalPaneSplitSource } from '../shared/feature-education-telemetry'
 import type { TerminalTabCreateReply } from '../shared/terminal-reveal-identity'
 import type { TerminalPresenceLocalTerminal } from '../shared/terminal-presence-ipc'
+import {
+  PRINCIPAL_CONSENT_BIND_CHANNEL,
+  PRINCIPAL_CONSENT_CHANGED_CHANNEL,
+  PRINCIPAL_CONSENT_CREATE_PRINCIPAL_CHANNEL,
+  PRINCIPAL_CONSENT_DEPROVISION_CHANNEL,
+  PRINCIPAL_CONSENT_DESIGNATE_CHANNEL,
+  PRINCIPAL_CONSENT_PROVISION_CHANNEL,
+  PRINCIPAL_CONSENT_REBIND_CHANNEL,
+  PRINCIPAL_CONSENT_SNAPSHOT_CHANNEL,
+  PRINCIPAL_CONSENT_UNBIND_CHANNEL,
+  type PrincipalConsentSnapshot
+} from '../shared/principal-consent-ipc'
+import {
+  PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
+  PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  type PrincipalLaneStatusSnapshot
+} from '../shared/principal-lane-status-ipc'
 import type { ProjectExecutionRuntimeResolution } from '../shared/project-execution-runtime'
 import type { StartupCommandDelivery } from '../shared/codex-startup-delivery'
 import type {
@@ -1312,6 +1329,48 @@ const api = {
       return () => ipcRenderer.removeListener('terminalPresence:changed', listener)
     }
   } satisfies PreloadApi['terminalPresence'],
+
+  // Why beside terminalPresence: another host-only IPC lane (S9 §2a) — the consent surface reaches
+  // the desktop's own registry, sender-gated in main, never negotiated to a paired client.
+  principalConsent: {
+    snapshot: () => ipcRenderer.invoke(PRINCIPAL_CONSENT_SNAPSHOT_CHANNEL),
+    createPrincipal: (displayName: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_CREATE_PRINCIPAL_CHANNEL, { displayName }),
+    bind: (deviceId: string, principalId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_BIND_CHANNEL, { deviceId, principalId }),
+    unbind: (deviceId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_UNBIND_CHANNEL, { deviceId }),
+    rebind: (deviceId: string, principalId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_REBIND_CHANNEL, { deviceId, principalId }),
+    designatePusher: (principalId: string, deviceId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_DESIGNATE_CHANNEL, { principalId, deviceId }),
+    provision: (principalId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_PROVISION_CHANNEL, { principalId }),
+    deprovision: (principalId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_CONSENT_DEPROVISION_CHANNEL, { principalId }),
+    onChanged: (callback: (snapshot: PrincipalConsentSnapshot) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        snapshot: PrincipalConsentSnapshot
+      ): void => callback(snapshot)
+      ipcRenderer.on(PRINCIPAL_CONSENT_CHANGED_CHANNEL, listener)
+      return () => ipcRenderer.removeListener(PRINCIPAL_CONSENT_CHANGED_CHANNEL, listener)
+    }
+  } satisfies PreloadApi['principalConsent'],
+
+  // Why beside principalConsent: THIS desktop's own principal-lane residency + delegation leases,
+  // host-only IPC for the AccountsPane section (S9 §2e/§2h).
+  principalLaneStatus: {
+    get: () => ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_GET_CHANNEL),
+    onChanged: (callback: (snapshot: PrincipalLaneStatusSnapshot) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        snapshot: PrincipalLaneStatusSnapshot
+      ): void => callback(snapshot)
+      ipcRenderer.on(PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL, listener)
+      return () => ipcRenderer.removeListener(PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL, listener)
+    }
+  } satisfies PreloadApi['principalLaneStatus'],
 
   feedback: {
     submit: (args: {
