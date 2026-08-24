@@ -45,6 +45,33 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
       }))
   }),
   defineMethod({
+    // The host-only read the local `orca lane status` renders and every device-selector verb
+    // resolves against. Behind `withConsent` like the writes: a roster of who is bound to whom is
+    // a host-only fact, so an identified socket is refused here exactly as it is at a bind.
+    name: 'accounts.lane.readStatus',
+    params: null,
+    handler: async (_params, ctx) =>
+      withConsent(ctx.clientKind, (service) => ({
+        grants: service.listGrants(),
+        principals: service.listPrincipals().map((principal) => ({
+          principalId: principal.principalId,
+          displayName: principal.displayName,
+          delegatedGrantId: principal.delegatedGrantId ?? null,
+          laneState: service.laneResidencyState(principal.principalId),
+          boundDeviceIds: service.boundDeviceIds(principal.principalId)
+        }))
+      }))
+  }),
+  defineMethod({
+    // The undo trail (§2a rule (iii)); deletions stay visible. Host-only for the same reason.
+    name: 'accounts.lane.readAudit',
+    params: null,
+    handler: async (_params, ctx) =>
+      withConsent(ctx.clientKind, (service) => ({
+        audit: service.listAudit().map((row) => ({ ...row }))
+      }))
+  }),
+  defineMethod({
     name: 'accounts.lane.createPrincipal',
     params: CreatePrincipalParams,
     handler: async (params, ctx) =>

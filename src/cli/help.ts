@@ -22,6 +22,19 @@ Accounts:
   account add               Add a managed Claude or Codex account on this Orca host
   account list              List managed Claude and Codex accounts on this Orca host
 
+Person lanes:
+  lane persons              List people who can own a per-person Claude credential lane
+  lane create-person        Create a person who can own a credential lane
+  lane bind                 Bind a paired device to a person
+  lane unbind               Unbind a device from its person
+  lane rebind               Rebind a device to a person (drops the designation)
+  lane designate            Designate which of a person's devices pushes their Claude account
+  lane provision            Create a person's credential lane
+  lane deprovision          Wipe and remove a person's credential lane
+  lane bind-link            Bind a federated home-peer link to its grant's person
+  lane status               Show lane residency, bindings, and pusher designations
+  lane audit                Show the host-only lane consent audit trail
+
 Skills:
   skills list               List version-matched skill guides bundled with this Orca CLI
   skills get                Print a version-matched skill guide as Markdown
@@ -513,6 +526,18 @@ function formatCommandFlagHelp(flag: string, commandPath: string[]): string {
   // which is the wrong meaning here — this selects the account provider.
   if (command === 'account add' && flag === 'agent') {
     return '--agent <id>           Account provider: claude or codex (default claude)'
+  }
+  if (command.startsWith('lane ') && flag === 'device') {
+    return '--device <sel>        Device id, unique id prefix, or pairing label'
+  }
+  if (command.startsWith('lane ') && flag === 'person') {
+    return '--person <sel>        Person id or exact display name'
+  }
+  if (command === 'lane create-person' && flag === 'name') {
+    return '--name <name>         Display name for the new person'
+  }
+  if (command === 'lane bind-link' && flag === 'link') {
+    return '--link <fingerprint>  Home-peer fingerprint (64 hex chars) to bind'
   }
   if (flag === 'key' && command === 'computer hotkey') {
     return '--key <key-combo>      Modifier chord with one key, e.g. CmdOrCtrl+A'

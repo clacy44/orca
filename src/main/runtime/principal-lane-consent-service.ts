@@ -11,9 +11,11 @@ import { seedFreshLaneConfig } from '../claude-accounts/principal-lane-config-se
 import { writeLaneSettings } from '../claude-accounts/principal-lane-settings'
 import { mirrorHostUserContentIntoLane } from '../claude-accounts/principal-lane-user-content-mirror'
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
+import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import type { HostConsent } from './principal-consent-authority'
-import type { PrincipalRegistry } from './principal-registry'
+import type { LaneGrantSummary, PrincipalRegistry } from './principal-registry'
 import type { PrincipalAuditRow, PrincipalRecord } from './principal-registry-store'
 
 /**
@@ -68,6 +70,16 @@ export class PrincipalLaneConsentService {
   /** The still-surviving grants bound to a principal; the bridge joins these into binding rows. */
   boundDeviceIds(principalId: string): string[] {
     return this.registry.boundDeviceIds(principalId)
+  }
+
+  /** The full grant roster the local `orca lane` verbs resolve a device selector against. */
+  listGrants(): LaneGrantSummary[] {
+    return this.registry.listGrants()
+  }
+
+  /** Whether this principal's lane holds a credential on this host right now (§2h). */
+  laneResidencyState(principalId: string): RuntimeTerminalLaneState {
+    return resolveLaneResidencyState(principalId, { platform: this.platform })
   }
 
   bindGrant(consent: HostConsent, deviceId: string, principalId: string): void {
