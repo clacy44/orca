@@ -56,10 +56,14 @@ describe('lane delegation host client (release-audit B3 adapter)', () => {
     await expect(client.getCapabilities()).resolves.toEqual(['agent-identity-lanes.v1'])
   })
 
-  it('answers no capabilities rather than throwing when the status probe fails', async () => {
+  // Chair decision (capability-probe stickiness): a failed status probe must read as "no answer
+  // yet", not as `[]` — folding it into an empty array is indistinguishable from an ok response
+  // that explicitly lacks the capability, which is exactly what made the push client's cache latch
+  // "unsupported" on a transient failure.
+  it('throws rather than answering no capabilities when the status probe fails', async () => {
     getRuntimeEnvironmentStatusMock.mockResolvedValueOnce(fail('runtime_unavailable', 'down'))
     const client = createLaneDelegationHostClient('env-1')
-    await expect(client.getCapabilities()).resolves.toEqual([])
+    await expect(client.getCapabilities()).rejects.toMatchObject({ code: 'runtime_unavailable' })
   })
 
   it('resolves call() to the RPC result on success', async () => {
@@ -93,7 +97,9 @@ describe('lane delegation host client (release-audit B3 adapter)', () => {
   it('refuses every call once the host is manually disconnected', async () => {
     isManuallyDisconnectedMock.mockReturnValueOnce(true).mockReturnValueOnce(true)
     const client = createLaneDelegationHostClient('env-1')
-    await expect(client.getCapabilities()).resolves.toEqual([])
+    await expect(client.getCapabilities()).rejects.toMatchObject({
+      code: 'runtime_manually_disconnected'
+    })
     await expect(client.call('accounts.lane.push')).rejects.toMatchObject({
       code: 'runtime_manually_disconnected'
     })

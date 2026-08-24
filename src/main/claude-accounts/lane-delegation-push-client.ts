@@ -1,6 +1,7 @@
 import { AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
+import { LaneCapabilityProbe } from './lane-delegation-capability-probe'
 import type { LaneDelegationLeaseStore } from './lane-delegation-lease'
 
 /**
@@ -72,13 +73,15 @@ export type LanePushOutcome =
   | 'already-connected'
 
 export class LaneDelegationPushClient {
-  private supported: boolean | null = null
+  private readonly capabilityProbe: LaneCapabilityProbe
   private lastKnownSha: string | null = null
   private principalId: string | null = null
   private unsubscribe: (() => void) | null = null
   private connecting: Promise<LanePushOutcome> | null = null
 
-  constructor(private readonly options: LaneDelegationPushClientOptions) {}
+  constructor(private readonly options: LaneDelegationPushClientOptions) {
+    this.capabilityProbe = new LaneCapabilityProbe({ hostId: options.host.hostId })
+  }
 
   /**
    * Reconnect arm: subscribe first, then push, so the ready status supplies `basedOn`.
@@ -105,6 +108,13 @@ export class LaneDelegationPushClient {
   }
 
   private async connectOnce(): Promise<LanePushOutcome> {
+    // A genuine reconnect: no live subscription (the real thing, a post-`end` resubscribe, or the
+    // first connect after disconnect/re-pair/remove) — as opposed to a passive status probe landing
+    // here while already subscribed. Clears a confirmed `unsupported` immediately; an `unknown` host
+    // mid-backoff still waits out its window (reconnect is not a backoff bypass).
+    if (this.unsubscribe === null) {
+      this.capabilityProbe.forceReprobe('reconnect')
+    }
     if (!(await this.hostSupportsLanes())) {
       return 'unsupported-host'
     }
@@ -130,8 +140,8 @@ export class LaneDelegationPushClient {
   disconnect(): void {
     this.unsubscribe?.()
     this.unsubscribe = null
-    // Deliberately NOT a lease release: §2e says a dropped connection never un-suppresses.
-    this.supported = null
+    // Deliberately NOT a lease release: §2e says a dropped connection never un-suppresses. The
+    // capability probe is left as-is; `connectOnce()`'s reconnect arm re-probes it if needed.
   }
 
   /** Selection-change arm, and the body of every other push this client performs. */
@@ -230,7 +240,6 @@ export class LaneDelegationPushClient {
       // follow-up): one network blip silently stopped `receipt` frames — and therefore Q2's pull
       // of the host's rotations — for the rest of the process's life.
       this.unsubscribe = null
-      this.supported = null
     }
   }
 
@@ -280,16 +289,18 @@ export class LaneDelegationPushClient {
   }
 
   private async hostSupportsLanes(): Promise<boolean> {
-    if (this.supported !== null) {
-      return this.supported
+    if (!this.capabilityProbe.shouldAttempt()) {
+      return this.capabilityProbe.supported
     }
     try {
       const capabilities = await this.options.host.getCapabilities()
-      this.supported = capabilities.includes(AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY)
+      this.capabilityProbe.recordSuccess(
+        capabilities.includes(AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY)
+      )
     } catch {
-      this.supported = false
+      this.capabilityProbe.recordFailure()
     }
-    return this.supported
+    return this.capabilityProbe.supported
   }
 }
 

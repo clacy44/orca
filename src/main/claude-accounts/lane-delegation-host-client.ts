@@ -43,12 +43,19 @@ export function createLaneDelegationHostClient(environmentId: string): LaneDeleg
   }
   return {
     hostId: environmentId,
+    // Why (chair decision, capability-probe stickiness): a transport failure/timeout/non-ok status
+    // must read as "no answer yet", never as "this host lacks the capability" — so this throws
+    // instead of folding every non-answer into `[]`. Only a genuine ok `status.get` reaches the
+    // `return`, and its `capabilities` (present or not) is the one true explicit answer.
     async getCapabilities(): Promise<readonly string[]> {
       if (isRuntimeEnvironmentManuallyDisconnected(environmentId)) {
-        return []
+        throw new LaneDelegationHostDisconnectedError()
       }
       const response = await getRuntimeEnvironmentStatus(userDataPath(), environmentId)
-      return response.ok ? (response.result.capabilities ?? []) : []
+      if (!response.ok) {
+        throw new LaneDelegationHostCallError(response.error.code, response.error.message)
+      }
+      return response.result.capabilities ?? []
     },
     async call<T>(method: string, params?: unknown): Promise<T> {
       assertReachable()
