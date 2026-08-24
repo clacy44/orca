@@ -5669,7 +5669,8 @@
           "codexSystemDefaultNeedsSignIn": "No Codex sign-in was found for {{value0}}.",
           "codexConfigSyncMissingSource": "Codex is still using the settings it last synced because {{value0}} is missing. Restore that file to resume syncing.",
           "codexConfigSyncBlankSource": "Codex is still using the settings it last synced because {{value0}} is empty. That is expected while a synced folder finishes downloading.",
-          "codexConfigSyncUnreadableSource": "Codex is still using the settings it last synced because {{value0}} could not be read. Check that file's permissions."
+          "codexConfigSyncUnreadableSource": "Codex is still using the settings it last synced because {{value0}} could not be read. Check that file's permissions.",
+          "claudeSwitchLive": "{{value0}} -> {{value1}}. Your Claude terminals picked up the new account live."
         },
         "AdvancedPane": {
           "40b29e0bf3": "Restart",
@@ -10726,6 +10727,61 @@
               "disconnectFailed": "Could not remove the saved Bitbucket credential."
             }
           }
+        },
+        "AccountLaneLeaseRow": {
+          "unnamedAccount": "Delegated account",
+          "nameLabel": "Friendly name for this account",
+          "saveName": "Save name",
+          "cancelName": "Cancel",
+          "editName": "Rename account",
+          "delegatedTo": "On {{value0}} for {{value1}} · since {{value2}}",
+          "release": "Release"
+        },
+        "AccountLaneStatusSection": {
+          "loaded": "Loaded",
+          "absent": "Absent",
+          "reauth": "Reauth required",
+          "restart": "Restart required",
+          "noPush": "No push received from {{value0}} yet — re-check the designated device.",
+          "writeFailed": "Lane update failed.",
+          "title": "Per-person credential lanes",
+          "operatingRule": "One pusher, one puller: while an account is loaded on a shared host, this desktop will not start a local terminal under it. Release it here to use it locally again.",
+          "leasesTitle": "Accounts you delegated"
+        },
+        "PrincipalConsentAuditList": {
+          "createPrincipal": "Added {{value0}}",
+          "bind": "Bound {{value0}} to {{value1}}",
+          "unbind": "Unbound {{value0}} from {{value1}}",
+          "designate": "Made {{value0}} the pusher for {{value1}}",
+          "linkBind": "Bound a federated link to {{value0}}",
+          "title": "Consent history"
+        },
+        "PrincipalConsentDeviceRow": {
+          "laneLoaded": "loaded",
+          "laneAbsent": "absent",
+          "laneReauth": "reauth required",
+          "pusher": "Pusher",
+          "neverConnected": "Never connected",
+          "boundTo": "Belongs to {{value0}}",
+          "unbound": "Not bound to a person",
+          "laneStatus": "lane {{value0}}",
+          "bindLabel": "Bind {{value0}} to a person",
+          "bindPlaceholder": "Bind to person…",
+          "rebindLabel": "Change the person {{value0}} belongs to",
+          "isPusher": "Is pusher",
+          "designate": "Set as pusher",
+          "deprovision": "Deprovision lane",
+          "provision": "Provision lane",
+          "unbindAction": "Unbind"
+        },
+        "PrincipalConsentSurface": {
+          "writeFailed": "Consent update failed.",
+          "title": "Credential lanes",
+          "subtitle": "Bind each shared-access device to a person so Orca runs its Claude terminals under that person’s own account. Only a person’s designated device pushes their credential.",
+          "noDevices": "No shared-access devices to bind yet.",
+          "newPersonPlaceholder": "Add a person…",
+          "newPersonLabel": "New person name",
+          "addPerson": "Add person"
         }
       },
       "right": {
