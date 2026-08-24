@@ -58,6 +58,11 @@ import { ProviderHostScopeControl } from './ProviderHostScopeControl'
 import { SearchableSetting } from './SearchableSetting'
 import { SettingsRow, SettingsSegmentedControl } from './SettingsFormControls'
 import { matchesSettingsSearch } from './settings-search'
+import { callRuntimeRpc, getActiveRuntimeTarget } from '@/runtime/runtime-rpc-client'
+import type { RuntimeTerminalListResult } from '../../../../shared/runtime-types'
+import { resolveClaudeAccountSwitchLiveTerminals } from './claude-account-switch-live-terminals'
+import { resolveClaudeAccountSwitchRestartHedge } from './claude-account-switch-restart-hedge'
+import { AccountLaneStatusSection } from './AccountLaneStatusSection'
 import {
   markLiveCodexSessionsForRestart,
   resolveCodexRestartPromptAccountLabel
@@ -306,6 +311,27 @@ function getSelectedAccountRuntime(
     }
   }
   return { runtime: 'host', label: getHostRuntimeLabel() }
+}
+
+// Why default 'required' on a read failure (S9 §2h): the classifier removes the hedge only when it
+// has PROVEN every live Claude terminal re-resolves in place, so a failed/timed-out terminal.list
+// read must fall back to the safe pre-S9 hedge rather than silently suppressing it.
+async function resolveClaudeSwitchRestartHedgeForTarget(
+  settings: GlobalSettings
+): Promise<'none' | 'required'> {
+  try {
+    const { terminals } = await callRuntimeRpc<RuntimeTerminalListResult>(
+      getActiveRuntimeTarget(settings),
+      'terminal.list',
+      { includeVisualLayouts: false },
+      { timeoutMs: 4000 }
+    )
+    return resolveClaudeAccountSwitchRestartHedge(
+      resolveClaudeAccountSwitchLiveTerminals(terminals)
+    )
+  } catch {
+    return 'required'
+  }
 }
 
 export function AccountsPane({
@@ -800,19 +826,34 @@ export function AccountsPane({
           nextActiveAccountId !== null &&
           action === `reauth:${nextActiveAccountId}`)
       if (shouldPromptRestart) {
-        toast.info(
-          translate('auto.components.settings.AccountsPane.f921d32606', 'Claude account updated.'),
-          {
-            description: translate(
-              'auto.components.settings.AccountsPane.b15ce90870',
-              '{{value0}} -> {{value1}}. Restart live Claude terminals before continuing old sessions.',
-              {
-                value0: getClaudeAccountLabel(claudeAccounts, previousActiveAccountId),
-                value1: getClaudeAccountLabel(next, nextActiveAccountId)
-              }
-            )
-          }
+        // Why the hedge is now classified, not unconditional (S9 §2h, R2): a per-person lane
+        // re-resolves the new account LIVE with no restart, so the old "restart live Claude
+        // terminals" sentence is wrong for every lane pane. Read the live terminals point-in-time
+        // (the desktop has no central terminal.list feed, §10(d)) and only hedge when at least one
+        // terminal cannot pick up the switch in place; on a read failure, keep the safe hedge.
+        const hedge = await resolveClaudeSwitchRestartHedgeForTarget(settings)
+        const title = translate(
+          'auto.components.settings.AccountsPane.f921d32606',
+          'Claude account updated.'
         )
+        const fromTo = {
+          value0: getClaudeAccountLabel(claudeAccounts, previousActiveAccountId),
+          value1: getClaudeAccountLabel(next, nextActiveAccountId)
+        }
+        toast.info(title, {
+          description:
+            hedge === 'required'
+              ? translate(
+                  'auto.components.settings.AccountsPane.b15ce90870',
+                  '{{value0}} -> {{value1}}. Restart live Claude terminals before continuing old sessions.',
+                  fromTo
+                )
+              : translate(
+                  'auto.components.settings.AccountsPane.claudeSwitchLive',
+                  '{{value0}} -> {{value1}}. Your Claude terminals picked up the new account live.',
+                  fromTo
+                )
+        })
       }
     } catch (error) {
       if (isClaudeAccountCancellation(error)) {
@@ -1102,6 +1143,7 @@ export function AccountsPane({
             )}
           </div>
         </SearchableSetting>
+        <AccountLaneStatusSection />
       </section>
     ) : null,
     matchesSettingsSearch(searchQuery, getAccountsCodexSearchEntries()) ? (
