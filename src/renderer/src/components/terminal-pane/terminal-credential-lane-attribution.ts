@@ -4,15 +4,15 @@
 // `'wsl'` row is labelled for where it runs; and a `'unknown'` row is a pre-S9 pane that must never
 // be attributed to anyone. The rules must be assertable without a DOM, so the chip's copy is the
 // only thing that lives in the component.
-import type { RuntimeTerminalCredentialLane } from '../../../../shared/runtime-types'
+import type {
+  RuntimeTerminalCredentialLane,
+  RuntimeTerminalLaneAccountLabel,
+  RuntimeTerminalLaneUsage
+} from '../../../../shared/runtime-types'
 import {
   resolveTerminalLaneAccountChipState,
   type TerminalLaneAccountChipState
 } from './terminal-lane-account-chip-state'
-import type {
-  RuntimeTerminalLaneAccountLabel,
-  RuntimeTerminalLaneUsage
-} from '../../../../shared/runtime-types'
 
 /**
  * What one terminal row's credential attribution renders as (S9 §2h).

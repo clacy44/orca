@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { shouldOfferOpenInMyLane, viewerOwnsCredentialLane } from './terminal-open-in-lane-action'
 import type { TerminalCredentialLaneAttribution } from './terminal-credential-lane-attribution'
-import type { TerminalPresenceParticipant } from '@/lib/pane-manager/terminal-presence-state'
+import type { RuntimeTerminalPresenceParticipant } from '../../../../shared/runtime-types'
 
 const owned: TerminalCredentialLaneAttribution = {
   kind: 'owned',
@@ -9,8 +9,8 @@ const owned: TerminalCredentialLaneAttribution = {
 }
 
 const participant = (
-  over: Partial<TerminalPresenceParticipant> = {}
-): TerminalPresenceParticipant => ({
+  over: Partial<RuntimeTerminalPresenceParticipant> = {}
+): RuntimeTerminalPresenceParticipant => ({
   participantId: 'p1',
   label: 'Ana',
   kind: 'runtime',

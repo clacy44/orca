@@ -7,16 +7,19 @@
 //         source lane to open into;
 //   (iii) it must not be the viewer's OWN lane — opening your own lane in your own lane is a no-op,
 //         and the backend refuses `terminal.lane_open_forbidden` for the wrong-principal case.
-import type { TerminalPresenceParticipant } from '@/lib/pane-manager/terminal-presence-state'
+import type { RuntimeTerminalPresenceParticipant } from '../../../../shared/runtime-types'
 import type { TerminalCredentialLaneAttribution } from './terminal-credential-lane-attribution'
 
 /**
  * True when the viewer already owns this terminal's credential lane — the person whose lane it is
  * is attached from this very client (§2h: one owner label over a desktop AND a phone, so `self` is
  * the discriminator, not the participant count).
+ *
+ * Reads the `terminal.list` presence participant, the row that carries `credentialLaneOwner` from
+ * the projection's owner-label join — the per-pane stream participant does not carry it (§2h).
  */
 export function viewerOwnsCredentialLane(
-  participants: readonly TerminalPresenceParticipant[]
+  participants: readonly RuntimeTerminalPresenceParticipant[]
 ): boolean {
   return participants.some(
     (participant) => participant.self === true && participant.credentialLaneOwner === true

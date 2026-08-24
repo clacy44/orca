@@ -3,7 +3,17 @@
 // make that wrong for most terminals — R2 is that a lane re-resolves its account LIVE, with no
 // restart (§2h). The hedge must become conditional on the live terminals' lane states, and the
 // classification is the part with rules, so it lives here where it can be asserted without a toast.
-import type { RuntimeTerminalLaneState } from '../../../../shared/runtime-types'
+/**
+ * The lane residency states this hedge turns on. It is the shipped `RuntimeTerminalLaneState`
+ * (`loaded | absent | reauth-required`) PLUS `restart-required` — §2h's degraded value from the §4
+ * live-probe fallback, which the wire type does not yet carry (it is the "restart-required seam",
+ * §10(e)). Modelled locally so the classifier is correct the moment that value ships.
+ */
+export type ClaudeAccountSwitchLaneState =
+  | 'loaded'
+  | 'absent'
+  | 'reauth-required'
+  | 'restart-required'
 
 /**
  * What the post-switch hedge should say (S9 §2h, R2 and its degraded path).
@@ -23,7 +33,7 @@ export type ClaudeAccountSwitchRestartHedge = 'none' | 'required'
 export type ClaudeAccountSwitchLiveTerminal = {
   /** True for a `'grant'` lane pane; false for a shared/host, remote or WSL terminal. */
   onLane: boolean
-  laneState?: RuntimeTerminalLaneState
+  laneState?: ClaudeAccountSwitchLaneState
 }
 
 export function resolveClaudeAccountSwitchRestartHedge(
