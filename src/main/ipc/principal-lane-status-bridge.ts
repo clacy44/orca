@@ -9,6 +9,12 @@ import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+  PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
+  type PrincipalLaneStatusReleaseRequest,
+  type PrincipalLaneStatusReleaseResult,
+  type PrincipalLaneStatusRenameRequest,
+  type PrincipalLaneStatusRenameResult,
   type PrincipalLaneStatusSnapshot
 } from '../../shared/principal-lane-status-ipc'
 import { getLaneDelegationLeaseStore } from '../claude-accounts/lane-delegation-lease'
@@ -28,6 +34,10 @@ export type PrincipalLaneStatusBridgeOptions = {
   resolveLaneState?: (principalId: string) => RuntimeTerminalLaneState
   /** Injected in tests. Defaults to this desktop's persisted lease list. */
   listDelegationLeases?: () => ClaudeLaneDelegationLease[]
+  /** Injected in tests. Defaults to dropping this desktop's lease for the account (§2e recovery). */
+  releaseLease?: (accountId: string) => boolean
+  /** Injected in tests. Defaults to persisting the Q3 friendly name on the lease. */
+  renameLease?: (accountId: string, friendlyName: string | null) => boolean
 }
 
 // Why a broadcast set and not one window: provision/deprovision are process-wide events, and every
@@ -56,6 +66,13 @@ export function registerPrincipalLaneStatusBridge(
     options.resolveLaneState ?? ((id: string) => resolveLaneResidencyState(id))
   const listDelegationLeases =
     options.listDelegationLeases ?? (() => getLaneDelegationLeaseStore()?.list() ?? [])
+  const releaseLease =
+    options.releaseLease ??
+    ((accountId: string) => getLaneDelegationLeaseStore()?.release(accountId) ?? false)
+  const renameLease =
+    options.renameLease ??
+    ((accountId: string, friendlyName: string | null) =>
+      getLaneDelegationLeaseStore()?.rename(accountId, friendlyName) ?? false)
 
   const isMainWindowSender = (event: IpcMainInvokeEvent): boolean =>
     !mainWindow.isDestroyed() &&
@@ -88,6 +105,40 @@ export function registerPrincipalLaneStatusBridge(
     return buildSnapshot()
   })
 
+  // Why the sender check gates these two writes exactly as `get` gates the read: releasing a lease
+  // un-suppresses this desktop's own rotation and renaming persists a human label — both are host
+  // acts, refused to any foreign sender BEFORE the lease store is touched (§2e, terminal-presence
+  // precedent). A write republishes so every host frame re-reads the lease view.
+  ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL)
+  ipcMain.handle(
+    PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+    (event, request: PrincipalLaneStatusReleaseRequest): PrincipalLaneStatusReleaseResult => {
+      if (!isMainWindowSender(event)) {
+        return { released: false }
+      }
+      const released = releaseLease(request.accountId)
+      if (released) {
+        broadcast()
+      }
+      return { released }
+    }
+  )
+
+  ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL)
+  ipcMain.handle(
+    PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
+    (event, request: PrincipalLaneStatusRenameRequest): PrincipalLaneStatusRenameResult => {
+      if (!isMainWindowSender(event)) {
+        return { renamed: false }
+      }
+      const renamed = renameLease(request.accountId, request.friendlyName)
+      if (renamed) {
+        broadcast()
+      }
+      return { renamed }
+    }
+  )
+
   const dispose = (): void => {
     if (disposed) {
       return
@@ -96,6 +147,8 @@ export function registerPrincipalLaneStatusBridge(
     broadcasters.delete(broadcast)
     if (activeRegistrationToken === token) {
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_GET_CHANNEL)
+      ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL)
+      ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL)
     }
   }
 

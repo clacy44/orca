@@ -19,6 +19,12 @@ export type ClaudeLaneDelegationLease = {
   since: number
   /** §2e's expiry arm: after this the lease is inert, so a dead host cannot suppress forever. */
   expiresAt: number | null
+  /**
+   * Q3's editable friendly name for this delegated account, persisted WITH the lease so the desktop
+   * shows a human name ("work", "personal") instead of the opaque account id. Renewal preserves it;
+   * absent until the human sets one.
+   */
+  friendlyName?: string | null
 }
 
 /** One row per delegated account; a desktop delegates few, and a corrupt list must stay bounded. */
@@ -59,6 +65,7 @@ export function normalizeClaudeLaneLease(value: unknown): ClaudeLaneDelegationLe
   if (!accountId || !hostId || !principalId || !delegatedGrantId) {
     return null
   }
+  const friendlyName = readBounded(record.friendlyName, 128)
   return {
     accountId,
     accountUuid: readBounded(record.accountUuid, 256),
@@ -66,7 +73,8 @@ export function normalizeClaudeLaneLease(value: unknown): ClaudeLaneDelegationLe
     principalId,
     delegatedGrantId,
     since: readTimestamp(record.since) ?? 0,
-    expiresAt: readTimestamp(record.expiresAt)
+    expiresAt: readTimestamp(record.expiresAt),
+    ...(friendlyName ? { friendlyName } : {})
   }
 }
 

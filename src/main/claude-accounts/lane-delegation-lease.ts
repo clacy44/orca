@@ -70,7 +70,9 @@ export class LaneDelegationLeaseStore {
     const lease: ClaudeLaneDelegationLease = {
       ...input,
       since: existing?.since ?? now,
-      expiresAt: now + (this.options.ttlMs ?? CLAUDE_LANE_LEASE_TTL_MS)
+      expiresAt: now + (this.options.ttlMs ?? CLAUDE_LANE_LEASE_TTL_MS),
+      // Why preserve: renewal must not wipe the human's Q3 friendly name (§2e — the lease is durable).
+      ...(existing?.friendlyName ? { friendlyName: existing.friendlyName } : {})
     }
     this.put(lease)
     try {
@@ -87,6 +89,29 @@ export class LaneDelegationLeaseStore {
     const rows = this.list()
     const next = rows.filter((lease) => lease.accountId !== accountId)
     if (next.length === rows.length) {
+      return false
+    }
+    this.options.persistence.setClaudeLaneDelegationLeases(next)
+    return true
+  }
+
+  /** Q3: set (or clear, with an empty name) the human-friendly name persisted on this lease. */
+  rename(accountId: string, friendlyName: string | null): boolean {
+    const rows = this.list()
+    const trimmed = friendlyName?.trim() ? friendlyName.trim().slice(0, 128) : null
+    let changed = false
+    const next = rows.map((lease) => {
+      if (lease.accountId !== accountId) {
+        return lease
+      }
+      changed = true
+      if (trimmed) {
+        return { ...lease, friendlyName: trimmed }
+      }
+      const { friendlyName: _dropped, ...rest } = lease
+      return rest
+    })
+    if (!changed) {
       return false
     }
     this.options.persistence.setClaudeLaneDelegationLeases(next)

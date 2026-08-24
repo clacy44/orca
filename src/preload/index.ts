@@ -36,6 +36,8 @@ import {
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+  PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
 } from '../shared/principal-lane-status-ipc'
 import type { ProjectExecutionRuntimeResolution } from '../shared/project-execution-runtime'
@@ -1369,7 +1371,11 @@ const api = {
       ): void => callback(snapshot)
       ipcRenderer.on(PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL, listener)
       return () => ipcRenderer.removeListener(PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL, listener)
-    }
+    },
+    releaseLease: (accountId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL, { accountId }),
+    renameLease: (accountId: string, friendlyName: string | null) =>
+      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL, { accountId, friendlyName })
   } satisfies PreloadApi['principalLaneStatus'],
 
   feedback: {

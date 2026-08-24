@@ -1,4 +1,8 @@
-import type { PrincipalLaneStatusSnapshot } from '../../shared/principal-lane-status-ipc'
+import type {
+  PrincipalLaneStatusReleaseResult,
+  PrincipalLaneStatusRenameResult,
+  PrincipalLaneStatusSnapshot
+} from '../../shared/principal-lane-status-ipc'
 
 // Host-only IPC (S9 §2e/§2h, §10(d)): the AccountsPane section's read of THIS desktop's own
 // principal-lane residency and its delegation leases. Sender-gated in main — a non-host frame gets
@@ -9,4 +13,11 @@ export type PrincipalLaneStatusApi = {
   get: () => Promise<PrincipalLaneStatusSnapshot>
   /** Republished when a provision/deprovision (or other residency change) fires on the host. */
   onChanged: (callback: (snapshot: PrincipalLaneStatusSnapshot) => void) => () => void
+  /** Drop THIS desktop's delegation lease for the account (§2e recovery). Republishes the lease view. */
+  releaseLease: (accountId: string) => Promise<PrincipalLaneStatusReleaseResult>
+  /** Set/clear the Q3 friendly name persisted on the lease. Republishes the lease view. */
+  renameLease: (
+    accountId: string,
+    friendlyName: string | null
+  ) => Promise<PrincipalLaneStatusRenameResult>
 }

@@ -346,4 +346,40 @@ describe('rule (iv) runtime credential clearing', () => {
     })
     expect(deleteKeychainItem).toHaveBeenCalledWith(paths.configDir)
   })
+
+  it('sets and clears the Q3 friendly name on a lease', () => {
+    const { store, peek } = makeStore()
+    store.take({
+      accountId: 'acct-1',
+      accountUuid: null,
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    expect(store.rename('acct-1', '  work  ')).toBe(true)
+    expect(peek()[0].friendlyName).toBe('work')
+    expect(store.rename('acct-1', '   ')).toBe(true)
+    expect(peek()[0].friendlyName).toBeUndefined()
+    expect(store.rename('missing', 'x')).toBe(false)
+  })
+
+  it('preserves the friendly name across a renewal take', () => {
+    const { store, peek } = makeStore()
+    store.take({
+      accountId: 'acct-1',
+      accountUuid: null,
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    store.rename('acct-1', 'personal')
+    store.take({
+      accountId: 'acct-1',
+      accountUuid: 'acct-uuid-1',
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    expect(peek()[0].friendlyName).toBe('personal')
+  })
 })

@@ -14,6 +14,8 @@ import type { ClaudeLaneDelegationLease } from '../../shared/claude-lane-lease'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+  PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
 } from '../../shared/principal-lane-status-ipc'
 import {
@@ -129,5 +131,78 @@ describe('principal lane status bridge', () => {
       stub.sends.filter((send) => send.channel === PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL)
     ).toHaveLength(0)
     dispose()
+  })
+})
+
+function invokeChannel<T>(channel: string, sender: object, request: unknown): T {
+  const entry = handleMock.mock.calls.findLast((call) => call[0] === channel) as
+    | [string, (event: IpcMainInvokeEvent, request: unknown) => T]
+    | undefined
+  if (!entry) {
+    throw new Error(`${channel} was never registered`)
+  }
+  return entry[1]({ sender } as unknown as IpcMainInvokeEvent, request)
+}
+
+describe('principal lane status bridge writes', () => {
+  let stub: WindowStub
+  let releaseLease: ReturnType<typeof vi.fn<(accountId: string) => boolean>>
+  let renameLease: ReturnType<
+    typeof vi.fn<(accountId: string, friendlyName: string | null) => boolean>
+  >
+
+  beforeEach(() => {
+    handleMock.mockClear()
+    removeHandlerMock.mockClear()
+    stub = makeWindow()
+    releaseLease = vi.fn<(accountId: string) => boolean>().mockReturnValue(true)
+    renameLease = vi
+      .fn<(accountId: string, friendlyName: string | null) => boolean>()
+      .mockReturnValue(true)
+    registerPrincipalLaneStatusBridge(stub.window, { ...options(), releaseLease, renameLease })
+  })
+
+  it('releases a lease for the host frame and republishes', () => {
+    const result = invokeChannel<{ released: boolean }>(
+      PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+      stub.sender,
+      { accountId: 'acct-1' }
+    )
+    expect(result).toEqual({ released: true })
+    expect(releaseLease).toHaveBeenCalledWith('acct-1')
+    expect(
+      stub.sends.filter((send) => send.channel === PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL)
+    ).toHaveLength(1)
+  })
+
+  it('renames a lease for the host frame', () => {
+    const result = invokeChannel<{ renamed: boolean }>(
+      PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
+      stub.sender,
+      { accountId: 'acct-1', friendlyName: 'work' }
+    )
+    expect(result).toEqual({ renamed: true })
+    expect(renameLease).toHaveBeenCalledWith('acct-1', 'work')
+  })
+
+  // Mutation proof: the sender check is the door. Deleting it turns these two refusals green->red.
+  it('refuses a foreign sender BEFORE the lease store is touched (release)', () => {
+    const result = invokeChannel<{ released: boolean }>(
+      PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+      {},
+      { accountId: 'acct-1' }
+    )
+    expect(result).toEqual({ released: false })
+    expect(releaseLease).not.toHaveBeenCalled()
+  })
+
+  it('refuses a foreign sender BEFORE the lease store is touched (rename)', () => {
+    const result = invokeChannel<{ renamed: boolean }>(
+      PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
+      {},
+      { accountId: 'acct-1', friendlyName: 'work' }
+    )
+    expect(result).toEqual({ renamed: false })
+    expect(renameLease).not.toHaveBeenCalled()
   })
 })

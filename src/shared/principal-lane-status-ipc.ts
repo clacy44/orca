@@ -24,5 +24,15 @@ export type PrincipalLaneStatusSnapshot = {
   delegationLeases: ClaudeLaneDelegationLease[]
 }
 
+/** Release request: drop THIS desktop's delegation lease for one account (§2e recovery, Q-lease). */
+export type PrincipalLaneStatusReleaseRequest = { accountId: string }
+export type PrincipalLaneStatusReleaseResult = { released: boolean }
+
+/** Rename request: set/clear the Q3 friendly name persisted on one lease. */
+export type PrincipalLaneStatusRenameRequest = { accountId: string; friendlyName: string | null }
+export type PrincipalLaneStatusRenameResult = { renamed: boolean }
+
 export const PRINCIPAL_LANE_STATUS_GET_CHANNEL = 'principalLaneStatus:get'
 export const PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL = 'principalLaneStatus:changed'
+export const PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL = 'principalLaneStatus:release'
+export const PRINCIPAL_LANE_STATUS_RENAME_CHANNEL = 'principalLaneStatus:rename'
