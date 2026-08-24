@@ -23,6 +23,23 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/account.js')).ACCOUNT_HANDLERS
   },
   {
+    name: 'lane',
+    keys: [
+      'lane persons',
+      'lane create-person',
+      'lane bind',
+      'lane unbind',
+      'lane rebind',
+      'lane designate',
+      'lane provision',
+      'lane deprovision',
+      'lane bind-link',
+      'lane status',
+      'lane audit'
+    ],
+    load: async () => (await import('./handlers/lane.js')).LANE_HANDLERS
+  },
+  {
     name: 'artifacts',
     keys: [
       'artifacts list',
