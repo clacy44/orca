@@ -2084,7 +2084,7 @@ describe('registerPtyHandlers', () => {
     })
 
     it('clears Claude live-PTY tracking from shared provider teardown', () => {
-      markClaudePtySpawned('ssh-claude-pty')
+      markClaudePtySpawned('ssh-claude-pty', null)
       expect(hasLiveClaudePtys()).toBe(true)
 
       clearProviderPtyState('ssh-claude-pty')
@@ -4679,7 +4679,7 @@ describe('registerPtyHandlers', () => {
           expect.any(String),
           'wt-runtime',
           null,
-          { tabId: 'tab-1', leafId },
+          { tabId: 'tab-1', leafId, isReattach: false },
           false
         )
       })
@@ -7912,6 +7912,412 @@ describe('registerPtyHandlers', () => {
     })
   })
 
+  // Why: guard 3 (S9 §2a) sits after each path's deletion list is applied, so these assert the
+  // spawn options the provider is handed. The client vectors converge here: terminal.create and
+  // worktree.create reach path A through the runtime controller, session.tabs.createTerminal and
+  // terminal.split reach path B through pty:spawn, and launchConfig.agentEnv arrives as args.env.
+  describe('CLAUDE_CONFIG_DIR launch scope', () => {
+    type CapturedSpawn = {
+      env: Record<string, string>
+      envToDelete?: string[]
+      sessionId?: string
+    }
+
+    function setupCapturingProvider() {
+      const capturedSpawn = vi.fn(async (options: CapturedSpawn) => ({
+        id: options.sessionId ?? 'captured-pty'
+      }))
+      setLocalPtyProvider({
+        spawn: capturedSpawn,
+        supportsGitCredentialGuardHost: () => true,
+        supportsAgentSessionClaims: () => true,
+        supportsAgentSessionCreateOperations: () => true,
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        shutdown: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn()),
+        listProcesses: vi.fn(async () => []),
+        getForegroundProcess: vi.fn(async () => null)
+      } as never)
+      return capturedSpawn
+    }
+
+    type SpawnController = {
+      spawn(args: {
+        cols: number
+        rows: number
+        worktreeId?: string
+        env?: Record<string, string>
+        envToDelete?: string[]
+        command?: string
+        connectionId?: string
+      }): Promise<{ id: string }>
+    }
+
+    function registerController(prepareClaudeAuth?: unknown): SpawnController {
+      const runtime = {
+        setPtyController: vi.fn(),
+        registerPty: vi.fn(),
+        noteTerminalSpawnCommand: vi.fn(),
+        createPreAllocatedTerminalHandle: vi.fn(() => 'term_guard3'),
+        registerPreAllocatedHandleForPty: vi.fn(),
+        onPtySpawned: vi.fn(),
+        onPtyExit: vi.fn(),
+        onPtyData: vi.fn()
+      }
+      handlers.clear()
+      registerPtyHandlers(
+        mainWindow as never,
+        runtime as never,
+        undefined,
+        undefined,
+        prepareClaudeAuth as never
+      )
+      return runtime.setPtyController.mock.calls[0]?.[0] as SpawnController
+    }
+
+    // Why: the WSL managed-account branch is the only host patch that carries a config dir today.
+    const makeWslManagedAuth = () =>
+      vi.fn(async () => ({
+        configDir: '/tmp/orca-user-data/claude-accounts/acct-1/auth',
+        envPatch: { CLAUDE_CONFIG_DIR: '/home/me/.orca-claude/acct-1' },
+        stripAuthEnv: true,
+        provenance: 'managed:acct-1'
+      }))
+
+    const makeHostDefaultAuth = () =>
+      vi.fn(async () => ({
+        configDir: '/home/me/.claude',
+        envPatch: {},
+        stripAuthEnv: false,
+        provenance: 'host'
+      }))
+
+    it('strips a client-supplied CLAUDE_CONFIG_DIR from a path A spawn', async () => {
+      const capturedSpawn = setupCapturingProvider()
+      const controller = registerController(makeHostDefaultAuth())
+
+      await controller.spawn({
+        cols: 80,
+        rows: 24,
+        worktreeId: 'wt-a',
+        command: 'claude',
+        env: { CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/victim/auth' }
+      })
+
+      const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+      expect(options.env.CLAUDE_CONFIG_DIR).toBeUndefined()
+    })
+
+    it('strips a client-supplied CLAUDE_CONFIG_DIR from a non-Claude path A command', async () => {
+      const capturedSpawn = setupCapturingProvider()
+      const hostDefaultAuth = makeHostDefaultAuth()
+      const controller = registerController(hostDefaultAuth)
+
+      await controller.spawn({
+        cols: 80,
+        rows: 24,
+        worktreeId: 'wt-a',
+        env: { CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/victim/auth' }
+      })
+
+      expect(hostDefaultAuth).not.toHaveBeenCalled()
+      const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+      expect(options.env.CLAUDE_CONFIG_DIR).toBeUndefined()
+    })
+
+    it('strips a client CLAUDE_CONFIG_DIR deletion request from the path A provider list', async () => {
+      const capturedSpawn = setupCapturingProvider()
+      const controller = registerController(makeWslManagedAuth())
+
+      await controller.spawn({
+        cols: 80,
+        rows: 24,
+        worktreeId: 'wt-a',
+        command: 'claude',
+        env: { CLAUDE_CONFIG_DIR: '/tmp/decoy' },
+        envToDelete: ['CLAUDE_CONFIG_DIR']
+      })
+
+      const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+      expect(options.env.CLAUDE_CONFIG_DIR).toBe('/home/me/.orca-claude/acct-1')
+      expect(options.envToDelete ?? []).not.toContain('CLAUDE_CONFIG_DIR')
+    })
+
+    it('strips a client-supplied CLAUDE_CONFIG_DIR from a path B spawn', async () => {
+      const capturedSpawn = setupCapturingProvider()
+      registerController(makeHostDefaultAuth())
+
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        command: 'claude',
+        env: { CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/victim/auth' }
+      })
+
+      const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+      expect(options.env.CLAUDE_CONFIG_DIR).toBeUndefined()
+    })
+
+    it('strips a client CLAUDE_CONFIG_DIR deletion request from the path B provider list', async () => {
+      const capturedSpawn = setupCapturingProvider()
+      registerController(makeWslManagedAuth())
+
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        command: 'claude',
+        env: { CLAUDE_CONFIG_DIR: '/tmp/decoy' },
+        envToDelete: ['CLAUDE_CONFIG_DIR']
+      })
+
+      const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+      expect(options.env.CLAUDE_CONFIG_DIR).toBe('/home/me/.orca-claude/acct-1')
+      expect(options.envToDelete ?? []).not.toContain('CLAUDE_CONFIG_DIR')
+    })
+
+    it('keeps an SSH pane CLAUDE_CONFIG_DIR verbatim and gives it no host value', async () => {
+      const connectionId = 'ssh-guard3'
+      const capturedSpawn = vi.fn(async (options: CapturedSpawn) => ({
+        id: `ssh:${connectionId}@@remote-pty`,
+        ...options
+      }))
+      setupCapturingProvider()
+      registerSshPtyProvider(connectionId, {
+        spawn: capturedSpawn,
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn())
+      } as never)
+      const wslManagedAuth = makeWslManagedAuth()
+      registerController(wslManagedAuth)
+
+      try {
+        await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+          cols: 80,
+          rows: 24,
+          connectionId,
+          command: 'claude',
+          env: { CLAUDE_CONFIG_DIR: '/home/remote-dev/.claude-work' }
+        })
+
+        const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+        expect(options.env.CLAUDE_CONFIG_DIR).toBe('/home/remote-dev/.claude-work')
+        expect(wslManagedAuth).not.toHaveBeenCalled()
+      } finally {
+        unregisterSshPtyProvider(connectionId)
+      }
+    })
+
+    // Why: path A is the route terminal.create, worktree.create and terminal.split take, and
+    // deleting the guard call there alone would leave the path-B SSH assertion green.
+    it('keeps an SSH pane CLAUDE_CONFIG_DIR verbatim on a path A spawn', async () => {
+      const connectionId = 'ssh-guard3-path-a'
+      const capturedSpawn = vi.fn(async (options: CapturedSpawn) => ({
+        id: `ssh:${connectionId}@@remote-pty-a`,
+        ...options
+      }))
+      setupCapturingProvider()
+      registerSshPtyProvider(connectionId, {
+        spawn: capturedSpawn,
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn())
+      } as never)
+      const wslManagedAuth = makeWslManagedAuth()
+      const controller = registerController(wslManagedAuth)
+
+      try {
+        await controller.spawn({
+          cols: 80,
+          rows: 24,
+          worktreeId: 'wt-ssh',
+          connectionId,
+          command: 'claude',
+          env: { CLAUDE_CONFIG_DIR: '/home/remote-dev/.claude-work' }
+        })
+
+        const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+        expect(options.env.CLAUDE_CONFIG_DIR).toBe('/home/remote-dev/.claude-work')
+        expect(wslManagedAuth).not.toHaveBeenCalled()
+      } finally {
+        unregisterSshPtyProvider(connectionId)
+      }
+    })
+
+    it('scrubs a client CLAUDE_CONFIG_DIR out of the launchConfig path B persists', async () => {
+      setupCapturingProvider()
+      registerController(makeHostDefaultAuth())
+
+      const response = (await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        worktreeId: 'wt-persist',
+        command: 'claude',
+        launchAgent: 'claude',
+        launchConfig: {
+          agentEnv: {
+            CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-accounts/victim/auth',
+            ORCA_TAB_ID: 't1'
+          }
+        }
+      })) as { launchConfig?: { agentEnv?: Record<string, string> } }
+
+      expect(response.launchConfig?.agentEnv).toEqual({ ORCA_TAB_ID: 't1' })
+    })
+
+    it('refuses a path A SSH spawn whose env points into the host lane root', async () => {
+      const connectionId = 'ssh-guard3-lane'
+      setupCapturingProvider()
+      registerSshPtyProvider(connectionId, {
+        spawn: vi.fn(async () => ({ id: `ssh:${connectionId}@@remote-pty-lane` })),
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        onData: vi.fn(() => vi.fn()),
+        onExit: vi.fn(() => vi.fn())
+      } as never)
+      const controller = registerController(makeHostDefaultAuth())
+
+      try {
+        await expect(
+          controller.spawn({
+            cols: 80,
+            rows: 24,
+            worktreeId: 'wt-ssh',
+            connectionId,
+            command: 'claude',
+            env: { CLAUDE_CONFIG_DIR: '/tmp/orca-user-data/claude-lanes/principal-a' }
+          })
+        ).rejects.toThrow(/credential lane on a remote pane/)
+      } finally {
+        unregisterSshPtyProvider(connectionId)
+      }
+    })
+
+    // Why: §2m(5) — the live auth-var refusal and the launch scrub are the two production
+    // sites that decide whether a differently-cased auth key reaches the child. On Windows
+    // `anthropic_api_key` IS `ANTHROPIC_API_KEY` to the process, and it outranks the stored
+    // OAuth login, so an exact-case comparison here is the whole injection.
+    describe('win32 auth env key case', () => {
+      const withPlatform = async (platform: string, run: () => Promise<void>): Promise<void> => {
+        const originalPlatform = process.platform
+        Object.defineProperty(process, 'platform', { configurable: true, value: platform })
+        try {
+          await run()
+        } finally {
+          Object.defineProperty(process, 'platform', {
+            configurable: true,
+            value: originalPlatform
+          })
+        }
+      }
+
+      it('refuses a lower-cased auth var on a managed path A launch', async () => {
+        setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+
+        await withPlatform('win32', async () => {
+          await expect(
+            controller.spawn({
+              cols: 80,
+              rows: 24,
+              worktreeId: 'wt-case',
+              command: 'claude',
+              env: { anthropic_api_key: 'sk-ant-attacker' }
+            })
+          ).rejects.toThrow(/Anthropic auth environment variables/)
+        })
+      })
+
+      it('refuses a lower-cased auth var on a managed path B launch', async () => {
+        setupCapturingProvider()
+        registerController(makeWslManagedAuth())
+
+        await withPlatform('win32', async () => {
+          await expect(
+            handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+              cols: 80,
+              rows: 24,
+              command: 'claude',
+              env: { anthropic_api_key: 'sk-ant-attacker' }
+            })
+          ).rejects.toThrow(/Anthropic auth environment variables/)
+        })
+      })
+
+      // Negative control: on POSIX the lower-cased name is a different variable the CLI never
+      // reads, so the same launch must still be served.
+      it('serves the same launch on linux, where the key is a different variable', async () => {
+        const capturedSpawn = setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+
+        await withPlatform('linux', async () => {
+          await controller.spawn({
+            cols: 80,
+            rows: 24,
+            worktreeId: 'wt-case',
+            command: 'claude',
+            env: { anthropic_api_key: 'sk-ant-attacker' }
+          })
+        })
+
+        expect(capturedSpawn).toHaveBeenCalled()
+      })
+
+      it('names the inherited casing in the deletion list the provider replays', async () => {
+        const capturedSpawn = setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+        process.env.anthropic_api_key = 'sk-ant-inherited'
+
+        try {
+          await withPlatform('win32', async () => {
+            await controller.spawn({
+              cols: 80,
+              rows: 24,
+              worktreeId: 'wt-case',
+              command: 'claude'
+            })
+          })
+
+          const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+          expect(options.envToDelete ?? []).toContain('anthropic_api_key')
+        } finally {
+          delete process.env.anthropic_api_key
+        }
+      })
+
+      it('leaves the deletion list exact-case on linux', async () => {
+        const capturedSpawn = setupCapturingProvider()
+        const controller = registerController(makeWslManagedAuth())
+        process.env.anthropic_api_key = 'sk-ant-inherited'
+
+        try {
+          await withPlatform('linux', async () => {
+            await controller.spawn({
+              cols: 80,
+              rows: 24,
+              worktreeId: 'wt-case',
+              command: 'claude'
+            })
+          })
+
+          const options = capturedSpawn.mock.calls.at(-1)?.[0] as CapturedSpawn
+          expect(options.envToDelete ?? []).not.toContain('anthropic_api_key')
+          expect(options.envToDelete ?? []).toContain('ANTHROPIC_API_KEY')
+        } finally {
+          delete process.env.anthropic_api_key
+        }
+      })
+    })
+  })
+
   // Why: daemon resize is fire-and-forget, so pty:getSize must report the APPLIED size, not the requested one (Claude-Code split-pane desync).
   describe('pty:getSize reports applied size, not requested size', () => {
     function setupProviderWithAppliedSize(args: {
@@ -8347,7 +8753,7 @@ describe('registerPtyHandlers', () => {
       expect.any(String),
       'wt-1',
       null,
-      { tabId: 'tab-1', leafId, incarnationId: expect.any(String) },
+      { tabId: 'tab-1', leafId, incarnationId: expect.any(String), isReattach: false },
       false
     )
   })
@@ -18726,6 +19132,7 @@ describe('registerPtyHandlers', () => {
     } as never)
 
     const created = await runtime.createTerminal(`id:${worktreeId}`, {
+      credentialLane: { kind: 'shared' },
       presentation: 'background'
     })
     expect(created.ptyId).toBe(ptyId)

@@ -3,6 +3,7 @@ import type { OrchestrationDb } from './db'
 import type { MessageRow, TaskRow, CoordinatorStatus } from './types'
 import { buildDispatchPreamble } from './preamble'
 import { reconcileLifecycleMessage } from './lifecycle-reconciliation'
+import type { TerminalCredentialLaneOption } from '../terminal-credential-lane-resolution'
 
 type WorktreeDrift = {
   base: string
@@ -22,8 +23,14 @@ export type CoordinatorRuntime = {
     terminals: { handle: string; worktreeId: string; connected: boolean; writable: boolean }[]
   }>
   createTerminal(
-    worktreeSelector?: string,
-    opts?: { command?: string; title?: string }
+    worktreeSelector: string | undefined,
+    // Why: the lane option is the runtime's own union (S9 §2a); narrowing it here to the one value
+    // this loop states would forbid the interface ever carrying another.
+    opts: {
+      credentialLane: TerminalCredentialLaneOption
+      command?: string
+      title?: string
+    }
   ): Promise<{ handle: string; worktreeId: string }>
   waitForTerminal(
     handle: string,
@@ -373,6 +380,10 @@ export class Coordinator {
       // Why: create at most one terminal per tick to avoid spawning many at once.
       try {
         const created = await this.runtime.createTerminal(this.opts.worktree, {
+          // Why: this branch runs only when the worktree has zero terminals, so there is no source
+          // pane to inherit from and `shared` is the only reachable answer — stated explicitly
+          // rather than defaulted, which is what §2a requires of every spawner.
+          credentialLane: { kind: 'shared' },
           title: `Worker: ${readyTasks[0].spec.slice(0, 40)}`
         })
         terminals.push(created.handle)

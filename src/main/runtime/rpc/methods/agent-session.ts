@@ -206,9 +206,13 @@ type AgentSessionRuntime = OrcaRuntimeService & {
 function callerContext(
   clientId: string | undefined,
   clientKind: 'mobile' | 'runtime' | undefined,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  // Why: `clientId` here is already `pairedDeviceId ?? clientId`, which cannot key a lane — the
+  // funnel resolver needs the grant itself (S9 §2a).
+  pairedDeviceId?: string
 ): RuntimeAgentSessionRpcCaller {
   return {
+    ...(pairedDeviceId !== undefined ? { pairedDeviceId } : {}),
     ...(clientId !== undefined ? { clientId } : {}),
     ...(clientKind !== undefined ? { clientKind } : {}),
     ...(signal ? { signal } : {})
@@ -240,7 +244,7 @@ export const AGENT_SESSION_METHODS: RpcAnyMethod[] = [
     handler: (params, { runtime, pairedDeviceId, clientId, clientKind, signal }) =>
       (runtime as AgentSessionRuntime).ensureAgentSession(
         withExecutionHostAgentPresentation(params, clientKind),
-        callerContext(pairedDeviceId ?? clientId, clientKind, signal)
+        callerContext(pairedDeviceId ?? clientId, clientKind, signal, pairedDeviceId)
       )
   }),
   defineMethod({
@@ -250,7 +254,7 @@ export const AGENT_SESSION_METHODS: RpcAnyMethod[] = [
       assertOperationTimestampWithinFutureSkew(params.clientOperationId)
       return (runtime as AgentSessionRuntime).createAgentSession(
         withExecutionHostAgentPresentation(params, clientKind),
-        callerContext(pairedDeviceId ?? clientId, clientKind, signal)
+        callerContext(pairedDeviceId ?? clientId, clientKind, signal, pairedDeviceId)
       )
     }
   })

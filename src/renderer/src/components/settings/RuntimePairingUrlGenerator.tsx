@@ -4,6 +4,7 @@ import { useMountedRef } from '@/hooks/useMountedRef'
 import type { RuntimeAccessGrant } from '../../../../shared/runtime-access-grants'
 import { Label } from '../ui/label'
 import { RuntimeAccessGrantList } from './RuntimeAccessGrantList'
+import { PrincipalConsentSurface } from './PrincipalConsentSurface'
 import { translate } from '@/i18n/i18n'
 import { RuntimePairingGeneratorForm } from './RuntimePairingGeneratorForm'
 import { useRuntimePairingLinkCopy } from './use-runtime-pairing-link-copy'
@@ -372,6 +373,8 @@ export function RuntimePairingUrlGenerator({
         onRefresh={() => void loadRuntimeAccessGrants({ showToastOnError: true })}
         onRevoke={(grant) => void revokeRuntimeAccess(grant)}
       />
+
+      <PrincipalConsentSurface grants={runtimeAccessGrants} />
     </div>
   )
 }

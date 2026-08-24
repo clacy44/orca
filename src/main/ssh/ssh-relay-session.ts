@@ -2551,7 +2551,8 @@ export class SshRelaySession {
       this.runtime?.registerPty(appPtyId, lease.worktreeId, this.targetId, {
         tabId: lease.tabId,
         leafId: lease.leafId,
-        incarnationId
+        incarnationId,
+        isReattach: true
       })
       try {
         this.store.persistPtyBinding({

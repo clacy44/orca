@@ -297,6 +297,9 @@ function shouldUseSharedControlSubscription(method: string): boolean {
     method === 'session.tabs.subscribe' ||
     method === 'session.tabs.subscribeAll' ||
     method === 'accounts.subscribe' ||
+    // §2l's liveness precondition reads the socket this subscription runs on, so it must ride the
+    // POOLED shared-control connection: a per-call socket would refuse a connected desktop.
+    method === 'accounts.lane.statusSubscribe' ||
     method === 'notifications.subscribe' ||
     method === 'files.watch'
   )

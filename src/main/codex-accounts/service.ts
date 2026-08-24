@@ -57,6 +57,7 @@ import {
   type CodexAccountSelectionTarget
 } from './runtime-selection'
 import { assertOwnedHostCodexManagedHomePath } from './host-codex-managed-home-ownership'
+import { assertCaptureSourceOutsideClaudeLanes } from '../claude-accounts/managed-capture-containment'
 
 const LOGIN_TIMEOUT_MS = 120_000
 const MAX_LOGIN_OUTPUT_CHARS = 4_000
@@ -763,6 +764,7 @@ export class CodexAccountService {
     if (!trimmed) {
       throw new Error('A Codex home directory path is required.')
     }
+    assertCaptureSourceOutsideClaudeLanes(trimmed, 'codex-home')
     const authPath = join(resolve(trimmed), 'auth.json')
     if (!existsSync(authPath)) {
       throw new Error(

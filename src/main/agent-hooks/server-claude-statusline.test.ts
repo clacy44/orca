@@ -40,16 +40,19 @@ describe('AgentHookServer /statusline/claude', () => {
         seven_day: { used_percentage: 40, resets_at: 1712059200 }
       }
     })
+    const paneKey = 'tab-1:11111111-1111-4111-8111-111111111111'
     const body = new URLSearchParams({
-      paneKey: 'pane-1',
+      paneKey,
       configDir: '/home/dev/managed',
       payload
     }).toString()
 
     await expect(post(body)).resolves.toMatchObject({ status: 204 })
+    // The paneKey now reaches the listener: it is the lane attribution key (S9 §2k).
     expect(events).toEqual([
       {
         configDir: '/home/dev/managed',
+        paneKey,
         fiveHour: { used_percentage: 12.5, resets_at: 1738425600 },
         sevenDay: { used_percentage: 40, resets_at: 1712059200 }
       }

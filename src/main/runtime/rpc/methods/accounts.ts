@@ -1,5 +1,9 @@
 import { z } from 'zod'
 import { defineMethod, defineStreamingMethod, type RpcAnyMethod } from '../core'
+import {
+  assertClaudeSelectionInScope,
+  projectAccountsSnapshot
+} from '../../accounts-lane-projection'
 
 // Why: monotonically increasing per-process counter avoids the Date.now()
 // collision that fired when two near-simultaneous accounts.subscribe calls
@@ -99,7 +103,7 @@ export const ACCOUNT_METHODS: readonly RpcAnyMethod[] = [
   defineMethod({
     name: 'accounts.list',
     params: ListAccountsParams,
-    handler: async (params, { runtime }) => {
+    handler: async (params, { runtime, pairedDeviceId }) => {
       // Why: ensure the snapshot reflects the latest provider state before
       // returning. Desktop polling pauses when the window is unfocused and
       // inactive-account caches only fill on AccountsPane open, so without
@@ -107,13 +111,19 @@ export const ACCOUNT_METHODS: readonly RpcAnyMethod[] = [
       if (params.refreshUsage) {
         await runtime.refreshAccountsForMobile()
       }
-      return runtime.getAccountsSnapshot()
+      // Per-connection from here on: another principal's lane is an opaque row (S9 §2d).
+      return projectAccountsSnapshot(runtime.getAccountsSnapshot(), pairedDeviceId)
     }
   }),
   defineMethod({
     name: 'accounts.selectClaude',
     params: SelectAccountParams,
-    handler: async (params, { runtime }) => runtime.selectClaudeAccount(params.accountId)
+    handler: async (params, { runtime, pairedDeviceId }) => {
+      // Caller scope first, target residency second — the order §2d fixes. The target check is
+      // inside the account service, where the renderer and the local socket reach it too.
+      assertClaudeSelectionInScope(pairedDeviceId)
+      return runtime.selectClaudeAccount(params.accountId)
+    }
   }),
   defineMethod({
     name: 'accounts.selectCodex',
@@ -179,10 +189,10 @@ export const ACCOUNT_METHODS: readonly RpcAnyMethod[] = [
   defineStreamingMethod({
     name: 'accounts.subscribe',
     params: null,
-    handler: async (_params, { runtime, connectionId }, emit) => {
+    handler: async (_params, { runtime, connectionId, pairedDeviceId }, emit) => {
       await new Promise<void>((resolve) => {
         const unsubscribe = runtime.onAccountsChanged((snapshot) => {
-          emit({ type: 'snapshot', snapshot })
+          emit({ type: 'snapshot', snapshot: projectAccountsSnapshot(snapshot, pairedDeviceId) })
         })
 
         // Why: scope the id by connectionId so two sockets from the same
@@ -206,7 +216,11 @@ export const ACCOUNT_METHODS: readonly RpcAnyMethod[] = [
         // something to render immediately, then refresh only stale data.
         // Connection cutovers replay this subscription and must not turn the
         // manual-force lane into an unbounded provider-fetch loop.
-        emit({ type: 'ready', subscriptionId, snapshot: runtime.getAccountsSnapshot() })
+        emit({
+          type: 'ready',
+          subscriptionId,
+          snapshot: projectAccountsSnapshot(runtime.getAccountsSnapshot(), pairedDeviceId)
+        })
         void runtime.refreshAccountsForMobileSubscriber()
       })
     }

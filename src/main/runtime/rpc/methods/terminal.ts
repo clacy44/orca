@@ -894,7 +894,9 @@ const TerminalFocus = TerminalHandle.extend({
   navigation: z.enum(['caller', 'host']).optional()
 })
 
-const TerminalListParams = z.object({
+// Exported for §2d's negative control: the schema carries NO caller-identity field, so a client
+// naming another grant's `pairedDeviceId` has it stripped before the handler runs.
+export const TerminalListParams = z.object({
   worktree: OptionalString,
   limit: OptionalFiniteNumber,
   handles: z
@@ -1040,6 +1042,18 @@ const TerminalCreateParams = z.object({
   presentation: z.enum(['background', 'focused']).optional(),
   tabId: OptionalString,
   leafId: OptionalString
+})
+
+// §2g: the seed prompt is validated for bytes/control chars in the runtime, not here — the wire cap
+// only keeps a hostile client from forcing the host to buffer megabytes before the byte check runs.
+export const TerminalOpenInMyLane = z.object({
+  sourcePtyId: requiredString('Missing source terminal PTY id'),
+  seedPrompt: z
+    .string()
+    .max(64 * 1024)
+    .optional(),
+  focus: z.unknown().optional(),
+  activate: z.unknown().optional()
 })
 
 const TerminalSplit = TerminalHandle.extend({
@@ -1218,6 +1232,9 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         handles: params.handles,
         requireFreshPtyLiveness: params.requireFreshPtyLiveness,
         includeVisualLayouts: params.includeVisualLayouts,
+        // Why unconditional, unlike presence: §2d gates the lane's usage bar on the caller's own
+        // principal, and a caller that asks for no presence still gets its own lane's row.
+        ...(pairedDeviceId ? { pairedDeviceId } : {}),
         ...(presence ? { presence } : {})
       })
     }
@@ -1239,11 +1256,12 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.recoverPane',
     params: TerminalRecoverPane,
-    handler: async (params, { runtime }) => ({
+    handler: async (params, { runtime, pairedDeviceId }) => ({
       terminal: await runtime.recoverTerminalPane(
         params.paneKey,
         params.worktreeId,
-        params.expectedTerminal
+        params.expectedTerminal,
+        pairedDeviceId ? { pairedDeviceId } : {}
       )
     })
   }),
@@ -1534,6 +1552,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         params.reconcileExisting === true,
         (canonicalWorktreeSelector, preAllocatedHandle) =>
           runtime.createTerminal(canonicalWorktreeSelector, {
+            credentialLane: runtime.resolveCallerCredentialLane(pairedDeviceId),
             command: params.command,
             startupCommandDelivery: params.startupCommandDelivery,
             env: params.env,
@@ -1560,10 +1579,24 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
     })
   }),
   defineMethod({
+    name: 'terminal.openInMyLane',
+    params: TerminalOpenInMyLane,
+    handler: async (params, { runtime, pairedDeviceId }) => ({
+      terminal: await runtime.openTerminalInMyLane({
+        sourcePtyId: params.sourcePtyId,
+        ...(params.seedPrompt !== undefined ? { seedPrompt: params.seedPrompt } : {}),
+        caller: { pairedDeviceId },
+        focus: params.focus === true,
+        activate: params.activate === true
+      })
+    })
+  }),
+  defineMethod({
     name: 'terminal.split',
     params: TerminalSplit,
-    handler: async (params, { runtime }) => ({
+    handler: async (params, { runtime, pairedDeviceId }) => ({
       split: await runtime.splitTerminal(params.terminal, {
+        ...(pairedDeviceId ? { pairedDeviceId } : {}),
         direction: params.direction,
         command: params.command,
         env: params.env,
@@ -1654,8 +1687,11 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'agentTeams.tmuxCompat',
     params: AgentTeamsTmuxCompat,
-    handler: async (params, { runtime }) => ({
-      tmux: await runtime.handleAgentTeamsTmuxCompat(params)
+    handler: async (params, { runtime, pairedDeviceId }) => ({
+      tmux: await runtime.handleAgentTeamsTmuxCompat(
+        params,
+        pairedDeviceId ? { pairedDeviceId } : {}
+      )
     })
   }),
   defineMethod({

@@ -2,7 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -657,7 +665,7 @@ describe('ClaudeAccountService credential capture', () => {
       identity: { email: 'new@example.com', organizationUuid: null, organizationName: null }
     }))
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       await service.addAccount({ runtime: 'host' })
     } finally {
@@ -979,7 +987,7 @@ describe('ClaudeAccountService credential capture', () => {
       runtimeAuth as never
     )
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       await service.selectAccount('account-2')
     } finally {
@@ -1896,6 +1904,78 @@ describe('ClaudeAccountService.addAccountFromConfigDir', () => {
       '{"claudeAiOauth":{"accessToken":"tok"}}\n'
     )
     expect(deps.runtimeAuth.clearLastWrittenCredentialsJson).toHaveBeenCalledWith(accounts[0].id)
+  })
+
+  it('refuses a config dir inside the claude-lanes root', async () => {
+    const laneDir = join(managedRoot, 'claude-lanes', 'principal-a')
+    mkdirSync(laneDir, { recursive: true })
+    writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"t"}}\n')
+
+    const deps = makeDeps()
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      deps.store as never,
+      deps.rateLimits as never,
+      deps.runtimeAuth as never
+    )
+
+    await expect(service.addAccountFromConfigDir(laneDir)).rejects.toThrow(
+      /per-principal credential lane storage/
+    )
+    expect(deps.getSettings().claudeManagedAccounts).toHaveLength(0)
+  })
+
+  it('refuses a decoy symlink whose realpath lands inside claude-lanes', async () => {
+    const laneDir = join(managedRoot, 'claude-lanes', 'principal-a')
+    mkdirSync(laneDir, { recursive: true })
+    writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"t"}}\n')
+    sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-decoy-'))
+    const decoy = join(sourceDir, 'decoy')
+    symlinkSync(laneDir, decoy)
+
+    const deps = makeDeps()
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      deps.store as never,
+      deps.rateLimits as never,
+      deps.runtimeAuth as never
+    )
+
+    await expect(service.addAccountFromConfigDir(decoy)).rejects.toThrow(
+      /symbolic link|per-principal credential lane storage/
+    )
+    expect(deps.getSettings().claudeManagedAccounts).toHaveLength(0)
+  })
+
+  it('allows a config dir whose path merely contains claude-lanes as text', async () => {
+    sourceDir = mkdtempSync(join(tmpdir(), 'orca-claude-lanes-lookalike-'))
+    const configDir = join(sourceDir, 'claude-lanes-archive')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(
+      join(configDir, '.credentials.json'),
+      '{"claudeAiOauth":{"accessToken":"tok"}}\n',
+      'utf-8'
+    )
+    writeFileSync(
+      join(configDir, '.claude.json'),
+      JSON.stringify({ oauthAccount: { emailAddress: 'lookalike@example.com' } }),
+      'utf-8'
+    )
+
+    const deps = makeDeps()
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      deps.store as never,
+      deps.rateLimits as never,
+      deps.runtimeAuth as never
+    )
+    ;(service as unknown as { runClaudeCommand: () => Promise<string> }).runClaudeCommand = vi.fn(
+      async () => '{"email":"lookalike@example.com"}'
+    )
+
+    await service.addAccountFromConfigDir(configDir)
+
+    expect(deps.getSettings().claudeManagedAccounts[0]?.email).toBe('lookalike@example.com')
   })
 
   it('captures only the config-scoped macOS Keychain credential', async () => {

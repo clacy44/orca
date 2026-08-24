@@ -1,14 +1,52 @@
 const liveClaudePtyIds = new Set<string>()
+
+/**
+ * The shared lane's reserved key, mirroring `terminal-presence-registry.ts`'s attachment key.
+ *
+ * A principal id is a v4 UUID, so nothing can collide with it (S9 §2f).
+ */
+export const SHARED_CLAUDE_LANE_KEY = 'host'
+
+// Why: which credential lane each live pty was pinned to. A pty absent from this map is
+// UNATTRIBUTED — seeded from persistence and not yet reconciled — and defers every account's
+// rotation, because over-deferring costs a delayed refresh while under-deferring revokes a
+// single-use token out from under a running CLI (S9 §2e). A SPAWN is never in that class: it is
+// pinned to a lane or to the shared one, and L1 forbids a lane's account also being the shared
+// one, so a shared-lane `claude` defers nobody's lane.
+const lanePrincipalIdByPtyId = new Map<string, string>()
 // Why: ids restored from persistence at startup, not yet confirmed against the
 // daemon. They keep the OAuth refresh gate closed so an early managed refresh
 // cannot rotate the single-use refresh token out from under a Claude CLI that
 // survived the app restart inside the daemon.
 const seededUnconfirmedPtyIds = new Set<string>()
-let switchInProgress = false
+/**
+ * Gate members that must NOT be persisted (S9 §2k).
+ *
+ * The lane usage probe never reaches `provider.spawn`, so it has no id in the daemon's namespace
+ * at all — it mints a synthetic, lane-scoped one. `markClaudePtySpawned` persists every id it is
+ * handed, so a synthetic id would land in `claudeLivePtySessionIds`, be seeded back at the next
+ * startup, and defer that account's rotation until the daemon reconciliation dropped it as
+ * unknown. It self-heals, but only after the startup pass §2e had to make observe-only.
+ */
+const ephemeralPtyIds = new Set<string>()
+/**
+ * The account-switch gate, keyed by LANE (S9 §2f).
+ *
+ * One module-global boolean made one developer's push block the other developer's spawns, and
+ * made the shared lane's own switch block every lane pane on the host. The key is the pane's
+ * lane principal, or `SHARED_CLAUDE_LANE_KEY` for the shared one.
+ */
+const switchesInProgressByLane = new Set<string>()
 
 export type ClaudeLivePtyPersistence = {
-  addClaudeLivePtySessionId(sessionId: string): void
+  addClaudeLivePtySessionId(sessionId: string, laneId: string): void
   removeClaudeLivePtySessionId(sessionId: string): void
+}
+
+/** One persisted seed: the daemon session id, and the lane it was pinned to if the state has one. */
+export type SeededClaudeLivePtySession = {
+  sessionId: string
+  laneId: string | null
 }
 
 let persistence: ClaudeLivePtyPersistence | null = null
@@ -37,10 +75,22 @@ function notifyDrainedOnTransition(hadLivePtys: boolean): void {
   }
 }
 
-export function seedLiveClaudePtysFromPersistence(sessionIds: readonly string[]): void {
-  for (const sessionId of sessionIds) {
+/**
+ * A seed WITH a lane defers only that lane; one without defers every account (S9 §2f, §3 row 6).
+ *
+ * A pre-S9c state carries ids and no lanes, so its seeds stay unattributed until the daemon
+ * reconciliation drops the dead ones — over-deferring costs a delayed refresh, while guessing the
+ * shared lane would revoke a single-use token out from under a lane's surviving CLI.
+ */
+export function seedLiveClaudePtysFromPersistence(
+  sessions: readonly SeededClaudeLivePtySession[]
+): void {
+  for (const { sessionId, laneId } of sessions) {
     liveClaudePtyIds.add(sessionId)
     seededUnconfirmedPtyIds.add(sessionId)
+    if (laneId) {
+      lanePrincipalIdByPtyId.set(sessionId, laneId)
+    }
   }
 }
 
@@ -60,6 +110,7 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
   for (const sessionId of seededUnconfirmedPtyIds) {
     if (!alive.has(sessionId)) {
       liveClaudePtyIds.delete(sessionId)
+      lanePrincipalIdByPtyId.delete(sessionId)
       persistence?.removeClaudeLivePtySessionId(sessionId)
     }
   }
@@ -67,15 +118,44 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
   notifyDrainedOnTransition(hadLivePtys)
 }
 
-export function markClaudePtySpawned(ptyId: string): void {
+/** The lane is required, not optional: an omitted one silently deferred every lane's rotation. */
+export function markClaudePtySpawned(ptyId: string, lanePrincipalId: string | null): void {
   liveClaudePtyIds.add(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
-  persistence?.addClaudeLivePtySessionId(ptyId)
+  const laneId = lanePrincipalId || SHARED_CLAUDE_LANE_KEY
+  lanePrincipalIdByPtyId.set(ptyId, laneId)
+  persistence?.addClaudeLivePtySessionId(ptyId, laneId)
+}
+
+/**
+ * The lane usage probe's arm: same deferral, never persisted, never seeded back.
+ *
+ * A probe in lane L defers rotation of L's account exactly as a user's `claude` does — the probe
+ * IS a live claude holding that lane's single-use refresh token.
+ */
+export function markEphemeralClaudePtySpawned(ptyId: string, lanePrincipalId: string): void {
+  liveClaudePtyIds.add(ptyId)
+  ephemeralPtyIds.add(ptyId)
+  lanePrincipalIdByPtyId.set(ptyId, lanePrincipalId)
+}
+
+export function markEphemeralClaudePtyExited(ptyId: string): void {
+  const hadLivePtys = liveClaudePtyIds.size > 0
+  ephemeralPtyIds.delete(ptyId)
+  liveClaudePtyIds.delete(ptyId)
+  lanePrincipalIdByPtyId.delete(ptyId)
+  notifyDrainedOnTransition(hadLivePtys)
+}
+
+/** Test seam: a synthetic id must never reach `persistence.addClaudeLivePtySessionId`. */
+export function isEphemeralClaudePty(ptyId: string): boolean {
+  return ephemeralPtyIds.has(ptyId)
 }
 
 export function markClaudePtyExited(ptyId: string): void {
   const hadLivePtys = liveClaudePtyIds.size > 0
   liveClaudePtyIds.delete(ptyId)
+  lanePrincipalIdByPtyId.delete(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
   persistence?.removeClaudeLivePtySessionId(ptyId)
   notifyDrainedOnTransition(hadLivePtys)
@@ -85,17 +165,54 @@ export function hasLiveClaudePtys(): boolean {
   return liveClaudePtyIds.size > 0
 }
 
-export function beginClaudeAuthSwitch(): void {
-  if (switchInProgress) {
+/** Whether a pty pinned to THIS lane is live — the query the lane's rotation gate asks. */
+export function hasLiveClaudePtysInLane(lanePrincipalId: string): boolean {
+  for (const [ptyId, laneId] of lanePrincipalIdByPtyId) {
+    if (laneId === lanePrincipalId && liveClaudePtyIds.has(ptyId)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * The PERSONAL lanes a live `claude` is running in, deduplicated (S9 §2c trigger 2, first arm).
+ *
+ * The shared lane is excluded by its reserved key: it has no lane file to sync, and its rotation
+ * is `doSyncForCurrentSelection`'s business.
+ */
+export function listLanesWithLiveClaudePtys(): string[] {
+  const laneIds = new Set<string>()
+  for (const [ptyId, laneId] of lanePrincipalIdByPtyId) {
+    if (laneId !== SHARED_CLAUDE_LANE_KEY && liveClaudePtyIds.has(ptyId)) {
+      laneIds.add(laneId)
+    }
+  }
+  return [...laneIds]
+}
+
+/** Seeded ids this process has not reconciled yet; they defer every account's rotation. */
+export function hasUnattributedLiveClaudePtys(): boolean {
+  for (const ptyId of liveClaudePtyIds) {
+    if (!lanePrincipalIdByPtyId.has(ptyId)) {
+      return true
+    }
+  }
+  return false
+}
+
+/** The lane id is required: an omitted one silently gated every lane behind the shared one. */
+export function beginClaudeAuthSwitch(laneId: string): void {
+  if (switchesInProgressByLane.has(laneId)) {
     throw new Error('A Claude account switch is already in progress.')
   }
-  switchInProgress = true
+  switchesInProgressByLane.add(laneId)
 }
 
-export function endClaudeAuthSwitch(): void {
-  switchInProgress = false
+export function endClaudeAuthSwitch(laneId: string): void {
+  switchesInProgressByLane.delete(laneId)
 }
 
-export function isClaudeAuthSwitchInProgress(): boolean {
-  return switchInProgress
+export function isClaudeAuthSwitchInProgress(laneId: string): boolean {
+  return switchesInProgressByLane.has(laneId)
 }

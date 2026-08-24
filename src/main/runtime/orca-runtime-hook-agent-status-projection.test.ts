@@ -80,6 +80,7 @@ async function createRuntimeWithHookRows(
     getForegroundProcess: async () => null
   })
   await runtime.createTerminal(`id:${WORKTREE_ID}`, {
+    credentialLane: { kind: 'shared' },
     tabId: TAB_ID,
     leafId: LEAF_ID,
     launchAgent: 'claude',

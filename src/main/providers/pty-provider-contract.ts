@@ -98,6 +98,9 @@ export type PtySpawnOptions = {
   }
   /** Host-scoped structured-create identity used only for lower-owner replay. */
   agentSessionCreateOperationId?: string
+  /** The pane's Claude credential lane, stamped by `computeLaneLaunch` at the spawn anchor so
+   *  the provider's own env build is lane-scoped rather than host-wide (S9 §2 preamble). */
+  credentialLane?: { principalId: string }
   /** Signals that the native process exists even if later publication fails. */
   onPtySpawnCommitted?: () => void
   /** Cancels only before physical dispatch; operation identity fences later ambiguity. */

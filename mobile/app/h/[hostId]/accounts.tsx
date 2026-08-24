@@ -10,30 +10,31 @@ import {
 } from 'react-native'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
-import { ChevronLeft, Check, RefreshCw, User } from 'lucide-react-native'
+import { ChevronLeft, RefreshCw, User } from 'lucide-react-native'
 import { loadHosts } from '../../../src/transport/host-store'
 import { useHostClient } from '../../../src/transport/client-context'
 import { colors, spacing } from '../../../src/theme/mobile-theme'
 import { styles } from '../../../src/accounts/mobile-accounts-screen-styles'
 import { useNow } from '../../../src/hooks/use-now'
-import { ClaudeIcon, OpenAIIcon } from '../../../src/components/AgentIcons'
 import {
   type AccountsSnapshot,
   type ProviderKey,
-  decodeAccountsSnapshot,
-  getActiveProviderRateLimits,
-  getInactiveProviderUsage,
-  getUsageBarState,
-  getWindowResetLabel,
-  hasActiveProviderUsage,
-  UsageBar
+  decodeAccountsSnapshot
 } from '../../../src/components/AccountUsage'
-import {
-  getActiveCodexAccountIdForRateLimitTarget,
-  getCodexResetCreditSummary
-} from '../../../src/components/codex-reset-credit'
-import { CodexResetCreditAction } from '../../../src/components/CodexResetCreditAction'
 import { useCodexResetCreditAction } from '../../../src/components/use-codex-reset-credit-action'
+import { ProviderAccountSection } from '../../../src/accounts/ProviderAccountSection'
+import { useHostStatusGates } from '../../../src/transport/host-status-gates'
+import {
+  IDLE_SWITCH_STATE,
+  NO_LANE,
+  isLaneAccountLoaded,
+  readLaneProjection,
+  reduceSwitchRequest,
+  resolveClaudeSwitchCall,
+  shouldSubscribeToLaneStatus,
+  type MobileLaneProjection,
+  type SwitchRequestState
+} from '../../../src/accounts/lane-delegated-switch-request'
 
 export default function AccountsScreen() {
   const router = useRouter()
@@ -48,9 +49,15 @@ export default function AccountsScreen() {
   const [refreshing, setRefreshing] = useState(false)
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
   const [clockEnabled, setClockEnabled] = useState(false)
+  // §2l: the phone's lane is whatever the host publishes for THIS caller; an old host publishes
+  // none and every branch below stays on today's behaviour.
+  const [lane, setLane] = useState<MobileLaneProjection>(NO_LANE)
+  const [switchState, setSwitchState] = useState<SwitchRequestState>(IDLE_SWITCH_STATE)
+  const { hostCapabilities } = useHostStatusGates({ hostId, client, connState })
 
-  const acceptSnapshot = useCallback((nextSnapshot: AccountsSnapshot) => {
+  const acceptSnapshot = useCallback((nextSnapshot: AccountsSnapshot, raw?: unknown) => {
     setSnapshot(nextSnapshot)
+    setLane(readLaneProjection(raw))
     setError(null)
   }, [])
   const rejectInvalidSnapshot = useCallback(() => {
@@ -119,7 +126,7 @@ export default function AccountsScreen() {
       const evt = payload as { type?: string; snapshot?: unknown }
       if (evt.type === 'ready' || evt.type === 'snapshot') {
         try {
-          acceptSnapshot(decodeAccountsSnapshot(evt.snapshot))
+          acceptSnapshot(decodeAccountsSnapshot(evt.snapshot), evt.snapshot)
         } catch {
           rejectInvalidSnapshot()
         }
@@ -127,6 +134,52 @@ export default function AccountsScreen() {
     })
     return unsubscribe
   }, [acceptSnapshot, client, connState, rejectInvalidSnapshot])
+
+  // §2l step 4: the switch outcome arrives on this stream. The `pending` reply is not an outcome.
+  const subscribeToLane = shouldSubscribeToLaneStatus({
+    lane,
+    hostCapabilities,
+    connected: connState === 'connected'
+  })
+  useEffect(() => {
+    if (!client || !subscribeToLane) {
+      return
+    }
+    return client.subscribe('accounts.lane.statusSubscribe', null, (frame) => {
+      setSwitchState((state) => reduceSwitchRequest(state, { type: 'lane-frame', frame }))
+    })
+  }, [client, subscribeToLane])
+
+  const requestLaneSwitch = useCallback(
+    async (delegatedAccountId: string | null) => {
+      const call = resolveClaudeSwitchCall({
+        lane,
+        accountId: null,
+        delegatedAccountId,
+        hostCapabilities
+      })
+      if (!client || call.method !== 'accounts.lane.requestSwitch') {
+        Alert.alert(
+          'Could not switch account',
+          call.method === null && call.reason === 'unsupported-host'
+            ? 'This host is too old to switch your own Claude account from here. Update Orca on the host.'
+            : 'That account is not offered for switching from this device yet. Tick it in Orca on your desktop.'
+        )
+        return
+      }
+      const res = await client.sendRequest(call.method, call.params)
+      const requestId = res.ok ? ((res.result as { requestId?: string }).requestId ?? null) : null
+      setSwitchState((state) =>
+        reduceSwitchRequest(
+          state,
+          res.ok
+            ? { type: 'requested', requestId, delegatedAccountId: call.params.delegatedAccountId }
+            : { type: 'refused', message: res.error.message }
+        )
+      )
+    },
+    [client, hostCapabilities, lane]
+  )
 
   const refresh = useCallback(async () => {
     if (!client) {
@@ -136,7 +189,7 @@ export default function AccountsScreen() {
     try {
       const res = await client.sendRequest('accounts.list')
       if (res.ok) {
-        acceptSnapshot(decodeAccountsSnapshot(res.result))
+        acceptSnapshot(decodeAccountsSnapshot(res.result), res.result)
       } else {
         setError(res.error.message)
       }
@@ -154,6 +207,15 @@ export default function AccountsScreen() {
   const selectAccount = useCallback(
     async (provider: ProviderKey, accountId: string | null) => {
       if (!client) {
+        return
+      }
+      // §2d refuses this caller's `selectClaude` outright once it holds a lane, so the phone must
+      // not send one: its own account moves through the delegated list below instead.
+      if (provider === 'claude' && lane.holdsLane) {
+        Alert.alert(
+          'Switch in your own lane',
+          "This host keeps your Claude account separate from everyone else's. Pick one of your own accounts below."
+        )
         return
       }
       const codexTarget = provider === 'codex' ? snapshot?.rateLimits.codexTarget : null
@@ -187,144 +249,8 @@ export default function AccountsScreen() {
         setBusyAccountId(null)
       }
     },
-    [client, refresh, snapshot]
+    [client, lane, refresh, requestLaneSwitch, snapshot]
   )
-
-  const renderProviderSection = (provider: ProviderKey, title: string) => {
-    if (!snapshot) {
-      return null
-    }
-    const state = provider === 'claude' ? snapshot.claude : snapshot.codex
-    const activeAccountId =
-      provider === 'codex' && snapshot.codex.activeAccountIdsByRuntime
-        ? getActiveCodexAccountIdForRateLimitTarget(snapshot)
-        : state.activeAccountId
-    const activeUsage = getActiveProviderRateLimits(snapshot, provider)
-    const activeSessionBar = getUsageBarState(activeUsage, 'session')
-    const activeWeeklyBar = getUsageBarState(activeUsage, 'weekly')
-    const resetCredit = provider === 'codex' ? getCodexResetCreditSummary(activeUsage, now) : null
-    const Icon = provider === 'claude' ? ClaudeIcon : OpenAIIcon
-    return (
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Icon size={14} />
-          <Text style={styles.sectionHeading}>{title}</Text>
-        </View>
-        <View style={styles.card}>
-          {/* System default row */}
-          <Pressable
-            style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-            onPress={() => selectAccount(provider, null)}
-            disabled={busyAccountId !== null || resettingCodex || connState !== 'connected'}
-          >
-            <View style={styles.rowMain}>
-              <Text style={styles.rowTitle}>System default</Text>
-              <Text style={styles.rowSubtitle}>Use the agent's own login</Text>
-              {/* Why: when system default is the active selection, activeUsage
-                  holds the system-default login's rate limits — surface them
-                  here so non-managed users still see their usage. */}
-              {activeAccountId === null && hasActiveProviderUsage(activeUsage) ? (
-                <View style={styles.usageRow}>
-                  <UsageBar
-                    label="5h"
-                    usedPercent={activeSessionBar.usedPercent}
-                    unavailable={activeSessionBar.unavailable}
-                    loading={activeSessionBar.loading}
-                    resetText={getWindowResetLabel(activeUsage, 'session', now)}
-                  />
-                  <UsageBar
-                    label="7d"
-                    usedPercent={activeWeeklyBar.usedPercent}
-                    unavailable={activeWeeklyBar.unavailable}
-                    loading={activeWeeklyBar.loading}
-                    resetText={getWindowResetLabel(activeUsage, 'weekly', now)}
-                  />
-                </View>
-              ) : null}
-            </View>
-            <View style={styles.rowTrailing}>
-              {activeAccountId === null ? (
-                <Check size={16} color={colors.accentBlue} />
-              ) : busyAccountId === `${provider}:default` ? (
-                <ActivityIndicator size="small" color={colors.textSecondary} />
-              ) : null}
-            </View>
-          </Pressable>
-
-          {state.accounts.map((account) => {
-            const isActive = activeAccountId === account.id
-            const inactiveEntry = !isActive
-              ? getInactiveProviderUsage(snapshot, provider, account.id)
-              : null
-            const usage = isActive ? activeUsage : (inactiveEntry?.rateLimits ?? null)
-            const isFetching =
-              (isActive && usage?.status === 'fetching') ||
-              (!isActive && inactiveEntry?.isFetching === true)
-            const sessionBar = getUsageBarState(usage, 'session', isFetching)
-            const weeklyBar = getUsageBarState(usage, 'weekly', isFetching)
-            return (
-              <View key={account.id}>
-                <View style={styles.separator} />
-                <Pressable
-                  style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-                  onPress={() => selectAccount(provider, account.id)}
-                  disabled={
-                    busyAccountId !== null ||
-                    resettingCodex ||
-                    connState !== 'connected' ||
-                    isActive
-                  }
-                >
-                  <View style={styles.rowMain}>
-                    <Text style={styles.rowTitle} numberOfLines={1}>
-                      {account.email}
-                    </Text>
-                    <View style={styles.usageRow}>
-                      <UsageBar
-                        label="5h"
-                        usedPercent={sessionBar.usedPercent}
-                        unavailable={sessionBar.unavailable}
-                        loading={sessionBar.loading}
-                        resetText={getWindowResetLabel(usage, 'session', now)}
-                      />
-                      <UsageBar
-                        label="7d"
-                        usedPercent={weeklyBar.usedPercent}
-                        unavailable={weeklyBar.unavailable}
-                        loading={weeklyBar.loading}
-                        resetText={getWindowResetLabel(usage, 'weekly', now)}
-                      />
-                    </View>
-                    {usage?.error ? (
-                      <Text style={styles.errorText} numberOfLines={1}>
-                        {usage.error}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <View style={styles.rowTrailing}>
-                    {isActive ? (
-                      <Check size={16} color={colors.accentBlue} />
-                    ) : busyAccountId === account.id ? (
-                      <ActivityIndicator size="small" color={colors.textSecondary} />
-                    ) : null}
-                  </View>
-                </Pressable>
-              </View>
-            )
-          })}
-          {resetCredit && codexResetSupported && resetScope && connState === 'connected' ? (
-            <CodexResetCreditAction
-              summary={resetCredit}
-              scopeLabel={resetScopeLabel}
-              busy={resettingCodex}
-              disabled={resettingCodex || busyAccountId !== null || connState !== 'connected'}
-              onPress={confirmCodexReset}
-            />
-          ) : null}
-        </View>
-      </View>
-    )
-  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -379,8 +305,72 @@ export default function AccountsScreen() {
           </View>
         ) : (
           <>
-            {renderProviderSection('claude', 'Claude')}
-            {renderProviderSection('codex', 'Codex')}
+            {(['claude', 'codex'] as const).map((provider) => (
+              <ProviderAccountSection
+                key={provider}
+                provider={provider}
+                title={provider === 'claude' ? 'Claude' : 'Codex'}
+                snapshot={snapshot}
+                now={now}
+                busyAccountId={busyAccountId}
+                resettingCodex={resettingCodex}
+                connState={connState}
+                selectAccount={selectAccount}
+                codexResetSupported={codexResetSupported}
+                resetScope={resetScope}
+                resetScopeLabel={resetScopeLabel}
+                confirmCodexReset={confirmCodexReset}
+              />
+            ))}
+            {lane.holdsLane ? (
+              <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionHeading}>Your Claude accounts</Text>
+                </View>
+                <View style={styles.card}>
+                  {lane.delegable.map((entry, index) => (
+                    <View key={entry.delegatedAccountId}>
+                      {index > 0 ? <View style={styles.separator} /> : null}
+                      <Pressable
+                        style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+                        onPress={() => void requestLaneSwitch(entry.delegatedAccountId)}
+                        disabled={switchState.status === 'pending' || connState !== 'connected'}
+                      >
+                        <View style={styles.rowMain}>
+                          <Text style={styles.rowTitle} numberOfLines={1}>
+                            {entry.displayName ?? entry.email ?? 'Claude account'}
+                          </Text>
+                          <Text style={styles.rowSubtitle}>
+                            {isLaneAccountLoaded(lane, entry.delegatedAccountId)
+                              ? 'Loaded on this host'
+                              : 'Switch through your desktop'}
+                          </Text>
+                        </View>
+                      </Pressable>
+                    </View>
+                  ))}
+                  {lane.delegable.length === 0 ? (
+                    <View style={styles.row}>
+                      <Text style={styles.rowSubtitle}>
+                        No accounts offered yet. Tick the ones you want on your desktop.
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+            ) : null}
+            {switchState.status === 'pending' ? (
+              <View style={styles.footerHint}>
+                <Text style={styles.footerHintText}>
+                  Asking your desktop to switch this account…
+                </Text>
+              </View>
+            ) : null}
+            {switchState.status === 'failed' ? (
+              <View style={styles.footerHint}>
+                <Text style={styles.errorText}>{switchState.message}</Text>
+              </View>
+            ) : null}
             <View style={styles.footerHint}>
               <User size={14} color={colors.textMuted} />
               <Text style={styles.footerHintText}>

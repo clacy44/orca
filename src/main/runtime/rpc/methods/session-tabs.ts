@@ -41,6 +41,9 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
     handler: async (params, { runtime, clientKind, pairedDeviceId }) =>
       runtime.activateMobileSessionTab(params.worktree, params.tabId, params.leafId, {
         notifyClients: params.notifyClients !== false,
+        // Why: the tap spends this as caller identity as well as a navigation id — the materialize
+        // reattaches an existing pane and the adopt predicate is its only gate (§2a row 35).
+        ...(pairedDeviceId ? { pairedDeviceId } : {}),
         clientNavigationId: pairedDeviceId,
         ...(params.intent ? { intent: params.intent } : {}),
         navigation: resolveRuntimeNavigationTarget({
@@ -56,6 +59,7 @@ export const SESSION_TAB_METHODS: RpcAnyMethod[] = [
     params: CreateTerminalTab,
     handler: async (params, { runtime, signal, clientKind, pairedDeviceId }) =>
       runtime.createMobileSessionTerminal(params.worktree, {
+        credentialLane: runtime.resolveCallerCredentialLane(pairedDeviceId),
         afterTabId: params.afterTabId,
         targetGroupId: params.targetGroupId,
         command: params.command,

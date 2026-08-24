@@ -42,7 +42,10 @@ describe('OrcaRuntimeService terminal startup cwd', () => {
       getForegroundProcess: async () => null
     })
 
-    await runtime.createTerminal('id:wt-1', { cwd: '/repo/app/packages/web' })
+    await runtime.createTerminal('id:wt-1', {
+      credentialLane: { kind: 'shared' },
+      cwd: '/repo/app/packages/web'
+    })
 
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -63,7 +66,10 @@ describe('OrcaRuntimeService terminal startup cwd', () => {
       getForegroundProcess: async () => null
     })
 
-    await runtime.createTerminal('id:wt-1', { cwd: '/repo/app-other' })
+    await runtime.createTerminal('id:wt-1', {
+      credentialLane: { kind: 'shared' },
+      cwd: '/repo/app-other'
+    })
 
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -99,7 +105,10 @@ describe('OrcaRuntimeService terminal startup cwd', () => {
       terminalDriverChanged: vi.fn()
     })
 
-    await runtime.createTerminal('id:wt-1', { cwd: '/repo/app/packages/web' })
+    await runtime.createTerminal('id:wt-1', {
+      credentialLane: { kind: 'shared' },
+      cwd: '/repo/app/packages/web'
+    })
 
     expect(revealTerminalSession).toHaveBeenCalledWith(
       'wt-1',

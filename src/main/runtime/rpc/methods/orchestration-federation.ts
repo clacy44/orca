@@ -51,6 +51,11 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
         })
       }
 
+      // Why: no source pane (`lineage.noParent`) and no pairedDeviceId — the link's own binding
+      // is the only authority, and an unticked link fails closed (§2a, §7 q8).
+      const credentialLane = runtime.resolveFederatedLinkCredentialLane(
+        orchestrationMutation.callerFingerprint
+      )
       const db = runtime.getOrchestrationDb()
       db.createRemoteDispatchAttachment({
         dispatchId: params.dispatchId,
@@ -83,6 +88,7 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           })
           const setupDecision = params.setup ?? 'run'
           const created = await runtime.createManagedWorktree({
+            credentialLane,
             repoSelector: params.repo as string,
             name: params.name as string,
             baseBranch: params.baseBranch,
@@ -163,6 +169,7 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           } else {
             failedStage = 'terminal_create'
             const terminal = await runtime.createTerminal(`id:${worktree.id}`, {
+              credentialLane,
               // Why: agent ids are not shell commands (`cursor` is the desktop app,
               // its CLI is `cursor-agent`); resolve through the TUI agent config.
               startupAgent: agent as TuiAgent,

@@ -29,8 +29,11 @@ import {
   writeActiveClaudeKeychainCredentials,
   writeManagedClaudeKeychainCredentials
 } from './keychain'
-import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from './live-pty-gate'
+import { beginClaudeAuthSwitch, endClaudeAuthSwitch, SHARED_CLAUDE_LANE_KEY } from './live-pty-gate'
 import { findDuplicateClaudeAccount } from './claude-duplicate-account'
+import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-containment'
+import { assertManagedClaudeAccountNotLaneResident } from './managed-account-lane-residency'
+import { assertClaudeAccountNotDelegatedToLane } from './lane-delegation-lease'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
@@ -210,6 +213,7 @@ export class ClaudeAccountService {
     if (!trimmed) {
       throw new Error('A Claude config directory path is required.')
     }
+    assertCaptureSourceOutsideClaudeLanes(trimmed, 'claude-config-dir')
     const resolvedDir = resolve(trimmed)
     // Why: macOS keeps Claude credentials in the Keychain rather than a file, so
     // only require `.credentials.json` off-darwin; captureAuthFromConfigDir reads
@@ -407,6 +411,8 @@ export class ClaudeAccountService {
   }
 
   private async doRemoveAccount(accountId: string): Promise<ClaudeRateLimitAccountsState> {
+    // L1: deleting an account a lane is running on would strand that lane (§2d).
+    assertManagedClaudeAccountNotLaneResident(accountId)
     const account = this.requireAccount(accountId)
     const settings = this.store.getSettings()
     const nextAccounts = settings.claudeManagedAccounts.filter((entry) => entry.id !== accountId)
@@ -461,6 +467,12 @@ export class ClaudeAccountService {
     accountId: string | null,
     target?: ClaudeAccountSelectionTarget
   ): Promise<ClaudeRateLimitAccountsState> {
+    // L1's second edge, and it is here rather than at the RPC because it must hold for EVERY
+    // caller class — the renderer and the anonymous local socket carry no `pairedDeviceId` (§2d).
+    assertManagedClaudeAccountNotLaneResident(accountId)
+    // §2e rule (iv)'s local twin: on the DELEGATING desktop, whose runtime file the host's index
+    // cannot see. Selecting here would materialize the third copy a plain `claude` then rotates.
+    assertClaudeAccountNotDelegatedToLane(accountId)
     let effectiveTarget = target
     if (accountId !== null) {
       const account = this.requireAccount(accountId)
@@ -561,11 +573,13 @@ export class ClaudeAccountService {
     target?: ClaudeAccountSelectionTarget,
     operation?: () => Promise<void>
   ): Promise<void> {
-    beginClaudeAuthSwitch()
+    // The HOST switch path: it moves the shared lane's credential and nothing else, so it takes
+    // the shared lane's key and leaves every principal lane's spawns running (S9 §2f).
+    beginClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
     try {
       await (operation ? operation() : this.runtimeAuth.syncForCurrentSelection(target))
     } finally {
-      endClaudeAuthSwitch()
+      endClaudeAuthSwitch(SHARED_CLAUDE_LANE_KEY)
     }
   }
 

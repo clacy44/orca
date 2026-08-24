@@ -197,6 +197,7 @@ import {
   settleServeDesktopActivation as settleServeDesktopActivationGate
 } from './startup/serve-desktop-activation'
 import { RateLimitService } from './rate-limits/service'
+import { resolveLaneUsageRow } from './rate-limits/lane-statusline-usage'
 import { readMiniMaxSessionCookie } from './minimax/minimax-cookie-store'
 import { getInitialClaudeRateLimitTarget } from './rate-limits/claude-rate-limit-target'
 import { getInitialCodexRateLimitTarget } from './rate-limits/codex-rate-limit-target'
@@ -254,6 +255,7 @@ import { getDefaultWslDistro } from './wsl'
 import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './worktree-trash'
 import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
+import { wipeResidentLanesAtStartup } from './claude-accounts/principal-lane-startup-wipe'
 import {
   attachClaudeLivePtyPersistence,
   onLiveClaudePtysDrained,
@@ -1470,7 +1472,7 @@ function openMainWindow(options: { revealOnDidFinishLoad?: boolean } = {}): Brow
     store,
     runtime,
     prepareCodexRuntimeHomeForLaunch,
-    (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target),
+    (target, lanePrincipalId) => claudeRuntimeAuth!.prepareForClaudeLaunch(target, lanePrincipalId),
     {
       prepareCodexSessionResume: prepareCodexSessionResumeForLaunch,
       awaitLocalPtyStartup: () => localPtyStartupReady,
@@ -2245,11 +2247,29 @@ void app.whenReady().then(async () => {
   onLiveClaudePtysDrained(() => {
     void rateLimits?.refreshAfterClaudeLivePtysDrained()
   })
-  const persistedClaudePtyIds = store.getClaudeLivePtySessionIds()
-  seedLiveClaudePtysFromPersistence(persistedClaudePtyIds)
-  if (persistedClaudePtyIds.length > 0) {
+  // S9 §2f, and the ordering is the point: observe-only lane sync (which records the watermark)
+  // → wipe → seed the live-PTY gate → bind listeners. A crash never ran the close handler, so a
+  // lane's credential is still at rest; watermarking BEFORE the wipe is what refuses the
+  // reconnecting desktop's cached pre-restart blob into the lane this just emptied.
+  // Why guarded: this `whenReady` chain has no `.catch`, and everything below — the window, the
+  // runtime RPC server, the rest of boot — is downstream of this await. A missed lane wipe is
+  // recoverable at the next start; a host that never opens a window is not.
+  const laneStartupWipes = await wipeResidentLanesAtStartup({ persistence: store }).catch(
+    (error: unknown) => {
+      console.warn('[claude-lane] Startup lane wipe failed:', error)
+      return []
+    }
+  )
+  if (laneStartupWipes.length > 0) {
     console.log(
-      `[claude-live-pty] Seeded ${persistedClaudePtyIds.length} persisted Claude session id(s) into the refresh gate`
+      `[claude-lane] Wiped ${laneStartupWipes.filter((row) => row.completed).length}/${laneStartupWipes.length} resident Claude credential lane(s) at startup`
+    )
+  }
+  const persistedClaudePtySessions = store.getClaudeLivePtySessions()
+  seedLiveClaudePtysFromPersistence(persistedClaudePtySessions)
+  if (persistedClaudePtySessions.length > 0) {
+    console.log(
+      `[claude-live-pty] Seeded ${persistedClaudePtySessions.length} persisted Claude session id(s) into the refresh gate`
     )
   }
   applyAppIcon(store.getSettings().appIcon)
@@ -2430,6 +2450,14 @@ void app.whenReady().then(async () => {
   rateLimits.setClaudeAuthPreparationResolver((target) =>
     claudeRuntimeAuth!.prepareForRateLimitFetch(target)
   )
+  // Why beside it: the shared fetch is the tick, and the lane rows must be re-read on the same
+  // one or a lane's statusline post is attributed against a stale config dir (S9 §2k).
+  rateLimits.setClaudeLaneAttributionResolver(() => claudeRuntimeAuth!.listLaneUsageAttributions())
+  // Why the same seam feeds both sinks: a push or a clear changes which account the lane holds,
+  // and the row the DISPLACED account posted must not survive under the new label (S9 §2d/§2k).
+  claudeRuntimeAuth.laneCredentials.setLaneUsageInvalidationListener((laneId) => {
+    rateLimits?.forgetLaneStatuslineUsage(laneId)
+  })
   // Why: live Claude sessions stream usage windows through their statusLine command; feeding them here avoids OAuth usage-endpoint polling (and its 429s).
   agentHookServer.setClaudeStatusLineListener((event) => {
     rateLimits?.ingestLiveClaudeRateLimits(event)
@@ -2562,6 +2590,21 @@ void app.whenReady().then(async () => {
     orchestrationEnvironmentTransport
   })
   runtime = runtimeService
+  // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
+  // which is constructed after them. A post arriving before this lands falls back to the
+  // config-dir map, which is the pre-S9b behaviour (S9 §2k).
+  rateLimits?.setClaudeUsagePaneLaneLookup((paneKey) => {
+    const lane = runtimeService.credentialLaneOfPaneKey(paneKey)
+    return lane ? { laneId: lane.kind === 'principal' ? lane.principalId : null } : null
+  })
+  runtimeService.setLaneAccountRowResolvers({
+    laneUsageOf: (principalId) =>
+      resolveLaneUsageRow({
+        pulled: claudeRuntimeAuth?.laneUsageFor(principalId) ?? null,
+        posted: rateLimits?.laneStatuslineUsageOf(principalId) ?? null,
+        pullDisabled: claudeRuntimeAuth?.isLaneUsagePullDisabled() === true
+      })
+  })
   runtimeService.prepareLegacyWorkerTerminalRecovery()
   // Why: federated mail queued before the restart resumes here instead of waiting for
   // an RPC to touch the Run.
@@ -3042,7 +3085,8 @@ void app.whenReady().then(async () => {
       runtime,
       prepareCodexRuntimeHomeForLaunch,
       () => store!.getSettings(),
-      (target) => claudeRuntimeAuth!.prepareForClaudeLaunch(target),
+      (target, lanePrincipalId) =>
+        claudeRuntimeAuth!.prepareForClaudeLaunch(target, lanePrincipalId),
       store,
       prepareCodexSessionResumeForLaunch,
       {

@@ -1,0 +1,533 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import {
+  assertPrincipalId,
+  deprovisionPrincipalLane,
+  getPrincipalLaneDir,
+  isPrincipalId,
+  listResidentPrincipalLaneIds,
+  openPrincipalLane,
+  provisionPrincipalLane,
+  requiresVerifiedWindowsDacl,
+  resolveOwnedPrincipalLaneDir
+} from './principal-credential-lane'
+import {
+  isLaneLoaded,
+  LANE_KEYCHAIN_ITEM,
+  sweepLaneCredentialTempArtifacts,
+  wipeLaneCredentials
+} from './principal-lane-credential-sweep'
+import { formatLaneProvenance, readLaneProvenanceLabel } from './principal-lane-provenance'
+import { reconcileOrphanPrincipalLanes } from './principal-lane-orphan-reconciliation'
+
+vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
+
+const PRINCIPAL_A = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+const PRINCIPAL_B = '11112222-3333-4444-8555-666677778888'
+
+describe('principal credential lane', () => {
+  let userData = ''
+  let lanesRoot = ''
+
+  beforeEach(() => {
+    userData = mkdtempSync(join(tmpdir(), 'orca-lane-'))
+    lanesRoot = join(userData, 'claude-lanes')
+  })
+
+  afterEach(() => {
+    rmSync(userData, { recursive: true, force: true })
+  })
+
+  const options = (): { lanesRoot: string; platform: NodeJS.Platform } => ({
+    lanesRoot,
+    platform: 'linux'
+  })
+
+  describe('principal id validation at creation', () => {
+    it('accepts the exact randomUUID shape the registry mints', () => {
+      expect(isPrincipalId(PRINCIPAL_A)).toBe(true)
+    })
+
+    it('refuses a 36-character non-UUID lane id at creation', () => {
+      const notAUuid = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
+      expect(notAUuid).toHaveLength(36)
+
+      expect(() => assertPrincipalId(notAUuid)).toThrow(/host-minted UUID shape/)
+      expect(() => getPrincipalLaneDir(notAUuid, options())).toThrow(/host-minted UUID shape/)
+      expect(() => provisionPrincipalLane(notAUuid, options())).toThrow(/host-minted UUID shape/)
+      expect(existsSync(join(lanesRoot, notAUuid))).toBe(false)
+    })
+
+    it('refuses a traversal segment before it can reach path.join', () => {
+      expect(() => getPrincipalLaneDir('../escape', options())).toThrow(/host-minted UUID shape/)
+    })
+  })
+
+  describe('provisioning', () => {
+    it('creates <lanesRoot>/<principalId> at 0700 with an owning marker', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+
+      // The canonical form, which is what the read path returns: one lane, one string.
+      expect(lane.laneDir).toBe(realpathOf(join(lanesRoot, PRINCIPAL_A)))
+      expect(lane.laneDir).toBe(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options()))
+      expect(statSync(lane.laneDir).mode & 0o777).toBe(0o700)
+      expect(readFileSync(join(lane.laneDir, '.orca-principal-lane'), 'utf-8').trim()).toBe(
+        PRINCIPAL_A
+      )
+    })
+
+    it('mints an opaque provenance label that carries neither the principal id nor a device id', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+
+      expect(lane.provenanceLabel).toMatch(/^[0-9a-f]{32}$/)
+      expect(lane.provenanceLabel).not.toContain(PRINCIPAL_A)
+      expect(formatLaneProvenance(lane.provenanceLabel)).toBe(`lane:${lane.provenanceLabel}`)
+      expect(readLaneProvenanceLabel(lane.laneDir)).toBe(lane.provenanceLabel)
+    })
+
+    it('keeps the same label across a re-provision', () => {
+      const first = provisionPrincipalLane(PRINCIPAL_A, options())
+      const second = provisionPrincipalLane(PRINCIPAL_A, options())
+
+      expect(second.provenanceLabel).toBe(first.provenanceLabel)
+    })
+
+    it('refuses to write through a symlink planted at the lane path', () => {
+      const victim = join(userData, 'victim')
+      mkdirSync(victim, { recursive: true })
+      writeFileSync(join(victim, 'settings.json'), '{"model":"host"}')
+      mkdirSync(lanesRoot, { recursive: true })
+      symlinkSync(victim, join(lanesRoot, PRINCIPAL_A))
+
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /Something other than this person/
+      )
+      // Nothing was written through the link: no marker, no provenance, no mode change.
+      expect(existsSync(join(victim, '.orca-principal-lane'))).toBe(false)
+      expect(readdirSync(victim)).toEqual(['settings.json'])
+      expect(statSync(victim).mode & 0o777).not.toBe(0o700)
+    })
+
+    it('refuses to write through a lane path that is a file', () => {
+      mkdirSync(lanesRoot, { recursive: true })
+      writeFileSync(join(lanesRoot, PRINCIPAL_A), 'not a lane')
+
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /Something other than this person/
+      )
+    })
+
+    it('refuses to provision through a symlinked lanes root, on a first provisioning', () => {
+      const outside = join(userData, 'evil')
+      mkdirSync(outside, { recursive: true })
+      symlinkSync(outside, lanesRoot)
+
+      // The case with nothing at the lane path to lstat: the ROOT is what has to be proved.
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /keeps credential lanes in is its own/
+      )
+      expect(existsSync(join(outside, PRINCIPAL_A))).toBe(false)
+      expect(readdirSync(outside)).toEqual([])
+    })
+
+    it('refuses a lanes root that is not a full path rather than resolving it against the cwd', () => {
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, { lanesRoot: 'relative-lanes', platform: 'linux' })
+      ).toThrow(/not a full path/)
+      expect(existsSync(resolve('relative-lanes'))).toBe(false)
+    })
+
+    it('refuses a lane directory carrying another principal’s marker', () => {
+      const laneDir = join(lanesRoot, PRINCIPAL_A)
+      mkdirSync(laneDir, { recursive: true })
+      writeFileSync(join(laneDir, '.orca-principal-lane'), `${PRINCIPAL_B}\n`)
+
+      expect(() => provisionPrincipalLane(PRINCIPAL_A, options())).toThrow(
+        /not marked as this person/
+      )
+    })
+  })
+
+  describe('ownership discipline', () => {
+    it('resolves a provisioned lane it owns', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options())).toBe(realpathOf(lane.laneDir))
+    })
+
+    it('refuses a lane that is a symlink out of the root', () => {
+      const outside = join(userData, 'outside')
+      mkdirSync(outside, { recursive: true })
+      writeFileSync(join(outside, '.orca-principal-lane'), `${PRINCIPAL_A}\n`)
+      mkdirSync(lanesRoot, { recursive: true })
+      symlinkSync(outside, join(lanesRoot, PRINCIPAL_A))
+
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options())).toBeNull()
+    })
+
+    it('refuses a lane with a foreign marker', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      writeFileSync(join(lane.laneDir, '.orca-principal-lane'), `${PRINCIPAL_B}\n`)
+
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options())).toBeNull()
+    })
+
+    it('refuses a lane with no marker at all', () => {
+      mkdirSync(join(lanesRoot, PRINCIPAL_A), { recursive: true })
+
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options())).toBeNull()
+      expect(openPrincipalLane(PRINCIPAL_A, options())).toBeNull()
+    })
+
+    it('refuses a nested wrong-segment candidate', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      const nested = join(lane.laneDir, PRINCIPAL_B)
+      mkdirSync(nested, { recursive: true })
+      writeFileSync(join(nested, '.orca-principal-lane'), `${PRINCIPAL_B}\n`)
+
+      // A two-segment candidate is not a lane: the lane key is one segment under the root.
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_B, options())).toBeNull()
+    })
+  })
+
+  describe('credential sweep', () => {
+    const plantArtifacts = (laneDir: string): void => {
+      writeFileSync(join(laneDir, '.credentials.json'), '{"claudeAiOauth":{}}', { mode: 0o600 })
+      writeFileSync(join(laneDir, `.credentials.json.4242.${'a'.repeat(8)}.tmp`), 'blob', {
+        mode: 0o600
+      })
+      writeFileSync(join(laneDir, '.credentials.json.4242.1700000000000.abcd1234.tmp'), 'blob', {
+        mode: 0o600
+      })
+      writeFileSync(join(laneDir, 'settings.json'), '{"hooks":{}}')
+      mkdirSync(join(laneDir, 'projects'), { recursive: true })
+      writeFileSync(join(laneDir, 'projects', 'transcript.jsonl'), '{}')
+    }
+
+    it('wipes the credential and every tmp sibling while keeping settings and transcripts', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+      writeFileSync(
+        join(lane.laneDir, '.claude.json'),
+        JSON.stringify({ oauthAccount: { emailAddress: 'a@example.com' }, theme: 'dark' })
+      )
+
+      const removed = await wipeLaneCredentials(lane.laneDir, { platform: 'linux' })
+
+      expect(existsSync(join(lane.laneDir, '.credentials.json'))).toBe(false)
+      expect(removed.filter((name) => name.endsWith('.tmp'))).toHaveLength(2)
+      expect(existsSync(join(lane.laneDir, 'settings.json'))).toBe(true)
+      expect(existsSync(join(lane.laneDir, 'projects', 'transcript.jsonl'))).toBe(true)
+      const config = JSON.parse(
+        readFileSync(join(lane.laneDir, '.claude.json'), 'utf-8')
+      ) as Record<string, unknown>
+      expect('oauthAccount' in config).toBe(false)
+      expect(config.theme).toBe('dark')
+      expect(isLaneLoaded(lane.laneDir)).toBe(false)
+    })
+
+    it('deletes the lane-scoped Keychain item on darwin, and only the scoped one', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+      const deleted: string[] = []
+
+      const removed = await wipeLaneCredentials(lane.laneDir, {
+        platform: 'darwin',
+        deleteKeychainItem: async (configDir) => {
+          deleted.push(configDir)
+        }
+      })
+
+      // Scoped BY the lane dir: the strict deleter derives `Claude Code-credentials-<sha8>` from
+      // it, so a lane never reaches the host-wide unsuffixed service.
+      expect(deleted).toEqual([lane.laneDir])
+      expect(removed).toContain(LANE_KEYCHAIN_ITEM)
+      expect(isLaneLoaded(lane.laneDir)).toBe(false)
+    })
+
+    it('refuses to report a wipe the Keychain would not accept', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+
+      await expect(
+        wipeLaneCredentials(lane.laneDir, {
+          platform: 'darwin',
+          deleteKeychainItem: async () => {
+            throw new Error('keychain access denied')
+          }
+        })
+      ).rejects.toThrow('keychain access denied')
+    })
+
+    it('touches no Keychain on the other platforms', async () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+      const deleteKeychainItem = vi.fn(async () => {})
+
+      const removed = await wipeLaneCredentials(lane.laneDir, {
+        platform: 'linux',
+        deleteKeychainItem
+      })
+
+      expect(deleteKeychainItem).not.toHaveBeenCalled()
+      expect(removed).not.toContain(LANE_KEYCHAIN_ITEM)
+    })
+
+    it('sweeps a planted tmp blob on the next lane open while leaving the credential', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      plantArtifacts(lane.laneDir)
+
+      const opened = openPrincipalLane(PRINCIPAL_A, options())
+
+      expect(opened).toBe(realpathOf(lane.laneDir))
+      expect(
+        sweepLaneCredentialTempArtifacts(lane.laneDir),
+        'the open sweep already removed every staged blob'
+      ).toHaveLength(0)
+      expect(isLaneLoaded(lane.laneDir)).toBe(true)
+    })
+  })
+
+  describe('deprovision', () => {
+    it('removes the lane directory it owns', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+
+      expect(deprovisionPrincipalLane(PRINCIPAL_A, options())).toBe(true)
+      expect(existsSync(lane.laneDir)).toBe(false)
+    })
+
+    it('refuses to remove a directory it does not own', () => {
+      const laneDir = join(lanesRoot, PRINCIPAL_A)
+      mkdirSync(laneDir, { recursive: true })
+
+      expect(deprovisionPrincipalLane(PRINCIPAL_A, options())).toBe(false)
+      expect(existsSync(laneDir)).toBe(true)
+    })
+  })
+
+  describe('the startup wipe input', () => {
+    it('selects only the lanes holding a credential artifact', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      provisionPrincipalLane(PRINCIPAL_B, options())
+      writeFileSync(join(lanesRoot, PRINCIPAL_A, '.credentials.json'), '{}')
+
+      expect(listResidentPrincipalLaneIds(options())).toEqual([PRINCIPAL_A])
+    })
+
+    it('selects every owned lane on darwin, where the Keychain holds the other half', () => {
+      // Claude Code 2.1+ can leave the lane's credential ONLY in the config-dir-scoped Keychain
+      // item, which no file predicate sees — and the sweep's darwin arm is what removes it.
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      provisionPrincipalLane(PRINCIPAL_B, options())
+
+      expect(listResidentPrincipalLaneIds({ lanesRoot, platform: 'darwin' }).sort()).toEqual(
+        [PRINCIPAL_A, PRINCIPAL_B].sort()
+      )
+    })
+
+    it('never selects a directory it cannot prove it owns, on either platform', () => {
+      mkdirSync(join(lanesRoot, PRINCIPAL_A), { recursive: true })
+      writeFileSync(join(lanesRoot, PRINCIPAL_A, '.credentials.json'), '{}')
+
+      expect(listResidentPrincipalLaneIds(options())).toEqual([])
+      expect(listResidentPrincipalLaneIds({ lanesRoot, platform: 'darwin' })).toEqual([])
+    })
+  })
+
+  describe('orphan reconciliation', () => {
+    it('deletes a lane no surviving bound grant claims', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      provisionPrincipalLane(PRINCIPAL_B, options())
+
+      const result = reconcileOrphanPrincipalLanes({
+        boundPrincipalIds: [PRINCIPAL_A],
+        registryLoadSucceeded: true,
+        lanesRoot
+      })
+
+      expect(result.deletedPrincipalIds).toEqual([PRINCIPAL_B])
+      expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(true)
+      expect(existsSync(join(lanesRoot, PRINCIPAL_B))).toBe(false)
+    })
+
+    it('deletes nothing when the device registry load threw', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      provisionPrincipalLane(PRINCIPAL_B, options())
+
+      const result = reconcileOrphanPrincipalLanes({
+        boundPrincipalIds: [],
+        registryLoadSucceeded: false,
+        lanesRoot
+      })
+
+      expect(result.skipped).toBe('registry-load-failed')
+      expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(true)
+      expect(existsSync(join(lanesRoot, PRINCIPAL_B))).toBe(true)
+    })
+
+    it('deletes nothing when a successful load reports zero bound grants', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+
+      const result = reconcileOrphanPrincipalLanes({
+        boundPrincipalIds: [],
+        registryLoadSucceeded: true,
+        lanesRoot
+      })
+
+      expect(result.skipped).toBe('registry-empty')
+      expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(true)
+    })
+
+    it('leaves a UUID-named directory that carries no Orca marker alone', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      const impostor = join(lanesRoot, PRINCIPAL_B)
+      mkdirSync(impostor, { recursive: true })
+      writeFileSync(join(impostor, 'notes.txt'), 'not a lane')
+
+      const result = reconcileOrphanPrincipalLanes({
+        boundPrincipalIds: [PRINCIPAL_A],
+        registryLoadSucceeded: true,
+        lanesRoot
+      })
+
+      expect(result.deletedPrincipalIds).toEqual([])
+      expect(existsSync(impostor)).toBe(true)
+    })
+
+    it('leaves a foreign directory under the lanes root alone', () => {
+      provisionPrincipalLane(PRINCIPAL_A, options())
+      const foreign = join(lanesRoot, 'not-a-lane')
+      mkdirSync(foreign, { recursive: true })
+
+      reconcileOrphanPrincipalLanes({
+        boundPrincipalIds: [PRINCIPAL_A],
+        registryLoadSucceeded: true,
+        lanesRoot
+      })
+
+      expect(existsSync(foreign)).toBe(true)
+    })
+  })
+
+  describe('win32 lane hardening', () => {
+    it('fails provisioning closed when the DACL cannot be verified', () => {
+      const attempted: [string, boolean][] = []
+
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, {
+          lanesRoot,
+          platform: 'win32',
+          restrictWindowsPath: (target, isDirectory) => {
+            attempted.push([target, isDirectory])
+            return false
+          }
+        })
+      ).toThrow(/could not verify this credential lane/)
+      // The lane itself is gone by now, so canonicalize the root the hardening was handed.
+      expect(attempted).toEqual([[join(realpathOf(lanesRoot), PRINCIPAL_A), true]])
+      expect(existsSync(join(lanesRoot, PRINCIPAL_A))).toBe(false)
+    })
+
+    it('provisions when the DACL verifies', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, {
+        lanesRoot,
+        platform: 'win32',
+        restrictWindowsPath: () => true
+      })
+
+      expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
+    })
+
+    it('disables an existing lane whose re-provision cannot verify its DACL, and restores it on a verified one', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_A, options())
+      writeFileSync(join(lane.laneDir, '.credentials.json'), '{"claudeAiOauth":{}}')
+
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, {
+          lanesRoot,
+          platform: 'win32',
+          restrictWindowsPath: () => false
+        })
+      ).toThrow(/could not verify this credential lane/)
+
+      // The content survives for recovery, but nothing resolves the lane while it is unverified.
+      expect(existsSync(join(lane.laneDir, '.credentials.json'))).toBe(true)
+      expect(resolveOwnedPrincipalLaneDir(PRINCIPAL_A, options())).toBeNull()
+      expect(openPrincipalLane(PRINCIPAL_A, options())).toBeNull()
+
+      provisionPrincipalLane(PRINCIPAL_A, {
+        lanesRoot,
+        platform: 'win32',
+        restrictWindowsPath: () => true
+      })
+
+      expect(openPrincipalLane(PRINCIPAL_A, options())).toBe(realpathOf(lane.laneDir))
+    })
+
+    it('refuses a lane root on a remote UNC share before it writes anything', () => {
+      const share = '\\\\fileserver\\team\\claude-lanes'
+
+      expect(() =>
+        provisionPrincipalLane(PRINCIPAL_A, {
+          lanesRoot: share,
+          platform: 'win32',
+          restrictWindowsPath: () => true
+        })
+      ).toThrow(/network share/)
+      // Why resolved: that literal is not absolute on POSIX, so the only place a guard-less run
+      // could write is under the runner's cwd — which is where this asserts nothing landed.
+      expect(existsSync(resolve(share))).toBe(false)
+    })
+
+    it('provisions a local drive root and skips the refusal for the WSL redirector', () => {
+      // The local-root arm: the same win32 provisioning call over a non-UNC root still succeeds.
+      const lane = provisionPrincipalLane(PRINCIPAL_A, {
+        lanesRoot,
+        platform: 'win32',
+        restrictWindowsPath: () => true
+      })
+
+      expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
+      expect(
+        requiresVerifiedWindowsDacl('\\\\wsl.localhost\\Ubuntu\\home\\dev\\lanes\\p', 'win32')
+      ).toBe(false)
+    })
+
+    it('skips the DACL step for a wsl.localhost lane root and requires it for a local drive', () => {
+      expect(
+        requiresVerifiedWindowsDacl(
+          '\\\\wsl.localhost\\Ubuntu\\home\\dev\\.local\\share\\orca\\claude-lanes\\lane',
+          'win32'
+        )
+      ).toBe(false)
+      expect(requiresVerifiedWindowsDacl('C:\\Users\\dev\\claude-lanes\\lane', 'win32')).toBe(true)
+      expect(requiresVerifiedWindowsDacl('C:\\Users\\dev\\claude-lanes\\lane', 'linux')).toBe(false)
+    })
+  })
+
+  describe.runIf(process.platform === 'win32')('win32 lane hardening, real ACL', () => {
+    it('provisions a lane whose DACL the real call verifies', () => {
+      const lane = provisionPrincipalLane(PRINCIPAL_B, { lanesRoot, platform: 'win32' })
+
+      expect(existsSync(join(lane.laneDir, '.orca-principal-lane'))).toBe(true)
+    })
+  })
+})
+
+// Why: macOS resolves /var to /private/var, so compare against the canonical form.
+function realpathOf(path: string): string {
+  return realpathSync.native(path)
+}

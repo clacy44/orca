@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getDefaultSettings } from '../../shared/constants'
+import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
@@ -159,9 +160,20 @@ function createSettings(overrides: Partial<GlobalSettings> = {}): GlobalSettings
   }
 }
 
+function createLaneWatermarkStoreStub() {
+  let laneWatermarks: ClaudeLaneCredentialWatermark[] = []
+  return {
+    getClaudeLaneCredentialWatermarks: vi.fn(() => laneWatermarks.slice()),
+    setClaudeLaneCredentialWatermarks: vi.fn((rows: readonly ClaudeLaneCredentialWatermark[]) => {
+      laneWatermarks = rows.slice()
+    })
+  }
+}
+
 function createStore(settings: GlobalSettings) {
   return {
     getSettings: vi.fn(() => settings),
+    ...createLaneWatermarkStoreStub(),
     updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
       settings = {
         ...settings,
@@ -477,6 +489,7 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
+      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -532,6 +545,7 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
+      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -599,6 +613,7 @@ describe('ClaudeRuntimeAuthService', () => {
     })
     const store = {
       getSettings: vi.fn(() => settings),
+      ...createLaneWatermarkStoreStub(),
       updateSettings: vi.fn((updates: Partial<GlobalSettings>) => {
         settings = {
           ...settings,
@@ -1031,7 +1046,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, refreshedCredentials, 'utf-8')
       await service.syncForCurrentSelection()
@@ -1070,7 +1085,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, conflictingCredentials, 'utf-8')
       await service.syncForCurrentSelection()
@@ -1117,7 +1132,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, wipedCredentials, 'utf-8')
       await service.syncForCurrentSelection()
@@ -2966,7 +2981,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const service = new ClaudeRuntimeAuthService(store as never)
     await service.syncForCurrentSelection()
 
-    markClaudePtySpawned('live-claude-pty')
+    markClaudePtySpawned('live-claude-pty', null)
     try {
       writeFileSync(runtimeCredentialsPath, unverifiedLiveCredentials, 'utf-8')
       settings.activeClaudeManagedAccountId = 'account-2'
@@ -3857,6 +3872,31 @@ describe('ClaudeRuntimeAuthService', () => {
     vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(null)
   })
 
+  // §2k budgets the pull as a tick, not as a blocker: `prepareForRateLimitFetch` is the FIRST
+  // await of the rate-limit cycle and precedes codex/gemini/kimi/minimax/grok dispatch.
+  it('does not block the rate-limit fetch on the lane usage pull', async () => {
+    const settings = createSettings({})
+    const store = createStore(settings)
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+    let releaseTick = (): void => {}
+    vi.spyOn(service.laneCredentials, 'pullLaneUsage').mockReturnValue(
+      new Promise((resolve) => {
+        releaseTick = () => resolve({ probed: [], skipped: [], failed: [], disabled: false })
+      })
+    )
+    try {
+      const outcome = await Promise.race([
+        service.prepareForRateLimitFetch().then(() => 'prepared'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked-on-the-pull'), 50))
+      ])
+
+      expect(outcome).toBe('prepared')
+    } finally {
+      releaseTick()
+    }
+  })
+
   it('does not refresh the active account while a Claude PTY is live', async () => {
     const expired = createClaudeCredentialsJson('one@example.com', 'one-expired', null, 1_000)
     const managedAuthPath1 = createManagedClaudeAuth(testState.userDataDir, 'account-1', expired)
@@ -3877,7 +3917,7 @@ describe('ClaudeRuntimeAuthService', () => {
     const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
     const service = new ClaudeRuntimeAuthService(store as never)
 
-    markClaudePtySpawned('pty-live-1')
+    markClaudePtySpawned('pty-live-1', null)
     try {
       const preparation = await service.prepareForRateLimitFetch()
       // A live Claude owns the credentials; refreshing here would race its
@@ -3928,5 +3968,176 @@ describe('ClaudeRuntimeAuthService', () => {
     await service.syncForCurrentSelection()
 
     expect(readManagedCredentialsForTest('account-1', managedAuthPath1)).toBe(runtimeRotated)
+  })
+})
+
+describe('ClaudeRuntimeAuthService lane preparation', () => {
+  const PRINCIPAL = '3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+
+  beforeEach(() => {
+    setPlatform('linux')
+    vi.resetModules()
+    vi.clearAllMocks()
+    testState.userDataDir = mkdtempSync(join(tmpdir(), 'orca-claude-lane-runtime-'))
+    testState.fakeHomeDir = mkdtempSync(join(tmpdir(), 'orca-claude-lane-home-'))
+    mkdirSync(join(testState.fakeHomeDir, '.claude'), { recursive: true })
+  })
+
+  afterEach(() => {
+    if (originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
+    rmSync(testState.userDataDir, { recursive: true, force: true })
+    rmSync(testState.fakeHomeDir, { recursive: true, force: true })
+  })
+
+  async function provisionLoadedLane(): Promise<string> {
+    const { provisionPrincipalLane } = await import('./principal-credential-lane')
+    const lane = provisionPrincipalLane(PRINCIPAL, { platform: 'linux' })
+    writeFileSync(
+      join(lane.laneDir, '.credentials.json'),
+      createClaudeCredentialsJson('lane@example.com', 'lane-token'),
+      'utf-8'
+    )
+    return lane.laneDir
+  }
+
+  it('returns the lane config dir, envPatch, stripAuthEnv and an unmanaged provenance', async () => {
+    const laneDir = await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch(undefined, PRINCIPAL)
+
+    expect(preparation.configDir).toBe(laneDir)
+    expect(preparation.envPatch).toEqual({ CLAUDE_CONFIG_DIR: laneDir })
+    expect(preparation.stripAuthEnv).toBe(true)
+    expect(preparation.runtime).toBe('host')
+    expect(typeof preparation.managedRefreshDeferredByLivePty).toBe('boolean')
+    expect(preparation.provenance).toMatch(/^lane:[0-9a-f]{32}$/)
+    expect(preparation.provenance).not.toContain(PRINCIPAL)
+  })
+
+  it('mints a provenance the managed-auth predicate refuses', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const { isManagedClaudeAuth } = await import('../rate-limits/claude-fetcher')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch(undefined, PRINCIPAL)
+
+    // Why: `isManagedClaudeAuth` gates CLI usage supplementation, which §2k scopes to the shared
+    // lane — lane usage arrives by the statusline path instead.
+    expect(isManagedClaudeAuth(preparation)).toBe(false)
+  })
+
+  it('fails a lane launch closed when the lane holds no credential', async () => {
+    const { provisionPrincipalLane } = await import('./principal-credential-lane')
+    provisionPrincipalLane(PRINCIPAL, { platform: 'linux' })
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    await expect(service.prepareForClaudeLaunch(undefined, PRINCIPAL)).rejects.toThrow(
+      /not loaded on this host/
+    )
+  })
+
+  it('fails a lane launch closed when the lane was never provisioned', async () => {
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    await expect(service.prepareForClaudeLaunch(undefined, PRINCIPAL)).rejects.toThrow(
+      /not set up on this host/
+    )
+  })
+
+  it('refuses a lane-pinned launch on a WSL target instead of falling through to the shared dir', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    // The fall-through would hand this pane the distro's shared `~/.claude` while presence still
+    // renders it as this person's lane — a lane-pinned pane on someone else's credential.
+    await expect(
+      service.prepareForClaudeLaunch({ runtime: 'wsl', wslDistro: 'Ubuntu' }, PRINCIPAL)
+    ).rejects.toThrow(/not available inside WSL yet/)
+  })
+
+  it('leaves a WSL target on the WSL branch when no lane is named', async () => {
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch({
+      runtime: 'wsl',
+      wslDistro: 'Ubuntu'
+    })
+
+    expect(preparation.runtime).toBe('wsl')
+    expect(preparation.provenance).not.toMatch(/^lane:/)
+  })
+
+  it('records the lane watermark on a launch and leaves the shared identity alone', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    await service.prepareForClaudeLaunch(undefined, PRINCIPAL)
+
+    const [rows] = store.setClaudeLaneCredentialWatermarks.mock.calls.at(-1) ?? []
+    expect(rows).toEqual([
+      expect.objectContaining({ laneId: PRINCIPAL, refreshTokenSha256: expect.any(String) })
+    ])
+    // The lane's account must never reach the host's own `.claude.json` identity.
+    const hostConfigPath = join(testState.fakeHomeDir, '.claude', '.claude.json')
+    expect(existsSync(hostConfigPath) ? readFileSync(hostConfigPath, 'utf-8') : '').not.toContain(
+      'lane@example.com'
+    )
+    expect((await service.prepareForClaudeLaunch()).provenance).toBe('system')
+  })
+
+  it('defers the lane refresh for a pty in THAT lane and not for one in another', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const { markClaudePtyExited, markClaudePtySpawned } = await import('./live-pty-gate')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    expect(
+      (await service.prepareForClaudeLaunch(undefined, PRINCIPAL)).managedRefreshDeferredByLivePty
+    ).toBe(false)
+
+    // Negative control: another principal's lane pty says nothing about this account.
+    markClaudePtySpawned('other-lane-pty', '11112222-3333-4444-8555-666677778888')
+    expect(
+      (await service.prepareForClaudeLaunch(undefined, PRINCIPAL)).managedRefreshDeferredByLivePty
+    ).toBe(false)
+
+    markClaudePtySpawned('lane-pty', PRINCIPAL)
+    expect(
+      (await service.prepareForClaudeLaunch(undefined, PRINCIPAL)).managedRefreshDeferredByLivePty
+    ).toBe(true)
+
+    markClaudePtyExited('lane-pty')
+    markClaudePtyExited('other-lane-pty')
+  })
+
+  it('leaves the host branch unchanged when no lane is named', async () => {
+    await provisionLoadedLane()
+    const store = createStore(createSettings())
+    const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+    const service = new ClaudeRuntimeAuthService(store as never)
+
+    const preparation = await service.prepareForClaudeLaunch()
+
+    expect(preparation.configDir).toBe(join(testState.fakeHomeDir, '.claude'))
+    expect(preparation.provenance).toBe('system')
+    expect(preparation.stripAuthEnv).toBe(false)
   })
 })

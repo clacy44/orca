@@ -8,6 +8,13 @@ import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-au
 import { applyClaudeEnvPatch } from '../claude-accounts/environment'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
 import { cleanupHiddenRateLimitPty, registerHiddenRateLimitPty } from './hidden-pty-cleanup'
+import {
+  HIDDEN_PTY_KILL_UNCONFIRMED_ERROR,
+  killHiddenRateLimitPtyAwaitingExit
+} from './hidden-pty-exit'
+import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
+import { removeInheritedAgentHookEnv } from '../../shared/agent-hook-identity-env'
+import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
 import { extractClaudePtyResetMetadata } from './claude-pty-reset-parser'
 import {
   getHiddenRateLimitWslCwdSetupCommands,
@@ -201,13 +208,14 @@ function describeClaudeUsageFailure(output: string): string {
   return 'Claude usage is unavailable right now.'
 }
 
-function abortedClaudeUsageResult(): ProviderRateLimits {
+function abortedClaudeUsageResult(killConfirmed = true): ProviderRateLimits {
   return {
     provider: 'claude',
     session: null,
     weekly: null,
     updatedAt: Date.now(),
-    error: 'Rate-limit fetch aborted',
+    // The two are distinct to the lane fence: only a confirmed-dead probe lets a wipe report done.
+    error: killConfirmed ? 'Rate-limit fetch aborted' : HIDDEN_PTY_KILL_UNCONFIRMED_ERROR,
     status: 'error'
   }
 }
@@ -252,6 +260,18 @@ export async function fetchViaPty(options?: {
     // risking rate-limit/geo signals on the account. Falls back to {} when unset.
     const proxyEnv = buildConfiguredProxyEnv(options?.networkProxySettings)
     Object.assign(spawnEnv, proxyEnv)
+    // Why here and nowhere upstream: this probe never reaches a PtyProvider, so neither the
+    // provider's pane-identity scrub nor its win32 lane-key collapse runs over it. Without the
+    // first, an Orca launched from an Orca terminal hands the probe's `claude` a STALE
+    // ORCA_PANE_KEY, which the statusline posts and the new pane→lane join then trusts — landing
+    // this lane's usage on another principal's row. Without the second, an inherited
+    // `Claude_Config_Dir` outranks the lane's own key on Win32 (S9 §2k, §2m(5)).
+    removeUnspecifiedPaneIdentityEnv(spawnEnv)
+    // The third inherited-env scrub §2k names beside the other two: this probe's `claude` runs the
+    // LANE's managed statusline, and inherited hook coordinates would post the lane's config dir —
+    // and with it the host-minted principal id — to ANOTHER Orca, under a token that authenticates.
+    removeInheritedAgentHookEnv(spawnEnv)
+    collapseLaneEnvKeys(spawnEnv, options?.authPreparation?.envPatch)
     const authPreparation = options?.authPreparation
     const wslConfig =
       authPreparation?.runtime === 'wsl' &&
@@ -327,8 +347,11 @@ export async function fetchViaPty(options?: {
         timeout = null
       }
       clearFollowupTimers()
-      cleanupHiddenRateLimitPty(term, termDisposables, { kill: true })
-      resolve(abortedClaudeUsageResult())
+      // §2f's fence settles on the probe's `claude` being GONE, not on the signal being posted: a
+      // still-rotating CLI writes `.credentials.json` back into the lane the sweep just read clean.
+      void killHiddenRateLimitPtyAwaitingExit(term, termDisposables).then((outcome) => {
+        resolve(abortedClaudeUsageResult(outcome === 'exited'))
+      })
     }
 
     if (options?.signal) {

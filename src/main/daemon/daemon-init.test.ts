@@ -631,7 +631,10 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     // Why: live-pty-gate is intentionally unmocked — import from the same fresh registry so gate state matches daemon-init's.
     const gate = await import('../claude-accounts/live-pty-gate')
     defaultListSessionsSessions.push({ sessionId: 'claude-alive' })
-    gate.seedLiveClaudePtysFromPersistence(['claude-alive', 'claude-dead'])
+    gate.seedLiveClaudePtysFromPersistence([
+      { sessionId: 'claude-alive', laneId: null },
+      { sessionId: 'claude-dead', laneId: null }
+    ])
     try {
       await mod.initDaemonPtyProvider()
 

@@ -224,7 +224,10 @@ describe('terminal.list presence boundary pass', () => {
           connected: true,
           writable: true,
           lastOutputAt: null,
-          preview: ''
+          preview: '',
+          // Why present without being asked for: S9 §2h's lane fields are properties of the
+          // TERMINAL, published on every row like `connected`, not of the presence projection.
+          credentialLane: 'unknown'
         }
       ],
       topologyRevisions: { [REPO_WORKTREE_ID]: 0 },
@@ -543,7 +546,10 @@ describe('terminal.list presence default direction', () => {
           connected: true,
           writable: true,
           lastOutputAt: null,
-          preview: ''
+          preview: '',
+          // Why present without being asked for: S9 §2h's lane fields are properties of the
+          // TERMINAL, published on every row like `connected`, not of the presence projection.
+          credentialLane: 'unknown'
         }
       ],
       topologyRevisions: { [REPO_WORKTREE_ID]: 0 },

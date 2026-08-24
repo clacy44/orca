@@ -15,6 +15,7 @@ vi.mock('node-pty', () => ({
 
 import { fetchViaPty } from './claude-pty'
 import { getActiveHiddenRateLimitPtyCount } from './hidden-pty-cleanup'
+import { HIDDEN_PTY_KILL_UNCONFIRMED_ERROR } from './hidden-pty-exit'
 
 function makeDisposable() {
   return { dispose: vi.fn() }
@@ -173,6 +174,8 @@ describe('fetchViaPty', () => {
     expect(getActiveHiddenRateLimitPtyCount()).toBe(1)
 
     controller.abort()
+    await vi.advanceTimersByTimeAsync(0)
+    term.emitExit()
 
     await expect(resultPromise).resolves.toMatchObject({
       provider: 'claude',
@@ -180,6 +183,50 @@ describe('fetchViaPty', () => {
       error: 'Rate-limit fetch aborted'
     })
     expect(killMock).toHaveBeenCalledTimes(1)
+    expect(getActiveHiddenRateLimitPtyCount()).toBe(0)
+  })
+
+  // §2f: the lane sweep runs on this settlement, so settling on the posted signal alone lets a
+  // mid-rotation `claude` write `.credentials.json` back into a lane already reported wiped.
+  it('does not settle the abort until the hidden claude has actually exited', async () => {
+    const term = makeMockTerm()
+    spawnMock.mockReturnValue(term)
+    const controller = new AbortController()
+    let settled = false
+
+    const resultPromise = fetchViaPty({ signal: controller.signal }).then((result) => {
+      settled = true
+      return result
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(1_500)
+
+    expect(term.kill).toHaveBeenCalledTimes(1)
+    expect(settled).toBe(false)
+
+    term.emitExit()
+    await expect(resultPromise).resolves.toMatchObject({ error: 'Rate-limit fetch aborted' })
+  })
+
+  it('escalates to SIGKILL and reports the kill unconfirmed when the child never exits', async () => {
+    const term = makeMockTerm()
+    spawnMock.mockReturnValue(term)
+    const controller = new AbortController()
+
+    const resultPromise = fetchViaPty({ signal: controller.signal })
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(term.kill).toHaveBeenLastCalledWith('SIGKILL')
+
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    await expect(resultPromise).resolves.toMatchObject({
+      status: 'error',
+      error: HIDDEN_PTY_KILL_UNCONFIRMED_ERROR
+    })
     expect(getActiveHiddenRateLimitPtyCount()).toBe(0)
   })
 

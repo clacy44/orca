@@ -305,6 +305,7 @@ import {
   type ExecutionHostId
 } from '../../shared/execution-host'
 import { preservedBranchCleanupScopeKey } from '../../shared/preserved-branch-cleanup'
+import { scopeLaunchConfigClaudeConfigDir } from '../ipc/claude-config-dir-launch-guard'
 import { getRegisteredSshState } from '../ipc/ssh'
 import type {
   AgentProviderSessionMetadata,
@@ -397,6 +398,8 @@ import {
   type RuntimeSpeechModelSummary,
   type RuntimeSpeechSetupState,
   type RuntimeTerminalShow,
+  type RuntimeTerminalLaneAccountLabel,
+  type RuntimeTerminalLaneUsage,
   type RuntimeTerminalSummary,
   type RuntimeTerminalVisualGroupNode,
   type RuntimeTerminalVisualLayout,
@@ -499,10 +502,6 @@ import {
   isTuiAgentEnabled,
   pickTuiAgent
 } from '../../shared/tui-agent-selection'
-import {
-  resolveTuiAgentLaunchArgs,
-  resolveTuiAgentLaunchEnv
-} from '../../shared/tui-agent-launch-defaults'
 import { resolveLocalWindowsAgentStartupShell } from '../../shared/windows-terminal-shell'
 import {
   getTuiAgentLaunchCommand,
@@ -1080,7 +1079,13 @@ import {
 } from './mobile-session-tabs-agent-status-heartbeat'
 import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-coalescer'
 import { terminalPresenceRegistry } from './terminal-presence-registry'
+import { assertLaneSeedPromptWithinBounds, callerMayOpenSourceLane } from './terminal-open-in-lane'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
+import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
+import { assertLaneAgentArgsAllowed, laneScopedAgentLaunchInputs } from './lane-launch-computation'
+import { createPresenceParticipantPrincipalResolver } from './presence-participant-principal'
+import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import {
   appendRecentPtyPathCandidates,
   recentTerminalOutputIncludesPath,
@@ -1138,6 +1143,19 @@ import {
   resolveNestedRepoSelection
 } from '../project-groups/nested-repo-import'
 import { createNestedRepoImportTargetResolver } from '../project-groups/nested-repo-import-target'
+import type { PaneCredentialLane, PaneCredentialLaneLookup } from './pane-credential-lane-registry'
+import { PaneLaneAuthority } from './pane-lane-authority'
+import {
+  resumeLaneBoundSleepingRecords,
+  withoutSleepingAgentRecord
+} from './lane-sleeping-agent-wake'
+import { runtimePathsEqual, runtimeWorktreeIdsEqual } from './runtime-worktree-id-equality'
+import {
+  SHARED_CREDENTIAL_LANE,
+  assertCredentialLaneSupplied,
+  type PrincipalLookup,
+  type TerminalCredentialLaneOption
+} from './terminal-credential-lane-resolution'
 
 function sanitizeNestedRepoRuntimeImportError(context: string, error: unknown): string {
   console.warn(`[project-groups] ${context}`, error)
@@ -1218,6 +1236,9 @@ type RuntimeStore = {
   flushOrThrow?: Store['flushOrThrow']
   flushPendingOrThrowAsync?: Store['flushPendingOrThrowAsync']
   persistPtyBinding?: Store['persistPtyBinding']
+  persistPaneCredentialLane?: Store['persistPaneCredentialLane']
+  forgetPaneCredentialLane?: Store['forgetPaneCredentialLane']
+  getPaneCredentialLanes?: Store['getPaneCredentialLanes']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
   updateUI?: Store['updateUI']
@@ -1391,6 +1412,9 @@ type RuntimePtyWorktreeRecord = {
   // spawn-time tab/pane identity so later reveals can adopt under the env key.
   tabId: string | null
   paneKey: string | null
+  // Why: the pane's own lane, resolved once at bind time; never a device id, so neither a revoke
+  // nor a re-bind can orphan or re-point a live pane (S9 §2h).
+  lanePrincipalId?: string | null
   launchConfig: SleepingAgentLaunchConfig | null
   launchToken: string | null
   // Why: provider PTY IDs can be reused; launch identity belongs only to the process that received the token.
@@ -1433,6 +1457,9 @@ type RuntimePtyWorktreeRecord = {
 }
 
 type TerminalCreateOptions = {
+  // Why: required so the compiler enumerates every spawner; the funnel binds it to the pane it
+  // mints and every spawn edge reads it back from there, never from the request (S9 §2a).
+  credentialLane: TerminalCredentialLaneOption
   command?: string
   claudeAgentTeamsSourceCommand?: string
   cwd?: string
@@ -1751,6 +1778,8 @@ type RuntimePtyController = {
     rows: number
     cwd?: string
     command?: string
+    /** The launch the record will carry: guard 2 and §2g's containment check read it (§2a). */
+    launchConfig?: SleepingAgentLaunchConfig
     launchAgent?: TuiAgent
     commandDelivery?: 'renderer' | 'provider'
     startupCommandDelivery?: WorktreeStartupLaunch['startupCommandDelivery']
@@ -2048,7 +2077,10 @@ type RuntimeNotifier = {
   // renderer to run its own navigation-free wake (experimental agent sleep);
   // the runtime has no in-memory sleeping records or wake authority. Optional to
   // match the many renderer-backed notifier methods only the real bridge wires.
-  resumeSleepingAgents?(worktreeId: string): void
+  // Why (S9 §2a): the wake is partitioned host-side, so the withheld paneKeys travel with it —
+  // the renderer's own record field is written only at hydration and is absent on a record
+  // captured live, which would let a lane pane wake onto the shared credential.
+  resumeSleepingAgents?(worktreeId: string, withheldPaneKeys?: readonly string[]): void
   terminalFitOverrideChanged(
     ptyId: string,
     mode: 'mobile-fit' | 'remote-desktop-fit' | 'desktop-fit',
@@ -2815,6 +2847,26 @@ export class OrcaRuntimeService {
   private readonly runtimeId = randomUUID()
   private readonly startedAt = Date.now()
   private readonly store: RuntimeStore | null
+  // Why: the lane is a property of the pane record, bound at the paneKey mint (S9 §2a).
+  private readonly paneLanes = new PaneLaneAuthority({
+    rendererLeafExists: (tabId, leafId) => this.leaves.has(this.getLeafKey(tabId, leafId)),
+    livePtyPaneKeys: () =>
+      Array.from(this.ptysById.values(), (pty) => pty.paneKey).filter(
+        (paneKey): paneKey is string => typeof paneKey === 'string'
+      ),
+    workspaceSessionOf: (worktreeId) => this.getWorkspaceSessionForWorktree(worktreeId),
+    mobileSessionTabsOf: (worktreeId) => this.mobileSessionTabsByWorktree.get(worktreeId) ?? null,
+    paneOfPty: (ptyId) => {
+      const pty = this.ptysById.get(ptyId)
+      return pty?.paneKey
+        ? { worktreeId: pty.worktreeId, paneKey: pty.paneKey, connectionId: pty.connectionId }
+        : null
+    },
+    readPersistedLanes: () => this.store?.getPaneCredentialLanes?.() ?? null,
+    persistLane: (row) => this.store?.persistPaneCredentialLane?.(row),
+    forgetPersistedLane: (row) => this.store?.forgetPaneCredentialLane?.(row),
+    killPty: (ptyId) => this.ptyController?.kill?.(ptyId)
+  })
   private managedHookReconciliationGeneration = 0
   private managedHookReconciliationTail: Promise<void> = Promise.resolve()
   private readonly orchestrationEnvironmentTransport: OrchestrationEnvironmentTransport | null
@@ -8045,6 +8097,9 @@ export class OrcaRuntimeService {
     leafId?: string,
     opts: {
       notifyClients?: boolean
+      // Why: the tap is a caller identity here as well as a navigation id — this edge reattaches
+      // an existing pane, so the adopt predicate is its whole gate (§2a row 35).
+      pairedDeviceId?: string
       clientNavigationId?: string
       navigation?: RuntimeNavigationTarget
       intent?: TabActivationIntent
@@ -8109,10 +8164,14 @@ export class OrcaRuntimeService {
         let agentStartup: Awaited<
           ReturnType<OrcaRuntimeService['resolveMobileSessionTerminalCommand']>
         > = {}
+        // Why hoisted: the re-resolved launch below is built against this lane, and the
+        // materialize must not resolve the caller's lane twice and shape one from the other.
+        const materializeLane = this.resolveCallerCredentialLane(opts.pairedDeviceId)
         if (tab.launchAgent) {
           try {
             const workspace = await this.resolveTerminalWorkspaceLaunchScope(`id:${worktreeId}`)
             agentStartup = await this.resolveMobileSessionTerminalCommand(workspace, {
+              credentialLane: materializeLane,
               agent: tab.launchAgent
             })
           } catch {
@@ -8122,6 +8181,9 @@ export class OrcaRuntimeService {
         }
         try {
           await this.createRuntimeOwnedMobileSessionTerminal(worktreeId, targetsHost, undefined, {
+            credentialLane: materializeLane,
+            // Why: this call site is not a create — it reattaches or respawns the pane the tapped
+            // tab already names, so §2a(i)'s identity drop never reaches it.
             identity: {
               tabId: tab.parentTabId,
               leafId: tab.leafId,
@@ -10038,6 +10100,8 @@ export class OrcaRuntimeService {
       leafId: string
       incarnationId?: PtyIncarnationId
       agentLaunchAuthority?: { launchToken: string; launchAgent: TuiAgent }
+      /** A reattach adopts an existing pane, so it attributes no lane to one that has none (§2h). */
+      isReattach?: boolean
     },
     isWsl?: boolean
   ): void {
@@ -10049,6 +10113,15 @@ export class OrcaRuntimeService {
       binding && isValidTerminalTabId(binding.tabId) && isTerminalLeafId(binding.leafId)
         ? makePaneKey(binding.tabId, binding.leafId)
         : null
+    if (paneKey && binding) {
+      this.paneLanes.bindMintedPane(
+        worktreeId,
+        binding.tabId,
+        binding.leafId,
+        connectionId,
+        binding.isReattach
+      )
+    }
     const pty = this.recordPtyWorktree(ptyId, worktreeId, {
       connected: true,
       connectionId,
@@ -10059,6 +10132,9 @@ export class OrcaRuntimeService {
       ...(binding && paneKey ? { tabId: binding.tabId, paneKey } : {}),
       ...(binding?.incarnationId ? { incarnationId: binding.incarnationId } : {})
     })
+    if (paneKey) {
+      this.paneLanes.stampPaneLane(pty, worktreeId, paneKey)
+    }
     const agentLaunchAuthority = binding?.agentLaunchAuthority
     if (
       agentLaunchAuthority &&
@@ -16091,6 +16167,8 @@ export class OrcaRuntimeService {
       // Why one object rather than a boolean plus an id: presence is opt-in AND caller-scoped, so an
       // absent object is the single state that omits the key from every row.
       presence?: TerminalListPresenceScope
+      /** The caller's grant, for the lane-usage projection rule of §2d. */
+      pairedDeviceId?: string | null
     } = {}
   ): Promise<RuntimeTerminalListResult> {
     if (!Number.isInteger(limit) || limit <= 0) {
@@ -16223,6 +16301,32 @@ export class OrcaRuntimeService {
         selfParticipantId: opts.presence.selfParticipantId
       })
     }
+    // Why after presence and not inside it: these are properties of the TERMINAL, published on
+    // every row, while the owner label they add lands on the participants presence just built.
+    applyTerminalCredentialLaneRows(listedTerminals, {
+      laneOf: (worktreeId, paneKey) => this.paneLanes.laneOf(worktreeId, paneKey),
+      connectionIdOf: (ptyId) => this.ptysById.get(ptyId)?.connectionId,
+      wslDistroOf: (ptyId) => this.ptysById.get(ptyId)?.wslDistro,
+      observedAgentTypesOf: (paneKey) =>
+        (this.getAgentProviderSessionSnapshotFn?.() ?? [])
+          .filter((row) => row.paneKey === paneKey)
+          .map((row) => row.agentType),
+      laneStateOf: (principalId) => resolveLaneResidencyState(principalId),
+      ...(this.laneAccountRowResolvers.laneAccountLabelOf
+        ? { laneAccountLabelOf: this.laneAccountRowResolvers.laneAccountLabelOf }
+        : {}),
+      ...(this.laneAccountRowResolvers.laneUsageOf
+        ? { laneUsageOf: this.laneAccountRowResolvers.laneUsageOf }
+        : {}),
+      // §2d: a peer sees the label and NOT the bar, so the caller's own principal is the gate.
+      callerPrincipalId: this.paneLanes.principalOfGrant(opts.pairedDeviceId),
+      // Why a resolver and not a lookup: the join is a scan of the connection map, and this
+      // one is asked per participant per row (§2h).
+      principalOfParticipant: createPresenceParticipantPrincipalResolver({
+        connections: () => terminalPresenceRegistry.connections(),
+        principalOfGrant: (pairedDeviceId) => this.paneLanes.principalOfGrant(pairedDeviceId)
+      })
+    })
     // Why: undefined (pre-flag client) must still get layouts; only an explicit
     // `false` opts out.
     const visualLayouts =
@@ -16426,6 +16530,7 @@ export class OrcaRuntimeService {
       for (const { claim, pty, paneKey } of validated) {
         pty.tabId = claim.tabId
         pty.paneKey = paneKey
+        this.paneLanes.stampPaneLane(pty, workspace.id, paneKey)
       }
       return {
         adopted: false,
@@ -16743,6 +16848,7 @@ export class OrcaRuntimeService {
     for (const { claim, pty, paneKey } of validated) {
       pty.tabId = claim.tabId
       pty.paneKey = paneKey
+      this.paneLanes.stampPaneLane(pty, workspace.id, paneKey)
     }
     this.hydrateHeadlessMobileSessionTabsFromWorkspaceSession(workspace.id, {
       force: true,
@@ -17186,7 +17292,10 @@ export class OrcaRuntimeService {
   async recoverTerminalPane(
     paneKey: string,
     expectedWorktreeId: string,
-    expectedHandle?: string
+    expectedHandle?: string,
+    // Why: recovery re-enters createTerminal with the client's own pane identity, so it needs a
+    // caller for the inherit predicate; relay-lease panes are never lane-bound today (§2a).
+    caller: { pairedDeviceId?: string | null } = {}
   ): Promise<RuntimeTerminalResolvePane> {
     const parsed = parsePaneKey(paneKey)
     const pty = this.getPtyRecordForPaneKey(paneKey)
@@ -17219,6 +17328,11 @@ export class OrcaRuntimeService {
     }
     // Why: disconnected PTYs can reissue handles during graph cleanup; only a connected replacement satisfies the pane CAS.
     const recovery = this.createTerminal(`id:${expectedWorktreeId}`, {
+      credentialLane: {
+        kind: 'inherit',
+        fromPtyId: pty.ptyId,
+        ...(caller.pairedDeviceId ? { pairedDeviceId: caller.pairedDeviceId } : {})
+      },
       tabId: parsed.tabId,
       leafId: parsed.leafId,
       focus: false,
@@ -21998,6 +22112,44 @@ export class OrcaRuntimeService {
     )
   }
 
+  /** The wake's owner half: lane records resume through the HOST create path (S9 §2a). */
+  private async resumeOwnedLaneSleepingAgents(
+    repo: Repo,
+    worktreeId: string,
+    pairedDeviceId: string | undefined
+  ): Promise<{ withheldPaneKeys: string[]; refusedForeign: boolean; resumed: number }> {
+    const hostId = getRepoExecutionHostId(repo)
+    const partition = this.paneLanes.partitionSleepingWake(
+      this.store?.getWorkspaceSession?.(hostId).sleepingAgentSessionsByPaneKey ?? {},
+      worktreeId,
+      pairedDeviceId
+    )
+    const resumed = await resumeLaneBoundSleepingRecords(partition.ownedRecords, worktreeId, {
+      resume: (request) =>
+        this.ensureAgentSession(request, { ...(pairedDeviceId ? { pairedDeviceId } : {}) }),
+      clearRecord: (paneKey) => this.clearSleepingAgentRecord(hostId, worktreeId, paneKey),
+      flush: () => this.flushWorkspaceSessionOrThrowAsync()
+    })
+    return {
+      withheldPaneKeys: partition.withheldPaneKeys,
+      refusedForeign: partition.refusedForeign,
+      resumed
+    }
+  }
+
+  private clearSleepingAgentRecord(hostId: string, worktreeId: string, paneKey: string): void {
+    const session = this.store?.getWorkspaceSession?.(hostId)
+    const next = withoutSleepingAgentRecord(session?.sleepingAgentSessionsByPaneKey, paneKey, (r) =>
+      runtimeWorktreeIdsEqual(r.worktreeId, worktreeId)
+    )
+    if (session && next) {
+      this.store?.setWorkspaceSession?.(
+        { ...session, sleepingAgentSessionsByPaneKey: next },
+        hostId
+      )
+    }
+  }
+
   async sleepManagedWorktree(worktreeSelector: string): Promise<{ worktreeId: string }> {
     const worktree = await this.resolveWorktreeSelector(worktreeSelector)
     // Why: sleep is renderer-initiated on desktop (it tears down tab state
@@ -22012,6 +22164,8 @@ export class OrcaRuntimeService {
     opts: {
       notifyClients?: boolean
       clientKind?: 'mobile' | 'runtime'
+      // Why: the wake resumes panes, so it needs a caller the ownership predicate can read (§2a).
+      pairedDeviceId?: string
       navigation?: RuntimeNavigationTarget
     } = {}
   ): Promise<{
@@ -22021,7 +22175,12 @@ export class OrcaRuntimeService {
     /** Mobile-scoped slept-agent wake outcome. `unsupported-headless` means no
      *  renderer holds the sleeping records (headless `orca serve`), so nothing
      *  woke — clients must not present the worktree's agents as resumed. */
-    sleepingAgentWake: 'requested' | 'unsupported-headless' | 'not-applicable'
+    sleepingAgentWake:
+      | 'requested'
+      | 'unsupported-headless'
+      | 'not-applicable'
+      /** Lane-bound records stayed asleep: the renderer wake would mint an unbound pane. */
+      | 'wake_refused_not_owned'
   }> {
     this.assertGraphReady()
     const worktree = await this.resolveWorktreeSelector(worktreeSelector)
@@ -22040,8 +22199,11 @@ export class OrcaRuntimeService {
       this.notifyWorktreesChanged(repo.id)
     }
 
-    let sleepingAgentWake: 'requested' | 'unsupported-headless' | 'not-applicable' =
-      'not-applicable'
+    let sleepingAgentWake:
+      | 'requested'
+      | 'unsupported-headless'
+      | 'not-applicable'
+      | 'wake_refused_not_owned' = 'not-applicable'
     if (targetsHost || targetsClients) {
       // Why: inactive worktree terminal panes are renderer-owned and may not have
       // live PTYs until the desktop activates the worktree and mounts them.
@@ -22066,8 +22228,23 @@ export class OrcaRuntimeService {
       // unaffected. Headless serve has no renderer to wake anything, so report
       // that explicitly instead of letting mobile assume the agents resumed.
       if (opts.clientKind === 'mobile') {
+        // Why: the renderer wake does not reuse the slept pane — it mints a fresh, unbound one,
+        // which under §2a resolves to the shared `~/.claude`. A lane record is therefore withheld
+        // from it and resumes only through the host create path, for its owner — but *only* the
+        // lane records are: the shared-lane records beside them wake as they always did (§3).
+        const wake = await this.resumeOwnedLaneSleepingAgents(
+          repo,
+          worktree.id,
+          opts.pairedDeviceId
+        )
+        const withheldPaneKeys = wake.withheldPaneKeys
         if (this.getAvailableAuthoritativeWindow()) {
-          this.notifier?.resumeSleepingAgents?.(worktree.id)
+          this.notifier?.resumeSleepingAgents?.(worktree.id, withheldPaneKeys)
+          sleepingAgentWake = wake.refusedForeign ? 'wake_refused_not_owned' : 'requested'
+        } else if (wake.refusedForeign) {
+          sleepingAgentWake = 'wake_refused_not_owned'
+        } else if (wake.resumed > 0) {
+          // The host create path resumed them; no renderer was needed, so this is not degraded.
           sleepingAgentWake = 'requested'
         } else if (
           // Why: sleeping records are partitioned by execution host; reading
@@ -22091,6 +22268,8 @@ export class OrcaRuntimeService {
   private async buildStartupForDraft(
     repo: Repo,
     draft: string,
+    /** The lane the panes this startup launches will carry (§2 rows 13/14). */
+    credentialLane: PaneCredentialLane,
     requestedAgent?: TuiAgent
   ): Promise<{
     agent: TuiAgent
@@ -22141,12 +22320,13 @@ export class OrcaRuntimeService {
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
     })
+    const laneScoped = laneScopedAgentLaunchInputs({ lane: credentialLane, settings, agent })
     const draftLaunchPlan = buildAgentDraftLaunchPlan({
       agent,
       draft: content,
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       platform: agentLaunchPlatform,
       shell: queuedShell,
       isRemote
@@ -22168,9 +22348,9 @@ export class OrcaRuntimeService {
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       platform: agentLaunchPlatform,
       shell: queuedShell,
       isRemote,
@@ -22197,6 +22377,8 @@ export class OrcaRuntimeService {
     repo: Repo,
     agent: TuiAgent,
     prompt: string | undefined,
+    /** The lane the panes this startup launches will carry (§2 rows 13/14). */
+    credentialLane: PaneCredentialLane,
     launchPreferences?: AgentLaunchPreferences
   ): { agent: TuiAgent; startup: WorktreeStartupLaunch; followup?: WorktreeStartupFollowup } {
     if (!this.store) {
@@ -22216,12 +22398,13 @@ export class OrcaRuntimeService {
       terminalWindowsShell: settings.terminalWindowsShell
     })
     const sessionOptions = this.toAgentSessionOptions(launchPreferences)
+    const laneScoped = laneScopedAgentLaunchInputs({ lane: credentialLane, settings, agent })
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: prompt ?? '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       sessionOptions,
       sessionOptionsOverrideAgentArgs: Boolean(sessionOptions),
       platform: agentLaunchPlatform,
@@ -22401,6 +22584,7 @@ export class OrcaRuntimeService {
     worktreeSelector: string,
     worktreeId: string,
     defaultTabs: CreateWorktreeResult['defaultTabs'] | undefined,
+    credentialLane: PaneCredentialLane,
     surfacing: { surfaceOwner?: false } = {}
   ): Promise<string[]> {
     if (!defaultTabs || defaultTabs.tabs.length === 0 || !this.ptyController?.spawn) {
@@ -22411,6 +22595,7 @@ export class OrcaRuntimeService {
       try {
         const command = template.command?.trim()
         const terminal = await this.createTerminal(worktreeSelector, {
+          credentialLane,
           ...(template.title ? { title: template.title } : {}),
           ...(command && defaultTabs.runCommands ? { command } : {}),
           ...surfacing
@@ -22430,6 +22615,7 @@ export class OrcaRuntimeService {
   }
 
   private async provisionManagedWorktreeTerminals(args: {
+    credentialLane: PaneCredentialLane
     worktreeSelector: string
     worktreeId: string
     worktreePath: string
@@ -22459,6 +22645,7 @@ export class OrcaRuntimeService {
         args.worktreeSelector,
         args.worktreeId,
         args.defaultTabs,
+        args.credentialLane,
         surfacing
       )
       let primaryTerminalHandle = args.primaryTerminalHandle ?? defaultTabHandles[0] ?? null
@@ -22469,7 +22656,10 @@ export class OrcaRuntimeService {
           >
         ).setupScriptLaunchMode ?? 'new-tab'
       if (!args.hasStartupTerminal && !primaryTerminalHandle) {
-        const terminal = await this.createTerminal(args.worktreeSelector, surfacing)
+        const terminal = await this.createTerminal(args.worktreeSelector, {
+          credentialLane: args.credentialLane,
+          ...surfacing
+        })
         primaryTerminalHandle = terminal.handle
       }
       if (args.setup) {
@@ -22504,6 +22694,7 @@ export class OrcaRuntimeService {
               ...surfacing
             })
           : this.createTerminal(args.worktreeSelector, {
+              credentialLane: args.credentialLane,
               title: 'Setup',
               command: setupCommand,
               env: setupEnv,
@@ -22631,6 +22822,9 @@ export class OrcaRuntimeService {
   }
 
   async createManagedWorktree(args: {
+    // Why: required in the args too — this path mints panes with no caller identity of its own,
+    // so under the funnel's rule alone a worker would silently land on the shared lane (§2a).
+    credentialLane: TerminalCredentialLaneOption
     repoSelector: string
     name: string
     baseBranch?: string
@@ -22676,6 +22870,10 @@ export class OrcaRuntimeService {
     if (!this.store) {
       throw new Error('runtime_unavailable')
     }
+    // Why: resolved once, so every pane this create mints binds the same lane.
+    const credentialLane = this.resolveCreateCredentialLane(
+      assertCredentialLaneSupplied(args.credentialLane)
+    )
 
     const repo = await this.resolveRepoSelector(args.repoSelector)
     const createSettings = this.store.getSettings()
@@ -22700,12 +22898,13 @@ export class OrcaRuntimeService {
             repo,
             args.startupAgent,
             args.startupPrompt,
+            credentialLane,
             args.startupLaunchPreferences
           )
         : null
     const draftStartup =
       !args.startup && !agentStartup && args.startupDraft
-        ? await this.buildStartupForDraft(repo, args.startupDraft, requestedAgent)
+        ? await this.buildStartupForDraft(repo, args.startupDraft, credentialLane, requestedAgent)
         : null
     const effectiveStartup = args.startup ?? agentStartup?.startup ?? draftStartup?.startup
     const effectiveStartupFollowup = agentStartup?.followup
@@ -22786,6 +22985,7 @@ export class OrcaRuntimeService {
             this.markLocalWorkspaceTrustedForAgent(startupTrustAgent, worktree.path)
           }
           const terminal = await this.createTerminal(`id:${worktree.id}`, {
+            credentialLane,
             command: effectiveStartup.command,
             env: effectiveStartup.env,
             ...(effectiveStartup.launchConfig
@@ -22826,7 +23026,10 @@ export class OrcaRuntimeService {
         }
       } else if (this.ptyController?.spawn && !didSpawnStartup) {
         try {
-          await this.createTerminal(`id:${worktree.id}`, { surfaceOwner: false })
+          await this.createTerminal(`id:${worktree.id}`, {
+            credentialLane,
+            surfaceOwner: false
+          })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           warning = warning
@@ -22859,6 +23062,7 @@ export class OrcaRuntimeService {
     if (repo.connectionId) {
       const result = await this.createManagedRemoteWorktree(repo, {
         ...args,
+        credentialLane,
         activate: args.activate,
         ...(effectiveStartup ? { startup: effectiveStartup } : {}),
         ...(effectiveStartupFollowup ? { startupFollowup: effectiveStartupFollowup } : {}),
@@ -23539,6 +23743,7 @@ export class OrcaRuntimeService {
           this.markLocalWorkspaceTrustedForAgent(startupTrustAgent, worktreePath)
         }
         const terminal = await this.createTerminal(`id:${worktree.id}`, {
+          credentialLane,
           command: sequencedStartup.command,
           ...(setup && effectiveStartup
             ? { claudeAgentTeamsSourceCommand: effectiveStartup.command }
@@ -23582,6 +23787,7 @@ export class OrcaRuntimeService {
         // carries the wrapped command for retry); #6298's wait-for-setup
         // guarantee is enforced by the shell marker, not by spawn timing.
         const provisioned = await this.provisionManagedWorktreeTerminals({
+          credentialLane,
           worktreeSelector: `id:${worktree.id}`,
           worktreeId: worktree.id,
           worktreePath,
@@ -23633,6 +23839,7 @@ export class OrcaRuntimeService {
       // Why: inactive terminal materialization matches normal worktree creation,
       // but setup/default tab failures must not gate automation dispatch.
       const provisioning = this.provisionManagedWorktreeTerminals({
+        credentialLane,
         worktreeSelector: `id:${worktree.id}`,
         worktreeId: worktree.id,
         worktreePath,
@@ -23659,7 +23866,7 @@ export class OrcaRuntimeService {
       }
     } else if (this.ptyController?.spawn) {
       try {
-        await this.createTerminal(`id:${worktree.id}`, { surfaceOwner: false })
+        await this.createTerminal(`id:${worktree.id}`, { credentialLane, surfaceOwner: false })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         warning = warning
@@ -23742,6 +23949,7 @@ export class OrcaRuntimeService {
   private async createManagedRemoteWorktree(
     repo: Repo,
     args: {
+      credentialLane: PaneCredentialLane
       name: string
       baseBranch?: string
       compareBaseRef?: string
@@ -23886,6 +24094,7 @@ export class OrcaRuntimeService {
           )
         }
         const terminal = await this.createTerminal(`path:${result.worktree.path}`, {
+          credentialLane: args.credentialLane,
           command: sequencedStartup.command,
           ...(result.setup && args.startup
             ? { claudeAgentTeamsSourceCommand: args.startup.command }
@@ -23925,6 +24134,7 @@ export class OrcaRuntimeService {
         // so renderer activation may not materialize setup/default tabs. Await so
         // a failed setup spawn falls back to renderer activation for retry.
         const provisioned = await this.provisionManagedWorktreeTerminals({
+          credentialLane: args.credentialLane,
           worktreeSelector: `path:${result.worktree.path}`,
           worktreeId: result.worktree.id,
           worktreePath: result.worktree.path,
@@ -23981,6 +24191,7 @@ export class OrcaRuntimeService {
       // Why: inactive terminal materialization matches normal worktree creation,
       // but setup/default tab failures must not gate automation dispatch.
       const provisioning = this.provisionManagedWorktreeTerminals({
+        credentialLane: args.credentialLane,
         worktreeSelector: `path:${result.worktree.path}`,
         worktreeId: result.worktree.id,
         worktreePath: result.worktree.path,
@@ -24007,7 +24218,10 @@ export class OrcaRuntimeService {
       }
     } else if (!shouldActivate && this.ptyController?.spawn) {
       try {
-        await this.createTerminal(`path:${result.worktree.path}`, { surfaceOwner: false })
+        await this.createTerminal(`path:${result.worktree.path}`, {
+          credentialLane: args.credentialLane,
+          surfaceOwner: false
+        })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         warning = warning
@@ -25869,7 +26083,8 @@ export class OrcaRuntimeService {
 
   private async resolveAgentTerminalCreateOptions(
     workspace: TerminalWorkspaceLaunchScope,
-    opts: TerminalCreateOptions
+    opts: TerminalCreateOptions,
+    credentialLane: PaneCredentialLane
   ): Promise<TerminalCreateOptions> {
     // Why: raw shell commands like `codex exec` must remain user-authored shell.
     // Only unmanaged, repo-backed, bare agent launches get Settings defaults.
@@ -25921,12 +26136,15 @@ export class OrcaRuntimeService {
     }
 
     const sessionOptions = this.toAgentSessionOptions(opts.launchPreferences)
+    // Why here and not at the spawn anchor: this is the one place the host rebuilds a launch FROM
+    // settings, so it is the only place `ignored for lane launches` can be exact (S9 §2 row 13).
+    const laneScoped = laneScopedAgentLaunchInputs({ lane: credentialLane, settings, agent })
     const startupPlan = buildAgentStartupPlan({
       agent,
       prompt: '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       sessionOptions,
       sessionOptionsOverrideAgentArgs: Boolean(sessionOptions),
       platform,
@@ -26027,7 +26245,7 @@ export class OrcaRuntimeService {
 
   async ensureAgentSession(
     request: RuntimeEnsureAgentSessionRequest,
-    _caller: RuntimeAgentSessionRpcCaller = {}
+    caller: RuntimeAgentSessionRpcCaller = {}
   ): Promise<RuntimeEnsureAgentSessionResult> {
     if (request.kind === 'automatic') {
       // Legacy renderer sleep records are migration evidence, not host authority.
@@ -26040,7 +26258,7 @@ export class OrcaRuntimeService {
     const namespace = this.getAgentSessionExecutionNamespace(workspace, request.agent)
     if (
       !namespace ||
-      !(await this.executionOwnerSupportsAgentSessionOperation(workspace, 'resume', _caller.signal))
+      !(await this.executionOwnerSupportsAgentSessionOperation(workspace, 'resume', caller.signal))
     ) {
       // Why: the renderer still holds the exact old request and may retry it before any side effect.
       throw new Error('agent_session_legacy_required')
@@ -26063,15 +26281,25 @@ export class OrcaRuntimeService {
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
     })
+    // Why resolved here and not at the createTerminal call below: the launch is BUILT here, and
+    // a peer's host-wide defaults may not shape this principal's lane (§2 rows 13/14).
+    const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+    assertLaneAgentArgsAllowed({
+      lane: credentialLane,
+      agentArgs: request.agentArgs,
+      platform
+    })
+    const laneScoped = laneScopedAgentLaunchInputs({
+      lane: credentialLane,
+      settings,
+      agent: request.agent
+    })
     const startup = buildAgentResumeStartupPlan({
       agent: request.agent,
       providerSession: identity.providerSession,
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs:
-        request.agentArgs !== undefined
-          ? request.agentArgs
-          : resolveTuiAgentLaunchArgs(request.agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(request.agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: request.agentArgs !== undefined ? request.agentArgs : laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       ompResumeFilePath: request.ompResumeFilePath,
       sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
       platform,
@@ -26090,10 +26318,11 @@ export class OrcaRuntimeService {
     } else {
       this.markLocalWorkspaceTrustedForAgent(request.agent, workspace.path)
     }
-    if (_caller.signal?.aborted) {
+    if (caller.signal?.aborted) {
       throw new Error('client_disconnected')
     }
     const terminal = await this.createTerminal(`id:${workspace.id}`, {
+      credentialLane,
       command: startup.launchCommand,
       env: startup.env,
       launchConfig: startup.launchConfig,
@@ -26103,7 +26332,7 @@ export class OrcaRuntimeService {
       leafId: request.placement?.leafId,
       persistHostSessionBinding: true,
       agentSessionClaim: claim,
-      signal: _caller.signal
+      signal: caller.signal
     })
     return {
       terminal,
@@ -26227,14 +26456,22 @@ export class OrcaRuntimeService {
         isRemote,
         terminalWindowsShell: settings.terminalWindowsShell
       })
+      const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+      assertLaneAgentArgsAllowed({
+        lane: credentialLane,
+        agentArgs: request.agentArgs,
+        platform
+      })
+      const laneScoped = laneScopedAgentLaunchInputs({
+        lane: credentialLane,
+        settings,
+        agent: request.agent
+      })
       const startupArgs = {
         agent: request.agent,
-        cmdOverrides: settings.agentCmdOverrides ?? {},
-        agentArgs:
-          request.agentArgs !== undefined
-            ? request.agentArgs
-            : resolveTuiAgentLaunchArgs(request.agent, settings.agentDefaultArgs),
-        agentEnv: resolveTuiAgentLaunchEnv(request.agent, settings.agentDefaultEnv),
+        cmdOverrides: laneScoped.cmdOverrides,
+        agentArgs: request.agentArgs !== undefined ? request.agentArgs : laneScoped.agentArgs,
+        agentEnv: laneScoped.agentEnv,
         sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
         platform,
         shell,
@@ -26278,6 +26515,7 @@ export class OrcaRuntimeService {
       const operationHandle = `term_${deterministicAgentSessionUuid(`${executionOperationId}:handle`)}`
       try {
         terminal = await this.createTerminal(`id:${workspace.id}`, {
+          credentialLane,
           command: startup.launchCommand,
           env: startup.env,
           launchConfig: startup.launchConfig,
@@ -26336,10 +26574,136 @@ export class OrcaRuntimeService {
     }
   }
 
+  /** Lanes reach the funnel only through the host consent surface; with no lookup all is shared. */
+  private laneAccountRowResolvers: {
+    laneAccountLabelOf?: ((principalId: string) => RuntimeTerminalLaneAccountLabel | null) | null
+    laneUsageOf?: ((principalId: string) => RuntimeTerminalLaneUsage | null) | null
+  } = {}
+
+  setPrincipalLaneLookup(lookup: PrincipalLookup | null): void {
+    this.paneLanes.setPrincipalLookup(lookup)
+  }
+
+  resolveCallerCredentialLane(pairedDeviceId?: string | null): PaneCredentialLane {
+    return this.paneLanes.callerLane(pairedDeviceId)
+  }
+
+  paneCredentialLaneLookup(
+    worktreeId: string,
+    tabId: string,
+    leafId: string
+  ): PaneCredentialLaneLookup {
+    return this.paneLanes.lookup(worktreeId, tabId, leafId)
+  }
+
+  /** Q3's row labels and the lane's usage row; unset until the host wires their sources (§2k). */
+  setLaneAccountRowResolvers(resolvers: {
+    /** `null` UNSETS it: a detached registry must stop minting peer-visible owner labels. */
+    laneAccountLabelOf?: ((principalId: string) => RuntimeTerminalLaneAccountLabel | null) | null
+    laneUsageOf?: ((principalId: string) => RuntimeTerminalLaneUsage | null) | null
+  }): void {
+    // Merged, not replaced: the usage source and the label source are attached at different
+    // points in host startup — the credential service early, the principal registry with pairing.
+    this.laneAccountRowResolvers = { ...this.laneAccountRowResolvers, ...resolvers }
+  }
+
+  /** The lane a posted paneKey names — the usage attribution join's first hop (§2k). */
+  credentialLaneOfPaneKey(paneKey: string): PaneCredentialLane | null {
+    return this.paneLanes.laneOfPaneKey(paneKey)
+  }
+
+  /** The lane the pane RECORD carries, read back by pane identity at every spawn edge (§2a). */
+  credentialLaneOfPane(worktreeId: string, paneKey: string): PaneCredentialLane | null {
+    return this.paneLanes.laneOf(worktreeId, paneKey)
+  }
+
+  /** The lane a handle-addressed inherit edge resolves to, through the same ownership predicate. */
+  resolveInheritedCredentialLaneForHandle(
+    handle: string,
+    caller: { pairedDeviceId?: string | null } = {}
+  ): PaneCredentialLane {
+    const ptyId = this.getLivePtyForHandle(handle)?.pty.ptyId
+    return this.paneLanes.inheritedLaneOfPty(ptyId ?? '', caller)
+  }
+
+  resolveFederatedLinkCredentialLane(homePeerFingerprint: string | undefined): PaneCredentialLane {
+    return this.paneLanes.federatedLinkLane(homePeerFingerprint)
+  }
+
+  private resolveCreateCredentialLane(option: TerminalCredentialLaneOption): PaneCredentialLane {
+    return option.kind === 'inherit'
+      ? this.paneLanes.inheritedLaneOfPty(option.fromPtyId, {
+          pairedDeviceId: option.pairedDeviceId
+        })
+      : option
+  }
+
+  /**
+   * §2g: open a NEW terminal in the source terminal's workspace, under the CALLER's own lane.
+   *
+   * It moves no process and copies no files. A caller with no principal lane is refused rather than
+   * served from the shared lane; authorization is the attachment join (§2h), not mere registration;
+   * and the optional seed prompt is bounded and delivered as terminal input, never shell-interpolated.
+   */
+  async openTerminalInMyLane(args: {
+    sourcePtyId: string
+    seedPrompt?: string
+    caller: { pairedDeviceId?: string | null }
+    focus?: boolean
+    activate?: boolean
+  }): Promise<RuntimeTerminalCreate> {
+    if (args.seedPrompt !== undefined) {
+      assertLaneSeedPromptWithinBounds(args.seedPrompt)
+    }
+    const callerLane = this.resolveCallerCredentialLane(args.caller.pairedDeviceId)
+    const callerPrincipalId = this.paneLanes.principalOfGrant(args.caller.pairedDeviceId)
+    if (callerLane.kind !== 'principal' || !callerPrincipalId || !args.caller.pairedDeviceId) {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_open_no_lane',
+        'Opening a terminal in your Claude credential lane needs a lane of your own, and this connection has none. Pair this device to a person and provision the lane first, then try again.'
+      )
+    }
+    const source = this.ptysById.get(args.sourcePtyId)
+    if (!source) {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_source_unknown',
+        'Orca could not find that terminal to open a new one beside it. It may have already closed.'
+      )
+    }
+    const authorized = callerMayOpenSourceLane({
+      registry: terminalPresenceRegistry,
+      sourcePtyId: args.sourcePtyId,
+      caller: { principalId: callerPrincipalId, pairedDeviceId: args.caller.pairedDeviceId },
+      principalOfGrant: (pairedDeviceId) => this.paneLanes.principalOfGrant(pairedDeviceId)
+    })
+    if (!authorized) {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_open_forbidden',
+        'Orca can only open a terminal in your lane on a terminal you are attached to. Open the terminal you want to branch from first, then try again.'
+      )
+    }
+    const created = await this.createTerminal(`id:${source.worktreeId}`, {
+      credentialLane: callerLane,
+      focus: args.focus === true,
+      activate: args.activate === true
+    })
+    if (args.seedPrompt !== undefined && args.seedPrompt.length > 0 && created.ptyId) {
+      // Why input and not a `command`: the prompt lands on the shell's line for the person to read
+      // and submit, exactly as a paste would — never interpolated into a launched command line (§2g).
+      await this.writeTerminalInputChunks(created.ptyId, args.seedPrompt)
+    }
+    return created
+  }
+
   async createTerminal(
-    worktreeSelector?: string,
-    opts: TerminalCreateOptions = {}
+    worktreeSelector: string | undefined,
+    opts: TerminalCreateOptions
   ): Promise<RuntimeTerminalCreate> {
+    const credentialLane = this.resolveCreateCredentialLane(
+      assertCredentialLaneSupplied(opts?.credentialLane)
+    )
+    this.paneLanes.assertLaneCreateHasWorkspace(credentialLane, worktreeSelector)
+    const laneCreate = credentialLane.kind === 'principal'
     if (opts.startupAgent && worktreeSelector === undefined) {
       // Why: the launch is resolved against a workspace, so with no selector
       // startupAgent is silently dropped and the terminal is a bare shell.
@@ -26352,10 +26716,12 @@ export class OrcaRuntimeService {
     // when no selector was provided. The new background-spawn branch hard-
     // requires a resolvable selector, so route the no-selector case through
     // the renderer IPC path to preserve that behavior.
-    const rendererWindow = opts.rendererBacked === true ? availableAuthoritativeWindow : null
+    const rendererWindow =
+      opts.rendererBacked === true && !laneCreate ? availableAuthoritativeWindow : null
     const shouldCreateInBackground =
       worktreeSelector !== undefined &&
-      (Boolean(opts.agentSessionClaim) ||
+      (laneCreate ||
+        Boolean(opts.agentSessionClaim) ||
         (!requiresRendererFocus && opts.rendererBacked !== true) ||
         // Why: `orca serve` exposes the local runtime without a renderer
         // window. Renderer-backed and focus-requested creates are preferred on
@@ -26370,7 +26736,11 @@ export class OrcaRuntimeService {
         throw new Error('runtime_unavailable')
       }
       const workspace = await this.resolveTerminalWorkspaceLaunchScope(worktreeSelector)
-      const launchOpts = await this.resolveAgentTerminalCreateOptions(workspace, opts)
+      const launchOpts = await this.resolveAgentTerminalCreateOptions(
+        workspace,
+        opts,
+        credentialLane
+      )
       let ptySpawnCommitReported = false
       const reportPtySpawnCommitted = (): void => {
         if (ptySpawnCommitReported) {
@@ -26398,6 +26768,15 @@ export class OrcaRuntimeService {
       let tabId = canAdoptPaneIdentity ? (hintedTabId as string) : randomUUID()
       let leafId = canAdoptPaneIdentity ? (launchOpts.leafId as string) : randomUUID()
       let paneKey = makePaneKey(tabId, leafId)
+      // Why: the hint validated into a paneKey above; the adopt gate runs here, before
+      // adoptStablePane and before any launch input is assembled, and is caller-class
+      // independent — a lane-less caller may not adopt a lane-bound pane either (§2a(ii)).
+      // The workspace's connection is part of the question, so the gate and the bind take it
+      // together and this one value carries to the post-spawn redirect below.
+      const paneAdoption = this.paneLanes.adoptForCreate(
+        { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
+        credentialLane
+      )
       const claimedStablePaneCreate = this.ptyController.claimStablePaneCreate?.({
         worktreeId: workspace.id,
         connectionId: workspace.connectionId,
@@ -26476,7 +26855,10 @@ export class OrcaRuntimeService {
           claudeAgentTeamsSourceCommand !== launchOpts.command
             ? agentTeamsPlan.command
             : undefined
-        const effectiveLaunchConfig =
+        // Why here: guard 3 covers path A's spawn env inside pty.ts, but the launch config
+        // never enters that file — the record built from it below outlives the spawn and is
+        // published back to clients, so the client's CLAUDE_CONFIG_DIR is scrubbed here too.
+        const effectiveLaunchConfig = scopeLaunchConfigClaudeConfigDir(
           launchOpts.launchConfig && agentTeamsPlan
             ? {
                 ...launchOpts.launchConfig,
@@ -26490,7 +26872,9 @@ export class OrcaRuntimeService {
                   ...agentTeamsPlan.env
                 }
               }
-            : launchOpts.launchConfig
+            : launchOpts.launchConfig,
+          { connectionId: workspace.connectionId }
+        )
         // Why: setup/agent sequencing wraps the PTY launch in a wait shell before
         // Claude Agent Teams runs. Preserve the direct Claude command separately
         // so the wrapper can exec the teammate-mode variant after setup completes.
@@ -26524,6 +26908,9 @@ export class OrcaRuntimeService {
             command: sequencedStartupCommand
               ? launchOpts.command
               : (agentTeamsPlan?.command ?? launchOpts.command),
+            // Why the anchor needs it: `computeLaneLaunch` reads the agentArgs allowlist and the
+            // resume-path containment off this object, and this branch serves every lane create.
+            ...(effectiveLaunchConfig ? { launchConfig: effectiveLaunchConfig } : {}),
             launchAgent: launchOpts.launchAgent,
             commandDelivery: 'provider',
             startupCommandDelivery: launchOpts.startupCommandDelivery,
@@ -26577,6 +26964,7 @@ export class OrcaRuntimeService {
           reportPtySpawnCommitted()
         }
         const adoptedStablePane = Boolean(result.stablePaneOwner)
+        const mintedPaneKey = paneKey
         if (result.agentSessionEnsure) {
           const canonicalSurface = result.agentSessionEnsure.owner.surface
           preAllocatedHandle = canonicalSurface.terminalHandle
@@ -26589,6 +26977,21 @@ export class OrcaRuntimeService {
           leafId = result.stablePaneOwner.leafId
           paneKey = makePaneKey(tabId, leafId)
         }
+        // Why: the spawn can land on a canonical/stable owner pane rather than the minted one, so
+        // the gate that ran at the mint has not seen this pane — re-run it against the pane the
+        // process actually lives in. The record below then reads its lane off that pane's row, so
+        // the two can never disagree (§2a, §5).
+        this.paneLanes.adoptRedirected(
+          { worktreeId: workspace.id, tabId, leafId, connectionId: workspace.connectionId },
+          {
+            callerLane: credentialLane,
+            ptyId: result.id,
+            redirected: paneKey !== mintedPaneKey,
+            // Why: only a row this create minted may be released — a client-hinted identity whose
+            // row already existed, and a pane left deliberately unattributed, both keep their state.
+            releaseMintedPaneKey: paneAdoption.mintedRow ? mintedPaneKey : null
+          }
+        )
         try {
           this.assertPtyDidNotExitBeforeRegistration(result.id, result.incarnationId)
         } catch (error) {
@@ -26604,10 +27007,16 @@ export class OrcaRuntimeService {
         this.registerPty(result.id, workspace.id, workspace.connectionId, {
           tabId,
           leafId,
+          // Why: the adopt above already decided this pane's lane — a row, or a deliberate
+          // non-attribution for a pane the host knew but never attributed (§2h). Minting the
+          // shared row here would undo that decision one statement later.
+          isReattach: true,
           ...(result.incarnationId ? { incarnationId: result.incarnationId } : {})
         })
         const pty = this.getOrCreatePtyWorktreeRecord(result.id)
         if (pty) {
+          this.paneLanes.stampPaneLane(pty, workspace.id, paneKey)
+
           if (persistHostSessionBinding) {
             pty.runtimeSessionOwned = true
           }
@@ -26703,7 +27112,7 @@ export class OrcaRuntimeService {
       ? await this.resolveTerminalWorkspaceLaunchScope(worktreeSelector)
       : null
     const launchOpts = workspace
-      ? await this.resolveAgentTerminalCreateOptions(workspace, opts)
+      ? await this.resolveAgentTerminalCreateOptions(workspace, opts, credentialLane)
       : opts
     const worktreeId = workspace?.id
     const cwd = workspace
@@ -26897,13 +27306,16 @@ export class OrcaRuntimeService {
     if (!repo) {
       throw new Error('Repository for the selected workspace is no longer available.')
     }
-    const startup = this.buildStartupForAgent(repo, opts.agent, opts.prompt)
+    // Why shared here too: this is the local-IPC launch below, which keeps today's `~/.claude`.
+    const startup = this.buildStartupForAgent(repo, opts.agent, opts.prompt, SHARED_CREDENTIAL_LANE)
     if (repo.connectionId) {
       await this.markRemoteWorkspaceTrustedForAgent(opts.agent, repo.connectionId, worktree.path)
     } else {
       this.markLocalWorkspaceTrustedForAgent(opts.agent, worktree.path)
     }
     return await this.createTerminal(`id:${worktree.id}`, {
+      // Why: local IPC only — an anonymous local launch keeps today's shared `~/.claude` (§2a).
+      credentialLane: SHARED_CREDENTIAL_LANE,
       command: startup.startup.command,
       env: startup.startup.env,
       ...(startup.startup.launchConfig ? { launchConfig: startup.startup.launchConfig } : {}),
@@ -26949,6 +27361,7 @@ export class OrcaRuntimeService {
   async createMobileSessionTerminal(
     worktreeSelector: string,
     opts: {
+      credentialLane: PaneCredentialLane
       afterTabId?: string
       targetGroupId?: string
       command?: string
@@ -26967,7 +27380,7 @@ export class OrcaRuntimeService {
       navigation?: RuntimeNavigationTarget
       clientMutationId?: string
       signal?: AbortSignal
-    } = {}
+    }
   ): Promise<RuntimeMobileSessionCreateTerminalResult> {
     const navigation = opts.navigation ?? 'all'
     const select = opts.select ?? opts.activate !== false
@@ -27019,6 +27432,7 @@ export class OrcaRuntimeService {
   private async runCreateMobileSessionTerminal(
     worktreeSelector: string,
     opts: {
+      credentialLane: PaneCredentialLane
       afterTabId?: string
       targetGroupId?: string
       command?: string
@@ -27035,7 +27449,7 @@ export class OrcaRuntimeService {
       clientNavigationId?: string
       clientMutationId?: string
       signal?: AbortSignal
-    } = {}
+    }
   ): Promise<RuntimeMobileSessionCreateTerminalResult> {
     const pairedCreate = Boolean(opts.clientNavigationId)
     const graphEpoch = this.captureReadyGraphEpoch()
@@ -27057,13 +27471,17 @@ export class OrcaRuntimeService {
     if (opts.signal?.aborted) {
       throw new Error('client_disconnected')
     }
-    const win = this.getAvailableAuthoritativeWindow()
+    // Why: for a lane caller the host branch is primary unconditionally — the renderer mints the
+    // tab on the window path, and a renderer-minted pane is never adopted into a lane (§2a(i)).
+    const win =
+      opts.credentialLane.kind === 'principal' ? null : this.getAvailableAuthoritativeWindow()
     if (!win) {
       return await this.createRuntimeOwnedMobileSessionTerminal(
         worktreeId,
         opts.activate !== false,
         opts.afterTabId,
         {
+          credentialLane: opts.credentialLane,
           command: startupCommand.command,
           cwd,
           env: startupCommand.env,
@@ -27188,12 +27606,21 @@ export class OrcaRuntimeService {
           opts.activate !== false,
           opts.afterTabId,
           {
+            credentialLane: opts.credentialLane,
             command: startupCommand.command,
             cwd,
             env: startupCommand.env,
             envToDelete: startupCommand.envToDelete,
             startupCommandDelivery: startupCommand.startupCommandDelivery,
-            identity: { tabId: pendingSurface.tab.parentTabId, leafId: pendingSurface.tab.leafId },
+            // Why: a renderer-minted identity is never adopted into a lane on a create (§2a(i)).
+            ...(opts.credentialLane.kind === 'principal'
+              ? {}
+              : {
+                  identity: {
+                    tabId: pendingSurface.tab.parentTabId,
+                    leafId: pendingSurface.tab.leafId
+                  }
+                }),
             launchAgent: startupCommand.launchAgent,
             viewMode: opts.viewMode,
             targetGroupId: opts.targetGroupId,
@@ -27231,6 +27658,8 @@ export class OrcaRuntimeService {
   private async resolveMobileSessionTerminalCommand(
     workspace: TerminalWorkspaceLaunchScope,
     opts: {
+      /** Required: this builder pre-bakes a launch, so the lane must reach it (§2 rows 13/14). */
+      credentialLane: PaneCredentialLane
       command?: string
       env?: Record<string, string>
       envToDelete?: string[]
@@ -27274,12 +27703,17 @@ export class OrcaRuntimeService {
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
     })
+    const laneScoped = laneScopedAgentLaunchInputs({
+      lane: opts.credentialLane,
+      settings,
+      agent: opts.agent
+    })
     const startupPlan = buildAgentStartupPlan({
       agent: opts.agent,
       prompt: opts.agentPrompt ?? '',
-      cmdOverrides: settings.agentCmdOverrides ?? {},
-      agentArgs: resolveTuiAgentLaunchArgs(opts.agent, settings.agentDefaultArgs),
-      agentEnv: resolveTuiAgentLaunchEnv(opts.agent, settings.agentDefaultEnv),
+      cmdOverrides: laneScoped.cmdOverrides,
+      agentArgs: laneScoped.agentArgs,
+      agentEnv: laneScoped.agentEnv,
       platform,
       shell: queuedShell,
       isRemote,
@@ -27315,8 +27749,9 @@ export class OrcaRuntimeService {
   private async createRuntimeOwnedMobileSessionTerminal(
     worktreeId: string,
     activate: boolean,
-    afterTabId?: string,
+    afterTabId: string | undefined,
     opts: {
+      credentialLane: PaneCredentialLane
       command?: string
       cwd?: string
       env?: Record<string, string>
@@ -27328,7 +27763,7 @@ export class OrcaRuntimeService {
       targetGroupId?: string
       launchConfig?: SleepingAgentLaunchConfig
       signal?: AbortSignal
-    } = {}
+    }
   ): Promise<RuntimeMobileSessionCreateTerminalResult> {
     const workspace = await this.resolveTerminalWorkspaceLaunchScope(`id:${worktreeId}`)
     const cwd = this.resolveWorkspaceTerminalStartupCwd(workspace, opts.cwd)
@@ -27337,6 +27772,7 @@ export class OrcaRuntimeService {
       opts.identity?.sessionId ?? (workspace.connectionId ? undefined : `serve-${randomUUID()}`)
     const isNewSession = stableSessionId !== undefined && opts.identity?.sessionId === undefined
     const terminal = await this.createTerminal(`id:${worktreeId}`, {
+      credentialLane: opts.credentialLane,
       focus: false,
       command: opts.command,
       cwd,
@@ -28132,6 +28568,8 @@ export class OrcaRuntimeService {
       env?: Record<string, string>
       envToDelete?: string[]
       activate?: boolean
+      // Why: an inherit edge needs a caller; absent means the anonymous local socket (§2a case ii).
+      pairedDeviceId?: string | null
       // Why: same split as createTerminal — adopt the pane without revealing its
       // workspace, for splits the user never asked to see.
       surfaceOwner?: false
@@ -28144,6 +28582,14 @@ export class OrcaRuntimeService {
     }
     this.assertGraphReady()
     const { leaf } = this.getLiveLeafForHandle(handle)
+    // Why: this branch re-enters through the anonymous renderer path, which mints a pane the host
+    // cannot pin to a lane — so a lane pane's split fails closed here rather than producing a
+    // shared-credential child of it (§2a, §3's degradation row). The predicate still runs, so a
+    // cross-lane split is refused `lane_not_owned` before this.
+    this.paneLanes.assertRendererSplittable(
+      { worktreeId: leaf.worktreeId, tabId: leaf.tabId, leafId: leaf.leafId },
+      { pairedDeviceId: opts.pairedDeviceId }
+    )
     const direction = opts.direction ?? 'horizontal'
 
     // Snapshot current leaf keys so the post-split graph-sync delta reveals the new pane.
@@ -28172,6 +28618,7 @@ export class OrcaRuntimeService {
       env?: Record<string, string>
       envToDelete?: string[]
       activate?: boolean
+      pairedDeviceId?: string | null
       // Why: same split as createTerminal — adopt the pane without revealing its
       // workspace, for splits the user never asked to see.
       surfaceOwner?: false
@@ -28190,6 +28637,11 @@ export class OrcaRuntimeService {
       throw new Error('terminal_handle_stale')
     }
     const direction = opts.direction ?? 'horizontal'
+    // Why: refuse before the spawn, and here rather than in the `terminal.split` handler —
+    // `agentTeams.tmuxCompat` reaches this same method (§2a).
+    const inheritedLane = this.paneLanes.inheritedLaneOfPty(pty.ptyId, {
+      pairedDeviceId: opts.pairedDeviceId
+    })
     const workspace = await this.resolveTerminalWorkspaceLaunchScope(`id:${pty.worktreeId}`)
     const sourceAuthority = this.resolveTerminalSplitSourceAuthority(
       workspace.id,
@@ -28205,6 +28657,7 @@ export class OrcaRuntimeService {
     const leafId = randomUUID()
     const preAllocatedHandle = this.createPreAllocatedTerminalHandle()
     const paneKey = makePaneKey(parentTabId, leafId)
+    this.paneLanes.bind(workspace.id, parentTabId, leafId, inheritedLane, workspace.connectionId)
     const result = await this.ptyController.spawn({
       cols: 120,
       rows: 40,
@@ -28247,6 +28700,7 @@ export class OrcaRuntimeService {
     if (createdPty) {
       createdPty.tabId = parentTabId
       createdPty.paneKey = paneKey
+      this.paneLanes.stampPaneLane(createdPty, workspace.id, paneKey)
       createdPty.runtimeSessionOwned = pty.runtimeSessionOwned
       this.setPairedRendererSessionOwnership(
         createdPty.ptyId,
@@ -28432,10 +28886,15 @@ export class OrcaRuntimeService {
   }
 
   async handleAgentTeamsTmuxCompat(
-    request: AgentTeamsTmuxCompatRequest
+    request: AgentTeamsTmuxCompatRequest,
+    caller: { pairedDeviceId?: string | null } = {}
   ): Promise<AgentTeamsTmuxCompatResponse> {
     return await this.claudeAgentTeams.handleTmuxCompat(request, {
-      splitTerminal: (handle, opts) => this.splitTerminal(handle, opts),
+      splitTerminal: (handle, opts) =>
+        this.splitTerminal(handle, {
+          ...opts,
+          ...(caller.pairedDeviceId ? { pairedDeviceId: caller.pairedDeviceId } : {})
+        }),
       readTerminal: (handle, opts) => this.readTerminal(handle, opts),
       sendTerminal: (handle, action) => this.sendTerminal(handle, action),
       focusTerminal: (handle) => this.focusTerminal(handle),
@@ -38430,26 +38889,6 @@ function getPtyTerminalState(pty: RuntimePtyWorktreeRecord): RuntimeTerminalStat
 function branchSelectorMatches(branch: string, selector: string): boolean {
   // Why: Git can report a local branch as `refs/heads/foo` or `foo` depending on the plumbing path; accept either.
   return normalizeLocalBranchName(branch) === normalizeLocalBranchName(selector)
-}
-
-function runtimePathsEqual(left: string, right: string): boolean {
-  return normalizeRuntimePathForComparison(left) === normalizeRuntimePathForComparison(right)
-}
-
-/**
- * Why: runtime identity is per *workspace*, not per checkout dir. Folder projects back
- * several independent workspaces with one directory, separated only by the
- * `::workspace:<uuid>` suffix that filesystem callers must strip; stripping it here
- * instead lets one session steal a sibling's PTYs. Normalize only path spelling, so
- * Windows/WSL/SSH ids still match themselves across hosts.
- */
-function runtimeWorktreeIdsEqual(left: string, right: string): boolean {
-  const parsedLeft = splitWorktreeId(left)
-  const parsedRight = splitWorktreeId(right)
-  return parsedLeft && parsedRight
-    ? parsedLeft.repoId === parsedRight.repoId &&
-        runtimePathsEqual(parsedLeft.worktreePath, parsedRight.worktreePath)
-    : left === right
 }
 
 function runtimeWorktreeIdentityKey(worktreeId: string): string {

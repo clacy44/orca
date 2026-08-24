@@ -1,11 +1,26 @@
 /* eslint-disable max-lines -- Why: keeps file/Keychain/snapshot/env-patch auth semantics together so PTY launch and quota-fetch paths can't drift. */
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { app } from 'electron'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import type { Store } from '../persistence'
-import { writeFileAtomically } from '../codex-accounts/fs-utils'
+import {
+  asJsonRecord,
+  compareRefreshTokens,
+  normalizeIdentityField,
+  readFreshnessFromCredentials,
+  readIdentityFromCredentials,
+  readIdentityFromOauthAccount,
+  type ClaudeCredentialIdentity,
+  type ClaudeRefreshTokenComparison
+} from './claude-credential-identity'
+import {
+  hasClaudeOauthAccessToken,
+  writeCredentialsFileAtomically,
+  writeJsonFileAtomically,
+  writeOauthAccountIntoConfigFile
+} from './lane-credential-writer'
 import type { ClaudeEnvPatch } from './environment'
 import {
   readClaudeManagedAuthFile,
@@ -28,6 +43,14 @@ import {
   writeActiveClaudeKeychainCredentialsForRuntime,
   writeManagedClaudeKeychainCredentials
 } from './keychain'
+import { LaneCredentialCoordinator } from './lane-credential-coordinator'
+import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
+import type { ProviderRateLimits } from '../../shared/rate-limit-types'
+import {
+  assertClaudeLaunchNotDelegatedToLane,
+  isClaudeAccountDelegatedToLane
+} from './lane-delegation-lease'
+import { assertLaneLaunchRuntimeSupported, prepareLaneLaunch } from './principal-lane-preparation'
 import {
   getSelectedClaudeAccountIdForTarget,
   normalizeClaudeAccountSelectionTarget,
@@ -58,12 +81,6 @@ type ClaudeSystemDefaultSnapshot = {
   capturedAt: number
 }
 
-type ClaudeAuthIdentity = {
-  accountUuid: string | null
-  email: string | null
-  organizationUuid: string | null
-}
-
 type ClaudeReadBackResult =
   | { status: 'unchanged' | 'persisted' }
   | {
@@ -81,7 +98,6 @@ type ClaudeKeychainReadResult =
 type ClaudeKeychainSnapshotValue =
   | { status: 'captured'; credentialsJson: string | null }
   | { status: 'unknown' }
-type ClaudeRefreshTokenComparison = 'same' | 'different' | 'missing'
 type ClaudeRuntimeCredentialCandidate = {
   credentialsJson: string
   runtimeOauthAccount: unknown
@@ -104,24 +120,58 @@ export class ClaudeRuntimeAuthService {
   private lastWrittenOauthAccount: unknown = null
   private skipNextReadBackForAccountId: string | null = null
   private managedRefreshDeferredByLivePtyAccountId: string | null = null
+  readonly laneCredentials: LaneCredentialCoordinator
 
   constructor(private readonly store: Store) {
+    this.laneCredentials = new LaneCredentialCoordinator({
+      persistence: store,
+      sharedLane: {
+        readCredentials: () => this.readSharedLaneCredentialsBestEffort(),
+        readOauthAccount: () => this.readRuntimeOauthAccount()
+      }
+    })
     this.initializeLastSyncedState()
     void this.safeSyncForCurrentSelection()
   }
 
   async prepareForClaudeLaunch(
-    target?: ClaudeAccountSelectionTarget
+    target?: ClaudeAccountSelectionTarget,
+    lanePrincipalId?: string
   ): Promise<ClaudeRuntimeAuthPreparation> {
     const effectiveTarget = target ?? this.getDefaultAccountSelectionTarget()
+    if (lanePrincipalId) {
+      // Trigger 1: a lane-pinned launch must see whatever the lane's own claude rotated.
+      await this.laneCredentials.syncLane(lanePrincipalId, 'launch')
+    }
     await this.syncForCurrentSelection(effectiveTarget)
-    return this.getPreparation(effectiveTarget)
+    return this.getPreparation(effectiveTarget, lanePrincipalId)
+  }
+
+  /** The lane's own usage row, for the terminal join `laneId → account → usage` (S9 §2k). */
+  laneUsageFor(laneId: string): ProviderRateLimits | null {
+    return this.laneCredentials.laneUsage(laneId)
+  }
+
+  /** Where the probe cannot run, the row carries a reason code instead of a bar (S9 §2k). */
+  isLaneUsagePullDisabled(): boolean {
+    return this.laneCredentials.isLaneUsagePullDisabled()
+  }
+
+  /** The lane rows the statusline attribution map keys by config dir (S9 §2k). */
+  listLaneUsageAttributions(): ClaudeLaneUsageAttribution[] {
+    return this.laneCredentials.laneUsageAttributions()
   }
 
   async prepareForRateLimitFetch(
     target?: ClaudeAccountSelectionTarget
   ): Promise<ClaudeRuntimeAuthPreparation> {
     const effectiveTarget = target ?? this.getDefaultAccountSelectionTarget()
+    // Trigger 2: a lane whose own claude is live may have rotated since the last tick, and each
+    // loaded lane gets its own usage probe — which itself syncs the lane it probed (S9 §2c/§2k).
+    await this.laneCredentials.syncLanesWithLivePtys()
+    // Started, not awaited: this resolver is read twice per cycle and precedes every other
+    // provider's fetch, and a probe is a real `claude` bounded by a 25 s PTY timeout (§2k).
+    this.laneCredentials.startLaneUsagePull()
     await this.syncForCurrentSelection(effectiveTarget)
     return this.getPreparation(effectiveTarget)
   }
@@ -185,6 +235,9 @@ export class ClaudeRuntimeAuthService {
       this.lastSyncedAccountId
     )
     this.managedRefreshDeferredByLivePtyAccountId = null
+    // The `host` residency row is derived from the shared lane's FILES, so it is re-derived here
+    // rather than seeded once: a `claude login` between two syncs is otherwise unobserved.
+    this.laneCredentials.refreshHostResidencyRow()
     const previousManagedCredentialsJson = previousAccount
       ? await this.readManagedCredentials(previousAccount)
       : null
@@ -408,7 +461,10 @@ export class ClaudeRuntimeAuthService {
     if (liveClaudePtys && isOauthTokenExpiring(credentialsJson)) {
       this.managedRefreshDeferredByLivePtyAccountId = activeAccount.id
     }
-    if (!liveClaudePtys) {
+    // §2e (i): a delegated account's rotation belongs to the HOST, keyed by account. Every bound
+    // desktop suppresses — the named `delegatedGrantId` included, because it is the PUSHING
+    // desktop and its unsuppressed rotator sits on the token the lane's live claude holds.
+    if (!liveClaudePtys && !isClaudeAccountDelegatedToLane(activeAccount.id)) {
       const refreshed = await this.refreshManagedAccountTokenIfNeeded(
         activeAccount,
         credentialsJson
@@ -601,7 +657,10 @@ export class ClaudeRuntimeAuthService {
     return candidates
   }
 
-  private getPreparation(target?: ClaudeAccountSelectionTarget): ClaudeRuntimeAuthPreparation {
+  private getPreparation(
+    target?: ClaudeAccountSelectionTarget,
+    lanePrincipalId?: string
+  ): ClaudeRuntimeAuthPreparation {
     const settings = this.store.getSettings()
     const paths = this.pathResolver.getRuntimePaths()
     const normalizedTarget = this.resolveWslDefaultTarget(
@@ -609,6 +668,18 @@ export class ClaudeRuntimeAuthService {
     )
     const activeAccountId = getSelectedClaudeAccountIdForTarget(settings, normalizedTarget)
     const activeAccount = this.getActiveAccount(settings.claudeManagedAccounts, activeAccountId)
+    // §2e (ii): this machine's own managed launch under an account delegated to a host lane.
+    assertClaudeLaunchNotDelegatedToLane(activeAccount?.id)
+    if (lanePrincipalId) {
+      // Why before the WSL arms rather than after them: falling through leaves a lane-pinned pane
+      // on the shared WSL config dir, which is the silent misattribution the lane exists to close.
+      assertLaneLaunchRuntimeSupported(normalizeClaudeAccountSelectionTarget(normalizedTarget))
+      return prepareLaneLaunch({
+        principalId: lanePrincipalId,
+        isRefreshDeferredByLivePty: () =>
+          this.laneCredentials.isLaneRefreshDeferredByLivePty(lanePrincipalId)
+      })
+    }
     if (
       normalizeClaudeAccountSelectionTarget(normalizedTarget).runtime === 'wsl' &&
       activeAccount?.managedAuthRuntime === 'wsl' &&
@@ -849,33 +920,12 @@ export class ClaudeRuntimeAuthService {
     )
   }
 
-  private readIdentityFromCredentials(credentialsJson: string): ClaudeAuthIdentity | null {
-    let parsed: Record<string, unknown>
-    try {
-      parsed = JSON.parse(credentialsJson) as Record<string, unknown>
-    } catch {
-      return null
-    }
-    const oauth = this.asRecord(parsed.claudeAiOauth)
-    return {
-      accountUuid: this.normalizeField(
-        this.readString(oauth, 'accountUuid') ?? this.readString(oauth, 'accountId')
-      ),
-      email: this.normalizeField(this.readString(oauth, 'email')),
-      organizationUuid: this.normalizeField(
-        this.readString(oauth, 'organizationUuid') ?? this.readString(oauth, 'organizationId')
-      )
-    }
+  private readIdentityFromCredentials(credentialsJson: string): ClaudeCredentialIdentity | null {
+    return readIdentityFromCredentials(credentialsJson)
   }
 
   private isValidCredentialsJsonObject(credentialsJson: string): boolean {
-    try {
-      const parsed = this.asRecord(JSON.parse(credentialsJson))
-      const oauth = this.asRecord(parsed?.claudeAiOauth)
-      return this.normalizeField(this.readString(oauth, 'accessToken')) !== null
-    } catch {
-      return false
-    }
+    return hasClaudeOauthAccessToken(credentialsJson)
   }
 
   private runtimeCredentialsAreFresher(
@@ -923,88 +973,26 @@ export class ClaudeRuntimeAuthService {
   }
 
   private readFreshnessFromCredentials(credentialsJson: string): number | null {
-    let parsed: Record<string, unknown>
-    try {
-      parsed = JSON.parse(credentialsJson) as Record<string, unknown>
-    } catch {
-      return null
-    }
-    const oauth = this.asRecord(parsed.claudeAiOauth)
-    return (
-      this.readNumber(oauth, 'expiresAt') ??
-      this.readNumber(oauth, 'expires_at') ??
-      this.readNumber(oauth, 'expiry') ??
-      this.readNumber(oauth, 'expires')
-    )
+    return readFreshnessFromCredentials(credentialsJson)
   }
 
   private compareRefreshTokens(
     runtimeCredentialsJson: string,
     managedCredentialsJson: string
   ): ClaudeRefreshTokenComparison {
-    const runtimeRefreshToken = this.readRefreshTokenFromCredentials(runtimeCredentialsJson)
-    const managedRefreshToken = this.readRefreshTokenFromCredentials(managedCredentialsJson)
-    if (!runtimeRefreshToken || !managedRefreshToken) {
-      return 'missing'
-    }
-    return runtimeRefreshToken === managedRefreshToken ? 'same' : 'different'
+    return compareRefreshTokens(runtimeCredentialsJson, managedCredentialsJson)
   }
 
-  private readRefreshTokenFromCredentials(credentialsJson: string): string | null {
-    try {
-      const parsed = JSON.parse(credentialsJson) as Record<string, unknown>
-      const oauth = this.asRecord(parsed.claudeAiOauth)
-      return this.normalizeField(this.readString(oauth, 'refreshToken'))
-    } catch {
-      return null
-    }
-  }
-
-  private readIdentityFromOauthAccount(oauthAccount: unknown): ClaudeAuthIdentity {
-    const oauth = this.asRecord(oauthAccount)
-    return {
-      accountUuid: this.normalizeField(
-        this.readString(oauth, 'accountUuid') ?? this.readString(oauth, 'accountId')
-      ),
-      email: this.normalizeField(
-        this.readString(oauth, 'emailAddress') ?? this.readString(oauth, 'email')
-      ),
-      organizationUuid: this.normalizeField(
-        this.readString(oauth, 'organizationUuid') ?? this.readString(oauth, 'organizationId')
-      )
-    }
+  private readIdentityFromOauthAccount(oauthAccount: unknown): ClaudeCredentialIdentity {
+    return readIdentityFromOauthAccount(oauthAccount)
   }
 
   private asRecord(value: unknown): Record<string, unknown> | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return null
-    }
-    return value as Record<string, unknown>
-  }
-
-  private readString(value: Record<string, unknown> | null, key: string): string | null {
-    const candidate = value?.[key]
-    return typeof candidate === 'string' ? candidate : null
-  }
-
-  private readNumber(value: Record<string, unknown> | null, key: string): number | null {
-    const candidate = value?.[key]
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
-      return candidate
-    }
-    if (typeof candidate === 'string') {
-      const parsed = Number(candidate)
-      return Number.isFinite(parsed) ? parsed : null
-    }
-    return null
+    return asJsonRecord(value)
   }
 
   private normalizeField(value: string | null | undefined): string | null {
-    if (!value) {
-      return null
-    }
-    const trimmed = value.trim()
-    return trimmed === '' ? null : trimmed
+    return normalizeIdentityField(value)
   }
 
   private async readManagedCredentials(account: ClaudeManagedAccount): Promise<string | null> {
@@ -1211,7 +1199,7 @@ export class ClaudeRuntimeAuthService {
       legacyKeychainCredentialsCaptured: legacyKeychainCredentialsJson.status === 'captured',
       capturedAt: Date.now()
     }
-    this.writeJson(snapshotPath, snapshot)
+    writeJsonFileAtomically(snapshotPath, snapshot)
   }
 
   private async restoreSystemDefaultSnapshot(
@@ -1414,6 +1402,16 @@ export class ClaudeRuntimeAuthService {
     return existsSync(credentialsPath) ? readFileSync(credentialsPath, 'utf-8') : null
   }
 
+  // Why swallow: the residency index reads this on every check, and an unreadable shared file
+  // must not turn a `selectClaude` into a crash.
+  private readSharedLaneCredentialsBestEffort(): string | null {
+    try {
+      return this.readRuntimeCredentialsFile()
+    } catch {
+      return null
+    }
+  }
+
   private runtimeCredentialsBelongToAccount(
     credentialsJson: string | null,
     account: ClaudeManagedAccount,
@@ -1574,18 +1572,10 @@ export class ClaudeRuntimeAuthService {
   }
 
   private writeRuntimeOauthAccount(oauthAccount: unknown): boolean {
-    const configPath = this.pathResolver.getRuntimePaths().configPath
-    const existing = this.readJsonObject(configPath)
-    if (existing === null) {
-      return false
-    }
-    if (oauthAccount === null || oauthAccount === undefined) {
-      delete existing.oauthAccount
-    } else {
-      existing.oauthAccount = oauthAccount
-    }
-    this.writeJson(configPath, existing)
-    return true
+    return writeOauthAccountIntoConfigFile(
+      this.pathResolver.getRuntimePaths().configPath,
+      oauthAccount
+    )
   }
 
   private jsonValuesEqual(left: unknown, right: unknown): boolean {
@@ -1730,68 +1720,10 @@ export class ClaudeRuntimeAuthService {
   }
 
   private writeRuntimeCredentials(contents: string): void {
-    const credentialsPath = this.pathResolver.getRuntimePaths().credentialsPath
-    mkdirSync(dirname(credentialsPath), { recursive: true })
-    // Why: skip unchanged rewrites to dodge Windows EPERM contention (#1507); re-verify the file since another Claude may have rewritten it.
-    if (
-      this.lastWrittenCredentialsJson === contents &&
-      this.fileContentsEqual(credentialsPath, contents)
-    ) {
-      this.ensureOwnerOnlyMode(credentialsPath)
-      return
-    }
-    if (this.fileContentsEqual(credentialsPath, contents)) {
-      this.ensureOwnerOnlyMode(credentialsPath)
-      this.lastWrittenCredentialsJson = contents
-      return
-    }
-    writeFileAtomically(credentialsPath, contents, { mode: 0o600 })
-    this.lastWrittenCredentialsJson = contents
-  }
-
-  private writeJson(targetPath: string, value: unknown): void {
-    const serialized = `${JSON.stringify(value, null, 2)}\n`
-    mkdirSync(dirname(targetPath), { recursive: true })
-    // Why: same Windows contention reason as writeRuntimeCredentials.
-    if (this.fileContentsEqual(targetPath, serialized)) {
-      return
-    }
-    writeFileAtomically(targetPath, serialized, { mode: 0o600 })
-  }
-
-  private fileContentsEqual(targetPath: string, contents: string): boolean {
-    try {
-      return existsSync(targetPath) && readFileSync(targetPath, 'utf-8') === contents
-    } catch {
-      return false
-    }
-  }
-
-  private ensureOwnerOnlyMode(targetPath: string): void {
-    if (process.platform === 'win32') {
-      return
-    }
-    try {
-      chmodSync(targetPath, 0o600)
-    } catch {
-      /* Best effort: the next atomic write will set the restrictive mode. */
-    }
-  }
-
-  private readJsonObject(targetPath: string): Record<string, unknown> | null {
-    if (!existsSync(targetPath)) {
-      return {}
-    }
-    try {
-      const parsed = JSON.parse(readFileSync(targetPath, 'utf-8')) as unknown
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>
-      }
-    } catch {
-      // Why: invalid config is unknown external state; return null so we don't erase user or Claude-owned settings.
-      return null
-    }
-    return null
+    this.lastWrittenCredentialsJson = writeCredentialsFileAtomically(
+      this.pathResolver.getRuntimePaths().credentialsPath,
+      contents
+    )
   }
 
   private getRuntimeMetadataDir(): string {

@@ -81,12 +81,14 @@ export const WORKTREE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'worktree.activate',
     params: WorktreeActivate,
-    handler: async (params, { runtime, clientKind }) =>
+    handler: async (params, { runtime, clientKind, pairedDeviceId }) =>
       // Why: clientKind ('mobile'|'runtime') scopes the host-renderer slept-agent
       // wake to phones so web/desktop activation behavior is unchanged.
       runtime.activateManagedWorktree(params.worktree, {
         notifyClients: params.notifyClients !== false,
         clientKind,
+        // Why: the wake resumes a pane, so it needs a caller the ownership predicate can read.
+        ...(pairedDeviceId ? { pairedDeviceId } : {}),
         navigation: resolveRuntimeNavigationTarget({
           navigation: params.navigation,
           notifyClients: params.notifyClients,
@@ -114,6 +116,7 @@ export const WORKTREE_METHODS: RpcMethod[] = [
         // but failed create attempts must release the reservation for a safe retry.
         try {
           const result = await runtime.createManagedWorktree({
+            credentialLane: runtime.resolveCallerCredentialLane(context.pairedDeviceId),
             repoSelector: params.repo,
             name: params.name ?? '',
             baseBranch: params.baseBranch,

@@ -119,7 +119,12 @@ describe('agent session RPC methods', () => {
       expect(replies[0]).toMatchObject({ ok: true })
       expect(runtime[testCase.runtimeMethod]).toHaveBeenCalledWith(
         { ...testCase.params, presentation: 'background' },
-        { clientId: `paired-${clientKind}`, clientKind }
+        // Why: the collapsed `clientId` cannot key a lane, so the grant travels beside it (§2a).
+        {
+          pairedDeviceId: `paired-${clientKind}`,
+          clientId: `paired-${clientKind}`,
+          clientKind
+        }
       )
     }
   })
@@ -206,7 +211,8 @@ describe('agent session RPC methods', () => {
     const runtime = {
       getRuntimeId: () => 'runtime-1',
       createTerminal,
-      dedupeTerminalCreate
+      dedupeTerminalCreate,
+      resolveCallerCredentialLane: () => ({ kind: 'shared' as const })
     }
     const dispatcher = new RpcDispatcher({
       runtime: runtime as unknown as OrcaRuntimeService,
@@ -230,6 +236,7 @@ describe('agent session RPC methods', () => {
       expect.any(Function)
     )
     expect(createTerminal).toHaveBeenCalledWith('id:worktree-1', {
+      credentialLane: { kind: 'shared' },
       command: 'codex resume provider-session-1',
       startupCommandDelivery: undefined,
       env: undefined,

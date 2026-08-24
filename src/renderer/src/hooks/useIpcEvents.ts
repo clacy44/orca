@@ -2096,9 +2096,9 @@ export function useIpcEvents(): void {
     )
 
     unsubs.push(
-      window.api.ui.onResumeSleepingAgents(({ worktreeId }) => {
+      window.api.ui.onResumeSleepingAgents(({ worktreeId, withheldPaneKeys }) => {
         // Why: a phone opened this worktree; wake its slept agents without changing the desktop's worktree/tab/view.
-        backgroundSleepingAgentWakeDispatcher.request(worktreeId)
+        backgroundSleepingAgentWakeDispatcher.request(worktreeId, withheldPaneKeys)
       })
     )
 

@@ -26,7 +26,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.workerStart',
     params: WorkerStartParams,
-    handler: async (params, { runtime, orchestrationMutation }) => {
+    handler: async (params, { runtime, orchestrationMutation, pairedDeviceId }) => {
       const db = runtime.getOrchestrationDb()
       const coordinatorPane = runtime.getTerminalPaneKey(params.from)
       const run = coordinatorPane ? db.getCurrentRunForPane(coordinatorPane) : undefined
@@ -44,6 +44,11 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         )
       }
 
+      // Why: "the worker runs on the coordinator's authority" says nothing about whether this
+      // caller owns that pane — resolve before anything is created (§2a).
+      const credentialLane = runtime.resolveInheritedCredentialLaneForHandle(params.from, {
+        pairedDeviceId
+      })
       if (params.on) {
         return startFederatedWorker({
           params,
@@ -145,6 +150,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           failedStage = 'worktree_create'
           const created = await createWorkerWorktree({
             runtime,
+            credentialLane,
             db,
             dispatchId: started.dispatch.id,
             requestedWorktree,
@@ -166,6 +172,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           })
           const terminal = await createExistingWorktreeWorkerTerminal({
             runtime,
+            credentialLane,
             worktreeId: resolvedWorktree!.id,
             agent: agent as TuiAgent,
             launchPreferences: launch.preferences,

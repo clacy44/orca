@@ -94,6 +94,9 @@ export type WorkspaceSessionState = {
   sleepingAgentSessionsByPaneKey?: Record<string, SleepingAgentSessionRecord>
   /** Host-issued process incarnation for each durable terminal surface. */
   terminalPtyIncarnationsByPaneKey?: Record<string, string>
+  /** The Claude credential lane each pane is bound to (S9 §2a). A pane with no row is unknown and
+   *  is never attributed; a row with no principalId is explicitly the shared host lane. */
+  terminalCredentialLanesByPaneKey?: Record<string, PersistedPaneCredentialLane>
   /** Monotonic host authority watermark for terminal membership in each repo. */
   terminalTopologyRevisionByRepoId?: Record<string, number>
   /** Legacy per-surface fences migrated into terminalTopologyRevisionByRepoId on load. */
@@ -109,5 +112,7 @@ export type WorkspaceSessionState = {
     }
   >
 }
+
+export type PersistedPaneCredentialLane = { worktreeId: string; principalId?: string }
 
 export type WorkspaceSessionPatch = Partial<WorkspaceSessionState>

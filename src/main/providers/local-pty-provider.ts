@@ -44,6 +44,11 @@ import { SessionNotFoundError } from '../daemon/daemon-errors'
 import { resolvePathEnvKey } from '../pty/windows-environment-path'
 import { isHostCodexHomeForWsl, isWslCodexHomeForHost } from '../pty/codex-home-wsl-env'
 import { addWslEnvKeys } from '../wsl-env'
+import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
+import {
+  assertLaneShellSupported,
+  assertNoLanePathCrossesWsl
+} from '../../shared/lane-wsl-boundary'
 import {
   POWERLEVEL10K_WIZARD_DISABLE_ENV,
   seedPowerlevel10kWizardEnv
@@ -89,13 +94,7 @@ import {
   expandWindowsEnvironmentVariables,
   expandWindowsPathEnvironmentVariables
 } from '../../shared/windows-environment-expansion'
-
-const PANE_IDENTITY_ENV_KEYS = [
-  'ORCA_PANE_KEY',
-  'ORCA_TAB_ID',
-  'ORCA_WORKTREE_ID',
-  'ORCA_AGENT_LAUNCH_TOKEN'
-] as const
+import { removeUnspecifiedPaneIdentityEnv } from '../../shared/pane-identity-env'
 
 let ptyCounter = 0
 const ptyProcesses = new Map<string, pty.IPty>()
@@ -156,20 +155,6 @@ const startupIngressByPty = new Map<string, PtyStartupIngress>()
  */
 function getDefaultCwd(): string {
   return resolveSafePtyDefaultCwd()
-}
-
-/**
- * Removes inherited pane identity unless this PTY explicitly supplies it.
- */
-function removeUnspecifiedPaneIdentityEnv(
-  env: Record<string, string>,
-  explicitEnv: Record<string, string> | undefined
-): void {
-  for (const key of PANE_IDENTITY_ENV_KEYS) {
-    if (!explicitEnv || !Object.hasOwn(explicitEnv, key)) {
-      delete env[key]
-    }
-  }
 }
 
 /**
@@ -512,6 +497,8 @@ export type LocalPtyProviderOptions = {
       shellPath?: string
       isWsl?: boolean
       wslDistro?: string | null
+      /** The pane's lane, so this third env build is lane-scoped and not host-wide (§2 preamble). */
+      credentialLane?: PtySpawnOptions['credentialLane']
     }
   ) => Record<string, string>
   /** Whether worktree-scoped shell history is enabled; when true (or absent) with a worktreeId, HISTFILE is scoped per-worktree. */
@@ -719,6 +706,9 @@ export class LocalPtyProvider implements IPtyProvider {
 
     const isWslShell = Boolean(wslInfo) || pathWin32.basename(shellPath).toLowerCase() === 'wsl.exe'
     const launchWslDistro = isWslShell ? (launchWslContext?.distro ?? null) : null
+    // Why here and not at the anchor: `PtySpawnOptions` carries no resolved shell, and this is
+    // the first step that can see the value the WSLENV export gate below reads (S9 §2a).
+    assertLaneShellSupported(args.credentialLane, shellPath)
     const finalEnv = this.opts.buildSpawnEnv
       ? this.opts.buildSpawnEnv(id, spawnEnv, {
           command: args.command,
@@ -727,7 +717,8 @@ export class LocalPtyProvider implements IPtyProvider {
           cwd,
           shellPath,
           isWsl: isWslShell,
-          wslDistro: launchWslDistro
+          wslDistro: launchWslDistro,
+          ...(args.credentialLane ? { credentialLane: args.credentialLane } : {})
         })
       : spawnEnv
     // Why: app-level env hooks can re-add scrubbed vars; delete last so shims like Claude Agent Teams keep their PATH.
@@ -767,6 +758,7 @@ export class LocalPtyProvider implements IPtyProvider {
         } else if (finalEnv.CODEX_HOME) {
           addWslEnvKeys(finalEnv, ['CODEX_HOME', 'ORCA_CODEX_HOME'])
         }
+        assertNoLanePathCrossesWsl(finalEnv, shellPath)
         if (finalEnv.CLAUDE_CONFIG_DIR) {
           // Why: managed WSL Claude passes a Linux CLAUDE_CONFIG_DIR through wsl.exe; non-default vars need WSLENV import.
           addWslEnvKeys(finalEnv, ['CLAUDE_CONFIG_DIR'])
@@ -853,6 +845,9 @@ export class LocalPtyProvider implements IPtyProvider {
     }
     const requestedEnv = args.env
     expandWindowsPathEnvironmentVariables(finalEnv)
+    // Why after the merge and not at the anchor: the merge above is what reinstates an inherited
+    // casing of a lane key ahead of the canonical one, and Win32 resolves the first (§2m(5)).
+    collapseLaneEnvKeys(finalEnv, requestedEnv)
     promoteAgentTeamsShimPath(
       finalEnv,
       requestedEnv ? requestedEnv[resolvePathEnvKey(requestedEnv, process.platform)] : undefined

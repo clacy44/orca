@@ -9,6 +9,8 @@ function makeRequest(method: string, params?: unknown): RpcRequest {
   return { id: 'req-1', authToken: 'tok', method, params }
 }
 
+const laneStub = { resolveCallerCredentialLane: () => ({ kind: 'shared' as const }) }
+
 describe('session tab RPC methods', () => {
   it('routes mobile-only activation without notifying desktop clients', async () => {
     const runtime = {
@@ -63,6 +65,8 @@ describe('session tab RPC methods', () => {
     expect(replies).toHaveLength(1)
     expect(runtime.activateMobileSessionTab).toHaveBeenCalledWith('id:wt-1', 'tab-1', undefined, {
       notifyClients: true,
+      // Why: the tap is caller identity as well as a navigation id (S9 §2a row 35).
+      pairedDeviceId: 'device-a',
       clientNavigationId: 'device-a',
       navigation: 'caller'
     })
@@ -396,6 +400,7 @@ describe('session tab RPC methods', () => {
 
   it('dispatches ordinary terminal creation with the requested tab group', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       createMobileSessionTerminal: vi.fn().mockResolvedValue({
         tab: {
@@ -435,6 +440,7 @@ describe('session tab RPC methods', () => {
 
     expect(response.ok).toBe(true)
     expect(runtime.createMobileSessionTerminal).toHaveBeenCalledWith('id:wt-1', {
+      credentialLane: { kind: 'shared' },
       afterTabId: undefined,
       targetGroupId: 'group-left',
       command: 'zsh',
@@ -461,6 +467,7 @@ describe('session tab RPC methods', () => {
 
   it('defaults legacy paired terminal creation to caller-owned selection', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       createMobileSessionTerminal: vi.fn().mockResolvedValue({
         tab: { type: 'terminal', id: 'tab-1::leaf-1' },
@@ -493,6 +500,7 @@ describe('session tab RPC methods', () => {
 
   it('preserves legacy agent creation for mixed-version clients', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       createMobileSessionTerminal: vi.fn().mockResolvedValue({
         tab: {
@@ -521,6 +529,7 @@ describe('session tab RPC methods', () => {
 
     expect(response.ok).toBe(true)
     expect(runtime.createMobileSessionTerminal).toHaveBeenCalledWith('id:wt-1', {
+      credentialLane: { kind: 'shared' },
       afterTabId: undefined,
       targetGroupId: undefined,
       command: undefined,
@@ -560,6 +569,7 @@ describe('session tab RPC methods', () => {
 
   it('dispatches terminal creation with startup command delivery metadata', async () => {
     const runtime = {
+      ...laneStub,
       getRuntimeId: () => 'test-runtime',
       createMobileSessionTerminal: vi.fn().mockResolvedValue({
         tab: {
@@ -588,6 +598,7 @@ describe('session tab RPC methods', () => {
 
     expect(response.ok).toBe(true)
     expect(runtime.createMobileSessionTerminal).toHaveBeenCalledWith('id:wt-1', {
+      credentialLane: { kind: 'shared' },
       afterTabId: undefined,
       targetGroupId: undefined,
       command: "codex 'linked issue context'",

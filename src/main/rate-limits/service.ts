@@ -20,6 +20,13 @@ import {
   type NormalizedClaudeAccountSelectionTarget
 } from '../claude-accounts/runtime-selection'
 import { fetchGeminiRateLimits } from './gemini-usage-fetcher'
+import {
+  ClaudeUsageAttributionMap,
+  publishedAuthProvenance,
+  type ClaudeLaneUsageAttribution,
+  type ClaudeUsagePaneLane
+} from './claude-usage-attribution'
+import { LaneStatuslineUsageStore } from './lane-statusline-usage'
 import { fetchKimiRateLimits } from './kimi-fetcher'
 import type { KimiHomeResolution } from '../kimi/kimi-runtime-home'
 import { fetchGrokRateLimits } from './grok-fetcher'
@@ -132,12 +139,6 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function normalizeClaudeConfigDir(dir: string | null | undefined): string | null {
-  // Why: normalize mixed Windows separators for path attribution; preserve Linux case sensitivity.
-  const trimmed = dir?.trim().replace(/\\/g, '/').replace(/\/+$/, '')
-  return trimmed || null
-}
-
 function delayUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.resolve()
@@ -213,8 +214,11 @@ export class RateLimitService {
   private fetchIdleResolvers: (() => void)[] = []
   private codexFetchGeneration = 0
   private claudeFetchGeneration = 0
-  // Why: statusline ingest must attribute live windows to the selected account without re-running the side-effectful auth sync per post.
-  private lastClaudeAuthSnapshot: { configDir: string | null; provenance: string } | null = null
+  // Why: statusline ingest must attribute live windows to the selected account without re-running the side-effectful auth sync per post. Keyed by config dir since S9b, so a lane's post lands on the lane's own row instead of being dropped against one host-wide dir.
+  private readonly claudeAttribution = new ClaudeUsageAttributionMap()
+  // Why a second sink and not `state.claude`: that object is the host-wide, peer-published bar.
+  private readonly laneStatuslineUsage = new LaneStatuslineUsageStore()
+  private claudeLaneAttributionResolver: (() => readonly ClaudeLaneUsageAttribution[]) | null = null
   private opencodeFetchGeneration = 0
   private minimaxFetchGeneration = 0
   private lastOpencodeConfigHash = ''
@@ -279,6 +283,36 @@ export class RateLimitService {
 
   setClaudeAuthPreparationResolver(resolver: ClaudeAuthPreparationResolver): void {
     this.claudeAuthPreparationResolver = resolver
+  }
+
+  /** One attribution row per loaded lane, re-read on every tick (S9 §2c trigger 2, §2k). */
+  setClaudeLaneAttributionResolver(
+    resolver: (() => readonly ClaudeLaneUsageAttribution[]) | null
+  ): void {
+    this.claudeLaneAttributionResolver = resolver
+  }
+
+  /** The lane's own statusline-derived row, for the terminal join. Never peer-published (§2d). */
+  laneStatuslineUsageOf(laneId: string): ProviderRateLimits | null {
+    return this.laneStatuslineUsage.get(laneId)
+  }
+
+  /**
+   * The lane's credential changed hands, so the row its OLD account posted is dropped (S9 §2d).
+   *
+   * The tick-level `retainLanes` above only sees lanes that left the loaded set; a push keeps the
+   * lane loaded and merely re-points it, and between the push and the next post the row would
+   * otherwise show the outgoing account's numbers under the incoming account's label.
+   */
+  forgetLaneStatuslineUsage(laneId: string): void {
+    this.laneStatuslineUsage.forget(laneId)
+  }
+
+  /** The pane→lane join the posted paneKey unlocks; absent, the config-dir map answers alone. */
+  setClaudeUsagePaneLaneLookup(
+    lookup: ((paneKey: string) => ClaudeUsagePaneLane | null) | null
+  ): void {
+    this.claudeAttribution.setPaneLaneLookup(lookup)
   }
 
   setClaudeFetchTarget(target?: ClaudeAccountSelectionTarget): void {
@@ -514,7 +548,7 @@ export class RateLimitService {
     // Why: a new account/target starts with a clean retry schedule.
     this.activeFailureStreakByProvider.claude = 0
     // Why: statusline posts from the outgoing account's sessions must not land on the incoming account's bar mid-switch.
-    this.lastClaudeAuthSnapshot = null
+    this.claudeAttribution.clearSharedLane()
     this.lastInactiveClaudeFetchAt = 0
     this.updateState({
       ...this.state,
@@ -532,7 +566,7 @@ export class RateLimitService {
     this.activeFailureStreakByProvider.claude = 0
     if (targetChanged) {
       // Why: statusline posts from the outgoing target's sessions must not land on the incoming target's bar mid-switch.
-      this.lastClaudeAuthSnapshot = null
+      this.claudeAttribution.clearSharedLane()
     }
     this.updateState({
       ...this.state,
@@ -1462,34 +1496,47 @@ export class RateLimitService {
     ) {
       return
     }
-    this.lastClaudeAuthSnapshot = {
-      configDir: normalizeClaudeConfigDir(authPreparation?.envPatch.CLAUDE_CONFIG_DIR),
-      provenance: authPreparation?.provenance ?? 'system'
-    }
+    this.claudeAttribution.rememberSharedLane(
+      authPreparation?.envPatch.CLAUDE_CONFIG_DIR ?? null,
+      authPreparation?.provenance ?? 'system'
+    )
+    // Why on the same tick: §2c's `syncLane` is what makes a lane's row current, and the shared
+    // fetch is the only thing that runs on every tick — a lane row read later would be stale.
+    const laneRows = this.claudeLaneAttributionResolver?.() ?? []
+    this.claudeAttribution.rememberLanes(laneRows)
+    // Why here: a wiped lane loses its attribution row on this same tick, and a row that can no
+    // longer attract a post must not keep serving the bar it last posted (§2d).
+    this.laneStatuslineUsage.retainLanes(laneRows.map((row) => row.laneId))
   }
 
   /** Live usage windows forwarded from a Claude session's statusLine command. */
   ingestLiveClaudeRateLimits(event: ClaudeStatusLineRateLimits): void {
-    // Why: attribution needs the selected account's config dir; until a fetch cycle captures it, drop posts rather than guess the account.
-    const snapshot = this.lastClaudeAuthSnapshot
-    if (!snapshot) {
-      // Why: breadcrumbs make a silently dark live feed diagnosable — dropped posts are otherwise invisible.
-      console.debug('[rate-limits] dropped live Claude usage: no auth snapshot yet', {
-        eventConfigDir: event.configDir
-      })
-      return
-    }
-    // Why: sessions of other accounts (or other runtimes) report their own quota; mixing them into the active account's bar would lie.
-    if (normalizeClaudeConfigDir(event.configDir) !== snapshot.configDir) {
-      console.debug('[rate-limits] dropped live Claude usage: configDir mismatch', {
+    // Why: sessions of other accounts (or other lanes) report their own quota; a post the host
+    // cannot place is dropped rather than guessed onto the active account's bar.
+    const attribution = this.claudeAttribution.attribute(event)
+    if (!attribution) {
+      // Why: breadcrumbs make a silently dark live feed diagnosable — dropped posts are otherwise
+      // invisible. The config dir is host-side and never leaves this log line.
+      console.debug('[rate-limits] dropped live Claude usage: unattributable post', {
         eventConfigDir: event.configDir,
-        snapshotConfigDir: snapshot.configDir
+        hasPaneKey: Boolean(event.paneKey)
       })
       return
     }
     const freshSession = mapClaudeUsageWindow(event.fiveHour ?? undefined, 300)
     const freshWeekly = mapClaudeUsageWindow(event.sevenDay ?? undefined, 10080)
     if (!freshSession && !freshWeekly) {
+      return
+    }
+    if (attribution.laneId !== null) {
+      // Why a different sink and not this bar with a provenance stamp: `state.claude` is host-wide
+      // and peer-published, so writing a lane's numbers here shows one developer's usage on the
+      // other's bar — the inversion of §2d. The lane's own row reads the map instead (§2k).
+      this.laneStatuslineUsage.ingest(attribution.laneId, {
+        session: freshSession,
+        weekly: freshWeekly,
+        authProvenance: publishedAuthProvenance(attribution)
+      })
       return
     }
     const previous = this.state.claude
@@ -1522,7 +1569,9 @@ export class RateLimitService {
           source: 'live-session',
           lastSuccessfulSource: 'live-session',
           credentialSource: previous?.usageMetadata?.credentialSource,
-          authProvenance: snapshot.provenance
+          // Why through the guard: the posted configDir and the lane's raw provenance are both
+          // host-side identifiers, and this field is peer-readable (§2a, §2k).
+          authProvenance: publishedAuthProvenance(attribution)
         }
       }
     })

@@ -19,6 +19,22 @@ import {
   writeFileDurableSync
 } from './durable-file-write'
 import { join, dirname, isAbsolute, resolve, sep } from 'node:path'
+import {
+  normalizeClaudeLaneWatermarks,
+  type ClaudeLaneCredentialWatermark
+} from '../shared/claude-lane-watermark'
+import {
+  normalizeClaudeLivePtySessionLanes,
+  type ClaudeLivePtySessionLane
+} from '../shared/claude-live-pty-session-lane'
+import {
+  normalizeClaudeLaneDelegationRows,
+  type ClaudeLaneDelegationRow
+} from '../shared/claude-lane-delegation'
+import {
+  normalizeClaudeLaneLeases,
+  type ClaudeLaneDelegationLease
+} from '../shared/claude-lane-lease'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
@@ -73,6 +89,7 @@ import type {
   TerminalTab
 } from '../shared/terminal-tab-types'
 import type {
+  PersistedPaneCredentialLane,
   WorkspaceSessionPatch,
   WorkspaceSessionState
 } from '../shared/workspace-session-state-types'
@@ -102,6 +119,7 @@ import type { MigrationUnsupportedPtyEntry } from '../shared/agent-status-types'
 import { MOBILE_PAIRING_USERDATA_FILES } from './runtime/mobile-pairing-files'
 import { normalizePersistedMobileClientTabSelections } from './runtime/client-session-tab-selection-persistence'
 import { sanitizeWorkspaceSessionTerminalRetirements } from './runtime/mobile-session-terminal-persistence-retirement'
+import { mergePersistedPaneCredentialLanes } from './runtime/persisted-pane-credential-lane-rows'
 import {
   removeRepoFromHostWorkspaceSessions,
   removeRepoFromWorkspaceSession
@@ -2652,6 +2670,19 @@ function deleteScannedSessionFieldsForOwners(
       })
     )
   }
+  if (next.terminalCredentialLanesByPaneKey) {
+    next.terminalCredentialLanesByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalCredentialLanesByPaneKey).filter(([paneKey, lane]) => {
+        if (isRemovedOwner(lane.worktreeId)) {
+          return false
+        }
+        // Why: an unseparated key yields -1, and `slice(0, -1)` would drop a character and match a
+        // tabId no caller ever wrote — the same guard its incarnation sibling above carries.
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTabIds.has(paneKey.slice(0, separator))
+      })
+    )
+  }
   if (next.terminalSurfaceTombstonesByPaneKey) {
     next.terminalSurfaceTombstonesByPaneKey = Object.fromEntries(
       Object.entries(next.terminalSurfaceTombstonesByPaneKey).filter(
@@ -3805,6 +3836,12 @@ export class Store {
             .filter((lease): lease is SshRemotePtyLease => lease !== null),
           sshPtyConsumerRecoveries: parsed.sshPtyConsumerRecoveries,
           claudeLivePtySessionIds: normalizeClaudeLivePtySessionIds(parsed.claudeLivePtySessionIds),
+          claudeLivePtySessionLanes: normalizeClaudeLivePtySessionLanes(
+            parsed.claudeLivePtySessionLanes
+          ),
+          claudeLaneCredentialWatermarks: normalizeClaudeLaneWatermarks(
+            parsed.claudeLaneCredentialWatermarks
+          ),
           migrationUnsupportedPtyEntries: normalizeMigrationUnsupportedPtyEntries(
             parsed.migrationUnsupportedPtyEntries
           ),
@@ -6539,10 +6576,11 @@ export class Store {
   /** Persist a non-'local' host partition; remote hosts skip setLocalWorkspaceSession's local-daemon PTY-binding race guards. */
   private setHostWorkspaceSession(hostId: ExecutionHostId, session: WorkspaceSessionState): void {
     // Why: each partition owns its topology fence; renderer writes omit it and must rebase locally.
-    session = sanitizeWorkspaceSessionTerminalRetirements(
-      session,
-      this.state.workspaceSessionsByHostId?.[hostId]
-    )
+    const prior = this.state.workspaceSessionsByHostId?.[hostId]
+    session = sanitizeWorkspaceSessionTerminalRetirements(session, prior)
+    // Why: pane lanes are host-owned in *every* partition, not just the local one — binding rows
+    // are written per execution host, so a renderer write here must not orphan them either (§2h).
+    session = mergePersistedPaneCredentialLanes(session, prior)
     const pruned = pruneWorkspaceSessionBrowserHistory(
       pruneLocalTerminalScrollbackBuffers(session, this.state.repos)
     )
@@ -6563,6 +6601,9 @@ export class Store {
       pruneLocalTerminalScrollbackBuffers(session, this.state.repos)
     )
 
+    // Why: the pane lane is host-owned; a renderer session write that omits it must not orphan
+    // live panes into `unknown` (S9 §2h).
+    session = mergePersistedPaneCredentialLanes(session, prior)
     // Why (Issue #217): merge existing bindings when the incoming binding is empty, so a stale pre-spawn snapshot can't overwrite the durable PTY binding.
     const normalized = normalizeWorkspaceSessionPaneIdentities(
       session,
@@ -6897,6 +6938,64 @@ export class Store {
     return this.state.repos.find((repo) => repo.id === repoId)?.connectionId ?? null
   }
 
+  // Why: the pane's lane is bound at the paneKey mint, before any launch input is assembled, and
+  // is write-once — a respawn into a bound pane runs on the row's lane (S9 §2a).
+  persistPaneCredentialLane(
+    args: { worktreeId: string; tabId: string; leafId: string; principalId?: string },
+    hostId?: string | null
+  ): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const paneKey = makePaneKey(args.tabId, args.leafId)
+    if (session.terminalCredentialLanesByPaneKey?.[paneKey]) {
+      return
+    }
+    session.terminalCredentialLanesByPaneKey = {
+      ...session.terminalCredentialLanesByPaneKey,
+      [paneKey]: {
+        worktreeId: args.worktreeId,
+        ...(args.principalId ? { principalId: args.principalId } : {})
+      }
+    }
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.scheduleSave()
+  }
+
+  // Why: the row is the durable authority, so a create whose pane was refused after it minted one
+  // must drop it here too — otherwise the released binding comes back on the next rehydrate.
+  forgetPaneCredentialLane(
+    args: { worktreeId: string; tabId: string; leafId: string },
+    hostId?: string | null
+  ): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const paneKey = makePaneKey(args.tabId, args.leafId)
+    const existing = session.terminalCredentialLanesByPaneKey?.[paneKey]
+    if (!existing || existing.worktreeId !== args.worktreeId) {
+      return
+    }
+    const { [paneKey]: _removed, ...rest } = session.terminalCredentialLanesByPaneKey ?? {}
+    session.terminalCredentialLanesByPaneKey = rest
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.scheduleSave()
+  }
+
+  getPaneCredentialLanes(hostId?: string | null): Record<string, PersistedPaneCredentialLane> {
+    return {
+      ...this.getWorkspaceSession(this.resolveHostId(hostId)).terminalCredentialLanesByPaneKey
+    }
+  }
+
   // Why: sync-flush the pty binding before pty:spawn returns to close the spawn/persist SIGKILL race (Issue #217).
   persistPtyBinding(
     args: {
@@ -7137,17 +7236,78 @@ export class Store {
     return [...(this.state.claudeLivePtySessionIds ?? [])]
   }
 
-  addClaudeLivePtySessionId(sessionId: string): void {
+  /** Each seeded id with the lane it was pinned to; `laneId: null` on a pre-S9c state (S9 §2f). */
+  getClaudeLivePtySessions(): { sessionId: string; laneId: string | null }[] {
+    const lanes = new Map(
+      (this.state.claudeLivePtySessionLanes ?? []).map((row) => [row.sessionId, row.laneId])
+    )
+    return this.getClaudeLivePtySessionIds().map((sessionId) => ({
+      sessionId,
+      laneId: lanes.get(sessionId) ?? null
+    }))
+  }
+
+  addClaudeLivePtySessionId(sessionId: string, laneId: string): void {
     if (sessionId.length === 0 || sessionId.length > 512) {
       return
     }
     const ids = this.state.claudeLivePtySessionIds ?? []
-    if (ids.includes(sessionId)) {
+    const laneRows = this.state.claudeLivePtySessionLanes ?? []
+    // Why the lane is compared too: a pre-S9c id re-marked spawned would otherwise keep its
+    // missing lane row forever, and a seed with no lane attribution defers EVERY account.
+    if (
+      ids.includes(sessionId) &&
+      laneRows.some((row) => row.sessionId === sessionId && row.laneId === laneId)
+    ) {
       return
     }
     // Why: drop oldest at the cap — stale ids get pruned against the daemon at startup, so only recency matters.
-    this.state.claudeLivePtySessionIds = [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+    this.state.claudeLivePtySessionIds = ids.includes(sessionId)
+      ? ids
+      : [...ids, sessionId].slice(-MAX_CLAUDE_LIVE_PTY_SESSION_IDS)
+    this.state.claudeLivePtySessionLanes = this.retainLivePtySessionLanes([
+      ...laneRows.filter((row) => row.sessionId !== sessionId),
+      { sessionId, laneId }
+    ])
     // Why: flush sync so a force-quit right after a Claude spawn still seeds the live-PTY gate next launch.
+    this.flush()
+  }
+
+  /** The lane rows follow the capped id list; an orphan row would out-live its seed forever. */
+  private retainLivePtySessionLanes(
+    rows: readonly ClaudeLivePtySessionLane[]
+  ): ClaudeLivePtySessionLane[] {
+    const kept = new Set(this.state.claudeLivePtySessionIds ?? [])
+    return rows.filter((row) => kept.has(row.sessionId))
+  }
+
+  getClaudeLaneDelegationLeases(): ClaudeLaneDelegationLease[] {
+    return normalizeClaudeLaneLeases(this.state.claudeLaneDelegationLeases)
+  }
+
+  setClaudeLaneDelegationLeases(rows: readonly ClaudeLaneDelegationLease[]): void {
+    this.state.claudeLaneDelegationLeases = normalizeClaudeLaneLeases(rows)
+    // Why: flush sync — a lost lease un-suppresses a rotator the host lane is depending on.
+    this.flush()
+  }
+
+  getClaudeLaneDelegationRows(): ClaudeLaneDelegationRow[] {
+    return normalizeClaudeLaneDelegationRows(this.state.claudeLaneDelegationRows)
+  }
+
+  setClaudeLaneDelegationRows(rows: readonly ClaudeLaneDelegationRow[]): void {
+    this.state.claudeLaneDelegationRows = normalizeClaudeLaneDelegationRows(rows)
+    // Why: flush sync — a lost delegable list refuses the phone's next switch by name.
+    this.flush()
+  }
+
+  getClaudeLaneCredentialWatermarks(): ClaudeLaneCredentialWatermark[] {
+    return normalizeClaudeLaneWatermarks(this.state.claudeLaneCredentialWatermarks)
+  }
+
+  setClaudeLaneCredentialWatermarks(rows: readonly ClaudeLaneCredentialWatermark[]): void {
+    this.state.claudeLaneCredentialWatermarks = normalizeClaudeLaneWatermarks(rows)
+    // Why: flush sync — a force-quit that loses a watermark makes the next push read as stale.
     this.flush()
   }
 
@@ -7157,6 +7317,9 @@ export class Store {
       return
     }
     this.state.claudeLivePtySessionIds = ids.filter((id) => id !== sessionId)
+    this.state.claudeLivePtySessionLanes = (this.state.claudeLivePtySessionLanes ?? []).filter(
+      (row) => row.sessionId !== sessionId
+    )
     this.scheduleSave()
   }
 

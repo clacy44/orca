@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { TerminalPresenceParticipant } from '@/lib/pane-manager/terminal-presence-state'
+import { i18n } from '@/i18n/i18n'
+import { PSEUDO_LOCALIZATION_LOCALE } from '@/i18n/pseudo-localization'
 import { TerminalPresenceChip } from './TerminalPresenceChip'
 import { resolveTerminalPresenceChipState } from './terminal-presence-chip-state'
 
@@ -70,5 +72,63 @@ describe('TerminalPresenceChip', () => {
     expect(markup).toContain('Ben&#x27;s phone attached · last seen 4m ago')
     expect(markup).toContain('data-presence-activity="stale"')
     expect(markup).not.toContain('typing')
+  })
+
+  describe('the lane account segment (S9 §2k)', () => {
+    it('renders the owner, the account name and the bar beside the presence copy', () => {
+      const markup = renderToStaticMarkup(
+        <TerminalPresenceChip state={null} lane={{ label: 'Ana · work', usedPercent: 74 }} />
+      )
+
+      expect(markup).toContain('Ana · work · 74%')
+    })
+
+    it('renders the label with no percentage when the bar is omitted for a peer', () => {
+      const markup = renderToStaticMarkup(
+        <TerminalPresenceChip state={null} lane={{ label: 'Ana · work' }} />
+      )
+
+      expect(markup).toContain('Ana · work')
+      expect(markup).not.toContain('%')
+    })
+
+    it('says why the bar is missing rather than rendering a stale one', () => {
+      const markup = renderToStaticMarkup(
+        <TerminalPresenceChip
+          state={null}
+          lane={{ label: 'Ana', unavailableReason: 'pull-unsupported-on-host' }}
+        />
+      )
+
+      expect(markup).toContain('Ana · usage unavailable on this host')
+    })
+
+    // The host sends a CODE; the sentence is this client's. Under the pseudo locale a string that
+    // skipped `translate` stays bare ASCII, so this discriminates the two implementations.
+    it('routes both lane strings through i18n rather than interpolating them raw', async () => {
+      const previous = i18n.language
+      await i18n.changeLanguage(PSEUDO_LOCALIZATION_LOCALE)
+      try {
+        expect(
+          renderToStaticMarkup(
+            <TerminalPresenceChip
+              state={null}
+              lane={{ label: 'Ana', unavailableReason: 'pull-unsupported-on-host' }}
+            />
+          )
+        ).toContain('[Ana · usage unavailable on this host]')
+        expect(
+          renderToStaticMarkup(
+            <TerminalPresenceChip state={null} lane={{ label: 'Ana', usedPercent: 61 }} />
+          )
+        ).toContain('[Ana · 61%]')
+      } finally {
+        await i18n.changeLanguage(previous)
+      }
+    })
+
+    it('still renders nothing when neither presence nor a lane row is present', () => {
+      expect(renderToStaticMarkup(<TerminalPresenceChip state={null} />)).toBe('')
+    })
   })
 })

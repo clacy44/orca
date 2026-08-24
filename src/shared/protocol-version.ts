@@ -103,6 +103,11 @@ export const FILE_MUTATION_OWNERSHIP_RUNTIME_CAPABILITY = 'files.mutation-owners
 export const FILE_MUTATION_OWNERSHIP_UPDATE_REQUIRED_MESSAGE =
   'Remote file changes require a newer Orca server. Update the HUB and try again.'
 
+// Why client-gated at all when an unknown method fails loudly (`dispatcher.ts` returns
+// `method_not_found`): the loud failure is a stack trace, not "update the host". This says one
+// thing — this host has per-person Claude credential lanes — and never anything per-grant (S9 §3).
+export const AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY = 'agent.identity-lanes.v1' as const
+
 export const RUNTIME_CAPABILITIES = [
   'runtime.status.compat.v1',
   'runtime.environments.v1',
@@ -140,7 +145,8 @@ export const RUNTIME_CAPABILITIES = [
   FILE_MUTATION_OWNERSHIP_RUNTIME_CAPABILITY,
   ACCOUNT_IMPORT_RUNTIME_CAPABILITY,
   CODEX_RESET_CREDIT_RUNTIME_CAPABILITY,
-  ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY
+  ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY,
+  AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})

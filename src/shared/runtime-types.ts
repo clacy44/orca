@@ -12,6 +12,7 @@ import type {
   BrowserSessionProfile,
   BrowserSessionProfileSource
 } from './browser-workspace-types'
+import type { RateLimitWindow } from './rate-limit-types'
 import type { BaseRefSearchResult, Repo } from './repo-types'
 import type { TabGroupLayoutNode } from './tab-types'
 import type { TerminalColorOverrides } from './terminal-color-overrides'
@@ -492,6 +493,22 @@ export type RuntimeFileReadChunkResult = {
   eof: boolean
 }
 
+/** How a terminal resolves its Claude credential (S9 §2h). Display strings, Rule-1 additive: an
+ *  older client that has no case for one simply renders nothing. `'grant'` keeps its rev-10 name
+ *  and reads "pinned to a principal's lane"; `'shared-runtime'` is the OpenClaude downgrade — a
+ *  lane pane observed running a runtime the lane cannot isolate. */
+export type RuntimeTerminalCredentialLane =
+  | 'grant'
+  | 'host'
+  | 'remote'
+  | 'wsl'
+  | 'shared-runtime'
+  | 'unknown'
+
+/** Whether the lane's credential is on this host right now. `'absent'` is what launches key on, so
+ *  it is also the fail-closed value while the host cannot make a residency claim (S9 §2f, §2h). */
+export type RuntimeTerminalLaneState = 'loaded' | 'absent' | 'reauth-required'
+
 // Why declared here rather than imported: shared/ must not reach into the main process, and the wire
 // needs the same three members the host's projection carries — the assignment at the list boundary is
 // what keeps the two declarations from drifting apart.
@@ -502,6 +519,9 @@ export type RuntimeTerminalPresenceKind = 'runtime' | 'mobile' | 'host'
 export type RuntimeTerminalPresenceParticipant = {
   participantId: string
   label: string
+  // Why on the participant and not on the row: one person connected from a desktop AND a phone is ONE
+  // owner label over two participants, which is what a principal-keyed lane means on screen (S9 §2h).
+  credentialLaneOwner?: true
   // Why on the wire: nothing else distinguishes the local human from a peer device named after a
   // machine, or a phone from a desktop — and both distinctions are display rules a client owns.
   kind: RuntimeTerminalPresenceKind
@@ -525,6 +545,35 @@ export type RuntimeTerminalPresence = {
   participants: RuntimeTerminalPresenceParticipant[]
 }
 
+/**
+ * Q3's two labels on one row (S9 §2h/§2k). `owner` is the host-observed principal label — a join
+ * the projection makes, not spoofable; `accountName` is the owner-authored per-account name the
+ * desktop pushed (§2b's third envelope member), so it is client-asserted and absent when unset.
+ */
+export type RuntimeTerminalLaneAccountLabel = {
+  owner: string
+  accountName?: string
+}
+
+/**
+ * The usage of the account this terminal's lane holds RIGHT NOW (S9 §2k, Q7).
+ *
+ * OMITTED, never zeroed, for a grant of another principal: zero reads as "no usage left to worry
+ * about", omission reads as "not yours" (§2d). `unavailable` is the win32 arm, where the per-lane
+ * pull is disabled and a stale bar would be worse than none.
+ */
+/**
+ * Why a code and not a sentence: the host does not know the viewer's locale, and this row is read
+ * by desktop, phone and peer clients alike. The host names the CONDITION; the client says it.
+ */
+export type RuntimeTerminalLaneUsageUnavailableReason = 'pull-unsupported-on-host'
+
+export type RuntimeTerminalLaneUsage = {
+  session: RateLimitWindow | null
+  weekly: RateLimitWindow | null
+  unavailableReason?: RuntimeTerminalLaneUsageUnavailableReason
+}
+
 export type RuntimeTerminalSummary = {
   handle: string
   ptyId: string | null
@@ -541,6 +590,11 @@ export type RuntimeTerminalSummary = {
   lastOutputAt: number | null
   preview: string
   presence?: RuntimeTerminalPresence
+  credentialLane?: RuntimeTerminalCredentialLane
+  laneState?: RuntimeTerminalLaneState
+  /** Additive (Rule 1); peer-visible, which `laneUsage` deliberately is not (§2k). */
+  laneAccountLabel?: RuntimeTerminalLaneAccountLabel
+  laneUsage?: RuntimeTerminalLaneUsage
 }
 
 export type RuntimeTerminalVisualTerminalNode = {

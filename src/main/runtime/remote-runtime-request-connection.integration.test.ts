@@ -217,6 +217,7 @@ describe('remote runtime request connection integration', () => {
           worktrees
         }),
         dedupeWorktreeCreate: passthroughDedupe,
+        resolveCallerCredentialLane: () => ({ kind: 'shared' as const }),
         createManagedWorktree: ({ name }: { name?: string }) => {
           const worktree = {
             id: `repo-1::${name || 'created'}`,
@@ -652,6 +653,7 @@ describe('remote runtime request connection integration', () => {
           worktrees
         }),
         dedupeWorktreeCreate: passthroughDedupe,
+        resolveCallerCredentialLane: () => ({ kind: 'shared' as const }),
         createManagedWorktree: ({ name }: { name?: string }) => {
           const worktree = {
             id: `repo-1::${name || 'created'}`,

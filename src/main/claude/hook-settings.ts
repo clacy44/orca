@@ -68,8 +68,17 @@ export const CLAUDE_EVENTS = [
   }
 ] as const
 
-export function getConfigPath(settings = CLAUDE_HOOK_SETTINGS): string {
-  return join(homedir(), settings.configDirName, 'settings.json')
+/**
+ * The host's `settings.json`, or — when a lane path is passed — that lane's.
+ *
+ * A credential lane IS its `CLAUDE_CONFIG_DIR`, so its settings sit directly in it. The lane path
+ * is the only `CLAUDE_CONFIG_DIR` awareness here: host behaviour with no argument is unchanged,
+ * and the host resolver deliberately does not read the variable (S9 §2a).
+ */
+export function getConfigPath(settings = CLAUDE_HOOK_SETTINGS, laneConfigDir?: string): string {
+  return laneConfigDir
+    ? join(laneConfigDir, 'settings.json')
+    : join(homedir(), settings.configDirName, 'settings.json')
 }
 
 export function getStatusLineScriptBaseName(settings = CLAUDE_HOOK_SETTINGS): string {
