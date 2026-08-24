@@ -14,7 +14,7 @@ import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { HostConsent } from './principal-consent-authority'
 import type { PrincipalRegistry } from './principal-registry'
-import type { PrincipalRecord } from './principal-registry-store'
+import type { PrincipalAuditRow, PrincipalRecord } from './principal-registry-store'
 
 /**
  * §6's S9a merge gates (i) and (ii), in code rather than in a note.
@@ -58,6 +58,16 @@ export class PrincipalLaneConsentService {
 
   listPrincipals(): readonly PrincipalRecord[] {
     return this.registry.listPrincipals()
+  }
+
+  /** The audit log — the host-only surface's undo trail; deletions stay visible (§2a rule (iii)). */
+  listAudit(): readonly PrincipalAuditRow[] {
+    return this.registry.listAudit()
+  }
+
+  /** The still-surviving grants bound to a principal; the bridge joins these into binding rows. */
+  boundDeviceIds(principalId: string): string[] {
+    return this.registry.boundDeviceIds(principalId)
   }
 
   bindGrant(consent: HostConsent, deviceId: string, principalId: string): void {
