@@ -269,6 +269,24 @@ export class TerminalPresenceRegistry {
     return this.attachments
   }
 
+  // Why here and not two accessors: `participants` is private, so openInMyLane's authorization join
+  // (attachmentsOf → connectionId → pairedDeviceId) runs inside the registry and exposes only the
+  // grants — never a participant or a principal. The host applies `principalOf` (§2g). The reserved
+  // host key (connectionId null) is skipped, so only real attached grants ever count.
+  grantsAttachedTo(ptyId: string): string[] {
+    const grants: string[] = []
+    for (const attachment of this.attachmentsOf(ptyId).values()) {
+      if (attachment.connectionId === null) {
+        continue
+      }
+      const participant = this.participants.get(attachment.connectionId)
+      if (participant) {
+        grants.push(participant.pairedDeviceId)
+      }
+    }
+    return grants
+  }
+
   // Why: sites (a)/(b) — a raw keystroke on a live stream is human intent, and only this stamp arms a hold.
   recordInteractiveInput(ptyId: string, subscriptionKey: string): void {
     const attachment = this.attachments.get(ptyId)?.get(subscriptionKey)

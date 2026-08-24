@@ -1079,6 +1079,8 @@ import {
 } from './mobile-session-tabs-agent-status-heartbeat'
 import { TerminalFocusNavigationCoalescer } from './terminal-focus-navigation-coalescer'
 import { terminalPresenceRegistry } from './terminal-presence-registry'
+import { assertLaneSeedPromptWithinBounds, callerMayOpenSourceLane } from './terminal-open-in-lane'
+import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
 import { assertLaneAgentArgsAllowed, laneScopedAgentLaunchInputs } from './lane-launch-computation'
@@ -26634,6 +26636,63 @@ export class OrcaRuntimeService {
           pairedDeviceId: option.pairedDeviceId
         })
       : option
+  }
+
+  /**
+   * §2g: open a NEW terminal in the source terminal's workspace, under the CALLER's own lane.
+   *
+   * It moves no process and copies no files. A caller with no principal lane is refused rather than
+   * served from the shared lane; authorization is the attachment join (§2h), not mere registration;
+   * and the optional seed prompt is bounded and delivered as terminal input, never shell-interpolated.
+   */
+  async openTerminalInMyLane(args: {
+    sourcePtyId: string
+    seedPrompt?: string
+    caller: { pairedDeviceId?: string | null }
+    focus?: boolean
+    activate?: boolean
+  }): Promise<RuntimeTerminalCreate> {
+    if (args.seedPrompt !== undefined) {
+      assertLaneSeedPromptWithinBounds(args.seedPrompt)
+    }
+    const callerLane = this.resolveCallerCredentialLane(args.caller.pairedDeviceId)
+    const callerPrincipalId = this.paneLanes.principalOfGrant(args.caller.pairedDeviceId)
+    if (callerLane.kind !== 'principal' || !callerPrincipalId || !args.caller.pairedDeviceId) {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_open_no_lane',
+        'Opening a terminal in your Claude credential lane needs a lane of your own, and this connection has none. Pair this device to a person and provision the lane first, then try again.'
+      )
+    }
+    const source = this.ptysById.get(args.sourcePtyId)
+    if (!source) {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_source_unknown',
+        'Orca could not find that terminal to open a new one beside it. It may have already closed.'
+      )
+    }
+    const authorized = callerMayOpenSourceLane({
+      registry: terminalPresenceRegistry,
+      sourcePtyId: args.sourcePtyId,
+      caller: { principalId: callerPrincipalId, pairedDeviceId: args.caller.pairedDeviceId },
+      principalOfGrant: (pairedDeviceId) => this.paneLanes.principalOfGrant(pairedDeviceId)
+    })
+    if (!authorized) {
+      throw new ClaudeLaneRefusal(
+        'terminal.lane_open_forbidden',
+        'Orca can only open a terminal in your lane on a terminal you are attached to. Open the terminal you want to branch from first, then try again.'
+      )
+    }
+    const created = await this.createTerminal(`id:${source.worktreeId}`, {
+      credentialLane: callerLane,
+      focus: args.focus === true,
+      activate: args.activate === true
+    })
+    if (args.seedPrompt !== undefined && args.seedPrompt.length > 0 && created.ptyId) {
+      // Why input and not a `command`: the prompt lands on the shell's line for the person to read
+      // and submit, exactly as a paste would — never interpolated into a launched command line (§2g).
+      await this.writeTerminalInputChunks(created.ptyId, args.seedPrompt)
+    }
+    return created
   }
 
   async createTerminal(

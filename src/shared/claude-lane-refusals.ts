@@ -53,6 +53,10 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'terminal.lane_pane_unbound',
   'terminal.lane_source_unknown',
   'terminal.lane_renderer_split_unsupported',
+  'terminal.lane_open_no_lane',
+  'terminal.lane_open_forbidden',
+  'terminal.lane_seed_too_long',
+  'terminal.lane_seed_control_char',
   'terminal.lane_requires_workspace',
   'terminal.lane_link_unbound',
   'worktree.wake_refused_not_owned'

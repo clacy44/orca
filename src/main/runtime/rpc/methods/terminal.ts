@@ -1044,6 +1044,18 @@ const TerminalCreateParams = z.object({
   leafId: OptionalString
 })
 
+// §2g: the seed prompt is validated for bytes/control chars in the runtime, not here — the wire cap
+// only keeps a hostile client from forcing the host to buffer megabytes before the byte check runs.
+export const TerminalOpenInMyLane = z.object({
+  sourcePtyId: requiredString('Missing source terminal PTY id'),
+  seedPrompt: z
+    .string()
+    .max(64 * 1024)
+    .optional(),
+  focus: z.unknown().optional(),
+  activate: z.unknown().optional()
+})
+
 const TerminalSplit = TerminalHandle.extend({
   direction: z
     .unknown()
@@ -1564,6 +1576,19 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
             ...(preAllocatedHandle ? { preAllocatedHandle } : {})
           })
       )
+    })
+  }),
+  defineMethod({
+    name: 'terminal.openInMyLane',
+    params: TerminalOpenInMyLane,
+    handler: async (params, { runtime, pairedDeviceId }) => ({
+      terminal: await runtime.openTerminalInMyLane({
+        sourcePtyId: params.sourcePtyId,
+        ...(params.seedPrompt !== undefined ? { seedPrompt: params.seedPrompt } : {}),
+        caller: { pairedDeviceId },
+        focus: params.focus === true,
+        activate: params.activate === true
+      })
     })
   }),
   defineMethod({
