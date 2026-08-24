@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { PrincipalConsentSurface } from './PrincipalConsentSurface'
+import { isHostConsentSurfaceAvailable, PrincipalConsentSurface } from './PrincipalConsentSurface'
 import { resetPrincipalConsentStoreForTest } from './principal-consent-store'
 import { resetPrincipalLaneStatusStoreForTest } from './principal-lane-status-store'
 import { resetPrincipalLaneStatusSubscriptionForTest } from './principal-lane-status-subscription'
@@ -99,6 +99,17 @@ describe('PrincipalConsentSurface', () => {
     setWindowApi(undefined)
     const { container } = render(<PrincipalConsentSurface grants={GRANTS} />)
     expect(container.querySelector('[data-testid="principal-consent-surface"]')).toBeNull()
+  })
+
+  it('returns false with no window global (DOM-less render, e.g. renderToStaticMarkup)', () => {
+    const savedWindow = globalThis.window
+    // @ts-expect-error simulating a DOM-less environment
+    delete globalThis.window
+    try {
+      expect(isHostConsentSurfaceAvailable()).toBe(false)
+    } finally {
+      globalThis.window = savedWindow
+    }
   })
 
   it('renders a row per device with its binding, pusher badge and never-connected state', async () => {

@@ -23,7 +23,11 @@ import { PrincipalConsentAuditList } from './PrincipalConsentAuditList'
 // tick is a host act, so it is absent on any client that is not the desktop's own frame (§3).
 export function isHostConsentSurfaceAvailable(): boolean {
   const isWebClient = (globalThis as { __ORCA_WEB_CLIENT__?: boolean }).__ORCA_WEB_CLIENT__ === true
-  return !isWebClient && typeof window.api?.principalConsent?.snapshot === 'function'
+  return (
+    !isWebClient &&
+    typeof window !== 'undefined' &&
+    typeof window.api?.principalConsent?.snapshot === 'function'
+  )
 }
 
 /**
