@@ -71,6 +71,17 @@ vi.mock('./runtime-environment-request-connections', () => ({
   closeRemoteRuntimeRequestConnection: closeRemoteRuntimeRequestConnectionMock
 }))
 
+const { notifyLaneDelegationHostUnreachableMock } = vi.hoisted(() => ({
+  notifyLaneDelegationHostUnreachableMock: vi.fn()
+}))
+
+// Release-audit follow-up: T1's caller scan cannot see whether this trigger actually fires, only
+// that the line exists — this asserts the production call, not just the source text.
+vi.mock('../claude-accounts/lane-delegation-desktop-service', () => ({
+  notifyLaneDelegationHostReachable: vi.fn(),
+  notifyLaneDelegationHostUnreachable: notifyLaneDelegationHostUnreachableMock
+}))
+
 import {
   invalidateRuntimeEnvironmentTransport,
   registerRuntimeEnvironmentHandlers
@@ -138,6 +149,7 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     reconnectRemoteRuntimeSharedControlConnectionMock.mockReset()
     retryRemoteRuntimeSharedControlConnectionsNowMock.mockReset()
     closeRemoteRuntimeRequestConnectionMock.mockReset()
+    notifyLaneDelegationHostUnreachableMock.mockReset()
   })
 
   afterEach(() => {
@@ -164,6 +176,12 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     expect(onMock.mock.calls.map((call) => call[0])).toEqual([
       'runtimeEnvironments:subscriptionBinary'
     ])
+  })
+
+  it('fires the B3 desktop-unreachable trigger on transport invalidation', () => {
+    invalidateRuntimeEnvironmentTransport('env-x')
+
+    expect(notifyLaneDelegationHostUnreachableMock).toHaveBeenCalledWith('env-x')
   })
 
   it('clears stale IPC registrations before registering runtime environment handlers', () => {

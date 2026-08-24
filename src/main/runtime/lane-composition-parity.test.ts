@@ -44,7 +44,10 @@ type ExportedSeam = { name: string; file: string }
 
 function laneAttachStartExports(): ExportedSeam[] {
   const seams: ExportedSeam[] = []
-  const pattern = /^export\s+(?:async\s+)?function\s+(attach\w+|start\w+)\s*\(/gm
+  // `set*Dependencies` is included alongside `attach*`/`start*`: T1's own mutation proof found
+  // that deleting the production call to `setLaneWireHostDependencies` (B1's actual fix) left
+  // every other guard green, because a `set*` provider is invisible to the narrower pattern.
+  const pattern = /^export\s+(?:async\s+)?function\s+(attach\w+|start\w+|set\w*Dependencies)\s*\(/gm
   for (const file of LANE_MODULE_FILES) {
     const source = readFileSync(file, 'utf8')
     for (const match of source.matchAll(pattern)) {
@@ -84,6 +87,7 @@ describe('lane composition parity (release-audit T1)', () => {
     expect(names).toContain('attachLaneWireService')
     expect(names).toContain('attachPrincipalLaneConsentService')
     expect(names).toContain('attachManagedAccountResidencyGuard')
+    expect(names).toContain('setLaneWireHostDependencies')
   })
 
   it.each(seams.map((seam) => [seam.name, seam] as const))(
