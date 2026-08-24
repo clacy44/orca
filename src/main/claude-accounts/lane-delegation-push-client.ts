@@ -69,21 +69,49 @@ export type LanePushOutcome =
   | 'no-selection'
   | 'refused'
   | 'not-delegated'
+  | 'already-connected'
 
 export class LaneDelegationPushClient {
   private supported: boolean | null = null
   private lastKnownSha: string | null = null
   private principalId: string | null = null
   private unsubscribe: (() => void) | null = null
+  private connecting: Promise<LanePushOutcome> | null = null
 
   constructor(private readonly options: LaneDelegationPushClientOptions) {}
 
-  /** Reconnect arm: subscribe first, then push, so the ready status supplies `basedOn`. */
+  /**
+   * Reconnect arm: subscribe first, then push, so the ready status supplies `basedOn`.
+   *
+   * Idempotent and reentrancy-safe (release-audit B3 follow-up): this is invoked from a passive
+   * host-status probe (settings hydration, the sidebar, every `runtimeEnvironments:getStatus`),
+   * not only on an actual (re)connect, and `getCapabilities()` below is itself implemented over
+   * that same status probe — so a cold call can recursively re-enter this method before the first
+   * call's subscribe/publish/push has finished. Coalescing concurrent calls onto one in-flight
+   * promise, and skipping the body entirely once a subscription is already live, keeps a probe
+   * from rewriting the credential envelope into the lane on every settings/sidebar render.
+   * `disconnect()` clears `unsubscribe`, so a real reconnect still republishes both.
+   */
   async connect(): Promise<LanePushOutcome> {
+    if (this.connecting) {
+      return this.connecting
+    }
+    this.connecting = this.connectOnce()
+    try {
+      return await this.connecting
+    } finally {
+      this.connecting = null
+    }
+  }
+
+  private async connectOnce(): Promise<LanePushOutcome> {
     if (!(await this.hostSupportsLanes())) {
       return 'unsupported-host'
     }
-    this.unsubscribe ??= await this.options.host.subscribeLaneStatus((frame) => {
+    if (this.unsubscribe) {
+      return 'already-connected'
+    }
+    this.unsubscribe = await this.options.host.subscribeLaneStatus((frame) => {
       // A throwing frame handler would otherwise surface as an unhandled rejection: rule (iv)'s
       // clear can lose a win32 race with a live `claude`, and that must be reported, not lost.
       void this.onFrame(frame).catch((error) => {
@@ -92,6 +120,11 @@ export class LaneDelegationPushClient {
     })
     await this.publishDelegableAccounts()
     return this.pushSelection()
+  }
+
+  /** Live subscription right now — false after `disconnect()`, before the next `connect()`. */
+  isConnected(): boolean {
+    return this.unsubscribe !== null
   }
 
   disconnect(): void {
@@ -188,6 +221,16 @@ export class LaneDelegationPushClient {
       if (account) {
         await this.pushAccount(account)
       }
+      return
+    }
+    if (frame.type === 'end') {
+      // A mid-stream drop (the transport's `error`/`close` — the host client maps both to `end`).
+      // Nothing previously cleared `unsubscribe` here, so the next reachable notification's
+      // `connect()` saw a live subscription and skipped resubscribing forever (release-audit B3
+      // follow-up): one network blip silently stopped `receipt` frames — and therefore Q2's pull
+      // of the host's rotations — for the rest of the process's life.
+      this.unsubscribe = null
+      this.supported = null
     }
   }
 

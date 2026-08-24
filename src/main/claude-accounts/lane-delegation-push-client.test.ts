@@ -278,4 +278,42 @@ describe('desktop lane push client', () => {
     expect(await harness.client.connect()).toBe('refused')
     expect(harness.refusals.map((entry) => entry.method)).toEqual(['accounts.lane.push'])
   })
+
+  // Release-audit B3 follow-up: every ok status probe (settings hydration, the sidebar, opening
+  // the hosts dropdown) calls `connect()` again, not just an actual reconnect.
+  it('does not republish or repush on a second connect while already subscribed', async () => {
+    const harness = makeClient()
+    expect(await harness.client.connect()).toBe('pushed')
+    harness.calls.length = 0
+    expect(await harness.client.connect()).toBe('already-connected')
+    expect(harness.calls).toEqual([])
+    expect(harness.isSubscribed()).toBe(true)
+  })
+
+  it('republishes and repushes after a disconnect, then a fresh connect', async () => {
+    const harness = makeClient()
+    await harness.client.connect()
+    harness.client.disconnect()
+    harness.calls.length = 0
+    expect(await harness.client.connect()).toBe('pushed')
+    // No second `accounts.lane.status`: the delegation resolved by the first connect is cached
+    // and survives a disconnect (only the subscription and `supported` cache are cleared).
+    expect(harness.calls.map((call) => call.method)).toEqual([
+      'accounts.lane.setDelegableAccounts',
+      'accounts.lane.push'
+    ])
+    expect(harness.isSubscribed()).toBe(true)
+  })
+
+  it('coalesces concurrent connect() calls onto one subscribe/publish/push', async () => {
+    const harness = makeClient()
+    const [first, second] = await Promise.all([harness.client.connect(), harness.client.connect()])
+    expect(first).toBe('pushed')
+    expect(second).toBe('pushed')
+    expect(harness.calls.map((call) => call.method)).toEqual([
+      'accounts.lane.setDelegableAccounts',
+      'accounts.lane.status',
+      'accounts.lane.push'
+    ])
+  })
 })
