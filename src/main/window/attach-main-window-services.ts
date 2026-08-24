@@ -28,6 +28,8 @@ import { registerDaemonManagementHandlers } from '../ipc/pty-management'
 import { registerSshHandlers } from '../ipc/ssh'
 import { registerRemoteWorkspaceHandlers } from '../ipc/remote-workspace'
 import { registerTerminalPresenceHandlers } from '../ipc/terminal-presence'
+import { registerPrincipalConsentBridge } from '../ipc/principal-consent-bridge'
+import { registerPrincipalLaneStatusBridge } from '../ipc/principal-lane-status-bridge'
 import { browserManager } from '../browser/browser-manager'
 import { hasSystemMediaAccess, requestSystemMediaAccess } from '../browser/browser-media-access'
 import type { OrcaRuntimeService, RuntimeWorktreeLifecycleEvent } from '../runtime/orca-runtime'
@@ -160,6 +162,9 @@ export function attachMainWindowServices(
   registerTerminalPresenceHandlers(mainWindow, {
     resolveTerminalHandle: (ptyId) => runtime.resolveExistingTerminalHandleForPty(ptyId)
   })
+  // Why here beside presence: the consent seam is host-only IPC that tears down with this window (S9 §2a).
+  registerPrincipalConsentBridge(mainWindow)
+  registerPrincipalLaneStatusBridge(mainWindow)
   registerFileDropRelay(mainWindow)
   registerTccPromptNoticeHandlers(mainWindow)
   // Why: setupAutoUpdater sync-require()s electron-updater (slow on cold Windows w/ Defender, #7225), so defer past first paint; timer fallback covers crash-looping renderers.
