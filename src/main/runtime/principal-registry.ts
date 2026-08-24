@@ -19,28 +19,14 @@ import {
   type PrincipalRegistryState
 } from './principal-registry-store'
 
-/** The registry rows the principal registry needs; the device registry supplies them. */
-export type PrincipalGrantSource = {
-  getDevice(deviceId: string): PrincipalGrantRow | null
-  listDevices(): readonly PrincipalGrantRow[]
-  /** False after a caught load throw — a destructive sweep must not read zero devices as zero grants. */
-  readonly loadSucceeded: boolean
-}
+import type {
+  LaneGrantSummary,
+  PrincipalGrantRow,
+  PrincipalGrantSource,
+  PrincipalRegistryOptions
+} from './principal-grant-source'
 
-export type PrincipalGrantRow = {
-  deviceId: string
-  name: string
-  token: string
-  pairedAt: number
-  lastSeenAt: number
-  pendingExpiresAt?: number
-}
-
-export type PrincipalRegistryOptions = {
-  /** The runtime's shared auth token, refused by name as a federated link key (§2a rev 16). */
-  runtimeAuthToken?: string | null
-  now?: () => number
-}
+export type { LaneGrantSummary, PrincipalGrantRow, PrincipalGrantSource, PrincipalRegistryOptions }
 
 /**
  * Principals, and the five host-side consent writes that are their only writers (S9 §2a).
@@ -114,6 +100,27 @@ export class PrincipalRegistry {
     return this.state.principals.some((row) => row.principalId === binding.principalId)
       ? binding.principalId
       : null
+  }
+
+  /**
+   * Every pairing grant this host still knows, joined with its lane binding (S9 §2a read side).
+   *
+   * The host-only surface's one grant roster: bind offers an unbound `perPerson` row a device to
+   * name, and status/audit render `boundPrincipalId` and `designated`. A revoked device drops out
+   * with `listDevices`, so a stale row never reaches the surface as a live one.
+   */
+  listGrants(): LaneGrantSummary[] {
+    return this.grants.listDevices().map((device) => {
+      const boundPrincipalId = this.principalOf(device.deviceId)
+      return {
+        deviceId: device.deviceId,
+        label: device.name,
+        perPerson: device.pendingExpiresAt !== undefined,
+        boundPrincipalId,
+        designated:
+          boundPrincipalId !== null && this.delegatedGrantIdOf(boundPrincipalId) === device.deviceId
+      }
+    })
   }
 
   /** Bound grants whose device row still survives — a revoke stops counting immediately. */

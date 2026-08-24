@@ -152,6 +152,60 @@ describe('principal lane consent RPC', () => {
     expect(listed.principals).toHaveLength(1)
   })
 
+  it('serves the status and audit reads over the local socket, refusing an identified one', async () => {
+    grants.add('desktop')
+    const { principalId } = (await call('accounts.lane.createPrincipal', {
+      displayName: 'Ana'
+    })) as { principalId: string }
+    await call('accounts.lane.bindGrant', { deviceId: 'desktop', principalId })
+    await call('accounts.lane.designatePusher', { principalId, deviceId: 'desktop' })
+
+    // The anonymous local caller reads the roster it just built.
+    const status = (await call('accounts.lane.readStatus', null)) as {
+      grants: {
+        deviceId: string
+        label: string
+        boundPrincipalId: string | null
+        designated: boolean
+      }[]
+      principals: {
+        principalId: string
+        laneState: string
+        delegatedGrantId: string | null
+        boundDeviceIds: string[]
+      }[]
+    }
+    expect(status.grants).toEqual([
+      {
+        deviceId: 'desktop',
+        label: 'Ana',
+        perPerson: true,
+        boundPrincipalId: principalId,
+        designated: true
+      }
+    ])
+    expect(status.principals[0]).toMatchObject({
+      principalId,
+      laneState: 'absent',
+      delegatedGrantId: 'desktop',
+      boundDeviceIds: ['desktop']
+    })
+
+    const audit = (await call('accounts.lane.readAudit', null)) as { audit: { action: string }[] }
+    expect(audit.audit.map((row) => row.action)).toEqual(['create-principal', 'bind', 'designate'])
+
+    // The SAME reads over an identified remote transport are refused by the host — a roster is a
+    // host-only fact, so the consent door closes on the read exactly as it does on a write.
+    for (const clientKind of ['mobile', 'runtime'] as const) {
+      await expect(call('accounts.lane.readStatus', null, { clientKind })).rejects.toThrow(
+        /decisions made at the host machine/
+      )
+      await expect(call('accounts.lane.readAudit', null, { clientKind })).rejects.toThrow(
+        /decisions made at the host machine/
+      )
+    }
+  })
+
   it('binds, designates and provisions over the local socket', async () => {
     grants.add('desktop')
     const { principalId } = (await call('accounts.lane.createPrincipal', {
