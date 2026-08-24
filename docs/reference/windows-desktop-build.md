@@ -175,3 +175,30 @@ New-NetFirewallRule -DisplayName "Orca serve" -Direction Inbound -Action Allow `
 (mirrors the scoped pattern Orca's own mobile-pairing rule uses,
 `src/main/runtime/windows-mobile-firewall.ts:229`) — don't leave it open
 on `Public`/`Domain` or unscoped.
+
+## One-time lane setup on the serve box
+
+Before anyone opens a lane-scoped terminal on this box, run the day-one
+`orca lane` sequence once, as the owner, at the shell — this box is
+headless (`orca serve`, above), so there is no desktop AccountsPane to
+drive the equivalent consent writes from:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane create-person --name "<owner>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane create-person --name "<other developer>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane bind --device <owner-desktop> --person "<owner>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane bind --device <other-desktop> --person "<other developer>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane designate --person "<owner>" --device <owner-desktop>
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane designate --person "<other developer>" --device <other-desktop>
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<owner>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<other developer>"
+```
+
+create-person twice, bind each paired device, designate each person's
+desktop as their lane's pusher, then provision both lanes — in that
+order, since designate is required before provision will succeed
+(`accounts.lane.no_pusher_designated` otherwise). The one remaining
+step, ticking each person's delegable accounts, has no CLI verb and is
+done from each person's own desktop Accounts pane instead. Full verb
+list, refusal codes and rationale: `docs/reference/agent-identity-s9-design.md`
+§9 ("Day-one setup") and §10 item 39.
