@@ -76,21 +76,25 @@ function laneCopy(lane: TerminalLaneAccountChipState): string {
 export function TerminalPresenceChip({
   state,
   lane,
+  laneNote,
   rootClassName
 }: {
   state: TerminalPresenceChipState | null
   /**
-   * S9 §2k's two additive row fields, already resolved. Absent on a non-lane pane.
-   *
-   * DEFERRED TO S9d, not dead by accident: no desktop call site passes it yet, because the
-   * renderer has no per-pane feed of the `terminal.list` lane fields at all — building one is the
-   * desktop-UI slice (§6, S9d), which also moves the presence rows onto the owner-label join.
+   * S9 §2k's two additive row fields for an OWNED (`'grant'`) lane, already resolved by
+   * `resolveTerminalLaneAccountChipState`: the `owner · account` label plus the usage percent.
+   * Absent on a non-owned pane; `laneNote` carries the shared/remote/WSL cases instead.
    */
   lane?: TerminalLaneAccountChipState | null
+  /**
+   * The already-translated note for a NON-owned attribution (S9 §2h): "shared credential", "runs on
+   * a remote host", "runs in WSL". Absent for an owned or unattributed pane.
+   */
+  laneNote?: string | null
   rootClassName?: string
 }): ReactElement | null {
   useTerminalPresenceLastSeenTick(state?.activity === 'stale')
-  if (!state && !lane) {
+  if (!state && !lane && !laneNote) {
     return null
   }
   return (
@@ -103,6 +107,10 @@ export function TerminalPresenceChip({
       {lane ? (
         <span className="text-muted-foreground" data-terminal-lane-account>
           {laneCopy(lane)}
+        </span>
+      ) : laneNote ? (
+        <span className="text-muted-foreground" data-terminal-lane-note>
+          {laneNote}
         </span>
       ) : null}
     </div>

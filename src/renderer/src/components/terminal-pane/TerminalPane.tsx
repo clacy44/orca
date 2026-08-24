@@ -59,7 +59,7 @@ import { resolveLeafCloseCopyKind } from '../terminal/terminal-close-copy-kind'
 import { RUNNING_CLOSE_PROBE_TIMEOUT_MS } from '../terminal/running-terminal-close-guard'
 import CodexRestartChip from '../CodexRestartChip'
 import { MobileDriverOverlay } from './MobileDriverOverlay'
-import { TerminalPresenceChip } from './TerminalPresenceChip'
+import { TerminalPresenceLaneChip } from './TerminalPresenceLaneChip'
 import { resolveTerminalPresenceChipState } from './terminal-presence-chip-state'
 import { getPresenceForPty } from '@/lib/pane-manager/terminal-presence-state'
 import { stripSshReconnectOwnedErrorLines, TerminalErrorToast } from './TerminalErrorToast'
@@ -3267,14 +3267,14 @@ function TerminalPane(
         }
         // Why beside the driver overlay and not in the pane header: the header renders only with titles
         // or always-on headers enabled, so a chip mounted there is invisible to most panes.
+        // Why no early return on empty presence now (S9 §2h): a pane with no peer can still carry a
+        // credential-lane attribution to show, so the lane chip renders whenever either has something.
         const presence = resolveTerminalPresenceChipState(getPresenceForPty(ptyId))
-        if (!presence) {
-          return null
-        }
         return createPortal(
-          <TerminalPresenceChip
+          <TerminalPresenceLaneChip
             key={`terminal-presence-${pane.id}-${ptyId}`}
-            state={presence}
+            ptyId={ptyId}
+            presenceState={presence}
             rootClassName="terminal-presence-chip"
           />,
           pane.container,

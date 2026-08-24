@@ -3043,6 +3043,15 @@
             "stale": "{{value0}} attached · last seen {{value1}}m ago",
             "laneUsageUnavailable": "{{value0}} · usage unavailable on this host",
             "laneUsagePercent": "{{value0}} · {{value1}}%"
+          },
+          "TerminalOpenInMyLaneAction": {
+            "open": "Open in my lane"
+          },
+          "TerminalPresenceLaneChip": {
+            "shared": "Shared credential",
+            "remote": "Runs on a remote host",
+            "wsl": "Runs in WSL",
+            "openFailed": "Could not open this terminal in your lane."
           }
         }
       },

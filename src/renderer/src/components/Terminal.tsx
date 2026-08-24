@@ -27,6 +27,7 @@ import {
 import { Button } from '@/components/ui/button'
 import TabBar from './tab-bar/TabBar'
 import TerminalPane from './terminal-pane/TerminalPane'
+import { useTerminalCredentialLaneFeed } from './terminal-pane/use-terminal-credential-lane-feed'
 import {
   ORCA_EDITOR_REQUEST_FILE_CLOSE_EVENT,
   ORCA_EDITOR_SAVE_AND_CLOSE_EVENT,
@@ -288,6 +289,9 @@ function getKeybindingContext(target: EventTarget | null): KeybindingContext {
 }
 
 function Terminal(): React.JSX.Element | null {
+  // S9 §2h: hydrate the per-pane credential-lane store from the local host's terminal.list, so every
+  // pane's presence chip can attribute its Claude credential.
+  useTerminalCredentialLaneFeed()
   const mountedWorktreeIdsRef = useRef(new Set<string>())
   // Why an array: browser-guest eviction needs activation order (LRU), not just membership.
   const browserGuestWorktreeRecencyRef = useRef<string[]>([])
