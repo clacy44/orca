@@ -6,6 +6,7 @@ import {
 import type { PrincipalLookup } from './terminal-credential-lane-resolution'
 import type { RuntimeTerminalLaneAccountLabel } from '../../shared/runtime-types'
 import { getLaneWireService } from './lane-wire-service'
+import { attachComposedLaneWire, detachComposedLaneWire } from './lane-wire-composition'
 
 /**
  * Where the principal registry becomes the host's live authority (S9 §2a, §6).
@@ -56,6 +57,9 @@ export function attachPrincipalLaneHost(input: {
     linkPrincipalOf: (homePeerFingerprint) => registry.linkPrincipalOf(homePeerFingerprint)
   }
   attachPrincipalLaneConsentService(new PrincipalLaneConsentService(registry))
+  // Bound to the same registry, same lifetime, for the same reason as the consent surface above
+  // (release-audit B1): the wire's lanes derive from this registry's grant rows.
+  attachComposedLaneWire(registry)
   input.runtime.setLaneAccountRowResolvers?.({
     laneAccountLabelOf: (principalId) => laneAccountLabel(registry, principalId)
   })
@@ -92,6 +96,7 @@ function laneAccountLabel(
  */
 export function detachPrincipalLaneHost(runtime: PrincipalLaneHostRuntime): void {
   attachPrincipalLaneConsentService(null)
+  detachComposedLaneWire()
   runtime.setPrincipalLaneLookup?.(null)
   // The label resolver closes over the registry whose grant source is gone: left attached, the
   // host keeps minting PEER-VISIBLE owner labels from rows nothing can revoke any more (§2h).
