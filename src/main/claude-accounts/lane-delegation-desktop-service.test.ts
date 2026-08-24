@@ -200,6 +200,26 @@ describe('LaneDelegationDesktopService', () => {
     expect(getLaneDelegationLeaseStore()).not.toBeNull()
   })
 
+  // Release-audit B3 follow-up: an explicit "Disconnect" was silently undone by the next
+  // unrelated selection change — a Claude account switch reconnected the closed client and
+  // pushed a credential to it.
+  it('a selection change does not reconnect or push to a host the user explicitly disconnected', async () => {
+    const store = makeStore()
+    startLaneDelegationDesktopService({ store })
+    notifyLaneDelegationHostReachable('env-1')
+    await flush()
+    const host = hostClients.get('env-1')!
+    notifyLaneDelegationHostUnreachable('env-1')
+    host.call.mockClear()
+    host.subscribeLaneStatus.mockClear()
+
+    store.emitSettingsChanged({ activeClaudeManagedAccountId: 'acct-1' })
+    await flush()
+
+    expect(host.call).not.toHaveBeenCalled()
+    expect(host.subscribeLaneStatus).not.toHaveBeenCalled()
+  })
+
   it('the explicit delegate action pushes the named account onto the named host', async () => {
     startLaneDelegationDesktopService({ store: makeStore() })
     const delegated = await delegateAccountToLaneHost('env-1', 'acct-1')

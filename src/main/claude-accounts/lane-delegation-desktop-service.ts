@@ -148,7 +148,12 @@ export class LaneDelegationDesktopService {
         'activeClaudeManagedAccountIdsByRuntime' in updates
       ) {
         for (const client of this.clients.values()) {
-          void client.pushSelection()
+          // Skip a host the user explicitly disconnected: it stays in the map (§2e's lease never
+          // releases on a drop), but an unrelated selection change must not silently reconnect it
+          // and push a credential to a host that was deliberately closed.
+          if (client.isConnected()) {
+            void client.pushSelection()
+          }
         }
       }
     })
