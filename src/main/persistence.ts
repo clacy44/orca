@@ -311,6 +311,7 @@ import {
   deleteRemovedTerminalScrollbackSnapshotsAsync,
   migrateWorkspaceSessionTerminalScrollbackSnapshotsAsync
 } from './terminal-scrollback-snapshot-async-migration'
+import { migrateTerminalTabId } from './persistence-terminal-tab-ptyid-rebind'
 import { track } from './telemetry/client'
 import { getCohortAtEmit } from './telemetry/cohort-classifier'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from './startup/startup-diagnostics'
@@ -2564,8 +2565,8 @@ function createMinimalPersistedTerminalTab(args: {
     color: null,
     sortOrder: args.existingTabCount,
     createdAt: Date.now(),
-    ...(args.startupCwd ? { startupCwd: args.startupCwd } : {}),
-    pendingActivationSpawn: true
+    // Why: pendingActivationSpawn is a renderer-transient flag; this row is written straight to disk, so it must not be set here.
+    ...(args.startupCwd ? { startupCwd: args.startupCwd } : {})
   }
 }
 
@@ -7009,7 +7010,7 @@ export class Store {
       expectedSourceBinding?: PtyBindingSourceExpectation
     },
     hostId?: string | null
-  ): boolean {
+  ): boolean | 'leaf_id_not_persisted' {
     const resolvedHostId = this.resolveHostId(hostId)
     const session = this.getWorkspaceSession(resolvedHostId)
     const paneKey = `${args.tabId}:${args.leafId}`
@@ -7101,25 +7102,36 @@ export class Store {
     if (tab) {
       tab.ptyId = args.ptyId
     } else {
-      terminalMembershipChanged = true
-      // Why: pty:spawn can beat the debounced writer; persist a minimal tab so hydration won't prune the binding as orphaned.
-      const nextTabs = [
-        ...(tabs ?? []),
-        createMinimalPersistedTerminalTab({
-          ...args,
-          worktreeId: bindingWorktreeId,
-          existingTabCount: tabs?.length ?? 0
-        })
-      ]
-      session.tabsByWorktree = {
-        ...session.tabsByWorktree,
-        [bindingWorktreeId]: nextTabs
-      }
-      session.activeWorktreeId ??= bindingWorktreeId
-      session.activeTabId ??= args.tabId
-      session.activeTabIdByWorktree = {
-        ...session.activeTabIdByWorktree,
-        [bindingWorktreeId]: session.activeTabIdByWorktree?.[bindingWorktreeId] ?? args.tabId
+      const rebindTarget = tabs?.find((t) => t.ptyId === args.ptyId)
+      if (rebindTarget) {
+        terminalMembershipChanged = true
+        // Why: the ptyId already owns a row under a stale tabId; migrate every
+        // other structure keyed by that id (active selection, unified-tab
+        // mirror, leaf layout incl. split siblings, pane incarnation/lane/
+        // tombstone state) before renaming, or they strand under the old id.
+        migrateTerminalTabId(session, rebindTarget.id, args.tabId)
+        rebindTarget.id = args.tabId
+      } else {
+        terminalMembershipChanged = true
+        // Why: pty:spawn can beat the debounced writer; persist a minimal tab so hydration won't prune the binding as orphaned.
+        const nextTabs = [
+          ...(tabs ?? []),
+          createMinimalPersistedTerminalTab({
+            ...args,
+            worktreeId: bindingWorktreeId,
+            existingTabCount: tabs?.length ?? 0
+          })
+        ]
+        session.tabsByWorktree = {
+          ...session.tabsByWorktree,
+          [bindingWorktreeId]: nextTabs
+        }
+        session.activeWorktreeId ??= bindingWorktreeId
+        session.activeTabId ??= args.tabId
+        session.activeTabIdByWorktree = {
+          ...session.activeTabIdByWorktree,
+          [bindingWorktreeId]: session.activeTabIdByWorktree?.[bindingWorktreeId] ?? args.tabId
+        }
       }
     }
     if (!isTerminalLeafId(args.leafId)) {
@@ -7131,7 +7143,8 @@ export class Store {
         restoreSession()
         throw err
       }
-      return true
+      // Why: distinguishable from a real bind — the leaf-keyed layout was never touched.
+      return 'leaf_id_not_persisted'
     }
     const layout = session.terminalLayoutsByTabId?.[args.tabId]
     if (layout) {

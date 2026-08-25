@@ -9834,6 +9834,50 @@ describe('connectPanePty', () => {
     )
   })
 
+  // B5 (#8291, SSH/relay path): `isAlternateScreen` on the daemon's snapshot
+  // is host-authoritative — it is only ever set from a live reattach's own
+  // modes (daemon-pty-adapter.ts), never from a cold-restore payload — so a
+  // bounded relay replay window that itself carries no ?1049h bytes must
+  // still keep mouse reporting when the host says the owner is live and on
+  // the alternate screen.
+  it('keeps mouse reporting on a warm reattach whose only alt-screen signal is the host-authoritative flag', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport('tab-pty')
+    transport.connect.mockImplementation(async ({ sessionId }: { sessionId?: string }) =>
+      sessionId
+        ? {
+            id: sessionId,
+            snapshot: 'zsh$ ',
+            isAlternateScreen: true
+          }
+        : null
+    )
+    transportFactoryQueue.push(transport)
+    setReattachPaneTitle('zsh')
+
+    const pane = createPane(1)
+    const textarea = {} as HTMLTextAreaElement
+    configureTerminalFocusMode(pane, textarea)
+    await withMockedDocumentActiveElement(textarea, async () => {
+      const manager = createManager(1)
+      const deps = createDeps({
+        restoredLeafId: LEAF_1,
+        restoredPtyIdByLeafId: { [LEAF_1]: 'tab-pty' }
+      })
+
+      connectPanePty(pane as never, manager as never, deps as never)
+      await flushAsyncTicks(20)
+
+      const chosen = (pane.terminal.write as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => String(call[0]))
+        .find(
+          (data) =>
+            data === POST_REPLAY_REATTACH_RESET || data === POST_REPLAY_REATTACH_RESET_KEEP_MOUSE
+        )
+      expect(chosen).toBe(POST_REPLAY_REATTACH_RESET_KEEP_MOUSE)
+    })
+  })
+
   it('does not treat persisted tab launchAgent metadata as a live agent reattach', async () => {
     const { connectPanePty } = await import('./pty-connection')
     const transport = createMockTransport('tab-pty')

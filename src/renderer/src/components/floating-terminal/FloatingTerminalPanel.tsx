@@ -942,7 +942,7 @@ export function FloatingTerminalPanel({
       }
       if (item.contentType === 'terminal') {
         // closeTerminalTab runs its own pin guard + post-confirm force-reenter; arm on actual close.
-        closeTerminalTab(item.entityId, { onClosed: armIfEmptying })
+        void closeTerminalTab(item.entityId, { onClosed: armIfEmptying })
         return
       }
       const state = useAppStore.getState()
@@ -1920,7 +1920,7 @@ export function FloatingTerminalPanel({
                           if (shouldDeferParkedPtyExitTabClose(tab.id, ptyId)) {
                             return
                           }
-                          closeTerminalTab(tab.id, {
+                          void closeTerminalTab(tab.id, {
                             reason: 'pty-exit',
                             lifecyclePtyId: ptyId
                           })

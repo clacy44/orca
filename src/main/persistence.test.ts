@@ -6744,6 +6744,187 @@ describe('Store', () => {
     expect(statSync(dataFile()).ino).toBe(inoBefore)
   })
 
+  it('rebinds an existing tab row by ptyId instead of minting a duplicate for a fresh tabId', async () => {
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: 'tab1',
+      tabsByWorktree: {
+        wt1: [
+          {
+            id: 'tab1',
+            worktreeId: 'wt1',
+            title: 'Terminal',
+            customTitle: null,
+            color: null,
+            sortOrder: 0,
+            createdAt: 1,
+            ptyId: 'daemon-pty'
+          }
+        ]
+      },
+      terminalLayoutsByTabId: {
+        tab1: {
+          root: { type: 'leaf', leafId: TEST_LEAF_1 },
+          activeLeafId: TEST_LEAF_1,
+          expandedLeafId: null,
+          ptyIdsByLeafId: { [TEST_LEAF_1]: 'daemon-pty' }
+        }
+      }
+    })
+
+    // A fresh tabId re-binding a ptyId that already owns a row (e.g. after a duplicate-close race).
+    store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab2',
+      leafId: TEST_LEAF_2,
+      ptyId: 'daemon-pty'
+    })
+
+    const persisted = readDataFile() as {
+      workspaceSession: { tabsByWorktree: Record<string, { id: string; ptyId: string }[]> }
+    }
+    const tabs = persisted.workspaceSession.tabsByWorktree.wt1
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ id: 'tab2', ptyId: 'daemon-pty' })
+  })
+
+  it('migrates active selection, unified tabs, split layout siblings and incarnations when rebinding a stale tab id', async () => {
+    const TEST_LEAF_3 = '33333333-3333-4333-8333-333333333333'
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: 'tab1',
+      activeTabIdByWorktree: { wt1: 'tab1' },
+      tabsByWorktree: {
+        wt1: [
+          {
+            id: 'tab1',
+            worktreeId: 'wt1',
+            title: 'Terminal',
+            customTitle: null,
+            color: null,
+            sortOrder: 0,
+            createdAt: 1,
+            ptyId: 'daemon-pty'
+          }
+        ]
+      },
+      unifiedTabs: {
+        wt1: [
+          {
+            id: 'tab1',
+            entityId: 'tab1',
+            groupId: 'g1',
+            worktreeId: 'wt1',
+            contentType: 'terminal',
+            label: 'Terminal',
+            customLabel: null,
+            color: null,
+            sortOrder: 0,
+            createdAt: 1
+          }
+        ]
+      },
+      terminalLayoutsByTabId: {
+        tab1: {
+          root: {
+            type: 'split',
+            direction: 'vertical',
+            first: { type: 'leaf', leafId: TEST_LEAF_1 },
+            second: { type: 'leaf', leafId: TEST_LEAF_3 }
+          },
+          activeLeafId: TEST_LEAF_1,
+          expandedLeafId: null,
+          ptyIdsByLeafId: { [TEST_LEAF_1]: 'daemon-pty', [TEST_LEAF_3]: 'sibling-pty' }
+        }
+      },
+      terminalPtyIncarnationsByPaneKey: {
+        [`tab1:${TEST_LEAF_1}`]: 'inc-1'
+      }
+    })
+
+    store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab2',
+      leafId: TEST_LEAF_2,
+      ptyId: 'daemon-pty'
+    })
+
+    const persisted = readDataFile() as {
+      workspaceSession: {
+        activeTabId: string | null
+        activeTabIdByWorktree: Record<string, string | null>
+        unifiedTabs: Record<string, { id: string; entityId: string }[]>
+        terminalLayoutsByTabId: Record<
+          string,
+          { ptyIdsByLeafId: Record<string, string>; root: unknown }
+        >
+        terminalPtyIncarnationsByPaneKey: Record<string, string>
+      }
+    }
+    const session = persisted.workspaceSession
+
+    expect(session.activeTabId).toBe('tab2')
+    expect(session.activeTabIdByWorktree.wt1).toBe('tab2')
+    expect(session.unifiedTabs.wt1).toHaveLength(1)
+    expect(session.unifiedTabs.wt1[0]).toMatchObject({ id: 'tab2', entityId: 'tab2' })
+    expect(Object.keys(session.terminalLayoutsByTabId)).toEqual(['tab2'])
+    // The split's sibling pane must still be reachable from the (renamed) tab.
+    expect(session.terminalLayoutsByTabId.tab2.ptyIdsByLeafId).toMatchObject({
+      [TEST_LEAF_1]: 'daemon-pty',
+      [TEST_LEAF_3]: 'sibling-pty',
+      [TEST_LEAF_2]: 'daemon-pty'
+    })
+    expect(session.terminalPtyIncarnationsByPaneKey).toMatchObject({
+      [`tab2:${TEST_LEAF_1}`]: 'inc-1'
+    })
+    expect(session.terminalPtyIncarnationsByPaneKey[`tab1:${TEST_LEAF_1}`]).toBeUndefined()
+  })
+
+  it('never writes pendingActivationSpawn to the persisted file when minting a binding-recovery tab', async () => {
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: null,
+      tabsByWorktree: { wt1: [] },
+      terminalLayoutsByTabId: {}
+    })
+
+    store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab-new',
+      leafId: TEST_LEAF_1,
+      ptyId: 'daemon-pty-2'
+    })
+
+    const raw = readFileSync(dataFile(), 'utf-8')
+    expect(raw).not.toContain('pendingActivationSpawn')
+  })
+
+  it('returns a distinguishable not-persisted result for a non-UUID leafId', async () => {
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: null,
+      tabsByWorktree: { wt1: [] },
+      terminalLayoutsByTabId: {}
+    })
+
+    const result = store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab-legacy',
+      leafId: 'legacy-non-uuid-leaf-id',
+      ptyId: 'daemon-pty-3'
+    })
+
+    expect(result).toBe('leaf_id_not_persisted')
+  })
+
   // ── worktreeMeta startup GC ────────────────────────────────────────
 
   it('garbage-collects stale local worktreeMeta at load with a 30-day grace', async () => {

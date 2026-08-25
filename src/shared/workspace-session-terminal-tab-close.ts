@@ -163,10 +163,36 @@ export function closeTerminalTabInWorkspaceSession(
   }
 
   const closingPtyIds = collectTabPtyIds(session, tabId, terminalRow?.ptyId)
+
+  // Why: RC2 can leave duplicate rows bound to the same ptyId (a reattach that
+  // minted a fresh tab instead of rebinding). Collapse those duplicates into
+  // this close so the PTY's last *real* referrer is this operation and not a
+  // leftover row — otherwise close-all never converges (#RC3/B4).
+  const duplicateTabIds = new Set<string>()
+  if (closingPtyIds.size > 0) {
+    for (const tab of session.tabsByWorktree[worktreeId] ?? []) {
+      if (tab.id === tabId || !tab.ptyId || !closingPtyIds.has(tab.ptyId)) {
+        continue
+      }
+      // Why not "no layout of its own": persistPtyBinding always mints a
+      // minimal layout alongside a row, so an RC2 leftover has one too — that
+      // can't distinguish it from a deliberate shared-pty tab. What can: a
+      // duplicate references no *other* live session — every ptyId it owns
+      // is already among the ones this close is killing. A tab that also
+      // owns a distinct pty (e.g. a second real pane) is not swept.
+      const isSubsetOfClosing = [...collectTabPtyIds(session, tab.id, tab.ptyId)].every((ptyId) =>
+        closingPtyIds.has(ptyId)
+      )
+      if (isSubsetOfClosing) {
+        duplicateTabIds.add(tab.id)
+      }
+    }
+  }
+
   const otherPtyIds = new Set<string>()
   for (const tabs of Object.values(session.tabsByWorktree)) {
     for (const tab of tabs) {
-      if (tab.id !== tabId) {
+      if (tab.id !== tabId && !duplicateTabIds.has(tab.id)) {
         for (const ptyId of collectTabPtyIds(session, tab.id, tab.ptyId)) {
           otherPtyIds.add(ptyId)
         }
@@ -176,6 +202,12 @@ export function closeTerminalTabInWorkspaceSession(
   const ptyIdsToKill = [...closingPtyIds].filter((ptyId) => !otherPtyIds.has(ptyId))
   const closedVisibleIds = new Set(unifiedTerminalTabs.map((tab) => tab.id))
   closedVisibleIds.add(tabId)
+  for (const duplicateTabId of duplicateTabIds) {
+    closedVisibleIds.add(duplicateTabId)
+    for (const duplicateUnified of findUnifiedTerminalTabs(session, worktreeId, duplicateTabId)) {
+      closedVisibleIds.add(duplicateUnified.id)
+    }
+  }
   const nextTabs = (session.unifiedTabs?.[worktreeId] ?? []).filter(
     (tab) => !closedVisibleIds.has(tab.id)
   )
@@ -206,7 +238,9 @@ export function closeTerminalTabInWorkspaceSession(
     ...session,
     tabsByWorktree: {
       ...session.tabsByWorktree,
-      [worktreeId]: (session.tabsByWorktree[worktreeId] ?? []).filter((tab) => tab.id !== tabId)
+      [worktreeId]: (session.tabsByWorktree[worktreeId] ?? []).filter(
+        (tab) => tab.id !== tabId && !duplicateTabIds.has(tab.id)
+      )
     },
     terminalLayoutsByTabId: { ...session.terminalLayoutsByTabId },
     unifiedTabs: { ...session.unifiedTabs, [worktreeId]: nextTabs },
@@ -218,6 +252,10 @@ export function closeTerminalTabInWorkspaceSession(
   }
   delete next.terminalLayoutsByTabId[tabId]
   delete next.remoteSessionIdsByTabId![tabId]
+  for (const duplicateTabId of duplicateTabIds) {
+    delete next.terminalLayoutsByTabId[duplicateTabId]
+    delete next.remoteSessionIdsByTabId![duplicateTabId]
+  }
   if (nextLayout) {
     next.tabGroupLayouts![worktreeId] = nextLayout
   } else {
@@ -229,7 +267,12 @@ export function closeTerminalTabInWorkspaceSession(
     delete next.activeGroupIdByWorktree![worktreeId]
   }
   for (const [paneKey, record] of Object.entries(next.sleepingAgentSessionsByPaneKey ?? {})) {
-    if (paneKey.startsWith(`${tabId}:`) || record.tabId === tabId) {
+    if (
+      paneKey.startsWith(`${tabId}:`) ||
+      record.tabId === tabId ||
+      (record.tabId !== undefined && duplicateTabIds.has(record.tabId)) ||
+      [...duplicateTabIds].some((duplicateTabId) => paneKey.startsWith(`${duplicateTabId}:`))
+    ) {
       delete next.sleepingAgentSessionsByPaneKey![paneKey]
     }
   }

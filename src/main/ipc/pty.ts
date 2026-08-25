@@ -832,7 +832,8 @@ function persistAdmittedStablePaneBinding(args: {
   if (persisted === false) {
     throw new Error('terminal_pane_owner_changed')
   }
-  return true
+  // Why: 'leaf_id_not_persisted' means the leaf-keyed binding was skipped, not bound — let the caller retry via its fallback path.
+  return persisted === true
 }
 
 async function attachStablePaneOwner(

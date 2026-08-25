@@ -14,6 +14,7 @@ import {
 import { extractOscTitleScanTail } from '../../shared/osc-title-scan-tail'
 import { planWorktreeSortOrderUpdates } from '../../shared/worktree/sort-order-update'
 import { isArtifactSharingEnabled } from '../../shared/artifact-sharing-gate'
+import { MobileSessionTerminalMaterializationLedger } from './mobile-session-terminal-materialization-ledger'
 import { sortDirEntries } from '../../shared/file-name-sort'
 import { isServerDriveListRequest, listWindowsDrives } from './windows-drive-listing'
 import { extractLastOsc7Uri, extractOscScanTail } from '../daemon/osc7-uri-extraction'
@@ -2912,6 +2913,8 @@ export class OrcaRuntimeService {
   private readonly rendererPublicationThrottle = new RendererPublicationThrottle()
   private tabs = new Map<string, RuntimeSyncedTab>()
   private mobileSessionTabsByWorktree = new Map<string, RuntimeMobileSessionTabsSnapshot>()
+  private readonly mobileSessionTerminalMaterializationLedger =
+    new MobileSessionTerminalMaterializationLedger()
   // Why: renderer publication ordering must be judged against the renderer's
   // own last-accepted (epoch, version) — never against the stored snapshot's
   // version, which main-local touches bump independently and can push
@@ -8152,7 +8155,13 @@ export class OrcaRuntimeService {
           !this.notifier?.focusTerminal ||
           this.shouldMaterializeHeadlessMobileSessionTab(snapshot!, tab))
       if (shouldMaterializePendingTerminal) {
-        const sessionId = tab.ptyId ?? tab.parentLayout?.ptyIdsByLeafId?.[tab.leafId] ?? undefined
+        // Why: a dead-PTY tab has no live ptyId to reattach to, but a prior activation
+        // may already have materialized one — reuse it so repeat taps do not each mint
+        // a fresh serve-<uuid> (RC4/B6).
+        const sessionId =
+          tab.ptyId ??
+          tab.parentLayout?.ptyIdsByLeafId?.[tab.leafId] ??
+          this.mobileSessionTerminalMaterializationLedger.get(tab.id)
         const targetGroupId = snapshot?.tabGroups?.find((group) =>
           group.tabOrder.includes(tab.parentTabId)
         )?.id
@@ -8180,23 +8189,31 @@ export class OrcaRuntimeService {
           }
         }
         try {
-          await this.createRuntimeOwnedMobileSessionTerminal(worktreeId, targetsHost, undefined, {
-            credentialLane: materializeLane,
-            // Why: this call site is not a create — it reattaches or respawns the pane the tapped
-            // tab already names, so §2a(i)'s identity drop never reaches it.
-            identity: {
-              tabId: tab.parentTabId,
-              leafId: tab.leafId,
-              sessionId
-            },
-            cwd: tab.startupCwd,
-            command: agentStartup.command,
-            env: agentStartup.env,
-            startupCommandDelivery: agentStartup.startupCommandDelivery,
-            launchConfig: agentStartup.launchConfig,
-            launchAgent: tab.launchAgent,
-            targetGroupId
-          })
+          const materialized = await this.createRuntimeOwnedMobileSessionTerminal(
+            worktreeId,
+            targetsHost,
+            undefined,
+            {
+              credentialLane: materializeLane,
+              // Why: this call site is not a create — it reattaches or respawns the pane the tapped
+              // tab already names, so §2a(i)'s identity drop never reaches it.
+              identity: {
+                tabId: tab.parentTabId,
+                leafId: tab.leafId,
+                sessionId
+              },
+              cwd: tab.startupCwd,
+              command: agentStartup.command,
+              env: agentStartup.env,
+              startupCommandDelivery: agentStartup.startupCommandDelivery,
+              launchConfig: agentStartup.launchConfig,
+              launchAgent: tab.launchAgent,
+              targetGroupId
+            }
+          )
+          if (materialized.tab.ptyId) {
+            this.mobileSessionTerminalMaterializationLedger.record(tab.id, materialized.tab.ptyId)
+          }
         } catch (err) {
           if (sessionId && parseAppSshPtyId(sessionId)) {
             // Why: an expired SSH reattach clears durable bindings in the store,
@@ -16691,8 +16708,8 @@ export class OrcaRuntimeService {
           customTitle: null,
           color: null,
           sortOrder: tabsById.size,
-          createdAt: Date.now(),
-          pendingActivationSpawn: true
+          createdAt: Date.now()
+          // Why: pendingActivationSpawn is a renderer-transient flag; this row is written straight to disk, so it must not be set here.
         }
         tabsById.set(claim.tabId, tab)
       }
@@ -27833,8 +27850,14 @@ export class OrcaRuntimeService {
       parentLayout,
       isActive: activate
     }
+    // Why: the live pty's tabId can diverge from the identity we were asked to
+    // reattach (e.g. a fresh spawn), which would otherwise strand the original
+    // pending row under an id nothing dedupes against (RC4/B8).
+    const originallyRequestedTabId = opts.identity
+      ? `${opts.identity.tabId}::${opts.identity.leafId}`
+      : undefined
     const tabs = (existing?.tabs ?? [])
-      .filter((candidate) => candidate.id !== tab.id)
+      .filter((candidate) => candidate.id !== tab.id && candidate.id !== originallyRequestedTabId)
       .map((candidate) => ({
         ...candidate,
         ...(candidate.type === 'terminal' && candidate.parentTabId === parentTabId

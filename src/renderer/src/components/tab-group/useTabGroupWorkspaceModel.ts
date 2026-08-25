@@ -236,7 +236,7 @@ export function useTabGroupWorkspaceModel({
       if (item.contentType === 'terminal') {
         // Why: closeTerminalTab can defer behind a pin / running-process dialog, so the
         // empty check has to run on the actual close — never on cancel.
-        closeTerminalTab(
+        void closeTerminalTab(
           item.entityId,
           opts?.skipEmptyCheck ? undefined : { onClosed: leaveWorktreeIfEmpty }
         )
@@ -298,7 +298,7 @@ export function useTabGroupWorkspaceModel({
         if (item.contentType === 'terminal' && isWebRuntimeSessionActive(runtimeEnvironmentId)) {
           // Why: revoke local resume + hook authority before the host removes its canonical tab.
           // No running-process prompt: a bulk close of N busy tabs would be a modal storm.
-          closeTerminalTab(item.entityId, { skipRunningProcessConfirm: true })
+          void closeTerminalTab(item.entityId, { skipRunningProcessConfirm: true })
           continue
         }
         if (item.contentType === 'browser') {

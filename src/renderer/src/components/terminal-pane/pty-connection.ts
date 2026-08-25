@@ -5530,9 +5530,16 @@ export function connectPanePty(
       if (shouldPreserveAgentReattachModes()) {
         return buildPostReplayLiveAgentReattachReset(payload)
       }
-      // Why: an alt-screen pane is a live TUI Orca just does not recognise as an agent, and the
-      // replay already re-armed its mouse modes — keep them instead of wiping them (#8291).
-      return (isAlternateScreen ?? kittyKeyboardModes.isAlternateScreen)
+      // Why OR both signals: `isAlternateScreen` is the host's live snapshot
+      // modes (set only on a genuinely live reattach, daemon-pty-adapter.ts —
+      // cold restore never sets it), so it survives a bounded relay replay
+      // window that doesn't itself contain ?1049h. kittyKeyboardModes is
+      // scanned fresh from the bytes this reattach is actually replaying, so
+      // it still catches alt-screen panes the host signal doesn't cover.
+      // Either way this only decides between the two mouse-clearing-safe
+      // profiles now that the daemon (#12101) no longer launders a dead
+      // owner's mouse bits forward as live.
+      return isAlternateScreen || kittyKeyboardModes.isAlternateScreen
         ? POST_REPLAY_REATTACH_RESET_KEEP_MOUSE
         : POST_REPLAY_REATTACH_RESET
     }

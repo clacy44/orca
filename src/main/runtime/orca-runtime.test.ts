@@ -27657,6 +27657,86 @@ describe('OrcaRuntimeService', () => {
     ])
   })
 
+  it('B6 regression: two activations of one dead-PTY tab spawn at most one PTY', async () => {
+    // Why: RC4 — a tab with no live/persisted ptyId re-minted a fresh
+    // serve-<uuid> on every activation once its materialized PTY died.
+    // The materialization ledger must make the second activation reattach
+    // to the first activation's session id instead of spawning again.
+    let spawnCount = 0
+    const spawn = vi.fn().mockImplementation(() => {
+      spawnCount += 1
+      return Promise.resolve({ id: `fresh-mobile-pty-${spawnCount}` })
+    })
+    const { runtimeStore } = makeRuntimeStoreWithWorkspaceSession(
+      makeWorkspaceSessionWithHeadlessTerminal({
+        tabsByWorktree: {
+          [TEST_WORKTREE_ID]: [
+            {
+              id: 'host-tab',
+              ptyId: null,
+              worktreeId: TEST_WORKTREE_ID,
+              title: 'Persisted Terminal',
+              customTitle: null,
+              color: null,
+              sortOrder: 0,
+              createdAt: 1
+            }
+          ]
+        },
+        terminalLayoutsByTabId: {
+          'host-tab': makeHeadlessTerminalLayout({ [HEADLESS_LEAF_ID]: undefined })
+        }
+      })
+    )
+    const runtime = new OrcaRuntimeService(runtimeStore as never)
+    runtime.setNotifier({
+      worktreesChanged: vi.fn(),
+      reposChanged: vi.fn(),
+      activateWorktree: vi.fn(),
+      createTerminal: vi.fn(),
+      revealTerminalSession: vi.fn(),
+      splitTerminal: vi.fn(),
+      renameTerminal: vi.fn(),
+      focusTerminal: vi.fn(),
+      closeTerminal: vi.fn(),
+      sleepWorktree: vi.fn(),
+      terminalFitOverrideChanged: vi.fn(),
+      terminalDriverChanged: vi.fn()
+    })
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => []
+    })
+
+    await runtime.activateMobileSessionTab(`id:${TEST_WORKTREE_ID}`, 'host-tab', HEADLESS_LEAF_ID, {
+      notifyClients: false
+    })
+    expect(spawn).toHaveBeenCalledTimes(1)
+    const firstSpawnedPtyId = (await spawn.mock.results[0]?.value)?.id as string
+
+    // Why: simulate the materialized PTY dying, then a cache rebuild that
+    // re-derives tabs from the still-unpersisted (ptyId: null) session —
+    // exactly what strands the identity across a worktree cache reload.
+    // Only the materialization ledger (keyed process-side, not on disk)
+    // remembers what was actually spawned once the cache forgets.
+    runtime.onPtyExit(firstSpawnedPtyId, 0)
+    runtime['hydrateHeadlessMobileSessionTabsFromWorkspaceSession'](TEST_WORKTREE_ID, {
+      force: true
+    })
+
+    await runtime.activateMobileSessionTab(`id:${TEST_WORKTREE_ID}`, 'host-tab', HEADLESS_LEAF_ID, {
+      notifyClients: false
+    })
+
+    // Why: the second activation must ask to reattach to the PTY the first
+    // activation actually spawned, not mint a brand-new random serve-<uuid>.
+    const secondSessionId = spawn.mock.calls.at(-1)?.[0]?.sessionId as string
+    expect(secondSessionId).toBe(firstSpawnedPtyId)
+  })
+
   it('materializes phone-local pending terminal tabs without stored PTY bindings', async () => {
     const spawn = vi.fn().mockResolvedValue({ id: 'fresh-mobile-pty' })
     const focusTerminal = vi.fn()
