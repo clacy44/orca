@@ -23,7 +23,27 @@ type RestoreBase = {
 // owner last armed, not a live process — trusting them forward makes the
 // checkpoint a fixed point (#12101). Alt-screen/paste/cursor bits stay: they
 // describe recoverable screen content, not a process that can re-arm input.
-function clearStaleColdRestoreMouseModes(modes: TerminalModes): TerminalModes {
+// `liveModes`, when given, is the CURRENT owning process's modes (this path
+// is only ever reached with one — see buildDurableCheckpointSnapshot below):
+// a genuinely live owner still armed for mouse input must win over whatever
+// the on-disk checkpoint happened to have last recorded, or reattach/periodic
+// checkpoints strip mouse tracking from sessions that never died (#8291).
+function clearStaleColdRestoreMouseModes(
+  modes: TerminalModes,
+  liveModes?: TerminalModes
+): TerminalModes {
+  if (liveModes?.mouseTracking) {
+    // Why the live owner's fields win wholesale, not field-by-field: a live
+    // process that still has mouse tracking armed is the ground truth for
+    // the whole mouse mode group, not just the on/off bit.
+    return {
+      ...modes,
+      mouseTracking: true,
+      mouseTrackingMode: liveModes.mouseTrackingMode,
+      sgrMouseMode: liveModes.sgrMouseMode,
+      sgrMousePixelsMode: liveModes.sgrMousePixelsMode
+    }
+  }
   return {
     ...modes,
     mouseTracking: false,
@@ -35,9 +55,9 @@ function clearStaleColdRestoreMouseModes(modes: TerminalModes): TerminalModes {
 
 export function terminalSnapshotFromColdRestore(
   info: ColdRestoreInfo,
-  opts?: { outputSequence?: number; frameRestoreAnsi?: string }
+  opts?: { outputSequence?: number; frameRestoreAnsi?: string; liveModes?: TerminalModes }
 ): TerminalSnapshot {
-  const modes = clearStaleColdRestoreMouseModes(info.modes)
+  const modes = clearStaleColdRestoreMouseModes(info.modes, opts?.liveModes)
   return {
     snapshotAnsi: info.snapshotAnsi,
     scrollbackAnsi: info.modes.alternateScreen ? info.scrollbackAnsi : '',
@@ -73,7 +93,8 @@ export async function buildDurableCheckpointSnapshot(opts: {
   ) {
     return terminalSnapshotFromColdRestore(opts.restoreInfo, {
       outputSequence: opts.liveSnapshot.outputSequence,
-      frameRestoreAnsi: opts.liveSnapshot.frameRestoreAnsi
+      frameRestoreAnsi: opts.liveSnapshot.frameRestoreAnsi,
+      liveModes: opts.liveSnapshot.modes
     })
   }
 
@@ -118,6 +139,14 @@ export async function buildDurableCheckpointSnapshot(opts: {
     const snapshot = emulator.getSnapshot()
     return {
       ...snapshot,
+      // Why re-apply here too: the rebuilt emulator replayed
+      // COLD_RESTORE_SEED_MODE_RESET, but opts.restoreInfo may be absent
+      // (pending-records-only rebuild) or the live owner may have re-armed
+      // mouse tracking after the checkpoint was written — the live process
+      // is always the authority when this function runs (see call sites).
+      modes: opts.restoreInfo
+        ? clearStaleColdRestoreMouseModes(snapshot.modes, opts.liveSnapshot.modes)
+        : snapshot.modes,
       ...(opts.liveSnapshot.outputSequence !== undefined
         ? { outputSequence: opts.liveSnapshot.outputSequence }
         : {}),

@@ -82,3 +82,52 @@ describe('buildDurableCheckpointSnapshot mode-fixed-point (#12101)', () => {
     expect(snapshot.modes.alternateScreen).toBe(true)
   })
 })
+
+// B1: buildDurableCheckpointSnapshot is not cold-restore-only — it runs for a
+// GENUINELY live session too (periodic checkpoint + reattach), where
+// opts.liveSnapshot is the live emulator's own modes. Clearing mouse bits
+// unconditionally there regresses #8291 (a live alt-screen TUI must keep its
+// modes across reattach/checkpoint).
+function liveTuiSnapshot(): TerminalSnapshot {
+  return {
+    snapshotAnsi: 'live frame',
+    scrollbackAnsi: '',
+    rehydrateSequences: '',
+    cwd: '/home/dev',
+    modes: {
+      bracketedPaste: false,
+      mouseTracking: true,
+      mouseTrackingMode: 'any',
+      sgrMouseMode: true,
+      sgrMousePixelsMode: false,
+      applicationCursor: false,
+      alternateScreen: true
+    },
+    cols: 80,
+    rows: 24,
+    scrollbackLines: 0
+  }
+}
+
+describe('buildDurableCheckpointSnapshot keeps a live owner mouse modes (#8291 / B1)', () => {
+  it('fast path: a live liveSnapshot keeps mouse modes even though disk restoreInfo is stale', async () => {
+    const snapshot = await buildDurableCheckpointSnapshot({
+      liveSnapshot: liveTuiSnapshot(),
+      restoreInfo: coldRestoreInfoFromDeadTui(),
+      scrollbackRows: DAEMON_RESTORE_SCROLLBACK_ROWS
+    })
+
+    expect(snapshot.modes.mouseTracking).toBe(true)
+    expect(snapshot.rehydrateSequences).toContain('\x1b[?1003h')
+  })
+
+  it('rebuild path: a live liveSnapshot keeps mouse modes even though disk restoreInfo is stale', async () => {
+    const snapshot = await buildDurableCheckpointSnapshot({
+      liveSnapshot: liveTuiSnapshot(),
+      restoreInfo: coldRestoreInfoFromDeadTui(),
+      scrollbackRows: 200
+    })
+
+    expect(snapshot.modes.mouseTracking).toBe(true)
+  })
+})
