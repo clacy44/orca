@@ -9834,12 +9834,13 @@ describe('connectPanePty', () => {
     )
   })
 
-  // RC1/B5 (#12101): a daemon reattach that isn't flagged coldRestore (the
-  // owner died mid-session, not at daemon restart) still carries a stale
-  // persisted isAlternateScreen=true from the dead TUI's last checkpoint. The
-  // replayed bytes themselves carry no live mouse DECSET, so the renderer must
-  // not trust the persisted flag alone into keeping mouse reporting armed.
-  it('does not keep mouse reporting on a warm reattach whose only alt-screen signal is the persisted flag', async () => {
+  // B5 (#8291, SSH/relay path): `isAlternateScreen` on the daemon's snapshot
+  // is host-authoritative — it is only ever set from a live reattach's own
+  // modes (daemon-pty-adapter.ts), never from a cold-restore payload — so a
+  // bounded relay replay window that itself carries no ?1049h bytes must
+  // still keep mouse reporting when the host says the owner is live and on
+  // the alternate screen.
+  it('keeps mouse reporting on a warm reattach whose only alt-screen signal is the host-authoritative flag', async () => {
     const { connectPanePty } = await import('./pty-connection')
     const transport = createMockTransport('tab-pty')
     transport.connect.mockImplementation(async ({ sessionId }: { sessionId?: string }) =>
@@ -9873,7 +9874,7 @@ describe('connectPanePty', () => {
           (data) =>
             data === POST_REPLAY_REATTACH_RESET || data === POST_REPLAY_REATTACH_RESET_KEEP_MOUSE
         )
-      expect(chosen).toBe(POST_REPLAY_REATTACH_RESET)
+      expect(chosen).toBe(POST_REPLAY_REATTACH_RESET_KEEP_MOUSE)
     })
   })
 
