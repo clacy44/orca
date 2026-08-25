@@ -9834,6 +9834,49 @@ describe('connectPanePty', () => {
     )
   })
 
+  // RC1/B5 (#12101): a daemon reattach that isn't flagged coldRestore (the
+  // owner died mid-session, not at daemon restart) still carries a stale
+  // persisted isAlternateScreen=true from the dead TUI's last checkpoint. The
+  // replayed bytes themselves carry no live mouse DECSET, so the renderer must
+  // not trust the persisted flag alone into keeping mouse reporting armed.
+  it('does not keep mouse reporting on a warm reattach whose only alt-screen signal is the persisted flag', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport('tab-pty')
+    transport.connect.mockImplementation(async ({ sessionId }: { sessionId?: string }) =>
+      sessionId
+        ? {
+            id: sessionId,
+            snapshot: 'zsh$ ',
+            isAlternateScreen: true
+          }
+        : null
+    )
+    transportFactoryQueue.push(transport)
+    setReattachPaneTitle('zsh')
+
+    const pane = createPane(1)
+    const textarea = {} as HTMLTextAreaElement
+    configureTerminalFocusMode(pane, textarea)
+    await withMockedDocumentActiveElement(textarea, async () => {
+      const manager = createManager(1)
+      const deps = createDeps({
+        restoredLeafId: LEAF_1,
+        restoredPtyIdByLeafId: { [LEAF_1]: 'tab-pty' }
+      })
+
+      connectPanePty(pane as never, manager as never, deps as never)
+      await flushAsyncTicks(20)
+
+      const chosen = (pane.terminal.write as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => String(call[0]))
+        .find(
+          (data) =>
+            data === POST_REPLAY_REATTACH_RESET || data === POST_REPLAY_REATTACH_RESET_KEEP_MOUSE
+        )
+      expect(chosen).toBe(POST_REPLAY_REATTACH_RESET)
+    })
+  })
+
   it('does not treat persisted tab launchAgent metadata as a live agent reattach', async () => {
     const { connectPanePty } = await import('./pty-connection')
     const transport = createMockTransport('tab-pty')
