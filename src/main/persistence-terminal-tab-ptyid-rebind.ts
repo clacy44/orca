@@ -63,6 +63,10 @@ export function migrateTerminalTabId(
     const { [oldTabId]: movedLayout, ...rest } = session.terminalLayoutsByTabId
     session.terminalLayoutsByTabId = { ...rest, [newTabId]: movedLayout }
   }
+  if (session.remoteSessionIdsByTabId && oldTabId in session.remoteSessionIdsByTabId) {
+    const { [oldTabId]: movedRelaySessionId, ...rest } = session.remoteSessionIdsByTabId
+    session.remoteSessionIdsByTabId = { ...rest, [newTabId]: movedRelaySessionId }
+  }
   session.terminalPtyIncarnationsByPaneKey = rekeyPaneKeyPrefix(
     session.terminalPtyIncarnationsByPaneKey,
     oldTabId,
@@ -76,15 +80,36 @@ export function migrateTerminalTabId(
   session.terminalSurfaceTombstonesByPaneKey = rekeyPaneKeyPrefix(
     session.terminalSurfaceTombstonesByPaneKey,
     oldTabId,
-    newTabId
+    newTabId,
+    (tombstone) =>
+      tombstone.parentTabId === oldTabId ? { ...tombstone, parentTabId: newTabId } : tombstone
+  )
+  // Why: same paneKey-prefix convention as the other *ByPaneKey maps above,
+  // but the record ALSO carries its own paneKey/tabId fields (redundant with
+  // the map key) that a key-only rekey would leave stale.
+  session.sleepingAgentSessionsByPaneKey = rekeyPaneKeyPrefix(
+    session.sleepingAgentSessionsByPaneKey,
+    oldTabId,
+    newTabId,
+    (record) => ({
+      ...record,
+      paneKey: record.paneKey.startsWith(`${oldTabId}:`)
+        ? `${newTabId}:${record.paneKey.slice(`${oldTabId}:`.length)}`
+        : record.paneKey,
+      ...(record.tabId === oldTabId ? { tabId: newTabId } : {})
+    })
   )
 }
 
 // paneKey is `${tabId}:${leafId}` — move every entry whose tabId prefix matches.
+// `mapValue` additionally rewrites a value that embeds the old tab id itself
+// (e.g. a tombstone's parentTabId), so the key rename does not leave stale
+// data behind inside the moved record.
 function rekeyPaneKeyPrefix<T>(
   record: Record<string, T> | undefined,
   oldTabId: string,
-  newTabId: string
+  newTabId: string,
+  mapValue?: (value: T) => T
 ): Record<string, T> | undefined {
   if (!record) {
     return record
@@ -94,7 +119,7 @@ function rekeyPaneKeyPrefix<T>(
   const next: Record<string, T> = {}
   for (const [key, value] of Object.entries(record)) {
     if (key.startsWith(prefix)) {
-      next[`${newTabId}:${key.slice(prefix.length)}`] = value
+      next[`${newTabId}:${key.slice(prefix.length)}`] = mapValue ? mapValue(value) : value
       changed = true
     } else {
       next[key] = value
