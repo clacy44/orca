@@ -230,4 +230,33 @@ describe('closeTerminalTabInWorkspaceSession', () => {
     expect(current.tabsByWorktree[WORKTREE_ID]).toEqual([])
     expect(current.terminalLayoutsByTabId).toEqual({})
   })
+
+  it('B4 regression: close-all on duplicate RC2 rows leaves zero tabs and kills the shared pty', () => {
+    // Why: RC2 could mint bare duplicate rows for a tabId that already has a
+    // real row bound to the same ptyId. Closing the real row must collapse
+    // the duplicates too, or close-all can never converge (leftover rows
+    // keep "another tab still owns it" true forever).
+    const current = session({
+      tabsByWorktree: {
+        [WORKTREE_ID]: [
+          terminalTab('terminal-1', 'shared-pty'),
+          terminalTab('duplicate-a', 'shared-pty'),
+          terminalTab('duplicate-b', 'shared-pty')
+        ]
+      },
+      terminalLayoutsByTabId: {
+        'terminal-1': {
+          root: { type: 'leaf', leafId: 'leaf-1' },
+          activeLeafId: 'leaf-1',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-1': 'shared-pty' }
+        }
+      }
+    })
+
+    const result = closeTerminalTabInWorkspaceSession(current, WORKTREE_ID, 'terminal-1')
+
+    expect(result.session.tabsByWorktree[WORKTREE_ID]).toEqual([])
+    expect(result.ptyIdsToKill).toEqual(['shared-pty'])
+  })
 })
