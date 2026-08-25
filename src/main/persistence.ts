@@ -311,6 +311,7 @@ import {
   deleteRemovedTerminalScrollbackSnapshotsAsync,
   migrateWorkspaceSessionTerminalScrollbackSnapshotsAsync
 } from './terminal-scrollback-snapshot-async-migration'
+import { migrateTerminalTabId } from './persistence-terminal-tab-ptyid-rebind'
 import { track } from './telemetry/client'
 import { getCohortAtEmit } from './telemetry/cohort-classifier'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from './startup/startup-diagnostics'
@@ -7104,7 +7105,11 @@ export class Store {
       const rebindTarget = tabs?.find((t) => t.ptyId === args.ptyId)
       if (rebindTarget) {
         terminalMembershipChanged = true
-        // Why: the ptyId already owns a row under a stale tabId; rename it instead of minting a second row for the same pty.
+        // Why: the ptyId already owns a row under a stale tabId; migrate every
+        // other structure keyed by that id (active selection, unified-tab
+        // mirror, leaf layout incl. split siblings, pane incarnation/lane/
+        // tombstone state) before renaming, or they strand under the old id.
+        migrateTerminalTabId(session, rebindTarget.id, args.tabId)
         rebindTarget.id = args.tabId
       } else {
         terminalMembershipChanged = true
