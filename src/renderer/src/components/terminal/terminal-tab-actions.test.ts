@@ -778,10 +778,11 @@ describe('closeOtherTerminalTabs', () => {
     isWebRuntimeSessionActiveMock.mockReturnValue(false)
   })
 
-  it('delegates other terminal closes to the host runtime in paired web clients', () => {
+  it('delegates other terminal closes to the host runtime in paired web clients', async () => {
     const setActiveTab = vi.fn()
     const closeTab = vi.fn()
     isWebRuntimeSessionActiveMock.mockReturnValue(true)
+    closeWebRuntimeSessionTabMock.mockResolvedValue(true)
     getStateMock.mockReturnValue({
       settings: { activeRuntimeEnvironmentId: 'web-runtime' },
       tabsByWorktree: {
@@ -791,7 +792,7 @@ describe('closeOtherTerminalTabs', () => {
       closeTab
     })
 
-    closeOtherTerminalTabs('keep', 'wt-1')
+    await closeOtherTerminalTabs('keep', 'wt-1')
 
     expect(setActiveTab).toHaveBeenCalledWith('keep')
     expect(closeWebRuntimeSessionTabMock).toHaveBeenCalledTimes(2)
@@ -819,10 +820,11 @@ describe('closeTerminalTabsToRight', () => {
     isWebRuntimeSessionActiveMock.mockReturnValue(false)
   })
 
-  it('delegates terminal tabs to the host while still closing local editor tabs to the right', () => {
+  it('delegates terminal tabs to the host while still closing local editor tabs to the right', async () => {
     const closeTab = vi.fn()
     const closeFile = vi.fn()
     isWebRuntimeSessionActiveMock.mockReturnValue(true)
+    closeWebRuntimeSessionTabMock.mockResolvedValue(true)
     getStateMock.mockReturnValue({
       settings: { activeRuntimeEnvironmentId: 'web-runtime' },
       tabsByWorktree: {
@@ -834,7 +836,7 @@ describe('closeTerminalTabsToRight', () => {
       closeFile
     })
 
-    closeTerminalTabsToRight('term-a', 'wt-1')
+    await closeTerminalTabsToRight('term-a', 'wt-1')
 
     expect(closeWebRuntimeSessionTabMock).toHaveBeenCalledTimes(2)
     expect(closeWebRuntimeSessionTabMock).toHaveBeenCalledWith({

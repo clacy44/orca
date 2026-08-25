@@ -29,7 +29,30 @@ function isPinnedVisibleTab(
   )
 }
 
-export function closeOtherTerminalTabs(tabId: string, activeWorktreeId: string | null): void {
+// Why: prune the local mirror only once the host confirms the close, and surface
+// (not swallow) a failed close so a duplicate/refused row does not silently reappear.
+async function closeHostTerminalTab(
+  worktreeId: string,
+  environmentId: string | null | undefined,
+  tabId: string
+): Promise<void> {
+  const closed = await closeWebRuntimeSessionTab({
+    worktreeId,
+    tabId,
+    environmentId,
+    reason: 'user'
+  })
+  if (closed) {
+    closeLocalTerminalTabState(tabId, { remoteCloseOwnedByHost: true })
+  } else {
+    console.error(`[terminal-tab-bulk-actions] host refused to close tab ${tabId}`)
+  }
+}
+
+export async function closeOtherTerminalTabs(
+  tabId: string,
+  activeWorktreeId: string | null
+): Promise<void> {
   if (!activeWorktreeId) {
     return
   }
@@ -49,21 +72,17 @@ export function closeOtherTerminalTabs(tabId: string, activeWorktreeId: string |
       continue
     }
     if (closeHostTerminalTabs) {
-      // Why: prune the mirror immediately, then close on its authoritative host so snapshots converge.
-      closeLocalTerminalTabState(tab.id, { remoteCloseOwnedByHost: true })
-      void closeWebRuntimeSessionTab({
-        worktreeId: activeWorktreeId,
-        tabId: tab.id,
-        environmentId: runtimeEnvironmentId,
-        reason: 'user'
-      })
+      await closeHostTerminalTab(activeWorktreeId, runtimeEnvironmentId, tab.id)
     } else {
       state.closeTab(tab.id)
     }
   }
 }
 
-export function closeTerminalTabsToRight(tabId: string, activeWorktreeId: string | null): void {
+export async function closeTerminalTabsToRight(
+  tabId: string,
+  activeWorktreeId: string | null
+): Promise<void> {
   if (!activeWorktreeId) {
     return
   }
@@ -97,14 +116,7 @@ export function closeTerminalTabsToRight(tabId: string, activeWorktreeId: string
     }
     if (terminalIdSet.has(id)) {
       if (closeHostTerminalTabs) {
-        // Why: prune the mirror immediately, then close on its authoritative host so snapshots converge.
-        closeLocalTerminalTabState(id, { remoteCloseOwnedByHost: true })
-        void closeWebRuntimeSessionTab({
-          worktreeId: activeWorktreeId,
-          tabId: id,
-          environmentId: runtimeEnvironmentId,
-          reason: 'user'
-        })
+        await closeHostTerminalTab(activeWorktreeId, runtimeEnvironmentId, id)
       } else {
         state.closeTab(id)
       }
