@@ -6744,6 +6744,93 @@ describe('Store', () => {
     expect(statSync(dataFile()).ino).toBe(inoBefore)
   })
 
+  it('rebinds an existing tab row by ptyId instead of minting a duplicate for a fresh tabId', async () => {
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: 'tab1',
+      tabsByWorktree: {
+        wt1: [
+          {
+            id: 'tab1',
+            worktreeId: 'wt1',
+            title: 'Terminal',
+            customTitle: null,
+            color: null,
+            sortOrder: 0,
+            createdAt: 1,
+            ptyId: 'daemon-pty'
+          }
+        ]
+      },
+      terminalLayoutsByTabId: {
+        tab1: {
+          root: { type: 'leaf', leafId: TEST_LEAF_1 },
+          activeLeafId: TEST_LEAF_1,
+          expandedLeafId: null,
+          ptyIdsByLeafId: { [TEST_LEAF_1]: 'daemon-pty' }
+        }
+      }
+    })
+
+    // A fresh tabId re-binding a ptyId that already owns a row (e.g. after a duplicate-close race).
+    store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab2',
+      leafId: TEST_LEAF_2,
+      ptyId: 'daemon-pty'
+    })
+
+    const persisted = readDataFile() as {
+      workspaceSession: { tabsByWorktree: Record<string, { id: string; ptyId: string }[]> }
+    }
+    const tabs = persisted.workspaceSession.tabsByWorktree.wt1
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ id: 'tab2', ptyId: 'daemon-pty' })
+  })
+
+  it('never writes pendingActivationSpawn to the persisted file when minting a binding-recovery tab', async () => {
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: null,
+      tabsByWorktree: { wt1: [] },
+      terminalLayoutsByTabId: {}
+    })
+
+    store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab-new',
+      leafId: TEST_LEAF_1,
+      ptyId: 'daemon-pty-2'
+    })
+
+    const raw = readFileSync(dataFile(), 'utf-8')
+    expect(raw).not.toContain('pendingActivationSpawn')
+  })
+
+  it('returns a distinguishable not-persisted result for a non-UUID leafId', async () => {
+    const store = await createStore()
+    store.setWorkspaceSession({
+      activeRepoId: 'r1',
+      activeWorktreeId: 'wt1',
+      activeTabId: null,
+      tabsByWorktree: { wt1: [] },
+      terminalLayoutsByTabId: {}
+    })
+
+    const result = store.persistPtyBinding({
+      worktreeId: 'wt1',
+      tabId: 'tab-legacy',
+      leafId: 'legacy-non-uuid-leaf-id',
+      ptyId: 'daemon-pty-3'
+    })
+
+    expect(result).toBe('leaf_id_not_persisted')
+  })
+
   // ── worktreeMeta startup GC ────────────────────────────────────────
 
   it('garbage-collects stale local worktreeMeta at load with a 30-day grace', async () => {

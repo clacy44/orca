@@ -16691,8 +16691,8 @@ export class OrcaRuntimeService {
           customTitle: null,
           color: null,
           sortOrder: tabsById.size,
-          createdAt: Date.now(),
-          pendingActivationSpawn: true
+          createdAt: Date.now()
+          // Why: pendingActivationSpawn is a renderer-transient flag; this row is written straight to disk, so it must not be set here.
         }
         tabsById.set(claim.tabId, tab)
       }
