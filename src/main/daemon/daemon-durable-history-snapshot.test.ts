@@ -129,5 +129,22 @@ describe('buildDurableCheckpointSnapshot keeps a live owner mouse modes (#8291 /
     })
 
     expect(snapshot.modes.mouseTracking).toBe(true)
+    // Why: rehydrateSequences must be re-derived from the corrected modes
+    // (mirroring the fast path), not left as whatever the rebuilt emulator's
+    // own getSnapshot() produced from the seeded reset trailer.
+    expect(snapshot.rehydrateSequences).toContain('\x1b[?1003h')
+    expect(snapshot.rehydrateSequences).toContain('\x1b[?1006h')
+  })
+
+  it('rebuild path: a dead-owner cold restore (no live mouse) keeps mouse modes cleared', async () => {
+    const snapshot = await buildDurableCheckpointSnapshot({
+      liveSnapshot: baseLiveSnapshot(),
+      restoreInfo: coldRestoreInfoFromDeadTui(),
+      scrollbackRows: 200
+    })
+
+    expect(snapshot.modes.mouseTracking).toBe(false)
+    expect(snapshot.rehydrateSequences).not.toContain('\x1b[?1003h')
+    expect(snapshot.rehydrateSequences).not.toContain('\x1b[?1006h')
   })
 })

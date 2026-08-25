@@ -137,16 +137,23 @@ export async function buildDurableCheckpointSnapshot(opts: {
       return opts.liveSnapshot
     }
     const snapshot = emulator.getSnapshot()
+    // Why re-apply here too: the rebuilt emulator replayed
+    // COLD_RESTORE_SEED_MODE_RESET, but opts.restoreInfo may be absent
+    // (pending-records-only rebuild) or the live owner may have re-armed
+    // mouse tracking after the checkpoint was written — the live process
+    // is always the authority when this function runs (see call sites).
+    const modes = opts.restoreInfo
+      ? clearStaleColdRestoreMouseModes(snapshot.modes, opts.liveSnapshot.modes)
+      : snapshot.modes
     return {
       ...snapshot,
-      // Why re-apply here too: the rebuilt emulator replayed
-      // COLD_RESTORE_SEED_MODE_RESET, but opts.restoreInfo may be absent
-      // (pending-records-only rebuild) or the live owner may have re-armed
-      // mouse tracking after the checkpoint was written — the live process
-      // is always the authority when this function runs (see call sites).
-      modes: opts.restoreInfo
-        ? clearStaleColdRestoreMouseModes(snapshot.modes, opts.liveSnapshot.modes)
-        : snapshot.modes,
+      modes,
+      // Why re-derive from the corrected modes: rehydrateSequences came from
+      // getSnapshot()'s own (pre-correction) modes, so a live owner's re-armed
+      // mouse tracking would otherwise never reach the re-arm sequences, same
+      // fixed-point hazard the fast path (terminalSnapshotFromColdRestore)
+      // already guards against.
+      rehydrateSequences: buildRehydrateSequences(modes),
       ...(opts.liveSnapshot.outputSequence !== undefined
         ? { outputSequence: opts.liveSnapshot.outputSequence }
         : {}),
