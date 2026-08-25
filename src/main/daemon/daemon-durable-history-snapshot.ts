@@ -2,8 +2,10 @@ import { ColdRestoreReplayWriter } from './cold-restore-replay-writer'
 import { DAEMON_RESTORE_SCROLLBACK_ROWS } from './daemon-restore-scrollback-depth'
 import { HeadlessEmulator } from './headless-emulator'
 import { isValidTerminalHistorySize } from './terminal-history-dimensions'
+import { buildRehydrateSequences } from './terminal-mode-rehydrate-sequences'
+import { COLD_RESTORE_SEED_MODE_RESET } from '../../shared/terminal-mode-reset-profiles'
 import type { ColdRestoreInfo } from './terminal-history-cold-restore-info'
-import type { PendingOutputRecord, TerminalSnapshot } from './types'
+import type { PendingOutputRecord, TerminalModes, TerminalSnapshot } from './types'
 
 type RestoreBase = {
   scrollbackAnsi: string
@@ -17,19 +19,34 @@ type RestoreBase = {
   rows: number
 }
 
+// Why: a cold-restore checkpoint's mouse bits describe whatever the SIGKILLed
+// owner last armed, not a live process — trusting them forward makes the
+// checkpoint a fixed point (#12101). Alt-screen/paste/cursor bits stay: they
+// describe recoverable screen content, not a process that can re-arm input.
+function clearStaleColdRestoreMouseModes(modes: TerminalModes): TerminalModes {
+  return {
+    ...modes,
+    mouseTracking: false,
+    mouseTrackingMode: 'none',
+    sgrMouseMode: false,
+    sgrMousePixelsMode: false
+  }
+}
+
 export function terminalSnapshotFromColdRestore(
   info: ColdRestoreInfo,
   opts?: { outputSequence?: number; frameRestoreAnsi?: string }
 ): TerminalSnapshot {
+  const modes = clearStaleColdRestoreMouseModes(info.modes)
   return {
     snapshotAnsi: info.snapshotAnsi,
     scrollbackAnsi: info.modes.alternateScreen ? info.scrollbackAnsi : '',
     oscLinks: info.oscLinks,
-    rehydrateSequences: info.rehydrateSequences,
+    rehydrateSequences: buildRehydrateSequences(modes),
     ...(info.pendingEscapeTailAnsi ? { pendingEscapeTailAnsi: info.pendingEscapeTailAnsi } : {}),
     ...(opts?.frameRestoreAnsi ? { frameRestoreAnsi: opts.frameRestoreAnsi } : {}),
     cwd: info.cwd,
-    modes: info.modes,
+    modes,
     cols: info.cols,
     rows: info.rows,
     scrollbackLines:
@@ -79,6 +96,10 @@ export async function buildDurableCheckpointSnapshot(opts: {
         base.scrollbackAnsi,
         base.rehydrateSequences,
         base.snapshotAnsi,
+        // Why after the snapshot, mirroring terminal-history-seed-segments.ts:
+        // undoes the snapshot's own mode trailer so the rebuilt emulator can't
+        // re-arm a dead TUI's mouse modes for getSnapshot() to launder forward.
+        COLD_RESTORE_SEED_MODE_RESET,
         base.pendingEscapeTailAnsi ?? ''
       ]) {
         if (!(await replay.write(segment))) {
