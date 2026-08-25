@@ -285,7 +285,7 @@ describe('closeTerminalTab', () => {
       setActiveTab: vi.fn()
     })
 
-    await closeTerminalTab('local-tab-1')
+    const result = await closeTerminalTab('local-tab-1')
 
     expect(closeWebRuntimeSessionTabMock).toHaveBeenCalledWith({
       worktreeId: 'wt-1',
@@ -295,6 +295,7 @@ describe('closeTerminalTab', () => {
     })
     expect(closeTab).not.toHaveBeenCalled()
     expect(consoleErrorSpy).toHaveBeenCalled()
+    expect(result).toBe(false)
     consoleErrorSpy.mockRestore()
   })
 

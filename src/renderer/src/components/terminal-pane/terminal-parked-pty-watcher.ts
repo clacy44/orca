@@ -60,7 +60,7 @@ export function startParkedPtyWatcher(args: {
     // Why: the empty entry prevents a pending pinned-close confirmation from restarting the dead PTY.
     entry.disposersByPtyId.get(ptyId)?.()
     entry.disposersByPtyId.delete(ptyId)
-    closeTerminalTab(tab.id, {
+    void closeTerminalTab(tab.id, {
       captureRecentlyClosed: false,
       hostCloseReason: 'pty-exit',
       lifecyclePtyId: ptyId,

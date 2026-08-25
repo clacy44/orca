@@ -149,6 +149,7 @@ describe('runKillAllTerminalSurfaces', () => {
     const closeSurface = vi.fn((targetId: string, _options: unknown) => {
       calls.push(`close:${targetId}`)
       removeSurface(current, targetId)
+      return Promise.resolve(true)
     })
     const killPty = vi.fn((ptyId: string) => {
       calls.push(`kill:${ptyId}`)
@@ -264,7 +265,10 @@ describe('runKillAllTerminalSurfaces', () => {
       tabsByWorktree: { wt: [terminal('target', 'wt'), terminal('later', 'wt')] },
       ptyIdsByTabId: { target: ['local-pty'], later: ['later-pty'] }
     })
-    const closeSurface = vi.fn((targetId: string) => removeSurface(current, targetId))
+    const closeSurface = vi.fn((targetId: string) => {
+      removeSurface(current, targetId)
+      return Promise.resolve(true)
+    })
     const killPty = vi.fn().mockResolvedValue(undefined)
 
     const summary = await runKillAllTerminalSurfaces(['target'], {
@@ -304,7 +308,10 @@ describe('runKillAllTerminalSurfaces', () => {
         remainingCount: 0,
         killedSessionIds: ['daemon-pty']
       }),
-      closeSurface: (targetId) => removeSurface(current, targetId),
+      closeSurface: (targetId) => {
+        removeSurface(current, targetId)
+        return Promise.resolve(true)
+      },
       killPty,
       reportSummary: vi.fn()
     })
@@ -315,7 +322,7 @@ describe('runKillAllTerminalSurfaces', () => {
 
   it('reports the informational zero state without provider fanout', async () => {
     const killDaemonSessions = vi.fn().mockResolvedValue({ killedCount: 0, remainingCount: 0 })
-    const closeSurface = vi.fn()
+    const closeSurface = vi.fn().mockResolvedValue(true)
     const killPty = vi.fn()
 
     const summary = await runKillAllTerminalSurfaces([], {
@@ -397,6 +404,9 @@ describe('runKillAllTerminalSurfaces', () => {
         removeSurface(current, targetId)
         throw new Error('post-close store failure')
       }
+      // Why false, not a throw: 'remains' simulates a refused close (the
+      // boolean-false path), not an exception — both must count as failed.
+      return Promise.resolve(false)
     })
 
     const summary = await runKillAllTerminalSurfaces(['throws-after-close', 'remains'], {
@@ -429,6 +439,7 @@ describe('runKillAllTerminalSurfaces', () => {
           throw new Error('pre-mutation failure')
         }
         removeSurface(current, targetId)
+        return Promise.resolve(true)
       }
     )
     const killPty = vi.fn().mockResolvedValue(undefined)
@@ -490,6 +501,7 @@ describe('runKillAllTerminalSurfaces', () => {
           current = { ...current }
         }
         expect(options.precomputedCloseState.terminalCountBeforeClose).toBeGreaterThan(0)
+        return Promise.resolve(true)
       }
     )
     const killPty = vi.fn().mockResolvedValue(undefined)
@@ -542,6 +554,65 @@ describe('runKillAllTerminalSurfaces', () => {
     })
   })
 
+  it('a refused close (boolean false, no throw) leaves its tab and PTY alone; confirmed siblings still prune and kill', async () => {
+    // Why: closeTerminalTab never rejects/throws on a host refusal — it
+    // resolves false. This exercises that boolean path end to end (not a
+    // thrown error), confirming exactly the confirmed closes are pruned and
+    // killed while the refused tab/PTY survive, with no unhandled rejection.
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const current = state({
+        tabsByWorktree: {
+          wt: [terminal('ok-1', 'wt'), terminal('refused', 'wt'), terminal('ok-2', 'wt')]
+        },
+        ptyIdsByTabId: {
+          'ok-1': ['pty-ok-1'],
+          refused: ['pty-refused'],
+          'ok-2': ['pty-ok-2']
+        }
+      })
+      const closeSurface = vi.fn((targetId: string) => {
+        if (targetId === 'refused') {
+          return Promise.resolve(false)
+        }
+        removeSurface(current, targetId)
+        return Promise.resolve(true)
+      })
+      const killPty = vi.fn().mockResolvedValue(undefined)
+
+      const summary = await runKillAllTerminalSurfaces(['ok-1', 'refused', 'ok-2'], {
+        getState: () => current,
+        killDaemonSessions: vi.fn().mockResolvedValue({ killedCount: 0, remainingCount: 0 }),
+        closeSurface,
+        killPty,
+        yieldToRenderer: vi.fn().mockResolvedValue(undefined),
+        reportSummary: vi.fn()
+      })
+
+      expect(killPty).toHaveBeenCalledWith('pty-ok-1')
+      expect(killPty).toHaveBeenCalledWith('pty-ok-2')
+      expect(killPty).not.toHaveBeenCalledWith('pty-refused')
+      expect(snapshotKillAllTerminalSurfaceIds(current)).toEqual(['refused'])
+      expect(summary).toMatchObject({
+        targetCount: 3,
+        absentTargetCount: 2,
+        failedCloseAttemptCount: 1
+      })
+
+      // Why flush a microtask turn: any unchecked rejection from this run
+      // would have already surfaced by the time the awaited call returns,
+      // but a trailing yield keeps the assertion honest against scheduling.
+      await Promise.resolve()
+      expect(unhandledRejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+  })
+
   it('records bounded fanout and two-close batches for 100 terminal tabs', async () => {
     const tabs = Array.from({ length: 100 }, (_, index) => terminal(`tab-${index}`, 'wt'))
     const ptyIdsByTabId = Object.fromEntries(tabs.map((tab, index) => [tab.id, [`pty-${index}`]]))
@@ -571,9 +642,10 @@ describe('runKillAllTerminalSurfaces', () => {
           remainingCount: 0,
           killedSessionIds: []
         }),
-        closeSurface: (tabId, options) => {
-          closeTerminalTab(tabId, options)
+        closeSurface: async (tabId, options) => {
+          const closed = await closeTerminalTab(tabId, options)
           nowMs += 1
+          return closed
         },
         killPty: providerKill,
         now: () => nowMs,

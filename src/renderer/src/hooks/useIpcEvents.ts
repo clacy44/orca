@@ -2051,7 +2051,7 @@ export function useIpcEvents(): void {
           window.dispatchEvent(new CustomEvent(CLOSE_TERMINAL_PANE_EVENT, { detail }))
         } else {
           // Why: the CLI/RPC caller is answered immediately, so it cannot wait on a modal.
-          closeTerminalTab(tabId, { skipRunningProcessConfirm: true })
+          void closeTerminalTab(tabId, { skipRunningProcessConfirm: true })
         }
       })
     )
@@ -2068,7 +2068,7 @@ export function useIpcEvents(): void {
             responded = true
             window.api.ui.respondTerminalTabClose({ requestId, ...(error ? { error } : {}) })
           }
-          closeTerminalTab(tabId, {
+          void closeTerminalTab(tabId, {
             rejectPinned: true,
             onCancel: () => respond('terminal_tab_pinned'),
             onClosed: () => {

@@ -35,7 +35,7 @@ async function closeHostTerminalTab(
   worktreeId: string,
   environmentId: string | null | undefined,
   tabId: string
-): Promise<void> {
+): Promise<boolean> {
   const closed = await closeWebRuntimeSessionTab({
     worktreeId,
     tabId,
@@ -47,6 +47,7 @@ async function closeHostTerminalTab(
   } else {
     console.error(`[terminal-tab-bulk-actions] host refused to close tab ${tabId}`)
   }
+  return closed
 }
 
 export async function closeOtherTerminalTabs(

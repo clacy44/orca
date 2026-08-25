@@ -34,7 +34,22 @@ import {
 export type { PrecomputedTerminalCloseState } from './terminal-close-target'
 export { closeOtherTerminalTabs, closeTerminalTabsToRight } from './terminal-tab-bulk-actions'
 
+// Why Promise<boolean> that never rejects: callers need to know whether the
+// tab actually closed (host confirmed / no host involved) so they can decide
+// what to prune, without adopting a try/catch of their own at every call site.
 export async function closeTerminalTab(
+  tabId: string,
+  options?: Parameters<typeof closeTerminalTabAttempt>[1]
+): Promise<boolean> {
+  try {
+    return await closeTerminalTabAttempt(tabId, options)
+  } catch (error) {
+    console.error(`[terminal-tab-actions] closeTerminalTab threw for tab ${tabId}:`, error)
+    return false
+  }
+}
+
+async function closeTerminalTabAttempt(
   tabId: string,
   options?: {
     force?: boolean
@@ -56,7 +71,7 @@ export async function closeTerminalTab(
     onClosed?: () => void
     onCancel?: () => void
   }
-): Promise<void> {
+): Promise<boolean> {
   const state = useAppStore.getState()
   const precomputedCloseState = validatePrecomputedTerminalCloseState(
     tabId,
@@ -79,13 +94,13 @@ export async function closeTerminalTab(
       })
     }
     options?.onClosed?.()
-    return
+    return true
   }
   const { worktreeId: owningWorktreeId, terminalTabId } = target
   const worktreeRoute = resolveTerminalWorktreeRoute(state, owningWorktreeId)
   if (!worktreeRoute) {
     options?.onCancel?.()
-    return
+    return false
   }
 
   // Why: a pinned tab routes through the confirmation guard instead of closing
@@ -99,19 +114,22 @@ export async function closeTerminalTab(
     // owner may be unattended; reject pinned tabs without bypassing the guard.
     if (options?.rejectPinned) {
       options.onCancel?.()
-      return
+      return false
     }
     // Why: the pin prompt supersedes the running-process one only when it actually
     // appears. With `confirmClosePinnedTab` off it says nothing, so fall through and let
     // a busy pinned tab still get asked — Cmd+W did exactly that before #10142.
     if (shouldConfirmPinnedTabClose(state)) {
+      // Why false here: the modal defers the actual close to its onClose
+      // re-entry (a separate closeTerminalTab call), so this call resolves
+      // before any close is attempted.
       guardPinnedTabClose({
         isPinned: true,
         tabLabel: resolvePinnedTabLabel(state, owningWorktreeId, terminalTabId),
-        onClose: () => closeTerminalTab(tabId, { ...options, force: true }),
+        onClose: () => void closeTerminalTab(tabId, { ...options, force: true }),
         ...(options?.onCancel ? { onCancel: options.onCancel } : {})
       })
-      return
+      return false
     }
   }
 
@@ -119,22 +137,23 @@ export async function closeTerminalTab(
   // prompt that Cmd+W enforced (#10142). Guarding here — above the web-runtime branch so
   // host-backed tabs are covered too — gives every close path one shared policy.
   if (shouldConfirmRunningTerminalClose(options)) {
+    // Why false here too: same deferred-modal shape as the pinned guard above.
     guardRunningTerminalClose({
       terminalTabId,
       tabLabel: resolvePinnedTabLabel(state, owningWorktreeId, terminalTabId),
       // Why: re-enter instead of continuing inline so pinned/route/precomputed state is
       // re-validated against fresh state after an arbitrarily long dialog.
-      onClose: () => closeTerminalTab(tabId, { ...options, skipRunningProcessConfirm: true }),
+      onClose: () => void closeTerminalTab(tabId, { ...options, skipRunningProcessConfirm: true }),
       ...(options?.onCancel ? { onCancel: options.onCancel } : {})
     })
-    return
+    return false
   }
 
   const runtimeEnvironmentId = worktreeRoute.runtimeEnvironmentId
   if (runtimeEnvironmentId && isWebRuntimeSessionActive(runtimeEnvironmentId)) {
     if (options?.reason === 'pty-exit') {
       // Why: stream exit is not host-tab closure; the HUB snapshot decides whether reconnect restores or removes this tab.
-      return
+      return true
     }
     // Why: a remote-owned worktree's tabs are host-authoritative, so the close
     // MUST reach the host or its next snapshot re-adds the tab (the "close then
@@ -198,7 +217,7 @@ export async function closeTerminalTab(
       console.error(`[terminal-tab-actions] host refused to close tab ${terminalTabId}`)
     }
     options?.onClosed?.()
-    return
+    return closed
   }
 
   const currentTerminalTabIds = precomputedCloseState
@@ -238,7 +257,7 @@ export async function closeTerminalTab(
       }
     }
     options?.onClosed?.()
-    return
+    return true
   }
 
   if (state.activeWorktreeId === owningWorktreeId && terminalTabId === state.activeTabId) {
@@ -262,4 +281,5 @@ export async function closeTerminalTab(
       : {})
   })
   options?.onClosed?.()
+  return true
 }

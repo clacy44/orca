@@ -52,7 +52,7 @@ type KillAllTerminalSurfaceDependencies = {
       precomputedRetirementPlan: TerminalTabRetirementPlan
       precomputedCloseState: PrecomputedTerminalCloseState
     }
-  ) => void
+  ) => Promise<boolean>
   killPty: (ptyId: string) => Promise<void>
   now: () => number
   yieldToRenderer: () => Promise<void>
@@ -226,7 +226,10 @@ export async function runKillAllTerminalSurfaces(
       )
       let closeFailed = false
       try {
-        deps.closeSurface(targetId, {
+        // Why await + check the boolean, not just try/catch: closeTerminalTab
+        // never rejects on a host refusal — it resolves false. Treat that the
+        // same as a thrown failure so a refused close never gets its PTY killed.
+        const closed = await deps.closeSurface(targetId, {
           force: true,
           localPtyTeardownOwnedExternally: true,
           precomputedRetirementPlan: retirementPlan,
@@ -236,6 +239,10 @@ export async function runKillAllTerminalSurfaces(
             nextTerminalTabId
           }
         })
+        if (!closed) {
+          closeFailed = true
+          failedCloseTargetIds.add(targetId)
+        }
       } catch {
         closeFailed = true
         failedCloseTargetIds.add(targetId)

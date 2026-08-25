@@ -1710,7 +1710,7 @@ function Terminal(): React.JSX.Element | null {
   }, [activeWorktreeId, openNewMarkdownInActiveWorkspace])
 
   const handleCloseTab = useCallback((tabId: string) => {
-    closeTerminalTab(tabId)
+    void closeTerminalTab(tabId)
   }, [])
 
   const handleCloseBrowserTab = useCallback(
@@ -1789,7 +1789,7 @@ function Terminal(): React.JSX.Element | null {
       if (shouldDeferParkedPtyExitTabClose(tabId, ptyId)) {
         return
       }
-      closeTerminalTab(tabId, { reason: 'pty-exit', lifecyclePtyId: ptyId })
+      void closeTerminalTab(tabId, { reason: 'pty-exit', lifecyclePtyId: ptyId })
     },
     [consumeSuppressedPtyExit]
   )
@@ -1821,7 +1821,7 @@ function Terminal(): React.JSX.Element | null {
           if (unifiedTab.contentType === 'terminal') {
             // Why: paired-host bulk close must revoke renderer resume and hook authority, not just remove the host session tab.
             // No running-process prompt: "Close Others" over N busy tabs would be a modal storm.
-            closeTerminalTab(unifiedTab.entityId, { skipRunningProcessConfirm: true })
+            void closeTerminalTab(unifiedTab.entityId, { skipRunningProcessConfirm: true })
           } else {
             void closeWebRuntimeSessionTab({
               worktreeId: activeWorktreeId,
