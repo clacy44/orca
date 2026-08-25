@@ -118,7 +118,11 @@ describe('closeTerminalTabInWorkspaceSession', () => {
     expect(result.session.defaultTerminalTabsAppliedByWorktreeId?.[WORKTREE_ID]).toBe(true)
   })
 
-  it('does not kill a PTY still owned by another terminal tab', () => {
+  it('does not kill a PTY still owned by another terminal tab that also has a session of its own', () => {
+    // Why the survivor also owns 'own-pty': a row referencing ONLY ptyIds
+    // already in the closing set has no session beyond this close and is a
+    // duplicate to collapse (B4); a row that also has a distinct pty of its
+    // own is a genuinely separate tab and must survive with its pty intact.
     const current = session({
       tabsByWorktree: {
         [WORKTREE_ID]: [
@@ -134,10 +138,15 @@ describe('closeTerminalTabInWorkspaceSession', () => {
           ptyIdsByLeafId: { 'leaf-1': 'shared-pty' }
         },
         'terminal-2': {
-          root: { type: 'leaf', leafId: 'leaf-2' },
+          root: {
+            type: 'split',
+            direction: 'vertical',
+            first: { type: 'leaf', leafId: 'leaf-2' },
+            second: { type: 'leaf', leafId: 'leaf-2-own' }
+          },
           activeLeafId: 'leaf-2',
           expandedLeafId: null,
-          ptyIdsByLeafId: { 'leaf-2': 'shared-pty' }
+          ptyIdsByLeafId: { 'leaf-2': 'shared-pty', 'leaf-2-own': 'own-pty' }
         }
       }
     })
@@ -258,5 +267,92 @@ describe('closeTerminalTabInWorkspaceSession', () => {
 
     expect(result.session.tabsByWorktree[WORKTREE_ID]).toEqual([])
     expect(result.ptyIdsToKill).toEqual(['shared-pty'])
+  })
+
+  it('B4: collapses duplicates that each carry their own minted layout (persistPtyBinding always mints one)', () => {
+    // Why: persistPtyBinding mints a minimal terminalLayoutsByTabId entry
+    // alongside every row it persists, so an RC2 leftover always HAS a
+    // layout — "no layout of its own" cannot be the duplicate signal. This
+    // reproduces the exact persisted shape (each duplicate with its own
+    // single-leaf layout mapping only to the shared pty).
+    const current = session({
+      tabsByWorktree: {
+        [WORKTREE_ID]: [
+          terminalTab('terminal-1', 'shared-pty'),
+          terminalTab('duplicate-a', 'shared-pty'),
+          terminalTab('duplicate-b', 'shared-pty'),
+          terminalTab('duplicate-c', 'shared-pty')
+        ]
+      },
+      terminalLayoutsByTabId: {
+        'terminal-1': {
+          root: { type: 'leaf', leafId: 'leaf-1' },
+          activeLeafId: 'leaf-1',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-1': 'shared-pty' }
+        },
+        'duplicate-a': {
+          root: { type: 'leaf', leafId: 'leaf-a' },
+          activeLeafId: 'leaf-a',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-a': 'shared-pty' }
+        },
+        'duplicate-b': {
+          root: { type: 'leaf', leafId: 'leaf-b' },
+          activeLeafId: 'leaf-b',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-b': 'shared-pty' }
+        },
+        'duplicate-c': {
+          root: { type: 'leaf', leafId: 'leaf-c' },
+          activeLeafId: 'leaf-c',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-c': 'shared-pty' }
+        }
+      }
+    })
+
+    const result = closeTerminalTabInWorkspaceSession(current, WORKTREE_ID, 'terminal-1')
+
+    expect(result.session.tabsByWorktree[WORKTREE_ID]).toEqual([])
+    expect(result.ptyIdsToKill).toEqual(['shared-pty'])
+  })
+
+  it('does not sweep a tab that shares the closing pty but also owns a distinct one of its own', () => {
+    // Why: a deliberately shared pty across two tabs must not be collapsed
+    // away just because one of its ptyIds matches — only a row that owns NO
+    // session beyond what's already closing is a duplicate.
+    const current = session({
+      tabsByWorktree: {
+        [WORKTREE_ID]: [
+          terminalTab('terminal-1', 'shared-pty'),
+          terminalTab('legit-other', 'shared-pty')
+        ]
+      },
+      terminalLayoutsByTabId: {
+        'terminal-1': {
+          root: { type: 'leaf', leafId: 'leaf-1' },
+          activeLeafId: 'leaf-1',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-1': 'shared-pty' }
+        },
+        'legit-other': {
+          root: {
+            type: 'split',
+            direction: 'vertical',
+            first: { type: 'leaf', leafId: 'leaf-shared' },
+            second: { type: 'leaf', leafId: 'leaf-own' }
+          },
+          activeLeafId: 'leaf-shared',
+          expandedLeafId: null,
+          ptyIdsByLeafId: { 'leaf-shared': 'shared-pty', 'leaf-own': 'own-pty' }
+        }
+      }
+    })
+
+    const result = closeTerminalTabInWorkspaceSession(current, WORKTREE_ID, 'terminal-1')
+
+    expect(result.session.tabsByWorktree[WORKTREE_ID].map((tab) => tab.id)).toEqual(['legit-other'])
+    expect(result.ptyIdsToKill).toEqual([])
   })
 })

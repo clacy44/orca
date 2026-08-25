@@ -171,15 +171,19 @@ export function closeTerminalTabInWorkspaceSession(
   const duplicateTabIds = new Set<string>()
   if (closingPtyIds.size > 0) {
     for (const tab of session.tabsByWorktree[worktreeId] ?? []) {
-      // Why: a row with its own layout owns real leaf/pane structure (e.g. a
-      // deliberately shared pty across two panes) and must not be swept up —
-      // only bare rows minted with no layout of their own are RC2 leftovers.
-      if (
-        tab.id !== tabId &&
-        tab.ptyId &&
-        closingPtyIds.has(tab.ptyId) &&
-        !session.terminalLayoutsByTabId[tab.id]
-      ) {
+      if (tab.id === tabId || !tab.ptyId || !closingPtyIds.has(tab.ptyId)) {
+        continue
+      }
+      // Why not "no layout of its own": persistPtyBinding always mints a
+      // minimal layout alongside a row, so an RC2 leftover has one too — that
+      // can't distinguish it from a deliberate shared-pty tab. What can: a
+      // duplicate references no *other* live session — every ptyId it owns
+      // is already among the ones this close is killing. A tab that also
+      // owns a distinct pty (e.g. a second real pane) is not swept.
+      const isSubsetOfClosing = [...collectTabPtyIds(session, tab.id, tab.ptyId)].every((ptyId) =>
+        closingPtyIds.has(ptyId)
+      )
+      if (isSubsetOfClosing) {
         duplicateTabIds.add(tab.id)
       }
     }
