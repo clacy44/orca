@@ -34,7 +34,7 @@ import {
 export type { PrecomputedTerminalCloseState } from './terminal-close-target'
 export { closeOtherTerminalTabs, closeTerminalTabsToRight } from './terminal-tab-bulk-actions'
 
-export function closeTerminalTab(
+export async function closeTerminalTab(
   tabId: string,
   options?: {
     force?: boolean
@@ -56,7 +56,7 @@ export function closeTerminalTab(
     onClosed?: () => void
     onCancel?: () => void
   }
-): void {
+): Promise<void> {
   const state = useAppStore.getState()
   const precomputedCloseState = validatePrecomputedTerminalCloseState(
     tabId,
@@ -160,22 +160,13 @@ export function closeTerminalTab(
       wireReason === 'user'
         ? null
         : getLatestWebSessionTabsPublicationEpoch(runtimeEnvironmentId, owningWorktreeId)
-    // Why: prune local mirrors immediately so close feels responsive while the
-    // host session snapshot catches up.
-    closeLocalTerminalTabState(terminalTabId, {
-      reason: options?.reason,
-      ...(options?.captureRecentlyClosed !== undefined
-        ? { captureRecentlyClosed: options.captureRecentlyClosed }
-        : {}),
-      remoteCloseOwnedByHost: true,
-      ...(options?.localPtyTeardownOwnedExternally
-        ? { localPtyTeardownOwnedExternally: true }
-        : {}),
-      ...(options?.precomputedRetirementPlan
-        ? { precomputedRetirementPlan: options.precomputedRetirementPlan }
-        : {})
-    })
-    void closeWebRuntimeSessionTab({
+    // Why await before pruning: a void-fired close whose result went
+    // unchecked let a refused/failed host close silently keep the tab alive
+    // on the host while the local mirror had already vanished, so it
+    // reappeared on the next snapshot (B7). Only prune once the host
+    // confirms; a failure is logged and the mirror is left standing so the
+    // tab does not disappear out from under a close the host never honored.
+    const closed = await closeWebRuntimeSessionTab({
       worktreeId: owningWorktreeId,
       tabId: hostBackedTabId,
       environmentId: runtimeEnvironmentId,
@@ -189,6 +180,23 @@ export function closeTerminalTab(
           }
         : {})
     })
+    if (closed) {
+      closeLocalTerminalTabState(terminalTabId, {
+        reason: options?.reason,
+        ...(options?.captureRecentlyClosed !== undefined
+          ? { captureRecentlyClosed: options.captureRecentlyClosed }
+          : {}),
+        remoteCloseOwnedByHost: true,
+        ...(options?.localPtyTeardownOwnedExternally
+          ? { localPtyTeardownOwnedExternally: true }
+          : {}),
+        ...(options?.precomputedRetirementPlan
+          ? { precomputedRetirementPlan: options.precomputedRetirementPlan }
+          : {})
+      })
+    } else {
+      console.error(`[terminal-tab-actions] host refused to close tab ${terminalTabId}`)
+    }
     options?.onClosed?.()
     return
   }
