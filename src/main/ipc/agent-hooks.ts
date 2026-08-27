@@ -30,6 +30,7 @@ import { registerAgentPaneAuthorityIpcHandlers } from './agent-pane-authority-ip
 import { createAgentPaneAuthorityOwnership } from './agent-pane-authority-ownership'
 import {
   enrichAgentStatusIpcPayload,
+  filterRetainedHistoryAgentStatusRows,
   isValidAgentStatusDropTabId,
   type AgentStatusRuntimeEnrichment
 } from './agent-status-ipc-boundary'
@@ -113,9 +114,11 @@ export function registerAgentHookHandlers(
     // Why: the renderer pulls this after workspace hydration, so startup cannot
     // lose replayed statuses while its local store is still empty. Match the
     // live push enrichment in main/index.ts so parent/child rows survive replay.
-    return agentHookServer
-      .getStatusSnapshot()
-      .map((entry) => enrichAgentStatusIpcPayload(entry, runtime))
+    // Retained-history rows (FIX 2) are filtered here at the producer, not left
+    // to each client to re-derive — same predicate as worktree.ps.
+    return filterRetainedHistoryAgentStatusRows(agentHookServer.getStatusSnapshot(), runtime).map(
+      (entry) => enrichAgentStatusIpcPayload(entry, runtime)
+    )
   })
   ipcMain.handle('agentStatus:inferInterrupt', (_event, request: unknown): boolean => {
     if (typeof request !== 'object' || request === null) {

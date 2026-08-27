@@ -181,7 +181,18 @@ describe('agentStatus:getSnapshot IPC', () => {
               coordinatorHandle: 'term-parent'
             }
           : undefined
-      )
+      ),
+      buildRetainedHistoryAgentRowContext: vi.fn(() => ({
+        mirroredWorktreeIdByTabId: new Map([
+          ['tab-1', 'worktree-1'],
+          ['tab-2', 'worktree-1']
+        ]),
+        connectedPtyEvidence: {
+          tabIds: new Set<string>(),
+          paneKeys: new Set<string>(),
+          ptyIds: new Set<string>()
+        }
+      }))
     }
     const { registerAgentHookHandlers } = await import('./agent-hooks')
     registerAgentHookHandlers(runtime)

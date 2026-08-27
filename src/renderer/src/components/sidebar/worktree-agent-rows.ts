@@ -29,6 +29,7 @@ import {
   effectiveWorktreeAgentRowStartedAt,
   tabFromWorktreeAttributedStatusEntry
 } from './worktree-agent-row-fallback-tab'
+import { isTablessEntryLiveForWorktreeRow } from './worktree-agent-row-tabless-liveness'
 
 /**
  * Resolves the sidebar row agent type, prioritizing launch agent configuration
@@ -273,12 +274,15 @@ export function buildWorktreeAgentRows(args: {
       continue
     }
     const rowEntry = entryWithRuntimeOrchestration(entry, args.runtimeAgentOrchestrationByPaneKey)
+    const isFresh = isExplicitAgentStatusFresh(rowEntry, args.now, AGENT_STATUS_STALE_AFTER_MS)
+    if (!isTablessEntryLiveForWorktreeRow(isFresh, rowEntry, currentTabIds)) {
+      continue
+    }
     const startedAt = effectiveWorktreeAgentRowStartedAt(rowEntry)
     const tab = tabFromWorktreeAttributedStatusEntry(rowEntry, startedAt)
     if (!tab) {
       continue
     }
-    const isFresh = isExplicitAgentStatusFresh(rowEntry, args.now, AGENT_STATUS_STALE_AFTER_MS)
     const shouldDecay =
       !isFresh &&
       (rowEntry.state === 'working' || rowEntry.state === 'blocked' || rowEntry.state === 'waiting')
