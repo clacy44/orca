@@ -24,6 +24,23 @@ export const LANE_COMMAND_SPECS: CommandSpec[] = [
     examples: ['orca lane create-person --name "Ana Ng"']
   },
   {
+    path: ['lane', 'invite'],
+    summary: 'Mint a per-person pairing invite for someone to redeem on their own machine',
+    usage:
+      'orca lane invite --person <idOrName> [--scope runtime|mobile] [--ttl <hours>] [--address <host>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'scope', 'ttl', 'address'],
+    notes: [
+      PERSON_NOTE,
+      '--scope defaults to runtime — the only scope admitted on the lane push/pull/clear/status RPCs.',
+      '--ttl is in hours, 1..24, and can only shorten the 24h default.',
+      '--address advertises the endpoint the invited machine will dial; it defaults to the address this serve was started with.'
+    ],
+    examples: [
+      'orca lane invite --person "Ana Ng"',
+      'orca lane invite --person "Ana Ng" --scope runtime --ttl 4 --address example.com'
+    ]
+  },
+  {
     path: ['lane', 'bind'],
     summary: 'Bind a paired device to a person',
     usage: 'orca lane bind --device <idOrPrefixOrLabel> --person <idOrName> [--json]',

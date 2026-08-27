@@ -34,6 +34,7 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
       'lane provision',
       'lane deprovision',
       'lane bind-link',
+      'lane invite',
       'lane status',
       'lane audit'
     ],

@@ -519,6 +519,11 @@ export class OrcaRuntimeRpcServer {
   private deviceRegistry: DeviceRegistry | null = null
   private e2eeKeypair: E2EEKeypair | null = null
   private pairingInitializationFailure: PairingOfferUnavailable | null = null
+  // Why: `options.pairingAddress` (main/index.ts) is a launch-time local with nowhere durable to
+  // land. Without retaining it, a runtime-time mint (`accounts.lane.mintInvite`) has no address to
+  // reuse and falls back to the 127.0.0.1 default in `resolveAdvertisedPairingEndpoint`, emitting a
+  // loopback link the desktop dialog refuses as `host-unreachable`.
+  private advertisedPairingAddress: string | null = null
   private tlsFingerprint: string | null = null
   private activeTransports: RpcTransport[] = []
   private transports: RuntimeTransportMetadata[] = []
@@ -724,6 +729,13 @@ export class OrcaRuntimeRpcServer {
     return ws?.endpoint ?? null
   }
 
+  // Why: called once from main/index.ts beside the serve-readiness resolve, with the same
+  // `--serve-pairing-address` the banner itself advertises — so a later runtime-time mint
+  // (`accounts.lane.mintInvite`) reuses it instead of falling back to loopback.
+  setAdvertisedPairingAddress(address: string | null): void {
+    this.advertisedPairingAddress = address
+  }
+
   createPairingOffer(args: {
     address?: string | null
     name?: string
@@ -736,6 +748,10 @@ export class OrcaRuntimeRpcServer {
     // Why: STA-2370 — recorded on the grant so a "This computer only" client reconnecting cannot make the
     // next launch bind every interface. Defaults to network reach, which is what every other caller means.
     reach?: RuntimePairingReach
+    // Why optional and consumed only on the `mint === 'always'` arm: a named invite is handed to one
+    // person and may need a shorter leash than the 24h default; every other caller (coalesced QR,
+    // rotate) leaves this undefined and is byte-identical to before.
+    ttlMs?: number
   }):
     | PairingOfferUnavailable
     | {
@@ -763,7 +779,10 @@ export class OrcaRuntimeRpcServer {
       return pairingUnavailable('e2ee_key_unavailable', E2EE_KEY_UNAVAILABLE_GUIDANCE)
     }
 
-    const advertised = resolveAdvertisedPairingEndpoint(rawEndpoint, args.address)
+    const advertised = resolveAdvertisedPairingEndpoint(
+      rawEndpoint,
+      args.address ?? this.advertisedPairingAddress
+    )
     if (!advertised.ok) {
       return pairingUnavailable(advertised.reason, advertised.guidance)
     }
@@ -781,7 +800,7 @@ export class OrcaRuntimeRpcServer {
       // co-worker's un-scanned invite the moment a second named one is created.
       device =
         args.mint === 'always'
-          ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach)
+          ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach, args.ttlMs)
           : args.rotate
             ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
             : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
@@ -1277,7 +1296,14 @@ export class OrcaRuntimeRpcServer {
           userDataPath: this.userDataPath,
           grants: pairingIdentity.deviceRegistry,
           runtimeAuthToken: this.authToken,
-          runtime: this.runtime
+          runtime: this.runtime,
+          // Why here and not a standalone closure: `this.createPairingOffer` is already in scope
+          // inside RuntimeRpcServer, so a runtime-time mint (`accounts.lane.mintInvite`) reuses the
+          // exact same offer-construction path every other pairing entry point does.
+          pairing: {
+            createPairingOffer: (args) => this.createPairingOffer(args),
+            advertisedAddress: () => this.advertisedPairingAddress
+          }
         }).registry
         try {
           const host = this.resolveInitialWebSocketBindHost()

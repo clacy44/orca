@@ -1912,6 +1912,10 @@ async function printServeReady(options: ServeOptions): Promise<void> {
       throw new Error(`--serve-project-root must be a directory: ${options.projectRoot}`)
     }
   }
+  // Why here: this is the one place the launch-time flag is durably retained, so a later
+  // runtime-time mint (`accounts.lane.mintInvite`) reuses the same advertised address the banner
+  // itself is about to print rather than falling back to loopback.
+  runtimeRpc.setAdvertisedPairingAddress(options.pairingAddress)
   const boundEndpoint = runtimeRpc.getWebSocketEndpoint()
   const advertised = boundEndpoint
     ? resolveAdvertisedPairingEndpoint(boundEndpoint, options.pairingAddress)

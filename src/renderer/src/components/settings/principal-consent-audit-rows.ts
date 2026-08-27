@@ -12,6 +12,7 @@ export type ConsentAuditAction =
   | 'designate'
   | 'link-bind'
   | 'provision'
+  | 'mint-invite'
 
 /** One audit row as delivered over the host-only IPC seam — the registry row, verbatim. */
 export type ConsentAuditRow = {
@@ -23,6 +24,8 @@ export type ConsentAuditRow = {
   homePeerFingerprint?: string
   designatedGrantId?: string | null
   platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
+  inviteScope?: 'mobile' | 'runtime'
+  inviteExpiresAt?: number
 }
 
 export type ConsentAuditRowView = {

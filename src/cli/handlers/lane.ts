@@ -6,12 +6,14 @@ import type { RuntimeStatus } from '../../shared/runtime-types'
 import { AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import {
   formatAudit,
+  formatInvite,
   formatPersonList,
   formatStatus,
   personName,
   resolveDevice,
   resolvePerson,
   type LaneAuditRow,
+  type LaneInvite,
   type LanePrincipal,
   type LaneStatusSnapshot
 } from '../lane-format'
@@ -84,6 +86,44 @@ export const LANE_HANDLERS: Record<string, CommandHandler> = {
       { displayName }
     )
     printResult(result, ctx.json, (value) => `Created ${value.displayName}\n  ${value.principalId}`)
+  },
+  'lane invite': async (ctx) => {
+    rejectRemoteSelectionFlags(ctx)
+    const personSelector = requireStringFlag(ctx, 'person')
+    const scopeFlag = optionalStringFlag(ctx, 'scope') ?? 'runtime'
+    if (scopeFlag !== 'runtime' && scopeFlag !== 'mobile') {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        `--scope must be "runtime" or "mobile", not "${scopeFlag}".`
+      )
+    }
+    const ttlFlag = optionalStringFlag(ctx, 'ttl')
+    let ttlHours: number | undefined
+    if (ttlFlag !== null) {
+      const parsed = Number(ttlFlag)
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 24) {
+        throw new RuntimeClientError(
+          'invalid_argument',
+          `--ttl must be a whole number of hours from 1 to 24, not "${ttlFlag}".`
+        )
+      }
+      ttlHours = parsed
+    }
+    const address = optionalStringFlag(ctx, 'address')
+    await assertLaneSupported(ctx.client)
+    // Why resolved before the mint: an unknown/ambiguous --person must fail before any credential
+    // is minted, not after.
+    const snapshot = await readStatus(ctx.client)
+    const principalId = resolvePerson(snapshot.principals, personSelector)
+    const result = await ctx.client.call<LaneInvite>('accounts.lane.mintInvite', {
+      principalId,
+      scope: scopeFlag,
+      ...(ttlHours !== undefined ? { ttlHours } : {}),
+      ...(address ? { address } : {})
+    })
+    printResult({ ...result, result: { invite: result.result } }, ctx.json, (value) =>
+      formatInvite(value.invite)
+    )
   },
   'lane bind': async (ctx) => {
     rejectRemoteSelectionFlags(ctx)

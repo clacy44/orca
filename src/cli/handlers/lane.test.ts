@@ -113,6 +113,19 @@ const defaultImpl: CallImpl = (method) => {
   if (method === 'accounts.lane.bindFederatedLink') {
     return Promise.resolve({ boundDeviceId: 'ben-laptop-99' })
   }
+  if (method === 'accounts.lane.mintInvite') {
+    return Promise.resolve({
+      deviceId: '52f2327b-aaaa-bbbb-cccc-000000000000',
+      deviceIdPrefix: '52f2327b',
+      principalId: ANA,
+      displayName: 'Ana Ng',
+      scope: 'runtime',
+      expiresAt: Date.now() + 86_400_000,
+      pairingUrl: 'orca://pair?code=abc',
+      webClientUrl: null,
+      endpoint: 'wss://example.com:6768'
+    })
+  }
   return Promise.resolve({})
 }
 
@@ -126,6 +139,7 @@ describe('lane CLI handlers', () => {
         'lane create-person',
         'lane deprovision',
         'lane designate',
+        'lane invite',
         'lane persons',
         'lane provision',
         'lane rebind',
@@ -235,6 +249,58 @@ describe('lane CLI handlers', () => {
     const { client } = makeClient(defaultImpl)
     await expect(
       LANE_HANDLERS['lane persons'](context(client, { environment: 'homelab' }))
+    ).rejects.toThrow(/does not retarget/)
+  })
+
+  it('resolves --person to a principalId and mints the invite', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await LANE_HANDLERS['lane invite'](
+      context(client, { person: 'Ana Ng', scope: 'runtime', ttl: '2', address: 'example.com' })
+    )
+    expect(calls).toContainEqual([
+      'accounts.lane.mintInvite',
+      { principalId: ANA, scope: 'runtime', ttlHours: 2, address: 'example.com' }
+    ])
+  })
+
+  it('defaults --scope to runtime and omits ttl/address when not given', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng' }))
+    expect(calls).toContainEqual([
+      'accounts.lane.mintInvite',
+      { principalId: ANA, scope: 'runtime' }
+    ])
+  })
+
+  it('refuses an unknown --person before minting anything', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Nobody' }))
+    ).rejects.toThrow(/No person matches/)
+    expect(calls.some(([method]) => method === 'accounts.lane.mintInvite')).toBe(false)
+  })
+
+  it('rejects an invalid --scope', async () => {
+    const { client } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', scope: 'desktop' }))
+    ).rejects.toThrow(/--scope must be/)
+  })
+
+  it('rejects a --ttl outside 1..24', async () => {
+    const { client } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', ttl: '0' }))
+    ).rejects.toThrow(/--ttl must be/)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', ttl: '25' }))
+    ).rejects.toThrow(/--ttl must be/)
+  })
+
+  it('rejects --environment on lane invite like every other lane verb', async () => {
+    const { client } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', environment: 'homelab' }))
     ).rejects.toThrow(/does not retarget/)
   })
 })

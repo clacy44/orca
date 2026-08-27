@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { hardenExistingSecureFile, writeSecureJsonFile } from '../../shared/secure-file'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import type { DeviceScope } from '../../shared/runtime-types'
 
 export const PRINCIPAL_REGISTRY_FILENAME = 'claude-principals.json'
 
@@ -42,6 +43,7 @@ export type PrincipalAuditAction =
   | 'designate'
   | 'link-bind'
   | 'provision'
+  | 'mint-invite'
 
 /** §6 gate acceptance recorded on a `provision` audit row (B2's operator override). */
 export type PrincipalPlatformAcceptance = 'unverified-win32' | 'unverified-darwin'
@@ -57,6 +59,9 @@ export type PrincipalAuditRow = {
   designatedGrantId?: string | null
   /** Only a `provision` row on a §6-gated platform carries this — the operator's override. */
   platformAcceptance?: PrincipalPlatformAcceptance
+  /** Only a `mint-invite` row carries these two — never a token, never a pairing URL (S9 §2a). */
+  inviteScope?: DeviceScope
+  inviteExpiresAt?: number
 }
 
 export type PrincipalRegistryState = {
@@ -117,6 +122,21 @@ export function savePrincipalRegistryState(
 
 function normalizeArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : []
+}
+
+/** Moved out of `principal-registry.ts` to hold that file under the line ceiling. */
+export function inviteMintedAuditRow(
+  deviceId: string,
+  details: { principalId: string; scope: DeviceScope },
+  expiresAt: number
+): Omit<PrincipalAuditRow, 'at'> {
+  return {
+    action: 'mint-invite',
+    principalId: details.principalId,
+    deviceId,
+    inviteScope: details.scope,
+    inviteExpiresAt: expiresAt
+  }
 }
 
 /** Moved out of `principal-registry.ts` to hold that file under the line ceiling. */

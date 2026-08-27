@@ -157,4 +157,30 @@ describe('mobile RPC allowlist', () => {
       ].filter((method) => allowed.has(method))
     ).toEqual([])
   })
+
+  // `accounts.lane.mintInvite` mints a live bearer credential, and `terminal.openInMyLane` opens a
+  // terminal in another person's lane — neither belongs to a phone. mintInvite is host-only by
+  // design (refused before this allowlist is even consulted, at `authorizeHostConsent`); pinning
+  // both here means a future accidental addition breaks a test, not just a design doc.
+  it('does not grant mobile credentials mintInvite or terminal.openInMyLane', () => {
+    const allowed = mobileRpcAllowlist()
+    expect(
+      ['accounts.lane.mintInvite', 'terminal.openInMyLane'].filter((method) => allowed.has(method))
+    ).toEqual([])
+  })
+
+  it('still grants mobile credentials the three phone-initiated lane methods', () => {
+    const allowed = mobileRpcAllowlist()
+    expect(
+      [
+        'accounts.lane.requestSwitch',
+        'accounts.lane.statusSubscribe',
+        'accounts.lane.statusUnsubscribe'
+      ].filter((method) => allowed.has(method))
+    ).toEqual([
+      'accounts.lane.requestSwitch',
+      'accounts.lane.statusSubscribe',
+      'accounts.lane.statusUnsubscribe'
+    ])
+  })
 })

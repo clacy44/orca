@@ -13,13 +13,18 @@ import {
   updateEnvironmentFromPairingCode
 } from './runtime-environment-store'
 
-function pairingCode(endpoint = 'ws://127.0.0.1:6768', pairedDeviceId?: string): string {
+function pairingCode(
+  endpoint = 'ws://127.0.0.1:6768',
+  pairedDeviceId?: string,
+  scope?: 'mobile' | 'runtime'
+): string {
   return encodePairingOffer({
     v: 2,
     endpoint,
     deviceToken: 'device-token',
     publicKeyB64: Buffer.from(new Uint8Array(32).fill(1)).toString('base64'),
-    ...(pairedDeviceId ? { pairedDeviceId } : {})
+    ...(pairedDeviceId ? { pairedDeviceId } : {}),
+    ...(scope ? { scope } : {})
   })
 }
 
@@ -39,6 +44,35 @@ describe('runtime environment store', () => {
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('refuses to save a mobile-scope invite — its RPCs would fail per-method with forbidden', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+
+    expect(() =>
+      addEnvironmentFromPairingCode(userDataPath, {
+        name: 'phone link',
+        pairingCode: pairingCode('ws://127.0.0.1:6768', undefined, 'mobile')
+      })
+    ).toThrow(/mobile-only access/)
+    expect(listEnvironments(userDataPath)).toEqual([])
+  })
+
+  it('refuses to update a saved environment onto a mobile-scope invite', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+
+    addEnvironmentFromPairingCode(userDataPath, {
+      name: 'dev box',
+      pairingCode: pairingCode('ws://127.0.0.1:6768', undefined, 'runtime')
+    })
+
+    expect(() =>
+      updateEnvironmentFromPairingCode(userDataPath, 'dev box', {
+        pairingCode: pairingCode('ws://192.0.2.10:6768', undefined, 'mobile')
+      })
+    ).toThrow(/mobile-only access/)
   })
 
   it('rejects duplicate server names instead of silently replacing the saved server', () => {

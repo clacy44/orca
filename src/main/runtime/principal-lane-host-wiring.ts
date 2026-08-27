@@ -1,7 +1,8 @@
 import { PrincipalRegistry, type PrincipalGrantSource } from './principal-registry'
 import {
   PrincipalLaneConsentService,
-  attachPrincipalLaneConsentService
+  attachPrincipalLaneConsentService,
+  type PairingInviteSource
 } from './principal-lane-consent-service'
 import type { PrincipalLookup } from './terminal-credential-lane-resolution'
 import type { RuntimeTerminalLaneAccountLabel } from '../../shared/runtime-types'
@@ -46,6 +47,9 @@ export function attachPrincipalLaneHost(input: {
   grants: PrincipalGrantSource
   runtimeAuthToken: string
   runtime: PrincipalLaneHostRuntime
+  // Why optional: a REMOTE-host runtime proxy passes none, and `mintInvite` refuses
+  // `accounts.lane.invite_unavailable` rather than throwing at attach time.
+  pairing?: PairingInviteSource
 }): PrincipalLaneHostAttachment {
   const registry = new PrincipalRegistry(input.userDataPath, input.grants, {
     runtimeAuthToken: input.runtimeAuthToken
@@ -56,7 +60,12 @@ export function attachPrincipalLaneHost(input: {
     principalOf: (deviceId) => registry.principalOf(deviceId),
     linkPrincipalOf: (homePeerFingerprint) => registry.linkPrincipalOf(homePeerFingerprint)
   }
-  const consentService = new PrincipalLaneConsentService(registry)
+  const consentService = new PrincipalLaneConsentService(
+    registry,
+    undefined,
+    undefined,
+    input.pairing
+  )
   attachPrincipalLaneConsentService(consentService)
   // Startup sweep (release-audit follow-up): `reconcileOrphanLanes` had no production caller —
   // a lane directory for a principal the registry no longer binds any device to would sit on
