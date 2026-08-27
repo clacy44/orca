@@ -4,6 +4,7 @@
   "description": "Next-gen IDE for parallel agentic development",
   "homepage": "https://github.com/stablyai/orca",
   "author": "stablyai",
+  "repository": "github:clacy44/orca",
   "bin": {
     "orca": "./out/cli/index.js",
     "orca-dev": "./config/scripts/orca-dev.mjs"
