@@ -108,7 +108,11 @@ export function GeneralUpdateSettingsSection(): React.JSX.Element {
             // persistent settings toggles.
             onClick={(event) => window.api.updater.check(getUpdateCheckClickOptions(event))}
             title={updateCheckHint}
-            disabled={updateStatus.state === 'checking' || updateStatus.state === 'downloading'}
+            disabled={
+              updateStatus.state === 'checking' ||
+              updateStatus.state === 'downloading' ||
+              updateStatus.state === 'unmanaged'
+            }
             className="gap-2"
           >
             {updateStatus.state === 'checking' ? (
@@ -166,6 +170,7 @@ export function GeneralUpdateSettingsSection(): React.JSX.Element {
               'auto.components.settings.GeneralUpdateSettingsSection.d69a09b672',
               'Updates are checked automatically on launch.'
             )}
+          {updateStatus.state === 'unmanaged' && updateStatus.message}
           {updateStatus.state === 'checking' &&
             translate(
               'auto.components.settings.GeneralUpdateSettingsSection.31fd7150cf',

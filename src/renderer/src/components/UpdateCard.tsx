@@ -213,6 +213,10 @@ export function UpdateCard() {
   if (status.state === 'idle') {
     return null
   }
+  // Why: no valid update feed for this build (see update-feed-resolution.ts) — never show an actionable update card.
+  if (status.state === 'unmanaged') {
+    return null
+  }
 
   // Error: show for user-initiated failures or failures tied to a cached version; background failures stay silent.
   if (status.state === 'error' && !shouldShowDetailedErrorCard && !isUserInitiated) {
