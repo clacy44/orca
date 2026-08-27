@@ -19153,10 +19153,39 @@ export class OrcaRuntimeService {
     }
   }
 
+  /** Independent proof a pane is still live even when its tab left every
+   * session record — shared by both retained-history context builders below. */
+  private buildConnectedPtyEvidenceForRetainedHistory(): {
+    tabIds: Set<string>
+    paneKeys: Set<string>
+    ptyIds: Set<string>
+  } {
+    const connectedPtyEvidence = {
+      tabIds: new Set<string>(),
+      paneKeys: new Set<string>(),
+      ptyIds: new Set<string>()
+    }
+    for (const pty of this.ptysById.values()) {
+      if (!pty.connected) {
+        continue
+      }
+      connectedPtyEvidence.ptyIds.add(pty.ptyId)
+      if (pty.tabId) {
+        connectedPtyEvidence.tabIds.add(pty.tabId)
+      }
+      if (pty.paneKey) {
+        connectedPtyEvidence.paneKeys.add(pty.paneKey)
+      }
+    }
+    return connectedPtyEvidence
+  }
+
   /** Same liveness join as `attachAgentRowsToSummaries`, computed standalone for
-   * the other two publication points (`agentStatus:getSnapshot`, mobile/paired
-   * session-tab snapshots) so a ghost agent row cannot leak onto either — see
-   * `isRetainedHistoryAgentRow` (FIX 2). */
+   * `agentStatus:getSnapshot` so a ghost agent row cannot leak onto it either —
+   * see `isRetainedHistoryAgentRow` (FIX 2). Enumerates every repo/session host,
+   * so it is only for call sites that already do (worktree.ps-shaped scans);
+   * hot single-worktree polls must use
+   * `buildRetainedHistoryAgentRowContextForWorktree` instead. */
   buildRetainedHistoryAgentRowContext(): RetainedHistoryAgentRowContext {
     const mirroredWorktreeIdByTabId = new Map<string, string>()
     const hostIds = new Set<ExecutionHostId>(['local'])
@@ -19184,28 +19213,36 @@ export class OrcaRuntimeService {
         mirroredWorktreeIdByTabId.set(tabId, tab.worktreeId)
       }
     }
-    const connectedPtyEvidence: {
-      tabIds: Set<string>
-      paneKeys: Set<string>
-      ptyIds: Set<string>
-    } = {
-      tabIds: new Set<string>(),
-      paneKeys: new Set<string>(),
-      ptyIds: new Set<string>()
+    return {
+      mirroredWorktreeIdByTabId,
+      connectedPtyEvidence: this.buildConnectedPtyEvidenceForRetainedHistory()
     }
-    for (const pty of this.ptysById.values()) {
-      if (!pty.connected) {
-        continue
-      }
-      connectedPtyEvidence.ptyIds.add(pty.ptyId)
-      if (pty.tabId) {
-        connectedPtyEvidence.tabIds.add(pty.tabId)
-      }
-      if (pty.paneKey) {
-        connectedPtyEvidence.paneKeys.add(pty.paneKey)
+  }
+
+  /** Worktree-scoped variant for the mobile/paired session-tab snapshot poll
+   * (a hot path): resolves only the ONE session that owns `worktreeId` (via
+   * `getRepo`, never `getRepos`) instead of enumerating every repo/session
+   * host, so a floating/unparseable worktree id still costs nothing extra. */
+  private buildRetainedHistoryAgentRowContextForWorktree(
+    worktreeId: string
+  ): RetainedHistoryAgentRowContext {
+    const mirroredWorktreeIdByTabId = new Map<string, string>()
+    const hostId = this.tryGetWorkspaceSessionHostIdForWorktree(worktreeId)
+    if (hostId) {
+      const session = this.store?.getWorkspaceSession?.(hostId)
+      for (const tab of session?.tabsByWorktree?.[worktreeId] ?? []) {
+        mirroredWorktreeIdByTabId.set(tab.id, worktreeId)
       }
     }
-    return { mirroredWorktreeIdByTabId, connectedPtyEvidence }
+    for (const [tabId, tab] of this.tabs) {
+      if (!mirroredWorktreeIdByTabId.has(tabId)) {
+        mirroredWorktreeIdByTabId.set(tabId, tab.worktreeId)
+      }
+    }
+    return {
+      mirroredWorktreeIdByTabId,
+      connectedPtyEvidence: this.buildConnectedPtyEvidenceForRetainedHistory()
+    }
   }
 
   listRepos(): Repo[] {
@@ -32202,8 +32239,25 @@ export class OrcaRuntimeService {
     const liveBrowserTabsByPageId = this.getLiveBrowserTabsByPageId(snapshot.worktree)
     // FIX 2: same producer-side liveness join as attachAgentRowsToSummaries and
     // agentStatus:getSnapshot, so this per-tab agentStatus carrier cannot leak a
-    // ghost agent row to a paired client either.
-    const retainedHistoryCtx = this.buildRetainedHistoryAgentRowContext()
+    // ghost agent row to a paired client either. This very snapshot's own tabs
+    // are themselves proof of existence (mirrors "session tabs count as
+    // existence" in attachAgentRowsToSummaries) — a headless/paired session has
+    // no separate persisted or renderer-graph record of them.
+    const baseRetainedHistoryCtx = this.buildRetainedHistoryAgentRowContextForWorktree(
+      snapshot.worktree
+    )
+    const snapshotMirroredWorktreeIdByTabId = new Map(
+      baseRetainedHistoryCtx.mirroredWorktreeIdByTabId
+    )
+    for (const snapshotTab of snapshot.tabs) {
+      if (snapshotTab.type === 'terminal') {
+        snapshotMirroredWorktreeIdByTabId.set(snapshotTab.parentTabId, snapshot.worktree)
+      }
+    }
+    const retainedHistoryCtx: RetainedHistoryAgentRowContext = {
+      ...baseRetainedHistoryCtx,
+      mirroredWorktreeIdByTabId: snapshotMirroredWorktreeIdByTabId
+    }
     const isRetainedHistoryRow = (row: {
       paneKey: string
       tabId?: string
