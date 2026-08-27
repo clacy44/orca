@@ -65,7 +65,7 @@ export type PrincipalLaneStatusBridgeOptions = {
   /** Injected in tests. Defaults to pushing the named account onto the named host lane. */
   delegateAccount?: (environmentId: string, accountId: string) => Promise<boolean>
   /** Injected in tests. Defaults to re-querying one remote host's lane status on demand. */
-  refreshHost?: (environmentId: string) => Promise<void>
+  refreshHost?: (environmentId: string) => Promise<boolean>
 }
 
 // Why a broadcast set and not one window: provision/deprovision are process-wide events, and every
@@ -212,17 +212,20 @@ export function registerPrincipalLaneStatusBridge(
       if (!isMainWindowSender(event)) {
         return { refreshed: false }
       }
-      await refreshHost(request.environmentId)
+      const refreshed = await refreshHost(request.environmentId)
       broadcast()
-      return { refreshed: true }
+      return { refreshed }
     }
   )
 
   // Discoverability follow-up: a remote client's status can change with no local IPC call at all —
   // a `status` frame off the lane-status stream, or a reachability-triggered `refreshStatus()` —
   // so the desktop service's own listener, not just the two writes above, must be able to
-  // re-broadcast. Only the LAST registration wins on purpose: one desktop process has one window.
-  setLaneDelegationDesktopStatusListener(broadcast)
+  // re-broadcast. Wired to `notifyPrincipalLaneStatusChanged`, the same fan-out `broadcasters`
+  // already uses for provision/deprovision, so every registered host frame re-reads regardless of
+  // which bridge registration is the "active" one — not the per-window `broadcast` closure, which
+  // would silently stop reaching every window but the newest.
+  setLaneDelegationDesktopStatusListener(notifyPrincipalLaneStatusChanged)
 
   const dispose = (): void => {
     if (disposed) {
