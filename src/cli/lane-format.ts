@@ -38,6 +38,20 @@ export type LaneAuditRow = {
   homePeerFingerprint?: string
   designatedGrantId?: string | null
   platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
+  inviteScope?: 'runtime' | 'mobile'
+  inviteExpiresAt?: number
+}
+
+export type LaneInvite = {
+  deviceId: string
+  deviceIdPrefix: string
+  principalId: string
+  displayName: string
+  scope: 'runtime' | 'mobile'
+  expiresAt: number
+  pairingUrl: string
+  webClientUrl: string | null
+  endpoint: string
 }
 
 /**
@@ -159,6 +173,30 @@ export function formatStatus(snapshot: LaneStatusSnapshot): string {
   ].join('\n')
 }
 
+function formatInviteExpiry(expiresAt: number): string {
+  const date = new Date(expiresAt)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+export function formatInvite(invite: LaneInvite): string {
+  const lines = [
+    `Invite for ${invite.displayName} — ${invite.scope} scope, expires ${formatInviteExpiry(invite.expiresAt)}`,
+    `  device  ${invite.deviceIdPrefix}`,
+    `  link    ${invite.pairingUrl}`,
+    ...(invite.webClientUrl ? [`  web     ${invite.webClientUrl}     (runtime scope only)`] : []),
+    ...(invite.scope === 'mobile'
+      ? [
+          'A mobile invite can be bound and designated but can never push a credential; designate a runtime grant as the pusher.'
+        ]
+      : []),
+    `Redeem on that machine:  orca environment add --name <label> --pairing-code '${invite.pairingUrl}'`,
+    '                         or Orca → Settings → Environments → Add',
+    `Then, back here:         orca lane bind --device ${invite.deviceIdPrefix} --person "${invite.displayName}"`
+  ]
+  return lines.join('\n')
+}
+
 export function formatAudit(rows: LaneAuditRow[]): string {
   if (rows.length === 0) {
     return 'No lane audit entries.'
@@ -182,6 +220,14 @@ export function formatAudit(rows: LaneAuditRow[]): string {
     }
     if (row.platformAcceptance) {
       parts.push(`platform=${row.platformAcceptance}`)
+    }
+    if (row.action === 'mint-invite') {
+      if (row.inviteScope) {
+        parts.push(`scope=${row.inviteScope}`)
+      }
+      if (row.inviteExpiresAt !== undefined) {
+        parts.push(`expires=${formatInviteExpiry(row.inviteExpiresAt)}`)
+      }
     }
     return `  ${parts.join('  ')}`
   })
