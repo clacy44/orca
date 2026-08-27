@@ -152,7 +152,7 @@ describe('designation reaching an already-subscribed lane-status stream (release
     })
   })
 
-  it('also emits on provision and deprovision, so the residency badge stays live too', () => {
+  it('also emits on provision and deprovision, so the residency badge stays live too', async () => {
     startHarness()
     const consent = getPrincipalLaneConsentService()!
     const wire = getLaneWireService()!
@@ -169,6 +169,78 @@ describe('designation reaching an already-subscribed lane-status stream (release
 
     consent.provisionLane(CONSENT, ana.principalId)
     expect(frames.filter((f) => f.type === 'status')).toHaveLength(1)
+
+    // The wired path this file's name promises but the body above never exercised: deprovision is
+    // async and emits after an awaited `wipeLaneCredentials`, i.e. exactly where an ordering
+    // mistake (emitting before the wipe settles, or not at all) would be invisible without a test.
+    await consent.deprovisionLane(CONSENT, ana.principalId)
+    expect(frames.filter((f) => f.type === 'status')).toHaveLength(2)
+  })
+
+  it("never delivers a designation frame to another principal's subscriber", () => {
+    const { grants } = startHarness()
+    const consent = getPrincipalLaneConsentService()!
+    const wire = getLaneWireService()!
+    const ana = consent.createPrincipal(CONSENT, 'Ana')
+    const bo = consent.createPrincipal(CONSENT, 'Bo')
+    const boDeviceId = 'b'.repeat(64)
+    grants.add(boDeviceId)
+    consent.bindGrant(CONSENT, DEVICE_ID, ana.principalId)
+    consent.bindGrant(CONSENT, boDeviceId, bo.principalId)
+
+    // Two principals, each with their own bound device subscribed to their own lane: routing is
+    // per-subscriber, re-resolved through `callerOf` on every delivery (lane-status-stream.ts), so
+    // this is the exact seam a leak from Ana's lane to Bo's subscriber would show up on.
+    const anaFrames: LaneStatusFrame[] = []
+    const boFrames: LaneStatusFrame[] = []
+    wire.stream.subscribe(
+      { deviceId: DEVICE_ID, principalId: ana.principalId },
+      'conn-ana',
+      (frame) => anaFrames.push(frame)
+    )
+    wire.stream.subscribe(
+      { deviceId: boDeviceId, principalId: bo.principalId },
+      'conn-bo',
+      (frame) => boFrames.push(frame)
+    )
+
+    consent.designatePusher(CONSENT, ana.principalId, DEVICE_ID)
+    expect(anaFrames.filter((f) => f.type === 'status')).toHaveLength(1)
+    expect(boFrames.filter((f) => f.type === 'status')).toHaveLength(0)
+  })
+
+  it('a subscription follows a rebound grant to the new principal and stops answering for the old one', () => {
+    const { grants } = startHarness()
+    const consent = getPrincipalLaneConsentService()!
+    const wire = getLaneWireService()!
+    const ana = consent.createPrincipal(CONSENT, 'Ana')
+    const bo = consent.createPrincipal(CONSENT, 'Bo')
+    // A second device kept bound to Ana throughout, so a later Ana-only emit has somewhere to go
+    // that is not the rebound device — proving the rebound subscriber really stopped answering for
+    // Ana rather than Ana's lane having gone quiet altogether.
+    const anaAnchorDeviceId = 'c'.repeat(64)
+    grants.add(anaAnchorDeviceId)
+    consent.bindGrant(CONSENT, DEVICE_ID, ana.principalId)
+    consent.bindGrant(CONSENT, anaAnchorDeviceId, ana.principalId)
+
+    const frames: LaneStatusFrame[] = []
+    wire.stream.subscribe(
+      { deviceId: DEVICE_ID, principalId: ana.principalId },
+      'conn-1',
+      (frame) => frames.push(frame)
+    )
+
+    consent.designatePusher(CONSENT, ana.principalId, anaAnchorDeviceId)
+    expect(frames.filter((f) => f.type === 'status')).toHaveLength(1)
+
+    consent.rebindGrant(CONSENT, DEVICE_ID, bo.principalId)
+    // Rebind notifies Ana (the prior principal, but this subscriber's grant no longer resolves to
+    // her) then Bo (the new principal, which it now does) — exactly one more frame, for Bo.
+    expect(frames.filter((f) => f.type === 'status')).toHaveLength(2)
+
+    consent.designatePusher(CONSENT, ana.principalId, anaAnchorDeviceId)
+    // A further Ana-only emit must not reach a subscriber whose grant now belongs to Bo.
+    expect(frames.filter((f) => f.type === 'status')).toHaveLength(2)
   })
 
   it('does not throw when no lane wire is attached (a build with lanes disabled)', () => {
