@@ -214,3 +214,11 @@ host." Full verb list, refusal codes and rationale:
 `docs/reference/agent-identity-s9-design.md` §9 ("Day-one setup"),
 §10 item 39, and §10(f) (the 2026-08-24 release audit that added the
 override).
+
+## Auto-update
+
+Fork builds now gate the auto-updater on build identity: package.json
+`repository` resolves upstream/fork/off (default off for non-stablyai
+builds), overridable via ORCA_UPDATE_FEED=upstream|fork|off (see
+src/main/update-feed-resolution.ts). Dismiss any 'Update Available' panel
+from an older fork build — it points at upstream.

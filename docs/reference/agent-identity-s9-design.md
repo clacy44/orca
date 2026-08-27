@@ -1,4 +1,4 @@
-# S9 — Agent identity on a shared host (design, rev 29, reconciled line by line with the shipped S9a + S9b + S9c + S9d)
+# S9 — Agent identity on a shared host (design, rev 30, reconciled line by line with the shipped S9a + S9b + S9c + S9d)
 
 Repo read-only at `/home/ubuntu/orca-integration` @ `feat/resilience-presence-integration` (B2 merged); **as of rev 25 the citations below are re-derived against the *implementation* tree, `/home/ubuntu/orca-s9` @ `feat/agent-identity-s9`, which now carries S9a, S9b, S9c and S9d (§10).** Problem: two developers share one dev box and one operating-system account; each has several personal Claude accounts. **Host pivot, rev 11:** that box now runs **Windows Server**, not Linux; both developers work from Windows 11 desktops; the owner's personal VPS stays Linux and single-owner and is out of S9's scope. The macOS and Linux material below is kept in full — Orca ships all three and nothing here is demoted for being non-Windows — but **the shared host this design is built for is Windows Server (§2m)**, and every platform-dependent claim was re-opened against `win32` for this revision. Requirements as approved: **R1** a terminal's Claude credential is controlled only by the **principal** that opened it (rev 11: a principal is a *person*, and several of that person's grants — desktop and phone — share one lane; Q1, §2a); **R2** the opener switches among *their own* accounts live and every terminal they opened re-resolves with no restart; **R3** the other developer's terminals never move; **R4** both keep viewing/typing into each other's terminals (B2 presence shows the owner); **R5** account inventory stays on the owner's desktop. Accepted trade-off: the selected credential **is** materialized on the dev box, in that grant's own directory, `0600`, wiped when the **principal's** last connection closes and re-pushed on reconnect.
 
@@ -600,9 +600,22 @@ Round 10 returned **zero blockers** and two majors. Both are recorded here verba
 15. **Containment (S9a, §2m(4)).** Attempt `orca account add --config-dir` against a lane root through, in turn: an 8.3 short-name form; a drive-letter case flip; a `\\?\` extended-path form; and a planted NTFS junction into the lane. *Pass:* all four are refused.
 16. **Three shells (S9a, §2m(8)).** Repeat step 2 (the plain-shell case) three times: once under **PowerShell**, once under **Git Bash**, once under `cmd` — the resolver's middle fallback — and drive **at least one** of the three through a per-tab shell override rather than the host's default-shell setting (the path every restored lane pane actually resolves its shell through). *Pass, each time:* `$CLAUDE_CONFIG_DIR` (or `%CLAUDE_CONFIG_DIR%`) reads as the lane path **from inside the pane, after the shell's own profile has run** — a `$PROFILE` or `.bashrc` that rewrites it must fail this step, not pass silently.
 
-## 10. What shipped — S9a, S9b, S9c and S9d implementation deviations (rev 29)
+## 10. What shipped — S9a, S9b, S9c and S9d implementation deviations (rev 30)
 
 **This section is the reconciliation.** Every item is a place where the *implementation* departed from §2–§6 as written, recorded as a decision with the reason it was taken. Nothing here is a proposal: it is all in the tree at the `feat/agent-identity-s9` tip. Where the code is right and this document was wrong, the sentence above has been corrected in place and the item says so. **Rev 25 adds (c) and (d)** — S9c and S9d, both now shipped — and extends the gate-skip retrospective, formerly (c) and now (e), with what those two slices' gates skipped. **Rev 26 extends (d)** with S9d Parts 2–4's pure-resolver layer (the restart-hedge classifier and the consent-surface resolvers) and restates, item by item, what of Parts 2–4 is still unbuilt. **Rev 28 adds item 39 below**, recording the headless-host `orca lane` CLI that drives the same host-only consent RPCs item 39 names, renumbers a gap in §7's list, and gives §9's preamble a day-one setup step built from it; no §2–§6 behavior changed. **Rev 29 adds (f)**, the 2026-08-24 release audit that found the entire S9c/S9d lane wire — and, with it, §8 item 4's residency predicates — sitting unattached in production despite being fully implemented and fully tested in isolation; it records the three blockers and one major the audit found, the two composition-parity controls it added so the same failure shape cannot recur silently, and the Windows/macOS provisioning override it shipped alongside the fix. §9 step 0 and `docs/reference/windows-desktop-build.md` are updated to match.
+**Rev 30** records two operational incidents found and fixed after the S9c/S9d
+lane wire went live in production, documented in full in their own reference
+docs rather than reconciled line-by-line against §2–§6 here (neither changed
+any lane-wire behavior this section covers): `terminal-reattach-stability.md`
+(the 2026-08-25 mouse-report-spam/duplicate-tab/non-converging-close-all/
+dead-tab-remint incident, fixed on `feat/terminal-reattach-stability` and
+shipped as Artifact 5) and `sidebar-ghost-agent-rows.md` (the 2026-08-27
+"3 agents" sidebar symptom from unretired agent-hook rows across a resumed
+session, FIX 1/2/5 shipped, FIX 3/4 deferred). As of 2026-08-25 18:27 UTC the
+VPS runs Artifact 5 (sha256 `83019f4dbbddeaa4b6c95feddc77d1530c2a7f77a6c70042c8d5391d310a99b8`,
+integration tip `a7f23391e1`), installed via `orca-install-v3.sh`; a Clacy
+named invite (`--pair-name Clacy`) is minted and pending pairing with the
+owner's desktop.
 
 ### (a) S9a — env/arg hardening, capture containment, lanes, the funnel
 
