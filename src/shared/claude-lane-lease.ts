@@ -25,6 +25,13 @@ export type ClaudeLaneDelegationLease = {
    * absent until the human sets one.
    */
   friendlyName?: string | null
+  /**
+   * Additive (Rule 1): true when this account was THIS desktop's own active local selection at
+   * lease-creation time. Rule (iv) clears its runtime file the instant the lease is taken, so a
+   * signed-in local Claude session goes to "Not logged in" with no warning — this flag is what lets
+   * Release re-select the account locally afterward, undoing that sign-out.
+   */
+  wasLocalActive?: boolean
 }
 
 /** One row per delegated account; a desktop delegates few, and a corrupt list must stay bounded. */
@@ -74,7 +81,8 @@ export function normalizeClaudeLaneLease(value: unknown): ClaudeLaneDelegationLe
     delegatedGrantId,
     since: readTimestamp(record.since) ?? 0,
     expiresAt: readTimestamp(record.expiresAt),
-    ...(friendlyName ? { friendlyName } : {})
+    ...(friendlyName ? { friendlyName } : {}),
+    ...(record.wasLocalActive === true ? { wasLocalActive: true } : {})
   }
 }
 

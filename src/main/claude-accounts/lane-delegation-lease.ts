@@ -37,6 +37,12 @@ export type LaneDelegationLeaseOptions = {
   clearRuntimeCredentials?: (lease: ClaudeLaneDelegationLease) => void
   /** Reports a clear that lost the win32 race with a live `claude`; the retry is the next status. */
   onClearFailed?: (lease: ClaudeLaneDelegationLease, error: unknown) => void
+  /**
+   * Owner addendum: whether `accountId` is THIS desktop's own active local selection right now.
+   * Sampled once, when a lease is first taken, and stamped onto it as `wasLocalActive` so Release
+   * knows to re-select the account locally afterward (rule (iv) already cleared its runtime file).
+   */
+  isLocallyActiveAccount?: (accountId: string) => boolean
 }
 
 export type LaneDelegationLeaseInput = {
@@ -67,12 +73,15 @@ export class LaneDelegationLeaseStore {
   take(input: LaneDelegationLeaseInput): ClaudeLaneDelegationLease {
     const existing = this.list().find((lease) => lease.accountId === input.accountId)
     const now = this.now()
+    const wasLocalActive =
+      existing?.wasLocalActive ?? this.options.isLocallyActiveAccount?.(input.accountId) ?? false
     const lease: ClaudeLaneDelegationLease = {
       ...input,
       since: existing?.since ?? now,
       expiresAt: now + (this.options.ttlMs ?? CLAUDE_LANE_LEASE_TTL_MS),
       // Why preserve: renewal must not wipe the human's Q3 friendly name (§2e — the lease is durable).
-      ...(existing?.friendlyName ? { friendlyName: existing.friendlyName } : {})
+      ...(existing?.friendlyName ? { friendlyName: existing.friendlyName } : {}),
+      ...(wasLocalActive ? { wasLocalActive: true } : {})
     }
     this.put(lease)
     try {

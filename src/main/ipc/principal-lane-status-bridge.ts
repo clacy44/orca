@@ -6,6 +6,7 @@
 import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ClaudeLaneDelegationLease } from '../../shared/claude-lane-lease'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
+import { listEnvironments } from '../../shared/runtime-environment-store'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
@@ -15,6 +16,7 @@ import {
   type PrincipalLaneStatusDelegableHost,
   type PrincipalLaneStatusDelegateRequest,
   type PrincipalLaneStatusDelegateResult,
+  type PrincipalLaneStatusDelegationLease,
   type PrincipalLaneStatusReleaseRequest,
   type PrincipalLaneStatusReleaseResult,
   type PrincipalLaneStatusRenameRequest,
@@ -27,6 +29,8 @@ import {
 } from '../claude-accounts/lane-delegation-desktop-service'
 import { getLaneDelegationLeaseStore } from '../claude-accounts/lane-delegation-lease'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
+import { reselectClaudeAccountLocallyAfterLaneRelease } from '../claude-accounts/service'
+import type { Store } from '../persistence'
 import { getPrincipalLaneConsentService } from '../runtime/principal-lane-consent-service'
 
 const EMPTY_SNAPSHOT: PrincipalLaneStatusSnapshot = {
@@ -54,6 +58,14 @@ export type PrincipalLaneStatusBridgeOptions = {
   listDelegableHosts?: () => PrincipalLaneStatusDelegableHost[]
   /** Injected in tests. Defaults to pushing the named account onto the named host lane. */
   delegateAccount?: (environmentId: string, accountId: string) => Promise<boolean>
+  /** Injected in tests. Defaults to this desktop's managed Claude accounts, from `store`. */
+  listManagedAccounts?: () => readonly { id: string; email: string }[]
+  /** Injected in tests. Defaults to the environment store's names, keyed by id (= a lease's hostId). */
+  listEnvironmentNames?: () => readonly { id: string; name: string }[]
+  /** Used only for the `listManagedAccounts` default above. */
+  store?: Store
+  /** Owner addendum. Defaults to re-selecting the account through the desktop's account service. */
+  reselectLocally?: (accountId: string) => Promise<boolean>
 }
 
 // Why a broadcast set and not one window: provision/deprovision are process-wide events, and every
@@ -95,22 +107,42 @@ export function registerPrincipalLaneStatusBridge(
     options.delegateAccount ??
     ((environmentId: string, accountId: string) =>
       delegateAccountToLaneHost(environmentId, accountId))
+  const listManagedAccounts =
+    options.listManagedAccounts ?? (() => options.store?.getSettings().claudeManagedAccounts ?? [])
+  const listEnvironmentNames =
+    options.listEnvironmentNames ?? (() => listEnvironments(app.getPath('userData')))
+  const reselectLocally = options.reselectLocally ?? reselectClaudeAccountLocallyAfterLaneRelease
 
   const isMainWindowSender = (event: IpcMainInvokeEvent): boolean =>
     !mainWindow.isDestroyed() &&
     !mainWindow.webContents.isDestroyed() &&
     event.sender === mainWindow.webContents
 
-  const buildSnapshot = (): PrincipalLaneStatusSnapshot => ({
-    lanes: listPrincipals().map((principal) => ({
-      principalId: principal.principalId,
-      displayName: principal.displayName,
-      delegatedGrantId: principal.delegatedGrantId ?? null,
-      laneState: resolveLaneState(principal.principalId)
-    })),
-    delegationLeases: listDelegationLeases(),
-    delegableHosts: listDelegableHosts()
+  const buildLeaseView = (
+    lease: ClaudeLaneDelegationLease,
+    principals: readonly { principalId: string; displayName: string }[]
+  ): PrincipalLaneStatusDelegationLease => ({
+    ...lease,
+    accountLabel: listManagedAccounts().find((a) => a.id === lease.accountId)?.email ?? null,
+    hostLabel: listEnvironmentNames().find((e) => e.id === lease.hostId)?.name ?? null,
+    personLabel:
+      principals.find((principal) => principal.principalId === lease.principalId)?.displayName ??
+      null
   })
+
+  const buildSnapshot = (): PrincipalLaneStatusSnapshot => {
+    const principals = listPrincipals()
+    return {
+      lanes: principals.map((principal) => ({
+        principalId: principal.principalId,
+        displayName: principal.displayName,
+        delegatedGrantId: principal.delegatedGrantId ?? null,
+        laneState: resolveLaneState(principal.principalId)
+      })),
+      delegationLeases: listDelegationLeases().map((lease) => buildLeaseView(lease, principals)),
+      delegableHosts: listDelegableHosts()
+    }
+  }
 
   const broadcast = (): void => {
     if (disposed || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
@@ -135,15 +167,24 @@ export function registerPrincipalLaneStatusBridge(
   ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL)
   ipcMain.handle(
     PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
-    (event, request: PrincipalLaneStatusReleaseRequest): PrincipalLaneStatusReleaseResult => {
+    async (
+      event,
+      request: PrincipalLaneStatusReleaseRequest
+    ): Promise<PrincipalLaneStatusReleaseResult> => {
       if (!isMainWindowSender(event)) {
-        return { released: false }
+        return { released: false, reselectedLocally: false }
       }
+      // Read BEFORE releasing: `wasLocalActive` lives on the row that's about to be removed.
+      const wasLocalActive =
+        listDelegationLeases().find((lease) => lease.accountId === request.accountId)
+          ?.wasLocalActive === true
       const released = releaseLease(request.accountId)
+      const reselectedLocally =
+        released && wasLocalActive ? await reselectLocally(request.accountId) : false
       if (released) {
         broadcast()
       }
-      return { released }
+      return { released, reselectedLocally }
     }
   )
 

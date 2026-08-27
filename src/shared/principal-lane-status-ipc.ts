@@ -25,18 +25,37 @@ export type PrincipalLaneStatusRow = {
   laneState: RuntimeTerminalLaneState
 }
 
+/**
+ * A delegation lease as the AccountsPane renders it: the persisted lease PLUS, additively (Rule 1),
+ * the names the desktop can resolve for it right now — the delegated account's email, the host
+ * environment's name, and (when this desktop also provisions that principal) the person's display
+ * name. Each is null when unresolvable, so the card falls back to the underlying id.
+ */
+export type PrincipalLaneStatusDelegationLease = ClaudeLaneDelegationLease & {
+  accountLabel?: string | null
+  hostLabel?: string | null
+  personLabel?: string | null
+}
+
 /** What `principalLaneStatus:get` answers and `principalLaneStatus:changed` republishes. */
 export type PrincipalLaneStatusSnapshot = {
   lanes: PrincipalLaneStatusRow[]
   /** The delegation leases THIS desktop persists — one row per account it delegated (§2e). */
-  delegationLeases: ClaudeLaneDelegationLease[]
+  delegationLeases: PrincipalLaneStatusDelegationLease[]
   /** Additive (Rule 1): paired hosts this desktop can push a Claude account onto right now (B3). */
   delegableHosts: PrincipalLaneStatusDelegableHost[]
 }
 
 /** Release request: drop THIS desktop's delegation lease for one account (§2e recovery, Q-lease). */
 export type PrincipalLaneStatusReleaseRequest = { accountId: string }
-export type PrincipalLaneStatusReleaseResult = { released: boolean }
+export type PrincipalLaneStatusReleaseResult = {
+  released: boolean
+  /**
+   * Owner addendum: true when the released lease's `wasLocalActive` flag re-selected the account
+   * locally after the release — the toast that tells the human their local sign-out is undone.
+   */
+  reselectedLocally: boolean
+}
 
 /** Rename request: set/clear the Q3 friendly name persisted on one lease. */
 export type PrincipalLaneStatusRenameRequest = { accountId: string; friendlyName: string | null }

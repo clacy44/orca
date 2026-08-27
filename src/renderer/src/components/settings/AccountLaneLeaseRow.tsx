@@ -3,7 +3,7 @@ import { Check, Pencil, X } from 'lucide-react'
 import { translate } from '@/i18n/i18n'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
-import type { ClaudeLaneDelegationLease } from '../../../../shared/claude-lane-lease'
+import type { PrincipalLaneStatusDelegationLease } from '../../../../shared/principal-lane-status-ipc'
 
 function formatSince(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -16,19 +16,17 @@ function formatSince(timestamp: number): string {
 
 /**
  * One delegation lease THIS desktop holds (S9 §2e): the account it pushed to a host, shown as the
- * Q3 friendly name it can edit in place, with the host, the person and when it was delegated, plus
- * the release action that gives the account back. The friendly name is persisted where the lease
- * lives, so it survives a reconnect.
+ * Q3 friendly name it can edit in place — falling back to the account's email, then its id — with
+ * the host name, the person and when it was delegated, plus the release action that gives the
+ * account back. The friendly name is persisted where the lease lives, so it survives a reconnect.
  */
 export function AccountLaneLeaseRow({
   lease,
-  personLabel,
   busy,
   onRename,
   onRelease
 }: {
-  lease: ClaudeLaneDelegationLease
-  personLabel: string
+  lease: PrincipalLaneStatusDelegationLease
   busy: boolean
   onRename: (friendlyName: string | null) => void
   onRelease: () => void
@@ -42,9 +40,9 @@ export function AccountLaneLeaseRow({
     }
   }, [lease.friendlyName, editing])
 
-  const displayName =
-    lease.friendlyName ??
-    translate('auto.components.settings.AccountLaneLeaseRow.unnamedAccount', 'Delegated account')
+  const displayName = lease.friendlyName ?? lease.accountLabel ?? lease.accountId
+  const hostLabel = lease.hostLabel ?? lease.hostId
+  const personLabel = lease.personLabel ?? lease.principalId
 
   const commit = (): void => {
     const trimmed = draft.trim()
@@ -124,10 +122,19 @@ export function AccountLaneLeaseRow({
         <div className="text-muted-foreground text-xs">
           {translate(
             'auto.components.settings.AccountLaneLeaseRow.delegatedTo',
-            'On {{value0}} for {{value1}} · since {{value2}}',
-            { value0: lease.hostId, value1: personLabel, value2: formatSince(lease.since) }
+            '→ {{value0}} ({{value1}}) · since {{value2}}',
+            { value0: hostLabel, value1: personLabel, value2: formatSince(lease.since) }
           )}
         </div>
+        {lease.wasLocalActive ? (
+          <div className="text-muted-foreground text-xs" data-testid="lease-signed-out-locally">
+            {translate(
+              'auto.components.settings.AccountLaneLeaseRow.signedOutLocally',
+              'Signed out of local terminals while loaded on {{value0}}',
+              { value0: hostLabel }
+            )}
+          </div>
+        ) : null}
       </div>
 
       <Button

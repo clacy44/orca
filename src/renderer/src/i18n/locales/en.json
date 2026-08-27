@@ -10740,13 +10740,13 @@
           }
         },
         "AccountLaneLeaseRow": {
-          "unnamedAccount": "Delegated account",
           "nameLabel": "Friendly name for this account",
           "saveName": "Save name",
           "cancelName": "Cancel",
           "editName": "Rename account",
-          "delegatedTo": "On {{value0}} for {{value1}} · since {{value2}}",
-          "release": "Release"
+          "delegatedTo": "→ {{value0}} ({{value1}}) · since {{value2}}",
+          "release": "Release",
+          "signedOutLocally": "Signed out of local terminals while loaded on {{value0}}"
         },
         "AccountLaneStatusSection": {
           "loaded": "Loaded",
@@ -10760,7 +10760,16 @@
           "leasesTitle": "Accounts you delegated",
           "delegateTitle": "Load an account onto a host",
           "delegateAccountPlaceholder": "Choose account…",
-          "delegateButton": "Delegate"
+          "delegateButton": "Delegate",
+          "delegateSucceeded": "Loaded {{value0}} onto {{value1}}",
+          "delegateFailed": "Could not load {{value0}} onto {{value1}}. The host may have refused the account.",
+          "confirmDelegateTitle": "Delegate the account you’re using here?",
+          "confirmDelegateDescription": "{{value0}} will be signed out of local terminals while it is loaded on {{value1}}.",
+          "switchAccountPlaceholder": "Choose another account…",
+          "confirmCancel": "Cancel",
+          "delegateAnyway": "Delegate anyway",
+          "switchThenDelegate": "Switch local use to {{value0}}",
+          "releasedAndReselected": "Released {{value0}}; it is active locally again."
         },
         "PrincipalConsentAuditList": {
           "createPrincipal": "Added {{value0}}",

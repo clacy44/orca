@@ -89,7 +89,9 @@ function options() {
     ],
     resolveLaneState: (id: string) => (id === 'prin-1' ? ('loaded' as const) : ('absent' as const)),
     listDelegationLeases: () => [LEASE],
-    listDelegableHosts: () => []
+    listDelegableHosts: () => [],
+    listManagedAccounts: () => [],
+    listEnvironmentNames: () => []
   }
 }
 
@@ -109,7 +111,24 @@ describe('principal lane status bridge', () => {
     expect(snapshot.lanes).toEqual([
       { principalId: 'prin-1', displayName: 'Ana', delegatedGrantId: 'dev-1', laneState: 'loaded' }
     ])
-    expect(snapshot.delegationLeases).toEqual([LEASE])
+    expect(snapshot.delegationLeases).toEqual([
+      { ...LEASE, accountLabel: null, hostLabel: null, personLabel: 'Ana' }
+    ])
+  })
+
+  it('resolves the lease view names from the injected account/environment lookups', () => {
+    handleMock.mockClear()
+    removeHandlerMock.mockClear()
+    const localStub = makeWindow()
+    registerPrincipalLaneStatusBridge(localStub.window, {
+      ...options(),
+      listManagedAccounts: () => [{ id: 'acct-1', email: 'ana@corp.test' }],
+      listEnvironmentNames: () => [{ id: 'host-1', name: 'Office Mac' }]
+    })
+    const snapshot = invokeGet(localStub.sender)
+    expect(snapshot.delegationLeases).toEqual([
+      { ...LEASE, accountLabel: 'ana@corp.test', hostLabel: 'Office Mac', personLabel: 'Ana' }
+    ])
   })
 
   it('gives a non-host sender the empty snapshot rather than the lanes', () => {
@@ -176,17 +195,56 @@ describe('principal lane status bridge writes', () => {
     })
   })
 
-  it('releases a lease for the host frame and republishes', () => {
-    const result = invokeChannel<{ released: boolean }>(
+  it('releases a lease for the host frame and republishes', async () => {
+    const result = await invokeChannel<Promise<{ released: boolean; reselectedLocally: boolean }>>(
       PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
       stub.sender,
       { accountId: 'acct-1' }
     )
-    expect(result).toEqual({ released: true })
+    expect(result).toEqual({ released: true, reselectedLocally: false })
     expect(releaseLease).toHaveBeenCalledWith('acct-1')
     expect(
       stub.sends.filter((send) => send.channel === PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL)
     ).toHaveLength(1)
+  })
+
+  it('re-selects the account locally on release when the lease was taken from the active local selection', async () => {
+    handleMock.mockClear()
+    removeHandlerMock.mockClear()
+    const localStub = makeWindow()
+    const reselectLocally = vi.fn().mockResolvedValue(true)
+    registerPrincipalLaneStatusBridge(localStub.window, {
+      ...options(),
+      listDelegationLeases: () => [{ ...LEASE, wasLocalActive: true }],
+      releaseLease,
+      reselectLocally
+    })
+    const result = await invokeChannel<Promise<{ released: boolean; reselectedLocally: boolean }>>(
+      PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+      localStub.sender,
+      { accountId: 'acct-1' }
+    )
+    expect(result).toEqual({ released: true, reselectedLocally: true })
+    expect(reselectLocally).toHaveBeenCalledWith('acct-1')
+  })
+
+  it('does not re-select locally when the lease was not taken from the active local selection', async () => {
+    handleMock.mockClear()
+    removeHandlerMock.mockClear()
+    const localStub = makeWindow()
+    const reselectLocally = vi.fn().mockResolvedValue(true)
+    registerPrincipalLaneStatusBridge(localStub.window, {
+      ...options(),
+      releaseLease,
+      reselectLocally
+    })
+    const result = await invokeChannel<Promise<{ released: boolean; reselectedLocally: boolean }>>(
+      PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
+      localStub.sender,
+      { accountId: 'acct-1' }
+    )
+    expect(result).toEqual({ released: true, reselectedLocally: false })
+    expect(reselectLocally).not.toHaveBeenCalled()
   })
 
   it('renames a lease for the host frame', () => {
@@ -200,13 +258,13 @@ describe('principal lane status bridge writes', () => {
   })
 
   // Mutation proof: the sender check is the door. Deleting it turns these two refusals green->red.
-  it('refuses a foreign sender BEFORE the lease store is touched (release)', () => {
-    const result = invokeChannel<{ released: boolean }>(
+  it('refuses a foreign sender BEFORE the lease store is touched (release)', async () => {
+    const result = await invokeChannel<Promise<{ released: boolean; reselectedLocally: boolean }>>(
       PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
       {},
       { accountId: 'acct-1' }
     )
-    expect(result).toEqual({ released: false })
+    expect(result).toEqual({ released: false, reselectedLocally: false })
     expect(releaseLease).not.toHaveBeenCalled()
   })
 

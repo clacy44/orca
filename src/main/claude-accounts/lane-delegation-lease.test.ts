@@ -23,7 +23,14 @@ afterEach(() => {
   }
 })
 
-function makeStore(options: { now?: () => number; ttlMs?: number; failClearTimes?: number } = {}) {
+function makeStore(
+  options: {
+    now?: () => number
+    ttlMs?: number
+    failClearTimes?: number
+    isLocallyActiveAccount?: (accountId: string) => boolean
+  } = {}
+) {
   let rows: ClaudeLaneDelegationLease[] = []
   const cleared: ClaudeLaneDelegationLease[] = []
   const clearFailures: unknown[] = []
@@ -37,6 +44,7 @@ function makeStore(options: { now?: () => number; ttlMs?: number; failClearTimes
     },
     now: options.now,
     ttlMs: options.ttlMs,
+    isLocallyActiveAccount: options.isLocallyActiveAccount,
     clearRuntimeCredentials: (lease) => {
       if (remainingFailures > 0) {
         remainingFailures -= 1
@@ -245,6 +253,50 @@ describe('desktop delegation lease', () => {
   it('is inert with no lease store attached', () => {
     expect(isClaudeAccountDelegatedToLane('acct-1')).toBe(false)
     expect(refusalCode(() => assertClaudeAccountNotDelegatedToLane('acct-1'))).toBe('no_refusal')
+  })
+
+  it('stamps wasLocalActive when the account was the active local selection at take time', () => {
+    const harness = makeStore({ isLocallyActiveAccount: (accountId) => accountId === 'acct-1' })
+    const lease = harness.store.take({
+      accountId: 'acct-1',
+      accountUuid: null,
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    expect(lease.wasLocalActive).toBe(true)
+    const other = harness.store.take({
+      accountId: 'acct-2',
+      accountUuid: null,
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    expect(other.wasLocalActive).toBeUndefined()
+  })
+
+  it('preserves wasLocalActive across a renewal even after the local selection moves on', () => {
+    let active = true
+    const harness = makeStore({
+      isLocallyActiveAccount: (accountId) => active && accountId === 'acct-1'
+    })
+    const first = harness.store.take({
+      accountId: 'acct-1',
+      accountUuid: null,
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    expect(first.wasLocalActive).toBe(true)
+    active = false
+    const renewed = harness.store.take({
+      accountId: 'acct-1',
+      accountUuid: null,
+      hostId: 'host-1',
+      principalId: LANE_A,
+      delegatedGrantId: 'desktop-a'
+    })
+    expect(renewed.wasLocalActive).toBe(true)
   })
 
   it('clears the runtime credential file as part of taking the lease', () => {

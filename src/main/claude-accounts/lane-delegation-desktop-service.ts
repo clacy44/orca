@@ -127,6 +127,8 @@ export class LaneDelegationDesktopService {
     const pathResolver = new ClaudeRuntimePathResolver()
     this.leases = new LaneDelegationLeaseStore({
       persistence: store,
+      isLocallyActiveAccount: (accountId) =>
+        getSelectedClaudeAccountIdForTarget(store.getSettings(), { runtime: 'host' }) === accountId,
       clearRuntimeCredentials: (lease) =>
         clearRuntimeCredentialsForDelegatedAccount(
           pathResolver.getRuntimePaths(),

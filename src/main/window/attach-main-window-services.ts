@@ -164,7 +164,7 @@ export function attachMainWindowServices(
   })
   // Why here beside presence: the consent seam is host-only IPC that tears down with this window (S9 §2a).
   registerPrincipalConsentBridge(mainWindow)
-  registerPrincipalLaneStatusBridge(mainWindow)
+  registerPrincipalLaneStatusBridge(mainWindow, { store })
   registerFileDropRelay(mainWindow)
   registerTccPromptNoticeHandlers(mainWindow)
   // Why: setupAutoUpdater sync-require()s electron-updater (slow on cold Windows w/ Defender, #7225), so defer past first paint; timer fallback covers crash-looping renderers.
