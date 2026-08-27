@@ -30,6 +30,7 @@ export type ConsentAuditAction =
   | 'designate'
   | 'link-bind'
   | 'provision'
+  | 'mint-invite'
 
 /** One audit row, the registry row verbatim — the undo trail that keeps a mis-tick reversible. */
 export type ConsentAuditRow = {
@@ -42,6 +43,9 @@ export type ConsentAuditRow = {
   designatedGrantId?: string | null
   /** Only a `provision` row on a §6-gated platform carries this (B2's operator override). */
   platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
+  /** Only a `mint-invite` row carries these two — never a token, never a pairing URL. */
+  inviteScope?: 'mobile' | 'runtime'
+  inviteExpiresAt?: number
 }
 
 /** What `principalConsent:snapshot` answers and `principalConsent:changed` republishes. */

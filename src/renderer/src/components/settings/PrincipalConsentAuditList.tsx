@@ -51,6 +51,12 @@ function auditSentence(row: ConsentAuditRowView): string {
         'Provisioned a credential lane for {{value0}}',
         { value0: person }
       )
+    case 'mint-invite':
+      return translate(
+        'auto.components.settings.PrincipalConsentAuditList.mintInvite',
+        'Invited {{value0}}',
+        { value0: person }
+      )
   }
 }
 
