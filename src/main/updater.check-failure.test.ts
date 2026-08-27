@@ -78,6 +78,16 @@ vi.mock('electron', () => ({
   net: { fetch: netFetchMock }
 }))
 
+// Why: these tests exercise the release-check machinery, not feed identity (covered by update-feed-resolution.test.ts).
+vi.mock('./update-feed-resolution', () => ({
+  resolveActiveUpdateFeed: vi.fn(() => ({
+    mode: 'upstream',
+    owner: 'stablyai',
+    repo: 'orca',
+    reason: 'test-default'
+  }))
+}))
+
 vi.mock('electron-updater', () => ({
   autoUpdater: autoUpdaterMock
 }))

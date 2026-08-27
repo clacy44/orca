@@ -154,6 +154,16 @@ vi.mock('electron', () => ({
   net: { fetch: vi.fn() }
 }))
 
+// Why: these tests exercise the release-check machinery, not feed identity (covered by update-feed-resolution.test.ts).
+vi.mock('./update-feed-resolution', () => ({
+  resolveActiveUpdateFeed: vi.fn(() => ({
+    mode: 'upstream',
+    owner: 'stablyai',
+    repo: 'orca',
+    reason: 'test-default'
+  }))
+}))
+
 const { getLinuxRootPackageTypeMock, recordUpdaterLifecycleMock } = vi.hoisted(() => ({
   getLinuxRootPackageTypeMock: vi.fn<() => 'deb' | 'rpm' | null>(() => null),
   recordUpdaterLifecycleMock: vi.fn()
