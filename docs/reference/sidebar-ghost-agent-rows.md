@@ -3,7 +3,8 @@
 ## Status
 
 FIX 1 and FIX 5 shipped on `feat/sidebar-resumed-session-collapse`
-(`f200efed35`, `9a0850c5ba`); FIX 2 shipped on the same branch (`38d74b359d`).
+(`f200efed35`, `9a0850c5ba`); FIX 2 (the host-side liveness join) shipped
+on the same branch (`38d74b359d`, `e456f903fb`).
 FIX 3 and FIX 4 are diagnosed but deferred.
 
 ## Symptom

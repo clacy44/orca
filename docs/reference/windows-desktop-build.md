@@ -181,11 +181,20 @@ on `Public`/`Domain` or unscoped.
 Before anyone opens a lane-scoped terminal on this box, run the day-one
 `orca lane` sequence once, as the owner, at the shell — this box is
 headless (`orca serve`, above), so there is no desktop AccountsPane to
-drive the equivalent consent writes from:
+drive the equivalent consent writes from. **As of rev 31, `--pair-name`
+at serve start is no longer part of this sequence** — day-one setup now
+starts with `orca lane invite`, a named per-person grant minted over the
+same host-only consent RPC (`accounts.lane.mintInvite`) the rest of the
+sequence uses:
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane create-person --name "<owner>"
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane create-person --name "<other developer>"
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane invite --person "<owner>" --scope runtime
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane invite --person "<other developer>" --scope runtime
+# redeem each printed link in that person's own desktop Add environment dialog
+# (or `orca environment add --name <name> --pairing-code <link>` on a headless redeemer),
+# then open one terminal from it so the grant is actually redeemed, before continuing:
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane bind --device <owner-desktop> --person "<owner>"
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane bind --device <other-desktop> --person "<other developer>"
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane designate --person "<owner>" --device <owner-desktop>
@@ -194,26 +203,32 @@ drive the equivalent consent writes from:
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<other developer>" --accept-unverified-platform
 ```
 
-create-person twice, bind each paired device, designate each person's
-desktop as their lane's pusher, then provision both lanes — in that
-order, since designate is required before provision will succeed
-(`accounts.lane.no_pusher_designated` otherwise). `provision` carries
-`--accept-unverified-platform` here because Windows is a gated platform
-until the shared box has passed the §9 live-box probes (steps 12 and
-13 — DACL read-back, credential-store isolation); without the flag,
-provisioning refuses `accounts.lane.provisioning_platform_gated`. The
-override is recorded, not silent: it writes `platformAcceptance:
-'unverified-win32'` onto that lane's `provision` audit row, visible
-back via `orca lane audit` as `platform=unverified-win32`. Once steps
-12–13 have actually passed on this box, drop the flag — re-provisioning
-is not required, but a fresh provision no longer needs it either. The
-one remaining step, delegating each person's account onto this box,
-has no CLI verb and is done from each person's own desktop Accounts
-pane instead, via the "Delegate" action under "Load an account onto a
-host." Full verb list, refusal codes and rationale:
-`docs/reference/agent-identity-s9-design.md` §9 ("Day-one setup"),
-§10 item 39, and §10(f) (the 2026-08-24 release audit that added the
-override).
+create-person twice, invite each person and redeem the printed link on
+their own desktop (the dialog — and `orca environment add` — refuse a
+mobile-scope link outright, so `--scope runtime`, the default, is what
+this flow needs; `--ttl <hours>` can only shorten the invite's 24h
+ceiling, never extend it, and at most 16 (`MAX_LIVE_MINTED_GRANTS`) of
+these invites can be pending across the host at once), bind each
+now-redeemed device, designate each person's desktop as their lane's
+pusher, then provision both lanes — in that order, since a grant must be
+redeemed before it can be bound, and designate is required before
+provision will succeed (`accounts.lane.no_pusher_designated` otherwise).
+`provision` carries `--accept-unverified-platform` here because Windows
+is a gated platform until the shared box has passed the §9 live-box
+probes (steps 12 and 13 — DACL read-back, credential-store isolation);
+without the flag, provisioning refuses
+`accounts.lane.provisioning_platform_gated`. The override is recorded,
+not silent: it writes `platformAcceptance: 'unverified-win32'` onto
+that lane's `provision` audit row, visible back via `orca lane audit`
+as `platform=unverified-win32`. Once steps 12–13 have actually passed
+on this box, drop the flag — re-provisioning is not required, but a
+fresh provision no longer needs it either. The one remaining step,
+delegating each person's account onto this box, has no CLI verb and is
+done from each person's own desktop Accounts pane instead, via the
+"Delegate" action under "Load an account onto a host." Full verb list,
+refusal codes and rationale: `docs/reference/agent-identity-s9-design.md`
+§9 ("Day-one setup"), §10 item 39, §10(f) (the 2026-08-24 release audit
+that added the override), and §10's rev-31 note (the invite verb).
 
 ## Auto-update
 
