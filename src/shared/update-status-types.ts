@@ -72,6 +72,8 @@ export type UpdateStatus = (
       changelog: ChangelogData | null
     }
   | { state: 'not-available'; userInitiated?: boolean }
+  // Why: build has no valid update feed (fork build, no upstream/fork identity, or ORCA_UPDATE_FEED=off).
+  | { state: 'unmanaged'; message: string }
   | { state: 'downloading'; percent: number; version: string; activeNudgeId?: string }
   | { state: 'downloaded'; version: string; releaseUrl?: string; activeNudgeId?: string }
   | {

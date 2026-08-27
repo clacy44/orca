@@ -33,6 +33,7 @@ import {
   disarmUpdateInstallExitWatchdog
 } from './update-install-exit-watchdog'
 import { registerAutoUpdaterHandlers } from './updater-events'
+import { resolveActiveUpdateFeed } from './update-feed-resolution'
 import { recordUpdaterLifecycle } from './updater-lifecycle-diagnostics'
 import { getLinuxRootPackageType } from './linux-update-package-type'
 import {
@@ -270,7 +271,12 @@ function decorateStatusWithActiveNudge(status: UpdateStatus): UpdateStatus {
   if (!activeUpdateNudgeId) {
     return status
   }
-  if (status.state === 'idle' || status.state === 'checking' || status.state === 'not-available') {
+  if (
+    status.state === 'idle' ||
+    status.state === 'checking' ||
+    status.state === 'not-available' ||
+    status.state === 'unmanaged'
+  ) {
     return status
   }
   return { ...status, activeNudgeId: activeUpdateNudgeId }
@@ -1525,6 +1531,11 @@ function runBackgroundUpdateCheck(
     sendStatus({ state: 'not-available' })
     return false
   }
+  const backgroundFeed = resolveActiveUpdateFeed()
+  if (backgroundFeed.mode === 'off') {
+    sendStatus({ state: 'unmanaged', message: backgroundFeed.message })
+    return false
+  }
   // Why: set the nudge marker before any events arrive so later checks can't inherit a stale campaign id; persisted id keeps a nudge card dismissable after relaunch.
   activeUpdateNudgeId = nudgeId
   // Why: 'checking-for-update' arrives a tick later, so a second focus/resume can slip in before status flips; track launch in memory to dedupe that gap.
@@ -1603,6 +1614,12 @@ export function checkForUpdatesFromMenu(options?: UpdateCheckOptions): void {
     return
   }
   restoreReleaseUpdateSource()
+
+  const menuFeed = resolveActiveUpdateFeed()
+  if (menuFeed.mode === 'off') {
+    sendStatus({ state: 'unmanaged', message: menuFeed.message })
+    return
+  }
 
   const checkVariant = getUpdateCheckVariant(options)
   if (checkVariant === 'prerelease') {
@@ -2198,11 +2215,17 @@ export function setupAutoUpdater(
 
   // Security: never re-add a verifyUpdateCodeSignature override — a no-op disables electron-updater's built-in Authenticode check and accepts any installer.
 
-  // Why: generic provider avoids the native GitHub provider's RC-channel filtering; per-check repinning to a concrete /releases/download/<tag>/ URL avoids /latest redirect drift between check and download.
+  // Why: a fork build must never wire up automatic checks against an upstream/unresolvable feed (see update-feed-resolution.ts).
   if (activeUpdateSource === 'release') {
+    const feed = resolveActiveUpdateFeed()
+    if (feed.mode === 'off') {
+      sendStatus({ state: 'unmanaged', message: feed.message })
+      return
+    }
+    // Why: generic provider avoids the native GitHub provider's RC-channel filtering; per-check repinning to a concrete /releases/download/<tag>/ URL avoids /latest redirect drift between check and download.
     autoUpdater.setFeedURL({
       provider: 'generic',
-      url: 'https://github.com/stablyai/orca/releases/latest/download'
+      url: `https://github.com/${feed.owner}/${feed.repo}/releases/latest/download`
     })
   }
 
