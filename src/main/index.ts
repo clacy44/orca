@@ -253,7 +253,10 @@ import { normalizeRuntimePathForComparison } from '../shared/cross-platform-path
 import type { AgentProviderSessionMetadata } from '../shared/agent-session-resume'
 import { getDefaultWslDistro } from './wsl'
 import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './worktree-trash'
-import { ClaudeAccountService } from './claude-accounts/service'
+import {
+  attachClaudeAccountServiceForLaneRelease,
+  ClaudeAccountService
+} from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
 import { setLaneWireHostDependencies } from './runtime/lane-wire-composition'
 import { startLaneDelegationDesktopService } from './claude-accounts/lane-delegation-desktop-service'
@@ -2435,6 +2438,7 @@ void app.whenReady().then(async () => {
   codexSessionMigration.scheduleInitialRun()
   claudeRuntimeAuth = new ClaudeRuntimeAuthService(store)
   claudeAccounts = new ClaudeAccountService(store, rateLimits, claudeRuntimeAuth)
+  attachClaudeAccountServiceForLaneRelease(claudeAccounts)
   // Why here: release-audit B1 — the lane wire's dependencies exist the instant the coordinator
   // does, and nothing is attached yet, so no RPC can be served and no rotation can start from
   // this line. `attachPrincipalLaneHost` composes and attaches the wire itself once a registry

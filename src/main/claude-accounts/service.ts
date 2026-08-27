@@ -1287,3 +1287,31 @@ export class ClaudeAccountService {
     return trimmed === '' ? null : trimmed
   }
 }
+
+let activeServiceForLaneRelease: ClaudeAccountService | null = null
+
+/**
+ * Owner addendum (§2e Release): lets the lane-status bridge re-select an account locally after
+ * handing a lease back, undoing rule (iv)'s runtime-file clear. The managed account's own auth
+ * path is already current — Q2 pulls every host rotation back into it while the lease is held — so
+ * `selectAccount` alone re-materializes it into the runtime file.
+ */
+export function attachClaudeAccountServiceForLaneRelease(
+  service: ClaudeAccountService | null
+): void {
+  activeServiceForLaneRelease = service
+}
+
+export async function reselectClaudeAccountLocallyAfterLaneRelease(
+  accountId: string
+): Promise<boolean> {
+  if (!activeServiceForLaneRelease) {
+    return false
+  }
+  try {
+    await activeServiceForLaneRelease.selectAccount(accountId)
+    return true
+  } catch {
+    return false
+  }
+}

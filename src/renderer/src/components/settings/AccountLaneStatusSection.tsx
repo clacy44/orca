@@ -1,152 +1,18 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 import { translate } from '@/i18n/i18n'
-import { Badge } from '../ui/badge'
-import { Button } from '../ui/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 import type { ClaudeManagedAccountSummary } from '../../../../shared/managed-account-types'
-import type { RuntimeTerminalLaneState } from '../../../../shared/runtime-types'
 import type {
   PrincipalLaneStatusDelegableHost,
-  PrincipalLaneStatusRow
+  PrincipalLaneStatusDelegateResult,
+  PrincipalLaneStatusReleaseResult
 } from '../../../../shared/principal-lane-status-ipc'
 import { usePrincipalLaneStatus } from './principal-lane-status-store'
 import { acquirePrincipalLaneStatusSubscription } from './principal-lane-status-subscription'
 import { isHostConsentSurfaceAvailable } from './PrincipalConsentSurface'
 import { AccountLaneLeaseRow } from './AccountLaneLeaseRow'
-
-// The lane residency states this section paints. It is the shipped `RuntimeTerminalLaneState`
-// (loaded | absent | reauth-required) PLUS `restart-required` — §2h's degraded value the wire does
-// not carry yet (§10(e)) — so the badge is correct the moment that value ships.
-type LaneStateForDisplay = RuntimeTerminalLaneState | 'restart-required'
-
-function laneStateBadge(state: LaneStateForDisplay): {
-  label: string
-  variant: 'default' | 'secondary' | 'destructive' | 'outline'
-} {
-  switch (state) {
-    case 'loaded':
-      return {
-        label: translate('auto.components.settings.AccountLaneStatusSection.loaded', 'Loaded'),
-        variant: 'default'
-      }
-    case 'absent':
-      return {
-        label: translate('auto.components.settings.AccountLaneStatusSection.absent', 'Absent'),
-        variant: 'outline'
-      }
-    case 'reauth-required':
-      return {
-        label: translate(
-          'auto.components.settings.AccountLaneStatusSection.reauth',
-          'Reauth required'
-        ),
-        variant: 'destructive'
-      }
-    case 'restart-required':
-      return {
-        label: translate(
-          'auto.components.settings.AccountLaneStatusSection.restart',
-          'Restart required'
-        ),
-        variant: 'secondary'
-      }
-  }
-}
-
-function LaneRow({ lane }: { lane: PrincipalLaneStatusRow }): ReactElement {
-  const badge = laneStateBadge(lane.laneState)
-  // §2e: a designated pusher whose lane never loaded is the mis-designation case — name it so the
-  // human re-ticks, rather than leaving an unexplained empty lane.
-  const noPush = lane.laneState === 'absent' && lane.delegatedGrantId !== null
-  return (
-    <div
-      className="border-border/60 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2"
-      data-testid="account-lane-row"
-      data-principal-id={lane.principalId}
-    >
-      <div className="min-w-0 space-y-0.5">
-        <span className="truncate text-sm font-medium">{lane.displayName}</span>
-        {noPush ? (
-          <div className="text-muted-foreground text-xs" data-testid="lane-no-push">
-            {translate(
-              'auto.components.settings.AccountLaneStatusSection.noPush',
-              'No push received from {{value0}} yet — re-check the designated device.',
-              { value0: lane.delegatedGrantId ?? '' }
-            )}
-          </div>
-        ) : null}
-      </div>
-      <Badge variant={badge.variant} className="shrink-0" data-lane-state={lane.laneState}>
-        {badge.label}
-      </Badge>
-    </div>
-  )
-}
-
-/** One paired, reachable host this desktop's grant is designated to push onto (B3). */
-function DelegateHostRow({
-  host,
-  accounts,
-  selectedAccountId,
-  onSelectAccount,
-  busy,
-  onDelegate
-}: {
-  host: PrincipalLaneStatusDelegableHost
-  accounts: readonly ClaudeManagedAccountSummary[]
-  selectedAccountId: string | null
-  onSelectAccount: (accountId: string) => void
-  busy: boolean
-  onDelegate: () => void
-}): ReactElement {
-  const badge = laneStateBadge(host.laneState)
-  return (
-    <div
-      className="border-border/60 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2"
-      data-testid="delegate-host-row"
-      data-environment-id={host.environmentId}
-    >
-      <div className="min-w-0 space-y-0.5">
-        <span className="truncate text-sm font-medium">{host.label}</span>
-        <Badge variant={badge.variant} className="shrink-0" data-lane-state={host.laneState}>
-          {badge.label}
-        </Badge>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Select value={selectedAccountId ?? undefined} onValueChange={onSelectAccount}>
-          <SelectTrigger className="h-8 w-[200px]" size="sm">
-            <SelectValue
-              placeholder={translate(
-                'auto.components.settings.AccountLaneStatusSection.delegateAccountPlaceholder',
-                'Choose account…'
-              )}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {accounts.map((account) => (
-              <SelectItem key={account.id} value={account.id}>
-                {account.email}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy || !selectedAccountId}
-          onClick={onDelegate}
-          data-testid="delegate-host-button"
-        >
-          {translate(
-            'auto.components.settings.AccountLaneStatusSection.delegateButton',
-            'Delegate'
-          )}
-        </Button>
-      </div>
-    </div>
-  )
-}
+import { DelegateActiveAccountDialog } from './DelegateActiveAccountDialog'
+import { DelegateHostRow, LaneRow } from './AccountLaneRows'
 
 /**
  * The AccountsPane per-lane section (S9 §2e/§2h): this desktop's provisioned Claude credential
@@ -159,7 +25,12 @@ export function AccountLaneStatusSection(): ReactElement | null {
   const status = usePrincipalLaneStatus()
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
   const [claudeAccounts, setClaudeAccounts] = useState<readonly ClaudeManagedAccountSummary[]>([])
+  const [activeAccountId, setActiveAccountId] = useState<string | null>(null)
   const [selectedAccountByHost, setSelectedAccountByHost] = useState<Record<string, string>>({})
+  const [confirmDelegate, setConfirmDelegate] = useState<{
+    host: PrincipalLaneStatusDelegableHost
+    accountId: string
+  } | null>(null)
 
   useEffect(() => {
     if (!available) {
@@ -177,17 +48,13 @@ export function AccountLaneStatusSection(): ReactElement | null {
     void window.api.claudeAccounts.list().then((state) => {
       if (!cancelled) {
         setClaudeAccounts(state.accounts)
+        setActiveAccountId(state.activeAccountId)
       }
     })
     return () => {
       cancelled = true
     }
   }, [available, hasDelegableHosts])
-
-  const personById = useMemo(
-    () => new Map(status.lanes.map((lane) => [lane.principalId, lane.displayName])),
-    [status.lanes]
-  )
 
   if (!available) {
     return null
@@ -200,10 +67,37 @@ export function AccountLaneStatusSection(): ReactElement | null {
     return null
   }
 
-  const runWrite = async (accountId: string, write: () => Promise<unknown>): Promise<void> => {
+  // `isSuccess`/`failureMessage` let a write that RESOLVES with a refusal (e.g. `{ delegated: false }`
+  // — the desktop's delegate call never rejects) surface the same refusal-sentence toast as a thrown
+  // error, without every caller re-implementing the check.
+  const runWrite = async (
+    accountId: string,
+    write: () => Promise<unknown>,
+    options?: {
+      isSuccess?: (result: unknown) => boolean
+      successMessage?: string | ((result: unknown) => string | null)
+      failureMessage?: string
+    }
+  ): Promise<void> => {
     setBusyAccountId(accountId)
     try {
-      await write()
+      const result = await write()
+      if (options?.isSuccess && !options.isSuccess(result)) {
+        throw new Error(
+          options.failureMessage ??
+            translate(
+              'auto.components.settings.AccountLaneStatusSection.writeFailed',
+              'Lane update failed.'
+            )
+        )
+      }
+      const successMessage =
+        typeof options?.successMessage === 'function'
+          ? options.successMessage(result)
+          : (options?.successMessage ?? null)
+      if (successMessage) {
+        toast.success(successMessage)
+      }
     } catch (error) {
       toast.error(
         translate(
@@ -216,6 +110,38 @@ export function AccountLaneStatusSection(): ReactElement | null {
       setBusyAccountId(null)
     }
   }
+
+  const doDelegate = (host: PrincipalLaneStatusDelegableHost, accountId: string): void => {
+    const accountLabel =
+      claudeAccounts.find((account) => account.id === accountId)?.email ?? accountId
+    void runWrite(
+      host.environmentId,
+      () => window.api.principalLaneStatus.delegateAccountToHost(accountId, host.environmentId),
+      {
+        isSuccess: (result) => (result as PrincipalLaneStatusDelegateResult).delegated === true,
+        successMessage: translate(
+          'auto.components.settings.AccountLaneStatusSection.delegateSucceeded',
+          'Loaded {{value0}} onto {{value1}}',
+          { value0: accountLabel, value1: host.label }
+        ),
+        failureMessage: translate(
+          'auto.components.settings.AccountLaneStatusSection.delegateFailed',
+          'Could not load {{value0}} onto {{value1}}. The host may have refused the account.',
+          { value0: accountLabel, value1: host.label }
+        )
+      }
+    )
+  }
+
+  const confirmDelegateAccountLabel = confirmDelegate
+    ? (claudeAccounts.find((account) => account.id === confirmDelegate.accountId)?.email ??
+      confirmDelegate.accountId)
+    : ''
+  const confirmDelegateOtherAccounts = confirmDelegate
+    ? [...claudeAccounts]
+        .filter((account) => account.id !== confirmDelegate.accountId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+    : []
 
   return (
     <section
@@ -257,18 +183,29 @@ export function AccountLaneStatusSection(): ReactElement | null {
             <AccountLaneLeaseRow
               key={lease.accountId}
               lease={lease}
-              personLabel={personById.get(lease.principalId) ?? lease.principalId}
               busy={busyAccountId === lease.accountId}
               onRename={(friendlyName) =>
                 runWrite(lease.accountId, () =>
                   window.api.principalLaneStatus.renameLease(lease.accountId, friendlyName)
                 )
               }
-              onRelease={() =>
-                runWrite(lease.accountId, () =>
-                  window.api.principalLaneStatus.releaseLease(lease.accountId)
+              onRelease={() => {
+                const accountLabel = lease.friendlyName ?? lease.accountLabel ?? lease.accountId
+                void runWrite(
+                  lease.accountId,
+                  () => window.api.principalLaneStatus.releaseLease(lease.accountId),
+                  {
+                    successMessage: (result) =>
+                      (result as PrincipalLaneStatusReleaseResult).reselectedLocally
+                        ? translate(
+                            'auto.components.settings.AccountLaneStatusSection.releasedAndReselected',
+                            'Released {{value0}}; it is active locally again.',
+                            { value0: accountLabel }
+                          )
+                        : null
+                  }
                 )
-              }
+              }}
             />
           ))}
         </div>
@@ -297,16 +234,47 @@ export function AccountLaneStatusSection(): ReactElement | null {
                 if (!accountId) {
                   return
                 }
-                void runWrite(host.environmentId, () =>
-                  window.api.principalLaneStatus.delegateAccountToHost(
-                    accountId,
-                    host.environmentId
-                  )
-                )
+                if (accountId === activeAccountId) {
+                  setConfirmDelegate({ host, accountId })
+                  return
+                }
+                doDelegate(host, accountId)
               }}
             />
           ))}
         </div>
+      ) : null}
+
+      {confirmDelegate ? (
+        <DelegateActiveAccountDialog
+          open
+          hostLabel={confirmDelegate.host.label}
+          accountLabel={confirmDelegateAccountLabel}
+          otherAccounts={confirmDelegateOtherAccounts}
+          defaultSwitchAccountId={confirmDelegateOtherAccounts[0]?.id ?? null}
+          onCancel={() => setConfirmDelegate(null)}
+          onDelegateAnyway={() => {
+            const { host, accountId } = confirmDelegate
+            setConfirmDelegate(null)
+            doDelegate(host, accountId)
+          }}
+          onSwitchThenDelegate={(switchToAccountId) => {
+            const { host, accountId } = confirmDelegate
+            setConfirmDelegate(null)
+            void (async () => {
+              setBusyAccountId(host.environmentId)
+              try {
+                await window.api.claudeAccounts.select({
+                  accountId: switchToAccountId,
+                  runtime: 'host'
+                })
+              } finally {
+                setBusyAccountId(null)
+              }
+              doDelegate(host, accountId)
+            })()
+          }}
+        />
       ) : null}
     </section>
   )
