@@ -31319,6 +31319,50 @@ describe('OrcaRuntimeService', () => {
     expect(getSession().terminalLayoutsByTabId['host-tab']).toBeUndefined()
   })
 
+  it('retires the agent-hook status row for a headless tab closed via closeMobileSessionTab', async () => {
+    // Why: a headless serve host never routes through the renderer's own
+    // closeTab IPC, so the hook-status retirement dep must fire from this
+    // runtime chokepoint or a still-running agent process keeps resurrecting
+    // a sidebar row for a dead pane (ghost-agent-row regression).
+    const persistedPtyId = 'ssh:ssh-1@@relay-pty'
+    const { runtimeStore } = makeRuntimeStoreWithWorkspaceSession(
+      makeWorkspaceSessionWithHeadlessTerminal({
+        tabsByWorktree: {
+          [TEST_WORKTREE_ID]: [
+            {
+              id: 'host-tab',
+              ptyId: persistedPtyId,
+              worktreeId: TEST_WORKTREE_ID,
+              title: 'Remote Terminal',
+              customTitle: null,
+              color: null,
+              sortOrder: 0,
+              createdAt: 1
+            }
+          ]
+        },
+        terminalLayoutsByTabId: {
+          'host-tab': makeHeadlessTerminalLayout({ [HEADLESS_LEAF_ID]: persistedPtyId })
+        }
+      })
+    )
+    const dropAgentHookStatusForTab = vi.fn()
+    const runtime = new OrcaRuntimeService(runtimeStore as never, undefined, {
+      dropAgentHookStatusForTab
+    })
+    runtime.setPtyController({
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => [{ id: persistedPtyId, cwd: TEST_WORKTREE_PATH, title: 'Remote' }]
+    })
+    runtime.syncWindowGraph(0, { tabs: [], leaves: [] })
+
+    await runtime.closeMobileSessionTab(`id:${TEST_WORKTREE_ID}`, 'host-tab', { reason: 'user' })
+
+    expect(dropAgentHookStatusForTab).toHaveBeenCalledWith('host-tab')
+  })
+
   it('durably tears down a runtime-owned SSH headless tab when renderer cleanup fails', async () => {
     // #8958: the renderer relay can't see headless tabs, so its advisory fallback must not block authoritative teardown/flush.
     const persistedPtyId = 'ssh:ssh-1@@relay-pty'

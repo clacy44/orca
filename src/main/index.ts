@@ -2592,6 +2592,9 @@ void app.whenReady().then(async () => {
       agentHookServer.attestCompatibilityAuthority(candidate),
     retireAgentHookCompatibilityAuthority: (paneKey) =>
       agentHookServer.retirePaneAuthority(paneKey),
+    // Why: a closed session tab must retire its hook status row too, or a still-
+    // running agent process keeps resurrecting a sidebar row for a dead pane.
+    dropAgentHookStatusForTab: (tabId) => agentHookServer.dropStatusEntriesByTabPrefix(tabId),
     canRecoverPersistentLocalPtys: () => getDaemonProvider() !== null,
     // Why: source codex-home here (runs in window AND serve) so aiVault.listSessions includes managed-Codex sessions; registerCoreHandlers is window-only.
     getAdditionalAiVaultCodexHomePaths: () =>

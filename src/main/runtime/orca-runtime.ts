@@ -3452,6 +3452,7 @@ export class OrcaRuntimeService {
       }) => AgentHookAuthorityAttestation | null)
     | null
   private readonly retireAgentHookCompatibilityAuthorityFn: ((paneKey: string) => void) | null
+  private readonly dropAgentHookStatusForTabFn: ((tabId: string) => void) | null
   private readonly canRecoverPersistentLocalPtysFn: () => boolean
   private readonly buildAgentHookPtyEnv: (() => Record<string, string>) | null
   private readonly getDesktopWindowStatusFn: () => RuntimeDesktopWindowStatus
@@ -3526,6 +3527,9 @@ export class OrcaRuntimeService {
         terminalProvenance: 'current_runtime' | 'restored'
       }) => AgentHookAuthorityAttestation | null
       retireAgentHookCompatibilityAuthority?: (paneKey: string) => void
+      // Why: a closed session tab must retire its agent-hook status row too, or a
+      // still-running process keeps resurrecting it as a live sidebar agent.
+      dropAgentHookStatusForTab?: (tabId: string) => void
       canRecoverPersistentLocalPtys?: () => boolean
       // Why: codex-home paths for the Agent Session History scan must be sourced
       // here, not via the window-only registerCoreHandlers path — that path never
@@ -3563,6 +3567,7 @@ export class OrcaRuntimeService {
       deps?.attestAgentHookCompatibilityAuthority ?? null
     this.retireAgentHookCompatibilityAuthorityFn =
       deps?.retireAgentHookCompatibilityAuthority ?? null
+    this.dropAgentHookStatusForTabFn = deps?.dropAgentHookStatusForTab ?? null
     this.canRecoverPersistentLocalPtysFn = deps?.canRecoverPersistentLocalPtys ?? (() => true)
     // Why: configure the shared AiVault scan cache from a serve-mode-reachable
     // seam so the aiVault.listSessions RPC includes managed-Codex + WSL sessions
@@ -8635,6 +8640,7 @@ export class OrcaRuntimeService {
           killPtys: options.reason === undefined || options.reason === 'user'
         })
         this.notifyRendererOfHeadlessTerminalClose(tab.parentTabId)
+        this.dropAgentHookStatusForTabFn?.(tab.parentTabId)
         this.store?.flushOrThrow?.()
         return { closed: true }
       }
@@ -8670,9 +8676,13 @@ export class OrcaRuntimeService {
             allowMissingPersistedTab: true
           })
           this.notifyRendererOfHeadlessTerminalClose(tab.parentTabId)
+          this.dropAgentHookStatusForTabFn?.(tab.parentTabId)
           this.store?.flushOrThrow?.()
         }
         this.clearRuntimeSessionOwnershipForMobileTab(worktreeId, snapshot!, tab.parentTabId)
+        if (!remainingTab) {
+          this.dropAgentHookStatusForTabFn?.(tab.parentTabId)
+        }
         return { closed: true }
       }
       // Why: notifier implementations without the acknowledged relay may expose
@@ -8680,11 +8690,15 @@ export class OrcaRuntimeService {
       if (closingWholeParent && this.isRuntimeOwnedHeadlessMobileTab(worktreeId, tab)) {
         this.closeHeadlessMobileTerminalTab(worktreeId, snapshot!, tab)
         this.notifyRendererOfHeadlessTerminalClose(tab.parentTabId)
+        this.dropAgentHookStatusForTabFn?.(tab.parentTabId)
         this.store?.flushOrThrow?.()
         return { closed: true }
       }
       if (!this.notifier?.closeTerminal) {
         this.closeHeadlessMobileTerminalTab(worktreeId, snapshot!, tab)
+        if (closingWholeParent) {
+          this.dropAgentHookStatusForTabFn?.(tab.parentTabId)
+        }
         this.store?.flushOrThrow?.()
         return { closed: true }
       }
