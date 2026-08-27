@@ -64,7 +64,10 @@ export function attachPrincipalLaneHost(input: {
     registry,
     undefined,
     undefined,
-    input.pairing
+    input.pairing,
+    // A connected desktop's lane-status subscription otherwise only re-learns
+    // `callerIsDelegatedGrant` on its next unrelated push/clear (release-audit follow-up).
+    (principalId) => getLaneWireService()?.notifyPrincipalChanged(principalId)
   )
   attachPrincipalLaneConsentService(consentService)
   // Startup sweep (release-audit follow-up): `reconcileOrphanLanes` had no production caller —

@@ -122,6 +122,20 @@ export class LaneWireService {
         'The Claude account was released on the host while this switch was still waiting, so nothing was switched. Load an account on the desktop that owns them, then try again.'
       )
     }
+    this.emitStatusToLane(laneId)
+  }
+
+  /**
+   * Additive (release-audit follow-up): a registry write outside the wire — bind, unbind,
+   * rebind, designate, provision, deprovision — changes what `statusOf` answers for this
+   * principal's grants without going through `onLaneChanged`. A connected desktop otherwise never
+   * learns `callerIsDelegatedGrant` flipped until its next unrelated status probe.
+   */
+  notifyPrincipalChanged(principalId: string): void {
+    this.emitStatusToLane(principalId)
+  }
+
+  private emitStatusToLane(laneId: string): void {
     for (const subscriber of this.stream.subscribersOf(laneId)) {
       const caller = this.stream.callerOf(subscriber)
       if (caller) {

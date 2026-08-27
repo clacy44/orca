@@ -86,7 +86,10 @@ export class PrincipalLaneConsentService {
     private readonly registry: PrincipalRegistry,
     private readonly hostSources: () => LaneHostSources = defaultHostSources,
     private readonly platform: NodeJS.Platform = process.platform,
-    private readonly pairing?: PairingInviteSource
+    private readonly pairing?: PairingInviteSource,
+    // Additive (release-audit follow-up): lets a connected desktop's lane-status stream learn a
+    // registry write happened, without this service knowing the wire exists.
+    private readonly onPrincipalChanged?: (principalId: string) => void
   ) {}
 
   createPrincipal(consent: HostConsent, displayName: string): PrincipalRecord {
@@ -119,18 +122,30 @@ export class PrincipalLaneConsentService {
 
   bindGrant(consent: HostConsent, deviceId: string, principalId: string): void {
     this.registry.bindGrant(consent, deviceId, principalId)
+    this.onPrincipalChanged?.(principalId)
   }
 
   unbindGrant(consent: HostConsent, deviceId: string): boolean {
-    return this.registry.unbindGrant(consent, deviceId)
+    const priorPrincipalId = this.registry.principalOf(deviceId)
+    const unbound = this.registry.unbindGrant(consent, deviceId)
+    if (unbound && priorPrincipalId) {
+      this.onPrincipalChanged?.(priorPrincipalId)
+    }
+    return unbound
   }
 
   rebindGrant(consent: HostConsent, deviceId: string, principalId: string): void {
+    const priorPrincipalId = this.registry.principalOf(deviceId)
     this.registry.rebindGrant(consent, deviceId, principalId)
+    if (priorPrincipalId && priorPrincipalId !== principalId) {
+      this.onPrincipalChanged?.(priorPrincipalId)
+    }
+    this.onPrincipalChanged?.(principalId)
   }
 
   designatePusher(consent: HostConsent, principalId: string, deviceId: string): void {
     this.registry.designatePusher(consent, principalId, deviceId)
+    this.onPrincipalChanged?.(principalId)
   }
 
   /**
@@ -231,6 +246,7 @@ export class PrincipalLaneConsentService {
       principalId,
       gate && accepted ? platformAcceptanceFor(this.platform) : undefined
     )
+    this.onPrincipalChanged?.(principalId)
     return lane
   }
 
@@ -275,7 +291,9 @@ export class PrincipalLaneConsentService {
       // Why: wipe before removing the tree, so a failed rmdir still leaves no credential at rest.
       await wipeLaneCredentials(laneDir, { platform: this.platform })
     }
-    return deprovisionPrincipalLane(principalId)
+    const deprovisioned = deprovisionPrincipalLane(principalId)
+    this.onPrincipalChanged?.(principalId)
+    return deprovisioned
   }
 
   /** Startup sweep; the gate lives in the reconciler and reads both load flags. */
