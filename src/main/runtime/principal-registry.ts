@@ -31,6 +31,9 @@ import type {
 
 export type { LaneGrantSummary, PrincipalGrantRow, PrincipalGrantSource, PrincipalRegistryOptions }
 
+type MintInviteArgs = { deviceId: string; principalId: string; scope: 'mobile' | 'runtime' }
+type MintInviteResult = { expiresAt: number }
+
 /**
  * Principals, and the five host-side consent writes that are their only writers (S9 §2a).
  *
@@ -85,10 +88,7 @@ export class PrincipalRegistry {
       )
     }
     this.commit(
-      {
-        ...this.state,
-        principals: [...this.state.principals, principal]
-      },
+      { ...this.state, principals: [...this.state.principals, principal] },
       { action: 'create-principal', principalId: principal.principalId }
     )
     return principal
@@ -242,21 +242,14 @@ export class PrincipalRegistry {
     principalId: string,
     platformAcceptance?: PrincipalPlatformAcceptance
   ): void {
-    this.commit(this.state, {
-      action: 'provision',
-      principalId,
-      ...(platformAcceptance ? { platformAcceptance } : {})
-    })
+    const platformRow = platformAcceptance ? { platformAcceptance } : {}
+    this.commit(this.state, { action: 'provision', principalId, ...platformRow })
   }
 
   /** `mint-invite` audit write (`orca lane invite`): never a token, never a pairing URL. */
-  recordInviteMinted(
-    _consent: HostConsent,
-    deviceId: string,
-    details: { principalId: string; scope: 'mobile' | 'runtime' }
-  ): { expiresAt: number } {
-    const expiresAt = this.grants.getDevice(deviceId)?.pendingExpiresAt ?? this.now()
-    this.commit(this.state, inviteMintedAuditRow(deviceId, details, expiresAt))
+  recordInviteMinted(_consent: HostConsent, args: MintInviteArgs): MintInviteResult {
+    const expiresAt = this.grants.getDevice(args.deviceId)?.pendingExpiresAt ?? this.now()
+    this.commit(this.state, inviteMintedAuditRow(args.deviceId, args, expiresAt))
     return { expiresAt }
   }
 
@@ -379,12 +372,10 @@ export class PrincipalRegistry {
   }
 
   private commit(nextState: PrincipalRegistryState, row: Omit<PrincipalAuditRow, 'at'>): void {
-    const committed: PrincipalRegistryState = {
-      ...nextState,
-      // Why capped here and not only in the store: an in-memory trail that outgrew the file would
-      // make `listAudit()` disagree with what a restart reads back, and grow without bound.
-      audit: [...nextState.audit, { at: this.now(), ...row }].slice(-PRINCIPAL_AUDIT_MAX_ROWS)
-    }
+    // Why capped here and not only in the store: an in-memory trail that outgrew the file would
+    // make `listAudit()` disagree with what a restart reads back, and grow without bound.
+    const audit = [...nextState.audit, { at: this.now(), ...row }].slice(-PRINCIPAL_AUDIT_MAX_ROWS)
+    const committed: PrincipalRegistryState = { ...nextState, audit }
     // Why: persist before the memory swap, so a failed write cannot leave an authority decision
     // live in-process and absent from disk.
     savePrincipalRegistryState(this.registryPath, committed)

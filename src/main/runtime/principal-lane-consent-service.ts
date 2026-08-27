@@ -188,7 +188,8 @@ export class PrincipalLaneConsentService {
       // must be complete on its own — the same discipline as `accounts.lane.push_malformed`.
       throw new ClaudeLaneRefusal('accounts.lane.invite_unavailable', offer.guidance)
     }
-    const { expiresAt } = this.registry.recordInviteMinted(consent, offer.deviceId, {
+    const { expiresAt } = this.registry.recordInviteMinted(consent, {
+      deviceId: offer.deviceId,
       principalId: params.principalId,
       scope: params.scope
     })
