@@ -372,7 +372,7 @@ describe('LaneDelegationDesktopService', () => {
     ])
 
     resetLaneDelegationDesktopServiceForTest()
-    await expect(refreshLaneDelegationHostStatus('env-1')).resolves.toBeUndefined()
+    await expect(refreshLaneDelegationHostStatus('env-1')).resolves.toBe(false)
   })
 
   it('a status change notifies the registered listener; detaching stops further notifications', async () => {

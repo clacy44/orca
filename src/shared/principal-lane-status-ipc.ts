@@ -33,6 +33,7 @@ export type PrincipalLaneStatusRow = {
  */
 export type PrincipalLaneStatusRemoteHostRow =
   | { environmentId: string; label: string; state: 'checking' }
+  | { environmentId: string; label: string; state: 'unreachable' }
   | { environmentId: string; label: string; state: 'unsupported' }
   | { environmentId: string; label: string; state: 'not-designated' }
   | {

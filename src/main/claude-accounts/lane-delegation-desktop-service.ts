@@ -6,10 +6,12 @@
 // construction, plus the three triggers that keep a client's push current: reconnect, selection
 // change, and an explicit delegate action from the AccountsPane.
 import { listEnvironments } from '../../shared/runtime-environment-store'
+import { isUserManagedRuntimeEnvironment } from '../../shared/runtime-environments'
 import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import type { Store } from '../persistence'
+import { isRuntimeEnvironmentManuallyDisconnected } from '../ipc/runtime-environment-connectivity-handlers'
 import { readIdentityFromCredentials } from './claude-credential-identity'
 import { deleteActiveClaudeKeychainCredentials } from './keychain'
 import { createLaneDelegationHostClient } from './lane-delegation-host-client'
@@ -44,6 +46,7 @@ export type DelegableHostRow = {
  */
 export type RemoteHostLaneRow =
   | { environmentId: string; label: string; state: 'checking' }
+  | { environmentId: string; label: string; state: 'unreachable' }
   | { environmentId: string; label: string; state: 'unsupported' }
   | { environmentId: string; label: string; state: 'not-designated' }
   | {
@@ -212,10 +215,22 @@ export class LaneDelegationDesktopService {
     }
   }
 
-  /** Explicit refresh IPC arm: the AccountsPane row's own Refresh button. */
-  async refreshHost(environmentId: string): Promise<void> {
+  /**
+   * Explicit refresh IPC arm: the AccountsPane row's own Refresh button.
+   *
+   * Reports whether the re-query actually landed (major/minor follow-up): `refreshStatus()` now
+   * answers false on a refused `accounts.lane.status` call, and `connect()`'s outcome is judged
+   * the same way a push outcome is — `refused`/`unsupported-host` are failures, everything else
+   * (including `already-connected`, which just means another caller's connect got there first and
+   * will have applied its own status) counts as the row's data being current.
+   */
+  async refreshHost(environmentId: string): Promise<boolean> {
     const client = this.clientFor(environmentId)
-    await (client.isConnected() ? client.refreshStatus() : client.connect())
+    if (client.isConnected()) {
+      return client.refreshStatus()
+    }
+    const outcome = await client.connect()
+    return outcome !== 'refused' && outcome !== 'unsupported-host'
   }
 
   /** Disconnect/re-pair/remove arm — never releases the lease (§2e: a drop never un-suppresses). */
@@ -255,30 +270,42 @@ export class LaneDelegationDesktopService {
    * must always be able to say why, not just fall silent when there is nothing to delegate onto.
    */
   listRemoteHostRows(userDataPath: string): RemoteHostLaneRow[] {
-    return listEnvironments(userDataPath).map((environment) => {
-      const label = environment.name
-      const client = this.clients.get(environment.id)
-      if (!client) {
-        return { environmentId: environment.id, label, state: 'checking' }
-      }
-      if (client.getCapabilityState() === 'unsupported') {
-        return { environmentId: environment.id, label, state: 'unsupported' }
-      }
-      const status = client.getLastStatus()
-      if (!status) {
-        return { environmentId: environment.id, label, state: 'checking' }
-      }
-      if (status.callerIsDelegatedGrant !== true) {
-        return { environmentId: environment.id, label, state: 'not-designated' }
-      }
-      return {
-        environmentId: environment.id,
-        label,
-        state: 'ready',
-        laneId: status.laneId,
-        laneState: status.laneState
-      }
-    })
+    // Minor discoverability follow-up: a per-worktree ephemeral VM is not a delegate target — its
+    // reachability is never wired to this service (deviations note, on purpose) — so without this
+    // filter it would sit in this list forever reading "Checking…" for a host nobody can act on.
+    return listEnvironments(userDataPath)
+      .filter(isUserManagedRuntimeEnvironment)
+      .map((environment) => {
+        const label = environment.name
+        const client = this.clients.get(environment.id)
+        // Minor discoverability follow-up: a manually-disconnected host's `assertReachable` throws
+        // on every call, so a client for it either doesn't exist yet or will NEVER get past
+        // `checking` — the one non-ready state the section otherwise cannot explain (it reads as "a
+        // check is in progress" when none is and none ever will be until the user reconnects).
+        if (isRuntimeEnvironmentManuallyDisconnected(environment.id)) {
+          return { environmentId: environment.id, label, state: 'unreachable' }
+        }
+        if (!client) {
+          return { environmentId: environment.id, label, state: 'checking' }
+        }
+        if (client.getCapabilityState() === 'unsupported') {
+          return { environmentId: environment.id, label, state: 'unsupported' }
+        }
+        const status = client.getLastStatus()
+        if (!status) {
+          return { environmentId: environment.id, label, state: 'checking' }
+        }
+        if (status.callerIsDelegatedGrant !== true) {
+          return { environmentId: environment.id, label, state: 'not-designated' }
+        }
+        return {
+          environmentId: environment.id,
+          label,
+          state: 'ready',
+          laneId: status.laneId,
+          laneState: status.laneState
+        }
+      })
   }
 }
 
@@ -324,8 +351,8 @@ export function listRemoteLaneHostRows(userDataPath: string): RemoteHostLaneRow[
 }
 
 /** Explicit refresh IPC arm. */
-export function refreshLaneDelegationHostStatus(environmentId: string): Promise<void> {
-  return activeService?.refreshHost(environmentId) ?? Promise.resolve()
+export function refreshLaneDelegationHostStatus(environmentId: string): Promise<boolean> {
+  return activeService?.refreshHost(environmentId) ?? Promise.resolve(false)
 }
 
 /** Test-only: the module-global service must not leak between suites. */
