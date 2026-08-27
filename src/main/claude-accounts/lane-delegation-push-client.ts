@@ -83,6 +83,7 @@ export class LaneDelegationPushClient {
   private principalId: string | null = null
   private unsubscribe: (() => void) | null = null
   private connecting: Promise<LanePushOutcome> | null = null
+  private refreshing: Promise<boolean> | null = null
 
   constructor(private readonly options: LaneDelegationPushClientOptions) {
     this.capabilityProbe = new LaneCapabilityProbe({ hostId: options.host.hostId })
@@ -203,12 +204,35 @@ export class LaneDelegationPushClient {
    * Explicit re-query (discoverability follow-up): unlike `resolveDelegation`, this always spends
    * a real `accounts.lane.status` call — the refresh button, and a reachability notification that
    * finds a subscription already live, both need the CURRENT answer, not the cached one.
+   *
+   * Coalesced onto one in-flight promise (major finding follow-up), same shape as `connect()`'s
+   * `connecting` guard: the reachability arm can be reached from settings hydration, the sidebar,
+   * and every `runtimeEnvironments:getStatus` for the SAME environment, all landing here before
+   * any of them resolve. Without this, each of those redundant probes queues its own
+   * `accounts.lane.status` host call ahead of user-facing RPCs on that environment's serialized
+   * call queue. The explicit Refresh button goes through this same coalescing, which is a feature,
+   * not a limitation: a refresh already in flight answers every concurrent caller instead of
+   * stacking another host round trip behind it.
    */
-  async refreshStatus(): Promise<void> {
+  async refreshStatus(): Promise<boolean> {
+    if (this.refreshing) {
+      return this.refreshing
+    }
+    this.refreshing = this.refreshStatusOnce()
+    try {
+      return await this.refreshing
+    } finally {
+      this.refreshing = null
+    }
+  }
+
+  private async refreshStatusOnce(): Promise<boolean> {
     try {
       this.applyStatus(await this.options.host.call<ClaudeLaneStatus>('accounts.lane.status'))
+      return true
     } catch (error) {
       this.options.onRefused?.('accounts.lane.status', error)
+      return false
     }
   }
 
@@ -268,6 +292,11 @@ export class LaneDelegationPushClient {
 
   /** The host's published value wins: the local lease row is a cache of it, never an authority. */
   private applyStatus(status: ClaudeLaneStatus): void {
+    // `onStatusChanged` is documented as firing only when the answer changes; compare against the
+    // previous frame before overwriting it so a re-query that comes back identical (e.g. two
+    // coalesced-away `refreshStatus` probes landing back to back, or a ready frame that repeats
+    // the last status) does not force a snapshot rebuild + IPC broadcast for nothing.
+    const changed = !laneStatusEqual(this.lastStatus, status)
     this.lastStatus = status
     this.principalId = readString(status?.laneId)
     this.delegatedGrantId = readString(status?.delegatedGrantId)
@@ -278,7 +307,9 @@ export class LaneDelegationPushClient {
     this.options.leases.applyPublishedStatus(this.options.host.hostId, status, (identity) =>
       this.options.accounts.resolveLocalAccountId(identity)
     )
-    this.options.onStatusChanged?.()
+    if (changed) {
+      this.options.onStatusChanged?.()
+    }
   }
 
   /** Q2, on every receipt: a rotation the host performed lands back in the desktop's store. */
@@ -346,4 +377,21 @@ function parseIdentity(oauthAccountJson: string | null): ClaudeCredentialIdentit
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** Field-by-field comparison of a flat, JSON-serializable status frame; null is its own state. */
+function laneStatusEqual(a: ClaudeLaneStatus | null, b: ClaudeLaneStatus | null): boolean {
+  if (a === b) {
+    return true
+  }
+  if (a === null || b === null) {
+    return false
+  }
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof ClaudeLaneStatus>
+  for (const key of keys) {
+    if (a[key] !== b[key]) {
+      return false
+    }
+  }
+  return true
 }
