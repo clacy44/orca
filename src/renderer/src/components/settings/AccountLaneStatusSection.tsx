@@ -194,6 +194,17 @@ function RemoteHostRowStatus({ row }: { row: PrincipalLaneStatusRemoteHostRow })
       </div>
     )
   }
+  if (row.state === 'unreachable') {
+    return (
+      <div className="text-muted-foreground text-xs" data-testid="remote-host-unreachable">
+        {translate(
+          'auto.components.settings.AccountLaneStatusSection.unreachable',
+          '{{value0}} is disconnected — reconnect it to check for a lane.',
+          { value0: row.label }
+        )}
+      </div>
+    )
+  }
   if (row.state === 'unsupported') {
     return (
       <div className="text-muted-foreground text-xs" data-testid="remote-host-unsupported">
@@ -299,7 +310,15 @@ export function AccountLaneStatusSection(): ReactElement | null {
   const runRefresh = async (environmentId: string): Promise<void> => {
     setRefreshingEnvironmentId(environmentId)
     try {
-      await window.api.principalLaneStatus.refreshHost(environmentId)
+      const { refreshed } = await window.api.principalLaneStatus.refreshHost(environmentId)
+      if (!refreshed) {
+        toast.error(
+          translate(
+            'auto.components.settings.AccountLaneStatusSection.refreshFailed',
+            'Refresh failed.'
+          )
+        )
+      }
     } catch (error) {
       toast.error(
         translate(

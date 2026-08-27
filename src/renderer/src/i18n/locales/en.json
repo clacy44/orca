@@ -10763,6 +10763,7 @@
           "delegateButton": "Delegate",
           "refreshHost": "Refresh",
           "checking": "Checking…",
+          "unreachable": "{{value0}} is disconnected — reconnect it to check for a lane.",
           "unsupported": "Lanes not supported — update the host.",
           "notDesignated": "This device is not designated for any person on {{value0}} (run `orca lane designate` on the host).",
           "refreshFailed": "Refresh failed.",
