@@ -71,14 +71,16 @@ vi.mock('./runtime-environment-request-connections', () => ({
   closeRemoteRuntimeRequestConnection: closeRemoteRuntimeRequestConnectionMock
 }))
 
-const { notifyLaneDelegationHostUnreachableMock } = vi.hoisted(() => ({
-  notifyLaneDelegationHostUnreachableMock: vi.fn()
-}))
+const { notifyLaneDelegationHostReachableMock, notifyLaneDelegationHostUnreachableMock } =
+  vi.hoisted(() => ({
+    notifyLaneDelegationHostReachableMock: vi.fn(),
+    notifyLaneDelegationHostUnreachableMock: vi.fn()
+  }))
 
 // Release-audit follow-up: T1's caller scan cannot see whether this trigger actually fires, only
 // that the line exists — this asserts the production call, not just the source text.
 vi.mock('../claude-accounts/lane-delegation-desktop-service', () => ({
-  notifyLaneDelegationHostReachable: vi.fn(),
+  notifyLaneDelegationHostReachable: notifyLaneDelegationHostReachableMock,
   notifyLaneDelegationHostUnreachable: notifyLaneDelegationHostUnreachableMock
 }))
 
@@ -249,6 +251,18 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     expect(await list(null, undefined)).toEqual([])
   })
 
+  // Discoverability follow-up (release audit): a freshly added environment previously sat
+  // unconnected on the lane wire until some unrelated reconnect passed through it.
+  it('notifies lane delegation reachability when an environment is added by pairing code', async () => {
+    registerRuntimeEnvironmentHandlers(store as never)
+    const add = handler<
+      { name: string; pairingCode: string },
+      { environment: { id: string; name: string } }
+    >('runtimeEnvironments:addFromPairingCode')
+    const added = await add(null, { name: 'desk', pairingCode: pairingCode() })
+    expect(notifyLaneDelegationHostReachableMock).toHaveBeenCalledWith(added.environment.id)
+  })
+
   it('blocks loopback before verification unless an SSH tunnel is declared', async () => {
     registerRuntimeEnvironmentHandlers(store as never)
     const verifyAndAdd = handler<
@@ -276,7 +290,7 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     })
     const verifyAndAdd = handler<
       { name: string; pairingCode: string; allowLoopback?: boolean },
-      { ok: boolean; environment?: { name: string; connectionDependency?: string } }
+      { ok: boolean; environment?: { id: string; name: string; connectionDependency?: string } }
     >('runtimeEnvironments:verifyAndAddFromPairingCode')
 
     const result = await verifyAndAdd(null, {
@@ -289,6 +303,9 @@ describe('registerRuntimeEnvironmentHandlers', () => {
       ok: true,
       environment: { name: 'desk', connectionDependency: 'ssh-tunnel' }
     })
+    // Discoverability follow-up: a verified add is a paired environment too — it must also arm
+    // the lane-delegation reachability trigger, not only the raw pairing-code add path.
+    expect(notifyLaneDelegationHostReachableMock).toHaveBeenCalledWith(result.environment!.id)
     expect(sendRemoteRuntimeRequestMock).toHaveBeenCalledWith(
       expect.objectContaining({ endpoint: 'ws://127.0.0.1:6768' }),
       'status.get',

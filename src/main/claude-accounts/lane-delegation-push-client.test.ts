@@ -42,10 +42,17 @@ function makeClient(
     failReadByClientRef?: boolean
     /** What a one-shot `accounts.lane.status` answers before the ready frame lands. */
     statusCall?: ClaudeLaneStatus | null
-  } = {}
+    /**
+     * A real transport parses a fresh object out of the wire on every call — never the same
+     * reference twice, even for byte-identical frames. Deep-clone `statusCall` per call to match.
+     */
+    freshStatusPerCall?: boolean
+  } = {},
+  statusRef?: { current: ClaudeLaneStatus }
 ) {
   const calls: { method: string; params: unknown }[] = []
   const refusals: { method: string; error: unknown }[] = []
+  const statusChanges: undefined[] = []
   let emitFrame: ((frame: LaneStatusFrameIn) => void) | null = null
   const rotatedWrites: { accountId: string; credentialsJson: string }[] = []
   let leaseRows: ClaudeLaneDelegationLease[] = []
@@ -81,8 +88,15 @@ function makeClient(
           if (options.statusCall === null) {
             throw new Error('accounts.lane.not_provisioned')
           }
-          return (options.statusCall ??
-            STATUS({ refreshTokenSha256: null, heldIdentity: null })) as never
+          const answer =
+            statusRef?.current ??
+            options.statusCall ??
+            STATUS({ refreshTokenSha256: null, heldIdentity: null })
+          return (
+            options.freshStatusPerCall
+              ? (JSON.parse(JSON.stringify(answer)) as ClaudeLaneStatus)
+              : answer
+          ) as never
         }
         return {} as never
       },
@@ -109,7 +123,8 @@ function makeClient(
         identity?.accountUuid === 'acct-uuid-1' ? 'acct-1' : null
     },
     leases,
-    onRefused: (method, error) => refusals.push({ method, error })
+    onRefused: (method, error) => refusals.push({ method, error }),
+    onStatusChanged: () => statusChanges.push(undefined)
   })
   return {
     client,
@@ -117,6 +132,7 @@ function makeClient(
     refusals,
     leases,
     rotatedWrites,
+    statusChanges,
     getCapabilities,
     queuePull: (value: unknown) => pulls.unshift(value),
     emit: (frame: LaneStatusFrameIn) => emitFrame?.(frame),
@@ -321,6 +337,59 @@ describe('desktop lane push client', () => {
       'accounts.lane.status',
       'accounts.lane.push'
     ])
+  })
+
+  // Regression for the review finding: `delegable` (array) and `heldIdentity` (object) must be
+  // compared by value, not by reference — a real transport parses a fresh object out of the wire
+  // on every call, so a reference check reports `changed` even for byte-identical frames.
+  it('does not fire onStatusChanged for repeated identical status frames off a fresh object each time', async () => {
+    const status = STATUS({
+      heldIdentity: { accountUuid: 'acct-uuid-1', email: 'ana@corp.test', organizationUuid: null },
+      delegable: [
+        { delegatedAccountId: 'tok-1', clientRef: 'ref-1', displayName: 'Work', email: null }
+      ]
+    })
+    const harness = makeClient({ statusCall: status, freshStatusPerCall: true })
+    expect(await harness.client.refreshStatus()).toBe(true)
+    expect(await harness.client.refreshStatus()).toBe(true)
+    expect(await harness.client.refreshStatus()).toBe(true)
+    expect(harness.statusChanges.length).toBe(1)
+  })
+
+  it('fires onStatusChanged when a freshly-parsed frame actually differs', async () => {
+    const held: ClaudeLaneStatus = STATUS({
+      heldIdentity: { accountUuid: 'acct-uuid-1', email: 'ana@corp.test', organizationUuid: null },
+      delegable: [
+        { delegatedAccountId: 'tok-1', clientRef: 'ref-1', displayName: 'Work', email: null }
+      ]
+    })
+    const statusRef = { current: held }
+    const harness = makeClient({ freshStatusPerCall: true }, statusRef)
+    await harness.client.refreshStatus()
+    expect(harness.statusChanges.length).toBe(1)
+
+    // Same frame again, still off a fresh object: no second fire.
+    await harness.client.refreshStatus()
+    expect(harness.statusChanges.length).toBe(1)
+
+    // A genuinely different `delegable` list: fires again.
+    statusRef.current = {
+      ...held,
+      delegable: [
+        { delegatedAccountId: 'tok-1', clientRef: 'ref-1', displayName: 'Work', email: null },
+        { delegatedAccountId: 'tok-2', clientRef: 'ref-2', displayName: 'Personal', email: null }
+      ]
+    }
+    await harness.client.refreshStatus()
+    expect(harness.statusChanges.length).toBe(2)
+
+    // A genuinely different `heldIdentity`: fires again.
+    statusRef.current = {
+      ...statusRef.current,
+      heldIdentity: { accountUuid: 'acct-uuid-2', email: 'ana@corp.test', organizationUuid: null }
+    }
+    await harness.client.refreshStatus()
+    expect(harness.statusChanges.length).toBe(3)
   })
 })
 
