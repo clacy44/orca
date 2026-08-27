@@ -2128,6 +2128,76 @@ describe('OrcaRuntimeRpcServer', () => {
     }
   }, 15_000)
 
+  it('mints a named invite with a caller-given ttlMs, clamped to at most the 24h default', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+
+    await server.start()
+
+    try {
+      const now = Date.now()
+      const shortened = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Ana',
+        mint: 'always',
+        scope: 'runtime',
+        ttlMs: 2 * 60 * 60 * 1000
+      })
+      if (!shortened.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+      const device = server.getDeviceRegistry()?.getDevice(shortened.deviceId)
+      expect(device?.pendingExpiresAt).toBeGreaterThanOrEqual(now + 2 * 60 * 60 * 1000 - 2000)
+      expect(device?.pendingExpiresAt).toBeLessThanOrEqual(now + 2 * 60 * 60 * 1000 + 2000)
+    } finally {
+      await server.stop()
+    }
+  }, 15_000)
+
+  it('reuses the retained advertised pairing address for a later named invite', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+
+    await server.start()
+
+    try {
+      // Why 100.64.1.20 and not a loopback literal: the point is the fallback reaches an
+      // off-host-reachable endpoint, not merely a non-empty one.
+      server.setAdvertisedPairingAddress('100.64.1.20')
+      const offer = server.createPairingOffer({ name: 'Ana', mint: 'always', scope: 'runtime' })
+      if (!offer.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+      expect(offer.endpoint).toContain('100.64.1.20')
+
+      // An explicit `address` still wins over the retained default.
+      const overridden = server.createPairingOffer({
+        address: '100.64.1.99',
+        name: 'Ben',
+        mint: 'always',
+        scope: 'runtime'
+      })
+      if (!overridden.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+      expect(overridden.endpoint).toContain('100.64.1.99')
+    } finally {
+      await server.stop()
+    }
+  }, 15_000)
+
   it('leaves a pairing offer without mint byte-identical to the coalescing behavior', async () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
     const runtime = new OrcaRuntimeService()

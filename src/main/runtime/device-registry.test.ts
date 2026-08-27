@@ -318,6 +318,22 @@ describe('DeviceRegistry pending grants', () => {
     ])
     expect(readRegistryFile()[0]).not.toHaveProperty('pendingExpiresAt')
   })
+
+  it('mints with a caller-given ttlMs, clamped to at most the 24h default', () => {
+    const registry = new DeviceRegistry(userDataPath)
+    const now = Date.now()
+
+    const shortened = registry.mintPendingDevice('Ana', 'runtime', 'network', 2 * 60 * 60 * 1000)
+    expect(shortened.pendingExpiresAt).toBeGreaterThanOrEqual(now + 2 * 60 * 60 * 1000 - 1000)
+    expect(shortened.pendingExpiresAt).toBeLessThanOrEqual(now + 2 * 60 * 60 * 1000 + 1000)
+
+    // Why it can only shorten: an invite can never outlive the design's 24h leak-control ceiling.
+    const tooLong = registry.mintPendingDevice('Ben', 'runtime', 'network', DAY_MS * 10)
+    expect(tooLong.pendingExpiresAt).toBeLessThanOrEqual(now + DAY_MS + 1000)
+
+    const omitted = registry.mintPendingDevice('Cy', 'runtime')
+    expect(omitted.pendingExpiresAt).toBeGreaterThanOrEqual(now + DAY_MS - 1000)
+  })
 })
 
 describe('DeviceRegistry load provenance', () => {

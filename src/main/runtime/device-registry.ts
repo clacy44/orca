@@ -142,9 +142,16 @@ export class DeviceRegistry {
   mintPendingDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    // Why clamped to (0, PENDING_GRANT_TTL_MS] rather than accepted verbatim: an invite can only be
+    // SHORTENED, never extended past the design's leak control (S9 §2a's 24h ceiling).
+    ttlMs?: number
   ): DeviceEntry {
     const now = Date.now()
+    const clampedTtlMs =
+      ttlMs !== undefined && Number.isFinite(ttlMs)
+        ? Math.min(Math.max(ttlMs, 1), PENDING_GRANT_TTL_MS)
+        : PENDING_GRANT_TTL_MS
     return this.createAndPersistDevice(
       // Why: the cap leaves room for the row about to be appended, so no window ever holds more than
       // MAX_LIVE_MINTED_GRANTS live invites no matter how often the renderer regenerates.
@@ -155,7 +162,7 @@ export class DeviceRegistry {
       name,
       scope,
       pairingReach,
-      now + PENDING_GRANT_TTL_MS
+      now + clampedTtlMs
     )
   }
 
