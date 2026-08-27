@@ -6,6 +6,7 @@ import {
   type LaneCapabilityProbeState
 } from './lane-delegation-capability-probe'
 import type { LaneDelegationLeaseStore } from './lane-delegation-lease'
+import { laneStatusEqual } from './lane-status-frame-equality'
 
 /**
  * The desktop's own side of the lane wire (S9 §2c/§2e/§2l step 3).
@@ -377,21 +378,4 @@ function parseIdentity(oauthAccountJson: string | null): ClaudeCredentialIdentit
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
-}
-
-/** Field-by-field comparison of a flat, JSON-serializable status frame; null is its own state. */
-function laneStatusEqual(a: ClaudeLaneStatus | null, b: ClaudeLaneStatus | null): boolean {
-  if (a === b) {
-    return true
-  }
-  if (a === null || b === null) {
-    return false
-  }
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof ClaudeLaneStatus>
-  for (const key of keys) {
-    if (a[key] !== b[key]) {
-      return false
-    }
-  }
-  return true
 }
