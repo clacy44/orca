@@ -29,6 +29,18 @@ const PrincipalParams = z.object({ principalId: PrincipalIdParam }).strict()
 const ProvisionParams = z
   .object({ principalId: PrincipalIdParam, acceptUnverifiedPlatform: z.boolean().optional() })
   .strict()
+// Why exactly one of principalId/displayName is not enforced in the schema: the CLI always sends
+// principalId (resolved from `--person` before the call), while displayName exists so a future
+// host UI can invite by name directly. Both being absent or both present is refused at the handler.
+const MintInviteParams = z
+  .object({
+    principalId: PrincipalIdParam.optional(),
+    displayName: z.string().min(1).max(PRINCIPAL_DISPLAY_NAME_MAX_LENGTH).optional(),
+    scope: z.enum(['runtime', 'mobile']).default('runtime'),
+    ttlHours: z.number().int().min(1).max(24).optional(),
+    address: z.string().min(1).max(255).optional()
+  })
+  .strict()
 
 /**
  * Binding a device to a person, designating who pushes, and provisioning a lane are **host-side
@@ -84,6 +96,33 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
       withConsent(ctx.clientKind, (service, consent) => {
         const principal = service.createPrincipal(consent, params.displayName)
         return { principalId: principal.principalId, displayName: principal.displayName }
+      })
+  }),
+  defineMethod({
+    // Host-only, same as every other write here (`withConsent` refuses any identified socket at
+    // `authorizeHostConsent`) — NEVER added to MOBILE_RPC_METHOD_ALLOWLIST, because it mints a live
+    // bearer credential rather than pointing at one. The CLI resolves `--person` to a principalId
+    // before calling; `displayName` exists only for a future host UI that invites by name directly.
+    name: 'accounts.lane.mintInvite',
+    params: MintInviteParams,
+    handler: async (params, ctx) =>
+      withConsent(ctx.clientKind, (service, consent) => {
+        const principalId =
+          params.principalId ??
+          service.listPrincipals().find((row) => row.displayName === params.displayName)
+            ?.principalId
+        if (!principalId) {
+          throw new ClaudeLaneRefusal(
+            'accounts.lane.person_unknown',
+            'Orca has no record of that person. Create them first with `orca lane create-person --name <name>`, then invite them.'
+          )
+        }
+        return service.mintInvite(consent, {
+          principalId,
+          scope: params.scope,
+          ...(params.ttlHours !== undefined ? { ttlHours: params.ttlHours } : {}),
+          ...(params.address !== undefined ? { address: params.address } : {})
+        })
       })
   }),
   defineMethod({

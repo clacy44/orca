@@ -9,6 +9,7 @@ import {
   type LinkBindableGrant
 } from './principal-link-fingerprint-binding'
 import {
+  inviteMintedAuditRow,
   loadPrincipalRegistryState,
   PRINCIPAL_AUDIT_MAX_ROWS,
   PRINCIPAL_REGISTRY_FILENAME,
@@ -241,8 +242,22 @@ export class PrincipalRegistry {
     principalId: string,
     platformAcceptance?: PrincipalPlatformAcceptance
   ): void {
-    const platformRow = platformAcceptance ? { platformAcceptance } : {}
-    this.commit(this.state, { action: 'provision', principalId, ...platformRow })
+    this.commit(this.state, {
+      action: 'provision',
+      principalId,
+      ...(platformAcceptance ? { platformAcceptance } : {})
+    })
+  }
+
+  /** `mint-invite` audit write (`orca lane invite`): never a token, never a pairing URL. */
+  recordInviteMinted(
+    _consent: HostConsent,
+    deviceId: string,
+    details: { principalId: string; scope: 'mobile' | 'runtime' }
+  ): { expiresAt: number } {
+    const expiresAt = this.grants.getDevice(deviceId)?.pendingExpiresAt ?? this.now()
+    this.commit(this.state, inviteMintedAuditRow(deviceId, details, expiresAt))
+    return { expiresAt }
   }
 
   delegatedGrantIdOf(principalId: string): string | null {

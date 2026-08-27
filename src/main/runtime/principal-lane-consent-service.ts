@@ -13,7 +13,8 @@ import { mirrorHostUserContentIntoLane } from '../claude-accounts/principal-lane
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
+import type { DeviceScope, RuntimeTerminalLaneState } from '../../shared/runtime-types'
+import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import type { HostConsent } from './principal-consent-authority'
 import type { LaneGrantSummary, PrincipalRegistry } from './principal-registry'
 import type {
@@ -21,6 +22,35 @@ import type {
   PrincipalPlatformAcceptance,
   PrincipalRecord
 } from './principal-registry-store'
+
+/**
+ * The one seam a runtime-time named invite (`accounts.lane.mintInvite`) crosses into
+ * `RuntimeRpcServer.createPairingOffer` — optional because a remote-host runtime proxy has no
+ * pairing surface of its own to arm (same convention as `PrincipalLaneHostRuntime`).
+ */
+export type PairingInviteOfferArgs = {
+  address?: string | null
+  name: string
+  mint: 'always'
+  scope: DeviceScope
+  reach: 'network'
+  ttlMs?: number
+}
+
+export type PairingInviteOfferResult =
+  | { available: false; reason: string; guidance: string }
+  | {
+      available: true
+      pairingUrl: string
+      endpoint: string
+      deviceId: string
+      webClientUrl: string | null
+    }
+
+export type PairingInviteSource = {
+  createPairingOffer: (args: PairingInviteOfferArgs) => PairingInviteOfferResult
+  advertisedAddress: () => string | null
+}
 
 /**
  * §6's S9a merge gates (i) and (ii), in code rather than in a note.
@@ -55,7 +85,8 @@ export class PrincipalLaneConsentService {
   constructor(
     private readonly registry: PrincipalRegistry,
     private readonly hostSources: () => LaneHostSources = defaultHostSources,
-    private readonly platform: NodeJS.Platform = process.platform
+    private readonly platform: NodeJS.Platform = process.platform,
+    private readonly pairing?: PairingInviteSource
   ) {}
 
   createPrincipal(consent: HostConsent, displayName: string): PrincipalRecord {
@@ -100,6 +131,78 @@ export class PrincipalLaneConsentService {
 
   designatePusher(consent: HostConsent, principalId: string, deviceId: string): void {
     this.registry.designatePusher(consent, principalId, deviceId)
+  }
+
+  /**
+   * The runtime-time mint (spec `orca lane invite`): a per-person named invite for a headless
+   * host, where the only prior door was `orca serve --pair-name` at launch. It does NOT bind —
+   * `bindGrant` still refuses an un-redeemed invite, so bind stays the separate second consent
+   * write after the desktop opens the link.
+   */
+  mintInvite(
+    consent: HostConsent,
+    params: { principalId: string; scope: DeviceScope; ttlHours?: number; address?: string }
+  ): {
+    deviceId: string
+    deviceIdPrefix: string
+    principalId: string
+    displayName: string
+    scope: DeviceScope
+    expiresAt: number
+    pairingUrl: string
+    webClientUrl: string | null
+    endpoint: string
+  } {
+    const person = this.registry
+      .listPrincipals()
+      .find((row) => row.principalId === params.principalId)
+    if (!person) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.person_unknown',
+        'Orca has no record of that person. Create them first with `orca lane create-person --name <name>`, then invite them.'
+      )
+    }
+    const name = normalizePairingDeviceName(person.displayName)
+    if (!name) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.invite_name_invalid',
+        `"${person.displayName}" does not normalize to a printable pairing label. Rename them with \`orca lane create-person\` before inviting.`
+      )
+    }
+    if (!this.pairing) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.invite_unavailable',
+        'Pairing is not available on this host, so Orca cannot mint an invite. Check that WebSocket pairing started and try again.'
+      )
+    }
+    const offer = this.pairing.createPairingOffer({
+      address: params.address ?? this.pairing.advertisedAddress(),
+      name,
+      mint: 'always',
+      scope: params.scope,
+      reach: 'network',
+      ...(params.ttlHours !== undefined ? { ttlMs: params.ttlHours * 3_600_000 } : {})
+    })
+    if (!offer.available) {
+      // Rule 3: an old client has no string for a new code, so the offer's own guidance sentence
+      // must be complete on its own — the same discipline as `accounts.lane.push_malformed`.
+      throw new ClaudeLaneRefusal('accounts.lane.invite_unavailable', offer.guidance)
+    }
+    const { expiresAt } = this.registry.recordInviteMinted(consent, offer.deviceId, {
+      principalId: params.principalId,
+      scope: params.scope
+    })
+    return {
+      deviceId: offer.deviceId,
+      deviceIdPrefix: offer.deviceId.slice(0, 8),
+      principalId: params.principalId,
+      displayName: person.displayName,
+      scope: params.scope,
+      expiresAt,
+      pairingUrl: offer.pairingUrl,
+      webClientUrl: offer.webClientUrl,
+      endpoint: offer.endpoint
+    }
   }
 
   bindFederatedLink(consent: HostConsent, homePeerFingerprint: string): { boundDeviceId: string } {
