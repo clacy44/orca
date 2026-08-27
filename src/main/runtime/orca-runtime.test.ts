@@ -38295,6 +38295,95 @@ describe('OrcaRuntimeService', () => {
     })
   })
 
+  it('publishes exactly one row when two retained rows share a providerSession.id with a live row (FIX 2)', async () => {
+    // Why: three last-status entries can share one providerSession.id (a
+    // resumed session reattached under a new pane). Two are pure retained
+    // history (#6072); the third is live. Every producer-side publication
+    // path must agree — worktree.ps AND agentStatus:getSnapshot.
+    const { runtimeStore } = makeRuntimeStoreWithWorkspaceSession({
+      ...getDefaultWorkspaceSession(),
+      tabsByWorktree: {}
+    })
+    const now = Date.now()
+    const sharedProviderSession = { key: 'session_id' as const, id: 'sess-shared' }
+    const ghostLeafId1 = '77777777-7777-4777-8777-777777777777'
+    const ghostLeafId2 = '88888888-8888-4888-8888-888888888888'
+    const liveLeafId = '99999999-9999-4999-8999-999999999999'
+    const liveTabId = 'tab-live'
+    const livePaneKey = `${liveTabId}:${liveLeafId}`
+    const snapshot = [
+      {
+        paneKey: `ghost-tab-1:${ghostLeafId1}`,
+        worktreeId: TEST_WORKTREE_ID,
+        tabId: 'ghost-tab-1',
+        state: 'done' as const,
+        prompt: 'resumed elsewhere',
+        agentType: 'claude',
+        connectionId: null,
+        providerSession: sharedProviderSession,
+        receivedAt: now - 1000,
+        stateStartedAt: now - 60_000
+      },
+      {
+        paneKey: `ghost-tab-2:${ghostLeafId2}`,
+        worktreeId: TEST_WORKTREE_ID,
+        tabId: 'ghost-tab-2',
+        state: 'done' as const,
+        prompt: 'resumed elsewhere again',
+        agentType: 'claude',
+        connectionId: null,
+        providerSession: sharedProviderSession,
+        receivedAt: now - 500,
+        stateStartedAt: now - 30_000
+      },
+      {
+        paneKey: livePaneKey,
+        worktreeId: TEST_WORKTREE_ID,
+        tabId: liveTabId,
+        state: 'working' as const,
+        prompt: 'still going',
+        agentType: 'claude',
+        connectionId: null,
+        providerSession: sharedProviderSession,
+        receivedAt: now,
+        stateStartedAt: now - 5_000
+      }
+    ]
+    const runtime = new OrcaRuntimeService(runtimeStore as never, undefined, {
+      getAgentStatusSnapshot: () => snapshot
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: liveTabId,
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Claude',
+          activeLeafId: liveLeafId,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: liveTabId,
+          worktreeId: TEST_WORKTREE_ID,
+          leafId: liveLeafId,
+          paneRuntimeId: 1,
+          ptyId: 'pty-live'
+        }
+      ]
+    })
+
+    const { worktrees } = await runtime.getWorktreePs()
+    const summary = worktrees.find((worktree) => worktree.worktreeId === TEST_WORKTREE_ID)
+    expect(summary?.agents).toEqual([expect.objectContaining({ paneKey: livePaneKey })])
+
+    const { filterRetainedHistoryAgentStatusRows } =
+      await import('../ipc/agent-status-ipc-boundary')
+    const filtered = filterRetainedHistoryAgentStatusRows(snapshot, runtime)
+    expect(filtered).toEqual([expect.objectContaining({ paneKey: livePaneKey })])
+  })
+
   it('keeps a hydrated row while its persisted session tab exists and no renderer graph is attached', async () => {
     // Why: headless serve has no renderer graph; session.tabs.list serves this
     // tab to mobile as current, so its agent row must stay (desktop parity).

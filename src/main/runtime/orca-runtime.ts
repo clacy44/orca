@@ -53,6 +53,10 @@ import {
   type AgentStatusEntry
 } from '../../shared/agent-status-types'
 import { indexAgentStatusRowsByPaneKey } from '../agent-hooks/agent-status-pane-index'
+import {
+  isRetainedHistoryAgentRow,
+  type RetainedHistoryAgentRowContext
+} from '../agent-hooks/retained-history-agent-row'
 import type { AgentHookAuthorityAttestation } from '../agent-hooks/server'
 import type {
   AgentSessionClaimedSpawnResult,
@@ -480,7 +484,6 @@ import {
 } from '../../shared/stable-pane-id'
 import { parseAppSshPtyId } from '../../shared/ssh-pty-id'
 import { isValidHostTerminalTabId, isValidTerminalTabId } from '../../shared/terminal-tab-id'
-import { isWslHookRelayConnectionId } from '../../shared/wsl-hook-relay-contract'
 import {
   applyTerminalQuickCommandMutation,
   MAX_QUICK_COMMANDS,
@@ -19071,21 +19074,21 @@ export class OrcaRuntimeService {
         parsePaneKey(src.paneKey)?.tabId ??
         parseLegacyNumericPaneKey(src.paneKey)?.tabId
       const mirroredWorktreeId = tabId ? mirroredWorktreeIdByTabId.get(tabId) : undefined
+      // Why: hook snapshots hydrate from last-status.json for days, so a row
+      // from a local or WSL-relayed pane whose tab left every session and the
+      // live graph, with no connected PTY, is retained history — surfacing it
+      // resurrects closed agents on mobile (#6072). SSH rows are exempt (their
+      // tabs may exist only remotely), as are rows with no resolvable tabId
+      // (staleness unprovable). Session tabs count as existence: headless
+      // serve has no renderer graph, and session.tabs.list serves them.
+      // Shared with the two other publication points — see retained-history-agent-row.ts.
       if (
-        tabId !== undefined &&
-        mirroredWorktreeId === undefined &&
-        (src.connectionId === null || isWslHookRelayConnectionId(src.connectionId)) &&
-        !connectedPtyEvidence.tabIds.has(tabId) &&
-        !connectedPtyEvidence.paneKeys.has(src.paneKey) &&
-        (src.ptyId === undefined || !connectedPtyEvidence.ptyIds.has(src.ptyId))
+        isRetainedHistoryAgentRow(
+          { paneKey: src.paneKey, tabId, connectionId: src.connectionId, ptyId: src.ptyId },
+          { mirroredWorktreeIdByTabId, connectedPtyEvidence },
+          tabId
+        )
       ) {
-        // Why: hook snapshots hydrate from last-status.json for days, so a row
-        // from a local or WSL-relayed pane whose tab left every session and the
-        // live graph, with no connected PTY, is retained history — surfacing it
-        // resurrects closed agents on mobile (#6072). SSH rows are exempt (their
-        // tabs may exist only remotely), as are rows with no resolvable tabId
-        // (staleness unprovable). Session tabs count as existence: headless
-        // serve has no renderer graph, and session.tabs.list serves them.
         continue
       }
       const worktreeId = mirroredWorktreeId ?? src.worktreeId
@@ -19148,6 +19151,61 @@ export class OrcaRuntimeService {
         }
       }
     }
+  }
+
+  /** Same liveness join as `attachAgentRowsToSummaries`, computed standalone for
+   * the other two publication points (`agentStatus:getSnapshot`, mobile/paired
+   * session-tab snapshots) so a ghost agent row cannot leak onto either — see
+   * `isRetainedHistoryAgentRow` (FIX 2). */
+  buildRetainedHistoryAgentRowContext(): RetainedHistoryAgentRowContext {
+    const mirroredWorktreeIdByTabId = new Map<string, string>()
+    const hostIds = new Set<ExecutionHostId>(['local'])
+    for (const repo of this.store?.getRepos?.() ?? []) {
+      hostIds.add(getRepoExecutionHostId(repo))
+    }
+    for (const hostId of this.store?.getWorkspaceSessionHostIds?.() ?? []) {
+      hostIds.add(hostId)
+    }
+    for (const hostId of hostIds) {
+      const session = this.store?.getWorkspaceSession?.(hostId)
+      if (!session) {
+        continue
+      }
+      for (const [worktreeId, tabs] of Object.entries(session.tabsByWorktree ?? {})) {
+        for (const tab of tabs) {
+          mirroredWorktreeIdByTabId.set(tab.id, worktreeId)
+        }
+      }
+    }
+    // Why: a live renderer graph may precede persistence; persisted tab
+    // ownership wins when present (matches attachAgentRowsToSummaries).
+    for (const [tabId, tab] of this.tabs) {
+      if (!mirroredWorktreeIdByTabId.has(tabId)) {
+        mirroredWorktreeIdByTabId.set(tabId, tab.worktreeId)
+      }
+    }
+    const connectedPtyEvidence: {
+      tabIds: Set<string>
+      paneKeys: Set<string>
+      ptyIds: Set<string>
+    } = {
+      tabIds: new Set<string>(),
+      paneKeys: new Set<string>(),
+      ptyIds: new Set<string>()
+    }
+    for (const pty of this.ptysById.values()) {
+      if (!pty.connected) {
+        continue
+      }
+      connectedPtyEvidence.ptyIds.add(pty.ptyId)
+      if (pty.tabId) {
+        connectedPtyEvidence.tabIds.add(pty.tabId)
+      }
+      if (pty.paneKey) {
+        connectedPtyEvidence.paneKeys.add(pty.paneKey)
+      }
+    }
+    return { mirroredWorktreeIdByTabId, connectedPtyEvidence }
   }
 
   listRepos(): Repo[] {
@@ -32142,6 +32200,25 @@ export class OrcaRuntimeService {
   ): RuntimeMobileSessionTabsResult {
     const tabs: RuntimeMobileSessionClientTab[] = []
     const liveBrowserTabsByPageId = this.getLiveBrowserTabsByPageId(snapshot.worktree)
+    // FIX 2: same producer-side liveness join as attachAgentRowsToSummaries and
+    // agentStatus:getSnapshot, so this per-tab agentStatus carrier cannot leak a
+    // ghost agent row to a paired client either.
+    const retainedHistoryCtx = this.buildRetainedHistoryAgentRowContext()
+    const isRetainedHistoryRow = (row: {
+      paneKey: string
+      tabId?: string
+      connectionId: string | null
+    }): boolean => {
+      const tabId =
+        row.tabId ??
+        parsePaneKey(row.paneKey)?.tabId ??
+        parseLegacyNumericPaneKey(row.paneKey)?.tabId
+      return isRetainedHistoryAgentRow(
+        { paneKey: row.paneKey, tabId, connectionId: row.connectionId },
+        retainedHistoryCtx,
+        tabId
+      )
+    }
     // Production reads hook rows by pane; the snapshot fallback remains for tests
     // and embedders that have not adopted the narrow getter.
     let hookRowsByPaneKey: Map<string, AgentStatusIpcPayload[]> | null = null
@@ -32153,13 +32230,16 @@ export class OrcaRuntimeService {
       }
       const direct = this.getAgentProviderSessionRowsForPaneFn?.(paneKey)
       if (direct) {
-        hookRowsForPane.set(paneKey, direct)
-        return direct
+        const filtered = direct.filter((row) => !isRetainedHistoryRow(row))
+        hookRowsForPane.set(paneKey, filtered)
+        return filtered
       }
       hookRowsByPaneKey ??= indexAgentStatusRowsByPaneKey(
         this.getAgentProviderSessionSnapshotFn?.() ?? []
       )
-      const rows = hookRowsByPaneKey.get(paneKey) ?? []
+      const rows = (hookRowsByPaneKey.get(paneKey) ?? []).filter(
+        (row) => !isRetainedHistoryRow(row)
+      )
       hookRowsForPane.set(paneKey, rows)
       return rows
     }
@@ -32215,7 +32295,12 @@ export class OrcaRuntimeService {
       // for both title ownership and status publication so the two cannot diverge.
       const retainedAgentStatus = tab.agentStatus
         ? null
-        : this.getFreshRetainedAgentStatusForMobileTab(paneKey, liveLeafPty ?? mobileStatusPty, tab)
+        : this.getFreshRetainedAgentStatusForMobileTab(
+            paneKey,
+            liveLeafPty ?? mobileStatusPty,
+            tab,
+            retainedHistoryCtx
+          )
       const hookAgentStatus = tab.agentStatus
         ? this.getHookAgentRowForPane(getHookRowsForPane(paneKey))
         : null
@@ -32725,7 +32810,8 @@ export class OrcaRuntimeService {
   private getFreshRetainedAgentStatusForMobileTab(
     paneKey: string,
     pty: RuntimePtyWorktreeRecord | null,
-    tab: RuntimeMobileSessionTerminalTab
+    tab: RuntimeMobileSessionTerminalTab,
+    retainedHistoryCtx: RetainedHistoryAgentRowContext = this.buildRetainedHistoryAgentRowContext()
   ): RuntimeAgentRowSnapshot | null {
     let retained = this.latestAgentStatusByPaneKey.get(paneKey) ?? null
     if (!retained) {
@@ -32733,6 +32819,22 @@ export class OrcaRuntimeService {
       if (ptyId) {
         for (const snapshot of this.latestAgentStatusByPaneKey.values()) {
           if (snapshot.ptyId !== ptyId) {
+            continue
+          }
+          // Why: a ptyId-only match can resolve to a DIFFERENT pane's cached
+          // row (this pane's own paneKey lookup already missed) — that other
+          // pane's tab may have left every session with no connected PTY,
+          // making it retained history, not a live row for this tab (FIX 2).
+          if (
+            isRetainedHistoryAgentRow(
+              {
+                paneKey: snapshot.paneKey,
+                tabId: snapshot.tabId,
+                connectionId: snapshot.connectionId
+              },
+              retainedHistoryCtx
+            )
+          ) {
             continue
           }
           if (!retained || snapshot.updatedAt > retained.updatedAt) {
