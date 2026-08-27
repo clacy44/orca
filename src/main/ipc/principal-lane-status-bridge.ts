@@ -10,20 +10,27 @@ import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
   PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
   PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusDelegableHost,
   type PrincipalLaneStatusDelegateRequest,
   type PrincipalLaneStatusDelegateResult,
+  type PrincipalLaneStatusRefreshHostRequest,
+  type PrincipalLaneStatusRefreshHostResult,
   type PrincipalLaneStatusReleaseRequest,
   type PrincipalLaneStatusReleaseResult,
+  type PrincipalLaneStatusRemoteHostRow,
   type PrincipalLaneStatusRenameRequest,
   type PrincipalLaneStatusRenameResult,
   type PrincipalLaneStatusSnapshot
 } from '../../shared/principal-lane-status-ipc'
 import {
   delegateAccountToLaneHost,
-  listDelegableLaneHosts
+  listDelegableLaneHosts,
+  listRemoteLaneHostRows,
+  refreshLaneDelegationHostStatus,
+  setLaneDelegationDesktopStatusListener
 } from '../claude-accounts/lane-delegation-desktop-service'
 import { getLaneDelegationLeaseStore } from '../claude-accounts/lane-delegation-lease'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
@@ -32,7 +39,8 @@ import { getPrincipalLaneConsentService } from '../runtime/principal-lane-consen
 const EMPTY_SNAPSHOT: PrincipalLaneStatusSnapshot = {
   lanes: [],
   delegationLeases: [],
-  delegableHosts: []
+  delegableHosts: [],
+  remoteHosts: []
 }
 
 export type PrincipalLaneStatusBridgeOptions = {
@@ -52,8 +60,12 @@ export type PrincipalLaneStatusBridgeOptions = {
   renameLease?: (accountId: string, friendlyName: string | null) => boolean
   /** Injected in tests. Defaults to this desktop's connected, designated-pusher hosts. */
   listDelegableHosts?: () => PrincipalLaneStatusDelegableHost[]
+  /** Injected in tests. Defaults to one discoverability row per remote environment (B3 follow-up). */
+  listRemoteHosts?: () => PrincipalLaneStatusRemoteHostRow[]
   /** Injected in tests. Defaults to pushing the named account onto the named host lane. */
   delegateAccount?: (environmentId: string, accountId: string) => Promise<boolean>
+  /** Injected in tests. Defaults to re-querying one remote host's lane status on demand. */
+  refreshHost?: (environmentId: string) => Promise<void>
 }
 
 // Why a broadcast set and not one window: provision/deprovision are process-wide events, and every
@@ -91,10 +103,15 @@ export function registerPrincipalLaneStatusBridge(
       getLaneDelegationLeaseStore()?.rename(accountId, friendlyName) ?? false)
   const listDelegableHosts =
     options.listDelegableHosts ?? (() => listDelegableLaneHosts(app.getPath('userData')))
+  const listRemoteHosts =
+    options.listRemoteHosts ?? (() => listRemoteLaneHostRows(app.getPath('userData')))
   const delegateAccount =
     options.delegateAccount ??
     ((environmentId: string, accountId: string) =>
       delegateAccountToLaneHost(environmentId, accountId))
+  const refreshHost =
+    options.refreshHost ??
+    ((environmentId: string) => refreshLaneDelegationHostStatus(environmentId))
 
   const isMainWindowSender = (event: IpcMainInvokeEvent): boolean =>
     !mainWindow.isDestroyed() &&
@@ -109,7 +126,8 @@ export function registerPrincipalLaneStatusBridge(
       laneState: resolveLaneState(principal.principalId)
     })),
     delegationLeases: listDelegationLeases(),
-    delegableHosts: listDelegableHosts()
+    delegableHosts: listDelegableHosts(),
+    remoteHosts: listRemoteHosts()
   })
 
   const broadcast = (): void => {
@@ -182,6 +200,30 @@ export function registerPrincipalLaneStatusBridge(
     }
   )
 
+  // Why the same sender gate: the Refresh button re-queries a remote host, which is a host-facing
+  // act exactly like delegate/release/rename — a foreign sender must never trigger it either.
+  ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL)
+  ipcMain.handle(
+    PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
+    async (
+      event,
+      request: PrincipalLaneStatusRefreshHostRequest
+    ): Promise<PrincipalLaneStatusRefreshHostResult> => {
+      if (!isMainWindowSender(event)) {
+        return { refreshed: false }
+      }
+      await refreshHost(request.environmentId)
+      broadcast()
+      return { refreshed: true }
+    }
+  )
+
+  // Discoverability follow-up: a remote client's status can change with no local IPC call at all —
+  // a `status` frame off the lane-status stream, or a reachability-triggered `refreshStatus()` —
+  // so the desktop service's own listener, not just the two writes above, must be able to
+  // re-broadcast. Only the LAST registration wins on purpose: one desktop process has one window.
+  setLaneDelegationDesktopStatusListener(broadcast)
+
   const dispose = (): void => {
     if (disposed) {
       return
@@ -193,6 +235,8 @@ export function registerPrincipalLaneStatusBridge(
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL)
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL)
       ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL)
+      ipcMain.removeHandler(PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL)
+      setLaneDelegationDesktopStatusListener(null)
     }
   }
 

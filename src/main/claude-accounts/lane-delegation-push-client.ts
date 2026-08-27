@@ -1,7 +1,10 @@
 import { AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
-import { LaneCapabilityProbe } from './lane-delegation-capability-probe'
+import {
+  LaneCapabilityProbe,
+  type LaneCapabilityProbeState
+} from './lane-delegation-capability-probe'
 import type { LaneDelegationLeaseStore } from './lane-delegation-lease'
 
 /**
@@ -62,6 +65,8 @@ export type LaneDelegationPushClientOptions = {
   accounts: DesktopLaneAccountSource
   leases: LaneDelegationLeaseStore
   onRefused?: (method: string, error: unknown) => void
+  /** Additive (discoverability follow-up): fired whenever `getLastStatus()`'s answer changes. */
+  onStatusChanged?: () => void
 }
 
 export type LanePushOutcome =
@@ -189,6 +194,24 @@ export class LaneDelegationPushClient {
     return this.lastStatus
   }
 
+  /** The capability probe's cached answer — 'unknown' before the first `status.get` resolves. */
+  getCapabilityState(): LaneCapabilityProbeState {
+    return this.capabilityProbe.currentState
+  }
+
+  /**
+   * Explicit re-query (discoverability follow-up): unlike `resolveDelegation`, this always spends
+   * a real `accounts.lane.status` call — the refresh button, and a reachability notification that
+   * finds a subscription already live, both need the CURRENT answer, not the cached one.
+   */
+  async refreshStatus(): Promise<void> {
+    try {
+      this.applyStatus(await this.options.host.call<ClaudeLaneStatus>('accounts.lane.status'))
+    } catch (error) {
+      this.options.onRefused?.('accounts.lane.status', error)
+    }
+  }
+
   /**
    * The ready frame, or a one-shot `accounts.lane.status` when it has not landed yet.
    *
@@ -255,6 +278,7 @@ export class LaneDelegationPushClient {
     this.options.leases.applyPublishedStatus(this.options.host.hostId, status, (identity) =>
       this.options.accounts.resolveLocalAccountId(identity)
     )
+    this.options.onStatusChanged?.()
   }
 
   /** Q2, on every receipt: a rotation the host performed lands back in the desktop's store. */

@@ -90,9 +90,12 @@ vi.mock('../../shared/runtime-environment-store', () => ({
 import {
   delegateAccountToLaneHost,
   listDelegableLaneHosts,
+  listRemoteLaneHostRows,
   notifyLaneDelegationHostReachable,
   notifyLaneDelegationHostUnreachable,
+  refreshLaneDelegationHostStatus,
   resetLaneDelegationDesktopServiceForTest,
+  setLaneDelegationDesktopStatusListener,
   startLaneDelegationDesktopService
 } from './lane-delegation-desktop-service'
 
@@ -134,6 +137,27 @@ function makeStore(): Store & {
   } as unknown as Store & { emitSettingsChanged: (updates: Record<string, unknown>) => void }
 }
 
+/** A fresh host client stub whose `accounts.lane.status` answers "connected, not designated". */
+function notDesignatedHostClient(): HostClientStub {
+  const entry: HostClientStub = {
+    handlers: {
+      'accounts.lane.status': () => ({
+        ...STATUS,
+        delegatedGrantId: null,
+        callerIsDelegatedGrant: false
+      }),
+      'accounts.lane.setDelegableAccounts': () => ({}),
+      'accounts.lane.push': () => ({ refreshTokenSha256: 'b'.repeat(64) })
+    },
+    getCapabilities: vi.fn().mockResolvedValue(['agent.identity-lanes.v1']),
+    call: vi.fn((method: string, params?: unknown) =>
+      Promise.resolve(entry.handlers[method]?.(params))
+    ),
+    subscribeLaneStatus: vi.fn().mockResolvedValue(vi.fn())
+  }
+  return entry
+}
+
 /** Flushes the task queue enough times for `connect()`'s awaited chain to settle. */
 async function flush(): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -149,6 +173,7 @@ describe('LaneDelegationDesktopService', () => {
   afterEach(() => {
     resetLaneDelegationDesktopServiceForTest()
     attachLaneDelegationLeaseStore(null)
+    setLaneDelegationDesktopStatusListener(null)
   })
 
   it('attaches the lease store on construction, arming the delegated-elsewhere guards', () => {
@@ -255,5 +280,116 @@ describe('LaneDelegationDesktopService', () => {
     expect(listDelegableLaneHosts('/tmp/userdata')).toEqual([])
     expect(() => notifyLaneDelegationHostReachable('env-1')).not.toThrow()
     expect(() => notifyLaneDelegationHostUnreachable('env-1')).not.toThrow()
+  })
+
+  // Discoverability follow-up (release audit): the row list exists for every remote environment,
+  // whether or not this desktop's grant is connected/designated on it — the AccountsPane's blank
+  // section came from `listDelegableLaneHosts` silently dropping every non-ready host.
+  describe('listRemoteLaneHostRows', () => {
+    it('reports checking before the first connect, then ready once designated', async () => {
+      startLaneDelegationDesktopService({ store: makeStore() })
+      expect(listRemoteLaneHostRows('/tmp/userdata')).toEqual([
+        { environmentId: 'env-1', label: 'Office Mac', state: 'checking' }
+      ])
+      notifyLaneDelegationHostReachable('env-1')
+      await flush()
+      expect(listRemoteLaneHostRows('/tmp/userdata')).toEqual([
+        {
+          environmentId: 'env-1',
+          label: 'Office Mac',
+          state: 'ready',
+          laneId: 'p-ana',
+          laneState: 'absent'
+        }
+      ])
+    })
+
+    it('reports not-designated for a connected grant the host has not named as pusher', async () => {
+      startLaneDelegationDesktopService({ store: makeStore() })
+      notifyLaneDelegationHostReachable('env-1')
+      await flush()
+      hostClients.get('env-1')!.handlers['accounts.lane.status'] = () => ({
+        ...STATUS,
+        delegatedGrantId: 'some-other-device',
+        callerIsDelegatedGrant: false
+      })
+      await refreshLaneDelegationHostStatus('env-1')
+      expect(listRemoteLaneHostRows('/tmp/userdata')).toEqual([
+        { environmentId: 'env-1', label: 'Office Mac', state: 'not-designated' }
+      ])
+      // And it drops out of the ready-only delegable list.
+      expect(listDelegableLaneHosts('/tmp/userdata')).toEqual([])
+    })
+  })
+
+  // The core B3 discoverability bug: a desktop subscribed BEFORE the host designated it never
+  // re-read `accounts.lane.status` again, because `connect()` is a no-op once already subscribed.
+  it('re-queries status on a reachability notification that finds an already-live subscription', async () => {
+    // The live symptom's exact timing: this desktop connects/subscribes BEFORE the host
+    // designates it, so the first `accounts.lane.status` answers "not yet designated".
+    startLaneDelegationDesktopService({ store: makeStore() })
+    hostClients.set('env-1', notDesignatedHostClient())
+    createHostClientMock.mockImplementationOnce(() => hostClients.get('env-1')!)
+
+    notifyLaneDelegationHostReachable('env-1')
+    await flush()
+    expect(listRemoteLaneHostRows('/tmp/userdata')).toEqual([
+      { environmentId: 'env-1', label: 'Office Mac', state: 'not-designated' }
+    ])
+    expect(hostClients.get('env-1')!.subscribeLaneStatus).toHaveBeenCalledTimes(1)
+
+    // The host designates this device sometime later. The desktop's subscription is already
+    // live, so `connect()` alone would be a no-op — `notifyHostReachable` must spend a real
+    // re-query instead of waiting for some unrelated reconnect.
+    hostClients.get('env-1')!.handlers['accounts.lane.status'] = () => STATUS
+    notifyLaneDelegationHostReachable('env-1')
+    await flush()
+
+    expect(listRemoteLaneHostRows('/tmp/userdata')).toEqual([
+      {
+        environmentId: 'env-1',
+        label: 'Office Mac',
+        state: 'ready',
+        laneId: 'p-ana',
+        laneState: 'absent'
+      }
+    ])
+    // Still exactly one subscription — the fix is a re-query, not a resubscribe.
+    expect(hostClients.get('env-1')!.subscribeLaneStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('the explicit refresh IPC re-queries status and its module helper is a safe no-op unattached', async () => {
+    startLaneDelegationDesktopService({ store: makeStore() })
+    notifyLaneDelegationHostReachable('env-1')
+    await flush()
+    hostClients.get('env-1')!.handlers['accounts.lane.status'] = () => ({
+      ...STATUS,
+      laneState: 'loaded'
+    })
+    await refreshLaneDelegationHostStatus('env-1')
+    expect(listDelegableLaneHosts('/tmp/userdata')).toEqual([
+      { environmentId: 'env-1', label: 'Office Mac', laneId: 'p-ana', laneState: 'loaded' }
+    ])
+
+    resetLaneDelegationDesktopServiceForTest()
+    await expect(refreshLaneDelegationHostStatus('env-1')).resolves.toBeUndefined()
+  })
+
+  it('a status change notifies the registered listener; detaching stops further notifications', async () => {
+    startLaneDelegationDesktopService({ store: makeStore() })
+    const listener = vi.fn()
+    setLaneDelegationDesktopStatusListener(listener)
+    notifyLaneDelegationHostReachable('env-1')
+    await flush()
+    expect(listener).toHaveBeenCalled()
+
+    listener.mockClear()
+    setLaneDelegationDesktopStatusListener(null)
+    hostClients.get('env-1')!.handlers['accounts.lane.status'] = () => ({
+      ...STATUS,
+      laneState: 'loaded'
+    })
+    await refreshLaneDelegationHostStatus('env-1')
+    expect(listener).not.toHaveBeenCalled()
   })
 })

@@ -25,6 +25,24 @@ export type PrincipalLaneStatusRow = {
   laneState: RuntimeTerminalLaneState
 }
 
+/**
+ * One remote Orca environment's lane-discoverability row (release-audit follow-up): exists for
+ * EVERY paired environment, whether or not this desktop's grant on it is connected, designated,
+ * or even lane-capable, so the AccountsPane section can always say why, instead of rendering
+ * nothing when a host offers no delegate target.
+ */
+export type PrincipalLaneStatusRemoteHostRow =
+  | { environmentId: string; label: string; state: 'checking' }
+  | { environmentId: string; label: string; state: 'unsupported' }
+  | { environmentId: string; label: string; state: 'not-designated' }
+  | {
+      environmentId: string
+      label: string
+      state: 'ready'
+      laneId: string
+      laneState: RuntimeTerminalLaneState
+    }
+
 /** What `principalLaneStatus:get` answers and `principalLaneStatus:changed` republishes. */
 export type PrincipalLaneStatusSnapshot = {
   lanes: PrincipalLaneStatusRow[]
@@ -32,6 +50,8 @@ export type PrincipalLaneStatusSnapshot = {
   delegationLeases: ClaudeLaneDelegationLease[]
   /** Additive (Rule 1): paired hosts this desktop can push a Claude account onto right now (B3). */
   delegableHosts: PrincipalLaneStatusDelegableHost[]
+  /** Additive (Rule 1): every remote environment's row, ready or not (discoverability follow-up). */
+  remoteHosts: PrincipalLaneStatusRemoteHostRow[]
 }
 
 /** Release request: drop THIS desktop's delegation lease for one account (§2e recovery, Q-lease). */
@@ -46,8 +66,13 @@ export type PrincipalLaneStatusRenameResult = { renamed: boolean }
 export type PrincipalLaneStatusDelegateRequest = { accountId: string; environmentId: string }
 export type PrincipalLaneStatusDelegateResult = { delegated: boolean }
 
+/** Refresh request: re-query one remote host's lane status right now (discoverability follow-up). */
+export type PrincipalLaneStatusRefreshHostRequest = { environmentId: string }
+export type PrincipalLaneStatusRefreshHostResult = { refreshed: boolean }
+
 export const PRINCIPAL_LANE_STATUS_GET_CHANNEL = 'principalLaneStatus:get'
 export const PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL = 'principalLaneStatus:changed'
 export const PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL = 'principalLaneStatus:release'
 export const PRINCIPAL_LANE_STATUS_RENAME_CHANNEL = 'principalLaneStatus:rename'
 export const PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL = 'principalLaneStatus:delegate'
+export const PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL = 'principalLaneStatus:refreshHost'

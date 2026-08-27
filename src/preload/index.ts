@@ -37,6 +37,7 @@ import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
   PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
   PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
@@ -1378,7 +1379,9 @@ const api = {
     renameLease: (accountId: string, friendlyName: string | null) =>
       ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL, { accountId, friendlyName }),
     delegateAccountToHost: (accountId: string, environmentId: string) =>
-      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL, { accountId, environmentId })
+      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL, { accountId, environmentId }),
+    refreshHost: (environmentId: string) =>
+      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL, { environmentId })
   } satisfies PreloadApi['principalLaneStatus'],
 
   feedback: {

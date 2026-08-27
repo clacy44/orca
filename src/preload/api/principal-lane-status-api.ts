@@ -1,5 +1,6 @@
 import type {
   PrincipalLaneStatusDelegateResult,
+  PrincipalLaneStatusRefreshHostResult,
   PrincipalLaneStatusReleaseResult,
   PrincipalLaneStatusRenameResult,
   PrincipalLaneStatusSnapshot
@@ -26,4 +27,6 @@ export type PrincipalLaneStatusApi = {
     accountId: string,
     environmentId: string
   ) => Promise<PrincipalLaneStatusDelegateResult>
+  /** Re-query one remote host's lane status right now (discoverability follow-up). */
+  refreshHost: (environmentId: string) => Promise<PrincipalLaneStatusRefreshHostResult>
 }

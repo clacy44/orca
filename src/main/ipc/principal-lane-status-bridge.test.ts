@@ -16,6 +16,7 @@ import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
   PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
+  PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
   PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
   PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
@@ -89,7 +90,8 @@ function options() {
     ],
     resolveLaneState: (id: string) => (id === 'prin-1' ? ('loaded' as const) : ('absent' as const)),
     listDelegationLeases: () => [LEASE],
-    listDelegableHosts: () => []
+    listDelegableHosts: () => [],
+    listRemoteHosts: () => []
   }
 }
 
@@ -114,7 +116,12 @@ describe('principal lane status bridge', () => {
 
   it('gives a non-host sender the empty snapshot rather than the lanes', () => {
     const snapshot = invokeGet({})
-    expect(snapshot).toEqual({ lanes: [], delegationLeases: [], delegableHosts: [] })
+    expect(snapshot).toEqual({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: [],
+      remoteHosts: []
+    })
   })
 
   it('broadcasts a fresh snapshot when a lane-status change fires', () => {
@@ -156,6 +163,7 @@ describe('principal lane status bridge writes', () => {
   let delegateAccount: ReturnType<
     typeof vi.fn<(environmentId: string, accountId: string) => Promise<boolean>>
   >
+  let refreshHost: ReturnType<typeof vi.fn<(environmentId: string) => Promise<void>>>
 
   beforeEach(() => {
     handleMock.mockClear()
@@ -168,11 +176,13 @@ describe('principal lane status bridge writes', () => {
     delegateAccount = vi
       .fn<(environmentId: string, accountId: string) => Promise<boolean>>()
       .mockResolvedValue(true)
+    refreshHost = vi.fn<(environmentId: string) => Promise<void>>().mockResolvedValue(undefined)
     registerPrincipalLaneStatusBridge(stub.window, {
       ...options(),
       releaseLease,
       renameLease,
-      delegateAccount
+      delegateAccount,
+      refreshHost
     })
   })
 
@@ -242,5 +252,29 @@ describe('principal lane status bridge writes', () => {
     )
     expect(result).toEqual({ delegated: false })
     expect(delegateAccount).not.toHaveBeenCalled()
+  })
+
+  it('refreshes a remote host for the host frame and republishes', async () => {
+    const result = await invokeChannel<Promise<{ refreshed: boolean }>>(
+      PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
+      stub.sender,
+      { environmentId: 'env-1' }
+    )
+    expect(result).toEqual({ refreshed: true })
+    expect(refreshHost).toHaveBeenCalledWith('env-1')
+    expect(
+      stub.sends.filter((send) => send.channel === PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL)
+    ).toHaveLength(1)
+  })
+
+  // Mutation proof: the sender check is the door. Deleting it turns this refusal green->red.
+  it('refuses a foreign sender BEFORE the refresh runs', async () => {
+    const result = await invokeChannel<Promise<{ refreshed: boolean }>>(
+      PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
+      {},
+      { environmentId: 'env-1' }
+    )
+    expect(result).toEqual({ refreshed: false })
+    expect(refreshHost).not.toHaveBeenCalled()
   })
 })

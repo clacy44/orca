@@ -36,6 +36,24 @@ export type DelegableHostRow = {
   laneState: RuntimeTerminalLaneState
 }
 
+/**
+ * One remote Orca environment's lane-discoverability row (discoverability follow-up): unlike
+ * `DelegableHostRow`, this exists for EVERY paired environment, not only a designated, connected
+ * one — so the AccountsPane can always say why a host offers nothing to delegate onto, rather than
+ * rendering nothing at all.
+ */
+export type RemoteHostLaneRow =
+  | { environmentId: string; label: string; state: 'checking' }
+  | { environmentId: string; label: string; state: 'unsupported' }
+  | { environmentId: string; label: string; state: 'not-designated' }
+  | {
+      environmentId: string
+      label: string
+      state: 'ready'
+      laneId: string
+      laneState: RuntimeTerminalLaneState
+    }
+
 class StoreLaneAccountSource implements DesktopLaneAccountSource {
   constructor(private readonly store: Store) {}
 
@@ -167,16 +185,37 @@ export class LaneDelegationDesktopService {
         accounts: this.accounts,
         leases: this.leases,
         onRefused: (method, error) =>
-          console.warn(`[lane-delegation-desktop] ${environmentId} refused ${method}:`, error)
+          console.warn(`[lane-delegation-desktop] ${environmentId} refused ${method}:`, error),
+        onStatusChanged: () => statusListener?.()
       })
       this.clients.set(environmentId, client)
     }
     return client
   }
 
-  /** Reconnect arm: fired from every reconnect the environment-status seam passes through. */
+  /**
+   * Reconnect arm: fired from every reconnect the environment-status seam passes through, and
+   * from an `orca environment add`/Add-environment-dialog success (release-audit follow-up — a
+   * newly added environment previously sat unconnected until some unrelated reconnect).
+   *
+   * A subscription that is already live is NOT re-subscribed (`connect()` is idempotent-guarded),
+   * so a status the host published while nothing on this client's side changed — a designation on
+   * the host that happened between two of this desktop's `status.get` polls — would otherwise
+   * never be re-read. `refreshStatus()` spends the real query that closes that gap.
+   */
   notifyHostReachable(environmentId: string): void {
-    void this.clientFor(environmentId).connect()
+    const client = this.clientFor(environmentId)
+    if (client.isConnected()) {
+      void client.refreshStatus()
+    } else {
+      void client.connect()
+    }
+  }
+
+  /** Explicit refresh IPC arm: the AccountsPane row's own Refresh button. */
+  async refreshHost(environmentId: string): Promise<void> {
+    const client = this.clientFor(environmentId)
+    await (client.isConnected() ? client.refreshStatus() : client.connect())
   }
 
   /** Disconnect/re-pair/remove arm — never releases the lease (§2e: a drop never un-suppresses). */
@@ -194,28 +233,64 @@ export class LaneDelegationDesktopService {
     return outcome === 'pushed'
   }
 
-  /** Every connected client whose grant is this lane's designated pusher — the AccountsPane list. */
+  /** Every connected client whose grant is this lane's designated pusher — B3's delegate targets. */
   listDelegableHosts(userDataPath: string): DelegableHostRow[] {
-    const environments = listEnvironments(userDataPath)
-    const rows: DelegableHostRow[] = []
-    for (const [environmentId, client] of this.clients) {
-      const status = client.getLastStatus()
-      if (!status || status.callerIsDelegatedGrant !== true) {
-        continue
+    return this.listRemoteHostRows(userDataPath).flatMap((row) =>
+      row.state === 'ready'
+        ? [
+            {
+              environmentId: row.environmentId,
+              label: row.label,
+              laneId: row.laneId,
+              laneState: row.laneState
+            }
+          ]
+        : []
+    )
+  }
+
+  /**
+   * One discoverability row per REMOTE environment (release-audit follow-up), whether or not this
+   * desktop's grant on it is connected, designated, or supported at all — the section this backs
+   * must always be able to say why, not just fall silent when there is nothing to delegate onto.
+   */
+  listRemoteHostRows(userDataPath: string): RemoteHostLaneRow[] {
+    return listEnvironments(userDataPath).map((environment) => {
+      const label = environment.name
+      const client = this.clients.get(environment.id)
+      if (!client) {
+        return { environmentId: environment.id, label, state: 'checking' }
       }
-      const environment = environments.find((entry) => entry.id === environmentId)
-      rows.push({
-        environmentId,
-        label: environment?.name ?? environmentId,
+      if (client.getCapabilityState() === 'unsupported') {
+        return { environmentId: environment.id, label, state: 'unsupported' }
+      }
+      const status = client.getLastStatus()
+      if (!status) {
+        return { environmentId: environment.id, label, state: 'checking' }
+      }
+      if (status.callerIsDelegatedGrant !== true) {
+        return { environmentId: environment.id, label, state: 'not-designated' }
+      }
+      return {
+        environmentId: environment.id,
+        label,
+        state: 'ready',
         laneId: status.laneId,
         laneState: status.laneState
-      })
-    }
-    return rows
+      }
+    })
   }
 }
 
 let activeService: LaneDelegationDesktopService | null = null
+// Module-level, not per-instance: the bridge that registers this listener composes independently
+// of `startLaneDelegationDesktopService`, and must not lose its registration across a restart.
+let statusListener: (() => void) | null = null
+
+/** Discoverability follow-up: lets the IPC bridge re-broadcast whenever any client's status moves. */
+export function setLaneDelegationDesktopStatusListener(listener: (() => void) | null): void {
+  statusListener = listener
+}
 
 export function startLaneDelegationDesktopService(options: {
   store: Store
@@ -241,6 +316,16 @@ export function delegateAccountToLaneHost(
 
 export function listDelegableLaneHosts(userDataPath: string): DelegableHostRow[] {
   return activeService?.listDelegableHosts(userDataPath) ?? []
+}
+
+/** The discoverability row list — every remote environment, connected or not (release audit). */
+export function listRemoteLaneHostRows(userDataPath: string): RemoteHostLaneRow[] {
+  return activeService?.listRemoteHostRows(userDataPath) ?? []
+}
+
+/** Explicit refresh IPC arm. */
+export function refreshLaneDelegationHostStatus(environmentId: string): Promise<void> {
+  return activeService?.refreshHost(environmentId) ?? Promise.resolve()
 }
 
 /** Test-only: the module-global service must not leak between suites. */
