@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { Loader2, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import { translate } from '@/i18n/i18n'
 import { Badge } from '../ui/badge'
@@ -7,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import type { ClaudeManagedAccountSummary } from '../../../../shared/managed-account-types'
 import type { RuntimeTerminalLaneState } from '../../../../shared/runtime-types'
 import type {
-  PrincipalLaneStatusDelegableHost,
+  PrincipalLaneStatusRemoteHostRow,
   PrincipalLaneStatusRow
 } from '../../../../shared/principal-lane-status-ipc'
 import { usePrincipalLaneStatus } from './principal-lane-status-store'
@@ -84,67 +85,141 @@ function LaneRow({ lane }: { lane: PrincipalLaneStatusRow }): ReactElement {
   )
 }
 
-/** One paired, reachable host this desktop's grant is designated to push onto (B3). */
-function DelegateHostRow({
-  host,
+/** The Refresh control every remote-host row carries, regardless of its state. */
+function RefreshHostButton({
+  busy,
+  onRefresh
+}: {
+  busy: boolean
+  onRefresh: () => void
+}): ReactElement {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={busy}
+      onClick={onRefresh}
+      data-testid="refresh-host-button"
+      aria-label={translate(
+        'auto.components.settings.AccountLaneStatusSection.refreshHost',
+        'Refresh'
+      )}
+    >
+      {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+    </Button>
+  )
+}
+
+/**
+ * One row per REMOTE Orca environment (release-audit follow-up), whatever this desktop's grant on
+ * it currently is: still being checked, connected but not designated, too old to support lanes, or
+ * ready to push onto. Every state carries the same Refresh action, so a stale row is never a dead
+ * end — the whole point of this section always rendering rather than vanishing.
+ */
+function RemoteHostRow({
+  row,
   accounts,
   selectedAccountId,
   onSelectAccount,
   busy,
-  onDelegate
+  refreshing,
+  onDelegate,
+  onRefresh
 }: {
-  host: PrincipalLaneStatusDelegableHost
+  row: PrincipalLaneStatusRemoteHostRow
   accounts: readonly ClaudeManagedAccountSummary[]
   selectedAccountId: string | null
   onSelectAccount: (accountId: string) => void
   busy: boolean
+  refreshing: boolean
   onDelegate: () => void
+  onRefresh: () => void
 }): ReactElement {
-  const badge = laneStateBadge(host.laneState)
   return (
     <div
       className="border-border/60 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2"
-      data-testid="delegate-host-row"
-      data-environment-id={host.environmentId}
+      data-testid="remote-host-row"
+      data-environment-id={row.environmentId}
+      data-host-state={row.state}
     >
       <div className="min-w-0 space-y-0.5">
-        <span className="truncate text-sm font-medium">{host.label}</span>
-        <Badge variant={badge.variant} className="shrink-0" data-lane-state={host.laneState}>
-          {badge.label}
-        </Badge>
+        <span className="truncate text-sm font-medium">{row.label}</span>
+        <RemoteHostRowStatus row={row} />
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <Select value={selectedAccountId ?? undefined} onValueChange={onSelectAccount}>
-          <SelectTrigger className="h-8 w-[200px]" size="sm">
-            <SelectValue
-              placeholder={translate(
-                'auto.components.settings.AccountLaneStatusSection.delegateAccountPlaceholder',
-                'Choose account…'
+        {row.state === 'ready' ? (
+          <>
+            <Select value={selectedAccountId ?? undefined} onValueChange={onSelectAccount}>
+              <SelectTrigger className="h-8 w-[200px]" size="sm">
+                <SelectValue
+                  placeholder={translate(
+                    'auto.components.settings.AccountLaneStatusSection.delegateAccountPlaceholder',
+                    'Choose account…'
+                  )}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {accounts.map((account) => (
+                  <SelectItem key={account.id} value={account.id}>
+                    {account.email}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || !selectedAccountId}
+              onClick={onDelegate}
+              data-testid="delegate-host-button"
+            >
+              {translate(
+                'auto.components.settings.AccountLaneStatusSection.delegateButton',
+                'Delegate'
               )}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {accounts.map((account) => (
-              <SelectItem key={account.id} value={account.id}>
-                {account.email}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy || !selectedAccountId}
-          onClick={onDelegate}
-          data-testid="delegate-host-button"
-        >
-          {translate(
-            'auto.components.settings.AccountLaneStatusSection.delegateButton',
-            'Delegate'
-          )}
-        </Button>
+            </Button>
+          </>
+        ) : null}
+        <RefreshHostButton busy={refreshing} onRefresh={onRefresh} />
       </div>
     </div>
+  )
+}
+
+function RemoteHostRowStatus({ row }: { row: PrincipalLaneStatusRemoteHostRow }): ReactElement {
+  if (row.state === 'checking') {
+    return (
+      <div className="text-muted-foreground text-xs" data-testid="remote-host-checking">
+        {translate('auto.components.settings.AccountLaneStatusSection.checking', 'Checking…')}
+      </div>
+    )
+  }
+  if (row.state === 'unsupported') {
+    return (
+      <div className="text-muted-foreground text-xs" data-testid="remote-host-unsupported">
+        {translate(
+          'auto.components.settings.AccountLaneStatusSection.unsupported',
+          'Lanes not supported — update the host.'
+        )}
+      </div>
+    )
+  }
+  if (row.state === 'not-designated') {
+    return (
+      <div className="text-muted-foreground text-xs" data-testid="remote-host-not-designated">
+        {translate(
+          'auto.components.settings.AccountLaneStatusSection.notDesignated',
+          'This device is not designated for any person on {{value0}} (run `orca lane designate` on the host).',
+          { value0: row.label }
+        )}
+      </div>
+    )
+  }
+  const badge = laneStateBadge(row.laneState)
+  return (
+    <Badge variant={badge.variant} className="shrink-0" data-lane-state={row.laneState}>
+      {badge.label}
+    </Badge>
   )
 }
 
@@ -158,6 +233,7 @@ export function AccountLaneStatusSection(): ReactElement | null {
   const available = isHostConsentSurfaceAvailable()
   const status = usePrincipalLaneStatus()
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
+  const [refreshingEnvironmentId, setRefreshingEnvironmentId] = useState<string | null>(null)
   const [claudeAccounts, setClaudeAccounts] = useState<readonly ClaudeManagedAccountSummary[]>([])
   const [selectedAccountByHost, setSelectedAccountByHost] = useState<Record<string, string>>({})
 
@@ -192,10 +268,13 @@ export function AccountLaneStatusSection(): ReactElement | null {
   if (!available) {
     return null
   }
+  // Discoverability follow-up (release audit): the section used to vanish whenever nothing was
+  // ready to delegate onto, which is exactly the state a not-yet-designated device is stuck in.
+  // Any remote environment — ready or not — earns the section a place to say why.
   if (
     status.lanes.length === 0 &&
     status.delegationLeases.length === 0 &&
-    status.delegableHosts.length === 0
+    status.remoteHosts.length === 0
   ) {
     return null
   }
@@ -214,6 +293,23 @@ export function AccountLaneStatusSection(): ReactElement | null {
       )
     } finally {
       setBusyAccountId(null)
+    }
+  }
+
+  const runRefresh = async (environmentId: string): Promise<void> => {
+    setRefreshingEnvironmentId(environmentId)
+    try {
+      await window.api.principalLaneStatus.refreshHost(environmentId)
+    } catch (error) {
+      toast.error(
+        translate(
+          'auto.components.settings.AccountLaneStatusSection.refreshFailed',
+          'Refresh failed.'
+        ),
+        { description: error instanceof Error ? error.message : String(error) }
+      )
+    } finally {
+      setRefreshingEnvironmentId(null)
     }
   }
 
@@ -274,40 +370,46 @@ export function AccountLaneStatusSection(): ReactElement | null {
         </div>
       ) : null}
 
-      {status.delegableHosts.length > 0 ? (
-        <div className="space-y-2">
-          <h4 className="text-muted-foreground text-xs font-medium">
-            {translate(
-              'auto.components.settings.AccountLaneStatusSection.delegateTitle',
-              'Load an account onto a host'
-            )}
-          </h4>
-          {status.delegableHosts.map((host) => (
-            <DelegateHostRow
-              key={host.environmentId}
-              host={host}
+      <div className="space-y-2">
+        <h4 className="text-muted-foreground text-xs font-medium">
+          {translate(
+            'auto.components.settings.AccountLaneStatusSection.delegateTitle',
+            'Load an account onto a host'
+          )}
+        </h4>
+        {status.remoteHosts.length > 0 ? (
+          status.remoteHosts.map((row) => (
+            <RemoteHostRow
+              key={row.environmentId}
+              row={row}
               accounts={claudeAccounts}
-              selectedAccountId={selectedAccountByHost[host.environmentId] ?? null}
+              selectedAccountId={selectedAccountByHost[row.environmentId] ?? null}
               onSelectAccount={(accountId) =>
-                setSelectedAccountByHost((prev) => ({ ...prev, [host.environmentId]: accountId }))
+                setSelectedAccountByHost((prev) => ({ ...prev, [row.environmentId]: accountId }))
               }
-              busy={busyAccountId === host.environmentId}
+              busy={busyAccountId === row.environmentId}
+              refreshing={refreshingEnvironmentId === row.environmentId}
               onDelegate={() => {
-                const accountId = selectedAccountByHost[host.environmentId]
+                const accountId = selectedAccountByHost[row.environmentId]
                 if (!accountId) {
                   return
                 }
-                void runWrite(host.environmentId, () =>
-                  window.api.principalLaneStatus.delegateAccountToHost(
-                    accountId,
-                    host.environmentId
-                  )
+                void runWrite(row.environmentId, () =>
+                  window.api.principalLaneStatus.delegateAccountToHost(accountId, row.environmentId)
                 )
               }}
+              onRefresh={() => void runRefresh(row.environmentId)}
             />
-          ))}
-        </div>
-      ) : null}
+          ))
+        ) : (
+          <p className="text-muted-foreground text-xs" data-testid="remote-hosts-empty">
+            {translate(
+              'auto.components.settings.AccountLaneStatusSection.noRemoteHosts',
+              'No remote Orca environments are paired yet.'
+            )}
+          </p>
+        )}
+      </div>
     </section>
   )
 }

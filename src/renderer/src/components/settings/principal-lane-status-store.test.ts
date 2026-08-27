@@ -28,6 +28,7 @@ function snapshot(
       }
     ],
     delegableHosts: [],
+    remoteHosts: [],
     ...overrides
   }
 }
@@ -44,7 +45,8 @@ describe('principal lane status store', () => {
     expect(getPrincipalLaneStatusSnapshot()).toEqual({
       lanes: [],
       delegationLeases: [],
-      delegableHosts: []
+      delegableHosts: [],
+      remoteHosts: []
     })
     expect(getPrincipalLaneStatus('prin-1')).toBeNull()
     expect(getDelegationLeases()).toEqual([])
@@ -85,7 +87,8 @@ describe('principal lane status store', () => {
     expect(getPrincipalLaneStatusSnapshot()).toEqual({
       lanes: [],
       delegationLeases: [],
-      delegableHosts: []
+      delegableHosts: [],
+      remoteHosts: []
     })
   })
 

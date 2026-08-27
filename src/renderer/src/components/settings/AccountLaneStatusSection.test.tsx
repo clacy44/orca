@@ -64,17 +64,20 @@ function setWindowApi(
     releaseLease: ReturnType<typeof vi.fn>
     renameLease: ReturnType<typeof vi.fn>
     delegateAccountToHost: ReturnType<typeof vi.fn>
+    refreshHost: ReturnType<typeof vi.fn>
     claudeAccountsList: ReturnType<typeof vi.fn>
   }> = {}
 ): {
   releaseLease: ReturnType<typeof vi.fn>
   renameLease: ReturnType<typeof vi.fn>
   delegateAccountToHost: ReturnType<typeof vi.fn>
+  refreshHost: ReturnType<typeof vi.fn>
 } {
   const releaseLease = overrides.releaseLease ?? vi.fn().mockResolvedValue({ released: true })
   const renameLease = overrides.renameLease ?? vi.fn().mockResolvedValue({ renamed: true })
   const delegateAccountToHost =
     overrides.delegateAccountToHost ?? vi.fn().mockResolvedValue({ delegated: true })
+  const refreshHost = overrides.refreshHost ?? vi.fn().mockResolvedValue({ refreshed: true })
   const claudeAccountsList =
     overrides.claudeAccountsList ??
     vi.fn().mockResolvedValue({
@@ -97,11 +100,12 @@ function setWindowApi(
       onChanged: vi.fn().mockReturnValue(() => {}),
       releaseLease,
       renameLease,
-      delegateAccountToHost
+      delegateAccountToHost,
+      refreshHost
     },
     claudeAccounts: { list: claudeAccountsList }
   }
-  return { releaseLease, renameLease, delegateAccountToHost }
+  return { releaseLease, renameLease, delegateAccountToHost, refreshHost }
 }
 
 function setWebClient(value: boolean): void {
@@ -129,7 +133,8 @@ const LANES_SNAPSHOT: PrincipalLaneStatusSnapshot = {
       expiresAt: null
     }
   ],
-  delegableHosts: []
+  delegableHosts: [],
+  remoteHosts: []
 }
 
 const DELEGABLE_HOSTS_SNAPSHOT: PrincipalLaneStatusSnapshot = {
@@ -137,6 +142,15 @@ const DELEGABLE_HOSTS_SNAPSHOT: PrincipalLaneStatusSnapshot = {
   delegationLeases: [],
   delegableHosts: [
     { environmentId: 'env-1', label: 'Office Mac', laneId: 'p-ana', laneState: 'absent' }
+  ],
+  remoteHosts: [
+    {
+      environmentId: 'env-1',
+      label: 'Office Mac',
+      state: 'ready',
+      laneId: 'p-ana',
+      laneState: 'absent'
+    }
   ]
 }
 
@@ -159,11 +173,21 @@ describe('AccountLaneStatusSection', () => {
     expect(container.querySelector('[data-testid="account-lane-status-section"]')).toBeNull()
   })
 
-  it('renders nothing when there are no lanes, leases or delegable hosts', async () => {
-    setWindowApi({ lanes: [], delegationLeases: [], delegableHosts: [] })
+  it('renders nothing when there are no lanes, leases or remote hosts at all', async () => {
+    setWindowApi({ lanes: [], delegationLeases: [], delegableHosts: [], remoteHosts: [] })
     const { container } = render(<AccountLaneStatusSection />)
     await waitFor(() => expect(window.api.principalLaneStatus.get).toHaveBeenCalled())
     expect(container.querySelector('[data-testid="account-lane-status-section"]')).toBeNull()
+  })
+
+  it('renders with a short empty-state sentence when local lanes exist but no remote host is paired', async () => {
+    setWindowApi(LANES_SNAPSHOT)
+    render(<AccountLaneStatusSection />)
+    await waitFor(() => expect(screen.getAllByTestId('account-lane-row')).toHaveLength(2))
+    expect(screen.getByTestId('remote-hosts-empty').textContent).toContain(
+      'No remote Orca environments'
+    )
+    expect(screen.queryByTestId('remote-host-row')).toBeNull()
   })
 
   it('shows each lane with its residency badge and the operating rule', async () => {
@@ -222,11 +246,11 @@ describe('AccountLaneStatusSection', () => {
     expect(renameLease).toHaveBeenCalledWith('acct-1', 'work')
   })
 
-  it('lists a delegable host with an account picker and delegates the chosen account', async () => {
+  it('lists a ready host with an account picker and delegates the chosen account', async () => {
     const { delegateAccountToHost } = setWindowApi(DELEGABLE_HOSTS_SNAPSHOT)
     render(<AccountLaneStatusSection />)
     const hostRow = await waitFor(() => {
-      const row = screen.queryByTestId('delegate-host-row')
+      const row = screen.queryByTestId('remote-host-row')
       expect(row).toBeTruthy()
       return row as HTMLElement
     })
@@ -241,5 +265,76 @@ describe('AccountLaneStatusSection', () => {
 
     await userEvent.click(delegateButton)
     expect(delegateAccountToHost).toHaveBeenCalledWith('acct-work', 'env-1')
+  })
+
+  it('shows "checking…" for a remote host with no status yet, and no delegate control', async () => {
+    setWindowApi({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: [],
+      remoteHosts: [{ environmentId: 'env-1', label: 'VPS', state: 'checking' }]
+    })
+    render(<AccountLaneStatusSection />)
+    const hostRow = await waitFor(() => {
+      const row = screen.queryByTestId('remote-host-row')
+      expect(row).toBeTruthy()
+      return row as HTMLElement
+    })
+    expect(within(hostRow).getByTestId('remote-host-checking').textContent).toContain('Checking')
+    expect(within(hostRow).queryByTestId('delegate-host-button')).toBeNull()
+  })
+
+  it('names the not-designated remedy for a connected, undesignated remote host', async () => {
+    setWindowApi({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: [],
+      remoteHosts: [{ environmentId: 'env-1', label: 'VPS', state: 'not-designated' }]
+    })
+    render(<AccountLaneStatusSection />)
+    const hostRow = await waitFor(() => {
+      const row = screen.queryByTestId('remote-host-row')
+      expect(row).toBeTruthy()
+      return row as HTMLElement
+    })
+    const message = within(hostRow).getByTestId('remote-host-not-designated').textContent
+    expect(message).toContain('not designated for any person on VPS')
+    expect(message).toContain('orca lane designate')
+    expect(within(hostRow).queryByTestId('delegate-host-button')).toBeNull()
+  })
+
+  it('names the upgrade remedy for a remote host that does not support lanes', async () => {
+    setWindowApi({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: [],
+      remoteHosts: [{ environmentId: 'env-1', label: 'Old VPS', state: 'unsupported' }]
+    })
+    render(<AccountLaneStatusSection />)
+    const hostRow = await waitFor(() => {
+      const row = screen.queryByTestId('remote-host-row')
+      expect(row).toBeTruthy()
+      return row as HTMLElement
+    })
+    expect(within(hostRow).getByTestId('remote-host-unsupported').textContent).toContain(
+      'not supported'
+    )
+  })
+
+  it('the Refresh button on a remote host row invokes the refresh IPC', async () => {
+    const { refreshHost } = setWindowApi({
+      lanes: [],
+      delegationLeases: [],
+      delegableHosts: [],
+      remoteHosts: [{ environmentId: 'env-1', label: 'VPS', state: 'not-designated' }]
+    })
+    render(<AccountLaneStatusSection />)
+    const hostRow = await waitFor(() => {
+      const row = screen.queryByTestId('remote-host-row')
+      expect(row).toBeTruthy()
+      return row as HTMLElement
+    })
+    await userEvent.click(within(hostRow).getByTestId('refresh-host-button'))
+    expect(refreshHost).toHaveBeenCalledWith('env-1')
   })
 })
