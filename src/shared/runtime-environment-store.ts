@@ -36,6 +36,20 @@ export function getEnvironmentStorePath(userDataPath: string): string {
   return join(userDataPath, ENVIRONMENTS_FILE)
 }
 
+// Why: `parseHostAccessLink` (the desktop dialog's door) already refuses a mobile-scope link with
+// this sentence, but this store's own `parsePairingCode` call is indifferent to scope — so
+// `orca environment add` would happily save a mobile-scope invite whose non-allowlisted RPCs then
+// fail per-method with `forbidden`, read as a broken host rather than a wrong-scope link. Refuse it
+// here with the same words so the CLI and UI doors agree.
+function assertNotMobileScope(offer: PairingOffer): void {
+  if (offer.scope === 'mobile') {
+    throw new RuntimeEnvironmentStoreError(
+      'invalid_argument',
+      'This link grants mobile-only access. Generate a link for another Orca client.'
+    )
+  }
+}
+
 export function listEnvironments(userDataPath: string): KnownRuntimeEnvironment[] {
   return readEnvironmentStore(userDataPath).environments
 }
@@ -57,6 +71,7 @@ export function addEnvironmentFromPairingCode(
       'Invalid pairing code. Expected an orca://pair?... URL or bare pairing payload.'
     )
   }
+  assertNotMobileScope(offer)
   const store = readEnvironmentStore(userDataPath)
   const now = args.now ?? Date.now()
   const existing = store.environments.find((entry) => entry.name === args.name)
@@ -108,6 +123,7 @@ export function updateEnvironmentFromPairingCode(
       'Invalid pairing code. Expected an orca://pair?... URL or bare pairing payload.'
     )
   }
+  assertNotMobileScope(offer)
   const store = readEnvironmentStore(userDataPath)
   const existing = resolveEnvironmentFromStore(store, selector)
   const now = args.now ?? Date.now()
