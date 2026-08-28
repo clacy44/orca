@@ -123,6 +123,27 @@ describe('lane-login CLI handlers (S9-L1 §modules E)', () => {
     ])
   })
 
+  it('emits a login-started JSON line under --json as soon as loginStartInline resolves, before the final result line', async () => {
+    const { client } = makeClient(defaultImpl)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await LANE_LOGIN_HANDLERS['lane login'](
+        context(client, { person: 'Ana Ng', email: 'ana@x.com', code: '123456' }, true)
+      )
+      const lines = logSpy.mock.calls.map((call) => call[0] as string)
+      expect(lines).toHaveLength(2)
+      expect(JSON.parse(lines[0])).toEqual({
+        event: 'login-started',
+        loginSessionId: 'session-1',
+        authorizeUrl: 'https://platform.claude.com/oauth/authorize?redirect_uri=x',
+        expiresAt: expect.any(Number)
+      })
+      expect(JSON.parse(lines[1])).toMatchObject({ ok: true })
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
   it('throws (a script failure) when a scripted --code is rejected, rather than looping', async () => {
     const { client } = makeClient((method, params) => {
       if (method === 'accounts.lane.loginSubmitCodeInline') {

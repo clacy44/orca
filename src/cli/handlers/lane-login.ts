@@ -72,7 +72,19 @@ export const LANE_LOGIN_HANDLERS: Record<string, CommandHandler> = {
       principalId,
       expectedEmail
     })
-    if (!ctx.json) {
+    if (ctx.json) {
+      // Emitted as soon as the session exists, well before the code prompt below blocks on
+      // stdin — a scripted `--json --code` caller has nothing else to learn the authorize URL
+      // from. The FINAL result line (below, unchanged) still carries the login outcome.
+      console.log(
+        JSON.stringify({
+          event: 'login-started',
+          loginSessionId: started.result.loginSessionId,
+          authorizeUrl: started.result.authorizeUrl,
+          expiresAt: started.result.expiresAt
+        })
+      )
+    } else {
       console.log(
         `Sign in to Claude as ${expectedEmail} for ${personName(snapshot.principals, principalId)}:\n  ${started.result.authorizeUrl}`
       )
