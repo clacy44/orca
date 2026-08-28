@@ -81,7 +81,8 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
           displayName: principal.displayName,
           delegatedGrantId: principal.delegatedGrantId ?? null,
           laneState: service.laneResidencyState(principal.principalId),
-          boundDeviceIds: service.boundDeviceIds(principal.principalId)
+          boundDeviceIds: service.boundDeviceIds(principal.principalId),
+          unverifiedLegacy: service.isUnverifiedLegacyLane(principal.principalId)
         }))
       }))
   }),

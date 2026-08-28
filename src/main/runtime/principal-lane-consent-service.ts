@@ -13,6 +13,7 @@ import { writeLaneSettings } from '../claude-accounts/principal-lane-settings'
 import { mirrorHostUserContentIntoLane } from '../claude-accounts/principal-lane-user-content-mirror'
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
+import { isUnverifiedLegacyLane } from '../claude-accounts/lane-legacy-provenance'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { DeviceScope, RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
@@ -119,6 +120,13 @@ export class PrincipalLaneConsentService {
   /** Whether this principal's lane holds a credential on this host right now (§2h). */
   laneResidencyState(principalId: string): RuntimeTerminalLaneState {
     return resolveLaneResidencyState(principalId, { platform: this.platform })
+  }
+
+  /** §6's S9-L3 `unverified-legacy` migration: a lane loaded before the per-lane login model,
+   * never wiped on sight, never promoted — see `lane-legacy-provenance.ts`. */
+  isUnverifiedLegacyLane(principalId: string): boolean {
+    const laneDir = resolveOwnedPrincipalLaneDir(principalId, { platform: this.platform })
+    return laneDir !== null && isUnverifiedLegacyLane(laneDir)
   }
 
   bindGrant(consent: HostConsent, deviceId: string, principalId: string): void {

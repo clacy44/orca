@@ -29,6 +29,9 @@ export type ClaudeLaneStatus = {
   /** S9-L1 §rpcs item 8: a projection of the per-lane account store's INDEX, never a walk.
    *  Additive (Rule 1) — L2's already-merged `lane-login-client.ts` reads this field. */
   accounts?: LaneAccountRow[]
+  /** §6's S9-L3 `unverified-legacy` migration (additive, Rule 1): `.credentials.json` predates
+   *  the per-lane login model and holds no index row — never wiped on sight, never promoted. */
+  unverifiedLegacy?: boolean
 }
 
 /** Rejects the control range outright rather than stripping it: §2b refuses, never sanitizes. */

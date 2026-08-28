@@ -3,6 +3,7 @@ import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { listLaneAccounts } from '../claude-accounts/principal-lane-account-store'
 import { isLaneWipePending } from '../claude-accounts/lane-wipe-pending'
+import { isUnverifiedLegacyLane } from '../claude-accounts/lane-legacy-provenance'
 
 /**
  * The host side of the lane wire: caller derivation and status (S9 §2c/§2d, rev 32's
@@ -101,7 +102,8 @@ export class LaneWireAuthority {
             label: account.label,
             active: account.active
           }))
-        : []
+        : [],
+      unverifiedLegacy: laneDir !== null && isUnverifiedLegacyLane(laneDir)
     }
   }
 
