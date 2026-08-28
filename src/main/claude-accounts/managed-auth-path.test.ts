@@ -84,3 +84,65 @@ describe('managed Claude auth path containment', () => {
     ).toThrow(/not owned by Orca/)
   })
 })
+
+// S9-L1 B1: the injectable `root` option is what lets `<lane>/claude-accounts` share this exact
+// discipline instead of a second copy of it (§storeLayout "MIRRORING managed-auth-path.ts").
+describe('an injected lane-scoped root', () => {
+  let laneAccountsRoot = ''
+  let authPath = ''
+
+  beforeEach(() => {
+    // A directory the electron mock's userData does NOT point at, so a bug that silently fell
+    // back to the desktop default would fail these tests rather than pass them by accident.
+    laneAccountsRoot = mkdtempSync(join(tmpdir(), 'orca-lane-accounts-'))
+    authPath = join(laneAccountsRoot, ACCOUNT, 'auth')
+    mkdirSync(authPath, { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(laneAccountsRoot, { recursive: true, force: true })
+  })
+
+  it('resolves a marked two-segment auth dir under the injected root', () => {
+    writeFileSync(join(authPath, '.orca-managed-claude-auth'), `${ACCOUNT}\n`)
+
+    expect(resolveOwnedClaudeManagedAuthPath(ACCOUNT, authPath, { root: laneAccountsRoot })).toBe(
+      authPath
+    )
+  })
+
+  it('refuses an unmarked directory under the injected root', () => {
+    expect(
+      resolveOwnedClaudeManagedAuthPath(ACCOUNT, authPath, { root: laneAccountsRoot })
+    ).toBeNull()
+  })
+
+  // Negative control: the same candidate resolves against ITS OWN root but not against the
+  // unrelated desktop-managed root the earlier describe block set up, and vice versa — an
+  // injected root is not a fallback that widens what a lane can reach.
+  it('does not resolve against the desktop-managed root, only its own', () => {
+    writeFileSync(join(authPath, '.orca-managed-claude-auth'), `${ACCOUNT}\n`)
+
+    expect(resolveOwnedClaudeManagedAuthPath(ACCOUNT, authPath)).toBeNull()
+  })
+
+  // The symlink-escape negative control the lane root needs of its own: a lane-scoped account
+  // directory that is actually a link out of the lane's store must refuse exactly as the
+  // desktop-managed root does above.
+  it('refuses a symlinked lane account dir pointing out of its own root', () => {
+    const outside = join(tmpdir(), `orca-lane-escape-${Date.now()}`)
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, '.orca-managed-claude-auth'), `${ACCOUNT}\n`)
+    const linked = join(laneAccountsRoot, 'account-2', 'auth')
+    mkdirSync(join(laneAccountsRoot, 'account-2'), { recursive: true })
+    symlinkSync(outside, linked)
+
+    try {
+      expect(
+        resolveOwnedClaudeManagedAuthPath('account-2', linked, { root: laneAccountsRoot })
+      ).toBeNull()
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+})

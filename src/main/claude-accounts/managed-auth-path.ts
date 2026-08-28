@@ -16,9 +16,13 @@ export function getClaudeManagedAccountsRoot(): string {
 export function resolveOwnedClaudeManagedAuthPath(
   accountId: string,
   candidatePath: string,
-  options: { adoptLegacyMarker?: boolean } = {}
+  options: { adoptLegacyMarker?: boolean; root?: string } = {}
 ): string | null {
-  const rootPath = getClaudeManagedAccountsRoot()
+  // Why an injectable root rather than a second copy of this function: S9-L1's per-lane store
+  // (`<lane>/claude-accounts`) needs the SAME symlink refusal, containment, two-segment match,
+  // marker-equals-id rule and 0600 atomic I/O as the desktop's managed-account store. Two copies
+  // drift and only one gets the next fix (S9-L1 §storeLayout).
+  const rootPath = options.root ?? getClaudeManagedAccountsRoot()
   const resolvedCandidate = resolve(candidatePath)
   if (!existsSync(resolvedCandidate) || !existsSync(rootPath)) {
     return null
