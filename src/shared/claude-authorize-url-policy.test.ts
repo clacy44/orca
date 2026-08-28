@@ -62,6 +62,42 @@ describe('isRelayableAuthorizeUrl — each rejected class', () => {
     expect(isRelayableAuthorizeUrl(url)).toBe(false)
   })
 
+  // MP: `allowedHosts.includes(hostname)` (exact equality) is what rejects these; an
+  // `allowedHosts.some((h) => hostname.endsWith(h))` weakening would accept every one of them —
+  // a subdomain-suffix lookalike of an allow-listed host, not merely the allow-listed host with
+  // something appended after it (that shape is covered above by "*.evil.com").
+  it('refuses a hostname that merely ENDS WITH an allow-listed host (suffix, not subdomain)', () => {
+    expect(
+      isRelayableAuthorizeUrl(authorizeUrl('notclaude.com', '/oauth/authorize', GOOD_REDIRECT))
+    ).toBe(false)
+  })
+
+  it('refuses a subdomain lookalike that is not itself the allow-listed host', () => {
+    expect(
+      isRelayableAuthorizeUrl(
+        authorizeUrl('evilplatform.claude.com', '/oauth/authorize', GOOD_REDIRECT)
+      )
+    ).toBe(false)
+  })
+
+  it('refuses a TLD lookalike sharing an allow-listed host as a suffix', () => {
+    expect(
+      isRelayableAuthorizeUrl(authorizeUrl('xclaude.ai', '/oauth/authorize', GOOD_REDIRECT))
+    ).toBe(false)
+  })
+
+  it('refuses a redirect_uri host that is a subdomain lookalike of an allow-listed redirect host', () => {
+    expect(
+      isRelayableAuthorizeUrl(
+        authorizeUrl(
+          'claude.com',
+          '/cai/oauth/authorize',
+          'https://evil-console.anthropic.com/oauth/code/callback'
+        )
+      )
+    ).toBe(false)
+  })
+
   // MP: reading only .hostname (ignoring .username/.password) would accept this.
   it('mutation proof: a hostname-only check would accept the userinfo-smuggled URL above', () => {
     const url = `https://user:pass@claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(GOOD_REDIRECT)}`
@@ -225,5 +261,39 @@ describe('describeAuthorizeUrlRejection', () => {
 
   it('names no hostname for text that does not parse as a URL at all', () => {
     expect(describeAuthorizeUrlRejection('not a url at all')).not.toContain('host was')
+  })
+
+  // Regression: the pre-fix sentence blamed the AUTHORIZE URL's own host for every rejection,
+  // even when that host was allow-listed and the real problem was the redirect_uri — the loopback
+  // redirect Orca's OTHER url builder emits is exactly this shape (claude.com, allow-listed;
+  // redirect_uri -> localhost, not allow-listed).
+  it('does not blame the authorize host when the authorize origin is allow-listed and the redirect_uri is the problem', () => {
+    const url = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent('http://localhost:54231/callback')}`
+    const description = describeAuthorizeUrlRejection(url)
+    expect(description).not.toBe('its host was "claude.com"')
+    expect(description).not.toContain('claude.com')
+    expect(description).toContain('localhost')
+  })
+
+  it('names the redirect_uri host, not the authorize host, when the redirect origin is off the allow-list', () => {
+    const url = authorizeUrl('claude.com', '/cai/oauth/authorize', 'https://evil.example.com/cb')
+    expect(describeAuthorizeUrlRejection(url)).toContain('evil.example.com')
+  })
+
+  it('names a redirect_uri-count problem distinctly, not as a host', () => {
+    const duplicated = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(
+      GOOD_REDIRECT
+    )}&redirect_uri=${encodeURIComponent('https://evil.example.com/cb')}`
+    expect(describeAuthorizeUrlRejection(duplicated)).not.toContain('host was')
+  })
+
+  // MP: reverting to "always report the authorize URL's own hostname" (the pre-fix shape) would
+  // report "claude.com" here instead of the actual offending redirect host.
+  it('mutation proof: reporting the authorize URL hostname unconditionally would say "claude.com" here, not the real cause', () => {
+    const url = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent('http://localhost:54231/callback')}`
+    const parsed = new URL(url)
+    const unconditionalHostReport = `its host was "${parsed.hostname}"`
+    expect(unconditionalHostReport).toBe('its host was "claude.com"') // ...the old shape's wrong answer...
+    expect(describeAuthorizeUrlRejection(url)).not.toBe(unconditionalHostReport) // ...the fix disagrees.
   })
 })

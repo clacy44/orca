@@ -16,9 +16,12 @@
  *     pathnames — `/oauth/authorize` and `/cai/oauth/authorize` — and exactly one redirect
  *     pathname, `oauth/code/callback`, paired in the binary with `//claude.com/cai/oauth/authorize`
  *     and with `platform.claude.com` elsewhere (also the OAuth token host, `oauth-refresh.ts`).
- *     `console.anthropic.com` does not appear in this build's strings at all — it is allow-listed
- *     here per the S9 design (rev 38) as another legitimate Anthropic authorize/redirect surface
- *     the CLI or a future build may use, not because 2.1.250 was observed emitting it.
+ *     `console.anthropic.com` does not appear in this build's strings at all, and the S9 design
+ *     (rev 38) does not name it either — it is allow-listed here as forward-compatibility for
+ *     another legitimate Anthropic authorize/redirect surface a future build may use, NOT because
+ *     it traces to an observed build or to the design (which names only `platform.claude.com` as
+ *     the redirect host, R-32b). Every other entry in the allow-lists below traces to one or the
+ *     other; this is the one exception, and is called out as one on that basis alone.
  * Re-verify both ways whenever the pinned CLI version bumps (see
  * lane-login-cli-version-gate.ts's LAST_VERIFIED_CLI_VERSION) and update this comment together
  * with that constant — they must never name different builds.
@@ -75,6 +78,51 @@ function isTrustedOrigin(
   )
 }
 
+/** Which check `classifyAuthorizeUrl` failed on — lets a refusal sentence name the actual cause
+ * instead of always blaming the authorize URL's own host, which is wrong for every rejection that
+ * came from the `redirect_uri` instead (the loopback redirect Orca's OTHER url builder emits is
+ * exactly this case: the authorize origin is `claude.com`, allow-listed, and the redirect is not). */
+export type AuthorizeUrlRejectionReason =
+  | 'unparsable'
+  | 'authorize_origin'
+  | 'redirect_uri_count'
+  | 'redirect_uri_unparsable'
+  | 'redirect_origin'
+
+export type AuthorizeUrlClassification =
+  | { ok: true }
+  | { ok: false; reason: AuthorizeUrlRejectionReason; hostname: string | null }
+
+/**
+ * Single source of truth for both `isRelayableAuthorizeUrl` and `describeAuthorizeUrlRejection` —
+ * a second, separately-maintained walk of the same checks is exactly how the two drift apart.
+ */
+function classifyAuthorizeUrl(url: string): AuthorizeUrlClassification {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { ok: false, reason: 'unparsable', hostname: null }
+  }
+  if (!isTrustedOrigin(parsed, ALLOWED_AUTHORIZE_HOSTS, ALLOWED_AUTHORIZE_PATHNAMES)) {
+    return { ok: false, reason: 'authorize_origin', hostname: parsed.hostname }
+  }
+  const redirectUriValues = parsed.searchParams.getAll('redirect_uri')
+  if (redirectUriValues.length !== 1) {
+    return { ok: false, reason: 'redirect_uri_count', hostname: parsed.hostname }
+  }
+  let redirect: URL
+  try {
+    redirect = new URL(redirectUriValues[0])
+  } catch {
+    return { ok: false, reason: 'redirect_uri_unparsable', hostname: parsed.hostname }
+  }
+  if (!isTrustedOrigin(redirect, ALLOWED_REDIRECT_HOSTS, [REQUIRED_REDIRECT_PATHNAME])) {
+    return { ok: false, reason: 'redirect_origin', hostname: redirect.hostname }
+  }
+  return { ok: true }
+}
+
 /**
  * True when `url` is a printed (not loopback-callback) Claude authorization URL safe to relay:
  * its own origin passes `isTrustedOrigin` against the authorize allow-list, and it carries EXACTLY
@@ -83,39 +131,31 @@ function isTrustedOrigin(
  * passes `isTrustedOrigin` against the redirect allow-list.
  */
 export function isRelayableAuthorizeUrl(url: string): boolean {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return false
-  }
-  if (!isTrustedOrigin(parsed, ALLOWED_AUTHORIZE_HOSTS, ALLOWED_AUTHORIZE_PATHNAMES)) {
-    return false
-  }
-  const redirectUriValues = parsed.searchParams.getAll('redirect_uri')
-  if (redirectUriValues.length !== 1) {
-    return false
-  }
-  let redirect: URL
-  try {
-    redirect = new URL(redirectUriValues[0])
-  } catch {
-    return false
-  }
-  return isTrustedOrigin(redirect, ALLOWED_REDIRECT_HOSTS, [REQUIRED_REDIRECT_PATHNAME])
+  return classifyAuthorizeUrl(url).ok
 }
 
 /**
- * Names ONLY the hostname `url` was observed to carry (never its query string, and therefore
+ * Names ONLY the hostname(s) `url` was observed to carry (never its query string, and therefore
  * never an OAuth `code`/`state` value) — safe to fold into a refusal sentence shown to a person.
- * `url` that fails to parse at all names no hostname (there is none to observe).
+ * Worded from the SAME classification `isRelayableAuthorizeUrl` computes, so the reason named is
+ * always the reason the URL actually failed on — never "its host was X" for a rejection that came
+ * from `redirect_uri`, where X is an allow-listed host that was never the problem.
  */
 export function describeAuthorizeUrlRejection(url: string): string {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return 'the printed text was not a valid URL at all'
+  const result = classifyAuthorizeUrl(url)
+  if (result.ok) {
+    return 'it was in fact safe to relay'
   }
-  return `its host was "${parsed.hostname}"`
+  switch (result.reason) {
+    case 'unparsable':
+      return 'the printed text was not a valid URL at all'
+    case 'authorize_origin':
+      return `its host was "${result.hostname}"`
+    case 'redirect_uri_count':
+      return 'it did not carry exactly one redirect address'
+    case 'redirect_uri_unparsable':
+      return 'the redirect address inside it was not a valid URL'
+    case 'redirect_origin':
+      return `the redirect address inside it pointed at "${result.hostname}"`
+  }
 }
