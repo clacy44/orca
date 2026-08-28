@@ -9,6 +9,26 @@ import { z } from 'zod'
  * already-merged client contract) exactly.
  */
 
+/** No regex literal — oxlint's `no-control-regex` flags a control-char class outright. */
+function hasControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x1f || code === 0x7f) {
+      return true
+    }
+  }
+  return false
+}
+
+/** §rpcs item 2: `code: string(1..512, no control chars)` — a control char would ride verbatim
+ * into the login child's stdin (`lane-login-session.ts` writes it unescaped), letting one
+ * `submitCode` call smuggle multiple newline-terminated codes past `MAX_LOGIN_CODE_ATTEMPTS`. */
+const CODE_PARAM = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => !hasControlChar(value), 'code must not contain control characters')
+
 export const LaneLoginStartParams = z
   .object({
     // Required (§3 row 1): an optional expectation would make I6 skippable at the caller's choice.
@@ -19,7 +39,7 @@ export const LaneLoginStartParams = z
 export const LaneLoginSubmitCodeParams = z
   .object({
     loginSessionId: z.string().min(1).max(256),
-    code: z.string().min(1).max(128)
+    code: CODE_PARAM
   })
   .strict()
 
@@ -66,7 +86,7 @@ export const LaneLoginSubmitCodeInlineParams = z
   .object({
     principalId: PrincipalIdParam,
     loginSessionId: z.string().min(1).max(256),
-    code: z.string().min(1).max(128)
+    code: CODE_PARAM
   })
   .strict()
 
