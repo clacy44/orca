@@ -9,6 +9,23 @@ import { getLaneAccountsRoot } from './lane-account-index'
 import { resolveContainedLaneAccountEntry } from './principal-lane-account-store'
 import { flush, type Session } from './lane-login-session-types'
 
+/** The lane's in-flight (`live`/`child-exited`) session id, of ANY owner kind — `statusOfLane`'s
+ * lookup, since a host-inline `--cancel` invocation holds no sessionId of its own (§modules E). */
+export function findInFlightSessionId(
+  sessions: Map<string, Session>,
+  laneId: string
+): string | null {
+  for (const session of sessions.values()) {
+    if (
+      session.laneId === laneId &&
+      (session.state === 'live' || session.state === 'child-exited')
+    ) {
+      return session.sessionId
+    }
+  }
+  return null
+}
+
 /** Pure, synchronous: the state-transition half. Never leaves `cancelled`, never fires from
  * `captured`. Kills the process group; does NOT touch the filesystem. */
 export function cancelStateTransition(sessions: Map<string, Session>, sessionId: string): void {

@@ -16,6 +16,7 @@ import {
   cancelDestructive as cancelDestructiveOp,
   cancelLaneLoginSessions as cancelLaneLoginSessionsOp,
   cancelStateTransition as cancelStateTransitionOp,
+  findInFlightSessionId,
   sweepCancelledLoginDirs as sweepCancelledLoginDirsOp
 } from './lane-login-session-cancel'
 import {
@@ -254,6 +255,13 @@ export class LaneLoginSessionRegistry {
     await this.cancelDestructive(sessionId)
   }
 
+  /** The host-inline `--cancel` verb's lookup (§modules E): a later CLI invocation holds no
+   * sessionId of its own. */
+  statusOfLane(laneId: string): LaneLoginSessionStatus | null {
+    const sessionId = findInFlightSessionId(this.sessions, laneId)
+    return sessionId ? this.statusOf(sessionId) : null
+  }
+
   statusOf(sessionId: string): LaneLoginSessionStatus | null {
     const session = this.sessions.get(sessionId)
     if (!session) {
@@ -271,15 +279,7 @@ export class LaneLoginSessionRegistry {
   }
 
   private hasInFlightSession(laneId: string): boolean {
-    for (const session of this.sessions.values()) {
-      if (
-        session.laneId === laneId &&
-        (session.state === 'live' || session.state === 'child-exited')
-      ) {
-        return true
-      }
-    }
-    return false
+    return findInFlightSessionId(this.sessions, laneId) !== null
   }
 
   private spawnAndAwaitUrl(session: Session): Promise<string> {

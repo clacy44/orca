@@ -62,6 +62,51 @@ export class LaneLoginAuthority {
     return this.start(principalId, laneDir, expectedEmail, { kind: 'host-inline' })
   }
 
+  /** Host-inline `submitCode` — the CLI's own invocation, never a grant. Same
+   * (iii)/(iv)-shaped ownership check as `loginSubmitCode`, on the `host-inline` owner kind. */
+  async loginSubmitCodeInline(
+    principalId: string,
+    sessionId: string,
+    code: string
+  ): Promise<LaneLoginSubmitCodeResult> {
+    const status = this.requireOwnedInlineSession(principalId, sessionId)
+    try {
+      const result = await this.options.coordinator.loginSessions.submitCode(sessionId, code)
+      if (result.status === 'completed' && result.identity) {
+        this.options.publish(status.laneId, {
+          type: 'login-completed',
+          loginSessionId: sessionId,
+          identity: result.identity
+        })
+      }
+      return result
+    } catch (error) {
+      this.publishFailureIfRefusal(status.laneId, sessionId, error)
+      throw error
+    }
+  }
+
+  /**
+   * Host-inline `--cancel`: a fresh CLI invocation holds no sessionId of its own, so this looks
+   * up the lane's in-flight host-inline session rather than taking one as a param — symmetric
+   * with the ownership shape everywhere else here: only the entry point that started a session
+   * may end it, so a grant-started session is `login_session_unknown` to this path too.
+   */
+  async loginCancelInline(principalId: string): Promise<{ cancelled: true }> {
+    const status = this.options.coordinator.loginSessions.statusOfLane(principalId)
+    if (!status || status.owner.kind !== 'host-inline') {
+      throw refusal('accounts.lane.login_session_unknown')
+    }
+    await this.options.coordinator.loginSessions.cancel(status.sessionId)
+    this.options.publish(principalId, {
+      type: 'login-failed',
+      loginSessionId: status.sessionId,
+      code: 'accounts.lane.login_cancelled',
+      message: CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES['accounts.lane.login_cancelled']
+    })
+    return { cancelled: true }
+  }
+
   async loginSubmitCode(
     pairedDeviceId: string | null | undefined,
     sessionId: string,
@@ -179,6 +224,19 @@ export class LaneLoginAuthority {
       status.owner.kind !== 'grant' ||
       status.owner.deviceId !== caller.deviceId
     ) {
+      throw refusal('accounts.lane.login_session_unknown')
+    }
+    return status
+  }
+
+  /** The inline mirror of `requireOwnedGrantSession`: unknown id, another lane's session, or a
+   * grant-owned session all collapse to the same refusal — never distinguishing "forbidden". */
+  private requireOwnedInlineSession(
+    principalId: string,
+    sessionId: string
+  ): LaneLoginSessionStatus {
+    const status = this.options.coordinator.loginSessions.statusOf(sessionId)
+    if (!status || status.laneId !== principalId || status.owner.kind !== 'host-inline') {
       throw refusal('accounts.lane.login_session_unknown')
     }
     return status
