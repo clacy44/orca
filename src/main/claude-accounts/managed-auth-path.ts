@@ -7,7 +7,7 @@ import {
 } from '../../shared/lane-path-containment'
 import { writeFileAtomically } from '../codex-accounts/fs-utils'
 
-const MANAGED_AUTH_MARKER = '.orca-managed-claude-auth'
+export const MANAGED_AUTH_MARKER = '.orca-managed-claude-auth'
 
 export function getClaudeManagedAccountsRoot(): string {
   return join(app.getPath('userData'), 'claude-accounts')
@@ -71,7 +71,7 @@ export function resolveOwnedClaudeManagedAuthPath(
 
 export function readClaudeManagedAuthFile(
   managedAuthPath: string,
-  filename: '.credentials.json' | 'oauth-account.json'
+  filename: '.credentials.json' | 'oauth-account.json' | '.claude.json' | '.config.json'
 ): string | null {
   const filePath = resolve(managedAuthPath, filename)
   try {
