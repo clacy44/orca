@@ -90,3 +90,22 @@ export async function sweepCancelledLoginDirs(
     await cancelDestructive(sessions, session.sessionId)
   }
 }
+
+/** `cancel`, run detached from its caller (an exit/TTL callback, not a request awaiting a reply).
+ * `cancelDestructive`'s `rmSync` can throw (EPERM/EBUSY while the just-exited child still holds a
+ * handle, EACCES, a network mount) — swallowed and logged here rather than left to become an
+ * unhandled rejection, since `swept` staying false already makes the sweep retryable. */
+export async function reapLoginSessionSilently(
+  sessions: Map<string, Session>,
+  sessionId: string
+): Promise<void> {
+  cancelStateTransition(sessions, sessionId)
+  try {
+    await cancelDestructive(sessions, sessionId)
+  } catch (error) {
+    console.warn(
+      '[claude-accounts] Lane login session reap failed; will retry on next sweep:',
+      error
+    )
+  }
+}
