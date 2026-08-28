@@ -63,6 +63,14 @@ export type Session = {
   swept: boolean
   ttlTimer: ReturnType<typeof setTimeout> | null
   captureOncePromise: Promise<LaneLoginCaptureResult> | null
+  /** True from the stdin write until `submitCode`'s exit/reprompt race settles — the signal
+   * `onChildSettled` uses to tell §sessionStateMachine's `child-exited` sub-case (b) ("exit INTO
+   * a successful capture", stay cancellable, no reap) from sub-case (a) ("exit BEFORE a capture",
+   * reap now). `onChildSettled` always runs before the racing `submitCode` call observes the
+   * exit (its exit promise resolves the settled handler before anyone downstream sees it), so
+   * this flag — not the (always-still-null) `captureOncePromise` — is the only signal available
+   * at reap time. */
+  pendingSubmit: boolean
 }
 
 export function flush(waiters: (() => void)[]): void {
@@ -83,4 +91,25 @@ export function wipeInProgressRefusal(action: string): ClaudeLaneRefusal {
     'accounts.lane.wipe_in_progress',
     `Orca is clearing this credential lane on the host right now, so it did not ${action}. Wait for that to finish, then try again.`
   )
+}
+
+/** Resolves once the paste-code prompt has fired, or immediately if it already has. */
+export function awaitPasteReady(session: Session): Promise<void> {
+  if (session.pasteReady) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    session.pasteReadyWaiters.push(resolve)
+  })
+}
+
+/** Resolves once a NEW prompt edge fires past `baseline` — a fresh reprompt, not the one already
+ * counted when the caller started waiting. */
+export function awaitPromptEdgeAfter(session: Session, baseline: number): Promise<void> {
+  if (session.promptEdgeCount > baseline) {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    session.promptEdgeWaiters.push(resolve)
+  })
 }

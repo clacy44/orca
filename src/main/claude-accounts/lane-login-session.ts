@@ -22,6 +22,8 @@ import {
 import {
   LOGIN_TIMEOUT_MS,
   MAX_LOGIN_CODE_ATTEMPTS,
+  awaitPasteReady,
+  awaitPromptEdgeAfter,
   flush,
   refusal,
   wipeInProgressRefusal,
@@ -128,7 +130,8 @@ export class LaneLoginSessionRegistry {
       promptEdgeWaiters: [],
       swept: false,
       ttlTimer: null,
-      captureOncePromise: null
+      captureOncePromise: null,
+      pendingSubmit: false
     }
     this.sessions.set(sessionId, session)
     session.ttlTimer = setTimeout(() => this.onTtlExpired(sessionId), LOGIN_TIMEOUT_MS)
@@ -153,8 +156,7 @@ export class LaneLoginSessionRegistry {
       const authorizationUrl = await this.spawnAndAwaitUrl(session)
       return { sessionId, authorizationUrl, expiresAt: session.expiresAt }
     } catch (error) {
-      this.cancelStateTransition(sessionId)
-      await this.cancelDestructive(sessionId)
+      await this.cancel(sessionId)
       throw error
     }
   }
@@ -175,17 +177,15 @@ export class LaneLoginSessionRegistry {
       throw refusal('accounts.lane.login_session_unknown')
     }
     if (this.now() >= session.expiresAt) {
-      this.cancelStateTransition(sessionId)
-      await this.cancelDestructive(sessionId)
+      await this.cancel(sessionId)
       throw refusal('accounts.lane.login_session_expired')
     }
     if (session.attempts >= MAX_LOGIN_CODE_ATTEMPTS) {
-      this.cancelStateTransition(sessionId)
-      await this.cancelDestructive(sessionId)
+      await this.cancel(sessionId)
       throw refusal('accounts.lane.login_code_rejected')
     }
 
-    await this.awaitPasteReady(session)
+    await awaitPasteReady(session)
     // Re-read via a fresh lookup: TS narrows `session.state`/`exited` from the guard above and
     // does not know an `await` let them mutate, so re-fetch rather than trust the stale narrowed
     // snapshot. `exited` catches a child that crashed WHILE this call was buffering, before ever
@@ -199,26 +199,41 @@ export class LaneLoginSessionRegistry {
 
     session.attempts += 1
     const edgeBaseline = session.promptEdgeCount
-    const repromptWaited = this.awaitPromptEdgeAfter(session, edgeBaseline)
+    const repromptWaited = awaitPromptEdgeAfter(session, edgeBaseline)
+    // Set BEFORE the write, cleared right after the race settles: the window `onChildSettled`
+    // checks to tell "exit into a successful capture" (leave the session capturable) from "exit
+    // with nothing in flight to carry it forward" (reap now) — see the field's doc comment.
+    session.pendingSubmit = true
     session.handle?.writeStdin(`${code}\n`)
 
     const settled = await Promise.race([
       session.exitPromise.then(() => 'exited' as const),
       repromptWaited.then(() => 'reprompt' as const)
     ])
+    session.pendingSubmit = false
 
     if (settled === 'reprompt' && !session.exited) {
       const attemptsRemaining = MAX_LOGIN_CODE_ATTEMPTS - session.attempts
       if (attemptsRemaining <= 0) {
-        this.cancelStateTransition(sessionId)
-        await this.cancelDestructive(sessionId)
+        await this.cancel(sessionId)
         throw refusal('accounts.lane.login_code_rejected')
       }
       return { status: 'rejected', identity: null, attemptsRemaining }
     }
 
-    const outcome = await this.ensureCaptureStarted(sessionId)
+    // The capture's in-turn refusals (`login_cancelled`, `wipe_in_progress`) are thrown, not
+    // returned — `wipe_in_progress` can fire on a session still `live`/`child-exited`, which
+    // would otherwise strand it exactly like an unswept plain exit. `cancel` is an idempotent
+    // no-op once already `cancelled`/`captured`, so reaping unconditionally here is safe.
+    let outcome: LaneLoginCaptureResult
+    try {
+      outcome = await this.ensureCaptureStarted(sessionId)
+    } catch (error) {
+      await this.cancel(sessionId)
+      throw error
+    }
     if (outcome.kind === 'identity_mismatch') {
+      await this.cancel(sessionId)
       throw refusal('accounts.lane.login_identity_mismatch')
     }
     return {
@@ -310,6 +325,13 @@ export class LaneLoginSessionRegistry {
       // (I6, then the queue turn) still owns whether this session ever reaches `captured`.
       session.state = 'child-exited'
     }
+    // §sessionStateMachine `child-exited` sub-case (a): exit BEFORE a capture (crash, kill, CLI
+    // gave up) — reap now. Sub-case (b), a `submitCode` racing this exact exit, is
+    // `pendingSubmit`; its own continuation owns cancellation then. `captureOncePromise` is a
+    // defensive belt — always still null here given the current call order.
+    if (!session.pendingSubmit && session.captureOncePromise === null) {
+      void this.cancel(sessionId)
+    }
   }
 
   private ensureCaptureStarted(sessionId: string): Promise<LaneLoginCaptureResult> {
@@ -352,25 +374,6 @@ export class LaneLoginSessionRegistry {
     if (!session || session.state === 'captured' || session.state === 'cancelled') {
       return
     }
-    this.cancelStateTransition(sessionId)
-    void this.cancelDestructive(sessionId)
-  }
-
-  private awaitPasteReady(session: Session): Promise<void> {
-    if (session.pasteReady) {
-      return Promise.resolve()
-    }
-    return new Promise((resolve) => {
-      session.pasteReadyWaiters.push(resolve)
-    })
-  }
-
-  private awaitPromptEdgeAfter(session: Session, baseline: number): Promise<void> {
-    if (session.promptEdgeCount > baseline) {
-      return Promise.resolve()
-    }
-    return new Promise((resolve) => {
-      session.promptEdgeWaiters.push(resolve)
-    })
+    void this.cancel(sessionId)
   }
 }

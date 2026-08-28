@@ -318,6 +318,76 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
     })
   })
 
+  it('P-A: a child that exits with no submitCode ever made is reaped on the exit event, freeing the lane for a new login', async () => {
+    const registry = makeRegistry()
+    const startPromise = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[0])
+    await startPromise
+    const firstAuthDir = spawnMocks.spawnClaudeCliChildProcess.mock.calls.findLast(
+      (call) => call[0][0] === 'auth' && call[0][1] === 'login'
+    )![1].windowsPath
+
+    // The ordinary "browser never came back / CLI gave up" path: the child exits on its own with
+    // no `submitCode` ever made.
+    loginChildren[0].exit(1)
+    // Let the exit's `.then` chain (which drives `onChildSettled`) settle before asserting.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(registry.statusOfLane('lane-1')).toBeNull()
+    expect(existsSync(firstAuthDir)).toBe(false)
+
+    // The single-in-flight lock must not still be pinned: a second start on the same lane
+    // succeeds and spawns a fresh child, rather than refusing `login_already_in_flight` forever.
+    const second = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[1])
+    await expect(second).resolves.toMatchObject({ sessionId: expect.any(String) })
+    expect(loginChildren).toHaveLength(2)
+  })
+
+  it('P-B: submitCode rejecting login_identity_mismatch reaps the session, freeing the lane for a new login', async () => {
+    statusScript = JSON.stringify({ email: 'someone-else@x.com' })
+    const registry = makeRegistry()
+    const startPromise = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[0])
+    const { sessionId } = await startPromise
+    plantCapturedCredentials('a@x.com')
+
+    const submit = registry.submitCode(sessionId, '123456')
+    loginChildren[0].exit(0)
+    await expect(submit).rejects.toMatchObject({ code: 'accounts.lane.login_identity_mismatch' })
+
+    expect(registry.statusOf(sessionId)?.state).toBe('cancelled')
+    expect(registry.statusOfLane('lane-1')).toBeNull()
+
+    // The most likely operator error (mistyped/wrong-case --email) must not make the lane
+    // un-loginnable for the rest of the host process.
+    statusScript = JSON.stringify({ email: 'a@x.com' })
+    const second = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[1])
+    await expect(second).resolves.toMatchObject({ sessionId: expect.any(String) })
+  })
+
   it('a submit buffered on the paste prompt is login_session_unknown if the child crashes first, never a raw stdin write', async () => {
     const registry = makeRegistry()
     const startPromise = registry.start({
