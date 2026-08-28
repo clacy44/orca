@@ -2,9 +2,10 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { deleteActiveClaudeKeychainCredentialsStrict } from './keychain'
+import { purgeLaneAccountStore } from './principal-lane-account-store'
+import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './lane-credential-filenames'
 
-export const LANE_CREDENTIALS_FILENAME = '.credentials.json'
-export const LANE_CONFIG_FILENAME = '.claude.json'
+export { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME }
 
 /**
  * A credential blob can sit at rest under a name no filename-scoped wipe touches: both atomic
@@ -96,6 +97,11 @@ export async function wipeLaneCredentials(
       if (dropLaneOauthAccount(laneDir)) {
         removed.push(`${LANE_CONFIG_FILENAME}#oauthAccount`)
       }
+      // S9-L1 B2/§storeLayout "PURGE": every OTHER login this lane ever captured lives under
+      // `claude-accounts/`, which this sweep's own artifact match (`.credentials.json` plus
+      // `*.tmp` at the lane's top level) never reached. Only once the active credential is
+      // confirmed gone — never on the throw path below, which reports nothing done.
+      removed.push(...purgeLaneAccountStore(laneDir))
       return removed
     }
   }
