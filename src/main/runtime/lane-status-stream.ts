@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
 import type { ClaudeLaneRefusalCode } from '../../shared/claude-lane-refusals'
 import type { LaneLoginIdentity } from '../../shared/claude-lane-login-rpc'
+import { laneStatusEqual } from '../claude-accounts/lane-status-frame-equality'
 import type { LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
 
 /**
@@ -40,6 +41,10 @@ export type LaneStatusSubscriber = {
   /** The grant, never the principal: the binding it resolves through can move under the socket. */
   deviceId: string
   emit: (frame: LaneStatusFrame) => void
+  /** The last `status` frame actually delivered to this subscriber — `publish`'s dedupe input.
+   * Optional so a bare object literal (as tests construct for `callerOf`) still satisfies the
+   * type; treated as "nothing delivered yet" when absent. */
+  lastStatus?: ClaudeLaneStatus | null
 }
 
 export class LaneStatusStream {
@@ -53,7 +58,12 @@ export class LaneStatusStream {
     emit: (frame: LaneStatusFrame) => void
   ): LaneStatusSubscriber {
     const subscriptionId = `lane-status-${connectionId ?? 'inproc'}-${randomUUID()}`
-    const subscriber: LaneStatusSubscriber = { subscriptionId, deviceId: caller.deviceId, emit }
+    const subscriber: LaneStatusSubscriber = {
+      subscriptionId,
+      deviceId: caller.deviceId,
+      emit,
+      lastStatus: null
+    }
     this.subscribers.set(subscriptionId, subscriber)
     return subscriber
   }
@@ -74,10 +84,24 @@ export class LaneStatusStream {
     )
   }
 
-  /** Every grant of the principal sees it — the desktop included; nobody else does. */
+  /** Every grant of the principal sees it — the desktop included; nobody else does.
+   *
+   * A `status` frame is deduped against the LAST one this particular subscriber actually
+   * received (`laneStatusEqual`, which compares `accounts`/`heldIdentity` by value rather than by
+   * the fresh-projection reference every status read hands back) — `emitStatusToLane` re-emits on
+   * every lane change whether or not that change altered what a given grant's own view of the
+   * lane shows, and a subscriber deserves a stable frame, not a `status` tick on every unrelated
+   * change. Every other frame kind (`login-started`, …) always delivers — dedupe applies only to
+   * the field-comparable `status` shape. */
   publish(principalId: string, frame: LaneStatusFrame): number {
     let delivered = 0
     for (const subscriber of this.subscribersOf(principalId)) {
+      if (frame.type === 'status') {
+        if (laneStatusEqual(subscriber.lastStatus ?? null, frame.status)) {
+          continue
+        }
+        subscriber.lastStatus = frame.status
+      }
       subscriber.emit(frame)
       delivered += 1
     }

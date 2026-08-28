@@ -43,6 +43,34 @@ describe('lane status stream subscriber resolution', () => {
     expect(frames).toHaveLength(1)
   })
 
+  // MP: comparing `lastStatus` with `!==` (or not tracking it at all) would deliver every one of
+  // these — the failure this dedupe exists to prevent, since `LaneWireService.emitStatusToLane`
+  // re-publishes on every lane change whether or not THIS subscriber's own view of it moved.
+  it('drops a status frame that is field-equal to the last one this subscriber received', () => {
+    const { stream, frames } = makeStream()
+
+    expect(stream.publish(LANE_A, STATUS_FRAME)).toBe(1)
+    // A content-equal frame, freshly built — a different reference, same field values.
+    expect(stream.publish(LANE_A, { type: 'status', status: { ...STATUS_FRAME.status } })).toBe(0)
+    expect(frames).toHaveLength(1)
+
+    const changed: LaneStatusFrame = {
+      type: 'status',
+      status: { ...STATUS_FRAME.status, laneState: 'loaded' }
+    }
+    expect(stream.publish(LANE_A, changed)).toBe(1)
+    expect(frames).toHaveLength(2)
+  })
+
+  it('never dedupes a non-status frame, even back to back with itself', () => {
+    const { stream, frames } = makeStream()
+    const endFrame: LaneStatusFrame = { type: 'end' }
+
+    expect(stream.publish(LANE_A, endFrame)).toBe(1)
+    expect(stream.publish(LANE_A, endFrame)).toBe(1)
+    expect(frames).toHaveLength(2)
+  })
+
   it('stops delivering once the grant is unbound', () => {
     const { bindings, stream, frames } = makeStream()
     bindings.delete('desktop-a')
