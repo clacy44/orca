@@ -67,6 +67,13 @@ export type LaneLoginSessionRegistryOptions = {
 }
 
 export class LaneLoginSessionRegistry {
+  /** Retained for the life of the process even once terminal (`captured`/`cancelled`) — BY
+   * DESIGN, not yet bounded: a late `submitCode` against a terminal id answers from a real record
+   * (`login_session_unknown` is reserved for a genuinely unknown/dropped id, distinct from "this
+   * one finished"), and `statusOf`/`statusOfLane` keep serving a terminal state rather than a map
+   * miss. No eviction runs, so a host that stays up and logs in lanes indefinitely grows this map
+   * one row per login, never freed — a slow leak this review flagged as acceptable for now but not
+   * closed; a bounded-delay/LRU eviction of terminal rows is the fix if it needs to be. */
   private readonly sessions = new Map<string, Session>()
   private readonly authState: Pick<LaneAuthState, 'serializeLaneWrite'>
   private readonly writer: Pick<LaneCredentialWriter, 'writeCredentials' | 'writeOauthAccount'>
@@ -335,7 +342,7 @@ export class LaneLoginSessionRegistry {
     // `pendingSubmit`; its own continuation owns cancellation then. `captureOncePromise` is a
     // defensive belt — always still null here given the current call order.
     if (!session.pendingSubmit && session.captureOncePromise === null) {
-      void this.cancel(sessionId)
+      void this.reapSilently(sessionId)
     }
   }
 
@@ -380,6 +387,21 @@ export class LaneLoginSessionRegistry {
     if (!session || session.state === 'captured' || session.state === 'cancelled') {
       return
     }
-    void this.cancel(sessionId)
+    void this.reapSilently(sessionId)
+  }
+
+  /** `cancel` run detached from its caller (exit/TTL callbacks, not a request awaiting a reply).
+   * `cancelDestructive`'s `rmSync` can throw (EPERM/EBUSY while the just-exited child still holds
+   * a handle, EACCES, a network mount) — swallowed and logged here rather than left to become an
+   * unhandled rejection, since `session.swept` staying false already makes the sweep retryable. */
+  private async reapSilently(sessionId: string): Promise<void> {
+    try {
+      await this.cancel(sessionId)
+    } catch (error) {
+      console.warn(
+        '[claude-accounts] Lane login session reap failed; will retry on next sweep:',
+        error
+      )
+    }
   }
 }

@@ -44,7 +44,11 @@ export function cancelStateTransition(sessions: Map<string, Session>, sessionId:
 }
 
 /** The destructive half: sweeps the session's half-written `<laneAccountId>` directory.
- * Idempotent, and a no-op once `captured` has already promoted the credential elsewhere. */
+ * Idempotent, and a no-op once `captured` has already promoted the credential elsewhere.
+ * `swept` is set only AFTER `rmSync` returns — a throw (EPERM/EBUSY while the just-exited
+ * child still holds a handle, EACCES, a network mount) leaves it false so a retry (a later
+ * `cancel`, or `sweepCancelledLoginDirs`'s own re-read) can sweep it instead of certifying a
+ * directory that was never actually removed. */
 export async function cancelDestructive(
   sessions: Map<string, Session>,
   sessionId: string
@@ -53,7 +57,6 @@ export async function cancelDestructive(
   if (!session || session.swept || session.state === 'captured') {
     return
   }
-  session.swept = true
   const contained = resolveContainedLaneAccountEntry(
     getLaneAccountsRoot(session.laneDir),
     session.laneAccountId
@@ -61,6 +64,7 @@ export async function cancelDestructive(
   if (contained) {
     rmSync(contained, { recursive: true, force: true })
   }
+  session.swept = true
 }
 
 /** Every in-flight session of `laneId` -> `cancelled`, synchronously — no promise returned

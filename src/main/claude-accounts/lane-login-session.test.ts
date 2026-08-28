@@ -1,10 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import type * as NodeFsModule from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { readLaneAccountIndex } from './lane-account-index'
 import { markLaneWipePending, resetLaneWipePendingForTests } from './lane-wipe-pending'
+
+/** Lets one specific `rmSync` call (matched by a predicate on its path) throw EPERM, the ordinary
+ * win32/network-mount shape when a just-exited child's handles are not yet released — the probe
+ * P-D/P-E (review finding) needs to arm the reap's own sweep to fail without touching every other
+ * `rmSync` this suite's setup/teardown relies on. */
+const fsFailureMocks = vi.hoisted(() => ({
+  failRmSyncWhen: null as ((path: string) => boolean) | null
+}))
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof NodeFsModule>()
+  return {
+    ...original,
+    rmSync: (path: unknown, options?: Parameters<typeof original.rmSync>[1]) => {
+      const predicate = fsFailureMocks.failRmSyncWhen
+      if (predicate && typeof path === 'string' && predicate(path)) {
+        fsFailureMocks.failRmSyncWhen = null
+        const error = new Error('EPERM: operation not permitted, rmdir') as NodeJS.ErrnoException
+        error.code = 'EPERM'
+        throw error
+      }
+      return original.rmSync(path as string, options)
+    }
+  }
+})
 
 /** Verbatim, matching `lane-login-url-parser.ts`'s private `PASTE_CODE_PROMPT` — deliberately NO
  * trailing newline (a line-buffered feed would hang). */
@@ -588,6 +613,59 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
       expect.unreachable()
     } catch (error) {
       expect(isClaudeLaneRefusal(error)).toBe(true)
+    }
+  })
+
+  it('P-D/P-E: a reap whose sweep throws does not escape as an unhandled rejection, and leaves the credential retryably swept', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      feedGoodLoginPrompt(loginChildren[0])
+      const { sessionId } = await startPromise
+      const authDir = spawnMocks.spawnClaudeCliChildProcess.mock.calls.findLast(
+        (call) => call[0][0] === 'auth' && call[0][1] === 'login'
+      )![1].windowsPath
+      // A complete credential, exactly what a real capture would leave at rest mid-login.
+      writeFileSync(
+        join(authDir, '.credentials.json'),
+        JSON.stringify({ claudeAiOauth: { accessToken: 'at', refreshToken: 'rt' } })
+      )
+      const laneAccountId = basename(dirname(authDir))
+      fsFailureMocks.failRmSyncWhen = (path) => path.endsWith(laneAccountId)
+
+      // The ordinary "browser never came back / CLI gave up" path the reap exists to serve.
+      loginChildren[0].exit(1)
+      // Let the exit's `.then` chain (`onChildSettled` -> the detached reap) run to completion,
+      // including whatever turn Node needs to flag a rejection as unhandled if one escaped.
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+
+      expect(unhandled).toEqual([])
+      // The failed sweep must not have latched `swept`: the credential is still at rest, so the
+      // wipe fence's own destructive half (filtered on `!session.swept`) would still reach it
+      // rather than skipping it forever.
+      expect(existsSync(join(authDir, '.credentials.json'))).toBe(true)
+      expect(registry.statusOf(sessionId)?.state).toBe('cancelled')
+
+      // Retry once the transient failure clears: a later cancel actually sweeps it.
+      fsFailureMocks.failRmSyncWhen = null
+      await registry.cancel(sessionId)
+      expect(existsSync(authDir)).toBe(false)
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+      fsFailureMocks.failRmSyncWhen = null
     }
   })
 })
