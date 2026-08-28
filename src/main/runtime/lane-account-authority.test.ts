@@ -63,6 +63,7 @@ function makeHarness() {
   const laneDir = (laneId: string): string => join(lanesRoot, laneId)
   return {
     service,
+    coordinator,
     laneDir,
     loadLane: (laneId: string, refreshToken: string): void => {
       writeFileSync(join(laneDir(laneId), '.credentials.json'), credentials(refreshToken))
@@ -95,6 +96,50 @@ describe('LaneAccountAuthority — selectAccount/removeAccount (S9-L1 §modules 
 
     expect(result).toEqual({ active: ACCOUNT_A })
     expect(existsSync(join(laneDir(LANE_A), '.credentials.json'))).toBe(true)
+  })
+
+  // Review finding: `selectLaneAccount`'s `invalidateProbes` parameter defaults to a no-op, so
+  // nothing failed if a future edit dropped the argument — only reading the call site proved it
+  // was threaded. Pins it at the wiring layer: a REAL coordinator's own method must actually run
+  // for this lane, and before the credential write it guards, not after.
+  it('threads the real coordinator.invalidateLaneUsageProbes into selectAccount, before the write', async () => {
+    const { service, laneDir, coordinator } = makeHarness()
+    plantAccount(laneDir(LANE_A), ACCOUNT_A, 'a@x.com')
+    writeLaneAccountIndex(join(laneDir(LANE_A), 'claude-accounts'), [
+      { laneAccountId: ACCOUNT_A, email: 'a@x.com', label: null, active: false, capturedAt: 'now' }
+    ])
+    const order: string[] = []
+    const invalidateSpy = vi
+      .spyOn(coordinator, 'invalidateLaneUsageProbes')
+      .mockImplementation(async (laneId) => {
+        order.push(`invalidate:${laneId}`)
+      })
+    const writeSpy = vi.spyOn(coordinator.authState, 'serializeLaneWrite')
+
+    await service.accountAuthority.selectAccount('device-a', ACCOUNT_A)
+
+    expect(invalidateSpy).toHaveBeenCalledWith(LANE_A)
+    expect(writeSpy).toHaveBeenCalled()
+    // `invalidateProbes` runs INSIDE the `serializeLaneWrite` turn, before the credential write —
+    // asserted by call order rather than by mock return timing, since both are already resolved
+    // by the time `selectAccount` returns.
+    expect(order).toEqual([`invalidate:${LANE_A}`])
+    invalidateSpy.mockRestore()
+    writeSpy.mockRestore()
+  })
+
+  it('threads the real coordinator.invalidateLaneUsageProbes into selectAccountInline', async () => {
+    const { service, laneDir, coordinator } = makeHarness()
+    plantAccount(laneDir(LANE_A), ACCOUNT_A, 'a@x.com')
+    writeLaneAccountIndex(join(laneDir(LANE_A), 'claude-accounts'), [
+      { laneAccountId: ACCOUNT_A, email: 'a@x.com', label: null, active: false, capturedAt: 'now' }
+    ])
+    const invalidateSpy = vi.spyOn(coordinator, 'invalidateLaneUsageProbes')
+
+    await service.accountAuthority.selectAccountInline(LANE_A, ACCOUNT_A)
+
+    expect(invalidateSpy).toHaveBeenCalledWith(LANE_A)
+    invalidateSpy.mockRestore()
   })
 
   it('refuses selectAccount for an unknown id and touches nothing', async () => {
