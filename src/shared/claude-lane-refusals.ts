@@ -52,6 +52,9 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   // The doc's own arithmetic (57→56) is wrong against this tree (60 entries above);
   // S9-L1's scope boundary (§F) forbids retiring the sixteen push/lease-era codes,
   // so this slice is additive-only: 60 → 76. Retirement is S9-L3's.
+  // S9-L2 (design rev 38 §3, row 1/2/9) mints the same login-quartet/select/remove/logout
+  // codes on the client side; every one carries a complete sentence (below) since the client
+  // has no string table for these.
   'accounts.lane.login_not_designated',
   'accounts.lane.no_login_device_designated',
   'accounts.lane.login_already_in_flight',
@@ -104,4 +107,60 @@ export class ClaudeLaneRefusal extends Error {
 
 export function isClaudeLaneRefusal(error: unknown): error is ClaudeLaneRefusal {
   return error instanceof ClaudeLaneRefusal
+}
+
+/**
+ * S9-L2 (design rev 38 §3): the fifteen minted sentences for the login quartet plus
+ * selectAccount/removeAccount/logout, so a v2 host has one canonical wording to send and the
+ * client renders it verbatim rather than keeping its own copy that can drift from the host's. A
+ * mock host (used while L1's server is not yet merged) should send these strings unchanged.
+ */
+export const CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES: Record<
+  | 'accounts.lane.login_not_designated'
+  | 'accounts.lane.no_login_device_designated'
+  | 'accounts.lane.login_already_in_flight'
+  | 'accounts.lane.login_session_unknown'
+  | 'accounts.lane.login_session_expired'
+  | 'accounts.lane.login_code_rejected'
+  | 'accounts.lane.login_identity_mismatch'
+  | 'accounts.lane.login_cancelled'
+  | 'accounts.lane.login_store_full'
+  | 'accounts.lane.login_cli_unsupported'
+  | 'accounts.lane.account_unknown'
+  | 'accounts.lane.switch_in_progress'
+  | 'accounts.lane.switch_write_locked'
+  | 'accounts.lane.switch_write_failed'
+  | 'accounts.lane.logout_incomplete',
+  string
+> = {
+  'accounts.lane.login_not_designated':
+    'This device is paired to you but is not the device you designated to sign this lane into an account, so Orca did not start the login. Start it from the designated device, or designate this one on the host first.',
+  'accounts.lane.no_login_device_designated':
+    'No device is designated to sign this lane into a Claude account, so Orca did not start the login. On the host, run `orca lane designate --person <name> --device <id>`, then try again.',
+  'accounts.lane.login_already_in_flight':
+    'A Claude login is already in progress for this lane, so Orca did not start a second one. Finish or cancel the login that is running, then start this one again.',
+  'accounts.lane.login_session_unknown':
+    'Orca has no record of that login for you — it was started somewhere else, it belongs to another device, or Orca restarted since it began — so nothing was submitted. Start a new login and use the link it gives you.',
+  'accounts.lane.login_session_expired':
+    'This login has expired, so Orca did not submit the code. Start a new login and complete it before the link runs out.',
+  'accounts.lane.login_code_rejected':
+    'That code was not accepted. Check the code and try again — after too many wrong attempts this login ends and you will need to start a new one.',
+  'accounts.lane.login_identity_mismatch':
+    'You signed in as a different account than the one this login expected, so Orca did not load it into the lane. Start a new login and sign in as the expected account, or start one with no expected account to allow any account.',
+  'accounts.lane.login_cancelled':
+    'This login was cancelled, so Orca did not submit the code. Start a new login if you still want to sign this lane in.',
+  'accounts.lane.login_store_full':
+    'This lane already holds the maximum number of signed-in accounts, so Orca did not start a new login. Remove an account you no longer need, then try again.',
+  'accounts.lane.login_cli_unsupported':
+    'This login cannot be started from here right now, so Orca did not start it. Try again from the device designated to sign this lane in.',
+  'accounts.lane.account_unknown':
+    'Orca has no record of that account in this lane — it may already have been removed, or a logout may have cleared the lane — so nothing changed. Refresh the account list and try again.',
+  'accounts.lane.switch_in_progress':
+    'Another switch is already running for this lane, so Orca did not start a second one. Wait a moment and try again.',
+  'accounts.lane.switch_write_locked':
+    'A Claude session on the host is holding this lane’s credential file, so Orca could not switch accounts just now. The lane is unchanged — wait a moment and try again.',
+  'accounts.lane.switch_write_failed':
+    'Orca could not write the lane’s credential file, so the switch did not happen and the lane is unchanged. Try again, and let the person who runs the host know if it keeps failing.',
+  'accounts.lane.logout_incomplete':
+    'Orca could not confirm every credential for this lane was removed, so it is refusing to report the logout as done. Try again — nothing else was affected while this ran.'
 }

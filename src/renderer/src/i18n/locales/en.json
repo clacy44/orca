@@ -10806,6 +10806,37 @@
           "newPersonPlaceholder": "Add a person…",
           "newPersonLabel": "New person name",
           "addPerson": "Add person"
+        },
+        "LaneAccountListRow": {
+          "active": "Active",
+          "remove": "Remove",
+          "switch": "Switch"
+        },
+        "LaneLoginDialog": {
+          "binding": "Signing in {{value0}}’s lane on {{value1}}.",
+          "cancelButton": "Cancel",
+          "codeLabel": "Code from the browser",
+          "codeRejected": "That code was not accepted ({{value0}} attempt(s) left). Check the code and try again.",
+          "completed": "Signed in to {{value0}}.",
+          "doneButton": "Done",
+          "expectedEmailHint": "If you sign in as a different account, Orca refuses the login and removes it.",
+          "expectedEmailLabel": "Expected account email",
+          "openUrlHint": "Open this link in any browser — a phone works too — and sign in as {{value0}}.",
+          "qrAlt": "QR code for the login link",
+          "signedIn": "Signed in to {{value0}}.",
+          "startButton": "Start login",
+          "submitCodeButton": "Submit code",
+          "title": "Sign this lane into an account",
+          "tryAgainButton": "Try again",
+          "expectedEmailPlaceholder": "name@example.com"
+        },
+        "LaneLoginSection": {
+          "actionFailed": "Action failed",
+          "loginFailed": "Login failed",
+          "logout": "Log out",
+          "logoutFailed": "Log out failed",
+          "signIn": "Sign this lane into an account",
+          "updateHost": "Sign-in for this lane needs a newer host — update the host to use it."
         }
       },
       "right": {
