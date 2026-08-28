@@ -349,6 +349,101 @@ describe('the principal lane lifecycle wipe', () => {
     expect(existsSync(credentialsPath(LANE_A))).toBe(false)
     expect(existsSync(credentialsPath(LANE_B))).toBe(false)
   })
+
+  /**
+   * S9-L1 §fenceWiring "session side": `cancelLaneLoginSessions` (sync, state-transition only)
+   * and `sweepCancelledLoginDirs` (async, destructive) are the two new deps a login session
+   * registry hands the lifecycle. These tests pin the three call sites and their ordering
+   * against the SHIPPED `wipe()`/`refuseWipe()`/missing-directory arms directly — no login
+   * session registry involved, just recorder functions standing in for its two exports.
+   */
+  describe('S9-L1 §fenceWiring session-side wiring', () => {
+    it('cancels every in-flight login session in the SAME synchronous step as the mark, before the queue/sweep', async () => {
+      const order: string[] = []
+      const lifecycle = new PrincipalLaneLifecycle({
+        resolveLaneDir: (laneId) => laneDir(laneId),
+        laneDirExists: (laneId) => existsSync(laneDir(laneId)),
+        serializeLaneWrite: async (laneId, run) => {
+          order.push(`queue-enter:${laneId}`)
+          return run()
+        },
+        invalidateProbes: () => Promise.resolve(),
+        platform: 'linux',
+        cancelLaneLoginSessions: (laneId) => order.push(`cancel:${laneId}`),
+        sweepCancelledLoginDirs: async (laneId) => {
+          order.push(`sweep-dirs:${laneId}`)
+        }
+      })
+
+      const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+      expect(outcome.completed).toBe(true)
+      // The cancel fires BEFORE the queue is ever entered — it is not a member of the queue, it
+      // is taken alongside the mark that gates entry into it — and the destructive sweep runs
+      // only once inside that same turn, ahead of the credential sweep it shares the turn with.
+      expect(order).toEqual([`cancel:${LANE_A}`, `queue-enter:${LANE_A}`, `sweep-dirs:${LANE_A}`])
+    })
+
+    it('cancels login sessions on the refuseWipe arm too, deferring the destructive sweep (no queue turn held there)', async () => {
+      const cancelled: string[] = []
+      const swept: string[] = []
+      const lifecycle = new PrincipalLaneLifecycle({
+        resolveLaneDir: () => null, // unprovable ownership, but SOMETHING is at that path
+        laneDirExists: () => true,
+        serializeLaneWrite: (_laneId, run) => run(),
+        invalidateProbes: () => Promise.resolve(),
+        platform: 'linux',
+        cancelLaneLoginSessions: (laneId) => cancelled.push(laneId),
+        sweepCancelledLoginDirs: async (laneId) => {
+          swept.push(laneId)
+        }
+      })
+
+      const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+      expect(outcome.completed).toBe(false)
+      expect(cancelled).toEqual([LANE_A])
+      expect(swept).toEqual([])
+    })
+
+    it('cancels login sessions on the missing-directory fast path, where no mark is ever taken', async () => {
+      const cancelled: string[] = []
+      const lifecycle = new PrincipalLaneLifecycle({
+        resolveLaneDir: () => null,
+        laneDirExists: () => false, // nothing at rest at all — the arm a naive edit misses
+        serializeLaneWrite: (_laneId, run) => run(),
+        invalidateProbes: () => Promise.resolve(),
+        platform: 'linux',
+        cancelLaneLoginSessions: (laneId) => cancelled.push(laneId)
+      })
+
+      const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+      expect(outcome.completed).toBe(true)
+      expect(cancelled).toEqual([LANE_A])
+      // Nothing was at rest and no mark was set on this arm — the induction premise the OTHER
+      // two arms rely on does not apply here, and nothing should have latched a mark either.
+      expect(isLaneWipePending(LANE_A)).toBe(false)
+    })
+
+    it('the coordinator wires a REAL LaneLoginSessionRegistry into the lifecycle — not a stub with no caller', async () => {
+      // Closes the S9-L1 review's standing blocker: every module this slice ships must be
+      // reached from production code. `LaneCredentialCoordinator` is the composition root
+      // `runtime-auth-service.ts` constructs in production.
+      const lanes = makeCoordinator()
+      await lanes.syncLane(LANE_A, 'launch')
+      const sessionsBefore = lanes.loginSessions.statusOf('anything')
+      expect(sessionsBefore).toBeNull() // real registry, real (empty) map — not undefined/a stub
+
+      const cancelSpy = vi.spyOn(lanes.loginSessions, 'cancelLaneLoginSessions')
+      const sweepSpy = vi.spyOn(lanes.loginSessions, 'sweepCancelledLoginDirs')
+
+      await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+
+      expect(cancelSpy).toHaveBeenCalledWith(LANE_A)
+      expect(sweepSpy).toHaveBeenCalledWith(LANE_A)
+    })
+  })
 })
 
 describe('the close predicate', () => {

@@ -55,6 +55,18 @@ export type PrincipalLaneLifecycleDeps = {
   serializeLaneWrite<T>(laneId: string, run: () => Promise<T>): Promise<T>
   /** Aborts the lane's probes and resolves once each probe's `claude` is gone (§2k's kill half). */
   invalidateProbes(laneId: string): Promise<void>
+  /**
+   * S9-L1 §fenceWiring: the state-transition half of cancel for every in-flight login session of
+   * this lane. MUST be synchronous and MUST NOT return a promise — taken in the SAME synchronous
+   * step as `markLaneWipePending`, with no `await` between them, or the induction gap reopens.
+   */
+  cancelLaneLoginSessions?(laneId: string): void
+  /**
+   * S9-L1 §fenceWiring: the destructive half — sweeps every cancelled session's half-written
+   * `<laneAccountId>` directory. Run ONLY inside the fence's own `serializeLaneWrite` turn
+   * (`attemptWipe`), never concurrently with an admitted capture.
+   */
+  sweepCancelledLoginDirs?(laneId: string): Promise<void>
   platform?: NodeJS.Platform
   /**
    * Fired on BOTH arms: it says the lane CHANGED, not that the wipe succeeded (§2h).
@@ -145,13 +157,20 @@ export class PrincipalLaneLifecycle {
   ): Promise<LaneWipeOutcome> {
     const laneDir = this.deps.resolveLaneDir(laneId)
     if (!laneDir) {
-      return this.deps.laneDirExists(laneId)
-        ? this.refuseWipe(laneId, reason, 'Orca could not prove it owns that lane directory')
-        : { laneId, reason, removed: [], completed: true, laneRemoved: false }
+      if (this.deps.laneDirExists(laneId)) {
+        return this.refuseWipe(laneId, reason, 'Orca could not prove it owns that lane directory')
+      }
+      // Nothing at rest here and no mark to set, so the induction premise below does not apply
+      // to this arm — a naive edit at the mark site alone misses it entirely (§fenceWiring).
+      this.deps.cancelLaneLoginSessions?.(laneId)
+      return { laneId, reason, removed: [], completed: true, laneRemoved: false }
     }
     // Set BEFORE anything is aborted: the start-side fence has to be closed for the whole
     // sequence, or the tick a millisecond later spawns a probe into the lane being swept.
     const sequence = markLaneWipePending(laneId)
+    // Same synchronous step as the mark above — NO `await` between them (§fenceWiring: an await
+    // here reopens the induction gap a `cancel` racing `start` relies on being closed).
+    this.deps.cancelLaneLoginSessions?.(laneId)
     const removed: string[] = []
     for (let attempt = 1; attempt <= WIPE_ATTEMPTS; attempt += 1) {
       const swept = await this.attemptWipe(laneId, laneDir, options.finalize)
@@ -188,6 +207,10 @@ export class PrincipalLaneLifecycle {
    */
   private refuseWipe(laneId: string, reason: LaneWipeReason, why: string): LaneWipeOutcome {
     const sequence = markLaneWipePending(laneId)
+    // Same synchronous step as the mark, same reason as the fence arm's (§fenceWiring: this arm
+    // sets the mark, so the induction premise applies here too — deferring the sweep, not the
+    // transition, since no queue turn is held on this arm).
+    this.deps.cancelLaneLoginSessions?.(laneId)
     releaseUnconfirmedLaneWipe(laneId, sequence)
     console.warn(`[principal-lane] Lane not wiped: ${why}; leaving it wipe-pending`)
     this.deps.onLaneWiped?.(laneId)
@@ -209,6 +232,9 @@ export class PrincipalLaneLifecycle {
         return null
       }
       try {
+        // The destructive half of cancel, INSIDE this same turn — never concurrently with an
+        // admitted capture (§fenceWiring).
+        await this.deps.sweepCancelledLoginDirs?.(laneId)
         const removed = await wipeLaneCredentials(
           laneDir,
           this.deps.platform ? { platform: this.deps.platform } : {}

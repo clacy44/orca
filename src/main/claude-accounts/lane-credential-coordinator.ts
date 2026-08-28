@@ -15,6 +15,7 @@ import {
 } from './live-pty-gate'
 import { ensureLaneProvenanceLabelOrNull, formatLaneProvenance } from './principal-lane-provenance'
 import { LaneAuthState } from './lane-auth-state'
+import { LaneLoginSessionRegistry } from './lane-login-session'
 import { LaneSyncDriver, type LaneSyncOutcome, type LaneSyncTrigger } from './lane-sync-driver'
 import { PrincipalLaneStore } from './principal-lane-store'
 import type { PrincipalLaneOptions } from './principal-credential-lane'
@@ -44,6 +45,8 @@ export class LaneCredentialCoordinator {
   readonly syncDriver: LaneSyncDriver
   readonly usagePull: LaneUsagePull
   readonly lifecycle: PrincipalLaneLifecycle
+  /** S9-L1: the per-lane login session map, sharing this coordinator's own write queue. */
+  readonly loginSessions: LaneLoginSessionRegistry
   private laneUsageInvalidated: ((laneId: string) => void) | null = null
   private laneWiped: ((laneId: string) => void) | null = null
   // Why populated from `syncLane` rather than from a lane listing: "loaded" is a fact the sync
@@ -69,11 +72,14 @@ export class LaneCredentialCoordinator {
         await this.syncLane(laneId, 'rate-limit-tick')
       }
     })
+    this.loginSessions = new LaneLoginSessionRegistry({ authState: this.authState })
     this.lifecycle = new PrincipalLaneLifecycle({
       resolveLaneDir: (laneId) => this.store.resolveLaneDir(laneId),
       laneDirExists: (laneId) => this.store.hasLaneDirectory(laneId),
       serializeLaneWrite: (laneId, run) => this.authState.serializeLaneWrite(laneId, run),
       invalidateProbes: (laneId) => this.invalidateLaneUsageProbes(laneId),
+      cancelLaneLoginSessions: (laneId) => this.loginSessions.cancelLaneLoginSessions(laneId),
+      sweepCancelledLoginDirs: (laneId) => this.loginSessions.sweepCancelledLoginDirs(laneId),
       ...(options.laneOptions?.platform ? { platform: options.laneOptions.platform } : {}),
       onLaneWiped: (laneId) => this.laneWiped?.(laneId)
     })
