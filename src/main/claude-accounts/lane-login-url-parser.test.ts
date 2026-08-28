@@ -11,11 +11,16 @@ import {
   stripOsc8
 } from './lane-login-url-parser'
 
-const HOSTED_URL = `https://platform.claude.com/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
+// The real 2.1.250 shape (§4 negative control): `claude.com` + `/cai/oauth/authorize`, a
+// `platform.claude.com` redirect_uri — observed via a live, throwaway `claude auth login
+// --claudeai` run (killed before completion, never submitted) and confirmed against the
+// installed binary's `strings` output. See `../../shared/claude-authorize-url-policy.ts` for the
+// full allow-list this (and the other allow-listed shapes) is checked against.
+const HOSTED_URL = `https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
   'https://platform.claude.com/oauth/code/callback'
 )}&code_challenge_method=S256`
 
-const LOOPBACK_URL = `https://platform.claude.com/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
+const LOOPBACK_URL = `https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
   'http://localhost:54231/callback'
 )}`
 
@@ -27,7 +32,7 @@ const PHISHING_URL_PLAINTEXT_IP = `http://192.0.2.7:8080/authorize?redirect_uri=
   'https://platform.claude.com/oauth/code/callback'
 )}`
 // P2: correct origin, but redirect_uri downgraded to plaintext.
-const DOWNGRADED_REDIRECT_URL = `https://platform.claude.com/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
+const DOWNGRADED_REDIRECT_URL = `https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
   'http://platform.claude.com/oauth/code/callback'
 )}`
 
@@ -81,7 +86,10 @@ describe('firstAuthorizeUrl', () => {
 })
 
 describe('isRelayableAuthorizeUrl / assertRelayableAuthorizeUrl', () => {
-  it('accepts a URL whose own origin and redirect_uri are both platform.claude.com', () => {
+  // Delegates to `../../shared/claude-authorize-url-policy.ts`, whose own test file carries the
+  // full allow-list matrix and per-rejected-class mutation proofs — these stay as a thin
+  // integration check that the delegation actually happened.
+  it('accepts the real (claude.com, /cai/oauth/authorize, platform.claude.com redirect) shape', () => {
     expect(isRelayableAuthorizeUrl(HOSTED_URL)).toBe(true)
     expect(() => assertRelayableAuthorizeUrl(HOSTED_URL)).not.toThrow()
   })
@@ -103,7 +111,7 @@ describe('isRelayableAuthorizeUrl / assertRelayableAuthorizeUrl', () => {
   })
 
   // P1: an attacker-hosted origin with a well-formed, correct redirect_uri.
-  it('refuses a URL whose own origin is not platform.claude.com (P1)', () => {
+  it('refuses a URL whose own origin is not on the allow-list (P1)', () => {
     expect(isRelayableAuthorizeUrl(PHISHING_URL)).toBe(false)
   })
 
@@ -170,37 +178,46 @@ describe('firstRelayableAuthorizeUrl', () => {
     expect(firstRelayableAuthorizeUrl(`go here: ${HOSTED_URL} thanks`)).toBe(HOSTED_URL)
   })
 
-  // P3 / §5 "Printed URL only": a stream that also carries the loopback variant,
-  // printed FIRST, must still relay the hosted one — selection and validation
-  // are one operation, not "take the first match, then assert it".
-  it('relays the hosted URL even when a non-relayable loopback URL is printed first', () => {
+  // §2b prompt refusal: decides on the FIRST complete URL candidate and never scans past it
+  // hoping a later one is better — a login child that prints one bad URL and stops must refuse
+  // promptly, not wait forever for a second URL that will never come. A real login never prints
+  // a loopback variant before the hosted one (confirmed live against 2.1.250 — see the module
+  // doc comment), so refusing on the first candidate costs nothing in practice.
+  it('refuses on a non-relayable loopback URL printed first — does NOT wait for the hosted one after it', () => {
     const stream = `browser opener: ${LOOPBACK_URL}\nprinted: ${HOSTED_URL}\n`
-    expect(firstRelayableAuthorizeUrl(stream)).toBe(HOSTED_URL)
+    expect(() => firstRelayableAuthorizeUrl(stream)).toThrow()
   })
 
-  // P8: an unrelated banner URL precedes the real authorize URL.
-  it('skips an unrelated banner URL and relays the authorize URL that follows', () => {
+  // Same "decide on first, period" rule applies to an unrelated banner URL, not only a
+  // security-relevant lookalike.
+  it('refuses on an unrelated banner URL printed first — does NOT skip ahead to the real one', () => {
     const stream = `Learn more at https://docs.claude.com/cli\n${HOSTED_URL}\n`
-    expect(firstRelayableAuthorizeUrl(stream)).toBe(HOSTED_URL)
+    expect(() => firstRelayableAuthorizeUrl(stream)).toThrow()
   })
 
-  // MP: "first match, then assert" (the pre-fix decomposition) would pick the
-  // loopback/banner URL here and throw instead of relaying the hosted one.
-  it('mutation proof: picking the first URL of any kind (not first relayable) fails both ordering cases', () => {
+  // MP: a "scan every candidate, first RELAYABLE one wins" selector (the pre-fix decomposition)
+  // would keep looking past the bad first candidate and successfully relay the hosted URL here —
+  // exactly the behavior that leaves a real "one bad URL, nothing after it" stream undecided
+  // forever instead of refusing. The shipped function decides on the first candidate instead.
+  it('mutation proof: scanning past a non-relayable first candidate for a later relayable one would (wrongly) succeed here', () => {
     const loopbackFirst = `browser opener: ${LOOPBACK_URL}\nprinted: ${HOSTED_URL}\n`
-    const bannerFirst = `Learn more at https://docs.claude.com/cli\n${HOSTED_URL}\n`
-    const naiveFirstOfAnyKind = (text: string): string | null => firstAuthorizeUrl(text)
-    expect(naiveFirstOfAnyKind(loopbackFirst)).not.toBe(HOSTED_URL)
-    expect(naiveFirstOfAnyKind(bannerFirst)).not.toBe(HOSTED_URL)
-    // ...while the fixed selection gets both right.
-    expect(firstRelayableAuthorizeUrl(loopbackFirst)).toBe(HOSTED_URL)
-    expect(firstRelayableAuthorizeUrl(bannerFirst)).toBe(HOSTED_URL)
+    const candidates = loopbackFirst.match(/https?:\/\/[^\s]+/g) ?? []
+    const scanPastBadFirstCandidate = candidates.find((candidate) =>
+      isRelayableAuthorizeUrl(candidate)
+    )
+    expect(scanPastBadFirstCandidate).toBe(HOSTED_URL) // ...the old "keep scanning" shape finds it...
+    // ...the shipped function, deciding on the first candidate only, refuses instead.
+    expect(() => firstRelayableAuthorizeUrl(loopbackFirst)).toThrow()
   })
 
-  it('refuses when no candidate in the text is relayable', () => {
+  it('refuses when the only candidate in the text is not relayable', () => {
     expect(() => firstRelayableAuthorizeUrl(`only this: ${LOOPBACK_URL}`)).toThrow()
+  })
+
+  it('refuses when no candidate is present in the text at all', () => {
     try {
       firstRelayableAuthorizeUrl('no url at all here')
+      expect.unreachable()
     } catch (error) {
       expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
         'accounts.lane.login_url_unparsed'
@@ -229,6 +246,43 @@ describe('createAuthorizeUrlAccumulator', () => {
     const acc = createAuthorizeUrlAccumulator()
     expect(acc.feed('no url ')).toBeNull()
     expect(acc.feed('in this stream')).toBeNull()
+  })
+
+  // §2b prompt refusal: `feed` must decide on the FIRST complete candidate synchronously, in the
+  // SAME call, not wait for a later chunk or for `finish()` — this is the unit-level half of the
+  // session-level timing test (`lane-login-session.test.ts`) asserting `loginStart` settles
+  // promptly rather than riding the child out to its TTL.
+  it('throws login_url_unparsed the instant the FIRST complete candidate is not relayable — never waits for a later one', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    expect(() => acc.feed(`browser opener: ${PHISHING_URL}\n`)).toThrow()
+  })
+
+  it('the refusal names the observed (bad) hostname, not the query or any code', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    try {
+      acc.feed(`${PHISHING_URL}\n`)
+      expect.unreachable()
+    } catch (error) {
+      const message = isClaudeLaneRefusal(error) ? error.message : ''
+      expect(message).toContain('evil.example.com')
+    }
+  })
+
+  // MP: a "skip and keep scanning" accumulator would return null here (no relayable candidate
+  // seen yet, still hoping for one) instead of deciding — exactly the hang the timing test exists
+  // to catch, since a login child that prints only this URL never sends a later chunk to rescue it.
+  it('mutation proof: skip-and-continue on the first bad candidate would return null (undecided) instead of throwing', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    let threw = false
+    let decided: string | null = null
+    try {
+      decided = acc.feed(`browser opener: ${PHISHING_URL}\n`)
+    } catch {
+      threw = true
+    }
+    const skipAndContinueWouldReturn = null // the old shape's "wait for a better one" outcome
+    expect(decided).toBe(skipAndContinueWouldReturn) // never assigned — the throw happened first
+    expect(threw).toBe(true)
   })
 
   // MP: a naive per-chunk `firstRelayableAuthorizeUrl` call (no accumulation)

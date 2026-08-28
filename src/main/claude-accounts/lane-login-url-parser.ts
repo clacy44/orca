@@ -9,34 +9,28 @@
  * The `create*Accumulator`/`create*Watcher` factories below own the chunk-boundary
  * contract (§2b: "a parse failure surfaces as a named lane state, never a hang") —
  * callers must not re-buffer chunks themselves before feeding them in.
+ *
+ * Which URL is safe to relay at all is NOT decided here — that allow-list is shared
+ * with any client that must agree with the host (`../../shared/claude-authorize-url-policy`).
+ * This module owns only: extracting URL text out of a raw terminal stream, and deciding
+ * WHEN a candidate is complete enough to judge.
  */
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import {
+  describeAuthorizeUrlRejection,
+  isRelayableAuthorizeUrl as isRelayableAuthorizeUrlPolicy
+} from '../../shared/claude-authorize-url-policy'
 
 /** The exact prompt the Claude CLI prints once it is ready for a pasted code.
  * Deliberately has NO trailing newline — callers must test on raw chunks, never
- * on completed lines, or this prompt is never observed. */
+ * on completed lines, or this prompt is never observed.
+ *
+ * Verified against the installed `claude` binary, version 2.1.250: a live, throwaway
+ * `claude auth login --claudeai` run (killed before completion, never submitted) printed
+ * this prompt verbatim, with no trailing newline, immediately after the authorize URL.
+ * Re-verify whenever the pinned CLI version bumps (see
+ * lane-login-cli-version-gate.ts's LAST_VERIFIED_CLI_VERSION). */
 const PASTE_CODE_PROMPT = 'Paste code here if prompted > '
-
-/** Host+scheme a relayable authorization URL's own origin must equal (§2b, §4
- * R-32b: "whoever chooses which URL a person authenticates against chooses whose
- * lane receives the resulting grant"). Checking only `redirect_uri` and not this
- * origin lets an attacker-hosted page carry a well-formed redirect_uri through. */
-const REQUIRED_AUTHORIZE_HOST = 'platform.claude.com'
-
-/** Pathname a relayable authorization URL must have — the one authorize endpoint,
- * not any path on the trusted host. Verified against the installed `claude`
- * binary (2.1.248, `claude --version`): 'https://platform.claude.com/oauth/authorize'
- * is the ONLY /oauth/authorize URL in the binary (no other anthropic.com oauth
- * host is present at all). Re-verify this and REQUIRED_AUTHORIZE_HOST /
- * REQUIRED_REDIRECT_HOST / PASTE_CODE_PROMPT together whenever the pinned CLI
- * version bumps (see lane-login-cli-version-gate.ts's INSTALLED_CLI_VERSION). */
-const REQUIRED_AUTHORIZE_PATHNAME = '/oauth/authorize'
-
-/** Host a relayable authorization URL's `redirect_uri` query param must equal.
- * Anything else (e.g. a `localhost:<ephemeral>` loopback variant the CLI also prints)
- * must never be relayed to a client: a code delivered to an unauthenticated loopback
- * port on the person's own desktop is a plaintext credential leak. */
-const REQUIRED_REDIRECT_HOST = 'platform.claude.com'
 
 /** Matches a complete OSC-8 hyperlink — open sequence (carrying the target URL),
  * visible label, and close sequence — terminated by ST (`ESC \`) or BEL (`\x07`).
@@ -68,13 +62,15 @@ const MAX_URL_ACCUMULATOR_CHARS = 8000
  * hold the prompt plus a run of trailing ANSI escapes. */
 const MAX_PROMPT_TAIL_CHARS = PASTE_CODE_PROMPT.length + 64
 
-const LOGIN_URL_UNPARSED_SENTENCE =
-  'The authorization URL printed by the login process could not be safely relayed — ' +
-  'it must be the https://platform.claude.com address the CLI prints, with a ' +
-  'https://platform.claude.com redirect_uri, not a substitute. Cancel this login and try again.'
-
-function loginUrlUnparsedRefusal(): ClaudeLaneRefusal {
-  return new ClaudeLaneRefusal('accounts.lane.login_url_unparsed', LOGIN_URL_UNPARSED_SENTENCE)
+function loginUrlUnparsedRefusal(candidate: string | null): ClaudeLaneRefusal {
+  const detail = candidate
+    ? `it was not safe to relay — ${describeAuthorizeUrlRejection(candidate)}, and that is not an address Orca will send you to`
+    : 'the login process never printed one'
+  return new ClaudeLaneRefusal(
+    'accounts.lane.login_url_unparsed',
+    `Orca could not safely relay the authorization URL the login process printed: ${detail}. ` +
+      'Cancel this login and try again.'
+  )
 }
 
 /**
@@ -110,41 +106,12 @@ export function firstAuthorizeUrl(text: string): string | null {
 }
 
 /**
- * True when `url` is a printed (not loopback-callback) Claude authorization URL
- * safe to relay to a client: its own origin must be exactly
- * `https://platform.claude.com` (§4 R-32b — the origin itself, not only
- * `redirect_uri`, is what an attacker-hosted phishing page would substitute),
- * its pathname must be the one authorize endpoint, and it must carry EXACTLY
- * ONE `redirect_uri` query parameter, itself an `https://platform.claude.com`
- * URL, not a `localhost:<ephemeral>` loopback. A second `redirect_uri` is
- * refused outright rather than validating only the first occurrence — reading
- * one of two conflicting relay-relevant values is not validating the URL.
+ * True when `url` is safe to relay per the shared allow-list
+ * (`../../shared/claude-authorize-url-policy`) — re-exported here so existing callers of this
+ * module do not need a second import for the one check that matters most.
  */
 export function isRelayableAuthorizeUrl(url: string): boolean {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return false
-  }
-  if (
-    parsed.protocol !== 'https:' ||
-    parsed.hostname !== REQUIRED_AUTHORIZE_HOST ||
-    parsed.pathname !== REQUIRED_AUTHORIZE_PATHNAME
-  ) {
-    return false
-  }
-  const redirectUriValues = parsed.searchParams.getAll('redirect_uri')
-  if (redirectUriValues.length !== 1) {
-    return false
-  }
-  let redirect: URL
-  try {
-    redirect = new URL(redirectUriValues[0])
-  } catch {
-    return false
-  }
-  return redirect.protocol === 'https:' && redirect.hostname === REQUIRED_REDIRECT_HOST
+  return isRelayableAuthorizeUrlPolicy(url)
 }
 
 /**
@@ -153,42 +120,74 @@ export function isRelayableAuthorizeUrl(url: string): boolean {
  */
 export function assertRelayableAuthorizeUrl(url: string): void {
   if (!isRelayableAuthorizeUrl(url)) {
-    throw loginUrlUnparsedRefusal()
+    throw loginUrlUnparsedRefusal(url)
   }
 }
 
 /**
- * Selection and validation as one operation (§5 "Printed URL only"): scans every
- * http(s) candidate in `text`, in order, and returns the first one that is
- * actually relayable — never the first URL of any kind, and never "last URL
- * wins". A stream that prints a loopback variant before the hosted one (or an
- * unrelated banner URL before either) still relays the hosted URL, by
- * construction, because a non-qualifying candidate is skipped rather than
- * accepted-then-asserted. Throws `login_url_unparsed` only when no candidate in
- * `text` qualifies.
+ * Finds the FIRST http(s) URL candidate in `strippedText` and decides on it immediately — never
+ * "keep scanning past a bad one hoping a later one is better" (§2b prompt refusal: a decoy or
+ * compromised first candidate must refuse promptly, not stall the login waiting for a legitimate
+ * one that may never come). `atStreamEnd` distinguishes the two ways a candidate counts as
+ * complete (§2b): terminated by a real boundary byte already in the text (whitespace/control
+ * character — true regardless of `atStreamEnd`), or, when `atStreamEnd` is true, simply having
+ * reached the end of everything the stream will ever produce (the child exited, or a one-shot
+ * caller handed over its whole text at once). A match run to the text's end while `atStreamEnd`
+ * is false is treated as "wait for more" — it could still be a truncated prefix.
+ *
+ * Returns the relayable URL, or `null` when nothing decidable is present yet (only possible with
+ * `atStreamEnd: false`). Throws `login_url_unparsed` when the first candidate found is complete
+ * and not relayable, OR (only at `atStreamEnd`) when no candidate was ever found at all.
+ */
+function decideFirstUrlCandidate(strippedText: string, atStreamEnd: boolean): string | null {
+  URL_PATTERN.lastIndex = 0
+  const match = URL_PATTERN.exec(strippedText)
+  URL_PATTERN.lastIndex = 0
+  if (!match) {
+    if (atStreamEnd) {
+      throw loginUrlUnparsedRefusal(null)
+    }
+    return null
+  }
+  const matchEndsAtTextEnd = match.index + match[0].length === strippedText.length
+  if (matchEndsAtTextEnd && !atStreamEnd) {
+    // Might still be a truncated prefix of a longer URL — wait for more.
+    return null
+  }
+  const candidate = match[0]
+  if (isRelayableAuthorizeUrl(candidate)) {
+    return candidate
+  }
+  throw loginUrlUnparsedRefusal(candidate)
+}
+
+/**
+ * Selection and validation of the FIRST http(s) URL candidate in `text` as one operation: decides
+ * immediately rather than scanning past a non-qualifying candidate for a later, better one (see
+ * `decideFirstUrlCandidate`). `text` is treated as a complete, final stream (`atStreamEnd: true`)
+ * — the natural shape for a one-shot caller, and what `createAuthorizeUrlAccumulator.finish()`
+ * uses at end-of-stream.
  */
 export function firstRelayableAuthorizeUrl(text: string): string {
   const stripped = stripAllEscapes(text)
-  const candidates = stripped.match(URL_PATTERN) ?? []
-  for (const candidate of candidates) {
-    if (isRelayableAuthorizeUrl(candidate)) {
-      return candidate
-    }
-  }
-  throw loginUrlUnparsedRefusal()
+  // `decideFirstUrlCandidate` with `atStreamEnd: true` always either returns a string or throws —
+  // it never returns null in that mode — but that isn't expressible in its own return type since
+  // the mid-stream (`atStreamEnd: false`) mode legitimately can.
+  return decideFirstUrlCandidate(stripped, true) as string
 }
 
 /**
  * Chunk-boundary-safe accumulator for `firstRelayableAuthorizeUrl`. The ~900-char
  * printed URL (§2b) can straddle a stdout chunk boundary; feeding chunks straight
  * to `firstRelayableAuthorizeUrl` one at a time would truncate it mid-string and
- * refuse a legitimate login. `feed` accumulates a bounded tail and returns a URL
- * only once a candidate match is confirmed complete — terminated by a real
- * boundary byte (whitespace/control character) already in the buffer, NEVER by
- * merely having reached the end of whatever has arrived so far, which could
- * still be a truncated prefix. A match flush against the buffer's end is
- * therefore always "wait for more", with no cap-based exception: relaying a
- * possibly-truncated URL is worse than refusing one, so reaching the cap
+ * refuse a legitimate login. `feed` accumulates a bounded tail and decides on the
+ * FIRST complete URL candidate the moment it is confirmed complete — terminated by
+ * a real boundary byte (whitespace/control character) already in the buffer, NEVER
+ * by merely having reached the end of whatever has arrived so far, which could
+ * still be a truncated prefix. Deciding on the first candidate (not scanning past
+ * it for a later one) is itself the §2b "prompt refusal" contract: a login child
+ * that prints one non-relayable URL and nothing else must refuse promptly, not
+ * wait indefinitely for a second URL that will never arrive. Reaching the cap
  * without ever observing a terminated match discards the buffer and refuses
  * `login_url_unparsed` rather than guessing. `finish()` is the only path that
  * treats a still-unterminated match as final — call it once the child's stdout
@@ -208,25 +207,14 @@ export function createAuthorizeUrlAccumulator(): {
         // Never emit a prefix we cannot see complete: give up on whatever was
         // accumulating rather than risk relaying a truncated authorization URL.
         buffer = ''
-        throw loginUrlUnparsedRefusal()
+        throw loginUrlUnparsedRefusal(null)
       }
       const stripped = stripAllEscapes(buffer)
-      URL_PATTERN.lastIndex = 0
-      let match: RegExpExecArray | null
-      // eslint-disable-next-line no-cond-assign -- scanning every candidate, first relayable wins.
-      while ((match = URL_PATTERN.exec(stripped))) {
-        const matchEndsAtBufferTail = match.index + match[0].length === stripped.length
-        if (matchEndsAtBufferTail) {
-          // Might still be a truncated prefix of a longer URL — wait for more.
-          continue
-        }
-        if (isRelayableAuthorizeUrl(match[0])) {
-          URL_PATTERN.lastIndex = 0
-          return match[0]
-        }
+      const decided = decideFirstUrlCandidate(stripped, false)
+      if (decided) {
+        buffer = ''
       }
-      URL_PATTERN.lastIndex = 0
-      return null
+      return decided
     },
     finish(): string {
       // End of stream is itself a boundary: a match ending at the buffer tail
