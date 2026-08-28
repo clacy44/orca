@@ -702,4 +702,63 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
       fsFailureMocks.failRmSyncWhen = null
     }
   })
+
+  describe('§2b prompt refusal — a non-relayable authorize URL rejects loginStart promptly', () => {
+    // The real 2.1.250 shape (§4): `claude.com` + `/cai/oauth/authorize`, a `platform.claude.com`
+    // redirect — observed via a live, throwaway `claude auth login --claudeai` run (killed before
+    // completion, never submitted). Negative control for the timing test below: this shape must
+    // still relay normally, not be swept up by the same refusal.
+    const REAL_CLI_SHAPE_URL = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(
+      'https://platform.claude.com/oauth/code/callback'
+    )}`
+
+    it('loginStart rejects login_url_unparsed promptly on a fake CLI printing an evil.example.com authorize URL — settles before a 500ms timer, kills the child, sweeps its dir', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      const authDir = spawnMocks.spawnClaudeCliChildProcess.mock.calls.findLast(
+        (call) => call[0][0] === 'auth' && call[0][1] === 'login'
+      )![1].windowsPath
+      const laneAccountDir = dirname(authDir)
+      expect(existsSync(laneAccountDir)).toBe(true)
+
+      // Swallow the rejection on this branch of the race so it isn't reported as unhandled —
+      // `startPromise` itself is still asserted on below.
+      const settledWithin500ms = Promise.race([
+        startPromise.then(
+          () => 'resolved' as const,
+          () => 'rejected' as const
+        ),
+        new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 500))
+      ])
+
+      const evilUrl = `https://evil.example.com/oauth/authorize?redirect_uri=${encodeURIComponent(
+        'https://platform.claude.com/oauth/code/callback'
+      )}`
+      loginChildren[0].feed(`Open this link:\n${evilUrl}\n`)
+
+      expect(await settledWithin500ms).toBe('rejected')
+      await expect(startPromise).rejects.toMatchObject({ code: 'accounts.lane.login_url_unparsed' })
+      expect(loginChildren[0].handle.kill).toHaveBeenCalledTimes(1)
+      expect(existsSync(laneAccountDir)).toBe(false)
+    })
+
+    it('negative control: the real 2.1.250 URL shape relays normally, not refused', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      loginChildren[0].feed(`Open this link:\n${REAL_CLI_SHAPE_URL}\n${PASTE_PROMPT}`)
+
+      const { authorizationUrl } = await startPromise
+      expect(authorizationUrl).toBe(REAL_CLI_SHAPE_URL)
+    })
+  })
 })
