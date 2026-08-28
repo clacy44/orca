@@ -1,11 +1,20 @@
 /**
- * Version gate for lane logins (S9 §4 gate (vi), §risks "OAUTH-CONSTANT PIN
- * DRIFT"). The login parser (lane-login-url-parser.ts) and the OAuth constants
- * (oauth-refresh.ts) are a scraped contract pinned to one observed `claude`
- * build — a CLI outside the range those were verified against must refuse the
- * login rather than silently trust unobserved output shapes. Fails CLOSED: a
- * spawn error or unparsable `--version` output is refused exactly like an
- * out-of-range version, never treated as "assume supported".
+ * Version gate for lane logins (S9 design rev 39, §4 "Version pin" and §6 hard
+ * gate (vi)). The login parser (lane-login-url-parser.ts) and the OAuth constants
+ * (oauth-refresh.ts) are a scraped contract last VERIFIED against one observed
+ * `claude` build. Rev 39 narrows the pin to a FLOOR: a CLI at or above
+ * MIN_TESTED_CLI_VERSION, on the SAME major version, proceeds — logging one
+ * advisory line when it is newer than LAST_VERIFIED_CLI_VERSION, since the parser
+ * constants may need re-verification — because the constants the gate protects
+ * are enforced by the parser itself (the shared allow-list refuses any URL shape
+ * it does not recognise, and a changed paste prompt ends in
+ * `login_session_expired`, never a silent hazard), whereas the hard ceiling revs
+ * 32–38 carried turned every routine CLI update into a login outage (observed
+ * 2026-08-28: the installed 2.1.250 exceeded the 2.1.248 ceiling and every lane
+ * login on the box was refused). Fails CLOSED only on what actually indicates an
+ * unrecognized CLI: below the floor, a different major version, or unparsable
+ * `--version` output (including a spawn error) — never "assume supported" for
+ * those.
  */
 import { execFileSync } from 'node:child_process'
 import { resolveClaudeCommand } from '../codex-cli/command'
@@ -16,21 +25,27 @@ import {
 
 const CLI_VERSION_PROBE_TIMEOUT_MS = 5_000
 
-/** Floor of the tested range (§risks: the OAuth constants and login parser were
- * last verified against the installed binary starting at this build). */
+/** Floor of the tested range (rev 39 §4: the oldest build the OAuth constants and
+ * login parser are known to fit; `oauth-refresh.ts` was first verified against it). */
 export const MIN_TESTED_CLI_VERSION = '2.1.177'
 
 /**
- * Ceiling of the tested range. Bump this ONLY after re-running the §risks
- * Gate 0 procedure against the new build — re-verifying oauth-refresh.ts's
- * OAUTH_TOKEN_URL/OAUTH_CLIENT_ID and lane-login-url-parser.ts's
- * REQUIRED_AUTHORIZE_HOST/REQUIRED_AUTHORIZE_PATHNAME/PASTE_CODE_PROMPT
- * against a fresh capture — then update this constant AND the matching
- * "verified against" comments in both of those files together; the three
- * must never name different builds. Last verified: `claude --version` =>
- * 2.1.248, 2026-08-28.
+ * The build the OAuth constants and login parser were LAST re-verified against —
+ * not a ceiling. Re-verify after a CLI bump: re-check oauth-refresh.ts's
+ * OAUTH_TOKEN_URL/OAUTH_CLIENT_ID and the allow-list in
+ * `../../shared/claude-authorize-url-policy.ts` (the login parser's
+ * PASTE_CODE_PROMPT too) against a fresh capture — then update this constant AND
+ * the matching "verified against" comments in those files together; they must
+ * never name different builds. A version above this constant is NOT refused
+ * (see `isClaudeCliVersionSupported`) — it logs one advisory line instead.
+ * Last verified: `claude --version` => 2.1.250, 2026-08-28, two ways: (1) a live,
+ * throwaway `claude auth login --claudeai` run (killed before completion, never
+ * submitted) — printed URL and paste prompt matched; (2) `strings` over the
+ * installed binary at `/home/ubuntu/.local/share/claude/versions/2.1.250` —
+ * confirmed `/oauth/authorize`, `/cai/oauth/authorize`, and `oauth/code/callback`
+ * are the only authorize/redirect pathnames present.
  */
-export const INSTALLED_CLI_VERSION = '2.1.248'
+export const LAST_VERIFIED_CLI_VERSION = '2.1.250'
 
 type ParsedCliVersion = { major: number; minor: number; patch: number }
 
@@ -56,30 +71,55 @@ function loginCliUnsupportedRefusal(): ClaudeLaneRefusal {
 }
 
 /**
- * True when `rawVersionOutput` parses to a version within
- * [MIN_TESTED_CLI_VERSION, INSTALLED_CLI_VERSION] inclusive. Unparsable output
- * is unsupported, not "assume the newest is fine" (fail closed).
+ * True when `rawVersionOutput` parses to a version at or above
+ * MIN_TESTED_CLI_VERSION, on the SAME major version as it — there is no ceiling,
+ * so a minor/patch bump past LAST_VERIFIED_CLI_VERSION is still supported (see
+ * `assertClaudeCliVersionSupported`'s advisory log). A different major is refused
+ * outright rather than version-number-compared against the floor: a major bump
+ * may change output shapes this gate has no evidence about at all. Unparsable
+ * output is unsupported, not "assume the newest is fine" (fail closed).
  */
 export function isClaudeCliVersionSupported(rawVersionOutput: string): boolean {
   const parsed = parseClaudeCliVersion(rawVersionOutput)
   if (!parsed) {
     return false
   }
-  // Guards a future typo in the two constants above, not runtime input.
+  // Guards a future typo in the constant above, not runtime input.
   const min = parseClaudeCliVersion(MIN_TESTED_CLI_VERSION)
-  const max = parseClaudeCliVersion(INSTALLED_CLI_VERSION)
-  if (!min || !max) {
+  if (!min) {
     return false
   }
-  return compareCliVersions(parsed, min) >= 0 && compareCliVersions(parsed, max) <= 0
+  return parsed.major === min.major && compareCliVersions(parsed, min) >= 0
+}
+
+let newerCliAdvisoryLogged = false
+
+/** Logs ONE `console.info` line per process the first time a supported CLI turns out to be newer
+ * than `LAST_VERIFIED_CLI_VERSION` — an FYI that the login parser constants may need
+ * re-verification, never a refusal. */
+function maybeLogNewerCliAdvisory(parsed: ParsedCliVersion): void {
+  if (newerCliAdvisoryLogged) {
+    return
+  }
+  const lastVerified = parseClaudeCliVersion(LAST_VERIFIED_CLI_VERSION)
+  if (!lastVerified || compareCliVersions(parsed, lastVerified) <= 0) {
+    return
+  }
+  newerCliAdvisoryLogged = true
+  console.info(
+    `claude CLI ${parsed.major}.${parsed.minor}.${parsed.patch} is newer than the last verified ` +
+      `${LAST_VERIFIED_CLI_VERSION}; login parser constants may need re-verification`
+  )
 }
 
 /** Throws `accounts.lane.login_cli_unsupported` unless `rawVersionOutput` is
- * in the tested range. */
+ * supported (see `isClaudeCliVersionSupported`); otherwise may log the newer-CLI advisory. */
 export function assertClaudeCliVersionSupported(rawVersionOutput: string): void {
-  if (!isClaudeCliVersionSupported(rawVersionOutput)) {
+  const parsed = parseClaudeCliVersion(rawVersionOutput)
+  if (!parsed || !isClaudeCliVersionSupported(rawVersionOutput)) {
     throw loginCliUnsupportedRefusal()
   }
+  maybeLogNewerCliAdvisory(parsed)
 }
 
 /** Runs `claude --version` and throws `accounts.lane.login_cli_unsupported`

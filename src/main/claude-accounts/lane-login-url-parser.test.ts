@@ -11,11 +11,16 @@ import {
   stripOsc8
 } from './lane-login-url-parser'
 
-const HOSTED_URL = `https://platform.claude.com/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
+// The real 2.1.250 shape (§4 negative control): `claude.com` + `/cai/oauth/authorize`, a
+// `platform.claude.com` redirect_uri — observed via a live, throwaway `claude auth login
+// --claudeai` run (killed before completion, never submitted) and confirmed against the
+// installed binary's `strings` output. See `../../shared/claude-authorize-url-policy.ts` for the
+// full allow-list this (and the other allow-listed shapes) is checked against.
+const HOSTED_URL = `https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
   'https://platform.claude.com/oauth/code/callback'
 )}&code_challenge_method=S256`
 
-const LOOPBACK_URL = `https://platform.claude.com/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
+const LOOPBACK_URL = `https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
   'http://localhost:54231/callback'
 )}`
 
@@ -27,7 +32,7 @@ const PHISHING_URL_PLAINTEXT_IP = `http://192.0.2.7:8080/authorize?redirect_uri=
   'https://platform.claude.com/oauth/code/callback'
 )}`
 // P2: correct origin, but redirect_uri downgraded to plaintext.
-const DOWNGRADED_REDIRECT_URL = `https://platform.claude.com/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
+const DOWNGRADED_REDIRECT_URL = `https://claude.com/cai/oauth/authorize?client_id=abc&redirect_uri=${encodeURIComponent(
   'http://platform.claude.com/oauth/code/callback'
 )}`
 
@@ -64,6 +69,24 @@ describe('stripOsc8', () => {
     const wrapped = `${osc8Wrap(HOSTED_URL, 'a')}${osc8Wrap(LOOPBACK_URL, 'b')}`
     expect(stripOsc8(wrapped)).toBe(`${HOSTED_URL}${LOOPBACK_URL}`)
   })
+
+  // P: a bare OSC-8 CLOSE (empty target) must never be treated as an OPEN — doing so lets the
+  // real URL sitting between two closes be captured as a throwaway "label" and erased entirely.
+  it('does not erase a URL sitting between two bare OSC-8 closes', () => {
+    const wrapped = `\x1b]8;;\x07 ${HOSTED_URL} \x1b]8;;\x07`
+    expect(stripOsc8(wrapped)).toContain(HOSTED_URL)
+  })
+
+  // MP: allowing an empty target to count as an open (`*?` instead of `+?`) reproduces exactly
+  // this collapse — the fix's own doc comment names it.
+  it('mutation proof: an empty-target-as-open regex would collapse the two-close case above to empty', () => {
+    // eslint-disable-next-line no-control-regex -- reproduces the pre-fix regex shape for the proof.
+    const preFixRegex = /\x1b\]8;;([^\x1b\x07]*?)(?:\x1b\\|\x07)[\s\S]*?\x1b\]8;;(?:\x1b\\|\x07)/g
+    const wrapped = `\x1b]8;;\x07 ${HOSTED_URL} \x1b]8;;\x07`
+    const preFixResult = wrapped.replace(preFixRegex, (_match, url: string) => url)
+    expect(preFixResult).toBe('') // ...the old shape erases the URL entirely...
+    expect(stripOsc8(wrapped)).not.toBe('') // ...the shipped fix does not.
+  })
 })
 
 describe('firstAuthorizeUrl', () => {
@@ -81,7 +104,10 @@ describe('firstAuthorizeUrl', () => {
 })
 
 describe('isRelayableAuthorizeUrl / assertRelayableAuthorizeUrl', () => {
-  it('accepts a URL whose own origin and redirect_uri are both platform.claude.com', () => {
+  // Delegates to `../../shared/claude-authorize-url-policy.ts`, whose own test file carries the
+  // full allow-list matrix and per-rejected-class mutation proofs — these stay as a thin
+  // integration check that the delegation actually happened.
+  it('accepts the real (claude.com, /cai/oauth/authorize, platform.claude.com redirect) shape', () => {
     expect(isRelayableAuthorizeUrl(HOSTED_URL)).toBe(true)
     expect(() => assertRelayableAuthorizeUrl(HOSTED_URL)).not.toThrow()
   })
@@ -103,7 +129,7 @@ describe('isRelayableAuthorizeUrl / assertRelayableAuthorizeUrl', () => {
   })
 
   // P1: an attacker-hosted origin with a well-formed, correct redirect_uri.
-  it('refuses a URL whose own origin is not platform.claude.com (P1)', () => {
+  it('refuses a URL whose own origin is not on the allow-list (P1)', () => {
     expect(isRelayableAuthorizeUrl(PHISHING_URL)).toBe(false)
   })
 
@@ -170,37 +196,82 @@ describe('firstRelayableAuthorizeUrl', () => {
     expect(firstRelayableAuthorizeUrl(`go here: ${HOSTED_URL} thanks`)).toBe(HOSTED_URL)
   })
 
-  // P3 / §5 "Printed URL only": a stream that also carries the loopback variant,
-  // printed FIRST, must still relay the hosted one — selection and validation
-  // are one operation, not "take the first match, then assert it".
+  // §2 / §5 "Printed URL only" (design rev 39): the relay decision scans every complete candidate
+  // in print order and relays the first RELAYABLE one. A non-relayable candidate ahead of the
+  // hosted URL — the `http://localhost:<port>/callback` browser-opener variant some builds also
+  // print, or any banner/docs link — is skipped, never refused on.
   it('relays the hosted URL even when a non-relayable loopback URL is printed first', () => {
     const stream = `browser opener: ${LOOPBACK_URL}\nprinted: ${HOSTED_URL}\n`
     expect(firstRelayableAuthorizeUrl(stream)).toBe(HOSTED_URL)
   })
 
-  // P8: an unrelated banner URL precedes the real authorize URL.
   it('skips an unrelated banner URL and relays the authorize URL that follows', () => {
     const stream = `Learn more at https://docs.claude.com/cli\n${HOSTED_URL}\n`
     expect(firstRelayableAuthorizeUrl(stream)).toBe(HOSTED_URL)
   })
 
-  // MP: "first match, then assert" (the pre-fix decomposition) would pick the
-  // loopback/banner URL here and throw instead of relaying the hosted one.
-  it('mutation proof: picking the first URL of any kind (not first relayable) fails both ordering cases', () => {
+  // MP (design §5): a selector that decides on the FIRST candidate — refusing the moment it is
+  // not relayable instead of scanning on — turns the loopback-then-hosted fixture into a refusal
+  // of a legitimate login. The shipped function scans; the inline mutant below does not.
+  it('mutation proof: deciding on the first candidate instead of the first relayable one would refuse the loopback-then-hosted stream', () => {
     const loopbackFirst = `browser opener: ${LOOPBACK_URL}\nprinted: ${HOSTED_URL}\n`
-    const bannerFirst = `Learn more at https://docs.claude.com/cli\n${HOSTED_URL}\n`
-    const naiveFirstOfAnyKind = (text: string): string | null => firstAuthorizeUrl(text)
-    expect(naiveFirstOfAnyKind(loopbackFirst)).not.toBe(HOSTED_URL)
-    expect(naiveFirstOfAnyKind(bannerFirst)).not.toBe(HOSTED_URL)
-    // ...while the fixed selection gets both right.
-    expect(firstRelayableAuthorizeUrl(loopbackFirst)).toBe(HOSTED_URL)
-    expect(firstRelayableAuthorizeUrl(bannerFirst)).toBe(HOSTED_URL)
+    const firstCandidate = firstAuthorizeUrl(loopbackFirst)
+    expect(firstCandidate).toBe(LOOPBACK_URL) // ...the mutant judges only this one...
+    expect(isRelayableAuthorizeUrl(firstCandidate!)).toBe(false) // ...and would refuse here...
+    expect(firstRelayableAuthorizeUrl(loopbackFirst)).toBe(HOSTED_URL) // ...the shipped scan relays.
   })
 
-  it('refuses when no candidate in the text is relayable', () => {
-    expect(() => firstRelayableAuthorizeUrl(`only this: ${LOOPBACK_URL}`)).toThrow()
+  it("refuses when the only candidate in the text is not relayable, naming that candidate's failing check", () => {
+    try {
+      firstRelayableAuthorizeUrl(`only this: ${LOOPBACK_URL}`)
+      expect.unreachable()
+    } catch (error) {
+      expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
+        'accounts.lane.login_url_unparsed'
+      )
+      const message = isClaudeLaneRefusal(error) ? error.message : ''
+      expect(message).toContain('localhost')
+      expect(message).not.toContain('never printed one')
+    }
+  })
+
+  // The refusal names the FIRST rejected candidate, never a later one, and never the query.
+  it('names the first rejected candidate when several non-relayable URLs were printed', () => {
+    try {
+      firstRelayableAuthorizeUrl(`${PHISHING_URL}\n${LOOPBACK_URL}\n`)
+      expect.unreachable()
+    } catch (error) {
+      const message = isClaudeLaneRefusal(error) ? error.message : ''
+      expect(message).toContain('evil.example.com')
+      expect(message).not.toContain('localhost')
+      expect(message).not.toContain('redirect_uri=')
+    }
+  })
+
+  // The relayed value is the WHATWG-normalized `.href`, not the raw matched text: a raw bidi
+  // control character sitting in the query string (invisible plumbing to every check here, since
+  // validation only looks at `redirect_uri`) must not survive into what a person reads before
+  // authenticating — `.href` percent-encodes it like any other non-ASCII byte.
+  it('percent-encodes a raw bidi-override character in the query string rather than relaying it literally', () => {
+    const withBidiOverride = `${HOSTED_URL}&x=‮evil`
+    const relayed = firstRelayableAuthorizeUrl(withBidiOverride)
+    expect(relayed).toBe(new URL(withBidiOverride).href)
+    expect(relayed).not.toContain('‮')
+    expect(relayed).toContain('%E2%80%AE')
+  })
+
+  // MP: relaying `match[0]` (the pre-fix shape) would hand back the raw text with the literal
+  // bidi-override byte still sitting in it, unchanged from what was printed.
+  it('mutation proof: relaying the raw matched text instead of the normalized href would keep the raw bidi override', () => {
+    const withBidiOverride = `${HOSTED_URL}&x=‮evil`
+    expect(withBidiOverride).toContain('‮') // ...the raw text the old shape would relay...
+    expect(firstRelayableAuthorizeUrl(withBidiOverride)).not.toContain('‮') // ...the fix does not.
+  })
+
+  it('refuses when no candidate is present in the text at all', () => {
     try {
       firstRelayableAuthorizeUrl('no url at all here')
+      expect.unreachable()
     } catch (error) {
       expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
         'accounts.lane.login_url_unparsed'
@@ -231,6 +302,47 @@ describe('createAuthorizeUrlAccumulator', () => {
     expect(acc.feed('in this stream')).toBeNull()
   })
 
+  // §2 "printed URL only" across chunks: a non-relayable candidate that arrives in an EARLIER
+  // chunk than the hosted URL is skipped, not refused on — `feed` keeps waiting, and relays the
+  // hosted URL when it lands.
+  it('keeps waiting past a non-relayable loopback URL and relays the hosted URL from a later chunk', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    expect(acc.feed(`browser opener: ${LOOPBACK_URL}\n`)).toBeNull()
+    expect(acc.feed(`printed: ${HOSTED_URL}\n`)).toBe(HOSTED_URL)
+  })
+
+  // The refusal for a stream that never carries a relayable URL is raised where the stream
+  // provably ends — `finish()`, which the session calls on the paste-prompt edge and on child
+  // exit — worded after the first rejected candidate, never as "never printed one".
+  it("refuses at finish() after only a non-relayable URL was fed, naming that URL's failing check", () => {
+    const acc = createAuthorizeUrlAccumulator()
+    expect(acc.feed(`browser opener: ${PHISHING_URL}\n`)).toBeNull()
+    try {
+      acc.finish()
+      expect.unreachable()
+    } catch (error) {
+      expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
+        'accounts.lane.login_url_unparsed'
+      )
+      const message = isClaudeLaneRefusal(error) ? error.message : ''
+      expect(message).toContain('evil.example.com')
+      expect(message).not.toContain('never printed one')
+      expect(message).not.toContain('redirect_uri=')
+    }
+  })
+
+  // MP (design §5): an accumulator that refuses on the first complete non-relayable candidate
+  // (the rev-38-era interim shape) turns the loopback-then-hosted stream into a refusal of a
+  // legitimate login.
+  it('mutation proof: refusing on the first complete candidate would reject the loopback-then-hosted stream', () => {
+    const firstChunk = `browser opener: ${LOOPBACK_URL}\n`
+    const mutantWouldRefuse = !isRelayableAuthorizeUrl(firstAuthorizeUrl(firstChunk)!)
+    expect(mutantWouldRefuse).toBe(true) // ...the mutant throws on this chunk alone...
+    const acc = createAuthorizeUrlAccumulator()
+    expect(acc.feed(firstChunk)).toBeNull() // ...the shipped accumulator waits...
+    expect(acc.feed(`printed: ${HOSTED_URL}\n`)).toBe(HOSTED_URL) // ...and relays the hosted URL.
+  })
+
   // MP: a naive per-chunk `firstRelayableAuthorizeUrl` call (no accumulation)
   // truncates the URL at the boundary and throws instead of waiting.
   it('mutation proof: feeding chunks straight into firstRelayableAuthorizeUrl truncates and refuses', () => {
@@ -255,6 +367,44 @@ describe('createAuthorizeUrlAccumulator', () => {
     expect(isClaudeLaneRefusal(thrown) ? thrown.code : null).toBe(
       'accounts.lane.login_url_unparsed'
     )
+    // The cap fired because the child printed MORE than the bound, not nothing — say so.
+    const message = isClaudeLaneRefusal(thrown) ? thrown.message : ''
+    expect(message).toContain('more text than Orca will hold')
+    expect(message).not.toContain('never printed one')
+  })
+
+  it('at the cap, a rejected candidate already seen is what the refusal names', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    let thrown: unknown
+    try {
+      acc.feed(`${PHISHING_URL}\n${'x'.repeat(8000)}\n`)
+    } catch (error) {
+      thrown = error
+    }
+    const message = isClaudeLaneRefusal(thrown) ? thrown.message : ''
+    expect(message).toContain('evil.example.com')
+    expect(message).not.toContain('more text than Orca will hold')
+  })
+
+  // A chunk that pushes the buffer past the cap can still carry a complete, decidable candidate
+  // (a chattier CLI's noise plus a fully-terminated good URL) — the cap must not refuse ahead of
+  // deciding on it, and the good URL must relay normally rather than being reported as never
+  // printed.
+  it('relays a good URL even when the noise ahead of it alone would exceed the cap', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    const fed = `${'x'.repeat(7990)}\n${HOSTED_URL}\n`
+    expect(acc.feed(fed)).toBe(HOSTED_URL)
+  })
+
+  // MP: checking the cap BEFORE deciding (the pre-fix order) discards this exact buffer and
+  // throws `login_url_unparsed` instead of relaying the good URL it plainly contains.
+  it('mutation proof: checking the cap before deciding would refuse the good-URL-after-noise case above', () => {
+    const buffer = `${'x'.repeat(7990)}\n${HOSTED_URL}\n`
+    expect(buffer.length).toBeGreaterThan(8000)
+    const preFixWouldRefuse = buffer.length > 8000 // the old shape's cap-first check
+    expect(preFixWouldRefuse).toBe(true) // ...the old shape discards before ever deciding...
+    const acc = createAuthorizeUrlAccumulator()
+    expect(acc.feed(buffer)).toBe(HOSTED_URL) // ...the shipped fix decides first and relays.
   })
 
   // MP: the pre-fix shape ("matchEndsAtBufferTail && buffer.length < MAX")

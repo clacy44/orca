@@ -19,7 +19,7 @@ import { attachLaneWireService } from './lane-wire-service'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
 import { readLaneAccountIndex } from '../claude-accounts/lane-account-index'
-import { INSTALLED_CLI_VERSION } from '../claude-accounts/lane-login-cli-version-gate'
+import { LAST_VERIFIED_CLI_VERSION } from '../claude-accounts/lane-login-cli-version-gate'
 import type { PrincipalGrantRow } from './principal-registry'
 import { PrincipalRegistry } from './principal-registry'
 import { authorizeHostConsent } from './principal-consent-authority'
@@ -66,7 +66,7 @@ const args = process.argv.slice(2)
 const configDir = process.env.CLAUDE_CONFIG_DIR
 
 if (args[0] === '--version') {
-  process.stdout.write('${INSTALLED_CLI_VERSION} (Claude Code)\\n', () => process.exit(0))
+  process.stdout.write('${LAST_VERIFIED_CLI_VERSION} (Claude Code)\\n', () => process.exit(0))
 } else if (args[0] === 'auth' && args[1] === 'status') {
   let email = null
   try {

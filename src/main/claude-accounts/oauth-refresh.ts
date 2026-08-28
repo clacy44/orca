@@ -2,8 +2,10 @@ import { net, session } from 'electron'
 import { ensureElectronProxyFromEnvironment } from '../network/proxy-settings'
 
 // Why: the OAuth client id and token endpoint are the public Claude Code
-// values, verified against the installed `claude` binary (2.1.248, last
-// reverified 2026-08-28) and the claude-swap reference tool. Orca owns the
+// values, verified against the installed `claude` binary (2.1.250, last
+// reverified 2026-08-28 — must never name a different build than
+// lane-login-cli-version-gate.ts's LAST_VERIFIED_CLI_VERSION) and the
+// claude-swap reference tool. Orca owns the
 // refresh so a single-use refresh token is rotated and persisted atomically,
 // instead of being scraped back after the CLI rotates it (the lossy path
 // that strands stale tokens).

@@ -41,6 +41,7 @@ import { isLaneWipePending } from './lane-wipe-pending'
 import type { LaneAuthState } from './lane-auth-state'
 import { LaneCredentialWriter } from './lane-credential-writer'
 import { captureLaneLogin, type LaneLoginCaptureResult } from './lane-login-capture'
+import { refusalForAbortedStart } from './lane-login-start-failure'
 
 export {
   LOGIN_TIMEOUT_MS,
@@ -139,6 +140,7 @@ export class LaneLoginSessionRegistry {
       promptEdgeWaiters: [],
       swept: false,
       ttlTimer: null,
+      ttlExpired: false,
       captureOncePromise: null,
       pendingSubmit: false
     }
@@ -165,8 +167,9 @@ export class LaneLoginSessionRegistry {
       const authorizationUrl = await this.spawnAndAwaitUrl(session)
       return { sessionId, authorizationUrl, expiresAt: session.expiresAt }
     } catch (error) {
+      const abortedAs = refusalForAbortedStart(this.sessions.get(sessionId), error)
       await this.cancel(sessionId)
-      throw error
+      throw abortedAs
     }
   }
 
@@ -391,6 +394,7 @@ export class LaneLoginSessionRegistry {
     if (!session || session.state === 'captured' || session.state === 'cancelled') {
       return
     }
+    session.ttlExpired = true
     void reapLoginSessionSilently(this.sessions, sessionId)
   }
 }

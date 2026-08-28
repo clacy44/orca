@@ -74,6 +74,18 @@ export function spawnLaneLoginChild(
           if (!sink.pasteReady) {
             sink.pasteReady = true
           }
+          // The paste prompt IS the CLI's own "I have finished printing the URL" signal (§2b): a
+          // child that reaches it without ever completing a URL candidate (prints only the paste
+          // prompt, or a still-unterminated fragment) must decide NOW, not park the caller for the
+          // full login timeout waiting for a candidate that will never arrive.
+          if (!urlSettled) {
+            urlSettled = true
+            try {
+              resolveUrl(urlAccumulator.finish())
+            } catch (error) {
+              rejectUrl(error)
+            }
+          }
           flush(sink.pasteReadyWaiters)
           flush(sink.promptEdgeWaiters)
         } else if (!promptNow) {

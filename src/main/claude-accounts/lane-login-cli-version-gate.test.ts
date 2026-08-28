@@ -27,14 +27,14 @@ describe('parseClaudeCliVersion', () => {
 })
 
 describe('isClaudeCliVersionSupported / assertClaudeCliVersionSupported', () => {
-  it('accepts the recorded floor and ceiling, inclusive', async () => {
-    const { isClaudeCliVersionSupported, MIN_TESTED_CLI_VERSION, INSTALLED_CLI_VERSION } =
+  it('accepts the recorded floor and the last-verified build', async () => {
+    const { isClaudeCliVersionSupported, MIN_TESTED_CLI_VERSION, LAST_VERIFIED_CLI_VERSION } =
       await import('./lane-login-cli-version-gate')
     expect(isClaudeCliVersionSupported(MIN_TESTED_CLI_VERSION)).toBe(true)
-    expect(isClaudeCliVersionSupported(INSTALLED_CLI_VERSION)).toBe(true)
+    expect(isClaudeCliVersionSupported(LAST_VERIFIED_CLI_VERSION)).toBe(true)
   })
 
-  it('accepts a version strictly between the floor and ceiling', async () => {
+  it('accepts a version strictly between the floor and the last-verified build', async () => {
     const { isClaudeCliVersionSupported } = await import('./lane-login-cli-version-gate')
     expect(isClaudeCliVersionSupported('2.1.200 (Claude Code)')).toBe(true)
   })
@@ -47,10 +47,35 @@ describe('isClaudeCliVersionSupported / assertClaudeCliVersionSupported', () => 
     expect(() => assertClaudeCliVersionSupported('2.1.176')).toThrow()
   })
 
-  it('refuses a version above the ceiling', async () => {
+  // No ceiling any more: a same-major version above LAST_VERIFIED_CLI_VERSION proceeds (with an
+  // advisory log — see the `ceiling advisory` describe block below), it is not refused.
+  it('accepts a same-major version ABOVE the last-verified build — advisory, not a ceiling', async () => {
     const { isClaudeCliVersionSupported } = await import('./lane-login-cli-version-gate')
-    expect(isClaudeCliVersionSupported('2.1.249')).toBe(false)
+    expect(isClaudeCliVersionSupported('2.1.999')).toBe(true)
+    expect(isClaudeCliVersionSupported('2.9.0')).toBe(true)
+  })
+
+  // A different major IS refused, regardless of whether it numerically exceeds the floor.
+  it('refuses a different major version even when it numerically exceeds the floor', async () => {
+    const { isClaudeCliVersionSupported } = await import('./lane-login-cli-version-gate')
     expect(isClaudeCliVersionSupported('3.0.0')).toBe(false)
+    expect(isClaudeCliVersionSupported('1.9.999')).toBe(false)
+  })
+
+  // MP: a "no ceiling" gate that forgot to also compare `major` (patch/minor-only, or a bare
+  // `parsed >= min` numeric compare with major treated as just another digit place after an
+  // overflow) would wrongly accept 3.0.0 since it is not literally BELOW the floor.
+  it('mutation proof: an any-major "at or above the floor" check would wrongly accept 3.0.0', async () => {
+    const { parseClaudeCliVersion, isClaudeCliVersionSupported } =
+      await import('./lane-login-cli-version-gate')
+    const tooNewMajor = parseClaudeCliVersion('3.0.0')!
+    const min = parseClaudeCliVersion('2.1.177')!
+    const anyMajorAtOrAboveFloorWouldAccept =
+      tooNewMajor.major - min.major ||
+      tooNewMajor.minor - min.minor ||
+      tooNewMajor.patch - min.patch
+    expect(anyMajorAtOrAboveFloorWouldAccept >= 0).toBe(true) // ...numerically "at or above"...
+    expect(isClaudeCliVersionSupported('3.0.0')).toBe(false) // ...the shipped guard still refuses it.
   })
 
   // Fail-closed: unparsable output is unsupported, never "assume newest is fine".
@@ -73,17 +98,54 @@ describe('isClaudeCliVersionSupported / assertClaudeCliVersionSupported', () => 
       expect(isClaudeLaneRefusal(error) ? error.message.length : 0).toBeGreaterThan(40)
     }
   })
+})
 
-  // MP: a range check that only compares patch numbers (ignoring major/minor)
-  // would treat 3.0.0 and 1.9.999 as "close enough" to the recorded range.
-  it('mutation proof: a patch-only comparison would wrongly accept an out-of-range major/minor', async () => {
-    const { parseClaudeCliVersion } = await import('./lane-login-cli-version-gate')
-    const tooNew = parseClaudeCliVersion('3.0.0')!
-    const max = parseClaudeCliVersion('2.1.248')!
-    const patchOnlyWouldAccept = tooNew.patch <= max.patch
-    expect(patchOnlyWouldAccept).toBe(true) // ...the naive comparison is fooled...
-    const { isClaudeCliVersionSupported } = await import('./lane-login-cli-version-gate')
-    expect(isClaudeCliVersionSupported('3.0.0')).toBe(false) // ...the shipped guard is not.
+describe('ceiling advisory — assertClaudeCliVersionSupported logs, never refuses, on a newer build', () => {
+  it('logs exactly one console.info line, worded with the observed and last-verified versions', async () => {
+    vi.resetModules()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { assertClaudeCliVersionSupported, LAST_VERIFIED_CLI_VERSION } =
+        await import('./lane-login-cli-version-gate')
+      expect(() => assertClaudeCliVersionSupported('2.9.0 (Claude Code)')).not.toThrow()
+      expect(infoSpy).toHaveBeenCalledTimes(1)
+      const line = infoSpy.mock.calls[0][0] as string
+      expect(line).toContain('2.9.0')
+      expect(line).toContain(LAST_VERIFIED_CLI_VERSION)
+      expect(line).toContain('newer than the last verified')
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  // Once per PROCESS, not once per call: a second, later assert (a second login attempt) must
+  // not re-log.
+  it('logs only once across repeated calls in the same module instance', async () => {
+    vi.resetModules()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { assertClaudeCliVersionSupported } = await import('./lane-login-cli-version-gate')
+      assertClaudeCliVersionSupported('2.9.0 (Claude Code)')
+      assertClaudeCliVersionSupported('2.9.1 (Claude Code)')
+      assertClaudeCliVersionSupported('2.9.2 (Claude Code)')
+      expect(infoSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('does not log for a version at or below the last-verified build', async () => {
+    vi.resetModules()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { assertClaudeCliVersionSupported, LAST_VERIFIED_CLI_VERSION, MIN_TESTED_CLI_VERSION } =
+        await import('./lane-login-cli-version-gate')
+      assertClaudeCliVersionSupported(LAST_VERIFIED_CLI_VERSION)
+      assertClaudeCliVersionSupported(MIN_TESTED_CLI_VERSION)
+      expect(infoSpy).not.toHaveBeenCalled()
+    } finally {
+      infoSpy.mockRestore()
+    }
   })
 })
 

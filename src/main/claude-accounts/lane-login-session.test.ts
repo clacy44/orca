@@ -702,4 +702,143 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
       fsFailureMocks.failRmSyncWhen = null
     }
   })
+
+  describe('§2b prompt refusal — a non-relayable authorize URL rejects loginStart promptly', () => {
+    // The real 2.1.250 shape (§4): `claude.com` + `/cai/oauth/authorize`, a `platform.claude.com`
+    // redirect — observed via a live, throwaway `claude auth login --claudeai` run (killed before
+    // completion, never submitted). Negative control for the timing test below: this shape must
+    // still relay normally, not be swept up by the same refusal.
+    const REAL_CLI_SHAPE_URL = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(
+      'https://platform.claude.com/oauth/code/callback'
+    )}`
+
+    // Design rev 39 §2: a non-relayable URL is skipped, not refused on — the refusal is raised on
+    // the paste-prompt edge (the CLI's own "done printing the URL" signal) when nothing relayable
+    // preceded it. A child that prints only the decoy and then STALLS (no prompt, no exit) is
+    // bounded by LOGIN_TIMEOUT_MS and surfaces login_session_expired, never a silent hang.
+    it('loginStart rejects login_url_unparsed promptly when a fake CLI prints an evil.example.com authorize URL and then the paste prompt — settles before a 500ms timer, kills the child, sweeps its dir', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      const authDir = spawnMocks.spawnClaudeCliChildProcess.mock.calls.findLast(
+        (call) => call[0][0] === 'auth' && call[0][1] === 'login'
+      )![1].windowsPath
+      const laneAccountDir = dirname(authDir)
+      expect(existsSync(laneAccountDir)).toBe(true)
+
+      // Swallow the rejection on this branch of the race so it isn't reported as unhandled —
+      // `startPromise` itself is still asserted on below.
+      const settledWithin500ms = Promise.race([
+        startPromise.then(
+          () => 'resolved' as const,
+          () => 'rejected' as const
+        ),
+        new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 500))
+      ])
+
+      const evilUrl = `https://evil.example.com/oauth/authorize?redirect_uri=${encodeURIComponent(
+        'https://platform.claude.com/oauth/code/callback'
+      )}`
+      loginChildren[0].feed(`Open this link:\n${evilUrl}\n${PASTE_PROMPT}`)
+
+      expect(await settledWithin500ms).toBe('rejected')
+      await expect(startPromise).rejects.toMatchObject({ code: 'accounts.lane.login_url_unparsed' })
+      expect(loginChildren[0].handle.kill).toHaveBeenCalledTimes(1)
+      expect(existsSync(laneAccountDir)).toBe(false)
+    })
+
+    // §2 / §5 "printed URL only": the loopback browser-opener variant printed AHEAD of the hosted
+    // URL must not refuse the login — the hosted URL that follows is relayed (mutation proof:
+    // deciding on the first candidate turns this red).
+    it('loginStart relays the hosted URL when a non-relayable loopback variant is printed first', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      const loopbackUrl = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(
+        'http://localhost:54231/callback'
+      )}`
+      loginChildren[0].feed(`browser opener: ${loopbackUrl}\n`)
+      loginChildren[0].feed(`Open this link:\n${REAL_CLI_SHAPE_URL}\n${PASTE_PROMPT}`)
+
+      const { authorizationUrl } = await startPromise
+      expect(authorizationUrl).toBe(REAL_CLI_SHAPE_URL)
+      expect(loginChildren[0].handle.kill).not.toHaveBeenCalled()
+    })
+
+    // A decoy-only child that never reaches the prompt is bounded by the session timeout, not
+    // parked forever: the TTL arm reaps it with login_session_expired.
+    it('loginStart on a child that prints only a non-relayable URL and then stalls ends in login_session_expired at the TTL, not a hang', async () => {
+      vi.useFakeTimers()
+      try {
+        const registry = makeRegistry()
+        const startPromise = registry.start({
+          laneId: 'lane-1',
+          laneDir,
+          expectedEmail: 'a@x.com',
+          owner: HOST_INLINE
+        })
+        const settled = startPromise.then(
+          () => 'resolved' as const,
+          (error: unknown) => (isClaudeLaneRefusal(error) ? error.code : 'other')
+        )
+        const evilUrl = `https://evil.example.com/oauth/authorize?redirect_uri=${encodeURIComponent(
+          'https://platform.claude.com/oauth/code/callback'
+        )}`
+        loginChildren[0].feed(`Open this link:\n${evilUrl}\n`)
+        await vi.advanceTimersByTimeAsync(LOGIN_TIMEOUT_MS + 1)
+        expect(await settled).toBe('accounts.lane.login_session_expired')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('negative control: the real 2.1.250 URL shape relays normally, not refused', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      loginChildren[0].feed(`Open this link:\n${REAL_CLI_SHAPE_URL}\n${PASTE_PROMPT}`)
+
+      const { authorizationUrl } = await startPromise
+      expect(authorizationUrl).toBe(REAL_CLI_SHAPE_URL)
+    })
+
+    // Regression: a child that reaches the paste-code prompt without ever printing a relayable
+    // URL (or any URL at all) must refuse promptly off the prompt edge — the prompt IS the CLI's
+    // own "done printing the URL" signal — never park the caller for the full LOGIN_TIMEOUT_MS
+    // waiting on a candidate that will never arrive.
+    it('loginStart rejects login_url_unparsed promptly when the child reaches the paste prompt having printed no URL at all — settles before a 500ms timer', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+
+      const settledWithin500ms = Promise.race([
+        startPromise.then(
+          () => 'resolved' as const,
+          () => 'rejected' as const
+        ),
+        new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 500))
+      ])
+
+      loginChildren[0].feed(`Opening browser to sign in...\n${PASTE_PROMPT}`)
+
+      expect(await settledWithin500ms).toBe('rejected')
+      await expect(startPromise).rejects.toMatchObject({ code: 'accounts.lane.login_url_unparsed' })
+    })
+  })
 })
