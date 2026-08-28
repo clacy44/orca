@@ -181,11 +181,12 @@ on `Public`/`Domain` or unscoped.
 Before anyone opens a lane-scoped terminal on this box, run the day-one
 `orca lane` sequence once, as the owner, at the shell — this box is
 headless (`orca serve`, above), so there is no desktop AccountsPane to
-drive the equivalent consent writes from. **As of rev 31, `--pair-name`
-at serve start is no longer part of this sequence** — day-one setup now
-starts with `orca lane invite`, a named per-person grant minted over the
-same host-only consent RPC (`accounts.lane.mintInvite`) the rest of the
-sequence uses:
+drive the equivalent consent writes from. **As of rev 32, a lane's
+credential is no longer pushed from a desktop.** Each lane is signed in
+by running `claude auth login` *inside the lane*, and the sequence below
+ends with a login rather than a "Delegate" action — that action, and the
+`accounts.lane.push` verb behind it, no longer exist
+(`docs/reference/agent-identity-s9-design.md` §2b, §6's S9-L3).
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane create-person --name "<owner>"
@@ -201,6 +202,8 @@ sequence uses:
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane designate --person "<other developer>" --device <other-desktop>
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<owner>" --accept-unverified-platform
 & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane provision --person "<other developer>" --accept-unverified-platform
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane login --person "<owner>" --email <owner-email>
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.exe" lane login --person "<other developer>" --email <other-email>
 ```
 
 create-person twice, invite each person and redeem the printed link on
@@ -209,26 +212,76 @@ mobile-scope link outright, so `--scope runtime`, the default, is what
 this flow needs; `--ttl <hours>` can only shorten the invite's 24h
 ceiling, never extend it, and at most 16 (`MAX_LIVE_MINTED_GRANTS`) of
 these invites can be pending across the host at once), bind each
-now-redeemed device, designate each person's desktop as their lane's
-pusher, then provision both lanes — in that order, since a grant must be
-redeemed before it can be bound, and designate is required before
-provision will succeed (`accounts.lane.no_pusher_designated` otherwise).
-`provision` carries `--accept-unverified-platform` here because Windows
-is a gated platform until the shared box has passed the §9 live-box
-probes (steps 12 and 13 — DACL read-back, credential-store isolation);
-without the flag, provisioning refuses
-`accounts.lane.provisioning_platform_gated`. The override is recorded,
-not silent: it writes `platformAcceptance: 'unverified-win32'` onto
-that lane's `provision` audit row, visible back via `orca lane audit`
-as `platform=unverified-win32`. Once steps 12–13 have actually passed
-on this box, drop the flag — re-provisioning is not required, but a
-fresh provision no longer needs it either. The one remaining step,
-delegating each person's account onto this box, has no CLI verb and is
-done from each person's own desktop Accounts pane instead, via the
-"Delegate" action under "Load an account onto a host." Full verb list,
-refusal codes and rationale: `docs/reference/agent-identity-s9-design.md`
-§9 ("Day-one setup"), §10 item 39, §10(f) (the 2026-08-24 release audit
-that added the override), and §10's rev-31 note (the invite verb).
+now-redeemed device, designate each person's device as their lane's
+**login device** — the one grant that may start a login for that lane
+and see the authorization URL, not a pusher; a phone is a legitimate
+tick here, since a login moves no secret — then provision both lanes,
+then sign each lane in. Order matters throughout: a grant must be
+redeemed before it can be bound, designate is required before provision
+will succeed, and provision is required before login will succeed
+(`accounts.lane.no_login_device_designated` otherwise, at either the
+provision or the login step). `provision` carries
+`--accept-unverified-platform` here because Windows is a gated platform
+until the shared box has passed the §9 live-box probes (steps 12 and 13
+— DACL read-back, credential-store isolation); without the flag,
+provisioning refuses `accounts.lane.provisioning_platform_gated`. The
+override is recorded, not silent: it writes
+`platformAcceptance: 'unverified-win32'` onto that lane's `provision`
+audit row, visible back via `orca lane audit` as
+`platform=unverified-win32`. Once steps 12–13 have actually passed on
+this box, drop the flag — re-provisioning is not required, but a fresh
+provision no longer needs it either.
+
+**Signing a lane in.** `orca lane login --person <name> --email
+<expected-account-email>` is required, not optional — an inline login
+without `--email` is refused before a session is even started, because
+an optional expectation would make the identity check (I6) skippable on
+exactly the path this runbook makes mandatory. Run at the host's own
+shell it starts a login session inline, prints an authorization URL, and
+waits for a pasted code — exactly as `orca account add` already does.
+From a paired desktop instead of the box's own shell: open the host row
+in the desktop app, choose **"Log in to an account,"** complete the
+printed URL in any browser, and paste the code back into the same
+dialog — only that person's **designated** device may start this, which
+is what the `designate` step above set up. *Pass:* `orca lane status`
+shows that lane `loaded`, with the account you named. Authenticating as
+a different account than the one named refuses
+`accounts.lane.login_identity_mismatch` and sweeps the half-written
+login — that is the identity check working, not a setup failure.
+
+**Managing logins already in a lane.** `orca lane accounts --person
+<name>` lists every login the lane currently holds (up to eight,
+`MAX_LANE_LOGINS`); `orca lane switch` — `orca lane use --person <name>
+--account <id>` — moves the lane's **active** credential among logins it
+already holds, with no browser round-trip, no network call and no new
+person involved, because it is a local file rewrite rather than a login;
+`orca lane logout --person <name>` ends every login the lane holds on
+this box (`.credentials.json`, the `.claude.json` account block, and
+every stored login directory) and runs `claude auth logout` inside the
+lane first.
+
+**Three invariants worth stating plainly, because the push model did not
+have them.** The same Claude account can be logged in locally on
+someone's own machine *and* on this host's lane at once — they are two
+independent OAuth grants with two independent refresh-token chains, and
+neither can revoke or rotate the other. Each lane keeps its own login
+until an explicit `logout`, a revoke of the last grant bound to that
+person, or a `deprovision` of the lane — a disconnect, an idle timeout,
+or restarting Orca on this box never signs a lane out. And there is no
+local sign-out of any kind: nothing this runbook does ever touches the
+account on anyone's own laptop, because a lane's login lives entirely
+inside the lane's own credential store.
+
+All of the above is gated behind the `agent.identity-lanes.v2` runtime
+capability. A client that predates it — or a v1 host — cannot run this
+sequence at all; the desktop instead shows "this host needs updating for
+per-lane sign-in" rather than falling back to the deleted push flow.
+
+Full verb list, refusal codes and rationale:
+`docs/reference/agent-identity-s9-design.md` §2b–§2f, §3, §9 ("Day-one
+setup"), §10 item 39, §10(f) (the 2026-08-24 release audit that added
+the override), §10's rev-31 note (the invite verb), and §10(g) (the
+rev 32 re-basing this section now reflects).
 
 ## Auto-update
 
