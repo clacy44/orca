@@ -10739,28 +10739,16 @@
             }
           }
         },
-        "AccountLaneLeaseRow": {
-          "unnamedAccount": "Delegated account",
-          "nameLabel": "Friendly name for this account",
-          "saveName": "Save name",
-          "cancelName": "Cancel",
-          "editName": "Rename account",
-          "delegatedTo": "On {{value0}} for {{value1}} · since {{value2}}",
-          "release": "Release"
-        },
         "AccountLaneStatusSection": {
           "loaded": "Loaded",
           "absent": "Absent",
           "reauth": "Reauth required",
           "restart": "Restart required",
-          "noPush": "No push received from {{value0}} yet — re-check the designated device.",
+          "noLogin": "Lane designated to {{value0}}; no login completed yet.",
           "writeFailed": "Lane update failed.",
           "title": "Per-person credential lanes",
-          "operatingRule": "One pusher, one puller: while an account is loaded on a shared host, this desktop will not start a local terminal under it. Release it here to use it locally again.",
-          "leasesTitle": "Accounts you delegated",
-          "delegateTitle": "Load an account onto a host",
-          "delegateAccountPlaceholder": "Choose account…",
-          "delegateButton": "Delegate",
+          "operatingRule": "Each lane holds its own Claude sign-in, independent of any account on this desktop.",
+          "remoteTitle": "Sign a remote lane in",
           "refreshHost": "Refresh",
           "checking": "Checking…",
           "unreachable": "{{value0}} is disconnected — reconnect it to check for a lane.",

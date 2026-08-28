@@ -142,10 +142,10 @@ describe('mobile RPC allowlist', () => {
     ).toEqual([])
   })
 
-  // S9 §2l: a phone can never push. `assertDelegatedPusher` refuses a non-designated grant too,
-  // so this is the outer of the two gates — the one that keeps a credential-bearing lane method
-  // from ever reaching dispatch on a mobile-scoped token.
-  it('does not grant mobile credentials any credential-bearing lane method', () => {
+  // Rev 32 (S9-L3, §10(g)) deletes push/pullRotated/clear/setDelegableAccounts/requestSwitch with
+  // the push model; this pins that none of them ever comes back onto the mobile-scoped allowlist,
+  // and that the host-only `status` verb stays off it too.
+  it('does not grant mobile credentials any credential-bearing or host-only lane method', () => {
     const allowed = mobileRpcAllowlist()
     expect(
       [
@@ -153,6 +153,7 @@ describe('mobile RPC allowlist', () => {
         'accounts.lane.pullRotated',
         'accounts.lane.clear',
         'accounts.lane.setDelegableAccounts',
+        'accounts.lane.requestSwitch',
         'accounts.lane.status'
       ].filter((method) => allowed.has(method))
     ).toEqual([])
@@ -173,12 +174,12 @@ describe('mobile RPC allowlist', () => {
     const allowed = mobileRpcAllowlist()
     expect(
       [
-        'accounts.lane.requestSwitch',
+        'accounts.lane.selectAccount',
         'accounts.lane.statusSubscribe',
         'accounts.lane.statusUnsubscribe'
       ].filter((method) => allowed.has(method))
     ).toEqual([
-      'accounts.lane.requestSwitch',
+      'accounts.lane.selectAccount',
       'accounts.lane.statusSubscribe',
       'accounts.lane.statusUnsubscribe'
     ])

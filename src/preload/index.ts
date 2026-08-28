@@ -35,11 +35,8 @@ import {
 } from '../shared/principal-consent-ipc'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
-  PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
   PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
-  PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
-  PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
 } from '../shared/principal-lane-status-ipc'
 import {
@@ -1373,8 +1370,8 @@ const api = {
     }
   } satisfies PreloadApi['principalConsent'],
 
-  // Why beside principalConsent: THIS desktop's own principal-lane residency + delegation leases,
-  // host-only IPC for the AccountsPane section (S9 §2e/§2h).
+  // Why beside principalConsent: THIS desktop's own principal-lane residency + remote-host
+  // discoverability, host-only IPC for the AccountsPane section (S9 §2e/§2h, rev 32).
   principalLaneStatus: {
     get: () => ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_GET_CHANNEL),
     onChanged: (callback: (snapshot: PrincipalLaneStatusSnapshot) => void): (() => void) => {
@@ -1385,12 +1382,6 @@ const api = {
       ipcRenderer.on(PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL, listener)
       return () => ipcRenderer.removeListener(PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL, listener)
     },
-    releaseLease: (accountId: string) =>
-      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL, { accountId }),
-    renameLease: (accountId: string, friendlyName: string | null) =>
-      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_RENAME_CHANNEL, { accountId, friendlyName }),
-    delegateAccountToHost: (accountId: string, environmentId: string) =>
-      ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL, { accountId, environmentId }),
     refreshHost: (environmentId: string) =>
       ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL, { environmentId })
   } satisfies PreloadApi['principalLaneStatus'],

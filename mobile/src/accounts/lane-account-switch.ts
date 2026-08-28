@@ -3,8 +3,9 @@
  * `pending` state, no lane-status subscription to learn the outcome. `accounts.lane.selectAccount`
  * is a local file rewrite on the host and completes synchronously.
  *
- * Replaces `resolveClaudeSwitchCall`'s role for the v2 model (`lane-delegated-switch-request.ts` is
- * left in place — it still routes v1 hosts correctly — until S9-L3 deletes the push model outright).
+ * Replaces `resolveClaudeSwitchCall`'s role for the v2 model — S9-L3 deletes the push model and the
+ * v1 routing module (`lane-delegated-switch-request.ts`) outright; `accounts.tsx` now wires only
+ * this one.
  */
 export const AGENT_IDENTITY_LANES_V2_CAPABILITY = 'agent.identity-lanes.v2'
 

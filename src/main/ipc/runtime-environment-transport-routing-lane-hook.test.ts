@@ -9,12 +9,12 @@ import type * as remoteRuntimeClientModule from '../../shared/remote-runtime-cli
 
 // Release-audit follow-up (B3): T1's caller scan only proves the trigger line exists in source,
 // not that it actually fires. This proves the production ok-status path calls it.
-const { notifyLaneDelegationHostReachableMock } = vi.hoisted(() => ({
-  notifyLaneDelegationHostReachableMock: vi.fn()
+const { notifyLaneLoginHostReachableMock } = vi.hoisted(() => ({
+  notifyLaneLoginHostReachableMock: vi.fn()
 }))
 
-vi.mock('../claude-accounts/lane-delegation-desktop-service', () => ({
-  notifyLaneDelegationHostReachable: notifyLaneDelegationHostReachableMock
+vi.mock('../claude-accounts/lane-login-desktop-service', () => ({
+  notifyLaneLoginHostReachable: notifyLaneLoginHostReachableMock
 }))
 
 const { sendRemoteRuntimeRequestMock } = vi.hoisted(() => ({
@@ -48,7 +48,7 @@ function seedEnvironment(): string {
 beforeEach(() => {
   userDataPath = mkdtempSync(join(tmpdir(), 'orca-lane-hook-'))
   sendRemoteRuntimeRequestMock.mockReset()
-  notifyLaneDelegationHostReachableMock.mockReset()
+  notifyLaneLoginHostReachableMock.mockReset()
 })
 
 afterEach(() => {
@@ -67,11 +67,11 @@ describe('lane delegation reachable trigger', () => {
     })
 
     await getRuntimeEnvironmentStatus(userDataPath, id, 500)
-    expect(notifyLaneDelegationHostReachableMock).toHaveBeenCalledWith(id)
+    expect(notifyLaneLoginHostReachableMock).toHaveBeenCalledWith(id)
 
-    notifyLaneDelegationHostReachableMock.mockClear()
+    notifyLaneLoginHostReachableMock.mockClear()
     sendRemoteRuntimeRequestMock.mockRejectedValueOnce(new Error('connect failed'))
     await getRuntimeEnvironmentStatus(userDataPath, id, 500)
-    expect(notifyLaneDelegationHostReachableMock).not.toHaveBeenCalled()
+    expect(notifyLaneLoginHostReachableMock).not.toHaveBeenCalled()
   })
 })

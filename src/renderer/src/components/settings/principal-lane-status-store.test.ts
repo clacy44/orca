@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PrincipalLaneStatusSnapshot } from '../../../../shared/principal-lane-status-ipc'
 import {
-  getDelegationLeases,
   getPrincipalLaneStatus,
   getPrincipalLaneStatusSnapshot,
   resetPrincipalLaneStatusStoreForTest,
@@ -16,18 +15,6 @@ function snapshot(
     lanes: [
       { principalId: 'prin-1', displayName: 'Ana', delegatedGrantId: 'dev-1', laneState: 'loaded' }
     ],
-    delegationLeases: [
-      {
-        accountId: 'acct-1',
-        accountUuid: null,
-        hostId: 'host-1',
-        principalId: 'prin-1',
-        delegatedGrantId: 'dev-1',
-        since: 1,
-        expiresAt: null
-      }
-    ],
-    delegableHosts: [],
     remoteHosts: [],
     ...overrides
   }
@@ -42,21 +29,14 @@ describe('principal lane status store', () => {
   })
 
   it('starts empty so a section with no lane host renders nothing', () => {
-    expect(getPrincipalLaneStatusSnapshot()).toEqual({
-      lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
-      remoteHosts: []
-    })
+    expect(getPrincipalLaneStatusSnapshot()).toEqual({ lanes: [], remoteHosts: [] })
     expect(getPrincipalLaneStatus('prin-1')).toBeNull()
-    expect(getDelegationLeases()).toEqual([])
   })
 
-  it('exposes a provisioned lane and this desktop leases after a snapshot lands', () => {
+  it('exposes a provisioned lane after a snapshot lands', () => {
     setPrincipalLaneStatusSnapshot(snapshot())
     expect(getPrincipalLaneStatus('prin-1')?.laneState).toBe('loaded')
     expect(getPrincipalLaneStatus('prin-absent')).toBeNull()
-    expect(getDelegationLeases()).toHaveLength(1)
   })
 
   it('hydrates from get and keeps fresh through onChanged', async () => {
@@ -84,12 +64,7 @@ describe('principal lane status store', () => {
     expect(getPrincipalLaneStatus('prin-1')?.laneState).toBe('absent')
 
     stop()
-    expect(getPrincipalLaneStatusSnapshot()).toEqual({
-      lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
-      remoteHosts: []
-    })
+    expect(getPrincipalLaneStatusSnapshot()).toEqual({ lanes: [], remoteHosts: [] })
   })
 
   it('lets a republish that beats the initial read win', async () => {

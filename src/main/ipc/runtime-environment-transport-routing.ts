@@ -27,7 +27,7 @@ import {
   resetSharedControlSupport,
   supportsSharedControl
 } from './runtime-environment-shared-control-support'
-import { notifyLaneDelegationHostReachable } from '../claude-accounts/lane-delegation-desktop-service'
+import { notifyLaneLoginHostReachable } from '../claude-accounts/lane-login-desktop-service'
 
 const DEFAULT_REMOTE_RUNTIME_TIMEOUT_MS = 15_000
 
@@ -76,7 +76,7 @@ export async function getRuntimeEnvironmentStatus(
     // Why here: this is the one point every reconnect passes through — the explicit
     // `runtimeEnvironments:connect` handler and the renderer's status polling both land here
     // (release-audit B3). The service lazily creates its client and connects it.
-    notifyLaneDelegationHostReachable(environment.id)
+    notifyLaneLoginHostReachable(environment.id)
   }
   return attachRemoteControlDiagnostics(
     withTailscaleHintForResponse(response, pairing.endpoint),

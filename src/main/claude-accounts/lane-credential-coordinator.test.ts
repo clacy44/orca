@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
 import { LaneCredentialCoordinator } from './lane-credential-coordinator'
 import {
   SHARED_CLAUDE_LANE_KEY,
@@ -23,21 +22,10 @@ const credentials = (refreshToken: string): string =>
 describe('the lane sync trigger 2 arm', () => {
   let userData = ''
   let lanesRoot = ''
-  const rows: ClaudeLaneCredentialWatermark[] = []
   const spawned: string[] = []
 
   const coordinator = (): LaneCredentialCoordinator =>
-    new LaneCredentialCoordinator({
-      persistence: {
-        getClaudeLaneCredentialWatermarks: () => rows.slice(),
-        setClaudeLaneCredentialWatermarks: (next) => {
-          rows.length = 0
-          rows.push(...next)
-        }
-      },
-      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
-      laneOptions: { lanesRoot, platform: 'linux' }
-    })
+    new LaneCredentialCoordinator({ laneOptions: { lanesRoot, platform: 'linux' } })
 
   const spawn = (ptyId: string, laneId: string | null): void => {
     markClaudePtySpawned(ptyId, laneId)
@@ -47,7 +35,6 @@ describe('the lane sync trigger 2 arm', () => {
   beforeEach(() => {
     userData = mkdtempSync(join(tmpdir(), 'orca-lane-tick-'))
     lanesRoot = join(userData, 'claude-lanes')
-    rows.length = 0
     for (const laneId of [LANE_A, LANE_B]) {
       provisionPrincipalLane(laneId, { lanesRoot, platform: 'linux' })
       writeFileSync(join(lanesRoot, laneId, '.credentials.json'), credentials(`rt-${laneId}`))
@@ -80,8 +67,8 @@ describe('the lane sync trigger 2 arm', () => {
     expect(outcomes.map((outcome) => [outcome.laneId, outcome.trigger])).toEqual([
       [LANE_A, 'rate-limit-tick']
     ])
-    // The watermark is the observable half: lane B's was never read, so it has no row.
-    expect(rows.map((row) => row.laneId)).toEqual([LANE_A])
+    // Lane B was never a live-pty lane, so its file was never read on this tick.
+    expect(outcomes[0]?.credentialState?.identity).toBeDefined()
   })
 
   it('syncs nothing when no lane holds a live claude', async () => {
@@ -91,7 +78,6 @@ describe('the lane sync trigger 2 arm', () => {
     // Negative control: a shared-lane claude is not a lane tick, and a lane with no live pty is
     // left alone until its own launch syncs it.
     expect(await lanes.syncLanesWithLivePtys()).toEqual([])
-    expect(rows).toEqual([])
   })
 })
 
@@ -102,25 +88,13 @@ describe('the lane sync trigger 2 arm', () => {
 describe('the usage attribution post-step', () => {
   let userData = ''
   let lanesRoot = ''
-  const rows: ClaudeLaneCredentialWatermark[] = []
 
   const coordinator = (): LaneCredentialCoordinator =>
-    new LaneCredentialCoordinator({
-      persistence: {
-        getClaudeLaneCredentialWatermarks: () => rows.slice(),
-        setClaudeLaneCredentialWatermarks: (next) => {
-          rows.length = 0
-          rows.push(...next)
-        }
-      },
-      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
-      laneOptions: { lanesRoot, platform: 'linux' }
-    })
+    new LaneCredentialCoordinator({ laneOptions: { lanesRoot, platform: 'linux' } })
 
   beforeEach(() => {
     userData = mkdtempSync(join(tmpdir(), 'orca-lane-attribution-'))
     lanesRoot = join(userData, 'claude-lanes')
-    rows.length = 0
     provisionPrincipalLane(LANE_A, { lanesRoot, platform: 'linux' })
     // Far-future expiry: an expiring blob makes the sync try to ROTATE, which is not what these
     // cases are about.

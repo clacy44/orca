@@ -5,7 +5,6 @@
  * so a bare code — or an untyped throw — reaches the person as nothing at all.
  */
 export const CLAUDE_LANE_REFUSAL_CODES = [
-  'accounts.lane.no_pusher_designated',
   'accounts.lane.grant_unknown',
   'accounts.lane.grant_not_bound',
   'accounts.lane.grant_not_per_person',
@@ -14,21 +13,9 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.principal_unknown',
   'accounts.lane.principal_id_invalid',
   'accounts.lane.display_name_invalid',
-  'accounts.lane.push_stale',
-  'accounts.lane.push_malformed',
-  'accounts.lane.push_not_delegated',
   'accounts.lane.not_provisioned',
   'accounts.lane.caller_unidentified',
-  'accounts.lane.delegable_account_unknown',
-  'accounts.lane.delegable_list_invalid',
-  'accounts.lane.desktop_unavailable',
-  'accounts.lane.switch_timed_out',
-  'accounts.lane.switch_lane_cleared',
   'accounts.selection_out_of_scope',
-  'accounts.lane.push_write_failed',
-  'accounts.lane.push_write_locked',
-  'accounts.lane.account_resident_elsewhere',
-  'accounts.lane.residency_unverifiable',
   'accounts.lane.link_fingerprint_unbindable',
   'accounts.lane.provision_dacl_unverified',
   'accounts.lane.provisioning_platform_gated',
@@ -40,21 +27,15 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.invite_name_invalid',
   'accounts.lane.invite_unavailable',
   'accounts.lane.not_enabled',
-  'accounts.lane.delegated_elsewhere',
-  'accounts.lane.local_clear_locked',
-  'accounts.lane.clear_incomplete',
   'accounts.lane.probe_not_confirmed_dead',
   'accounts.lane.wipe_in_progress',
-  // --- S9-L1: per-lane Claude account login — sixteen minted, additive only.
-  // Fifteen are §3's mint list (spec:479, across rev 32/34/36); the sixteenth,
-  // switch_write_failed, is sourced from §2m (spec:372) and does not appear in
-  // §3's list — §3 is the incomplete one here, not this array.
-  // The doc's own arithmetic (57→56) is wrong against this tree (60 entries above);
-  // S9-L1's scope boundary (§F) forbids retiring the sixteen push/lease-era codes,
-  // so this slice is additive-only: 60 → 76. Retirement is S9-L3's.
-  // S9-L2 (design rev 38 §3, row 1/2/9) mints the same login-quartet/select/remove/logout
-  // codes on the client side; every one carries a complete sentence (below) since the client
-  // has no string table for these.
+  // S9-L3 (§6, §10(g)) retires the sixteen push/lease-era codes the design's degradation row
+  // (spec:479) enumerates: no_pusher_designated, push_stale, push_malformed, push_not_delegated,
+  // push_write_failed, push_write_locked, account_resident_elsewhere, residency_unverifiable,
+  // delegated_elsewhere, local_clear_locked, delegable_account_unknown, delegable_list_invalid,
+  // desktop_unavailable, switch_timed_out, switch_lane_cleared, clear_incomplete.
+  // S9-L1/S9-L2 mint the login-quartet/select/remove/logout codes below on the client side;
+  // every one carries a complete sentence (below) since the client has no string table for these.
   'accounts.lane.login_not_designated',
   'accounts.lane.no_login_device_designated',
   'accounts.lane.login_already_in_flight',

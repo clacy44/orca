@@ -83,7 +83,7 @@ describe('the lane wipe re-read', () => {
     }).catch((thrown: unknown) => thrown)
 
     expect(isClaudeLaneRefusal(error)).toBe(true)
-    expect(isClaudeLaneRefusal(error) ? error.code : null).toBe('accounts.lane.clear_incomplete')
+    expect(isClaudeLaneRefusal(error) ? error.code : null).toBe('accounts.lane.logout_incomplete')
     // The identity is NOT dropped: nothing may report this lane released.
     expect(JSON.parse(readFileSync(join(laneDir, '.claude.json'), 'utf-8'))).toHaveProperty(
       'oauthAccount'

@@ -46,10 +46,6 @@ import {
 import { LaneCredentialCoordinator } from './lane-credential-coordinator'
 import type { ClaudeLaneUsageAttribution } from '../rate-limits/claude-usage-attribution'
 import type { ProviderRateLimits } from '../../shared/rate-limit-types'
-import {
-  assertClaudeLaunchNotDelegatedToLane,
-  isClaudeAccountDelegatedToLane
-} from './lane-delegation-lease'
 import { assertLaneLaunchRuntimeSupported, prepareLaneLaunch } from './principal-lane-preparation'
 import {
   getSelectedClaudeAccountIdForTarget,
@@ -123,13 +119,7 @@ export class ClaudeRuntimeAuthService {
   readonly laneCredentials: LaneCredentialCoordinator
 
   constructor(private readonly store: Store) {
-    this.laneCredentials = new LaneCredentialCoordinator({
-      persistence: store,
-      sharedLane: {
-        readCredentials: () => this.readSharedLaneCredentialsBestEffort(),
-        readOauthAccount: () => this.readRuntimeOauthAccount()
-      }
-    })
+    this.laneCredentials = new LaneCredentialCoordinator({})
     this.initializeLastSyncedState()
     void this.safeSyncForCurrentSelection()
   }
@@ -235,9 +225,6 @@ export class ClaudeRuntimeAuthService {
       this.lastSyncedAccountId
     )
     this.managedRefreshDeferredByLivePtyAccountId = null
-    // The `host` residency row is derived from the shared lane's FILES, so it is re-derived here
-    // rather than seeded once: a `claude login` between two syncs is otherwise unobserved.
-    this.laneCredentials.refreshHostResidencyRow()
     const previousManagedCredentialsJson = previousAccount
       ? await this.readManagedCredentials(previousAccount)
       : null
@@ -461,10 +448,9 @@ export class ClaudeRuntimeAuthService {
     if (liveClaudePtys && isOauthTokenExpiring(credentialsJson)) {
       this.managedRefreshDeferredByLivePtyAccountId = activeAccount.id
     }
-    // §2e (i): a delegated account's rotation belongs to the HOST, keyed by account. Every bound
-    // desktop suppresses — the named `delegatedGrantId` included, because it is the PUSHING
-    // desktop and its unsuppressed rotator sits on the token the lane's live claude holds.
-    if (!liveClaudePtys && !isClaudeAccountDelegatedToLane(activeAccount.id)) {
+    // Rev 32 deletes the delegation lease (§10(g)): a lane never holds a copy of this account's
+    // blob any more, so there is nothing left for this device's own rotation to suppress.
+    if (!liveClaudePtys) {
       const refreshed = await this.refreshManagedAccountTokenIfNeeded(
         activeAccount,
         credentialsJson
@@ -668,17 +654,11 @@ export class ClaudeRuntimeAuthService {
     )
     const activeAccountId = getSelectedClaudeAccountIdForTarget(settings, normalizedTarget)
     const activeAccount = this.getActiveAccount(settings.claudeManagedAccounts, activeAccountId)
-    // §2e (ii): this machine's own managed launch under an account delegated to a host lane.
-    assertClaudeLaunchNotDelegatedToLane(activeAccount?.id)
     if (lanePrincipalId) {
       // Why before the WSL arms rather than after them: falling through leaves a lane-pinned pane
       // on the shared WSL config dir, which is the silent misattribution the lane exists to close.
       assertLaneLaunchRuntimeSupported(normalizeClaudeAccountSelectionTarget(normalizedTarget))
-      return prepareLaneLaunch({
-        principalId: lanePrincipalId,
-        isRefreshDeferredByLivePty: () =>
-          this.laneCredentials.isLaneRefreshDeferredByLivePty(lanePrincipalId)
-      })
+      return prepareLaneLaunch({ principalId: lanePrincipalId })
     }
     if (
       normalizeClaudeAccountSelectionTarget(normalizedTarget).runtime === 'wsl' &&
@@ -1400,16 +1380,6 @@ export class ClaudeRuntimeAuthService {
   private readRuntimeCredentialsFile(): string | null {
     const credentialsPath = this.pathResolver.getRuntimePaths().credentialsPath
     return existsSync(credentialsPath) ? readFileSync(credentialsPath, 'utf-8') : null
-  }
-
-  // Why swallow: the residency index reads this on every check, and an unreadable shared file
-  // must not turn a `selectClaude` into a crash.
-  private readSharedLaneCredentialsBestEffort(): string | null {
-    try {
-      return this.readRuntimeCredentialsFile()
-    } catch {
-      return null
-    }
   }
 
   private runtimeCredentialsBelongToAccount(

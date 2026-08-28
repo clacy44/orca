@@ -262,10 +262,9 @@ export class PrincipalRegistry {
   }
 
   /**
-   * The provisioning gate: bound grants, and a designated pusher among them.
+   * The provisioning gate: bound grants, and a designated device among them (rev 32, §2d(i)).
    *
-   * A lane is never created without a designation, which is what lets the push rule stay flat
-   * ("not the `delegatedGrantId` → refused") with no first-push carve-out.
+   * A lane is never created without a designation — the one grant that may start a login for it.
    */
   assertLaneProvisionable(principalId: string): void {
     this.requirePrincipal(principalId)
@@ -277,8 +276,8 @@ export class PrincipalRegistry {
     }
     if (!this.delegatedGrantIdOf(principalId)) {
       throw new ClaudeLaneRefusal(
-        'accounts.lane.no_pusher_designated',
-        'No grant has been designated as this person’s pusher, so Orca cannot create their credential lane. Tick one of their bound devices as the one that pushes their Claude account.'
+        'accounts.lane.no_login_device_designated',
+        'No device is designated to sign this lane into a Claude account, so Orca cannot create their credential lane. Tick one of their bound devices as the one that signs them in.'
       )
     }
   }

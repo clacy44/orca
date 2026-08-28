@@ -7,12 +7,18 @@ import type {
   LaneLoginCapabilityState,
   LaneLoginIdentity
 } from '../../shared/claude-lane-login-rpc'
+import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
+import { listEnvironments } from '../../shared/runtime-environment-store'
+import { isUserManagedRuntimeEnvironment } from '../../shared/runtime-environments'
+import { isRuntimeEnvironmentManuallyDisconnected } from '../ipc/runtime-environment-connectivity-handlers'
 import { LaneLoginClient, LaneLoginRefusedError } from './lane-login-client'
 import { createLaneLoginTransport } from './lane-login-transport'
 
 export type LaneLoginEnvironmentSnapshot = {
   environmentId: string
   capability: LaneLoginCapabilityState
+  laneState: 'absent' | 'loaded' | 'reauth-required' | 'restart-required' | null
+  callerIsDelegatedGrant: boolean
   accounts: LaneAccountRow[]
   /** The most recent login session this desktop's grant started against this environment, if any. */
   activeLoginSessionId: string | null
@@ -20,10 +26,25 @@ export type LaneLoginEnvironmentSnapshot = {
   lastLoginError: { code: string; message: string } | null
 }
 
+/** One remote environment's lane-discoverability row (release-audit follow-up, §6's S9-L3). */
+export type RemoteLaneHostRow =
+  | { environmentId: string; label: string; state: 'checking' }
+  | { environmentId: string; label: string; state: 'unreachable' }
+  | { environmentId: string; label: string; state: 'unsupported' }
+  | { environmentId: string; label: string; state: 'not-designated' }
+  | {
+      environmentId: string
+      label: string
+      state: 'ready'
+      laneState: RuntimeTerminalLaneState
+    }
+
 function emptySnapshot(environmentId: string): LaneLoginEnvironmentSnapshot {
   return {
     environmentId,
     capability: 'unknown',
+    laneState: null,
+    callerIsDelegatedGrant: false,
     accounts: [],
     activeLoginSessionId: null,
     activeLoginExpiresAt: null,
@@ -34,14 +55,22 @@ function emptySnapshot(environmentId: string): LaneLoginEnvironmentSnapshot {
 export class LaneLoginDesktopService {
   private readonly clients = new Map<string, LaneLoginClient>()
   private readonly snapshots = new Map<string, LaneLoginEnvironmentSnapshot>()
-  private listener: (() => void) | null = null
+  // A Set, not one field: `lane-login-bridge.ts`'s login-quartet broadcast and
+  // `principal-lane-status-bridge.ts`'s discoverability broadcast both listen on this one
+  // module-singleton service, and a single-field listener would let the second registration
+  // silently displace the first.
+  private readonly listeners = new Set<() => void>()
 
-  setStatusListener(listener: (() => void) | null): void {
-    this.listener = listener
+  /** Returns the disposer — call it, never pass `null`, to stop listening. */
+  addStatusListener(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
   }
 
   private notify(): void {
-    this.listener?.()
+    for (const listener of this.listeners) {
+      listener()
+    }
   }
 
   private snapshotFor(environmentId: string): LaneLoginEnvironmentSnapshot {
@@ -89,6 +118,15 @@ export class LaneLoginDesktopService {
         },
         onAccountsChanged: (accounts) => {
           this.snapshots.set(environmentId, { ...this.snapshotFor(environmentId), accounts })
+          this.notify()
+        },
+        onStatusChanged: (status) => {
+          this.snapshots.set(environmentId, {
+            ...this.snapshotFor(environmentId),
+            laneState: status.laneState,
+            callerIsDelegatedGrant: status.callerIsDelegatedGrant,
+            accounts: status.accounts
+          })
           this.notify()
         }
       })
@@ -209,6 +247,65 @@ export class LaneLoginDesktopService {
   disconnect(environmentId: string): void {
     this.clients.get(environmentId)?.disconnect()
   }
+
+  /** Reconnect arm: fired from every reconnect the environment-status seam passes through. */
+  notifyHostReachable(environmentId: string): void {
+    void this.connect(environmentId)
+  }
+
+  /** Disconnect/re-pair/remove arm. */
+  notifyHostUnreachable(environmentId: string): void {
+    this.disconnect(environmentId)
+  }
+
+  /**
+   * Explicit refresh IPC arm: the AccountsPane row's own Refresh button.
+   *
+   * There is no one-shot re-read on this client, only the subscription's own frames, so a refresh
+   * disconnects and reconnects — the same round trip `connect()` already makes idempotent-guarded
+   * against, just forced past that guard.
+   */
+  async refreshHost(environmentId: string): Promise<boolean> {
+    this.disconnect(environmentId)
+    const state = await this.connect(environmentId)
+    return state === 'supported'
+  }
+
+  /**
+   * One discoverability row per REMOTE environment (release-audit follow-up), whether or not this
+   * desktop's grant on it is connected, designated, or supported at all.
+   */
+  listRemoteHostRows(userDataPath: string): RemoteLaneHostRow[] {
+    return listEnvironments(userDataPath)
+      .filter(isUserManagedRuntimeEnvironment)
+      .map((environment) => {
+        const label = environment.name
+        if (isRuntimeEnvironmentManuallyDisconnected(environment.id)) {
+          return { environmentId: environment.id, label, state: 'unreachable' as const }
+        }
+        const snapshot = this.snapshots.get(environment.id)
+        if (!snapshot || snapshot.capability === 'unknown' || snapshot.capability === 'checking') {
+          return { environmentId: environment.id, label, state: 'checking' as const }
+        }
+        if (snapshot.capability === 'unsupported') {
+          return { environmentId: environment.id, label, state: 'unsupported' as const }
+        }
+        if (!snapshot.callerIsDelegatedGrant || snapshot.laneState === null) {
+          return { environmentId: environment.id, label, state: 'not-designated' as const }
+        }
+        // `restart-required` is a locally-modelled S9d Part 2 value not yet on the wire's
+        // `RuntimeTerminalLaneState`; a lane in that state needs a fresh sign-in exactly as a
+        // reauth-required one does, so it renders the same badge here.
+        const laneState =
+          snapshot.laneState === 'restart-required' ? 'reauth-required' : snapshot.laneState
+        return {
+          environmentId: environment.id,
+          label,
+          state: 'ready' as const,
+          laneState
+        }
+      })
+  }
 }
 
 function refusalOf(error: unknown): { code: string; message: string } {
@@ -232,4 +329,28 @@ export function getLaneLoginDesktopService(): LaneLoginDesktopService | null {
 /** Test-only: the module-global service must not leak between suites. */
 export function resetLaneLoginDesktopServiceForTest(): void {
   activeService = null
+}
+
+// Module-level convenience wrappers, mirroring `lane-delegation-desktop-service.ts`'s deleted
+// shape so the connectivity-handler and IPC-bridge call sites swap over with a one-line import
+// change (§6's S9-L3).
+
+export function addLaneLoginDesktopStatusListener(listener: () => void): () => void {
+  return activeService?.addStatusListener(listener) ?? (() => {})
+}
+
+export function notifyLaneLoginHostReachable(environmentId: string): void {
+  activeService?.notifyHostReachable(environmentId)
+}
+
+export function notifyLaneLoginHostUnreachable(environmentId: string): void {
+  activeService?.notifyHostUnreachable(environmentId)
+}
+
+export function refreshLaneLoginHostStatus(environmentId: string): Promise<boolean> {
+  return activeService?.refreshHost(environmentId) ?? Promise.resolve(false)
+}
+
+export function listRemoteLaneHostRows(userDataPath: string): RemoteLaneHostRow[] {
+  return activeService?.listRemoteHostRows(userDataPath) ?? []
 }

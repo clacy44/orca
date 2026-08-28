@@ -39,11 +39,34 @@ describe('CLAUDE_LANE_REFUSAL_CODES — S9-L1 mint', () => {
     expect(new Set(CLAUDE_LANE_REFUSAL_CODES).size).toBe(CLAUDE_LANE_REFUSAL_CODES.length)
   })
 
-  it('still holds every pre-S9-L1 code — additive only, nothing retired', () => {
-    // §F: S9-L1 must not retire any of the push/lease-era codes; that is S9-L3's.
-    expect(CLAUDE_LANE_REFUSAL_CODES).toContain('accounts.lane.push_write_failed')
-    expect(CLAUDE_LANE_REFUSAL_CODES).toContain('accounts.lane.push_write_locked')
-    expect(CLAUDE_LANE_REFUSAL_CODES).toContain('accounts.lane.clear_incomplete')
+  it('S9-L3 retires the sixteen push/lease-era codes (§6, §10(g))', () => {
+    const retired = [
+      'accounts.lane.no_pusher_designated',
+      'accounts.lane.push_stale',
+      'accounts.lane.push_malformed',
+      'accounts.lane.push_not_delegated',
+      'accounts.lane.push_write_failed',
+      'accounts.lane.push_write_locked',
+      'accounts.lane.account_resident_elsewhere',
+      'accounts.lane.residency_unverifiable',
+      'accounts.lane.delegated_elsewhere',
+      'accounts.lane.local_clear_locked',
+      'accounts.lane.delegable_account_unknown',
+      'accounts.lane.delegable_list_invalid',
+      'accounts.lane.desktop_unavailable',
+      'accounts.lane.switch_timed_out',
+      'accounts.lane.switch_lane_cleared',
+      'accounts.lane.clear_incomplete'
+    ]
+    for (const code of retired) {
+      expect(CLAUDE_LANE_REFUSAL_CODES).not.toContain(code)
+    }
+    // The renamed successors survive: `push_write_failed`/`push_write_locked` become
+    // `switch_write_failed`/`switch_write_locked`, and `clear_incomplete` becomes
+    // `logout_incomplete` (§3 row 12, §2f).
+    expect(CLAUDE_LANE_REFUSAL_CODES).toContain('accounts.lane.switch_write_failed')
+    expect(CLAUDE_LANE_REFUSAL_CODES).toContain('accounts.lane.switch_write_locked')
+    expect(CLAUDE_LANE_REFUSAL_CODES).toContain('accounts.lane.logout_incomplete')
   })
 
   it('ClaudeLaneRefusal carries a code from the typed union', () => {

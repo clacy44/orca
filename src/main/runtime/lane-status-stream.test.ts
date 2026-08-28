@@ -22,10 +22,17 @@ function makeStream() {
 }
 
 const STATUS_FRAME: LaneStatusFrame = {
-  type: 'switch-failed',
-  requestId: 'r1',
-  code: 'accounts.lane.switch_timed_out',
-  message: 'x'
+  type: 'status',
+  status: {
+    laneId: LANE_A,
+    laneState: 'absent',
+    delegatedGrantId: null,
+    callerIsDelegatedGrant: false,
+    heldDisplayName: null,
+    heldIdentity: null,
+    refreshTokenSha256: null,
+    expiresAt: null
+  }
 }
 
 describe('lane status stream subscriber resolution', () => {
@@ -55,13 +62,5 @@ describe('lane status stream subscriber resolution', () => {
     expect(frames).toHaveLength(0)
     // Positive control: it is now the OTHER principal's subscriber, not a dead one.
     expect(stream.publish(LANE_B, STATUS_FRAME)).toBe(1)
-  })
-
-  it('drops the liveness precondition for an unbound designated grant', () => {
-    const { bindings, stream } = makeStream()
-
-    expect(stream.hasSubscriptionForGrant(LANE_A, 'desktop-a')).toBe(true)
-    bindings.delete('desktop-a')
-    expect(stream.hasSubscriptionForGrant(LANE_A, 'desktop-a')).toBe(false)
   })
 })

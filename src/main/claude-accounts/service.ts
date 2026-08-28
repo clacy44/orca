@@ -32,8 +32,6 @@ import {
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch, SHARED_CLAUDE_LANE_KEY } from './live-pty-gate'
 import { findDuplicateClaudeAccount } from './claude-duplicate-account'
 import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-containment'
-import { assertManagedClaudeAccountNotLaneResident } from './managed-account-lane-residency'
-import { assertClaudeAccountNotDelegatedToLane } from './lane-delegation-lease'
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
@@ -411,8 +409,6 @@ export class ClaudeAccountService {
   }
 
   private async doRemoveAccount(accountId: string): Promise<ClaudeRateLimitAccountsState> {
-    // L1: deleting an account a lane is running on would strand that lane (§2d).
-    assertManagedClaudeAccountNotLaneResident(accountId)
     const account = this.requireAccount(accountId)
     const settings = this.store.getSettings()
     const nextAccounts = settings.claudeManagedAccounts.filter((entry) => entry.id !== accountId)
@@ -467,12 +463,10 @@ export class ClaudeAccountService {
     accountId: string | null,
     target?: ClaudeAccountSelectionTarget
   ): Promise<ClaudeRateLimitAccountsState> {
-    // L1's second edge, and it is here rather than at the RPC because it must hold for EVERY
-    // caller class — the renderer and the anonymous local socket carry no `pairedDeviceId` (§2d).
-    assertManagedClaudeAccountNotLaneResident(accountId)
-    // §2e rule (iv)'s local twin: on the DELEGATING desktop, whose runtime file the host's index
-    // cannot see. Selecting here would materialize the third copy a plain `claude` then rotates.
-    assertClaudeAccountNotDelegatedToLane(accountId)
+    // Rev 32 deletes L1 and the delegation lease (§10(g)): selecting account X locally while X is
+    // logged into a lane is harmless now — the two hold independent grants and independent
+    // refresh-token chains, so this residency check has nothing left to protect. It was the
+    // mechanism of the 2026-08-27 incident and is removed rather than relaxed.
     let effectiveTarget = target
     if (accountId !== null) {
       const account = this.requireAccount(accountId)

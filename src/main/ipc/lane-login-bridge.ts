@@ -59,7 +59,7 @@ export function registerLaneLoginBridge(
   // per-environment, so this listener re-sends the LAST environment mutated. Renderer callers key
   // their own state by `environmentId` in the payload, so a stale unrelated row is never applied.
   let lastTouchedEnvironmentId: string | null = null
-  service.setStatusListener(() => {
+  const removeStatusListener = service.addStatusListener(() => {
     if (lastTouchedEnvironmentId) {
       broadcast(lastTouchedEnvironmentId)
     }
@@ -159,7 +159,7 @@ export function registerLaneLoginBridge(
       return
     }
     disposed = true
-    service.setStatusListener(null)
+    removeStatusListener()
     if (activeRegistrationToken === token) {
       ipcMain.removeHandler(LANE_LOGIN_GET_CHANNEL)
       ipcMain.removeHandler(LANE_LOGIN_START_CHANNEL)

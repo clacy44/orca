@@ -71,17 +71,16 @@ vi.mock('./runtime-environment-request-connections', () => ({
   closeRemoteRuntimeRequestConnection: closeRemoteRuntimeRequestConnectionMock
 }))
 
-const { notifyLaneDelegationHostReachableMock, notifyLaneDelegationHostUnreachableMock } =
-  vi.hoisted(() => ({
-    notifyLaneDelegationHostReachableMock: vi.fn(),
-    notifyLaneDelegationHostUnreachableMock: vi.fn()
-  }))
+const { notifyLaneLoginHostReachableMock, notifyLaneLoginHostUnreachableMock } = vi.hoisted(() => ({
+  notifyLaneLoginHostReachableMock: vi.fn(),
+  notifyLaneLoginHostUnreachableMock: vi.fn()
+}))
 
 // Release-audit follow-up: T1's caller scan cannot see whether this trigger actually fires, only
 // that the line exists — this asserts the production call, not just the source text.
-vi.mock('../claude-accounts/lane-delegation-desktop-service', () => ({
-  notifyLaneDelegationHostReachable: notifyLaneDelegationHostReachableMock,
-  notifyLaneDelegationHostUnreachable: notifyLaneDelegationHostUnreachableMock
+vi.mock('../claude-accounts/lane-login-desktop-service', () => ({
+  notifyLaneLoginHostReachable: notifyLaneLoginHostReachableMock,
+  notifyLaneLoginHostUnreachable: notifyLaneLoginHostUnreachableMock
 }))
 
 import {
@@ -151,7 +150,7 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     reconnectRemoteRuntimeSharedControlConnectionMock.mockReset()
     retryRemoteRuntimeSharedControlConnectionsNowMock.mockReset()
     closeRemoteRuntimeRequestConnectionMock.mockReset()
-    notifyLaneDelegationHostUnreachableMock.mockReset()
+    notifyLaneLoginHostUnreachableMock.mockReset()
   })
 
   afterEach(() => {
@@ -183,7 +182,7 @@ describe('registerRuntimeEnvironmentHandlers', () => {
   it('fires the B3 desktop-unreachable trigger on transport invalidation', () => {
     invalidateRuntimeEnvironmentTransport('env-x')
 
-    expect(notifyLaneDelegationHostUnreachableMock).toHaveBeenCalledWith('env-x')
+    expect(notifyLaneLoginHostUnreachableMock).toHaveBeenCalledWith('env-x')
   })
 
   it('clears stale IPC registrations before registering runtime environment handlers', () => {
@@ -260,7 +259,7 @@ describe('registerRuntimeEnvironmentHandlers', () => {
       { environment: { id: string; name: string } }
     >('runtimeEnvironments:addFromPairingCode')
     const added = await add(null, { name: 'desk', pairingCode: pairingCode() })
-    expect(notifyLaneDelegationHostReachableMock).toHaveBeenCalledWith(added.environment.id)
+    expect(notifyLaneLoginHostReachableMock).toHaveBeenCalledWith(added.environment.id)
   })
 
   it('blocks loopback before verification unless an SSH tunnel is declared', async () => {
@@ -305,7 +304,7 @@ describe('registerRuntimeEnvironmentHandlers', () => {
     })
     // Discoverability follow-up: a verified add is a paired environment too — it must also arm
     // the lane-delegation reachability trigger, not only the raw pairing-code add path.
-    expect(notifyLaneDelegationHostReachableMock).toHaveBeenCalledWith(result.environment!.id)
+    expect(notifyLaneLoginHostReachableMock).toHaveBeenCalledWith(result.environment!.id)
     expect(sendRemoteRuntimeRequestMock).toHaveBeenCalledWith(
       expect.objectContaining({ endpoint: 'ws://127.0.0.1:6768' }),
       'status.get',

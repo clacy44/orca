@@ -10,8 +10,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
-import type { ClaudeLaneDelegationRow } from '../../shared/claude-lane-delegation'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import {
   attachPrincipalLaneHost,
@@ -42,27 +40,6 @@ class FakeGrants implements PrincipalGrantSource {
 
   listDevices(): readonly PrincipalGrantRow[] {
     return this.rows
-  }
-}
-
-class FakePersistence {
-  private watermarks: ClaudeLaneCredentialWatermark[] = []
-  private delegationRows: ClaudeLaneDelegationRow[] = []
-
-  getClaudeLaneCredentialWatermarks(): ClaudeLaneCredentialWatermark[] {
-    return this.watermarks
-  }
-
-  setClaudeLaneCredentialWatermarks(rows: readonly ClaudeLaneCredentialWatermark[]): void {
-    this.watermarks = [...rows]
-  }
-
-  getClaudeLaneDelegationRows(): ClaudeLaneDelegationRow[] {
-    return this.delegationRows
-  }
-
-  setClaudeLaneDelegationRows(rows: readonly ClaudeLaneDelegationRow[]): void {
-    this.delegationRows = [...rows]
   }
 }
 
@@ -110,17 +87,10 @@ describe('production lane wire composition (release-audit B1)', () => {
   it('answers accounts.lane RPCs through the production wiring once dependencies are registered', () => {
     userDataPath = mkdtempSync(join(tmpdir(), 'orca-lane-wire-composition-'))
     const lanesRoot = mkdtempSync(join(tmpdir(), 'orca-lane-wire-composition-lanes-'))
-    const persistence = new FakePersistence()
     const coordinator = new LaneCredentialCoordinator({
-      persistence,
-      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
       laneOptions: { lanesRoot, platform: 'linux' }
     })
-    setLaneWireHostDependencies({
-      coordinator,
-      persistence,
-      accounts: { findAccount: () => null }
-    })
+    setLaneWireHostDependencies({ coordinator })
 
     attachPrincipalLaneHost({
       userDataPath,
@@ -143,17 +113,10 @@ describe('production lane wire composition (release-audit B1)', () => {
   it('arms the close-wipe lifecycle join once the production wire is attached, and disarms it on detach', () => {
     userDataPath = mkdtempSync(join(tmpdir(), 'orca-lane-wire-composition-'))
     const lanesRoot = mkdtempSync(join(tmpdir(), 'orca-lane-wire-composition-lanes-'))
-    const persistence = new FakePersistence()
     const coordinator = new LaneCredentialCoordinator({
-      persistence,
-      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
       laneOptions: { lanesRoot, platform: 'linux' }
     })
-    setLaneWireHostDependencies({
-      coordinator,
-      persistence,
-      accounts: { findAccount: () => null }
-    })
+    setLaneWireHostDependencies({ coordinator })
 
     const runtime = noopRuntime()
     const attachment = attachPrincipalLaneHost({

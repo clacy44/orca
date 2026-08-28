@@ -1,8 +1,8 @@
-// The renderer endpoint of the host-only lane-status seam (S9 §2e/§2h, §10(d)). The AccountsPane
-// section reads THIS desktop's own principal-lane residency and its delegation leases from here;
-// the store is fed by the preload `principalLaneStatus` lane — a `get` on mount, then `onChanged`
-// republishes. Kept out of Zustand for the same reason presence is: it is a small, self-contained
-// external store a section subscribes to, not app-wide state.
+// The renderer endpoint of the host-only lane-status seam (S9 §2e/§2h, §10(d), rev 32). The
+// AccountsPane section reads THIS desktop's own principal-lane residency from here; the store is
+// fed by the preload `principalLaneStatus` lane — a `get` on mount, then `onChanged` republishes.
+// Kept out of Zustand for the same reason presence is: it is a small, self-contained external
+// store a section subscribes to, not app-wide state.
 import { useSyncExternalStore } from 'react'
 import type {
   PrincipalLaneStatusSnapshot,
@@ -11,8 +11,6 @@ import type {
 
 const EMPTY_SNAPSHOT: PrincipalLaneStatusSnapshot = Object.freeze({
   lanes: [],
-  delegationLeases: [],
-  delegableHosts: [],
   remoteHosts: []
 }) as PrincipalLaneStatusSnapshot
 
@@ -32,11 +30,6 @@ export function setPrincipalLaneStatusSnapshot(next: PrincipalLaneStatusSnapshot
 
 export function getPrincipalLaneStatusSnapshot(): PrincipalLaneStatusSnapshot {
   return snapshot
-}
-
-/** All delegation leases this desktop holds, or none — the AccountsPane lease view's input (§2e). */
-export function getDelegationLeases(): PrincipalLaneStatusSnapshot['delegationLeases'] {
-  return snapshot.delegationLeases
 }
 
 /** One provisioned lane's status, or null when this desktop provisioned no such lane (§2h). */

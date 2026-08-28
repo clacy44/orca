@@ -192,13 +192,13 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   'accounts.selectCodexForTarget',
   'accounts.subscribe',
   'accounts.unsubscribe',
-  // S9 §2l: the phone asks its own desktop to switch; it never pushes and never reads a
-  // credential — `requestSwitch` names an opaque token, and the stream carries lane STATE.
-  'accounts.lane.requestSwitch',
+  // S9 §2l, rev 32: any grant bound to the principal may switch among the logins in its own
+  // lane, including the phone -- a local file rewrite that needs no other device to be reachable.
+  'accounts.lane.selectAccount',
   'accounts.lane.statusSubscribe',
   'accounts.lane.statusUnsubscribe',
   // Deliberately absent, and pinned by a negative control in `mobile-rpc-allowlist.test.ts`:
-  // `push`, `pullRotated`, `clear`, `setDelegableAccounts`, `status`.
+  // `push`, `pullRotated`, `clear`, `setDelegableAccounts`, `requestSwitch`, `status`.
   'aiVault.listSessions',
   'aiVault.resolveSessionTitles',
   'aiVault.prepareSessionResume',

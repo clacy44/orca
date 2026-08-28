@@ -1,21 +1,21 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { ClaudeCredentialIdentity } from '../../shared/claude-credential-identity-types'
-import type { ClaudeLaneDelegableAccount } from '../../shared/claude-lane-delegation'
 import type { RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import { getLaneWireService } from './lane-wire-service'
 import type { LaneWireService } from './lane-wire-service'
 
 /**
- * §2d's per-connection projection, and the caller-scope refusal beside it.
+ * §2d's per-connection projection, and the caller-scope refusal beside it (rev 32's re-basing).
  *
  * `accounts.list` and BOTH `accounts.subscribe` emit points publish the shared snapshot verbatim
  * today, so grant B receives grant A's emails and usage. This adds ONE additive field: the lane
- * rows the caller may see. The caller's own lane is shown with its identity and its delegable
- * list; another principal's lane is an opaque `occupied` boolean, the owner's presence label and
- * — because Q3 is about the label the other developer sees — the account's `displayName` when its
- * owner set one. No account id, no email, no usage, no sha, no lane path, and no `laneState`:
- * §2d's enumeration is closed, and `reauth-required` tells a peer the other person's account is
- * in a broken-auth state, which is strictly more than `occupied` carries.
+ * rows the caller may see. The caller's own lane is shown with its identity; another principal's
+ * lane is an opaque `occupied` boolean and the owner's presence label. No account id, no email, no
+ * usage, no sha, no lane path, and no `laneState`: §2d's enumeration is closed, and
+ * `reauth-required` tells a peer the other person's account is in a broken-auth state, which is
+ * strictly more than `occupied` carries. Rev 32 deletes the delegable list and the owner-set
+ * `displayName` widening with the delegation directory that carried them (§10(g)); S9-L1's account
+ * index restores an owner-set label under a different name once it lands.
  *
  * With zero lanes the projection returns the SAME OBJECT it was handed, so a pre-lane host is
  * byte-identical to today and not merely equal-looking.
@@ -27,15 +27,10 @@ export type ClaudeLaneProjectionRow = {
   laneState?: RuntimeTerminalLaneState
   occupied: boolean
   ownerLabel: string | null
-  /** The one deliberate peer-visible widening (§2b/§2k): an owner-authored name, never an email. */
-  displayName: string | null
-  /** Self only — §2e's suppression signal, read by every bound desktop of this principal. */
+  /** Self only — §2d(i)'s designation signal, read by every bound desktop of this principal. */
   delegatedGrantId?: string | null
   callerIsDelegatedGrant?: boolean
   identity?: ClaudeCredentialIdentity | null
-  /** Self only: which delegable token the lane holds, so a client marks it by id, not by name. */
-  heldDelegatedAccountId?: string | null
-  delegable?: ClaudeLaneDelegableAccount[]
 }
 
 export type ClaudeLaneProjection = { claudeLanes: ClaudeLaneProjectionRow[] }
@@ -94,12 +89,9 @@ function projectLaneRows(
       laneState: status.laneState,
       occupied: status.laneState !== 'absent',
       ownerLabel: service.labelOf(caller.principalId),
-      displayName: status.heldDisplayName,
       delegatedGrantId: status.delegatedGrantId,
       callerIsDelegatedGrant: status.callerIsDelegatedGrant,
-      identity: status.heldIdentity,
-      heldDelegatedAccountId: status.heldDelegatedAccountId ?? null,
-      delegable: status.delegable
+      identity: status.heldIdentity
     })
   }
   for (const lane of service.listLanes()) {
@@ -113,8 +105,7 @@ function projectLaneRows(
     rows.push({
       scope: 'peer',
       occupied: laneState !== 'absent',
-      ownerLabel: lane.label,
-      displayName: service.delegation.getRow(lane.principalId).heldDisplayName
+      ownerLabel: lane.label
     })
   }
   return rows

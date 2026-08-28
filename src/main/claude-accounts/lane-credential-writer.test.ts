@@ -133,7 +133,7 @@ describe('lane credential writer', () => {
       const laneDir = mkdtempSync(join(root, 'lane-'))
       const { writer } = windowsWriter({ restrictPath: () => false })
       await expect(writer.writeCredentials(laneDir, CREDENTIALS)).rejects.toMatchObject({
-        code: 'accounts.lane.push_write_failed'
+        code: 'accounts.lane.switch_write_failed'
       })
       expect(existsSync(join(laneDir, '.credentials.json'))).toBe(false)
       // And no full-credential temp is left at rest.
@@ -147,7 +147,7 @@ describe('lane credential writer', () => {
       // The bytes have landed, so the refusal is what stops the caller reporting a lane the
       // host cannot vouch for.
       await expect(writer.writeCredentials(laneDir, CREDENTIALS)).rejects.toMatchObject({
-        code: 'accounts.lane.push_write_failed'
+        code: 'accounts.lane.switch_write_failed'
       })
     })
 
@@ -163,7 +163,7 @@ describe('lane credential writer', () => {
         }
       })
       await expect(writer.writeCredentials(laneDir, CREDENTIALS)).rejects.toMatchObject({
-        code: 'accounts.lane.push_write_locked'
+        code: 'accounts.lane.switch_write_locked'
       })
       expect(readFileSync(target, 'utf-8')).toBe('existing-credential')
       expect(readdirSync(laneDir)).toEqual(['.credentials.json'])

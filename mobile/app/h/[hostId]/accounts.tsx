@@ -25,16 +25,11 @@ import { useCodexResetCreditAction } from '../../../src/components/use-codex-res
 import { ProviderAccountSection } from '../../../src/accounts/ProviderAccountSection'
 import { useHostStatusGates } from '../../../src/transport/host-status-gates'
 import {
-  IDLE_SWITCH_STATE,
-  NO_LANE,
-  isLaneAccountLoaded,
-  readLaneProjection,
-  reduceSwitchRequest,
-  resolveClaudeSwitchCall,
-  shouldSubscribeToLaneStatus,
-  type MobileLaneProjection,
-  type SwitchRequestState
-} from '../../../src/accounts/lane-delegated-switch-request'
+  NO_LANE_ACCOUNTS,
+  readLaneAccountsProjection,
+  resolveLaneAccountSwitchCall,
+  type LaneAccountsProjection
+} from '../../../src/accounts/lane-account-switch'
 
 export default function AccountsScreen() {
   const router = useRouter()
@@ -51,13 +46,13 @@ export default function AccountsScreen() {
   const [clockEnabled, setClockEnabled] = useState(false)
   // §2l: the phone's lane is whatever the host publishes for THIS caller; an old host publishes
   // none and every branch below stays on today's behaviour.
-  const [lane, setLane] = useState<MobileLaneProjection>(NO_LANE)
-  const [switchState, setSwitchState] = useState<SwitchRequestState>(IDLE_SWITCH_STATE)
+  const [lane, setLane] = useState<LaneAccountsProjection>(NO_LANE_ACCOUNTS)
+  const [laneError, setLaneError] = useState<string | null>(null)
   const { hostCapabilities } = useHostStatusGates({ hostId, client, connState })
 
   const acceptSnapshot = useCallback((nextSnapshot: AccountsSnapshot, raw?: unknown) => {
     setSnapshot(nextSnapshot)
-    setLane(readLaneProjection(raw))
+    setLane(readLaneAccountsProjection(raw))
     setError(null)
   }, [])
   const rejectInvalidSnapshot = useCallback(() => {
@@ -135,52 +130,6 @@ export default function AccountsScreen() {
     return unsubscribe
   }, [acceptSnapshot, client, connState, rejectInvalidSnapshot])
 
-  // §2l step 4: the switch outcome arrives on this stream. The `pending` reply is not an outcome.
-  const subscribeToLane = shouldSubscribeToLaneStatus({
-    lane,
-    hostCapabilities,
-    connected: connState === 'connected'
-  })
-  useEffect(() => {
-    if (!client || !subscribeToLane) {
-      return
-    }
-    return client.subscribe('accounts.lane.statusSubscribe', null, (frame) => {
-      setSwitchState((state) => reduceSwitchRequest(state, { type: 'lane-frame', frame }))
-    })
-  }, [client, subscribeToLane])
-
-  const requestLaneSwitch = useCallback(
-    async (delegatedAccountId: string | null) => {
-      const call = resolveClaudeSwitchCall({
-        lane,
-        accountId: null,
-        delegatedAccountId,
-        hostCapabilities
-      })
-      if (!client || call.method !== 'accounts.lane.requestSwitch') {
-        Alert.alert(
-          'Could not switch account',
-          call.method === null && call.reason === 'unsupported-host'
-            ? 'This host is too old to switch your own Claude account from here. Update Orca on the host.'
-            : 'That account is not offered for switching from this device yet. Tick it in Orca on your desktop.'
-        )
-        return
-      }
-      const res = await client.sendRequest(call.method, call.params)
-      const requestId = res.ok ? ((res.result as { requestId?: string }).requestId ?? null) : null
-      setSwitchState((state) =>
-        reduceSwitchRequest(
-          state,
-          res.ok
-            ? { type: 'requested', requestId, delegatedAccountId: call.params.delegatedAccountId }
-            : { type: 'refused', message: res.error.message }
-        )
-      )
-    },
-    [client, hostCapabilities, lane]
-  )
-
   const refresh = useCallback(async () => {
     if (!client) {
       return
@@ -203,6 +152,41 @@ export default function AccountsScreen() {
       setRefreshing(false)
     }
   }, [acceptSnapshot, client, rejectInvalidSnapshot])
+
+  // §2l: `selectAccount` is a synchronous host-local rewrite — no `pending` state, no lane-status
+  // subscription to learn the outcome (unlike the deleted push-era `requestSwitch`).
+  const requestLaneSwitch = useCallback(
+    async (laneAccountId: string) => {
+      const call = resolveLaneAccountSwitchCall({
+        lane,
+        accountId: null,
+        laneAccountId,
+        hostCapabilities
+      })
+      if (!client || call.method !== 'accounts.lane.selectAccount') {
+        Alert.alert(
+          'Could not switch account',
+          call.method === null && call.reason === 'unsupported-host'
+            ? 'This host is too old to switch your own Claude account from here. Update Orca on the host.'
+            : 'That account could not be found in your lane. Refresh and try again.'
+        )
+        return
+      }
+      setBusyAccountId(laneAccountId)
+      setLaneError(null)
+      try {
+        const res = await client.sendRequest(call.method, call.params)
+        if (!res.ok) {
+          setLaneError(res.error.message)
+        } else {
+          await refresh()
+        }
+      } finally {
+        setBusyAccountId(null)
+      }
+    },
+    [client, hostCapabilities, lane, refresh]
+  )
 
   const selectAccount = useCallback(
     async (provider: ProviderKey, accountId: string | null) => {
@@ -328,47 +312,38 @@ export default function AccountsScreen() {
                   <Text style={styles.sectionHeading}>Your Claude accounts</Text>
                 </View>
                 <View style={styles.card}>
-                  {lane.delegable.map((entry, index) => (
-                    <View key={entry.delegatedAccountId}>
+                  {lane.accounts.map((entry, index) => (
+                    <View key={entry.laneAccountId}>
                       {index > 0 ? <View style={styles.separator} /> : null}
                       <Pressable
                         style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-                        onPress={() => void requestLaneSwitch(entry.delegatedAccountId)}
-                        disabled={switchState.status === 'pending' || connState !== 'connected'}
+                        onPress={() => void requestLaneSwitch(entry.laneAccountId)}
+                        disabled={busyAccountId !== null || connState !== 'connected'}
                       >
                         <View style={styles.rowMain}>
                           <Text style={styles.rowTitle} numberOfLines={1}>
-                            {entry.displayName ?? entry.email ?? 'Claude account'}
+                            {entry.label ?? entry.email}
                           </Text>
                           <Text style={styles.rowSubtitle}>
-                            {isLaneAccountLoaded(lane, entry.delegatedAccountId)
-                              ? 'Loaded on this host'
-                              : 'Switch through your desktop'}
+                            {entry.active ? 'Loaded on this host' : 'Sign in on this host to load'}
                           </Text>
                         </View>
                       </Pressable>
                     </View>
                   ))}
-                  {lane.delegable.length === 0 ? (
+                  {lane.accounts.length === 0 ? (
                     <View style={styles.row}>
                       <Text style={styles.rowSubtitle}>
-                        No accounts offered yet. Tick the ones you want on your desktop.
+                        No accounts signed in yet. Sign this lane in from Orca on the host.
                       </Text>
                     </View>
                   ) : null}
                 </View>
               </View>
             ) : null}
-            {switchState.status === 'pending' ? (
+            {laneError ? (
               <View style={styles.footerHint}>
-                <Text style={styles.footerHintText}>
-                  Asking your desktop to switch this account…
-                </Text>
-              </View>
-            ) : null}
-            {switchState.status === 'failed' ? (
-              <View style={styles.footerHint}>
-                <Text style={styles.errorText}>{switchState.message}</Text>
+                <Text style={styles.errorText}>{laneError}</Text>
               </View>
             ) : null}
             <View style={styles.footerHint}>

@@ -48,7 +48,7 @@ function handlerFor(channel: string) {
 
 function fakeService(): LaneLoginDesktopService {
   return {
-    setStatusListener: vi.fn(),
+    addStatusListener: vi.fn(() => () => {}),
     connect: vi.fn(async () => 'supported'),
     getSnapshot: vi.fn(() => ({
       environmentId: 'env-1',

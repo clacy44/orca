@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { parsePairingCode } from '../../shared/pairing'
-import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
 import { OrcaRuntimeService } from './orca-runtime'
@@ -156,25 +155,9 @@ describe("the lane wipe on the principal's last connection close", () => {
         credentials(`rt-${principalId}`)
       )
     }
-    let watermarks: ClaudeLaneCredentialWatermark[] = []
-    const persistence = {
-      getClaudeLaneCredentialWatermarks: () => watermarks,
-      setClaudeLaneCredentialWatermarks: (rows: readonly ClaudeLaneCredentialWatermark[]) => {
-        watermarks = [...rows]
-      },
-      getClaudeLaneDelegationRows: () => [],
-      setClaudeLaneDelegationRows: () => {}
-    }
     const coordinator = new LaneCredentialCoordinator({
-      persistence,
-      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
       laneOptions: { lanesRoot, platform: 'linux' }
     })
-    // The observe-only sync every resident lane has already had by the time a socket closes: it
-    // is what put the watermark there, and §2f keeps it across the wipe.
-    for (const principalId of [ana.principalId, benPrincipal.principalId]) {
-      await coordinator.syncLane(principalId, 'startup')
-    }
     attachLaneWireService(
       new LaneWireService({
         principals: {
@@ -182,7 +165,6 @@ describe("the lane wipe on the principal's last connection close", () => {
           delegatedGrantIdOf: () => null
         },
         coordinator,
-        persistence,
         platform: 'linux'
       })
     )
@@ -196,7 +178,6 @@ describe("the lane wipe on the principal's last connection close", () => {
       desktopWs,
       phoneWs,
       benWs,
-      watermarks: () => watermarks,
       laneDir: (principalId: string) => join(lanesRoot, principalId),
       isLoaded: (principalId: string) =>
         existsSync(join(lanesRoot, principalId, '.credentials.json'))
@@ -219,8 +200,8 @@ describe("the lane wipe on the principal's last connection close", () => {
     // The principal's true last close.
     await closeAndSettle(harness.phoneWs)
     expect(harness.isLoaded(harness.ana.principalId)).toBe(false)
-    // The watermark is KEPT, and the lane directory survives with it.
-    expect(harness.watermarks().some((row) => row.laneId === harness.ana.principalId)).toBe(true)
+    // §2f: the credential goes, but the lane directory survives a close-wipe — only a revoke of
+    // the principal's last grant removes it.
     expect(existsSync(harness.laneDir(harness.ana.principalId))).toBe(true)
     // Nobody else's lane moved.
     expect(harness.isLoaded(harness.benPrincipal.principalId)).toBe(true)
@@ -239,11 +220,7 @@ describe("the lane wipe on the principal's last connection close", () => {
     await new Promise((resolve) => setTimeout(resolve, 120))
 
     expect(existsSync(harness.laneDir(harness.ana.principalId))).toBe(false)
-    expect(harness.watermarks().some((row) => row.laneId === harness.ana.principalId)).toBe(false)
-    // Ben's lane keeps both, because it was never his last grant.
-    expect(
-      harness.watermarks().some((row) => row.laneId === harness.benPrincipal.principalId)
-    ).toBe(true)
+    // Ben's lane is untouched, because it was never his last grant.
     expect(existsSync(harness.laneDir(harness.benPrincipal.principalId))).toBe(true)
   })
 })

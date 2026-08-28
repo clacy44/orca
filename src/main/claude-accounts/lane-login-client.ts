@@ -22,12 +22,20 @@ import { isLaneLoginRpcError } from '../../shared/claude-lane-login-rpc'
 import type { LaneLoginTransport } from './lane-login-transport'
 export type { LaneLoginCapabilityState } from '../../shared/claude-lane-login-rpc'
 
+export type LaneLoginHostStatusChange = {
+  laneState: 'absent' | 'loaded' | 'reauth-required' | 'restart-required'
+  callerIsDelegatedGrant: boolean
+  accounts: LaneAccountRow[]
+}
+
 export type LaneLoginClientEvents = {
   onCapabilityChanged?: (state: LaneLoginCapabilityState) => void
   onLoginStarted?: (loginSessionId: string, expiresAt: number) => void
   onLoginCompleted?: (loginSessionId: string, identity: LaneLoginIdentity) => void
   onLoginFailed?: (loginSessionId: string, code: string, message: string) => void
   onAccountsChanged?: (accounts: LaneAccountRow[]) => void
+  /** Discoverability follow-up: every field of the host's `status` frame this client can use. */
+  onStatusChanged?: (status: LaneLoginHostStatusChange) => void
 }
 
 /** Thrown for every refused RPC: carries the host's own code + complete sentence (§3 Rule-3 row). */
@@ -99,9 +107,22 @@ export class LaneLoginClient {
     } else if (frame.type === 'login-failed') {
       this.events.onLoginFailed?.(frame.loginSessionId, frame.code, frame.message)
     } else if (frame.type === 'status') {
-      const status = frame.status as { accounts?: LaneAccountRow[] } | undefined
+      const status = frame.status as
+        | {
+            accounts?: LaneAccountRow[]
+            laneState?: LaneLoginHostStatusChange['laneState']
+            callerIsDelegatedGrant?: boolean
+          }
+        | undefined
       if (status?.accounts) {
         this.events.onAccountsChanged?.(status.accounts)
+      }
+      if (status?.laneState) {
+        this.events.onStatusChanged?.({
+          laneState: status.laneState,
+          callerIsDelegatedGrant: status.callerIsDelegatedGrant === true,
+          accounts: status.accounts ?? []
+        })
       }
     } else if (frame.type === 'end') {
       this.unsubscribe = null

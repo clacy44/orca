@@ -28,6 +28,7 @@ export type LaneLoginHostStatus = {
   laneState: 'absent' | 'loaded' | 'reauth-required' | 'restart-required'
   accounts: LaneAccountRow[]
   delegatedGrantId: string | null
+  callerIsDelegatedGrant: boolean
 }
 
 export type LaneLoginTransport = {

@@ -9,8 +9,7 @@ import type {
 } from '../../shared/lane-login-ipc'
 
 // S9-L2 (design rev 38 §2l/§3): renderer's window into the desktop lane-login client. One
-// environment (paired host) at a time per call, matching the per-host shape of
-// `principalLaneStatus.delegateAccountToHost`.
+// environment (paired host) at a time per call, matching `principalLaneStatus`'s per-host shape.
 export type LaneLoginApi = {
   /** Reads (and, as a side effect, connects/probes) the given environment's lane-login snapshot. */
   get: (environmentId: string) => Promise<LaneLoginEnvironmentSnapshotDto | null>

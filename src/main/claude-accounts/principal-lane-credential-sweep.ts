@@ -100,8 +100,8 @@ export async function wipeLaneCredentials(
     }
   }
   throw new ClaudeLaneRefusal(
-    'accounts.lane.clear_incomplete',
-    'Orca swept this Claude credential lane but a credential file kept reappearing in it, so the lane is not confirmed empty and the release was not completed. Stop any Claude session still running in that lane on the host machine, then release the account again.'
+    'accounts.lane.logout_incomplete',
+    'Orca swept this Claude credential lane but a credential file kept reappearing in it, so the lane is not confirmed empty and the logout was not completed. Stop any Claude session still running in that lane on the host machine, then log out again.'
   )
 }
 
