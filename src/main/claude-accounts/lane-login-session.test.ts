@@ -760,5 +760,32 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
       const { authorizationUrl } = await startPromise
       expect(authorizationUrl).toBe(REAL_CLI_SHAPE_URL)
     })
+
+    // Regression: a child that reaches the paste-code prompt without ever printing a relayable
+    // URL (or any URL at all) must refuse promptly off the prompt edge — the prompt IS the CLI's
+    // own "done printing the URL" signal — never park the caller for the full LOGIN_TIMEOUT_MS
+    // waiting on a candidate that will never arrive.
+    it('loginStart rejects login_url_unparsed promptly when the child reaches the paste prompt having printed no URL at all — settles before a 500ms timer', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+
+      const settledWithin500ms = Promise.race([
+        startPromise.then(
+          () => 'resolved' as const,
+          () => 'rejected' as const
+        ),
+        new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 500))
+      ])
+
+      loginChildren[0].feed(`Opening browser to sign in...\n${PASTE_PROMPT}`)
+
+      expect(await settledWithin500ms).toBe('rejected')
+      await expect(startPromise).rejects.toMatchObject({ code: 'accounts.lane.login_url_unparsed' })
+    })
   })
 })
