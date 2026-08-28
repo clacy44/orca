@@ -2,7 +2,10 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { deleteActiveClaudeKeychainCredentialsStrict } from './keychain'
-import { purgeLaneAccountStore } from './principal-lane-account-store'
+import {
+  listLaneAccountStoreArtifacts,
+  purgeLaneAccountStore
+} from './principal-lane-account-store'
 import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './lane-credential-filenames'
 
 export { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME }
@@ -40,6 +43,9 @@ export type LaneCredentialWipeOptions = {
    * `claude` §2f names — can put a credential back between two synchronous passes.
    */
   onSweptPass?: (pass: number) => void
+  /** Same observability, for the `claude-accounts/` store's own purge-then-re-read — a detached
+   * login child can re-create a `<uuid>/auth` there just as it can the top-level credential. */
+  onStorePurged?: (pass: number) => void
 }
 
 /** How many times a lane that keeps re-growing a credential is swept before the wipe refuses. */
@@ -93,15 +99,26 @@ export async function wipeLaneCredentials(
       }
     }
     options.onSweptPass?.(pass)
-    if (listLaneCredentialArtifacts(laneDir).length === 0) {
+    if (listLaneCredentialArtifacts(laneDir).length !== 0) {
+      continue
+    }
+    // S9-L1 B2/§storeLayout "PURGE": every OTHER login this lane ever captured lives under
+    // `claude-accounts/`, which the credential-only sweep above never reaches. Purged and
+    // RE-READ inside the SAME bounded loop, only once the active credential is confirmed gone
+    // (never on a pass that just re-purged over a still-reappearing credential) — a wipe reported
+    // over an unread `claude-accounts/` directory is the same failure as one that never ran, and
+    // a detached login child from a previous process can re-create a `<uuid>/auth` here just as
+    // it can re-create the top-level credential.
+    for (const name of purgeLaneAccountStore(laneDir)) {
+      if (!removed.includes(name)) {
+        removed.push(name)
+      }
+    }
+    options.onStorePurged?.(pass)
+    if (listLaneAccountStoreArtifacts(laneDir).length === 0) {
       if (dropLaneOauthAccount(laneDir)) {
         removed.push(`${LANE_CONFIG_FILENAME}#oauthAccount`)
       }
-      // S9-L1 B2/§storeLayout "PURGE": every OTHER login this lane ever captured lives under
-      // `claude-accounts/`, which this sweep's own artifact match (`.credentials.json` plus
-      // `*.tmp` at the lane's top level) never reached. Only once the active credential is
-      // confirmed gone — never on the throw path below, which reports nothing done.
-      removed.push(...purgeLaneAccountStore(laneDir))
       return removed
     }
   }

@@ -179,6 +179,18 @@ export function removeLaneAccount(
  * with its `.tmp` staging siblings. Leaves `settings.json`, mirrored user content and transcripts
  * alone — none of those live under `claude-accounts`, so a root-scoped walk cannot reach them.
  */
+/** Every entry still at rest directly under `<lane>/claude-accounts` — the store-side half of
+ * `listLaneCredentialArtifacts`'s re-read discipline, used by the logout sweep to confirm the
+ * store is actually empty rather than reporting over a directory a surviving login child just
+ * re-created. */
+export function listLaneAccountStoreArtifacts(laneDir: string): string[] {
+  const laneAccountsRoot = getLaneAccountsRoot(laneDir)
+  if (!existsSync(laneAccountsRoot)) {
+    return []
+  }
+  return readdirSync(laneAccountsRoot)
+}
+
 export function purgeLaneAccountStore(laneDir: string): string[] {
   const laneAccountsRoot = getLaneAccountsRoot(laneDir)
   if (!existsSync(laneAccountsRoot)) {

@@ -122,6 +122,56 @@ describe('the lane wipe re-read', () => {
     expect(existsSync(join(accountsRoot, keptId))).toBe(true)
   })
 
+  // The failure this closes: a detached login child from a PREVIOUS process re-creating a
+  // `<uuid>/auth` directory in `claude-accounts/` right after this sweep's own purge removed it —
+  // the re-read must catch it on the very next pass, same discipline as the credential file.
+  it('sweeps the account store again when a login capture directory reappears after the first purge', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    const reappearingId = '55555555-5555-4555-8555-555555555555'
+    const storePasses: number[] = []
+
+    const removed = await wipeLaneCredentials(laneDir, {
+      platform: 'linux',
+      onStorePurged: (pass) => {
+        storePasses.push(pass)
+        if (pass === 1) {
+          mkdirSync(join(accountsRoot, reappearingId, 'auth'), { recursive: true })
+          writeFileSync(
+            join(accountsRoot, reappearingId, 'auth', '.orca-managed-claude-auth'),
+            `${reappearingId}\n`
+          )
+          writeFileSync(join(accountsRoot, reappearingId, 'auth', '.credentials.json'), CREDENTIALS)
+        }
+      }
+    })
+
+    expect(storePasses).toEqual([1, 2])
+    expect(existsSync(join(accountsRoot, reappearingId))).toBe(false)
+    expect(removed).toContain(reappearingId)
+  })
+
+  // MP anchor: today's single-shot purge (no re-read) would report this wipe `completed`, over a
+  // directory that in fact never came back clean.
+  it('refuses logout_incomplete, never reporting success, when the account store never reads back clean', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    const stuckId = '44444444-4444-4444-8444-444444444444'
+
+    const error = await wipeLaneCredentials(laneDir, {
+      platform: 'linux',
+      onStorePurged: () => {
+        mkdirSync(join(accountsRoot, stuckId, 'auth'), { recursive: true })
+        writeFileSync(
+          join(accountsRoot, stuckId, 'auth', '.orca-managed-claude-auth'),
+          `${stuckId}\n`
+        )
+        writeFileSync(join(accountsRoot, stuckId, 'auth', '.credentials.json'), CREDENTIALS)
+      }
+    }).catch((thrown: unknown) => thrown)
+
+    expect(isClaudeLaneRefusal(error)).toBe(true)
+    expect(isClaudeLaneRefusal(error) ? error.code : null).toBe('accounts.lane.logout_incomplete')
+  })
+
   // Negative control: a lane that comes back clean is swept ONCE, not re-swept on a timer.
   it('reads back once when nothing reappears', async () => {
     const passes: number[] = []
