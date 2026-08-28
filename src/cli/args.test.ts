@@ -38,6 +38,13 @@ describe('parseArgs', () => {
     expect(parsed.flags.get('value')).toBe('')
   })
 
+  it('parses `orca lane login --cancel --person <name>` with --cancel as a boolean', () => {
+    const parsed = parseArgs(['lane', 'login', '--cancel', '--person', 'Ana Ng'])
+
+    expect(parsed.flags.get('cancel')).toBe(true)
+    expect(parsed.flags.get('person')).toBe('Ana Ng')
+  })
+
   it('still parses boolean flags and space-separated values', () => {
     const parsed = parseArgs(['tab', 'create', '--json', '--url', 'https://example.com'])
 

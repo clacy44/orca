@@ -24,8 +24,11 @@ import {
  * Why status.get and not the method's own `method_not_found`: the loud failure is a stack trace,
  * not one sentence naming the fix. The capability says exactly one thing — this host has per-person
  * Claude credential lanes — so its absence maps cleanly to a single instruction (S9 §3).
+ *
+ * Exported (with the four helpers below it): `lane-login.ts` shares this shape rather than a copy —
+ * this file's own 300-line ratchet is what forced the login/logout/accounts/use verbs out to it.
  */
-async function assertLaneSupported(client: RuntimeClient): Promise<void> {
+export async function assertLaneSupported(client: RuntimeClient): Promise<void> {
   const status = await client.call<RuntimeStatus>('status.get')
   if (!status.result.capabilities?.includes(AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY)) {
     throw new RuntimeClientError(
@@ -38,7 +41,7 @@ async function assertLaneSupported(client: RuntimeClient): Promise<void> {
 // Why reject rather than silently retarget: `orca lane` is a host-machine consent surface, so
 // `--environment homelab` would aim it at the wrong box — the exact mistake the host-only door
 // exists to prevent. Mirrors `orca account`'s guard.
-function rejectRemoteSelectionFlags(ctx: HandlerContext): void {
+export function rejectRemoteSelectionFlags(ctx: HandlerContext): void {
   for (const flag of ['environment', 'pairing-code']) {
     if (ctx.flags.has(flag)) {
       throw new RuntimeClientError(
@@ -49,7 +52,7 @@ function rejectRemoteSelectionFlags(ctx: HandlerContext): void {
   }
 }
 
-function requireStringFlag(ctx: HandlerContext, flag: string): string {
+export function requireStringFlag(ctx: HandlerContext, flag: string): string {
   const value = ctx.flags.get(flag)
   if (typeof value !== 'string' || value.length === 0) {
     throw new RuntimeClientError('invalid_argument', `Missing a value for --${flag}.`)
@@ -57,12 +60,12 @@ function requireStringFlag(ctx: HandlerContext, flag: string): string {
   return value
 }
 
-function optionalStringFlag(ctx: HandlerContext, flag: string): string | null {
+export function optionalStringFlag(ctx: HandlerContext, flag: string): string | null {
   const value = ctx.flags.get(flag)
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-async function readStatus(client: RuntimeClient): Promise<LaneStatusSnapshot> {
+export async function readStatus(client: RuntimeClient): Promise<LaneStatusSnapshot> {
   const response = await client.call<LaneStatusSnapshot>('accounts.lane.readStatus')
   return response.result
 }

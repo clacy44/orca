@@ -22,6 +22,9 @@ export type LaneGrant = {
 export type LaneStatusPrincipal = LanePrincipal & {
   laneState: RuntimeTerminalLaneState
   boundDeviceIds: string[]
+  /** §6's S9-L3 migration: a `.credentials.json` from before the per-lane login model — never
+   * wiped on sight, never promoted, replaced by the lane's first successful `orca lane login`. */
+  unverifiedLegacy: boolean
 }
 
 export type LaneStatusSnapshot = {
@@ -40,6 +43,13 @@ export type LaneAuditRow = {
   platformAcceptance?: 'unverified-win32' | 'unverified-darwin'
   inviteScope?: 'runtime' | 'mobile'
   inviteExpiresAt?: number
+}
+
+export type LaneAccount = {
+  laneAccountId: string
+  email: string
+  label: string | null
+  active: boolean
 }
 
 export type LaneInvite = {
@@ -113,6 +123,45 @@ export function resolvePerson(principals: LanePrincipal[], selector: string): st
   )
 }
 
+/** Resolve `--account <id|email>` against a lane's captured logins: an exact laneAccountId, or an
+ * exact (case-insensitive) email — never a prefix, since an email is not a stable-prefixed id. */
+export function resolveLaneAccount(accounts: LaneAccount[], selector: string): LaneAccount {
+  const exactId = accounts.find((account) => account.laneAccountId === selector)
+  if (exactId) {
+    return exactId
+  }
+  const emailMatches = accounts.filter(
+    (account) => account.email.toLowerCase() === selector.toLowerCase()
+  )
+  if (emailMatches.length === 1) {
+    return emailMatches[0]
+  }
+  if (emailMatches.length === 0) {
+    throw new RuntimeClientError(
+      'invalid_argument',
+      `No signed-in account matches "${selector}". Run \`orca lane accounts --person <name>\` to list this lane's accounts by id and email.`
+    )
+  }
+  const candidates = emailMatches
+    .map((account) => `  ${account.laneAccountId}  ${account.email}`)
+    .join('\n')
+  throw new RuntimeClientError(
+    'invalid_argument',
+    `"${selector}" matches more than one signed-in account:\n${candidates}\nRe-run with the exact account id.`
+  )
+}
+
+export function formatAccountList(accounts: LaneAccount[]): string {
+  if (accounts.length === 0) {
+    return 'No signed-in accounts. Sign one in with: orca lane login --person <name> --email <email>'
+  }
+  const lines = accounts.map(
+    (account) =>
+      `  ${account.active ? '*' : ' '} ${account.email}${account.label ? ` (${account.label})` : ''}  ${account.laneAccountId}`
+  )
+  return `Accounts (${accounts.length}, * = active):\n${lines.join('\n')}`
+}
+
 export function personName(principals: LanePrincipal[], principalId: string | null): string {
   if (!principalId) {
     return '(none)'
@@ -148,7 +197,10 @@ export function formatStatus(snapshot: LaneStatusSnapshot): string {
           const designated = principal.delegatedGrantId
             ? personDevice(snapshot.grants, principal.delegatedGrantId)
             : '(no pusher designated)'
-          return `  ${principal.displayName}  lane:${principal.laneState}  devices:${principal.boundDeviceIds.length}  pusher:${designated}`
+          const legacy = principal.unverifiedLegacy
+            ? `  [unverified legacy — run \`orca lane login --person "${principal.displayName}" --email <email>\` to replace it]`
+            : ''
+          return `  ${principal.displayName}  lane:${principal.laneState}  devices:${principal.boundDeviceIds.length}  pusher:${designated}${legacy}`
         })
   const unbound = snapshot.grants.filter((grant) => grant.boundPrincipalId === null)
   const deviceLines = snapshot.grants.map((grant) => {
