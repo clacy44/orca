@@ -118,6 +118,37 @@ describe('isRelayableAuthorizeUrl / assertRelayableAuthorizeUrl', () => {
     expect(isRelayableAuthorizeUrl(DOWNGRADED_REDIRECT_URL)).toBe(false)
   })
 
+  // P2d (review-r2): a duplicate redirect_uri must refuse outright, not validate
+  // only the first occurrence and ignore the second.
+  it('refuses a URL carrying more than one redirect_uri (P2d)', () => {
+    const duplicated = `https://platform.claude.com/oauth/authorize?redirect_uri=${encodeURIComponent(
+      'https://platform.claude.com/oauth/code/callback'
+    )}&redirect_uri=${encodeURIComponent('https://evil.example.com/cb')}`
+    expect(isRelayableAuthorizeUrl(duplicated)).toBe(false)
+  })
+
+  // MP: getting redirect_uri via `.get()` (first occurrence only) rather than
+  // requiring `.getAll()` to have exactly one entry lets the duplicate above pass.
+  it('mutation proof: reading only the first redirect_uri accepts the duplicate above', () => {
+    const duplicated = `https://platform.claude.com/oauth/authorize?redirect_uri=${encodeURIComponent(
+      'https://platform.claude.com/oauth/code/callback'
+    )}&redirect_uri=${encodeURIComponent('https://evil.example.com/cb')}`
+    const parsed = new URL(duplicated)
+    const firstOnly = parsed.searchParams.get('redirect_uri')
+    expect(firstOnly).toBe('https://platform.claude.com/oauth/code/callback')
+    // ...the value a `.get()`-based guard would have validated and accepted —
+    // while the shipped guard correctly refuses the whole URL.
+    expect(isRelayableAuthorizeUrl(duplicated)).toBe(false)
+  })
+
+  // P2e (review-r2): the endpoint itself must be pinned, not any path on the host.
+  it('refuses a well-formed URL on an unexpected pathname (P2e)', () => {
+    const wrongPath = `https://platform.claude.com/anything/at/all?redirect_uri=${encodeURIComponent(
+      'https://platform.claude.com/oauth/code/callback'
+    )}`
+    expect(isRelayableAuthorizeUrl(wrongPath)).toBe(false)
+  })
+
   // P7: the refusal is a typed ClaudeLaneRefusal, not a bespoke error class the
   // shared refusal machinery does not recognize.
   it('throws a ClaudeLaneRefusal carrying accounts.lane.login_url_unparsed', () => {
@@ -205,6 +236,78 @@ describe('createAuthorizeUrlAccumulator', () => {
   it('mutation proof: feeding chunks straight into firstRelayableAuthorizeUrl truncates and refuses', () => {
     const prefix = `printed: ${HOSTED_URL.slice(0, 40)}`
     expect(() => firstRelayableAuthorizeUrl(prefix)).toThrow()
+  })
+
+  // P14 (review-r2): reaching the cap must NEVER relay a truncated prefix — it
+  // must refuse. Negative control: a URL cut mid-parameter must never surface
+  // as a return value, truncated or otherwise.
+  it('refuses accounts.lane.login_url_unparsed at the cap instead of relaying a truncated prefix', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    // Padding plus a URL cut 10 chars short pushes the buffer over the 8000-char
+    // cap while a match is still pinned to the buffer tail (never terminated).
+    const fed = `${'x'.repeat(8000)} ${HOSTED_URL.slice(0, -10)}`
+    let thrown: unknown
+    try {
+      acc.feed(fed)
+    } catch (error) {
+      thrown = error
+    }
+    expect(isClaudeLaneRefusal(thrown) ? thrown.code : null).toBe(
+      'accounts.lane.login_url_unparsed'
+    )
+  })
+
+  // MP: the pre-fix shape ("matchEndsAtBufferTail && buffer.length < MAX")
+  // treats reaching the cap as proof of completeness and relays the prefix
+  // instead of refusing — this must go red against that shape.
+  it('mutation proof: accepting a match at the cap instead of refusing would relay a truncated prefix', () => {
+    const buffer = `${'x'.repeat(8000)} ${HOSTED_URL.slice(0, -10)}`
+    const stripped = buffer // no escapes present in this fixture
+    // Reuses the module's own bare-URL extraction rather than a second copy of
+    // its control-byte-excluding pattern.
+    const matched = firstAuthorizeUrl(stripped)
+    // The old shape's condition for "accept, do not wait": the match runs to
+    // the buffer's tail AND the buffer has reached its cap.
+    const oldShapeWouldAccept = matched !== null && stripped.endsWith(matched)
+    expect(oldShapeWouldAccept).toBe(true)
+    expect(matched).not.toBe(HOSTED_URL) // ...and what it would accept is a cut prefix.
+    // The shipped accumulator refuses instead of returning that prefix.
+    const acc = createAuthorizeUrlAccumulator()
+    expect(() => acc.feed(buffer)).toThrow()
+  })
+
+  describe('finish', () => {
+    // P12 (review-r2): a URL that is the very last thing the stream ever
+    // produces, with no trailing boundary byte, must not be silence.
+    it('relays a URL that never received a trailing boundary byte before stream end', () => {
+      const acc = createAuthorizeUrlAccumulator()
+      expect(acc.feed(`printed: ${HOSTED_URL}`)).toBeNull() // no boundary yet — must wait
+      expect(acc.finish()).toBe(HOSTED_URL)
+    })
+
+    // End-of-child is itself a valid terminator, same as whitespace/newline.
+    it('relays a URL split across a chunk boundary and resolved only at finish()', () => {
+      const acc = createAuthorizeUrlAccumulator()
+      const prefix = HOSTED_URL.slice(0, 40)
+      const suffix = HOSTED_URL.slice(40)
+      expect(acc.feed(prefix)).toBeNull()
+      expect(acc.feed(suffix)).toBeNull()
+      expect(acc.finish()).toBe(HOSTED_URL)
+    })
+
+    // Never silence: nothing relayable ⇒ a named refusal, not null/undefined.
+    it('throws login_url_unparsed at finish() when nothing relayable was ever seen', () => {
+      const acc = createAuthorizeUrlAccumulator()
+      acc.feed('no url in this stream')
+      try {
+        acc.finish()
+        expect.unreachable()
+      } catch (error) {
+        expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
+          'accounts.lane.login_url_unparsed'
+        )
+      }
+    })
   })
 })
 

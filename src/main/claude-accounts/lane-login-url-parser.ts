@@ -23,6 +23,15 @@ const PASTE_CODE_PROMPT = 'Paste code here if prompted > '
  * origin lets an attacker-hosted page carry a well-formed redirect_uri through. */
 const REQUIRED_AUTHORIZE_HOST = 'platform.claude.com'
 
+/** Pathname a relayable authorization URL must have — the one authorize endpoint,
+ * not any path on the trusted host. Verified against the installed `claude`
+ * binary (2.1.248, `claude --version`): 'https://platform.claude.com/oauth/authorize'
+ * is the ONLY /oauth/authorize URL in the binary (no other anthropic.com oauth
+ * host is present at all). Re-verify this and REQUIRED_AUTHORIZE_HOST /
+ * REQUIRED_REDIRECT_HOST / PASTE_CODE_PROMPT together whenever the pinned CLI
+ * version bumps (see lane-login-cli-version-gate.ts's INSTALLED_CLI_VERSION). */
+const REQUIRED_AUTHORIZE_PATHNAME = '/oauth/authorize'
+
 /** Host a relayable authorization URL's `redirect_uri` query param must equal.
  * Anything else (e.g. a `localhost:<ephemeral>` loopback variant the CLI also prints)
  * must never be relayed to a client: a code delivered to an unauthenticated loopback
@@ -105,8 +114,11 @@ export function firstAuthorizeUrl(text: string): string | null {
  * safe to relay to a client: its own origin must be exactly
  * `https://platform.claude.com` (§4 R-32b — the origin itself, not only
  * `redirect_uri`, is what an attacker-hosted phishing page would substitute),
- * and its `redirect_uri` query parameter must itself be an
- * `https://platform.claude.com` URL, not a `localhost:<ephemeral>` loopback.
+ * its pathname must be the one authorize endpoint, and it must carry EXACTLY
+ * ONE `redirect_uri` query parameter, itself an `https://platform.claude.com`
+ * URL, not a `localhost:<ephemeral>` loopback. A second `redirect_uri` is
+ * refused outright rather than validating only the first occurrence — reading
+ * one of two conflicting relay-relevant values is not validating the URL.
  */
 export function isRelayableAuthorizeUrl(url: string): boolean {
   let parsed: URL
@@ -115,16 +127,20 @@ export function isRelayableAuthorizeUrl(url: string): boolean {
   } catch {
     return false
   }
-  if (parsed.protocol !== 'https:' || parsed.hostname !== REQUIRED_AUTHORIZE_HOST) {
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.hostname !== REQUIRED_AUTHORIZE_HOST ||
+    parsed.pathname !== REQUIRED_AUTHORIZE_PATHNAME
+  ) {
     return false
   }
-  const redirectUri = parsed.searchParams.get('redirect_uri')
-  if (!redirectUri) {
+  const redirectUriValues = parsed.searchParams.getAll('redirect_uri')
+  if (redirectUriValues.length !== 1) {
     return false
   }
   let redirect: URL
   try {
-    redirect = new URL(redirectUri)
+    redirect = new URL(redirectUriValues[0])
   } catch {
     return false
   }
@@ -168,16 +184,31 @@ export function firstRelayableAuthorizeUrl(text: string): string {
  * to `firstRelayableAuthorizeUrl` one at a time would truncate it mid-string and
  * refuse a legitimate login. `feed` accumulates a bounded tail and returns a URL
  * only once a candidate match is confirmed complete — terminated by a real
- * boundary byte in the buffer, not merely by having reached the end of whatever
- * has arrived so far, which could still be a truncated prefix.
+ * boundary byte (whitespace/control character) already in the buffer, NEVER by
+ * merely having reached the end of whatever has arrived so far, which could
+ * still be a truncated prefix. A match flush against the buffer's end is
+ * therefore always "wait for more", with no cap-based exception: relaying a
+ * possibly-truncated URL is worse than refusing one, so reaching the cap
+ * without ever observing a terminated match discards the buffer and refuses
+ * `login_url_unparsed` rather than guessing. `finish()` is the only path that
+ * treats a still-unterminated match as final — call it once the child's stdout
+ * stream itself has ended, so a URL that is the very last thing printed (with
+ * no trailing byte to terminate it) still resolves to a URL or a refusal,
+ * never silence.
  */
-export function createAuthorizeUrlAccumulator(): { feed(chunk: string): string | null } {
+export function createAuthorizeUrlAccumulator(): {
+  feed(chunk: string): string | null
+  finish(): string
+} {
   let buffer = ''
   return {
     feed(chunk: string): string | null {
       buffer += chunk
       if (buffer.length > MAX_URL_ACCUMULATOR_CHARS) {
-        buffer = buffer.slice(-MAX_URL_ACCUMULATOR_CHARS)
+        // Never emit a prefix we cannot see complete: give up on whatever was
+        // accumulating rather than risk relaying a truncated authorization URL.
+        buffer = ''
+        throw loginUrlUnparsedRefusal()
       }
       const stripped = stripAllEscapes(buffer)
       URL_PATTERN.lastIndex = 0
@@ -185,11 +216,8 @@ export function createAuthorizeUrlAccumulator(): { feed(chunk: string): string |
       // eslint-disable-next-line no-cond-assign -- scanning every candidate, first relayable wins.
       while ((match = URL_PATTERN.exec(stripped))) {
         const matchEndsAtBufferTail = match.index + match[0].length === stripped.length
-        // A match flush against the end of what we've accumulated so far might
-        // still be a truncated prefix of a longer URL — wait for more input
-        // unless the buffer is already at its cap, in which case this is the
-        // most we will ever see of it.
-        if (matchEndsAtBufferTail && buffer.length < MAX_URL_ACCUMULATOR_CHARS) {
+        if (matchEndsAtBufferTail) {
+          // Might still be a truncated prefix of a longer URL — wait for more.
           continue
         }
         if (isRelayableAuthorizeUrl(match[0])) {
@@ -199,6 +227,13 @@ export function createAuthorizeUrlAccumulator(): { feed(chunk: string): string |
       }
       URL_PATTERN.lastIndex = 0
       return null
+    },
+    finish(): string {
+      // End of stream is itself a boundary: a match ending at the buffer tail
+      // is no longer "possibly truncated" — nothing more will ever arrive.
+      const relayed = firstRelayableAuthorizeUrl(buffer)
+      buffer = ''
+      return relayed
     }
   }
 }
