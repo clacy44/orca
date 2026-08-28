@@ -39,9 +39,16 @@ const PASTE_CODE_PROMPT = 'Paste code here if prompted > '
  * twice in the stripped text with no separator between the two copies (the prior
  * greedy-`\S*` shape additionally swallowed the terminator and close into the
  * capture, leaving raw escape bytes behind — both defects are fixed by capturing
- * only the target and dropping everything through the matching close). */
+ * only the target and dropping everything through the matching close). The
+ * captured target requires at least one char (`+?`, not `*?`): an OSC-8 open with
+ * an EMPTY target is per-spec indistinguishable from a bare close, so treating it
+ * as an open too would let a real CLOSE sequence stand in for an open, capture
+ * everything up to the NEXT close (including a real URL sitting between them) as
+ * a throwaway "label", and erase it on strip. A bare close with nothing open
+ * simply fails to match here and its raw bytes pass through unstripped — control
+ * bytes URL_PATTERN already stops at, so they cannot hide a URL either. */
 // eslint-disable-next-line no-control-regex -- OSC-8 hyperlink escapes ARE control bytes; matching them is the point.
-const OSC8_LINK = /\x1b\]8;;([^\x1b\x07]*?)(?:\x1b\\|\x07)[\s\S]*?\x1b\]8;;(?:\x1b\\|\x07)/g
+const OSC8_LINK = /\x1b\]8;;([^\x1b\x07]+?)(?:\x1b\\|\x07)[\s\S]*?\x1b\]8;;(?:\x1b\\|\x07)/g
 
 /** Matches any other ANSI escape (SGR colour codes, cursor show/hide, etc.) so
  * prompt/URL detection can tolerate the wrapping §2b records as unconditional
@@ -63,8 +70,12 @@ const MAX_URL_ACCUMULATOR_CHARS = 8000
 const MAX_PROMPT_TAIL_CHARS = PASTE_CODE_PROMPT.length + 64
 
 function loginUrlUnparsedRefusal(candidate: string | null): ClaudeLaneRefusal {
+  // `describeAuthorizeUrlRejection` names the check that actually failed (own origin, redirect
+  // count, or redirect origin) — do not weld on a fixed "and that is not an address..." clause
+  // here, since that reads as blaming the printed host even when the host was allow-listed and
+  // the real reason was its redirect_uri.
   const detail = candidate
-    ? `it was not safe to relay — ${describeAuthorizeUrlRejection(candidate)}, and that is not an address Orca will send you to`
+    ? `it was not safe to relay — ${describeAuthorizeUrlRejection(candidate)}`
     : 'the login process never printed one'
   return new ClaudeLaneRefusal(
     'accounts.lane.login_url_unparsed',
@@ -156,7 +167,14 @@ function decideFirstUrlCandidate(strippedText: string, atStreamEnd: boolean): st
   }
   const candidate = match[0]
   if (isRelayableAuthorizeUrl(candidate)) {
-    return candidate
+    // Relay the WHATWG-normalized `.href`, not the raw matched text: `isRelayableAuthorizeUrl`
+    // already parsed `candidate` successfully (so this reparse cannot throw), and normalizing is
+    // what folds an oddity like `https:/\host/...` to the canonical `https://host/...` a
+    // downstream parser (QR encoder, mobile `Linking.openURL`) may read differently than WHATWG
+    // does, and percent-encodes a raw bidi-override or other non-ASCII byte sitting in the query
+    // string rather than relaying it as literal text that could visually mislead a person reading
+    // the URL before they authenticate against it.
+    return new URL(candidate).href
   }
   throw loginUrlUnparsedRefusal(candidate)
 }
@@ -203,16 +221,20 @@ export function createAuthorizeUrlAccumulator(): {
   return {
     feed(chunk: string): string | null {
       buffer += chunk
-      if (buffer.length > MAX_URL_ACCUMULATOR_CHARS) {
-        // Never emit a prefix we cannot see complete: give up on whatever was
-        // accumulating rather than risk relaying a truncated authorization URL.
-        buffer = ''
-        throw loginUrlUnparsedRefusal(null)
-      }
+      // Decide BEFORE checking the cap: a chunk that pushes the buffer over
+      // MAX_URL_ACCUMULATOR_CHARS can still carry a complete, decidable candidate (a chatty CLI's
+      // noise plus a fully-terminated URL) — discarding on length alone first would misreport that
+      // as "the login process never printed one" when it plainly did. The cap still protects
+      // against unbounded growth: it only fires below when no decision was reachable.
       const stripped = stripAllEscapes(buffer)
       const decided = decideFirstUrlCandidate(stripped, false)
       if (decided) {
         buffer = ''
+      } else if (buffer.length > MAX_URL_ACCUMULATOR_CHARS) {
+        // Never emit a prefix we cannot see complete: give up on whatever was
+        // accumulating rather than risk relaying a truncated authorization URL.
+        buffer = ''
+        throw loginUrlUnparsedRefusal(null)
       }
       return decided
     },

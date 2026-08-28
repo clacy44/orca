@@ -69,6 +69,24 @@ describe('stripOsc8', () => {
     const wrapped = `${osc8Wrap(HOSTED_URL, 'a')}${osc8Wrap(LOOPBACK_URL, 'b')}`
     expect(stripOsc8(wrapped)).toBe(`${HOSTED_URL}${LOOPBACK_URL}`)
   })
+
+  // P: a bare OSC-8 CLOSE (empty target) must never be treated as an OPEN — doing so lets the
+  // real URL sitting between two closes be captured as a throwaway "label" and erased entirely.
+  it('does not erase a URL sitting between two bare OSC-8 closes', () => {
+    const wrapped = `\x1b]8;;\x07 ${HOSTED_URL} \x1b]8;;\x07`
+    expect(stripOsc8(wrapped)).toContain(HOSTED_URL)
+  })
+
+  // MP: allowing an empty target to count as an open (`*?` instead of `+?`) reproduces exactly
+  // this collapse — the fix's own doc comment names it.
+  it('mutation proof: an empty-target-as-open regex would collapse the two-close case above to empty', () => {
+    // eslint-disable-next-line no-control-regex -- reproduces the pre-fix regex shape for the proof.
+    const preFixRegex = /\x1b\]8;;([^\x1b\x07]*?)(?:\x1b\\|\x07)[\s\S]*?\x1b\]8;;(?:\x1b\\|\x07)/g
+    const wrapped = `\x1b]8;;\x07 ${HOSTED_URL} \x1b]8;;\x07`
+    const preFixResult = wrapped.replace(preFixRegex, (_match, url: string) => url)
+    expect(preFixResult).toBe('') // ...the old shape erases the URL entirely...
+    expect(stripOsc8(wrapped)).not.toBe('') // ...the shipped fix does not.
+  })
 })
 
 describe('firstAuthorizeUrl', () => {
@@ -214,6 +232,26 @@ describe('firstRelayableAuthorizeUrl', () => {
     expect(() => firstRelayableAuthorizeUrl(`only this: ${LOOPBACK_URL}`)).toThrow()
   })
 
+  // The relayed value is the WHATWG-normalized `.href`, not the raw matched text: a raw bidi
+  // control character sitting in the query string (invisible plumbing to every check here, since
+  // validation only looks at `redirect_uri`) must not survive into what a person reads before
+  // authenticating — `.href` percent-encodes it like any other non-ASCII byte.
+  it('percent-encodes a raw bidi-override character in the query string rather than relaying it literally', () => {
+    const withBidiOverride = `${HOSTED_URL}&x=‮evil`
+    const relayed = firstRelayableAuthorizeUrl(withBidiOverride)
+    expect(relayed).toBe(new URL(withBidiOverride).href)
+    expect(relayed).not.toContain('‮')
+    expect(relayed).toContain('%E2%80%AE')
+  })
+
+  // MP: relaying `match[0]` (the pre-fix shape) would hand back the raw text with the literal
+  // bidi-override byte still sitting in it, unchanged from what was printed.
+  it('mutation proof: relaying the raw matched text instead of the normalized href would keep the raw bidi override', () => {
+    const withBidiOverride = `${HOSTED_URL}&x=‮evil`
+    expect(withBidiOverride).toContain('‮') // ...the raw text the old shape would relay...
+    expect(firstRelayableAuthorizeUrl(withBidiOverride)).not.toContain('‮') // ...the fix does not.
+  })
+
   it('refuses when no candidate is present in the text at all', () => {
     try {
       firstRelayableAuthorizeUrl('no url at all here')
@@ -309,6 +347,27 @@ describe('createAuthorizeUrlAccumulator', () => {
     expect(isClaudeLaneRefusal(thrown) ? thrown.code : null).toBe(
       'accounts.lane.login_url_unparsed'
     )
+  })
+
+  // A chunk that pushes the buffer past the cap can still carry a complete, decidable candidate
+  // (a chattier CLI's noise plus a fully-terminated good URL) — the cap must not refuse ahead of
+  // deciding on it, and the good URL must relay normally rather than being reported as never
+  // printed.
+  it('relays a good URL even when the noise ahead of it alone would exceed the cap', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    const fed = `${'x'.repeat(7990)}\n${HOSTED_URL}\n`
+    expect(acc.feed(fed)).toBe(HOSTED_URL)
+  })
+
+  // MP: checking the cap BEFORE deciding (the pre-fix order) discards this exact buffer and
+  // throws `login_url_unparsed` instead of relaying the good URL it plainly contains.
+  it('mutation proof: checking the cap before deciding would refuse the good-URL-after-noise case above', () => {
+    const buffer = `${'x'.repeat(7990)}\n${HOSTED_URL}\n`
+    expect(buffer.length).toBeGreaterThan(8000)
+    const preFixWouldRefuse = buffer.length > 8000 // the old shape's cap-first check
+    expect(preFixWouldRefuse).toBe(true) // ...the old shape discards before ever deciding...
+    const acc = createAuthorizeUrlAccumulator()
+    expect(acc.feed(buffer)).toBe(HOSTED_URL) // ...the shipped fix decides first and relays.
   })
 
   // MP: the pre-fix shape ("matchEndsAtBufferTail && buffer.length < MAX")
