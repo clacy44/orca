@@ -71,8 +71,16 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
     serializeLaneWrite: async <T>(_laneId: string, run: () => Promise<T>): Promise<T> => run()
   }
 
+  // Not the live `claude --version` probe: this suite's outcome must not depend on whichever CLI
+  // build happens to be installed on the box running it. `lane-login-cli-version-gate.test.ts`
+  // covers the gate itself, including the mutation proof that removing the probe turns it red.
+  const passingCliVersionGate = (): void => {}
+
   function makeRegistry(): LaneLoginSessionRegistry {
-    return new LaneLoginSessionRegistry({ authState })
+    return new LaneLoginSessionRegistry({
+      authState,
+      assertCliVersionSupported: passingCliVersionGate
+    })
   }
 
   function feedGoodLoginPrompt(child: FakeLoginChild): void {
@@ -334,7 +342,11 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
 
   it('a submit past the TTL is login_session_expired with destructive cleanup, never a raw stdin error', async () => {
     let now = Date.now()
-    const registry = new LaneLoginSessionRegistry({ authState, now: () => now })
+    const registry = new LaneLoginSessionRegistry({
+      authState,
+      now: () => now,
+      assertCliVersionSupported: passingCliVersionGate
+    })
     const startPromise = registry.start({
       laneId: 'lane-1',
       laneDir,

@@ -52,6 +52,12 @@ export type LaneLoginSessionRegistryOptions = {
   writer?: Pick<LaneCredentialWriter, 'writeCredentials' | 'writeOauthAccount'>
   now?: () => number
   mintId?: () => string
+  /**
+   * Injected so the version gate is assertable without spawning a real `claude --version` and
+   * without a test's outcome depending on whichever CLI build happens to be installed on the box
+   * that runs the suite. Defaults to the real, spawning gate.
+   */
+  assertCliVersionSupported?: () => void
 }
 
 export class LaneLoginSessionRegistry {
@@ -60,12 +66,15 @@ export class LaneLoginSessionRegistry {
   private readonly writer: Pick<LaneCredentialWriter, 'writeCredentials' | 'writeOauthAccount'>
   private readonly now: () => number
   private readonly mintId: () => string
+  private readonly assertCliVersionSupported: () => void
 
   constructor(options: LaneLoginSessionRegistryOptions) {
     this.authState = options.authState
     this.writer = options.writer ?? new LaneCredentialWriter()
     this.now = options.now ?? Date.now
     this.mintId = options.mintId ?? randomUUID
+    this.assertCliVersionSupported =
+      options.assertCliVersionSupported ?? assertLoginCliVersionSupported
   }
 
   /**
@@ -83,7 +92,7 @@ export class LaneLoginSessionRegistry {
     const { laneId, laneDir, expectedEmail, owner } = params
 
     // (1) — no `await` between here and `this.sessions.set` below.
-    assertLoginCliVersionSupported()
+    this.assertCliVersionSupported()
     if (isLaneWipePending(laneId)) {
       throw wipeInProgressRefusal('start a login')
     }

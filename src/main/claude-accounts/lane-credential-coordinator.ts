@@ -37,6 +37,9 @@ export type LaneCredentialCoordinatorOptions = {
   listLanesWithLivePtys?: () => string[]
   /** Injected so the probe's fence is assertable without spawning a real hidden `claude`. */
   fetchLaneUsage?: LaneUsagePullDeps['fetchUsage']
+  /** Injected so a login session's CLI version gate is assertable without depending on whichever
+   *  `claude` build happens to be installed on the box the suite runs on. */
+  assertLoginCliVersionSupported?: () => void
 }
 
 export class LaneCredentialCoordinator {
@@ -72,7 +75,12 @@ export class LaneCredentialCoordinator {
         await this.syncLane(laneId, 'rate-limit-tick')
       }
     })
-    this.loginSessions = new LaneLoginSessionRegistry({ authState: this.authState })
+    this.loginSessions = new LaneLoginSessionRegistry({
+      authState: this.authState,
+      ...(options.assertLoginCliVersionSupported
+        ? { assertCliVersionSupported: options.assertLoginCliVersionSupported }
+        : {})
+    })
     this.lifecycle = new PrincipalLaneLifecycle({
       resolveLaneDir: (laneId) => this.store.resolveLaneDir(laneId),
       laneDirExists: (laneId) => this.store.hasLaneDirectory(laneId),
