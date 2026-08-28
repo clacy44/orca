@@ -110,6 +110,19 @@ export const LANE_COMMAND_SPECS: CommandSpec[] = [
     examples: ['orca lane bind-link --link 0f1e2d3c...']
   },
   {
+    path: ['lane', 'wipe'],
+    summary:
+      "Force-release a lane's latched wipe-pending mark without waiting on the confirm-dead budget",
+    usage: 'orca lane wipe --person <idOrName> --force [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'force'],
+    notes: [
+      PERSON_NOTE,
+      "--force is required: this ends a latch a wipe left in place because it could not confirm the lane's credential was gone, and a credential may still be at rest until the next logout, revoke, or deprovision sweeps it.",
+      'Refuses if the lane was not latched wipe-pending — there is nothing to release.'
+    ],
+    examples: ['orca lane wipe --person "Ana Ng" --force']
+  },
+  {
     path: ['lane', 'status'],
     summary: 'Show lane residency, device bindings, and pusher designations',
     usage: 'orca lane status [--person <idOrName>] [--json]',

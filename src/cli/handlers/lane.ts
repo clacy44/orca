@@ -226,6 +226,28 @@ export const LANE_HANDLERS: Record<string, CommandHandler> = {
         : `${personName(snapshot.principals, principalId)} had no lane; nothing changed.`
     )
   },
+  'lane wipe': async (ctx) => {
+    rejectRemoteSelectionFlags(ctx)
+    const personSelector = requireStringFlag(ctx, 'person')
+    if (!ctx.flags.has('force')) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        '`orca lane wipe` requires `--force`: it force-releases a latched wipe-pending mark, and a credential may still be at rest until the next logout, revoke, or deprovision sweeps it.'
+      )
+    }
+    await assertLaneSupported(ctx.client)
+    const snapshot = await readStatus(ctx.client)
+    const principalId = resolvePerson(snapshot.principals, personSelector)
+    const result = await ctx.client.call<{ released: boolean }>('accounts.lane.wipe', {
+      principalId,
+      force: true
+    })
+    printResult(result, ctx.json, (value) =>
+      value.released
+        ? `Released the latched wipe-pending mark for ${personName(snapshot.principals, principalId)}'s lane`
+        : `${personName(snapshot.principals, principalId)}'s lane was not latched wipe-pending; nothing changed.`
+    )
+  },
   'lane bind-link': async (ctx) => {
     rejectRemoteSelectionFlags(ctx)
     const homePeerFingerprint = requireStringFlag(ctx, 'link')

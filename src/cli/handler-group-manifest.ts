@@ -36,7 +36,8 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
       'lane bind-link',
       'lane invite',
       'lane status',
-      'lane audit'
+      'lane audit',
+      'lane wipe'
     ],
     load: async () => (await import('./handlers/lane.js')).LANE_HANDLERS
   },
