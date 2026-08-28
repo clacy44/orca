@@ -6,10 +6,18 @@
  * `.credentials.json` back after the pass that removed it. The wipe is reported only after a
  * clean read-back, and refuses by name when the directory never comes back clean.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { readLaneAccountIndex, writeLaneAccountIndex } from './lane-account-index'
 import { listLaneAccounts } from './principal-lane-account-store'
@@ -182,6 +190,67 @@ describe('the lane wipe re-read', () => {
     })
 
     expect(passes).toEqual([1])
+  })
+
+  // P-F (review finding): an entry `purgeLaneAccountStore` is contracted to LEAVE must not make
+  // the raw-readdir re-read gate refuse forever — the everyday macOS case, one Finder visit.
+  it('logs out cleanly when an unrelated file (not credentials, not this store’s shape) sits under claude-accounts', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    mkdirSync(accountsRoot, { recursive: true })
+    writeFileSync(join(accountsRoot, '.DS_Store'), 'not a credential')
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const removed = await wipeLaneCredentials(laneDir, { platform: 'linux' })
+
+    expect(removed).toContain(LANE_CREDENTIALS_FILENAME)
+    // Left in place, exactly as `purgeLaneAccountStore`'s own contract promises — not removed,
+    // and not what blocks the logout from reporting done.
+    expect(existsSync(join(accountsRoot, '.DS_Store'))).toBe(true)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('.DS_Store'))
+    warnSpy.mockRestore()
+  })
+
+  // P-G (review finding): a symlink named as a v4 UUID — the shape `purgeLaneAccountStore`'s own
+  // comment says it will not touch — must not pin logout/revoke either.
+  it('logs out cleanly when a symlink under claude-accounts is left in place by the purge', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    const decoyTarget = mkdtempSync(join(tmpdir(), 'orca-lane-sweep-decoy-'))
+    const decoyId = '99999999-9999-4999-8999-999999999999'
+    mkdirSync(accountsRoot, { recursive: true })
+    symlinkSync(decoyTarget, join(accountsRoot, decoyId))
+
+    try {
+      const removed = await wipeLaneCredentials(laneDir, { platform: 'linux' })
+
+      expect(removed).toContain(LANE_CREDENTIALS_FILENAME)
+      expect(existsSync(join(accountsRoot, decoyId))).toBe(true)
+    } finally {
+      rmSync(decoyTarget, { recursive: true, force: true })
+    }
+  })
+
+  // Negative control alongside P-F/P-G: a genuinely purgeable directory that keeps regrowing
+  // must still refuse — the fix narrows the gate, it must not widen it into never refusing.
+  it('still refuses logout_incomplete when a real login-capture directory keeps reappearing, foreign junk or not', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    mkdirSync(accountsRoot, { recursive: true })
+    writeFileSync(join(accountsRoot, '.DS_Store'), 'not a credential')
+    const stuckId = '33333333-3333-4333-8333-333333333333'
+
+    const error = await wipeLaneCredentials(laneDir, {
+      platform: 'linux',
+      onStorePurged: () => {
+        mkdirSync(join(accountsRoot, stuckId, 'auth'), { recursive: true })
+        writeFileSync(
+          join(accountsRoot, stuckId, 'auth', '.orca-managed-claude-auth'),
+          `${stuckId}\n`
+        )
+        writeFileSync(join(accountsRoot, stuckId, 'auth', '.credentials.json'), CREDENTIALS)
+      }
+    }).catch((thrown: unknown) => thrown)
+
+    expect(isClaudeLaneRefusal(error)).toBe(true)
+    expect(isClaudeLaneRefusal(error) ? error.code : null).toBe('accounts.lane.logout_incomplete')
   })
 
   it('refuses by name rather than reporting a wipe the directory contradicts', async () => {

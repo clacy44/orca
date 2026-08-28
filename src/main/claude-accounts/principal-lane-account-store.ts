@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync, type Dirent } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import {
@@ -179,16 +179,50 @@ export function removeLaneAccount(
  * with its `.tmp` staging siblings. Leaves `settings.json`, mirrored user content and transcripts
  * alone — none of those live under `claude-accounts`, so a root-scoped walk cannot reach them.
  */
-/** Every entry still at rest directly under `<lane>/claude-accounts` — the store-side half of
- * `listLaneCredentialArtifacts`'s re-read discipline, used by the logout sweep to confirm the
- * store is actually empty rather than reporting over a directory a surviving login child just
- * re-created. */
+/** Every entry still at rest directly under `<lane>/claude-accounts` — a raw directory listing,
+ * so it includes entries `purgeLaneAccountStore` deliberately never touches (a symlink, an
+ * escape, an unrelated file). Kept for callers that want the unfiltered picture; the sweep's own
+ * "confirmed empty" gate is `listPurgeableLaneAccountStoreArtifacts` below, not this. */
 export function listLaneAccountStoreArtifacts(laneDir: string): string[] {
   const laneAccountsRoot = getLaneAccountsRoot(laneDir)
   if (!existsSync(laneAccountsRoot)) {
     return []
   }
   return readdirSync(laneAccountsRoot)
+}
+
+/**
+ * Whether `purgeLaneAccountStore` is contracted to remove this entry: the index file (or a
+ * `.tmp` staging sibling), or a directory that canonically resolves as contained within the
+ * root. The single source of truth both `purgeLaneAccountStore` and
+ * `listPurgeableLaneAccountStoreArtifacts` classify by — kept as one predicate so the two can
+ * never drift the way the raw-readdir re-read gate once did.
+ */
+function isLaneAccountStorePurgeableEntry(laneAccountsRoot: string, entry: Dirent): boolean {
+  if (entry.isFile()) {
+    return entry.name === LANE_ACCOUNT_INDEX_FILENAME || isLaneAccountIndexTmpSibling(entry.name)
+  }
+  if (!entry.isDirectory()) {
+    return false
+  }
+  return resolveContainedLaneAccountEntry(laneAccountsRoot, entry.name) !== null
+}
+
+/** Every entry still at rest under `<lane>/claude-accounts` that `purgeLaneAccountStore` is
+ * CONTRACTED to remove — the store-side half of `listLaneCredentialArtifacts`'s re-read
+ * discipline. Deliberately narrower than a raw readdir: a symlink, an escape, or an unrelated
+ * file (a stray `.DS_Store`, one co-tenant's plant) is left in place by the purge itself, so
+ * counting it here would make the wipe's re-read loop retry forever over something no pass can
+ * ever remove. Used by the logout sweep to confirm the store is actually empty of what it
+ * controls, rather than reporting over a directory a surviving login child just re-created. */
+export function listPurgeableLaneAccountStoreArtifacts(laneDir: string): string[] {
+  const laneAccountsRoot = getLaneAccountsRoot(laneDir)
+  if (!existsSync(laneAccountsRoot)) {
+    return []
+  }
+  return readdirSync(laneAccountsRoot, { withFileTypes: true })
+    .filter((entry) => isLaneAccountStorePurgeableEntry(laneAccountsRoot, entry))
+    .map((entry) => entry.name)
 }
 
 export function purgeLaneAccountStore(laneDir: string): string[] {
@@ -198,23 +232,21 @@ export function purgeLaneAccountStore(laneDir: string): string[] {
   }
   const removed: string[] = []
   for (const entry of readdirSync(laneAccountsRoot, { withFileTypes: true })) {
+    if (!isLaneAccountStorePurgeableEntry(laneAccountsRoot, entry)) {
+      // A symlink, an escape, or an unrelated file: not an entry this walk may act on. Left in
+      // place rather than silently certified purged.
+      continue
+    }
     if (entry.isFile()) {
-      if (entry.name === LANE_ACCOUNT_INDEX_FILENAME || isLaneAccountIndexTmpSibling(entry.name)) {
-        rmSync(join(laneAccountsRoot, entry.name), { force: true })
-        removed.push(entry.name)
-      }
-      continue
+      rmSync(join(laneAccountsRoot, entry.name), { force: true })
+    } else {
+      // Purgeable directories are exactly the ones `isLaneAccountStorePurgeableEntry` already
+      // proved `resolveContainedLaneAccountEntry` resolves non-null.
+      rmSync(resolveContainedLaneAccountEntry(laneAccountsRoot, entry.name)!, {
+        recursive: true,
+        force: true
+      })
     }
-    if (!entry.isDirectory()) {
-      continue
-    }
-    const contained = resolveContainedLaneAccountEntry(laneAccountsRoot, entry.name)
-    if (!contained) {
-      // A symlink or an escape: not a directory this walk may act on. Left in place rather than
-      // silently certified purged.
-      continue
-    }
-    rmSync(contained, { recursive: true, force: true })
     removed.push(entry.name)
   }
   return removed

@@ -4,6 +4,7 @@ import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { deleteActiveClaudeKeychainCredentialsStrict } from './keychain'
 import {
   listLaneAccountStoreArtifacts,
+  listPurgeableLaneAccountStoreArtifacts,
   purgeLaneAccountStore
 } from './principal-lane-account-store'
 import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './lane-credential-filenames'
@@ -115,7 +116,17 @@ export async function wipeLaneCredentials(
       }
     }
     options.onStorePurged?.(pass)
-    if (listLaneAccountStoreArtifacts(laneDir).length === 0) {
+    // Gated on what `purgeLaneAccountStore` is CONTRACTED to remove, never a raw readdir: a
+    // symlink, an escape, or an unrelated file (a stray `.DS_Store`, one co-tenant's plant) is
+    // deliberately left in place by the purge itself, and folding it into "kept reappearing"
+    // would refuse every future logout/revoke of this lane forever, over nothing a wipe controls.
+    if (listPurgeableLaneAccountStoreArtifacts(laneDir).length === 0) {
+      const foreign = listLaneAccountStoreArtifacts(laneDir)
+      if (foreign.length !== 0) {
+        console.warn(
+          `[claude-accounts] Lane credential store swept, but left unrecognized entries in place (not credentials, not this store's shape): ${foreign.join(', ')}`
+        )
+      }
       if (dropLaneOauthAccount(laneDir)) {
         removed.push(`${LANE_CONFIG_FILENAME}#oauthAccount`)
       }
