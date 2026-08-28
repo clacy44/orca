@@ -5,7 +5,9 @@ import {
   isClaudeLaneRefusal
 } from './claude-lane-refusals'
 
-// S9-L1 §3 mint list — additive only (§F forbids retiring the push/lease-era codes here).
+// S9-L1 mint list — fifteen from §3 (spec:479), plus switch_write_failed from §2m
+// (spec:372, not in §3's list — see the array comment in claude-lane-refusals.ts).
+// Additive only (§F forbids retiring the push/lease-era codes here).
 const S9_L1_MINTED = [
   'accounts.lane.login_not_designated',
   'accounts.lane.no_login_device_designated',

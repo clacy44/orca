@@ -45,7 +45,10 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.clear_incomplete',
   'accounts.lane.probe_not_confirmed_dead',
   'accounts.lane.wipe_in_progress',
-  // --- S9-L1: per-lane Claude account login (§3) — sixteen minted, additive only.
+  // --- S9-L1: per-lane Claude account login — sixteen minted, additive only.
+  // Fifteen are §3's mint list (spec:479, across rev 32/34/36); the sixteenth,
+  // switch_write_failed, is sourced from §2m (spec:372) and does not appear in
+  // §3's list — §3 is the incomplete one here, not this array.
   // The doc's own arithmetic (57→56) is wrong against this tree (60 entries above);
   // S9-L1's scope boundary (§F) forbids retiring the sixteen push/lease-era codes,
   // so this slice is additive-only: 60 → 76. Retirement is S9-L3's.
