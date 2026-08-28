@@ -4,9 +4,11 @@ import {
 } from '../../shared/claude-lane-refusals'
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import {
+  listLaneAccounts,
   removeLaneAccount,
   selectLaneAccount
 } from '../claude-accounts/principal-lane-account-store'
+import type { LaneAccountRow } from '../../shared/claude-lane-login-rpc'
 import type { LaneChangeCause, LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
 
 /**
@@ -70,6 +72,46 @@ export class LaneAccountAuthority {
     const outcome = await this.options.coordinator.lifecycle.wipeOnExplicitLogout(
       caller.principalId
     )
+    if (!outcome.completed) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.logout_incomplete',
+        CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES['accounts.lane.logout_incomplete']
+      )
+    }
+    return { cleared: outcome.removed }
+  }
+
+  /** Host-inline `orca lane use`: the CLI resolves `--person` itself, so this takes a
+   * principalId directly rather than deriving one from a paired grant (§modules E). */
+  async selectAccountInline(
+    principalId: string,
+    laneAccountId: string
+  ): Promise<{ active: string }> {
+    const laneDir = this.requireProvisionedLaneDir(principalId)
+    await this.options.coordinator.authState.serializeLaneWrite(principalId, () =>
+      selectLaneAccount(laneDir, principalId, laneAccountId)
+    )
+    this.options.onLaneChanged?.(principalId, 'select-account')
+    return { active: laneAccountId }
+  }
+
+  /** Host-inline `orca lane accounts` — a projection of the index, never a walk (§storeLayout).
+   * Never `authDir`: a local filesystem path has no reason to cross the wire (mirrors the
+   * `accounts` field `LaneWireAuthority.statusOf` publishes to a paired grant). */
+  listAccountsInline(principalId: string): LaneAccountRow[] {
+    const laneDir = this.requireProvisionedLaneDir(principalId)
+    return listLaneAccounts(laneDir).map((account) => ({
+      laneAccountId: account.laneAccountId,
+      email: account.email,
+      label: account.label,
+      active: account.active
+    }))
+  }
+
+  /** Host-inline `orca lane logout`. Same lifecycle-fence route as the grant-facing `logout`. */
+  async logoutInline(principalId: string): Promise<{ cleared: string[] }> {
+    this.requireProvisionedLaneDir(principalId)
+    const outcome = await this.options.coordinator.lifecycle.wipeOnExplicitLogout(principalId)
     if (!outcome.completed) {
       throw new ClaudeLaneRefusal(
         'accounts.lane.logout_incomplete',

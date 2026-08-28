@@ -205,3 +205,51 @@ describe('LaneAccountAuthority — logout', () => {
     )
   })
 })
+
+/** §modules E: the host-inline CLI door — a principalId directly, not a paired grant. */
+describe('LaneAccountAuthority §modules E — host-inline select/list/logout', () => {
+  it('selectAccountInline writes the credential in synchronously, by principalId', async () => {
+    const { service, laneDir } = makeHarness()
+    plantAccount(laneDir(LANE_A), ACCOUNT_A, 'a@x.com')
+    writeLaneAccountIndex(join(laneDir(LANE_A), 'claude-accounts'), [
+      { laneAccountId: ACCOUNT_A, email: 'a@x.com', label: null, active: false, capturedAt: 'now' }
+    ])
+
+    const result = await service.accountAuthority.selectAccountInline(LANE_A, ACCOUNT_A)
+
+    expect(result).toEqual({ active: ACCOUNT_A })
+    expect(existsSync(join(laneDir(LANE_A), '.credentials.json'))).toBe(true)
+  })
+
+  it('listAccountsInline projects the index and never leaks a filesystem path (no authDir)', async () => {
+    const { service, laneDir } = makeHarness()
+    plantAccount(laneDir(LANE_A), ACCOUNT_A, 'a@x.com')
+    writeLaneAccountIndex(join(laneDir(LANE_A), 'claude-accounts'), [
+      { laneAccountId: ACCOUNT_A, email: 'a@x.com', label: null, active: true, capturedAt: 'now' }
+    ])
+
+    const rows = service.accountAuthority.listAccountsInline(LANE_A)
+
+    expect(rows).toEqual([
+      { laneAccountId: ACCOUNT_A, email: 'a@x.com', label: null, active: true }
+    ])
+    expect(JSON.stringify(rows)).not.toContain('authDir')
+  })
+
+  it('listAccountsInline on an unprovisioned lane refuses rather than returning empty silently', () => {
+    const { service } = makeHarness()
+    expect(() => service.accountAuthority.listAccountsInline('no-such-lane')).toThrow()
+  })
+
+  it('logoutInline sweeps the named lane by principalId, no paired grant needed', async () => {
+    const { service, loadLane, laneCredentialsOnDisk } = makeHarness()
+    loadLane(LANE_A, 'rt-1')
+    loadLane(LANE_B, 'rt-2')
+
+    const result = await service.accountAuthority.logoutInline(LANE_A)
+
+    expect(result.cleared).toContain('.credentials.json')
+    expect(laneCredentialsOnDisk(LANE_A)).toBeNull()
+    expect(laneCredentialsOnDisk(LANE_B)).not.toBeNull()
+  })
+})

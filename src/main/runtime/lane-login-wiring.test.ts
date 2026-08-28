@@ -169,4 +169,46 @@ describe('S9-L1 §rpcs: the login-quartet RPCs are reachable from production com
     expect(result).toEqual({ released: true })
     expect(isLaneWipePending(principal.principalId)).toBe(false)
   })
+
+  it('§modules E: every *Inline lane method is host-only — a paired (identified) caller is refused', async () => {
+    const coordinator = new LaneCredentialCoordinator({
+      laneOptions: { lanesRoot: join(userDataPath, 'claude-lanes'), platform: 'linux' }
+    })
+    setLaneWireHostDependencies({ coordinator })
+    const grants = new FakeGrants()
+    grants.add('desktop-a')
+    const consent = authorizeHostConsent({})
+    const setupRegistry = new PrincipalRegistry(userDataPath, grants)
+    const principal = setupRegistry.createPrincipal(consent, 'Ana')
+
+    attachPrincipalLaneHost({ userDataPath, grants, runtimeAuthToken: 'test-token', runtime: {} })
+
+    const INLINE_METHODS = [
+      'accounts.lane.loginStartInline',
+      'accounts.lane.loginSubmitCodeInline',
+      'accounts.lane.loginCancelInline',
+      'accounts.lane.selectAccountInline',
+      'accounts.lane.listAccountsInline',
+      'accounts.lane.logoutInline'
+    ]
+    for (const name of INLINE_METHODS) {
+      const method = CLAUDE_CREDENTIAL_LANE_METHODS.find((m) => m.name === name)
+      if (!method || isStreamingMethod(method)) {
+        throw new Error(`missing ${name}`)
+      }
+      const params = method.params!.parse({
+        principalId: principal.principalId,
+        ...(name === 'accounts.lane.loginStartInline' ? { expectedEmail: 'a@x.com' } : {}),
+        ...(name === 'accounts.lane.loginSubmitCodeInline'
+          ? { loginSessionId: 'x', code: '123456' }
+          : {}),
+        ...(name === 'accounts.lane.selectAccountInline' ? { laneAccountId: 'x' } : {})
+      })
+      // A paired grant (`clientKind: 'runtime'`) must never reach these — they take a
+      // principalId directly, so a paired caller reaching one could address ANY lane by id.
+      await expect(
+        method.handler(params, { clientKind: 'runtime', pairedDeviceId: 'desktop-a' } as RpcContext)
+      ).rejects.toMatchObject({ code: 'accounts.lane.consent_caller_not_local' })
+    }
+  })
 })

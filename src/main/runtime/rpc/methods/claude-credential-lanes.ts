@@ -1,12 +1,19 @@
 import { z } from 'zod'
 import { defineMethod, defineStreamingMethod, type RpcAnyMethod, type RpcContext } from '../core'
 import { requireLaneWireService } from '../../lane-wire-service'
+import { authorizeHostConsent } from '../../principal-consent-authority'
 import {
   LaneLoginCancelParams,
+  LaneLoginCancelInlineParams,
+  LaneLoginStartInlineParams,
   LaneLoginStartParams,
   LaneLoginStatusParams,
+  LaneLoginSubmitCodeInlineParams,
   LaneLoginSubmitCodeParams,
+  LaneListAccountsInlineParams,
+  LaneLogoutInlineParams,
   LaneRemoveAccountParams,
+  LaneSelectAccountInlineParams,
   LaneSelectAccountParams
 } from './claude-lane-login-params'
 
@@ -90,6 +97,78 @@ export const CLAUDE_CREDENTIAL_LANE_METHODS: readonly RpcAnyMethod[] = [
     handler: async (_params, ctx) =>
       requireLaneWireService().accountAuthority.logout(ctx.pairedDeviceId)
   }),
+  // §modules E: the host-inline `orca lane login/logout/accounts/use` verbs run the SAME
+  // authorities as the paired-grant methods above, through the SAME per-lane session map and
+  // write queue — never a copy, never a parallel path. Every one is host-only
+  // (`authorizeHostConsent` refuses any identified/paired socket, same door as `accounts.lane.wipe`
+  // and the rest of `principal-lanes.ts`) and NONE may join `MOBILE_RPC_METHOD_ALLOWLIST`: each
+  // takes a principalId directly rather than deriving one from `ctx.pairedDeviceId`, so a paired
+  // caller reaching one would address an arbitrary lane by id.
+  defineMethod({
+    name: 'accounts.lane.loginStartInline',
+    params: LaneLoginStartInlineParams,
+    handler: async (params, ctx) => {
+      requireHostCaller(ctx)
+      const result = await requireLaneWireService().loginAuthority.loginStartInline(
+        params.principalId,
+        params.expectedEmail
+      )
+      return {
+        loginSessionId: result.sessionId,
+        authorizeUrl: result.authorizationUrl,
+        expiresAt: result.expiresAt
+      }
+    }
+  }),
+  defineMethod({
+    name: 'accounts.lane.loginSubmitCodeInline',
+    params: LaneLoginSubmitCodeInlineParams,
+    handler: async (params, ctx) => {
+      requireHostCaller(ctx)
+      return requireLaneWireService().loginAuthority.loginSubmitCodeInline(
+        params.principalId,
+        params.loginSessionId,
+        params.code
+      )
+    }
+  }),
+  defineMethod({
+    name: 'accounts.lane.loginCancelInline',
+    params: LaneLoginCancelInlineParams,
+    handler: async (params, ctx) => {
+      requireHostCaller(ctx)
+      return requireLaneWireService().loginAuthority.loginCancelInline(params.principalId)
+    }
+  }),
+  defineMethod({
+    name: 'accounts.lane.selectAccountInline',
+    params: LaneSelectAccountInlineParams,
+    handler: async (params, ctx) => {
+      requireHostCaller(ctx)
+      return requireLaneWireService().accountAuthority.selectAccountInline(
+        params.principalId,
+        params.laneAccountId
+      )
+    }
+  }),
+  defineMethod({
+    name: 'accounts.lane.listAccountsInline',
+    params: LaneListAccountsInlineParams,
+    handler: async (params, ctx) => {
+      requireHostCaller(ctx)
+      return {
+        accounts: requireLaneWireService().accountAuthority.listAccountsInline(params.principalId)
+      }
+    }
+  }),
+  defineMethod({
+    name: 'accounts.lane.logoutInline',
+    params: LaneLogoutInlineParams,
+    handler: async (params, ctx) => {
+      requireHostCaller(ctx)
+      return requireLaneWireService().accountAuthority.logoutInline(params.principalId)
+    }
+  }),
   defineMethod({
     name: 'accounts.lane.status',
     params: null,
@@ -125,6 +204,12 @@ export const CLAUDE_CREDENTIAL_LANE_METHODS: readonly RpcAnyMethod[] = [
     }
   })
 ]
+
+/** Host-only door for the six `*Inline` methods — identical shape to `principal-lanes.ts`'s
+ * `withConsent`: refuses any identified (paired) socket, never silently. */
+function requireHostCaller(ctx: RpcContext): void {
+  authorizeHostConsent({ clientKind: ctx.clientKind })
+}
 
 function registerLaneSubscriptionCleanup(
   ctx: RpcContext,
