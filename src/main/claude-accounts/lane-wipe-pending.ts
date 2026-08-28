@@ -48,6 +48,29 @@ export function releaseUnconfirmedLaneWipe(laneId: string, sequence: number): vo
 }
 
 /**
+ * S9-L1 §fenceWiring "THE LATCH RELEASE", the bounded-budget arm: after a sweep attempt loop
+ * exhausts its OWN retry budget (confirm-dead-window × `LANE_SWEEP_PASSES`, `WIPE_ATTEMPTS` in
+ * `principal-lane-lifecycle.ts`) with no clean read-back, the MARK releases too — not only the
+ * sequence. Distinct from `releaseUnconfirmedLaneWipe`: a caller that never attempted a sweep at
+ * all (`refuseWipe` — it could not even prove ownership of the lane directory) has no sweep
+ * budget to have exhausted, and must keep using that one to leave the mark latched.
+ *
+ * Returns whether the mark actually cleared — false when ANOTHER sequence is still in flight on
+ * this lane (a second wipe racing this one), whose own give-up or success owns the mark; clearing
+ * it here would race that sequence's own transition.
+ */
+export function releaseUnconfirmedLaneWipeBudgetExhausted(
+  laneId: string,
+  sequence: number
+): boolean {
+  releaseWipeSequence(laneId, sequence)
+  if (wipeSequencesInFlight.has(laneId)) {
+    return false
+  }
+  return wipePendingLaneIds.delete(laneId)
+}
+
+/**
  * `orca lane wipe --person <name> --force` (S9-L1 §fenceWiring "THE LATCH RELEASE"): the exit a
  * fence-with-no-exit needs once S9-L3 deletes `applyPush`'s `clearLaneWipePendingOnCredentialLoaded`
  * un-latching path (`lane-wire-authority.ts` no longer calls it — rev 32 already deleted `applyPush`

@@ -4,7 +4,8 @@ import {
   clearLaneWipePending,
   forceReleaseLaneWipeLatch,
   markLaneWipePending,
-  releaseUnconfirmedLaneWipe
+  releaseUnconfirmedLaneWipe,
+  releaseUnconfirmedLaneWipeBudgetExhausted
 } from './lane-wipe-pending'
 import { wipeLaneCredentials } from './principal-lane-credential-sweep'
 
@@ -166,8 +167,19 @@ export class PrincipalLaneLifecycle {
     // here reopens the induction gap a `cancel` racing `start` relies on being closed).
     this.deps.cancelLaneLoginSessions?.(laneId)
     const removed: string[] = []
+    // §fenceWiring "THE LATCH RELEASE", bounded-budget arm: true once ANY attempt's sweep
+    // GENUINELY ran (the probe confirmed dead, and `wipeLaneCredentials` itself re-read across
+    // its own `LANE_SWEEP_PASSES` before reporting `logout_incomplete`) — never merely because
+    // `confirmProbesDead` timed out, which proves nothing about whether a live process still
+    // holds the credential.
+    let sweepGenuinelyRan = false
     for (let attempt = 1; attempt <= WIPE_ATTEMPTS; attempt += 1) {
-      const swept = await this.attemptWipe(laneId, laneDir, options.finalize)
+      const { swept, sweepGenuinelyRan: ranThisAttempt } = await this.attemptWipe(
+        laneId,
+        laneDir,
+        options.finalize
+      )
+      sweepGenuinelyRan = sweepGenuinelyRan || ranThisAttempt
       for (const name of swept ?? []) {
         if (!removed.includes(name)) {
           removed.push(name)
@@ -184,23 +196,32 @@ export class PrincipalLaneLifecycle {
       }
       break
     }
-    // The mark stays set: launches keep failing closed and no surface may say the lane is empty.
-    // The SEQUENCE ends here though, so a later push into the lane can void the mark rather than
+    // The SEQUENCE always ends here, so a later push into the lane can void the mark rather than
     // inheriting a latch that would skip this lane's usage probe for the rest of the process.
     //
-    // §fenceWiring "THE LATCH RELEASE" deliberately does NOT auto-clear the mark from THIS arm:
-    // the sweep never ran (the early return above is taken before `wipeLaneCredentials` is ever
-    // called), so a credential may still be at rest — `getLaneState` reads this same mark to keep
-    // a launch failing closed (`principal-lane-lifecycle.test.ts` "fails a lane launch closed
-    // while the wipe is pending, credential still on disk" pins exactly this). Auto-releasing here
-    // would silently make that still-resident, unconfirmed-dead credential launchable again, which
-    // is a worse failure than a latched lane. The deliberate, SAFE exit this slice ships is the
-    // operator's `orca lane wipe --person <name> --force` (`forceReleaseWipeLatch`, below) — an
-    // explicit human judgment call rather than a timer. A fully automatic timed release that also
-    // gets the launch-gating interaction right is left open, named rather than guessed at (see
-    // final report).
-    releaseUnconfirmedLaneWipe(laneId, sequence)
-    console.warn(`[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending`)
+    // §fenceWiring "THE LATCH RELEASE" bounded-budget arm: the mark itself releases too, but
+    // ONLY when `sweepGenuinelyRan` — a probe was confirmed dead and a real sweep exhausted its
+    // own bounded re-read budget. When the probe was never confirmed dead across every attempt, a
+    // live process may still hold the credential, and the mark stays latched exactly as before —
+    // `getLaneState` keeps reading it to fail launches closed (`principal-lane-lifecycle.test.ts`
+    // "fails a lane launch closed while the wipe is pending, credential still on disk" pins that
+    // arm). The operator's `orca lane wipe --person <name> --force` remains the exit for THAT
+    // case, and for a second sequence still racing this one (`releaseUnconfirmedLaneWipeBudgetExhausted`
+    // returns false without clearing when one is).
+    if (sweepGenuinelyRan) {
+      if (releaseUnconfirmedLaneWipeBudgetExhausted(laneId, sequence)) {
+        console.warn(
+          '[principal-lane] wipe-unconfirmed: sweep budget exhausted with the probe confirmed dead; releasing the wipe-pending mark'
+        )
+      } else {
+        console.warn(
+          '[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending (another wipe sequence still in flight on this lane)'
+        )
+      }
+    } else {
+      releaseUnconfirmedLaneWipe(laneId, sequence)
+      console.warn(`[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending`)
+    }
     this.deps.onLaneWiped?.(laneId)
     return { laneId, reason, removed, completed: false, laneRemoved: false }
   }
@@ -244,15 +265,23 @@ export class PrincipalLaneLifecycle {
     return deadlineAt !== undefined && Date.now() >= deadlineAt
   }
 
-  /** One pass of the fence. `null` = the wipe is not confirmed; the mark must stay set. */
+  /**
+   * One pass of the fence. `swept: null` means not confirmed this pass; the mark must stay set.
+   *
+   * `sweepGenuinelyRan` distinguishes the TWO ways a pass can fail to confirm: the probe was
+   * never confirmed dead (no sweep even started — a live `claude` may still be rotating this
+   * lane's credential, so the bounded-budget release below must never fire) from a real sweep
+   * that ran its own `LANE_SWEEP_PASSES` re-reads and still found the directory regrown (the
+   * probe IS confirmed dead; what remains is a detached process this fence cannot reach).
+   */
   private async attemptWipe(
     laneId: string,
     laneDir: string,
     finalize?: (laneDir: string) => void
-  ): Promise<string[] | null> {
+  ): Promise<{ swept: string[] | null; sweepGenuinelyRan: boolean }> {
     return this.deps.serializeLaneWrite(laneId, async () => {
       if (!(await this.confirmProbesDead(laneId))) {
-        return null
+        return { swept: null, sweepGenuinelyRan: false }
       }
       try {
         // The destructive half of cancel, INSIDE this same turn — never concurrently with an
@@ -263,14 +292,18 @@ export class PrincipalLaneLifecycle {
           this.deps.platform ? { platform: this.deps.platform } : {}
         )
         finalize?.(laneDir)
-        return removed
+        return { swept: removed, sweepGenuinelyRan: true }
       } catch (error) {
         // `logout_incomplete` is the sweep refusing to report a wipe over a directory that kept
-        // re-growing a credential. Anything else is a real fault and must not read as done either.
+        // re-growing a credential — it DID run its own bounded re-read. Anything else is a real
+        // fault (disk error, …), not a confirmed "kept regrowing" signal, and must not count
+        // toward the bounded-budget release either.
+        const sweptViaLogoutIncomplete =
+          isClaudeLaneRefusal(error) && error.code === 'accounts.lane.logout_incomplete'
         if (!isClaudeLaneRefusal(error)) {
           console.warn('[principal-lane] Lane credential sweep failed:', error)
         }
-        return null
+        return { swept: null, sweepGenuinelyRan: sweptViaLogoutIncomplete }
       }
     })
   }
