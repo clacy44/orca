@@ -90,7 +90,11 @@ export async function selectLaneAccount(
   writer: Pick<
     LaneCredentialWriter,
     'writeCredentials' | 'writeOauthAccount'
-  > = new LaneCredentialWriter()
+  > = new LaneCredentialWriter(),
+  /** Ends any usage probe already spawned for this lane BEFORE the credential rewrite below —
+   * the deleted `LaneWireAuthority.beginLaneSwitch`'s invariant: otherwise a probe still holding
+   * the pre-switch account's single-use refresh token rotates it back over this write. */
+  invalidateProbes: (laneId: string) => Promise<void> = async () => {}
 ): Promise<void> {
   const laneAccountsRoot = getLaneAccountsRoot(laneDir)
   const rows = readLaneAccountIndex(laneAccountsRoot)
@@ -113,6 +117,7 @@ export async function selectLaneAccount(
   const oauthAccount = parseOauthAccount(oauthAccountText)
   beginClaudeAuthSwitch(laneId)
   try {
+    await invalidateProbes(laneId)
     await writer.writeCredentials(laneDir, credentialsJson)
     if (oauthAccount !== null) {
       writer.writeOauthAccount(laneDir, oauthAccount)

@@ -60,6 +60,10 @@ export type LaneLoginCaptureContext = {
    * would refuse every capture, since this turn always runs after the child has exited.
    */
   isStillCapturable(): boolean
+  /** Ends any usage probe already spawned for this lane BEFORE the credential rewrite below — see
+   * `principal-lane-account-store.ts`'s `selectLaneAccount` for the same invariant, restored here
+   * for the login-capture write path (the deleted `LaneWireAuthority.beginLaneSwitch`'s job). */
+  invalidateProbes(laneId: string): Promise<void>
   /** Called INSIDE the turn, strictly after the index row is written — that write IS `captured`. */
   onCaptured(): void
 }
@@ -98,6 +102,7 @@ export async function captureLaneLogin(
     }
     beginClaudeAuthSwitch(ctx.laneId)
     try {
+      await ctx.invalidateProbes(ctx.laneId)
       await ctx.writer.writeCredentials(ctx.laneDir, credentialsJson)
       ctx.writer.writeOauthAccount(ctx.laneDir, oauthAccount)
       writeLaneAccountIndex(getLaneAccountsRoot(ctx.laneDir), nextIndexRows(ctx, email))

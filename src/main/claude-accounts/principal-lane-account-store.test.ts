@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   existsSync,
   mkdirSync,
@@ -284,6 +284,34 @@ describe('principal-lane-account-store', () => {
       expect(JSON.parse(readFileSync(join(laneDir, '.credentials.json'), 'utf-8'))).toEqual(
         JSON.parse(CREDENTIALS('a@x.com'))
       )
+    })
+
+    it("invalidates this lane's usage probes BEFORE rewriting the credential, so a probe still holding the old refresh token cannot rotate it back over the switch", async () => {
+      plantAccount(laneDir, ID_A, 'a@x.com')
+      plantAccount(laneDir, ID_B, 'b@x.com')
+      writeLaneAccountIndex(join(laneDir, 'claude-accounts'), [
+        indexRow(ID_A, 'a@x.com', true),
+        indexRow(ID_B, 'b@x.com', false)
+      ])
+      writeFileSync(join(laneDir, '.credentials.json'), CREDENTIALS('a@x.com'))
+      const order: string[] = []
+      const writer = {
+        writeCredentials: async (_laneDir: string, _credentialsJson: string) => {
+          order.push('writeCredentials')
+        },
+        writeOauthAccount: (_laneDir: string, _oauthAccount: unknown) => {
+          order.push('writeOauthAccount')
+          return true
+        }
+      }
+      const invalidateProbes = vi.fn(async (laneId: string) => {
+        order.push(`invalidate:${laneId}`)
+      })
+
+      await selectLaneAccount(laneDir, 'lane-1', ID_B, writer, invalidateProbes)
+
+      expect(invalidateProbes).toHaveBeenCalledWith('lane-1')
+      expect(order[0]).toBe('invalidate:lane-1')
     })
 
     it('holds the switch gate open only for its own lane', async () => {

@@ -77,6 +77,7 @@ export class LaneCredentialCoordinator {
     })
     this.loginSessions = new LaneLoginSessionRegistry({
       authState: this.authState,
+      invalidateLaneUsageProbes: (laneId) => this.invalidateLaneUsageProbes(laneId),
       ...(options.assertLoginCliVersionSupported
         ? { assertCliVersionSupported: options.assertLoginCliVersionSupported }
         : {})

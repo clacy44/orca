@@ -61,6 +61,9 @@ export type LaneLoginSessionRegistryOptions = {
    * that runs the suite. Defaults to the real, spawning gate.
    */
   assertCliVersionSupported?: () => void
+  /** Ends any usage probe already spawned for this lane before a capture rewrites its credential
+   * — see `principal-lane-account-store.ts`'s `selectLaneAccount` for the same invariant. */
+  invalidateLaneUsageProbes?: (laneId: string) => Promise<void>
 }
 
 export class LaneLoginSessionRegistry {
@@ -70,6 +73,7 @@ export class LaneLoginSessionRegistry {
   private readonly now: () => number
   private readonly mintId: () => string
   private readonly assertCliVersionSupported: () => void
+  private readonly invalidateLaneUsageProbes: (laneId: string) => Promise<void>
 
   constructor(options: LaneLoginSessionRegistryOptions) {
     this.authState = options.authState
@@ -78,6 +82,7 @@ export class LaneLoginSessionRegistry {
     this.mintId = options.mintId ?? randomUUID
     this.assertCliVersionSupported =
       options.assertCliVersionSupported ?? assertLoginCliVersionSupported
+    this.invalidateLaneUsageProbes = options.invalidateLaneUsageProbes ?? (async () => {})
   }
 
   /**
@@ -348,6 +353,7 @@ export class LaneLoginSessionRegistry {
         expectedEmail: session.expectedEmail,
         authState: this.authState,
         writer: this.writer,
+        invalidateProbes: this.invalidateLaneUsageProbes,
         isStillCapturable: () => {
           const current = this.sessions.get(sessionId)
           return !!current && (current.state === 'live' || current.state === 'child-exited')

@@ -41,7 +41,9 @@ export class LaneAccountAuthority {
     const caller = this.requireCaller(pairedDeviceId)
     const laneDir = this.requireProvisionedLaneDir(caller.principalId)
     await this.options.coordinator.authState.serializeLaneWrite(caller.principalId, () =>
-      selectLaneAccount(laneDir, caller.principalId, laneAccountId)
+      selectLaneAccount(laneDir, caller.principalId, laneAccountId, undefined, (id) =>
+        this.options.coordinator.invalidateLaneUsageProbes(id)
+      )
     )
     this.options.onLaneChanged?.(caller.principalId, 'select-account')
     return { active: laneAccountId }
@@ -89,7 +91,9 @@ export class LaneAccountAuthority {
   ): Promise<{ active: string }> {
     const laneDir = this.requireProvisionedLaneDir(principalId)
     await this.options.coordinator.authState.serializeLaneWrite(principalId, () =>
-      selectLaneAccount(laneDir, principalId, laneAccountId)
+      selectLaneAccount(laneDir, principalId, laneAccountId, undefined, (id) =>
+        this.options.coordinator.invalidateLaneUsageProbes(id)
+      )
     )
     this.options.onLaneChanged?.(principalId, 'select-account')
     return { active: laneAccountId }

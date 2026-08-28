@@ -84,6 +84,7 @@ describe('captureLaneLogin (S9-L1 A4)', () => {
       expectedEmail: 'a@x.com',
       authState,
       writer,
+      invalidateProbes: vi.fn(async (_laneId: string) => {}),
       isStillCapturable: () => true,
       onCaptured: vi.fn()
     }
@@ -120,6 +121,24 @@ describe('captureLaneLogin (S9-L1 A4)', () => {
       accountUuid: 'acct-1',
       emailAddress: 'a@x.com'
     })
+  })
+
+  it("invalidates this lane's usage probes BEFORE rewriting the credential, so a probe still holding the old refresh token cannot rotate it back over the switch", async () => {
+    scriptAuthStatus(JSON.stringify({ email: 'a@x.com' }))
+    const order: string[] = []
+    ;(ctx.invalidateProbes as ReturnType<typeof vi.fn>).mockImplementation(
+      async (laneId: string) => {
+        order.push(`invalidate:${laneId}`)
+      }
+    )
+    writer.writeCredentials.mockImplementation(async () => {
+      order.push('writeCredentials')
+    })
+
+    await captureLaneLogin(ctx)
+
+    expect(ctx.invalidateProbes).toHaveBeenCalledWith('lane-1')
+    expect(order).toEqual(['invalidate:lane-1', 'writeCredentials'])
   })
 
   it('marks a prior active row inactive when a second login is captured', async () => {
