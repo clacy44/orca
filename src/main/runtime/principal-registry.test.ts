@@ -188,7 +188,7 @@ describe('PrincipalRegistry', () => {
       expect(store.principalOf('desktop')).toBe(ana.principalId)
       expect(store.delegatedGrantIdOf(ana.principalId)).toBeNull()
       expect(() => store.assertLaneProvisionable(ana.principalId)).toThrow(
-        /No grant has been designated/
+        /No device is designated to sign this lane/
       )
     })
 
@@ -331,7 +331,7 @@ describe('PrincipalRegistry', () => {
         designatedGrantId: null
       })
       expect(() => store.assertLaneProvisionable(person.principalId)).toThrow(
-        /No grant has been designated/
+        /No device is designated to sign this lane/
       )
     })
 
@@ -344,7 +344,7 @@ describe('PrincipalRegistry', () => {
 
       expect(store.delegatedGrantIdOf(person.principalId)).toBeNull()
       expect(() => store.assertLaneProvisionable(person.principalId)).toThrow(
-        /No grant has been designated/
+        /No device is designated to sign this lane/
       )
     })
 
@@ -380,7 +380,7 @@ describe('PrincipalRegistry', () => {
       store.bindGrant(consent, 'desktop', person.principalId)
 
       expect(() => store.assertLaneProvisionable(person.principalId)).toThrow(
-        /No grant has been designated/
+        /No device is designated to sign this lane/
       )
     })
 

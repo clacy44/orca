@@ -14,9 +14,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
-import type { ClaudeLaneDelegationRow } from '../../shared/claude-lane-delegation'
-import type { ClaudeLaneDelegationLease } from '../../shared/claude-lane-lease'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import type { LaneStatusFrame } from './lane-status-stream'
 import { getLaneWireService } from './lane-wire-service'
@@ -68,49 +65,15 @@ afterEach(() => {
   }
 })
 
-function makePersistence(): {
-  getClaudeLaneCredentialWatermarks: () => ClaudeLaneCredentialWatermark[]
-  setClaudeLaneCredentialWatermarks: (rows: readonly ClaudeLaneCredentialWatermark[]) => void
-  getClaudeLaneDelegationRows: () => ClaudeLaneDelegationRow[]
-  setClaudeLaneDelegationRows: (rows: readonly ClaudeLaneDelegationRow[]) => void
-  getClaudeLaneDelegationLeases: () => ClaudeLaneDelegationLease[]
-  setClaudeLaneDelegationLeases: (rows: readonly ClaudeLaneDelegationLease[]) => void
-} {
-  let watermarks: ClaudeLaneCredentialWatermark[] = []
-  let delegationRows: ClaudeLaneDelegationRow[] = []
-  let leases: ClaudeLaneDelegationLease[] = []
-  return {
-    getClaudeLaneCredentialWatermarks: () => watermarks,
-    setClaudeLaneCredentialWatermarks: (rows) => {
-      watermarks = [...rows]
-    },
-    getClaudeLaneDelegationRows: () => delegationRows,
-    setClaudeLaneDelegationRows: (rows) => {
-      delegationRows = [...rows]
-    },
-    getClaudeLaneDelegationLeases: () => leases,
-    setClaudeLaneDelegationLeases: (rows) => {
-      leases = [...rows]
-    }
-  }
-}
-
 function startHarness(): { userDataPath: string; grants: FakeGrants } {
   const userDataPath = mkdtempSync(join(tmpdir(), 'orca-lane-designation-stream-'))
   electronState.userDataPath = userDataPath
   dirs.push(userDataPath)
   const lanesRoot = join(userDataPath, 'claude-lanes')
-  const persistence = makePersistence()
   const coordinator = new LaneCredentialCoordinator({
-    persistence,
-    sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
     laneOptions: { lanesRoot, platform: 'linux' }
   })
-  setLaneWireHostDependencies({
-    coordinator,
-    persistence,
-    accounts: { findAccount: () => null }
-  })
+  setLaneWireHostDependencies({ coordinator })
   const grants = new FakeGrants()
   grants.add(DEVICE_ID)
   attachPrincipalLaneHost({

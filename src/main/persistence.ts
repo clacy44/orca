@@ -20,21 +20,9 @@ import {
 } from './durable-file-write'
 import { join, dirname, isAbsolute, resolve, sep } from 'node:path'
 import {
-  normalizeClaudeLaneWatermarks,
-  type ClaudeLaneCredentialWatermark
-} from '../shared/claude-lane-watermark'
-import {
   normalizeClaudeLivePtySessionLanes,
   type ClaudeLivePtySessionLane
 } from '../shared/claude-live-pty-session-lane'
-import {
-  normalizeClaudeLaneDelegationRows,
-  type ClaudeLaneDelegationRow
-} from '../shared/claude-lane-delegation'
-import {
-  normalizeClaudeLaneLeases,
-  type ClaudeLaneDelegationLease
-} from '../shared/claude-lane-lease'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
@@ -3840,9 +3828,6 @@ export class Store {
           claudeLivePtySessionLanes: normalizeClaudeLivePtySessionLanes(
             parsed.claudeLivePtySessionLanes
           ),
-          claudeLaneCredentialWatermarks: normalizeClaudeLaneWatermarks(
-            parsed.claudeLaneCredentialWatermarks
-          ),
           migrationUnsupportedPtyEntries: normalizeMigrationUnsupportedPtyEntries(
             parsed.migrationUnsupportedPtyEntries
           ),
@@ -7292,36 +7277,6 @@ export class Store {
   ): ClaudeLivePtySessionLane[] {
     const kept = new Set(this.state.claudeLivePtySessionIds ?? [])
     return rows.filter((row) => kept.has(row.sessionId))
-  }
-
-  getClaudeLaneDelegationLeases(): ClaudeLaneDelegationLease[] {
-    return normalizeClaudeLaneLeases(this.state.claudeLaneDelegationLeases)
-  }
-
-  setClaudeLaneDelegationLeases(rows: readonly ClaudeLaneDelegationLease[]): void {
-    this.state.claudeLaneDelegationLeases = normalizeClaudeLaneLeases(rows)
-    // Why: flush sync — a lost lease un-suppresses a rotator the host lane is depending on.
-    this.flush()
-  }
-
-  getClaudeLaneDelegationRows(): ClaudeLaneDelegationRow[] {
-    return normalizeClaudeLaneDelegationRows(this.state.claudeLaneDelegationRows)
-  }
-
-  setClaudeLaneDelegationRows(rows: readonly ClaudeLaneDelegationRow[]): void {
-    this.state.claudeLaneDelegationRows = normalizeClaudeLaneDelegationRows(rows)
-    // Why: flush sync — a lost delegable list refuses the phone's next switch by name.
-    this.flush()
-  }
-
-  getClaudeLaneCredentialWatermarks(): ClaudeLaneCredentialWatermark[] {
-    return normalizeClaudeLaneWatermarks(this.state.claudeLaneCredentialWatermarks)
-  }
-
-  setClaudeLaneCredentialWatermarks(rows: readonly ClaudeLaneCredentialWatermark[]): void {
-    this.state.claudeLaneCredentialWatermarks = normalizeClaudeLaneWatermarks(rows)
-    // Why: flush sync — a force-quit that loses a watermark makes the next push read as stale.
-    this.flush()
   }
 
   removeClaudeLivePtySessionId(sessionId: string): void {

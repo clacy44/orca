@@ -1,5 +1,4 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import { hasLiveClaudePtys } from './live-pty-gate'
 import { isLaneWipePending } from './lane-wipe-pending'
 import type { NormalizedClaudeAccountSelectionTarget } from './runtime-selection'
 import { openPrincipalLane, type PrincipalLaneOptions } from './principal-credential-lane'
@@ -9,13 +8,6 @@ import type { ClaudeRuntimeAuthPreparation } from './runtime-auth-service'
 
 export type LanePreparationInput = PrincipalLaneOptions & {
   principalId: string
-  /**
-   * S9b re-keys this to "is a live PTY running in the lane where this account is resident",
-   * resolved through the residency index and single-valued by L1. Until the residency index
-   * exists, the host's existing live-PTY gate is the honest approximation: it over-defers, which
-   * is the safe direction — a double rotation revokes one copy of a single-use refresh token.
-   */
-  isRefreshDeferredByLivePty?: () => boolean
 }
 
 /**
@@ -49,7 +41,6 @@ export function prepareLaneLaunch(input: LanePreparationInput): ClaudeRuntimeAut
       'Your Claude account is not loaded on this host right now, so this terminal cannot start in your credential lane. Reconnect the device that pushes your account, then try again.'
     )
   }
-  const isDeferred = input.isRefreshDeferredByLivePty ?? hasLiveClaudePtys
   return {
     configDir: laneDir,
     runtime: 'host',
@@ -57,7 +48,8 @@ export function prepareLaneLaunch(input: LanePreparationInput): ClaudeRuntimeAut
     wslLinuxConfigDir: null,
     envPatch: { CLAUDE_CONFIG_DIR: laneDir },
     stripAuthEnv: true,
-    managedRefreshDeferredByLivePty: isDeferred(),
+    // Rev 32: Orca never rotates a lane's chain (§2e), so no lane launch is ever deferred by one.
+    managedRefreshDeferredByLivePty: false,
     provenance: formatLaneProvenance(ensureLaneProvenanceLabel(laneDir))
   }
 }

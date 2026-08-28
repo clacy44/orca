@@ -10739,28 +10739,16 @@
             }
           }
         },
-        "AccountLaneLeaseRow": {
-          "unnamedAccount": "Delegated account",
-          "nameLabel": "Friendly name for this account",
-          "saveName": "Save name",
-          "cancelName": "Cancel",
-          "editName": "Rename account",
-          "delegatedTo": "On {{value0}} for {{value1}} · since {{value2}}",
-          "release": "Release"
-        },
         "AccountLaneStatusSection": {
           "loaded": "Loaded",
           "absent": "Absent",
           "reauth": "Reauth required",
           "restart": "Restart required",
-          "noPush": "No push received from {{value0}} yet — re-check the designated device.",
+          "noLogin": "Lane designated to {{value0}}; no login completed yet.",
           "writeFailed": "Lane update failed.",
           "title": "Per-person credential lanes",
-          "operatingRule": "One pusher, one puller: while an account is loaded on a shared host, this desktop will not start a local terminal under it. Release it here to use it locally again.",
-          "leasesTitle": "Accounts you delegated",
-          "delegateTitle": "Load an account onto a host",
-          "delegateAccountPlaceholder": "Choose account…",
-          "delegateButton": "Delegate",
+          "operatingRule": "Each lane holds its own Claude sign-in, independent of any account on this desktop.",
+          "remoteTitle": "Sign a remote lane in",
           "refreshHost": "Refresh",
           "checking": "Checking…",
           "unreachable": "{{value0}} is disconnected — reconnect it to check for a lane.",
@@ -10806,6 +10794,37 @@
           "newPersonPlaceholder": "Add a person…",
           "newPersonLabel": "New person name",
           "addPerson": "Add person"
+        },
+        "LaneAccountListRow": {
+          "active": "Active",
+          "remove": "Remove",
+          "switch": "Switch"
+        },
+        "LaneLoginDialog": {
+          "binding": "Signing in {{value0}}’s lane on {{value1}}.",
+          "cancelButton": "Cancel",
+          "codeLabel": "Code from the browser",
+          "codeRejected": "That code was not accepted ({{value0}} attempt(s) left). Check the code and try again.",
+          "completed": "Signed in to {{value0}}.",
+          "doneButton": "Done",
+          "expectedEmailHint": "If you sign in as a different account, Orca refuses the login and removes it.",
+          "expectedEmailLabel": "Expected account email",
+          "openUrlHint": "Open this link in any browser — a phone works too — and sign in as {{value0}}.",
+          "qrAlt": "QR code for the login link",
+          "signedIn": "Signed in to {{value0}}.",
+          "startButton": "Start login",
+          "submitCodeButton": "Submit code",
+          "title": "Sign this lane into an account",
+          "tryAgainButton": "Try again",
+          "expectedEmailPlaceholder": "name@example.com"
+        },
+        "LaneLoginSection": {
+          "actionFailed": "Action failed",
+          "loginFailed": "Login failed",
+          "logout": "Log out",
+          "logoutFailed": "Log out failed",
+          "signIn": "Sign this lane into an account",
+          "updateHost": "Sign-in for this lane needs a newer host — update the host to use it."
         }
       },
       "right": {

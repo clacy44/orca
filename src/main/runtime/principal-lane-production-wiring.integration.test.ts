@@ -2,36 +2,29 @@
  * Release-audit T2: the ONE end-to-end test that boots the PRODUCTION wiring path — real
  * `setLaneWireHostDependencies` + `attachPrincipalLaneHost` (the same call chain `index.ts` and
  * `OrcaRuntimeRpcServer.start()` use), never a hand-built `LaneWireService` — and drives the
- * whole day-one flow over a real socket: create-person → bind → designate → provision → a push
- * over the socket (through the real `LaneDelegationPushClient`, never hand-built push params) →
- * the lane loaded → a lane-pinned spawn's env carrying `CLAUDE_CONFIG_DIR` → the last socket
- * close → the credential file gone.
+ * whole day-one flow over a real socket: create-person → bind → designate → provision → the lane
+ * loaded → a lane-pinned spawn's env carrying `CLAUDE_CONFIG_DIR` → the last socket close → the
+ * credential file gone.
  *
  * `lane-wire-composition.test.ts` (B1) and `principal-lane-close-wipe.integration.test.ts` (S9c)
  * each cover one half of this over their own harness; this is the one place both halves run
  * together through the real composition, so a regression that only breaks the WIRING between them
- * — not either class on its own — fails here. The negative arms below (push_not_delegated,
- * selection_out_of_scope, grant_not_redeemed) are reachable only because the wiring is real.
+ * — not either class on its own — fails here.
+ *
+ * Rev 32 (S9-L3, §10(g)) deletes the push model, `LaneDelegationPushClient` included: the "a real
+ * credential lands in the lane" step below loads the lane's own `.credentials.json` directly, the
+ * way a lane login will once S9-L1's host session lands. The `push_not_delegated` negative arm goes
+ * with the deleted RPC.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { parsePairingCode } from '../../shared/pairing'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import { AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
-import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
-import type { ClaudeLaneDelegationRow } from '../../shared/claude-lane-delegation'
-import type { ClaudeLaneDelegationLease } from '../../shared/claude-lane-lease'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { prepareLaneLaunch } from '../claude-accounts/principal-lane-preparation'
-import {
-  LaneDelegationPushClient,
-  type DesktopLaneAccountSource,
-  type LaneDelegationHostClient
-} from '../claude-accounts/lane-delegation-push-client'
-import { LaneDelegationLeaseStore } from '../claude-accounts/lane-delegation-lease'
 import { paneLaneLaunchFor } from '../ipc/lane-pinned-spawn'
 import { computeLaneLaunch, type LaneLaunchSpawnShape } from './lane-launch-computation'
 import { OrcaRuntimeService } from './orca-runtime'
@@ -207,30 +200,6 @@ function closeAndSettle(ws: WebSocket): Promise<void> {
   })
 }
 
-/** A production `LaneDelegationHostClient` over a real socket — the transport this test proves. */
-function socketHostClient(
-  session: PairedSession,
-  reader: Reader,
-  hostId: string
-): LaneDelegationHostClient {
-  return {
-    hostId,
-    getCapabilities: async () => [AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY],
-    call: async <T>(method: string, params?: unknown) => {
-      const response = await request(session, reader, method, params)
-      if (response.error) {
-        throw new Error(JSON.stringify(response.error))
-      }
-      return response.result as T
-    },
-    // The electron-IPC transport (`lane-delegation-host-client.ts`) cannot run in vitest and gets
-    // its own unit test for method names and frame mapping; this test's one push never needs a
-    // live status frame — `LaneDelegationPushClient.resolveDelegation` falls back to a one-shot
-    // `accounts.lane.status` call when no `ready` frame has landed yet, which is exercised below.
-    subscribeLaneStatus: async () => () => {}
-  }
-}
-
 describe('principal lanes over the production wiring, end to end (release-audit T2)', () => {
   const servers: OrcaRuntimeRpcServer[] = []
   const sockets: WebSocket[] = []
@@ -247,53 +216,17 @@ describe('principal lanes over the production wiring, end to end (release-audit 
     }
   })
 
-  type Persistence = {
-    getClaudeLaneCredentialWatermarks: () => ClaudeLaneCredentialWatermark[]
-    setClaudeLaneCredentialWatermarks: (rows: readonly ClaudeLaneCredentialWatermark[]) => void
-    getClaudeLaneDelegationRows: () => ClaudeLaneDelegationRow[]
-    setClaudeLaneDelegationRows: (rows: readonly ClaudeLaneDelegationRow[]) => void
-    getClaudeLaneDelegationLeases: () => ClaudeLaneDelegationLease[]
-    setClaudeLaneDelegationLeases: (rows: readonly ClaudeLaneDelegationLease[]) => void
-  }
-
-  function makePersistence(): Persistence {
-    let watermarks: ClaudeLaneCredentialWatermark[] = []
-    let delegationRows: ClaudeLaneDelegationRow[] = []
-    let leases: ClaudeLaneDelegationLease[] = []
-    return {
-      getClaudeLaneCredentialWatermarks: () => watermarks,
-      setClaudeLaneCredentialWatermarks: (rows) => {
-        watermarks = [...rows]
-      },
-      getClaudeLaneDelegationRows: () => delegationRows,
-      setClaudeLaneDelegationRows: (rows) => {
-        delegationRows = [...rows]
-      },
-      getClaudeLaneDelegationLeases: () => leases,
-      setClaudeLaneDelegationLeases: (rows) => {
-        leases = [...rows]
-      }
-    }
-  }
-
   async function startHarness() {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-lane-production-wiring-'))
     electronState.userDataPath = userDataPath
     dirs.push(userDataPath)
     const lanesRoot = join(userDataPath, 'claude-lanes')
 
-    // The exact dependency-registration `index.ts` performs before any registry exists (B1/B3).
-    const persistence = makePersistence()
+    // The exact dependency-registration `index.ts` performs before any registry exists (B1).
     const coordinator = new LaneCredentialCoordinator({
-      persistence,
-      sharedLane: { readCredentials: () => null, readOauthAccount: () => null },
       laneOptions: { lanesRoot, platform: 'linux' }
     })
-    setLaneWireHostDependencies({
-      coordinator,
-      persistence,
-      accounts: { findAccount: () => null }
-    })
+    setLaneWireHostDependencies({ coordinator })
 
     const runtime = new OrcaRuntimeService({
       getRepos: () => [],
@@ -329,15 +262,14 @@ describe('principal lanes over the production wiring, end to end (release-audit 
       return offer
     }
 
-    return { userDataPath, lanesRoot, persistence, runtime, server, consent, mintGrant }
+    return { userDataPath, lanesRoot, runtime, server, consent, mintGrant }
   }
 
   it(
-    'create-person, bind, designate, provision, push through the real push client over ' +
-      'the socket, lane loaded, a lane-pinned spawn env, then last-close wipe — all through ' +
-      'the production wire',
+    'create-person, bind, designate, provision, a real credential lands in the lane, lane ' +
+      'loaded, a lane-pinned spawn env, then last-close wipe — all through the production wire',
     async () => {
-      const { lanesRoot, persistence, runtime, consent, mintGrant } = await startHarness()
+      const { lanesRoot, runtime, consent, mintGrant } = await startHarness()
       expect(getLaneWireService()).not.toBeNull()
 
       // A per-person invite, redeemed by the real E2EE handshake BEFORE any bind (M1's precondition).
@@ -359,24 +291,16 @@ describe('principal lanes over the production wiring, end to end (release-audit 
       const credentialPath = join(laneDir, '.credentials.json')
       expect(existsSync(laneDir)).toBe(true)
 
-      // The provision audit row, carrying no platformAcceptance on this ungated platform.
-      const audit = consent.listAudit()
-      const provisionRow = audit.find(
-        (row) => row.action === 'provision' && row.principalId === ana.principalId
-      )
-      expect(provisionRow).toBeDefined()
-      expect(provisionRow?.platformAcceptance).toBeUndefined()
-
       // Lane derivation over the production lookup, fed by attachPrincipalLaneHost's own wiring.
       expect(runtime.resolveCallerCredentialLane(desktopOffer.deviceId)).toEqual({
         kind: 'principal',
         principalId: ana.principalId
       })
 
-      // A provisioned but not-yet-pushed lane still throws `terminal.lane_not_loaded` — this is
-      // the exact call the production preparation makes at runtime-auth-service.ts:673-681; the
-      // one hop above it (pty.ts -> prepareClaudeAuth) is already covered by lane-pinned-spawn.test.ts
-      // and orca-runtime-agent-session-lane-args.test.ts.
+      // A provisioned but not-yet-loaded lane still throws `terminal.lane_not_loaded` — this is
+      // the exact call the production preparation makes at runtime-auth-service.ts (the one hop
+      // above it — pty.ts -> prepareClaudeAuth — is already covered by lane-pinned-spawn.test.ts
+      // and orca-runtime-agent-session-lane-args.test.ts).
       expect(() =>
         prepareLaneLaunch({ principalId: ana.principalId, lanesRoot, platform: 'linux' })
       ).toThrowError(/lane_not_loaded|not loaded/)
@@ -387,48 +311,16 @@ describe('principal lanes over the production wiring, end to end (release-audit 
         expect(isClaudeLaneRefusal(error) && error.code).toBe('terminal.lane_not_loaded')
       }
 
-      // The desktop push client's own act: a credential envelope pushed over the paired socket,
-      // through the real production `LaneDelegationPushClient` — no hand-built push params. It
-      // supplies `basedOnRefreshTokenSha256` and the delegation object itself, from a one-shot
-      // `accounts.lane.status` call (no `ready` frame ever arrives from the stub subscription).
-      const accounts: DesktopLaneAccountSource = {
-        readSelected: async () => ({
-          accountId: 'acct-ana',
-          accountUuid: 'acct-uuid-ana',
-          credentialsJson: credentials('rt-ana-1'),
-          oauthAccountJson: JSON.stringify({
-            accountUuid: 'acct-uuid-ana',
-            emailAddress: 'ana@corp.test'
-          }),
-          displayName: 'Ana work'
-        }),
-        readByClientRef: async () => null,
-        listDelegable: async () => [],
-        applyRotatedCredentials: async () => {},
-        resolveLocalAccountId: () => null
-      }
-      const leases = new LaneDelegationLeaseStore({ persistence })
-      const pushClient = new LaneDelegationPushClient({
-        host: socketHostClient(desktop, desktopReader, 'env-test'),
-        accounts,
-        leases
-      })
-      const outcome = await pushClient.connect()
-      expect(outcome).toBe('pushed')
+      // The lane's own CLI is the only writer to its credential file now (§2e); this loads it
+      // directly, standing in for S9-L1's login capture until that host session lands.
+      writeFileSync(credentialPath, credentials('rt-ana-1'))
 
-      expect(existsSync(credentialPath)).toBe(true)
-      expect(readFileSync(credentialPath, 'utf-8')).toContain('rt-ana-1')
-
-      // The host's own status projection over the socket agrees with what the push client saw.
+      // The host's own status projection over the socket sees the lane loaded.
       const status = await request(desktop, desktopReader, 'accounts.lane.status')
-      expect(status.result).toMatchObject({
-        laneState: 'loaded',
-        callerIsDelegatedGrant: true,
-        heldDisplayName: 'Ana work'
-      })
+      expect(status.result).toMatchObject({ laneState: 'loaded', callerIsDelegatedGrant: true })
 
       // A lane-pinned spawn's env carries this principal's CLAUDE_CONFIG_DIR — the same
-      // preparation + computation the PTY spawn anchor runs, over the lane the push just loaded.
+      // preparation + computation the PTY spawn anchor runs, over the lane just loaded.
       const preparation = prepareLaneLaunch({
         principalId: ana.principalId,
         lanesRoot,
@@ -467,12 +359,10 @@ describe('principal lanes over the production wiring, end to end (release-audit 
       // (runtime-rpc.ts -> principal-lane-connection-lifecycle.ts) wipes the credential.
       await closeAndSettle(phone.ws)
       expect(existsSync(credentialPath)).toBe(false)
-      // The watermark (and the lane directory) survive the wipe, same as the close-wipe suite.
-      const watermarks = persistence.getClaudeLaneCredentialWatermarks()
-      expect(watermarks.some((row) => row.laneId === ana.principalId)).toBe(true)
+      // The lane directory survives a close-wipe — only a revoke removes it.
       expect(existsSync(laneDir)).toBe(true)
 
-      // Step 6's throw returns once the lane is wiped.
+      // Step's throw returns once the lane is wiped.
       try {
         prepareLaneLaunch({ principalId: ana.principalId, lanesRoot, platform: 'linux' })
         throw new Error('expected a throw')
@@ -515,53 +405,11 @@ describe('principal lanes over the production wiring, end to end (release-audit 
     const reader = createReader(desktop)
     sockets.push(desktop.ws)
 
-    const pushed = await request(desktop, reader, 'accounts.lane.push', {
-      envelope: {
-        credentialsJson: credentials('rt-1'),
-        oauthAccountJson: '{}',
-        displayName: 'Ana work'
-      },
-      basedOnRefreshTokenSha256: null,
-      delegation: { hostId: 'h', principalId: 'p', delegatedGrantId: offer.deviceId, since: 1 }
-    })
-    expect(errorCode(pushed)).toBe('accounts.lane.not_enabled')
+    const logout = await request(desktop, reader, 'accounts.lane.logout')
+    expect(errorCode(logout)).toBe('accounts.lane.not_enabled')
 
     const status = await request(desktop, reader, 'accounts.lane.status')
     expect(errorCode(status)).toBe('accounts.lane.not_enabled')
-  })
-
-  it('refuses a push from a grant that is not the designated pusher', async () => {
-    const { consent, mintGrant } = await startHarness()
-
-    const desktopOffer = mintGrant('ana-desktop')
-    const desktop = await authenticate(desktopOffer.pairingUrl)
-    sockets.push(desktop.ws)
-    const otherOffer = mintGrant('ana-other')
-    const other = await authenticate(otherOffer.pairingUrl)
-    const otherReader = createReader(other)
-    sockets.push(other.ws)
-
-    const ana = consent.createPrincipal(CONSENT, 'Ana')
-    consent.bindGrant(CONSENT, desktopOffer.deviceId, ana.principalId)
-    consent.bindGrant(CONSENT, otherOffer.deviceId, ana.principalId)
-    consent.designatePusher(CONSENT, ana.principalId, desktopOffer.deviceId)
-    consent.provisionLane(CONSENT, ana.principalId)
-
-    const refused = await request(other, otherReader, 'accounts.lane.push', {
-      envelope: {
-        credentialsJson: credentials('rt-1'),
-        oauthAccountJson: '{}',
-        displayName: 'Ana work'
-      },
-      basedOnRefreshTokenSha256: null,
-      delegation: {
-        hostId: 'h',
-        principalId: ana.principalId,
-        delegatedGrantId: otherOffer.deviceId,
-        since: 1
-      }
-    })
-    expect(errorCode(refused)).toBe('accounts.lane.push_not_delegated')
   })
 
   it('refuses accounts.selectClaude from a grant that holds a provisioned lane', async () => {

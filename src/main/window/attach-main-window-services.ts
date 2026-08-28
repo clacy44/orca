@@ -30,6 +30,11 @@ import { registerRemoteWorkspaceHandlers } from '../ipc/remote-workspace'
 import { registerTerminalPresenceHandlers } from '../ipc/terminal-presence'
 import { registerPrincipalConsentBridge } from '../ipc/principal-consent-bridge'
 import { registerPrincipalLaneStatusBridge } from '../ipc/principal-lane-status-bridge'
+import { registerLaneLoginBridge } from '../ipc/lane-login-bridge'
+import {
+  getLaneLoginDesktopService,
+  startLaneLoginDesktopService
+} from '../claude-accounts/lane-login-desktop-service'
 import { browserManager } from '../browser/browser-manager'
 import { hasSystemMediaAccess, requestSystemMediaAccess } from '../browser/browser-media-access'
 import type { OrcaRuntimeService, RuntimeWorktreeLifecycleEvent } from '../runtime/orca-runtime'
@@ -165,6 +170,11 @@ export function attachMainWindowServices(
   // Why here beside presence: the consent seam is host-only IPC that tears down with this window (S9 §2a).
   registerPrincipalConsentBridge(mainWindow)
   registerPrincipalLaneStatusBridge(mainWindow)
+  // S9-L2: the lane-login client's IPC seam, host-only, torn down with this window (§2l/§3).
+  registerLaneLoginBridge(
+    mainWindow,
+    getLaneLoginDesktopService() ?? startLaneLoginDesktopService()
+  )
   registerFileDropRelay(mainWindow)
   registerTccPromptNoticeHandlers(mainWindow)
   // Why: setupAutoUpdater sync-require()s electron-updater (slow on cold Windows w/ Defender, #7225), so defer past first paint; timer fallback covers crash-looping renderers.

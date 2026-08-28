@@ -20,7 +20,7 @@ import {
   subscribeRuntimeEnvironment
 } from './runtime-environment-transport-routing'
 import { RUNTIME_ENVIRONMENT_HANDLER_CHANNELS } from './runtime-environment-handler-channels'
-import { notifyLaneDelegationHostUnreachable } from '../claude-accounts/lane-delegation-desktop-service'
+import { notifyLaneLoginHostUnreachable } from '../claude-accounts/lane-login-desktop-service'
 
 type RetainedRemoteRuntimeSubscription = RemoteRuntimeSubscription & {
   environmentId: string
@@ -64,7 +64,7 @@ export function invalidateRuntimeEnvironmentTransport(environmentId: string): vo
   closeSubscriptionsForEnvironment(environmentId)
   // Why here (release-audit B3): disconnect, re-pair and remove all invalidate this transport, and
   // a dropped connection must not release the delegation lease — only stop pushing to it.
-  notifyLaneDelegationHostUnreachable(environmentId)
+  notifyLaneLoginHostUnreachable(environmentId)
 }
 
 export function registerRuntimeEnvironmentHandlers(store: Store): void {

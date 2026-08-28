@@ -107,6 +107,13 @@ export const FILE_MUTATION_OWNERSHIP_UPDATE_REQUIRED_MESSAGE =
 // `method_not_found`): the loud failure is a stack trace, not "update the host". This says one
 // thing — this host has per-person Claude credential lanes — and never anything per-grant (S9 §3).
 export const AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY = 'agent.identity-lanes.v1' as const
+// S9-L2 (design rev 38 §3): the credential-source re-basing bumps this from v1 to v2. A v2 host
+// does not implement `accounts.lane.push`/`pullRotated`/`clear`/`setDelegableAccounts`/
+// `requestSwitch` at all, so a v2 client must gate the new login-quartet + selectAccount/
+// removeAccount/logout verbs on THIS string, never on v1 — finding only v1 means "update this
+// client", not "fall back to push". The v1 constant and its push-client callers are left in place
+// for S9-L3 to delete once the login model is the only one live.
+export const AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY = 'agent.identity-lanes.v2' as const
 
 export const RUNTIME_CAPABILITIES = [
   'runtime.status.compat.v1',
@@ -146,7 +153,8 @@ export const RUNTIME_CAPABILITIES = [
   ACCOUNT_IMPORT_RUNTIME_CAPABILITY,
   CODEX_RESET_CREDIT_RUNTIME_CAPABILITY,
   ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY,
-  AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY
+  AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY,
+  AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})

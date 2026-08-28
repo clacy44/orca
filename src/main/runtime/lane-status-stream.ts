@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
-import type { LaneRotationReceipt } from '../claude-accounts/principal-lane-store'
 import type { LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
 
 /**
- * The lane status stream (S9 §2c/§2l), and the liveness precondition that reads it.
+ * The lane status stream (S9 §2c/§2l).
  *
  * Teardown has exactly ONE path: `registerSubscriptionCleanup(..., ctx.connectionId)` calls
  * `unsubscribe`, and `cleanupSubscriptionsForConnection` runs it on close — the same join
@@ -12,27 +11,22 @@ import type { LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
  * teardown, so there is none. No way to address another principal's stream either: a subscriber
  * is filed under the principal its grant resolved to.
  *
- * Every frame here is secretless: `laneState`, a rotation receipt carrying a sha256 and never a
- * token, the designation, and the delegable list's opaque tokens.
+ * Every frame here is secretless: `laneState` and the designation, never a credential.
  *
  * A subscriber is filed by its GRANT, and the principal is re-resolved on every delivery — the
  * same per-emit resolve `accounts.subscribe`'s projection makes. Snapshotting the caller at
  * subscribe time survived an unbind and a re-bind, neither of which touches the socket, so a grant
- * moved to another person kept receiving the first person's identity, sha and delegable list.
+ * moved to another person kept receiving the first person's identity and sha.
+ *
+ * Rev 32 deletes `switch-requested`/`switch-failed` (the deleted `requestSwitch` flow) and
+ * `receipt` (the deleted watermark's rotation receipts); S9-L1's three login-session frames
+ * (`login-started`/`login-completed`/`login-failed`, §3 row 2) replace them once that host session
+ * model lands — not yet in this tree.
  */
 
 export type LaneStatusFrame =
   | { type: 'ready'; subscriptionId: string; status: ClaudeLaneStatus }
   | { type: 'status'; status: ClaudeLaneStatus }
-  | { type: 'receipt'; receipt: LaneRotationReceipt }
-  | {
-      type: 'switch-requested'
-      requestId: string
-      delegatedAccountId: string
-      /** The desktop's own opaque handle for the account, so it can map the ask to its store. */
-      clientRef: string
-    }
-  | { type: 'switch-failed'; requestId: string; code: string; message: string }
   | { type: 'end' }
 
 export type LaneStatusSubscriber = {
@@ -68,25 +62,6 @@ export class LaneStatusStream {
     this.subscribers.delete(subscriptionId)
   }
 
-  /**
-   * §2l's liveness precondition, second conjunct.
-   *
-   * "Connected" is not enough and `scope` is not the key: a one-shot request socket satisfies
-   * neither, and an `orca` CLI grant can hold no subscription at all. What is asked is whether
-   * THIS principal's designated grant is carrying a lane-status subscription right now.
-   */
-  hasSubscriptionForGrant(principalId: string, deviceId: string): boolean {
-    for (const subscriber of this.subscribers.values()) {
-      if (
-        subscriber.deviceId === deviceId &&
-        this.callerOf(subscriber)?.principalId === principalId
-      ) {
-        return true
-      }
-    }
-    return false
-  }
-
   subscribersOf(principalId: string): LaneStatusSubscriber[] {
     return [...this.subscribers.values()].filter(
       (subscriber) => this.callerOf(subscriber)?.principalId === principalId
@@ -101,10 +76,5 @@ export class LaneStatusStream {
       delivered += 1
     }
     return delivered
-  }
-
-  /** A receipt is per LANE, so it publishes to that lane's principal and no other. */
-  publishReceipt(receipt: LaneRotationReceipt): number {
-    return this.publish(receipt.laneId, { type: 'receipt', receipt })
   }
 }

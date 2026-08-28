@@ -11,30 +11,16 @@ vi.mock('electron', () => ({
 }))
 
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
-import type { ClaudeLaneDelegationLease } from '../../shared/claude-lane-lease'
 import {
   PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL,
-  PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
   PRINCIPAL_LANE_STATUS_GET_CHANNEL,
   PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL,
-  PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
-  PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
 } from '../../shared/principal-lane-status-ipc'
 import {
   notifyPrincipalLaneStatusChanged,
   registerPrincipalLaneStatusBridge
 } from './principal-lane-status-bridge'
-
-const LEASE: ClaudeLaneDelegationLease = {
-  accountId: 'acct-1',
-  accountUuid: null,
-  hostId: 'host-1',
-  principalId: 'prin-1',
-  delegatedGrantId: 'dev-1',
-  since: 1,
-  expiresAt: null
-}
 
 type WindowStub = {
   window: BrowserWindow
@@ -89,8 +75,6 @@ function options() {
       { principalId: 'prin-1', displayName: 'Ana', delegatedGrantId: 'dev-1' }
     ],
     resolveLaneState: (id: string) => (id === 'prin-1' ? ('loaded' as const) : ('absent' as const)),
-    listDelegationLeases: () => [LEASE],
-    listDelegableHosts: () => [],
     listRemoteHosts: () => []
   }
 }
@@ -106,22 +90,17 @@ describe('principal lane status bridge', () => {
     dispose = registerPrincipalLaneStatusBridge(stub.window, options())
   })
 
-  it('answers the host frame with per-lane residency and this desktop leases', () => {
+  it('answers the host frame with per-lane residency and remote discoverability rows', () => {
     const snapshot = invokeGet(stub.sender)
     expect(snapshot.lanes).toEqual([
       { principalId: 'prin-1', displayName: 'Ana', delegatedGrantId: 'dev-1', laneState: 'loaded' }
     ])
-    expect(snapshot.delegationLeases).toEqual([LEASE])
+    expect(snapshot.remoteHosts).toEqual([])
   })
 
   it('gives a non-host sender the empty snapshot rather than the lanes', () => {
     const snapshot = invokeGet({})
-    expect(snapshot).toEqual({
-      lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
-      remoteHosts: []
-    })
+    expect(snapshot).toEqual({ lanes: [], remoteHosts: [] })
   })
 
   it('broadcasts a fresh snapshot when a lane-status change fires', () => {
@@ -156,102 +135,14 @@ function invokeChannel<T>(channel: string, sender: object, request: unknown): T 
 
 describe('principal lane status bridge writes', () => {
   let stub: WindowStub
-  let releaseLease: ReturnType<typeof vi.fn<(accountId: string) => boolean>>
-  let renameLease: ReturnType<
-    typeof vi.fn<(accountId: string, friendlyName: string | null) => boolean>
-  >
-  let delegateAccount: ReturnType<
-    typeof vi.fn<(environmentId: string, accountId: string) => Promise<boolean>>
-  >
   let refreshHost: ReturnType<typeof vi.fn<(environmentId: string) => Promise<boolean>>>
 
   beforeEach(() => {
     handleMock.mockClear()
     removeHandlerMock.mockClear()
     stub = makeWindow()
-    releaseLease = vi.fn<(accountId: string) => boolean>().mockReturnValue(true)
-    renameLease = vi
-      .fn<(accountId: string, friendlyName: string | null) => boolean>()
-      .mockReturnValue(true)
-    delegateAccount = vi
-      .fn<(environmentId: string, accountId: string) => Promise<boolean>>()
-      .mockResolvedValue(true)
     refreshHost = vi.fn<(environmentId: string) => Promise<boolean>>().mockResolvedValue(true)
-    registerPrincipalLaneStatusBridge(stub.window, {
-      ...options(),
-      releaseLease,
-      renameLease,
-      delegateAccount,
-      refreshHost
-    })
-  })
-
-  it('releases a lease for the host frame and republishes', () => {
-    const result = invokeChannel<{ released: boolean }>(
-      PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
-      stub.sender,
-      { accountId: 'acct-1' }
-    )
-    expect(result).toEqual({ released: true })
-    expect(releaseLease).toHaveBeenCalledWith('acct-1')
-    expect(
-      stub.sends.filter((send) => send.channel === PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL)
-    ).toHaveLength(1)
-  })
-
-  it('renames a lease for the host frame', () => {
-    const result = invokeChannel<{ renamed: boolean }>(
-      PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
-      stub.sender,
-      { accountId: 'acct-1', friendlyName: 'work' }
-    )
-    expect(result).toEqual({ renamed: true })
-    expect(renameLease).toHaveBeenCalledWith('acct-1', 'work')
-  })
-
-  // Mutation proof: the sender check is the door. Deleting it turns these two refusals green->red.
-  it('refuses a foreign sender BEFORE the lease store is touched (release)', () => {
-    const result = invokeChannel<{ released: boolean }>(
-      PRINCIPAL_LANE_STATUS_RELEASE_CHANNEL,
-      {},
-      { accountId: 'acct-1' }
-    )
-    expect(result).toEqual({ released: false })
-    expect(releaseLease).not.toHaveBeenCalled()
-  })
-
-  it('refuses a foreign sender BEFORE the lease store is touched (rename)', () => {
-    const result = invokeChannel<{ renamed: boolean }>(
-      PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
-      {},
-      { accountId: 'acct-1', friendlyName: 'work' }
-    )
-    expect(result).toEqual({ renamed: false })
-    expect(renameLease).not.toHaveBeenCalled()
-  })
-
-  it('delegates an account to a host for the host frame and republishes', async () => {
-    const result = await invokeChannel<Promise<{ delegated: boolean }>>(
-      PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
-      stub.sender,
-      { accountId: 'acct-1', environmentId: 'env-1' }
-    )
-    expect(result).toEqual({ delegated: true })
-    expect(delegateAccount).toHaveBeenCalledWith('env-1', 'acct-1')
-    expect(
-      stub.sends.filter((send) => send.channel === PRINCIPAL_LANE_STATUS_CHANGED_CHANNEL)
-    ).toHaveLength(1)
-  })
-
-  // Mutation proof: the sender check is the door. Deleting it turns this refusal green->red.
-  it('refuses a foreign sender BEFORE the delegate action runs', async () => {
-    const result = await invokeChannel<Promise<{ delegated: boolean }>>(
-      PRINCIPAL_LANE_STATUS_DELEGATE_CHANNEL,
-      {},
-      { accountId: 'acct-1', environmentId: 'env-1' }
-    )
-    expect(result).toEqual({ delegated: false })
-    expect(delegateAccount).not.toHaveBeenCalled()
+    registerPrincipalLaneStatusBridge(stub.window, { ...options(), refreshHost })
   })
 
   it('refreshes a remote host for the host frame and republishes', async () => {

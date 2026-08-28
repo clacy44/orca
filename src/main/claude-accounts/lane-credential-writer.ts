@@ -177,8 +177,8 @@ function assertLaneDaclVerified(verified: boolean): void {
     return
   }
   throw new ClaudeLaneRefusal(
-    'accounts.lane.push_write_failed',
-    "Orca could not confirm that this lane's credential file is restricted to your Windows account, so it refused the push rather than leave a Claude credential readable by others on this machine. Check that the lane folder is on a local drive and push again."
+    'accounts.lane.switch_write_failed',
+    "Orca could not confirm that this lane's credential file is restricted to your Windows account, so it refused the write rather than leave a Claude credential readable by others on this machine. Check that the lane folder is on a local drive and try again."
   )
 }
 
@@ -192,7 +192,7 @@ function asLaneWriteRefusal(error: unknown): unknown {
     return error
   }
   return new ClaudeLaneRefusal(
-    'accounts.lane.push_write_locked',
+    'accounts.lane.switch_write_locked',
     "A Claude session on the host is holding this lane's credential file open, so Orca could not replace it. Nothing was changed — close that session or retry in a moment."
   )
 }

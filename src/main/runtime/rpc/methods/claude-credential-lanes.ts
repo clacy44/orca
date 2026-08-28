@@ -1,30 +1,19 @@
 import { z } from 'zod'
 import { defineMethod, defineStreamingMethod, type RpcAnyMethod, type RpcContext } from '../core'
-import { parseDelegableAccountInputs } from '../../lane-delegation-directory'
 import { requireLaneWireService } from '../../lane-wire-service'
 
 /**
- * The lane wire: push, pull, clear, status and the status stream (S9 §2b/§2c/§2d/§2l).
+ * The lane wire: logout, status and the status stream (S9 §2b/§2c/§2d/§2l, rev 32's re-basing).
  *
  * EVERY method here derives its lane from `ctx.pairedDeviceId → principalId` and from nothing
- * else. There is no lane or principal parameter on any of them — `push`'s own schema is `strict`
- * and refuses an extra member outright — so there is nothing for one grant to name in order to
- * reach another's lane, and an anonymous local caller addresses no lane at all.
+ * else. There is no lane or principal parameter on any of them, so there is nothing for one grant
+ * to name in order to reach another's lane, and an anonymous local caller addresses no lane at
+ * all.
  *
- * Nothing here logs a payload: the two members `push` carries ARE the credential.
+ * Rev 32 deletes `push`, `pullRotated` and `setDelegableAccounts` with the push model (§10(g));
+ * `clear` is renamed `logout` (§3 row 2). S9-L1's login quartet and `selectAccount`/`removeAccount`
+ * are not yet wired into this tree's host RPC surface.
  */
-
-const PullRotatedParams = z
-  .object({
-    knownRefreshTokenSha256: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/, 'Invalid credential digest')
-      .nullable()
-      .default(null)
-  })
-  .strict()
-
-const SetDelegableAccountsParams = z.object({ accounts: z.unknown() }).strict()
 
 const LaneUnsubscribeParams = z
   .object({ subscriptionId: z.string().min(1, 'Missing subscriptionId').max(256) })
@@ -32,46 +21,14 @@ const LaneUnsubscribeParams = z
 
 export const CLAUDE_CREDENTIAL_LANE_METHODS: readonly RpcAnyMethod[] = [
   defineMethod({
-    // Why `unknown` rather than a zod schema on the wire boundary: every malformed shape must
-    // reach the caller as `accounts.lane.push_malformed` with its complete sentence, not as a
-    // generic invalid-params error the client has no string for (§3's Rule-3 row).
-    name: 'accounts.lane.push',
-    params: z.unknown(),
-    handler: async (params, ctx) =>
-      requireLaneWireService().authority.push(ctx.pairedDeviceId, params)
-  }),
-  defineMethod({
-    name: 'accounts.lane.pullRotated',
-    params: PullRotatedParams,
-    handler: async (params, ctx) =>
-      requireLaneWireService().authority.pullRotated(
-        ctx.pairedDeviceId,
-        params.knownRefreshTokenSha256
-      )
-  }),
-  defineMethod({
-    name: 'accounts.lane.clear',
+    name: 'accounts.lane.logout',
     params: null,
-    handler: async (_params, ctx) => requireLaneWireService().authority.clear(ctx.pairedDeviceId)
+    handler: async (_params, ctx) => requireLaneWireService().authority.logout(ctx.pairedDeviceId)
   }),
   defineMethod({
     name: 'accounts.lane.status',
     params: null,
     handler: async (_params, ctx) => requireLaneWireService().authority.status(ctx.pairedDeviceId)
-  }),
-  defineMethod({
-    // §8 item 2's writer: the desktop→host delegable-list write §2l step 1 needs and rev 21 never
-    // gave it. Authorized exactly as a push is — the designated grant only — and bounded here.
-    name: 'accounts.lane.setDelegableAccounts',
-    params: SetDelegableAccountsParams,
-    handler: async (params, ctx) => {
-      const service = requireLaneWireService()
-      const caller = service.authority.requireCaller(ctx.pairedDeviceId)
-      service.authority.assertDelegatedPusher(caller)
-      const entries = parseDelegableAccountInputs(params.accounts)
-      const delegable = service.delegation.setDelegableAccounts(caller.principalId, entries)
-      return { delegable }
-    }
   }),
   defineStreamingMethod({
     name: 'accounts.lane.statusSubscribe',

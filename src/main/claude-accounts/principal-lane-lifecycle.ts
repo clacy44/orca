@@ -55,8 +55,6 @@ export type PrincipalLaneLifecycleDeps = {
   serializeLaneWrite<T>(laneId: string, run: () => Promise<T>): Promise<T>
   /** Aborts the lane's probes and resolves once each probe's `claude` is gone (§2k's kill half). */
   invalidateProbes(laneId: string): Promise<void>
-  clearResidencyRow(laneId: string): void
-  removeWatermark(laneId: string): void
   platform?: NodeJS.Platform
   /**
    * Fired on BOTH arms: it says the lane CHANGED, not that the wipe succeeded (§2h).
@@ -132,7 +130,6 @@ export class PrincipalLaneLifecycle {
     const outcome = await this.wipe(laneId, 'grant-revoked', {
       finalize: (laneDir) => {
         rmSync(laneDir, { recursive: true, force: true })
-        this.deps.removeWatermark(laneId)
         laneRemoved = true
       }
     })
@@ -216,11 +213,10 @@ export class PrincipalLaneLifecycle {
           laneDir,
           this.deps.platform ? { platform: this.deps.platform } : {}
         )
-        this.deps.clearResidencyRow(laneId)
         finalize?.(laneDir)
         return removed
       } catch (error) {
-        // `clear_incomplete` is the sweep refusing to report a wipe over a directory that kept
+        // `logout_incomplete` is the sweep refusing to report a wipe over a directory that kept
         // re-growing a credential. Anything else is a real fault and must not read as done either.
         if (!isClaudeLaneRefusal(error)) {
           console.warn('[principal-lane] Lane credential sweep failed:', error)

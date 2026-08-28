@@ -256,7 +256,7 @@ import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './workt
 import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
 import { setLaneWireHostDependencies } from './runtime/lane-wire-composition'
-import { startLaneDelegationDesktopService } from './claude-accounts/lane-delegation-desktop-service'
+import { startLaneLoginDesktopService } from './claude-accounts/lane-login-desktop-service'
 import { wipeResidentLanesAtStartup } from './claude-accounts/principal-lane-startup-wipe'
 import {
   attachClaudeLivePtyPersistence,
@@ -2253,19 +2253,15 @@ void app.whenReady().then(async () => {
   onLiveClaudePtysDrained(() => {
     void rateLimits?.refreshAfterClaudeLivePtysDrained()
   })
-  // S9 §2f, and the ordering is the point: observe-only lane sync (which records the watermark)
-  // → wipe → seed the live-PTY gate → bind listeners. A crash never ran the close handler, so a
-  // lane's credential is still at rest; watermarking BEFORE the wipe is what refuses the
-  // reconnecting desktop's cached pre-restart blob into the lane this just emptied.
+  // S9 §2f, and the ordering is the point: wipe → seed the live-PTY gate → bind listeners. A
+  // crash never ran the close handler, so a lane's credential is still at rest.
   // Why guarded: this `whenReady` chain has no `.catch`, and everything below — the window, the
   // runtime RPC server, the rest of boot — is downstream of this await. A missed lane wipe is
   // recoverable at the next start; a host that never opens a window is not.
-  const laneStartupWipes = await wipeResidentLanesAtStartup({ persistence: store }).catch(
-    (error: unknown) => {
-      console.warn('[claude-lane] Startup lane wipe failed:', error)
-      return []
-    }
-  )
+  const laneStartupWipes = await wipeResidentLanesAtStartup({}).catch((error: unknown) => {
+    console.warn('[claude-lane] Startup lane wipe failed:', error)
+    return []
+  })
   if (laneStartupWipes.length > 0) {
     console.log(
       `[claude-lane] Wiped ${laneStartupWipes.filter((row) => row.completed).length}/${laneStartupWipes.length} resident Claude credential lane(s) at startup`
@@ -2436,21 +2432,13 @@ void app.whenReady().then(async () => {
   claudeRuntimeAuth = new ClaudeRuntimeAuthService(store)
   claudeAccounts = new ClaudeAccountService(store, rateLimits, claudeRuntimeAuth)
   // Why here: release-audit B1 — the lane wire's dependencies exist the instant the coordinator
-  // does, and nothing is attached yet, so no RPC can be served and no rotation can start from
-  // this line. `attachPrincipalLaneHost` composes and attaches the wire itself once a registry
-  // exists (`principal-lane-host-wiring.ts`).
-  setLaneWireHostDependencies({
-    coordinator: claudeRuntimeAuth.laneCredentials,
-    persistence: store,
-    accounts: {
-      findAccount: (accountId) =>
-        store!.getSettings().claudeManagedAccounts.find((account) => account.id === accountId) ??
-        null
-    }
-  })
-  // Why here: release-audit B3 — the desktop side of the same wire, composed the instant its
-  // dependencies exist so §2c's per-selection push and §2e's lease guards are armed from this line.
-  startLaneDelegationDesktopService({ store })
+  // does, and nothing is attached yet, so no RPC can be served from this line.
+  // `attachPrincipalLaneHost` composes and attaches the wire itself once a registry exists
+  // (`principal-lane-host-wiring.ts`).
+  setLaneWireHostDependencies({ coordinator: claudeRuntimeAuth.laneCredentials })
+  // Why here: release-audit B3 — the desktop side of the lane-login client, composed the instant
+  // the app is up so the reachability triggers below have a service to notify.
+  startLaneLoginDesktopService()
   rateLimits.setCodexHomePathResolver((target) =>
     codexRuntimeHome!.prepareForRateLimitFetch(target)
   )

@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { notifyLaneDelegationHostReachable } from '../claude-accounts/lane-delegation-desktop-service'
+import { notifyLaneLoginHostReachable } from '../claude-accounts/lane-login-desktop-service'
 import {
   addEnvironmentFromPairingCode,
   listEnvironments,
@@ -67,7 +67,7 @@ export function registerRuntimeEnvironmentConnectivityHandlers({
       manuallyDisconnectedEnvironmentIds.delete(environment.id)
       // Discoverability follow-up: a freshly added environment otherwise sits unconnected on the
       // lane wire until some unrelated reconnect passes through.
-      notifyLaneDelegationHostReachable(environment.id)
+      notifyLaneLoginHostReachable(environment.id)
       return { environment: redactRuntimeEnvironment(environment) }
     }
   )
@@ -77,7 +77,7 @@ export function registerRuntimeEnvironmentConnectivityHandlers({
       const result = await verifyAndAddRuntimeEnvironmentFromPairingCode(getUserDataPath(), args)
       if (result.ok) {
         manuallyDisconnectedEnvironmentIds.delete(result.environment.id)
-        notifyLaneDelegationHostReachable(result.environment.id)
+        notifyLaneLoginHostReachable(result.environment.id)
       }
       return result
     }

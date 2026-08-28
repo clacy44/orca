@@ -85,11 +85,11 @@ export function attachPrincipalLaneHost(input: {
 }
 
 /**
- * Q3's row label: the host-observed principal name, plus the owner-authored account name the
- * desktop pushed with the credential (§2b's third envelope member) where a lane wire is attached.
+ * Q3's row label: the host-observed principal name.
  *
- * The owner half is a join the host makes and is not spoofable; the account half is
- * client-asserted and simply absent until a push names one.
+ * Rev 32 deletes the delegation directory (§10(g)), so there is no more owner-authored account
+ * name a push carried alongside the credential — S9-L1's account index restores an owner-set label
+ * under a different name once it lands.
  */
 function laneAccountLabel(
   registry: PrincipalRegistry,
@@ -98,11 +98,7 @@ function laneAccountLabel(
   const owner = registry
     .listPrincipals()
     .find((record) => record.principalId === principalId)?.displayName
-  if (!owner) {
-    return null
-  }
-  const accountName = getLaneWireService()?.delegation.getRow(principalId).heldDisplayName
-  return accountName ? { owner, accountName } : { owner }
+  return owner ? { owner } : null
 }
 
 /**

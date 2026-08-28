@@ -86,7 +86,6 @@ describe('lane composition parity (release-audit T1)', () => {
     const names = seams.map((seam) => seam.name)
     expect(names).toContain('attachLaneWireService')
     expect(names).toContain('attachPrincipalLaneConsentService')
-    expect(names).toContain('attachManagedAccountResidencyGuard')
     expect(names).toContain('setLaneWireHostDependencies')
   })
 

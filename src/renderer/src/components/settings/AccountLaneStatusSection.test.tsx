@@ -7,105 +7,25 @@ import { AccountLaneStatusSection } from './AccountLaneStatusSection'
 import { resetPrincipalLaneStatusStoreForTest } from './principal-lane-status-store'
 import { resetPrincipalLaneStatusSubscriptionForTest } from './principal-lane-status-subscription'
 import type { PrincipalLaneStatusSnapshot } from '../../../../shared/principal-lane-status-ipc'
-import type { ClaudeRateLimitAccountsState } from '../../../../shared/managed-account-types'
 
-// Real radix Select needs pointer-capture APIs happy-dom does not implement; a plain-button stand-in
-// keeps this file's tests about the delegate action, not about radix's popover internals.
-vi.mock('../ui/select', async () => {
-  const React = await import('react')
-  const SelectContext = React.createContext<{ onValueChange?: (value: string) => void }>({})
-  return {
-    Select: ({
-      value,
-      onValueChange,
-      children
-    }: {
-      value?: string
-      onValueChange: (value: string) => void
-      children: React.ReactNode
-    }) => {
-      const contextValue = React.useMemo(() => ({ onValueChange }), [onValueChange])
-      return (
-        <SelectContext.Provider value={contextValue}>
-          <div data-slot="select" data-value={value}>
-            {children}
-          </div>
-        </SelectContext.Provider>
-      )
-    },
-    SelectTrigger: ({ children, ...props }: React.ComponentProps<'button'>) => (
-      <button type="button" data-slot="select-trigger" {...props}>
-        {children}
-      </button>
-    ),
-    SelectValue: () => null,
-    SelectContent: ({ children }: { children: React.ReactNode }) => (
-      <div data-slot="select-content">{children}</div>
-    ),
-    SelectItem: ({ value, children }: { value: string; children: React.ReactNode }) => {
-      const { onValueChange } = React.useContext(SelectContext)
-      return (
-        <button
-          type="button"
-          data-slot="select-item"
-          data-value={value}
-          onClick={() => onValueChange?.(value)}
-        >
-          {children}
-        </button>
-      )
-    }
-  }
-})
+// S9-L2's per-host lane-login UI renders alongside `RemoteHostRow`; mocked out here since this
+// file is about the residency/discoverability section, not the login quartet.
+vi.mock('./LaneLoginSection', () => ({ LaneLoginSection: () => null }))
 
 function setWindowApi(
   snapshot: PrincipalLaneStatusSnapshot,
-  overrides: Partial<{
-    releaseLease: ReturnType<typeof vi.fn>
-    renameLease: ReturnType<typeof vi.fn>
-    delegateAccountToHost: ReturnType<typeof vi.fn>
-    refreshHost: ReturnType<typeof vi.fn>
-    claudeAccountsList: ReturnType<typeof vi.fn>
-  }> = {}
-): {
-  releaseLease: ReturnType<typeof vi.fn>
-  renameLease: ReturnType<typeof vi.fn>
-  delegateAccountToHost: ReturnType<typeof vi.fn>
-  refreshHost: ReturnType<typeof vi.fn>
-} {
-  const releaseLease = overrides.releaseLease ?? vi.fn().mockResolvedValue({ released: true })
-  const renameLease = overrides.renameLease ?? vi.fn().mockResolvedValue({ renamed: true })
-  const delegateAccountToHost =
-    overrides.delegateAccountToHost ?? vi.fn().mockResolvedValue({ delegated: true })
+  overrides: Partial<{ refreshHost: ReturnType<typeof vi.fn> }> = {}
+): { refreshHost: ReturnType<typeof vi.fn> } {
   const refreshHost = overrides.refreshHost ?? vi.fn().mockResolvedValue({ refreshed: true })
-  const claudeAccountsList =
-    overrides.claudeAccountsList ??
-    vi.fn().mockResolvedValue({
-      accounts: [
-        {
-          id: 'acct-work',
-          email: 'ana@corp.test',
-          authMethod: 'subscription-oauth',
-          createdAt: 0,
-          updatedAt: 0,
-          lastAuthenticatedAt: 0
-        }
-      ],
-      activeAccountId: null
-    } satisfies ClaudeRateLimitAccountsState)
   ;(window as unknown as { api: unknown }).api = {
     principalConsent: { snapshot: vi.fn() },
     principalLaneStatus: {
       get: vi.fn().mockResolvedValue(snapshot),
       onChanged: vi.fn().mockReturnValue(() => {}),
-      releaseLease,
-      renameLease,
-      delegateAccountToHost,
       refreshHost
-    },
-    claudeAccounts: { list: claudeAccountsList }
+    }
   }
-  return { releaseLease, renameLease, delegateAccountToHost, refreshHost }
+  return { refreshHost }
 }
 
 function setWebClient(value: boolean): void {
@@ -122,36 +42,7 @@ const LANES_SNAPSHOT: PrincipalLaneStatusSnapshot = {
       laneState: 'absent'
     }
   ],
-  delegationLeases: [
-    {
-      accountId: 'acct-1',
-      accountUuid: null,
-      hostId: 'host-x',
-      principalId: 'p-ana',
-      delegatedGrantId: 'dev-ana',
-      since: 1_700_000_000_000,
-      expiresAt: null
-    }
-  ],
-  delegableHosts: [],
   remoteHosts: []
-}
-
-const DELEGABLE_HOSTS_SNAPSHOT: PrincipalLaneStatusSnapshot = {
-  lanes: [],
-  delegationLeases: [],
-  delegableHosts: [
-    { environmentId: 'env-1', label: 'Office Mac', laneId: 'p-ana', laneState: 'absent' }
-  ],
-  remoteHosts: [
-    {
-      environmentId: 'env-1',
-      label: 'Office Mac',
-      state: 'ready',
-      laneId: 'p-ana',
-      laneState: 'absent'
-    }
-  ]
 }
 
 describe('AccountLaneStatusSection', () => {
@@ -173,8 +64,8 @@ describe('AccountLaneStatusSection', () => {
     expect(container.querySelector('[data-testid="account-lane-status-section"]')).toBeNull()
   })
 
-  it('renders nothing when there are no lanes, leases or remote hosts at all', async () => {
-    setWindowApi({ lanes: [], delegationLeases: [], delegableHosts: [], remoteHosts: [] })
+  it('renders nothing when there are no lanes or remote hosts at all', async () => {
+    setWindowApi({ lanes: [], remoteHosts: [] })
     const { container } = render(<AccountLaneStatusSection />)
     await waitFor(() => expect(window.api.principalLaneStatus.get).toHaveBeenCalled())
     expect(container.querySelector('[data-testid="account-lane-status-section"]')).toBeNull()
@@ -195,7 +86,7 @@ describe('AccountLaneStatusSection', () => {
     render(<AccountLaneStatusSection />)
     await waitFor(() => expect(screen.getAllByTestId('account-lane-row')).toHaveLength(2))
     expect(screen.getByTestId('lane-operating-rule').textContent).toContain(
-      'One pusher, one puller'
+      'independent of any account'
     )
     const anaLane = screen
       .getAllByTestId('account-lane-row')
@@ -203,7 +94,7 @@ describe('AccountLaneStatusSection', () => {
     expect(within(anaLane).getByText('Loaded')).toBeTruthy()
   })
 
-  it('names the "no push received" state for an absent designated lane', async () => {
+  it('names the designated-but-not-loaded state for an absent designated lane', async () => {
     setWindowApi(LANES_SNAPSHOT)
     render(<AccountLaneStatusSection />)
     const borisLane = await waitFor(() => {
@@ -214,64 +105,13 @@ describe('AccountLaneStatusSection', () => {
       return row as HTMLElement
     })
     expect(within(borisLane).getByTestId('lane-no-push').textContent).toContain(
-      'No push received from dev-boris'
+      'Lane designated to dev-boris'
     )
   })
 
-  it('shows the lease with host, person and since, and releases it', async () => {
-    const { releaseLease } = setWindowApi(LANES_SNAPSHOT)
-    render(<AccountLaneStatusSection />)
-    const leaseRow = await waitFor(() => {
-      const row = screen.queryByTestId('account-lane-lease-row')
-      expect(row).toBeTruthy()
-      return row as HTMLElement
-    })
-    expect(within(leaseRow).getByText(/On host-x for Ana/)).toBeTruthy()
-    await userEvent.click(within(leaseRow).getByRole('button', { name: 'Release' }))
-    expect(releaseLease).toHaveBeenCalledWith('acct-1')
-  })
-
-  it('edits and persists the Q3 friendly name', async () => {
-    const { renameLease } = setWindowApi(LANES_SNAPSHOT)
-    render(<AccountLaneStatusSection />)
-    const leaseRow = await waitFor(() => {
-      const row = screen.queryByTestId('account-lane-lease-row')
-      expect(row).toBeTruthy()
-      return row as HTMLElement
-    })
-    await userEvent.click(within(leaseRow).getByRole('button', { name: 'Rename account' }))
-    const input = within(leaseRow).getByLabelText('Friendly name for this account')
-    await userEvent.type(input, 'work')
-    await userEvent.click(within(leaseRow).getByRole('button', { name: 'Save name' }))
-    expect(renameLease).toHaveBeenCalledWith('acct-1', 'work')
-  })
-
-  it('lists a ready host with an account picker and delegates the chosen account', async () => {
-    const { delegateAccountToHost } = setWindowApi(DELEGABLE_HOSTS_SNAPSHOT)
-    render(<AccountLaneStatusSection />)
-    const hostRow = await waitFor(() => {
-      const row = screen.queryByTestId('remote-host-row')
-      expect(row).toBeTruthy()
-      return row as HTMLElement
-    })
-    expect(within(hostRow).getByText('Office Mac')).toBeTruthy()
-    await waitFor(() => expect(window.api.claudeAccounts.list).toHaveBeenCalled())
-
-    const delegateButton = within(hostRow).getByTestId('delegate-host-button')
-    expect(delegateButton).toBeDisabled()
-
-    await userEvent.click(await within(hostRow).findByText('ana@corp.test'))
-    expect(delegateButton).not.toBeDisabled()
-
-    await userEvent.click(delegateButton)
-    expect(delegateAccountToHost).toHaveBeenCalledWith('acct-work', 'env-1')
-  })
-
-  it('shows "checking…" for a remote host with no status yet, and no delegate control', async () => {
+  it('shows "checking…" for a remote host with no status yet', async () => {
     setWindowApi({
       lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
       remoteHosts: [{ environmentId: 'env-1', label: 'VPS', state: 'checking' }]
     })
     render(<AccountLaneStatusSection />)
@@ -281,14 +121,11 @@ describe('AccountLaneStatusSection', () => {
       return row as HTMLElement
     })
     expect(within(hostRow).getByTestId('remote-host-checking').textContent).toContain('Checking')
-    expect(within(hostRow).queryByTestId('delegate-host-button')).toBeNull()
   })
 
   it('names the not-designated remedy for a connected, undesignated remote host', async () => {
     setWindowApi({
       lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
       remoteHosts: [{ environmentId: 'env-1', label: 'VPS', state: 'not-designated' }]
     })
     render(<AccountLaneStatusSection />)
@@ -300,14 +137,11 @@ describe('AccountLaneStatusSection', () => {
     const message = within(hostRow).getByTestId('remote-host-not-designated').textContent
     expect(message).toContain('not designated for any person on VPS')
     expect(message).toContain('orca lane designate')
-    expect(within(hostRow).queryByTestId('delegate-host-button')).toBeNull()
   })
 
   it('names the upgrade remedy for a remote host that does not support lanes', async () => {
     setWindowApi({
       lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
       remoteHosts: [{ environmentId: 'env-1', label: 'Old VPS', state: 'unsupported' }]
     })
     render(<AccountLaneStatusSection />)
@@ -324,8 +158,6 @@ describe('AccountLaneStatusSection', () => {
   it('the Refresh button on a remote host row invokes the refresh IPC', async () => {
     const { refreshHost } = setWindowApi({
       lanes: [],
-      delegationLeases: [],
-      delegableHosts: [],
       remoteHosts: [{ environmentId: 'env-1', label: 'VPS', state: 'not-designated' }]
     })
     render(<AccountLaneStatusSection />)

@@ -1,19 +1,12 @@
-import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { parsePairingCode } from '../../shared/pairing'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
-import type { ClaudeLaneDelegationRow } from '../../shared/claude-lane-delegation'
-import type { ClaudeLaneCredentialWatermark } from '../../shared/claude-lane-watermark'
 import { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
 import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
-import {
-  ManagedAccountResidencyGuard,
-  attachManagedAccountResidencyGuard
-} from '../claude-accounts/managed-account-lane-residency'
 import { OrcaRuntimeService } from './orca-runtime'
 import { attachLaneWireService, LaneWireService } from './lane-wire-service'
 import { decrypt, deriveSharedKey, encrypt, generateKeyPair } from './rpc/e2ee-crypto'
@@ -25,9 +18,14 @@ import { ACCOUNT_METHODS } from './rpc/methods/accounts'
  * §5's S9b real-socket arms: two E2EE-paired clients over real `ws`, one lane each.
  *
  * The point of doing it over sockets rather than in-process is the derivation itself — the lane a
- * push lands in comes from the authenticated socket's own `pairedDeviceId`, and no parameter on
- * any of these methods can name another. The in-process calls below stand for the two caller
+ * request addresses comes from the authenticated socket's own `pairedDeviceId`, and no parameter
+ * on any of these methods can name another. The in-process calls below stand for the two caller
  * classes that HAVE no paired device id: the renderer and the anonymous local socket.
+ *
+ * Rev 32 (S9-L3, §10(g)) deletes `push`, `pullRotated`, `requestSwitch`, the delegable list and the
+ * managed-account residency guard with the push model: a lane's file is loaded directly here in
+ * place of a push, and the residency/phone-switch/malformed-envelope coverage that judged those
+ * deleted mechanisms goes with them.
  */
 
 vi.mock('../git/worktree', () => ({
@@ -54,23 +52,6 @@ function credentials(refreshToken: string): string {
       expiresAt: Date.now() + 3_600_000
     }
   })
-}
-
-const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
-
-function pushParams(refreshToken: string, basedOn: string | null = null): Record<string, unknown> {
-  return {
-    envelope: {
-      credentialsJson: credentials(refreshToken),
-      oauthAccountJson: JSON.stringify({
-        accountUuid: LANE_ACCOUNT_UUID,
-        emailAddress: 'ana@corp.test'
-      }),
-      displayName: 'Ana work'
-    },
-    basedOnRefreshTokenSha256: basedOn,
-    delegation: { hostId: 'host-1', principalId: LANE_A, delegatedGrantId: 'unused', since: 1 }
-  }
 }
 
 function connect(endpoint: string): Promise<WebSocket> {
@@ -175,13 +156,7 @@ function request(
   method: string,
   params?: unknown
 ): Promise<Record<string, unknown>> {
-  const id = `req-${++requestSeq}`
-  session.ws.send(
-    encrypt(
-      JSON.stringify({ id, method, ...(params === undefined ? {} : { params }) }),
-      session.sharedKey
-    )
-  )
+  const id = send(session, method, params)
   return reader.next(id)
 }
 
@@ -198,7 +173,6 @@ describe('per-principal credential lanes over two paired sockets', () => {
 
   afterEach(async () => {
     attachLaneWireService(null)
-    attachManagedAccountResidencyGuard(null)
     for (const reader of readers.splice(0)) {
       reader.dispose()
     }
@@ -257,25 +231,7 @@ describe('per-principal credential lanes over two paired sockets', () => {
     if (options.provisionB !== false) {
       provisionPrincipalLane(LANE_B, { lanesRoot, platform: 'linux' })
     }
-    let watermarks: ClaudeLaneCredentialWatermark[] = []
-    let delegationRows: ClaudeLaneDelegationRow[] = []
-    const persistence = {
-      getClaudeLaneCredentialWatermarks: () => watermarks,
-      setClaudeLaneCredentialWatermarks: (rows: readonly ClaudeLaneCredentialWatermark[]) => {
-        watermarks = [...rows]
-      },
-      getClaudeLaneDelegationRows: () => delegationRows,
-      setClaudeLaneDelegationRows: (rows: readonly ClaudeLaneDelegationRow[]) => {
-        delegationRows = [...rows]
-      }
-    }
-    let sharedLaneCredentials: string | null = null
     const coordinator = new LaneCredentialCoordinator({
-      persistence,
-      sharedLane: {
-        readCredentials: () => sharedLaneCredentials,
-        readOauthAccount: () => null
-      },
       laneOptions: { lanesRoot, platform: 'linux' }
     })
     const bindings = new Map<string, string>([[offerA.deviceId, LANE_A]])
@@ -293,46 +249,13 @@ describe('per-principal credential lanes over two paired sockets', () => {
         ]
       },
       coordinator,
-      persistence,
       switchGate: { begin: () => {}, end: () => {} },
       platform: 'linux'
     })
     attachLaneWireService(service)
-    // The managed store side of L1: the host account the two developers already had before lanes.
-    attachManagedAccountResidencyGuard(
-      new ManagedAccountResidencyGuard({
-        residency: coordinator.residency,
-        accounts: {
-          findAccount: (accountId) =>
-            accountId === 'acct-host'
-              ? ({
-                  id: 'acct-host',
-                  email: 'host@example.com',
-                  managedAuthPath: '/managed/acct-host/auth',
-                  authMethod: 'subscription-oauth',
-                  createdAt: 0,
-                  updatedAt: 0,
-                  lastAuthenticatedAt: 0
-                } as never)
-              : null
-        },
-        resolveManagedAuthPath: (_accountId, candidatePath) => candidatePath,
-        readManagedAuthFile: (_path, fileName) =>
-          fileName === 'oauth-account.json'
-            ? JSON.stringify({ accountUuid: LANE_ACCOUNT_UUID })
-            : null
-      })
+    vi.spyOn(runtime, 'selectClaudeAccount').mockImplementation(
+      async (accountId) => ({ accounts: [], activeAccountId: accountId }) as never
     )
-    const selectClaudeAccount = vi
-      .spyOn(runtime, 'selectClaudeAccount')
-      .mockImplementation(async (accountId) => {
-        // Stands in for `ClaudeAccountService.doSelectAccount`, whose own call site — and the
-        // mutation proof that it is there — lives in `service-lane-residency.test.ts`.
-        const { assertManagedClaudeAccountNotLaneResident } =
-          await import('../claude-accounts/managed-account-lane-residency')
-        assertManagedClaudeAccountNotLaneResident(accountId)
-        return { accounts: [], activeAccountId: accountId } as never
-      })
     vi.spyOn(runtime, 'getAccountsSnapshot').mockReturnValue(HOST_SNAPSHOT as never)
     vi.spyOn(runtime, 'refreshAccountsForMobile').mockResolvedValue(undefined)
     vi.spyOn(runtime, 'refreshAccountsForMobileSubscriber').mockResolvedValue(undefined)
@@ -357,13 +280,22 @@ describe('per-principal credential lanes over two paired sockets', () => {
       readerB,
       deviceIdA: offerA.deviceId,
       deviceIdB: offerB.deviceId,
-      selectClaudeAccount,
       lanesRoot,
-      setSharedLaneCredentials: (value: string | null) => {
-        sharedLaneCredentials = value
+      /** Loads a lane's own credential file directly — the lane's CLI is the only writer (§2e). */
+      loadLane: (laneId: string, refreshToken: string): void => {
+        const laneDir = coordinator.store.resolveLaneDir(laneId)
+        if (!laneDir) {
+          throw new Error(`lane ${laneId} not provisioned`)
+        }
+        writeFileSync(join(laneDir, '.credentials.json'), credentials(refreshToken))
+        writeFileSync(
+          join(laneDir, '.claude.json'),
+          JSON.stringify({
+            oauthAccount: { accountUuid: LANE_ACCOUNT_UUID, emailAddress: 'ana@corp.test' }
+          })
+        )
       },
       laneCredentials: (laneId: string): string | null => {
-        // Resolved through the store, not joined: the lane path is canonicalized at provisioning.
         const laneDir = coordinator.store.resolveLaneDir(laneId)
         const path = laneDir ? join(laneDir, '.credentials.json') : null
         return path && existsSync(path) ? readFileSync(path, 'utf-8') : null
@@ -371,107 +303,18 @@ describe('per-principal credential lanes over two paired sockets', () => {
     }
   }
 
-  it('lands a push in the pusher own lane and leaves the other lane untouched', async () => {
+  it("B's own logout never reaches A's lane", async () => {
     const harness = await startHarness()
-    const pushed = await request(
-      harness.clientA,
-      harness.readerA,
-      'accounts.lane.push',
-      pushParams('rt-1')
-    )
-    expect(pushed.result).toMatchObject({ laneState: 'loaded' })
-    expect(harness.laneCredentials(LANE_A)).toContain('rt-1')
+    harness.loadLane(LANE_A, 'rt-a')
+    harness.loadLane(LANE_B, 'rt-b')
+
+    const result = await request(harness.clientB, harness.readerB, 'accounts.lane.logout')
+
+    expect(result.error).toBeUndefined()
     expect(harness.laneCredentials(LANE_B)).toBeNull()
-  })
-
-  it('gives B no way to target A lane: the delegation member does not move it', async () => {
-    const harness = await startHarness()
-    const refused = await request(harness.clientB, harness.readerB, 'accounts.lane.push', {
-      ...pushParams('rt-b'),
-      delegation: {
-        hostId: 'host-1',
-        principalId: LANE_A,
-        delegatedGrantId: harness.deviceIdA,
-        since: 1
-      }
-    })
-    // B IS its own lane's designated pusher, so this succeeds — into B's lane, never A's.
-    expect(refused.result).toMatchObject({ laneState: 'loaded' })
-    expect(harness.laneCredentials(LANE_A)).toBeNull()
-    expect(harness.laneCredentials(LANE_B)).toContain('rt-b')
-  })
-
-  it('accepts two consecutive pushes from the same desktop', async () => {
-    const harness = await startHarness()
-    const first = (
-      await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
-    ).result as { refreshTokenSha256: string }
-    expect(first.refreshTokenSha256).toBe(sha('rt-1'))
-    const second = await request(
-      harness.clientA,
-      harness.readerA,
-      'accounts.lane.push',
-      pushParams('rt-2', sha('rt-1'))
-    )
-    expect(second.result).toMatchObject({ refreshTokenSha256: sha('rt-2') })
-    expect(harness.laneCredentials(LANE_A)).toContain('rt-2')
-  })
-
-  it('refuses a push from a grant that is not the designated pusher, writing nothing', async () => {
-    const harness = await startHarness()
-    const service = harness.service
-    // Re-point A's designation at B's grant: A is now a bound, un-designated desktop.
-    attachLaneWireService(
-      new LaneWireService({
-        principals: {
-          principalOf: (deviceId) => (deviceId === harness.deviceIdA ? LANE_A : null),
-          delegatedGrantIdOf: () => harness.deviceIdB
-        },
-        coordinator: service.coordinator,
-        persistence: {
-          getClaudeLaneDelegationRows: () => [],
-          setClaudeLaneDelegationRows: () => {}
-        },
-        switchGate: { begin: () => {}, end: () => {} },
-        platform: 'linux'
-      })
-    )
-    const refused = await request(
-      harness.clientA,
-      harness.readerA,
-      'accounts.lane.push',
-      pushParams('rt-1')
-    )
-    expect(errorCode(refused)).toBe('accounts.lane.push_not_delegated')
-    expect(harness.laneCredentials(LANE_A)).toBeNull()
-  })
-
-  it('writes nothing for a malformed envelope, an oversized member or a fourth member', async () => {
-    const harness = await startHarness()
-    for (const params of [
-      { ...pushParams('rt-1'), envelope: { credentialsJson: '{}', oauthAccountJson: '{}' } },
-      {
-        ...pushParams('rt-1'),
-        envelope: {
-          credentialsJson: JSON.stringify({
-            claudeAiOauth: { accessToken: 'at', pad: 'x'.repeat(70_000) }
-          }),
-          oauthAccountJson: '{}'
-        }
-      },
-      {
-        ...pushParams('rt-1'),
-        envelope: {
-          credentialsJson: credentials('rt-1'),
-          oauthAccountJson: '{}',
-          settingsJson: '{}'
-        }
-      }
-    ]) {
-      const refused = await request(harness.clientA, harness.readerA, 'accounts.lane.push', params)
-      expect(errorCode(refused)).toBe('accounts.lane.push_malformed')
-      expect(harness.laneCredentials(LANE_A)).toBeNull()
-    }
+    // B's logout addressed B's own lane — derived from the socket, not a parameter — and A's is
+    // untouched.
+    expect(harness.laneCredentials(LANE_A)).toContain('rt-a')
   })
 
   it('refuses B selectClaude only once B holds a lane, and never an unprovisioned B', async () => {
@@ -491,19 +334,8 @@ describe('per-principal credential lanes over two paired sockets', () => {
     expect(errorCode(refused)).toBe('accounts.selection_out_of_scope')
   })
 
-  it('refuses a lane-resident target for a lane-less grant, the renderer and the local socket', async () => {
-    const harness = await startHarness({ provisionB: false })
-    await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
-    const refusedOverSocket = await request(
-      harness.clientB,
-      harness.readerB,
-      'accounts.selectClaude',
-      { accountId: 'acct-host' }
-    )
-    expect(errorCode(refusedOverSocket)).toBe('accounts.lane.account_resident_elsewhere')
-    expect(String((refusedOverSocket.error as { message?: string }).message)).toContain('Ana')
-
-    // The renderer and the anonymous local socket carry no paired device id at all.
+  it('the renderer and the anonymous local socket keep host-wide selectClaude too', async () => {
+    const harness = await startHarness()
     const select = ACCOUNT_METHODS.find((method) => method.name === 'accounts.selectClaude')
     if (!select || isStreamingMethod(select)) {
       throw new Error('missing accounts.selectClaude')
@@ -512,19 +344,15 @@ describe('per-principal credential lanes over two paired sockets', () => {
       { runtime: harness.runtime },
       { runtime: harness.runtime, clientKind: undefined }
     ]) {
-      await expect(select.handler({ accountId: 'acct-host' }, ctx as RpcContext)).rejects.toSatisfy(
-        (error: unknown) => isClaudeLaneRefusal(error)
-      )
+      await expect(
+        select.handler({ accountId: 'acct-host' }, ctx as RpcContext)
+      ).resolves.toBeDefined()
     }
-    // Negative control: an account no lane holds still selects for all three.
-    await expect(
-      select.handler({ accountId: 'acct-other' }, { runtime: harness.runtime } as RpcContext)
-    ).resolves.toBeDefined()
   })
 
   it('never shows B the email, identity or usage behind A lane', async () => {
     const harness = await startHarness()
-    await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
+    harness.loadLane(LANE_A, 'rt-1')
     const listed = await request(harness.clientB, harness.readerB, 'accounts.list', {
       refreshUsage: false
     })
@@ -532,7 +360,6 @@ describe('per-principal credential lanes over two paired sockets', () => {
     expect(serialized).not.toContain('ana@corp.test')
     expect(serialized).not.toContain(LANE_ACCOUNT_UUID)
     expect(serialized).toContain('"scope":"peer"')
-    expect(serialized).toContain('Ana work')
     const own = await request(harness.clientA, harness.readerA, 'accounts.list', {
       refreshUsage: false
     })
@@ -543,7 +370,7 @@ describe('per-principal credential lanes over two paired sockets', () => {
   // projections could be reverted to the raw snapshot and the whole suite stayed green.
   it('never shows B A lane behind either accounts.subscribe emit point', async () => {
     const harness = await startHarness()
-    await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
+    harness.loadLane(LANE_A, 'rt-1')
     const subscriptionId = send(harness.clientB, 'accounts.subscribe')
     const ready = await harness.readerB.next(subscriptionId)
     expect((ready.result as { type: string }).type).toBe('ready')
@@ -556,40 +383,17 @@ describe('per-principal credential lanes over two paired sockets', () => {
       expect(serialized).not.toContain('ana@corp.test')
       expect(serialized).not.toContain(LANE_ACCOUNT_UUID)
       expect(serialized).toContain('"scope":"peer"')
-      expect(serialized).toContain('Ana work')
     }
   })
 
   it('gives A own lane identity back on its own subscribe, so the projection is per connection', async () => {
     const harness = await startHarness()
-    await request(harness.clientA, harness.readerA, 'accounts.lane.push', pushParams('rt-1'))
+    harness.loadLane(LANE_A, 'rt-1')
     const subscriptionId = send(harness.clientA, 'accounts.subscribe')
     const ready = await harness.readerA.next(subscriptionId)
     const serialized = JSON.stringify((ready.result as { snapshot: unknown }).snapshot)
     expect(serialized).toContain('"scope":"self"')
     expect(serialized).toContain('ana@corp.test')
-  })
-
-  it('partitions the phone switch refusals: unknown token, then desktop_unavailable', async () => {
-    const harness = await startHarness()
-    const unknown = await request(harness.clientB, harness.readerB, 'accounts.lane.requestSwitch', {
-      delegatedAccountId: 'not-a-token'
-    })
-    expect(errorCode(unknown)).toBe('accounts.lane.delegable_account_unknown')
-
-    const [offered] = harness.service.delegation.setDelegableAccounts(LANE_B, [
-      { clientRef: 'ref-1', displayName: 'Ben work' }
-    ])
-    const away = await request(harness.clientB, harness.readerB, 'accounts.lane.requestSwitch', {
-      delegatedAccountId: offered?.delegatedAccountId
-    })
-    expect(errorCode(away)).toBe('accounts.lane.desktop_unavailable')
-    expect(String((away.error as { message?: string }).message)).toContain(
-      'desktop is not connected'
-    )
-    expect(
-      harness.readerB.frames.some((frame) => JSON.stringify(frame).includes('switch-requested'))
-    ).toBe(false)
   })
 
   it('refuses every lane method on the anonymous local socket', async () => {

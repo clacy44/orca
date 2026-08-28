@@ -351,7 +351,7 @@ describe('principal lane consent RPC', () => {
     await call('accounts.lane.bindGrant', { deviceId: 'desktop', principalId })
 
     await expect(call('accounts.lane.provision', { principalId })).rejects.toThrow(
-      /No grant has been designated/
+      /No device is designated to sign this lane/
     )
     expect(existsSync(join(state.userDataDir, 'claude-lanes', principalId))).toBe(false)
   })
