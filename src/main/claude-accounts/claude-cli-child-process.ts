@@ -16,11 +16,21 @@
 import { spawn } from 'node:child_process'
 import { resolveClaudeCommand } from '../codex-cli/command'
 import { buildWindowsCommandInvocation } from './windows-command-invocation'
+import { collapseLaneEnvKeys } from '../../shared/lane-env-key-case'
 
 const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+/** win32 only (a no-op cost elsewhere): collapses any inherited casing of `CLAUDE_CONFIG_DIR`
+ * beside the one this spawn is requesting down to the requested key alone. */
+function windowsSpawnEnv(claudeConfigDir: string): Record<string, string> {
+  const requested = { CLAUDE_CONFIG_DIR: claudeConfigDir }
+  const env = { ...process.env, ...requested } as Record<string, string>
+  collapseLaneEnvKeys(env, requested)
+  return env
 }
 
 export type ClaudeCliChildProcessConfigDir = {
@@ -90,7 +100,10 @@ export function spawnClaudeCliChildProcess(
       : process.platform === 'win32'
         ? {
             ...buildWindowsCommandInvocation(resolveClaudeCommand(), args),
-            env: { ...process.env, CLAUDE_CONFIG_DIR: configDir.windowsPath },
+            // §2m(5), the 4th win32 lane-key collapse site: Windows resolves env names
+            // case-insensitively, so an inherited `Claude_Config_Dir` beside the canonical key
+            // this login spawn just set has undefined precedence — collapse to the one requested.
+            env: windowsSpawnEnv(configDir.windowsPath),
             shell: false
           }
         : {

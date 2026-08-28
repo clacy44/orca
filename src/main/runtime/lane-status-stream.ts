@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
+import type { ClaudeLaneRefusalCode } from '../../shared/claude-lane-refusals'
+import type { LaneLoginIdentity } from '../../shared/claude-lane-login-rpc'
 import type { LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
 
 /**
@@ -19,15 +21,19 @@ import type { LaneWireCaller, LaneWirePrincipals } from './lane-wire-authority'
  * moved to another person kept receiving the first person's identity and sha.
  *
  * Rev 32 deletes `switch-requested`/`switch-failed` (the deleted `requestSwitch` flow) and
- * `receipt` (the deleted watermark's rotation receipts); S9-L1's three login-session frames
- * (`login-started`/`login-completed`/`login-failed`, §3 row 2) replace them once that host session
- * model lands — not yet in this tree.
+ * `receipt` (the deleted watermark's rotation receipts); S9-L1 adds the three login-session frames
+ * below in their place (§3 row 2) — additive only, matching `shared/claude-lane-login-rpc.ts`'s
+ * `LaneLoginStatusFrame` (L2's already-merged client contract) shape-for-shape.
  */
 
 export type LaneStatusFrame =
   | { type: 'ready'; subscriptionId: string; status: ClaudeLaneStatus }
   | { type: 'status'; status: ClaudeLaneStatus }
   | { type: 'end' }
+  // (ii): never carries the URL — that rides only the starting grant's `loginStart` reply.
+  | { type: 'login-started'; loginSessionId: string; expiresAt: number }
+  | { type: 'login-completed'; loginSessionId: string; identity: LaneLoginIdentity }
+  | { type: 'login-failed'; loginSessionId: string; code: ClaudeLaneRefusalCode; message: string }
 
 export type LaneStatusSubscriber = {
   subscriptionId: string

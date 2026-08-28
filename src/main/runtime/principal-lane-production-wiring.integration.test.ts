@@ -267,7 +267,8 @@ describe('principal lanes over the production wiring, end to end (release-audit 
 
   it(
     'create-person, bind, designate, provision, a real credential lands in the lane, lane ' +
-      'loaded, a lane-pinned spawn env, then last-close wipe — all through the production wire',
+      'loaded, a lane-pinned spawn env, survives every socket closing, then an explicit logout ' +
+      'wipes it — all through the production wire',
     async () => {
       const { lanesRoot, runtime, consent, mintGrant } = await startHarness()
       expect(getLaneWireService()).not.toBeNull()
@@ -337,32 +338,46 @@ describe('principal lanes over the production wiring, end to end (release-audit 
       expect(computed.spawnOptions.env?.CLAUDE_CONFIG_DIR).toBe(laneDir)
       expect(computed.spawnOptions.credentialLane).toEqual({ principalId: ana.principalId })
 
-      // Negative arm: a SECOND socket on the desktop's own grant. Closing one of them wipes
-      // nothing (§5's `hasOtherConnections` predicate, keyed by the GRANT).
+      // S9-L1 (§modules C, the login model): a socket closing NEVER wipes the lane any more —
+      // the residency window is login-until-logout, not push-until-last-close. A second socket
+      // on the desktop's own grant, a second grant on the same principal, and finally the
+      // PRINCIPAL'S TRUE LAST close all leave the credential exactly where it was.
       const secondDesktop = await authenticate(desktopOffer.pairingUrl)
       sockets.push(secondDesktop.ws)
       await closeAndSettle(secondDesktop.ws)
       expect(existsSync(credentialPath)).toBe(true)
 
-      // Negative arm: a SECOND grant on the same principal. Closing the phone's socket alone
-      // wipes nothing either — the lane's answer is the PRINCIPAL's, not any one grant's.
       const phoneOffer = mintGrant('ana-phone')
       const phone = await authenticate(phoneOffer.pairingUrl)
       sockets.push(phone.ws)
       consent.bindGrant(CONSENT, phoneOffer.deviceId, ana.principalId)
 
-      // The desktop grant's LAST socket: the phone is still connected on the same principal.
       await closeAndSettle(desktop.ws)
       expect(existsSync(credentialPath)).toBe(true)
 
-      // The principal's true last close: the production close hook
-      // (runtime-rpc.ts -> principal-lane-connection-lifecycle.ts) wipes the credential.
+      // The principal's TRUE last close — under S9c this wiped the lane; under the login model
+      // it must not.
       await closeAndSettle(phone.ws)
+      expect(existsSync(credentialPath)).toBe(true)
+      expect(existsSync(laneDir)).toBe(true)
+      // The lane still reads loaded: nothing closed-socket-driven ever touched it.
+      expect(() =>
+        prepareLaneLaunch({ principalId: ana.principalId, lanesRoot, platform: 'linux' })
+      ).not.toThrow()
+
+      // ONLY a deliberate act wipes it now. Reconnect the designated grant and log out through
+      // the REAL production RPC surface — `accounts.lane.logout` ->
+      // `LaneAccountAuthority.logout` -> `PrincipalLaneLifecycle.wipeOnExplicitLogout` — proving
+      // the new wipe path is reachable end to end, not just the deleted one's absence.
+      const thirdDesktop = await authenticate(desktopOffer.pairingUrl)
+      sockets.push(thirdDesktop.ws)
+      const thirdReader = createReader(thirdDesktop)
+      const logoutResult = await request(thirdDesktop, thirdReader, 'accounts.lane.logout')
+      expect((logoutResult.result as { cleared: string[] }).cleared).toContain('.credentials.json')
       expect(existsSync(credentialPath)).toBe(false)
-      // The lane directory survives a close-wipe — only a revoke removes it.
+      // The lane directory survives an explicit logout too — only a revoke/deprovision removes it.
       expect(existsSync(laneDir)).toBe(true)
 
-      // Step's throw returns once the lane is wiped.
       try {
         prepareLaneLaunch({ principalId: ana.principalId, lanesRoot, platform: 'linux' })
         throw new Error('expected a throw')

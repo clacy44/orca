@@ -16,6 +16,7 @@ import {
 } from './lane-account-index'
 import { readClaudeManagedAuthFile, resolveOwnedClaudeManagedAuthPath } from './managed-auth-path'
 import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from './live-pty-gate'
+import { isLaneWipePending } from './lane-wipe-pending'
 
 /**
  * The per-lane account store (S9-L1 B2/§storeLayout): every login a lane has ever captured, one
@@ -98,6 +99,15 @@ export async function selectLaneAccount(
   const credentialsJson = authDir ? readClaudeManagedAuthFile(authDir, '.credentials.json') : null
   if (!row || !authDir || credentialsJson === null) {
     throw accountUnknownRefusal()
+  }
+  // S9-L1 §fenceWiring "THE THREE QUEUE MEMBERS": load-bearing here, unlike the capture's merely
+  // advisory check — a `refuseWipe`/missing-directory arm sets the mark WITHOUT purging the store
+  // (no queue turn is held there), so the row above can still resolve after a wipe reported the
+  // lane NOT swept. Checked AFTER acquiring the caller's `serializeLaneWrite` turn and BEFORE the
+  // write (`lane-wire-authority.ts:112`-vs-`:120-122`'s shipped defect is the shape this must not
+  // repeat: checking outside the queue this call is already inside would race the wipe's own turn).
+  if (isLaneWipePending(laneId)) {
+    throw wipeInProgressRefusal()
   }
   const oauthAccountText = readClaudeManagedAuthFile(authDir, 'oauth-account.json')
   const oauthAccount = parseOauthAccount(oauthAccountText)
@@ -252,5 +262,12 @@ function accountUnknownRefusal(): ClaudeLaneRefusal {
   return new ClaudeLaneRefusal(
     'accounts.lane.account_unknown',
     'Orca has no record of that account in this lane — it may already have been removed, or a logout may have cleared the lane — so nothing changed. Refresh the account list and try again.'
+  )
+}
+
+function wipeInProgressRefusal(): ClaudeLaneRefusal {
+  return new ClaudeLaneRefusal(
+    'accounts.lane.wipe_in_progress',
+    'Orca is clearing this credential lane on the host right now, so it did not switch accounts. Wait for that to finish, then try again.'
   )
 }

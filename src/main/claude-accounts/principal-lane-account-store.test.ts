@@ -23,6 +23,7 @@ import {
 } from './principal-lane-account-store'
 import { isClaudeAuthSwitchInProgress } from './live-pty-gate'
 import { LaneAuthState } from './lane-auth-state'
+import { markLaneWipePending, resetLaneWipePendingForTests } from './lane-wipe-pending'
 
 const ID_A = '11111111-1111-4111-8111-111111111111'
 const ID_B = '22222222-2222-4222-8222-222222222222'
@@ -63,6 +64,7 @@ describe('principal-lane-account-store', () => {
 
   afterEach(() => {
     rmSync(laneDir, { recursive: true, force: true })
+    resetLaneWipePendingForTests()
   })
 
   describe('managed-auth-path rules, asserted item by item against the lane root', () => {
@@ -295,6 +297,23 @@ describe('principal-lane-account-store', () => {
       expect(isClaudeAuthSwitchInProgress('some-other-lane')).toBe(false)
       await applied
       expect(isClaudeAuthSwitchInProgress('lane-exclusive')).toBe(false)
+    })
+
+    // MP (S9-L1 §fenceWiring "THE THREE QUEUE MEMBERS"): the mark is set by a `refuseWipe`/
+    // missing-directory arm WITHOUT purging the store (no queue turn is held there), so the row
+    // can still resolve after a wipe reported the lane NOT swept — dropping this check turns a
+    // fixture where the mark is set but the account row/dir survive from a refused red into green,
+    // writing a switch into a lane the host has declared wipe-pending.
+    it('refuses wipe_in_progress rather than switching into a lane the host has marked pending', async () => {
+      plantAccount(laneDir, ID_A, 'a@x.com')
+      writeLaneAccountIndex(join(laneDir, 'claude-accounts'), [indexRow(ID_A, 'a@x.com', false)])
+      markLaneWipePending('lane-1')
+
+      const error = await selectLaneAccount(laneDir, 'lane-1', ID_A).catch((thrown) => thrown)
+
+      expect(isClaudeLaneRefusal(error) ? error.code : null).toBe('accounts.lane.wipe_in_progress')
+      expect(existsSync(join(laneDir, '.credentials.json'))).toBe(false)
+      expect(isClaudeAuthSwitchInProgress('lane-1')).toBe(false)
     })
 
     it('refuses account_unknown for an id with no index row, writing nothing', async () => {

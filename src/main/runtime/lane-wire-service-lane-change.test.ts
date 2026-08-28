@@ -85,7 +85,7 @@ describe('lane change routing through the lane wire service', () => {
     harness.attach('desktop-a')
     harness.attach('phone-a')
 
-    await harness.service.authority.logout('desktop-a')
+    await harness.service.accountAuthority.logout('desktop-a')
 
     for (const deviceId of ['desktop-a', 'phone-a']) {
       const statusFrames = (harness.frames.get(deviceId) ?? []).filter(
@@ -102,13 +102,13 @@ describe('lane change routing through the lane wire service', () => {
     harness.attach('desktop-a')
     const attached = harness.frames.get('desktop-a') ?? []
 
-    await harness.service.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    await harness.service.coordinator.lifecycle.wipeOnExplicitLogout(LANE_A)
     const framesWhileAttached = attached.length
     // `dispose()` deliberately keeps the wipe listener for the SWAP case, so a detach with nothing
     // incoming has to unregister it — or the coordinator keeps calling a disposed service.
     attachLaneWireService(null)
     harness.loadLane('rt-2')
-    await harness.service.coordinator.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    await harness.service.coordinator.lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(framesWhileAttached).toBeGreaterThan(0)
     expect(attached).toHaveLength(framesWhileAttached)

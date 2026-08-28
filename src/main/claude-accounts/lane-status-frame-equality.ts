@@ -24,11 +24,38 @@ export function laneStatusEqual(a: ClaudeLaneStatus | null, b: ClaudeLaneStatus 
       }
       continue
     }
+    if (key === 'accounts') {
+      if (!laneAccountRowsEqual(a.accounts, b.accounts)) {
+        return false
+      }
+      continue
+    }
     if (a[key] !== b[key]) {
       return false
     }
   }
   return true
+}
+
+/** `accounts` arrives as a freshly built array every call (a projection, never a stored
+ *  reference), so `!==` would report `changed` on every comparison even when nothing moved. */
+function laneAccountRowsEqual(
+  a: ClaudeLaneStatus['accounts'],
+  b: ClaudeLaneStatus['accounts']
+): boolean {
+  if (a === b) {
+    return true
+  }
+  if (!a || !b || a.length !== b.length) {
+    return false
+  }
+  return a.every(
+    (row, index) =>
+      row.laneAccountId === b[index]!.laneAccountId &&
+      row.email === b[index]!.email &&
+      row.label === b[index]!.label &&
+      row.active === b[index]!.active
+  )
 }
 
 function credentialIdentityEqual(
