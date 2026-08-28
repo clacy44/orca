@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import {
   attachClaudeLivePtyPersistence,
   beginClaudeAuthSwitch,
@@ -46,10 +47,19 @@ describe('Claude live PTY gate', () => {
     expect(isClaudeAuthSwitchInProgress(SHARED_CLAUDE_LANE_KEY)).toBe(true)
   })
 
-  it('still rejects overlapping account switches in the same lane', () => {
+  it('still rejects overlapping account switches in the same lane with a typed refusal', () => {
     beginClaudeAuthSwitch(LANE_A)
 
-    expect(() => beginClaudeAuthSwitch(LANE_A)).toThrow('already in progress')
+    // S9-L1 §modules D: a typed `ClaudeLaneRefusal`, not a bare `Error` — the untyped throw a
+    // client has no string table for (§3 Rule 3).
+    expect(() => beginClaudeAuthSwitch(LANE_A)).toThrow('already running')
+    try {
+      beginClaudeAuthSwitch(LANE_A)
+      expect.unreachable()
+    } catch (error) {
+      expect(isClaudeLaneRefusal(error)).toBe(true)
+      expect((error as { code: string }).code).toBe('accounts.lane.switch_in_progress')
+    }
   })
 
   it('leaves another lane, and the shared lane, un-gated by a lane switch (S9 §2f)', () => {

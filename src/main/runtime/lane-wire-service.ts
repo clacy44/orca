@@ -1,6 +1,8 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
-import { LaneStatusStream } from './lane-status-stream'
+import { LaneStatusStream, type LaneStatusFrame } from './lane-status-stream'
+import { LaneAccountAuthority } from './lane-account-authority'
+import { LaneLoginAuthority } from './lane-login-authority'
 import {
   LaneWireAuthority,
   type LaneChangeCause,
@@ -31,6 +33,10 @@ export type LaneWireServiceOptions = {
 export class LaneWireService {
   readonly stream: LaneStatusStream
   readonly authority: LaneWireAuthority
+  /** S9-L1 §modules D: the login quartet, over the coordinator's own `loginSessions` registry. */
+  readonly loginAuthority: LaneLoginAuthority
+  /** S9-L1 §modules D: selectAccount/removeAccount/logout. */
+  readonly accountAuthority: LaneAccountAuthority
   readonly coordinator: LaneCredentialCoordinator
   private readonly principals: LaneWirePrincipals
 
@@ -43,6 +49,19 @@ export class LaneWireService {
       coordinator: options.coordinator,
       switchGate: options.switchGate,
       platform: options.platform,
+      onLaneChanged: (laneId, cause) => this.onLaneChanged(laneId, cause)
+    })
+    const publish = (laneId: string, frame: LaneStatusFrame): void => {
+      this.stream.publish(laneId, frame)
+    }
+    this.loginAuthority = new LaneLoginAuthority({
+      principals: options.principals,
+      coordinator: options.coordinator,
+      publish
+    })
+    this.accountAuthority = new LaneAccountAuthority({
+      principals: options.principals,
+      coordinator: options.coordinator,
       onLaneChanged: (laneId, cause) => this.onLaneChanged(laneId, cause)
     })
     // §2f's lifecycle wipes run below the wire; the lane's own grants still have to learn that

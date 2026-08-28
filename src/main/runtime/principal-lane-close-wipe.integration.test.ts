@@ -13,11 +13,11 @@ import { deriveSharedKey, encrypt, generateKeyPair } from './rpc/e2ee-crypto'
 import { OrcaRuntimeRpcServer } from './runtime-rpc'
 
 /**
- * §5's S9c close arm over real sockets, because the predicate is only observable there.
- *
- * The close path is handed `hasOtherConnections` (the GRANT's answer) and `device.deviceToken`;
- * the lane's answer is the PRINCIPAL's, resolved from `device.deviceId`. Two sockets on one grant
- * and two grants on one principal are the two cases that separate them.
+ * S9-L1 (§modules C, the login model): the connection-CLOSE wipe this suite used to cover
+ * (S9c's close arm) is DELETED — a socket closing is not a logout, and the residency window is
+ * now login-until-logout rather than push-until-last-close (plan §7 question 12, flagged rather
+ * than landed silently). The first test below now pins the OPPOSITE: closing every socket of a
+ * principal's grants must NOT wipe their lane. The revoke arm is unchanged and still covered.
  */
 
 vi.mock('../git/worktree', () => ({
@@ -84,7 +84,7 @@ function closeAndSettle(ws: WebSocket): Promise<void> {
   })
 }
 
-describe("the lane wipe on the principal's last connection close", () => {
+describe("the principal's last connection close no longer wipes the lane (S9-L1)", () => {
   const servers: OrcaRuntimeRpcServer[] = []
   const sockets: WebSocket[] = []
   const dirs: string[] = []
@@ -184,26 +184,23 @@ describe("the lane wipe on the principal's last connection close", () => {
     }
   }
 
-  it('wipes only when the last socket of the last grant of that principal closes', async () => {
+  it('leaves the lane loaded even after every socket of every grant of that principal closes', async () => {
     const harness = await startHarness()
-    // A SECOND socket on the desktop's own grant: closing one of them wipes nothing.
     const secondDesktopWs = await authenticate(harness.desktop.pairingUrl)
     sockets.push(secondDesktopWs)
 
     await closeAndSettle(secondDesktopWs)
     expect(harness.isLoaded(harness.ana.principalId)).toBe(true)
 
-    // The desktop grant's LAST socket: the phone is still connected on the same principal.
     await closeAndSettle(harness.desktopWs)
     expect(harness.isLoaded(harness.ana.principalId)).toBe(true)
 
-    // The principal's true last close.
+    // The principal's TRUE last close — under the old S9c behavior this wiped the lane. Under the
+    // login model it must not: only an explicit logout, a revoke or a deprovision does.
     await closeAndSettle(harness.phoneWs)
-    expect(harness.isLoaded(harness.ana.principalId)).toBe(false)
-    // §2f: the credential goes, but the lane directory survives a close-wipe — only a revoke of
-    // the principal's last grant removes it.
+    expect(harness.isLoaded(harness.ana.principalId)).toBe(true)
     expect(existsSync(harness.laneDir(harness.ana.principalId))).toBe(true)
-    // Nobody else's lane moved.
+    // Nobody else's lane moved either.
     expect(harness.isLoaded(harness.benPrincipal.principalId)).toBe(true)
   })
 

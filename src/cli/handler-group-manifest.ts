@@ -36,9 +36,19 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
       'lane bind-link',
       'lane invite',
       'lane status',
-      'lane audit'
+      'lane audit',
+      'lane wipe'
     ],
     load: async () => (await import('./handlers/lane.js')).LANE_HANDLERS
+  },
+  {
+    // §modules E, split out of `lane.ts` for its 300-line ratchet — its own manifest entry
+    // rather than a merge into `lane`'s export, matching every other handlers/*.ts file's 1:1
+    // module-to-group convention (handler-group-manifest.test.ts "registers every handler
+    // module that exports a handler group").
+    name: 'lane-login',
+    keys: ['lane login', 'lane logout', 'lane accounts', 'lane use'],
+    load: async () => (await import('./handlers/lane-login.js')).LANE_LOGIN_HANDLERS
   },
   {
     name: 'artifacts',

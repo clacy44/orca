@@ -6,7 +6,9 @@ import {
 } from './claude-lane-refusals'
 
 // S9-L1 mint list — fifteen from §3 (spec:479), plus switch_write_failed from §2m
-// (spec:372, not in §3's list — see the array comment in claude-lane-refusals.ts).
+// (spec:372, not in §3's list — see the array comment in claude-lane-refusals.ts), plus
+// account_active minted by B2's removeLaneAccount guard (no existing code distinguishes
+// "known but protected" from "unknown"; see the array comment in claude-lane-refusals.ts).
 // Additive only (§F forbids retiring the push/lease-era codes here).
 const S9_L1_MINTED = [
   'accounts.lane.login_not_designated',
@@ -21,6 +23,7 @@ const S9_L1_MINTED = [
   'accounts.lane.login_store_full',
   'accounts.lane.login_cancelled',
   'accounts.lane.account_unknown',
+  'accounts.lane.account_active',
   'accounts.lane.switch_in_progress',
   'accounts.lane.switch_write_locked',
   'accounts.lane.logout_incomplete',
@@ -28,11 +31,11 @@ const S9_L1_MINTED = [
 ] as const
 
 describe('CLAUDE_LANE_REFUSAL_CODES — S9-L1 mint', () => {
-  it('contains all sixteen S9-L1 login/account-store codes', () => {
+  it('contains all seventeen S9-L1 login/account-store codes', () => {
     for (const code of S9_L1_MINTED) {
       expect(CLAUDE_LANE_REFUSAL_CODES).toContain(code)
     }
-    expect(S9_L1_MINTED).toHaveLength(16)
+    expect(S9_L1_MINTED).toHaveLength(17)
   })
 
   it('has no duplicate entries', () => {

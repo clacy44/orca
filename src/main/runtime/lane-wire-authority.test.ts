@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -12,7 +12,7 @@ import {
   markLaneWipePending,
   resetLaneWipePendingForTests
 } from '../claude-accounts/lane-wipe-pending'
-import { isClaudeAuthSwitchInProgress } from '../claude-accounts/live-pty-gate'
+import { readLaneAccountIndex, writeLaneAccountIndex } from '../claude-accounts/lane-account-index'
 import { LaneWireAuthority, type LaneSwitchGate } from './lane-wire-authority'
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
@@ -96,6 +96,26 @@ function makeHarness(
     laneCredentialsOnDisk: (laneId: string): string | null => {
       const path = join(lanesRoot, laneId, '.credentials.json')
       return existsSync(path) ? readFileSync(path, 'utf-8') : null
+    },
+    // Plants one captured login the same shape B2/A4 leave: an indexed row over a marker-valid,
+    // credentialed `<lane>/claude-accounts/<id>/auth` directory.
+    plantLaneAccount: (
+      laneId: string,
+      laneAccountId: string,
+      email: string,
+      active: boolean
+    ): void => {
+      const accountsRoot = join(lanesRoot, laneId, 'claude-accounts')
+      const authDir = join(accountsRoot, laneAccountId, 'auth')
+      mkdirSync(authDir, { recursive: true })
+      writeFileSync(join(authDir, '.orca-managed-claude-auth'), `${laneAccountId}\n`, {
+        mode: 0o600
+      })
+      writeFileSync(join(authDir, '.credentials.json'), credentials(`rt-${email}`), { mode: 0o600 })
+      writeLaneAccountIndex(accountsRoot, [
+        ...readLaneAccountIndex(accountsRoot),
+        { laneAccountId, email, label: null, active, capturedAt: new Date().toISOString() }
+      ])
     }
   }
 }
@@ -111,8 +131,9 @@ async function refusalCode(run: () => Promise<unknown>): Promise<string> {
 
 /**
  * Rev 32 (S9-L3, §10(g)) deletes `push`/`pullRotated` and the delegation directory that
- * `assertDelegatedPusher` and the watermark-freshness coverage below judged against. `logout`
- * replaces `clear` (§3 row 2) over the same wipe mechanism, and status loses the delegable list.
+ * `assertDelegatedPusher` and the watermark-freshness coverage below judged against. S9-L1 moves
+ * `logout` to `lane-account-authority.test.ts` (routed through the lifecycle fence there); status
+ * loses the delegable list.
  */
 describe('lane wire authority — caller derivation', () => {
   it('derives the lane from the caller, never from a parameter', () => {
@@ -138,7 +159,7 @@ describe('lane wire authority — caller derivation', () => {
 
   it('never auto-provisions: an unprovisioned lane is refused', async () => {
     const { authority } = makeHarness({ provision: [LANE_B] })
-    expect(await refusalCode(async () => authority.logout('device-a'))).toBe(
+    expect(await refusalCode(async () => authority.requireProvisionedLaneDir(LANE_A))).toBe(
       'accounts.lane.not_provisioned'
     )
   })
@@ -169,90 +190,47 @@ describe('lane wire authority — status', () => {
     const { authority } = makeHarness()
     expect(authority.status('device-a')).toMatchObject({ laneState: 'absent' })
   })
-})
 
-describe('lane wire authority — logout', () => {
-  it('sweeps the caller own lane and leaves another lane alone', async () => {
-    const { authority, loadLane, laneCredentialsOnDisk } = makeHarness()
-    loadLane(LANE_A, 'rt-1')
-    loadLane(LANE_B, 'rt-2')
+  // §rpcs item 8: `accounts` projects the per-lane account store's INDEX, never a directory walk —
+  // L2's already-merged `lane-login-client.ts` reads this field off the status frame.
+  it("projects the lane account store onto accounts, never another lane's", () => {
+    const { authority, plantLaneAccount } = makeHarness()
+    plantLaneAccount(LANE_A, '11111111-1111-4111-8111-111111111111', 'a@x.com', true)
+    plantLaneAccount(LANE_A, '22222222-2222-4222-8222-222222222222', 'b@x.com', false)
+    plantLaneAccount(LANE_B, '33333333-3333-4333-8333-333333333333', 'other@x.com', true)
 
-    const result = await authority.logout('device-a')
+    const result = authority.status('device-a')
 
-    expect(result.cleared).toContain('.credentials.json')
-    expect(laneCredentialsOnDisk(LANE_A)).toBeNull()
-    expect(laneCredentialsOnDisk(LANE_B)).not.toBeNull()
+    expect(result.accounts).toEqual([
+      {
+        laneAccountId: '11111111-1111-4111-8111-111111111111',
+        email: 'a@x.com',
+        label: null,
+        active: true
+      },
+      {
+        laneAccountId: '22222222-2222-4222-8222-222222222222',
+        email: 'b@x.com',
+        label: null,
+        active: false
+      }
+    ])
   })
 
-  it('names the cause of the lane change as logout', async () => {
-    const { authority, loadLane, laneChanges } = makeHarness()
-    loadLane(LANE_A, 'rt-1')
-    await authority.logout('device-a')
-    expect(laneChanges).toEqual([`logout:${LANE_A}`])
+  it('reports an empty accounts array, never a walk, for a lane with no login store yet', () => {
+    const { authority } = makeHarness()
+    expect(authority.status('device-a').accounts).toEqual([])
   })
 
-  it('takes the switch gate around the write and releases it afterwards', async () => {
-    const { authority, loadLane, gateCalls } = makeHarness()
-    loadLane(LANE_A, 'rt-1')
-    await authority.logout('device-a')
-    expect(gateCalls).toEqual([`begin:${LANE_A}`, `end:${LANE_A}`])
-  })
-
-  it('kills the in-flight usage probe before sweeping the lane', async () => {
-    const order: string[] = []
-    const { authority, coordinator, loadLane } = makeHarness({
-      fetchLaneUsage: async ({ signal }) =>
-        new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => {
-            order.push('probe-aborted')
-            reject(new Error('aborted'))
-          })
-        })
-    })
-    loadLane(LANE_A, 'rt-1')
-    await coordinator.syncLane(LANE_A, 'launch')
-    const pull = coordinator.pullLaneUsage()
-    await Promise.resolve()
-
-    await authority.logout('device-a')
-    order.push('swept')
-    await pull
-
-    expect(order).toEqual(['probe-aborted', 'swept'])
-  })
-
-  // Mutation proof: `beginLaneSwitch`'s wipe-in-progress guard is new in this slice (rev 32's
-  // logout inherits it from the deleted push handler's identical check). Deleting the guard turns
-  // this refusal into a silent sweep racing the fence's own wipe.
-  it('refuses a logout while a close-wipe is already marked pending for that lane', async () => {
-    const { authority, loadLane } = makeHarness()
-    loadLane(LANE_A, 'rt-1')
+  it('publishes laneWipePending on the status a lane wipe latched', () => {
+    const { authority } = makeHarness()
     markLaneWipePending(LANE_A)
 
-    expect(await refusalCode(async () => authority.logout('device-a'))).toBe(
-      'accounts.lane.wipe_in_progress'
-    )
-  })
-
-  it('releases the lane switch gate when the probe invalidation throws', async () => {
-    const { authority, loadLane, gateCalls, coordinator } = makeHarness()
-    loadLane(LANE_A, 'rt-1')
-    vi.spyOn(coordinator, 'invalidateLaneUsageProbes').mockRejectedValueOnce(new Error('boom'))
-
-    await expect(authority.logout('device-a')).rejects.toThrow('boom')
-
-    expect(gateCalls).toEqual([`begin:${LANE_A}`, `end:${LANE_A}`])
-  })
-
-  it('holds only its own lane on the real per-lane gate, and only while the write runs', async () => {
-    const { authority, loadLane } = makeHarness({ realSwitchGate: true })
-    loadLane(LANE_A, 'rt-1')
-    expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(false)
-    const promise = authority.logout('device-a')
-    // Best-effort: the write is fast enough locally that asserting mid-flight is flaky, so this
-    // only asserts the gate is clear again afterwards — the ordering itself is covered by the
-    // switch-gate unit tests in `live-pty-gate.test.ts`.
-    await promise
-    expect(isClaudeAuthSwitchInProgress(LANE_A)).toBe(false)
+    expect(authority.status('device-a')).toMatchObject({
+      laneState: 'absent',
+      laneWipePending: true
+    })
+    // Never leaks onto the other lane's own status.
+    expect(authority.status('device-b').laneWipePending).toBe(false)
   })
 })

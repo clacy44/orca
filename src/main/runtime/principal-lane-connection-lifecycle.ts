@@ -1,16 +1,17 @@
 import type { LaneWipeOutcome } from '../claude-accounts/principal-lane-lifecycle'
-import { principalHasRemainingConnections } from '../claude-accounts/principal-lane-lifecycle'
 import { getLaneWireService } from './lane-wire-service'
 
 /**
- * Where S9c's two connection-driven wipes join the socket and grant registries (§2f).
+ * Where S9c's revoke-driven wipe joins the socket and grant registries (§2f).
  *
- * Both joins exist because the registries are keyed one hop away from the lane. The close path is
- * handed a grant's `deviceToken`; the lane is keyed by the PRINCIPAL that grant is bound to, and
- * the survivor question is asked across every grant of that principal — a person on a desktop and
- * a phone holds one lane through two grants. The revoke paths call `removeDevice` before
- * `forgetGrant`, so the principal has to be captured on the way in and the survivors counted on
- * the way out.
+ * The join exists because the registries are keyed one hop away from the lane. The revoke path
+ * calls `removeDevice` before `forgetGrant`, so the principal has to be captured on the way in and
+ * the survivors counted on the way out.
+ *
+ * S9-L1 (§modules C, the login model): the connection-CLOSE wipe this file used to join is
+ * deleted. A socket closing is not a logout — the residency window is now login-until-logout, not
+ * push-until-last-close — so `wipeLaneOnConnectionClose`/`LaneCloseWipeResult` and the join's
+ * `wipeLane` member go with it. `removeLaneOnGrantRevoked` (a genuine revocation) stays.
  */
 
 export type PrincipalLaneConnectionJoin = {
@@ -20,51 +21,14 @@ export type PrincipalLaneConnectionJoin = {
   boundDeviceIds(principalId: string): string[]
   /** Every device id with an authenticated socket right now, the closing one excluded. */
   connectedDeviceIds(): readonly string[]
-  wipeLane(laneId: string): Promise<LaneWipeOutcome>
   removeLane(laneId: string): Promise<LaneWipeOutcome>
 }
 
-/** `…-incomplete` is the only arm that means the credential may still be at rest (§2f). */
-export type LaneCloseWipeResult =
-  | 'wiped'
-  | 'not-wiped-other-connections'
-  | 'not-wiped-no-lane'
-  | 'not-wiped-incomplete'
 export type LaneRevokeWipeResult =
   | 'removed'
   | 'not-removed-grants-survive'
   | 'not-removed-no-lane'
   | 'not-removed-incomplete'
-
-/**
- * A connection closed: wipe the lane only if it was the PRINCIPAL's last authenticated socket.
- *
- * Keyed by `socket.device.deviceId`, never the `deviceToken` the close path is handed: the token
- * is the grant's, and a grant-keyed predicate wipes a person's live credential the moment either
- * of their devices drops off Wi-Fi. An idle/keepalive close arrives here like any other.
- */
-export async function wipeLaneOnConnectionClose(
-  join: PrincipalLaneConnectionJoin,
-  closedDeviceId: string
-): Promise<LaneCloseWipeResult> {
-  const principalId = join.principalOf(closedDeviceId)
-  if (!principalId) {
-    return 'not-wiped-no-lane'
-  }
-  if (
-    principalHasRemainingConnections({
-      principalId,
-      connectedDeviceIds: join.connectedDeviceIds(),
-      principalOf: (deviceId) => join.principalOf(deviceId)
-    })
-  ) {
-    return 'not-wiped-other-connections'
-  }
-  const outcome = await join.wipeLane(principalId)
-  // `completed` is the only field that separates a swept lane from three failed attempts over a
-  // credential still on disk, and this enum is the only channel a caller has for the difference.
-  return outcome.completed ? 'wiped' : 'not-wiped-incomplete'
-}
 
 /**
  * A grant was revoked: remove the lane only when it was that principal's LAST grant.
@@ -110,7 +74,6 @@ export function createPrincipalLaneConnectionJoin(args: {
     principalOf: (deviceId) => bindings.principalOf(deviceId),
     boundDeviceIds: (principalId) => bindings.boundDeviceIds(principalId),
     connectedDeviceIds: args.connectedDeviceIds,
-    wipeLane: (laneId) => lifecycle.wipeOnLastConnectionClose(laneId),
     removeLane: (laneId) => lifecycle.removeLaneOnLastGrantRevoked(laneId)
   }
 }

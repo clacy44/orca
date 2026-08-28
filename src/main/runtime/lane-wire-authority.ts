@@ -1,22 +1,27 @@
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { ClaudeLaneStatus } from '../../shared/claude-lane-delegation'
 import type { LaneCredentialCoordinator } from '../claude-accounts/lane-credential-coordinator'
-import { wipeLaneCredentials } from '../claude-accounts/principal-lane-credential-sweep'
-import { isLaneWipeInFlight } from '../claude-accounts/lane-wipe-pending'
-import { beginClaudeAuthSwitch, endClaudeAuthSwitch } from '../claude-accounts/live-pty-gate'
+import { listLaneAccounts } from '../claude-accounts/principal-lane-account-store'
+import { isLaneWipePending } from '../claude-accounts/lane-wipe-pending'
+import { isUnverifiedLegacyLane } from '../claude-accounts/lane-legacy-provenance'
 
 /**
- * The host side of the lane wire: status and logout (S9 §2c/§2d, rev 32's credential-source
- * re-basing).
+ * The host side of the lane wire: caller derivation and status (S9 §2c/§2d, rev 32's
+ * credential-source re-basing).
  *
  * The lane is derived from `pairedDeviceId → principalId` and from nothing else. There is no lane
  * parameter on any method here, so there is nothing for a caller to spoof, and every refusal is
  * conditioned on the CALLER'S own lane state rather than on "some lane exists on this host".
  *
  * Rev 32 deletes `push`, `pullRotated` and the delegation directory (delegable list,
- * `setDelegableAccounts`) with the push model (§10(g)); S9-L1's `selectAccount`/`removeAccount`
- * and login-quartet RPCs are not yet wired into this tree's host — `logout` below is `clear`
- * renamed to the verb §3 row 2 specifies, over the same wipe mechanism.
+ * `setDelegableAccounts`) with the push model (§10(g)). S9-L1 moves `logout` (formerly `clear`,
+ * renamed at §3 row 2) to `lane-account-authority.ts`, alongside the new `selectAccount`/
+ * `removeAccount` — routed through `PrincipalLaneLifecycle.wipeOnExplicitLogout` there rather than
+ * the direct `wipeLaneCredentials` call this class used to make, so a logout gets the same
+ * login-session-cancelling fence every other wipe reason gets (§fenceWiring). The other lane
+ * authority classes each keep their own small `requireCaller`/`requireProvisionedLaneDir` — the
+ * derivation is five lines and duplicating it avoids threading this class through every other one
+ * just to reach two methods.
  */
 
 export type LaneWirePrincipals = {
@@ -36,7 +41,7 @@ export type LaneSwitchGate = {
 
 export type LaneWireCaller = { deviceId: string; principalId: string }
 
-export type LaneChangeCause = 'logout' | 'wipe'
+export type LaneChangeCause = 'logout' | 'wipe' | 'select-account' | 'remove-account'
 
 export type LaneWireAuthorityOptions = {
   principals: LaneWirePrincipals
@@ -44,11 +49,6 @@ export type LaneWireAuthorityOptions = {
   switchGate?: LaneSwitchGate
   platform?: NodeJS.Platform
   onLaneChanged?: (laneId: string, cause: LaneChangeCause) => void
-}
-
-const LANE_SWITCH_GATE: LaneSwitchGate = {
-  begin: (laneId) => beginClaudeAuthSwitch(laneId),
-  end: (laneId) => endClaudeAuthSwitch(laneId)
 }
 
 export class LaneWireAuthority {
@@ -71,29 +71,6 @@ export class LaneWireAuthority {
     return caller
   }
 
-  /**
-   * §2f's wipe, addressed to the caller's OWN lane, over `accounts.lane.logout` (rev 32 renames
-   * `clear` to `logout`; the per-login-directory sweep §3 row 2 also specifies is S9-L1's, not yet
-   * in this tree — this wipes the lane's `.credentials.json`/`oauthAccount`, same as before).
-   */
-  async logout(pairedDeviceId: string | null | undefined): Promise<{ cleared: string[] }> {
-    const caller = this.requireCaller(pairedDeviceId)
-    const laneDir = this.requireProvisionedLaneDir(caller.principalId)
-    const cleared = await this.options.coordinator.authState.serializeLaneWrite(
-      caller.principalId,
-      async () => {
-        const gate = await this.beginLaneSwitch(caller.principalId)
-        try {
-          return await wipeLaneCredentials(laneDir, { platform: this.options.platform })
-        } finally {
-          gate.end(caller.principalId)
-        }
-      }
-    )
-    this.options.onLaneChanged?.(caller.principalId, 'logout')
-    return { cleared }
-  }
-
   /** The status one grant may read: its own principal's lane, and no other. */
   status(pairedDeviceId: string | null | undefined): ClaudeLaneStatus {
     const caller = this.requireCaller(pairedDeviceId)
@@ -104,15 +81,29 @@ export class LaneWireAuthority {
     const { store } = this.options.coordinator
     const credentialState = store.getCredentialState(caller.principalId)
     const delegatedGrantId = this.options.principals.delegatedGrantIdOf(caller.principalId)
+    const laneDir = store.resolveLaneDir(caller.principalId)
     return {
       laneId: caller.principalId,
       laneState: store.getLaneState(caller.principalId),
+      // §fenceWiring "laneWipePending PUBLISH": additive and, until now, never actually populated
+      // here — an old client already tolerates its absence and reads `laneState` alone.
+      laneWipePending: isLaneWipePending(caller.principalId),
       delegatedGrantId,
       callerIsDelegatedGrant: delegatedGrantId === caller.deviceId,
       heldDisplayName: null,
       heldIdentity: credentialState?.identity ?? null,
       refreshTokenSha256: credentialState?.refreshTokenSha256 ?? null,
-      expiresAt: credentialState?.expiresAt ?? null
+      expiresAt: credentialState?.expiresAt ?? null,
+      // §rpcs item 8: an unprovisioned lane has no store to project — `[]`, never a walk.
+      accounts: laneDir
+        ? listLaneAccounts(laneDir).map((account) => ({
+            laneAccountId: account.laneAccountId,
+            email: account.email,
+            label: account.label,
+            active: account.active
+          }))
+        : [],
+      unverifiedLegacy: laneDir !== null && isUnverifiedLegacyLane(laneDir)
     }
   }
 
@@ -126,34 +117,6 @@ export class LaneWireAuthority {
       )
     }
     return laneDir
-  }
-
-  /**
-   * Closes the lane's switch gate and then kills what the change is about to invalidate (§2k).
-   *
-   * Order is the fence: the gate stops the NEXT probe from starting, the invalidation ends the one
-   * already running — which is holding the pre-change single-use refresh token and would otherwise
-   * post usage for the old account and rotate a credential the lane no longer holds.
-   */
-  private async beginLaneSwitch(laneId: string): Promise<LaneSwitchGate> {
-    const gate = this.options.switchGate ?? LANE_SWITCH_GATE
-    if (isLaneWipeInFlight(laneId)) {
-      throw new ClaudeLaneRefusal(
-        'accounts.lane.wipe_in_progress',
-        'Orca is clearing this credential lane on the host right now, so it did not run a second wipe. Wait for that to finish, then try again.'
-      )
-    }
-    gate.begin(laneId)
-    try {
-      await this.options.coordinator.invalidateLaneUsageProbes(laneId)
-    } catch (error) {
-      // The caller's `finally { gate.end(…) }` is not entered yet, and `begin` throws on a lane
-      // that is already gated — so a rejection here would leave this lane refusing every spawn and
-      // every logout for the process lifetime rather than for this logout.
-      gate.end(laneId)
-      throw error
-    }
-    return gate
   }
 }
 

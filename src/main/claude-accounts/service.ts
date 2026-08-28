@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- Why: Claude managed accounts need one audited owner
 for login, credential capture, Keychain storage, selection, and rate-limit refresh. */
 import { createHash, randomUUID } from 'node:crypto'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
@@ -12,8 +12,11 @@ import type {
 } from '../../shared/managed-account-types'
 import type { Store } from '../persistence'
 import type { RateLimitService } from '../rate-limits/service'
-import { resolveClaudeCommand } from '../codex-cli/command'
 import type { ClaudeRuntimeAuthService } from './runtime-auth-service'
+import {
+  spawnClaudeCliChildProcess,
+  type ClaudeCliChildProcessConfigDir
+} from './claude-cli-child-process'
 import {
   getClaudeManagedAccountsRoot,
   readClaudeManagedAuthFile,
@@ -35,7 +38,6 @@ import { assertCaptureSourceOutsideClaudeLanes } from './managed-capture-contain
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import { toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
-import { buildWindowsCommandInvocation } from './windows-command-invocation'
 import {
   getClaudeSelectionTargetForAccount,
   getSelectedClaudeAccountIdForTarget,
@@ -50,7 +52,6 @@ import {
 const LOGIN_TIMEOUT_MS = 180_000
 const STATUS_TIMEOUT_MS = 20_000
 const MAX_COMMAND_OUTPUT_CHARS = 4_000
-const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000
 // Claude leaves the login process running after an OAuth denial; fail fast so Settings can clear loading state.
 const CLAUDE_AUTH_DENIED_PATTERN =
   /\baccess_denied\b|authorization (?:request )?(?:was )?denied|sign-?in (?:was )?denied|login (?:was )?denied/i
@@ -1048,207 +1049,42 @@ export class ClaudeAccountService {
     await deleteManagedClaudeKeychainCredentials(accountId)
   }
 
+  // Thin delegating wrapper (AGENTS.md: ratcheted files take delegating calls
+  // only) — spawn/kill/process-group/taskkill/cleanup mechanics live in
+  // claude-cli-child-process.ts. This method keeps only what is domain-specific:
+  // accumulating and truncating output, and killing on a detected denial.
   private runClaudeCommand(
     args: string[],
-    configDir: { windowsPath: string; linuxPath: string | null; wslDistro: string | null },
+    configDir: ClaudeCliChildProcessConfigDir,
     timeoutMs: number,
     options?: { allowFailure?: boolean; signal?: AbortSignal; keepStdinOpen?: boolean }
   ): Promise<string> {
-    return new Promise((resolvePromise, rejectPromise) => {
-      const spawnConfig =
-        configDir.linuxPath && configDir.wslDistro
-          ? {
-              command: 'wsl.exe',
-              args: [
-                '-d',
-                configDir.wslDistro,
-                '--',
-                'bash',
-                '-lc',
-                `export CLAUDE_CONFIG_DIR=${shellQuote(configDir.linuxPath)}; exec claude ${args.map(shellQuote).join(' ')}`
-              ],
-              env: process.env,
-              shell: false,
-              windowsVerbatimArguments: false
-            }
-          : process.platform === 'win32'
-            ? {
-                ...buildWindowsCommandInvocation(resolveClaudeCommand(), args),
-                env: {
-                  ...process.env,
-                  CLAUDE_CONFIG_DIR: configDir.windowsPath
-                },
-                shell: false
-              }
-            : {
-                command: resolveClaudeCommand(),
-                args,
-                env: {
-                  ...process.env,
-                  CLAUDE_CONFIG_DIR: configDir.windowsPath
-                },
-                shell: false,
-                windowsVerbatimArguments: false
-              }
-      const child = spawn(spawnConfig.command, spawnConfig.args, {
-        // Why: Claude's browser auth can bind its callback lifetime to stdin.
-        // Keeping stdin open prevents hidden managed-login runs from tearing down
-        // the local callback server before the browser returns.
-        stdio: [options?.keepStdinOpen ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-        shell: spawnConfig.shell,
-        windowsVerbatimArguments: spawnConfig.windowsVerbatimArguments,
-        env: spawnConfig.env,
-        // Why: Claude auth can leave browser/login descendants alive after denial.
-        // A process group lets cancellation terminate the whole POSIX login tree.
-        detached: process.platform !== 'win32'
-      })
-      const stdout = child.stdout
-      const stderr = child.stderr
-      if (!stdout || !stderr) {
-        if (options?.keepStdinOpen) {
-          child.stdin?.destroy()
-        }
-        child.kill()
-        rejectPromise(new Error('Claude command failed to open output streams.'))
-        return
+    let output = ''
+    const appendOutput = (chunk: string, kill: (error: Error) => void): void => {
+      output = `${output}${chunk}`
+      if (output.length > MAX_COMMAND_OUTPUT_CHARS) {
+        output = output.slice(-MAX_COMMAND_OUTPUT_CHARS)
       }
-      const completesOnExit =
-        process.platform === 'win32' &&
-        configDir.linuxPath === null &&
-        configDir.wslDistro === null &&
-        args[0] === 'auth' &&
-        args[1] === 'login'
-      const completionEvent = completesOnExit ? 'exit' : 'close'
-
-      let settled = false
-      let output = ''
-      const appendOutput = (chunk: Buffer): void => {
-        output = `${output}${chunk.toString()}`
-        if (output.length > MAX_COMMAND_OUTPUT_CHARS) {
-          output = output.slice(-MAX_COMMAND_OUTPUT_CHARS)
-        }
-        if (CLAUDE_AUTH_DENIED_PATTERN.test(output)) {
-          killChild(() =>
-            settle(() => rejectPromise(new Error('Claude sign-in was denied. Please try again.')))
-          )
-        }
+      if (CLAUDE_AUTH_DENIED_PATTERN.test(output)) {
+        kill(new Error('Claude sign-in was denied. Please try again.'))
       }
-      let timeout: ReturnType<typeof setTimeout> | null = null
-      const cleanupListeners = (): void => {
-        if (timeout) {
-          clearTimeout(timeout)
-          timeout = null
-        }
-        stdout.off('data', appendOutput)
-        stderr.off('data', appendOutput)
-        child.off('error', onError)
-        child.off(completionEvent, onDone)
-        options?.signal?.removeEventListener('abort', onAbort)
-        if (options?.keepStdinOpen) {
-          child.stdin?.destroy()
-        }
-        if (completesOnExit) {
-          stdout.destroy()
-          stderr.destroy()
-        }
+    }
+    const { handle, result } = spawnClaudeCliChildProcess(args, configDir, timeoutMs, {
+      signal: options?.signal,
+      keepStdinOpen: options?.keepStdinOpen,
+      onStdoutChunk: (chunk) => appendOutput(chunk, handle.kill),
+      onStderrChunk: (chunk) => appendOutput(chunk, handle.kill)
+    })
+    return result.then(({ code }) => {
+      if (code === 0 || options?.allowFailure) {
+        return output
       }
-      const settle = (callback: () => void): void => {
-        if (settled) {
-          return
-        }
-        settled = true
-        cleanupListeners()
-        callback()
-      }
-      const timeoutError = new Error('Claude sign-in took too long to finish.')
-      const cancelError = new Error('Claude sign-in was cancelled.')
-      let terminationPending = false
-      const killChild = (afterKill: () => void): void => {
-        if (terminationPending || settled) {
-          return
-        }
-        terminationPending = true
-        if (process.platform === 'win32' && child.pid) {
-          const taskkill = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
-            stdio: 'ignore',
-            windowsHide: true
-          })
-          let taskkillFinished = false
-          const finishTaskkill = (succeeded: boolean): void => {
-            if (taskkillFinished) {
-              return
-            }
-            taskkillFinished = true
-            clearTimeout(taskkillTimeout)
-            if (!succeeded) {
-              child.kill()
-            }
-            afterKill()
-          }
-          const taskkillTimeout = setTimeout(() => {
-            taskkill.kill()
-            finishTaskkill(false)
-          }, WINDOWS_TASKKILL_TIMEOUT_MS)
-          taskkill.once('error', () => finishTaskkill(false))
-          taskkill.once('close', (code) => finishTaskkill(code === 0))
-          return
-        }
-        if (process.platform !== 'win32' && child.pid) {
-          try {
-            process.kill(-child.pid)
-            afterKill()
-            return
-          } catch {
-            // Fall back to the direct child if the process group is unavailable.
-          }
-        }
-        child.kill()
-        afterKill()
-      }
-      timeout = setTimeout(() => {
-        killChild(() => settle(() => rejectPromise(timeoutError)))
-      }, timeoutMs)
-
-      const onAbort = (): void => {
-        killChild(() => settle(() => rejectPromise(cancelError)))
-      }
-      const onError = (error: Error): void => {
-        if (terminationPending) {
-          return
-        }
-        settle(() => rejectPromise(error))
-      }
-      const onDone = (code: number | null): void => {
-        if (terminationPending) {
-          return
-        }
-        settle(() => {
-          if (code === 0 || options?.allowFailure) {
-            resolvePromise(output)
-            return
-          }
-          const trimmedOutput = output.trim()
-          rejectPromise(
-            new Error(
-              trimmedOutput
-                ? `Claude command failed: ${trimmedOutput}`
-                : `Claude command exited with code ${code ?? 'unknown'}.`
-            )
-          )
-        })
-      }
-
-      stdout.on('data', appendOutput)
-      stderr.on('data', appendOutput)
-      child.on('error', onError)
-      // Native Windows browsers can inherit these pipes and indefinitely delay close.
-      child.on(completionEvent, onDone)
-
-      if (options?.signal?.aborted) {
-        onAbort()
-      } else {
-        options?.signal?.addEventListener('abort', onAbort, { once: true })
-      }
+      const trimmedOutput = output.trim()
+      throw new Error(
+        trimmedOutput
+          ? `Claude command failed: ${trimmedOutput}`
+          : `Claude command exited with code ${code ?? 'unknown'}.`
+      )
     })
   }
 

@@ -1,0 +1,111 @@
+/**
+ * The five-cancellers-one-code-path machinery (S9-L1 A1, §sessionStateMachine "CANCEL, SPLIT").
+ * Free functions over the registry's own session map — not methods — so
+ * `principal-lane-lifecycle.ts` can be handed `cancelLaneLoginSessions` as a plain synchronous
+ * function (§fenceWiring) without exposing the whole registry to it.
+ */
+import { rmSync } from 'node:fs'
+import { getLaneAccountsRoot } from './lane-account-index'
+import { resolveContainedLaneAccountEntry } from './principal-lane-account-store'
+import { flush, type Session } from './lane-login-session-types'
+
+/** The lane's in-flight (`live`/`child-exited`) session id, of ANY owner kind — `statusOfLane`'s
+ * lookup, since a host-inline `--cancel` invocation holds no sessionId of its own (§modules E). */
+export function findInFlightSessionId(
+  sessions: Map<string, Session>,
+  laneId: string
+): string | null {
+  for (const session of sessions.values()) {
+    if (
+      session.laneId === laneId &&
+      (session.state === 'live' || session.state === 'child-exited')
+    ) {
+      return session.sessionId
+    }
+  }
+  return null
+}
+
+/** Pure, synchronous: the state-transition half. Never leaves `cancelled`, never fires from
+ * `captured`. Kills the process group; does NOT touch the filesystem. */
+export function cancelStateTransition(sessions: Map<string, Session>, sessionId: string): void {
+  const session = sessions.get(sessionId)
+  if (!session || session.state === 'captured' || session.state === 'cancelled') {
+    return
+  }
+  session.state = 'cancelled'
+  if (session.ttlTimer) {
+    clearTimeout(session.ttlTimer)
+    session.ttlTimer = null
+  }
+  session.handle?.kill(new Error('This Claude login was cancelled.'))
+  flush(session.pasteReadyWaiters)
+  flush(session.promptEdgeWaiters)
+}
+
+/** The destructive half: sweeps the session's half-written `<laneAccountId>` directory.
+ * Idempotent, and a no-op once `captured` has already promoted the credential elsewhere.
+ * `swept` is set only AFTER `rmSync` returns — a throw (EPERM/EBUSY while the just-exited
+ * child still holds a handle, EACCES, a network mount) leaves it false so a retry (a later
+ * `cancel`, or `sweepCancelledLoginDirs`'s own re-read) can sweep it instead of certifying a
+ * directory that was never actually removed. */
+export async function cancelDestructive(
+  sessions: Map<string, Session>,
+  sessionId: string
+): Promise<void> {
+  const session = sessions.get(sessionId)
+  if (!session || session.swept || session.state === 'captured') {
+    return
+  }
+  const contained = resolveContainedLaneAccountEntry(
+    getLaneAccountsRoot(session.laneDir),
+    session.laneAccountId
+  )
+  if (contained) {
+    rmSync(contained, { recursive: true, force: true })
+  }
+  session.swept = true
+}
+
+/** Every in-flight session of `laneId` -> `cancelled`, synchronously — no promise returned
+ * (§fenceWiring: taken in the SAME synchronous step as `markLaneWipePending`). */
+export function cancelLaneLoginSessions(sessions: Map<string, Session>, laneId: string): void {
+  for (const session of sessions.values()) {
+    if (session.laneId === laneId) {
+      cancelStateTransition(sessions, session.sessionId)
+    }
+  }
+}
+
+/** The destructive half for every session `cancelLaneLoginSessions` just marked — run INSIDE the
+ * wipe's own `serializeLaneWrite` turn, never concurrently with an admitted capture. */
+export async function sweepCancelledLoginDirs(
+  sessions: Map<string, Session>,
+  laneId: string
+): Promise<void> {
+  const toSweep = [...sessions.values()].filter(
+    (session) => session.laneId === laneId && session.state === 'cancelled' && !session.swept
+  )
+  for (const session of toSweep) {
+    await cancelDestructive(sessions, session.sessionId)
+  }
+}
+
+/** `cancel`, run detached from its caller (an exit/TTL callback, not a request awaiting a reply).
+ * `cancelDestructive`'s `rmSync` can throw (EPERM/EBUSY while the just-exited child still holds a
+ * handle, EACCES, a network mount) — swallowed and logged here rather than left to become an
+ * unhandled rejection, since `swept` staying false already makes the sweep retryable. */
+export async function reapLoginSessionSilently(
+  sessions: Map<string, Session>,
+  sessionId: string
+): Promise<void> {
+  cancelStateTransition(sessions, sessionId)
+  try {
+    await cancelDestructive(sessions, sessionId)
+  } catch (error) {
+    console.warn(
+      '[claude-accounts] Lane login session reap failed; will retry on next sweep:',
+      error
+    )
+  }
+}

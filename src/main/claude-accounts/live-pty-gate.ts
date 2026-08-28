@@ -1,3 +1,8 @@
+import {
+  ClaudeLaneRefusal,
+  CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES
+} from '../../shared/claude-lane-refusals'
+
 const liveClaudePtyIds = new Set<string>()
 
 /**
@@ -204,7 +209,13 @@ export function hasUnattributedLiveClaudePtys(): boolean {
 /** The lane id is required: an omitted one silently gated every lane behind the shared one. */
 export function beginClaudeAuthSwitch(laneId: string): void {
   if (switchesInProgressByLane.has(laneId)) {
-    throw new Error('A Claude account switch is already in progress.')
+    // S9-L1 §modules D: a typed refusal, not a bare `Error` — the untyped throw is the one client
+    // callers have no string for (§3 Rule 3), and the shipped `lane-wire-authority.ts:112`-vs-
+    // `:120-122` shape this refusal was minted to reach was the same "leaves it untyped" defect.
+    throw new ClaudeLaneRefusal(
+      'accounts.lane.switch_in_progress',
+      CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES['accounts.lane.switch_in_progress']
+    )
   }
   switchesInProgressByLane.add(laneId)
 }

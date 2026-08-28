@@ -25,7 +25,6 @@ import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-la
 import {
   createPrincipalLaneConnectionJoin,
   removeLaneOnGrantRevoked,
-  wipeLaneOnConnectionClose,
   type PrincipalGrantBindings
 } from './principal-lane-connection-lifecycle'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from './e2ee-keypair'
@@ -195,6 +194,13 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
   // S9 §2l, rev 32: any grant bound to the principal may switch among the logins in its own
   // lane, including the phone -- a local file rewrite that needs no other device to be reachable.
   'accounts.lane.selectAccount',
+  // S9-L1/S9-L2: the login quartet's start/submit/cancel are phone-initiated too -- a phone can be
+  // the DESIGNATED login device for its principal's lane. `loginStatus`/`removeAccount`/`logout`
+  // are deliberately absent: no mobile source calls them today, so they stay off this allowlist
+  // until a mobile feature actually needs them (§3 Rule 3: least privilege, not future-proofing).
+  'accounts.lane.loginStart',
+  'accounts.lane.loginSubmitCode',
+  'accounts.lane.loginCancel',
   'accounts.lane.statusSubscribe',
   'accounts.lane.statusUnsubscribe',
   // Deliberately absent, and pinned by a negative control in `mobile-rpc-allowlist.test.ts`:
@@ -685,25 +691,6 @@ export class OrcaRuntimeRpcServer {
     terminalPresenceRegistry.forgetGrant(deviceId)
     this.mobileSocketWiring?.terminateDeviceConnections(device.token)
     return true
-  }
-
-  /** The lane's own grants keep it alive; a wipe reported here is a failure worth logging. */
-  private async wipeLaneOnSocketClose(deviceId: string): Promise<void> {
-    const join = createPrincipalLaneConnectionJoin({
-      bindings: this.principalGrantBindings,
-      connectedDeviceIds: () => this.mobileSocketWiring?.connectedDeviceIds() ?? []
-    })
-    if (!join) {
-      return
-    }
-    try {
-      const result = await wipeLaneOnConnectionClose(join, deviceId)
-      if (result === 'not-wiped-incomplete') {
-        console.warn(`[runtime] Lane wipe on last connection close did not confirm the lane empty`)
-      }
-    } catch (error) {
-      console.warn('[runtime] Lane wipe on last connection close failed:', error)
-    }
   }
 
   private async removeLaneOnRevoke(revokedPrincipalId: string | null): Promise<void> {
@@ -1489,10 +1476,8 @@ export class OrcaRuntimeRpcServer {
         if (!hasOtherConnections) {
           this.runtime.onClientDisconnected(socket.device.deviceToken)
         }
-        // S9 §2f, and deliberately NOT under `hasOtherConnections`: that predicate is the GRANT's,
-        // and the lane's is the principal's — every grant of the person, counted after this socket
-        // has already left the registry.
-        void this.wipeLaneOnSocketClose(socket.device.deviceId)
+        // S9-L1 (§modules C, the login model): a socket closing no longer wipes the lane — see
+        // `principal-lane-connection-lifecycle.ts`. Revoke still does, below.
       },
       // Why: relay attempts are authorized upstream; only direct failures should prompt local re-pairing.
       onUnpairedDeviceAuthFailure: (metadata) => {

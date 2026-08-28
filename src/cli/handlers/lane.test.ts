@@ -107,6 +107,9 @@ const defaultImpl: CallImpl = (method) => {
   if (method === 'accounts.lane.deprovision') {
     return Promise.resolve({ deprovisioned: true })
   }
+  if (method === 'accounts.lane.wipe') {
+    return Promise.resolve({ released: true })
+  }
   if (method === 'accounts.lane.readAudit') {
     return Promise.resolve({ audit: [{ at: 0, action: 'create-principal', principalId: ANA }] })
   }
@@ -144,7 +147,8 @@ describe('lane CLI handlers', () => {
         'lane provision',
         'lane rebind',
         'lane status',
-        'lane unbind'
+        'lane unbind',
+        'lane wipe'
       ].sort()
     )
   })
@@ -236,6 +240,28 @@ describe('lane CLI handlers', () => {
     const { client, calls } = makeClient(defaultImpl)
     await LANE_HANDLERS['lane audit'](context(client, {}, true))
     expect(calls).toContainEqual(['accounts.lane.readAudit', undefined])
+  })
+
+  it('requires --force to release a latched wipe-pending mark', async () => {
+    const { client } = makeClient(defaultImpl)
+    await expect(LANE_HANDLERS['lane wipe'](context(client, { person: 'Ana Ng' }))).rejects.toThrow(
+      /requires `--force`/
+    )
+  })
+
+  it('resolves --person and calls accounts.lane.wipe with force: true', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await LANE_HANDLERS['lane wipe'](context(client, { person: 'Ana Ng', force: true }))
+    expect(calls).toContainEqual(['accounts.lane.wipe', { principalId: ANA, force: true }])
+  })
+
+  it('reports when the lane was not latched, without throwing', async () => {
+    const { client } = makeClient((method, params) =>
+      method === 'accounts.lane.wipe'
+        ? Promise.resolve({ released: false })
+        : defaultImpl(method, params)
+    )
+    await LANE_HANDLERS['lane wipe'](context(client, { person: 'Ana Ng', force: true }))
   })
 
   it('refuses a bind-link whose grant belongs to a different person than asserted', async () => {

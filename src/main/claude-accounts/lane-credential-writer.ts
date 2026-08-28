@@ -5,7 +5,7 @@ import { ClaudeLaneRefusal, isClaudeLaneRefusal } from '../../shared/claude-lane
 import { restrictWindowsPathSync } from '../../shared/secure-path-windows-acl'
 import { renameFileWithWindowsRetry, writeFileAtomically } from '../codex-accounts/fs-utils'
 import { writeActiveClaudeKeychainCredentials } from './keychain'
-import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './principal-lane-credential-sweep'
+import { LANE_CONFIG_FILENAME, LANE_CREDENTIALS_FILENAME } from './lane-credential-filenames'
 
 /**
  * The path-taking credential/config writers (S9 §2c).

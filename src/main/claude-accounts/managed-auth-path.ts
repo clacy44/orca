@@ -7,7 +7,7 @@ import {
 } from '../../shared/lane-path-containment'
 import { writeFileAtomically } from '../codex-accounts/fs-utils'
 
-const MANAGED_AUTH_MARKER = '.orca-managed-claude-auth'
+export const MANAGED_AUTH_MARKER = '.orca-managed-claude-auth'
 
 export function getClaudeManagedAccountsRoot(): string {
   return join(app.getPath('userData'), 'claude-accounts')
@@ -16,9 +16,13 @@ export function getClaudeManagedAccountsRoot(): string {
 export function resolveOwnedClaudeManagedAuthPath(
   accountId: string,
   candidatePath: string,
-  options: { adoptLegacyMarker?: boolean } = {}
+  options: { adoptLegacyMarker?: boolean; root?: string } = {}
 ): string | null {
-  const rootPath = getClaudeManagedAccountsRoot()
+  // Why an injectable root rather than a second copy of this function: S9-L1's per-lane store
+  // (`<lane>/claude-accounts`) needs the SAME symlink refusal, containment, two-segment match,
+  // marker-equals-id rule and 0600 atomic I/O as the desktop's managed-account store. Two copies
+  // drift and only one gets the next fix (S9-L1 §storeLayout).
+  const rootPath = options.root ?? getClaudeManagedAccountsRoot()
   const resolvedCandidate = resolve(candidatePath)
   if (!existsSync(resolvedCandidate) || !existsSync(rootPath)) {
     return null
@@ -67,7 +71,7 @@ export function resolveOwnedClaudeManagedAuthPath(
 
 export function readClaudeManagedAuthFile(
   managedAuthPath: string,
-  filename: '.credentials.json' | 'oauth-account.json'
+  filename: '.credentials.json' | 'oauth-account.json' | '.claude.json' | '.config.json'
 ): string | null {
   const filePath = resolve(managedAuthPath, filename)
   try {

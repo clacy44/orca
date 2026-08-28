@@ -23,6 +23,11 @@ const DesignateParams = z
   .strict()
 const LinkParams = z.object({ homePeerFingerprint: z.string().length(64) }).strict()
 const PrincipalParams = z.object({ principalId: PrincipalIdParam }).strict()
+// `force` is required-true, not a plain boolean flag: a param an older/careless caller could omit
+// and still trigger the release is the exact footgun `--force` exists to make deliberate.
+const ForceWipeLatchParams = z
+  .object({ principalId: PrincipalIdParam, force: z.literal(true) })
+  .strict()
 // B2: a dedicated params shape for provision alone (Rule 1 — a new optional field on an existing
 // host-only method), so an older host that has never seen `acceptUnverifiedPlatform` still parses
 // deprovision's identical-looking params unchanged.
@@ -76,7 +81,8 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
           displayName: principal.displayName,
           delegatedGrantId: principal.delegatedGrantId ?? null,
           laneState: service.laneResidencyState(principal.principalId),
-          boundDeviceIds: service.boundDeviceIds(principal.principalId)
+          boundDeviceIds: service.boundDeviceIds(principal.principalId),
+          unverifiedLegacy: service.isUnverifiedLegacyLane(principal.principalId)
         }))
       }))
   }),
@@ -189,6 +195,17 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
     handler: async (params, ctx) =>
       withConsent(ctx.clientKind, async (service, consent) => ({
         deprovisioned: await service.deprovisionLane(consent, params.principalId)
+      }))
+  }),
+  defineMethod({
+    // S9-L1 §fenceWiring "THE LATCH RELEASE": `orca lane wipe --person <name> --force`. Host-only,
+    // like every other write here — an operator override of a latch is exactly the kind of action
+    // that must originate at the machine, never over a paired connection.
+    name: 'accounts.lane.wipe',
+    params: ForceWipeLatchParams,
+    handler: async (params, ctx) =>
+      withConsent(ctx.clientKind, (service, consent) => ({
+        released: service.forceWipeLatch(consent, params.principalId)
       }))
   })
 ]

@@ -48,6 +48,53 @@ export function releaseUnconfirmedLaneWipe(laneId: string, sequence: number): vo
 }
 
 /**
+ * S9-L1 §fenceWiring "THE LATCH RELEASE", the bounded-budget arm: after a sweep attempt loop
+ * exhausts its OWN retry budget (confirm-dead-window × `LANE_SWEEP_PASSES`, `WIPE_ATTEMPTS` in
+ * `principal-lane-lifecycle.ts`) with no clean read-back, the MARK releases too — not only the
+ * sequence. Distinct from `releaseUnconfirmedLaneWipe`: a caller that never attempted a sweep at
+ * all (`refuseWipe` — it could not even prove ownership of the lane directory) has no sweep
+ * budget to have exhausted, and must keep using that one to leave the mark latched.
+ *
+ * Returns whether the mark actually cleared — false when ANOTHER sequence is still in flight on
+ * this lane (a second wipe racing this one), whose own give-up or success owns the mark; clearing
+ * it here would race that sequence's own transition.
+ */
+export function releaseUnconfirmedLaneWipeBudgetExhausted(
+  laneId: string,
+  sequence: number
+): boolean {
+  releaseWipeSequence(laneId, sequence)
+  if (wipeSequencesInFlight.has(laneId)) {
+    return false
+  }
+  return wipePendingLaneIds.delete(laneId)
+}
+
+/**
+ * `orca lane wipe --person <name> --force` (S9-L1 §fenceWiring "THE LATCH RELEASE"): the exit a
+ * fence-with-no-exit needs once S9-L3 deletes `applyPush`'s `clearLaneWipePendingOnCredentialLoaded`
+ * un-latching path (`lane-wire-authority.ts` no longer calls it — rev 32 already deleted `applyPush`
+ * itself in this tree). Without SOME exit, a lane a wipe could never confirm dead stays
+ * wipe-pending — and therefore un-loginnable AND un-launchable — for the rest of the process.
+ *
+ * Deliberately an OPERATOR action, not a timer: a stale, unconfirmed-dead credential may still be
+ * at rest under this mark (`principal-lane-lifecycle.ts`'s give-up arms never run the sweep), and
+ * `getLaneState` reads this same mark to keep a launch failing closed. An automatic release on the
+ * ordinary confirm-dead budget would silently make that credential launchable again the moment the
+ * budget expired — the informed human judgment call `--force` requires is what makes that
+ * acceptable instead of a silent regression.
+ *
+ * Refuses to act while a sequence is genuinely IN FLIGHT on this lane — a wipe actively mid-sweep
+ * must not have its own fence opened underneath it by an operator racing it from another shell.
+ */
+export function forceReleaseLaneWipeLatch(laneId: string): boolean {
+  if (isLaneWipeInFlight(laneId)) {
+    return false
+  }
+  return wipePendingLaneIds.delete(laneId)
+}
+
+/**
  * A credential deliberately loaded into the lane voids an UNCONFIRMED wipe's mark.
  *
  * Without this the mark is a one-way latch: one Keychain error or one probe that never confirmed

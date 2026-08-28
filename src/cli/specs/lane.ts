@@ -110,6 +110,69 @@ export const LANE_COMMAND_SPECS: CommandSpec[] = [
     examples: ['orca lane bind-link --link 0f1e2d3c...']
   },
   {
+    path: ['lane', 'login'],
+    summary: 'Sign a lane into a Claude account (host-inline, S9-L1 §modules E)',
+    usage:
+      'orca lane login --person <idOrName> --email <e> [--code <c>] [--json]\n       orca lane login --cancel --person <idOrName>',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'email', 'code', 'cancel'],
+    notes: [
+      PERSON_NOTE,
+      '--email is required: it is the account this login must land in, checked after the CLI reports back in — a mismatch or an unverifiable report discards the login and signs in nothing.',
+      '--code answers the paste-code prompt non-interactively (for scripts); omit it to be prompted on this terminal.',
+      "--cancel ends the lane's in-flight host-inline login (started by this verb, on this or another shell) rather than starting a new one; it cannot cancel a login a paired device started.",
+      'Runs inline, exactly like `orca account add` — the authorization URL and the paste prompt appear on this terminal, and the code never touches a log line.',
+      'A paired device and this verb share ONE per-lane login lock: whichever starts first wins, and the other is refused until it finishes, is cancelled, or times out.'
+    ],
+    examples: [
+      'orca lane login --person "Ana Ng" --email ana@example.com',
+      'orca lane login --person "Ana Ng" --email ana@example.com --code 123456',
+      'orca lane login --cancel --person "Ana Ng"'
+    ]
+  },
+  {
+    path: ['lane', 'logout'],
+    summary: 'Sign a lane out of every Claude account it holds',
+    usage: 'orca lane logout --person <idOrName> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person'],
+    notes: [
+      PERSON_NOTE,
+      'Wipes the active credential, every captured login this lane has ever signed into, and the account index. Refuses `logout_incomplete` rather than reporting a sweep that did not finish.'
+    ],
+    examples: ['orca lane logout --person "Ana Ng"']
+  },
+  {
+    path: ['lane', 'accounts'],
+    summary: "List a lane's captured Claude logins",
+    usage: 'orca lane accounts --person <idOrName> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person'],
+    notes: [PERSON_NOTE, 'Up to eight logins per lane; the active one is marked.'],
+    examples: ['orca lane accounts --person "Ana Ng"']
+  },
+  {
+    path: ['lane', 'use'],
+    summary: "Switch a lane's active Claude account to one it already holds",
+    usage: 'orca lane use --person <idOrName> --account <idOrEmail> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'account'],
+    notes: [
+      PERSON_NOTE,
+      '--account accepts a laneAccountId or an exact email from `orca lane accounts`.'
+    ],
+    examples: ['orca lane use --person "Ana Ng" --account ana@example.com']
+  },
+  {
+    path: ['lane', 'wipe'],
+    summary:
+      "Force-release a lane's latched wipe-pending mark without waiting on the confirm-dead budget",
+    usage: 'orca lane wipe --person <idOrName> --force [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'force'],
+    notes: [
+      PERSON_NOTE,
+      "--force is required: this ends a latch a wipe left in place because it could not confirm the lane's credential was gone, and a credential may still be at rest until the next logout, revoke, or deprovision sweeps it.",
+      'Refuses if the lane was not latched wipe-pending — there is nothing to release.'
+    ],
+    examples: ['orca lane wipe --person "Ana Ng" --force']
+  },
+  {
     path: ['lane', 'status'],
     summary: 'Show lane residency, device bindings, and pusher designations',
     usage: 'orca lane status [--person <idOrName>] [--json]',

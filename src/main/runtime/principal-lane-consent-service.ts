@@ -7,11 +7,13 @@ import {
   type ProvisionedPrincipalLane
 } from '../claude-accounts/principal-credential-lane'
 import { wipeLaneCredentials } from '../claude-accounts/principal-lane-credential-sweep'
+import { getLaneWireService } from './lane-wire-service'
 import { seedFreshLaneConfig } from '../claude-accounts/principal-lane-config-seed'
 import { writeLaneSettings } from '../claude-accounts/principal-lane-settings'
 import { mirrorHostUserContentIntoLane } from '../claude-accounts/principal-lane-user-content-mirror'
 import { reconcileOrphanPrincipalLanes } from '../claude-accounts/principal-lane-orphan-reconciliation'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
+import { isUnverifiedLegacyLane } from '../claude-accounts/lane-legacy-provenance'
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import type { DeviceScope, RuntimeTerminalLaneState } from '../../shared/runtime-types'
 import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
@@ -118,6 +120,13 @@ export class PrincipalLaneConsentService {
   /** Whether this principal's lane holds a credential on this host right now (§2h). */
   laneResidencyState(principalId: string): RuntimeTerminalLaneState {
     return resolveLaneResidencyState(principalId, { platform: this.platform })
+  }
+
+  /** §6's S9-L3 `unverified-legacy` migration: a lane loaded before the per-lane login model,
+   * never wiped on sight, never promoted — see `lane-legacy-provenance.ts`. */
+  isUnverifiedLegacyLane(principalId: string): boolean {
+    const laneDir = resolveOwnedPrincipalLaneDir(principalId, { platform: this.platform })
+    return laneDir !== null && isUnverifiedLegacyLane(laneDir)
   }
 
   bindGrant(consent: HostConsent, deviceId: string, principalId: string): void {
@@ -283,17 +292,59 @@ export class PrincipalLaneConsentService {
     seedFreshLaneConfig(laneDir, hostConfigPath)
   }
 
-  /** Async only because §2f's wipe reaches the lane's macOS Keychain item, not just its files. */
+  /**
+   * Async only because §2f's wipe reaches the lane's macOS Keychain item, not just its files.
+   *
+   * S9-L1 §fenceWiring: routed through the attached `PrincipalLaneLifecycle` when the lane wire is
+   * up, so an in-flight login is cancelled in the SAME step the wipe reason requires, and the
+   * directory removal below runs INSIDE the fence's own serialized turn via `finalize` rather than
+   * as an unguarded second step after it resolves. Falls back to the pre-S9-L1 direct wipe only
+   * when no lane wire is attached (a registry with lanes enabled but the wire not yet composed —
+   * not reachable in production `attachPrincipalLaneHost`, which composes both before returning).
+   */
   async deprovisionLane(consent: HostConsent, principalId: string): Promise<boolean> {
     void consent
     const laneDir = resolveOwnedPrincipalLaneDir(principalId)
-    if (laneDir) {
-      // Why: wipe before removing the tree, so a failed rmdir still leaves no credential at rest.
-      await wipeLaneCredentials(laneDir, { platform: this.platform })
+    if (!laneDir) {
+      const deprovisioned = deprovisionPrincipalLane(principalId)
+      this.onPrincipalChanged?.(principalId)
+      return deprovisioned
     }
+    const lifecycle = getLaneWireService()?.coordinator.lifecycle
+    if (lifecycle) {
+      // `finalize` runs INSIDE the fence's own serialized turn, so removal is atomic with the
+      // sweep rather than an unguarded second step after it resolves. The lifecycle's own
+      // `onLaneWiped` listener (wired by `LaneWireService`) already republishes status on both its
+      // success AND give-up arms — calling `onPrincipalChanged` again here would double-publish.
+      let deprovisioned = false
+      await lifecycle.removeLaneOnDeprovision(principalId, () => {
+        deprovisioned = deprovisionPrincipalLane(principalId)
+      })
+      return deprovisioned
+    }
+    await wipeLaneCredentials(laneDir, { platform: this.platform })
     const deprovisioned = deprovisionPrincipalLane(principalId)
     this.onPrincipalChanged?.(principalId)
     return deprovisioned
+  }
+
+  /**
+   * `orca lane wipe --person <name> --force` (§fenceWiring "THE LATCH RELEASE"): the operator's
+   * deliberate end to a latched `laneWipePending` mark, on demand rather than waiting on the
+   * bounded confirm-dead budget. Refuses when the lane wire is not attached (nothing to release —
+   * the mark lives in `lane-wipe-pending.ts`, this host's only writer of it) or the mark was not
+   * set (nothing to force).
+   */
+  forceWipeLatch(consent: HostConsent, principalId: string): boolean {
+    void consent
+    const lifecycle = getLaneWireService()?.coordinator.lifecycle
+    if (!lifecycle) {
+      throw new ClaudeLaneRefusal(
+        'accounts.lane.consent_caller_not_local',
+        'Per-person Claude credential lanes are not enabled on this host yet, so there is nothing to release.'
+      )
+    }
+    return lifecycle.forceReleaseWipeLatch(principalId)
   }
 
   /** Startup sweep; the gate lives in the reconciler and reads both load flags. */
