@@ -41,7 +41,7 @@ import { isLaneWipePending } from './lane-wipe-pending'
 import type { LaneAuthState } from './lane-auth-state'
 import { LaneCredentialWriter } from './lane-credential-writer'
 import { captureLaneLogin, type LaneLoginCaptureResult } from './lane-login-capture'
-import { refusalForAbortedStart } from './lane-login-start-failure'
+import { refusalForAbortedStart, refusalForUnknownAfterPasteWait } from './lane-login-start-failure'
 
 export {
   LOGIN_TIMEOUT_MS,
@@ -206,7 +206,7 @@ export class LaneLoginSessionRegistry {
     // exit-reaped check exists to prevent.
     const afterPasteReady = this.sessions.get(sessionId)
     if (!afterPasteReady || afterPasteReady.state === 'cancelled' || afterPasteReady.exited) {
-      throw refusal('accounts.lane.login_session_unknown')
+      throw refusalForUnknownAfterPasteWait(afterPasteReady)
     }
 
     session.attempts += 1

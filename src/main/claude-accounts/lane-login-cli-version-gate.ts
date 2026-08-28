@@ -5,10 +5,17 @@
  * `claude` build. Rev 39 narrows the pin to a FLOOR: a CLI at or above
  * MIN_TESTED_CLI_VERSION, on the SAME major version, proceeds — logging one
  * advisory line when it is newer than LAST_VERIFIED_CLI_VERSION, since the parser
- * constants may need re-verification — because the constants the gate protects
- * are enforced by the parser itself (the shared allow-list refuses any URL shape
- * it does not recognise, and a changed paste prompt ends in
- * `login_session_expired`, never a silent hazard), whereas the hard ceiling revs
+ * constants may need re-verification — because a same-major newer CLI that has
+ * drifted is still caught by the gate's own backstops: the shared allow-list
+ * (`claude-authorize-url-policy.ts`) refuses any authorize URL shape it does not
+ * recognise; a changed paste prompt never matches, so a submit parked on it is
+ * bounded by the login TTL and surfaces `login_session_expired`, not a silent
+ * hang; the `.orca-managed-claude-auth` marker plus capture reading only the
+ * session's own `<authDir>` keeps a drifted CLI from having its output trusted
+ * outside that directory; and the I6 `auth status --json` cross-check catches a
+ * CLI that stopped honouring `CLAUDE_CONFIG_DIR` (captured credentials that don't
+ * match the isolated dir are never accepted as this session's). Never a silent
+ * hazard. By contrast, the hard ceiling revs
  * 32–38 carried turned every routine CLI update into a login outage (observed
  * 2026-08-28: the installed 2.1.250 exceeded the 2.1.248 ceiling and every lane
  * login on the box was refused). Fails CLOSED only on what actually indicates an
