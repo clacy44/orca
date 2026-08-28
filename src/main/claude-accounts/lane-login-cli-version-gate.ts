@@ -1,15 +1,20 @@
 /**
- * Version gate for lane logins (S9 §4 gate (vi), §risks "OAUTH-CONSTANT PIN
- * DRIFT"). The login parser (lane-login-url-parser.ts) and the OAuth constants
+ * Version gate for lane logins (S9 design rev 39, §4 "Version pin" and §6 hard
+ * gate (vi)). The login parser (lane-login-url-parser.ts) and the OAuth constants
  * (oauth-refresh.ts) are a scraped contract last VERIFIED against one observed
- * `claude` build, not a hard ceiling: a CLI at or above the floor, on the SAME
- * major version, proceeds — logging one advisory line when it is newer than the
- * last-verified build, since the parser constants may need re-verification, but
- * never refusing the login over that alone (§risks "a hard ceiling turns every
- * routine CLI update into a login outage"). Fails CLOSED only on what actually
- * indicates an unrecognized CLI: below the floor, a different major version, or
- * unparsable `--version` output (including a spawn error) — never "assume
- * supported" for those.
+ * `claude` build. Rev 39 narrows the pin to a FLOOR: a CLI at or above
+ * MIN_TESTED_CLI_VERSION, on the SAME major version, proceeds — logging one
+ * advisory line when it is newer than LAST_VERIFIED_CLI_VERSION, since the parser
+ * constants may need re-verification — because the constants the gate protects
+ * are enforced by the parser itself (the shared allow-list refuses any URL shape
+ * it does not recognise, and a changed paste prompt ends in
+ * `login_session_expired`, never a silent hazard), whereas the hard ceiling revs
+ * 32–38 carried turned every routine CLI update into a login outage (observed
+ * 2026-08-28: the installed 2.1.250 exceeded the 2.1.248 ceiling and every lane
+ * login on the box was refused). Fails CLOSED only on what actually indicates an
+ * unrecognized CLI: below the floor, a different major version, or unparsable
+ * `--version` output (including a spawn error) — never "assume supported" for
+ * those.
  */
 import { execFileSync } from 'node:child_process'
 import { resolveClaudeCommand } from '../codex-cli/command'
@@ -20,8 +25,8 @@ import {
 
 const CLI_VERSION_PROBE_TIMEOUT_MS = 5_000
 
-/** Floor of the tested range (§risks: the OAuth constants and login parser were
- * last verified against the installed binary starting at this build). */
+/** Floor of the tested range (rev 39 §4: the oldest build the OAuth constants and
+ * login parser are known to fit; `oauth-refresh.ts` was first verified against it). */
 export const MIN_TESTED_CLI_VERSION = '2.1.177'
 
 /**

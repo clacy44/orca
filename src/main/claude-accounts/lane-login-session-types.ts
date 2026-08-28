@@ -62,6 +62,9 @@ export type Session = {
   promptEdgeWaiters: (() => void)[]
   swept: boolean
   ttlTimer: ReturnType<typeof setTimeout> | null
+  /** Set by the TTL arm before it reaps, so a `start()` still awaiting the URL surfaces
+   * `login_session_expired` instead of the raw error the killed child settles with. */
+  ttlExpired: boolean
   captureOncePromise: Promise<LaneLoginCaptureResult> | null
   /** True from the stdin write until `submitCode`'s exit/reprompt race settles — the signal
    * `onChildSettled` uses to tell §sessionStateMachine's `child-exited` sub-case (b) ("exit INTO

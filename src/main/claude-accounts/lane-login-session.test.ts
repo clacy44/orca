@@ -712,7 +712,11 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
       'https://platform.claude.com/oauth/code/callback'
     )}`
 
-    it('loginStart rejects login_url_unparsed promptly on a fake CLI printing an evil.example.com authorize URL — settles before a 500ms timer, kills the child, sweeps its dir', async () => {
+    // Design rev 39 §2: a non-relayable URL is skipped, not refused on — the refusal is raised on
+    // the paste-prompt edge (the CLI's own "done printing the URL" signal) when nothing relayable
+    // preceded it. A child that prints only the decoy and then STALLS (no prompt, no exit) is
+    // bounded by LOGIN_TIMEOUT_MS and surfaces login_session_expired, never a silent hang.
+    it('loginStart rejects login_url_unparsed promptly when a fake CLI prints an evil.example.com authorize URL and then the paste prompt — settles before a 500ms timer, kills the child, sweeps its dir', async () => {
       const registry = makeRegistry()
       const startPromise = registry.start({
         laneId: 'lane-1',
@@ -739,12 +743,61 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
       const evilUrl = `https://evil.example.com/oauth/authorize?redirect_uri=${encodeURIComponent(
         'https://platform.claude.com/oauth/code/callback'
       )}`
-      loginChildren[0].feed(`Open this link:\n${evilUrl}\n`)
+      loginChildren[0].feed(`Open this link:\n${evilUrl}\n${PASTE_PROMPT}`)
 
       expect(await settledWithin500ms).toBe('rejected')
       await expect(startPromise).rejects.toMatchObject({ code: 'accounts.lane.login_url_unparsed' })
       expect(loginChildren[0].handle.kill).toHaveBeenCalledTimes(1)
       expect(existsSync(laneAccountDir)).toBe(false)
+    })
+
+    // §2 / §5 "printed URL only": the loopback browser-opener variant printed AHEAD of the hosted
+    // URL must not refuse the login — the hosted URL that follows is relayed (mutation proof:
+    // deciding on the first candidate turns this red).
+    it('loginStart relays the hosted URL when a non-relayable loopback variant is printed first', async () => {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      const loopbackUrl = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(
+        'http://localhost:54231/callback'
+      )}`
+      loginChildren[0].feed(`browser opener: ${loopbackUrl}\n`)
+      loginChildren[0].feed(`Open this link:\n${REAL_CLI_SHAPE_URL}\n${PASTE_PROMPT}`)
+
+      const { authorizationUrl } = await startPromise
+      expect(authorizationUrl).toBe(REAL_CLI_SHAPE_URL)
+      expect(loginChildren[0].handle.kill).not.toHaveBeenCalled()
+    })
+
+    // A decoy-only child that never reaches the prompt is bounded by the session timeout, not
+    // parked forever: the TTL arm reaps it with login_session_expired.
+    it('loginStart on a child that prints only a non-relayable URL and then stalls ends in login_session_expired at the TTL, not a hang', async () => {
+      vi.useFakeTimers()
+      try {
+        const registry = makeRegistry()
+        const startPromise = registry.start({
+          laneId: 'lane-1',
+          laneDir,
+          expectedEmail: 'a@x.com',
+          owner: HOST_INLINE
+        })
+        const settled = startPromise.then(
+          () => 'resolved' as const,
+          (error: unknown) => (isClaudeLaneRefusal(error) ? error.code : 'other')
+        )
+        const evilUrl = `https://evil.example.com/oauth/authorize?redirect_uri=${encodeURIComponent(
+          'https://platform.claude.com/oauth/code/callback'
+        )}`
+        loginChildren[0].feed(`Open this link:\n${evilUrl}\n`)
+        await vi.advanceTimersByTimeAsync(LOGIN_TIMEOUT_MS + 1)
+        expect(await settled).toBe('accounts.lane.login_session_expired')
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('negative control: the real 2.1.250 URL shape relays normally, not refused', async () => {
