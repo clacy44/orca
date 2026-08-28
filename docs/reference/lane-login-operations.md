@@ -51,7 +51,7 @@ Quarantine directories below).
 | `accounts.lane.switch_in_progress` | Another write (switch or capture) is already using the lane's write queue. |
 | `accounts.lane.wipe_in_progress` | A logout/revoke/deprovision wipe is running or pending for this lane — retry after. |
 | `accounts.lane.logout_incomplete` | The sweep behind a logout did not finish cleanly — do not treat the lane as clear. |
-| `accounts.lane.login_cli_unsupported` | The installed `claude` build is outside the tested/parseable range. |
+| `accounts.lane.login_cli_unsupported` | The installed `claude` build is below the tested floor, on another major version, or its `--version` output could not be read. Newer builds are allowed (one advisory log line). |
 | `accounts.lane.provisioning_platform_gated` | macOS/Windows lane provisioning is off until its §9 live probe passes (override: `--accept-unverified-platform`). |
 
 All fifteen carry a complete human sentence — the remedy for most is
