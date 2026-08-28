@@ -9,10 +9,9 @@ function authorizeUrl(host: string, path: string, redirect: string): string {
 }
 
 const GOOD_REDIRECT = 'https://platform.claude.com/oauth/code/callback'
-const GOOD_REDIRECT_CONSOLE = 'https://console.anthropic.com/oauth/code/callback'
 
 describe('isRelayableAuthorizeUrl — the allow-list matrix', () => {
-  const hosts = ['claude.com', 'claude.ai', 'platform.claude.com', 'console.anthropic.com']
+  const hosts = ['claude.com', 'claude.ai', 'platform.claude.com']
   const paths = ['/oauth/authorize', '/cai/oauth/authorize']
 
   for (const host of hosts) {
@@ -23,12 +22,27 @@ describe('isRelayableAuthorizeUrl — the allow-list matrix', () => {
     }
   }
 
-  it('accepts a redirect_uri hosted on console.anthropic.com', () => {
+  // Design §2/§5 (R-32b): the redirect host is `platform.claude.com` and nothing else. A host with
+  // no build or design provenance — console.anthropic.com is in neither 2.1.250's strings nor the
+  // design — is not allow-listed as a guess.
+  it('refuses a redirect_uri hosted on console.anthropic.com (no observed build or design names it)', () => {
     expect(
       isRelayableAuthorizeUrl(
-        authorizeUrl('claude.com', '/cai/oauth/authorize', GOOD_REDIRECT_CONSOLE)
+        authorizeUrl(
+          'claude.com',
+          '/cai/oauth/authorize',
+          'https://console.anthropic.com/oauth/code/callback'
+        )
       )
-    ).toBe(true)
+    ).toBe(false)
+  })
+
+  it('refuses console.anthropic.com as the authorize origin for the same reason', () => {
+    expect(
+      isRelayableAuthorizeUrl(
+        authorizeUrl('console.anthropic.com', '/oauth/authorize', GOOD_REDIRECT)
+      )
+    ).toBe(false)
   })
 
   it('refuses a URL with no redirect_uri at all', () => {
@@ -285,6 +299,72 @@ describe('describeAuthorizeUrlRejection', () => {
       GOOD_REDIRECT
     )}&redirect_uri=${encodeURIComponent('https://evil.example.com/cb')}`
     expect(describeAuthorizeUrlRejection(duplicated)).not.toContain('host was')
+  })
+
+  // Each failed check names ITSELF. An allow-listed host is never blamed for a scheme, port or
+  // path failure, and the redirect sentence names the redirect's own failing check.
+  it('names an explicit port, not the (allow-listed) host, as the cause', () => {
+    const description = describeAuthorizeUrlRejection(
+      `https://claude.com:8443/cai/oauth/authorize?redirect_uri=${encodeURIComponent(GOOD_REDIRECT)}`
+    )
+    expect(description).toBe('its host "claude.com" named an explicit port')
+  })
+
+  it('names a plaintext scheme as the cause, without blaming the host', () => {
+    const description = describeAuthorizeUrlRejection(
+      `http://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(GOOD_REDIRECT)}`
+    )
+    expect(description).toBe('it was not an https address')
+  })
+
+  it('names an unexpected pathname as the cause, not the host', () => {
+    const description = describeAuthorizeUrlRejection(
+      `https://claude.com/anything?redirect_uri=${encodeURIComponent(GOOD_REDIRECT)}`
+    )
+    expect(description).toBe('its path on "claude.com" was not Claude\'s authorization endpoint')
+  })
+
+  it('names smuggled userinfo as the cause when the host itself is allow-listed', () => {
+    const description = describeAuthorizeUrlRejection(
+      `https://user:pw@claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(GOOD_REDIRECT)}`
+    )
+    expect(description).toBe('it carried a user name or password in front of its host')
+  })
+
+  it('names the foreign host, not the userinfo, when userinfo fronts a foreign host', () => {
+    const description = describeAuthorizeUrlRejection(
+      `https://claude.com@evil.example.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(GOOD_REDIRECT)}`
+    )
+    expect(description).toBe('its host was "evil.example.com"')
+  })
+
+  it('names a plaintext redirect scheme as the cause, not the (allow-listed) redirect host', () => {
+    const description = describeAuthorizeUrlRejection(
+      authorizeUrl(
+        'claude.com',
+        '/cai/oauth/authorize',
+        'http://platform.claude.com/oauth/code/callback'
+      )
+    )
+    expect(description).toBe('the redirect address inside it was not https')
+  })
+
+  it('names a wrong redirect pathname distinctly from a wrong redirect host', () => {
+    const description = describeAuthorizeUrlRejection(
+      authorizeUrl('claude.com', '/cai/oauth/authorize', 'https://platform.claude.com/other')
+    )
+    expect(description).toBe(
+      'the redirect address inside it pointed at "platform.claude.com" but not at the callback path'
+    )
+  })
+
+  // Pins the exact redirect-host wording so a re-wording to `its host was "localhost"` cannot pass,
+  // and pins that a foreign redirect host is named as the host even when its scheme is also wrong.
+  it('the redirect-host sentence is the redirect sentence verbatim, never the authorize-host one', () => {
+    const url = `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent('http://localhost:54231/callback')}`
+    expect(describeAuthorizeUrlRejection(url)).toBe(
+      'the redirect address inside it pointed at "localhost"'
+    )
   })
 
   // MP: reverting to "always report the authorize URL's own hostname" (the pre-fix shape) would

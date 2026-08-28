@@ -16,12 +16,9 @@
  *     pathnames — `/oauth/authorize` and `/cai/oauth/authorize` — and exactly one redirect
  *     pathname, `oauth/code/callback`, paired in the binary with `//claude.com/cai/oauth/authorize`
  *     and with `platform.claude.com` elsewhere (also the OAuth token host, `oauth-refresh.ts`).
- *     `console.anthropic.com` does not appear in this build's strings at all, and the S9 design
- *     (rev 38) does not name it either — it is allow-listed here as forward-compatibility for
- *     another legitimate Anthropic authorize/redirect surface a future build may use, NOT because
- *     it traces to an observed build or to the design (which names only `platform.claude.com` as
- *     the redirect host, R-32b). Every other entry in the allow-lists below traces to one or the
- *     other; this is the one exception, and is called out as one on that basis alone.
+ *     Every entry in the allow-lists below traces to one of those two sources or to the S9 design
+ *     (rev 39, §2/§5); a host with no build or design provenance is NOT listed — widening the
+ *     allow-list is a deliberate, reviewed change, never a forward-compatibility guess.
  * Re-verify both ways whenever the pinned CLI version bumps (see
  * lane-login-cli-version-gate.ts's LAST_VERIFIED_CLI_VERSION) and update this comment together
  * with that constant — they must never name different builds.
@@ -32,8 +29,7 @@
 const ALLOWED_AUTHORIZE_HOSTS: readonly string[] = [
   'claude.com',
   'claude.ai',
-  'platform.claude.com',
-  'console.anthropic.com'
+  'platform.claude.com'
 ]
 
 /** Pathnames a relayable authorize URL's OWN path may equal — the two observed authorize
@@ -44,15 +40,15 @@ const ALLOWED_AUTHORIZE_PATHNAMES: readonly string[] = ['/oauth/authorize', '/ca
  * (e.g. a `localhost:<ephemeral>` loopback variant the CLI also prints) must never be relayed: a
  * code delivered to an unauthenticated loopback port on the person's own desktop is a plaintext
  * credential leak (MP). */
-const ALLOWED_REDIRECT_HOSTS: readonly string[] = ['platform.claude.com', 'console.anthropic.com']
+const ALLOWED_REDIRECT_HOSTS: readonly string[] = ['platform.claude.com']
 
 /** The one pathname a relayable `redirect_uri` may have. */
 const REQUIRED_REDIRECT_PATHNAME = '/oauth/code/callback'
 
 /**
- * True when `origin` (an authorize URL's own origin, or its `redirect_uri`'s origin — the same
- * shape of check applies to both) is a bare `https:` origin on one of `allowedHosts`, at one of
- * `allowedPathnames`: no userinfo (`user:pass@host` would leave the hostname check passing while
+ * Names the first check `url` (an authorize URL's own origin, or its `redirect_uri`'s origin — the
+ * same shape of check applies to both) fails, or null when it is a bare `https:` origin on one of
+ * `allowedHosts`, at one of `allowedPathnames`: no userinfo (`user:pass@host` would leave the hostname check passing while
  * routing credentials at parse time to an attacker-controlled sink), no explicit port (a
  * same-host, different-port origin is not the same origin), and hostname compared by exact string
  * equality — which by construction also rejects a trailing-dot FQDN variant
@@ -61,21 +57,33 @@ const REQUIRED_REDIRECT_PATHNAME = '/oauth/code/callback'
  * Pathname is likewise exact-string-compared against the parsed (already dot-segment-normalized)
  * `.pathname`, which is what rejects a `//oauth/authorize` double slash or an unencoded `..`
  * traversal segment (either normalizes to something that is not one of `allowedPathnames`, or
- * collapses harmlessly to one that is).
+ * collapses harmlessly to one that is). The host is checked first only so the refusal sentence
+ * names the host for a foreign origin (`http://localhost:<port>/callback` reads as "pointed at
+ * localhost", not "was not https"); every check must pass regardless of order.
  */
-function isTrustedOrigin(
+type OriginCheck = 'scheme' | 'userinfo' | 'port' | 'host' | 'pathname'
+
+function failedOriginCheck(
   url: URL,
   allowedHosts: readonly string[],
   allowedPathnames: readonly string[]
-): boolean {
-  return (
-    url.protocol === 'https:' &&
-    url.username === '' &&
-    url.password === '' &&
-    url.port === '' &&
-    allowedHosts.includes(url.hostname) &&
-    allowedPathnames.includes(url.pathname)
-  )
+): OriginCheck | null {
+  if (!allowedHosts.includes(url.hostname)) {
+    return 'host'
+  }
+  if (url.protocol !== 'https:') {
+    return 'scheme'
+  }
+  if (url.username !== '' || url.password !== '') {
+    return 'userinfo'
+  }
+  if (url.port !== '') {
+    return 'port'
+  }
+  if (!allowedPathnames.includes(url.pathname)) {
+    return 'pathname'
+  }
+  return null
 }
 
 /** Which check `classifyAuthorizeUrl` failed on — lets a refusal sentence name the actual cause
@@ -84,10 +92,10 @@ function isTrustedOrigin(
  * exactly this case: the authorize origin is `claude.com`, allow-listed, and the redirect is not). */
 export type AuthorizeUrlRejectionReason =
   | 'unparsable'
-  | 'authorize_origin'
+  | `authorize_${OriginCheck}`
   | 'redirect_uri_count'
   | 'redirect_uri_unparsable'
-  | 'redirect_origin'
+  | `redirect_${OriginCheck}`
 
 export type AuthorizeUrlClassification =
   | { ok: true }
@@ -104,8 +112,13 @@ function classifyAuthorizeUrl(url: string): AuthorizeUrlClassification {
   } catch {
     return { ok: false, reason: 'unparsable', hostname: null }
   }
-  if (!isTrustedOrigin(parsed, ALLOWED_AUTHORIZE_HOSTS, ALLOWED_AUTHORIZE_PATHNAMES)) {
-    return { ok: false, reason: 'authorize_origin', hostname: parsed.hostname }
+  const authorizeCheck = failedOriginCheck(
+    parsed,
+    ALLOWED_AUTHORIZE_HOSTS,
+    ALLOWED_AUTHORIZE_PATHNAMES
+  )
+  if (authorizeCheck) {
+    return { ok: false, reason: `authorize_${authorizeCheck}`, hostname: parsed.hostname }
   }
   const redirectUriValues = parsed.searchParams.getAll('redirect_uri')
   if (redirectUriValues.length !== 1) {
@@ -117,18 +130,21 @@ function classifyAuthorizeUrl(url: string): AuthorizeUrlClassification {
   } catch {
     return { ok: false, reason: 'redirect_uri_unparsable', hostname: parsed.hostname }
   }
-  if (!isTrustedOrigin(redirect, ALLOWED_REDIRECT_HOSTS, [REQUIRED_REDIRECT_PATHNAME])) {
-    return { ok: false, reason: 'redirect_origin', hostname: redirect.hostname }
+  const redirectCheck = failedOriginCheck(redirect, ALLOWED_REDIRECT_HOSTS, [
+    REQUIRED_REDIRECT_PATHNAME
+  ])
+  if (redirectCheck) {
+    return { ok: false, reason: `redirect_${redirectCheck}`, hostname: redirect.hostname }
   }
   return { ok: true }
 }
 
 /**
  * True when `url` is a printed (not loopback-callback) Claude authorization URL safe to relay:
- * its own origin passes `isTrustedOrigin` against the authorize allow-list, and it carries EXACTLY
+ * its own origin passes `failedOriginCheck` against the authorize allow-list, and it carries EXACTLY
  * ONE `redirect_uri` query parameter (`searchParams.getAll`, not `.get` — reading only the first
  * of two conflicting values is not validating the URL, P2d), itself a `redirect_uri` whose origin
- * passes `isTrustedOrigin` against the redirect allow-list.
+ * passes `failedOriginCheck` against the redirect allow-list.
  */
 export function isRelayableAuthorizeUrl(url: string): boolean {
   return classifyAuthorizeUrl(url).ok
@@ -146,16 +162,35 @@ export function describeAuthorizeUrlRejection(url: string): string {
   if (result.ok) {
     return 'it was in fact safe to relay'
   }
+  // Every sentence names the check that failed and, at most, the hostname that failed it —
+  // never the query string. A sentence that named an allow-listed host for a scheme, port or
+  // path failure would tell the operator the opposite of what happened.
   switch (result.reason) {
     case 'unparsable':
       return 'the printed text was not a valid URL at all'
-    case 'authorize_origin':
+    case 'authorize_scheme':
+      return 'it was not an https address'
+    case 'authorize_userinfo':
+      return 'it carried a user name or password in front of its host'
+    case 'authorize_port':
+      return `its host "${result.hostname}" named an explicit port`
+    case 'authorize_host':
       return `its host was "${result.hostname}"`
+    case 'authorize_pathname':
+      return `its path on "${result.hostname}" was not Claude's authorization endpoint`
     case 'redirect_uri_count':
       return 'it did not carry exactly one redirect address'
     case 'redirect_uri_unparsable':
       return 'the redirect address inside it was not a valid URL'
-    case 'redirect_origin':
+    case 'redirect_scheme':
+      return 'the redirect address inside it was not https'
+    case 'redirect_userinfo':
+      return 'the redirect address inside it carried a user name or password'
+    case 'redirect_port':
+      return `the redirect address inside it named an explicit port on "${result.hostname}"`
+    case 'redirect_host':
       return `the redirect address inside it pointed at "${result.hostname}"`
+    case 'redirect_pathname':
+      return `the redirect address inside it pointed at "${result.hostname}" but not at the callback path`
   }
 }
