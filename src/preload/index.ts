@@ -42,6 +42,17 @@ import {
   PRINCIPAL_LANE_STATUS_RENAME_CHANNEL,
   type PrincipalLaneStatusSnapshot
 } from '../shared/principal-lane-status-ipc'
+import {
+  LANE_LOGIN_CANCEL_CHANNEL,
+  LANE_LOGIN_CHANGED_CHANNEL,
+  LANE_LOGIN_GET_CHANNEL,
+  LANE_LOGIN_LOGOUT_CHANNEL,
+  LANE_LOGIN_REMOVE_ACCOUNT_CHANNEL,
+  LANE_LOGIN_SELECT_ACCOUNT_CHANNEL,
+  LANE_LOGIN_START_CHANNEL,
+  LANE_LOGIN_SUBMIT_CODE_CHANNEL,
+  type LaneLoginEnvironmentSnapshotDto
+} from '../shared/lane-login-ipc'
 import type { ProjectExecutionRuntimeResolution } from '../shared/project-execution-runtime'
 import type { StartupCommandDelivery } from '../shared/codex-startup-delivery'
 import type {
@@ -1383,6 +1394,32 @@ const api = {
     refreshHost: (environmentId: string) =>
       ipcRenderer.invoke(PRINCIPAL_LANE_STATUS_REFRESH_HOST_CHANNEL, { environmentId })
   } satisfies PreloadApi['principalLaneStatus'],
+
+  // S9-L2 (design rev 38 §2l/§3): the lane-login client's renderer surface — one environment
+  // (paired host) at a time, mirroring principalLaneStatus's per-host delegate/refresh shape.
+  laneLogin: {
+    get: (environmentId: string) => ipcRenderer.invoke(LANE_LOGIN_GET_CHANNEL, environmentId),
+    onChanged: (callback: (snapshot: LaneLoginEnvironmentSnapshotDto) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        snapshot: LaneLoginEnvironmentSnapshotDto
+      ): void => callback(snapshot)
+      ipcRenderer.on(LANE_LOGIN_CHANGED_CHANNEL, listener)
+      return () => ipcRenderer.removeListener(LANE_LOGIN_CHANGED_CHANNEL, listener)
+    },
+    start: (environmentId: string, expectedEmail: string) =>
+      ipcRenderer.invoke(LANE_LOGIN_START_CHANNEL, { environmentId, expectedEmail }),
+    submitCode: (environmentId: string, loginSessionId: string, code: string) =>
+      ipcRenderer.invoke(LANE_LOGIN_SUBMIT_CODE_CHANNEL, { environmentId, loginSessionId, code }),
+    cancel: (environmentId: string, loginSessionId: string) =>
+      ipcRenderer.invoke(LANE_LOGIN_CANCEL_CHANNEL, { environmentId, loginSessionId }),
+    selectAccount: (environmentId: string, laneAccountId: string) =>
+      ipcRenderer.invoke(LANE_LOGIN_SELECT_ACCOUNT_CHANNEL, { environmentId, laneAccountId }),
+    removeAccount: (environmentId: string, laneAccountId: string) =>
+      ipcRenderer.invoke(LANE_LOGIN_REMOVE_ACCOUNT_CHANNEL, { environmentId, laneAccountId }),
+    logout: (environmentId: string) =>
+      ipcRenderer.invoke(LANE_LOGIN_LOGOUT_CHANNEL, { environmentId })
+  } satisfies PreloadApi['laneLogin'],
 
   feedback: {
     submit: (args: {
