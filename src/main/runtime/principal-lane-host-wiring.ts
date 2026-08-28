@@ -12,7 +12,10 @@ import { attachComposedLaneWire, detachComposedLaneWire } from './lane-wire-comp
 import { CLAUDE_LANES_DIRNAME } from '../claude-accounts/claude-lanes-root'
 import { resolveOwnedPrincipalLaneDir } from '../claude-accounts/principal-credential-lane'
 import { reconcileLaneAccountStore } from '../claude-accounts/lane-account-store-reconciliation'
-import { markLaneWipePending } from '../claude-accounts/lane-wipe-pending'
+import {
+  markLaneWipePending,
+  releaseUnconfirmedLaneWipe
+} from '../claude-accounts/lane-wipe-pending'
 
 /**
  * Where the principal registry becomes the host's live authority (S9 §2a, §6).
@@ -96,7 +99,12 @@ export function attachPrincipalLaneHost(input: {
     // is the publish — `reconcileLaneAccountStore` itself only logs and reports, deliberately, per
     // its own docstring.
     if (result.reappeared) {
-      markLaneWipePending(principalId)
+      // Mark-only, same shape as `refuseWipe` (principal-lane-lifecycle.ts): the sequence ends
+      // immediately so the mark latches without pinning `isLaneWipeInFlight` for the process
+      // lifetime — otherwise `forceReleaseLaneWipeLatch`, the only exit this slice ships, refuses
+      // forever against exactly this arm.
+      const sequence = markLaneWipePending(principalId)
+      releaseUnconfirmedLaneWipe(principalId, sequence)
       console.warn(
         `[principal-lane] A login capture directory for ${principalId} reappeared during startup reconciliation; marking the lane wipe-pending rather than reporting it clean`
       )

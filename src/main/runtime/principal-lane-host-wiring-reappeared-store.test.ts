@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PrincipalGrantRow, PrincipalGrantSource } from './principal-registry'
 import {
+  forceReleaseLaneWipeLatch,
   isLaneWipePending,
   resetLaneWipePendingForTests
 } from '../claude-accounts/lane-wipe-pending'
@@ -102,6 +103,10 @@ describe('attachPrincipalLaneHost — publishing a reconciliation surviving-chil
 
     expect(reconcileMock).toHaveBeenCalled()
     expect(isLaneWipePending(person.principalId)).toBe(true)
+    // The mark must latch WITHOUT pinning the sequence in flight — otherwise the operator's only
+    // exit (`orca lane wipe --force`) refuses forever against exactly this arm.
+    expect(forceReleaseLaneWipeLatch(person.principalId)).toBe(true)
+    expect(isLaneWipePending(person.principalId)).toBe(false)
   })
 
   it('does not mark the lane when reconciliation reports a clean pass', async () => {
