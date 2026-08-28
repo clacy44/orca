@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   clearLaneWipePending,
   clearLaneWipePendingOnCredentialLoaded,
+  forceReleaseLaneWipeLatch,
   isLaneWipeInFlight,
   isLaneWipePending,
   markLaneWipePending,
@@ -54,6 +55,43 @@ describe('the lane wipe-pending mark', () => {
     // A credential deliberately pushed in voids an UNCONFIRMED mark, never one still sweeping.
     expect(clearLaneWipePendingOnCredentialLoaded(LANE_A)).toBe(true)
     expect(isLaneWipePending(LANE_A)).toBe(false)
+  })
+
+  it('`--force` releases a latched, no-longer-in-flight mark and reports it released', () => {
+    const sequence = markLaneWipePending(LANE_A)
+    releaseUnconfirmedLaneWipe(LANE_A, sequence)
+    expect(isLaneWipePending(LANE_A)).toBe(true)
+
+    expect(forceReleaseLaneWipeLatch(LANE_A)).toBe(true)
+
+    expect(isLaneWipePending(LANE_A)).toBe(false)
+  })
+
+  it('`--force` reports nothing released when the lane was never latched', () => {
+    expect(forceReleaseLaneWipeLatch(LANE_A)).toBe(false)
+  })
+
+  // Mutation proof: dropping the `isLaneWipeInFlight` guard (releasing unconditionally) turns
+  // this red — a wipe actively mid-sweep would have its own fence opened underneath it by an
+  // operator racing it from another shell.
+  it('`--force` refuses to act while a sequence is genuinely still in flight', () => {
+    markLaneWipePending(LANE_A)
+
+    expect(forceReleaseLaneWipeLatch(LANE_A)).toBe(false)
+
+    expect(isLaneWipePending(LANE_A)).toBe(true)
+    expect(isLaneWipeInFlight(LANE_A)).toBe(true)
+  })
+
+  it('`--force` never touches another lane', () => {
+    const sequence = markLaneWipePending(LANE_A)
+    releaseUnconfirmedLaneWipe(LANE_A, sequence)
+    markLaneWipePending(LANE_B)
+
+    forceReleaseLaneWipeLatch(LANE_A)
+
+    expect(isLaneWipePending(LANE_A)).toBe(false)
+    expect(isLaneWipePending(LANE_B)).toBe(true)
   })
 
   it("never touches another lane's mark", () => {

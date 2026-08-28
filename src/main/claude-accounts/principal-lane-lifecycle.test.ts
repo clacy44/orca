@@ -11,7 +11,6 @@ import {
 } from './principal-lane-lifecycle'
 import { prepareLaneLaunch } from './principal-lane-preparation'
 import { PrincipalLaneStore } from './principal-lane-store'
-import { wipeResidentLanesAtStartup } from './principal-lane-startup-wipe'
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpdir() } }))
 
@@ -36,9 +35,6 @@ describe('the principal lane lifecycle wipe', () => {
 
   const laneDir = (laneId: string): string => join(lanesRoot, laneId)
   const credentialsPath = (laneId: string): string => join(laneDir(laneId), '.credentials.json')
-
-  const runStartupPass = () =>
-    wipeResidentLanesAtStartup({ laneOptions: { lanesRoot, platform: 'linux' } })
 
   const makeCoordinator = (): LaneCredentialCoordinator =>
     new LaneCredentialCoordinator({ laneOptions: { lanesRoot, platform: 'linux' } })
@@ -68,7 +64,7 @@ describe('the principal lane lifecycle wipe', () => {
     await lanes.syncLane(LANE_A, 'launch')
     writeFileSync(join(laneDir(LANE_A), '.credentials.json.9.abc.tmp'), credentials('staged'))
 
-    const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(outcome.completed).toBe(true)
     expect(outcome.removed).toContain('.credentials.json')
@@ -93,7 +89,7 @@ describe('the principal lane lifecycle wipe', () => {
       marks.push(isLaneWipePending(laneId))
     })
 
-    await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
 
     // The mark is already set by the time the kill half runs, and only lifted after this — a
     // clean sweep must never leave it set past a completed wipe.
@@ -122,7 +118,7 @@ describe('the principal lane lifecycle wipe', () => {
     const pull = lanes.pullLaneUsage()
     await Promise.resolve()
 
-    const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
     order.push('swept')
     await pull
 
@@ -138,7 +134,7 @@ describe('the principal lane lifecycle wipe', () => {
     const lanes = makeCoordinator()
     await lanes.syncLane(LANE_A, 'launch')
     let sawSkip: string | undefined
-    const wipe = lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const wipe = lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
     const pulled = await lanes.pullLaneUsage()
     sawSkip = pulled.skipped.find((row) => row.laneId === LANE_A)?.reason
     await wipe
@@ -154,7 +150,7 @@ describe('the principal lane lifecycle wipe', () => {
       // A directory the sweep cannot unlink from: the credential is still at rest afterwards.
       chmodSync(laneDir(LANE_A), 0o500)
 
-      const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+      const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
       chmodSync(laneDir(LANE_A), 0o700)
 
       expect(outcome.completed).toBe(false)
@@ -175,7 +171,7 @@ describe('the principal lane lifecycle wipe', () => {
       probeDeathTimeoutMs: 5
     })
 
-    const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(outcome.completed).toBe(false)
     // The credential is still on disk: the sweep never ran past the unconfirmed probe.
@@ -190,7 +186,7 @@ describe('the principal lane lifecycle wipe', () => {
     await lanes.syncLane(LANE_A, 'launch')
     rmSync(join(laneDir(LANE_A), '.orca-principal-lane'))
 
-    const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(outcome.completed).toBe(false)
     expect(existsSync(credentialsPath(LANE_A))).toBe(true)
@@ -214,7 +210,7 @@ describe('the principal lane lifecycle wipe', () => {
     const lanes = makeCoordinator()
     rmSync(laneDir(LANE_A), { recursive: true, force: true })
 
-    const outcome = await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(outcome.completed).toBe(true)
     expect(isLaneWipePending(LANE_A)).toBe(false)
@@ -232,7 +228,7 @@ describe('the principal lane lifecycle wipe', () => {
       onLaneWiped: (laneId) => changed.push(laneId)
     })
 
-    const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(outcome.completed).toBe(false)
     // The listener refuses outstanding switch requests by name and republishes the status: the
@@ -240,17 +236,39 @@ describe('the principal lane lifecycle wipe', () => {
     expect(changed).toEqual([LANE_A])
   })
 
-  it('starts no lane wipe once the startup pass has spent its budget', async () => {
-    const outcomes = await wipeResidentLanesAtStartup({
-      laneOptions: { lanesRoot, platform: 'linux' },
-      budgetMs: 0
+  it('`orca lane wipe --force` releases a latched mark left by a give-up arm and republishes', async () => {
+    const changed: string[] = []
+    const lifecycle = new PrincipalLaneLifecycle({
+      resolveLaneDir: (laneId) => laneDir(laneId),
+      laneDirExists: (laneId) => existsSync(laneDir(laneId)),
+      serializeLaneWrite: (_laneId, run) => run(),
+      invalidateProbes: () => new Promise<void>(() => {}),
+      platform: 'linux',
+      probeDeathTimeoutMs: 5,
+      onLaneWiped: (laneId) => changed.push(laneId)
+    })
+    await lifecycle.wipeOnExplicitLogout(LANE_A)
+    expect(isLaneWipePending(LANE_A)).toBe(true)
+    changed.length = 0
+
+    const released = lifecycle.forceReleaseWipeLatch(LANE_A)
+
+    expect(released).toBe(true)
+    expect(isLaneWipePending(LANE_A)).toBe(false)
+    // Republished, same listener the automatic arms use — a subscriber must not need to poll.
+    expect(changed).toEqual([LANE_A])
+  })
+
+  it('`orca lane wipe --force` reports nothing released for a lane that is not latched', () => {
+    const lifecycle = new PrincipalLaneLifecycle({
+      resolveLaneDir: (laneId) => laneDir(laneId),
+      laneDirExists: (laneId) => existsSync(laneDir(laneId)),
+      serializeLaneWrite: (_laneId, run) => run(),
+      invalidateProbes: async () => {},
+      platform: 'linux'
     })
 
-    // Bounded because this pass is awaited in front of the app window; the lanes it could not
-    // reach stay wipe-pending rather than being reported wiped.
-    expect(outcomes.every((row) => row.completed)).toBe(false)
-    expect(existsSync(credentialsPath(LANE_A))).toBe(true)
-    expect(isLaneWipePending(LANE_A)).toBe(true)
+    expect(lifecycle.forceReleaseWipeLatch(LANE_A)).toBe(false)
   })
 
   it('sweeps a lane that crashed holding only a staged .tmp credential blob', async () => {
@@ -260,11 +278,11 @@ describe('the principal lane lifecycle wipe', () => {
     rmSync(credentialsPath(LANE_A))
     const staged = join(laneDir(LANE_A), '.credentials.json.9.abcd.tmp')
     writeFileSync(staged, credentials('rt-staged'))
+    const lanes = makeCoordinator()
 
-    const outcomes = await runStartupPass()
+    const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
 
-    expect(outcomes.map((row) => row.laneId)).toContain(LANE_A)
-    expect(outcomes.every((row) => row.completed)).toBe(true)
+    expect(outcome.completed).toBe(true)
     expect(existsSync(staged)).toBe(false)
   })
 
@@ -279,7 +297,7 @@ describe('the principal lane lifecycle wipe', () => {
     })
     const store = new PrincipalLaneStore({ lanesRoot, platform: 'linux' })
 
-    const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+    const outcome = await lifecycle.wipeOnExplicitLogout(LANE_A)
 
     expect(outcome.completed).toBe(false)
     expect(existsSync(credentialsPath(LANE_A))).toBe(true)
@@ -290,20 +308,6 @@ describe('the principal lane lifecycle wipe', () => {
       /clearing your Claude account/i
     )
   })
-
-  it.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
-    'returns empty rather than throwing when the lanes root cannot be read',
-    async () => {
-      // The startup wipe is AWAITED inside `whenReady`, whose chain has no `.catch`: an EACCES or
-      // a Windows Protected-DACL EPERM here would take the window and the RPC server with it.
-      chmodSync(lanesRoot, 0o000)
-
-      const outcomes = await runStartupPass()
-      chmodSync(lanesRoot, 0o700)
-
-      expect(outcomes).toEqual([])
-    }
-  )
 
   it('removes the revoked lane inside the same write queue the sweep took', async () => {
     const queue: string[] = []
@@ -341,13 +345,30 @@ describe('the principal lane lifecycle wipe', () => {
     expect(existsSync(laneDir(LANE_B))).toBe(true)
   })
 
-  it('wipes every resident lane at startup, with nothing left holding a credential', async () => {
-    const outcomes = await runStartupPass()
+  it('logs out one lane without touching the other', async () => {
+    // S9-L1: no startup batch wipe any more — each lane's logout is its own explicit act.
+    const lanes = makeCoordinator()
+    await lanes.syncLane(LANE_A, 'launch')
+    await lanes.syncLane(LANE_B, 'launch')
 
-    expect(outcomes.map((row) => row.laneId).sort()).toEqual([LANE_A, LANE_B].sort())
-    expect(outcomes.every((row) => row.completed)).toBe(true)
+    const outcome = await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
+
+    expect(outcome.completed).toBe(true)
     expect(existsSync(credentialsPath(LANE_A))).toBe(false)
-    expect(existsSync(credentialsPath(LANE_B))).toBe(false)
+    expect(existsSync(credentialsPath(LANE_B))).toBe(true)
+  })
+
+  it('removes the directory and its credential on deprovision', async () => {
+    const lanes = makeCoordinator()
+    await lanes.syncLane(LANE_A, 'launch')
+
+    const outcome = await lanes.lifecycle.removeLaneOnDeprovision(LANE_A, (dir) =>
+      rmSync(dir, { recursive: true, force: true })
+    )
+
+    expect(outcome.laneRemoved).toBe(true)
+    expect(existsSync(laneDir(LANE_A))).toBe(false)
+    expect(existsSync(laneDir(LANE_B))).toBe(true)
   })
 
   /**
@@ -375,7 +396,7 @@ describe('the principal lane lifecycle wipe', () => {
         }
       })
 
-      const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+      const outcome = await lifecycle.wipeOnExplicitLogout(LANE_A)
 
       expect(outcome.completed).toBe(true)
       // The cancel fires BEFORE the queue is ever entered — it is not a member of the queue, it
@@ -399,7 +420,7 @@ describe('the principal lane lifecycle wipe', () => {
         }
       })
 
-      const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+      const outcome = await lifecycle.wipeOnExplicitLogout(LANE_A)
 
       expect(outcome.completed).toBe(false)
       expect(cancelled).toEqual([LANE_A])
@@ -417,7 +438,7 @@ describe('the principal lane lifecycle wipe', () => {
         cancelLaneLoginSessions: (laneId) => cancelled.push(laneId)
       })
 
-      const outcome = await lifecycle.wipeOnLastConnectionClose(LANE_A)
+      const outcome = await lifecycle.wipeOnExplicitLogout(LANE_A)
 
       expect(outcome.completed).toBe(true)
       expect(cancelled).toEqual([LANE_A])
@@ -438,7 +459,7 @@ describe('the principal lane lifecycle wipe', () => {
       const cancelSpy = vi.spyOn(lanes.loginSessions, 'cancelLaneLoginSessions')
       const sweepSpy = vi.spyOn(lanes.loginSessions, 'sweepCancelledLoginDirs')
 
-      await lanes.lifecycle.wipeOnLastConnectionClose(LANE_A)
+      await lanes.lifecycle.wipeOnExplicitLogout(LANE_A)
 
       expect(cancelSpy).toHaveBeenCalledWith(LANE_A)
       expect(sweepSpy).toHaveBeenCalledWith(LANE_A)

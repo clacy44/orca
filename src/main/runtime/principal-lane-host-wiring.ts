@@ -12,6 +12,7 @@ import { attachComposedLaneWire, detachComposedLaneWire } from './lane-wire-comp
 import { CLAUDE_LANES_DIRNAME } from '../claude-accounts/claude-lanes-root'
 import { resolveOwnedPrincipalLaneDir } from '../claude-accounts/principal-credential-lane'
 import { reconcileLaneAccountStore } from '../claude-accounts/lane-account-store-reconciliation'
+import { markLaneWipePending } from '../claude-accounts/lane-wipe-pending'
 
 /**
  * Where the principal registry becomes the host's live authority (S9 §2a, §6).
@@ -84,8 +85,21 @@ export function attachPrincipalLaneHost(input: {
   const lanesRoot = join(input.userDataPath, CLAUDE_LANES_DIRNAME)
   for (const principalId of registry.boundPrincipalIds()) {
     const laneDir = resolveOwnedPrincipalLaneDir(principalId, { lanesRoot })
-    if (laneDir) {
-      reconcileLaneAccountStore(laneDir)
+    if (!laneDir) {
+      continue
+    }
+    const result = reconcileLaneAccountStore(laneDir)
+    // §fenceWiring "laneWipePending PUBLISH": a directory that reappeared across the re-read means
+    // a login child from a PREVIOUS process is still writing it — mark this lane `absent` +
+    // wipe-pending rather than report a clean store; never kill a child this process did not
+    // spawn. Nothing subscribes yet at startup, so the mark alone (read on the next status query)
+    // is the publish — `reconcileLaneAccountStore` itself only logs and reports, deliberately, per
+    // its own docstring.
+    if (result.reappeared) {
+      markLaneWipePending(principalId)
+      console.warn(
+        `[principal-lane] A login capture directory for ${principalId} reappeared during startup reconciliation; marking the lane wipe-pending rather than reporting it clean`
+      )
     }
   }
   // Bound to the same registry, same lifetime, for the same reason as the consent surface above

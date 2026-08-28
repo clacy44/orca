@@ -2,6 +2,7 @@ import { rmSync } from 'node:fs'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import {
   clearLaneWipePending,
+  forceReleaseLaneWipeLatch,
   markLaneWipePending,
   releaseUnconfirmedLaneWipe
 } from './lane-wipe-pending'
@@ -18,17 +19,20 @@ import { wipeLaneCredentials } from './principal-lane-credential-sweep'
  * credential back between the two.
  *
  * The watermark and the lane directory SURVIVE a wipe (the desktop re-pushes on reconnect, and a
- * re-push is still judged against what the lane last held). Only the revoke arm removes them.
+ * re-push is still judged against what the lane last held). Only the revoke and deprovision arms
+ * remove them.
+ *
+ * S9-L1 §fenceWiring / the login model: the residency window is now unbounded — from login until
+ * logout, not from push until the earliest of last-close/idle/restart — so the two CHURN-driven
+ * wipes go. `wipeOnLastConnectionClose` (a socket closing) and `wipeResidentLanesAtStartup` (every
+ * process start) are deleted outright rather than re-themed: a login is a deliberate act, so only
+ * a deliberate act — logout, revoke or deprovision — may undo it. `principal-lane-startup-wipe.ts`
+ * goes with the startup arm. This is a real confidentiality-window regression against a co-tenant
+ * (an independently revocable grant sits at rest longer than a copy of the desktop's own
+ * credential used to), flagged rather than landed silently — see S9-L1 plan §7 question 12.
  */
 
-export type LaneWipeReason = 'last-connection-close' | 'startup' | 'grant-revoked'
-
-export type StartupLaneWipeOptions = {
-  /** Trigger 4: observe, record the watermark, never rotate. Owned by the startup pass alone. */
-  syncLaneObserveOnly(laneId: string): Promise<void>
-  /** Total deadline across every lane — this pass is awaited in front of the app window. */
-  budgetMs?: number
-}
+export type LaneWipeReason = 'explicit-logout' | 'grant-revoked' | 'deprovision'
 
 export type LaneWipeOutcome = {
   laneId: string
@@ -85,47 +89,16 @@ export type PrincipalLaneLifecycleDeps = {
 /** A wipe that cannot confirm the fence is retried, never reported done (§2f). */
 const WIPE_ATTEMPTS = 3
 const PROBE_DEATH_TIMEOUT_MS = 10_000
-/**
- * The whole startup pass's budget, because it is awaited in front of the app window.
- *
- * Each darwin attempt awaits a STRICT Keychain delete bounded only by its own 3 s command
- * timeout, so three lanes against a locked or prompting Keychain is ~27 s of black screen. A lane
- * the budget cuts short is left wipe-pending, which fails its launches closed until a push.
- */
-const STARTUP_WIPE_BUDGET_MS = 15_000
 
 export class PrincipalLaneLifecycle {
   constructor(private readonly deps: PrincipalLaneLifecycleDeps) {}
 
-  /** The principal's last authenticated socket closed, or their idle timeout fired. */
-  wipeOnLastConnectionClose(laneId: string): Promise<LaneWipeOutcome> {
-    return this.wipe(laneId, 'last-connection-close')
-  }
-
   /**
-   * The startup order §2f fixes: observe-only sync (which records the watermark) → wipe → seed.
-   *
-   * Taking the watermark BEFORE the wipe is what refuses a stale re-push into a lane that is now
-   * empty; taking it after would watermark nothing and let an older desktop blob land under a
-   * daemon session that has since rotated.
+   * `accounts.lane.logout` — a deliberate, explicit act by the lane's own principal (S9-L1
+   * §modules D). The directory and its watermark SURVIVE: a re-login is still the same lane.
    */
-  async wipeResidentLanesAtStartup(
-    laneIds: readonly string[],
-    options: StartupLaneWipeOptions
-  ): Promise<LaneWipeOutcome[]> {
-    const deadlineAt = Date.now() + (options.budgetMs ?? STARTUP_WIPE_BUDGET_MS)
-    const outcomes: LaneWipeOutcome[] = []
-    for (const laneId of laneIds) {
-      if (Date.now() >= deadlineAt) {
-        outcomes.push(
-          this.refuseWipe(laneId, 'startup', 'the startup wipe ran out of its total budget')
-        )
-        continue
-      }
-      await options.syncLaneObserveOnly(laneId)
-      outcomes.push(await this.wipe(laneId, 'startup', { deadlineAt }))
-    }
-    return outcomes
+  wipeOnExplicitLogout(laneId: string): Promise<LaneWipeOutcome> {
+    return this.wipe(laneId, 'explicit-logout')
   }
 
   /**
@@ -147,6 +120,27 @@ export class PrincipalLaneLifecycle {
     })
     // A wipe that never confirmed empty leaves the directory, the watermark AND the credential in
     // place: the mark stays set, so the lane keeps failing launches closed until a wipe confirms.
+    return { ...outcome, laneRemoved }
+  }
+
+  /**
+   * Deprovision: same shape as a revoke — sweep, then remove the directory INSIDE the fence's own
+   * serialized turn — reachable from a caller (`principal-lane-consent-service.ts`) that does not
+   * hold a `PrincipalLaneStore`/`PrincipalLaneLifecycle` of its own today. `finalize` is the
+   * caller's own directory removal (`deprovisionPrincipalLane`), threaded through so it runs
+   * atomically with the sweep rather than as an unguarded second step after this resolves.
+   */
+  async removeLaneOnDeprovision(
+    laneId: string,
+    finalize: (laneDir: string) => void
+  ): Promise<LaneWipeOutcome> {
+    let laneRemoved = false
+    const outcome = await this.wipe(laneId, 'deprovision', {
+      finalize: (laneDir) => {
+        finalize(laneDir)
+        laneRemoved = true
+      }
+    })
     return { ...outcome, laneRemoved }
   }
 
@@ -193,6 +187,18 @@ export class PrincipalLaneLifecycle {
     // The mark stays set: launches keep failing closed and no surface may say the lane is empty.
     // The SEQUENCE ends here though, so a later push into the lane can void the mark rather than
     // inheriting a latch that would skip this lane's usage probe for the rest of the process.
+    //
+    // §fenceWiring "THE LATCH RELEASE" deliberately does NOT auto-clear the mark from THIS arm:
+    // the sweep never ran (the early return above is taken before `wipeLaneCredentials` is ever
+    // called), so a credential may still be at rest — `getLaneState` reads this same mark to keep
+    // a launch failing closed (`principal-lane-lifecycle.test.ts` "fails a lane launch closed
+    // while the wipe is pending, credential still on disk" pins exactly this). Auto-releasing here
+    // would silently make that still-resident, unconfirmed-dead credential launchable again, which
+    // is a worse failure than a latched lane. The deliberate, SAFE exit this slice ships is the
+    // operator's `orca lane wipe --person <name> --force` (`forceReleaseWipeLatch`, below) — an
+    // explicit human judgment call rather than a timer. A fully automatic timed release that also
+    // gets the launch-gating interaction right is left open, named rather than guessed at (see
+    // final report).
     releaseUnconfirmedLaneWipe(laneId, sequence)
     console.warn(`[principal-lane] Lane wipe did not confirm empty; leaving it wipe-pending`)
     this.deps.onLaneWiped?.(laneId)
@@ -215,6 +221,23 @@ export class PrincipalLaneLifecycle {
     console.warn(`[principal-lane] Lane not wiped: ${why}; leaving it wipe-pending`)
     this.deps.onLaneWiped?.(laneId)
     return { laneId, reason, removed: [], completed: false, laneRemoved: false }
+  }
+
+  /**
+   * `orca lane wipe --person <name> --force` (§fenceWiring "THE LATCH RELEASE"): the operator's
+   * deliberate, on-demand end to a latched mark — the only exit this slice ships for a wipe that
+   * could never confirm the lane empty. Not a sweep — the credential the mark was protecting
+   * against may still be at rest; the operator is asserting that risk is theirs to accept now.
+   */
+  forceReleaseWipeLatch(laneId: string): boolean {
+    const cleared = forceReleaseLaneWipeLatch(laneId)
+    if (cleared) {
+      console.warn(
+        `[principal-lane] wipe-unconfirmed: operator forced the wipe-pending latch open for this lane`
+      )
+      this.deps.onLaneWiped?.(laneId)
+    }
+    return cleared
   }
 
   private pastDeadline(deadlineAt: number | undefined): boolean {

@@ -257,7 +257,6 @@ import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
 import { setLaneWireHostDependencies } from './runtime/lane-wire-composition'
 import { startLaneLoginDesktopService } from './claude-accounts/lane-login-desktop-service'
-import { wipeResidentLanesAtStartup } from './claude-accounts/principal-lane-startup-wipe'
 import {
   attachClaudeLivePtyPersistence,
   onLiveClaudePtysDrained,
@@ -2253,20 +2252,10 @@ void app.whenReady().then(async () => {
   onLiveClaudePtysDrained(() => {
     void rateLimits?.refreshAfterClaudeLivePtysDrained()
   })
-  // S9 §2f, and the ordering is the point: wipe → seed the live-PTY gate → bind listeners. A
-  // crash never ran the close handler, so a lane's credential is still at rest.
-  // Why guarded: this `whenReady` chain has no `.catch`, and everything below — the window, the
-  // runtime RPC server, the rest of boot — is downstream of this await. A missed lane wipe is
-  // recoverable at the next start; a host that never opens a window is not.
-  const laneStartupWipes = await wipeResidentLanesAtStartup({}).catch((error: unknown) => {
-    console.warn('[claude-lane] Startup lane wipe failed:', error)
-    return []
-  })
-  if (laneStartupWipes.length > 0) {
-    console.log(
-      `[claude-lane] Wiped ${laneStartupWipes.filter((row) => row.completed).length}/${laneStartupWipes.length} resident Claude credential lane(s) at startup`
-    )
-  }
+  // S9-L1 (§modules C): NO startup credential wipe — the login model's rule is wipe only on
+  // logout/revoke/deprovision, each a deliberate act. `attachPrincipalLaneHost` (called later, via
+  // the registry attach) runs `reconcileLaneAccountStore` per surviving lane instead, which is a
+  // read/quarantine pass over the per-login-capture store, never a credential wipe.
   const persistedClaudePtySessions = store.getClaudeLivePtySessions()
   seedLiveClaudePtysFromPersistence(persistedClaudePtySessions)
   if (persistedClaudePtySessions.length > 0) {
