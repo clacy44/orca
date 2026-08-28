@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { PrincipalRegistry, type PrincipalGrantSource } from './principal-registry'
 import {
   PrincipalLaneConsentService,
@@ -8,6 +9,9 @@ import type { PrincipalLookup } from './terminal-credential-lane-resolution'
 import type { RuntimeTerminalLaneAccountLabel } from '../../shared/runtime-types'
 import { getLaneWireService } from './lane-wire-service'
 import { attachComposedLaneWire, detachComposedLaneWire } from './lane-wire-composition'
+import { CLAUDE_LANES_DIRNAME } from '../claude-accounts/claude-lanes-root'
+import { resolveOwnedPrincipalLaneDir } from '../claude-accounts/principal-credential-lane'
+import { reconcileLaneAccountStore } from '../claude-accounts/lane-account-store-reconciliation'
 
 /**
  * Where the principal registry becomes the host's live authority (S9 §2a, §6).
@@ -74,6 +78,16 @@ export function attachPrincipalLaneHost(input: {
   // a lane directory for a principal the registry no longer binds any device to would sit on
   // disk forever. Runs once, right after the registry this host now trusts is attached.
   consentService.reconcileOrphanLanes()
+  // S9-L1 B4/§storeLayout "STARTUP ORDER": each SURVIVING lane's own `claude-accounts` store,
+  // right after the orphan pass above and before anything seeds live sessions from it. Not
+  // gated on `registry.loadSucceeded` — arm B is this pass's own fail-safe, not a borrowed one.
+  const lanesRoot = join(input.userDataPath, CLAUDE_LANES_DIRNAME)
+  for (const principalId of registry.boundPrincipalIds()) {
+    const laneDir = resolveOwnedPrincipalLaneDir(principalId, { lanesRoot })
+    if (laneDir) {
+      reconcileLaneAccountStore(laneDir)
+    }
+  }
   // Bound to the same registry, same lifetime, for the same reason as the consent surface above
   // (release-audit B1): the wire's lanes derive from this registry's grant rows.
   attachComposedLaneWire(registry)

@@ -48,6 +48,10 @@ export const CLAUDE_LANE_REFUSAL_CODES = [
   'accounts.lane.login_store_full',
   'accounts.lane.login_cancelled',
   'accounts.lane.account_unknown',
+  // S9-L1 B2 (§storeLayout "removeLaneAccount refuses the lane's active login unless the lane
+  // is being logged out") — not among the sixteen §3/§2m codes above; minted here because no
+  // existing code distinguishes "known but protected" from "unknown".
+  'accounts.lane.account_active',
   'accounts.lane.switch_in_progress',
   'accounts.lane.switch_write_locked',
   'accounts.lane.logout_incomplete',
@@ -108,6 +112,7 @@ export const CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES: Record<
   | 'accounts.lane.login_store_full'
   | 'accounts.lane.login_cli_unsupported'
   | 'accounts.lane.account_unknown'
+  | 'accounts.lane.account_active'
   | 'accounts.lane.switch_in_progress'
   | 'accounts.lane.switch_write_locked'
   | 'accounts.lane.switch_write_failed'
@@ -136,6 +141,8 @@ export const CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES: Record<
     'This login cannot be started from here right now, so Orca did not start it. Try again from the device designated to sign this lane in.',
   'accounts.lane.account_unknown':
     'Orca has no record of that account in this lane — it may already have been removed, or a logout may have cleared the lane — so nothing changed. Refresh the account list and try again.',
+  'accounts.lane.account_active':
+    'That account is the one this lane is signed in as right now, so Orca did not remove it. Select a different account first, or log this lane out if you want to remove it too.',
   'accounts.lane.switch_in_progress':
     'Another switch is already running for this lane, so Orca did not start a second one. Wait a moment and try again.',
   'accounts.lane.switch_write_locked':

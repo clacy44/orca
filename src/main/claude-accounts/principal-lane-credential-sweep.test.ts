@@ -6,11 +6,13 @@
  * `.credentials.json` back after the pass that removed it. The wipe is reported only after a
  * clean read-back, and refuses by name when the directory never comes back clean.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
+import { readLaneAccountIndex, writeLaneAccountIndex } from './lane-account-index'
+import { listLaneAccounts } from './principal-lane-account-store'
 import {
   LANE_CREDENTIALS_FILENAME,
   listLaneCredentialArtifacts,
@@ -62,6 +64,62 @@ describe('the lane wipe re-read', () => {
 
     expect(listLaneCredentialArtifacts(laneDir)).toEqual([])
     expect(removed).toContain('.credentials.json.4242.abc.tmp')
+  })
+
+  /**
+   * WIRING PROOF (S9-L1 B2/§storeLayout "PURGE"): `purgeLaneAccountStore` has a real production
+   * caller — `wipeLaneCredentials`, itself reachable from `deprovisionLane`'s RPC/IPC handlers —
+   * and not just its own unit tests. No call into the account-store module from this test.
+   */
+  it('purges the claude-accounts store once the active credential is confirmed swept', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    const strayId = '77777777-7777-4777-8777-777777777777'
+    mkdirSync(join(accountsRoot, strayId, 'auth'), { recursive: true })
+    writeFileSync(join(accountsRoot, strayId, 'auth', '.orca-managed-claude-auth'), `${strayId}\n`)
+    writeFileSync(join(accountsRoot, strayId, 'auth', '.credentials.json'), CREDENTIALS)
+    writeLaneAccountIndex(accountsRoot, [
+      {
+        laneAccountId: strayId,
+        email: 'a@x.com',
+        label: null,
+        active: false,
+        capturedAt: '2026-08-27T00:00:00.000Z'
+      }
+    ])
+
+    const removed = await wipeLaneCredentials(laneDir, { platform: 'linux' })
+
+    expect(existsSync(join(accountsRoot, strayId))).toBe(false)
+    expect(existsSync(join(accountsRoot, 'index.json'))).toBe(false)
+    expect(removed).toContain(strayId)
+    expect(listLaneAccounts(laneDir)).toEqual([])
+    expect(readLaneAccountIndex(accountsRoot)).toEqual([])
+  })
+
+  // MP: purging on the THROW path (a credential that keeps reappearing) would delete every OTHER
+  // login this lane holds even though the wipe itself was never confirmed done.
+  it('does not purge the account store when the sweep never reads back clean', async () => {
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    const keptId = '66666666-6666-4666-8666-666666666666'
+    mkdirSync(join(accountsRoot, keptId, 'auth'), { recursive: true })
+    writeFileSync(join(accountsRoot, keptId, 'auth', '.orca-managed-claude-auth'), `${keptId}\n`)
+    writeFileSync(join(accountsRoot, keptId, 'auth', '.credentials.json'), CREDENTIALS)
+    writeLaneAccountIndex(accountsRoot, [
+      {
+        laneAccountId: keptId,
+        email: 'a@x.com',
+        label: null,
+        active: false,
+        capturedAt: '2026-08-27T00:00:00.000Z'
+      }
+    ])
+
+    await wipeLaneCredentials(laneDir, {
+      platform: 'linux',
+      onSweptPass: () => writeFileSync(credentialsPath(), CREDENTIALS, { mode: 0o600 })
+    }).catch(() => undefined)
+
+    expect(existsSync(join(accountsRoot, keptId))).toBe(true)
   })
 
   // Negative control: a lane that comes back clean is swept ONCE, not re-swept on a timer.

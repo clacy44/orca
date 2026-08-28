@@ -3,9 +3,9 @@
  * it runs, every grant is lane-less and, worse, a federated create falls through to the shared
  * lane instead of being refused.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
@@ -18,6 +18,8 @@ import {
 } from './principal-lane-host-wiring'
 import { PaneLaneAuthority } from './pane-lane-authority'
 import type { PrincipalGrantRow, PrincipalGrantSource } from './principal-registry'
+import { CLAUDE_LANES_DIRNAME } from '../claude-accounts/claude-lanes-root'
+import { provisionPrincipalLane } from '../claude-accounts/principal-credential-lane'
 import type { PrincipalLookup } from './terminal-credential-lane-resolution'
 
 const RUNTIME_AUTH_TOKEN = 'a'.repeat(48)
@@ -75,6 +77,13 @@ function refusalCodeOf(run: () => unknown): string {
   }
 }
 
+// `reconcileOrphanPrincipalLanes` (an existing, pre-S9-L1 caller) defaults its own lanes root
+// off `app.getPath('userData')` rather than taking one as an argument, so this production
+// startup path needs SOME electron 'userData', and it must agree with `userDataPath` below —
+// production always passes the same value for both.
+const electronState = { userDataDir: '' }
+vi.mock('electron', () => ({ app: { getPath: () => electronState.userDataDir } }))
+
 describe('attachPrincipalLaneHost', () => {
   let userDataPath = ''
   let lookups: (PrincipalLookup | null)[] = []
@@ -82,6 +91,7 @@ describe('attachPrincipalLaneHost', () => {
 
   beforeEach(() => {
     userDataPath = mkdtempSync(join(tmpdir(), 'orca-lane-wiring-'))
+    electronState.userDataDir = userDataPath
     lookups = []
     runtime = { setPrincipalLaneLookup: (lookup) => lookups.push(lookup) }
   })
@@ -246,5 +256,126 @@ describe('attachPrincipalLaneHost', () => {
     })
 
     expect(authority.federatedLinkLane(fingerprintOf(PEER_TOKEN))).toEqual({ kind: 'shared' })
+  })
+
+  /**
+   * WIRING PROOF (S9-L1 B4/§storeLayout "STARTUP ORDER"): `reconcileLaneAccountStore` has a real
+   * production caller — this attach path, reached from `runtime-rpc.ts` at startup — and not just
+   * its own unit tests. A crashed login's unindexed directory, planted directly on disk exactly
+   * as a real crash would leave it, must be reconciled by `attachPrincipalLaneHost` alone, with no
+   * call into the reconciliation module from the test itself.
+   */
+  it("reconciles a bound principal lane's account store on attach", () => {
+    const lanesRoot = join(userDataPath, CLAUDE_LANES_DIRNAME)
+    const { registry } = attachPrincipalLaneHost({
+      userDataPath,
+      grants: new FakeGrants(),
+      runtimeAuthToken: RUNTIME_AUTH_TOKEN,
+      runtime
+    })
+    const consent = authorizeHostConsent({})
+    const person = registry.createPrincipal(consent, 'Ana')
+    registry.bindGrant(consent, 'home-peer', person.principalId)
+    const { laneDir } = provisionPrincipalLane(person.principalId, { lanesRoot })
+    const accountsRoot = join(laneDir, 'claude-accounts')
+    const strayId = '99999999-9999-4999-8999-999999999999'
+    const authDir = join(accountsRoot, strayId, 'auth')
+    mkdirSync(authDir, { recursive: true })
+    writeFileSync(join(authDir, '.orca-managed-claude-auth'), `${strayId}\n`, { mode: 0o600 })
+    writeFileSync(
+      join(authDir, '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'at', refreshToken: 'rt' } }),
+      { mode: 0o600 }
+    )
+    // No index.json at all: a missing index over a non-empty store is arm B (quarantine, not
+    // delete) — the observable proof distinguishes "reconciliation ran" from "nothing touched it".
+
+    detachPrincipalLaneHost(runtime)
+    attachPrincipalLaneHost({
+      userDataPath,
+      grants: new FakeGrants(),
+      runtimeAuthToken: RUNTIME_AUTH_TOKEN,
+      runtime
+    })
+    // The SECOND attach is the one under test: `registry.boundPrincipalIds()` must still list
+    // `person.principalId` because the grant row (`FakeGrants`) and the binding both persist
+    // across the two registry instances via `userDataPath`.
+
+    expect(existsSync(join(accountsRoot, strayId))).toBe(false)
+    const entries = readdirSync(accountsRoot)
+    expect(entries.some((name) => name.startsWith(`${strayId}.quarantined-`))).toBe(true)
+  })
+
+  // MP: scoping the wiring loop to the RPC-attach path only, and forgetting the lane the fixture
+  // is not bound to, would leave a SECOND lane's crashed login untouched by the same attach call.
+  it('reconciles every bound lane the attach call sees, not only the first', () => {
+    class TwoDeviceGrants implements PrincipalGrantSource {
+      loadSucceeded = true
+      private rows: PrincipalGrantRow[] = [
+        {
+          deviceId: 'home-peer',
+          name: 'Ana laptop',
+          token: PEER_TOKEN,
+          pairedAt: 1_000,
+          lastSeenAt: 1_000,
+          pendingExpiresAt: Date.now() + 60_000
+        },
+        {
+          deviceId: 'bo-peer',
+          name: 'Bo laptop',
+          token: 'bo-token',
+          pairedAt: 1_000,
+          lastSeenAt: 1_000,
+          pendingExpiresAt: Date.now() + 60_000
+        }
+      ]
+
+      getDevice(deviceId: string): PrincipalGrantRow | null {
+        return this.rows.find((row) => row.deviceId === deviceId) ?? null
+      }
+
+      listDevices(): readonly PrincipalGrantRow[] {
+        return this.rows
+      }
+    }
+
+    const lanesRoot = join(userDataPath, CLAUDE_LANES_DIRNAME)
+    const grants = new TwoDeviceGrants()
+    const { registry } = attachPrincipalLaneHost({
+      userDataPath,
+      grants,
+      runtimeAuthToken: RUNTIME_AUTH_TOKEN,
+      runtime
+    })
+    const consent = authorizeHostConsent({})
+    const ana = registry.createPrincipal(consent, 'Ana')
+    registry.bindGrant(consent, 'home-peer', ana.principalId)
+    const bo = registry.createPrincipal(consent, 'Bo')
+    registry.bindGrant(consent, 'bo-peer', bo.principalId)
+    const anaRoot = join(
+      provisionPrincipalLane(ana.principalId, { lanesRoot }).laneDir,
+      'claude-accounts'
+    )
+    const boRoot = join(
+      provisionPrincipalLane(bo.principalId, { lanesRoot }).laneDir,
+      'claude-accounts'
+    )
+    for (const root of [anaRoot, boRoot]) {
+      const id = '88888888-8888-4888-8888-888888888888'
+      mkdirSync(join(root, id, 'auth'), { recursive: true })
+      writeFileSync(join(root, id, 'auth', '.orca-managed-claude-auth'), `${id}\n`, { mode: 0o600 })
+    }
+
+    detachPrincipalLaneHost(runtime)
+    attachPrincipalLaneHost({ userDataPath, grants, runtimeAuthToken: RUNTIME_AUTH_TOKEN, runtime })
+
+    const id = '88888888-8888-4888-8888-888888888888'
+    // No credential file was planted (marker only) — a dangling, credential-less row under a
+    // MISSING index is still an unindexed directory, so both lanes' stray directories are
+    // quarantined the same way regardless of which lane the fixture happened to set up first.
+    for (const root of [anaRoot, boRoot]) {
+      expect(existsSync(join(root, id))).toBe(false)
+      expect(readdirSync(root).some((name) => name.startsWith(`${id}.quarantined-`))).toBe(true)
+    }
   })
 })
