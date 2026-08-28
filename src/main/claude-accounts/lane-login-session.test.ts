@@ -460,6 +460,40 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
     expect(registry.statusOf(sessionId)?.state).toBe('cancelled')
   })
 
+  it('review r2 minor: a failed cancel sweep does not replace the login_session_expired refusal with a raw fs error', async () => {
+    let now = Date.now()
+    const registry = new LaneLoginSessionRegistry({
+      authState,
+      now: () => now,
+      assertCliVersionSupported: passingCliVersionGate
+    })
+    const startPromise = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[0])
+    const { sessionId } = await startPromise
+    const authDir = spawnMocks.spawnClaudeCliChildProcess.mock.calls.findLast(
+      (call) => call[0][0] === 'auth' && call[0][1] === 'login'
+    )![1].windowsPath
+    const laneAccountId = basename(dirname(authDir))
+    now += LOGIN_TIMEOUT_MS + 1
+    // Arms the ONE rmSync call `submitCode`'s own `await this.cancel(sessionId)` makes while
+    // unwinding the TTL expiry — capture never starts on this path, so this is the only rmSync
+    // in flight. Proves the caller's already-decided refusal survives a transient sweep failure
+    // instead of being replaced by the raw EPERM it used to throw before delegating `cancel` to
+    // `reapLoginSessionSilently` (review r2 minor).
+    fsFailureMocks.failRmSyncWhen = (path) => path.endsWith(laneAccountId)
+
+    const submit = registry.submitCode(sessionId, '123456')
+
+    await expect(submit).rejects.toMatchObject({ code: 'accounts.lane.login_session_expired' })
+    // The failed sweep left `swept` false, same retryable state as the detached-reap case.
+    expect(registry.statusOf(sessionId)?.state).toBe('cancelled')
+  })
+
   it('the background TTL timer cancels an abandoned session and tears down its process group', async () => {
     vi.useFakeTimers()
     try {

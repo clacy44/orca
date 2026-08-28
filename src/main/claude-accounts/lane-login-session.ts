@@ -273,10 +273,17 @@ export class LaneLoginSessionRegistry {
     return sweepCancelledLoginDirsOp(this.sessions, laneId)
   }
 
-  /** Explicit `loginCancel` — one of the five cancellers, all one code path. */
+  /** Explicit `loginCancel` — one of the five cancellers, all one code path. Delegates to
+   * `reapLoginSessionSilently` rather than awaiting `cancelDestructive` directly: the state
+   * transition is what every caller here (`start`'s catch, `submitCode`'s refusal paths,
+   * `loginCancel`/`loginCancelInline`) actually needs to have happened before it throws its OWN
+   * error/refusal or reports the cancellation — a transient `rmSync` failure (EPERM/EBUSY while
+   * the just-exited child still holds a handle, EACCES, a network mount) must not replace that
+   * outcome with an opaque fs error. `swept` stays false on failure, so the retry this already
+   * gives detached exit/TTL reaps (§`cancelDestructive`'s own doc comment) covers an explicitly
+   * awaited cancel identically. */
   async cancel(sessionId: string): Promise<void> {
-    this.cancelStateTransition(sessionId)
-    await this.cancelDestructive(sessionId)
+    await reapLoginSessionSilently(this.sessions, sessionId)
   }
 
   /** The host-inline `--cancel` verb's lookup (§modules E): a later CLI invocation holds no
