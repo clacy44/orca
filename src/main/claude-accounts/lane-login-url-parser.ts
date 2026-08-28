@@ -69,14 +69,23 @@ const MAX_URL_ACCUMULATOR_CHARS = 8000
  * hold the prompt plus a run of trailing ANSI escapes. */
 const MAX_PROMPT_TAIL_CHARS = PASTE_CODE_PROMPT.length + 64
 
-function loginUrlUnparsedRefusal(candidate: string | null): ClaudeLaneRefusal {
-  // `describeAuthorizeUrlRejection` names the check that actually failed (own origin, redirect
-  // count, or redirect origin) — do not weld on a fixed "and that is not an address..." clause
-  // here, since that reads as blaming the printed host even when the host was allow-listed and
-  // the real reason was its redirect_uri.
-  const detail = candidate
-    ? `it was not safe to relay — ${describeAuthorizeUrlRejection(candidate)}`
-    : 'the login process never printed one'
+type LoginUrlUnparsedCause =
+  | { kind: 'rejected'; candidate: string }
+  | { kind: 'none' }
+  | { kind: 'cap' }
+
+function loginUrlUnparsedRefusal(cause: LoginUrlUnparsedCause): ClaudeLaneRefusal {
+  // `describeAuthorizeUrlRejection` names the check that actually failed (scheme, host, port,
+  // path, or the redirect_uri) — never a fixed "its host was…" clause, which would blame an
+  // allow-listed host for a rejection that came from somewhere else. The three causes are kept
+  // apart so the sentence never tells an operator the opposite of what happened: "never printed
+  // one" when the child printed a rejected URL, or when it printed more than the bound holds.
+  const detail =
+    cause.kind === 'rejected'
+      ? `it was not safe to relay — ${describeAuthorizeUrlRejection(cause.candidate)}`
+      : cause.kind === 'cap'
+        ? 'the login process printed more text than Orca will hold without a complete authorization URL in it'
+        : 'the login process never printed one'
   return new ClaudeLaneRefusal(
     'accounts.lane.login_url_unparsed',
     `Orca could not safely relay the authorization URL the login process printed: ${detail}. ` +
@@ -131,87 +140,97 @@ export function isRelayableAuthorizeUrl(url: string): boolean {
  */
 export function assertRelayableAuthorizeUrl(url: string): void {
   if (!isRelayableAuthorizeUrl(url)) {
-    throw loginUrlUnparsedRefusal(url)
+    throw loginUrlUnparsedRefusal({ kind: 'rejected', candidate: url })
   }
 }
 
+type RelayableUrlScan =
+  | { relayable: string; firstRejected: null }
+  | { relayable: null; firstRejected: string | null }
+
 /**
- * Finds the FIRST http(s) URL candidate in `strippedText` and decides on it immediately — never
- * "keep scanning past a bad one hoping a later one is better" (§2b prompt refusal: a decoy or
- * compromised first candidate must refuse promptly, not stall the login waiting for a legitimate
- * one that may never come). `atStreamEnd` distinguishes the two ways a candidate counts as
- * complete (§2b): terminated by a real boundary byte already in the text (whitespace/control
- * character — true regardless of `atStreamEnd`), or, when `atStreamEnd` is true, simply having
- * reached the end of everything the stream will ever produce (the child exited, or a one-shot
- * caller handed over its whole text at once). A match run to the text's end while `atStreamEnd`
- * is false is treated as "wait for more" — it could still be a truncated prefix.
+ * Scans every http(s) URL candidate in `strippedText` in print order and selects the FIRST
+ * RELAYABLE one — the §2 "printed URL only" rule: a login run can legitimately print a
+ * non-relayable URL ahead of the hosted one (the `http://localhost:<port>/callback` browser-opener
+ * variant, a docs or banner link), and skipping it is what keeps such a run from being refused.
+ * A candidate is complete when a boundary byte (whitespace / control character) already follows
+ * it in the text, or, when `atStreamEnd` is true, when it simply runs to the end of everything
+ * the stream will ever produce (the child exited, or the paste prompt — the CLI's own "I have
+ * finished printing the URL" signal — arrived, or a one-shot caller handed over its whole text).
+ * A candidate that runs to the text's end while `atStreamEnd` is false could still be a truncated
+ * prefix, so scanning stops there and the caller waits for more.
  *
- * Returns the relayable URL, or `null` when nothing decidable is present yet (only possible with
- * `atStreamEnd: false`). Throws `login_url_unparsed` when the first candidate found is complete
- * and not relayable, OR (only at `atStreamEnd`) when no candidate was ever found at all.
+ * Never throws: when nothing relayable is present it reports the first rejected candidate (if
+ * any) so the caller can decide — wait for more (mid-stream) or refuse (at stream end / cap) —
+ * and word the refusal after what was actually seen.
  */
-function decideFirstUrlCandidate(strippedText: string, atStreamEnd: boolean): string | null {
+function scanForRelayableUrl(strippedText: string, atStreamEnd: boolean): RelayableUrlScan {
   URL_PATTERN.lastIndex = 0
-  const match = URL_PATTERN.exec(strippedText)
-  URL_PATTERN.lastIndex = 0
-  if (!match) {
-    if (atStreamEnd) {
-      throw loginUrlUnparsedRefusal(null)
+  let firstRejected: string | null = null
+  let match: RegExpExecArray | null
+  while ((match = URL_PATTERN.exec(strippedText)) !== null) {
+    const candidate = match[0]
+    const matchEndsAtTextEnd = match.index + candidate.length === strippedText.length
+    if (matchEndsAtTextEnd && !atStreamEnd) {
+      // Might still be a truncated prefix of a longer URL — wait for more.
+      break
     }
-    return null
+    if (isRelayableAuthorizeUrl(candidate)) {
+      URL_PATTERN.lastIndex = 0
+      // Relay the WHATWG-normalized `.href`, not the raw matched text: `isRelayableAuthorizeUrl`
+      // already parsed `candidate` successfully (so this reparse cannot throw), and normalizing is
+      // what folds an oddity like `https:/\host/...` to the canonical `https://host/...` a
+      // downstream parser (QR encoder, mobile `Linking.openURL`) may read differently than WHATWG
+      // does, and percent-encodes a raw bidi-override or other non-ASCII byte sitting in the query
+      // string rather than relaying it as literal text that could visually mislead a person reading
+      // the URL before they authenticate against it.
+      return { relayable: new URL(candidate).href, firstRejected: null }
+    }
+    firstRejected ??= candidate
   }
-  const matchEndsAtTextEnd = match.index + match[0].length === strippedText.length
-  if (matchEndsAtTextEnd && !atStreamEnd) {
-    // Might still be a truncated prefix of a longer URL — wait for more.
-    return null
-  }
-  const candidate = match[0]
-  if (isRelayableAuthorizeUrl(candidate)) {
-    // Relay the WHATWG-normalized `.href`, not the raw matched text: `isRelayableAuthorizeUrl`
-    // already parsed `candidate` successfully (so this reparse cannot throw), and normalizing is
-    // what folds an oddity like `https:/\host/...` to the canonical `https://host/...` a
-    // downstream parser (QR encoder, mobile `Linking.openURL`) may read differently than WHATWG
-    // does, and percent-encodes a raw bidi-override or other non-ASCII byte sitting in the query
-    // string rather than relaying it as literal text that could visually mislead a person reading
-    // the URL before they authenticate against it.
-    return new URL(candidate).href
-  }
-  throw loginUrlUnparsedRefusal(candidate)
+  URL_PATTERN.lastIndex = 0
+  return { relayable: null, firstRejected }
+}
+
+function refusalForEndOfStream(scan: RelayableUrlScan): ClaudeLaneRefusal {
+  return loginUrlUnparsedRefusal(
+    scan.firstRejected ? { kind: 'rejected', candidate: scan.firstRejected } : { kind: 'none' }
+  )
 }
 
 /**
- * Selection and validation of the FIRST http(s) URL candidate in `text` as one operation: decides
- * immediately rather than scanning past a non-qualifying candidate for a later, better one (see
- * `decideFirstUrlCandidate`). `text` is treated as a complete, final stream (`atStreamEnd: true`)
- * — the natural shape for a one-shot caller, and what `createAuthorizeUrlAccumulator.finish()`
- * uses at end-of-stream.
+ * Selection and validation of the first RELAYABLE http(s) URL in `text` as one operation (see
+ * `scanForRelayableUrl`). `text` is treated as a complete, final stream (`atStreamEnd: true`) —
+ * the natural shape for a one-shot caller, and what `createAuthorizeUrlAccumulator.finish()` uses
+ * at end-of-stream — so the outcome is always a URL or a `login_url_unparsed` refusal, never
+ * silence (§2b).
  */
 export function firstRelayableAuthorizeUrl(text: string): string {
-  const stripped = stripAllEscapes(text)
-  // `decideFirstUrlCandidate` with `atStreamEnd: true` always either returns a string or throws —
-  // it never returns null in that mode — but that isn't expressible in its own return type since
-  // the mid-stream (`atStreamEnd: false`) mode legitimately can.
-  return decideFirstUrlCandidate(stripped, true) as string
+  const scan = scanForRelayableUrl(stripAllEscapes(text), true)
+  if (scan.relayable) {
+    return scan.relayable
+  }
+  throw refusalForEndOfStream(scan)
 }
 
 /**
  * Chunk-boundary-safe accumulator for `firstRelayableAuthorizeUrl`. The ~900-char
  * printed URL (§2b) can straddle a stdout chunk boundary; feeding chunks straight
  * to `firstRelayableAuthorizeUrl` one at a time would truncate it mid-string and
- * refuse a legitimate login. `feed` accumulates a bounded tail and decides on the
- * FIRST complete URL candidate the moment it is confirmed complete — terminated by
- * a real boundary byte (whitespace/control character) already in the buffer, NEVER
- * by merely having reached the end of whatever has arrived so far, which could
- * still be a truncated prefix. Deciding on the first candidate (not scanning past
- * it for a later one) is itself the §2b "prompt refusal" contract: a login child
- * that prints one non-relayable URL and nothing else must refuse promptly, not
- * wait indefinitely for a second URL that will never arrive. Reaching the cap
- * without ever observing a terminated match discards the buffer and refuses
- * `login_url_unparsed` rather than guessing. `finish()` is the only path that
- * treats a still-unterminated match as final — call it once the child's stdout
- * stream itself has ended, so a URL that is the very last thing printed (with
- * no trailing byte to terminate it) still resolves to a URL or a refusal,
- * never silence.
+ * refuse a legitimate login. `feed` accumulates a bounded tail and relays the
+ * first RELAYABLE complete candidate the moment one is confirmed complete —
+ * terminated by a real boundary byte (whitespace/control character) already in
+ * the buffer, NEVER by merely having reached the end of whatever has arrived so
+ * far, which could still be a truncated prefix. A complete candidate that is NOT
+ * relayable is skipped, not refused (§2 "printed URL only": the loopback variant
+ * or a banner link may precede the hosted URL); the refusal for a stream that
+ * never carries a relayable one is raised where the stream provably ends —
+ * `finish()`, which the session calls on the paste-prompt edge and on child exit
+ * — or at the cap below, so a login is never parked on a decoy for longer than
+ * the child keeps printing, and never past its own timeout. Reaching the cap
+ * without a relayable candidate discards the buffer and refuses
+ * `login_url_unparsed`, worded after what was seen (a rejected candidate, or
+ * simply too much text), rather than guessing.
  */
 export function createAuthorizeUrlAccumulator(): {
   feed(chunk: string): string | null
@@ -226,17 +245,20 @@ export function createAuthorizeUrlAccumulator(): {
       // noise plus a fully-terminated URL) — discarding on length alone first would misreport that
       // as "the login process never printed one" when it plainly did. The cap still protects
       // against unbounded growth: it only fires below when no decision was reachable.
-      const stripped = stripAllEscapes(buffer)
-      const decided = decideFirstUrlCandidate(stripped, false)
-      if (decided) {
+      const scan = scanForRelayableUrl(stripAllEscapes(buffer), false)
+      if (scan.relayable) {
         buffer = ''
-      } else if (buffer.length > MAX_URL_ACCUMULATOR_CHARS) {
+        return scan.relayable
+      }
+      if (buffer.length > MAX_URL_ACCUMULATOR_CHARS) {
         // Never emit a prefix we cannot see complete: give up on whatever was
         // accumulating rather than risk relaying a truncated authorization URL.
         buffer = ''
-        throw loginUrlUnparsedRefusal(null)
+        throw loginUrlUnparsedRefusal(
+          scan.firstRejected ? { kind: 'rejected', candidate: scan.firstRejected } : { kind: 'cap' }
+        )
       }
-      return decided
+      return null
     },
     finish(): string {
       // End of stream is itself a boundary: a match ending at the buffer tail

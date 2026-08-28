@@ -196,40 +196,56 @@ describe('firstRelayableAuthorizeUrl', () => {
     expect(firstRelayableAuthorizeUrl(`go here: ${HOSTED_URL} thanks`)).toBe(HOSTED_URL)
   })
 
-  // §2b prompt refusal: decides on the FIRST complete URL candidate and never scans past it
-  // hoping a later one is better — a login child that prints one bad URL and stops must refuse
-  // promptly, not wait forever for a second URL that will never come. A real login never prints
-  // a loopback variant before the hosted one (confirmed live against 2.1.250 — see the module
-  // doc comment), so refusing on the first candidate costs nothing in practice.
-  it('refuses on a non-relayable loopback URL printed first — does NOT wait for the hosted one after it', () => {
+  // §2 / §5 "Printed URL only" (design rev 39): the relay decision scans every complete candidate
+  // in print order and relays the first RELAYABLE one. A non-relayable candidate ahead of the
+  // hosted URL — the `http://localhost:<port>/callback` browser-opener variant some builds also
+  // print, or any banner/docs link — is skipped, never refused on.
+  it('relays the hosted URL even when a non-relayable loopback URL is printed first', () => {
     const stream = `browser opener: ${LOOPBACK_URL}\nprinted: ${HOSTED_URL}\n`
-    expect(() => firstRelayableAuthorizeUrl(stream)).toThrow()
+    expect(firstRelayableAuthorizeUrl(stream)).toBe(HOSTED_URL)
   })
 
-  // Same "decide on first, period" rule applies to an unrelated banner URL, not only a
-  // security-relevant lookalike.
-  it('refuses on an unrelated banner URL printed first — does NOT skip ahead to the real one', () => {
+  it('skips an unrelated banner URL and relays the authorize URL that follows', () => {
     const stream = `Learn more at https://docs.claude.com/cli\n${HOSTED_URL}\n`
-    expect(() => firstRelayableAuthorizeUrl(stream)).toThrow()
+    expect(firstRelayableAuthorizeUrl(stream)).toBe(HOSTED_URL)
   })
 
-  // MP: a "scan every candidate, first RELAYABLE one wins" selector (the pre-fix decomposition)
-  // would keep looking past the bad first candidate and successfully relay the hosted URL here —
-  // exactly the behavior that leaves a real "one bad URL, nothing after it" stream undecided
-  // forever instead of refusing. The shipped function decides on the first candidate instead.
-  it('mutation proof: scanning past a non-relayable first candidate for a later relayable one would (wrongly) succeed here', () => {
+  // MP (design §5): a selector that decides on the FIRST candidate — refusing the moment it is
+  // not relayable instead of scanning on — turns the loopback-then-hosted fixture into a refusal
+  // of a legitimate login. The shipped function scans; the inline mutant below does not.
+  it('mutation proof: deciding on the first candidate instead of the first relayable one would refuse the loopback-then-hosted stream', () => {
     const loopbackFirst = `browser opener: ${LOOPBACK_URL}\nprinted: ${HOSTED_URL}\n`
-    const candidates = loopbackFirst.match(/https?:\/\/[^\s]+/g) ?? []
-    const scanPastBadFirstCandidate = candidates.find((candidate) =>
-      isRelayableAuthorizeUrl(candidate)
-    )
-    expect(scanPastBadFirstCandidate).toBe(HOSTED_URL) // ...the old "keep scanning" shape finds it...
-    // ...the shipped function, deciding on the first candidate only, refuses instead.
-    expect(() => firstRelayableAuthorizeUrl(loopbackFirst)).toThrow()
+    const firstCandidate = firstAuthorizeUrl(loopbackFirst)
+    expect(firstCandidate).toBe(LOOPBACK_URL) // ...the mutant judges only this one...
+    expect(isRelayableAuthorizeUrl(firstCandidate!)).toBe(false) // ...and would refuse here...
+    expect(firstRelayableAuthorizeUrl(loopbackFirst)).toBe(HOSTED_URL) // ...the shipped scan relays.
   })
 
-  it('refuses when the only candidate in the text is not relayable', () => {
-    expect(() => firstRelayableAuthorizeUrl(`only this: ${LOOPBACK_URL}`)).toThrow()
+  it("refuses when the only candidate in the text is not relayable, naming that candidate's failing check", () => {
+    try {
+      firstRelayableAuthorizeUrl(`only this: ${LOOPBACK_URL}`)
+      expect.unreachable()
+    } catch (error) {
+      expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
+        'accounts.lane.login_url_unparsed'
+      )
+      const message = isClaudeLaneRefusal(error) ? error.message : ''
+      expect(message).toContain('localhost')
+      expect(message).not.toContain('never printed one')
+    }
+  })
+
+  // The refusal names the FIRST rejected candidate, never a later one, and never the query.
+  it('names the first rejected candidate when several non-relayable URLs were printed', () => {
+    try {
+      firstRelayableAuthorizeUrl(`${PHISHING_URL}\n${LOOPBACK_URL}\n`)
+      expect.unreachable()
+    } catch (error) {
+      const message = isClaudeLaneRefusal(error) ? error.message : ''
+      expect(message).toContain('evil.example.com')
+      expect(message).not.toContain('localhost')
+      expect(message).not.toContain('redirect_uri=')
+    }
   })
 
   // The relayed value is the WHATWG-normalized `.href`, not the raw matched text: a raw bidi
@@ -286,41 +302,45 @@ describe('createAuthorizeUrlAccumulator', () => {
     expect(acc.feed('in this stream')).toBeNull()
   })
 
-  // §2b prompt refusal: `feed` must decide on the FIRST complete candidate synchronously, in the
-  // SAME call, not wait for a later chunk or for `finish()` — this is the unit-level half of the
-  // session-level timing test (`lane-login-session.test.ts`) asserting `loginStart` settles
-  // promptly rather than riding the child out to its TTL.
-  it('throws login_url_unparsed the instant the FIRST complete candidate is not relayable — never waits for a later one', () => {
+  // §2 "printed URL only" across chunks: a non-relayable candidate that arrives in an EARLIER
+  // chunk than the hosted URL is skipped, not refused on — `feed` keeps waiting, and relays the
+  // hosted URL when it lands.
+  it('keeps waiting past a non-relayable loopback URL and relays the hosted URL from a later chunk', () => {
     const acc = createAuthorizeUrlAccumulator()
-    expect(() => acc.feed(`browser opener: ${PHISHING_URL}\n`)).toThrow()
+    expect(acc.feed(`browser opener: ${LOOPBACK_URL}\n`)).toBeNull()
+    expect(acc.feed(`printed: ${HOSTED_URL}\n`)).toBe(HOSTED_URL)
   })
 
-  it('the refusal names the observed (bad) hostname, not the query or any code', () => {
+  // The refusal for a stream that never carries a relayable URL is raised where the stream
+  // provably ends — `finish()`, which the session calls on the paste-prompt edge and on child
+  // exit — worded after the first rejected candidate, never as "never printed one".
+  it("refuses at finish() after only a non-relayable URL was fed, naming that URL's failing check", () => {
     const acc = createAuthorizeUrlAccumulator()
+    expect(acc.feed(`browser opener: ${PHISHING_URL}\n`)).toBeNull()
     try {
-      acc.feed(`${PHISHING_URL}\n`)
+      acc.finish()
       expect.unreachable()
     } catch (error) {
+      expect(isClaudeLaneRefusal(error) ? error.code : null).toBe(
+        'accounts.lane.login_url_unparsed'
+      )
       const message = isClaudeLaneRefusal(error) ? error.message : ''
       expect(message).toContain('evil.example.com')
+      expect(message).not.toContain('never printed one')
+      expect(message).not.toContain('redirect_uri=')
     }
   })
 
-  // MP: a "skip and keep scanning" accumulator would return null here (no relayable candidate
-  // seen yet, still hoping for one) instead of deciding — exactly the hang the timing test exists
-  // to catch, since a login child that prints only this URL never sends a later chunk to rescue it.
-  it('mutation proof: skip-and-continue on the first bad candidate would return null (undecided) instead of throwing', () => {
+  // MP (design §5): an accumulator that refuses on the first complete non-relayable candidate
+  // (the rev-38-era interim shape) turns the loopback-then-hosted stream into a refusal of a
+  // legitimate login.
+  it('mutation proof: refusing on the first complete candidate would reject the loopback-then-hosted stream', () => {
+    const firstChunk = `browser opener: ${LOOPBACK_URL}\n`
+    const mutantWouldRefuse = !isRelayableAuthorizeUrl(firstAuthorizeUrl(firstChunk)!)
+    expect(mutantWouldRefuse).toBe(true) // ...the mutant throws on this chunk alone...
     const acc = createAuthorizeUrlAccumulator()
-    let threw = false
-    let decided: string | null = null
-    try {
-      decided = acc.feed(`browser opener: ${PHISHING_URL}\n`)
-    } catch {
-      threw = true
-    }
-    const skipAndContinueWouldReturn = null // the old shape's "wait for a better one" outcome
-    expect(decided).toBe(skipAndContinueWouldReturn) // never assigned — the throw happened first
-    expect(threw).toBe(true)
+    expect(acc.feed(firstChunk)).toBeNull() // ...the shipped accumulator waits...
+    expect(acc.feed(`printed: ${HOSTED_URL}\n`)).toBe(HOSTED_URL) // ...and relays the hosted URL.
   })
 
   // MP: a naive per-chunk `firstRelayableAuthorizeUrl` call (no accumulation)
@@ -347,6 +367,23 @@ describe('createAuthorizeUrlAccumulator', () => {
     expect(isClaudeLaneRefusal(thrown) ? thrown.code : null).toBe(
       'accounts.lane.login_url_unparsed'
     )
+    // The cap fired because the child printed MORE than the bound, not nothing — say so.
+    const message = isClaudeLaneRefusal(thrown) ? thrown.message : ''
+    expect(message).toContain('more text than Orca will hold')
+    expect(message).not.toContain('never printed one')
+  })
+
+  it('at the cap, a rejected candidate already seen is what the refusal names', () => {
+    const acc = createAuthorizeUrlAccumulator()
+    let thrown: unknown
+    try {
+      acc.feed(`${PHISHING_URL}\n${'x'.repeat(8000)}\n`)
+    } catch (error) {
+      thrown = error
+    }
+    const message = isClaudeLaneRefusal(thrown) ? thrown.message : ''
+    expect(message).toContain('evil.example.com')
+    expect(message).not.toContain('more text than Orca will hold')
   })
 
   // A chunk that pushes the buffer past the cap can still carry a complete, decidable candidate
