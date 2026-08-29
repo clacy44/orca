@@ -321,6 +321,87 @@ describe('LaneLoginClient', () => {
     expect(transport.subscribeStatus).toHaveBeenCalledTimes(2)
   })
 
+  // Review round 2 (major): connect() right after disconnect(), while the retired generation's
+  // probe is still in flight, must start a FRESH probe — not join the abandoned one, whose
+  // doConnect() bails on the generation mismatch and would leave the client parked at 'checking'
+  // with no subscription and no retry. This is exactly the Refresh action (disconnect → connect).
+  it('connect() after disconnect() during an in-flight probe starts a fresh probe and subscribes', async () => {
+    let resolveFirstProbe!: (caps: readonly string[]) => void
+    const firstProbe = new Promise<readonly string[]>((resolve) => {
+      resolveFirstProbe = resolve
+    })
+    let probes = 0
+    const transport = makeTransport({
+      getCapabilities: vi.fn(async () => {
+        probes += 1
+        return probes === 1 ? firstProbe : [AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY]
+      })
+    })
+    const client = new LaneLoginClient(transport)
+    const stale = client.connect() // gen 1, parked on the pending first probe
+    client.disconnect() // gen 2
+    const fresh = client.connect() // must NOT join `stale`
+    expect(transport.getCapabilities).toHaveBeenCalledTimes(2)
+    expect(await fresh).toBe('supported')
+    expect(transport.subscribeStatus).toHaveBeenCalledTimes(1)
+    // The retired probe resolving late changes nothing: no second subscription, state stays.
+    resolveFirstProbe([AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY])
+    await stale
+    expect(transport.subscribeStatus).toHaveBeenCalledTimes(1)
+    expect(client.getCapabilityState()).toBe('supported')
+  })
+
+  // Mutation proof: a disconnect() that does NOT drop `connecting` (the round-1 shape) makes the
+  // second connect() join the retired probe — one getCapabilities call, no subscription, and the
+  // client stuck at 'checking' once the stale probe resolves.
+  it('MUTATION PROOF: a disconnect() that keeps the in-flight probe strands connect() at checking', async () => {
+    let resolveFirstProbe!: (caps: readonly string[]) => void
+    const firstProbe = new Promise<readonly string[]>((resolve) => {
+      resolveFirstProbe = resolve
+    })
+    const getCapabilities = vi.fn(async () => firstProbe)
+    let generation = 0
+    let connecting: Promise<string> | null = null
+    let unsubscribe: (() => void) | null = null
+    let subscribes = 0
+    const mutant = {
+      async connect(): Promise<string> {
+        if (unsubscribe) {
+          return 'supported'
+        }
+        if (connecting) {
+          return connecting // joins regardless of generation — the bug
+        }
+        const gen = ++generation
+        connecting = (async () => {
+          await getCapabilities()
+          if (gen !== generation) {
+            return 'checking'
+          }
+          subscribes += 1
+          unsubscribe = () => {}
+          return 'supported'
+        })()
+        try {
+          return await connecting
+        } finally {
+          connecting = null
+        }
+      },
+      disconnect(): void {
+        generation++ // ...but `connecting` is left in place
+      }
+    }
+    const stale = mutant.connect()
+    mutant.disconnect()
+    const fresh = mutant.connect()
+    expect(getCapabilities).toHaveBeenCalledTimes(1) // joined, no fresh probe
+    resolveFirstProbe([AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY])
+    expect(await fresh).toBe('checking') // stranded
+    expect(await stale).toBe('checking')
+    expect(subscribes).toBe(0)
+  })
+
   // Mutation proof: reproduces doConnect() WITHOUT the post-await generation re-check after
   // subscribeStatus() (the pre-fix shape) against the identical race above — the late
   // subscription's unsubscribe is never invoked, because nothing schedules the teardown.

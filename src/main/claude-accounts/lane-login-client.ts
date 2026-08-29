@@ -170,6 +170,11 @@ export class LaneLoginClient {
 
   disconnect(): void {
     this.generation++
+    // A probe still in flight belongs to the generation just retired: drop it, or the next
+    // connect() joins a promise whose doConnect() bails on the generation mismatch and leaves the
+    // client parked at 'checking' with no subscription and no retry (the Refresh action is exactly
+    // disconnect() then connect()).
+    this.connecting = null
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
