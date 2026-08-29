@@ -290,7 +290,12 @@ export class LaneLoginDesktopService {
         if (snapshot.capability === 'unsupported') {
           return { environmentId: environment.id, label, state: 'unsupported' as const }
         }
-        if (!snapshot.callerIsDelegatedGrant || snapshot.laneState === null) {
+        // Supported but no status frame delivered yet is "checking", never "not designated" —
+        // `laneState` is populated only once a status/ready frame has actually arrived.
+        if (snapshot.laneState === null) {
+          return { environmentId: environment.id, label, state: 'checking' as const }
+        }
+        if (!snapshot.callerIsDelegatedGrant) {
           return { environmentId: environment.id, label, state: 'not-designated' as const }
         }
         // `restart-required` is a locally-modelled S9d Part 2 value not yet on the wire's
