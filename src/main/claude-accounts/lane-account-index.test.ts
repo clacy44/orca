@@ -56,6 +56,16 @@ describe('lane account index', () => {
     }
   })
 
+  it('mints a fresh claude-accounts root at 0700, not the process umask default', () => {
+    const freshRoot = join(root, 'claude-accounts')
+    writeLaneAccountIndex(freshRoot, [rowFor(ID_A)])
+
+    if (process.platform !== 'win32') {
+      const mode = statSync(freshRoot).mode & 0o777
+      expect(mode).toBe(0o700)
+    }
+  })
+
   it('reads unparseable JSON as invalid, not as empty-and-fine', () => {
     mkdirSync(root, { recursive: true })
     writeFileSync(getLaneAccountIndexPath(root), '{not json', { mode: 0o600 })
