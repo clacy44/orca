@@ -294,4 +294,153 @@ describe('LaneLoginClient', () => {
     expect(onAccountsChanged).toHaveBeenCalledTimes(1)
     expect(transport.call).not.toHaveBeenCalled()
   })
+
+  // BLOCKER 1 (adversarial review): disconnect() firing while subscribeStatus() is still in
+  // flight used to be a no-op — `unsubscribe` was still null, so disconnect() had nothing to tear
+  // down — and the late resolve then stored a live subscription nothing would ever close.
+  it('disconnect() mid-subscribe: the late subscription tears itself down, not stored', async () => {
+    let resolveSubscribe!: (unsub: () => void) => void
+    const subscribePromise = new Promise<() => void>((resolve) => {
+      resolveSubscribe = resolve
+    })
+    const lateUnsub = vi.fn()
+    const transport = makeTransport({
+      subscribeStatus: vi.fn(() => subscribePromise)
+    })
+    const client = new LaneLoginClient(transport)
+    const connectPromise = client.connect()
+    // Let getCapabilities settle so doConnect is now parked on the pending subscribeStatus().
+    await Promise.resolve()
+    await Promise.resolve()
+    client.disconnect()
+    resolveSubscribe(lateUnsub)
+    await connectPromise
+    expect(lateUnsub).toHaveBeenCalledTimes(1)
+    // The late subscription was never retained: a fresh connect() opens its own, second one.
+    await client.connect()
+    expect(transport.subscribeStatus).toHaveBeenCalledTimes(2)
+  })
+
+  // Mutation proof: reproduces doConnect() WITHOUT the post-await generation re-check after
+  // subscribeStatus() (the pre-fix shape) against the identical race above — the late
+  // subscription's unsubscribe is never invoked, because nothing schedules the teardown.
+  it('MUTATION PROOF: without the post-subscribe generation check, the late unsub is never called', async () => {
+    let resolveSubscribe!: (unsub: () => void) => void
+    const subscribePromise = new Promise<() => void>((resolve) => {
+      resolveSubscribe = resolve
+    })
+    const lateUnsub = vi.fn()
+    const transport = makeTransport({
+      subscribeStatus: vi.fn(() => subscribePromise)
+    })
+    class NoPostSubscribeCheckClient {
+      unsub: (() => void) | null = null
+      generation = 0
+      constructor(private readonly t: LaneLoginTransport) {}
+      async connect(): Promise<void> {
+        if (this.unsub) {
+          return
+        }
+        this.generation += 1
+        const capabilities = await this.t.getCapabilities()
+        if (!capabilities.includes(AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY)) {
+          return
+        }
+        // Pre-fix: no re-check of `gen` here before storing the result.
+        this.unsub = await this.t.subscribeStatus(() => {})
+      }
+      disconnect(): void {
+        this.generation += 1
+        this.unsub?.()
+        this.unsub = null
+      }
+    }
+    const client = new NoPostSubscribeCheckClient(transport)
+    const connectPromise = client.connect()
+    await Promise.resolve()
+    await Promise.resolve()
+    client.disconnect()
+    resolveSubscribe(lateUnsub)
+    await connectPromise
+    expect(lateUnsub).not.toHaveBeenCalled()
+  })
+
+  // BLOCKER 2 (adversarial review): an 'end' frame delivered through the OLD subscription's
+  // onFrame closure, arriving AFTER disconnect() already ran, used to still schedule a reconnect
+  // — reconnecting to a host that was just removed (re-pair/removal racing the reachable hook).
+  it("disconnect() then a late 'end' on the stale closure schedules no reconnect", async () => {
+    vi.useFakeTimers()
+    try {
+      let deliver: (frame: unknown) => void = () => {}
+      const transport = makeTransport({
+        subscribeStatus: vi.fn(async (onFrame) => {
+          deliver = onFrame as (frame: unknown) => void
+          return () => {}
+        })
+      })
+      const client = new LaneLoginClient(transport)
+      await client.connect()
+      expect(transport.subscribeStatus).toHaveBeenCalledTimes(1)
+      client.disconnect()
+      // The stale closure still fires — this is the exact race: the host tears the subscription
+      // down asynchronously, and its 'end' frame lands after disconnect() already ran.
+      deliver({ type: 'end' })
+      await vi.advanceTimersByTimeAsync(35_000)
+      expect(transport.subscribeStatus).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Mutation proof: reproduces handleFrame WITHOUT the closure's own generation check (the
+  // pre-fix shape) against the identical race above — the late 'end' schedules a reconnect that
+  // DOES fire 35s later.
+  it("MUTATION PROOF: without the closure's generation check, the late 'end' reconnects anyway", async () => {
+    vi.useFakeTimers()
+    try {
+      let deliver: (frame: unknown) => void = () => {}
+      const transport = makeTransport({
+        subscribeStatus: vi.fn(async (onFrame) => {
+          deliver = onFrame as (frame: unknown) => void
+          return () => {}
+        })
+      })
+      class NoClosureCheckClient {
+        unsub: (() => void) | null = null
+        generation = 0
+        constructor(private readonly t: LaneLoginTransport) {}
+        async connect(): Promise<void> {
+          if (this.unsub) {
+            return
+          }
+          this.generation += 1
+          const capabilities = await this.t.getCapabilities()
+          if (!capabilities.includes(AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY)) {
+            return
+          }
+          this.unsub = await this.t.subscribeStatus((frame: unknown) => this.handleFrame(frame))
+        }
+        // Pre-fix: no generation check at the top — a stale closure's frame is still processed.
+        handleFrame(frame: unknown): void {
+          if ((frame as { type: string }).type === 'end') {
+            this.unsub = null
+            setTimeout(() => void this.connect(), 1_000)
+          }
+        }
+        disconnect(): void {
+          this.generation += 1
+          this.unsub?.()
+          this.unsub = null
+        }
+      }
+      const client = new NoClosureCheckClient(transport)
+      await client.connect()
+      client.disconnect()
+      deliver({ type: 'end' })
+      await vi.advanceTimersByTimeAsync(35_000)
+      expect(transport.subscribeStatus).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
