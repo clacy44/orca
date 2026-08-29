@@ -3,9 +3,10 @@
 // and therefore not decoration: the human must see WHO this login is for and WHICH account they
 // are about to authenticate as before Orca ever opens a browser.
 import { useEffect, useState, type ReactElement } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Check, Copy, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { translate } from '@/i18n/i18n'
+import { useClipboardTextCopyFeedback } from '@/hooks/use-clipboard-text-copy-feedback'
 import { Button } from '../ui/button'
 import {
   Dialog,
@@ -50,6 +51,10 @@ export function LaneLoginDialog({
   const qrDataUrl = useLaneLoginQr(
     stage.kind === 'awaiting-code' || stage.kind === 'submitting' ? stage.authorizeUrl : null
   )
+  const authorizeUrl =
+    stage.kind === 'awaiting-code' || stage.kind === 'submitting' ? stage.authorizeUrl : ''
+  const { copyText: copyAuthorizeUrl, status: copyUrlStatus } =
+    useClipboardTextCopyFeedback(authorizeUrl)
 
   useEffect(() => {
     if (!open) {
@@ -109,6 +114,17 @@ export function LaneLoginDialog({
     onCompleted()
   }
 
+  const copyUrl = async (): Promise<void> => {
+    if (!(await copyAuthorizeUrl())) {
+      toast.error(
+        translate(
+          'auto.components.settings.LaneLoginDialog.copyUrlFailedToast',
+          'Could not copy the login link'
+        )
+      )
+    }
+  }
+
   const cancelLogin = async (): Promise<void> => {
     if (stage.kind === 'awaiting-code' || stage.kind === 'submitting') {
       await window.api.laneLogin.cancel(environmentId, stage.loginSessionId)
@@ -119,7 +135,7 @@ export function LaneLoginDialog({
   return (
     <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : void cancelLogin())}>
       <DialogContent className="sm:max-w-md" data-testid="lane-login-dialog">
-        <DialogHeader>
+        <DialogHeader className="min-w-0">
           <DialogTitle>
             {translate(
               'auto.components.settings.LaneLoginDialog.title',
@@ -136,7 +152,7 @@ export function LaneLoginDialog({
         </DialogHeader>
 
         {stage.kind === 'expect-email' || stage.kind === 'starting' ? (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="lane-login-expected-email">
                 {translate(
@@ -180,8 +196,8 @@ export function LaneLoginDialog({
         ) : null}
 
         {stage.kind === 'awaiting-code' || stage.kind === 'submitting' ? (
-          <div className="space-y-3">
-            <div className="space-y-1.5">
+          <div className="min-w-0 space-y-3">
+            <div className="min-w-0 space-y-1.5">
               <p className="text-muted-foreground text-xs">
                 {translate(
                   'auto.components.settings.LaneLoginDialog.openUrlHint',
@@ -189,30 +205,59 @@ export function LaneLoginDialog({
                   { value0: expectedEmail.trim() }
                 )}
               </p>
-              <a
-                href={stage.authorizeUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-primary block truncate text-xs underline"
-                data-testid="lane-login-authorize-url"
-              >
-                {stage.authorizeUrl}
-              </a>
+              <div className="flex min-w-0 items-start gap-1.5">
+                <a
+                  href={stage.authorizeUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block max-h-24 min-w-0 flex-1 overflow-y-auto rounded-md border border-border/60 bg-muted/30 p-1.5 text-xs break-all text-primary underline scrollbar-sleek"
+                  data-testid="lane-login-authorize-url"
+                >
+                  {stage.authorizeUrl}
+                </a>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => void copyUrl()}
+                  data-testid="lane-login-copy-url-button"
+                >
+                  {copyUrlStatus === 'copied' ? (
+                    <Check className="size-3.5" />
+                  ) : (
+                    <Copy className="size-3.5" />
+                  )}
+                  {copyUrlStatus === 'copied'
+                    ? translate('auto.components.settings.LaneLoginDialog.copyUrlCopied', 'Copied')
+                    : copyUrlStatus === 'failed'
+                      ? translate(
+                          'auto.components.settings.LaneLoginDialog.copyUrlFailedLabel',
+                          'Copy failed'
+                        )
+                      : translate(
+                          'auto.components.settings.LaneLoginDialog.copyUrlButton',
+                          'Copy link'
+                        )}
+                </Button>
+              </div>
               {qrDataUrl ? (
-                <div className="flex justify-center rounded-lg border border-border/60 bg-white p-3">
-                  <img
-                    src={qrDataUrl}
-                    alt={translate(
-                      'auto.components.settings.LaneLoginDialog.qrAlt',
-                      'QR code for the login link'
-                    )}
-                    className="block"
-                    style={{ width: 160, height: 160, imageRendering: 'pixelated' }}
-                  />
+                <div className="flex justify-center">
+                  <div className="rounded-lg border border-border/60 bg-white p-3">
+                    <img
+                      src={qrDataUrl}
+                      alt={translate(
+                        'auto.components.settings.LaneLoginDialog.qrAlt',
+                        'QR code for the login link'
+                      )}
+                      className="block"
+                      style={{ width: 160, height: 160, imageRendering: 'pixelated' }}
+                    />
+                  </div>
                 </div>
               ) : null}
             </div>
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <Label htmlFor="lane-login-code">
                 {translate(
                   'auto.components.settings.LaneLoginDialog.codeLabel',
@@ -223,6 +268,16 @@ export function LaneLoginDialog({
                 id="lane-login-code"
                 value={code}
                 onChange={(event) => setCode(event.target.value)}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === 'Enter' &&
+                    code.trim().length > 0 &&
+                    stage.kind !== 'submitting'
+                  ) {
+                    event.preventDefault()
+                    void submitCode()
+                  }
+                }}
                 autoFocus
                 data-testid="lane-login-code-input"
               />
@@ -254,7 +309,7 @@ export function LaneLoginDialog({
         ) : null}
 
         {stage.kind === 'error' ? (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             <p className="text-destructive text-sm" role="alert" data-testid="lane-login-error">
               {stage.message}
             </p>
@@ -267,7 +322,7 @@ export function LaneLoginDialog({
         ) : null}
 
         {stage.kind === 'completed' ? (
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             <p className="text-sm" data-testid="lane-login-completed">
               {translate(
                 'auto.components.settings.LaneLoginDialog.completed',

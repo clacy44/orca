@@ -41,7 +41,7 @@ import { isLaneWipePending } from './lane-wipe-pending'
 import type { LaneAuthState } from './lane-auth-state'
 import { LaneCredentialWriter } from './lane-credential-writer'
 import { captureLaneLogin, type LaneLoginCaptureResult } from './lane-login-capture'
-import { refusalForAbortedStart } from './lane-login-start-failure'
+import { refusalForAbortedStart, refusalForUnknownAfterPasteWait } from './lane-login-start-failure'
 
 export {
   LOGIN_TIMEOUT_MS,
@@ -150,7 +150,10 @@ export class LaneLoginSessionRegistry {
 
     // (2) — everything past this point may `await`.
     try {
-      mkdirSync(authDir, { recursive: true })
+      // This is commonly a fresh lane's FIRST touch of `claude-accounts` at all — `recursive`
+      // applies `mode` to the root and the `<id>` dir it creates along the way to `authDir`, not
+      // only the leaf, so 0700 lands the whole way down rather than only on `auth` itself.
+      mkdirSync(authDir, { recursive: true, mode: 0o700 })
       // Marker written BEFORE the spawn (§storeLayout ordering (1)) via the shared
       // `managed-auth-path.ts` machinery, `adoptLegacyMarker` writing it in place of a bespoke
       // copy of the same write.
@@ -206,7 +209,7 @@ export class LaneLoginSessionRegistry {
     // exit-reaped check exists to prevent.
     const afterPasteReady = this.sessions.get(sessionId)
     if (!afterPasteReady || afterPasteReady.state === 'cancelled' || afterPasteReady.exited) {
-      throw refusal('accounts.lane.login_session_unknown')
+      throw refusalForUnknownAfterPasteWait(afterPasteReady)
     }
 
     session.attempts += 1

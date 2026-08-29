@@ -123,6 +123,27 @@ describe('lane-login CLI handlers (S9-L1 §modules E)', () => {
     ])
   })
 
+  it('emits a login-started JSON line under --json as soon as loginStartInline resolves, before the final result line', async () => {
+    const { client } = makeClient(defaultImpl)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await LANE_LOGIN_HANDLERS['lane login'](
+        context(client, { person: 'Ana Ng', email: 'ana@x.com', code: '123456' }, true)
+      )
+      const lines = logSpy.mock.calls.map((call) => call[0] as string)
+      expect(lines).toHaveLength(2)
+      expect(JSON.parse(lines[0])).toEqual({
+        event: 'login-started',
+        loginSessionId: 'session-1',
+        authorizeUrl: 'https://platform.claude.com/oauth/authorize?redirect_uri=x',
+        expiresAt: expect.any(Number)
+      })
+      expect(JSON.parse(lines[1])).toMatchObject({ ok: true })
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
   it('throws (a script failure) when a scripted --code is rejected, rather than looping', async () => {
     const { client } = makeClient((method, params) => {
       if (method === 'accounts.lane.loginSubmitCodeInline') {
@@ -207,5 +228,126 @@ describe('lane-login CLI handlers (S9-L1 §modules E)', () => {
         context(client, { person: 'Ana Ng', account: 'a', environment: 'homelab' })
       )
     ).rejects.toThrow(/does not retarget/)
+  })
+
+  // S9 design §2d closure principle: the CLI owns a host-inline session it started, so an
+  // interrupted terminal must cancel it rather than leaving it live for the 180s TTL.
+  describe('interrupting a pending login (§2d closure principle)', () => {
+    // Why: identify the listener THIS call registered by set difference — matches
+    // account.test.ts's helper, since `process.listeners(signal)` also carries vitest's own.
+    function newSignalListener(
+      signal: NodeJS.Signals,
+      before: readonly unknown[]
+    ): (signal: NodeJS.Signals) => void {
+      const added = process.listeners(signal).filter((listener) => !before.includes(listener))
+      if (added.length !== 1) {
+        throw new Error(`Expected 1 new ${signal} listener, found ${added.length}`)
+      }
+      return added[0] as (signal: NodeJS.Signals) => void
+    }
+
+    it('cancels the started session and exits non-zero when SIGINT interrupts the code prompt', async () => {
+      const { client, calls } = makeClient(defaultImpl)
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+      const listenersBefore = process.listeners('SIGINT')
+
+      const pending = LANE_LOGIN_HANDLERS['lane login'](
+        context(client, { person: 'Ana Ng', email: 'ana@x.com' })
+      )
+      await vi.waitFor(() =>
+        expect(calls.some(([method]) => method === 'accounts.lane.loginStartInline')).toBe(true)
+      )
+
+      newSignalListener('SIGINT', listenersBefore)('SIGINT')
+
+      await vi.waitFor(() =>
+        expect(calls).toContainEqual(['accounts.lane.loginCancelInline', { principalId: ANA }])
+      )
+      // loginCancelInline's own schema carries no loginSessionId (the runtime resolves the one
+      // host-inline session THIS principal has in flight) — this IS that call, since it is the
+      // only session the runtime knows about here.
+      await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(130))
+
+      await pending
+      exitSpy.mockRestore()
+    })
+
+    it('does not cancel a code already handed to the runtime — it may be mid-turn', async () => {
+      let releaseSubmit: (() => void) | undefined
+      const { client, calls } = makeClient((method, params) => {
+        if (method === 'accounts.lane.loginSubmitCodeInline') {
+          return new Promise((resolve) => {
+            releaseSubmit = () =>
+              resolve({
+                status: 'completed',
+                identity: { email: 'ana@x.com' },
+                attemptsRemaining: 4
+              })
+          })
+        }
+        return defaultImpl(method, params)
+      })
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+      const listenersBefore = process.listeners('SIGINT')
+
+      const pending = LANE_LOGIN_HANDLERS['lane login'](
+        context(client, { person: 'Ana Ng', email: 'ana@x.com', code: '123456' })
+      )
+      await vi.waitFor(() =>
+        expect(calls.some(([method]) => method === 'accounts.lane.loginSubmitCodeInline')).toBe(
+          true
+        )
+      )
+
+      newSignalListener('SIGINT', listenersBefore)('SIGINT')
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(calls.some(([method]) => method === 'accounts.lane.loginCancelInline')).toBe(false)
+
+      releaseSubmit!()
+      await pending
+
+      expect(calls.some(([method]) => method === 'accounts.lane.loginCancelInline')).toBe(false)
+      exitSpy.mockRestore()
+    })
+
+    it('cancels only once when a second signal arrives before the first finishes', async () => {
+      const { client, calls } = makeClient(defaultImpl)
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+      const sigintBefore = process.listeners('SIGINT')
+      const sigtermBefore = process.listeners('SIGTERM')
+
+      const pending = LANE_LOGIN_HANDLERS['lane login'](
+        context(client, { person: 'Ana Ng', email: 'ana@x.com' })
+      )
+      await vi.waitFor(() =>
+        expect(calls.some(([method]) => method === 'accounts.lane.loginStartInline')).toBe(true)
+      )
+
+      const onSigint = newSignalListener('SIGINT', sigintBefore)
+      const onSigterm = newSignalListener('SIGTERM', sigtermBefore)
+      onSigint('SIGINT')
+      onSigterm('SIGTERM')
+
+      await vi.waitFor(() =>
+        expect(
+          calls.filter(([method]) => method === 'accounts.lane.loginCancelInline')
+        ).toHaveLength(1)
+      )
+      await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
+      await pending
+
+      expect(exitSpy).toHaveBeenCalledTimes(1)
+      expect(exitSpy).toHaveBeenCalledWith(130)
+      exitSpy.mockRestore()
+    })
+
+    it('negative control: no signal, no cancel — a normal scripted login never calls loginCancelInline', async () => {
+      const { client, calls } = makeClient(defaultImpl)
+      await LANE_LOGIN_HANDLERS['lane login'](
+        context(client, { person: 'Ana Ng', email: 'ana@x.com', code: '123456' })
+      )
+      expect(calls.some(([method]) => method === 'accounts.lane.loginCancelInline')).toBe(false)
+    })
   })
 })

@@ -26,3 +26,21 @@ export function refusalForAbortedStart(session: Session | undefined, error: unkn
   }
   return error
 }
+
+/** Same TTL-vs-cancelled distinction as `refusalForAbortedStart`, for `submitCode`'s
+ * paste-ready wait: a session reaped by the TTL arm WHILE a submit sat parked on
+ * `awaitPasteReady` must surface `login_session_expired`, not `login_session_unknown` —
+ * the latter's sentence ("started somewhere else / another device / restarted") misdescribes
+ * a plain timeout. */
+export function refusalForUnknownAfterPasteWait(session: Session | undefined): ClaudeLaneRefusal {
+  if (session?.ttlExpired) {
+    return new ClaudeLaneRefusal(
+      'accounts.lane.login_session_expired',
+      CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES['accounts.lane.login_session_expired']
+    )
+  }
+  return new ClaudeLaneRefusal(
+    'accounts.lane.login_session_unknown',
+    CLAUDE_LANE_LOGIN_REFUSAL_SENTENCES['accounts.lane.login_session_unknown']
+  )
+}

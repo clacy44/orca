@@ -39,6 +39,10 @@ export type LaneLoginTransport = {
     onFrame: (
       frame:
         | LaneLoginStatusFrame
+        // The host's `accounts.lane.statusSubscribe` pushes this synchronously on subscribe
+        // (`lane-wire-service.ts`/`claude-credential-lanes.ts`) — the client's initial-status
+        // source, so no separate one-shot status read is needed.
+        | { type: 'ready'; subscriptionId: string; status: LaneLoginHostStatus }
         | { type: 'status'; status: LaneLoginHostStatus }
         | { type: 'end' }
     ) => void

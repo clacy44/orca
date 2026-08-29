@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type * as NodeFsModule from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -180,7 +180,7 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
     expect(loginChildren).toHaveLength(1)
     registry.cancelLaneLoginSessions('lane-1')
 
-    await expect(startPromise).rejects.toThrow(/cancelled/i)
+    await expect(startPromise).rejects.toMatchObject({ code: 'accounts.lane.login_cancelled' })
     expect(loginChildren[0].handle.kill).toHaveBeenCalledTimes(1)
     // MP anchor: if the session were inserted into the map AFTER an `await` (e.g. after the
     // mkdir), this synchronous cancel would find nothing and the login would proceed to mint a
@@ -218,6 +218,23 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
     expect(existsSync(join(configDir.windowsPath, '.orca-managed-claude-auth'))).toBe(true)
     feedGoodLoginPrompt(loginChildren[0])
     await startPromise
+  })
+
+  it('mints a fresh claude-accounts root at 0700, not the process umask default', async () => {
+    const registry = makeRegistry()
+    const startPromise = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[0])
+    await startPromise
+
+    if (process.platform !== 'win32') {
+      const mode = statSync(join(laneDir, 'claude-accounts')).mode & 0o777
+      expect(mode).toBe(0o700)
+    }
   })
 
   it('refuses accounts.lane.wipe_in_progress and spawns nothing when the lane is wipe-pending', async () => {
@@ -433,6 +450,39 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
 
     await expect(submit).rejects.toMatchObject({ code: 'accounts.lane.login_session_unknown' })
     expect(loginChildren[0].handle.writeStdin).not.toHaveBeenCalled()
+  })
+
+  // A CLI whose prompt text has drifted from PASTE_CODE_PROMPT never fires `pasteReady` — a
+  // submit parked on it must be bounded by the login TTL and surface `login_session_expired`,
+  // never `login_session_unknown` (S9 design rev 39 §4's version-gate backstops).
+  it('a submit parked on a changed paste prompt is login_session_expired at the TTL, never login_session_unknown', async () => {
+    vi.useFakeTimers()
+    try {
+      const registry = makeRegistry()
+      const startPromise = registry.start({
+        laneId: 'lane-1',
+        laneDir,
+        expectedEmail: 'a@x.com',
+        owner: HOST_INLINE
+      })
+      loginChildren[0].feed(`Open this link:\n${GOOD_URL}\nEnter the code here >> `)
+      const { sessionId } = await startPromise
+
+      const submit = registry.submitCode(sessionId, '123456')
+      // Attached before advancing the fake timer: the reject happens INSIDE that advance, and an
+      // unhandled `submit` at that microtask checkpoint would otherwise surface as a spurious
+      // unhandled-rejection warning, not a real assertion failure.
+      const settled = submit.then(
+        () => 'resolved' as const,
+        (error: unknown) => (isClaudeLaneRefusal(error) ? error.code : 'other')
+      )
+      await vi.advanceTimersByTimeAsync(LOGIN_TIMEOUT_MS + 1)
+
+      expect(await settled).toBe('accounts.lane.login_session_expired')
+      expect(loginChildren[0].handle.writeStdin).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a submit past the TTL is login_session_expired with destructive cleanup, never a raw stdin error', async () => {

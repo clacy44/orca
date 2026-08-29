@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline/promises'
 import type { CommandHandler } from '../dispatch'
 import { printResult } from '../format'
-import { RuntimeClientError } from '../runtime-client'
+import { RuntimeClientError, type RuntimeRpcSuccess } from '../runtime-client'
 import {
   formatAccountList,
   personName,
@@ -16,6 +16,7 @@ import {
   rejectRemoteSelectionFlags,
   requireStringFlag
 } from './lane'
+import { armLaneLoginInterruptGuard, type LaneLoginInterruptGuard } from './lane-login-interruption'
 
 /**
  * `orca lane login/logout/accounts/use` (S9-L1 §modules E) — split out of `lane.ts` for its
@@ -33,11 +34,16 @@ type LaneLoginSubmitCodeResult = {
 
 /** `--code` unset: prompt on THIS terminal, exactly as `orca account add` does — the code never
  * touches a log line or a flag another process on the box could read off the command line. */
-async function promptForLoginCode(): Promise<string> {
+async function promptForLoginCode(guard: LaneLoginInterruptGuard): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
+  rl.on('close', guard.onReadlineClose)
   try {
-    return (await rl.question('Paste the code from the authorization page: ')).trim()
+    return (
+      await rl.question('Paste the code from the authorization page: ', { signal: guard.signal })
+    ).trim()
   } finally {
+    // Detach before OUR close below, or that close would look like the stdin-closed interrupt.
+    rl.off('close', guard.onReadlineClose)
     rl.close()
   }
 }
@@ -72,36 +78,67 @@ export const LANE_LOGIN_HANDLERS: Record<string, CommandHandler> = {
       principalId,
       expectedEmail
     })
-    if (!ctx.json) {
+    if (ctx.json) {
+      // Emitted as soon as the session exists, well before the code prompt below blocks on
+      // stdin — a scripted `--json --code` caller has nothing else to learn the authorize URL
+      // from. The FINAL result line (below, unchanged) still carries the login outcome.
+      console.log(
+        JSON.stringify({
+          event: 'login-started',
+          loginSessionId: started.result.loginSessionId,
+          authorizeUrl: started.result.authorizeUrl,
+          expiresAt: started.result.expiresAt
+        })
+      )
+    } else {
       console.log(
         `Sign in to Claude as ${expectedEmail} for ${personName(snapshot.principals, principalId)}:\n  ${started.result.authorizeUrl}`
       )
     }
 
-    for (;;) {
-      const code = scriptedCode ?? (await promptForLoginCode())
-      const submitted = await ctx.client.call<LaneLoginSubmitCodeResult>(
-        'accounts.lane.loginSubmitCodeInline',
-        { principalId, loginSessionId: started.result.loginSessionId, code }
-      )
-      if (submitted.result.status === 'completed') {
-        printResult(
-          submitted,
-          ctx.json,
-          (value) =>
-            `Signed ${personName(snapshot.principals, principalId)}'s lane in as ${value.identity?.email ?? expectedEmail}`
+    // Why: from here the runtime holds a session THIS process started — on interrupt, this
+    // process (never the 180s TTL) must release it (S9 §2d closure principle).
+    const guard = armLaneLoginInterruptGuard(ctx.client, principalId)
+    try {
+      for (;;) {
+        const code = scriptedCode ?? (await promptForLoginCode(guard))
+        guard.markSubmitting(true)
+        let submitted: RuntimeRpcSuccess<LaneLoginSubmitCodeResult>
+        try {
+          submitted = await ctx.client.call<LaneLoginSubmitCodeResult>(
+            'accounts.lane.loginSubmitCodeInline',
+            { principalId, loginSessionId: started.result.loginSessionId, code }
+          )
+        } finally {
+          guard.markSubmitting(false)
+        }
+        if (submitted.result.status === 'completed') {
+          printResult(
+            submitted,
+            ctx.json,
+            (value) =>
+              `Signed ${personName(snapshot.principals, principalId)}'s lane in as ${value.identity?.email ?? expectedEmail}`
+          )
+          return
+        }
+        if (scriptedCode !== null) {
+          throw new RuntimeClientError(
+            'invalid_argument',
+            `That code was not accepted (${submitted.result.attemptsRemaining} attempt(s) left). Re-run with a fresh --code.`
+          )
+        }
+        console.log(
+          `That code was not accepted. ${submitted.result.attemptsRemaining} attempt(s) left.`
         )
+      }
+    } catch (error) {
+      if (guard.isAborting()) {
+        // The interrupt guard is already cancelling the session and exiting the process.
         return
       }
-      if (scriptedCode !== null) {
-        throw new RuntimeClientError(
-          'invalid_argument',
-          `That code was not accepted (${submitted.result.attemptsRemaining} attempt(s) left). Re-run with a fresh --code.`
-        )
-      }
-      console.log(
-        `That code was not accepted. ${submitted.result.attemptsRemaining} attempt(s) left.`
-      )
+      throw error
+    } finally {
+      guard.dispose()
     }
   },
   'lane logout': async (ctx) => {

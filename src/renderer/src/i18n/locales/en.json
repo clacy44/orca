@@ -10816,7 +10816,11 @@
           "submitCodeButton": "Submit code",
           "title": "Sign this lane into an account",
           "tryAgainButton": "Try again",
-          "expectedEmailPlaceholder": "name@example.com"
+          "expectedEmailPlaceholder": "name@example.com",
+          "copyUrlFailedToast": "Could not copy the login link",
+          "copyUrlCopied": "Copied",
+          "copyUrlFailedLabel": "Copy failed",
+          "copyUrlButton": "Copy link"
         },
         "LaneLoginSection": {
           "actionFailed": "Action failed",
