@@ -6,6 +6,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -81,6 +82,33 @@ describe('reconcileLaneAccountStore', () => {
     if (process.platform !== 'win32') {
       expect(statSync(root).mode & 0o777).toBe(0o755)
     }
+  })
+
+  // MP: dropping the `lstatSync(...).isSymbolicLink()` guard before the chmod turns this red —
+  // the target directory's mode gets rewritten to 0700 through the link.
+  it('refuses to chmod through a symlinked claude-accounts root', () => {
+    const outside = join(laneDir, '..', `orca-lane-reconcile-outside-${Date.now()}`)
+    mkdirSync(outside, { recursive: true, mode: 0o755 })
+    try {
+      symlinkSync(outside, join(laneDir, 'claude-accounts'))
+
+      reconcileLaneAccountStore(laneDir)
+
+      expect(statSync(outside).mode & 0o777).toBe(0o755)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  // Negative control: an unlinked root at the same starting mode still gets corrected, so the
+  // guard above is proven to be checking the symlink, not accidentally disabling the chmod outright.
+  it('still chmods a non-symlinked 0755 root (negative control for the symlink guard)', () => {
+    const root = join(laneDir, 'claude-accounts')
+    mkdirSync(root, { recursive: true, mode: 0o755 })
+
+    reconcileLaneAccountStore(laneDir)
+
+    expect(statSync(root).mode & 0o777).toBe(0o700)
   })
 
   describe('restart reaping (arm A)', () => {

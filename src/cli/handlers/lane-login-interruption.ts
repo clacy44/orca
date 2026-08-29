@@ -46,15 +46,17 @@ export function armLaneLoginInterruptGuard(
   let submitting = false
   let handled = false
 
-  const cancelSession = async (): Promise<void> => {
+  /** Resolves to whether a cancel was actually sent — false once the code is with the runtime. */
+  const cancelSession = async (): Promise<boolean> => {
     if (submitting) {
-      return
+      return false
     }
     try {
       await client.call('accounts.lane.loginCancelInline', { principalId })
     } catch {
       // Best effort: the process is exiting regardless of whether this lands.
     }
+    return true
   }
 
   const onInterrupt = (signal?: NodeJS.Signals): void => {
@@ -63,10 +65,19 @@ export function armLaneLoginInterruptGuard(
     }
     handled = true
     controller.abort()
-    void cancelSession().finally(() => {
-      console.log('Login cancelled.')
-      process.exit(signal ? (LANE_LOGIN_INTERRUPT_EXIT_CODES[signal] ?? 1) : 1)
-    })
+    void cancelSession().then(
+      (cancelled) => {
+        // Never claim a cancel that did not happen: a code already handed to the runtime keeps
+        // running to its own outcome (capture, refusal, or the session's timeout).
+        console.log(
+          cancelled
+            ? 'Login cancelled.'
+            : 'The code was already submitted, so this login was left running — check `orca lane accounts`.'
+        )
+        process.exit(signal ? (LANE_LOGIN_INTERRUPT_EXIT_CODES[signal] ?? 1) : 1)
+      },
+      () => process.exit(signal ? (LANE_LOGIN_INTERRUPT_EXIT_CODES[signal] ?? 1) : 1)
+    )
   }
 
   // Why: repeated signals must keep awaiting the same cancel, never restore Node's defaults.

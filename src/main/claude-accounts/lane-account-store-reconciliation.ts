@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   getLaneAccountsRoot,
@@ -73,10 +73,17 @@ export function reconcileLaneAccountStore(
   // A store this old may predate the 0700 `mkdirSync` mode fix — reconciliation is startup-run,
   // so it is where a pre-existing root gets corrected regardless of which arm (or neither) runs
   // below. POSIX only: on win32 the ACL comes from the lane dir itself and is inherited, and
-  // Node's `chmodSync` mode bits are meaningless there besides.
+  // Node's `chmodSync` mode bits are meaningless there besides. `chmodSync` follows symlinks (it
+  // is not `lchmodSync`), so the root is `lstatSync`-checked and the chmod refused when it is a
+  // symlink — same containment discipline `prepareContainedLanesRoot` and
+  // `resolveContainedLaneAccountEntry` already hold elsewhere in this store: a same-privilege
+  // swap of `claude-accounts` for a symlink must never let this startup pass rewrite an
+  // unrelated directory's permissions.
   if ((options.platform ?? process.platform) !== 'win32') {
     try {
-      chmodSync(laneAccountsRoot, 0o700)
+      if (!lstatSync(laneAccountsRoot).isSymbolicLink()) {
+        chmodSync(laneAccountsRoot, 0o700)
+      }
     } catch {
       // Best effort: reconciliation's own passes matter more than this doubly-defensive chmod.
     }
