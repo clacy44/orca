@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readLaneAccountIndex, writeLaneAccountIndex } from './lane-account-index'
@@ -53,6 +61,26 @@ describe('reconcileLaneAccountStore', () => {
     const result = reconcileLaneAccountStore(laneDir)
 
     expect(result.arm).toBe('none')
+  })
+
+  it('chmods a pre-existing 0755 root back to 0700 on posix, regardless of which arm runs', () => {
+    const root = join(laneDir, 'claude-accounts')
+    mkdirSync(root, { recursive: true, mode: 0o755 })
+
+    reconcileLaneAccountStore(laneDir)
+
+    expect(statSync(root).mode & 0o777).toBe(0o700)
+  })
+
+  it('does not chmod on win32 — the ACL there comes from the lane dir, not this root', () => {
+    const root = join(laneDir, 'claude-accounts')
+    mkdirSync(root, { recursive: true, mode: 0o755 })
+
+    reconcileLaneAccountStore(laneDir, { platform: 'win32' })
+
+    if (process.platform !== 'win32') {
+      expect(statSync(root).mode & 0o777).toBe(0o755)
+    }
   })
 
   describe('restart reaping (arm A)', () => {

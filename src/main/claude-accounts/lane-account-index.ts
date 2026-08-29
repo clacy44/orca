@@ -81,7 +81,12 @@ export function writeLaneAccountIndex(
   laneAccountsRoot: string,
   rows: readonly LaneAccountIndexRow[]
 ): void {
-  mkdirSync(laneAccountsRoot, { recursive: true })
+  // 0700 like the lane dir itself (`principal-credential-lane.ts`'s `mkdirSync(laneDir, ...,
+  // { mode: 0o700 })`) — a bare `mkdirSync` here defaults to the process umask (0755 on a typical
+  // host), leaving this store world-readable under a 0700 lane. `recursive: true` applies the mode
+  // to every directory it creates, not just the leaf, so this is also correct the first time a
+  // fresh lane's `claude-accounts` root is created via this path.
+  mkdirSync(laneAccountsRoot, { recursive: true, mode: 0o700 })
   writeFileAtomically(
     getLaneAccountIndexPath(laneAccountsRoot),
     `${JSON.stringify(rows, null, 2)}\n`,

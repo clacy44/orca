@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   getLaneAccountsRoot,
@@ -58,6 +58,8 @@ export type LaneAccountReconciliationResult = {
 export type LaneAccountReconciliationOptions = {
   /** Test-only seam mirroring `wipeLaneCredentials`'s `onSweptPass`: fires after each arm-A pass. */
   onSweptPass?: (pass: number) => void
+  /** Test-only seam; defaults to `process.platform`. */
+  platform?: NodeJS.Platform
 }
 
 export function reconcileLaneAccountStore(
@@ -67,6 +69,17 @@ export function reconcileLaneAccountStore(
   const laneAccountsRoot = getLaneAccountsRoot(laneDir)
   if (!existsSync(laneAccountsRoot)) {
     return noopResult()
+  }
+  // A store this old may predate the 0700 `mkdirSync` mode fix — reconciliation is startup-run,
+  // so it is where a pre-existing root gets corrected regardless of which arm (or neither) runs
+  // below. POSIX only: on win32 the ACL comes from the lane dir itself and is inherited, and
+  // Node's `chmodSync` mode bits are meaningless there besides.
+  if ((options.platform ?? process.platform) !== 'win32') {
+    try {
+      chmodSync(laneAccountsRoot, 0o700)
+    } catch {
+      // Best effort: reconciliation's own passes matter more than this doubly-defensive chmod.
+    }
   }
   const outcome = readLaneAccountIndexRaw(laneAccountsRoot)
   const entries = listLaneAccountEntries(laneAccountsRoot)

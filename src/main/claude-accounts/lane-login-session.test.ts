@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type * as NodeFsModule from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -218,6 +218,23 @@ describe('LaneLoginSessionRegistry (S9-L1 A1)', () => {
     expect(existsSync(join(configDir.windowsPath, '.orca-managed-claude-auth'))).toBe(true)
     feedGoodLoginPrompt(loginChildren[0])
     await startPromise
+  })
+
+  it('mints a fresh claude-accounts root at 0700, not the process umask default', async () => {
+    const registry = makeRegistry()
+    const startPromise = registry.start({
+      laneId: 'lane-1',
+      laneDir,
+      expectedEmail: 'a@x.com',
+      owner: HOST_INLINE
+    })
+    feedGoodLoginPrompt(loginChildren[0])
+    await startPromise
+
+    if (process.platform !== 'win32') {
+      const mode = statSync(join(laneDir, 'claude-accounts')).mode & 0o777
+      expect(mode).toBe(0o700)
+    }
   })
 
   it('refuses accounts.lane.wipe_in_progress and spawns nothing when the lane is wipe-pending', async () => {
