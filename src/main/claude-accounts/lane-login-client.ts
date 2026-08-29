@@ -63,6 +63,15 @@ export class LaneLoginClient {
   private connecting: Promise<LaneLoginCapabilityState> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectBackoffMs = LANE_LOGIN_RECONNECT_BASE_MS
+  // Generation guard (adversarial-review follow-up): bumped by `disconnect()` so an in-flight
+  // `doConnect()` — or a frame delivered through an already-torn-down subscription's closure —
+  // recognizes it is stale and backs off instead of resurrecting state disconnect() just cleared.
+  // This is the one mechanism that closes both: (1) a subscribeStatus() that resolves AFTER
+  // disconnect() (unsubscribe was null, so disconnect() couldn't tear it down) now tears itself
+  // down the moment it notices its generation is stale, instead of being stored; (2) a late 'end'
+  // frame delivered through that same stale closure is ignored outright, so it can never schedule
+  // a reconnect to a host that was just removed.
+  private generation = 0
 
   constructor(
     private readonly transport: LaneLoginTransport,
@@ -97,13 +106,14 @@ export class LaneLoginClient {
     if (this.connecting) {
       return this.connecting
     }
+    const gen = ++this.generation
     let resolveConnecting!: (state: LaneLoginCapabilityState) => void
     const connecting = new Promise<LaneLoginCapabilityState>((resolve) => {
       resolveConnecting = resolve
     })
     this.connecting = connecting
     try {
-      const state = await this.doConnect()
+      const state = await this.doConnect(gen)
       resolveConnecting(state)
       return state
     } finally {
@@ -113,7 +123,7 @@ export class LaneLoginClient {
     }
   }
 
-  private async doConnect(): Promise<LaneLoginCapabilityState> {
+  private async doConnect(gen: number): Promise<LaneLoginCapabilityState> {
     // Rule: only transition to 'checking' from 'unknown' — a reconnect after an 'end' frame (or a
     // retry while already 'supported') must never flash 'checking' at a live row.
     if (this.capability === 'unknown') {
@@ -123,8 +133,15 @@ export class LaneLoginClient {
     try {
       capabilities = await this.transport.getCapabilities()
     } catch {
+      if (gen !== this.generation) {
+        // disconnect() ran while this probe was in flight — its own state reset stands.
+        return this.capability
+      }
       this.setCapability('unknown')
-      this.scheduleReconnect()
+      this.scheduleReconnect(gen)
+      return this.capability
+    }
+    if (gen !== this.generation) {
       return this.capability
     }
     if (!capabilities.includes(AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY)) {
@@ -136,12 +153,23 @@ export class LaneLoginClient {
     const previousUnsubscribe = this.unsubscribe
     this.unsubscribe = null
     previousUnsubscribe?.()
-    this.unsubscribe = await this.transport.subscribeStatus((frame) => this.handleFrame(frame))
+    const unsubscribe = await this.transport.subscribeStatus((frame) =>
+      this.handleFrame(gen, frame)
+    )
+    if (gen !== this.generation) {
+      // BLOCKER 1's exact race: disconnect() ran while subscribeStatus() was in flight, so it saw
+      // `unsubscribe === null` and had nothing to tear down. Tear this late subscription down
+      // ourselves instead of storing it.
+      unsubscribe()
+      return this.capability
+    }
+    this.unsubscribe = unsubscribe
     this.reconnectBackoffMs = LANE_LOGIN_RECONNECT_BASE_MS
     return this.capability
   }
 
   disconnect(): void {
+    this.generation++
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -152,15 +180,22 @@ export class LaneLoginClient {
   }
 
   /** Bounded backoff after a repeated 'end': silent, never touches `capability`. */
-  private scheduleReconnect(): void {
+  private scheduleReconnect(gen: number): void {
     if (this.reconnectTimer) {
       return
     }
     const delay = this.reconnectBackoffMs
-    this.reconnectTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
       this.reconnectTimer = null
+      if (gen !== this.generation) {
+        // BLOCKER 2 belt-and-suspenders: even if a stale frame slipped past the closure guard,
+        // never reconnect to a host disconnect() already moved past.
+        return
+      }
       void this.connect()
     }, delay)
+    timer.unref?.()
+    this.reconnectTimer = timer
     this.reconnectBackoffMs = Math.min(this.reconnectBackoffMs * 2, LANE_LOGIN_RECONNECT_MAX_MS)
   }
 
@@ -178,12 +213,19 @@ export class LaneLoginClient {
   }
 
   private handleFrame(
+    gen: number,
     frame:
       | LaneLoginStatusFrame
       | { type: 'ready'; subscriptionId: string; status: LaneLoginHostStatus }
       | { type: 'status'; status: LaneLoginHostStatus }
       | { type: 'end' }
   ): void {
+    if (gen !== this.generation) {
+      // BLOCKER 2: a frame (in particular 'end') delivered through an already-disconnected
+      // subscription's own closure must never resurrect state disconnect() already moved past —
+      // most importantly, it must never schedule a reconnect to a host that was just removed.
+      return
+    }
     if (frame.type === 'login-started') {
       this.events.onLoginStarted?.(frame.loginSessionId, frame.expiresAt)
     } else if (frame.type === 'login-completed') {
@@ -197,7 +239,7 @@ export class LaneLoginClient {
       this.applyStatus(frame.status)
     } else if (frame.type === 'end') {
       this.unsubscribe = null
-      this.scheduleReconnect()
+      this.scheduleReconnect(gen)
     }
   }
 
