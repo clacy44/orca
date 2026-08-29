@@ -4,7 +4,16 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { LaneLoginDialog } from './LaneLoginDialog'
 
-function setApi(overrides: Partial<typeof window.api.laneLogin> = {}): void {
+const MOCK_QR_DATA_URL = 'data:image/png;base64,mock-qr'
+
+vi.mock('./use-lane-login-qr', () => ({
+  useLaneLoginQr: (authorizeUrl: string | null) => (authorizeUrl ? MOCK_QR_DATA_URL : null)
+}))
+
+function setApi(
+  overrides: Partial<typeof window.api.laneLogin> = {},
+  uiOverrides: Partial<typeof window.api.ui> = {}
+): void {
   window.api = {
     laneLogin: {
       get: vi.fn(),
@@ -24,8 +33,31 @@ function setApi(overrides: Partial<typeof window.api.laneLogin> = {}): void {
       removeAccount: vi.fn(),
       logout: vi.fn(),
       ...overrides
+    },
+    ui: {
+      writeClipboardText: vi.fn(async () => {}),
+      ...uiOverrides
     }
   } as never
+}
+
+async function renderAtAwaitingCode(
+  props: Partial<React.ComponentProps<typeof LaneLoginDialog>> = {}
+): Promise<void> {
+  render(
+    <LaneLoginDialog
+      open
+      onOpenChange={vi.fn()}
+      environmentId="env-1"
+      principalLabel="Ana"
+      laneLabel="shared-host"
+      onCompleted={vi.fn()}
+      {...props}
+    />
+  )
+  await userEvent.type(screen.getByTestId('lane-login-expected-email-input'), 'dev@example.com')
+  await userEvent.click(screen.getByTestId('lane-login-start-button'))
+  await waitFor(() => expect(screen.getByTestId('lane-login-authorize-url')).toBeTruthy())
 }
 
 describe('LaneLoginDialog', () => {
@@ -70,19 +102,7 @@ describe('LaneLoginDialog', () => {
 
   it('after loginStart, shows the authorize URL as a link and the code field, never a bare code table', async () => {
     setApi()
-    render(
-      <LaneLoginDialog
-        open
-        onOpenChange={vi.fn()}
-        environmentId="env-1"
-        principalLabel="Ana"
-        laneLabel="shared-host"
-        onCompleted={vi.fn()}
-      />
-    )
-    await userEvent.type(screen.getByTestId('lane-login-expected-email-input'), 'dev@example.com')
-    await userEvent.click(screen.getByTestId('lane-login-start-button'))
-    await waitFor(() => expect(screen.getByTestId('lane-login-authorize-url')).toBeTruthy())
+    await renderAtAwaitingCode()
     expect(screen.getByTestId('lane-login-authorize-url').getAttribute('href')).toContain(
       'platform.claude.com'
     )
@@ -118,21 +138,70 @@ describe('LaneLoginDialog', () => {
   it('calls onCompleted once the code is accepted', async () => {
     setApi()
     const onCompleted = vi.fn()
-    render(
-      <LaneLoginDialog
-        open
-        onOpenChange={vi.fn()}
-        environmentId="env-1"
-        principalLabel="Ana"
-        laneLabel="shared-host"
-        onCompleted={onCompleted}
-      />
-    )
-    await userEvent.type(screen.getByTestId('lane-login-expected-email-input'), 'dev@example.com')
-    await userEvent.click(screen.getByTestId('lane-login-start-button'))
-    await waitFor(() => expect(screen.getByTestId('lane-login-code-input')).toBeTruthy())
+    await renderAtAwaitingCode({ onCompleted })
     await userEvent.type(screen.getByTestId('lane-login-code-input'), '123456')
     await userEvent.click(screen.getByTestId('lane-login-submit-code-button'))
     await waitFor(() => expect(onCompleted).toHaveBeenCalledTimes(1))
+  })
+
+  // Root cause: DialogContent is a CSS grid, and grid items default to
+  // min-width:auto — a nowrap/truncate URL sets the min-content track width
+  // for every sibling. Mutation proof: restoring 'truncate' on the anchor (or
+  // dropping 'min-w-0' from its wrapping grid item) turns this red.
+  it('wraps the authorize URL instead of letting it set the dialog width', async () => {
+    setApi()
+    await renderAtAwaitingCode()
+    const url = screen.getByTestId('lane-login-authorize-url')
+    expect(url.className).toContain('break-all')
+    expect(url.className).not.toMatch(/\btruncate\b/)
+    expect(url.className).not.toMatch(/\bwhitespace-nowrap\b/)
+
+    const gridItem = url.closest('.space-y-3')
+    expect(gridItem).not.toBeNull()
+    expect(gridItem?.className).toContain('min-w-0')
+
+    const row = url.closest('.space-y-1\\.5')
+    expect(row?.className).toContain('min-w-0')
+  })
+
+  it('renders the QR code without a full-width white strip', async () => {
+    setApi()
+    await renderAtAwaitingCode()
+    const qr = await screen.findByAltText('QR code for the login link')
+    expect(qr.getAttribute('src')).toBe(MOCK_QR_DATA_URL)
+    const qrBox = qr.parentElement
+    expect(qrBox?.className).not.toMatch(/\bw-full\b/)
+    expect(qrBox?.className).not.toMatch(/\bflex-1\b/)
+  })
+
+  it('shows Submit code and Cancel in the awaiting-code stage', async () => {
+    setApi()
+    await renderAtAwaitingCode()
+    expect(screen.getByTestId('lane-login-submit-code-button')).toBeTruthy()
+    expect(screen.getByTestId('lane-login-cancel-button')).toBeTruthy()
+  })
+
+  it('submits on Enter in the code field, using the same guard as the button', async () => {
+    setApi()
+    const onCompleted = vi.fn()
+    await renderAtAwaitingCode({ onCompleted })
+
+    // Empty code: Enter must not submit.
+    await userEvent.type(screen.getByTestId('lane-login-code-input'), '{Enter}')
+    expect(onCompleted).not.toHaveBeenCalled()
+
+    await userEvent.type(screen.getByTestId('lane-login-code-input'), '123456')
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledTimes(1))
+  })
+
+  it('copies the authorize URL to the clipboard via the Copy link button', async () => {
+    const writeClipboardText = vi.fn(async () => {})
+    setApi({}, { writeClipboardText })
+    await renderAtAwaitingCode()
+    await userEvent.click(screen.getByTestId('lane-login-copy-url-button'))
+    await waitFor(() =>
+      expect(writeClipboardText).toHaveBeenCalledWith('https://platform.claude.com/authorize?x=1')
+    )
   })
 })
