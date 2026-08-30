@@ -130,6 +130,30 @@ describe('messageTypeHasLiveWaiter', () => {
     expect(messageTypeHasLiveWaiter(waiters, 'status', 'thr_2', 'pact_step')).toBe(true)
     expect(messageTypeHasLiveWaiter(waiters, 'status', null, null)).toBe(true)
   })
+
+  // Message-loss blocker fix: a still-live thread-scoped waiter must not be treated as "will
+  // cover this row" when the notify that surfaced this delivery pass never named a threadId —
+  // it withholds the push without ever actually waking that waiter (unconsumed AND unpushed).
+  describe('notifiedThreadIdKnown: false (message-loss blocker fix)', () => {
+    it("a thread-scoped waiter no longer covers even its own thread's row", () => {
+      const waiters = new Set([{ typeFilter: ['status'], threadId: 'thr_5' }])
+      expect(
+        messageTypeHasLiveWaiter(waiters, 'status', 'thr_5', null, { notifiedThreadIdKnown: false })
+      ).toBe(false)
+    })
+
+    it('a legacy no-thread waiter still covers every thread — #12536 is unaffected', () => {
+      const waiters = new Set([{ typeFilter: ['status'] }])
+      expect(
+        messageTypeHasLiveWaiter(waiters, 'status', 'thr_5', null, { notifiedThreadIdKnown: false })
+      ).toBe(true)
+    })
+
+    it("defaults to known (omitted options) — the one production call site keeps today's math", () => {
+      const waiters = new Set([{ typeFilter: ['status'], threadId: 'thr_5' }])
+      expect(messageTypeHasLiveWaiter(waiters, 'status', 'thr_5', null)).toBe(true)
+    })
+  })
 })
 
 describe('waiterConsumesArrival', () => {

@@ -2200,10 +2200,12 @@ type TerminalWaiter = {
   abortCleanup: (() => void) | null
 }
 
-// threadId/for: S10-3 pact spec A1/A4 — waiters are keyed by (agent, thread), and a
-// for:'pact'|'step' park is woken by resolvePactWaiters, a non-message channel. payloadKind
-// (rev 6): a for:'step' waiter only consumes the pact_step row it's parked for, never the
-// ordinary status traffic sharing its thread and type.
+// threadId/for: S10-3 pact spec A1/A4 (rev 7) — waiters are keyed by (agent, thread), and a
+// for:'pact'|'step'|'reply' park is woken by resolvePactWaiters, a non-message channel.
+// payloadKind: a for:'step' waiter only consumes the pact_step row it's parked for, never the
+// ordinary status traffic sharing its thread and type. Discriminator is still the caller-JSON
+// mitigation (message-waiter-thread-keying.ts assertPayloadKindNotCallerSet), not yet rev 7's
+// messages.payload_kind column (v34, pending in S10-2a).
 type MessageWaiter = {
   handle: string
   typeFilter: string[] | undefined
@@ -33596,7 +33598,13 @@ export class OrcaRuntimeService {
     return dispatchId ? `dispatch:${dispatchId}` : null
   }
 
-  deliverPendingMessagesForHandle(handle: string, reservedTypes?: ReadonlySet<string>): void {
+  // Why notifiedThreadIdKnown (message-loss blocker fix, S10-3a): defaults true so every
+  // caller but notifyMessageArrived's no-consumer branch keeps today's exact filtering.
+  deliverPendingMessagesForHandle(
+    handle: string,
+    reservedTypes?: ReadonlySet<string>,
+    notifiedThreadIdKnown = true
+  ): void {
     let terminalHandle = handle
     if (!this.handles.has(terminalHandle)) {
       const mailboxTerminal =
@@ -33614,7 +33622,11 @@ export class OrcaRuntimeService {
       // would type a message plus Enter into a working agent. Seeded state waits
       // for a live observation to authorize it.
       if (leaf.lastAgentStatus === 'idle' && leaf.lastAgentStatusObservedLive) {
-        this.deliverPendingMessages(leaf, { mailboxHandle: handle, reservedTypes })
+        this.deliverPendingMessages(leaf, {
+          mailboxHandle: handle,
+          reservedTypes,
+          notifiedThreadIdKnown
+        })
       }
     } catch {
       // Unknown/stale handles can't be pointed now; the persisted message stays available via explicit check or future idle delivery.
@@ -33714,9 +33726,8 @@ export class OrcaRuntimeService {
       // this row from the push. threadId undefined here (several call sites poke a mailbox
       // with no specific row) means no thread-scoped waiter can be trusted to cover what the
       // push is about to read — never withhold on their behalf (blocker fix, S10-3a).
-      const reservedTypes = buildReservedTypeKeys(waiters, {
-        notifiedThreadIdKnown: threadId !== undefined
-      })
+      const notifiedThreadIdKnown = threadId !== undefined
+      const reservedTypes = buildReservedTypeKeys(waiters, { notifiedThreadIdKnown })
       // Why queueMicrotask: resolveMessageWaiter removes the waiter synchronously
       // but its check handler marks the rows read a microtask later. Two sends
       // that resumed adjacently off one shared in-flight promise (group send
@@ -33724,7 +33735,11 @@ export class OrcaRuntimeService {
       // synchronous push would inject rows the resolved check is about to return.
       // Deferring one hop puts the push behind any already-queued check, and it
       // re-reads undelivered rows when it runs so nothing strands.
-      queueMicrotask(() => this.deliverPendingMessagesForHandle(handle, reservedTypes))
+      // notifiedThreadIdKnown carries forward so the push's still-live-waiter check applies
+      // the same masking as this snapshot (blocker fix, S10-3a) — see deliverPendingMessages.
+      queueMicrotask(() =>
+        this.deliverPendingMessagesForHandle(handle, reservedTypes, notifiedThreadIdKnown)
+      )
       return
     }
     for (const waiter of consumers) {
@@ -34380,7 +34395,14 @@ export class OrcaRuntimeService {
 
   private readonly parkedMessageRedeliveriesByPtyId = new Map<
     string,
-    Map<string, { leaf: RuntimeLeafRecord; reservedTypes?: ReadonlySet<string> }>
+    Map<
+      string,
+      {
+        leaf: RuntimeLeafRecord
+        reservedTypes?: ReadonlySet<string>
+        notifiedThreadIdKnown: boolean
+      }
+    >
   >()
 
   private createPtyWriteFlight(): PtyWriteFlight {
@@ -34440,7 +34462,8 @@ export class OrcaRuntimeService {
       }
       this.deliverPendingMessages(currentLeaf, {
         mailboxHandle,
-        reservedTypes: delivery.reservedTypes
+        reservedTypes: delivery.reservedTypes,
+        notifiedThreadIdKnown: delivery.notifiedThreadIdKnown
       })
     }
   }
@@ -34485,6 +34508,11 @@ export class OrcaRuntimeService {
       mailboxHandle?: string
       reservedTypes?: ReadonlySet<string>
       skipAbsenceProbe?: boolean
+      // Why (message-loss blocker fix, S10-3a): default true keeps every existing caller's
+      // exact filtering. notifyMessageArrived's no-consumer branch passes false when its own
+      // threadId arg was omitted — several dispatch: pokes carry no specific row — so the
+      // still-live waiter check below cannot assume this row is what that waiter is about.
+      notifiedThreadIdKnown?: boolean
     } = {}
   ): void {
     if (!this._orchestrationDb) {
@@ -34496,6 +34524,7 @@ export class OrcaRuntimeService {
       return
     }
     const mailboxHandle = options.mailboxHandle ?? handle
+    const notifiedThreadIdKnown = options.notifiedThreadIdKnown ?? true
 
     if (leaf.ptyId && this.messageDeliveryFlightsByPtyId.has(leaf.ptyId)) {
       let parked = this.parkedMessageRedeliveriesByPtyId.get(leaf.ptyId)
@@ -34503,12 +34532,20 @@ export class OrcaRuntimeService {
         parked = new Map()
         this.parkedMessageRedeliveriesByPtyId.set(leaf.ptyId, parked)
       }
-      const priorReservedTypes = parked.get(mailboxHandle)?.reservedTypes
+      const priorEntry = parked.get(mailboxHandle)
+      const priorReservedTypes = priorEntry?.reservedTypes
       const reservedTypes =
         priorReservedTypes || options.reservedTypes
           ? new Set([...(priorReservedTypes ?? []), ...(options.reservedTypes ?? [])])
           : undefined
-      parked.set(mailboxHandle, { leaf, reservedTypes })
+      // Why AND, not overwrite: one merged flush must stay unknown if EITHER parked notify
+      // was threadId-less, or a known-thread notify parked after an unknown one would
+      // silently re-arm withholding the unknown one earned an exemption from.
+      parked.set(mailboxHandle, {
+        leaf,
+        reservedTypes,
+        notifiedThreadIdKnown: (priorEntry?.notifiedThreadIdKnown ?? true) && notifiedThreadIdKnown
+      })
       return
     }
 
@@ -34535,7 +34572,9 @@ export class OrcaRuntimeService {
       const payloadKind = extractPayloadKind(message.payload)
       return (
         !isTypeReserved(options.reservedTypes, message.type, message.thread_id, payloadKind) &&
-        !messageTypeHasLiveWaiter(waiters, message.type, message.thread_id, payloadKind)
+        !messageTypeHasLiveWaiter(waiters, message.type, message.thread_id, payloadKind, {
+          notifiedThreadIdKnown
+        })
       )
     })
     if (unread.length === 0) {

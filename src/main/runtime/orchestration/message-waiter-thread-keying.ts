@@ -1,6 +1,10 @@
 // Why this module: orca-runtime.ts (ratcheted) delegates the composite-key math here.
-// S10-3 pact spec A1 (rev 6) — waiters/reservations keyed by (type, threadId, payloadKind),
-// not type alone, so a step waiter never consumes-and-discards ordinary thread traffic.
+// S10-3 pact spec A1 (rev 7 binding) — waiters/reservations keyed by (type, threadId,
+// payloadKind), not type alone, so a step waiter never consumes-and-discards ordinary thread
+// traffic. payload.kind here is still read from caller JSON (extractPayloadKind) behind the
+// assertPayloadKindNotCallerSet refusal at every send-shaped RPC — rev 7's dedicated
+// messages.payload_kind column (v34) that replaces the JSON read entirely is not yet landed
+// (pending S10-2a); this module reads the column instead the moment it exists.
 
 import { OrchestrationError } from './orchestration-error'
 
@@ -103,16 +107,30 @@ export function isTypeReserved(
 // check must agree, or a row can be simultaneously "will be returned by a check" and "pushed
 // into the pane" (or neither). A step waiter's payloadKind conjunct keeps it from claiming
 // ordinary status rows on its own thread — those must still reach the no-consumer push path.
+//
+// Why notifiedThreadIdKnown (message-loss blocker fix): threadId/payloadKind here are the
+// pending row's real, DB-read values — always trustworthy. What is NOT trustworthy is treating
+// a still-registered thread-scoped waiter as "will be woken for this row some other way" when
+// the notify that surfaced this delivery pass carried no threadId at all (several dispatch:
+// pokes are like this) — that waiter gets no such future wake, so deferring to it here strands
+// the row: matched by neither the consumer check (mismatched threadId) nor the push. Defaults
+// to known (true) so this call's only production site keeps today's math except when it says
+// otherwise.
 export function messageTypeHasLiveWaiter(
   waiters: Set<ThreadScopedWaiter> | undefined,
   messageType: string,
   threadId: string | null | undefined,
-  payloadKind: string | null | undefined
+  payloadKind: string | null | undefined,
+  options?: { notifiedThreadIdKnown?: boolean }
 ): boolean {
   if (!waiters) {
     return false
   }
+  const threadIdKnown = options?.notifiedThreadIdKnown ?? true
   for (const waiter of waiters) {
+    if (waiter.threadId && !threadIdKnown) {
+      continue
+    }
     if (waiterConsumesArrival(waiter, messageType, threadId, payloadKind)) {
       return true
     }
