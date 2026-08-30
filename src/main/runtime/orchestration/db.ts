@@ -91,6 +91,7 @@ import {
   type InsertGatedMessageParams,
   type InsertGatedMessageResult
 } from './message-gate-writer'
+import { loadInfraAllowlist } from './infra-allowlist'
 import {
   createThread as createThreadImpl,
   getThread as getThreadImpl,
@@ -670,6 +671,9 @@ export class OrchestrationDb {
   // per-terminal fan-out. Only createDispatchContext flips this false→true.
   private hasAnyDispatchContextsCache: boolean | undefined
 
+  // GATE § h3 (s10-2-spec.md:150): loaded once here, not per-call — see infra-allowlist.ts.
+  private readonly infraAllowlist: readonly string[]
+
   constructor(dbPath: (string & {}) | ':memory:') {
     this.db = new Database(dbPath)
     this.db.pragma('journal_mode = WAL')
@@ -678,6 +682,7 @@ export class OrchestrationDb {
     this.createTables()
     this.migrate()
     hardenOrchestrationDatabaseFiles(dbPath)
+    this.infraAllowlist = loadInfraAllowlist(dbPath)
   }
 
   private createTables(): void {
@@ -3401,10 +3406,19 @@ export class OrchestrationDb {
 
   // ── Durable threads, gated messages, purge (S10-2a) — logic lives in message-gate-writer.ts /
   // thread-directory.ts / message-purge.ts; these are delegating calls only (this file is
-  // ratcheted). `insertGatedMessage` is the single write choke (ruling 2): `insertMessage`
-  // below is host-lifecycle-only from this series on — see its own comment.
+  // ratcheted). `insertGatedMessage` is the single write choke for peer-facing content
+  // (ruling 2). `insertMessage` below is NOT yet host-lifecycle-only: this series lands no
+  // handler edits (s10-2-spec.md:119, 213), so several of its own internal callers and several
+  // external ones still write peer-supplied free text ungated. Its exact caller set — which
+  // callers are genuinely host-generated and which are pending reroute onto
+  // `insertGatedMessage` in S10-2b — is enumerated and CI-pinned in
+  // `insert-message-call-sites.ts` / `insert-message-call-site-audit.test.ts`, not asserted
+  // here.
   insertGatedMessage(params: InsertGatedMessageParams): InsertGatedMessageResult {
-    return insertGatedMessageImpl(this.db, params)
+    return insertGatedMessageImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
   }
 
   createThread(params: CreateThreadParams): ReturnType<typeof createThreadImpl> {
@@ -3463,11 +3477,17 @@ export class OrchestrationDb {
   }
 
   purgeMessage(params: PurgeMessageParams): PurgeMessageResult {
-    return purgeMessageImpl(this.db, params)
+    return purgeMessageImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
   }
 
   purgeThread(params: PurgeThreadParams): PurgeThreadResult {
-    return purgeThreadImpl(this.db, params)
+    return purgeThreadImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
   }
 
   listMessagesByAuthor(params: ListMessagesByAuthorParams): MessageRow[] {
