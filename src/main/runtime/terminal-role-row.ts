@@ -1,4 +1,4 @@
-import { isTerminalLeafId, makePaneKey } from '../../shared/stable-pane-id'
+import { isTerminalLeafId, makePaneKey, parsePaneKey } from '../../shared/stable-pane-id'
 import { isValidTerminalTabId } from '../../shared/terminal-tab-id'
 import type { RuntimeTerminalSetRole, RuntimeTerminalSummary } from '../../shared/runtime-types'
 
@@ -26,6 +26,20 @@ export function applyTerminalRoleRows(
       terminal.role = role
     }
   }
+}
+
+// Mirrors buildPtyTerminalSummary's orphan check: a headless/background terminal (no
+// renderer leaf) still has a stable pane identity via its PTY's paneKey, so role
+// assignment doesn't need a live leaf to resolve one (BUG 2 also covers headless).
+export function resolvePtyRolePaneTarget(pty: {
+  tabId: string | null
+  paneKey: string | null
+}): { tabId: string; leafId: string } | null {
+  const pane = parsePaneKey(pty.paneKey ?? '')
+  if (!pty.tabId || !pane || pane.tabId !== pty.tabId) {
+    return null
+  }
+  return { tabId: pty.tabId, leafId: pane.leafId }
 }
 
 export type TerminalRoleAssignment = {

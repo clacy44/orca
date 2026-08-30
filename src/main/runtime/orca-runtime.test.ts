@@ -25291,6 +25291,35 @@ describe('OrcaRuntimeService', () => {
     expect(afterClear?.role).toBeUndefined()
   })
 
+  it('sets a role on a headless/background terminal that has no renderer leaf (BUG 2)', async () => {
+    const roles: Record<string, string> = {}
+    const runtime = new OrcaRuntimeService({
+      ...store,
+      persistTerminalRole: ({ tabId, leafId, role }) => {
+        const key = `${tabId}:${leafId}`
+        if (role === null) {
+          delete roles[key]
+        } else {
+          roles[key] = role
+        }
+      },
+      getTerminalRoles: () => ({ ...roles })
+    })
+    // Why no attachWindow/syncWindowGraph: a pane created before any renderer
+    // window attaches (e.g. a headless `orca serve`) has a live PTY and a
+    // paneKey but no renderer leaf — setTerminalRole must not require one.
+    runtime.registerPty('pty-headless', TEST_WORKTREE_ID, null, {
+      tabId: 'tab-headless',
+      leafId: HEADLESS_LEAF_ID
+    })
+    const [terminal] = (await runtime.listTerminals()).terminals
+    expect(terminal).toBeDefined()
+
+    await runtime.setTerminalRole(terminal!.handle, 'merge-restructure backend')
+    const afterSet = (await runtime.listTerminals()).terminals[0]
+    expect(afterSet?.role).toBe('merge-restructure backend')
+  })
+
   it('omits stale browser session tabs that no longer have live webContents', async () => {
     const runtime = new OrcaRuntimeService(store)
     const tabList = vi.fn(() => ({

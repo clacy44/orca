@@ -1089,7 +1089,11 @@ import { assertLaneSeedPromptWithinBounds, callerMayOpenSourceLane } from './ter
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
-import { applyTerminalRoleRows, buildTerminalRoleAssignment } from './terminal-role-row'
+import {
+  applyTerminalRoleRows,
+  buildTerminalRoleAssignment,
+  resolvePtyRolePaneTarget
+} from './terminal-role-row'
 import {
   resolveMessageDeliveryState,
   resolveMessageRecipientPresence,
@@ -26224,15 +26228,18 @@ export class OrcaRuntimeService {
   }
 
   // Why independent of title: role is read back purely from the paneKey-keyed store on every
-  // `listTerminals` boundary pass (applyTerminalRoleRows), so unlike rename it never touches the
-  // live pty or notifies a renderer — a restart or a later rename cannot clobber it (BUG 2).
+  // `listTerminals` boundary pass (applyTerminalRoleRows), so unlike rename it never notifies a
+  // renderer — a restart or a later rename cannot clobber it (BUG 2). Resolves via the live PTY's
+  // paneKey first (headless/background terminals have no renderer leaf), falling back to the leaf
+  // graph for renderer-adopted terminals.
   async setTerminalRole(handle: string, role: string | null): Promise<RuntimeTerminalSetRole> {
-    this.assertGraphReady()
-    const { leaf } = this.getLiveLeafForHandle(handle)
+    const pty = this.getLivePtyForHandle(handle)
+    const ptyTarget = pty ? resolvePtyRolePaneTarget(pty.pty) : null
+    const target = ptyTarget ?? this.getLiveLeafForHandle(handle).leaf
     const assignment = buildTerminalRoleAssignment({
       handle,
-      tabId: leaf.tabId,
-      leafId: leaf.leafId,
+      tabId: target.tabId,
+      leafId: target.leafId,
       role
     })
     this.store?.persistTerminalRole?.(assignment.persist)
