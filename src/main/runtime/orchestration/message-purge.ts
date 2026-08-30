@@ -134,10 +134,6 @@ export function purgeMessage(
   if (!existing) {
     return { outcome: 'not_found' }
   }
-  if (existing.purged_at) {
-    // No second audit row on a benign re-purge.
-    return { outcome: 'already_purged', message: existing, alreadyPurged: true }
-  }
 
   const gated = gateReason(
     db,
@@ -153,6 +149,20 @@ export function purgeMessage(
   )
   if (!gated.ok) {
     return { outcome: 'refused', verdict: gated.verdict, refusalId: gated.refusalId }
+  }
+
+  if (existing.purged_at) {
+    // Ruling 9: correcting the stored reason on an already-purged row is allowed (the trigger's
+    // WHEN clause only fires on a body/subject/payload/un-purge attempt); no second audit row,
+    // no re-tombstone.
+    db.prepare('UPDATE messages SET purge_reason = ? WHERE id = ?').run(
+      gated.sanitizedReason,
+      params.messageId
+    )
+    const corrected = db
+      .prepare('SELECT * FROM messages WHERE id = ?')
+      .get(params.messageId) as MessageRow
+    return { outcome: 'already_purged', message: corrected, alreadyPurged: true }
   }
 
   db.exec('BEGIN IMMEDIATE')
