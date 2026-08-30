@@ -2,6 +2,7 @@ import type { RpcRequest } from './core'
 import type { OrcaRuntimeService } from '../orca-runtime'
 import { OrchestrationError } from '../orchestration/orchestration-error'
 import { formatMessageBanner } from '../orchestration/formatter'
+import { extractPayloadKind } from '../orchestration/message-waiter-thread-keying'
 import { ORCHESTRATION_MESSAGE_WAIT_DEFAULT_TIMEOUT_MS } from '../../../shared/orchestration-message-wait-timeout'
 import type { LegacyCompatibilityAuthority } from './orchestration-legacy-authority'
 import {
@@ -162,7 +163,12 @@ export async function handleLegacyReply(args: {
     body: params.body
   })
   if (!committed.duplicate) {
-    runtime.notifyMessageArrived(committed.question.asker_handle, 'status')
+    runtime.notifyMessageArrived(
+      committed.question.asker_handle,
+      'status',
+      committed.message.thread_id,
+      extractPayloadKind(committed.message.payload)
+    )
   }
   return {
     message: committed.message,

@@ -14,6 +14,7 @@ import {
   recordFederationAckCheckpoint
 } from './federation-ack-checkpoints'
 import { parseFederatedWorkerReportPayload } from './federation-worker-report-payload'
+import { extractPayloadKind } from './message-waiter-thread-keying'
 
 const MESSAGE_TYPE_SET = new Set<MessageType>(MESSAGE_TYPES)
 const FEDERATION_PULL_PAGE_SIZE = 50
@@ -129,7 +130,12 @@ async function syncFederatedDispatchPages(
       })
     }
     cursor = item.sequence
-    runtime.notifyMessageArrived(stored.message.to_handle, stored.message.type)
+    runtime.notifyMessageArrived(
+      stored.message.to_handle,
+      stored.message.type,
+      stored.message.thread_id,
+      extractPayloadKind(stored.message.payload)
+    )
     imported += stored.duplicate ? 0 : 1
   }
 

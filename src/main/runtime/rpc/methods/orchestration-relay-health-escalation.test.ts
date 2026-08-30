@@ -155,7 +155,7 @@ describe('federation relay unreachable escalation', () => {
       consecutiveFailures: FEDERATION_RELAY_UNREACHABLE_FAILURE_THRESHOLD
     })
     expect(mail[0].payload.lastSyncAt).toEqual(expect.any(String))
-    expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation')
+    expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation', null, 'relay_unreachable')
   })
 
   it('stays silent for the rest of the outage and speaks once on recovery', async () => {

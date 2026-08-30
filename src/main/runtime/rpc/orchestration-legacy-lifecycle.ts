@@ -2,6 +2,7 @@ import type { RpcRequest } from './core'
 import type { OrcaRuntimeService } from '../orca-runtime'
 import type { MessageType } from '../orchestration/db'
 import { OrchestrationError } from '../orchestration/orchestration-error'
+import { extractPayloadKind } from '../orchestration/message-waiter-thread-keying'
 import type { LegacyCompatibilityAuthority } from './orchestration-legacy-authority'
 import {
   inferLegacyWorkerOutcome,
@@ -104,7 +105,12 @@ export async function handleLegacyLifecycleSend(args: {
           : { kind: 'message_only' }
   })
   if (!committed.duplicate) {
-    runtime.notifyMessageArrived(committed.message.to_handle, committed.message.type)
+    runtime.notifyMessageArrived(
+      committed.message.to_handle,
+      committed.message.type,
+      committed.message.thread_id,
+      extractPayloadKind(committed.message.payload)
+    )
   }
   return {
     message: committed.message,

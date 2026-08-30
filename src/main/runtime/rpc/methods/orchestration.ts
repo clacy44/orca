@@ -37,6 +37,7 @@ import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-met
 import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
 import { ORCHESTRATION_THREAD_METHODS } from './orchestration-thread'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
@@ -833,7 +834,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
                 'dispatch_capability_invalid',
                 authority.reason
               ) ?? msg
-            runtime.notifyMessageArrived(to, rejection.type)
+            runtime.notifyMessageArrived(
+              to,
+              rejection.type,
+              rejection.thread_id,
+              extractPayloadKind(rejection.payload)
+            )
             return {
               message: rejection,
               lifecycle: {
@@ -872,15 +878,20 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
           if (reconciled.action === 'rejected') {
             const rejection = db.getMessageById(msg.id) ?? msg
-            runtime.notifyMessageArrived(to, rejection.type)
+            runtime.notifyMessageArrived(
+              to,
+              rejection.type,
+              rejection.thread_id,
+              extractPayloadKind(rejection.payload)
+            )
             return { message: rejection, lifecycle: reconciled }
           }
-          runtime.notifyMessageArrived(to, msg.type)
+          runtime.notifyMessageArrived(to, msg.type, msg.thread_id, extractPayloadKind(msg.payload))
           return msg.type === 'worker_done'
             ? { message: msg, lifecycle: reconciled }
             : { message: msg, ...pendingMail }
         }
-        runtime.notifyMessageArrived(to, msg.type)
+        runtime.notifyMessageArrived(to, msg.type, msg.thread_id, extractPayloadKind(msg.payload))
         return { message: msg }
       }
 
@@ -922,7 +933,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         })
       )
       for (const message of messages) {
-        runtime.notifyMessageArrived(message.to_handle, message.type)
+        runtime.notifyMessageArrived(
+          message.to_handle,
+          message.type,
+          message.thread_id,
+          extractPayloadKind(message.payload)
+        )
       }
 
       return { messages, recipients: handles.length }
@@ -1595,7 +1611,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         runId: original.run_id
       })
 
-      runtime.notifyMessageArrived(original.from_handle, reply.type)
+      runtime.notifyMessageArrived(
+        original.from_handle,
+        reply.type,
+        reply.thread_id,
+        extractPayloadKind(reply.payload)
+      )
       return { message: reply }
     }
   }),
@@ -1983,7 +2004,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           options
         })
         question = created.question
-        runtime.notifyMessageArrived(`run:${run.id}`, created.message.type)
+        runtime.notifyMessageArrived(
+          `run:${run.id}`,
+          created.message.type,
+          created.message.thread_id,
+          extractPayloadKind(created.message.payload)
+        )
       }
 
       const questionId = question.message_id

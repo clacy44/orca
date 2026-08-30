@@ -503,7 +503,12 @@ describe('orchestration RPC methods', () => {
       expect(db.getUnreadMessages(`run:${activeRunId}`)).toEqual([
         expect.objectContaining({ id: result.message.id, type: 'worker_done' })
       ])
-      expect(runtime.notifyMessageArrived).toHaveBeenCalledWith(`run:${activeRunId}`, 'worker_done')
+      expect(runtime.notifyMessageArrived).toHaveBeenCalledWith(
+        `run:${activeRunId}`,
+        'worker_done',
+        null,
+        null
+      )
     })
 
     it('requires the minted capability, exact pane, and process incarnation', async () => {
@@ -628,7 +633,7 @@ describe('orchestration RPC methods', () => {
         payload: JSON.stringify({ dispatchId: dispatch.id })
       })
 
-      expect(notify).toHaveBeenCalledWith(`run:${activeRunId}`, 'heartbeat')
+      expect(notify).toHaveBeenCalledWith(`run:${activeRunId}`, 'heartbeat', null, null)
       // Negative control: a live heartbeat carries no verdict, so the CLI still prints Sent <id>.
       expect(result).not.toHaveProperty('lifecycle')
     })
@@ -1887,7 +1892,7 @@ describe('orchestration RPC methods', () => {
       // Negative control: a purely local Dispatch enqueues nothing on the relay.
       expect(result.message.to_handle).toBe(`dispatch:${dispatch.id}`)
       expect(db.listPendingFederationRelay(dispatch.id, 'to_worker')).toHaveLength(0)
-      expect(notify).toHaveBeenCalledWith(`dispatch:${dispatch.id}`, 'status')
+      expect(notify).toHaveBeenCalledWith(`dispatch:${dispatch.id}`, 'status', escalation.id, null)
     })
 
     it('answers legacy_read_only before resolving the Dispatch sender', async () => {

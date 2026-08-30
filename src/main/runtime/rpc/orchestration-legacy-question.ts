@@ -3,6 +3,7 @@ import type { RpcRequest } from './core'
 import type { OrcaRuntimeService } from '../orca-runtime'
 import { OrchestrationError } from '../orchestration/orchestration-error'
 import { LEGACY_CONTRACT_VERSION } from '../orchestration/db'
+import { extractPayloadKind } from '../orchestration/message-waiter-thread-keying'
 import type { LegacyCompatibilityAuthority } from './orchestration-legacy-authority'
 import {
   normalizeLegacyText,
@@ -99,7 +100,12 @@ export async function handleLegacyAsk(args: {
     questionId = committed.question.message_id
     duplicate = committed.duplicate || Boolean(existingQuestionId)
     if (!duplicate) {
-      runtime.notifyMessageArrived(committed.message.to_handle, committed.message.type)
+      runtime.notifyMessageArrived(
+        committed.message.to_handle,
+        committed.message.type,
+        committed.message.thread_id,
+        extractPayloadKind(committed.message.payload)
+      )
     }
   }
 
