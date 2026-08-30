@@ -983,6 +983,7 @@ const TEST_REPO_ID = 'repo-1'
 const TEST_REPO_PATH = '/tmp/repo'
 const TEST_WORKTREE_PATH = '/tmp/worktree-a'
 const TEST_WORKTREE_ID = `${TEST_REPO_ID}::${TEST_WORKTREE_PATH}`
+const TERMINAL_ROLE_LEAF_ID = '55555555-5555-4555-8555-555555555555'
 const TEST_FOLDER_PROJECT_GROUP_ID = 'folder-project-group-1'
 const TEST_FOLDER_WORKSPACE_ID = 'folder-workspace-1'
 const TEST_FOLDER_WORKSPACE_KEY = `folder:${TEST_FOLDER_WORKSPACE_ID}`
@@ -25055,6 +25056,59 @@ describe('OrcaRuntimeService', () => {
 
     expect(terminal?.handle).toBeDefined()
     expect(tab?.handle).toBe(terminal?.handle)
+  })
+
+  it('sets a role visible on any subsequent list, and rename does not clobber it (BUG 2)', async () => {
+    const roles: Record<string, string> = {}
+    const runtime = new OrcaRuntimeService({
+      ...store,
+      persistTerminalRole: ({ tabId, leafId, role }) => {
+        const key = `${tabId}:${leafId}`
+        if (role === null) {
+          delete roles[key]
+        } else {
+          roles[key] = role
+        }
+      },
+      getTerminalRoles: () => ({ ...roles })
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Codex',
+          activeLeafId: TERMINAL_ROLE_LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId: TERMINAL_ROLE_LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: 'pty-1',
+          paneTitle: null
+        }
+      ]
+    })
+    const [terminal] = (await runtime.listTerminals()).terminals
+    expect(terminal).toBeDefined()
+
+    await runtime.setTerminalRole(terminal!.handle, 'merge-restructure backend')
+    const afterSet = (await runtime.listTerminals()).terminals[0]
+    expect(afterSet?.role).toBe('merge-restructure backend')
+
+    const renamed = await runtime.renameTerminal(terminal!.handle, 'New Title')
+    expect(renamed.title).toBe('New Title')
+    const afterRename = (await runtime.listTerminals()).terminals[0]
+    expect(afterRename?.role).toBe('merge-restructure backend')
+
+    await runtime.setTerminalRole(terminal!.handle, null)
+    const afterClear = (await runtime.listTerminals()).terminals[0]
+    expect(afterClear?.role).toBeUndefined()
   })
 
   it('omits stale browser session tabs that no longer have live webContents', async () => {

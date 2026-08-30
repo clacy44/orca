@@ -21,6 +21,8 @@ export type RosterTerminal = {
   // null or empty means it did and nobody is attached. Collapsing the two would print "nobody" for
   // "unknown" on every older peer in the roster.
   presence?: string | null
+  /** Agent-set purpose (S10 BUG 2); undefined on a pre-role peer, distinct from the title-guessed agent. */
+  role?: string
 }
 
 export type RosterProbeResponse = {
@@ -46,6 +48,7 @@ export type RosterRow = {
   agent: string | null
   worktreePath: string | null
   presence?: string | null
+  role?: string | null
 }
 
 export type EnvironmentTerminalRoster = {
@@ -166,6 +169,7 @@ function toRosterRows(runtime: ProbedRuntime): RosterRow[] {
     worktreePath: terminal.worktreePath ?? null,
     // Why spread-conditional: an absent key must survive to the formatter as absent, and writing
     // `presence: terminal.presence` would turn a pre-presence peer into an explicit undefined.
-    ...('presence' in terminal ? { presence: terminal.presence ?? null } : {})
+    ...('presence' in terminal ? { presence: terminal.presence ?? null } : {}),
+    ...('role' in terminal ? { role: terminal.role ?? null } : {})
   }))
 }

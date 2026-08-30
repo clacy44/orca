@@ -120,6 +120,20 @@ export const TERMINAL_COMMAND_SPECS: CommandSpec[] = [
     ]
   },
   {
+    path: ['terminal', 'set-role'],
+    summary: 'Set or clear the agent-authored purpose of a terminal',
+    usage: 'orca terminal set-role [--terminal <handle>] [--text <one line>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'text'],
+    notes: [
+      'Omit --text or pass an empty string to clear the role.',
+      'A role survives rename and runtime restart; it is a separate field from title (BUG 2).'
+    ],
+    examples: [
+      'orca terminal set-role --terminal term_abc123 --text "merge-restructure backend"',
+      'orca terminal set-role --terminal term_abc123 --json'
+    ]
+  },
+  {
     path: ['terminal', 'split'],
     summary: 'Split an existing terminal pane',
     usage:

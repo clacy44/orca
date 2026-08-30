@@ -6,6 +6,7 @@ import type {
   RuntimeTerminalListResult,
   RuntimeTerminalRead,
   RuntimeTerminalRename,
+  RuntimeTerminalSetRole,
   RuntimeTerminalSend,
   RuntimeTerminalShow,
   RuntimeTerminalSplit,
@@ -21,6 +22,7 @@ import {
   formatTerminalList,
   formatTerminalRead,
   formatTerminalRename,
+  formatTerminalSetRole,
   formatTerminalSend,
   formatTerminalShow,
   formatTerminalSplit,
@@ -147,6 +149,13 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
       title: getOptionalStringFlag(flags, 'title') ?? null
     })
     printResult(result, json, formatTerminalRename)
+  },
+  'terminal set-role': async ({ flags, client, cwd, json }) => {
+    const result = await client.call<{ setRole: RuntimeTerminalSetRole }>('terminal.setRole', {
+      terminal: await getTerminalHandle(flags, cwd, client),
+      role: getOptionalStringFlag(flags, 'text') ?? null
+    })
+    printResult(result, json, formatTerminalSetRole)
   },
   'terminal create': async ({ flags, client, cwd, json }) => {
     if (client.isRemote && !flags.has('worktree')) {

@@ -116,7 +116,8 @@ async function listRosterTerminals(
       worktreePath: terminal.worktreePath,
       // Why the `in` check rather than `?? null`: a peer that published no key is unknown, and the
       // roster column must be able to say so instead of claiming nobody is attached.
-      ...('presence' in terminal ? { presence: formatTerminalPresence(terminal.presence) } : {})
+      ...('presence' in terminal ? { presence: formatTerminalPresence(terminal.presence) } : {}),
+      ...(terminal.role !== undefined ? { role: terminal.role } : {})
     })),
     truncated: response.result.truncated
   }

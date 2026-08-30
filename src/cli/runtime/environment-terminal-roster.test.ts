@@ -196,6 +196,24 @@ describe('cross-runtime terminal roster', () => {
     ])
   })
 
+  it('keeps a peer that published no role distinguishable from one with an explicit role (BUG 2)', async () => {
+    const roster = await collectEnvironmentTerminalRoster([
+      reachable('old-host', 'env_old', {
+        runtimeId: 'runtime_old',
+        terminals: [{ handle: 'term_old', title: null }]
+      }),
+      reachable('new-host', 'env_new', {
+        runtimeId: 'runtime_new',
+        terminals: [{ handle: 'term_role', title: null, role: 'merge-restructure backend' }]
+      })
+    ])
+
+    expect(roster.rows.map((row) => ('role' in row ? row.role : 'absent'))).toEqual([
+      'absent',
+      'merge-restructure backend'
+    ])
+  })
+
   it('leaves presence unknown on every terminal-less row, reached or not', async () => {
     const roster = await collectEnvironmentTerminalRoster([
       failing('vps', rpcError('connect_failed', 'Connection refused.')),

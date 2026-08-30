@@ -10,6 +10,7 @@ import type {
   RuntimeTerminalVisualTab,
   RuntimeTerminalRead,
   RuntimeTerminalRename,
+  RuntimeTerminalSetRole,
   RuntimeTerminalSend,
   RuntimeTerminalShow,
   RuntimeTerminalSplit,
@@ -23,7 +24,7 @@ export function formatTerminalList(result: RuntimeTerminalListResult): string {
   const body = result.terminals
     .map(
       (terminal) =>
-        `${terminal.handle}  ${terminal.title ?? '(untitled)'}  ${terminal.connected ? 'connected' : 'disconnected'}  ${terminal.worktreePath}\n${terminal.preview ? `preview: ${terminal.preview}` : 'preview: <empty>'}`
+        `${terminal.handle}  ${terminal.title ?? '(untitled)'}${terminal.role ? `  [role: ${terminal.role}]` : ''}  ${terminal.connected ? 'connected' : 'disconnected'}  ${terminal.worktreePath}\n${terminal.preview ? `preview: ${terminal.preview}` : 'preview: <empty>'}`
     )
     .join('\n\n')
   const visualLayout = formatTerminalVisualLayouts(result.visualLayouts)
@@ -151,6 +152,14 @@ export function formatTerminalRename(result: { rename: RuntimeTerminalRename }):
   return result.rename.title
     ? `Renamed terminal ${result.rename.handle} to "${result.rename.title}".`
     : `Cleared title for terminal ${result.rename.handle}.`
+}
+
+export function formatTerminalSetRole(result: { setRole: RuntimeTerminalSetRole }): string {
+  const { handle, role } = result.setRole
+  const headline = role
+    ? `Set role for terminal ${handle} to "${role}".`
+    : `Cleared role for terminal ${handle}.`
+  return `${headline}\nNext step: orca terminal list --json — confirm the role on ${handle}.`
 }
 
 export function formatTerminalCreate(result: { terminal: RuntimeTerminalCreate }): string {

@@ -379,6 +379,7 @@ import {
   type RuntimeRepoSearchRefs,
   type RuntimeTerminalRead,
   type RuntimeTerminalRename,
+  type RuntimeTerminalSetRole,
   type RuntimeTerminalAgentStatus,
   type RuntimeTerminalSend,
   type RuntimeTerminalCreate,
@@ -1087,6 +1088,7 @@ import { assertLaneSeedPromptWithinBounds, callerMayOpenSourceLane } from './ter
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
+import { applyTerminalRoleRows, buildTerminalRoleAssignment } from './terminal-role-row'
 import { assertLaneAgentArgsAllowed, laneScopedAgentLaunchInputs } from './lane-launch-computation'
 import { createPresenceParticipantPrincipalResolver } from './presence-participant-principal'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
@@ -1243,6 +1245,8 @@ type RuntimeStore = {
   persistPaneCredentialLane?: Store['persistPaneCredentialLane']
   forgetPaneCredentialLane?: Store['forgetPaneCredentialLane']
   getPaneCredentialLanes?: Store['getPaneCredentialLanes']
+  persistTerminalRole?: Store['persistTerminalRole']
+  getTerminalRoles?: Store['getTerminalRoles']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
   updateUI?: Store['updateUI']
@@ -16361,6 +16365,7 @@ export class OrcaRuntimeService {
         principalOfGrant: (pairedDeviceId) => this.paneLanes.principalOfGrant(pairedDeviceId)
       })
     })
+    applyTerminalRoleRows(listedTerminals, this.store?.getTerminalRoles?.() ?? {})
     // Why: undefined (pre-flag client) must still get layouts; only an explicit
     // `false` opts out.
     const visualLayouts =
@@ -26209,6 +26214,22 @@ export class OrcaRuntimeService {
     const { leaf } = this.getLiveLeafForHandle(handle)
     this.notifier?.renameTerminal(leaf.tabId, title)
     return { handle, tabId: leaf.tabId, title }
+  }
+
+  // Why independent of title: role is read back purely from the paneKey-keyed store on every
+  // `listTerminals` boundary pass (applyTerminalRoleRows), so unlike rename it never touches the
+  // live pty or notifies a renderer — a restart or a later rename cannot clobber it (BUG 2).
+  async setTerminalRole(handle: string, role: string | null): Promise<RuntimeTerminalSetRole> {
+    this.assertGraphReady()
+    const { leaf } = this.getLiveLeafForHandle(handle)
+    const assignment = buildTerminalRoleAssignment({
+      handle,
+      tabId: leaf.tabId,
+      leafId: leaf.leafId,
+      role
+    })
+    this.store?.persistTerminalRole?.(assignment.persist)
+    return assignment.result
   }
 
   private async resolveAgentTerminalCreateOptions(
