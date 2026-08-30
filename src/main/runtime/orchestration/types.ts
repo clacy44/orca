@@ -252,6 +252,9 @@ export type MessageRow = {
   created_at: string
   delivered_at: string | null
   sender_pane_key: string | null
+  // Why optional: additive column (BUG 6) — older rows and in-memory test
+  // fixtures predate it, so absence must read the same as null.
+  recipient_pane_key?: string | null
 }
 
 export type TaskRow = {

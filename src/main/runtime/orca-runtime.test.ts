@@ -1103,6 +1103,7 @@ class InMemoryOrchestrationMessages {
     priority?: MessagePriority
     threadId?: string
     payload?: string
+    recipientPaneKey?: string
   }): MessageRow {
     this.sequence += 1
     const row: MessageRow = {
@@ -1120,10 +1121,23 @@ class InMemoryOrchestrationMessages {
       sequence: this.sequence,
       created_at: '1970-01-01 00:00:00',
       delivered_at: null,
-      sender_pane_key: null
+      sender_pane_key: null,
+      recipient_pane_key: msg.recipientPaneKey ?? null
     }
     this.messages.push(row)
     return row
+  }
+
+  // Why: mirrors OrchestrationDb.getRecipientPaneKeyForBareHandle (BUG 6) —
+  // the most recent recorded pane key for a stale bare peer handle.
+  getRecipientPaneKeyForBareHandle(handle: string): string | null {
+    for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+      const message = this.messages[i]
+      if (message.to_handle === handle && message.recipient_pane_key) {
+        return message.recipient_pane_key
+      }
+    }
+    return null
   }
 
   getUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
@@ -19933,7 +19947,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
@@ -20025,7 +20039,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const submitWrites = write.mock.calls.filter(
@@ -20066,7 +20080,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const submitWrites = write.mock.calls.filter(
@@ -20108,7 +20122,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       db.close()
@@ -20152,6 +20166,123 @@ describe('OrcaRuntimeService', () => {
         (c) => typeof c[1] === 'string' && c[1].includes('orca orchestration check')
       ).length
       expect(totalInjections).toBe(1)
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Why a UUID leaf id: getTerminalPaneKey only resolves a pane key for a
+  // stable (UUID) leaf id — syncSinglePty's default 'pane:1' fixture leaf
+  // does not qualify, but BUG 6's fallback is keyed on that pane key.
+  function syncSinglePtyWithStableLeaf(runtime: OrcaRuntimeService): void {
+    runtime.attachWindow(TEST_WINDOW_ID)
+    runtime.syncWindowGraph(TEST_WINDOW_ID, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Codex',
+          activeLeafId: HEADLESS_LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId: HEADLESS_LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: 'pty-1',
+          paneTitle: null
+        }
+      ]
+    })
+  }
+
+  it('repoints a bare peer handle through its recorded pane key after a graph reload re-mints it (BUG 6)', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = new OrcaRuntimeService(store)
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        getForegroundProcess: async () => null
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+
+      const [before] = (await runtime.listTerminals()).terminals
+      const staleHandle = before.handle
+      const paneKey = runtime.getTerminalPaneKey(staleHandle)
+      expect(paneKey).toBeTruthy()
+
+      // A peer send records the recipient's pane key alongside the message
+      // (mirrors what the RPC layer does at send time).
+      db.insertMessage({
+        from: 'term_sender',
+        to: staleHandle,
+        subject: 'lock-step: schema freeze',
+        recipientPaneKey: paneKey ?? undefined
+      })
+
+      // Force a graph reload — the same pane, tab and pty come back, but the
+      // bare handle is re-minted (it was never CLI-preallocated).
+      runtime.markRendererReloading(TEST_WINDOW_ID)
+      runtime.markGraphReady(TEST_WINDOW_ID)
+      syncSinglePtyWithStableLeaf(runtime)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+
+      const [after] = (await runtime.listTerminals()).terminals
+      expect(after.handle).not.toBe(staleHandle)
+
+      // The repoint scheduler still fires with the old, now-stale handle.
+      runtime.deliverPendingMessagesForHandle(staleHandle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-1',
+        expect.stringContaining('lock-step: schema freeze')
+      )
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('negative control: a stale bare handle with no recorded pane key stays unresolved (BUG 6)', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = new OrcaRuntimeService(store)
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        getForegroundProcess: async () => null
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+
+      const [before] = (await runtime.listTerminals()).terminals
+      const staleHandle = before.handle
+
+      // No recipientPaneKey recorded — the pre-fix state for a peer message.
+      db.insertMessage({ from: 'term_sender', to: staleHandle, subject: 'no pane key on file' })
+
+      runtime.markRendererReloading(TEST_WINDOW_ID)
+      runtime.markGraphReady(TEST_WINDOW_ID)
+      syncSinglePtyWithStableLeaf(runtime)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+
+      runtime.deliverPendingMessagesForHandle(staleHandle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).not.toHaveBeenCalled()
       db.close()
     } finally {
       vi.useRealTimers()
@@ -35361,7 +35492,9 @@ describe('OrcaRuntimeService', () => {
 
   describe('structured pty write claim', () => {
     const PROMPT_TEXT = 'a'.repeat(40_000)
-    const POINTER_TEXT = '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+    function pointerTextFor(subject: string): string {
+      return `\n[from: term_coord] "${subject}" thread:none\nRun \`orca orchestration check\`.\n`
+    }
 
     // Why 50: the send path resolves its guards through several awaited
     // promises before the first chunk; the paste then parks on a 0ms timer,
@@ -35398,7 +35531,7 @@ describe('OrcaRuntimeService', () => {
     }
 
     function isMailPointer(payload: string): boolean {
-      return payload.includes('orchestration message')
+      return payload.includes('orchestration check')
     }
 
     async function createIdleMailboxHarness(): Promise<{
@@ -35480,16 +35613,17 @@ describe('OrcaRuntimeService', () => {
       const { runtime, db, write, handle } = await createIdleMailboxHarness()
       try {
         db.insertMessage({ from: 'term_coord', to: handle, subject: 'no contention' })
+        const pointerText = pointerTextFor('no contention')
 
         runtime.notifyMessageArrived(handle, 'status')
         await Promise.resolve()
-        expect(write.mock.calls).toEqual([['pty-1', POINTER_TEXT]])
+        expect(write.mock.calls).toEqual([['pty-1', pointerText]])
 
         await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS - 1)
-        expect(write.mock.calls).toEqual([['pty-1', POINTER_TEXT]])
+        expect(write.mock.calls).toEqual([['pty-1', pointerText]])
         await vi.advanceTimersByTimeAsync(1)
         expect(write.mock.calls).toEqual([
-          ['pty-1', POINTER_TEXT],
+          ['pty-1', pointerText],
           ['pty-1', '\r']
         ])
       } finally {
@@ -35603,15 +35737,16 @@ describe('OrcaRuntimeService', () => {
         // window an unserialized mail Enter would submit into.
         setPtyLaunchAgent(runtime, 'pty-1', 'claude')
         db.insertMessage({ from: 'term_coord', to: handle, subject: 'arrived first' })
+        const pointerText = pointerTextFor('arrived first')
 
         runtime.notifyMessageArrived(handle, 'status')
         await Promise.resolve()
-        expect(writtenPayloads(write)).toEqual([POINTER_TEXT])
+        expect(writtenPayloads(write)).toEqual([pointerText])
 
         const prompt = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
         await drainToInterChunkYield()
         // The prompt waits for the pointer's Enter instead of pasting into it.
-        expect(writtenPayloads(write)).toEqual([POINTER_TEXT])
+        expect(writtenPayloads(write)).toEqual([pointerText])
 
         // The claude render gate never sees its marker, so the submit waits out its
         // hard timeout — the span an unserialized mail Enter would land inside.
@@ -35622,7 +35757,7 @@ describe('OrcaRuntimeService', () => {
         const pasteStart = payloads.findIndex((payload) =>
           payload.includes(AGENT_PROMPT_BRACKETED_PASTE_START)
         )
-        expect(payloads.slice(0, pasteStart)).toEqual([POINTER_TEXT, '\r'])
+        expect(payloads.slice(0, pasteStart)).toEqual([pointerText, '\r'])
         expect(payloads.slice(pasteStart).join('')).toBe(
           `${AGENT_PROMPT_BRACKETED_PASTE_START}${PROMPT_TEXT}${AGENT_PROMPT_BRACKETED_PASTE_END}\r`
         )
@@ -35709,11 +35844,11 @@ describe('OrcaRuntimeService', () => {
 
       // The push is deferred one microtask so it lands behind any resolved check.
       await Promise.resolve()
+      // BUG 7: the push is content-bearing (sender/subject/thread), not a bare count.
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        '\n[from: sender] "after wait" thread:none\nRun `orca orchestration check`.\n'
       )
-      expect(write).not.toHaveBeenCalledWith('pty-1', expect.stringContaining('after wait'))
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       expect(message.delivered_at).toBeNull()
@@ -35759,7 +35894,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_worker] "one P3 finding" thread:none\nRun `orca orchestration check`.\n'
       )
       expect(write).not.toHaveBeenCalledWith(
         'pty-1',
@@ -35806,7 +35941,8 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_coord] "narrow the retry to the SSH path" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
       expect(write).not.toHaveBeenCalledWith(
         'pty-1',
@@ -35969,7 +36105,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       expect(write).not.toHaveBeenCalledWith('pty-1', '\r')
     } finally {
@@ -36139,7 +36275,8 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_coord] "mid-dispatch correction" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
@@ -36234,11 +36371,13 @@ describe('OrcaRuntimeService', () => {
             typeof payload === 'string' && payload.includes('orca orchestration check')
         )
       expect(pointers()).toHaveLength(1)
-      expect(pointers()[0]?.[1]).toContain('You have 1 orchestration message')
+      expect(pointers()[0]?.[1]).toContain('[from: term_other_worker] "newer status"')
+      expect(pointers()[0]?.[1]).not.toContain('final worker settled')
 
       await vi.advanceTimersByTimeAsync(1_500)
       expect(pointers()).toHaveLength(2)
-      expect(pointers()[1]?.[1]).toContain('You have 2 orchestration messages')
+      expect(pointers()[1]?.[1]).toContain('[from: term_final_worker] "final worker settled"')
+      expect(pointers()[1]?.[1]).toContain('[from: term_other_worker] "newer status"')
       db.close()
     } finally {
       vi.useRealTimers()
@@ -36287,7 +36426,7 @@ describe('OrcaRuntimeService', () => {
       await vi.advanceTimersByTimeAsync(2_000)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36327,7 +36466,7 @@ describe('OrcaRuntimeService', () => {
       expect(pendingReads).toHaveBeenCalledTimes(1)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36362,7 +36501,7 @@ describe('OrcaRuntimeService', () => {
       syncSinglePty(runtime)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36437,7 +36576,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36509,7 +36648,8 @@ describe('OrcaRuntimeService', () => {
     await vi.waitFor(() => {
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_worker] "real-agent smoke complete" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
     })
     db.close()
@@ -36578,7 +36718,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36625,7 +36765,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36731,7 +36871,7 @@ describe('OrcaRuntimeService', () => {
         .map(([, data]) => data)
         .filter((data): data is string => typeof data === 'string')
       expect(payloads).toContain(
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: sender] "unclaimed status" thread:none\nRun `orca orchestration check`.\n'
       )
       expect(payloads.some((data) => data.includes('reserved completion'))).toBe(false)
       expect(status.delivered_at).toBeNull()
@@ -36913,7 +37053,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36967,7 +37107,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 200)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -37016,7 +37156,7 @@ describe('OrcaRuntimeService', () => {
       await Promise.resolve()
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -37167,7 +37307,8 @@ describe('OrcaRuntimeService', () => {
       ).toHaveLength(2)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 2 orchestration messages')
+        '\n[from: sender] "first" thread:none\n[from: sender] "second" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
       expect(second.delivered_at).toBeNull()
       db.close()
@@ -37198,7 +37339,7 @@ describe('OrcaRuntimeService', () => {
 
     expect(write).toHaveBeenCalledWith(
       'pty-1',
-      expect.stringContaining('You have 1 orchestration message')
+      expect.stringContaining('Run `orca orchestration check`.')
     )
     db.close()
   })

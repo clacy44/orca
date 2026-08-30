@@ -13,6 +13,7 @@ import { MESSAGE_TYPES } from '../../orchestration/types'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { formatMessageBanner } from '../../orchestration/formatter'
 import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
+import { isBarePeerHandle } from '../../orchestration/stale-handle-resolution'
 import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
 import { waitForFederatedLifecycleSettlement } from '../../orchestration/federation-lifecycle-settlement'
 import { abbreviateOrchestrationTasks } from '../../../../shared/orchestration-task-summary'
@@ -662,6 +663,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()
+        // Why: a bare peer handle has no mailbox row to fall back through on a
+        // later graph reload (BUG 6) — record its pane key now so the ambient
+        // push can re-resolve it once the handle goes stale.
+        const recipientPaneKey = isBarePeerHandle(to)
+          ? (runtime.getTerminalPaneKey(to) ?? undefined)
+          : undefined
         const msg = db.insertMessage({
           from,
           to,
@@ -672,6 +679,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           threadId: params.threadId,
           payload: params.payload,
           senderPaneKey,
+          recipientPaneKey,
           runId: routing.run?.id,
           deliveryContract: legacyWorkerDeliveryContract(
             runtime,
@@ -775,6 +783,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           threadId,
           payload: params.payload,
           senderPaneKey,
+          // Why: group addresses resolve to bare peer handles (BUG 6) — same
+          // durable pane-key recording as the point-to-point path above.
+          recipientPaneKey: runtime.getTerminalPaneKey(handle) ?? undefined,
           runId: routing.run?.id,
           deliveryContract: legacyWorkerDeliveryContract(
             runtime,
