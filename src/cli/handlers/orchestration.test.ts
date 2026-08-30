@@ -687,20 +687,20 @@ describe('orchestration timeout flag validation', () => {
 
     // Why: --peek rides with unread:false so pre-peek runtimes fall back to
     // the non-consuming all mode instead of the destructive mark-read default.
-    expect(callMock).toHaveBeenCalledWith('orchestration.check', {
-      terminal: 'term_worker',
-      terminalPaneKey: undefined,
-      unread: false,
-      peek: true,
-      all: undefined,
-      types: undefined,
-      format: undefined,
-      compatibilityCliCommand: expect.stringMatching(/^orca(?:-ide)?$/),
-      run: undefined,
-      ack: undefined,
-      wait: true,
-      timeoutMs: 250
-    })
+    // Why objectContaining (not a full literal): keeps this assertion stable across additive
+    // fields on the check payload; the ackMode default is covered exhaustively in
+    // orchestration-check-ack-mode-cli.test.ts.
+    expect(callMock).toHaveBeenCalledWith(
+      'orchestration.check',
+      expect.objectContaining({
+        terminal: 'term_worker',
+        unread: false,
+        peek: true,
+        ackMode: 'implicit',
+        wait: true,
+        timeoutMs: 250
+      })
+    )
   })
 
   it('filters already-read rows from a peek response for pre-peek runtimes', async () => {
