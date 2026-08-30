@@ -247,9 +247,10 @@ export function markThreadRead(
 export type GetThreadMessagesSinceOmitted = { purged: number; withheld: number }
 
 // Full-thread replay (BUG 4: every participant's side, not one recipient's inbox), unlike
-// getThreadMessagesFor. Filters purged rows and rows from a currently-quarantined sender in SQL
-// (never in a formatter) per s10-2-spec.md PURGE §; the counts are returned so the caller can
-// print the clean-room omission line without a second query.
+// getThreadMessagesFor. Filters purged rows (both messages.purged_at and — a purged thread's
+// tombstone — threads.purged_at) and rows from a currently-quarantined sender in SQL (never in a
+// formatter) per s10-2-spec.md PURGE §; the counts are returned so the caller can print the
+// clean-room omission line without a second query.
 export function getThreadMessagesSince(
   db: Database.Database,
   threadId: string,
@@ -262,13 +263,18 @@ export function getThreadMessagesSince(
     args.push(afterSequence)
   }
 
+  // A purged thread's tombstone (threads.purged_at) must be as invisible to a re-poster as it
+  // is to a reader: without this join, posting to a purged thread id would serve the new body
+  // in full even though getThread() already reports the thread gone.
   const liveArgs = [...args, limit]
   const messages = db
     .prepare(
       `SELECT m.* FROM messages m
+       JOIN threads t ON t.id = m.thread_id
        LEFT JOIN agents a ON a.id = m.sender_agent_id
        WHERE m.thread_id = ? ${sinceClause}
          AND m.purged_at IS NULL
+         AND t.purged_at IS NULL
          AND (a.id IS NULL OR a.quarantined = 0)
        ORDER BY m.sequence ASC
        LIMIT ?`
@@ -278,7 +284,10 @@ export function getThreadMessagesSince(
   const purged = (
     db
       .prepare(
-        `SELECT COUNT(*) AS n FROM messages m WHERE m.thread_id = ? ${sinceClause} AND m.purged_at IS NOT NULL`
+        `SELECT COUNT(*) AS n FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.thread_id = ? ${sinceClause}
+           AND (m.purged_at IS NOT NULL OR t.purged_at IS NOT NULL)`
       )
       .get(...args) as { n: number }
   ).n
@@ -286,8 +295,10 @@ export function getThreadMessagesSince(
     db
       .prepare(
         `SELECT COUNT(*) AS n FROM messages m
+         JOIN threads t ON t.id = m.thread_id
          JOIN agents a ON a.id = m.sender_agent_id
-         WHERE m.thread_id = ? ${sinceClause} AND m.purged_at IS NULL AND a.quarantined = 1`
+         WHERE m.thread_id = ? ${sinceClause} AND m.purged_at IS NULL AND t.purged_at IS NULL
+           AND a.quarantined = 1`
       )
       .get(...args) as { n: number }
   ).n

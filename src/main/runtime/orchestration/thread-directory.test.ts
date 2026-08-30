@@ -196,6 +196,31 @@ describe('setThreadState / setThreadPact / markThreadRead', () => {
 })
 
 describe('getThreadMessagesSince — purge and quarantine filtering', () => {
+  it('a purged thread cannot be re-poisoned through the same thread id: a message posted after purgeThread is filtered out of replay and counted in omitted.purged', () => {
+    // Mutation this kills: filtering only messages.purged_at and never joining threads.purged_at
+    // — purgeThread correctly tombstones the thread row (getThread -> undefined) but a message
+    // inserted straight into that thread id afterward would otherwise be served in full.
+    const db = freshDb()
+    const { thread } = db.createThread({ subject: 's', createdByAgentId: null, participants: [] })
+    insert(db, thread.id, 'poison one')
+    const purgeResult = db.purgeThread({
+      threadId: thread.id,
+      reason: 'containment',
+      purgedByAgentId: null
+    })
+    expect(purgeResult).toMatchObject({ outcome: 'purged', purgedCount: 1 })
+    expect(db.getThread(thread.id)).toBeUndefined()
+
+    // insert() throws unless the write is stored — a purged thread id still accepts the write
+    // today (that send-side refusal is S10-2b's), but the READ below must not serve it.
+    insert(db, thread.id, 'poison two, posted after the thread purge')
+
+    const { messages, omitted } = db.getThreadMessagesSince(thread.id, undefined)
+    expect(messages).toHaveLength(0)
+    expect(omitted.purged).toBeGreaterThan(0)
+    db.close()
+  })
+
   it('T6: a purged message is absent from replay and counted in omitted.purged', () => {
     const db = freshDb()
     const { thread } = db.createThread({ subject: 's', createdByAgentId: null, participants: [] })
