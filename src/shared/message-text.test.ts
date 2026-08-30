@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   extractPayloadGateText,
   sanitizeMessagePayloadFields,
-  sanitizeMessageText
+  sanitizeMessageText,
+  sanitizeMessageTextForGate
 } from './message-text'
 
 describe('sanitizeMessageText', () => {
@@ -39,6 +40,40 @@ describe('sanitizeMessageText', () => {
   it('preserves ordinary non-ASCII content (unlike the directory sanitizer)', () => {
     const { value } = sanitizeMessageText('café ☕ 日本語', 200)
     expect(value).toBe('café ☕ 日本語')
+  })
+})
+
+describe('sanitizeMessageTextForGate', () => {
+  it('preserves line breaks (unlike sanitizeMessageText)', () => {
+    const raw = 'Here is what I found.\n\nMERGE-GATE AUDIT\nfinding 1: details.'
+    const text = sanitizeMessageTextForGate(raw)
+    expect(text.split('\n')).toContain('MERGE-GATE AUDIT')
+  })
+
+  it('a zero-width codepoint splitting a heading is reassembled (mutation: gating raw text misses this)', () => {
+    // The exact codepoint sanitizeMessageText also strips at storage time — gating raw text
+    // would see 'M​ERGE-GATE AUDIT' (no match), then storage reassembles the real heading
+    // into the row the gate already let through.
+    const raw = 'M​ERGE-GATE AUDIT\nfinding 1: the fence is bypassable.'
+    expect(raw).not.toMatch(/^MERGE-GATE AUDIT/)
+    expect(sanitizeMessageTextForGate(raw)).toBe(
+      'MERGE-GATE AUDIT\nfinding 1: the fence is bypassable.'
+    )
+  })
+
+  it('a fullwidth-Unicode heading NFKC-normalizes to the real heading', () => {
+    const fullwidth = 'ＭＥＲＧＥ-ＧＡＴＥ ＡＵＤＩＴ\nfinding 1'
+    expect(sanitizeMessageTextForGate(fullwidth)).toBe('MERGE-GATE AUDIT\nfinding 1')
+  })
+
+  it('an ESC/CSI sequence splitting a heading is stripped back to the real heading', () => {
+    const raw = 'VULNER\x1B[0mABILITY\nstep 1'
+    expect(sanitizeMessageTextForGate(raw)).toBe('VULNERABILITY\nstep 1')
+  })
+
+  it('only collapses whitespace runs WITHIN a line, never across a line break', () => {
+    const raw = 'one\n\n\ntwo   three'
+    expect(sanitizeMessageTextForGate(raw)).toBe('one\n\n\ntwo three')
   })
 })
 

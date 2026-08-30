@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { evaluateMessageBodyGate, type GateVerdict } from '../../../shared/message-body-gate'
-import { sanitizeMessageText } from '../../../shared/message-text'
+import { sanitizeMessageText, sanitizeMessageTextForGate } from '../../../shared/message-text'
 import type { MessageRow } from './types'
 
 const PURGE_REASON_MAX_LENGTH = 500
@@ -34,7 +34,12 @@ function gateReason(
   infraAllowlist: readonly string[] | undefined
 ): GateReasonResult {
   const sanitizedReason = sanitizeMessageText(reason, PURGE_REASON_MAX_LENGTH).value
-  const verdict = evaluateMessageBodyGate({ body: sanitizedReason, infraAllowlist })
+  // Same gate-text discipline as insertGatedMessage (message-gate-writer.ts): neither raw nor
+  // the newline-collapsed stored text, but the normalized-line-preserving form.
+  const verdict = evaluateMessageBodyGate({
+    body: sanitizeMessageTextForGate(reason),
+    infraAllowlist
+  })
   if (verdict.tier !== 'hard') {
     return { ok: true, sanitizedReason }
   }

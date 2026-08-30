@@ -34,26 +34,23 @@ function stripEscapeSequences(input: string): string {
   return input.replace(OSC_RE, '').replace(CSI_RE, '')
 }
 
-/**
- * Pure text sanitizer for message `subject`/`body`/`payload` (and, gated the same way,
- * `purge_reason` / quarantine reason text — S10-2 GATE §, ruling 9). NFKC-normalizes, strips
- * ESC/CSI/OSC terminal sequences and zero-width/bidi-override codepoints, collapses every
- * newline (and other C0 whitespace controls) to a single space, drops remaining non-whitespace
- * C0/C1 controls and DEL outright, collapses whitespace runs, trims, then hard-truncates to
- * `maxLength`. Never throws — a length overage is reported via `truncated`, never refused; the
- * gate (message-body-gate.ts), not this function, is what can refuse a send.
- */
-export function sanitizeMessageText(raw: string, maxLength: number): SanitizeMessageTextResult {
+// Shared first pass for both sanitizers below: NFKC-normalize, strip ESC/CSI/OSC sequences and
+// zero-width/bidi-override codepoints, drop non-whitespace C0/C1 controls and DEL outright.
+// `newline` is what a line-feed/carriage-return collapses to — a space (sanitizeMessageText, so
+// stored/rendered text never carries a raw newline) or itself (sanitizeMessageTextForGate, so
+// the gate's line-start heading anchor still sees real line breaks).
+function normalizeAndStripControls(raw: string, newline: string): string {
   const normalized = raw.normalize('NFKC')
   const escapesStripped = stripEscapeSequences(normalized)
 
   let stripped = ''
   for (const ch of escapesStripped) {
     const code = ch.codePointAt(0) ?? 0
-    if (code === 0x0a || code === 0x0d || code === 0x09 || code === 0x0b || code === 0x0c) {
-      // Why: newlines and other C0 whitespace controls collapse to a space rather than
-      // vanishing — a subject that was two lines separated by nothing would otherwise read as
-      // one run-together word.
+    if (code === 0x0a || code === 0x0d) {
+      stripped += newline
+      continue
+    }
+    if (code === 0x09 || code === 0x0b || code === 0x0c) {
       stripped += ' '
       continue
     }
@@ -64,12 +61,46 @@ export function sanitizeMessageText(raw: string, maxLength: number): SanitizeMes
     }
     stripped += ch
   }
+  return stripped.replace(ZERO_WIDTH_OR_BIDI_RE, '')
+}
 
-  const noZeroWidth = stripped.replace(ZERO_WIDTH_OR_BIDI_RE, '')
-  const collapsed = noZeroWidth.replace(/ {2,}/g, ' ').trim()
+/**
+ * Pure text sanitizer for message `subject`/`body`/`payload` (and, gated the same way,
+ * `purge_reason` / quarantine reason text — S10-2 GATE §, ruling 9). NFKC-normalizes, strips
+ * ESC/CSI/OSC terminal sequences and zero-width/bidi-override codepoints, collapses every
+ * newline (and other C0 whitespace controls) to a single space, drops remaining non-whitespace
+ * C0/C1 controls and DEL outright, collapses whitespace runs, trims, then hard-truncates to
+ * `maxLength`. Never throws — a length overage is reported via `truncated`, never refused; the
+ * gate (message-body-gate.ts), not this function, is what can refuse a send.
+ */
+export function sanitizeMessageText(raw: string, maxLength: number): SanitizeMessageTextResult {
+  const stripped = normalizeAndStripControls(raw, ' ')
+  const collapsed = stripped.replace(/ {2,}/g, ' ').trim()
   const truncated = collapsed.length > maxLength
   const value = truncated ? collapsed.slice(0, maxLength).trimEnd() : collapsed
   return { value, truncated }
+}
+
+/**
+ * Gate input text (s10-2-spec.md:150 amended): the SAME NFKC-normalize + escape/zero-width/
+ * control stripping as `sanitizeMessageText`, but newline-PRESERVING, so it is evaluated by the
+ * gate instead of either the raw text or the fully-sanitized (newline-collapsed) text. Raw text
+ * alone under-gates: a zero-width codepoint or a fullwidth-Unicode variant can split a HARD
+ * heading so it never matches, and this exact normalization pass — applied identically at
+ * storage time — reassembles it in the stored/rendered row. Fully-sanitized text alone
+ * under-gates the opposite way (ruling 2's original bug): collapsing newlines to spaces destroys
+ * h1's line-start anchor for a heading that is not the literal first line. Gating this
+ * normalized-but-line-preserving text catches both: it sees what the reader will actually see.
+ * Only whitespace RUNS WITHIN a line are collapsed (never across a line break) so h1's anchor —
+ * checked per split line — is unaffected either way.
+ */
+export function sanitizeMessageTextForGate(raw: string): string {
+  const stripped = normalizeAndStripControls(raw, '\n')
+  return stripped
+    .split('\n')
+    .map((line) => line.replace(/[ \t]{2,}/g, ' ').trim())
+    .join('\n')
+    .trim()
 }
 
 // A5 (s10-3-pact-spec rev 6): payload is structured JSON, so a whole-payload text sanitizer

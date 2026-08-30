@@ -127,6 +127,21 @@ describe('purgeMessage', () => {
     db.close()
   })
 
+  it('purge reason gate: a HARD heading that is not the literal first line is still refused (same normalized-line-preserving gate as insertGatedMessage)', () => {
+    // Mutation this kills: gateReason gating sanitizeMessageText's newline-collapsed output
+    // (the same class of bug T2 covers for insertGatedMessage) instead of
+    // sanitizeMessageTextForGate's line-preserving output.
+    const db = freshDb()
+    const message = send(db)
+    const result = db.purgeMessage({
+      messageId: message.id,
+      reason: 'Housekeeping.\n\nMERGE-GATE AUDIT\nfinding 1: unresolved.',
+      purgedByAgentId: null
+    })
+    expect(result.outcome).toBe('refused')
+    db.close()
+  })
+
   it('T7: purging an answered question blanks answer_body but preserves a dedup hash', () => {
     const db = freshDb()
     const asked = send(db, { type: 'question' })

@@ -3,19 +3,20 @@
 // directly, which after this series is a host-lifecycle-only path (see the exemption list on
 // `db.ts`'s `insertMessage`). Kept out of db.ts per that file's ratchet rule.
 //
-// A5 (s10-3-pact-spec rev 6): `payload.kind` is host-written. A caller-supplied `kind` inside
-// `payload` is always refused (`payload_kind_reserved`), even with `acknowledgeGate` — this is
-// a structural rule, not a content-gate verdict, so the escape hatch does not apply to it. The
-// only legal way to set one is `hostPayloadKind`, a typed entry point reachable only from
-// trusted in-process callers (S10-3's `appendPactStep`, which will pass `'pact_step'`) — never
-// from a caller-controlled RPC parameter.
+// Not in this series: S10-3's A5 (`payload.kind`/`payload_kind` host-write guard). The brief
+// binding this series is s10-3-pact-spec rev 5 (A1 + A4 only); A5 landed in rev 6, and rev 7 —
+// the current doc — already supersedes rev 6's shape (an additive `messages.payload_kind`
+// column enforced inside this choke, not a `payload.kind` JSON field). Implementing it here
+// would be against a spec revision this series was never reviewed against, and would need
+// redoing the moment rev 7's column lands. S10-3 owns it.
 import { createHash, randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { evaluateMessageBodyGate, type GateVerdict } from '../../../shared/message-body-gate'
 import {
   extractPayloadGateText,
   sanitizeMessagePayloadFields,
-  sanitizeMessageText
+  sanitizeMessageText,
+  sanitizeMessageTextForGate
 } from '../../../shared/message-text'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { getAgentByPaneKey } from './derived-agent-rows'
@@ -54,21 +55,11 @@ export type InsertGatedMessageParams = {
   infraAllowlist?: readonly string[]
   /** Audit verb recorded on a refusal — 'send' | 'ask' | 'reply' | 'purge_reason' | etc. */
   verb?: string
-  /**
-   * A5, host-internal only. The sole intended caller is S10-3's `appendPactStep`. Never wire
-   * this to a caller-controlled RPC parameter — a caller sets a step by calling
-   * `orca agents step`, never by putting `kind` directly in a message payload.
-   */
-  hostPayloadKind?: string
 }
-
-export const PAYLOAD_KIND_RESERVED_MESSAGE =
-  'Refused: payload.kind is set by the host — a step is recorded with orca agents step, not by sending a message.'
 
 export type InsertGatedMessageResult =
   | { outcome: 'stored'; message: MessageRow; verdict: GateVerdict }
   | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
-  | { outcome: 'payload_kind_reserved' }
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
@@ -83,33 +74,6 @@ function resolveSenderAgentId(
     return null
   }
   return getAgentByPaneKey(db, senderHostId, senderPaneKey)?.id ?? null
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-// A5: refuses a caller-supplied payload.kind outright; only a trusted in-process caller
-// (hostPayloadKind) may stamp one in.
-function resolveGatedPayload(
-  params: Pick<InsertGatedMessageParams, 'payload' | 'hostPayloadKind'>
-): { ok: true; payload: unknown } | { ok: false } {
-  if (params.payload !== undefined && isPlainObject(params.payload) && 'kind' in params.payload) {
-    return { ok: false }
-  }
-  if (params.hostPayloadKind === undefined) {
-    return { ok: true, payload: params.payload }
-  }
-  if (params.payload !== undefined && !isPlainObject(params.payload)) {
-    return { ok: false }
-  }
-  return {
-    ok: true,
-    payload: {
-      ...(params.payload as Record<string, unknown> | undefined),
-      kind: params.hostPayloadKind
-    }
-  }
 }
 
 function writeGateRefusal(
@@ -150,47 +114,48 @@ function writeGateRefusal(
 }
 
 /**
- * The single write choke (ruling 2). Gates the RAW subject/body/payload (GATE §) BEFORE
- * sanitizing — `sanitizeMessageText` collapses every newline to a space, which would otherwise
- * destroy h1's line-start heading anchor for exactly the multi-line "audit heading, then body"
- * shape the anchor exists to catch (a heading followed by more text is not the first line of
- * the sanitized single-line string). Sanitization never *adds* structure, so gating pre-
- * sanitize is strictly more conservative — it cannot introduce a false HARD the sanitized text
- * wouldn't also have matched. Resolves `sender_agent_id` from the attested pane (ruling 7,
- * write-side half of ruling 4) after the verdict, and either stores the sanitized row (clean or
- * soft-flagged) or writes a `gate_refusals` audit row and stores nothing (hard, unless
- * `acknowledgeGate`). Never throws on a HARD verdict — refusal is a normal return value the RPC
- * layer turns into an error.
+ * The single write choke (ruling 2). Gates `sanitizeMessageTextForGate`'s output (GATE §, amended
+ * per s10-2-spec.md:150) — NOT the raw subject/body/payload and NOT the fully-sanitized
+ * (newline-collapsed) text that gets stored. Raw text under-gates: a zero-width codepoint or a
+ * fullwidth-Unicode variant splits a HARD heading so it never matches, and `sanitizeMessageText`
+ * (below, for storage) then normalizes it right back into a real heading in the stored/rendered
+ * row — an invisible character would bypass containment and the sanitizer would clean the
+ * evidence out of the row on the way in. Fully-sanitized text under-gates the other way: newline
+ * collapse destroys h1's line-start anchor for a heading that is not the literal first line.
+ * `sanitizeMessageTextForGate` applies the same normalization as storage while keeping line
+ * breaks, so the gate sees what the reader will actually see either way. Resolves
+ * `sender_agent_id` from the attested pane (ruling 7, write-side half of ruling 4) after the
+ * verdict, and either stores the sanitized row (clean or soft-flagged) or writes a
+ * `gate_refusals` audit row and stores nothing (hard, unless `acknowledgeGate`). Never throws on
+ * a HARD verdict — refusal is a normal return value the RPC layer turns into an error.
  */
 export function insertGatedMessage(
   db: Database.Database,
   params: InsertGatedMessageParams
 ): InsertGatedMessageResult {
-  const gatedPayload = resolveGatedPayload(params)
-  if (!gatedPayload.ok) {
-    return { outcome: 'payload_kind_reserved' }
-  }
-
   const senderHostId = params.senderHostId ?? 'local'
   const senderAgentId = resolveSenderAgentId(db, params.senderPaneKey, senderHostId)
 
   const rawBody = params.body ?? ''
   const rawPayloadGateText =
-    gatedPayload.payload === undefined ? undefined : extractPayloadGateText(gatedPayload.payload)
+    params.payload === undefined ? undefined : extractPayloadGateText(params.payload)
 
+  // Gate the normalized-but-line-preserving text (message-text.ts), not the raw bytes and not
+  // the fully-sanitized (newline-collapsed) text — see sanitizeMessageTextForGate's doc comment.
   const verdict = evaluateMessageBodyGate({
-    subject: params.subject,
-    body: rawBody,
-    payload: rawPayloadGateText,
+    subject: sanitizeMessageTextForGate(params.subject),
+    body: sanitizeMessageTextForGate(rawBody),
+    payload:
+      rawPayloadGateText === undefined ? undefined : sanitizeMessageTextForGate(rawPayloadGateText),
     infraAllowlist: params.infraAllowlist
   })
 
   const sanitizedSubject = sanitizeMessageText(params.subject, MESSAGE_SUBJECT_MAX_LENGTH).value
   const sanitizedBody = sanitizeMessageText(rawBody, MESSAGE_BODY_MAX_LENGTH).value
   const sanitizedPayload =
-    gatedPayload.payload === undefined
+    params.payload === undefined
       ? undefined
-      : sanitizeMessagePayloadFields(gatedPayload.payload, MESSAGE_PAYLOAD_FIELD_MAX_LENGTH)
+      : sanitizeMessagePayloadFields(params.payload, MESSAGE_PAYLOAD_FIELD_MAX_LENGTH)
   const payloadJson = sanitizedPayload === undefined ? null : JSON.stringify(sanitizedPayload)
 
   const verb = params.verb ?? 'send'
