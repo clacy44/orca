@@ -4,6 +4,7 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, OptionalString, OptionalBoolean, requiredString } from '../schemas'
 import {
   LEGACY_CONTRACT_VERSION,
+  PEER_RUN_ID,
   type MessageType,
   type MessagePriority,
   type OrchestrationDb,
@@ -663,14 +664,42 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         if (to.startsWith('dispatch:')) {
           requireActiveDispatchForWorkerMail(db, to.slice('dispatch:'.length))
         }
+        // Why (A4/ROUTING): `agent:<id>` is a directory address, not a terminal
+        // handle — resolve it here so an unknown/quarantined recipient refuses
+        // before insertMessage, and so the row lands on PEER_RUN_ID instead of
+        // silently defaulting to LEGACY_RUN_ID (which would throw on the
+        // recipient's `check`, db.ts:2928).
+        let agentRecipient: ReturnType<typeof db.getAgentById>
+        if (to.startsWith('agent:')) {
+          const agentId = to.slice('agent:'.length)
+          agentRecipient = db.getAgentById(agentId)
+          if (!agentRecipient) {
+            throw new OrchestrationError('agent_unknown', `Agent ${agentId} was not found.`, {
+              nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
+            })
+          }
+          if (agentRecipient.quarantined === 1) {
+            throw new OrchestrationError(
+              'agent_quarantined',
+              `Agent ${agentRecipient.display_name} is quarantined and cannot receive mail.`,
+              { nextSteps: [`orca agents show --id ${agentRecipient.id}`] }
+            )
+          }
+        }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()
         // Why: a bare peer handle has no mailbox row to fall back through on a
         // later graph reload (BUG 6) — record its pane key now so the ambient
         // push can re-resolve it once the handle goes stale.
-        const recipientPaneKey = isBarePeerHandle(to)
-          ? (runtime.getTerminalPaneKey(to) ?? undefined)
-          : undefined
+        const recipientPaneKey = agentRecipient
+          ? (agentRecipient.pane_key ?? undefined)
+          : isBarePeerHandle(to)
+            ? (runtime.getTerminalPaneKey(to) ?? undefined)
+            : undefined
+        const senderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        const senderAgentId = senderPaneKey
+          ? (db.getAgentByPaneKey(senderHostId, senderPaneKey)?.id ?? null)
+          : null
         const msg = db.insertMessage({
           from,
           to,
@@ -682,7 +711,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           payload: params.payload,
           senderPaneKey,
           recipientPaneKey,
-          runId: routing.run?.id,
+          senderAgentId,
+          runId: routing.run?.id ?? (agentRecipient ? PEER_RUN_ID : undefined),
           deliveryContract: legacyWorkerDeliveryContract(
             runtime,
             routing.run?.id ?? legacyCoordinatorRunId,
@@ -811,6 +841,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       params,
       {
         orchestrationCompatibilityEvidence,
+        orchestrationCompatibilityCallerAuthority,
         runtime,
         signal,
         legacyCoordinatorRunId,
@@ -1061,6 +1092,97 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           count: arrived.length,
           ...(params.format || params.inject
             ? { formatted: arrived.map(formatMessageBanner).join('\n\n') }
+            : {})
+        }
+      }
+
+      // Why (S10-1 ROUTING "Check"): the caller's own directory row, if any, owns
+      // an `agent:<id>` mailbox — durable via mailbox_deliveries (BUG 5), taken
+      // before the bare-handle branch below so a registered agent's mail never
+      // falls through to the legacy-fenced path.
+      const agentHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+      const attestedForAgentCheck =
+        orchestrationCompatibilityCallerAuthority?.terminalHandle === handle
+          ? orchestrationCompatibilityCallerAuthority
+          : undefined
+      const agentPaneKeyForCheck = attestedForAgentCheck?.paneKey ?? paneKey ?? undefined
+      const callerAgentRow = agentPaneKeyForCheck
+        ? db.getAgentByPaneKey(agentHostId, agentPaneKeyForCheck)
+        : undefined
+      if (callerAgentRow && !callerAgentRow.tombstoned_at) {
+        const address = `agent:${callerAgentRow.id}`
+        db.refreshAgentLiveness({
+          id: callerAgentRow.id,
+          state: 'idle',
+          terminalHandle: handle,
+          processIncarnation:
+            attestedForAgentCheck?.processIncarnation ??
+            runtime.getTerminalProcessIncarnation(handle)
+        })
+
+        if (params.peek || params.all) {
+          const addressRows = params.all
+            ? db.getAllMessagesForHandle(address, 100, typeFilter)
+            : db.getUnreadMessages(address, typeFilter)
+          const handleRows = params.all
+            ? db.getAllMessagesForHandle(handle, 100, typeFilter)
+            : db.getUnreadMessages(handle, typeFilter)
+          const mergedById = new Map<string, (typeof addressRows)[number]>()
+          for (const row of [...addressRows, ...handleRows]) {
+            mergedById.set(row.id, row)
+          }
+          const merged = [...mergedById.values()].sort((a, b) => a.sequence - b.sequence)
+          const legacyPending = merged.filter(
+            (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
+          ).length
+          const visible = params.all
+            ? merged
+            : merged.filter((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+          return {
+            mailbox: address,
+            agentId: callerAgentRow.id,
+            messages: visible,
+            count: visible.length,
+            legacyPending,
+            ...(params.format || params.inject
+              ? { formatted: visible.map(formatMessageBanner).join('\n\n') }
+              : {})
+          }
+        }
+
+        const acknowledged = params.ack ? db.acknowledgeMailboxDelivery(params.ack) : undefined
+
+        const addressUnread = db.getUnreadMessages(address, typeFilter)
+        const handleUnread = db.getUnreadMessages(handle, typeFilter)
+        const unreadById = new Map<string, (typeof addressUnread)[number]>()
+        for (const row of [...addressUnread, ...handleUnread]) {
+          unreadById.set(row.id, row)
+        }
+        const candidates = [...unreadById.values()].sort((a, b) => a.sequence - b.sequence)
+        const legacyPending = candidates.filter(
+          (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
+        ).length
+        const candidateIds = candidates
+          .filter((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+          .map((row) => row.id)
+
+        const current = db.getOrCreateMailboxDelivery({
+          mailboxHandle: address,
+          messageIds: candidateIds,
+          limit: 50
+        })
+        return {
+          mailbox: address,
+          agentId: callerAgentRow.id,
+          deliveryId: current?.delivery.id ?? null,
+          messages: current?.messages ?? [],
+          count: current?.messages.length ?? 0,
+          replayed: current?.replayed ?? false,
+          pendingBehind: current?.pendingBehind ?? 0,
+          legacyPending,
+          acknowledged: acknowledged?.delivery.id ?? null,
+          ...(params.format || params.inject
+            ? { formatted: (current?.messages ?? []).map(formatMessageBanner).join('\n\n') }
             : {})
         }
       }

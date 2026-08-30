@@ -248,4 +248,31 @@ describe('formatMessagePointer', () => {
     expect(result).toContain('[from: term_backend] "lock-step: schema freeze"')
     expect(result).not.toMatch(/^\nYou have \d+ orchestration/)
   })
+
+  // S10-1: the sender's directory identity (name + role), not the bare terminal handle.
+  it('shows the sender agent name and role when a resolver is supplied', () => {
+    const msg = makeMessage({ from_handle: 'term_backend', subject: 'schema freeze' })
+    const result = formatMessagePointer([msg], () => ({
+      displayName: 'merge-restructure-backend',
+      role: 'backend for the merge restructure'
+    }))
+    expect(result).toContain(
+      '[from: merge-restructure-backend (backend for the merge restructure)] "schema freeze"'
+    )
+  })
+
+  it('omits the role parenthetical when the agent has none', () => {
+    const msg = makeMessage({ from_handle: 'term_backend', subject: 'schema freeze' })
+    const result = formatMessagePointer([msg], () => ({
+      displayName: 'merge-restructure-backend',
+      role: null
+    }))
+    expect(result).toContain('[from: merge-restructure-backend] "schema freeze"')
+  })
+
+  it('falls back to the bare handle when the resolver finds no agent', () => {
+    const msg = makeMessage({ from_handle: 'term_backend', subject: 'schema freeze' })
+    const result = formatMessagePointer([msg], () => null)
+    expect(result).toContain('[from: term_backend] "schema freeze"')
+  })
 })
