@@ -56,7 +56,7 @@ describe('orchestration send pendingMail hint', () => {
 
   it('appends the hint to the local Sent branch', async () => {
     await expect(renderSend({ message: { id: 'msg_1' }, pendingMail: 2 })).resolves.toBe(
-      'Sent msg_1\nUnread coordinator mail: 2 — run `orca orchestration check`'
+      'Sent msg_1\nYour unread mail: 2 — run `orca orchestration check`'
     )
   })
 
@@ -73,7 +73,7 @@ describe('orchestration send pendingMail hint', () => {
         pendingMail: 1
       })
     ).resolves.toBe(
-      'Queued msg_relay for Run home (Dispatch ctx_remote)\nUnread coordinator mail: 1 — run `orca orchestration check`'
+      'Queued msg_relay for Run home (Dispatch ctx_remote)\nYour unread mail: 1 — run `orca orchestration check`'
     )
   })
 
@@ -90,7 +90,7 @@ describe('orchestration send pendingMail hint', () => {
         pendingMail: 5
       })
     ).resolves.toBe(
-      'Queued msg_worker for worker Dispatch ctx_worker\nUnread coordinator mail: 5 — run `orca orchestration check`'
+      'Queued msg_worker for worker Dispatch ctx_worker\nYour unread mail: 5 — run `orca orchestration check`'
     )
   })
 
@@ -136,7 +136,7 @@ describe('orchestration send pendingMail hint', () => {
     async (cli) => {
       process.env.ORCA_CLI_COMMAND = cli
       await expect(renderSend({ message: { id: 'msg_1' }, pendingMail: 3 })).resolves.toBe(
-        `Sent msg_1\nUnread coordinator mail: 3 — run \`${cli} orchestration check\``
+        `Sent msg_1\nYour unread mail: 3 — run \`${cli} orchestration check\``
       )
     }
   )

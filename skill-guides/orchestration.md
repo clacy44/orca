@@ -131,6 +131,7 @@ orca orchestration check [--terminal <handle>] [--ack <delivery_id>] [--peek|--a
 orca orchestration reply --id <msg_id> --body <text> [--from <handle>] [--json]
 orca orchestration ask (--question <text>|--resume <msg_id>) [--options <csv>] [--timeout-ms <n>] [--from <handle>] [--json]
 orca orchestration inbox [--limit <n>] [--json]
+orca orchestration sent --id <message_id> [--json]
 ```
 
 Rules:

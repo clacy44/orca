@@ -42,6 +42,8 @@ import {
   type LegacyCompatibilityResult,
   type OrchestrationMessageSummary as MessageSummary
 } from '../../shared/orchestration-check-output'
+import type { OrchestrationSentResult } from '../../shared/orchestration-delivery-state'
+import { formatOrchestrationSent } from '../orchestration-sent-format'
 
 // Why: 15 s is well under Claude Code's ~2 min Bash-tool silence budget while keeping log volume low. See design doc §3.4.
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000
@@ -148,7 +150,9 @@ function pendingMailHint(result: OrchestrationSendResult): string {
   }
   // Why the resolved binary: a worker inside the dev runtime must call orca-dev, and a
   // bare verb sends it to whichever runtime the plain `orca` on PATH happens to name.
-  return `\nUnread coordinator mail: ${pending} — run \`${resolveCompatibilityCliCommand()} orchestration check\``
+  // Why relabeled (BUG 3): this reports the SENDER's own unread mail, not a delivery receipt for
+  // the message just sent — `orchestration sent --id` is the real delivery-state read.
+  return `\nYour unread mail: ${pending} — run \`${resolveCompatibilityCliCommand()} orchestration check\``
 }
 
 // Why steps here and not on the host: the runtime answers a suppressed heartbeat with the
@@ -853,6 +857,14 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         })
         .join(full ? '\n\n' : '\n')
     })
+  },
+
+  'orchestration sent': async ({ flags, client, json }) => {
+    const id = getRequiredStringFlag(flags, 'id')
+    const result = await client.call<OrchestrationSentResult>('orchestration.sent', { id })
+    printResult(result, json, (r) =>
+      formatOrchestrationSent(r, id, resolveCompatibilityCliCommand())
+    )
   },
 
   'orchestration task-create': async ({ flags, client, cwd, json }) => {

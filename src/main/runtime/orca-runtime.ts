@@ -1089,6 +1089,12 @@ import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
 import { applyTerminalRoleRows, buildTerminalRoleAssignment } from './terminal-role-row'
+import {
+  resolveMessageDeliveryState,
+  resolveMessageRecipientPresence,
+  type MessageDeliveryState,
+  type MessageRecipientPresence
+} from './orchestration/message-delivery-state'
 import { assertLaneAgentArgsAllowed, laneScopedAgentLaunchInputs } from './lane-launch-computation'
 import { createPresenceParticipantPrincipalResolver } from './presence-participant-principal'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
@@ -33593,6 +33599,26 @@ export class OrcaRuntimeService {
     if (dispatchMailbox) {
       this.deliverPendingMessages(leaf, { mailboxHandle: dispatchMailbox })
     }
+  }
+
+  // Why here and not the RPC handler: `pointedMessageIdsByHandle` and live-leaf resolution are
+  // both private runtime state; `orchestration.sent` (BUG 3) reads them through this one method.
+  getMessageDeliverySnapshot(message: { id: string; to_handle: string; read: number }): {
+    delivery: MessageDeliveryState
+    recipient: MessageRecipientPresence
+  } {
+    const delivery = resolveMessageDeliveryState(
+      message,
+      this.pointedMessageIdsByHandle.get(message.to_handle)
+    )
+    const recipient = resolveMessageRecipientPresence(message.to_handle, (handle) => {
+      try {
+        return this.getLiveLeafForHandle(handle).leaf
+      } catch {
+        return null
+      }
+    })
+    return { delivery, recipient }
   }
 
   // Why: wake blocking orchestration.check --wait calls on this handle so they return the new message immediately instead of polling.

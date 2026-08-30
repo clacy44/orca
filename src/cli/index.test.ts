@@ -448,16 +448,15 @@ describe('orca root help', () => {
     expect(callMock).not.toHaveBeenCalled()
   })
 
-  it('documents the machine-readable terminal topology opt-in', async () => {
+  it('documents that --json and text return the same terminal topology (BUG 1)', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     logSpy.mockClear()
 
     await main(['terminal', 'list', '--help'], '/tmp/repo')
 
     const help = String(logSpy.mock.calls[0][0])
-    expect(help).toContain('[--include-visual-layouts] [--json]')
-    expect(help).toContain('--include-visual-layouts Include tab and pane topology in JSON output')
-    expect(help).toContain('JSON omits visualLayouts by default')
+    expect(help).toContain('orca terminal list [--worktree <selector>] [--limit <n>] [--json]')
+    expect(help).toContain('--json and text always return the same visualLayouts node set')
     expect(callMock).not.toHaveBeenCalled()
   })
 
@@ -3803,7 +3802,7 @@ describe('orca cli worktree awareness', () => {
     expect(callMock).toHaveBeenNthCalledWith(2, 'terminal.list', {
       worktree: 'id:repo::/tmp/repo/feature',
       limit: undefined,
-      includeVisualLayouts: false
+      includeVisualLayouts: true
     })
   })
 

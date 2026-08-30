@@ -126,6 +126,16 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'limit', 'terminal', 'full']
   },
   {
+    path: ['orchestration', 'sent'],
+    summary: 'Show the real delivery state of one sent message',
+    usage: 'orca orchestration sent --id <message_id> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id'],
+    notes: [
+      'delivery.state is queued (not yet pushed), pointed (pushed to the recipient pane, not yet read), or read.',
+      'This replaces reading the send receipt as a delivery confirmation — it never was one.'
+    ]
+  },
+  {
     path: ['orchestration', 'task-create'],
     summary: 'Create an orchestration task',
     usage:

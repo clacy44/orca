@@ -31,6 +31,7 @@ import {
 import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
+import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
@@ -422,6 +423,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_RUN_METHODS,
   ...ORCHESTRATION_WORKER_METHODS,
   ...ORCHESTRATION_FEDERATION_METHODS,
+  ...ORCHESTRATION_SENT_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,
