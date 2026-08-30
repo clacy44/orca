@@ -70,6 +70,7 @@ import {
   type RuntimeTerminalAgentStatusEvent
 } from './orca-runtime'
 import { RUNTIME_GRAPH_RELOAD_TIMEOUT_MS } from './runtime-graph-reload-lifecycle'
+import { reservationKey } from './orchestration/message-waiter-thread-keying'
 import {
   appendRecentPtyPathCandidates,
   recentTerminalPathCandidatesIncludePath,
@@ -1286,6 +1287,12 @@ class InMemoryOrchestrationMessages {
 
   // Why: onPtyExit consults it before failing a dispatch; these fixtures own none.
   getActiveDispatchForTerminal(): undefined {
+    return undefined
+  }
+
+  // Why: resolveMailboxTerminalHandle consults it for an `agent:` mailbox with no live
+  // terminal (S10-3 waiter fixtures address bare agent handles); these fixtures own no agents row.
+  getAgentById(): undefined {
     return undefined
   }
 
@@ -36022,6 +36029,373 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  it('parks a waiter to its own thread — a status row on a different thread does not wake it (K14)', async () => {
+    vi.useFakeTimers()
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const waiting = runtime.waitForMessage('agent:agent_thr', {
+        typeFilter: ['status'],
+        threadId: 'thr_2',
+        timeoutMs: 60_000
+      })
+      let settled: string | null = null
+      waiting.then((result) => {
+        settled = result
+      })
+
+      db.insertMessage({
+        from: 'agent:agent_other',
+        to: 'agent:agent_thr',
+        subject: 'pact step on the wrong thread',
+        type: 'status',
+        threadId: 'thr_1'
+      })
+      runtime.notifyMessageArrived('agent:agent_thr', 'status', 'thr_1')
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBeNull()
+
+      db.insertMessage({
+        from: 'agent:agent_other',
+        to: 'agent:agent_thr',
+        subject: 'pact step on the right thread',
+        type: 'status',
+        threadId: 'thr_2'
+      })
+      runtime.notifyMessageArrived('agent:agent_thr', 'status', 'thr_2')
+      await expect(waiting).resolves.toBe('notified')
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("a thread-scoped reservation snapshot does not hide a different thread's row from the pane push (K21)", async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_k21', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      // A waiter parked on thr_2 must not reserve `status` away from a thr_1 row.
+      runtime.waitForMessage('dispatch:ctx_k21', {
+        typeFilter: ['status'],
+        threadId: 'thr_2',
+        timeoutMs: 60_000
+      })
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_k21',
+        subject: 'status on thread 1',
+        type: 'status',
+        threadId: 'thr_1'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_k21', 'status', 'thr_1')
+      await Promise.resolve()
+
+      expect(write).toHaveBeenCalledWith('pty-1', expect.stringContaining('status on thread 1'))
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('a same-thread reservation still withholds the row from the pane push (K21 negative control)', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_k21_same', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      runtime.waitForMessage('dispatch:ctx_k21_same', {
+        typeFilter: ['status'],
+        threadId: 'thr_1',
+        timeoutMs: 60_000
+      })
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_k21_same',
+        subject: 'status on thread 1 again',
+        type: 'status',
+        threadId: 'thr_1'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_k21_same', 'status', 'thr_1')
+      await Promise.resolve()
+
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("a for:step waiter's reservation never withholds ordinary status traffic on its own thread (rev 6 — the re-park loop stays deleted)", async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_k21_kind', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      runtime.waitForMessage('dispatch:ctx_k21_kind', {
+        for: 'step',
+        threadId: 'thr_1',
+        timeoutMs: 60_000
+      })
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_k21_kind',
+        subject: 'ordinary status, not a pact step',
+        type: 'status',
+        threadId: 'thr_1'
+      })
+      runtime.notifyMessageArrived('dispatch:ctx_k21_kind', 'status', 'thr_1', null)
+      await Promise.resolve()
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-1',
+        expect.stringContaining('ordinary status, not a pact step')
+      )
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('a legacy no-thread waiter still reserves its type wholesale across every thread (#12536 stays closed)', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_legacy', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      const waiting = runtime.waitForMessage('dispatch:ctx_legacy', {
+        typeFilter: ['status'],
+        timeoutMs: 60_000
+      })
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_legacy',
+        subject: 'status on some pact thread',
+        type: 'status',
+        threadId: 'thr_9'
+      })
+      // The notify hook's caller passes the row's real thread_id (every current call site
+      // does) — a legacy waiter with no threadId of its own must still match it.
+      runtime.notifyMessageArrived('dispatch:ctx_legacy', 'status', 'thr_9')
+      await expect(waiting).resolves.toBe('notified')
+      await Promise.resolve()
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it("a for:step wait defaults typeFilter to ['status'] and payloadKind to 'pact_step' — ordinary status traffic never consumes it (rev 6)", async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const waiting = runtime.waitForMessage('agent:agent_f', {
+        for: 'step',
+        threadId: 'thr_1',
+        timeoutMs: 60_000
+      })
+      let settled: string | null = null
+      waiting.then((result) => {
+        settled = result
+      })
+
+      // Ordinary status chatter on the same thread — not a pact_step row — must not
+      // consume the park (the re-park loop rev 6 deletes).
+      runtime.notifyMessageArrived('agent:agent_f', 'status', 'thr_1', null)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBeNull()
+
+      runtime.notifyMessageArrived('agent:agent_f', 'status', 'thr_1', 'pact_step')
+      await expect(waiting).resolves.toBe('notified')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('a for:pact wait consumes no message at all — only resolvePactWaiters or its timeout ends it (rev 6)', async () => {
+    vi.useFakeTimers()
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const waiting = runtime.waitForMessage('agent:agent_pact_only', {
+        for: 'pact',
+        threadId: 'thr_1',
+        timeoutMs: 5_000
+      })
+      let settled: string | null = null
+      waiting.then((result) => {
+        settled = result
+      })
+
+      // Even a status/pact_step row on its own thread must not consume a for:pact park.
+      runtime.notifyMessageArrived('agent:agent_pact_only', 'status', 'thr_1', 'pact_step')
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBeNull()
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      await expect(waiting).resolves.toBe('timed_out')
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('resolvePactWaiters wakes only the intended for:pact/step waiter on the given thread', async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const onThread1 = runtime.waitForMessage('agent:agent_x', {
+        for: 'pact',
+        threadId: 'thr_1',
+        timeoutMs: 60_000
+      })
+      const onThread2 = runtime.waitForMessage('agent:agent_x', {
+        for: 'step',
+        threadId: 'thr_2',
+        timeoutMs: 60_000
+      })
+      const legacyCheck = runtime.waitForMessage('agent:agent_x', {
+        typeFilter: ['status'],
+        timeoutMs: 60_000
+      })
+      let resolvedThread1: string | null = null
+      let resolvedThread2: string | null = null
+      let resolvedLegacy: string | null = null
+      onThread1.then((result) => {
+        resolvedThread1 = result
+      })
+      onThread2.then((result) => {
+        resolvedThread2 = result
+      })
+      legacyCheck.then((result) => {
+        resolvedLegacy = result
+      })
+
+      runtime.resolvePactWaiters('agent_x', 'thr_1', 'accepted', ['orca agents pact --show thr_1'])
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(resolvedThread1).toBe('resolved')
+      expect(resolvedThread2).toBeNull()
+      expect(resolvedLegacy).toBeNull()
+
+      runtime.cancelMessageWaiters('agent:agent_x')
+      await expect(onThread2).resolves.toBe('cancelled')
+      await expect(legacyCheck).resolves.toBe('cancelled')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('resolvePactWaiters with threadId null wakes every for:pact/step waiter of the agent (turn_arrived)', async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const onThread1 = runtime.waitForMessage('agent:agent_turn', {
+        for: 'pact',
+        threadId: 'thr_1',
+        timeoutMs: 60_000
+      })
+      const onThread2 = runtime.waitForMessage('agent:agent_turn', {
+        for: 'step',
+        threadId: 'thr_2',
+        timeoutMs: 60_000
+      })
+      const legacyCheck = runtime.waitForMessage('agent:agent_turn', {
+        typeFilter: ['status'],
+        timeoutMs: 60_000
+      })
+
+      runtime.resolvePactWaiters('agent_turn', null, 'turn_arrived', [])
+      await expect(onThread1).resolves.toBe('resolved')
+      await expect(onThread2).resolves.toBe('resolved')
+
+      runtime.cancelMessageWaiters('agent:agent_turn')
+      await expect(legacyCheck).resolves.toBe('cancelled')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('resolvePactWaiters delivers {outcome, threadId, nextSteps} via onDetail', async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      let detail: unknown = null
+      const waiting = runtime.waitForMessage('agent:agent_d', {
+        for: 'pact',
+        threadId: 'thr_1',
+        timeoutMs: 60_000,
+        onDetail: (received) => {
+          detail = received
+        }
+      })
+      runtime.resolvePactWaiters('agent_d', 'thr_1', 'accepted', ['orca agents pact --show thr_1'])
+      await expect(waiting).resolves.toBe('resolved')
+      expect(detail).toEqual({
+        outcome: 'accepted',
+        threadId: 'thr_1',
+        nextSteps: ['orca agents pact --show thr_1']
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('cancelMessageWaiters resolves a for:pact waiter as cancelled, unaffected by the new fields', async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const waiting = runtime.waitForMessage('agent:agent_y', {
+        for: 'pact',
+        threadId: 'thr_1',
+        timeoutMs: 60_000
+      })
+      runtime.cancelMessageWaiters('agent:agent_y')
+      await expect(waiting).resolves.toBe('cancelled')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('resolvePactWaiters never wakes a legacy message/reply waiter on the same agent handle (older-client outcome tolerance)', async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      const legacyWaiting = runtime.waitForMessage('agent:agent_z', {
+        typeFilter: ['status'],
+        timeoutMs: 60_000
+      })
+      let settled = false
+      legacyWaiting.then(() => {
+        settled = true
+      })
+
+      runtime.resolvePactWaiters('agent_z', null, 'turn_arrived', [])
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      runtime.cancelMessageWaiters('agent:agent_z')
+      await expect(legacyWaiting).resolves.toBe('cancelled')
+    } finally {
+      db.close()
+    }
+  })
+
   it('does not point a dispatch mailbox at a worker whose idle was only restored, never observed', async () => {
     vi.useFakeTimers()
     const { runtime, db, write } = createDispatchMailboxHarness()
@@ -36391,7 +36765,13 @@ describe('OrcaRuntimeService', () => {
         subject: 'newer status',
         type: 'status'
       })
-      runtime.deliverPendingMessagesForHandle('run:run_stale_waiter', new Set(['worker_done']))
+      // Why the composite key, not the bare type (S10-3 A1/rev 6): reservedTypes is keyed by
+      // (type, threadId ?? '*', payloadKind ?? '*') — this simulates the wholesale reservation a
+      // legacy no-thread/no-kind waiter's own notify-time snapshot would have built.
+      runtime.deliverPendingMessagesForHandle(
+        'run:run_stale_waiter',
+        new Set([reservationKey('worker_done', undefined, undefined)])
+      )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
 
       const pointers = () =>
