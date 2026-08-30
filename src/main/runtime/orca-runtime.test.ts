@@ -19946,7 +19946,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
@@ -19989,7 +19989,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const submitWrites = write.mock.calls.filter(
@@ -20030,7 +20030,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       const submitWrites = write.mock.calls.filter(
@@ -20072,7 +20072,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       db.close()
@@ -35334,7 +35334,9 @@ describe('OrcaRuntimeService', () => {
 
   describe('structured pty write claim', () => {
     const PROMPT_TEXT = 'a'.repeat(40_000)
-    const POINTER_TEXT = '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+    function pointerTextFor(subject: string): string {
+      return `\n[from: term_coord] "${subject}" thread:none\nRun \`orca orchestration check\`.\n`
+    }
 
     // Why 50: the send path resolves its guards through several awaited
     // promises before the first chunk; the paste then parks on a 0ms timer,
@@ -35371,7 +35373,7 @@ describe('OrcaRuntimeService', () => {
     }
 
     function isMailPointer(payload: string): boolean {
-      return payload.includes('orchestration message')
+      return payload.includes('orchestration check')
     }
 
     async function createIdleMailboxHarness(): Promise<{
@@ -35453,16 +35455,17 @@ describe('OrcaRuntimeService', () => {
       const { runtime, db, write, handle } = await createIdleMailboxHarness()
       try {
         db.insertMessage({ from: 'term_coord', to: handle, subject: 'no contention' })
+        const pointerText = pointerTextFor('no contention')
 
         runtime.notifyMessageArrived(handle, 'status')
         await Promise.resolve()
-        expect(write.mock.calls).toEqual([['pty-1', POINTER_TEXT]])
+        expect(write.mock.calls).toEqual([['pty-1', pointerText]])
 
         await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS - 1)
-        expect(write.mock.calls).toEqual([['pty-1', POINTER_TEXT]])
+        expect(write.mock.calls).toEqual([['pty-1', pointerText]])
         await vi.advanceTimersByTimeAsync(1)
         expect(write.mock.calls).toEqual([
-          ['pty-1', POINTER_TEXT],
+          ['pty-1', pointerText],
           ['pty-1', '\r']
         ])
       } finally {
@@ -35576,15 +35579,16 @@ describe('OrcaRuntimeService', () => {
         // window an unserialized mail Enter would submit into.
         setPtyLaunchAgent(runtime, 'pty-1', 'claude')
         db.insertMessage({ from: 'term_coord', to: handle, subject: 'arrived first' })
+        const pointerText = pointerTextFor('arrived first')
 
         runtime.notifyMessageArrived(handle, 'status')
         await Promise.resolve()
-        expect(writtenPayloads(write)).toEqual([POINTER_TEXT])
+        expect(writtenPayloads(write)).toEqual([pointerText])
 
         const prompt = runtime.sendTerminalAgentPrompt(handle, PROMPT_TEXT)
         await drainToInterChunkYield()
         // The prompt waits for the pointer's Enter instead of pasting into it.
-        expect(writtenPayloads(write)).toEqual([POINTER_TEXT])
+        expect(writtenPayloads(write)).toEqual([pointerText])
 
         // The claude render gate never sees its marker, so the submit waits out its
         // hard timeout — the span an unserialized mail Enter would land inside.
@@ -35595,7 +35599,7 @@ describe('OrcaRuntimeService', () => {
         const pasteStart = payloads.findIndex((payload) =>
           payload.includes(AGENT_PROMPT_BRACKETED_PASTE_START)
         )
-        expect(payloads.slice(0, pasteStart)).toEqual([POINTER_TEXT, '\r'])
+        expect(payloads.slice(0, pasteStart)).toEqual([pointerText, '\r'])
         expect(payloads.slice(pasteStart).join('')).toBe(
           `${AGENT_PROMPT_BRACKETED_PASTE_START}${PROMPT_TEXT}${AGENT_PROMPT_BRACKETED_PASTE_END}\r`
         )
@@ -35682,11 +35686,11 @@ describe('OrcaRuntimeService', () => {
 
       // The push is deferred one microtask so it lands behind any resolved check.
       await Promise.resolve()
+      // BUG 7: the push is content-bearing (sender/subject/thread), not a bare count.
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        '\n[from: sender] "after wait" thread:none\nRun `orca orchestration check`.\n'
       )
-      expect(write).not.toHaveBeenCalledWith('pty-1', expect.stringContaining('after wait'))
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
       expect(message.delivered_at).toBeNull()
@@ -35732,7 +35736,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_worker] "one P3 finding" thread:none\nRun `orca orchestration check`.\n'
       )
       expect(write).not.toHaveBeenCalledWith(
         'pty-1',
@@ -35779,7 +35783,8 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_coord] "narrow the retry to the SSH path" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
       expect(write).not.toHaveBeenCalledWith(
         'pty-1',
@@ -35942,7 +35947,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       expect(write).not.toHaveBeenCalledWith('pty-1', '\r')
     } finally {
@@ -36112,7 +36117,8 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_coord] "mid-dispatch correction" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
       await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
       expect(write).toHaveBeenCalledWith('pty-1', '\r')
@@ -36207,11 +36213,13 @@ describe('OrcaRuntimeService', () => {
             typeof payload === 'string' && payload.includes('orca orchestration check')
         )
       expect(pointers()).toHaveLength(1)
-      expect(pointers()[0]?.[1]).toContain('You have 1 orchestration message')
+      expect(pointers()[0]?.[1]).toContain('[from: term_other_worker] "newer status"')
+      expect(pointers()[0]?.[1]).not.toContain('final worker settled')
 
       await vi.advanceTimersByTimeAsync(1_500)
       expect(pointers()).toHaveLength(2)
-      expect(pointers()[1]?.[1]).toContain('You have 2 orchestration messages')
+      expect(pointers()[1]?.[1]).toContain('[from: term_final_worker] "final worker settled"')
+      expect(pointers()[1]?.[1]).toContain('[from: term_other_worker] "newer status"')
       db.close()
     } finally {
       vi.useRealTimers()
@@ -36260,7 +36268,7 @@ describe('OrcaRuntimeService', () => {
       await vi.advanceTimersByTimeAsync(2_000)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36300,7 +36308,7 @@ describe('OrcaRuntimeService', () => {
       expect(pendingReads).toHaveBeenCalledTimes(1)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36335,7 +36343,7 @@ describe('OrcaRuntimeService', () => {
       syncSinglePty(runtime)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36410,7 +36418,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       db.close()
     } finally {
@@ -36482,7 +36490,8 @@ describe('OrcaRuntimeService', () => {
     await vi.waitFor(() => {
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: term_worker] "real-agent smoke complete" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
     })
     db.close()
@@ -36551,7 +36560,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36598,7 +36607,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36704,7 +36713,7 @@ describe('OrcaRuntimeService', () => {
         .map(([, data]) => data)
         .filter((data): data is string => typeof data === 'string')
       expect(payloads).toContain(
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        '\n[from: sender] "unclaimed status" thread:none\nRun `orca orchestration check`.\n'
       )
       expect(payloads.some((data) => data.includes('reserved completion'))).toBe(false)
       expect(status.delivered_at).toBeNull()
@@ -36886,7 +36895,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36940,7 +36949,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 200)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -36989,7 +36998,7 @@ describe('OrcaRuntimeService', () => {
       await Promise.resolve()
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('Run `orca orchestration check`.')
       )
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
@@ -37140,7 +37149,8 @@ describe('OrcaRuntimeService', () => {
       ).toHaveLength(2)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 2 orchestration messages')
+        '\n[from: sender] "first" thread:none\n[from: sender] "second" thread:none\n' +
+          'Run `orca orchestration check`.\n'
       )
       expect(second.delivered_at).toBeNull()
       db.close()
@@ -37171,7 +37181,7 @@ describe('OrcaRuntimeService', () => {
 
     expect(write).toHaveBeenCalledWith(
       'pty-1',
-      expect.stringContaining('You have 1 orchestration message')
+      expect.stringContaining('Run `orca orchestration check`.')
     )
     db.close()
   })

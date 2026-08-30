@@ -34460,7 +34460,7 @@ export class OrcaRuntimeService {
     // forever. Only an armed Enter hands settling to its own callback.
     let settlesInEnterCallback = false
     try {
-      const payload = formatMessagePointer(unread.length)
+      const payload = formatMessagePointer(unread)
       const wrote = this.ptyController?.write(deliveryPtyId, payload) ?? false
       if (!wrote) {
         return
