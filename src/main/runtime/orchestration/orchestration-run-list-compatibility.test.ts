@@ -44,6 +44,7 @@ describe('orchestration Run list compatibility', () => {
       runtime: { getOrchestrationDb: () => db }
     } as never)) as { runs: unknown[] }
 
-    expect(result.runs).toHaveLength(runCount + 1)
+    // +2: LEGACY_RUN_ID and PEER_RUN_ID (S10-1) are both seeded into `runs` by migrate().
+    expect(result.runs).toHaveLength(runCount + 2)
   })
 })

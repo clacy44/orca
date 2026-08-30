@@ -203,7 +203,9 @@ describe('OrchestrationDb Run pagination', () => {
     } while (cursor)
 
     expect(seen).toEqual(expect.arrayContaining(createdIds))
-    expect(new Set(seen).size).toBe(createdIds.length + 1)
+    // +2: LEGACY_RUN_ID and PEER_RUN_ID (S10-1) are both seeded into `runs` by migrate() and
+    // are not filtered by listRuns(), same as LEGACY_RUN_ID already wasn't before this change.
+    expect(new Set(seen).size).toBe(createdIds.length + 2)
   })
 })
 
@@ -240,7 +242,7 @@ describe('OrchestrationDb dispatch assignee index migration', () => {
 
     db = new OrchestrationDb(dbPath)
     const sqlite = sqliteFor(db)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(32)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(33)
     expect(db.getDispatchContextById(dispatch.id)).toMatchObject({ assignee_handle: 'term_worker' })
     expect(db.getTask(task.id)).toMatchObject({
       created_by_pane_key: null,
@@ -277,7 +279,7 @@ describe('OrchestrationDb dispatch assignee index migration', () => {
 
     db.close()
     db = new OrchestrationDb(dbPath)
-    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(32)
+    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(33)
     expect(db.getDispatchContextById(dispatch.id)).toBeDefined()
   })
 
@@ -309,7 +311,7 @@ describe('OrchestrationDb dispatch assignee index migration', () => {
 
     db = new OrchestrationDb(dbPath)
     const sqlite = sqliteFor(db)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(32)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(33)
     expect(db.getTask(task.id)).toMatchObject({
       created_by_pane_key: 'tab_creator:leaf_creator',
       created_by_process_incarnation: 'pty_creator:incarnation-a',
@@ -328,7 +330,7 @@ describe('OrchestrationDb dispatch assignee index migration', () => {
 
     db.close()
     db = new OrchestrationDb(dbPath)
-    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(32)
+    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(33)
     expect(db.getTask(task.id)?.created_by_process_incarnation).toBe('pty_creator:incarnation-a')
   })
 })

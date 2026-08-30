@@ -35,13 +35,48 @@ import type {
   FederatedDispatchRow,
   RemoteDispatchAttachmentRow,
   FederationRelayDirection,
-  FederationRelayItemRow
+  FederationRelayItemRow,
+  AgentRow,
+  AgentState,
+  AgentOriginKind,
+  MailboxDeliveryRow,
+  MailboxDeliveryStatus,
+  AgentAuditRow,
+  AgentRateRow
 } from './types'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { OrchestrationError } from './orchestration-error'
 import { resolveOrchestrationMigrationStartVersion } from './orchestration-schema-version-skew'
+import {
+  upsertAgentByPaneSuffix,
+  getAgentById as getAgentByIdImpl,
+  getAgentByName as getAgentByNameImpl,
+  listAgents as listAgentsImpl,
+  refreshAgentLiveness as refreshAgentLivenessImpl,
+  setAgentQuarantine as setAgentQuarantineImpl,
+  writeAgentAudit as writeAgentAuditImpl,
+  type UpsertAgentByPaneSuffixParams,
+  type UpsertAgentByPaneSuffixResult,
+  type ListAgentsParams,
+  type ListAgentsResult,
+  type RefreshAgentLivenessParams,
+  type SetAgentQuarantineParams,
+  type WriteAgentAuditParams
+} from './agent-directory'
+import {
+  checkAndBumpRate as checkAndBumpRateImpl,
+  type CheckAndBumpRateParams,
+  type RateLimitResult
+} from './agent-rate-limit'
+import {
+  getOrCreateMailboxDelivery as getOrCreateMailboxDeliveryImpl,
+  acknowledgeMailboxDelivery as acknowledgeMailboxDeliveryImpl,
+  type GetOrCreateMailboxDeliveryParams,
+  type GetOrCreateMailboxDeliveryResult,
+  type AcknowledgeMailboxDeliveryResult
+} from './peer-mailbox-deliveries'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -135,7 +170,28 @@ export type {
   MutationReceiptRow,
   MutationState,
   WorkerDispatchRow,
-  WorkerDispatchState
+  WorkerDispatchState,
+  AgentRow,
+  AgentState,
+  AgentOriginKind,
+  MailboxDeliveryRow,
+  MailboxDeliveryStatus,
+  AgentAuditRow,
+  AgentRateRow
+}
+export type {
+  UpsertAgentByPaneSuffixParams,
+  UpsertAgentByPaneSuffixResult,
+  ListAgentsParams,
+  ListAgentsResult,
+  RefreshAgentLivenessParams,
+  SetAgentQuarantineParams,
+  WriteAgentAuditParams,
+  CheckAndBumpRateParams,
+  RateLimitResult,
+  GetOrCreateMailboxDeliveryParams,
+  GetOrCreateMailboxDeliveryResult,
+  AcknowledgeMailboxDeliveryResult
 }
 
 function generateId(prefix: string): string {
@@ -284,6 +340,108 @@ function legacyMessageMatchesQuestion(
 }
 
 export const LEGACY_RUN_ID = ORCHESTRATION_LEGACY_RUN_ID
+// Sentinel Run for peer agent mail (S10-1, A4): `agent:<id>` sends bind here instead of
+// defaulting to LEGACY_RUN_ID, so a recipient's `check` sees the row instead of hitting the
+// legacy-read-only fence. Not a coordinator Run — orchestration.runUse refuses it (bindRun below).
+export const PEER_RUN_ID = 'run_peer_local'
+
+// v33 (S10-1): agent directory + durable peer mailbox deliveries + provenance audit/rate limiting.
+// Reused verbatim by both createTables() (fresh installs) and migrate()'s `current < 33` block
+// (existing installs) so the two can never drift — every statement is IF NOT EXISTS/idempotent.
+const AGENT_DIRECTORY_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS agents (
+        id                        TEXT PRIMARY KEY,
+        display_name              TEXT NOT NULL,
+        role                      TEXT,
+        host_id                   TEXT NOT NULL DEFAULT 'local',
+        pane_key                  TEXT,
+        terminal_handle           TEXT,
+        process_incarnation       TEXT,
+        worktree_id               TEXT,
+        worktree_path             TEXT,
+        branch                    TEXT,
+        title                     TEXT,
+        agent_label               TEXT,
+        state                     TEXT NOT NULL DEFAULT 'idle'
+          CHECK(state IN ('live', 'idle', 'gone')),
+        derived                   INTEGER NOT NULL DEFAULT 0,
+        quarantined               INTEGER NOT NULL DEFAULT 0,
+        quarantine_reason_code    TEXT,
+        quarantined_at            TEXT,
+        tombstoned_at             TEXT,
+        origin_kind               TEXT NOT NULL
+          CHECK(origin_kind IN ('pane', 'paired_runtime', 'derived')),
+        origin_pane_key           TEXT,
+        origin_handle             TEXT,
+        origin_host_id            TEXT NOT NULL,
+        origin_paired_device_id   TEXT,
+        origin_at                 TEXT NOT NULL DEFAULT (datetime('now')),
+        registered_at             TEXT NOT NULL DEFAULT (datetime('now')),
+        last_seen_at              TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name
+        ON agents(host_id, display_name) WHERE tombstoned_at IS NULL;
+      -- suffix match, not equality: tabId changes when a pane moves tabs (same precedent as
+      -- idx_dispatch_assignee_pane_leaf / idx_runs_coordinator_pane_leaf above).
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_pane_suffix
+        ON agents(host_id, substr(pane_key, instr(pane_key, ':') + 1))
+        WHERE pane_key IS NOT NULL AND tombstoned_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_agents_state
+        ON agents(state, quarantined) WHERE tombstoned_at IS NULL;
+
+      CREATE TRIGGER IF NOT EXISTS trg_agents_origin_immutable
+      BEFORE UPDATE ON agents
+      WHEN OLD.id <> NEW.id
+        OR OLD.origin_kind <> NEW.origin_kind
+        OR IFNULL(OLD.origin_pane_key, '') <> IFNULL(NEW.origin_pane_key, '')
+        OR OLD.origin_host_id <> NEW.origin_host_id
+        OR OLD.origin_at <> NEW.origin_at
+        OR OLD.registered_at <> NEW.registered_at
+      BEGIN
+        SELECT RAISE(ABORT, 'agent provenance is immutable');
+      END;
+
+      CREATE TABLE IF NOT EXISTS mailbox_deliveries (
+        id                TEXT PRIMARY KEY,
+        mailbox_handle    TEXT NOT NULL,
+        message_ids       TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'outstanding'
+          CHECK(status IN ('outstanding', 'acknowledged')),
+        created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        acknowledged_at   TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_mailbox_deliveries_one_outstanding
+        ON mailbox_deliveries(mailbox_handle) WHERE status = 'outstanding';
+
+      CREATE TABLE IF NOT EXISTS agent_audit (
+        seq               INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id          TEXT,
+        actor_pane_key    TEXT,
+        actor_host_id     TEXT,
+        verb              TEXT NOT NULL,
+        outcome           TEXT NOT NULL,
+        reason_code       TEXT,
+        at                TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TRIGGER IF NOT EXISTS trg_agent_audit_no_update
+      BEFORE UPDATE ON agent_audit
+      BEGIN
+        SELECT RAISE(ABORT, 'agent_audit is append-only');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_agent_audit_no_delete
+      BEFORE DELETE ON agent_audit
+      BEGIN
+        SELECT RAISE(ABORT, 'agent_audit is append-only');
+      END;
+
+      CREATE TABLE IF NOT EXISTS agent_rate (
+        subject_key   TEXT NOT NULL,
+        verb          TEXT NOT NULL,
+        window_start  TEXT NOT NULL,
+        count         INTEGER NOT NULL,
+        PRIMARY KEY(subject_key, verb, window_start)
+      );
+`
 
 export const LEGACY_CONTRACT_VERSION = 0
 export const CURRENT_CONTRACT_VERSION = ORCHESTRATION_CONTRACT_VERSION
@@ -305,8 +463,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback).
-const SCHEMA_VERSION = 32
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1).
+const SCHEMA_VERSION = 33
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -378,7 +536,8 @@ export class OrchestrationDb {
         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
         delivered_at  TEXT,
         sender_pane_key TEXT,
-        recipient_pane_key TEXT
+        recipient_pane_key TEXT,
+        sender_agent_id TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -639,6 +798,8 @@ export class OrchestrationDb {
         completed_at        TEXT,
         scheduler_lost_at   TEXT
       );
+
+      ${AGENT_DIRECTORY_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
   }
@@ -1057,6 +1218,21 @@ export class OrchestrationDb {
       // re-mint address (BUG 6) has to live on the message itself.
       if (current < 32 && !this.hasColumn('messages', 'recipient_pane_key')) {
         this.db.exec(`ALTER TABLE messages ADD COLUMN recipient_pane_key TEXT`)
+      }
+      // v32 → v33 (S10-1): agent directory, durable mailbox_deliveries, provenance audit/rate
+      // tables, and message author provenance for S10-3 purge/quarantine.
+      if (current < 33) {
+        if (!this.hasColumn('messages', 'sender_agent_id')) {
+          this.db.exec(`ALTER TABLE messages ADD COLUMN sender_agent_id TEXT`)
+        }
+        this.db.exec(AGENT_DIRECTORY_SCHEMA_SQL)
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO runs (
+               id, objective, home_database, consumer_generation, legacy
+             ) VALUES (?, ?, 'this_database', 0, 0)`
+          )
+          .run(PEER_RUN_ID, 'Peer agent mail (S10)')
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -2315,6 +2491,12 @@ export class OrchestrationDb {
       consumerGeneration: number
     }
   }): RunRow | undefined {
+    if (params.runId === PEER_RUN_ID) {
+      throw new OrchestrationError(
+        'invalid_argument',
+        `${PEER_RUN_ID} is a sentinel mailbox for peer agent mail (S10), not a coordinator Run.`
+      )
+    }
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const run = this.getRunRaw(params.runId)
@@ -2913,6 +3095,50 @@ export class OrchestrationDb {
         )
         .all(runId, address, limit) as MessageRow[]
     )
+  }
+
+  // ── Agent directory (S10-1) — logic lives in agent-directory.ts / peer-mailbox-deliveries.ts;
+  // these are delegating calls only (this file is ratcheted).
+  upsertAgentByPaneSuffix(params: UpsertAgentByPaneSuffixParams): UpsertAgentByPaneSuffixResult {
+    return upsertAgentByPaneSuffix(this.db, params)
+  }
+
+  getAgentById(id: string): AgentRow | undefined {
+    return getAgentByIdImpl(this.db, id)
+  }
+
+  getAgentByName(hostId: string, displayName: string): AgentRow | undefined {
+    return getAgentByNameImpl(this.db, hostId, displayName)
+  }
+
+  listAgents(params?: ListAgentsParams): ListAgentsResult {
+    return listAgentsImpl(this.db, params)
+  }
+
+  refreshAgentLiveness(params: RefreshAgentLivenessParams): AgentRow {
+    return refreshAgentLivenessImpl(this.db, params)
+  }
+
+  setAgentQuarantine(params: SetAgentQuarantineParams): AgentRow {
+    return setAgentQuarantineImpl(this.db, params)
+  }
+
+  writeAgentAudit(params: WriteAgentAuditParams): void {
+    writeAgentAuditImpl(this.db, params)
+  }
+
+  checkAndBumpRate(params: CheckAndBumpRateParams): RateLimitResult {
+    return checkAndBumpRateImpl(this.db, params)
+  }
+
+  getOrCreateMailboxDelivery(
+    params: GetOrCreateMailboxDeliveryParams
+  ): GetOrCreateMailboxDeliveryResult | undefined {
+    return getOrCreateMailboxDeliveryImpl(this.db, params)
+  }
+
+  acknowledgeMailboxDelivery(deliveryId: string): AcknowledgeMailboxDeliveryResult {
+    return acknowledgeMailboxDeliveryImpl(this.db, deliveryId)
   }
 
   // ── Messages ──

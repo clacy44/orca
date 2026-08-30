@@ -68,6 +68,19 @@ export type DeliveryRow = {
   acknowledged_at: string | null
 }
 
+// S10-1 agent directory row types live in ./agent-directory-types.ts (kept out of this file to
+// stay under the max-lines ratchet); re-exported here so db.ts's existing `export type { ... }`
+// aggregation (which draws from this file) can surface them unchanged.
+export type {
+  AgentState,
+  AgentOriginKind,
+  AgentRow,
+  MailboxDeliveryStatus,
+  MailboxDeliveryRow,
+  AgentAuditRow,
+  AgentRateRow
+} from './agent-directory-types'
+
 export type LegacyAdoptionRow = {
   source_run_id: string
   adopted_run_id: string
@@ -255,6 +268,9 @@ export type MessageRow = {
   // Why optional: additive column (BUG 6) — older rows and in-memory test
   // fixtures predate it, so absence must read the same as null.
   recipient_pane_key?: string | null
+  // Why optional: additive column (S10-1) — author provenance for S10-3 purge/quarantine;
+  // older rows and in-memory test fixtures predate it, so absence must read the same as null.
+  sender_agent_id?: string | null
 }
 
 export type TaskRow = {
