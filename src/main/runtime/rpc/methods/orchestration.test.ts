@@ -109,7 +109,7 @@ describe('orchestration RPC methods', () => {
 
   it('registers all expected methods', () => {
     const registry = buildRegistry(ORCHESTRATION_METHODS)
-    expect(registry.size).toBe(39)
+    expect(registry.size).toBe(40)
     expect(registry.has('orchestration.workerRelease')).toBe(true)
     expect(registry.has('orchestration.workerRetain')).toBe(true)
     expect(registry.has('orchestration.workerList')).toBe(true)
@@ -149,6 +149,7 @@ describe('orchestration RPC methods', () => {
     expect(registry.has('orchestration.gateList')).toBe(true)
     expect(registry.has('orchestration.reset')).toBe(true)
     expect(registry.has('orchestration.sent')).toBe(true)
+    expect(registry.has('orchestration.thread')).toBe(true)
   })
 
   describe('lightweight Runs', () => {

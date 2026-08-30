@@ -3714,6 +3714,26 @@ export class OrchestrationDb {
     )
   }
 
+  // Why unfiltered by to_handle (unlike getThreadMessagesFor above): `orchestration thread`
+  // replays every participant's side of the conversation, not one recipient's inbox (BUG 4).
+  // `sinceCreatedAt` must already be in the space-format UTC this column stores.
+  getThreadMessages(threadId: string, sinceCreatedAt?: string): MessageRow[] {
+    if (sinceCreatedAt !== undefined) {
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            'SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY sequence ASC'
+          )
+          .all(threadId, sinceCreatedAt) as MessageRow[]
+      )
+    }
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence ASC')
+        .all(threadId) as MessageRow[]
+    )
+  }
+
   createQuestion(params: {
     runId: string
     dispatchId: string

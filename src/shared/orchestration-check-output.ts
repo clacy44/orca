@@ -12,6 +12,9 @@ export type OrchestrationMessageSummary = {
   payload?: string | null
   priority?: string
   read?: number
+  /** Additive: `orchestration thread` (BUG 4) is the first reader that needs it on the wire. */
+  thread_id?: string | null
+  created_at?: string
 }
 
 export type LegacyCompatibilityResult = {

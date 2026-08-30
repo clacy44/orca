@@ -44,6 +44,10 @@ import {
 } from '../../shared/orchestration-check-output'
 import type { OrchestrationSentResult } from '../../shared/orchestration-delivery-state'
 import { formatOrchestrationSent } from '../orchestration-sent-format'
+import {
+  formatOrchestrationThread,
+  type OrchestrationThreadResult
+} from '../orchestration-thread-format'
 
 // Why: 15 s is well under Claude Code's ~2 min Bash-tool silence budget while keeping log volume low. See design doc §3.4.
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000
@@ -833,7 +837,8 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       count: number
     }>('orchestration.inbox', {
       limit: getOptionalPositiveIntegerFlag(flags, 'limit'),
-      terminal: getOptionalStringFlag(flags, 'terminal')
+      terminal: getOptionalStringFlag(flags, 'terminal'),
+      threadId: getOptionalStringFlag(flags, 'thread-id')
     })
     printResult(result, json, (r) => {
       if (r.count === 0) {
@@ -864,6 +869,17 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const result = await client.call<OrchestrationSentResult>('orchestration.sent', { id })
     printResult(result, json, (r) =>
       formatOrchestrationSent(r, id, resolveCompatibilityCliCommand())
+    )
+  },
+
+  'orchestration thread': async ({ flags, client, json }) => {
+    const id = getRequiredStringFlag(flags, 'id')
+    const result = await client.call<OrchestrationThreadResult>('orchestration.thread', {
+      id,
+      since: getOptionalStringFlag(flags, 'since')
+    })
+    printResult(result, json, (r) =>
+      formatOrchestrationThread(r, id, resolveCompatibilityCliCommand())
     )
   },
 

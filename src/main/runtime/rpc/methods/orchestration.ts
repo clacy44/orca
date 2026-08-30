@@ -32,6 +32,7 @@ import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
+import { ORCHESTRATION_THREAD_METHODS } from './orchestration-thread'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
@@ -168,7 +169,10 @@ const ReplyParams = z.object({
 const InboxParams = z.object({
   limit: OptionalFiniteNumber,
   // Why: filters the inbox to a handle so inbox and check --all give agreeing results (design doc §3.3).
-  terminal: OptionalString
+  terminal: OptionalString,
+  // Why it wins over --terminal (BUG 4): a thread is cross-participant, so filtering it further to
+  // one handle would silently drop the other side of the same conversation.
+  threadId: OptionalString
 })
 
 const TaskCreateParams = z.object({
@@ -424,6 +428,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_WORKER_METHODS,
   ...ORCHESTRATION_FEDERATION_METHODS,
   ...ORCHESTRATION_SENT_METHODS,
+  ...ORCHESTRATION_THREAD_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,
@@ -1282,9 +1287,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     handler: (params, { runtime }) => {
       const db = runtime.getOrchestrationDb()
       // Why: stale/unknown handles return empty rather than error — historical rows survive handle deletion (design doc §3.3).
-      const messages = params.terminal
-        ? db.getAllMessagesForHandle(params.terminal, params.limit)
-        : db.getInbox(params.limit)
+      const messages = params.threadId
+        ? db.getThreadMessages(params.threadId)
+        : params.terminal
+          ? db.getAllMessagesForHandle(params.terminal, params.limit)
+          : db.getInbox(params.limit)
       return { messages, count: messages.length }
     }
   }),

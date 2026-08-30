@@ -130,8 +130,9 @@ orca orchestration send --subject <text> [--to <run:id|dispatch:id|legacy_handle
 orca orchestration check [--terminal <handle>] [--ack <delivery_id>] [--peek|--all] [--types <type,...>] [--format] [--wait] [--timeout-ms <n>] [--json]
 orca orchestration reply --id <msg_id> --body <text> [--from <handle>] [--json]
 orca orchestration ask (--question <text>|--resume <msg_id>) [--options <csv>] [--timeout-ms <n>] [--from <handle>] [--json]
-orca orchestration inbox [--limit <n>] [--json]
+orca orchestration inbox [--limit <n>] [--terminal <handle>] [--thread-id <id>] [--json]
 orca orchestration sent --id <message_id> [--json]
+orca orchestration thread --id <thread_id> [--since <timestamp>] [--json]
 ```
 
 Rules:
