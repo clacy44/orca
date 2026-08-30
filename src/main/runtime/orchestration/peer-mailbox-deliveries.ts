@@ -92,22 +92,30 @@ export function getOrCreateMailboxDelivery(
 
 export type AcknowledgeMailboxDeliveryResult = { delivery: MailboxDeliveryRow; duplicate: boolean }
 
-/** Sets `read=1` on exactly the frozen ids of one Delivery. A never-existed id is refused; an
- * already-acknowledged id is a no-op (`duplicate: true`) — idempotent ack, never a re-apply. */
+/** Sets `read=1` on exactly the frozen ids of one Delivery. A never-existed id, or one that
+ * belongs to a different mailbox, is refused (`stale_delivery`) — ack is scoped to the caller's
+ * own mailbox so one agent can never suppress another's outstanding delivery. An
+ * already-acknowledged id for THIS mailbox is a no-op (`duplicate: true`) — idempotent ack,
+ * never a re-apply. */
 export function acknowledgeMailboxDelivery(
   db: Database.Database,
-  deliveryId: string
+  deliveryId: string,
+  mailboxHandle: string
 ): AcknowledgeMailboxDeliveryResult {
   db.exec('BEGIN IMMEDIATE')
   try {
     const delivery = db.prepare('SELECT * FROM mailbox_deliveries WHERE id = ?').get(deliveryId) as
       | MailboxDeliveryRow
       | undefined
-    if (!delivery) {
-      db.exec('ROLLBACK')
+    if (!delivery || delivery.mailbox_handle !== mailboxHandle) {
+      // Why: let the single catch-block below run the rollback (matches
+      // acknowledgeRunDelivery, db.ts:3043-3048) — an inline ROLLBACK here leaves the
+      // transaction already closed, so the catch's own ROLLBACK throws
+      // ERR_SQLITE_ERROR and masks this typed error entirely.
       throw new OrchestrationError(
         'stale_delivery',
-        `Mailbox delivery ${deliveryId} was not found.`
+        `Mailbox delivery ${deliveryId} was not found.`,
+        { nextSteps: ['orca orchestration check (mint a fresh delivery, then --ack that id)'] }
       )
     }
     if (delivery.status === 'acknowledged') {

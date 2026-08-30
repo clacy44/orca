@@ -159,4 +159,21 @@ describe('messages.sender_agent_id populated on every send', () => {
 
     expect(db.getMessageById(result.message.id)?.sender_agent_id).toBeNull()
   })
+
+  // MUTATION PROOF (adversarial review major #4, CONTAINMENT #7): a quarantined sender's row
+  // must never be stamped as provenance — that id is exactly what formatMessagePointer's
+  // resolver looks up to type a name/role into the recipient's PTY, and quarantine must hold in
+  // both directions. Reverting to stamping unconditionally reproduces the leak.
+  it('a quarantined sender leaves sender_agent_id null even though the row still exists', async () => {
+    const { senderHandle, recipientHandle, senderAgentId } = await setup()
+    db.setAgentQuarantine({ id: senderAgentId, quarantined: true, reasonCode: 'flagged' })
+
+    const result = (await call('orchestration.send', {
+      from: senderHandle,
+      to: recipientHandle,
+      subject: 'still talking while quarantined'
+    })) as { message: { id: string } }
+
+    expect(db.getMessageById(result.message.id)?.sender_agent_id).toBeNull()
+  })
 })

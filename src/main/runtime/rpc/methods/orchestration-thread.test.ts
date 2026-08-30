@@ -93,6 +93,45 @@ describe('orchestration.thread (BUG 4)', () => {
     expect((afterAll as { result: { messages: unknown[] } }).result.messages).toEqual([])
   })
 
+  // MUTATION PROOF (adversarial review, remote-wire-compatibility): a pre-S10-1 client/host
+  // resumes with the ISO `created_at` cursor it printed itself. If `--since` reverted to
+  // sequence-only parsing, this call would throw `invalid_argument` instead of replaying —
+  // exactly the old<->new break the review found.
+  it('also accepts an ISO timestamp --since cursor (pre-migration wire compatibility)', async () => {
+    directory = mkdtempSync(join(tmpdir(), 'orca-thread-since-timestamp-'))
+    db = new OrchestrationDb(join(directory, 'orchestration.db'))
+    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
+    db.insertMessage({ from: 'term_b', to: 'term_a', subject: 'two', threadId: 't1' })
+    const dispatcher = dispatcherFor(db)
+
+    // A cursor from well before either insert: the old sequence-only parser threw
+    // `invalid_argument` on any non-integer string — this must instead resolve as a
+    // `created_at` filter and replay everything.
+    const past = await dispatcher.dispatch(
+      request('thread-ts-past', 'orchestration.thread', {
+        id: 't1',
+        since: '2000-01-01T00:00:00Z'
+      })
+    )
+    expect(past.ok).toBe(true)
+    expect(
+      (past as { result: { messages: { subject: string }[] } }).result.messages.map(
+        (m) => m.subject
+      )
+    ).toEqual(['one', 'two'])
+
+    // A cursor from well after both inserts filters everything out — proves the timestamp
+    // branch actually reaches `created_at > ?`, not just that it fails to throw.
+    const future = await dispatcher.dispatch(
+      request('thread-ts-future', 'orchestration.thread', {
+        id: 't1',
+        since: '2099-01-01T00:00:00Z'
+      })
+    )
+    expect(future.ok).toBe(true)
+    expect((future as { result: { messages: unknown[] } }).result.messages).toEqual([])
+  })
+
   // MUTATION PROOF (S10-0 review minor): two messages inserted synchronously in the same test
   // necessarily share `created_at`'s whole-second resolution — a `created_at`-keyed --since would
   // be unable to tell them apart, either re-including or permanently dropping the second one. The

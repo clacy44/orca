@@ -711,13 +711,12 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const requestedRun = getOptionalStringFlag(flags, 'run')
     const remoteRunMailbox = await negotiateRemoteRunMailbox(client, requestedRun !== undefined)
     const terminal = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'terminal')
-    // Why unconditional and not a status.get negotiation (owner decision 3, dual behaviour): the
-    // param is additive — an older runtime's zod schema silently drops an unknown field, so it
-    // keeps behaving exactly as if `ackMode` were never sent (today's destructive default), and a
-    // current runtime opts the dispatch:/bare-handle mailboxes into the same replay-until-ack
-    // durability agent:<id> already has. A capability round trip would cost every `check` call
-    // (including tight --wait polling loops) to gain nothing a wire-compatible optional field
-    // doesn't already give for free. --legacy-destructive-read force-opts back to the old path.
+    // Why unconditional, not negotiated (owner decision 3, dual behaviour): `ackMode` is an
+    // additive optional RPC param — an old host's zod schema silently drops it and behaves
+    // exactly as before (zero regression), so a plain check never needs a `status.get` probe
+    // just to read the caller-handle mailbox. --legacy-destructive-read force-opts back to the
+    // old path. (`--run` keeps its own `negotiateRemoteRunMailbox` status.get above; that is
+    // unrelated to this param.)
     const legacyDestructiveRead = flags.has('legacy-destructive-read')
     if (legacyDestructiveRead) {
       console.error(

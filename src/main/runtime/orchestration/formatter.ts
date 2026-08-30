@@ -1,5 +1,6 @@
 import type { MessageRow } from './types'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
+import { sanitizeDirectoryText } from './agent-name-sanitizer'
 
 const BANNER_WIDTH = 60
 const SEPARATOR = '─'.repeat(BANNER_WIDTH)
@@ -120,11 +121,21 @@ function truncatePointerSubject(subject: string): string {
   return `${subject.slice(0, POINTER_SUBJECT_MAX - 1)}…`
 }
 
-/** Directory identity for the sender of one message (S10-1: pointer wires role). Both
- * fields are already sanitized at write (agent-name-sanitizer.ts) — nothing here re-sanitizes. */
+/** Directory identity for the sender of one message (S10-1: pointer wires role). Both fields
+ * are already sanitized at write (agent-name-sanitizer.ts), but §6 poison containment requires
+ * the render side to re-sanitize independently — see POINTER_ROLE_MAX_LENGTH below — so a
+ * future write-side regression (or a row read by any other path) cannot widen what gets typed
+ * into a peer's PTY. A quarantined sender must never be resolved here (CONTAINMENT #7); callers
+ * are responsible for excluding quarantined/tombstoned rows before returning an agent. */
 export type MessagePointerSenderAgent = { displayName: string; role: string | null }
 
 export type ResolveMessagePointerSenderAgent = (msg: MessageRow) => MessagePointerSenderAgent | null
+
+// Why much shorter than the 120-char write-side bound: a pointer is an ambient interrupt read
+// mid-flow, not a directory entry someone opted to look up — the shorter the render, the less
+// of an injected sentence a reader ever sees before triaging away from it.
+const POINTER_ROLE_MAX_LENGTH = 40
+const POINTER_NAME_MAX_LENGTH = 32
 
 function formatMessagePointerLine(
   msg: MessageRow,
@@ -132,9 +143,16 @@ function formatMessagePointerLine(
 ): string {
   const thread = msg.thread_id ?? 'none'
   const agent = resolveSenderAgent?.(msg) ?? null
-  const from = agent
-    ? `${agent.displayName}${agent.role ? ` (${agent.role})` : ''}`
-    : msg.from_handle
+  const sanitizedName = agent
+    ? sanitizeDirectoryText(agent.displayName, POINTER_NAME_MAX_LENGTH).value
+    : ''
+  const sanitizedRole = agent?.role
+    ? sanitizeDirectoryText(agent.role, POINTER_ROLE_MAX_LENGTH).value
+    : ''
+  const from =
+    agent && sanitizedName.length > 0
+      ? `${sanitizedName}${sanitizedRole ? ` (${sanitizedRole})` : ''}`
+      : msg.from_handle
   return `[from: ${from}] "${truncatePointerSubject(msg.subject)}" thread:${thread}`
 }
 

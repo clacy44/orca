@@ -6,6 +6,7 @@ import {
   resolveAgentQuery,
   scoreAgentCandidate
 } from './agent-resolver'
+import { deriveDisplayName } from './agent-derivation'
 
 function candidate(
   overrides: Partial<AgentResolverCandidateInput> = {}
@@ -110,9 +111,18 @@ describe('resolveAgentQuery', () => {
   })
 
   it('S4: a derived idle row for the right branch scores at or above threshold', () => {
+    // Why deriveDisplayName and not a hand-built displayName: a hand-built fixture can drift
+    // from what production actually mints (this is exactly what happened before — a fixture
+    // shaped 'merge-restructure-claude-code-a1b2' passed while the real deriveAgentLabelSlug
+    // truncated the branch name to fit the long product label and scored below threshold).
+    const displayName = deriveDisplayName({
+      branch: 'merge-restructure',
+      worktreePath: '/home/ubuntu/worktrees/merge-restructure',
+      title: '* working on the schema freeze'
+    })
     const derivedRow = candidate({
       id: 'agt_derived',
-      displayName: 'merge-restructure-claude-code-a1b2',
+      displayName,
       role: null,
       title: '* working on the schema freeze',
       branch: 'merge-restructure',

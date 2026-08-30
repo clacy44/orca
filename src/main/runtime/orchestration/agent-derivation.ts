@@ -6,7 +6,10 @@
 // text in the name. The sanitized title is stored and scored (agent-name-sanitizer.ts), never
 // promoted to a name.
 import { randomBytes } from 'node:crypto'
-import { getAgentLabel } from '../../../shared/terminal-title-agent-type'
+import {
+  getAgentLabel,
+  resolveTerminalTitleAgentType
+} from '../../../shared/terminal-title-agent-type'
 import { DISPLAY_NAME_PATTERN } from './agent-name-sanitizer'
 
 const DISPLAY_NAME_MAX_LENGTH = 32
@@ -34,10 +37,25 @@ function randomSuffixHex(): string {
   return randomBytes(2).toString('hex')
 }
 
-/** Coarse product label slug from a pane title, e.g. "Claude Code" -> "claude-code". Never the
- * literal title text; unrecognized/injected titles fall back to the generic "agent" slug. */
+/** Coarse product label slug from a pane title, e.g. "Claude Code" -> "claude". Never the
+ * literal title text; unrecognized/injected titles fall back to the generic "agent" slug.
+ *
+ * Why the short TuiAgent id and not slug(getAgentLabel(title)) directly (spec S4): getAgentLabel's
+ * product labels ("Claude Code", "GitHub Copilot") slugify to 10+ chars, which starves the
+ * branch/worktree half of DISPLAY_NAME_MAX_LENGTH's 32-char budget — e.g. branch
+ * `merge-restructure` truncates to `merge-restructu`, tokenizing to nothing find can match on.
+ * resolveTerminalTitleAgentType maps through this same module's TITLE_LABEL_TO_AGENT table to the
+ * short canonical id ("claude", "copilot") already used elsewhere for this exact product; falling
+ * back to the long label only for a title getAgentLabel recognizes but the id table does not. */
 export function deriveAgentLabelSlug(title: string | null): string {
-  const label = title ? getAgentLabel(title) : null
+  if (!title) {
+    return FALLBACK_LABEL_SLUG
+  }
+  const shortId = resolveTerminalTitleAgentType(title)
+  if (shortId) {
+    return slugify(shortId, FALLBACK_LABEL_SLUG)
+  }
+  const label = getAgentLabel(title)
   return label ? slugify(label, FALLBACK_LABEL_SLUG) : FALLBACK_LABEL_SLUG
 }
 

@@ -313,7 +313,9 @@ function readMailboxDelivery(
   // unread and hand them straight back into the newly-minted delivery — the message would
   // never actually clear. (This is exactly what broke when a first draft of this helper took
   // a pre-computed `candidates` array instead of fetching after the ack.)
-  const acknowledged = params.ack ? db.acknowledgeMailboxDelivery(params.ack) : undefined
+  const acknowledged = params.ack
+    ? db.acknowledgeMailboxDelivery(params.ack, params.mailboxHandle)
+    : undefined
   const candidates = params.fetchCandidates()
   const legacyPending = candidates.filter(
     (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
@@ -524,9 +526,15 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // if any, is author provenance on EVERY send — point-to-point and group fan-out alike
       // (messages.sender_agent_id, S10-3 purge/quarantine target).
       const senderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
-      const senderAgentId = senderPaneKey
-        ? (db.getAgentByPaneKey(senderHostId, senderPaneKey)?.id ?? null)
-        : null
+      const senderAgentRow = senderPaneKey
+        ? db.getAgentByPaneKey(senderHostId, senderPaneKey)
+        : undefined
+      // Why null for a quarantined sender: message-withholding (refusing the send outright) is
+      // S10-3, but stamping provenance to a quarantined identity is not — a quarantined row's
+      // name/role must never reach another pane (CONTAINMENT #7), and sender_agent_id is exactly
+      // what formatMessagePointer's resolver looks up to build that pane text.
+      const senderAgentId =
+        senderAgentRow && senderAgentRow.quarantined !== 1 ? senderAgentRow.id : null
       const remoteAttachment = senderPaneKey
         ? db.findActiveRemoteAttachmentForPane(senderPaneKey)
         : undefined
@@ -734,6 +742,27 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
             })
           }
+          // Why: a derived row has no reader on `agent:<id>` — its owning pane's
+          // attested check only ever reads its bare-handle mailbox, so mail
+          // addressed to the derived directory id is silently unreadable until
+          // that pane runs `orca agents register` (which upgrades the id in
+          // place and clears `derived`). Refuse at send time instead of
+          // accepting mail into a mailbox nothing will ever read.
+          if (agentRecipient.derived === 1) {
+            const bareHandle = agentRecipient.terminal_handle
+            throw new OrchestrationError(
+              'derived_agent_unaddressable',
+              `Agent ${agentRecipient.display_name} is not registered — agent:${agentRecipient.id} has no reader.`,
+              {
+                nextSteps: [
+                  bareHandle
+                    ? `orca orchestration send --to ${bareHandle} --subject "..."`
+                    : 'orca agents list',
+                  'orca agents register --name <slug> --role "<your role>" (run on that pane to make it addressable)'
+                ]
+              }
+            )
+          }
           if (agentRecipient.quarantined === 1) {
             throw new OrchestrationError(
               'agent_quarantined',
@@ -902,7 +931,6 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       params,
       {
         orchestrationCompatibilityEvidence,
-        orchestrationCompatibilityCallerAuthority,
         runtime,
         signal,
         legacyCoordinatorRunId,
@@ -1205,24 +1233,35 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // an `agent:<id>` mailbox — durable via mailbox_deliveries (BUG 5), taken
       // before the bare-handle branch below so a registered agent's mail never
       // falls through to the legacy-fenced path.
+      // Identity here is ONLY runtime.verifyOrchestrationCompatibilityCaller — never a
+      // caller-supplied `--terminal`/`terminalPaneKey`. `orchestrationCompatibilityCallerAuthority`
+      // (the legacy-adoption preflight) is undefined for an ordinary peer, so it cannot be a
+      // fallback source of identity here; this branch verifies directly instead (ARBITRATION A1,
+      // CONTAINMENT #1 — mirrors agents.register/find/quarantine's own direct verify call).
       const agentHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
-      const attestedForAgentCheck =
-        orchestrationCompatibilityCallerAuthority?.terminalHandle === handle
-          ? orchestrationCompatibilityCallerAuthority
+      const attestedForAgentCheck = runtime.verifyOrchestrationCompatibilityCaller(
+        orchestrationCompatibilityEvidence,
+        { currentRuntimeLaunchSufficient: true }
+      )
+      const callerAgentRow =
+        attestedForAgentCheck && attestedForAgentCheck.terminalHandle === handle
+          ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
           : undefined
-      const agentPaneKeyForCheck = attestedForAgentCheck?.paneKey ?? paneKey ?? undefined
-      const callerAgentRow = agentPaneKeyForCheck
-        ? db.getAgentByPaneKey(agentHostId, agentPaneKeyForCheck)
-        : undefined
-      if (callerAgentRow && !callerAgentRow.tombstoned_at) {
+      // Why derived !== 1: a derived row is minted by ANY caller's `agents list`/`find` for
+      // every live pane (agent-directory-rpc-liveness.ts) — the pane's own owner never opted
+      // in. Routing a never-registered pane through the durable agent: branch would silently
+      // flip its pre-existing bare-handle mailbox from destructive to replay-until-ack a
+      // release early (owner decision 3) merely because a third party listed the directory.
+      if (callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1) {
+        // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
+        const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
         const address = `agent:${callerAgentRow.id}`
         db.refreshAgentLiveness({
           id: callerAgentRow.id,
           state: 'idle',
           terminalHandle: handle,
           processIncarnation:
-            attestedForAgentCheck?.processIncarnation ??
-            runtime.getTerminalProcessIncarnation(handle)
+            attestedProcessIncarnation ?? runtime.getTerminalProcessIncarnation(handle)
         })
 
         if (params.peek || params.all) {

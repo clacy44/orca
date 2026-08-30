@@ -34548,7 +34548,13 @@ export class OrcaRuntimeService {
       const db = this._orchestrationDb
       const payload = formatMessagePointer(unread, (msg) => {
         const agent = msg.sender_agent_id ? db?.getAgentById(msg.sender_agent_id) : undefined
-        return agent ? { displayName: agent.display_name, role: agent.role } : null
+        // Why excluded here: a quarantined agent's name/role must never be typed into another
+        // agent's pane (CONTAINMENT #7 — quarantine is bidirectional); getAgentById only filters
+        // tombstoned rows, so quarantine is checked explicitly at this render boundary.
+        if (!agent || agent.quarantined === 1) {
+          return null
+        }
+        return { displayName: agent.display_name, role: agent.role }
       })
       const wrote = this.ptyController?.write(deliveryPtyId, payload) ?? false
       if (!wrote) {

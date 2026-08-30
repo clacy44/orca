@@ -83,7 +83,13 @@ export const ORCHESTRATION_AGENTS_FIND_METHODS: RpcMethod[] = [
       const withRole = trimmedCandidates.map((candidate: AgentResolverScoredCandidate) => ({
         ...candidate,
         role: rowsById.get(candidate.id)?.role ?? null,
-        host: hostId
+        host: hostId,
+        // Why: a derived candidate has no reader on `agent:<id>` — the CLI needs the bare
+        // handle to point the sender at a working address instead.
+        terminalHandle:
+          rowsById.get(candidate.id)?.derived === 1
+            ? (rowsById.get(candidate.id)?.terminal_handle ?? null)
+            : null
       }))
 
       const nextSteps =

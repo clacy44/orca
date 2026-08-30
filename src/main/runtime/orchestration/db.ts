@@ -77,6 +77,7 @@ import {
   type GetOrCreateMailboxDeliveryResult,
   type AcknowledgeMailboxDeliveryResult
 } from './peer-mailbox-deliveries'
+import type { ThreadSinceCursor } from './thread-replay-since-filter'
 import {
   getAgentByPaneKey as getAgentByPaneKeyImpl,
   upsertDerivedAgentForPane as upsertDerivedAgentForPaneImpl,
@@ -3143,8 +3144,11 @@ export class OrchestrationDb {
     return getOrCreateMailboxDeliveryImpl(this.db, params)
   }
 
-  acknowledgeMailboxDelivery(deliveryId: string): AcknowledgeMailboxDeliveryResult {
-    return acknowledgeMailboxDeliveryImpl(this.db, deliveryId)
+  acknowledgeMailboxDelivery(
+    deliveryId: string,
+    mailboxHandle: string
+  ): AcknowledgeMailboxDeliveryResult {
+    return acknowledgeMailboxDeliveryImpl(this.db, deliveryId, mailboxHandle)
   }
 
   getAgentByPaneKey(hostId: string, paneKey: string): AgentRow | undefined {
@@ -3984,18 +3988,29 @@ export class OrchestrationDb {
 
   // Why unfiltered by to_handle (unlike getThreadMessagesFor above): `orchestration thread`
   // replays every participant's side of the conversation, not one recipient's inbox (BUG 4).
-  // Why `sinceSequence` and not `created_at` (S10-0 review minor): `created_at` has whole-second
+  // Why `sequence` and not `created_at` (S10-0 review minor): `created_at` has whole-second
   // resolution, so two messages sent in the same wall-clock second are indistinguishable by
   // timestamp and a resume cursor built from one can silently re-include or drop the other.
-  // `sequence` is the monotonic AUTOINCREMENT column — always a strict total order.
-  getThreadMessages(threadId: string, sinceSequence?: number): MessageRow[] {
-    if (sinceSequence !== undefined) {
+  // `sequence` is the monotonic AUTOINCREMENT column — always a strict total order. Both cursor
+  // shapes are accepted for one release (thread-replay-since-filter.ts) so an old client's/host's
+  // own printed `created_at` cursor keeps resuming correctly (remote-wire-compatibility).
+  getThreadMessages(threadId: string, since?: ThreadSinceCursor): MessageRow[] {
+    if (since?.kind === 'sequence') {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
             'SELECT * FROM messages WHERE thread_id = ? AND sequence > ? ORDER BY sequence ASC'
           )
-          .all(threadId, sinceSequence) as MessageRow[]
+          .all(threadId, since.value) as MessageRow[]
+      )
+    }
+    if (since?.kind === 'timestamp') {
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            'SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY sequence ASC'
+          )
+          .all(threadId, since.value) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(

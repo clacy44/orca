@@ -1,21 +1,43 @@
 // S10-1d: agent:<id> routing + durability (A4/BUG5/BUG6) at the RPC layer. Registers fixture
 // agent rows directly via db.upsertAgentByPaneSuffix (an already-tested pure DB call) rather than
-// through orchestration.agents.register, so these tests focus on send/check, not identity.
+// through orchestration.agents.register, so these tests focus on send/check, not identity — but
+// `check`'s agent: branch is itself identity-gated (ARBITRATION A1: only
+// runtime.verifyOrchestrationCompatibilityCaller, never a bare --terminal), so term_b's evidence
+// still has to attest for the same reason orchestration-agents.test.ts's register fixtures do.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { OrchestrationDb, PEER_RUN_ID } from '../../orchestration/db'
-import { OrcaRuntimeService } from '../../orca-runtime'
+import {
+  OrcaRuntimeService,
+  type OrchestrationCompatibilityCallerAuthority
+} from '../../orca-runtime'
 import type { RpcContext } from '../core'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../../shared/orchestration-rpc-contract'
+import { OrchestrationError } from '../../orchestration/orchestration-error'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const EVIDENCE_B = { terminalHandle: 'term_b', paneKey: PANE_B, launchToken: 'token-b' }
+
+function makeAuthority(
+  paneKey: string,
+  terminalHandle: string,
+  processIncarnation = 'proc-1'
+): OrchestrationCompatibilityCallerAuthority {
+  return {
+    hostScope: { kind: 'local', hostId: 'local' },
+    paneKey,
+    terminalHandle,
+    processIncarnation,
+    launchTokenHash: 'hash'
+  }
+}
 
 describe('agent: routing + durability', () => {
   let db: OrchestrationDb
   let runtime: OrcaRuntimeService
   let agentBId: string
-  const ctx: RpcContext = {} as RpcContext
+  const ctx: RpcContext = { orchestrationCompatibilityEvidence: EVIDENCE_B } as RpcContext
 
   function method(name: string) {
     const found = ORCHESTRATION_METHODS.find((m) => m.name === name)
@@ -45,6 +67,16 @@ describe('agent: routing + durability', () => {
       return null
     })
     vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockReturnValue('proc-1')
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+      if (
+        evidence?.terminalHandle === EVIDENCE_B.terminalHandle &&
+        evidence.paneKey === EVIDENCE_B.paneKey &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_B, 'term_b')
+      }
+      return null
+    })
     ;(ctx as { runtime: OrcaRuntimeService }).runtime = runtime
 
     const created = db.upsertAgentByPaneSuffix({
@@ -195,5 +227,184 @@ describe('agent: routing + durability', () => {
     }
     expect(real.deliveryId).toBeTruthy()
     expect(real.replayed).toBe(false)
+  })
+
+  // MUTATION PROOF (adversarial review blocker #1, ARBITRATION A1): an attacker calling
+  // `orchestration.check` with a bare --terminal naming the victim's handle, but WITHOUT the
+  // victim's attested launch evidence, must never reach the victim's agent: mailbox. Reverting
+  // the identity gate to `orchestrationCompatibilityCallerAuthority?.paneKey ?? paneKey` (the
+  // pre-fix fallback) makes this pass again with `checked.mailbox === 'agent:<id>'` and the
+  // victim's mail exposed.
+  it("MUTATION PROOF: an unattested caller naming the victim's --terminal never gets the agent: mailbox", async () => {
+    setup()
+    await call('orchestration.send', {
+      from: 'term_a',
+      to: `agent:${agentBId}`,
+      subject: 'private to b'
+    })
+    const unattested = { runtime } as RpcContext // no orchestrationCompatibilityEvidence at all
+    const m = method('orchestration.check')
+    const parsed = m.params ? m.params.parse({ terminal: 'term_b' }) : undefined
+    const result = (await m.handler(parsed, unattested)) as {
+      mailbox?: string
+      agentId?: string
+      messages: unknown[]
+    }
+    expect(result.mailbox).toBeUndefined()
+    expect(result.agentId).toBeUndefined()
+    // Falls through to the bare-handle branch instead — never the durable agent: mailbox, and
+    // never the agent-addressed mail (which was sent to `agent:<id>`, not `term_b`).
+    expect(result.messages).toHaveLength(0)
+  })
+
+  // MUTATION PROOF: a caller who supplies a terminalPaneKey PARAM (not attested evidence) naming
+  // the victim's pane must also be refused — kills reinstating the `?? paneKey` fallback that
+  // trusted a client-claimed pane key.
+  it('MUTATION PROOF: a caller-supplied terminalPaneKey naming the victim never grants the agent: mailbox', async () => {
+    setup()
+    await call('orchestration.send', {
+      from: 'term_a',
+      to: `agent:${agentBId}`,
+      subject: 'private to b'
+    })
+    const attackerCtx = { runtime } as RpcContext // no evidence — only the param claims identity
+    const m = method('orchestration.check')
+    const parsed = m.params
+      ? m.params.parse({ terminal: 'attacker_handle', terminalPaneKey: PANE_B })
+      : undefined
+    const result = (await m.handler(parsed, attackerCtx)) as {
+      mailbox?: string
+      agentId?: string
+    }
+    expect(result.mailbox).toBeUndefined()
+    expect(result.agentId).toBeUndefined()
+    // The victim's cached terminal_handle must be untouched by the attacker's claimed handle.
+    const victim = db.getAgentById(agentBId)
+    expect(victim?.terminal_handle).toBe('term_b')
+  })
+
+  // MUTATION PROOF (adversarial review major #5): a derived row — minted by ANY caller's
+  // `agents list`/`find` for every live pane, never something the pane's own owner opted into —
+  // must not route `check` through the durable agent: branch. Reverting the `derived !== 1`
+  // guard would silently flip this pane's pre-existing bare-handle mailbox from destructive to
+  // replay-until-ack (owner decision 3) merely because a third party listed the directory.
+  it("MUTATION PROOF: a derived row never routes the pane's own check through the durable branch", async () => {
+    setup()
+    const PANE_C = 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    vi.spyOn(runtime, 'getTerminalPaneKey').mockImplementation((handle) => {
+      if (handle === 'term_a') {
+        return PANE_A
+      }
+      if (handle === 'term_b') {
+        return PANE_B
+      }
+      if (handle === 'term_c') {
+        return PANE_C
+      }
+      return null
+    })
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+      if (
+        evidence?.terminalHandle === 'term_c' &&
+        evidence.paneKey === PANE_C &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_C, 'term_c')
+      }
+      if (
+        evidence?.terminalHandle === EVIDENCE_B.terminalHandle &&
+        evidence.paneKey === EVIDENCE_B.paneKey &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_B, 'term_b')
+      }
+      return null
+    })
+    await call('orchestration.send', { from: 'term_a', to: 'term_c', subject: 'bare handle mail' })
+    // A DIFFERENT caller's `agents list`/`find` mints a derived row for term_c's pane — term_c's
+    // own owner never registered and never opted in.
+    db.upsertDerivedAgentForPane({
+      hostId: 'local',
+      paneKey: PANE_C,
+      terminalHandle: 'term_c',
+      processIncarnation: 'proc-1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null
+    })
+
+    const ctxC = {
+      runtime,
+      orchestrationCompatibilityEvidence: {
+        terminalHandle: 'term_c',
+        paneKey: PANE_C,
+        launchToken: 'token-c'
+      }
+    } as RpcContext
+    const m = method('orchestration.check')
+    const parsed = m.params ? m.params.parse({ terminal: 'term_c' }) : undefined
+    const result = (await m.handler(parsed, ctxC)) as {
+      mailbox?: string
+      agentId?: string
+      messages: { subject: string }[]
+    }
+    expect(result.mailbox).toBeUndefined()
+    expect(result.agentId).toBeUndefined()
+    // Still delivered — just through the pre-existing bare-handle path, not the durable one.
+    expect(result.messages.map((msg) => msg.subject)).toEqual(['bare handle mail'])
+  })
+
+  // FIX (blocker): a derived row's `agent:<id>` mailbox has no reader — sending there must be
+  // refused with a typed error naming the bare handle, not silently accepted into a black hole.
+  it('send to agent:<derivedId> is refused with derived_agent_unaddressable naming the bare handle', async () => {
+    setup()
+    const PANE_D = 'tabD:dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    const derived = db.upsertDerivedAgentForPane({
+      hostId: 'local',
+      paneKey: PANE_D,
+      terminalHandle: 'term_d',
+      processIncarnation: 'proc-1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null
+    })
+    expect(derived?.derived).toBe(1)
+
+    let caught: unknown
+    try {
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${derived?.id}`,
+        subject: 'work item for you'
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(OrchestrationError)
+    expect((caught as OrchestrationError).code).toBe('derived_agent_unaddressable')
+    const nextSteps = (caught as OrchestrationError & { data?: { nextSteps?: string[] } }).data
+      ?.nextSteps
+    expect(nextSteps?.some((step) => step.includes('term_d'))).toBe(true)
+
+    // No message was stored for the derived id.
+    expect(db.getUnreadMessages(`agent:${derived?.id}`)).toHaveLength(0)
+
+    // Negative control: the registered agent's address still routes and is readable via the
+    // attested check.
+    await call('orchestration.send', {
+      from: 'term_a',
+      to: `agent:${agentBId}`,
+      subject: 'registered still works'
+    })
+    const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
+      agentId: string
+      messages: { subject: string }[]
+    }
+    expect(checked.agentId).toBe(agentBId)
+    expect(checked.messages.map((m) => m.subject)).toEqual(['registered still works'])
   })
 })

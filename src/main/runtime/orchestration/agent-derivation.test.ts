@@ -10,12 +10,25 @@ describe('deriveDisplayName', () => {
       title: '* working on the schema freeze'
     })
     expect(name).toMatch(DISPLAY_NAME_PATTERN)
-    // 32-char budget truncates the base slug (branch name) before the agent label, so the
-    // full label survives while the branch prefix is shortened.
-    expect(name.startsWith('merge-restructu')).toBe(true)
-    expect(name).toContain('claude-code')
+    // The short TuiAgent id ("claude", not the 11-char "claude-code" product label) leaves
+    // enough of the 32-char budget that the full branch name survives untruncated — this is
+    // the exact shape (`merge-restructure-claude-<hex>`) the spec's S4 fixture names.
+    expect(name.startsWith('merge-restructure-claude-')).toBe(true)
     const hex = name.split('-').at(-1) ?? ''
     expect(hex).toMatch(/^[0-9a-f]{4}$/)
+  })
+
+  // MUTATION PROOF (adversarial review): reverting deriveAgentLabelSlug to slug(getAgentLabel())
+  // ("claude-code", 11 chars) starves the branch-name budget and truncates 'merge-restructure'
+  // to 'merge-restructu' — failing this assertion and, per the S4 resolver fixture, dropping the
+  // candidate's confidence below the 0.45 threshold.
+  it('MUTATION PROOF: the branch name is never truncated by a long product label', () => {
+    const name = deriveDisplayName({
+      branch: 'merge-restructure',
+      worktreePath: null,
+      title: '* working'
+    })
+    expect(name.startsWith('merge-restructure-')).toBe(true)
   })
 
   it('falls back to the worktree basename when branch is null', () => {
@@ -86,8 +99,8 @@ describe('deriveDisplayName', () => {
 })
 
 describe('deriveAgentLabelSlug', () => {
-  it('slugifies a known agent label', () => {
-    expect(deriveAgentLabelSlug('* working')).toBe('claude-code')
+  it('slugifies a known agent label to its short canonical id', () => {
+    expect(deriveAgentLabelSlug('* working')).toBe('claude')
   })
 
   it('falls back to "agent" for an unrecognized or null title', () => {

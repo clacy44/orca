@@ -14,6 +14,7 @@ type AgentView = {
   title: string | null
   branch: string | null
   worktreePath: string | null
+  terminalHandle?: string | null
 }
 
 type RegisterResult = { agent: AgentView; created: boolean; reMinted: boolean }
@@ -33,6 +34,7 @@ type FindCandidate = {
   derived: boolean
   confidence: number
   why: string[]
+  terminalHandle?: string | null
 }
 type FindResult = {
   outcome: 'resolved' | 'ambiguous' | 'no_match'
@@ -48,6 +50,21 @@ type FindResult = {
 // be either — id is the only shape a display_name (ASCII slug, no underscore) can never take.
 function nameOrId(value: string): { name?: string; id?: string } {
   return value.startsWith('agt_') ? { id: value } : { name: value }
+}
+
+// Why: `agent:<id>` has no reader for a derived (un-registered) row — point the
+// sender at the pane's bare handle instead, per FIX derived_agent_unaddressable.
+function sendNextStep(agent: {
+  id: string
+  derived: boolean
+  terminalHandle?: string | null
+}): string {
+  if (agent.derived) {
+    return agent.terminalHandle
+      ? `orca orchestration send --to ${agent.terminalHandle} --subject "..."`
+      : 'orca agents list'
+  }
+  return `orca orchestration send --to agent:${agent.id} --subject "..."`
 }
 
 function agentLine(agent: AgentView): string {
@@ -77,7 +94,7 @@ function formatAgentsList(result: ListResult): string {
       : ''
   return (
     `${lines.join('\n')}${omitted}\n` +
-    'Next: orca agents show <name> for details, or orca orchestration send --to agent:<id> --subject "..."'
+    'Next: orca agents show <name> for details, or orca orchestration send --to agent:<id> --subject "..." (~ names: send --to <bare handle> instead)'
   )
 }
 
@@ -85,7 +102,7 @@ function formatAgentGet(result: GetResult): string {
   const a = result.agent
   return (
     `${a.derived ? '~' : ''}${a.displayName} (${a.id}) [${a.state}]${a.role ? ` — ${a.role}` : ''}\n` +
-    `Next: orca orchestration send --to agent:${a.id} --subject "..."`
+    `Next: ${sendNextStep(a)}`
   )
 }
 
@@ -108,7 +125,7 @@ function formatAgentFind(result: FindResult): string {
   const top = result.candidates[0]
   return (
     `Resolved: ${top?.derived ? '~' : ''}${top?.displayName} (${top?.id}) — confidence ${top?.confidence.toFixed(2)}.\n` +
-    `Next: orca orchestration send --to agent:${top?.id} --subject "..."`
+    `Next: ${top ? sendNextStep(top) : 'orca agents list'}`
   )
 }
 

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalString, requiredString } from '../schemas'
-import { parseThreadSinceSequence } from '../../orchestration/thread-replay-since-filter'
+import { parseThreadSinceCursor } from '../../orchestration/thread-replay-since-filter'
 
 const ThreadParams = z.object({
   id: requiredString('Missing --id'),
@@ -18,7 +18,7 @@ export const ORCHESTRATION_THREAD_METHODS: RpcMethod[] = [
       const db = runtime.getOrchestrationDb()
       const messages = db.getThreadMessages(
         params.id,
-        params.since !== undefined ? parseThreadSinceSequence(params.since) : undefined
+        params.since !== undefined ? parseThreadSinceCursor(params.since) : undefined
       )
       return { messages, count: messages.length }
     }
