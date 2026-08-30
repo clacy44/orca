@@ -1,6 +1,6 @@
 # Orchestration skill-guide rewrite — opening + structure (rev 2)
 
-Target: `skill-guides/orchestration.md` (currently 441 lines, tree `/home/ubuntu/orca-integration` @ `2de4f5894e`). This is the drop-in replacement for the guide's **opening and structure** once the S10-1/S10-2 verbs below exist (S10-3 lands the guide edit itself, per `agent-coordination-s10-design.md:136`). Verbs used here are the ones in `agent-coordination-s10-1-spec.md` (CLI §, lines 99-101; ROUTING §, lines 131-137 — `ask`/`reply`/`wait`/`thread(s)` are not S10-1 verbs at all, they belong exclusively to `agent-coordination-s10-2-spec.md`) and `agent-coordination-s10-2-spec.md` (CLI §, lines 98-107). The lock-step pact verb family is `agent-coordination-s10-3-pact-spec.md` (CLI §, lines 96-104) — that spec now exists and supersedes the sketch at `agent-coordination-s10-design.md:97` (§2.3) and the one-shot `--pact` flag provisionally landed at `s10-2-spec.md:114,136`. Root problem cited throughout: `agent-coordination-s10-design.md:99-106` (`§2.4`).
+Target: `skill-guides/orchestration.md` (443 lines on the S10 line, tree `/home/ubuntu/orca-s10a` @ feat/s10-0a — two lines longer inside `## Messaging` than the 441-line base at `2de4f5894e`; §7 ranges below are for the S10 line). This is the drop-in replacement for the guide's **opening and structure** once the S10-1/S10-2 verbs below exist (S10-3 lands the guide edit itself, per `agent-coordination-s10-design.md:136`). Verbs used here are the ones in `agent-coordination-s10-1-spec.md` (CLI §, lines 99-101; ROUTING §, lines 131-137 — `ask`/`reply`/`wait`/`thread(s)` are not S10-1 verbs at all, they belong exclusively to `agent-coordination-s10-2-spec.md`) and `agent-coordination-s10-2-spec.md` (CLI §, lines 98-107). The lock-step pact verb family is `agent-coordination-s10-3-pact-spec.md` (CLI §, lines 96-104) — that spec now exists and supersedes the sketch at `agent-coordination-s10-design.md:97` (§2.3) and the one-shot `--pact` flag provisionally landed at `s10-2-spec.md:114,136`. Root problem cited throughout: `agent-coordination-s10-design.md:99-106` (`§2.4`).
 
 **rev 2** closes every finding of the round-1 cold-agent test: four off-by-one citations into `s10-2-spec.md`'s CLI section, one mislabelled section (CLI vs ROUTING), a backwards "no wake-up" citation, two uncited Containment bullets, a missing Lock-Step primitive (a cold agent told "in lock step" had nothing to find), and five missing `When It Goes Wrong` rows.
 
@@ -16,7 +16,7 @@ orca agents register --name <my-name> --role "<one line>"
 
 orca agents find "<plain-English description of the peer>" --json
   resolved   -> "To reach one: orca agents ask <name> \"...\""      [s10-1-spec.md:88 design]
-  ambiguous  -> candidate list + the exact disambiguating command   [s10-1-spec.md §S2]
+  ambiguous  -> candidate list + the exact disambiguating command   [s10-1-spec.md:88]
   no_match   -> "orca agents list"
 
 orca agents ask <name> "<question>" --json
@@ -49,7 +49,7 @@ New turn / lost context -> orca agents threads
 
 ---
 
-## 2. WHEN TO USE (replaces `skill-guides/orchestration.md:38-42`)
+## 2. WHEN TO USE (replaces `skill-guides/orchestration.md:38-46` (the heading, its four bullets and the "Do not use orchestration merely because…" paragraph — the new section carries both))
 
 ```
 ## When To Use
@@ -204,10 +204,10 @@ cached address (`s10-1-spec.md:143`).
 - `## Preconditions` (`:47-52`) — stays close to the top (right after Mental Model), gains one line: confirm the negotiated capability (`orchestration.agent-directory.v1` / `orchestration.threads.v1`) alongside `orca status --json`.
 - `## Contract Migration` (`:54-101`, ~45 lines) — moves well down, after `## Tasks And Dispatch`. It is entirely about adopting a legacy Dispatch-era assignment, which is a Tool Boundary/Ownership concern, not something a peer-coordinating agent needs before its first message.
 - `## Ownership` (`:102-125`) — stays, immediately after Tool Boundary, **edited at one clause**: the sentence at `:104` ends after "Lifecycle authority comes from the active Dispatch."; its trailing clause ("and terminal handles remain routing metadata rather than durable identity") is deleted, and a new sentence follows: "Agent ids (`orca agents register`) are durable identity; terminal handles are a cache the directory re-derives." The Run/Dispatch lifecycle-authority sentences on that line are untouched.
-- `## Messaging` (`:126-161`) — stays, retitled `## Coordinator/Worker Messaging` to disambiguate from the new peer `## Agents & Threads` section. The line at `:143` ("Terminal handles remain appropriate for low-level pre-Dispatch messaging...") is **kept, not deleted** — it is still correct for a coordinator messaging one not-yet-Dispatched worker — but it no longer needs to carry peer-coordination's entire weight, since When To Use entry #1 and the Peer Path now do.
-- `## Tasks And Dispatch` (`:162-183`), `## Preferred Supervised Worker Loop` (`:184-279`), `## Cross-Runtime Federation` (`:280-307`), `## Gates And Legacy Inspection` (`:308-321`), `## Full Handoffs` (`:322-366`), `## Worker Terminals` (`:367-413`), `## Agent Guidance` (`:414-426`) — all stay, unchanged, moved down as a block after the peer-coordination material and Contract Migration.
-- `## Example` (`:427-436`) — stays, gains a second example: a peer-coordination walkthrough using the Peer Path verbatim (including a short lock-step example), alongside the existing Dispatch example.
-- `## Next Action` (`:437-441`) — stays last; gains a peer-path branch ("If you were asked to coordinate with a specific already-running agent, start at Peer Path, not here.").
+- `## Messaging` (`:126-163`) — stays, retitled `## Coordinator/Worker Messaging` to disambiguate from the new peer `## Agents & Threads` section. The line at `:143` ("Terminal handles remain appropriate for low-level pre-Dispatch messaging...") is **kept, not deleted** — it is still correct for a coordinator messaging one not-yet-Dispatched worker — but it no longer needs to carry peer-coordination's entire weight, since When To Use entry #1 and the Peer Path now do.
+- `## Tasks And Dispatch` (`:164-185`), `## Preferred Supervised Worker Loop` (`:186-281`), `## Cross-Runtime Federation` (`:282-309`), `## Gates And Legacy Inspection` (`:310-323`), `## Full Handoffs` (`:324-368`), `## Worker Terminals` (`:369-415`), `## Agent Guidance` (`:416-428`) — all stay, unchanged, moved down as a block after the peer-coordination material and Contract Migration.
+- `## Example` (`:429-438`) — stays, gains a second example: a peer-coordination walkthrough using the Peer Path verbatim (including a short lock-step example), alongside the existing Dispatch example.
+- `## Next Action` (`:439-443`) — stays last; gains a peer-path branch ("If you were asked to coordinate with a specific already-running agent, start at Peer Path, not here.").
 
 **Deleted:** nothing outright — every existing sentence remains true of the Dispatch/coordinator path it describes. The rewrite's effect is entirely reordering plus the one sentence-level edit at old `:104`, because the root problem (`s10-design.md:99-101`) is section order and missing entries, not incorrect content: *"the current guide opens with Tool Boundary and ~45 lines of Contract Migration before the reader learns how to send a message... `git push` costs zero lines. Under context pressure the agent picks the cheap one — correctly."*
 
