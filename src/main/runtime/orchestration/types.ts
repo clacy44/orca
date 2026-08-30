@@ -81,6 +81,18 @@ export type {
   AgentRateRow
 } from './agent-directory-types'
 
+// S10-2 durable thread row types live in ./thread-directory-types.ts (same ratchet reason).
+export type {
+  ThreadOrigin,
+  ThreadState,
+  ThreadPactState,
+  ThreadRow,
+  ThreadParticipantRole,
+  ThreadParticipantInviteState,
+  ThreadParticipantRow,
+  GateRefusalRow
+} from './thread-directory-types'
+
 export type LegacyAdoptionRow = {
   source_run_id: string
   adopted_run_id: string
@@ -135,6 +147,12 @@ export type QuestionRow = {
   created_at: string
   answered_at: string | null
   closed_at: string | null
+  // Why optional: additive S10-2 v34 columns (asked/answered by, purge-safe dedup hash/timestamp, owning thread); pre-v34 rows predate them.
+  to_agent_id?: string | null
+  answered_by_agent_id?: string | null
+  answer_body_sha256?: string | null
+  answer_purged_at?: string | null
+  thread_key?: string | null
 }
 
 export type MutationState = 'pending' | 'completed'
@@ -271,6 +289,12 @@ export type MessageRow = {
   // Why optional: additive column (S10-1) — author provenance for S10-3 purge/quarantine;
   // older rows and in-memory test fixtures predate it, so absence must read the same as null.
   sender_agent_id?: string | null
+  // Why optional: additive S10-2 v34 columns (purge tombstone, soft-gate flags, per-thread cursor); pre-v34 rows predate them.
+  purged_at?: string | null
+  purge_reason?: string | null
+  purged_by_agent_id?: string | null
+  gate_flags?: string | null
+  thread_sequence?: number | null
 }
 
 export type TaskRow = {

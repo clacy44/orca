@@ -42,7 +42,10 @@ import type {
   MailboxDeliveryRow,
   MailboxDeliveryStatus,
   AgentAuditRow,
-  AgentRateRow
+  AgentRateRow,
+  ThreadRow,
+  ThreadParticipantRow,
+  ThreadState
 } from './types'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
@@ -83,6 +86,40 @@ import {
   pruneStaleDerivedAgents as pruneStaleDerivedAgentsImpl,
   type UpsertDerivedAgentForPaneParams
 } from './derived-agent-rows'
+import {
+  insertGatedMessage as insertGatedMessageImpl,
+  type InsertGatedMessageParams,
+  type InsertGatedMessageResult
+} from './message-gate-writer'
+import {
+  createThread as createThreadImpl,
+  getThread as getThreadImpl,
+  listThreadsForParticipant as listThreadsForParticipantImpl,
+  upsertThreadParticipant as upsertThreadParticipantImpl,
+  leaveThread as leaveThreadImpl,
+  bumpThreadOnMessage as bumpThreadOnMessageImpl,
+  setThreadState as setThreadStateImpl,
+  setThreadPact as setThreadPactImpl,
+  markThreadRead as markThreadReadImpl,
+  getThreadMessagesSince as getThreadMessagesSinceImpl,
+  listThreadParticipants as listThreadParticipantsImpl,
+  isThreadParticipant as isThreadParticipantImpl,
+  type CreateThreadParams,
+  type ListThreadsForParticipantParams,
+  type UpsertThreadParticipantParams,
+  type SetThreadPactParams,
+  type GetThreadMessagesSinceOmitted
+} from './thread-directory'
+import {
+  purgeMessage as purgeMessageImpl,
+  purgeThread as purgeThreadImpl,
+  listMessagesByAuthor as listMessagesByAuthorImpl,
+  type PurgeMessageParams,
+  type PurgeMessageResult,
+  type PurgeThreadParams,
+  type PurgeThreadResult,
+  type ListMessagesByAuthorParams
+} from './message-purge'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -449,6 +486,144 @@ const AGENT_DIRECTORY_SCHEMA_SQL = `
       );
 `
 
+// v34 (S10-2): durable threads, thread participants, and the gate refusal audit trail — tables
+// and triggers only, no data. Reused by both createTables() (every open, idempotent via IF NOT
+// EXISTS, same discipline as AGENT_DIRECTORY_SCHEMA_SQL above) and migrate()'s `current < 34`
+// block. The messages/question_threads column additions are baked into their own CREATE TABLE
+// definitions (fresh installs) and ALTERed under `current < 34` (existing installs), matching
+// how v33's sender_agent_id landed. The backfill (THREAD_DIRECTORY_BACKFILL_SQL below) is
+// deliberately NOT part of this constant: it reads `question_threads`, which createTables()'s
+// own exec runs before that table exists (question_threads is minted only inside migrate()'s
+// `current < 8` block) — running it here would throw "no such table" on every fresh install.
+const THREAD_DIRECTORY_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS threads (
+        id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        created_by_agent_id TEXT,
+        origin TEXT NOT NULL DEFAULT 'peer' CHECK(origin IN ('peer','question','fanout','legacy')),
+        state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','paused','closed')),
+        sensitive INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_message_at TEXT,
+        last_message_id TEXT,
+        last_message_sequence INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        pact_with_agent_id TEXT,
+        pact_state TEXT CHECK(pact_state IS NULL OR pact_state IN ('proposed','engaged','released')),
+        pact_turn_agent_id TEXT,
+        pact_at TEXT,
+        purged_at TEXT,
+        purge_reason TEXT,
+        purged_by_agent_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_threads_recent ON threads(state, last_message_at) WHERE purged_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS thread_participants (
+        thread_id TEXT NOT NULL,
+        participant_key TEXT NOT NULL,
+        agent_id TEXT,
+        handle TEXT,
+        role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner','member')),
+        joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+        left_at TEXT,
+        invited_by_agent_id TEXT,
+        invite_state TEXT CHECK(invite_state IS NULL OR invite_state IN ('pending','accepted','declined')),
+        last_read_sequence INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(thread_id, participant_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_thread_participants_agent
+        ON thread_participants(participant_key) WHERE left_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS gate_refusals (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_agent_id TEXT,
+        actor_pane_key TEXT,
+        actor_host_id TEXT,
+        verb TEXT NOT NULL,
+        rule_ids TEXT NOT NULL,
+        acknowledged INTEGER NOT NULL DEFAULT 0,
+        body_sha256 TEXT NOT NULL,
+        body_bytes INTEGER NOT NULL,
+        subject_sha256 TEXT NOT NULL,
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TRIGGER IF NOT EXISTS trg_threads_provenance_immutable
+      BEFORE UPDATE ON threads
+      WHEN OLD.id <> NEW.id
+        OR OLD.created_at <> NEW.created_at
+        OR IFNULL(OLD.created_by_agent_id, '') <> IFNULL(NEW.created_by_agent_id, '')
+        OR OLD.origin <> NEW.origin
+        OR (OLD.sensitive = 1 AND NEW.sensitive = 0)
+      BEGIN
+        SELECT RAISE(ABORT, 'thread provenance is immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_gate_refusals_no_update
+      BEFORE UPDATE ON gate_refusals
+      BEGIN
+        SELECT RAISE(ABORT, 'gate_refusals is append-only');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_gate_refusals_no_delete
+      BEFORE DELETE ON gate_refusals
+      BEGIN
+        SELECT RAISE(ABORT, 'gate_refusals is append-only');
+      END;
+
+      -- Pulled forward from the S10-4 ruling (agent-coordination-s10-4-federation-spec.md:18,
+      -- :91-94): 'paired_runtime' stays in the CHECK for wire compat (a rebuild is forbidden,
+      -- S10-1 test M3) but is refused at insert/update time — no code path mints one yet, and
+      -- closing the door now is cheaper than an S10-1 RISKS correction later.
+      CREATE TRIGGER IF NOT EXISTS trg_agents_no_foreign_origin
+      BEFORE INSERT ON agents
+      WHEN NEW.origin_kind NOT IN ('pane', 'derived')
+      BEGIN
+        SELECT RAISE(ABORT, 'foreign agents live in remote_agents');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_agents_no_foreign_origin_update
+      BEFORE UPDATE ON agents
+      WHEN NEW.origin_kind NOT IN ('pane', 'derived')
+      BEGIN
+        SELECT RAISE(ABORT, 'foreign agents live in remote_agents');
+      END;
+`
+
+// Separate from THREAD_DIRECTORY_SCHEMA_SQL (not folded into it): its WHEN clause references
+// messages.purged_at, so creating it unconditionally in createTables() would succeed (SQLite
+// does not validate a trigger's column references until it fires) but then abort the very next
+// UPDATE an EARLIER migrate() version block runs against a pre-v34 `messages` table that does
+// not have the column yet — "no such column: OLD.purged_at". Guarded by the same
+// hasColumn('messages', 'purged_at') check as the indexes below.
+const MESSAGES_PURGE_TRIGGER_SQL = `
+      CREATE TRIGGER IF NOT EXISTS trg_messages_purge_final
+      BEFORE UPDATE ON messages
+      WHEN OLD.purged_at IS NOT NULL
+        AND (NEW.purged_at IS NULL OR NEW.body <> '' OR NEW.subject <> '[purged]' OR IFNULL(NEW.payload, '') <> '')
+      BEGIN
+        SELECT RAISE(ABORT, 'purge is final');
+      END;
+`
+
+// Runs only inside migrate()'s `current < 34` block, after `question_threads` is guaranteed to
+// exist (created at `current < 8`, earlier in the same migration transaction for a fresh
+// install). Idempotent (INSERT OR IGNORE) and a no-op against an empty `messages` table.
+// Legacy subjects are the fixed literal, never derived from `messages.subject` (s10-2-spec.md:97
+// — those rows predate the write-side sanitizer, so promoting them would import unsanitized
+// author text into a new render surface).
+const THREAD_DIRECTORY_BACKFILL_SQL = `
+      INSERT OR IGNORE INTO threads (id, subject, origin, state, created_at, last_message_at,
+          last_message_sequence, message_count)
+        SELECT m.thread_id, '(legacy thread)',
+          CASE WHEN EXISTS(SELECT 1 FROM question_threads q WHERE q.message_id = m.thread_id) THEN 'question'
+               WHEN COUNT(DISTINCT m.to_handle) > 2 THEN 'fanout' ELSE 'legacy' END,
+          CASE WHEN COUNT(DISTINCT m.to_handle) > 2 THEN 'closed' ELSE 'open' END,
+          MIN(m.created_at), MAX(m.created_at), MAX(m.sequence), COUNT(*)
+        FROM messages m WHERE m.thread_id IS NOT NULL GROUP BY m.thread_id;
+      INSERT OR IGNORE INTO thread_participants (thread_id, participant_key, handle)
+        SELECT thread_id, from_handle, from_handle FROM messages WHERE thread_id IS NOT NULL
+        UNION SELECT thread_id, to_handle, to_handle FROM messages WHERE thread_id IS NOT NULL;
+`
+
 export const LEGACY_CONTRACT_VERSION = 0
 export const CURRENT_CONTRACT_VERSION = ORCHESTRATION_CONTRACT_VERSION
 
@@ -469,8 +644,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1).
-const SCHEMA_VERSION = 33
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a).
+const SCHEMA_VERSION = 34
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -543,7 +718,12 @@ export class OrchestrationDb {
         delivered_at  TEXT,
         sender_pane_key TEXT,
         recipient_pane_key TEXT,
-        sender_agent_id TEXT
+        sender_agent_id TEXT,
+        purged_at TEXT,
+        purge_reason TEXT,
+        purged_by_agent_id TEXT,
+        gate_flags TEXT,
+        thread_sequence INTEGER
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -806,8 +986,10 @@ export class OrchestrationDb {
       );
 
       ${AGENT_DIRECTORY_SCHEMA_SQL}
+      ${THREAD_DIRECTORY_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
+    this.createThreadDirectoryIndexesIfPossible()
   }
 
   // Why: CREATE TABLE IF NOT EXISTS won't alter existing DBs; migrate in a txn that bumps user_version only on success (atomic all-or-nothing).
@@ -952,7 +1134,12 @@ export class OrchestrationDb {
         answered_by_generation    INTEGER,
         created_at                TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at               TEXT,
-        closed_at                 TEXT
+        closed_at                 TEXT,
+        to_agent_id               TEXT,
+        answered_by_agent_id      TEXT,
+        answer_body_sha256        TEXT,
+        answer_purged_at          TEXT,
+        thread_key                TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_questions_dispatch_status
@@ -1239,6 +1426,39 @@ export class OrchestrationDb {
              ) VALUES (?, ?, 'this_database', 0, 0)`
           )
           .run(PEER_RUN_ID, 'Peer agent mail (S10)')
+      }
+      // v33 -> v34 (S10-2): durable threads, gate refusal audit, purge tombstone columns on
+      // messages, peer-question binding columns on question_threads. `question_threads` only
+      // ever gets created above (`current < 8`), never in createTables() — the same is true
+      // here: THREAD_DIRECTORY_SCHEMA_SQL's backfill reads `question_threads`, so it must run
+      // after that block, which sequential `if (current < N)` execution within one migrate()
+      // call already guarantees for both a fresh install (current starts at 0) and an upgrade.
+      if (current < 34) {
+        for (const column of [
+          ['purged_at', 'TEXT'],
+          ['purge_reason', 'TEXT'],
+          ['purged_by_agent_id', 'TEXT'],
+          ['gate_flags', 'TEXT'],
+          ['thread_sequence', 'INTEGER']
+        ] as const) {
+          if (!this.hasColumn('messages', column[0])) {
+            this.db.exec(`ALTER TABLE messages ADD COLUMN ${column[0]} ${column[1]}`)
+          }
+        }
+        for (const column of [
+          ['to_agent_id', 'TEXT'],
+          ['answered_by_agent_id', 'TEXT'],
+          ['answer_body_sha256', 'TEXT'],
+          ['answer_purged_at', 'TEXT'],
+          ['thread_key', 'TEXT']
+        ] as const) {
+          if (!this.hasColumn('question_threads', column[0])) {
+            this.db.exec(`ALTER TABLE question_threads ADD COLUMN ${column[0]} ${column[1]}`)
+          }
+        }
+        this.db.exec(THREAD_DIRECTORY_SCHEMA_SQL)
+        this.createThreadDirectoryIndexesIfPossible()
+        this.db.exec(THREAD_DIRECTORY_BACKFILL_SQL)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -1636,6 +1856,26 @@ export class OrchestrationDb {
       CREATE INDEX IF NOT EXISTS idx_messages_undelivered_inbox
         ON messages(to_handle, read, delivered_at, sequence)
     `)
+  }
+
+  // Why guarded (not baked into createTables()'s messages CREATE TABLE index list): an existing
+  // pre-v34 DB's `messages` table lacks `purged_at`/`thread_sequence` until migrate()'s
+  // `current < 34` ALTERs run, and createTables() executes BEFORE migrate() on every open —
+  // an unconditional CREATE INDEX/TRIGGER referencing those columns would throw "no such
+  // column" the moment an EARLIER migrate() version block (e.g. `current < 19`) touches
+  // `messages` and fires the trigger before the column exists. Same precedent as
+  // createUndeliveredInboxIndexIfPossible above.
+  private createThreadDirectoryIndexesIfPossible(): void {
+    if (!this.hasColumn('messages', 'purged_at')) {
+      return
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_inbox_live ON messages(to_handle, read) WHERE purged_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_thread_live ON messages(thread_id, sequence) WHERE purged_at IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_thread_sequence
+        ON messages(thread_id, thread_sequence) WHERE thread_sequence IS NOT NULL;
+    `)
+    this.db.exec(MESSAGES_PURGE_TRIGGER_SQL)
   }
 
   // Why: sqlite_master holds the table's CREATE SQL incl. the CHECK — cheapest reliable probe for whether it already allows 'heartbeat'.
@@ -3157,6 +3397,81 @@ export class OrchestrationDb {
 
   pruneStaleDerivedAgents(hostId: string): number {
     return pruneStaleDerivedAgentsImpl(this.db, hostId)
+  }
+
+  // ── Durable threads, gated messages, purge (S10-2a) — logic lives in message-gate-writer.ts /
+  // thread-directory.ts / message-purge.ts; these are delegating calls only (this file is
+  // ratcheted). `insertGatedMessage` is the single write choke (ruling 2): `insertMessage`
+  // below is host-lifecycle-only from this series on — see its own comment.
+  insertGatedMessage(params: InsertGatedMessageParams): InsertGatedMessageResult {
+    return insertGatedMessageImpl(this.db, params)
+  }
+
+  createThread(params: CreateThreadParams): ReturnType<typeof createThreadImpl> {
+    return createThreadImpl(this.db, params)
+  }
+
+  getThread(threadId: string): ThreadRow | undefined {
+    return getThreadImpl(this.db, threadId)
+  }
+
+  listThreadParticipants(threadId: string): ThreadParticipantRow[] {
+    return listThreadParticipantsImpl(this.db, threadId)
+  }
+
+  isThreadParticipant(threadId: string, participantKey: string): boolean {
+    return isThreadParticipantImpl(this.db, threadId, participantKey)
+  }
+
+  listThreadsForParticipant(params: ListThreadsForParticipantParams): ThreadRow[] {
+    return listThreadsForParticipantImpl(this.db, params)
+  }
+
+  upsertThreadParticipant(params: UpsertThreadParticipantParams): ThreadParticipantRow {
+    return upsertThreadParticipantImpl(this.db, params)
+  }
+
+  leaveThread(threadId: string, participantKey: string): void {
+    leaveThreadImpl(this.db, threadId, participantKey)
+  }
+
+  bumpThreadOnMessage(
+    threadId: string,
+    message: Pick<MessageRow, 'id' | 'sequence' | 'created_at'>
+  ): void {
+    bumpThreadOnMessageImpl(this.db, threadId, message)
+  }
+
+  setThreadState(threadId: string, state: ThreadState): ThreadRow {
+    return setThreadStateImpl(this.db, threadId, state)
+  }
+
+  setThreadPact(threadId: string, params: SetThreadPactParams): ThreadRow {
+    return setThreadPactImpl(this.db, threadId, params)
+  }
+
+  markThreadRead(threadId: string, participantKey: string, sequence: number): void {
+    markThreadReadImpl(this.db, threadId, participantKey, sequence)
+  }
+
+  getThreadMessagesSince(
+    threadId: string,
+    afterSequence?: number,
+    limit?: number
+  ): { messages: MessageRow[]; omitted: GetThreadMessagesSinceOmitted } {
+    return getThreadMessagesSinceImpl(this.db, threadId, afterSequence, limit)
+  }
+
+  purgeMessage(params: PurgeMessageParams): PurgeMessageResult {
+    return purgeMessageImpl(this.db, params)
+  }
+
+  purgeThread(params: PurgeThreadParams): PurgeThreadResult {
+    return purgeThreadImpl(this.db, params)
+  }
+
+  listMessagesByAuthor(params: ListMessagesByAuthorParams): MessageRow[] {
+    return listMessagesByAuthorImpl(this.db, params)
   }
 
   // ── Messages ──
