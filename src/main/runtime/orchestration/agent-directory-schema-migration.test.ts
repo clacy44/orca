@@ -59,12 +59,15 @@ describe('SCHEMA v32 -> v33 migration', () => {
     const dbPath = copyFixture()
     orchestrationDb = new OrchestrationDb(dbPath)
     orchestrationDb.close()
-    // Reopen: createTables()+migrate() run again against an already-v33 database.
+    // Reopen: createTables()+migrate() run again against an already-migrated database.
+    // Why 34, not 33: S10-2a bumped SCHEMA_VERSION past this suite's original v33 — every
+    // fixture DB this suite opens now migrates one version further than when this assertion
+    // was written (thread-directory-schema-migration.test.ts owns the v33->v34 step itself).
     expect(() => {
       orchestrationDb = new OrchestrationDb(dbPath)
     }).not.toThrow()
     const raw = rawInspect(dbPath)
-    expect(raw.pragma('user_version', { simple: true })).toBe(33)
+    expect(raw.pragma('user_version', { simple: true })).toBe(34)
     const agentRows = raw.prepare('SELECT COUNT(*) AS n FROM agents').get() as { n: number }
     expect(agentRows.n).toBe(0) // no duplicate seed rows, no spurious inserts
     raw.close()

@@ -41,7 +41,7 @@ describe('federation acknowledgment migration', () => {
     db = new OrchestrationDb(dbPath)
     const sqlite = (db as unknown as { db: Database.Database }).db
 
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(33)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(34)
     expect(db.getFederatedDispatch('ctx_migrated')).toMatchObject({
       to_home_imported_sequence: 2,
       to_home_acknowledged_sequence: 0
