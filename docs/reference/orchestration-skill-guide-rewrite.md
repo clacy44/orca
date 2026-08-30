@@ -75,7 +75,7 @@ user explicitly asks to supervise, monitor, wait, coordinate a DAG, or keep a
 blocking ask/reply loop.
 ```
 
-Entry #1 is new. Today the only line covering "two equals" is `:143`, and it frames peer messaging as `"appropriate for low-level pre-Dispatch messaging"` — a model reading that concludes its situation is out of scope, correctly, per the guide as written. Entry #1 fixes that without deleting `:143`'s content (see §7, diff plan) — `:143` still correctly describes raw terminal-handle messaging as a fallback for pre-Dispatch coordinator/worker pairs; it is no longer the guide's only signpost for peer coordination.
+Entry #1 is new. Today the only line covering "two equals" is `:145`, and it frames peer messaging as `"appropriate for low-level pre-Dispatch messaging"` — a model reading that concludes its situation is out of scope, correctly, per the guide as written. Entry #1 fixes that without deleting `:143`'s content (see §7, diff plan) — `:143` still correctly describes raw terminal-handle messaging as a fallback for pre-Dispatch coordinator/worker pairs; it is no longer the guide's only signpost for peer coordination.
 
 ---
 
@@ -195,7 +195,7 @@ cached address (`s10-1-spec.md:143`).
 
 ---
 
-## 7. DIFF PLAN against the existing 441-line guide
+## 7. DIFF PLAN against the existing 443-line guide (S10 line; 441 at base `2de4f5894e`)
 
 **New, prepended (sections 1-6 above), in this order:** Peer Path -> When To Use (replaces existing) -> Mental Model (new) -> Containment (new) -> Cross-Host stub (new) -> When It Goes Wrong table (new) -> a fuller `## Agents & Threads` reference section (new; the full `register/list/find/show/threads/thread/ask/reply/wait/pact/step/purge/quarantine/review` command block with flags, one level of detail below the Peer Path — same role for peer commands that `## Messaging` plays for coordinator/Dispatch commands today).
 
