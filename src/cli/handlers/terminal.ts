@@ -6,6 +6,7 @@ import type {
   RuntimeTerminalListResult,
   RuntimeTerminalRead,
   RuntimeTerminalRename,
+  RuntimeTerminalSetRole,
   RuntimeTerminalSend,
   RuntimeTerminalShow,
   RuntimeTerminalSplit,
@@ -21,6 +22,7 @@ import {
   formatTerminalList,
   formatTerminalRead,
   formatTerminalRename,
+  formatTerminalSetRole,
   formatTerminalSend,
   formatTerminalShow,
   formatTerminalSplit,
@@ -58,8 +60,9 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
     const result = await client.call<RuntimeTerminalListResult>('terminal.list', {
       worktree: await getOptionalWorktreeSelector(flags, 'worktree', cwd, client),
       limit: getOptionalPositiveIntegerFlag(flags, 'limit'),
-      // Why: agent JSON calls dominate; topology stays available through an explicit opt-in.
-      includeVisualLayouts: !json || flags.has('include-visual-layouts')
+      // Why always true: --json and text must return the same node set (BUG 1) — an
+      // agent walking tab nodes and a human reading text now see one document.
+      includeVisualLayouts: true
     })
     printResult(result, json, formatTerminalList)
   },
@@ -146,6 +149,13 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
       title: getOptionalStringFlag(flags, 'title') ?? null
     })
     printResult(result, json, formatTerminalRename)
+  },
+  'terminal set-role': async ({ flags, client, cwd, json }) => {
+    const result = await client.call<{ setRole: RuntimeTerminalSetRole }>('terminal.setRole', {
+      terminal: await getTerminalHandle(flags, cwd, client),
+      role: getOptionalStringFlag(flags, 'text') ?? null
+    })
+    printResult(result, json, formatTerminalSetRole)
   },
   'terminal create': async ({ flags, client, cwd, json }) => {
     if (client.isRemote && !flags.has('worktree')) {

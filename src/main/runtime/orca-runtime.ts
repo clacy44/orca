@@ -193,6 +193,7 @@ import {
   type FederationSyncHealth
 } from './orchestration/federation-sync-health'
 import { formatMessagePointer } from './orchestration/formatter'
+import { resolveStaleBarePeerHandle } from './orchestration/stale-handle-resolution'
 import { MailPointerRepointScheduler } from './orchestration/mail-pointer-repoint-scheduler'
 import { selectExactWorkerProviderSession } from './orchestration/worker-provider-session'
 import type {
@@ -379,6 +380,7 @@ import {
   type RuntimeRepoSearchRefs,
   type RuntimeTerminalRead,
   type RuntimeTerminalRename,
+  type RuntimeTerminalSetRole,
   type RuntimeTerminalAgentStatus,
   type RuntimeTerminalSend,
   type RuntimeTerminalCreate,
@@ -1087,6 +1089,17 @@ import { assertLaneSeedPromptWithinBounds, callerMayOpenSourceLane } from './ter
 import { ClaudeLaneRefusal } from '../../shared/claude-lane-refusals'
 import { applyTerminalListPresence, type TerminalListPresenceScope } from './terminal-list-presence'
 import { applyTerminalCredentialLaneRows } from './terminal-credential-lane-row'
+import {
+  applyTerminalRoleRows,
+  buildTerminalRoleAssignment,
+  resolvePtyRolePaneTarget
+} from './terminal-role-row'
+import {
+  resolveMessageDeliveryState,
+  resolveMessageRecipientPresence,
+  type MessageDeliveryState,
+  type MessageRecipientPresence
+} from './orchestration/message-delivery-state'
 import { assertLaneAgentArgsAllowed, laneScopedAgentLaunchInputs } from './lane-launch-computation'
 import { createPresenceParticipantPrincipalResolver } from './presence-participant-principal'
 import { resolveLaneResidencyState } from '../claude-accounts/principal-lane-residency'
@@ -1243,6 +1256,8 @@ type RuntimeStore = {
   persistPaneCredentialLane?: Store['persistPaneCredentialLane']
   forgetPaneCredentialLane?: Store['forgetPaneCredentialLane']
   getPaneCredentialLanes?: Store['getPaneCredentialLanes']
+  persistTerminalRole?: Store['persistTerminalRole']
+  getTerminalRoles?: Store['getTerminalRoles']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
   updateUI?: Store['updateUI']
@@ -16361,6 +16376,7 @@ export class OrcaRuntimeService {
         principalOfGrant: (pairedDeviceId) => this.paneLanes.principalOfGrant(pairedDeviceId)
       })
     })
+    applyTerminalRoleRows(listedTerminals, this.store?.getTerminalRoles?.() ?? {})
     // Why: undefined (pre-flag client) must still get layouts; only an explicit
     // `false` opts out.
     const visualLayouts =
@@ -17046,10 +17062,14 @@ export class OrcaRuntimeService {
     if (!panes) {
       return null
     }
+    // Why: mirrors the pane activeLeafId names — the same lookup buildTerminalVisualPane
+    // uses for its leaf node — so a tab node carries a handle wherever one resolves (BUG 1).
+    const activeHandle = summariesByLeafKey.get(this.getLeafKey(parentTabId, activeLeafId))?.handle
     return {
       tabId: parentTabId || tabId,
       title: this.tabs.get(parentTabId)?.title ?? firstSurface.title ?? null,
       activeLeafId,
+      ...(activeHandle ? { handle: activeHandle } : {}),
       panes
     }
   }
@@ -26207,6 +26227,25 @@ export class OrcaRuntimeService {
     return { handle, tabId: leaf.tabId, title }
   }
 
+  // Why independent of title: role is read back purely from the paneKey-keyed store on every
+  // `listTerminals` boundary pass (applyTerminalRoleRows), so unlike rename it never notifies a
+  // renderer — a restart or a later rename cannot clobber it (BUG 2). Resolves via the live PTY's
+  // paneKey first (headless/background terminals have no renderer leaf), falling back to the leaf
+  // graph for renderer-adopted terminals.
+  async setTerminalRole(handle: string, role: string | null): Promise<RuntimeTerminalSetRole> {
+    const pty = this.getLivePtyForHandle(handle)
+    const ptyTarget = pty ? resolvePtyRolePaneTarget(pty.pty) : null
+    const target = ptyTarget ?? this.getLiveLeafForHandle(handle).leaf
+    const assignment = buildTerminalRoleAssignment({
+      handle,
+      tabId: target.tabId,
+      leafId: target.leafId,
+      role
+    })
+    this.store?.persistTerminalRole?.(assignment.persist)
+    return assignment.result
+  }
+
   private async resolveAgentTerminalCreateOptions(
     workspace: TerminalWorkspaceLaunchScope,
     opts: TerminalCreateOptions,
@@ -33497,6 +33536,20 @@ export class OrcaRuntimeService {
     return null
   }
 
+  // Why: generalizes the Run/Dispatch pane-key fallback above to a bare peer
+  // handle (BUG 6), which has no mailbox row and instead relies on the pane
+  // key recorded on messages once addressed to it.
+  private resolveStalePeerHandle(handle: string): string | null {
+    const db = this._orchestrationDb
+    if (!db) {
+      return null
+    }
+    return resolveStaleBarePeerHandle(handle, db, {
+      isLiveHandle: (candidate) => this.handles.has(candidate),
+      getTerminalHandleForPaneKey: (paneKey) => this.getTerminalHandleForPaneKey(paneKey)
+    })
+  }
+
   // Why: a worker pane owns no handle- or Run-keyed mailbox — `runsBoundToPane`
   // matches coordinator panes only — so its Dispatch is the only address the
   // busy→idle edge can announce, and it has to be resolved from the pane.
@@ -33516,7 +33569,8 @@ export class OrcaRuntimeService {
   deliverPendingMessagesForHandle(handle: string, reservedTypes?: ReadonlySet<string>): void {
     let terminalHandle = handle
     if (!this.handles.has(terminalHandle)) {
-      const mailboxTerminal = this.resolveMailboxTerminalHandle(handle)
+      const mailboxTerminal =
+        this.resolveMailboxTerminalHandle(handle) ?? this.resolveStalePeerHandle(handle)
       if (!mailboxTerminal || !this.handles.has(mailboxTerminal)) {
         return
       }
@@ -33568,6 +33622,26 @@ export class OrcaRuntimeService {
     if (dispatchMailbox) {
       this.deliverPendingMessages(leaf, { mailboxHandle: dispatchMailbox })
     }
+  }
+
+  // Why here and not the RPC handler: `pointedMessageIdsByHandle` and live-leaf resolution are
+  // both private runtime state; `orchestration.sent` (BUG 3) reads them through this one method.
+  getMessageDeliverySnapshot(message: { id: string; to_handle: string; read: number }): {
+    delivery: MessageDeliveryState
+    recipient: MessageRecipientPresence
+  } {
+    const delivery = resolveMessageDeliveryState(
+      message,
+      this.pointedMessageIdsByHandle.get(message.to_handle)
+    )
+    const recipient = resolveMessageRecipientPresence(message.to_handle, (handle) => {
+      try {
+        return this.getLiveLeafForHandle(handle).leaf
+      } catch {
+        return null
+      }
+    })
+    return { delivery, recipient }
   }
 
   // Why: wake blocking orchestration.check --wait calls on this handle so they return the new message immediately instead of polling.
@@ -34444,7 +34518,7 @@ export class OrcaRuntimeService {
     // forever. Only an armed Enter hands settling to its own callback.
     let settlesInEnterCallback = false
     try {
-      const payload = formatMessagePointer(unread.length)
+      const payload = formatMessagePointer(unread)
       const wrote = this.ptyController?.write(deliveryPtyId, payload) ?? false
       if (!wrote) {
         return

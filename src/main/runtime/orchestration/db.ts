@@ -305,8 +305,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health.
-const SCHEMA_VERSION = 31
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback).
+const SCHEMA_VERSION = 32
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -377,7 +377,8 @@ export class OrchestrationDb {
         sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
         delivered_at  TEXT,
-        sender_pane_key TEXT
+        sender_pane_key TEXT,
+        recipient_pane_key TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -1051,6 +1052,11 @@ export class OrchestrationDb {
             'ALTER TABLE federated_dispatches ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0'
           )
         }
+      }
+      // v31 → v32: a bare peer handle carries no mailbox row, so the durable
+      // re-mint address (BUG 6) has to live on the message itself.
+      if (current < 32 && !this.hasColumn('messages', 'recipient_pane_key')) {
+        this.db.exec(`ALTER TABLE messages ADD COLUMN recipient_pane_key TEXT`)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -2922,6 +2928,7 @@ export class OrchestrationDb {
     threadId?: string
     payload?: string
     senderPaneKey?: string
+    recipientPaneKey?: string
     runId?: string
     deliveryContract?: MessageDeliveryContract
   }): MessageRow {
@@ -2932,9 +2939,9 @@ export class OrchestrationDb {
     const stmt = this.db.prepare(`
       INSERT INTO messages (
         id, run_id, delivery_contract, from_handle, to_handle, subject, body,
-        type, priority, thread_id, payload, sender_pane_key
+        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     stmt.run(
       id,
@@ -2948,7 +2955,8 @@ export class OrchestrationDb {
       msg.priority ?? 'normal',
       msg.threadId ?? null,
       msg.payload ?? null,
-      msg.senderPaneKey ?? null
+      msg.senderPaneKey ?? null,
+      msg.recipientPaneKey ?? null
     )
     return exposeMessageTimestamps(
       this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
@@ -3608,6 +3616,20 @@ export class OrchestrationDb {
     )
   }
 
+  // Why: a bare terminal handle owns no run/dispatch mailbox row to resolve
+  // through (BUG 6) — its durable address is the pane key recorded on the
+  // messages already addressed to it, so the most recent one wins.
+  getRecipientPaneKeyForBareHandle(handle: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT recipient_pane_key FROM messages
+         WHERE to_handle = ? AND recipient_pane_key IS NOT NULL
+         ORDER BY sequence DESC LIMIT 1`
+      )
+      .get(handle) as { recipient_pane_key: string | null } | undefined
+    return row?.recipient_pane_key ?? null
+  }
+
   getUndeliveredUnreadMailboxHandles(): string[] {
     return (
       this.db
@@ -3711,6 +3733,26 @@ export class OrchestrationDb {
           'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC'
         )
         .all(threadId, toHandle) as MessageRow[]
+    )
+  }
+
+  // Why unfiltered by to_handle (unlike getThreadMessagesFor above): `orchestration thread`
+  // replays every participant's side of the conversation, not one recipient's inbox (BUG 4).
+  // `sinceCreatedAt` must already be in the space-format UTC this column stores.
+  getThreadMessages(threadId: string, sinceCreatedAt?: string): MessageRow[] {
+    if (sinceCreatedAt !== undefined) {
+      return exposeMessageListTimestamps(
+        this.db
+          .prepare(
+            'SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY sequence ASC'
+          )
+          .all(threadId, sinceCreatedAt) as MessageRow[]
+      )
+    }
+    return exposeMessageListTimestamps(
+      this.db
+        .prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence ASC')
+        .all(threadId) as MessageRow[]
     )
   }
 

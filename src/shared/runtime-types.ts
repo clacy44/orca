@@ -589,6 +589,8 @@ export type RuntimeTerminalSummary = {
   writable: boolean
   lastOutputAt: number | null
   preview: string
+  /** Agent-authored purpose ("merge-restructure backend"), distinct from title/product (§S10 BUG 2). */
+  role?: string
   presence?: RuntimeTerminalPresence
   credentialLane?: RuntimeTerminalCredentialLane
   laneState?: RuntimeTerminalLaneState
@@ -620,6 +622,8 @@ export type RuntimeTerminalVisualTab = {
   tabId: string
   title: string | null
   activeLeafId: string | null
+  /** Handle of the pane `activeLeafId` names; absent only if that leaf resolved to no live terminal. */
+  handle?: string
   panes: RuntimeTerminalVisualPaneNode
 }
 
@@ -742,6 +746,11 @@ export type RuntimeTerminalRename = {
   handle: string
   tabId: string
   title: string | null
+}
+
+export type RuntimeTerminalSetRole = {
+  handle: string
+  role: string | null
 }
 
 export type RuntimeTerminalSend = {

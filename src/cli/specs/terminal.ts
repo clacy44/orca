@@ -5,11 +5,10 @@ export const TERMINAL_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['terminal', 'list'],
     summary: 'List live Orca-managed terminals',
-    usage:
-      'orca terminal list [--worktree <selector>] [--limit <n>] [--include-visual-layouts] [--json]',
+    usage: 'orca terminal list [--worktree <selector>] [--limit <n>] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'worktree', 'limit', 'include-visual-layouts'],
     notes: [
-      'JSON omits visualLayouts by default; pass --include-visual-layouts when machine-readable tab and pane topology is required.'
+      '--json and text always return the same visualLayouts node set (BUG 1); --include-visual-layouts is accepted for compatibility but has no effect.'
     ]
   },
   {
@@ -118,6 +117,20 @@ export const TERMINAL_COMMAND_SPECS: CommandSpec[] = [
     examples: [
       'orca terminal rename --terminal term_abc123 --title "RUNNER"',
       'orca terminal rename --terminal term_abc123 --json'
+    ]
+  },
+  {
+    path: ['terminal', 'set-role'],
+    summary: 'Set or clear the agent-authored purpose of a terminal',
+    usage: 'orca terminal set-role [--terminal <handle>] [--text <one line>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'terminal', 'text'],
+    notes: [
+      'Omit --text or pass an empty string to clear the role.',
+      'A role survives rename and runtime restart; it is a separate field from title (BUG 2).'
+    ],
+    examples: [
+      'orca terminal set-role --terminal term_abc123 --text "merge-restructure backend"',
+      'orca terminal set-role --terminal term_abc123 --json'
     ]
   },
   {

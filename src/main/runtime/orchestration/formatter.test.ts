@@ -185,13 +185,67 @@ describe('formatMessagesForInjection', () => {
 })
 
 describe('formatMessagePointer', () => {
-  it('formats a singular pointer without message content', () => {
-    expect(formatMessagePointer(1)).toBe(
-      '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+  it('returns empty string for no pending messages', () => {
+    expect(formatMessagePointer([])).toBe('')
+  })
+
+  it('renders sender, subject and thread for a single message', () => {
+    const msg = makeMessage({
+      from_handle: 'term_backend',
+      subject: 'schema freeze',
+      thread_id: 'th_123'
+    })
+    expect(formatMessagePointer([msg])).toBe(
+      '\n[from: term_backend] "schema freeze" thread:th_123\nRun `orca orchestration check`.\n'
     )
   })
 
-  it('pluralizes a batched pointer', () => {
-    expect(formatMessagePointer(3)).toContain('3 orchestration messages')
+  it('renders "thread:none" when the message has no thread', () => {
+    const msg = makeMessage({ thread_id: null })
+    expect(formatMessagePointer([msg])).toContain('thread:none')
+  })
+
+  it('renders one line per message for exactly two pending', () => {
+    const first = makeMessage({ id: 'msg_1', from_handle: 'term_a', subject: 'first' })
+    const second = makeMessage({ id: 'msg_2', from_handle: 'term_b', subject: 'second' })
+    expect(formatMessagePointer([first, second])).toBe(
+      '\n[from: term_a] "first" thread:none\n[from: term_b] "second" thread:none\n' +
+        'Run `orca orchestration check`.\n'
+    )
+  })
+
+  it('shows only the first two messages plus an overflow count for five pending', () => {
+    const messages = Array.from({ length: 5 }, (_, i) =>
+      makeMessage({ id: `msg_${i}`, from_handle: `term_${i}`, subject: `subject-${i}` })
+    )
+    expect(formatMessagePointer(messages)).toBe(
+      '\n[from: term_0] "subject-0" thread:none\n[from: term_1] "subject-1" thread:none\n' +
+        '— 3 more; run orca orchestration check\n'
+    )
+  })
+
+  it('never includes a 3 KB message body in the pointer text', () => {
+    const bigBody = 'x'.repeat(3000)
+    const msg = makeMessage({ subject: 'small subject', body: bigBody })
+    expect(formatMessagePointer([msg])).not.toContain(bigBody)
+    expect(formatMessagePointer([msg])).not.toContain('x'.repeat(100))
+  })
+
+  it('truncates a subject over 80 chars and never grows the pointer with it', () => {
+    const longSubject = `${'y'.repeat(200)}`
+    const msg = makeMessage({ subject: longSubject })
+    const result = formatMessagePointer([msg])
+    expect(result).not.toContain(longSubject)
+    expect(result).toContain(`${'y'.repeat(79)}…`)
+  })
+
+  // Mutation proof: reverting formatMessagePointer to the old contentless
+  // pointer (`You have N orchestration messages...`) turns this red because
+  // the sender/subject/thread line is gone.
+  it('mutation proof: content-bearing line is present, not just the old count pointer', () => {
+    const msg = makeMessage({ from_handle: 'term_backend', subject: 'lock-step: schema freeze' })
+    const result = formatMessagePointer([msg])
+    expect(result).toContain('[from: term_backend] "lock-step: schema freeze"')
+    expect(result).not.toMatch(/^\nYou have \d+ orchestration/)
   })
 })

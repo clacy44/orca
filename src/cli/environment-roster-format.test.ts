@@ -70,6 +70,31 @@ describe('environment roster output', () => {
     ).toEqual(['presence?', '-', '-', 'Ana (typing), devbox'])
   })
 
+  it('tags a role beside the agent, not instead of it (BUG 2)', () => {
+    const line = formatEnvironmentTerminalRoster({
+      rows: [row({ agent: 'Claude Code', role: 'merge-restructure backend' })],
+      runtimeCount: 1,
+      reachableCount: 1,
+      terminalCount: 1,
+      truncated: false
+    }).split('\n')[0]
+
+    expect(line).toContain('[Claude Code · role: merge-restructure backend]')
+  })
+
+  it('omits the role tag entirely when no role was set', () => {
+    const line = formatEnvironmentTerminalRoster({
+      rows: [row({ agent: 'Claude Code' })],
+      runtimeCount: 1,
+      reachableCount: 1,
+      terminalCount: 1,
+      truncated: false
+    }).split('\n')[0]
+
+    expect(line).toContain('[Claude Code]')
+    expect(line).not.toContain('role:')
+  })
+
   it('renders each participant from the kind and flags the host published', () => {
     expect(
       formatTerminalPresence({

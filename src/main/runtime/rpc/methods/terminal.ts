@@ -959,6 +959,13 @@ const TerminalRename = TerminalHandle.extend({
   })
 })
 
+// Why the same null-vs-undefined contract as rename: an omitted --text clears the role explicitly.
+const TerminalSetRole = TerminalHandle.extend({
+  role: z.custom<string | null>((value) => value === null || typeof value === 'string', {
+    message: 'Missing --text (pass empty string or null to clear the role)'
+  })
+})
+
 const TerminalSend = TerminalHandle.extend({
   text: OptionalString,
   enter: z.unknown().optional(),
@@ -1308,6 +1315,13 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
     params: TerminalRename,
     handler: async (params, { runtime }) => ({
       rename: await runtime.renameTerminal(params.terminal, params.title || null)
+    })
+  }),
+  defineMethod({
+    name: 'terminal.setRole',
+    params: TerminalSetRole,
+    handler: async (params, { runtime }) => ({
+      setRole: await runtime.setTerminalRole(params.terminal, params.role || null)
     })
   }),
   defineMethod({

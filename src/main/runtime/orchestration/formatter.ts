@@ -108,7 +108,38 @@ export function formatMessagesForInjection(messages: MessageRow[]): string {
   return `\n--- Orchestration Messages (${messages.length}) ---\n${banners}\n---\n`
 }
 
-export function formatMessagePointer(count: number): string {
-  const noun = count === 1 ? 'message' : 'messages'
-  return `\nYou have ${count} orchestration ${noun}. Run \`orca orchestration check\`.\n`
+const POINTER_MAX_SHOWN = 2
+const POINTER_SUBJECT_MAX = 80
+
+// Why: bounded per §6 poison containment — a subject can carry attacker-shaped
+// text, but never enough of it to trip a reader; the body is never touched.
+function truncatePointerSubject(subject: string): string {
+  if (subject.length <= POINTER_SUBJECT_MAX) {
+    return subject
+  }
+  return `${subject.slice(0, POINTER_SUBJECT_MAX - 1)}…`
+}
+
+function formatMessagePointerLine(msg: MessageRow): string {
+  const thread = msg.thread_id ?? 'none'
+  return `[from: ${msg.from_handle}] "${truncatePointerSubject(msg.subject)}" thread:${thread}`
+}
+
+// Why content-bearing but bounded (§6): an agent mid-flow reads a contentless
+// pointer as a low-value interrupt and defers it. Sender/subject/thread let it
+// triage without a round trip; only the first two are shown so a flood of
+// queued mail can never widen what gets typed into the pane.
+export function formatMessagePointer(messages: readonly MessageRow[]): string {
+  if (messages.length === 0) {
+    return ''
+  }
+  const shown = messages.slice(0, POINTER_MAX_SHOWN)
+  const lines = shown.map(formatMessagePointerLine)
+  const overflow = messages.length - shown.length
+  lines.push(
+    overflow > 0
+      ? `— ${overflow} more; run orca orchestration check`
+      : 'Run `orca orchestration check`.'
+  )
+  return `\n${lines.join('\n')}\n`
 }

@@ -335,7 +335,7 @@ describe('push-on-idle orchestration delivery absence gate', () => {
 
     expect(write).toHaveBeenCalledWith(
       STALE_PTY_ID,
-      expect.stringContaining('You have 1 orchestration message')
+      expect.stringContaining('Run `orca orchestration check`.')
     )
   })
 
@@ -379,8 +379,11 @@ describe('push-on-idle orchestration delivery absence gate', () => {
       .filter((data): data is string => typeof data === 'string')
     const pointers = payloads.filter((data) => data.includes('orca orchestration check'))
     expect(pointers).toHaveLength(1)
-    expect(pointers[0]).toContain('You have 1 orchestration message')
-    expect(payloads.some((data) => data.includes('unclaimed status'))).toBe(false)
+    // Still-pending 'unclaimed status' is content-bearing in the pointer (BUG 7);
+    // 'worker completion' was already pulled by check, so it is excluded.
+    expect(pointers[0]).toBe(
+      '\n[from: term_sender] "unclaimed status" thread:none\nRun `orca orchestration check`.\n'
+    )
     expect(payloads.some((data) => data.includes('Subject: worker completion'))).toBe(false)
   })
 
@@ -424,9 +427,12 @@ describe('push-on-idle orchestration delivery absence gate', () => {
       .filter((data): data is string => typeof data === 'string')
     const pointers = payloads.filter((data) => data.includes('orca orchestration check'))
     expect(pointers).toHaveLength(1)
-    expect(pointers[0]).toContain('You have 2 orchestration messages')
-    expect(payloads.some((data) => data.includes('unclaimed status'))).toBe(false)
-    expect(payloads.some((data) => data.includes('late completion'))).toBe(false)
+    // Neither message was ever pulled (the waiter was cancelled), so both are
+    // content-bearing in the single pointer (BUG 7).
+    expect(pointers[0]).toBe(
+      '\n[from: term_sender] "unclaimed status" thread:none\n' +
+        '[from: term_sender] "late completion" thread:none\nRun `orca orchestration check`.\n'
+    )
   })
 
   it('keeps messages queued instead of marking a proven-absent pty delivered', async () => {
@@ -456,7 +462,7 @@ describe('push-on-idle orchestration delivery absence gate', () => {
 
     expect(write).toHaveBeenCalledWith(
       STALE_PTY_ID,
-      expect.stringContaining('You have 1 orchestration message')
+      expect.stringContaining('Run `orca orchestration check`.')
     )
   })
 
@@ -485,7 +491,9 @@ describe('push-on-idle orchestration delivery absence gate', () => {
           ([, data]) => typeof data === 'string' && data.includes('orca orchestration check')
         )
       expect(pointerWrites()).toHaveLength(1)
-      expect(pointerWrites()[0]?.[1]).toContain('You have 1 orchestration message')
+      expect(pointerWrites()[0]?.[1]).toBe(
+        '\n[from: term_sender] "exactly once" thread:none\nRun `orca orchestration check`.\n'
+      )
 
       // Re-trigger inside the Enter window parks; resolving the settled first
       // probe again is a no-op.
@@ -502,7 +510,10 @@ describe('push-on-idle orchestration delivery absence gate', () => {
       await vi.advanceTimersByTimeAsync(0)
 
       expect(pointerWrites()).toHaveLength(2)
-      expect(pointerWrites()[1]?.[1]).toContain('You have 2 orchestration messages')
+      expect(pointerWrites()[1]?.[1]).toBe(
+        '\n[from: term_sender] "exactly once" thread:none\n' +
+          '[from: term_sender] "second message" thread:none\nRun `orca orchestration check`.\n'
+      )
 
       await vi.advanceTimersByTimeAsync(500)
       expect(stub.markAsDelivered).not.toHaveBeenCalled()
@@ -532,14 +543,19 @@ describe('push-on-idle orchestration delivery absence gate', () => {
           ([, data]) => typeof data === 'string' && data.includes('orca orchestration check')
         )
       expect(pointerWrites()).toHaveLength(1)
-      expect(pointerWrites()[0]?.[1]).toContain('You have 1 orchestration message')
+      expect(pointerWrites()[0]?.[1]).toBe(
+        '\n[from: term_sender] "first" thread:none\nRun `orca orchestration check`.\n'
+      )
       expect(probe).not.toHaveBeenCalled()
 
       // Settle flushes the parked trigger; both still-pending rows are counted,
       // while the newer sequence authorizes exactly one fresh pointer.
       await vi.advanceTimersByTimeAsync(500)
       expect(pointerWrites()).toHaveLength(2)
-      expect(pointerWrites()[1]?.[1]).toContain('You have 2 orchestration messages')
+      expect(pointerWrites()[1]?.[1]).toBe(
+        '\n[from: term_sender] "first" thread:none\n' +
+          '[from: term_sender] "second" thread:none\nRun `orca orchestration check`.\n'
+      )
 
       await vi.advanceTimersByTimeAsync(500)
       expect(stub.markAsDelivered).not.toHaveBeenCalled()

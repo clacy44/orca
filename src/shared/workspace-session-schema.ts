@@ -309,6 +309,7 @@ export const workspaceSessionStateSchema: z.ZodType<WorkspaceSessionState> = z.o
     'terminalPtyIncarnationsByPaneKey',
     salvagingRecord(z.string(), z.string().min(1).max(128))
   ),
+  terminalRolesByPaneKey: salvagedOptional('terminalRolesByPaneKey', leafStringsSchema),
   terminalTopologyRevisionByRepoId: salvagedOptional(
     'terminalTopologyRevisionByRepoId',
     salvagingRecord(z.string(), z.number().int().nonnegative())

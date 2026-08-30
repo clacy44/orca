@@ -122,8 +122,30 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['orchestration', 'inbox'],
     summary: 'Show messages across (or for) recipients',
-    usage: 'orca orchestration inbox [--limit <n>] [--terminal <handle>] [--full] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'limit', 'terminal', 'full']
+    usage:
+      'orca orchestration inbox [--limit <n>] [--terminal <handle>] [--thread-id <id>] [--full] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'limit', 'terminal', 'thread-id', 'full'],
+    notes: ['--thread-id replays every participant on that thread and wins over --terminal.']
+  },
+  {
+    path: ['orchestration', 'sent'],
+    summary: 'Show the real delivery state of one sent message',
+    usage: 'orca orchestration sent --id <message_id> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id'],
+    notes: [
+      'delivery.state is queued (not yet pushed), pointed (pushed to the recipient pane, not yet read), or read.',
+      'This replaces reading the send receipt as a delivery confirmation — it never was one.'
+    ]
+  },
+  {
+    path: ['orchestration', 'thread'],
+    summary: 'Replay every message on one thread, in order',
+    usage: 'orca orchestration thread --id <thread_id> [--since <timestamp>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id', 'since'],
+    notes: [
+      "--since resumes a prior replay: pass the last message you saw's created_at.",
+      'Read-only: replaying a thread never marks its messages read.'
+    ]
   },
   {
     path: ['orchestration', 'task-create'],

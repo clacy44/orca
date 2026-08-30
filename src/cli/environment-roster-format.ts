@@ -62,7 +62,12 @@ function formatRosterRow(row: RosterRow): string {
     row.title ?? '(untitled)',
     formatPresenceColumn(row)
   ]
-  return row.agent ? `${columns.join('  ')}  [${row.agent}]` : columns.join('  ')
+  // Why role beside, not instead of, agent: agent is title-guessed product, role is the
+  // agent-authored purpose (S10 BUG 2) — neither substitutes for the other.
+  const tags = [row.agent, row.role ? `role: ${row.role}` : null].filter((tag): tag is string =>
+    Boolean(tag)
+  )
+  return tags.length > 0 ? `${columns.join('  ')}  [${tags.join(' · ')}]` : columns.join('  ')
 }
 
 // Why three states and not two: a peer that never published the key is UNKNOWN, not empty — printing

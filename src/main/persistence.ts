@@ -2672,6 +2672,14 @@ function deleteScannedSessionFieldsForOwners(
       })
     )
   }
+  if (next.terminalRolesByPaneKey) {
+    next.terminalRolesByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalRolesByPaneKey).filter(([paneKey]) => {
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTabIds.has(paneKey.slice(0, separator))
+      })
+    )
+  }
   if (next.terminalSurfaceTombstonesByPaneKey) {
     next.terminalSurfaceTombstonesByPaneKey = Object.fromEntries(
       Object.entries(next.terminalSurfaceTombstonesByPaneKey).filter(
@@ -6980,6 +6988,30 @@ export class Store {
     return {
       ...this.getWorkspaceSession(this.resolveHostId(hostId)).terminalCredentialLanesByPaneKey
     }
+  }
+
+  // Why keyed by paneKey and not handle: the handle a caller set the role through is reissued on
+  // restart, but tabId:leafId is the same remint-stable identity `senderPaneKey` already relies on.
+  persistTerminalRole(
+    args: { tabId: string; leafId: string; role: string | null },
+    hostId?: string | null
+  ): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const paneKey = makePaneKey(args.tabId, args.leafId)
+    const { [paneKey]: _removed, ...rest } = session.terminalRolesByPaneKey ?? {}
+    session.terminalRolesByPaneKey = args.role === null ? rest : { ...rest, [paneKey]: args.role }
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.scheduleSave()
+  }
+
+  getTerminalRoles(hostId?: string | null): Record<string, string> {
+    return { ...this.getWorkspaceSession(this.resolveHostId(hostId)).terminalRolesByPaneKey }
   }
 
   // Why: sync-flush the pty binding before pty:spawn returns to close the spawn/persist SIGKILL race (Issue #217).

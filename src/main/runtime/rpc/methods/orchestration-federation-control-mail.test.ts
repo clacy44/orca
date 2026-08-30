@@ -480,7 +480,7 @@ describe('orchestration federation control mail', () => {
 
       expect(write).toHaveBeenCalledWith(
         'pty-worker',
-        '\nYou have 1 orchestration message. Run `orca orchestration check`.\n'
+        `\n[from: run:${runId}] "Continue" thread:none\nRun \`orca orchestration check\`.\n`
       )
       expect(write).not.toHaveBeenCalledWith(
         'pty-worker',
