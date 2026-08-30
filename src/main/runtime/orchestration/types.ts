@@ -82,16 +82,7 @@ export type {
 } from './agent-directory-types'
 
 // S10-2 durable thread row types live in ./thread-directory-types.ts (same ratchet reason).
-export type {
-  ThreadOrigin,
-  ThreadState,
-  ThreadPactState,
-  ThreadRow,
-  ThreadParticipantRole,
-  ThreadParticipantInviteState,
-  ThreadParticipantRow,
-  GateRefusalRow
-} from './thread-directory-types'
+export type * from './thread-directory-types'
 
 export type LegacyAdoptionRow = {
   source_run_id: string

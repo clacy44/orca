@@ -85,6 +85,9 @@ describe('purgeMessage', () => {
       purgedByAgentId: null
     })
     expect(second.outcome).toBe('already_purged')
+    if (second.outcome !== 'already_purged') {
+      throw new Error('expected already_purged')
+    }
     expect(second.message.purge_reason).toBe('corrected reason')
     expect(second.message.body).toBe('')
     db.close()

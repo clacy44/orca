@@ -108,10 +108,11 @@ export function listThreadsForParticipant(
   params: ListThreadsForParticipantParams
 ): ThreadRow[] {
   const limit = params.limit ?? 25
-  const stateClause = params.state && params.state !== 'all' ? 'AND t.state = ?' : ''
-  const args: unknown[] = [params.participantKey]
-  if (stateClause) {
-    args.push(params.state)
+  const scopedState = params.state && params.state !== 'all' ? params.state : undefined
+  const stateClause = scopedState ? 'AND t.state = ?' : ''
+  const args: Database.BindValue[] = [params.participantKey]
+  if (scopedState) {
+    args.push(scopedState)
   }
   args.push(limit)
   return db
@@ -256,7 +257,7 @@ export function getThreadMessagesSince(
   limit = 100
 ): { messages: MessageRow[]; omitted: GetThreadMessagesSinceOmitted } {
   const sinceClause = afterSequence !== undefined ? 'AND m.sequence > ?' : ''
-  const args: unknown[] = [threadId]
+  const args: Database.BindValue[] = [threadId]
   if (afterSequence !== undefined) {
     args.push(afterSequence)
   }
