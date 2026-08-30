@@ -37,7 +37,10 @@ import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-met
 import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
 import { ORCHESTRATION_THREAD_METHODS } from './orchestration-thread'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
-import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
+import {
+  assertPayloadKindNotCallerSet,
+  extractPayloadKind
+} from '../../orchestration/message-waiter-thread-keying'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
@@ -502,6 +505,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       }
     ) => {
       const db = runtime.getOrchestrationDb()
+      // Why first (K25, blocker fix): every branch below (point-to-point, group fan-out, and
+      // both federation relay directions) forwards params.payload verbatim — one guard at the
+      // single entry closes the forgery for all of them at once.
+      assertPayloadKindNotCallerSet(params.payload)
       const remoteRunMailbox = {
         remoteRunMailbox: params.remoteRunMailbox,
         pairedDeviceId,

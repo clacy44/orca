@@ -36170,6 +36170,51 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  // Blocker fix (S10-3a): a notify at the 2-arg form (no threadId — the shape every worker-stop/
+  // control/release/federation-relay poke site uses today) must never let a thread-scoped
+  // waiter's own reservation withhold a genuinely pending row on that thread from the push. A1's
+  // invariant is that a row is never both unconsumed and unpushed.
+  it('a thread-scoped waiter never strands a row under a threadId-less notify (message-loss blocker)', async () => {
+    vi.useFakeTimers()
+    const { runtime, db, write } = createDispatchMailboxHarness()
+    try {
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.setDispatch({ id: 'ctx_loss', assigneeHandle: terminal.handle })
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+      write.mockClear()
+
+      const waiting = runtime.waitForMessage('dispatch:ctx_loss', {
+        typeFilter: ['status'],
+        threadId: 'thr_5',
+        timeoutMs: 60_000
+      })
+      db.insertMessage({
+        from: 'term_coord',
+        to: 'dispatch:ctx_loss',
+        subject: 'status on thr_5',
+        type: 'status',
+        threadId: 'thr_5'
+      })
+      // The buggy 2-arg form: no threadId, exactly like orchestration-worker-stop.ts etc.
+      runtime.notifyMessageArrived('dispatch:ctx_loss', 'status')
+      await Promise.resolve()
+
+      // Before the fix: waiterConsumesArrival('thr_5' waiter, threadId=undefined) is false (not
+      // consumed), and the reservation snapshot still keys on the waiter's own thr_5 — so the
+      // queued push (which re-reads the row with its real thr_5) treated it as reserved and
+      // withheld it. Neither consumed nor pushed. After the fix, the push must deliver it.
+      expect(write).toHaveBeenCalledWith('pty-1', expect.stringContaining('status on thr_5'))
+      // The waiter itself is unaffected by this generic poke — still parked, not incorrectly
+      // woken by a notify that carried no thread information.
+      const race = await Promise.race([waiting, Promise.resolve('still_pending')])
+      expect(race).toBe('still_pending')
+    } finally {
+      db.close()
+      vi.useRealTimers()
+    }
+  })
+
   it('a legacy no-thread waiter still reserves its type wholesale across every thread (#12536 stays closed)', async () => {
     vi.useFakeTimers()
     const { runtime, db, write } = createDispatchMailboxHarness()
@@ -36352,6 +36397,48 @@ describe('OrcaRuntimeService', () => {
         threadId: 'thr_1',
         nextSteps: ['orca agents pact --show thr_1']
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  // A4: "resolves the waiters of agent:<agentId> registered with for:'pact'|'step'|'reply' ...
+  // a released pact must wake a --for reply park too". Without it the counterpart that asked a
+  // question parks against a pact that no longer exists and sleeps to the clamp.
+  it('resolvePactWaiters wakes a for:reply park on the released thread', async () => {
+    const { runtime, db } = createDispatchMailboxHarness()
+    try {
+      let detail: unknown = null
+      const replyPark = runtime.waitForMessage('agent:agent_r', {
+        for: 'reply',
+        threadId: 'thr_1',
+        timeoutMs: 60_000,
+        onDetail: (received) => {
+          detail = received
+        }
+      })
+      // Negative control: a reply park on another thread is none of this pact's business.
+      const offThread = runtime.waitForMessage('agent:agent_r', {
+        for: 'reply',
+        threadId: 'thr_2',
+        timeoutMs: 60_000
+      })
+      let offThreadSettled: string | null = null
+      offThread.then((result) => {
+        offThreadSettled = result
+      })
+
+      runtime.resolvePactWaiters('agent_r', 'thr_1', 'released', ['orca agents pact --show thr_1'])
+      await expect(replyPark).resolves.toBe('resolved')
+      expect(detail).toEqual({
+        outcome: 'released',
+        threadId: 'thr_1',
+        nextSteps: ['orca agents pact --show thr_1']
+      })
+      expect(offThreadSettled).toBeNull()
+
+      runtime.cancelMessageWaiters('agent:agent_r')
+      await expect(offThread).resolves.toBe('cancelled')
     } finally {
       db.close()
     }

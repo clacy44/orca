@@ -33711,8 +33711,12 @@ export class OrcaRuntimeService {
       // then would miss what its check is about to return. Captured now, the
       // types those waiters claim stay out of the batch. Keyed by (type, threadId ?? '*',
       // payloadKind ?? '*') (S10-3 A1/rev 6) so a thr_2 or off-kind reservation never hides
-      // this row from the push.
-      const reservedTypes = buildReservedTypeKeys(waiters)
+      // this row from the push. threadId undefined here (several call sites poke a mailbox
+      // with no specific row) means no thread-scoped waiter can be trusted to cover what the
+      // push is about to read — never withhold on their behalf (blocker fix, S10-3a).
+      const reservedTypes = buildReservedTypeKeys(waiters, {
+        notifiedThreadIdKnown: threadId !== undefined
+      })
       // Why queueMicrotask: resolveMessageWaiter removes the waiter synchronously
       // but its check handler marks the rows read a microtask later. Two sends
       // that resumed adjacently off one shared in-flight promise (group send

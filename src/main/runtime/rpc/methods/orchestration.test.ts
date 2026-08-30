@@ -387,6 +387,58 @@ describe('orchestration RPC methods', () => {
       ).rejects.toMatchObject({ code: 'invalid_argument' })
     })
 
+    // K25 (blocker fix): a caller-supplied payload.kind is the exact channel extractPayloadKind
+    // reads for the lock-step discriminator — refusing it here closes the forgery proven live
+    // against orchestration.send (notifyMessageArrived receiving a caller-chosen 'pact_step').
+    it("refuses a caller-supplied payload.kind ('pact_step' forgery, K25)", async () => {
+      setup()
+      await expect(
+        call('orchestration.send', {
+          from: 'term_worker',
+          to: 'term_coord',
+          subject: 'status update',
+          type: 'status',
+          payload: JSON.stringify({ kind: 'pact_step' })
+        })
+      ).rejects.toMatchObject({ code: 'payload_kind_reserved' })
+    })
+
+    it('refuses any caller-supplied payload.kind, not only pact_step', async () => {
+      setup()
+      await expect(
+        call('orchestration.send', {
+          from: 'term_worker',
+          to: 'term_coord',
+          subject: 'status update',
+          type: 'status',
+          payload: JSON.stringify({ kind: 'liveness_breach' })
+        })
+      ).rejects.toMatchObject({ code: 'payload_kind_reserved' })
+    })
+
+    it('negative control: a payload with no kind field sends normally', async () => {
+      setup()
+      const result = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: 'term_coord',
+        subject: 'status update',
+        type: 'status',
+        payload: JSON.stringify({ dispatchId: 'ctx_1' })
+      })) as { message: { id: string } }
+      expect(result.message.id).toMatch(/^msg_/)
+    })
+
+    it('negative control: malformed payload JSON is left to lifecycle validation, not refused here', async () => {
+      setup()
+      const result = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: 'term_coord',
+        subject: 'not json',
+        payload: 'not-json{'
+      })) as { message: { id: string } }
+      expect(result.message.id).toMatch(/^msg_/)
+    })
+
     it('stores the runtime-observed sender pane key on the message row', async () => {
       setup()
       vi.spyOn(runtime, 'getTerminalPaneKey').mockReturnValue('tab_runtime:leaf_runtime')

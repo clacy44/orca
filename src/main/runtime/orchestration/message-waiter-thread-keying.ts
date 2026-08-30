@@ -2,6 +2,8 @@
 // S10-3 pact spec A1 (rev 6) — waiters/reservations keyed by (type, threadId, payloadKind),
 // not type alone, so a step waiter never consumes-and-discards ordinary thread traffic.
 
+import { OrchestrationError } from './orchestration-error'
+
 /** Registered wait kind (S10-3 A4). Absent = a legacy message/reply wait (pre-S10-3 shape). */
 export type MessageWaiterKind = 'message' | 'reply' | 'pact' | 'step'
 
@@ -43,14 +45,27 @@ export function reservationKey(
 // Why: a for:'pact' waiter's typeFilter is [] (consumes nothing, rev 6) — its empty typeFilter
 // contributes no keys here, same as an unfiltered (typeFilter undefined) waiter contributes none:
 // an unfiltered waiter always consumes at notify time, so it's never present when this runs.
+//
+// Why notifiedThreadIdKnown (blocker fix): a synthetic notify (no threadId arg — several
+// dispatch: pokes carry no specific row) cannot tell whether a thread-scoped waiter's OWN
+// threadId describes the row(s) this push is about to read. Reserving on it anyway can
+// withhold a real pending row on that thread from the push forever, while the waiter — never
+// actually notified of that thread — never wakes either: unconsumed AND unpushed. Defaults to
+// known (true) so every direct caller keeps today's exact reservation math; only the notify
+// call site opts out when its own threadId is undefined.
 export function buildReservedTypeKeys(
-  waiters: Iterable<ThreadScopedWaiter> | undefined
+  waiters: Iterable<ThreadScopedWaiter> | undefined,
+  options?: { notifiedThreadIdKnown?: boolean }
 ): Set<string> {
   const keys = new Set<string>()
   if (!waiters) {
     return keys
   }
+  const threadIdKnown = options?.notifiedThreadIdKnown ?? true
   for (const waiter of waiters) {
+    if (waiter.threadId && !threadIdKnown) {
+      continue
+    }
     for (const type of waiter.typeFilter ?? []) {
       keys.add(reservationKey(type, waiter.threadId, waiter.payloadKind))
     }
@@ -58,10 +73,15 @@ export function buildReservedTypeKeys(
   return keys
 }
 
-// Why three keys, not one: a row is reserved when ANY waiter that would have produced a
-// covering key is live — wildcard-thread (any thread, any kind), thread-any-kind (this thread,
-// any kind), or thread-and-kind (this thread, this kind). A row never matches a reservation
-// scoped to a *different* thread or a *different* kind on the same thread.
+// Why four keys, not one: a row is reserved when ANY waiter that would have produced a
+// covering key is live — wildcard (any thread, any kind), thread-any-kind (this thread, any
+// kind), thread-and-kind (this thread, this kind), or kind-any-thread (any thread, this kind).
+// A row never matches a reservation scoped to a *different* thread or a *different* kind.
+// Why the fourth: buildReservedTypeKeys emits a key with the any-thread sentinel and a real
+// kind for a waiter that carries a payloadKind but no threadId (waitForMessage defaults
+// payloadKind off `for` alone, so a for:'step' park registered without a thread has exactly
+// that shape). Leaving that key unprobed lets a row its waiter WILL return from a check also
+// reach the pane — the #12536 double delivery the snapshot exists to prevent.
 export function isTypeReserved(
   reserved: ReadonlySet<string> | undefined,
   type: string,
@@ -74,7 +94,8 @@ export function isTypeReserved(
   return (
     reserved.has(reservationKey(type, undefined, undefined)) ||
     reserved.has(reservationKey(type, threadId, undefined)) ||
-    reserved.has(reservationKey(type, threadId, payloadKind))
+    reserved.has(reservationKey(type, threadId, payloadKind)) ||
+    reserved.has(reservationKey(type, undefined, payloadKind))
   )
 }
 
@@ -132,4 +153,28 @@ export function extractPayloadKind(payload: string | null | undefined): string |
     // Malformed payload JSON is never a pact_step row.
   }
   return null
+}
+
+// Why (K25, blocker fix): extractPayloadKind trusts whatever `kind` a caller's free-text
+// payload carries — the discriminator a for:'step' waiter and the pane trailer key off. Until
+// messages.payload_kind (v34, S10-2a) makes A5's write choke real, this is the entry-side
+// mitigation: refuse a payload.kind a caller supplied explicitly, at every RPC that stores
+// free-form payload text, so no thread member can mint the lock-step signal or withhold a row
+// under a forged step reservation.
+export function assertPayloadKindNotCallerSet(payload: string | null | undefined): void {
+  if (!payload) {
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(payload)
+  } catch {
+    return // Malformed payload JSON is caught by lifecycle validation, not here.
+  }
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) && 'kind' in parsed) {
+    throw new OrchestrationError(
+      'payload_kind_reserved',
+      'Refused: payload.kind is set by the host — a step is recorded with orca agents step, not by sending a message.'
+    )
+  }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  assertPayloadKindNotCallerSet,
   buildReservedTypeKeys,
   extractPayloadKind,
   isTypeReserved,
@@ -37,6 +38,38 @@ describe('buildReservedTypeKeys', () => {
     expect(buildReservedTypeKeys(new Set([{ typeFilter: [], threadId: 'thr_1' }]))).toEqual(
       new Set()
     )
+  })
+
+  // Blocker fix: a notify with no threadId (several dispatch: pokes carry no specific row)
+  // cannot trust a thread-scoped waiter's own threadId to describe the row(s) the push is
+  // about to read — reserving on it anyway strands a real pending row unconsumed AND unpushed.
+  describe('notifiedThreadIdKnown: false (message-loss blocker fix)', () => {
+    it('drops every thread-scoped waiter — it contributes no key at all', () => {
+      const keys = buildReservedTypeKeys(
+        new Set([{ typeFilter: ['status'], threadId: 'thr_5', payloadKind: 'pact_step' }]),
+        { notifiedThreadIdKnown: false }
+      )
+      expect(keys).toEqual(new Set())
+    })
+
+    it('still reserves a thread-unscoped waiter — legacy #12536 coverage is unaffected', () => {
+      const keys = buildReservedTypeKeys(new Set([{ typeFilter: ['worker_done'] }]), {
+        notifiedThreadIdKnown: false
+      })
+      expect(keys).toEqual(new Set(['worker_done\0*\0*']))
+    })
+
+    it("defaults to known (omitted option) — every existing call site keeps today's math", () => {
+      const waiters = new Set([
+        { typeFilter: ['status'], threadId: 'thr_1', payloadKind: 'pact_step' }
+      ])
+      expect(buildReservedTypeKeys(waiters)).toEqual(
+        buildReservedTypeKeys(waiters, {
+          notifiedThreadIdKnown: true
+        })
+      )
+      expect(buildReservedTypeKeys(waiters)).toEqual(new Set(['status\0thr_1\0pact_step']))
+    })
   })
 })
 
@@ -114,6 +147,47 @@ describe('waiterConsumesArrival', () => {
   })
 })
 
+// The reservation lookup must cover every key buildReservedTypeKeys can emit, or a row a live
+// waiter WILL return from its check also reaches the pane (#12536).
+describe('reservation key algebra is closed', () => {
+  it('probes the kind-scoped, thread-unscoped key the builder can emit', () => {
+    const waiters = new Set([{ typeFilter: ['status'], payloadKind: 'pact_step' }])
+    const keys = buildReservedTypeKeys(waiters)
+    expect(keys.has(reservationKey('status', undefined, 'pact_step'))).toBe(true)
+    // The waiter consumes this row, so the snapshot must withhold it from the push.
+    expect(waiterConsumesArrival([...waiters][0], 'status', 'thr_1', 'pact_step')).toBe(true)
+    expect(isTypeReserved(keys, 'status', 'thr_1', 'pact_step')).toBe(true)
+  })
+
+  it('negative control: that reservation never withholds a row of a different kind', () => {
+    const keys = buildReservedTypeKeys(
+      new Set([{ typeFilter: ['status'], payloadKind: 'pact_step' }])
+    )
+    expect(isTypeReserved(keys, 'status', 'thr_1', null)).toBe(false)
+    expect(isTypeReserved(keys, 'status', 'thr_1', 'other_kind')).toBe(false)
+  })
+
+  it('every key the builder emits is found by the lookup', () => {
+    const shapes = [
+      {},
+      { threadId: 'thr_1' },
+      { payloadKind: 'pact_step' },
+      { threadId: 'thr_1', payloadKind: 'pact_step' }
+    ]
+    for (const shape of shapes) {
+      const waiter = { typeFilter: ['status'], ...shape }
+      expect(
+        isTypeReserved(
+          buildReservedTypeKeys(new Set([waiter])),
+          'status',
+          shape.threadId ?? 'thr_1',
+          shape.payloadKind ?? null
+        )
+      ).toBe(true)
+    }
+  })
+})
+
 describe('extractPayloadKind', () => {
   it('reads a host-written kind out of the JSON payload', () => {
     expect(extractPayloadKind(JSON.stringify({ kind: 'pact_step', ordinal: 1 }))).toBe('pact_step')
@@ -125,5 +199,27 @@ describe('extractPayloadKind', () => {
     expect(extractPayloadKind(JSON.stringify({ origin: 'runtime' }))).toBeNull()
     expect(extractPayloadKind('not json')).toBeNull()
     expect(extractPayloadKind(JSON.stringify('a string payload'))).toBeNull()
+  })
+})
+
+describe('assertPayloadKindNotCallerSet (K25, blocker fix)', () => {
+  it('refuses any payload carrying an explicit kind field', () => {
+    expect(() => assertPayloadKindNotCallerSet(JSON.stringify({ kind: 'pact_step' }))).toThrow(
+      expect.objectContaining({ code: 'payload_kind_reserved' })
+    )
+    // Not just the reserved pact_step value — the whole field is refused (rev 6 wording).
+    expect(() => assertPayloadKindNotCallerSet(JSON.stringify({ kind: 'anything' }))).toThrow(
+      expect.objectContaining({ code: 'payload_kind_reserved' })
+    )
+  })
+
+  it('negative control: passes absent, kind-less, non-object, and malformed payloads through', () => {
+    expect(() => assertPayloadKindNotCallerSet(null)).not.toThrow()
+    expect(() => assertPayloadKindNotCallerSet(undefined)).not.toThrow()
+    expect(() =>
+      assertPayloadKindNotCallerSet(JSON.stringify({ dispatchId: 'ctx_1' }))
+    ).not.toThrow()
+    expect(() => assertPayloadKindNotCallerSet(JSON.stringify('a string payload'))).not.toThrow()
+    expect(() => assertPayloadKindNotCallerSet('not json{')).not.toThrow()
   })
 })
