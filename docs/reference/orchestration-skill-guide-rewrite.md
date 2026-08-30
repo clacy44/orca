@@ -37,7 +37,7 @@ orca agents pact --with <name> --on <thread>          -> propose/engage
 orca agents step --thread <t> --done "<what you did>" -> your turn, once
 orca agents wait --thread <t> --for step               -> blocks for theirs
 orca agents pact --show <t>                            -> a third party can check it tomorrow
-  [agent-coordination-s10-3-pact-spec.md:100,102-104 — supersedes the
+  [agent-coordination-s10-3-pact-spec.md:99,101-103 — supersedes the
    one-shot `--pact` flag at s10-2-spec.md:114,136]
 
 New turn / lost context -> orca agents threads
@@ -45,7 +45,7 @@ New turn / lost context -> orca agents threads
      "Reply: orca agents reply --thread thr_9fk2 --body \"...\""    [s10-2-spec.md:130-131]
 ```
 
-21 lines of commands, reachable with zero scrolling. Every branch above ends in the exact next command the CLI itself prints — an agent never has to remember one, and "lock step" now resolves to a named primitive instead of being silently substituted with `ask`+`wait --for reply`.
+34 lines (24 commands) — over the design's 15-line target by the eight lock-step lines, kept because a cold agent must find the pact primitive here, reachable with zero scrolling. Every branch above ends in the exact next command the CLI itself prints — an agent never has to remember one, and "lock step" now resolves to a named primitive instead of being silently substituted with `ask`+`wait --for reply`.
 
 ---
 
@@ -203,7 +203,7 @@ cached address (`s10-1-spec.md:143`).
 - `## Tool Boundary` (`:23-36`) — still true, still first thing to check before creating a Run/Task/Dispatch, but no longer the reader's first paragraph; peer coordination needs none of it.
 - `## Preconditions` (`:47-52`) — stays close to the top (right after Mental Model), gains one line: confirm the negotiated capability (`orchestration.agent-directory.v1` / `orchestration.threads.v1`) alongside `orca status --json`.
 - `## Contract Migration` (`:54-101`, ~45 lines) — moves well down, after `## Tasks And Dispatch`. It is entirely about adopting a legacy Dispatch-era assignment, which is a Tool Boundary/Ownership concern, not something a peer-coordinating agent needs before its first message.
-- `## Ownership` (`:102-125`) — stays, immediately after Tool Boundary, **edited**: the sentence at `:104` ("terminal handles remain routing metadata rather than durable identity") is deleted and replaced with a one-line pointer back to Mental Model ("agent ids are durable identity; handles are cache — see Mental Model above").
+- `## Ownership` (`:102-125`) — stays, immediately after Tool Boundary, **edited**: the trailing clause at `:104` ("terminal handles remain routing metadata rather than durable identity") — the Run/Dispatch lifecycle-authority sentences on that line stay ("terminal handles remain routing metadata rather than durable identity") is deleted and replaced with a one-line pointer back to Mental Model ("agent ids are durable identity; handles are cache — see Mental Model above").
 - `## Messaging` (`:126-161`) — stays, retitled `## Coordinator/Worker Messaging` to disambiguate from the new peer `## Agents & Threads` section. The line at `:143` ("Terminal handles remain appropriate for low-level pre-Dispatch messaging...") is **kept, not deleted** — it is still correct for a coordinator messaging one not-yet-Dispatched worker — but it no longer needs to carry peer-coordination's entire weight, since When To Use entry #1 and the Peer Path now do.
 - `## Tasks And Dispatch` (`:162-183`), `## Preferred Supervised Worker Loop` (`:184-279`), `## Cross-Runtime Federation` (`:280-307`), `## Gates And Legacy Inspection` (`:308-321`), `## Full Handoffs` (`:322-366`), `## Worker Terminals` (`:367-413`), `## Agent Guidance` (`:414-426`) — all stay, unchanged, moved down as a block after the peer-coordination material and Contract Migration.
 - `## Example` (`:427-436`) — stays, gains a second example: a peer-coordination walkthrough using the Peer Path verbatim (including a short lock-step example), alongside the existing Dispatch example.
