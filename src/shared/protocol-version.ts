@@ -114,6 +114,11 @@ export const AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY = 'agent.identity-lanes.v1'
 // client", not "fall back to push". The v1 constant and its push-client callers are left in place
 // for S9-L3 to delete once the login model is the only one live.
 export const AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY = 'agent.identity-lanes.v2' as const
+// S10-1: the agent directory (register/list/get/find/quarantine) and agent:<id>
+// routing. Old peers degrade into the roster's existing capability-missing set
+// (environment-terminal-roster.ts) rather than a hard error.
+export const ORCHESTRATION_AGENT_DIRECTORY_RUNTIME_CAPABILITY =
+  'orchestration.agent-directory.v1' as const
 
 export const RUNTIME_CAPABILITIES = [
   'runtime.status.compat.v1',
@@ -154,7 +159,8 @@ export const RUNTIME_CAPABILITIES = [
   CODEX_RESET_CREDIT_RUNTIME_CAPABILITY,
   ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY,
   AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY,
-  AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY
+  AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY,
+  ORCHESTRATION_AGENT_DIRECTORY_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})

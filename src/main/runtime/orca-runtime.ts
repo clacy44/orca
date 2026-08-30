@@ -12976,6 +12976,24 @@ export class OrcaRuntimeService {
     return 'local'
   }
 
+  /** S10-1: the exact liveness signals agent-directory.ts's classifyAgentLiveness needs for a
+   * durable pane key, mirroring the ambient-push gate's own read of these two leaf fields
+   * (Why comment at deliverPendingMessagesForHandle). Delegating read, no new classification. */
+  getAgentDirectoryLivenessSignals(paneKey: string): {
+    terminalHandle: string | null
+    lastAgentStatus: 'working' | 'permission' | 'idle' | null
+    observedLive: boolean
+  } {
+    const terminalHandle = this.getTerminalHandleForPaneKey(paneKey)
+    const parsed = parsePaneKey(paneKey)
+    const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
+    return {
+      terminalHandle,
+      lastAgentStatus: leaf?.lastAgentStatus ?? null,
+      observedLive: leaf?.lastAgentStatusObservedLive ?? false
+    }
+  }
+
   registerOrchestrationCompatibilitySshAttachment(
     targetId: string,
     connectionIncarnation: string

@@ -77,6 +77,12 @@ import {
   type GetOrCreateMailboxDeliveryResult,
   type AcknowledgeMailboxDeliveryResult
 } from './peer-mailbox-deliveries'
+import {
+  getAgentByPaneKey as getAgentByPaneKeyImpl,
+  upsertDerivedAgentForPane as upsertDerivedAgentForPaneImpl,
+  pruneStaleDerivedAgents as pruneStaleDerivedAgentsImpl,
+  type UpsertDerivedAgentForPaneParams
+} from './derived-agent-rows'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -3141,6 +3147,18 @@ export class OrchestrationDb {
     return acknowledgeMailboxDeliveryImpl(this.db, deliveryId)
   }
 
+  getAgentByPaneKey(hostId: string, paneKey: string): AgentRow | undefined {
+    return getAgentByPaneKeyImpl(this.db, hostId, paneKey)
+  }
+
+  upsertDerivedAgentForPane(params: UpsertDerivedAgentForPaneParams): AgentRow | undefined {
+    return upsertDerivedAgentForPaneImpl(this.db, params)
+  }
+
+  pruneStaleDerivedAgents(hostId: string): number {
+    return pruneStaleDerivedAgentsImpl(this.db, hostId)
+  }
+
   // ── Messages ──
 
   insertMessage(msg: {
@@ -3155,6 +3173,7 @@ export class OrchestrationDb {
     payload?: string
     senderPaneKey?: string
     recipientPaneKey?: string
+    senderAgentId?: string | null
     runId?: string
     deliveryContract?: MessageDeliveryContract
   }): MessageRow {
@@ -3165,9 +3184,9 @@ export class OrchestrationDb {
     const stmt = this.db.prepare(`
       INSERT INTO messages (
         id, run_id, delivery_contract, from_handle, to_handle, subject, body,
-        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key
+        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key, sender_agent_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     stmt.run(
       id,
@@ -3182,7 +3201,8 @@ export class OrchestrationDb {
       msg.threadId ?? null,
       msg.payload ?? null,
       msg.senderPaneKey ?? null,
-      msg.recipientPaneKey ?? null
+      msg.recipientPaneKey ?? null,
+      msg.senderAgentId ?? null
     )
     return exposeMessageTimestamps(
       this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
