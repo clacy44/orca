@@ -24,8 +24,11 @@ export function formatOrchestrationThread(
   const latest = result.messages.at(-1)
   // Why populated and not a placeholder: the printed next command already carries the cursor a
   // caller polling this thread forward needs, ready to paste (S10-0a's next-command convention).
-  const resumeHint = latest?.created_at
-    ? `\nNext step: ${cliCommand} orchestration thread --id ${threadId} --since ${latest.created_at} --json`
-    : ''
+  // Why `sequence` and not `created_at` (S10-0 review minor): created_at's whole-second
+  // resolution can't disambiguate two messages sent in the same second; sequence always can.
+  const resumeHint =
+    latest?.sequence !== undefined
+      ? `\nNext step: ${cliCommand} orchestration thread --id ${threadId} --since ${latest.sequence} --json`
+      : ''
   return `${rendered}${resumeHint}`
 }

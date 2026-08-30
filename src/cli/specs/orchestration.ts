@@ -103,13 +103,15 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
       'format',
       'wait',
       'timeout-ms',
-      'retry-request'
+      'retry-request',
+      'legacy-destructive-read'
     ],
     notes: [
       'On Windows PowerShell, quote comma-separated type filters, e.g. --types "worker_done,escalation".',
       '--format renders the returned rows as local text only; it never writes to another terminal.',
       'A bound Run replays the same Delivery until --ack; process every message before acknowledging.',
-      'A Run lives in one runtime. To read a Run owned by another runtime, add --environment <peer>; the ack lands in that peer, not locally.'
+      'A Run lives in one runtime. To read a Run owned by another runtime, add --environment <peer>; the ack lands in that peer, not locally.',
+      'The dispatch:/bare-handle peer mailboxes now replay-until-ack like a bound Run (implicit ack) when the connected runtime supports it. --legacy-destructive-read (deprecated) forces the old immediate mark-read instead.'
     ]
   },
   {
@@ -140,10 +142,10 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['orchestration', 'thread'],
     summary: 'Replay every message on one thread, in order',
-    usage: 'orca orchestration thread --id <thread_id> [--since <timestamp>] [--json]',
+    usage: 'orca orchestration thread --id <thread_id> [--since <sequence>] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'id', 'since'],
     notes: [
-      "--since resumes a prior replay: pass the last message you saw's created_at.",
+      "--since resumes a prior replay: pass the last message you saw's sequence number (printed in the next-step hint).",
       'Read-only: replaying a thread never marks its messages read.'
     ]
   },

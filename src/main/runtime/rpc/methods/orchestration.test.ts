@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { RpcDispatcher } from '../dispatcher'
 import { buildRegistry, type RpcContext, type RpcRequest } from '../core'
-import { OrchestrationDb } from '../../orchestration/db'
+import { OrchestrationDb, PEER_RUN_ID } from '../../orchestration/db'
 import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import type { RuntimeTerminalSummary } from '../../../../shared/runtime-types'
@@ -109,7 +109,12 @@ describe('orchestration RPC methods', () => {
 
   it('registers all expected methods', () => {
     const registry = buildRegistry(ORCHESTRATION_METHODS)
-    expect(registry.size).toBe(40)
+    expect(registry.size).toBe(45)
+    expect(registry.has('orchestration.agents.register')).toBe(true)
+    expect(registry.has('orchestration.agents.list')).toBe(true)
+    expect(registry.has('orchestration.agents.get')).toBe(true)
+    expect(registry.has('orchestration.agents.find')).toBe(true)
+    expect(registry.has('orchestration.agents.quarantine')).toBe(true)
     expect(registry.has('orchestration.workerRelease')).toBe(true)
     expect(registry.has('orchestration.workerRetain')).toBe(true)
     expect(registry.has('orchestration.workerList')).toBe(true)
@@ -178,7 +183,11 @@ describe('orchestration RPC methods', () => {
       await expect(
         call('orchestration.runCreate', { objective: 'No pane', from: 'term_stale' })
       ).rejects.toMatchObject({ code: 'stable_pane_required' })
-      expect(db.listRuns().runs.filter((run) => run.legacy === 0)).toHaveLength(0)
+      // PEER_RUN_ID (S10-1's sentinel mailbox run) is legacy:0 and always seeded by migrate() —
+      // exclude it, it is not a coordinator Run this call could have created.
+      expect(
+        db.listRuns().runs.filter((run) => run.legacy === 0 && run.id !== PEER_RUN_ID)
+      ).toHaveLength(0)
     })
 
     it('rebinds explicitly, lists Runs, and keeps the legacy Run inspect-only', async () => {

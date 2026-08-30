@@ -1,5 +1,6 @@
 import type { MessageRow } from './types'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
+import { sanitizeDirectoryText } from './agent-name-sanitizer'
 
 const BANNER_WIDTH = 60
 const SEPARATOR = '─'.repeat(BANNER_WIDTH)
@@ -120,21 +121,54 @@ function truncatePointerSubject(subject: string): string {
   return `${subject.slice(0, POINTER_SUBJECT_MAX - 1)}…`
 }
 
-function formatMessagePointerLine(msg: MessageRow): string {
+/** Directory identity for the sender of one message (S10-1: pointer wires role). Both fields
+ * are already sanitized at write (agent-name-sanitizer.ts), but §6 poison containment requires
+ * the render side to re-sanitize independently — see POINTER_ROLE_MAX_LENGTH below — so a
+ * future write-side regression (or a row read by any other path) cannot widen what gets typed
+ * into a peer's PTY. A quarantined sender must never be resolved here (CONTAINMENT #7); callers
+ * are responsible for excluding quarantined/tombstoned rows before returning an agent. */
+export type MessagePointerSenderAgent = { displayName: string; role: string | null }
+
+export type ResolveMessagePointerSenderAgent = (msg: MessageRow) => MessagePointerSenderAgent | null
+
+// Why much shorter than the 120-char write-side bound: a pointer is an ambient interrupt read
+// mid-flow, not a directory entry someone opted to look up — the shorter the render, the less
+// of an injected sentence a reader ever sees before triaging away from it.
+const POINTER_ROLE_MAX_LENGTH = 40
+const POINTER_NAME_MAX_LENGTH = 32
+
+function formatMessagePointerLine(
+  msg: MessageRow,
+  resolveSenderAgent?: ResolveMessagePointerSenderAgent
+): string {
   const thread = msg.thread_id ?? 'none'
-  return `[from: ${msg.from_handle}] "${truncatePointerSubject(msg.subject)}" thread:${thread}`
+  const agent = resolveSenderAgent?.(msg) ?? null
+  const sanitizedName = agent
+    ? sanitizeDirectoryText(agent.displayName, POINTER_NAME_MAX_LENGTH).value
+    : ''
+  const sanitizedRole = agent?.role
+    ? sanitizeDirectoryText(agent.role, POINTER_ROLE_MAX_LENGTH).value
+    : ''
+  const from =
+    agent && sanitizedName.length > 0
+      ? `${sanitizedName}${sanitizedRole ? ` (${sanitizedRole})` : ''}`
+      : msg.from_handle
+  return `[from: ${from}] "${truncatePointerSubject(msg.subject)}" thread:${thread}`
 }
 
 // Why content-bearing but bounded (§6): an agent mid-flow reads a contentless
 // pointer as a low-value interrupt and defers it. Sender/subject/thread let it
 // triage without a round trip; only the first two are shown so a flood of
 // queued mail can never widen what gets typed into the pane.
-export function formatMessagePointer(messages: readonly MessageRow[]): string {
+export function formatMessagePointer(
+  messages: readonly MessageRow[],
+  resolveSenderAgent?: ResolveMessagePointerSenderAgent
+): string {
   if (messages.length === 0) {
     return ''
   }
   const shown = messages.slice(0, POINTER_MAX_SHOWN)
-  const lines = shown.map(formatMessagePointerLine)
+  const lines = shown.map((msg) => formatMessagePointerLine(msg, resolveSenderAgent))
   const overflow = messages.length - shown.length
   lines.push(
     overflow > 0

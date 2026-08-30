@@ -73,6 +73,7 @@ describe('orchestration timeout flag validation', () => {
       compatibilityCliCommand: expect.stringMatching(/^orca(?:-ide)?$/),
       run: undefined,
       ack: undefined,
+      ackMode: 'implicit',
       wait: true,
       timeoutMs: 250
     })

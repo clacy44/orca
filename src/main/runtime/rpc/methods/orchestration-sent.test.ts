@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { RpcDispatcher } from '../dispatcher'
 import type { RpcRequest } from '../core'
@@ -74,5 +74,63 @@ describe('orchestration.sent (BUG 3)', () => {
     )
 
     expect(response).toMatchObject({ ok: false })
+  })
+
+  // RPC-level integration (S10-0 review minor): drives the real ambient-push machinery
+  // (deliverPendingMessagesForHandle against a live, idle leaf) rather than asserting on
+  // runtime-private state directly, and reads the result back through the actual
+  // `orchestration.sent` RPC handler — the same path a real CLI/RPC caller uses.
+  it('reports pointed once deliverPendingMessagesForHandle writes into a live idle leaf', async () => {
+    setup()
+    const write = vi.fn().mockReturnValue(true)
+    runtime!.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => null
+    } as never)
+    runtime!.attachWindow(1)
+    runtime!.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          title: 'Codex',
+          activeLeafId: 'pane:1',
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          leafId: 'pane:1',
+          paneRuntimeId: 1,
+          ptyId: 'pty-1',
+          paneTitle: null
+        }
+      ]
+    })
+    const [terminal] = (await runtime!.listTerminals()).terminals
+    // Why two frames: `lastAgentStatusObservedLive` only flips true once a live PTY frame is
+    // actually observed — an idle-from-birth leaf reads as a cold restore, not a push-eligible one.
+    runtime!.onPtyData('pty-1', ']0;Codex working', 100)
+    runtime!.onPtyData('pty-1', ']0;Codex done', 101)
+
+    const message = db!.insertMessage({ from: 'term_a', to: terminal.handle, subject: 'ping' })
+    const preResponse = await dispatcher.dispatch(
+      request('sent-pre', 'orchestration.sent', { id: message.id })
+    )
+    expect(preResponse).toMatchObject({ ok: true, result: { delivery: { state: 'queued' } } })
+
+    runtime!.deliverPendingMessagesForHandle(terminal.handle)
+    expect(write).toHaveBeenCalled()
+
+    const response = await dispatcher.dispatch(
+      request('sent-pointed', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({ ok: true, result: { delivery: { state: 'pointed' } } })
+    // Still unread — pointed is "written into the pane", not "read by the recipient".
+    expect(db!.getMessageById(message.id)?.read).toBe(0)
   })
 })

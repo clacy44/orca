@@ -15,6 +15,8 @@ export type OrchestrationMessageSummary = {
   /** Additive: `orchestration thread` (BUG 4) is the first reader that needs it on the wire. */
   thread_id?: string | null
   created_at?: string
+  /** Additive: the monotonic cursor `orchestration thread --since` resumes by (S10-0 minor). */
+  sequence?: number
 }
 
 export type LegacyCompatibilityResult = {

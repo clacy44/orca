@@ -168,6 +168,11 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/orchestration.js')).ORCHESTRATION_HANDLERS
   },
   {
+    name: 'agents',
+    keys: ['agents register', 'agents list', 'agents show', 'agents find', 'agents quarantine'],
+    load: async () => (await import('./handlers/agents.js')).AGENT_HANDLERS
+  },
+  {
     name: 'emulator',
     keys: [
       'emulator list',

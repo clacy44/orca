@@ -10,6 +10,7 @@ export const APPIMAGE_CLI_COMMAND_NAMES = [
   'account',
   'agent',
   'agent-context',
+  'agents',
   'artifacts',
   'automations',
   'back',

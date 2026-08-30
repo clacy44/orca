@@ -5,7 +5,8 @@ import {
   CURRENT_CONTRACT_VERSION,
   LEGACY_CONTRACT_VERSION,
   LEGACY_RUN_ID,
-  OrchestrationDb
+  OrchestrationDb,
+  PEER_RUN_ID
 } from './db'
 import {
   createLegacyStorageCutoverFixture,
@@ -151,7 +152,15 @@ describe('OrchestrationDb legacy contract storage', () => {
 
     expect(db.getLegacyAdoption()).toBeUndefined()
     expect(db.listLegacyCompatibilityPrincipals(LEGACY_RUN_ID)).toEqual([])
-    expect(db.listRuns().runs).toEqual([expect.objectContaining({ id: LEGACY_RUN_ID, legacy: 1 })])
+    // S10-1 also seeds PEER_RUN_ID (run_peer_local, legacy:0) into `runs` alongside
+    // LEGACY_RUN_ID — both are migrate()-seeded sentinels, neither an adopted/synthesized Run.
+    expect(db.listRuns().runs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: LEGACY_RUN_ID, legacy: 1 }),
+        expect.objectContaining({ id: PEER_RUN_ID, legacy: 0 })
+      ])
+    )
+    expect(db.listRuns().runs).toHaveLength(2)
   })
 
   it('keeps current Delivery disjoint from adopted direct and audit-only mail', () => {

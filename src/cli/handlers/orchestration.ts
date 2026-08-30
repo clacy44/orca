@@ -711,6 +711,19 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const requestedRun = getOptionalStringFlag(flags, 'run')
     const remoteRunMailbox = await negotiateRemoteRunMailbox(client, requestedRun !== undefined)
     const terminal = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'terminal')
+    // Why unconditional, not negotiated (owner decision 3, dual behaviour): `ackMode` is an
+    // additive optional RPC param — an old host's zod schema silently drops it and behaves
+    // exactly as before (zero regression), so a plain check never needs a `status.get` probe
+    // just to read the caller-handle mailbox. --legacy-destructive-read force-opts back to the
+    // old path. (`--run` keeps its own `negotiateRemoteRunMailbox` status.get above; that is
+    // unrelated to this param.)
+    const legacyDestructiveRead = flags.has('legacy-destructive-read')
+    if (legacyDestructiveRead) {
+      console.error(
+        'Warning: --legacy-destructive-read is deprecated. Durable delivery (implicit ack) is becoming the default for the dispatch:/bare-handle mailboxes; the agent:<id> mailbox is always durable.'
+      )
+    }
+    const ackMode: 'implicit' | undefined = legacyDestructiveRead ? undefined : 'implicit'
 
     // Why: Claude Code auto-backgrounds subprocesses silent ~2 min; emit JSON keepalives to stderr (stdout stays one payload). See §3.4.
     const stopKeepalive = wait ? startCheckKeepalive(timeoutMs) : null
@@ -749,6 +762,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           run: requestedRun,
           remoteRunMailbox: remoteRunMailbox.param,
           ack: getOptionalStringFlag(flags, 'ack'),
+          ackMode,
           wait: wait ? true : undefined,
           timeoutMs
         })

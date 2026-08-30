@@ -12976,6 +12976,24 @@ export class OrcaRuntimeService {
     return 'local'
   }
 
+  /** S10-1: the exact liveness signals agent-directory.ts's classifyAgentLiveness needs for a
+   * durable pane key, mirroring the ambient-push gate's own read of these two leaf fields
+   * (Why comment at deliverPendingMessagesForHandle). Delegating read, no new classification. */
+  getAgentDirectoryLivenessSignals(paneKey: string): {
+    terminalHandle: string | null
+    lastAgentStatus: 'working' | 'permission' | 'idle' | null
+    observedLive: boolean
+  } {
+    const terminalHandle = this.getTerminalHandleForPaneKey(paneKey)
+    const parsed = parsePaneKey(paneKey)
+    const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
+    return {
+      terminalHandle,
+      lastAgentStatus: leaf?.lastAgentStatus ?? null,
+      observedLive: leaf?.lastAgentStatusObservedLive ?? false
+    }
+  }
+
   registerOrchestrationCompatibilitySshAttachment(
     targetId: string,
     connectionIncarnation: string
@@ -33533,6 +33551,15 @@ export class OrcaRuntimeService {
           : false
       })
     }
+    // Why: S10-1 routing — `agent:<id>` is never rewritten to a handle at rest;
+    // pane_key is identity, so re-resolving through it on every push is what
+    // survives a graph reload (ROUTING §"Ambient push").
+    if (mailboxHandle.startsWith('agent:')) {
+      const row = db.getAgentById(mailboxHandle.slice('agent:'.length))
+      return row?.pane_key && !row.quarantined && !row.tombstoned_at
+        ? this.getTerminalHandleForPaneKey(row.pane_key)
+        : null
+    }
     return null
   }
 
@@ -34518,7 +34545,17 @@ export class OrcaRuntimeService {
     // forever. Only an armed Enter hands settling to its own callback.
     let settlesInEnterCallback = false
     try {
-      const payload = formatMessagePointer(unread)
+      const db = this._orchestrationDb
+      const payload = formatMessagePointer(unread, (msg) => {
+        const agent = msg.sender_agent_id ? db?.getAgentById(msg.sender_agent_id) : undefined
+        // Why excluded here: a quarantined agent's name/role must never be typed into another
+        // agent's pane (CONTAINMENT #7 — quarantine is bidirectional); getAgentById only filters
+        // tombstoned rows, so quarantine is checked explicitly at this render boundary.
+        if (!agent || agent.quarantined === 1) {
+          return null
+        }
+        return { displayName: agent.display_name, role: agent.role }
+      })
       const wrote = this.ptyController?.write(deliveryPtyId, payload) ?? false
       if (!wrote) {
         return
