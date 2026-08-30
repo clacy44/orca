@@ -10,7 +10,7 @@ import {
   type OrchestrationDb,
   type TaskStatus
 } from '../../orchestration/db'
-import { MESSAGE_TYPES } from '../../orchestration/types'
+import { MESSAGE_TYPES, type MessageRow, type RunRow } from '../../orchestration/types'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { formatMessageBanner } from '../../orchestration/formatter'
 import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
@@ -41,7 +41,6 @@ import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
 import type { OrcaRuntimeService } from '../../orca-runtime'
-import type { RunRow } from '../../orchestration/types'
 import { encodeFederatedControlMessage } from '../../orchestration/federation-control-message'
 import {
   ORCHESTRATION_FEDERATION_CONTROL_MAIL_PROTOCOL_VERSION,
@@ -138,6 +137,12 @@ const CheckParams = z
     // Why: one-release RPC compatibility only; the public CLI uses --format because no terminal input is injected.
     inject: OptionalBoolean,
     ack: OptionalString,
+    // Why optional and mailbox-scoped (owner decision 3, dual behaviour): the NEW `agent:<id>`
+    // mailbox is always implicit/durable regardless of this param. The existing `dispatch:` and
+    // bare-handle mailboxes default to today's destructive markAsRead-on-read when this is
+    // absent/'destructive' — zero regression for in-flight callers — and opt into the same
+    // replay-until-ack durability as `agent:<id>` only when the caller sends 'implicit'.
+    ackMode: z.enum(['implicit', 'destructive']).optional(),
     compatibilityAck: OptionalString,
     compatibilityQuestionAck: OptionalString,
     compatibilityCliCommand: z.enum(['orca', 'orca-ide', 'orca-dev']).optional(),
@@ -285,6 +290,50 @@ function parseMessageTypes(rawTypes: string | undefined): MessageType[] | undefi
     throw new OrchestrationError('invalid_argument', `Invalid --types: ${invalidTypes.join(',')}`)
   }
   return types && types.length > 0 ? types : undefined
+}
+
+// BUG 5, generalized: replay-until-`--ack` delivery over `mailbox_deliveries`, shared by the
+// `agent:<id>`, `dispatch:<id>` (ackMode:'implicit') and bare-handle (ackMode:'implicit') check
+// branches. Legacy rows (ORCHESTRATION_LEGACY_RUN_ID) are reported as `legacyPending`, never
+// thrown at the caller and never included in the delivery — the fence's intent, generalized past
+// the `agent:` mailbox it originally shipped on (A4/ROUTING).
+function readMailboxDelivery(
+  db: OrchestrationDb,
+  params: { mailboxHandle: string; fetchCandidates: () => MessageRow[]; ack?: string }
+): {
+  legacyPending: number
+  deliveryId: string | null
+  messages: MessageRow[]
+  replayed: boolean
+  pendingBehind: number
+  acknowledged: string | null
+} {
+  // Why ack BEFORE fetching candidates, not after: acknowledging marks the prior delivery's
+  // frozen ids `read`. A candidate query run before the ack would still see those ids as
+  // unread and hand them straight back into the newly-minted delivery — the message would
+  // never actually clear. (This is exactly what broke when a first draft of this helper took
+  // a pre-computed `candidates` array instead of fetching after the ack.)
+  const acknowledged = params.ack ? db.acknowledgeMailboxDelivery(params.ack) : undefined
+  const candidates = params.fetchCandidates()
+  const legacyPending = candidates.filter(
+    (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
+  ).length
+  const candidateIds = candidates
+    .filter((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+    .map((row) => row.id)
+  const current = db.getOrCreateMailboxDelivery({
+    mailboxHandle: params.mailboxHandle,
+    messageIds: candidateIds,
+    limit: 50
+  })
+  return {
+    legacyPending,
+    deliveryId: current?.delivery.id ?? null,
+    messages: current?.messages ?? [],
+    replayed: current?.replayed ?? false,
+    pendingBehind: current?.pendingBehind ?? 0,
+    acknowledged: acknowledged?.delivery.id ?? null
+  }
 }
 
 // Why: an ambient pane notice can be lost on hosts whose PTY write path never lands, so the
@@ -471,6 +520,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           : undefined
       // Why: attested hook identity survives graph remount; caller params never supply lifecycle authority.
       const senderPaneKey = attestedCaller?.paneKey ?? runtime.getTerminalPaneKey(from) ?? undefined
+      // Why hoisted here (not just the point-to-point branch below): the sender's directory row,
+      // if any, is author provenance on EVERY send — point-to-point and group fan-out alike
+      // (messages.sender_agent_id, S10-3 purge/quarantine target).
+      const senderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+      const senderAgentId = senderPaneKey
+        ? (db.getAgentByPaneKey(senderHostId, senderPaneKey)?.id ?? null)
+        : null
       const remoteAttachment = senderPaneKey
         ? db.findActiveRemoteAttachmentForPane(senderPaneKey)
         : undefined
@@ -691,15 +747,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // Why: a bare peer handle has no mailbox row to fall back through on a
         // later graph reload (BUG 6) — record its pane key now so the ambient
         // push can re-resolve it once the handle goes stale.
+        const isBareHandleTarget = isBarePeerHandle(to)
         const recipientPaneKey = agentRecipient
           ? (agentRecipient.pane_key ?? undefined)
-          : isBarePeerHandle(to)
+          : isBareHandleTarget
             ? (runtime.getTerminalPaneKey(to) ?? undefined)
             : undefined
-        const senderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
-        const senderAgentId = senderPaneKey
-          ? (db.getAgentByPaneKey(senderHostId, senderPaneKey)?.id ?? null)
-          : null
         const msg = db.insertMessage({
           from,
           to,
@@ -712,7 +765,14 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           senderPaneKey,
           recipientPaneKey,
           senderAgentId,
-          runId: routing.run?.id ?? (agentRecipient ? PEER_RUN_ID : undefined),
+          // Why (A4/BUG 6, generalized to bare-handle peers): with no bound Run, a bare
+          // terminal-handle send between two hand-started agents defaults to LEGACY_RUN_ID
+          // (db.ts insertMessage) exactly like an `agent:<id>` send would — and the
+          // recipient's `check` fences that with `legacy_read_only`. PEER_RUN_ID is the
+          // fix for both address shapes; only a genuine dispatch:/run: mailbox is left to
+          // its own routing (agentRecipient and isBareHandleTarget are both false there).
+          runId:
+            routing.run?.id ?? (agentRecipient || isBareHandleTarget ? PEER_RUN_ID : undefined),
           deliveryContract: legacyWorkerDeliveryContract(
             runtime,
             routing.run?.id ?? legacyCoordinatorRunId,
@@ -815,6 +875,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           threadId,
           payload: params.payload,
           senderPaneKey,
+          senderAgentId,
           // Why: group addresses resolve to bare peer handles (BUG 6) — same
           // durable pane-key recording as the point-to-point path above.
           recipientPaneKey: runtime.getTerminalPaneKey(handle) ?? undefined,
@@ -1045,11 +1106,36 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (workerMailbox) {
         const address = `dispatch:${workerMailbox.dispatchId}`
         const showAll = params.all === true || (params.unread === false && params.peek !== true)
-        const messages = showAll
-          ? db.getAllMessagesForHandle(address, 100, typeFilter)
-          : db.getUnreadMessages(address, typeFilter)
-        if (!showAll && params.peek !== true && messages.length > 0) {
-          db.markAsRead(messages.map((message) => message.id))
+        const consumeUnread = !showAll && params.peek !== true
+        // Why the dual path (owner decision 3): default stays today's destructive markAsRead —
+        // zero regression for in-flight callers. ackMode:'implicit' opts this dispatch: mailbox
+        // into the same replay-until-ack durability agent:<id> ships with (BUG 5). Why the
+        // candidate query is INSIDE the implicit branch and not hoisted above it: an ack must
+        // mark the prior delivery's ids read before this query runs, or it would still see
+        // them as unread and hand the just-acked batch straight back (readMailboxDelivery
+        // enforces this ordering internally via `fetchCandidates`).
+        let messages: MessageRow[]
+        let deliveryMeta: Record<string, unknown> = {}
+        if (consumeUnread && params.ackMode === 'implicit') {
+          const durable = readMailboxDelivery(db, {
+            mailboxHandle: address,
+            fetchCandidates: () => db.getUnreadMessages(address, typeFilter),
+            ack: params.ack
+          })
+          messages = durable.messages
+          deliveryMeta = {
+            deliveryId: durable.deliveryId,
+            replayed: durable.replayed,
+            pendingBehind: durable.pendingBehind,
+            acknowledged: durable.acknowledged
+          }
+        } else {
+          messages = showAll
+            ? db.getAllMessagesForHandle(address, 100, typeFilter)
+            : db.getUnreadMessages(address, typeFilter)
+          if (consumeUnread && messages.length > 0) {
+            db.markAsRead(messages.map((message) => message.id))
+          }
         }
         if (messages.length > 0 || !params.wait) {
           return {
@@ -1057,6 +1143,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             dispatchId: workerMailbox.dispatchId,
             messages,
             count: messages.length,
+            ...deliveryMeta,
             ...(params.format || params.inject
               ? { formatted: messages.map(formatMessageBanner).join('\n\n') }
               : {})
@@ -1083,13 +1170,31 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             connectionLost: waitResult === 'cancelled' && signal?.aborted === true
           }
         }
-        const arrived = db.getUnreadMessages(address, typeFilter)
-        db.markAsRead(arrived.map((message) => message.id))
+        let arrived: MessageRow[]
+        let arrivedDeliveryMeta: Record<string, unknown> = {}
+        if (params.ackMode === 'implicit') {
+          const durable = readMailboxDelivery(db, {
+            mailboxHandle: address,
+            fetchCandidates: () => db.getUnreadMessages(address, typeFilter),
+            ack: params.ack
+          })
+          arrived = durable.messages
+          arrivedDeliveryMeta = {
+            deliveryId: durable.deliveryId,
+            replayed: durable.replayed,
+            pendingBehind: durable.pendingBehind,
+            acknowledged: durable.acknowledged
+          }
+        } else {
+          arrived = db.getUnreadMessages(address, typeFilter)
+          db.markAsRead(arrived.map((message) => message.id))
+        }
         return {
           ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
           dispatchId: workerMailbox.dispatchId,
           messages: arrived,
           count: arrived.length,
+          ...arrivedDeliveryMeta,
           ...(params.format || params.inject
             ? { formatted: arrived.map(formatMessageBanner).join('\n\n') }
             : {})
@@ -1150,39 +1255,34 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
         }
 
-        const acknowledged = params.ack ? db.acknowledgeMailboxDelivery(params.ack) : undefined
-
-        const addressUnread = db.getUnreadMessages(address, typeFilter)
-        const handleUnread = db.getUnreadMessages(handle, typeFilter)
-        const unreadById = new Map<string, (typeof addressUnread)[number]>()
-        for (const row of [...addressUnread, ...handleUnread]) {
-          unreadById.set(row.id, row)
-        }
-        const candidates = [...unreadById.values()].sort((a, b) => a.sequence - b.sequence)
-        const legacyPending = candidates.filter(
-          (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
-        ).length
-        const candidateIds = candidates
-          .filter((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
-          .map((row) => row.id)
-
-        const current = db.getOrCreateMailboxDelivery({
+        const durable = readMailboxDelivery(db, {
           mailboxHandle: address,
-          messageIds: candidateIds,
-          limit: 50
+          // Why fetched here (inside the callback, run AFTER the ack): see readMailboxDelivery's
+          // own comment — a candidate query run before the ack would still see the prior
+          // delivery's ids as unread and hand them back into the new one.
+          fetchCandidates: () => {
+            const addressUnread = db.getUnreadMessages(address, typeFilter)
+            const handleUnread = db.getUnreadMessages(handle, typeFilter)
+            const unreadById = new Map<string, (typeof addressUnread)[number]>()
+            for (const row of [...addressUnread, ...handleUnread]) {
+              unreadById.set(row.id, row)
+            }
+            return [...unreadById.values()].sort((a, b) => a.sequence - b.sequence)
+          },
+          ack: params.ack
         })
         return {
           mailbox: address,
           agentId: callerAgentRow.id,
-          deliveryId: current?.delivery.id ?? null,
-          messages: current?.messages ?? [],
-          count: current?.messages.length ?? 0,
-          replayed: current?.replayed ?? false,
-          pendingBehind: current?.pendingBehind ?? 0,
-          legacyPending,
-          acknowledged: acknowledged?.delivery.id ?? null,
+          deliveryId: durable.deliveryId,
+          messages: durable.messages,
+          count: durable.messages.length,
+          replayed: durable.replayed,
+          pendingBehind: durable.pendingBehind,
+          legacyPending: durable.legacyPending,
+          acknowledged: durable.acknowledged,
           ...(params.format || params.inject
-            ? { formatted: (current?.messages ?? []).map(formatMessageBanner).join('\n\n') }
+            ? { formatted: durable.messages.map(formatMessageBanner).join('\n\n') }
             : {})
         }
       }
@@ -1191,40 +1291,80 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       const showAll = params.all === true || (params.unread === false && params.peek !== true)
       const consumeUnread = !showAll && params.peek !== true
 
+      // Why "the peer check branch": a bare terminal handle is the address two hand-started
+      // agents actually use before either registers (A4/BUG 6). It shares this mailbox with any
+      // genuinely-legacy pre-migration row, so — mirroring the agent:<id> branch above — a
+      // legacy row is reported as `legacyPending` and left untouched, never thrown at the caller.
+      // MUTATION PROOF: reinstating the old `throw new OrchestrationError('legacy_read_only', …)`
+      // here fails T2-equivalent coverage for the bare-handle mailbox (peer mail must never throw
+      // even when genuine legacy debt shares the same address).
       const readAndReturn = () => {
-        const messages = showAll
-          ? db.getAllMessagesForHandle(handle, undefined, typeFilter)
-          : db.getUnreadMessages(handle, typeFilter)
-
-        if (
-          consumeUnread &&
-          messages.some((message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID)
-        ) {
-          throw new OrchestrationError(
-            'legacy_read_only',
-            'Legacy orchestration messages are inspect-only; use --peek or --all. No acknowledgment was applied.',
-            { effectsApplied: false }
-          )
+        if (!consumeUnread) {
+          // --peek / --all: inspect everything (legacy rows included), no mutation, no throw.
+          const messages = showAll
+            ? db.getAllMessagesForHandle(handle, undefined, typeFilter)
+            : db.getUnreadMessages(handle, typeFilter)
+          return params.format || params.inject
+            ? {
+                messages,
+                formatted: messages.map(formatMessageBanner).join('\n\n'),
+                count: messages.length
+              }
+            : { messages, count: messages.length }
         }
 
-        let visibleMessages = messages
-        if (consumeUnread && messages.length > 0) {
+        if (params.ackMode === 'implicit') {
+          // Why the candidate query is INSIDE the callback (run AFTER the ack): see
+          // readMailboxDelivery's own comment — a query run before the ack would still see the
+          // prior delivery's ids as unread and hand them back into the newly-minted one.
+          let legacyPending = 0
+          const durable = readMailboxDelivery(db, {
+            mailboxHandle: handle,
+            fetchCandidates: () => {
+              const rows = db.getUnreadMessages(handle, typeFilter)
+              legacyPending = rows.filter(
+                (message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID
+              ).length
+              return rows.filter((message) => message.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+            },
+            ack: params.ack
+          })
+          const result = {
+            messages: durable.messages,
+            count: durable.messages.length,
+            deliveryId: durable.deliveryId,
+            replayed: durable.replayed,
+            pendingBehind: durable.pendingBehind,
+            legacyPending,
+            acknowledged: durable.acknowledged
+          }
+          return params.format || params.inject
+            ? { ...result, formatted: durable.messages.map(formatMessageBanner).join('\n\n') }
+            : result
+        }
+
+        // Destructive default (owner decision 3, dual behaviour): unchanged behavior for
+        // current rows — mark-read on read, zero regression for in-flight callers.
+        const messages = db.getUnreadMessages(handle, typeFilter)
+        const legacyPending = messages.filter(
+          (message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID
+        ).length
+        const current = messages.filter((message) => message.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+        let visibleMessages = current
+        if (current.length > 0) {
           // Why: unread check is an authoritative read path for worker_done/heartbeat, so reconcile lifecycle messages here too.
-          visibleMessages = messages.map((message) => {
+          visibleMessages = current.map((message) => {
             const reconciled = reconcileLifecycleMessage(db, message)
             return reconciled.action === 'rejected'
               ? (db.getMessageById(message.id) ?? message)
               : message
           })
-          db.markAsRead(messages.map((m) => m.id))
+          db.markAsRead(current.map((m) => m.id))
         }
-
-        if (params.format || params.inject) {
-          const formatted = visibleMessages.map(formatMessageBanner).join('\n\n')
-          return { messages: visibleMessages, formatted, count: visibleMessages.length }
-        }
-
-        return { messages: visibleMessages, count: visibleMessages.length }
+        const result = { messages: visibleMessages, count: visibleMessages.length, legacyPending }
+        return params.format || params.inject
+          ? { ...result, formatted: visibleMessages.map(formatMessageBanner).join('\n\n') }
+          : result
       }
 
       if (signal?.aborted) {

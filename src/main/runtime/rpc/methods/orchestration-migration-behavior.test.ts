@@ -71,7 +71,12 @@ describe('orchestration migration behavior', () => {
     expect(db.getMessageById(message.id)?.read).toBe(0)
   })
 
-  it('rejects acknowledgment of legacy mail without effects', async () => {
+  // S10-0 review minor (A4/BUG 6, generalized past the agent:<id> mailbox): a peer's plain
+  // `check` on a bare handle no longer throws when genuinely-legacy mail shares the mailbox — it
+  // reports the count as `legacyPending` and leaves those rows untouched, exactly like the
+  // agent:<id> branch already did. See the "never throws legacy_read_only" mutation proof in
+  // orchestration.ts's readAndReturn.
+  it('reports legacy mail as legacyPending on a plain check, without effects or a throw', async () => {
     const { db, runtime } = createRuntime()
     const message = db.insertMessage({
       from: 'term_worker',
@@ -80,12 +85,13 @@ describe('orchestration migration behavior', () => {
     })
     const check = ORCHESTRATION_METHODS.find((method) => method.name === 'orchestration.check')!
 
-    await expect(
-      check.handler(check.params!.parse({ terminal: 'term_coord' }), { runtime })
-    ).rejects.toMatchObject({
-      code: 'legacy_read_only',
-      data: { effectsApplied: false }
-    })
+    const result = (await check.handler(check.params!.parse({ terminal: 'term_coord' }), {
+      runtime
+    })) as { messages: unknown[]; count: number; legacyPending: number }
+
+    expect(result.messages).toEqual([])
+    expect(result.count).toBe(0)
+    expect(result.legacyPending).toBe(1)
     expect(db.getMessageById(message.id)?.read).toBe(0)
     expect(db.getInbox(100)).toHaveLength(1)
   })
