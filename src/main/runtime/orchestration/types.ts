@@ -1,3 +1,5 @@
+import type { MessageV34ColumnsRow } from './thread-directory-types'
+
 export const MESSAGE_TYPES = [
   'status',
   'dispatch',
@@ -280,13 +282,7 @@ export type MessageRow = {
   // Why optional: additive column (S10-1) — author provenance for S10-3 purge/quarantine;
   // older rows and in-memory test fixtures predate it, so absence must read the same as null.
   sender_agent_id?: string | null
-  // Why optional: additive S10-2 v34 columns (purge tombstone, soft-gate flags, per-thread cursor); pre-v34 rows predate them.
-  purged_at?: string | null
-  purge_reason?: string | null
-  purged_by_agent_id?: string | null
-  gate_flags?: string | null
-  thread_sequence?: number | null
-}
+} & MessageV34ColumnsRow
 
 export type TaskRow = {
   id: string

@@ -105,7 +105,8 @@ describe('SCHEMA v33 -> v34 migration', () => {
       'purge_reason',
       'purged_by_agent_id',
       'gate_flags',
-      'thread_sequence'
+      'thread_sequence',
+      'payload_kind'
     ]) {
       expect(
         (raw.pragma('table_info(messages)') as { name: string }[]).some((c) => c.name === column)
@@ -124,6 +125,21 @@ describe('SCHEMA v33 -> v34 migration', () => {
         )
       ).toBe(true)
     }
+    raw.close()
+  })
+
+  it('payload_kind (A5, pact-spec rev 7): pre-existing v33 rows backfill to NULL, not the empty string or any inferred value', () => {
+    const dbPath = copyFixture()
+    orchestrationDb = new OrchestrationDb(dbPath)
+    orchestrationDb.close()
+    orchestrationDb = undefined
+    const raw = rawInspect(dbPath)
+    const messageCount = raw.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }
+    expect(messageCount.n).toBeGreaterThan(0)
+    const nonNullCount = raw
+      .prepare('SELECT COUNT(*) AS n FROM messages WHERE payload_kind IS NOT NULL')
+      .get() as { n: number }
+    expect(nonNullCount.n).toBe(0)
     raw.close()
   })
 

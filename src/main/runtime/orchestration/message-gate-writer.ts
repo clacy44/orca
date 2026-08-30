@@ -3,12 +3,14 @@
 // directly, which after this series is a host-lifecycle-only path (see the exemption list on
 // `db.ts`'s `insertMessage`). Kept out of db.ts per that file's ratchet rule.
 //
-// Not in this series: S10-3's A5 (`payload.kind`/`payload_kind` host-write guard). The brief
-// binding this series is s10-3-pact-spec rev 5 (A1 + A4 only); A5 landed in rev 6, and rev 7 —
-// the current doc — already supersedes rev 6's shape (an additive `messages.payload_kind`
-// column enforced inside this choke, not a `payload.kind` JSON field). Implementing it here
-// would be against a spec revision this series was never reviewed against, and would need
-// redoing the moment rev 7's column lands. S10-3 owns it.
+// A5 (s10-3-pact-spec rev 7): the pact-step discriminator is a dedicated additive
+// `messages.payload_kind` column (see db.ts's v33->v34 migration), not a `payload.kind` JSON
+// field — the JSON `payload.kind` namespace is already used by runtime notifications
+// (input_not_consumed / liveness_breach / relay_unreachable). Enforced right here, the single
+// write choke: `hostPayloadKind` writes the column; a caller-supplied `payload.kind` in the
+// JSON is always refused (`payload_kind_reserved`), unconditionally — unlike an ordinary HARD
+// gate verdict, this refusal is never softened by `acknowledgeGate` (GATE §'s escape hatch is
+// for content-gate hits, not for a namespace callers must never be able to touch).
 import { createHash, randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { evaluateMessageBodyGate, type GateVerdict } from '../../../shared/message-body-gate'
@@ -48,6 +50,10 @@ export type InsertGatedMessageParams = {
   senderPaneKey?: string | null
   senderHostId?: string
   recipientPaneKey?: string | null
+  /** Writes the dedicated `messages.payload_kind` column (A5, pact-spec rev 7) — the pact-step
+   * discriminator. Never derived from `payload`; a caller-supplied `payload.kind` in the JSON
+   * is refused (`payload_kind_reserved`), never merged into this column. Host-only. */
+  hostPayloadKind?: string | null
   /** Converts a HARD verdict into a stored-and-flagged send (gate_refusals.acknowledged = 1);
    * the channel is never closed outright (GATE § escape hatch). */
   acknowledgeGate?: boolean
@@ -60,6 +66,19 @@ export type InsertGatedMessageParams = {
 export type InsertGatedMessageResult =
   | { outcome: 'stored'; message: MessageRow; verdict: GateVerdict }
   | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
+
+// A5 (rev 7): `payload.kind` is a reserved JSON key — the pact-step discriminator lives in the
+// dedicated `payload_kind` column instead, so a caller setting `payload.kind` can never shadow
+// or spoof it. Only a top-level `kind` own-property on a plain payload object is reserved;
+// non-object payloads have no JSON namespace to collide with.
+function payloadHasReservedKindField(payload: unknown): boolean {
+  return (
+    payload !== null &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    Object.hasOwn(payload, 'kind')
+  )
+}
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
@@ -160,6 +179,25 @@ export function insertGatedMessage(
 
   const verb = params.verb ?? 'send'
 
+  // A5 (rev 7): reserved-namespace refusal, unconditional — never softened by acknowledgeGate.
+  if (payloadHasReservedKindField(params.payload)) {
+    const refusalId = writeGateRefusal(db, {
+      actorAgentId: senderAgentId,
+      actorPaneKey: params.senderPaneKey ?? null,
+      actorHostId: senderAgentId ? senderHostId : null,
+      verb,
+      ruleIds: ['payload_kind_reserved'],
+      acknowledged: false,
+      subject: sanitizedSubject,
+      body: sanitizedBody
+    })
+    return {
+      outcome: 'refused',
+      verdict: { tier: 'hard', ruleIds: ['payload_kind_reserved'] },
+      refusalId
+    }
+  }
+
   if (verdict.tier === 'hard' && !params.acknowledgeGate) {
     const refusalId = writeGateRefusal(db, {
       actorAgentId: senderAgentId,
@@ -197,9 +235,9 @@ export function insertGatedMessage(
     `INSERT INTO messages (
        id, run_id, delivery_contract, from_handle, to_handle, subject, body,
        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key,
-       sender_agent_id, gate_flags
+       sender_agent_id, gate_flags, payload_kind
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     params.runId ?? ORCHESTRATION_LEGACY_RUN_ID,
@@ -215,7 +253,8 @@ export function insertGatedMessage(
     params.senderPaneKey ?? null,
     params.recipientPaneKey ?? null,
     senderAgentId,
-    gateFlags
+    gateFlags,
+    params.hostPayloadKind ?? null
   )
 
   const message = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow

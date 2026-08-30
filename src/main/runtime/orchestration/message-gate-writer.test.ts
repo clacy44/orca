@@ -326,6 +326,110 @@ describe('gate normalizes before matching, so a manufactured heading cannot slip
     expect(result.outcome).toBe('refused')
     db.close()
   })
+
+  it('A5: hostPayloadKind lands in the payload_kind column, not in the stored payload JSON', () => {
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'pact step',
+      body: 'engaging',
+      payload: { note: 'no kind field here' },
+      hostPayloadKind: 'pact_engage',
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('stored')
+    if (result.outcome !== 'stored') {
+      throw new Error('expected stored')
+    }
+    expect(result.message.payload_kind).toBe('pact_engage')
+    expect(result.message.payload).not.toBeNull()
+    expect(JSON.parse(result.message.payload as string)).not.toHaveProperty('kind')
+    db.close()
+  })
+
+  it('A5: caller-supplied payload.kind is refused (payload_kind_reserved) — nothing is stored', () => {
+    const db = freshDb()
+    const before = countMessages(db)
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'spoof attempt',
+      body: 'trying to set kind myself',
+      payload: { kind: 'liveness_breach' },
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('refused')
+    if (result.outcome !== 'refused') {
+      throw new Error('expected refused')
+    }
+    expect(result.verdict.ruleIds).toContain('payload_kind_reserved')
+    expect(countMessages(db)).toBe(before)
+    const refusal = rawGet(db, 'SELECT * FROM gate_refusals WHERE seq = ?', [result.refusalId]) as {
+      rule_ids: string
+      acknowledged: number
+    }
+    expect(JSON.parse(refusal.rule_ids)).toContain('payload_kind_reserved')
+    expect(refusal.acknowledged).toBe(0)
+    db.close()
+  })
+
+  it('A5: caller-supplied payload.kind is refused even with acknowledgeGate — the reserved namespace is not an escape-hatch content gate', () => {
+    const db = freshDb()
+    const before = countMessages(db)
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'spoof attempt',
+      body: 'trying to set kind myself, acknowledged',
+      payload: { kind: 'input_not_consumed' },
+      acknowledgeGate: true,
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('refused')
+    expect(countMessages(db)).toBe(before)
+    db.close()
+  })
+
+  it('A5 mutation guard: insertGatedMessage is the only writer shape for payload_kind — no other path copies payload.kind into the column', () => {
+    // Documents the mutation this test kills: a future writer (e.g. a raw db.insertMessage call,
+    // or a helper that reads payload.kind off an already-sanitized payload) copying the JSON
+    // payload.kind straight into the payload_kind column, bypassing the reserved-field refusal.
+    const db = freshDb()
+    const stored = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'pact step',
+      body: 'engaging',
+      payload: { note: 'unrelated', extra: { nested: true } },
+      hostPayloadKind: 'pact_engage',
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    if (stored.outcome !== 'stored') {
+      throw new Error('expected stored')
+    }
+    // The choke's INSERT param count is fixed to the hostPayloadKind field — the only way a
+    // caller can influence payload_kind is through that named option, never through `payload`.
+    expect(stored.message.payload_kind).toBe('pact_engage')
+    const noHostKind = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'pact step 2',
+      body: 'no host kind supplied',
+      payload: { note: 'unrelated' },
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    if (noHostKind.outcome !== 'stored') {
+      throw new Error('expected stored')
+    }
+    expect(noHostKind.message.payload_kind).toBeNull()
+    db.close()
+  })
 })
 
 function countMessages(db: OrchestrationDb): number {

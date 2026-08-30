@@ -645,7 +645,7 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a).
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a).
 const SCHEMA_VERSION = 34
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
@@ -728,7 +728,13 @@ export class OrchestrationDb {
         purge_reason TEXT,
         purged_by_agent_id TEXT,
         gate_flags TEXT,
-        thread_sequence INTEGER
+        thread_sequence INTEGER,
+        -- payload_kind (v34, S10-2/pact rev 7): a dedicated discriminator column for the
+        -- pact-step kind. The JSON payload.kind namespace is already used by runtime
+        -- notifications (input_not_consumed / liveness_breach / relay_unreachable), so the
+        -- pact-step discriminator gets its own column instead of overloading that namespace;
+        -- callers can never set it (see insertGatedMessage's payload_kind_reserved refusal).
+        payload_kind TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -1433,7 +1439,8 @@ export class OrchestrationDb {
           .run(PEER_RUN_ID, 'Peer agent mail (S10)')
       }
       // v33 -> v34 (S10-2): durable threads, gate refusal audit, purge tombstone columns on
-      // messages, peer-question binding columns on question_threads. `question_threads` only
+      // messages, the payload_kind pact-step discriminator column on messages, peer-question
+      // binding columns on question_threads. `question_threads` only
       // ever gets created above (`current < 8`), never in createTables() — the same is true
       // here: THREAD_DIRECTORY_SCHEMA_SQL's backfill reads `question_threads`, so it must run
       // after that block, which sequential `if (current < N)` execution within one migrate()
@@ -1444,7 +1451,12 @@ export class OrchestrationDb {
           ['purge_reason', 'TEXT'],
           ['purged_by_agent_id', 'TEXT'],
           ['gate_flags', 'TEXT'],
-          ['thread_sequence', 'INTEGER']
+          ['thread_sequence', 'INTEGER'],
+          // payload_kind (pact rev 7): dedicated pact-step discriminator column, additive and
+          // separate from the JSON payload.kind namespace already used by runtime
+          // notifications (input_not_consumed / liveness_breach / relay_unreachable). Callers
+          // can never set it directly; see insertGatedMessage's payload_kind_reserved refusal.
+          ['payload_kind', 'TEXT']
         ] as const) {
           if (!this.hasColumn('messages', column[0])) {
             this.db.exec(`ALTER TABLE messages ADD COLUMN ${column[0]} ${column[1]}`)

@@ -41,6 +41,21 @@ export type ThreadParticipantRow = {
   last_read_sequence: number
 }
 
+// messages' additive S10-2 v34 columns (purge tombstone, soft-gate flags, per-thread cursor,
+// pact-step discriminator); pre-v34 rows predate them all. Kept here, not types.ts, per that
+// file's max-lines ratchet.
+export type MessageV34ColumnsRow = {
+  purged_at?: string | null
+  purge_reason?: string | null
+  purged_by_agent_id?: string | null
+  gate_flags?: string | null
+  thread_sequence?: number | null
+  // payload_kind (pact-spec rev 7): dedicated pact-step discriminator column, distinct from the
+  // JSON payload.kind namespace already used by runtime notifications. Callers can never set it
+  // directly; only insertGatedMessage's hostPayloadKind option writes it.
+  payload_kind?: string | null
+}
+
 export type GateRefusalRow = {
   seq: number
   actor_agent_id: string | null
