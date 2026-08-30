@@ -3984,15 +3984,18 @@ export class OrchestrationDb {
 
   // Why unfiltered by to_handle (unlike getThreadMessagesFor above): `orchestration thread`
   // replays every participant's side of the conversation, not one recipient's inbox (BUG 4).
-  // `sinceCreatedAt` must already be in the space-format UTC this column stores.
-  getThreadMessages(threadId: string, sinceCreatedAt?: string): MessageRow[] {
-    if (sinceCreatedAt !== undefined) {
+  // Why `sinceSequence` and not `created_at` (S10-0 review minor): `created_at` has whole-second
+  // resolution, so two messages sent in the same wall-clock second are indistinguishable by
+  // timestamp and a resume cursor built from one can silently re-include or drop the other.
+  // `sequence` is the monotonic AUTOINCREMENT column — always a strict total order.
+  getThreadMessages(threadId: string, sinceSequence?: number): MessageRow[] {
+    if (sinceSequence !== undefined) {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY sequence ASC'
+            'SELECT * FROM messages WHERE thread_id = ? AND sequence > ? ORDER BY sequence ASC'
           )
-          .all(threadId, sinceCreatedAt) as MessageRow[]
+          .all(threadId, sinceSequence) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(

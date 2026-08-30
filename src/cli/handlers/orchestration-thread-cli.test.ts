@@ -18,7 +18,8 @@ describe('orchestration thread CLI (BUG 4)', () => {
             to_handle: 'term_b',
             subject: 'hi',
             type: 'status',
-            created_at: '2026-08-30T12:00:00Z'
+            created_at: '2026-08-30T12:00:00Z',
+            sequence: 7
           }
         ]
       }
@@ -28,7 +29,7 @@ describe('orchestration thread CLI (BUG 4)', () => {
     await ORCHESTRATION_HANDLERS['orchestration thread']({
       flags: new Map([
         ['id', 'thread_1'],
-        ['since', '2026-08-30T00:00:00Z']
+        ['since', '3']
       ]),
       client: { call } as unknown as RuntimeClient,
       cwd: '/tmp/repo',
@@ -37,12 +38,12 @@ describe('orchestration thread CLI (BUG 4)', () => {
 
     expect(call).toHaveBeenCalledWith('orchestration.thread', {
       id: 'thread_1',
-      since: '2026-08-30T00:00:00Z'
+      since: '3'
     })
     const printed = String(log.mock.calls[0]?.[0])
     expect(printed).toContain('msg_1')
     expect(printed).toContain('Next step:')
-    expect(printed).toContain('--since 2026-08-30T12:00:00Z')
+    expect(printed).toContain('--since 7')
   })
 
   it('passes --thread-id through on orchestration inbox', async () => {

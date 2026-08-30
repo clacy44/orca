@@ -66,7 +66,7 @@ describe('orchestration.thread (BUG 4)', () => {
     expect(result.messages.map((m) => m.subject)).toEqual(['one', 'two', 'three'])
   })
 
-  it('filters to messages strictly after --since', async () => {
+  it('filters to messages strictly after --since (a sequence cursor)', async () => {
     directory = mkdtempSync(join(tmpdir(), 'orca-thread-since-'))
     db = new OrchestrationDb(join(directory, 'orchestration.db'))
     db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
@@ -78,12 +78,8 @@ describe('orchestration.thread (BUG 4)', () => {
     })
     const dispatcher = dispatcherFor(db)
 
-    // Why a far-past/far-future bound and not the sibling message's own created_at: this store's
-    // created_at has whole-second resolution (matches every other timestamp column here), so two
-    // messages inserted in the same synchronous test can share one value — asserting against the
-    // filter's boundary behavior, not inter-message timing, is what's actually under test.
     const beforeAll = await dispatcher.dispatch(
-      request('thread-2a', 'orchestration.thread', { id: 't1', since: '2000-01-01T00:00:00Z' })
+      request('thread-2a', 'orchestration.thread', { id: 't1', since: '0' })
     )
     expect(
       (beforeAll as { result: { messages: { subject: string }[] } }).result.messages.map(
@@ -92,9 +88,43 @@ describe('orchestration.thread (BUG 4)', () => {
     ).toEqual(['one', 'two'])
 
     const afterAll = await dispatcher.dispatch(
-      request('thread-2b', 'orchestration.thread', { id: 't1', since: second.created_at })
+      request('thread-2b', 'orchestration.thread', { id: 't1', since: String(second.sequence) })
     )
     expect((afterAll as { result: { messages: unknown[] } }).result.messages).toEqual([])
+  })
+
+  // MUTATION PROOF (S10-0 review minor): two messages inserted synchronously in the same test
+  // necessarily share `created_at`'s whole-second resolution — a `created_at`-keyed --since would
+  // be unable to tell them apart, either re-including or permanently dropping the second one. The
+  // monotonic `sequence` cursor resumes exactly regardless: if `getThreadMessages` reverted to
+  // filtering on `created_at > sinceCreatedAt`, this assertion would fail (both messages share the
+  // same created_at, so `sequence > first.sequence` is the only boundary that isolates "two").
+  it('MUTATION PROOF: two messages in the same wall-clock second both resume correctly by sequence', async () => {
+    directory = mkdtempSync(join(tmpdir(), 'orca-thread-since-tie-'))
+    db = new OrchestrationDb(join(directory, 'orchestration.db'))
+    const first = db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
+    const second = db.insertMessage({
+      from: 'term_b',
+      to: 'term_a',
+      subject: 'two',
+      threadId: 't1'
+    })
+    expect(second.created_at).toBe(first.created_at)
+    const dispatcher = dispatcherFor(db)
+
+    const resumeFromFirst = await dispatcher.dispatch(
+      request('thread-tie-1', 'orchestration.thread', { id: 't1', since: String(first.sequence) })
+    )
+    expect(
+      (resumeFromFirst as { result: { messages: { subject: string }[] } }).result.messages.map(
+        (m) => m.subject
+      )
+    ).toEqual(['two'])
+
+    const resumeFromSecond = await dispatcher.dispatch(
+      request('thread-tie-2', 'orchestration.thread', { id: 't1', since: String(second.sequence) })
+    )
+    expect((resumeFromSecond as { result: { messages: unknown[] } }).result.messages).toEqual([])
   })
 
   it('never returns a different thread’s messages', async () => {
