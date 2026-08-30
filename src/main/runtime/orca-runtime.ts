@@ -17046,10 +17046,14 @@ export class OrcaRuntimeService {
     if (!panes) {
       return null
     }
+    // Why: mirrors the pane activeLeafId names — the same lookup buildTerminalVisualPane
+    // uses for its leaf node — so a tab node carries a handle wherever one resolves (BUG 1).
+    const activeHandle = summariesByLeafKey.get(this.getLeafKey(parentTabId, activeLeafId))?.handle
     return {
       tabId: parentTabId || tabId,
       title: this.tabs.get(parentTabId)?.title ?? firstSurface.title ?? null,
       activeLeafId,
+      ...(activeHandle ? { handle: activeHandle } : {}),
       panes
     }
   }

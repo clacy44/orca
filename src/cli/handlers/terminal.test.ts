@@ -5,6 +5,47 @@ import { printHelp } from '../help'
 import { COMMAND_SPECS } from '../specs'
 import { TERMINAL_HANDLERS } from './terminal'
 
+describe('terminal list CLI', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('requests visualLayouts identically for --json and text (BUG 1)', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: { terminals: [], visualLayouts: [], truncated: false, totalCount: 0 }
+    })
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await TERMINAL_HANDLERS['terminal list']({
+      flags: new Map(),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp/worktree',
+      json: true
+    })
+    await TERMINAL_HANDLERS['terminal list']({
+      flags: new Map(),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp/worktree',
+      json: false
+    })
+
+    expect(call).toHaveBeenNthCalledWith(
+      1,
+      'terminal.list',
+      expect.objectContaining({
+        includeVisualLayouts: true
+      })
+    )
+    expect(call).toHaveBeenNthCalledWith(
+      2,
+      'terminal.list',
+      expect.objectContaining({
+        includeVisualLayouts: true
+      })
+    )
+  })
+})
+
 describe('terminal close CLI', () => {
   afterEach(() => {
     vi.restoreAllMocks()

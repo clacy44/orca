@@ -5,11 +5,10 @@ export const TERMINAL_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['terminal', 'list'],
     summary: 'List live Orca-managed terminals',
-    usage:
-      'orca terminal list [--worktree <selector>] [--limit <n>] [--include-visual-layouts] [--json]',
+    usage: 'orca terminal list [--worktree <selector>] [--limit <n>] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'worktree', 'limit', 'include-visual-layouts'],
     notes: [
-      'JSON omits visualLayouts by default; pass --include-visual-layouts when machine-readable tab and pane topology is required.'
+      '--json and text always return the same visualLayouts node set (BUG 1); --include-visual-layouts is accepted for compatibility but has no effect.'
     ]
   },
   {
