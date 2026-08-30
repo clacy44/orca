@@ -29,6 +29,33 @@ describe('evaluateMessageBodyGate', () => {
     }
   })
 
+  it('h1: a bare SECURITY heading (no trailing punctuation) is HARD', () => {
+    const v = evaluateMessageBodyGate({
+      body: 'SECURITY\nthe relay accepts any from string'
+    })
+    expect(v.tier).toBe('hard')
+    expect(v.tier === 'hard' && v.ruleIds).toContain('security-heading')
+  })
+
+  it('h1: a bold lead-in SECURITY heading with nothing else on the line is HARD', () => {
+    const v = evaluateMessageBodyGate({
+      body: '**SECURITY**\nthe relay accepts any from string'
+    })
+    expect(v.tier).toBe('hard')
+  })
+
+  it('h1: a markdown SECURITY heading with nothing else on the line is HARD', () => {
+    const v = evaluateMessageBodyGate({
+      body: '## SECURITY\nthe relay accepts any from string'
+    })
+    expect(v.tier).toBe('hard')
+  })
+
+  it('h1 mutation guard: ordinary prose starting with "Security" is never HARD (a naive /^SECURITY\\b/i would false-positive here)', () => {
+    const v = evaluateMessageBodyGate({ body: 'Security work continues next sprint.' })
+    expect(v.tier).not.toBe('hard')
+  })
+
   it('h1: the broadened cue set (execution-confirmed, EXPLOIT, PoC) is HARD as a heading', () => {
     for (const line of ['EXECUTION-CONFIRMED: works', 'EXPLOIT: details below', 'PoC: attached']) {
       const v = evaluateMessageBodyGate({ body: line })

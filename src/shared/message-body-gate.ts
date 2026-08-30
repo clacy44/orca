@@ -27,11 +27,14 @@ export type GateInput = {
 
 // h1 — a heading, bold lead-in, or bare all-caps section-opener AT THE START of a line. Never
 // matches text appearing mid-sentence. The word list is the ruling-6 anchor set plus the
-// broadened cues from the docs-bus gate lesson (SECURITY with ANY trailing punctuation, not only
-// "(HIGH|CRITICAL)"; execution-confirmed, EXPLOIT, PoC alongside VULNERABILITY/MERGE-GATE AUDIT).
+// broadened cues from the docs-bus gate lesson (SECURITY bare or with ANY trailing punctuation,
+// not only "(HIGH|CRITICAL)"; execution-confirmed, EXPLOIT, PoC alongside VULNERABILITY/MERGE-GATE
+// AUDIT).
 const HARD_HEADING_RULES: readonly { id: string; re: RegExp }[] = [
   { id: 'merge-gate-audit-heading', re: /^MERGE-GATE\s+AUDIT\b/i },
-  { id: 'security-heading', re: /^SECURITY\b\s*[:\-–—,.()[\]]/i },
+  // Bare opener (end of line) or punctuation — not "Security work continues..." (more prose
+  // follows, matching neither branch).
+  { id: 'security-heading', re: /^SECURITY\b(?:\s*[:\-–—,.()[\]]|$)/i },
   { id: 'vulnerability-heading', re: /^VULNERABILITY\b/i },
   { id: 'execution-confirmed-heading', re: /^EXECUTION-CONFIRMED\b/i },
   { id: 'exploit-heading', re: /^EXPLOIT\b/i },
