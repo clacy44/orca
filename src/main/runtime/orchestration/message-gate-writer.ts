@@ -2,6 +2,13 @@
 // federation relay encode path route through `insertGatedMessage` — never `db.insertMessage`
 // directly, which after this series is a host-lifecycle-only path (see the exemption list on
 // `db.ts`'s `insertMessage`). Kept out of db.ts per that file's ratchet rule.
+//
+// A5 (s10-3-pact-spec rev 6): `payload.kind` is host-written. A caller-supplied `kind` inside
+// `payload` is always refused (`payload_kind_reserved`), even with `acknowledgeGate` — this is
+// a structural rule, not a content-gate verdict, so the escape hatch does not apply to it. The
+// only legal way to set one is `hostPayloadKind`, a typed entry point reachable only from
+// trusted in-process callers (S10-3's `appendPactStep`, which will pass `'pact_step'`) — never
+// from a caller-controlled RPC parameter.
 import { createHash, randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { evaluateMessageBodyGate, type GateVerdict } from '../../../shared/message-body-gate'
@@ -47,11 +54,21 @@ export type InsertGatedMessageParams = {
   infraAllowlist?: readonly string[]
   /** Audit verb recorded on a refusal — 'send' | 'ask' | 'reply' | 'purge_reason' | etc. */
   verb?: string
+  /**
+   * A5, host-internal only. The sole intended caller is S10-3's `appendPactStep`. Never wire
+   * this to a caller-controlled RPC parameter — a caller sets a step by calling
+   * `orca agents step`, never by putting `kind` directly in a message payload.
+   */
+  hostPayloadKind?: string
 }
+
+export const PAYLOAD_KIND_RESERVED_MESSAGE =
+  'Refused: payload.kind is set by the host — a step is recorded with orca agents step, not by sending a message.'
 
 export type InsertGatedMessageResult =
   | { outcome: 'stored'; message: MessageRow; verdict: GateVerdict }
   | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
+  | { outcome: 'payload_kind_reserved' }
 
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
@@ -66,6 +83,33 @@ function resolveSenderAgentId(
     return null
   }
   return getAgentByPaneKey(db, senderHostId, senderPaneKey)?.id ?? null
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+// A5: refuses a caller-supplied payload.kind outright; only a trusted in-process caller
+// (hostPayloadKind) may stamp one in.
+function resolveGatedPayload(
+  params: Pick<InsertGatedMessageParams, 'payload' | 'hostPayloadKind'>
+): { ok: true; payload: unknown } | { ok: false } {
+  if (params.payload !== undefined && isPlainObject(params.payload) && 'kind' in params.payload) {
+    return { ok: false }
+  }
+  if (params.hostPayloadKind === undefined) {
+    return { ok: true, payload: params.payload }
+  }
+  if (params.payload !== undefined && !isPlainObject(params.payload)) {
+    return { ok: false }
+  }
+  return {
+    ok: true,
+    payload: {
+      ...(params.payload as Record<string, unknown> | undefined),
+      kind: params.hostPayloadKind
+    }
+  }
 }
 
 function writeGateRefusal(
@@ -116,15 +160,20 @@ export function insertGatedMessage(
   db: Database.Database,
   params: InsertGatedMessageParams
 ): InsertGatedMessageResult {
+  const gatedPayload = resolveGatedPayload(params)
+  if (!gatedPayload.ok) {
+    return { outcome: 'payload_kind_reserved' }
+  }
+
   const senderHostId = params.senderHostId ?? 'local'
   const senderAgentId = resolveSenderAgentId(db, params.senderPaneKey, senderHostId)
 
   const sanitizedSubject = sanitizeMessageText(params.subject, MESSAGE_SUBJECT_MAX_LENGTH).value
   const sanitizedBody = sanitizeMessageText(params.body ?? '', MESSAGE_BODY_MAX_LENGTH).value
   const sanitizedPayload =
-    params.payload === undefined
+    gatedPayload.payload === undefined
       ? undefined
-      : sanitizeMessagePayloadFields(params.payload, MESSAGE_PAYLOAD_FIELD_MAX_LENGTH)
+      : sanitizeMessagePayloadFields(gatedPayload.payload, MESSAGE_PAYLOAD_FIELD_MAX_LENGTH)
   const payloadGateText =
     sanitizedPayload === undefined ? undefined : extractPayloadGateText(sanitizedPayload)
   const payloadJson = sanitizedPayload === undefined ? null : JSON.stringify(sanitizedPayload)

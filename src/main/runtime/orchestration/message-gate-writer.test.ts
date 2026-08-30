@@ -224,6 +224,79 @@ describe('insertGatedMessage', () => {
   })
 })
 
+describe('A5: payload.kind is host-written', () => {
+  it('a caller-supplied payload.kind is refused (payload_kind_reserved), even with acknowledgeGate', () => {
+    const db = freshDb()
+    const before = countMessages(db)
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'status',
+      body: 'ok',
+      payload: { kind: 'pact_step', ordinal: 3 },
+      runId: 'run_peer_local',
+      acknowledgeGate: true,
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('payload_kind_reserved')
+    expect(countMessages(db)).toBe(before)
+    db.close()
+  })
+
+  it('A5 mutation guard: dropping the payload.kind reservation check would let a caller forge a pact step', () => {
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'status',
+      body: 'ok',
+      payload: { kind: 'pact_step' },
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).not.toBe('stored')
+    db.close()
+  })
+
+  it('a payload with no kind field is unaffected', () => {
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'status',
+      body: 'ok',
+      payload: { ordinal: 3, note: 'fine' },
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('stored')
+    db.close()
+  })
+
+  it('hostPayloadKind (the trusted in-process entry point) stamps kind; it is never a caller-facing RPC param', () => {
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'step',
+      body: 'v34 landed',
+      payload: { ordinal: 1 },
+      runId: 'run_peer_local',
+      hostPayloadKind: 'pact_step',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('stored')
+    if (result.outcome !== 'stored') {
+      throw new Error('expected stored')
+    }
+    expect(JSON.parse(result.message.payload ?? '{}')).toMatchObject({
+      ordinal: 1,
+      kind: 'pact_step'
+    })
+    db.close()
+  })
+})
+
 function countMessages(db: OrchestrationDb): number {
   return (rawGet(db, 'SELECT COUNT(*) AS n FROM messages', []) as { n: number }).n
 }
