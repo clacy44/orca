@@ -297,6 +297,45 @@ describe('A5: payload.kind is host-written', () => {
   })
 })
 
+describe('gate runs on raw text, before sanitize collapses newlines', () => {
+  it('a HARD heading that is not the first line of the body is still refused', () => {
+    // Guard: insertGatedMessage must gate BEFORE sanitizeMessageText collapses newlines to
+    // spaces. Mutation that turns this red: gate the sanitized text instead of the raw text
+    // (i.e. move the sanitize calls above the evaluateMessageBodyGate call) — the heading no
+    // longer starts a line once newlines are gone, h1's anchor stops matching, and this
+    // multi-paragraph audit report is stored as an ordinary message.
+    const db = freshDb()
+    const before = countMessages(db)
+    const body =
+      'Here is what I found while reviewing the importer.\n\nMERGE-GATE AUDIT\nfinding 1: the fence is bypassable via a crafted subject.'
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 'review notes',
+      body,
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('refused')
+    expect(countMessages(db)).toBe(before)
+    db.close()
+  })
+
+  it('control: the same heading as the literal first line is refused too', () => {
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:b',
+      subject: 's',
+      body: 'MERGE-GATE AUDIT\nfinding 1: the fence is bypassable.',
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('refused')
+    db.close()
+  })
+})
+
 function countMessages(db: OrchestrationDb): number {
   return (rawGet(db, 'SELECT COUNT(*) AS n FROM messages', []) as { n: number }).n
 }

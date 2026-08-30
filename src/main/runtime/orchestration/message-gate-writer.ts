@@ -150,11 +150,17 @@ function writeGateRefusal(
 }
 
 /**
- * The single write choke (ruling 2). Sanitizes subject/body/payload (write-side half of ruling
- * 4), resolves `sender_agent_id` from the attested pane (ruling 7), runs the post-time gate
- * (GATE §) over the sanitized text, and either stores the row (clean or soft-flagged) or writes
- * a `gate_refusals` audit row and stores nothing (hard, unless `acknowledgeGate`). Never throws
- * on a HARD verdict — refusal is a normal return value the RPC layer turns into an error.
+ * The single write choke (ruling 2). Gates the RAW subject/body/payload (GATE §) BEFORE
+ * sanitizing — `sanitizeMessageText` collapses every newline to a space, which would otherwise
+ * destroy h1's line-start heading anchor for exactly the multi-line "audit heading, then body"
+ * shape the anchor exists to catch (a heading followed by more text is not the first line of
+ * the sanitized single-line string). Sanitization never *adds* structure, so gating pre-
+ * sanitize is strictly more conservative — it cannot introduce a false HARD the sanitized text
+ * wouldn't also have matched. Resolves `sender_agent_id` from the attested pane (ruling 7,
+ * write-side half of ruling 4) after the verdict, and either stores the sanitized row (clean or
+ * soft-flagged) or writes a `gate_refusals` audit row and stores nothing (hard, unless
+ * `acknowledgeGate`). Never throws on a HARD verdict — refusal is a normal return value the RPC
+ * layer turns into an error.
  */
 export function insertGatedMessage(
   db: Database.Database,
@@ -168,22 +174,24 @@ export function insertGatedMessage(
   const senderHostId = params.senderHostId ?? 'local'
   const senderAgentId = resolveSenderAgentId(db, params.senderPaneKey, senderHostId)
 
+  const rawBody = params.body ?? ''
+  const rawPayloadGateText =
+    gatedPayload.payload === undefined ? undefined : extractPayloadGateText(gatedPayload.payload)
+
+  const verdict = evaluateMessageBodyGate({
+    subject: params.subject,
+    body: rawBody,
+    payload: rawPayloadGateText,
+    infraAllowlist: params.infraAllowlist
+  })
+
   const sanitizedSubject = sanitizeMessageText(params.subject, MESSAGE_SUBJECT_MAX_LENGTH).value
-  const sanitizedBody = sanitizeMessageText(params.body ?? '', MESSAGE_BODY_MAX_LENGTH).value
+  const sanitizedBody = sanitizeMessageText(rawBody, MESSAGE_BODY_MAX_LENGTH).value
   const sanitizedPayload =
     gatedPayload.payload === undefined
       ? undefined
       : sanitizeMessagePayloadFields(gatedPayload.payload, MESSAGE_PAYLOAD_FIELD_MAX_LENGTH)
-  const payloadGateText =
-    sanitizedPayload === undefined ? undefined : extractPayloadGateText(sanitizedPayload)
   const payloadJson = sanitizedPayload === undefined ? null : JSON.stringify(sanitizedPayload)
-
-  const verdict = evaluateMessageBodyGate({
-    subject: sanitizedSubject,
-    body: sanitizedBody,
-    payload: payloadGateText,
-    infraAllowlist: params.infraAllowlist
-  })
 
   const verb = params.verb ?? 'send'
 
