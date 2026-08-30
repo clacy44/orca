@@ -19995,7 +19995,7 @@ describe('OrcaRuntimeService', () => {
       runtime.deliverPendingMessagesForHandle(terminal.handle)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
+        expect.stringContaining('[from: term_sender] "hi"')
       )
       const pointedSnapshot = runtime.getMessageDeliverySnapshot(message)
       expect(pointedSnapshot.delivery).toBe('pointed')
