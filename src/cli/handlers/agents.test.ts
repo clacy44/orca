@@ -150,6 +150,26 @@ describe('agents CLI', () => {
     expect(call).toHaveBeenCalledWith('orchestration.agents.get', { id: 'agt_abc123' })
   })
 
+  // FIX (major, re-review): a quarantined derived row must never get a working send address.
+  it('show for a quarantined derived agent prints the show next-step, never a send address', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        agent: agent({ derived: true, quarantined: true, terminalHandle: undefined }),
+        pushable: false
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_HANDLERS['agents show']({
+      flags: new Map([['name', 'agt_abc123']]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain('Next: orca agents show --id agt_abc123')
+    expect(printed).not.toContain('send --to')
+  })
+
   it('quarantine prints a populated next command', async () => {
     const call = vi.fn().mockResolvedValue({
       result: { agent: agent({ quarantined: true }) }

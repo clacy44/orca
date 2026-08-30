@@ -32,8 +32,9 @@ export function toPublicAgentView(row: AgentRow, full: boolean): Record<string, 
     // Why: a derived row has no reader on `agent:<id>` (FIX derived_agent_unaddressable) —
     // the CLI needs the bare handle to print a working `send --to` line for it. Exposed only
     // for derived rows: it is already the address callers used before this row existed, not
-    // new information CONTAINMENT #2 is guarding.
-    terminalHandle: row.derived === 1 ? row.terminal_handle : undefined
+    // new information CONTAINMENT #2 is guarding — EXCEPT a quarantined row, where handing
+    // out the pane address would route mail around the quarantine.
+    terminalHandle: row.derived === 1 && row.quarantined !== 1 ? row.terminal_handle : undefined
   }
   if (!full) {
     return base

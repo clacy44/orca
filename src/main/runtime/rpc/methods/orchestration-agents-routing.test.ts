@@ -14,6 +14,7 @@ import {
 import type { RpcContext } from '../core'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../../shared/orchestration-rpc-contract'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { toPublicAgentView } from './agent-directory-rpc-view'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -406,5 +407,54 @@ describe('agent: routing + durability', () => {
     }
     expect(checked.agentId).toBe(agentBId)
     expect(checked.messages.map((m) => m.subject)).toEqual(['registered still works'])
+  })
+
+  // FIX (major, re-review): quarantine outranks the derived refusal — derived_agent_unaddressable's
+  // nextSteps name the pane's bare handle, which for a quarantined row is a one-command bypass of
+  // the quarantine. The public view withholds the handle for the same reason.
+  it('a QUARANTINED derived agent refuses agent_quarantined and never surfaces the pane handle', async () => {
+    setup()
+    const PANE_Q = 'tabQ:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+    const derived = db.upsertDerivedAgentForPane({
+      hostId: 'local',
+      paneKey: PANE_Q,
+      terminalHandle: 'term_q',
+      processIncarnation: 'proc-1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null
+    })
+    expect(derived?.derived).toBe(1)
+    db.setAgentQuarantine({ id: derived!.id, quarantined: true, reasonCode: 'poisoned' })
+
+    let caught: unknown
+    try {
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${derived?.id}`,
+        subject: 'should not route'
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(OrchestrationError)
+    expect((caught as OrchestrationError).code).toBe('agent_quarantined')
+    const nextSteps = (caught as OrchestrationError & { data?: { nextSteps?: string[] } }).data
+      ?.nextSteps
+    expect(nextSteps?.some((step) => step.includes('term_q'))).toBe(false)
+    expect(db.getUnreadMessages(`agent:${derived?.id}`)).toHaveLength(0)
+    expect(db.getUnreadMessages('term_q')).toHaveLength(0)
+
+    // The public view withholds the pane handle while quarantined...
+    const view = toPublicAgentView(db.getAgentById(derived!.id)!, false)
+    expect(view.quarantined).toBe(true)
+    expect(view.terminalHandle).toBeUndefined()
+
+    // ...and restores it once the quarantine lifts (the derived refusal's nextSteps depend on it).
+    db.setAgentQuarantine({ id: derived!.id, quarantined: false, reasonCode: null })
+    const restored = toPublicAgentView(db.getAgentById(derived!.id)!, false)
+    expect(restored.terminalHandle).toBe('term_q')
   })
 })

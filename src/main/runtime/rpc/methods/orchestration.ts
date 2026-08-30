@@ -742,12 +742,24 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
             })
           }
+          // Why: quarantine is checked FIRST — the derived refusal's nextSteps
+          // name the pane's bare handle, and handing that address out for a
+          // quarantined row is a working bypass of the quarantine itself.
+          if (agentRecipient.quarantined === 1) {
+            throw new OrchestrationError(
+              'agent_quarantined',
+              `Agent ${agentRecipient.display_name} is quarantined and cannot receive mail.`,
+              { nextSteps: [`orca agents show --id ${agentRecipient.id}`] }
+            )
+          }
           // Why: a derived row has no reader on `agent:<id>` — its owning pane's
           // attested check only ever reads its bare-handle mailbox, so mail
           // addressed to the derived directory id is silently unreadable until
           // that pane runs `orca agents register` (which upgrades the id in
           // place and clears `derived`). Refuse at send time instead of
-          // accepting mail into a mailbox nothing will ever read.
+          // accepting mail into a mailbox nothing will ever read. (`reply` is a
+          // second to_handle writer that can still carry an `agent:` address via
+          // a forged `from`; guarded when sends route through the S10-2 choke.)
           if (agentRecipient.derived === 1) {
             const bareHandle = agentRecipient.terminal_handle
             throw new OrchestrationError(
@@ -761,13 +773,6 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
                   'orca agents register --name <slug> --role "<your role>" (run on that pane to make it addressable)'
                 ]
               }
-            )
-          }
-          if (agentRecipient.quarantined === 1) {
-            throw new OrchestrationError(
-              'agent_quarantined',
-              `Agent ${agentRecipient.display_name} is quarantined and cannot receive mail.`,
-              { nextSteps: [`orca agents show --id ${agentRecipient.id}`] }
             )
           }
         }

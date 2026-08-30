@@ -54,11 +54,19 @@ function nameOrId(value: string): { name?: string; id?: string } {
 
 // Why: `agent:<id>` has no reader for a derived (un-registered) row — point the
 // sender at the pane's bare handle instead, per FIX derived_agent_unaddressable.
+// `quarantined` is optional only for find candidates, which are never quarantined
+// (hard-excluded at orchestration-agents-find.ts).
 function sendNextStep(agent: {
   id: string
   derived: boolean
+  quarantined?: boolean
   terminalHandle?: string | null
 }): string {
+  // Why: never print a working send address for a quarantined row — that is a
+  // one-command bypass of the quarantine.
+  if (agent.quarantined) {
+    return `orca agents show --id ${agent.id}`
+  }
   if (agent.derived) {
     return agent.terminalHandle
       ? `orca orchestration send --to ${agent.terminalHandle} --subject "..."`
