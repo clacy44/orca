@@ -1102,6 +1102,7 @@ class InMemoryOrchestrationMessages {
     priority?: MessagePriority
     threadId?: string
     payload?: string
+    recipientPaneKey?: string
   }): MessageRow {
     this.sequence += 1
     const row: MessageRow = {
@@ -1119,10 +1120,23 @@ class InMemoryOrchestrationMessages {
       sequence: this.sequence,
       created_at: '1970-01-01 00:00:00',
       delivered_at: null,
-      sender_pane_key: null
+      sender_pane_key: null,
+      recipient_pane_key: msg.recipientPaneKey ?? null
     }
     this.messages.push(row)
     return row
+  }
+
+  // Why: mirrors OrchestrationDb.getRecipientPaneKeyForBareHandle (BUG 6) —
+  // the most recent recorded pane key for a stale bare peer handle.
+  getRecipientPaneKeyForBareHandle(handle: string): string | null {
+    for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+      const message = this.messages[i]
+      if (message.to_handle === handle && message.recipient_pane_key) {
+        return message.recipient_pane_key
+      }
+    }
+    return null
   }
 
   getUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
@@ -20102,6 +20116,123 @@ describe('OrcaRuntimeService', () => {
         (c) => typeof c[1] === 'string' && c[1].includes('orca orchestration check')
       ).length
       expect(totalInjections).toBe(1)
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Why a UUID leaf id: getTerminalPaneKey only resolves a pane key for a
+  // stable (UUID) leaf id — syncSinglePty's default 'pane:1' fixture leaf
+  // does not qualify, but BUG 6's fallback is keyed on that pane key.
+  function syncSinglePtyWithStableLeaf(runtime: OrcaRuntimeService): void {
+    runtime.attachWindow(TEST_WINDOW_ID)
+    runtime.syncWindowGraph(TEST_WINDOW_ID, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Codex',
+          activeLeafId: HEADLESS_LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId: HEADLESS_LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: 'pty-1',
+          paneTitle: null
+        }
+      ]
+    })
+  }
+
+  it('repoints a bare peer handle through its recorded pane key after a graph reload re-mints it (BUG 6)', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = new OrcaRuntimeService(store)
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        getForegroundProcess: async () => null
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+
+      const [before] = (await runtime.listTerminals()).terminals
+      const staleHandle = before.handle
+      const paneKey = runtime.getTerminalPaneKey(staleHandle)
+      expect(paneKey).toBeTruthy()
+
+      // A peer send records the recipient's pane key alongside the message
+      // (mirrors what the RPC layer does at send time).
+      db.insertMessage({
+        from: 'term_sender',
+        to: staleHandle,
+        subject: 'lock-step: schema freeze',
+        recipientPaneKey: paneKey ?? undefined
+      })
+
+      // Force a graph reload — the same pane, tab and pty come back, but the
+      // bare handle is re-minted (it was never CLI-preallocated).
+      runtime.markRendererReloading(TEST_WINDOW_ID)
+      runtime.markGraphReady(TEST_WINDOW_ID)
+      syncSinglePtyWithStableLeaf(runtime)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+
+      const [after] = (await runtime.listTerminals()).terminals
+      expect(after.handle).not.toBe(staleHandle)
+
+      // The repoint scheduler still fires with the old, now-stale handle.
+      runtime.deliverPendingMessagesForHandle(staleHandle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).toHaveBeenCalledWith(
+        'pty-1',
+        expect.stringContaining('lock-step: schema freeze')
+      )
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('negative control: a stale bare handle with no recorded pane key stays unresolved (BUG 6)', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = new OrcaRuntimeService(store)
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        getForegroundProcess: async () => null
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+
+      const [before] = (await runtime.listTerminals()).terminals
+      const staleHandle = before.handle
+
+      // No recipientPaneKey recorded — the pre-fix state for a peer message.
+      db.insertMessage({ from: 'term_sender', to: staleHandle, subject: 'no pane key on file' })
+
+      runtime.markRendererReloading(TEST_WINDOW_ID)
+      runtime.markGraphReady(TEST_WINDOW_ID)
+      syncSinglePtyWithStableLeaf(runtime)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
+
+      runtime.deliverPendingMessagesForHandle(staleHandle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).not.toHaveBeenCalled()
       db.close()
     } finally {
       vi.useRealTimers()

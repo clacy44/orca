@@ -193,6 +193,7 @@ import {
   type FederationSyncHealth
 } from './orchestration/federation-sync-health'
 import { formatMessagePointer } from './orchestration/formatter'
+import { resolveStaleBarePeerHandle } from './orchestration/stale-handle-resolution'
 import { MailPointerRepointScheduler } from './orchestration/mail-pointer-repoint-scheduler'
 import { selectExactWorkerProviderSession } from './orchestration/worker-provider-session'
 import type {
@@ -33497,6 +33498,20 @@ export class OrcaRuntimeService {
     return null
   }
 
+  // Why: generalizes the Run/Dispatch pane-key fallback above to a bare peer
+  // handle (BUG 6), which has no mailbox row and instead relies on the pane
+  // key recorded on messages once addressed to it.
+  private resolveStalePeerHandle(handle: string): string | null {
+    const db = this._orchestrationDb
+    if (!db) {
+      return null
+    }
+    return resolveStaleBarePeerHandle(handle, db, {
+      isLiveHandle: (candidate) => this.handles.has(candidate),
+      getTerminalHandleForPaneKey: (paneKey) => this.getTerminalHandleForPaneKey(paneKey)
+    })
+  }
+
   // Why: a worker pane owns no handle- or Run-keyed mailbox — `runsBoundToPane`
   // matches coordinator panes only — so its Dispatch is the only address the
   // busy→idle edge can announce, and it has to be resolved from the pane.
@@ -33516,7 +33531,8 @@ export class OrcaRuntimeService {
   deliverPendingMessagesForHandle(handle: string, reservedTypes?: ReadonlySet<string>): void {
     let terminalHandle = handle
     if (!this.handles.has(terminalHandle)) {
-      const mailboxTerminal = this.resolveMailboxTerminalHandle(handle)
+      const mailboxTerminal =
+        this.resolveMailboxTerminalHandle(handle) ?? this.resolveStalePeerHandle(handle)
       if (!mailboxTerminal || !this.handles.has(mailboxTerminal)) {
         return
       }
