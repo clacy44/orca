@@ -45,6 +45,23 @@ describe('parseArgs', () => {
     expect(parsed.flags.get('person')).toBe('Ana Ng')
   })
 
+  // Review finding: `all-hosts` was missing from BOOLEAN_FLAGS, so `--all-hosts` placed before
+  // the positional query swallowed it as the flag's value instead of leaving it a plain
+  // boolean — the idiomatic flag-before-positional order every other boolean flag supports.
+  it('parses `orca agents find --all-hosts "<query>"` with --all-hosts as a boolean, query intact', () => {
+    const parsed = parseArgs(['agents', 'find', '--all-hosts', 'the backend agent'])
+
+    expect(parsed.commandPath).toEqual(['agents', 'find', 'the backend agent'])
+    expect(parsed.flags.get('all-hosts')).toBe(true)
+  })
+
+  it('still parses `orca agents find "<query>" --all-hosts` (flag after positional)', () => {
+    const parsed = parseArgs(['agents', 'find', 'the backend agent', '--all-hosts'])
+
+    expect(parsed.commandPath).toEqual(['agents', 'find', 'the backend agent'])
+    expect(parsed.flags.get('all-hosts')).toBe(true)
+  })
+
   it('still parses boolean flags and space-separated values', () => {
     const parsed = parseArgs(['tab', 'create', '--json', '--url', 'https://example.com'])
 
