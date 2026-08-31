@@ -10,7 +10,11 @@ export function formatOrchestrationSent(
     delivery.recipient.state === 'unresolved'
       ? 'recipient not currently resolvable'
       : `recipient ${delivery.recipient.state}`
-  const headline = `${messageId}: ${delivery.state} (${recipient}).`
+  const state =
+    delivery.state === 'queued_awaiting_pane'
+      ? 'queued, delivery withheld (pane busy or unconfirmed idle)'
+      : delivery.state
+  const headline = `${messageId}: ${state} (${recipient}).`
   if (delivery.state === 'read') {
     return headline
   }
