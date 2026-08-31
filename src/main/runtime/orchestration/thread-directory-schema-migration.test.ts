@@ -67,7 +67,7 @@ describe('SCHEMA v33 -> v34 migration', () => {
       orchestrationDb = new OrchestrationDb(dbPath)
     }).not.toThrow()
     const raw = rawInspect(dbPath)
-    expect(raw.pragma('user_version', { simple: true })).toBe(35)
+    expect(raw.pragma('user_version', { simple: true })).toBe(36)
     raw.close()
   })
 

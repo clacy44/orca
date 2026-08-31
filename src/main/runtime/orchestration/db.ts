@@ -47,6 +47,8 @@ import type {
   ThreadParticipantRow,
   ThreadState
 } from './types'
+import type { RemoteAgentRow } from './remote-agent-directory-types'
+import type { RelaySeenRow, RelaySeenOutcome } from './federation-relay-seen-types'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
@@ -765,6 +767,62 @@ const PACT_PAIR_LIVE_SQL = `
       END;
 `
 
+// v36 (S10-4 rulings 1/2): remote_agents (mirrored peer-agent claims, NEVER a row in `agents` —
+// the local table's origin_kind CHECK/triggers above already refuse a foreign origin_kind) and
+// relay_seen (durable per-item federation import outcome, keyed the same way this tree's
+// federated-dispatch relay already keys sequence: dispatchId+sequence, not a new link_id — no
+// agent_links table exists in this tree and S10-4's scope here does not add one). No column
+// dependency on anything created later, so — unlike PACT_PAIR_LIVE_SQL above — this runs
+// unconditionally in createTables() same as AGENT_DIRECTORY_SCHEMA_SQL/THREAD_DIRECTORY_SCHEMA_SQL.
+const S10_4_FEDERATION_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS remote_agents (
+        environment_id          TEXT NOT NULL,   -- local KnownRuntimeEnvironment.id (the saved pairing)
+        environment_name        TEXT NOT NULL,   -- provenance only, for printing; never an address
+        remote_agent_id         TEXT NOT NULL,   -- the peer's own agents.id
+        display_name            TEXT NOT NULL,
+        role                    TEXT,
+        state                   TEXT NOT NULL DEFAULT 'idle' CHECK(state IN ('live', 'idle', 'gone')),
+        derived                 INTEGER NOT NULL DEFAULT 0,
+        remote_quarantined      INTEGER NOT NULL DEFAULT 0,  -- asserted by the origin host
+        local_quarantined       INTEGER NOT NULL DEFAULT 0,  -- this host's own defensive act
+        quarantine_reason_code  TEXT,
+        last_seen_at            TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY(environment_id, remote_agent_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_remote_agents_name ON remote_agents(display_name);
+
+      -- A remote-asserted lift must never clear a local defensive quarantine (mirrors the
+      -- correction s10-4-federation-spec.md notes the trust draft's version missed): a
+      -- legitimate LOCAL lift (remote_quarantined unchanged) still passes.
+      CREATE TRIGGER IF NOT EXISTS trg_remote_lift_scope
+      BEFORE UPDATE ON remote_agents
+      WHEN OLD.local_quarantined = 1 AND NEW.local_quarantined = 0
+        AND NEW.remote_quarantined <> OLD.remote_quarantined
+      BEGIN
+        SELECT RAISE(ABORT, 'a remote lift cannot clear a local quarantine');
+      END;
+
+      CREATE TABLE IF NOT EXISTS relay_seen (
+        dispatch_id   TEXT NOT NULL,
+        sequence      INTEGER NOT NULL,
+        message_id    TEXT NOT NULL,
+        outcome       TEXT NOT NULL CHECK(outcome IN ('imported', 'refused', 'duplicate')),
+        rule_ids      TEXT,   -- JSON array of gate rule ids; only set when outcome = 'refused'
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY(dispatch_id, sequence)
+      );
+      CREATE TRIGGER IF NOT EXISTS trg_relay_seen_no_update
+      BEFORE UPDATE ON relay_seen
+      BEGIN
+        SELECT RAISE(ABORT, 'relay_seen is append-only');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_relay_seen_no_delete
+      BEFORE DELETE ON relay_seen
+      BEGIN
+        SELECT RAISE(ABORT, 'relay_seen is append-only');
+      END;
+`
+
 // Runs only inside migrate()'s `current < 34` block, after `question_threads` is guaranteed to
 // exist (created at `current < 8`, earlier in the same migration transaction for a fresh
 // install). Idempotent (INSERT OR IGNORE) and a no-op against an empty `messages` table.
@@ -805,8 +863,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3).
-const SCHEMA_VERSION = 35
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2).
+const SCHEMA_VERSION = 36
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -1179,6 +1237,7 @@ export class OrchestrationDb {
 
       ${AGENT_DIRECTORY_SCHEMA_SQL}
       ${THREAD_DIRECTORY_SCHEMA_SQL}
+      ${S10_4_FEDERATION_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
     this.createThreadDirectoryIndexesIfPossible()
@@ -1695,6 +1754,15 @@ export class OrchestrationDb {
           )
         }
         this.createPactSchemaIndexesIfPossible()
+      }
+      // v35 -> v36 (S10-4 rulings 1/2): remote_agents + relay_seen. Neither table has a column
+      // dependency on anything created later, so createTables() already created both
+      // unconditionally earlier in this same open (same idempotent discipline as
+      // AGENT_DIRECTORY_SCHEMA_SQL's `current < 33` re-exec above) — re-run here too so an
+      // upgrading DB's version bump and its schema land inside the same atomic migration
+      // transaction.
+      if (current < 36) {
+        this.db.exec(S10_4_FEDERATION_SCHEMA_SQL)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -6556,6 +6624,165 @@ export class OrchestrationDb {
       )
   }
 
+  // S10-4 ruling 2: the durable half of importFederatedRelayItem's disposition. No own
+  // BEGIN/COMMIT (same discipline as setFederatedHomeImportSequence just above) so it commits
+  // atomically inside that method's enclosing transaction; INSERT OR IGNORE makes a retried call
+  // against an already-recorded (dispatch_id, sequence) a no-op rather than a PK error, so a
+  // second call for the same item (a replayed relay page) never overwrites the first outcome.
+  recordRelaySeen(params: {
+    dispatchId: string
+    sequence: number
+    messageId: string
+    outcome: RelaySeenOutcome
+    ruleIds?: readonly string[]
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO relay_seen (dispatch_id, sequence, message_id, outcome, rule_ids)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        params.dispatchId,
+        params.sequence,
+        params.messageId,
+        params.outcome,
+        params.ruleIds && params.ruleIds.length > 0 ? JSON.stringify(params.ruleIds) : null
+      )
+  }
+
+  listRelaySeen(dispatchId: string): RelaySeenRow[] {
+    return this.db
+      .prepare(`SELECT * FROM relay_seen WHERE dispatch_id = ? ORDER BY sequence ASC`)
+      .all(dispatchId) as RelaySeenRow[]
+  }
+
+  // S10-4 ruling 1: upsert a peer-asserted agent-directory row into the SEPARATE remote_agents
+  // table, keyed by the saved local environment (never a link_id — this tree has no agent_links
+  // table). A remote-quarantine flip is honored; a local quarantine is never cleared by this
+  // path (trg_remote_lift_scope enforces it even if a caller forgets to check).
+  upsertRemoteAgent(params: {
+    environmentId: string
+    environmentName: string
+    remoteAgentId: string
+    displayName: string
+    role: string | null
+    state: 'live' | 'idle' | 'gone'
+    derived: boolean
+    remoteQuarantined: boolean
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO remote_agents (
+           environment_id, environment_name, remote_agent_id, display_name, role, state,
+           derived, remote_quarantined, last_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(environment_id, remote_agent_id) DO UPDATE SET
+           environment_name = excluded.environment_name,
+           display_name = excluded.display_name,
+           role = excluded.role,
+           state = excluded.state,
+           derived = excluded.derived,
+           remote_quarantined = excluded.remote_quarantined,
+           last_seen_at = datetime('now')`
+      )
+      .run(
+        params.environmentId,
+        params.environmentName,
+        params.remoteAgentId,
+        params.displayName,
+        params.role,
+        params.state,
+        params.derived ? 1 : 0,
+        params.remoteQuarantined ? 1 : 0
+      )
+  }
+
+  listRemoteAgents(params?: {
+    environmentId?: string
+    includeQuarantined?: boolean
+  }): RemoteAgentRow[] {
+    const clauses: string[] = []
+    const args: Database.BindValue[] = []
+    if (params?.environmentId) {
+      clauses.push('environment_id = ?')
+      args.push(params.environmentId)
+    }
+    if (!params?.includeQuarantined) {
+      clauses.push('remote_quarantined = 0 AND local_quarantined = 0')
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
+    return this.db
+      .prepare(`SELECT * FROM remote_agents ${where} ORDER BY display_name ASC`)
+      .all(...args) as RemoteAgentRow[]
+  }
+
+  setLocalRemoteAgentQuarantine(params: {
+    environmentId: string
+    remoteAgentId: string
+    quarantined: boolean
+    reasonCode?: string | null
+  }): RemoteAgentRow {
+    this.db
+      .prepare(
+        `UPDATE remote_agents
+         SET local_quarantined = ?, quarantine_reason_code = ?
+         WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .run(
+        params.quarantined ? 1 : 0,
+        params.quarantined ? (params.reasonCode ?? null) : null,
+        params.environmentId,
+        params.remoteAgentId
+      )
+    const row = this.db
+      .prepare(`SELECT * FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`)
+      .get(params.environmentId, params.remoteAgentId) as RemoteAgentRow | undefined
+    if (!row) {
+      throw new OrchestrationError(
+        'agent_not_found',
+        `Remote agent ${params.remoteAgentId}@${params.environmentId} was not found.`
+      )
+    }
+    return row
+  }
+
+  // S10-4 ruling 5: an epoch-rewind recovery verb for a reimaged/reinstalled peer. Zeroes the
+  // to_home import/ack cursors on every federated dispatch this host still tracks against the
+  // named environment — the same tolerance federation-sync.ts already applies automatically on
+  // a `remote_runtime_epoch` change (a peer's own epoch bump), offered here as a manual escape
+  // hatch for the case a human has to force (the epoch string didn't change, or the peer is
+  // gone and unreachable so the automatic path never fires). Never touches relay_seen — a
+  // replayed id after relink still hits it and is caught as before.
+  relinkFederatedEnvironment(environmentId: string): { dispatchIds: string[] } {
+    const dispatchIds = this.db
+      .prepare(
+        `SELECT dispatch_id FROM federated_dispatches WHERE environment_id = ?
+           AND dispatch_id IN (SELECT id FROM dispatch_contexts WHERE status NOT IN ('completed', 'failed'))`
+      )
+      .all(environmentId)
+      .map((row) => (row as { dispatch_id: string }).dispatch_id)
+    if (dispatchIds.length === 0) {
+      return { dispatchIds }
+    }
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const reset = this.db.prepare(
+        `UPDATE federated_dispatches
+         SET to_home_imported_sequence = 0, to_home_acknowledged_sequence = 0,
+             remote_runtime_epoch = NULL, updated_at = datetime('now')
+         WHERE dispatch_id = ?`
+      )
+      for (const dispatchId of dispatchIds) {
+        reset.run(dispatchId)
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { dispatchIds }
+  }
+
   importFederatedRelayItem(params: {
     dispatchId: string
     sequence: number
@@ -6682,6 +6909,16 @@ export class OrchestrationDb {
             // provably false on this path: a duplicate with a missing message row threw
             // operation_unknown above.)
             this.setFederatedHomeImportSequence(params.dispatchId, params.sequence)
+            // S10-4 ruling 2: the durable relay_seen outcome row lands in the SAME transaction
+            // as the audit row and the cursor advance above — the refusal disposition is now
+            // three durable writes committed atomically, not two.
+            this.recordRelaySeen({
+              dispatchId: params.dispatchId,
+              sequence: params.sequence,
+              messageId: params.message.id,
+              outcome: 'refused',
+              ruleIds: inserted.verdict.ruleIds
+            })
             this.db.exec('COMMIT')
             return {
               message: null,
@@ -6744,6 +6981,16 @@ export class OrchestrationDb {
       }
       if (!duplicate) {
         this.setFederatedHomeImportSequence(params.dispatchId, params.sequence)
+        // S10-4 ruling 2: record the successful-import outcome too, same transaction. Skipped
+        // on the `duplicate` branch on purpose — a duplicate replay's relay_seen row was
+        // already written the first time this sequence landed (imported or refused), and
+        // INSERT OR IGNORE would just no-op against it anyway.
+        this.recordRelaySeen({
+          dispatchId: params.dispatchId,
+          sequence: params.sequence,
+          messageId: params.message.id,
+          outcome: 'imported'
+        })
       }
       this.db.exec('COMMIT')
       return { message, duplicate, ...(lifecycle ? { lifecycle } : {}) }

@@ -67,7 +67,7 @@ describe('SCHEMA v32 -> v33 migration', () => {
       orchestrationDb = new OrchestrationDb(dbPath)
     }).not.toThrow()
     const raw = rawInspect(dbPath)
-    expect(raw.pragma('user_version', { simple: true })).toBe(35)
+    expect(raw.pragma('user_version', { simple: true })).toBe(36)
     const agentRows = raw.prepare('SELECT COUNT(*) AS n FROM agents').get() as { n: number }
     expect(agentRows.n).toBe(0) // no duplicate seed rows, no spurious inserts
     raw.close()

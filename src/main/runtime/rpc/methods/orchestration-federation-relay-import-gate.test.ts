@@ -171,6 +171,18 @@ describe('federated relay import gate (Amendments A/D)', () => {
     // Anti-wedge (S10-4 ruling: a refusal MUST advance the cursor — mutation guard: removing
     // setFederatedHomeImportSequence from the refusal branch turns both assertions red).
     expect(homeDb.getFederatedDispatch(dispatch.id)!.to_home_imported_sequence).toBe(1)
+
+    // S10-4 ruling 2: the refusal disposition also writes a durable relay_seen row, same
+    // transaction as the gate_refusals audit row and the cursor advance above.
+    const seenAfterRefusal = homeDb.listRelaySeen(dispatch.id)
+    expect(seenAfterRefusal).toHaveLength(1)
+    expect(seenAfterRefusal[0]).toMatchObject({
+      sequence: 1,
+      message_id: 'relay_poison',
+      outcome: 'refused'
+    })
+    expect(JSON.parse(seenAfterRefusal[0]!.rule_ids!)).toContain('merge-gate-audit-heading')
+
     const next = homeDb.importFederatedRelayItem({
       dispatchId: dispatch.id,
       sequence: 2,
@@ -188,6 +200,16 @@ describe('federated relay import gate (Amendments A/D)', () => {
       lifecycle: { kind: 'none' }
     })
     expect(next.message?.id).toBe('relay_clean')
+
+    // The NEXT item — the one blocked by the earlier bug's dead cursor — imports clean and
+    // gets its own relay_seen row: the refusal did not wedge the link.
+    const seenAfterNext = homeDb.listRelaySeen(dispatch.id)
+    expect(seenAfterNext).toHaveLength(2)
+    expect(seenAfterNext[1]).toMatchObject({
+      sequence: 2,
+      message_id: 'relay_clean',
+      outcome: 'imported'
+    })
   })
 
   it('blocker D: a forged payload.kind on a status relay item is refused, column never set', async () => {
