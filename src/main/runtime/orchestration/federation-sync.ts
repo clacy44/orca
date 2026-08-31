@@ -118,6 +118,16 @@ async function syncFederatedDispatchPages(
       },
       lifecycle: parseFederatedLifecycle(message, item.message_id, dispatchId, dispatch.task_id)
     })
+    if (stored.refused || !stored.message) {
+      // The containment gate refused this item: the import already committed the
+      // gate_refusals audit row and advanced its cursor — deliver nothing, keep draining.
+      console.warn(
+        `federation relay item ${item.sequence} for ${dispatchId} was refused by the ` +
+          `containment gate (refusal #${stored.refused?.refusalId}); cursor advanced`
+      )
+      cursor = item.sequence
+      continue
+    }
     if (stored.lifecycle && supportsLifecycleSettlement) {
       settlements.push({
         sequence: item.sequence,

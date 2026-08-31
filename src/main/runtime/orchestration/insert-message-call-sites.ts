@@ -48,6 +48,10 @@ export const INSERT_MESSAGE_CALL_SITES: readonly InsertMessageCallSite[] = [
   // follow-up slice.
   // orchestration.ts (send point-to-point, broadcast, reply) and
   // federation-control-message.ts (federation relay import) have moved onto
-  // insertGatedMessage in S10-2b and are no longer on this list.
+  // insertGatedMessage in S10-2b and are no longer on this list. Of db.ts's five remaining
+  // sites, one is importFederatedRelayItem's 'runtime_notification' branch — host-lifecycle by
+  // provenance (peer-host-attested relay kind, never dispatched-agent prose; its free-text
+  // sibling branch is gated, and a refusal there is a committed disposition, not a throw);
+  // the other four are the legacy-question/mutation-replay plumbing described above.
   { file: 'main/runtime/orchestration/db.ts', count: 5, kind: 'pending-reroute' }
 ]

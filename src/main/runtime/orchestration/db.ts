@@ -6301,9 +6301,10 @@ export class OrchestrationDb {
         }
       | { kind: 'rejected'; code: string; reason: string }
   }): {
-    message: MessageRow
+    message: MessageRow | null
     duplicate: boolean
     lifecycle?: WorkerReportSettlement | { action: 'rejected'; code: string; reason: string }
+    refused?: { refusalId: number; ruleIds: readonly string[] }
   } {
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -6386,7 +6387,20 @@ export class OrchestrationDb {
             verb: 'federation_import'
           })
           if (inserted.outcome === 'refused') {
-            throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
+            // A relay refusal is a DISPOSITION, not an exception (S10-4 ruling: a refusal MUST
+            // advance the cursor). Throwing here rolled back the gate_refusals audit row this
+            // same transaction had just written AND left to_home_imported_sequence behind the
+            // item, so the identical poisoned item re-imported forever. Commit the audit row
+            // and the cursor; store no message row, settle no lifecycle. (`duplicate` is
+            // provably false on this path: a duplicate with a missing message row threw
+            // operation_unknown above.)
+            this.setFederatedHomeImportSequence(params.dispatchId, params.sequence)
+            this.db.exec('COMMIT')
+            return {
+              message: null,
+              duplicate: false,
+              refused: { refusalId: inserted.refusalId, ruleIds: inserted.verdict.ruleIds }
+            }
           }
           message = inserted.message
         }
