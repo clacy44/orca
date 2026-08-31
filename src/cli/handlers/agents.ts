@@ -8,7 +8,7 @@ import type { RuntimeRpcSuccess } from '../runtime-client'
 import { nameOrId, resolveAgentAcrossHost } from './agents-shared'
 import { addressOf, findAgentsAcrossHosts, LOCAL_FIND_HOST } from './agents-cross-host'
 
-type AgentView = {
+export type AgentView = {
   id: string
   displayName: string
   role: string | null
@@ -22,7 +22,12 @@ type AgentView = {
   terminalHandle?: string | null
 }
 
-type RegisterResult = { agent: AgentView; created: boolean; reMinted: boolean }
+type RegisterResult = {
+  agent: AgentView
+  created: boolean
+  reMinted: boolean
+  repointedMessages: number
+}
 type ListResult = {
   agents: AgentView[]
   liveCount: number
@@ -103,8 +108,12 @@ function agentLine(agent: AgentView): string {
 function formatAgentRegister(result: RegisterResult): string {
   const verb = result.reMinted ? 'Re-registered' : 'Registered'
   const role = result.agent.role ? ` — role: ${result.agent.role}` : ''
+  const repointed =
+    result.repointedMessages > 0
+      ? `\n${result.repointedMessages} unread message(s) from your previous terminal handle moved into this mailbox.`
+      : ''
   return (
-    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.\n` +
+    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}\n` +
     `Next: orca orchestration send --to agent:${result.agent.id} --subject "..."`
   )
 }
@@ -203,17 +212,6 @@ function formatAgentQuarantine(result: { agent: AgentView }): string {
   return (
     `Agent ${result.agent.displayName} (${result.agent.id}) is now ${state}.\n` +
     `Next: orca agents show --id ${result.agent.id}`
-  )
-}
-
-function formatAgentRetire(result: {
-  agent: AgentView
-  outcome: 'retired' | 'already_retired'
-}): string {
-  const verb = result.outcome === 'already_retired' ? 'was already retired' : 'retired'
-  return (
-    `Agent ${result.agent.displayName} (${result.agent.id}) ${verb}. Its name is free to reclaim.\n` +
-    'Next: orca agents list'
   )
 }
 
@@ -316,19 +314,6 @@ export const AGENT_HANDLERS: Record<string, CommandHandler> = {
       reasonCode: getOptionalStringFlag(flags, 'reason-code')
     })
     printResult(result, json, formatAgentQuarantine)
-  },
-  'agents retire': async ({ flags, client, json }) => {
-    const positional = getOptionalStringFlag(flags, 'name')
-    const id = getOptionalStringFlag(flags, 'id')
-    const target = id ? { id } : positional ? nameOrId(positional) : undefined
-    if (!target) {
-      throw new RuntimeClientError('invalid_argument', 'Pass an agent name or id.')
-    }
-    const result = await client.call<{ agent: AgentView; outcome: 'retired' | 'already_retired' }>(
-      'orchestration.agents.retire',
-      { ...target, force: flags.has('force') ? true : undefined }
-    )
-    printResult(result, json, formatAgentRetire)
   }
 }
 

@@ -133,7 +133,11 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       return {
         agent: toPublicAgentView(result.agent, true),
         created: result.outcome === 'created',
-        reMinted: result.outcome === 'reminted'
+        reMinted: result.outcome === 'reminted',
+        // S10-7 F-C: how many of the OLD terminal_handle's unread bare-handle messages this
+        // re-mint just repointed into the row's durable agent:<id> mailbox. Always 0 on a fresh
+        // 'created' row (no prior handle to repoint from).
+        repointedMessages: result.outcome === 'reminted' ? result.repointedMessages : 0
       }
     }
   })

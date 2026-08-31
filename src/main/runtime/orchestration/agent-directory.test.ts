@@ -114,6 +114,89 @@ describe('agent-directory', () => {
     })
   })
 
+  describe('mailbox repoint on re-mint (S10-7 F-C)', () => {
+    function unreadCountFor(db: Database.Database, toHandle: string): number {
+      return (
+        db
+          .prepare('SELECT COUNT(*) AS n FROM messages WHERE to_handle = ? AND read = 0')
+          .get(toHandle) as { n: number }
+      ).n
+    }
+
+    it('repoints unread bare-handle mail from the old terminal_handle into agent:<id>, reports the count, and audits it', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_old' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_old', subject: 'msg1' })
+      const readAlready = orchestrationDb!.insertMessage({
+        from: 'peer',
+        to: 'term_old',
+        subject: 'already read'
+      })
+      db.prepare('UPDATE messages SET read = 1 WHERE id = ?').run(readAlready.id)
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_old', subject: 'msg2' })
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_unrelated', subject: 'not mine' })
+
+      // Re-mint: same pane, terminal_handle changes (pane relaunch).
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_new' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(2)
+      }
+
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(2)
+      expect(unreadCountFor(db, 'term_old')).toBe(0) // the two unread rows moved
+      expect(
+        (
+          db.prepare('SELECT to_handle FROM messages WHERE id = ?').get(readAlready.id) as {
+            to_handle: string
+          }
+        ).to_handle
+      ).toBe('term_old') // already-read mail is left alone
+      expect(unreadCountFor(db, 'term_unrelated')).toBe(1) // untouched
+
+      const audit = db
+        .prepare("SELECT * FROM agent_audit WHERE verb = 'mailbox_repoint'")
+        .all() as { agent_id: string; outcome: string }[]
+      expect(audit).toHaveLength(1)
+      expect(audit[0]?.agent_id).toBe(id)
+      expect(audit[0]?.outcome).toBe('ok')
+    })
+
+    it('does nothing and audits nothing when terminal_handle is unchanged across a re-mint', () => {
+      const db = rawDb()
+      upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_stable' }))
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_stable', subject: 'msg1' })
+
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_stable' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(0)
+      }
+      expect(unreadCountFor(db, 'term_stable')).toBe(1) // left in place
+      const audit = db.prepare("SELECT * FROM agent_audit WHERE verb = 'mailbox_repoint'").all()
+      expect(audit).toHaveLength(0)
+    })
+
+    it('caps a single repoint at MAILBOX_REPOINT_BATCH_CAP (200), leaving the remainder addressable at the old handle', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_flood' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      for (let i = 0; i < 205; i += 1) {
+        orchestrationDb!.insertMessage({ from: 'peer', to: 'term_flood', subject: `msg${i}` })
+      }
+
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_flood_2' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(200)
+      }
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(200)
+      expect(unreadCountFor(db, 'term_flood')).toBe(5) // the remainder, still reachable by handle
+    })
+  })
+
   describe('reads filter tombstoned_at', () => {
     it('getAgentById / getAgentByName / listAgents never return a tombstoned row', () => {
       const db = rawDb()

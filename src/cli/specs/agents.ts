@@ -11,7 +11,9 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'name', 'role'],
     notes: [
       '--name is a lowercase ASCII slug, 3-32 chars (e.g. merge-restructure-backend).',
-      'Idempotent: re-registering from the same terminal after a restart updates the same agent.'
+      'Idempotent: re-registering from the same terminal after a restart updates the same agent.',
+      'If the terminal handle changed since last registration, unread mail still addressed to ' +
+        'the old handle moves into this mailbox automatically (reported as repointedMessages).'
     ]
   },
   {
