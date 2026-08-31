@@ -60,6 +60,13 @@ function resolveThreadReplay(
   if (isParticipant) {
     const messages = db.getThreadMessages(threadId, cursor)
     const omitted = db.getThreadMessagesOmitted(threadId, cursor)
+    // Read receipts (S10-2b deferral, ruling 8): a full participant read moves their cursor to
+    // the thread's current tip — markThreadRead is MAX()-monotonic, so this is safe to call on
+    // every read, including one that returned zero new messages. participantKey is exactly
+    // thread_participants.participant_key (agent id when attested, else the bare handle).
+    if (participantKey !== undefined && thread) {
+      db.markThreadRead(threadId, participantKey, thread.last_message_sequence)
+    }
     return {
       messages,
       count: messages.length,

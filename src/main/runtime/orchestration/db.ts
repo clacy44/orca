@@ -133,6 +133,45 @@ import {
   type AnswerPeerQuestionParams,
   type AnswerPeerQuestionResult
 } from './peer-question'
+import {
+  proposePact as proposePactImpl,
+  acceptPact as acceptPactImpl,
+  declinePact as declinePactImpl,
+  type ProposePactParams,
+  type AcceptPactParams,
+  type DeclinePactParams
+} from './pact-propose-accept'
+import {
+  pausePact as pausePactImpl,
+  resumePactOrRequest as resumePactOrRequestImpl,
+  releasePact as releasePactImpl,
+  autoPausePactsForAgent as autoPausePactsForAgentImpl,
+  autoPausePactOnThread as autoPausePactOnThreadImpl,
+  type PausePactParams,
+  type ResumePactParams,
+  type ResumePactOutcome,
+  type ReleasePactParams,
+  type AutoPauseOutcome
+} from './pact-lifecycle'
+import {
+  appendPactStep as appendPactStepImpl,
+  type AppendPactStepParams,
+  type AppendPactStepResult
+} from './pact-step'
+import { getEngagedPactWith as getEngagedPactWithImpl } from './pact-shared'
+import {
+  getPactState as getPactStateImpl,
+  getTurnsHeldBy as getTurnsHeldByImpl,
+  getPactLedger as getPactLedgerImpl,
+  getIncomingUnansweredProposal as getIncomingUnansweredProposalImpl,
+  type GetPactLedgerParams
+} from './pact-queries'
+import type { PactLedgerResult, PactPauseReason } from './pact-types'
+import {
+  findOrCreatePeerThread as findOrCreatePeerThreadImpl,
+  type FindOrCreatePeerThreadParams,
+  type FindOrCreatePeerThreadResult
+} from './peer-thread-mint'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -525,11 +564,95 @@ const THREAD_DIRECTORY_SCHEMA_SQL = `
         pact_state TEXT CHECK(pact_state IS NULL OR pact_state IN ('proposed','engaged','released')),
         pact_turn_agent_id TEXT,
         pact_at TEXT,
+        -- v35 (S10-3 pact spec, additive only — ruling 1: pact_state's CHECK is frozen at 3
+        -- values forever, so paused is a flag (pact_paused_at), never a 4th state).
+        pact_proposer_agent_id TEXT,
+        pact_steps_total INTEGER,                 -- NULL = --open
+        pact_ordinal INTEGER NOT NULL DEFAULT 0,   -- last committed step; reset to 0 on re-propose
+        -- pact_era (blocker fix, S10-3b review): bumped on every propose. pact_steps.ordinal
+        -- resets to 0 on re-propose but the ledger is append-only (ruling 2), so a released
+        -- pact's era-1 step rows are never removed; idx_pact_step_ordinal below is keyed on
+        -- (thread_id, pact_era, ordinal), never (thread_id, ordinal) alone, or a re-propose's
+        -- ordinal 1 collides with the still-present era-1 ordinal 1 row.
+        pact_era INTEGER NOT NULL DEFAULT 0,
+        pact_paused_at TEXT,
+        pact_pause_reason TEXT                     -- enum code ONLY, never free text (CONTAINMENT)
+          CHECK(pact_pause_reason IS NULL OR pact_pause_reason IN
+                ('counterpart_gone','counterpart_left','counterpart_quarantined',
+                 'thread_paused','thread_closed','operator')),
         purged_at TEXT,
         purge_reason TEXT,
         purged_by_agent_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_threads_recent ON threads(state, last_message_at) WHERE purged_at IS NULL;
+
+      -- pact_steps: v35 append-only ledger (ruling 2 — its own table, not a view over messages,
+      -- so a step survives purge). No dependency on threads' new columns, so safe to create
+      -- unconditionally here (unlike idx_pact_pair_live/trg_pact_turn_membership below, which DO
+      -- reference threads.pact_proposer_agent_id and must wait for that column to exist on an
+      -- upgrading DB — see createPactSchemaIndexesIfPossible).
+      CREATE TABLE IF NOT EXISTS pact_steps (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,                  -- 0 for non-step kinds; 1..n for step
+        -- pact_era (blocker fix): the thread's pact_era at write time — every row this era was
+        -- written under, stamped by insertPactStepRow from threads.pact_era. Not part of any
+        -- CHECK; only idx_pact_step_ordinal below reads it.
+        pact_era INTEGER NOT NULL DEFAULT 0,
+        kind TEXT NOT NULL CHECK(kind IN ('propose','accept','decline','step',
+                                          'pause','resume_request','resume','release')),
+        -- no who-paused column: the pausing side is the latest 'pause' row's actor_agent_id
+        -- (NULL = host/operator), and a resume is pending when a 'resume_request' follows it
+        -- with no 'resume' after it.
+        actor_agent_id TEXT,                       -- the attested caller; never params.from
+        actor_pane_key TEXT, actor_host_id TEXT,    -- NULL only on host/operator rows
+        message_id TEXT,                            -- the step-complete message; NULL otherwise
+        summary TEXT,                                -- sanitized, <=120, single line; NULL once purged
+        summary_sha256 TEXT NOT NULL,                -- of the sanitized text; survives purge
+        summary_purged_at TEXT,
+        turn_after_agent_id TEXT,                    -- whose turn this row produced
+        reason_code TEXT,                            -- pause/release/decline only; enum, no free text
+        at TEXT NOT NULL DEFAULT (datetime('now')),
+        -- table-level CHECK must trail every column def (SQLite grammar) — see F6.
+        CHECK(actor_agent_id IS NOT NULL OR kind IN ('pause','resume'))
+      );
+      -- (thread_id, pact_era, ordinal), not (thread_id, ordinal) alone (blocker fix): a
+      -- re-propose after release starts a new era at ordinal 1 while the released era's own
+      -- ordinal-1 step row is still in this append-only table (ruling 2) — without the era
+      -- column the two collide and every step after a re-propose throws a raw UNIQUE violation.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pact_step_ordinal
+        ON pact_steps(thread_id, pact_era, ordinal) WHERE kind = 'step';
+      CREATE INDEX IF NOT EXISTS idx_pact_steps_thread ON pact_steps(thread_id, seq);
+
+      CREATE TRIGGER IF NOT EXISTS trg_pact_steps_no_delete
+      BEFORE DELETE ON pact_steps
+      BEGIN
+        SELECT RAISE(ABORT, 'pact ledger is append-only');
+      END;
+
+      -- The one permitted transition is a purge: summary NULL<-value with summary_purged_at
+      -- value<-NULL, every other column unchanged. Written as an explicit inequality list, like
+      -- trg_messages_purge_final above — any other UPDATE (including one that touches nothing
+      -- ledger-relevant) aborts, because this table is never touched except by that one purge.
+      CREATE TRIGGER IF NOT EXISTS trg_pact_steps_append_only
+      BEFORE UPDATE ON pact_steps
+      WHEN NEW.seq <> OLD.seq
+        OR NEW.thread_id <> OLD.thread_id
+        OR NEW.ordinal <> OLD.ordinal
+        OR NEW.kind <> OLD.kind
+        OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
+        OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
+        OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
+        OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
+        OR NEW.summary_sha256 <> OLD.summary_sha256
+        OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
+        OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
+        OR NEW.at <> OLD.at
+        OR NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+                AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'pact ledger is append-only');
+      END;
 
       CREATE TABLE IF NOT EXISTS thread_participants (
         thread_id TEXT NOT NULL,
@@ -617,6 +740,31 @@ const MESSAGES_PURGE_TRIGGER_SQL = `
       END;
 `
 
+// Separate from THREAD_DIRECTORY_SCHEMA_SQL for the same reason as MESSAGES_PURGE_TRIGGER_SQL
+// above: both reference threads.pact_proposer_agent_id/pact_with_agent_id, which an existing
+// pre-v35 DB's `threads` table lacks until migrate()'s `current < 35` ALTERs run, and
+// createTables() execs THREAD_DIRECTORY_SCHEMA_SQL unconditionally BEFORE migrate() on every
+// open — an unconditional CREATE INDEX here would throw "no such column" against that DB.
+// Guarded by hasColumn('threads', 'pact_proposer_agent_id') in
+// createPactSchemaIndexesIfPossible below, same discipline as createThreadDirectoryIndexesIfPossible.
+const PACT_PAIR_LIVE_SQL = `
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pact_pair_live ON threads(
+        MIN(pact_proposer_agent_id, pact_with_agent_id), MAX(pact_proposer_agent_id, pact_with_agent_id))
+        WHERE pact_state IN ('proposed','engaged');
+
+      -- Load-bearing half of P4' (deadlock proof): in the database, so no handler edit can
+      -- weaken it. An engaged pact's turn must always be held by one of its two participants.
+      CREATE TRIGGER IF NOT EXISTS trg_pact_turn_membership
+      BEFORE UPDATE ON threads
+      WHEN NEW.pact_state = 'engaged' AND (
+        NEW.pact_turn_agent_id IS NULL
+        OR NEW.pact_turn_agent_id NOT IN (IFNULL(NEW.pact_proposer_agent_id, ''), IFNULL(NEW.pact_with_agent_id, ''))
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'an engaged pact needs a turn held by a participant');
+      END;
+`
+
 // Runs only inside migrate()'s `current < 34` block, after `question_threads` is guaranteed to
 // exist (created at `current < 8`, earlier in the same migration transaction for a fresh
 // install). Idempotent (INSERT OR IGNORE) and a no-op against an empty `messages` table.
@@ -657,8 +805,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a).
-const SCHEMA_VERSION = 34
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3).
+const SCHEMA_VERSION = 35
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -697,7 +845,28 @@ export class OrchestrationDb {
     this.infraAllowlist = loadInfraAllowlist(dbPath)
   }
 
+  // Unshipped-v35 pact_era repair (S10-3b verify blocker): a DB stamped v35 by an earlier copy
+  // of this same UNSHIPPED migration (no artifact ever carried v35) has threads/pact_steps
+  // WITHOUT pact_era — and createTables()'s own idx_pact_step_ordinal SQL references the column,
+  // so the open crashes before migrate() could repair anything. Runs first, version-agnostic:
+  // only a pre-fix-v35 DB can have either table existing without the column; everything else
+  // no-ops on two cheap probes.
+  private repairUnshippedV35PactEra(): void {
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+    if (hasTable('threads') && !this.hasColumn('threads', 'pact_era')) {
+      this.db.exec(`ALTER TABLE threads ADD COLUMN pact_era INTEGER NOT NULL DEFAULT 0`)
+    }
+    if (hasTable('pact_steps') && !this.hasColumn('pact_steps', 'pact_era')) {
+      this.db.exec(`ALTER TABLE pact_steps ADD COLUMN pact_era INTEGER NOT NULL DEFAULT 0`)
+      // createTables()'s CREATE UNIQUE INDEX IF NOT EXISTS re-creates it era-keyed right after.
+      this.db.exec(`DROP INDEX IF EXISTS idx_pact_step_ordinal`)
+    }
+  }
+
   private createTables(): void {
+    this.repairUnshippedV35PactEra()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,
@@ -1013,6 +1182,7 @@ export class OrchestrationDb {
     `)
     this.createUndeliveredInboxIndexIfPossible()
     this.createThreadDirectoryIndexesIfPossible()
+    this.createPactSchemaIndexesIfPossible()
   }
 
   // Why: CREATE TABLE IF NOT EXISTS won't alter existing DBs; migrate in a txn that bumps user_version only on success (atomic all-or-nothing).
@@ -1489,6 +1659,43 @@ export class OrchestrationDb {
         this.createThreadDirectoryIndexesIfPossible()
         this.db.exec(THREAD_DIRECTORY_BACKFILL_SQL)
       }
+      // v34 -> v35 (S10-3 pact spec): additive-only ALTERs on `threads`; pact_steps itself was
+      // already created above (THREAD_DIRECTORY_SCHEMA_SQL, no dependency on these columns, run
+      // unconditionally by createTables() before migrate() even starts). idx_pact_pair_live and
+      // trg_pact_turn_membership need the columns below to exist first, hence the explicit
+      // second call here (createTables()'s earlier call was a guarded no-op against this DB).
+      if (current < 35) {
+        for (const [column, ddl] of [
+          ['pact_proposer_agent_id', 'TEXT'],
+          ['pact_steps_total', 'INTEGER'],
+          ['pact_ordinal', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_era', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_paused_at', 'TEXT'],
+          [
+            'pact_pause_reason',
+            `TEXT CHECK(pact_pause_reason IS NULL OR pact_pause_reason IN ` +
+              `('counterpart_gone','counterpart_left','counterpart_quarantined','thread_paused','thread_closed','operator'))`
+          ]
+        ] as const) {
+          if (!this.hasColumn('threads', column)) {
+            this.db.exec(`ALTER TABLE threads ADD COLUMN ${column} ${ddl}`)
+          }
+        }
+        // Blocker fix (S10-3b review): pact_steps itself was already created above via
+        // THREAD_DIRECTORY_SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS`, which is a no-op against a
+        // DB that already ran an earlier (pre-fix) copy of this same unshipped v35 — such a DB's
+        // pact_steps lacks pact_era and idx_pact_step_ordinal still lacks the era column, so
+        // "IF NOT EXISTS" alone would leave the ordinal-collision bug in place. Patch both.
+        if (!this.hasColumn('pact_steps', 'pact_era')) {
+          this.db.exec(`ALTER TABLE pact_steps ADD COLUMN pact_era INTEGER NOT NULL DEFAULT 0`)
+          this.db.exec(`DROP INDEX IF EXISTS idx_pact_step_ordinal`)
+          this.db.exec(
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_pact_step_ordinal
+               ON pact_steps(thread_id, pact_era, ordinal) WHERE kind = 'step'`
+          )
+        }
+        this.createPactSchemaIndexesIfPossible()
+      }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
           ON dispatch_contexts(${DISPATCH_PANE_KEY_MATCH_SUFFIX_SQL})
@@ -1905,6 +2112,17 @@ export class OrchestrationDb {
         ON messages(thread_id, thread_sequence) WHERE thread_sequence IS NOT NULL;
     `)
     this.db.exec(MESSAGES_PURGE_TRIGGER_SQL)
+  }
+
+  // Guarded per the PACT_PAIR_LIVE_SQL comment: idx_pact_pair_live/trg_pact_turn_membership
+  // reference threads.pact_proposer_agent_id, absent on a pre-v35 DB until migrate()'s
+  // `current < 35` ALTERs land. Called from createTables() (no-ops pre-migration) and again at
+  // the end of that migration block (unguarded by then).
+  private createPactSchemaIndexesIfPossible(): void {
+    if (!this.hasColumn('threads', 'pact_proposer_agent_id')) {
+      return
+    }
+    this.db.exec(PACT_PAIR_LIVE_SQL)
   }
 
   // Why: sqlite_master holds the table's CREATE SQL incl. the CHECK — cheapest reliable probe for whether it already allows 'heartbeat'.
@@ -3510,6 +3728,75 @@ export class OrchestrationDb {
 
   setThreadPact(threadId: string, params: SetThreadPactParams): ThreadRow {
     return setThreadPactImpl(this.db, threadId, params)
+  }
+
+  // S10-3 pact spec — the twelve OrchestrationDb pact methods (RPCS §/SCHEMA §). Logic lives in
+  // pact-*.ts per this file's ratchet rule (same precedent as thread-directory.ts).
+  proposePact(params: ProposePactParams): ThreadRow {
+    return proposePactImpl(this.db, params)
+  }
+
+  acceptPact(params: AcceptPactParams): ThreadRow {
+    return acceptPactImpl(this.db, params)
+  }
+
+  declinePact(params: DeclinePactParams): ThreadRow {
+    return declinePactImpl(this.db, params)
+  }
+
+  appendPactStep(params: AppendPactStepParams): AppendPactStepResult {
+    return appendPactStepImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
+  pausePact(params: PausePactParams): ThreadRow {
+    return pausePactImpl(this.db, params)
+  }
+
+  // Dispatcher behind the CLI's single `pact --resume` flag — internally calls
+  // requestPactResume or resumePact depending on who the pausing side is (AUTHORITY §).
+  resumePactOrRequest(params: ResumePactParams): ResumePactOutcome {
+    return resumePactOrRequestImpl(this.db, params)
+  }
+
+  releasePact(params: ReleasePactParams): ThreadRow {
+    return releasePactImpl(this.db, params)
+  }
+
+  getPactState(threadId: string): ThreadRow | undefined {
+    return getPactStateImpl(this.db, threadId)
+  }
+
+  getEngagedPactWith(agentId: string, peerAgentId: string): ThreadRow | undefined {
+    return getEngagedPactWithImpl(this.db, agentId, peerAgentId)
+  }
+
+  getTurnsHeldBy(agentId: string): string[] {
+    return getTurnsHeldByImpl(this.db, agentId)
+  }
+
+  getPactLedger(params: GetPactLedgerParams): PactLedgerResult {
+    return getPactLedgerImpl(this.db, params)
+  }
+
+  getIncomingUnansweredProposal(agentId: string): ThreadRow | undefined {
+    return getIncomingUnansweredProposalImpl(this.db, agentId)
+  }
+
+  findOrCreatePeerThread(params: FindOrCreatePeerThreadParams): FindOrCreatePeerThreadResult {
+    return findOrCreatePeerThreadImpl(this.db, params)
+  }
+
+  // Liveness/leave/thread-state auto-pause hooks (K6/K16/K17) — called by the RPC layer, never
+  // internally by these pact methods (which only ever act on the caller's own request).
+  autoPausePactsForAgent(agentId: string, reason: PactPauseReason): AutoPauseOutcome[] {
+    return autoPausePactsForAgentImpl(this.db, agentId, reason)
+  }
+
+  autoPausePactOnThread(threadId: string, reason: PactPauseReason): AutoPauseOutcome | null {
+    return autoPausePactOnThreadImpl(this.db, threadId, reason)
   }
 
   markThreadRead(threadId: string, participantKey: string, sequence: number): void {

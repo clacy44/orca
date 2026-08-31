@@ -183,6 +183,11 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/agents-ask-reply.js')).AGENT_ASK_REPLY_HANDLERS
   },
   {
+    name: 'agents-pact',
+    keys: ['agents pact', 'agents step', 'agents invite'],
+    load: async () => (await import('./handlers/agents-pact.js')).AGENT_PACT_HANDLERS
+  },
+  {
     name: 'agents-containment',
     keys: ['agents purge', 'agents review'],
     load: async () => (await import('./handlers/agents-containment.js')).AGENT_CONTAINMENT_HANDLERS

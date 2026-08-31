@@ -1,5 +1,7 @@
-// S10-2 durable thread row types (SCHEMA v34). Split out of types.ts to keep that file under
-// the repo's max-lines ratchet, same precedent as agent-directory-types.ts.
+// S10-2 durable thread row types (SCHEMA v34; extended at v35, S10-3 pact spec). Split out of
+// types.ts to keep that file under the repo's max-lines ratchet, same precedent as
+// agent-directory-types.ts.
+import type { PactPauseReason } from './pact-types'
 export type ThreadOrigin = 'peer' | 'question' | 'fanout' | 'legacy'
 export type ThreadState = 'open' | 'paused' | 'closed'
 export type ThreadPactState = 'proposed' | 'engaged' | 'released'
@@ -20,6 +22,12 @@ export type ThreadRow = {
   pact_state: ThreadPactState | null
   pact_turn_agent_id: string | null
   pact_at: string | null
+  // v35 (S10-3 pact spec) — additive, see pact-types.ts.
+  pact_proposer_agent_id: string | null
+  pact_steps_total: number | null
+  pact_ordinal: number
+  pact_paused_at: string | null
+  pact_pause_reason: PactPauseReason | null
   purged_at: string | null
   purge_reason: string | null
   purged_by_agent_id: string | null

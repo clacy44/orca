@@ -43,6 +43,14 @@ import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
 import { ORCHESTRATION_THREAD_METHODS, resolveThreadReplay } from './orchestration-thread'
 import { ORCHESTRATION_CONTAINMENT_METHODS } from './orchestration-containment'
 import { ORCHESTRATION_THREADS_METHODS } from './orchestration-threads'
+import { ORCHESTRATION_WAIT_METHODS } from './orchestration-wait'
+import {
+  assertThreadNotSensitiveForBroadcast,
+  assertThreadNotSensitiveForFederation
+} from './orchestration-sensitive-thread-guard'
+import { ORCHESTRATION_PACT_METHODS } from './orchestration-pact'
+import { ORCHESTRATION_PACT_STEP_METHODS } from './orchestration-pact-step'
+import { ORCHESTRATION_THREAD_INVITE_METHODS } from './orchestration-thread-invite'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   assertPayloadKindNotCallerSet,
@@ -577,6 +585,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_THREAD_METHODS,
   ...ORCHESTRATION_CONTAINMENT_METHODS,
   ...ORCHESTRATION_THREADS_METHODS,
+  ...ORCHESTRATION_WAIT_METHODS,
+  ...ORCHESTRATION_PACT_METHODS,
+  ...ORCHESTRATION_PACT_STEP_METHODS,
+  ...ORCHESTRATION_THREAD_INVITE_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,
@@ -682,6 +694,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         const supportsLifecycleSettlement =
           remoteAttachment.protocol_version >=
           ORCHESTRATION_FEDERATION_LIFECYCLE_SETTLEMENT_PROTOCOL_VERSION
+        assertThreadNotSensitiveForFederation(db, params.threadId)
         const relay = db.enqueueFederationRelay({
           dispatchId: remoteAttachment.dispatch_id,
           direction: 'to_home',
@@ -802,6 +815,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             )
           }
           revalidateLegacyCoordinator?.()
+          assertThreadNotSensitiveForFederation(db, params.threadId)
           const relay = db.enqueueFederationRelay({
             dispatchId,
             direction: 'to_worker',
@@ -850,6 +864,32 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           : isBareHandleTarget
             ? (runtime.getTerminalPaneKey(to) ?? undefined)
             : undefined
+        // Send-side thread minting (S10-2b deferral, ruling 8): a peer-to-agent send with no
+        // explicit --thread-id lands the pair in a real thread automatically — reusing their
+        // live 1:1 if one exists — so wait/pact never require a separate threads.create round
+        // trip first. Scoped to genuine peer traffic: agent:<id> targets only, never a Dispatch
+        // lifecycle report (worker_done/heartbeat use their own dispatch: mailbox threading).
+        let mintedThreadId: string | undefined
+        let threadCreated = false
+        if (
+          !params.threadId &&
+          agentRecipient &&
+          params.type !== 'worker_done' &&
+          params.type !== 'heartbeat'
+        ) {
+          const senderAgentId = senderPaneKey
+            ? db.getAgentByPaneKey(senderHostId, senderPaneKey)?.id
+            : undefined
+          if (senderAgentId) {
+            const minted = db.findOrCreatePeerThread({
+              agentAId: senderAgentId,
+              agentBId: agentRecipient.id,
+              subjectHint: params.subject ?? null
+            })
+            mintedThreadId = minted.thread.id
+            threadCreated = minted.created
+          }
+        }
         // Amendment A: db.insertGatedMessage is the single write choke for point-to-point send
         // (ruling 2) — never db.insertMessage directly.
         const inserted = db.insertGatedMessage({
@@ -859,7 +899,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           body: params.body,
           type: params.type as MessageType,
           priority: params.priority as MessagePriority,
-          threadId: params.threadId,
+          threadId: params.threadId ?? mintedThreadId,
           payload: payloadValueForGate(params.payload),
           senderPaneKey,
           recipientPaneKey,
@@ -884,6 +924,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
         }
         const msg = inserted.message
+        if (mintedThreadId) {
+          db.bumpThreadOnMessage(mintedThreadId, msg)
+        }
         const dispatch = routing.dispatchId
           ? db.getDispatchContextById(routing.dispatchId)
           : undefined
@@ -972,7 +1015,19 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           msg.thread_id,
           extractPayloadKind(msg.payload_kind)
         )
-        return { message: msg }
+        // threadId/threadCreated/gateFlags are additive — present only when this send actually
+        // resolved or minted a thread (mintedThreadId) or an explicit --thread-id was already
+        // live on the row; absent for the untouched legacy no-thread path.
+        return {
+          message: msg,
+          ...(msg.thread_id
+            ? {
+                threadId: msg.thread_id,
+                threadCreated,
+                gateFlags: msg.gate_flags ? (JSON.parse(msg.gate_flags) as string[]) : null
+              }
+            : {})
+        }
       }
 
       // Why: fan out one message per recipient (independent read-tracking) but share a thread_id for correlation (Section 4.5).
@@ -988,6 +1043,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       }
 
       revalidateLegacyCoordinator?.()
+      assertThreadNotSensitiveForBroadcast(db, params.threadId)
       const threadId = params.threadId ?? `thread_${Date.now()}`
       // Amendment A: fan-out/broadcast routes through the single write choke too (ruling 2).
       // Gated once, before expansion (SENSITIVE THREADS §'s "a blocked body is blocked for all

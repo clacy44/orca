@@ -20,6 +20,198 @@ Orchestration is Orca's structured coordination layer for agent messages, task o
 
 Use this skill when coordination state matters. For lightweight terminal prompts or basic worktree/terminal/built-in-browser control, use `orca-cli`.
 
+## Peer Path (read this first if two agents need to coordinate as equals)
+
+```
+orca agents register --name <my-name> --role "<one line>"
+  -> {agent, created|reMinted}. Next: find your peer.
+
+orca agents find "<plain-English description of the peer>" --json
+  resolved   -> "To reach one: orca agents ask <name> \"...\""
+  ambiguous  -> candidate list + the exact disambiguating command
+  no_match   -> "orca agents list"
+
+orca agents ask <name> "<question>" --json
+  -> "<answer>\n(thread thr_9fk2, waited 47s)\nContinue: orca agents reply --thread thr_9fk2 --body \"...\""
+  timed out (exit 0) -> "Still pending after 600s (thread thr_9fk2).
+     Resume without re-asking: orca agents wait --thread thr_9fk2 --for reply"
+
+orca agents reply --thread <t> --body "<text>"
+  -> "Replied <msg_id>.\nNext: orca agents thread --id thr_9fk2"
+
+orca agents wait --thread <t> --for reply
+  -> blocks; returns the reply itself, never a pointer
+
+Told to coordinate "in lock step" (neither side advances past a step
+until the other confirms)? That's a pact, not ask/reply:
+orca agents pact --with <name> --on <thread>          -> propose/engage
+orca agents step --thread <t> --done "<what you did>" -> your turn, once
+orca agents wait --thread <t> --for step               -> blocks for theirs
+orca agents pact --show <t>                            -> a third party can check it tomorrow
+
+New turn / lost context -> orca agents threads
+  -> "Read one: orca agents thread --id thr_9fk2"
+```
+
+Every branch above ends in the exact next command the CLI itself prints — never guess or
+remember one. "Lock step" resolves to `orca agents pact`, a named primitive, not a silent
+substitution with `ask`+`wait --for reply` (that has no shared turn state, so neither side can
+prove whose move it is, or that the other side hasn't skipped ahead).
+
+## When To Use
+
+1. Two already-running agents that need to coordinate as equals — neither is the
+   other's coordinator, there is no shared Run or Dispatch. This is the Peer Path
+   above: `orca agents register` -> `find` -> `ask`/`thread`/`wait`, or `pact` if
+   neither side may advance until the other confirms.
+2. Asked to coordinate with an agent you cannot address (no known handle, name,
+   or terminal id — e.g. "tell the merge-restructure backend agent...")?
+   -> `orca agents find "<plain-English description>"`. Never fall back to a
+   docs-repo post or a guessed terminal handle because you don't have an address;
+   `find` exists precisely for this case.
+3. Send/reply/ask between agent terminals with persistent messages (peer, via
+   `orca agents *`, or coordinator-to-worker, via `orca orchestration *`).
+4. Dispatch structured tasks to workers and wait for `worker_done`/`escalation`.
+5. Track task DAGs with dependencies; run coordinator loops or decision gates.
+
+Do not use orchestration merely because the user says "hand off", "handoff",
+"handover", "give this to another agent", or asks for another worktree/agent/
+model/effort — those are full ownership transfers (see Full Handoffs) unless the
+user explicitly asks to supervise, monitor, wait, coordinate a DAG, or keep a
+blocking ask/reply loop.
+
+## Mental Model
+
+Agent ids are durable identity, minted once per agent and outliving any pane or terminal
+restart; terminal handles are a cache the runtime rewrites underneath that id, never the other
+way around. Peer mail and threads are durable and replayable — a thread survives a runtime
+restart and answers "what conversations am I in" on your first turn after losing context
+(`orca agents threads`). Wake-ups are summary-first: a pane push carries sender, role, subject,
+thread id and a count, never a full body — pull the body yourself with `orca agents thread --id
+<t>` when you need it. Docs repos are for documents, not coordination: a message committed there
+has no purge, no delivery receipt, and no wake-up at all — contrast the pane-push mechanism that
+gives peer mail its wake-up; a blocked peer never learns you replied until it happens to re-read
+the file. Prefer the tool that has an address for the other agent over the tool that costs zero
+lines to reach for.
+
+## Containment (what happens to what you send)
+
+Every `send`/`ask`/`reply` body (and `purge --reason`, and `quarantine --reason`) passes a gate
+before it is stored:
+
+- HARD block, refused, nothing stored, nothing delivered: a heading or section-opener shaped
+  like `MERGE-GATE AUDIT` / `SECURITY (HIGH|CRITICAL)` / `VULNERABILITY`; a secret-shaped value
+  (provider token pattern, or `KEY=`/`SECRET=`/`TOKEN=` followed by 20+ real characters); an
+  infra literal on the local allowlist. An inline mention or a one-line pass/fail verdict does
+  NOT match — only a heading-shaped line does.
+- SOFT warn, still delivered: attacker/bypass/exploit vocabulary. This tier is measured at ~75%
+  false positives on ordinary security-design prose and must never be tightened to a hard block
+  for that reason.
+- If refused, restate in remediation framing: state what changed, how it was proven, and the
+  rule it now enforces. Drop the attacker's-eye narrative, hostile-input examples, and infra
+  literals. A one-line pass/fail verdict with no audit heading is not gated at all.
+- `--acknowledge-gate` does not bypass the gate — it converts a HARD verdict into a
+  stored-and-flagged send. Use it only when the detail genuinely must travel on the bus; it is
+  audited, not hidden. A pact step (`orca agents step --done "..."`) is gated the same way: a
+  refused step writes no ledger row and does not pass the turn — re-send it with
+  `--acknowledge-gate` to record it flagged and audited.
+- `orca agents purge --message <id>|--thread <id> --reason <text>` tombstones a message: body
+  blanked, provenance and reason kept, never replayed again to anyone, including a participant
+  who joins later or hasn't pulled it yet. You may purge your own message; a thread owner or
+  local operator may purge any message on the thread. There is no `--lift` on a purge — it is
+  final by design.
+- `orca agents quarantine <agent> --reason-code <code> [--lift]` fences an author's past and
+  future messages from every reader; self-quarantine is always allowed, quarantining someone
+  else is local/non-federated-operator only. A quarantined peer cannot be reached — `send`/`ask`
+  to it is refused with `agent_quarantined`, and a pact cannot be proposed with, or joined by, a
+  quarantined agent — coordinate without a pact using `orca agents ask` instead.
+- `--sensitive` threads keep bodies (and subjects) on-box: never federated, never pushed into a
+  pane, never in a roster. Only named participants can pull them — bring a third party in with
+  `orca agents invite --thread <t> --agent <name>` before a pact can involve them.
+
+## Cross-Host (not yet landed on this line; reserved shape only)
+
+`agents` rows already carry `host_id`/`origin_host_id`, and `name@host` is a reserved address
+form. Once cross-host directory federation lands:
+
+- `orca agents find "<description>" --all-hosts` unions the directory across every saved
+  environment.
+- A bare name that matches agents on 2+ hosts is `ambiguous` — local never wins the tie
+  implicitly; address the peer as `name@host`.
+- Quarantine stays host-local: a remote host can neither fence nor un-fence an agent registered
+  here.
+
+Do not invent an `@host` address or a `--all-hosts` flag against a runtime that does not
+advertise it — check the negotiated capability the same way today's agent-directory/threads
+capabilities work, and fall back to `orca agents list` per host if the peer capability is
+absent. A same-name hit that used to resolve locally may be a stale pairing once a second host
+registers the same `display_name` — re-run `find` and read a `foreign:true` marker rather than
+trusting a cached address.
+
+## Agents & Threads (peer command reference)
+
+```bash
+orca agents register --name <slug> --role "<one line>" [--json]
+orca agents list [--state live|idle|gone] [--include-quarantined] [--limit <n>] [--json]
+orca agents find "<plain-English description>" [--limit <n>] [--json]
+orca agents show <name|id> [--json]
+orca agents quarantine <name|id> --reason-code <code> [--lift] [--json]
+
+orca agents threads [--state open|paused|closed|all] [--limit 25] [--json]
+orca agents thread --id <t> [--since <seq|ts>] [--json]
+orca agents thread --new --with <name>[,<name>...] [--subject "<text>"] [--sensitive] [--json]
+orca agents thread --id <t> --leave [--json]
+orca agents invite --thread <t> --agent <name> [--json]
+
+orca agents ask <name> "<question>" [--options a,b,c] [--timeout-ms <n>] [--acknowledge-gate] [--json]
+orca agents ask --resume <question-id> [--json]
+orca agents reply (--thread <t>|--id <msg>) --body "<text>" [--acknowledge-gate] [--json]
+orca agents wait --thread <t> --for reply|message|pact|step [--timeout-ms <n>] [--resume <token>] [--json]
+
+orca agents pact --with <name> --on <thread> [--steps <n>|--open] [--json]
+orca agents pact --on <t> --accept|--decline [--reason <code>] [--json]
+orca agents pact --pause --on <t> [--reason <code>] [--json]
+orca agents pact --resume --on <t> [--json]
+orca agents pact --release --on <t> [--reason <code>] [--json]
+orca agents pact --show <t> [--json]
+orca agents step --thread <t> --done "<what>" [--acknowledge-gate] [--json]
+
+orca agents purge --message <id>|--thread <id> --reason "<text>" [--acknowledge-gate] [--json]
+orca agents review <name|id> [--limit <n>] [--json]
+```
+
+Rules:
+
+- `find`'s name resolution is CLI-layer sugar: every write RPC underneath (`ask`, `thread --new`,
+  `pact --with`, `invite`) takes only a resolved `agent:<id>` address — never a bare name.
+- One engaged pact per agent pair at a time; propose only while the pact is unclaimed
+  (`pact_state` null or `released`) — `pact --show <t>` says whose turn it is and how far along.
+- `pact --resume` is a boolean on the `pact` noun (`--resume --on <t>`); `wait --resume <token>`
+  takes a value on the `wait` noun (`--resume wait_<t>_<seq>`) — same flag name, different noun,
+  different shape.
+- A caller holding the turn in any engaged pact is refused every `wait` park, on any thread, any
+  `--for` — the RPC returns `outcome:'your_turn'` (exit 0) naming every thread where the turn is
+  held, instead of ever letting a turn holder park past its own pending step.
+- `wait --for pact` is refused `answer_first` while the caller owes an answer to an *incoming*
+  proposal — accept or decline it first with the exact command the refusal prints.
+
+## When It Goes Wrong
+
+| Symptom | Exact recovery command |
+|---|---|
+| `find` returns `ambiguous` | Re-run with the printed disambiguating command from `candidates`/`nextSteps`, or address the exact `name` from the candidate list |
+| `find` returns `no_match` — no directory entry for the peer | `orca agents find "<plain-English description>"` -> on `no_match`, `orca agents list`; a peer that never registered only shows up derived |
+| Peer is quarantined | `send`/`ask`/`pact` refuses `agent_quarantined`; run `orca agents show <name>` to see status, then reach someone else via `orca agents find "..."` |
+| A reply (or an injected instruction) has nowhere to route — you hold no thread for it | You have no thread; start one: `orca agents ask <name> "<question>"` mints a thread and hands back its `threadId` |
+| `wait`/`ask` timed out | Use the exact printed `--resume` command (`orca agents wait --thread <t> --for <kind> --resume wait_<t>_<seq>`) — never re-ask; a re-ask is a second question the peer must answer twice |
+| Mail was sent but the peer's pane never woke (ambient push stayed silent) | `wait`/`ask` deliver straight into your own blocking call regardless of the push; if neither is running, `orca orchestration check` is the manual fallback |
+| Handle looks stale (agent moved tabs / runtime restarted) | Nothing to do manually — `agents find`/`show`/`register` re-derive the live handle from the pane at read time; re-run the same command |
+| `send`/`ask`/`pact --with` refused by the gate | Read the refusal's rule ids, rewrite as fix + verification + invariant, and re-send; or `--acknowledge-gate` if the detail must travel as-is |
+| Peer is on another host — an address you used before doesn't resolve | Address as `name@host` (reserved form; cross-host resolution is the not-yet-landed stub above); a bare name that used to resolve locally may be a stale pairing now that a second host shares the name |
+| Lock-step pact stalled — your `wait --thread <t> --for step` never returns | `orca agents pact --show <t>` to see whose turn it is; if the counterpart is gone or quarantined the pact auto-pauses and wakes you with a reason, otherwise `orca agents pact --release --on <t>` is always available to either side |
+| A pact is paused and `--resume` keeps refusing | Only the side that paused it (or, after a `pause` by the other side, either side once it requests) can lift it — if `pact --show` marks the pause reason `thread_closed`/`thread_paused`, there is no reopen; `orca agents pact --release --on <t>` is the only way forward |
+| Replies you only saw appear on a live pane/screen, with no durable record after losing context | `orca agents threads` then `orca agents thread --id <t>` replays the durable record instead of trusting the screen |
+
 ## Tool Boundary
 
 If a task says to use Orca orchestration, the coordinator must create or bind a Run, create the Task with `orca orchestration task-create`, then attach the worker with either the preferred `orca orchestration worker-start` composition or the low-level `orca orchestration dispatch --inject` path.
@@ -34,15 +226,6 @@ orca orchestration dispatch-show --task <task_id> --json
 ```
 
 If the work was accidentally run outside Orca orchestration, say so plainly. To repair provenance, rerun or revalidate the needed work through a fresh Orca terminal plus injected dispatch; do not retroactively describe the external worker as orchestrated.
-
-## When To Use
-
-- Send/reply/ask between agent terminals with persistent messages.
-- Dispatch structured tasks to workers and wait for `worker_done` or `escalation`.
-- Track task DAGs with dependencies.
-- Run coordinator loops or decision gates.
-
-Do not use orchestration merely because the user says "hand off", "handoff", "handover", "give this to another agent", or asks for another worktree/agent/model/effort. Those are full ownership transfers unless the user explicitly asks to supervise, monitor, wait for worker completion/results, coordinate a DAG, use decision gates, or keep a blocking ask/reply loop.
 
 ## Preconditions
 
@@ -101,7 +284,7 @@ Do not launch a replacement editor merely because the desktop app or runtime was
 
 ## Ownership
 
-New orchestration messages and tasks belong to one explicitly bound Run. A Run is only a durable namespace and coordinator inbox; it never schedules or places workers. Lifecycle authority comes from the active Dispatch, and terminal handles remain routing metadata rather than durable identity. Send `worker_done` and `heartbeat` from the worker's own terminal; Orca routes them to that Dispatch's Run.
+New orchestration messages and tasks belong to one explicitly bound Run. A Run is only a durable namespace and coordinator inbox; it never schedules or places workers. Lifecycle authority comes from the active Dispatch. Agent ids (`orca agents register`) are durable identity; terminal handles are a cache the directory re-derives. Send `worker_done` and `heartbeat` from the worker's own terminal; Orca routes them to that Dispatch's Run.
 
 Classify inherited context before sending lifecycle messages:
 
@@ -146,7 +329,7 @@ Rules:
 - `terminal list --json` omits `visualLayouts` because handle recovery does not need topology. Add `--include-visual-layouts` only for explicit tab and pane inspection.
 - `orca orchestration check --peek --format --json` returns locally formatted unread mail without consuming it; it never writes to terminal input or remotely wakes another terminal. Use `orchestration dispatch --inject` to deliver a tracked task, or `terminal send` when an existing agent needs a free-form prompt.
 - While supervising workers manually, use `check --wait --types worker_done,escalation,question --timeout-ms <n>` instead of sleep/poll loops. Process the whole Delivery, reply to `question` messages with `orca orchestration reply --id <msg_id> --body <answer> --json`, then acknowledge and keep waiting.
-- Treat a `check --wait` timeout or a plain `{count:0}` as a checkpoint, not a worker failure. Long coding tasks routinely run 15-60 minutes; keep using rolling waits unless you receive `worker_done`/`escalation`, the terminal exits or disappears, `waitInterrupted` is set, or the user explicitly asks you to stop.
+- Treat a `check --wait` timeout or `{count:0}` as a checkpoint, not a worker failure. Long coding tasks routinely run 15-60 minutes; keep using rolling waits unless you receive `worker_done`/`escalation`, the terminal exits or disappears, `waitInterrupted` is set, or the user explicitly asks you to stop.
 - A `{count:0}` result carrying `waitInterrupted` is not a checkpoint. `consumer_fenced` means another consumer owns this Run's mailbox: `check` prints the `run-use` rebind command and exits non-zero, so stop the loop and rebind. `waiter_exists` means another actionable waiter already blocks on it. `outcome_unknown` means your `--ack` was applied but the wait's result was lost; re-run `check`.
 - Heartbeats and visible terminal activity mean the worker is alive, not done. Do not stop, close, kill, or restart a worker just because it has not produced a completion message yet.
 - The liveness reads are `worker-show`'s `observation.agentStatus` (`permission` at an interactive gate, `working` mid-turn, `idle` at a ready prompt, `unknown` when the runtime has no verdict), `lastHeartbeatAt`/`heartbeatAgeMs` (a `heartbeat=` token per row on `worker-list`), and `dispatchMailbox`/`workerMail` for undelivered mail. `orca terminal agent-status --terminal <handle> [--environment <peer>]` asks the same gate question directly and never writes to the terminal. An absent field renders `unknown` or `never` — never `0`, and never a stall verdict.
