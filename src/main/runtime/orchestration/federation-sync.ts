@@ -103,6 +103,7 @@ async function syncFederatedDispatchPages(
     const stored = db.importFederatedRelayItem({
       dispatchId,
       sequence: item.sequence,
+      relayKind: item.kind,
       message: {
         id: item.message_id,
         runId: dispatch.run_id,

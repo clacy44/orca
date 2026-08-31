@@ -538,6 +538,7 @@ describe('orchestration federation', () => {
       homeDb.importFederatedRelayItem({
         dispatchId: dispatch.id,
         sequence: 2,
+        relayKind: 'status',
         message: {
           id: 'relay_gap',
           runId: task.run_id,
@@ -557,6 +558,7 @@ describe('orchestration federation', () => {
     homeDb.importFederatedRelayItem({
       dispatchId: dispatch.id,
       sequence: 1,
+      relayKind: 'status',
       message: {
         id: 'relay_first',
         runId: task.run_id,
@@ -572,6 +574,7 @@ describe('orchestration federation', () => {
     const recovered = homeDb.importFederatedRelayItem({
       dispatchId: dispatch.id,
       sequence: 2,
+      relayKind: 'status',
       message: {
         id: 'relay_gap',
         runId: task.run_id,
@@ -587,6 +590,7 @@ describe('orchestration federation', () => {
     const duplicate = homeDb.importFederatedRelayItem({
       dispatchId: dispatch.id,
       sequence: 2,
+      relayKind: 'status',
       message: {
         id: 'relay_gap',
         runId: task.run_id,

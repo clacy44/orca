@@ -59,7 +59,13 @@ function resolveThreadReplay(
 
   if (isParticipant) {
     const messages = db.getThreadMessages(threadId, cursor)
-    return { messages, count: messages.length, degraded: false }
+    const omitted = db.getThreadMessagesOmitted(threadId, cursor)
+    return {
+      messages,
+      count: messages.length,
+      degraded: false,
+      ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
+    }
   }
 
   // Degrade path: recipient-filtered by whatever handle we could attest, never the full
@@ -70,7 +76,17 @@ function resolveThreadReplay(
   }
   const afterSequence = cursor?.kind === 'sequence' ? cursor.value : undefined
   const messages = db.getThreadMessagesFor(threadId, callerHandle, afterSequence)
-  return { messages, count: messages.length, degraded: true }
+  const omitted = db.getThreadMessagesOmitted(
+    threadId,
+    afterSequence !== undefined ? { kind: 'sequence', value: afterSequence } : undefined,
+    callerHandle
+  )
+  return {
+    messages,
+    count: messages.length,
+    degraded: true,
+    ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
+  }
 }
 
 // Why its own file: threads were write-only — send --thread-id wrote the column, indexed at

@@ -326,6 +326,60 @@ describe('orchestration.thread (BUG 4, hardened per S10-2 ruling 1)', () => {
     const result = (response as { result: { messages: { subject: string }[] } }).result
     expect(result.messages.map((m) => m.subject)).toEqual(['sensitive body'])
   })
+
+  // Adversarial review S10-2b major #5: `omitted` was declared but never populated.
+  it('reports omitted.purged for a full participant', async () => {
+    db = new OrchestrationDb(':memory:')
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])
+    const toPurge = db.getThreadMessages(threadId).find((m) => m.subject === 'one')!
+    db.purgeMessage({ messageId: toPurge.id, reason: 'oops', purgedByAgentId: null })
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-omit-1', 'orchestration.thread', { id: threadId }, evidenceFor('term_a'))
+    )
+
+    const result = (
+      response as {
+        result: {
+          messages: { subject: string }[]
+          omitted?: { purged: number; withheld: number }
+        }
+      }
+    ).result
+    expect(result.messages.map((m) => m.subject)).toEqual(['two'])
+    expect(result.omitted).toEqual({ purged: 1, withheld: 0 })
+  })
+
+  it('reports omitted.purged on the recipient-filtered degrade path too', async () => {
+    db = new OrchestrationDb(':memory:')
+    const { thread } = db.createThread({
+      subject: 'test',
+      createdByAgentId: null,
+      participants: [{ participantKey: 'term_a', handle: 'term_a' }]
+    })
+    // term_c is not a participant, but IS a recipient on this thread — the degrade path
+    // (getThreadMessagesFor) filters by to_handle, not participant rows.
+    const toPurge = db.insertMessage({
+      from: 'term_a',
+      to: 'term_c',
+      subject: 'one',
+      threadId: thread.id
+    })
+    db.bumpThreadOnMessage(thread.id, toPurge)
+    db.purgeMessage({ messageId: toPurge.id, reason: 'oops', purgedByAgentId: null })
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-omit-2', 'orchestration.thread', { id: thread.id }, evidenceFor('term_c'))
+    )
+
+    const result = (
+      response as { result: { degraded: boolean; omitted?: { purged: number; withheld: number } } }
+    ).result
+    expect(result.degraded).toBe(true)
+    expect(result.omitted).toEqual({ purged: 1, withheld: 0 })
+  })
 })
 
 describe('orchestration.inbox --thread-id (BUG 4, hardened)', () => {

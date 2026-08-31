@@ -4463,6 +4463,48 @@ export class OrchestrationDb {
     )
   }
 
+  // Adversarial review S10-2b major #5 fix: getThreadMessages/getThreadMessagesFor above filter
+  // purged/quarantine-withheld rows straight in SQL (liveMessageSqlClause) but never counted
+  // what they excluded — resolveThreadReplay (orchestration-thread.ts) declares an `omitted`
+  // field on its return type and had no way to populate it. Same cursor/to_handle shape as
+  // whichever of the two queries the caller just ran, so the counts match exactly what that
+  // query excluded. Two separate COUNT queries (not a single CASE-summed one) so a row that is
+  // both purged AND from a quarantined sender is never double-counted: the withheld count
+  // explicitly excludes purged rows, same split as getThreadMessagesSince (thread-directory.ts).
+  getThreadMessagesOmitted(
+    threadId: string,
+    since?: ThreadSinceCursor,
+    toHandle?: string
+  ): { purged: number; withheld: number } {
+    const cursorClause =
+      since?.kind === 'sequence'
+        ? 'AND sequence > ?'
+        : since?.kind === 'timestamp'
+          ? 'AND created_at > ?'
+          : ''
+    const cursorArgs = since ? [since.value] : []
+    const toHandleClause = toHandle !== undefined ? 'AND to_handle = ?' : ''
+    const toHandleArgs = toHandle !== undefined ? [toHandle] : []
+    const purged = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages
+           WHERE thread_id = ? ${toHandleClause} ${cursorClause} AND purged_at IS NOT NULL`
+        )
+        .get(threadId, ...toHandleArgs, ...cursorArgs) as { n: number }
+    ).n
+    const withheld = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages
+           WHERE thread_id = ? ${toHandleClause} ${cursorClause} AND purged_at IS NULL
+             AND sender_agent_id IN (SELECT id FROM agents WHERE quarantined = 1)`
+        )
+        .get(threadId, ...toHandleArgs, ...cursorArgs) as { n: number }
+    ).n
+    return { purged, withheld }
+  }
+
   createQuestion(params: {
     runId: string
     dispatchId: string
@@ -6230,6 +6272,12 @@ export class OrchestrationDb {
   importFederatedRelayItem(params: {
     dispatchId: string
     sequence: number
+    /** federation_relay_items.kind for this item (federation-sync.ts's `item.kind`) — the
+     * peer-host-attested provenance discriminator (Amendment A/D fix): 'runtime_notification'
+     * only for rows the peer's own trusted runtime code enqueued; every other value (a
+     * MESSAGE_TYPES literal, or 'question') is reachable from the dispatched agent's own
+     * orchestration.send/ask. See the call site below for the full rationale. */
+    relayKind: string
     message: {
       id: string
       runId: string
@@ -6282,30 +6330,66 @@ export class OrchestrationDb {
 
       let message = this.getMessageById(params.message.id)
       if (!message) {
-        // Why insertMessage, not insertGatedMessage, here: this relay item carries mixed
-        // content — a worker's own free-text worker_done/escalation body (already gated once at
-        // the worker's own local orchestration.send/ask, on its own runtime, before it was ever
-        // relayed) alongside host-generated 'runtime_notification' relay items whose JSON
+        // Amendment A fix: this relay item carries mixed content — a worker's own free-text
+        // worker_done/escalation/status body (a dispatched agent's own orchestration.send/ask
+        // params, queued straight into federation_relay_items with NO gate check anywhere on
+        // that path — the "already gated once at the worker's own local orchestration.send"
+        // this comment used to claim is not true; that RPC branch only calls
+        // db.enqueueFederationRelay) alongside host-generated 'runtime_notification' relay
+        // items (dispatch-input-observer.ts / orchestration-federation-setup.ts) whose JSON
         // payload legitimately carries `kind` (input_not_consumed/liveness_breach/
-        // relay_unreachable — amendment D's reserved namespace). insertGatedMessage's
-        // payload_kind_reserved refusal would incorrectly fire on that second, legitimate
-        // shape. payload_kind (the COLUMN) is still populated directly, same bridge as
-        // runtime-notification.ts, so the read-side switch (amendment D) still matches these
-        // rows once they land here.
-        let payloadKind: string | null = null
-        if (params.message.payload) {
-          try {
-            const parsed: unknown = JSON.parse(params.message.payload)
-            const kind =
-              parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-                ? (parsed as Record<string, unknown>).kind
-                : undefined
-            payloadKind = typeof kind === 'string' ? kind : null
-          } catch {
-            payloadKind = null
+        // relay_unreachable/setup status — amendment D's reserved namespace). The two shapes are
+        // told apart by `params.relayKind` — federation_relay_items.kind, threaded through from
+        // federation-sync.ts's `item.kind` — which is peer-host-attested provenance, not a value
+        // the dispatched agent can set: its own orchestration.send/ask can only pick a
+        // MESSAGE_TYPES value for the relay kind (`kind: type`, orchestration.ts), never the
+        // literal 'runtime_notification' that only the peer's own trusted runtime code enqueues.
+        //
+        // 'runtime_notification' rows: same as before — payload_kind (the COLUMN) populated
+        // directly from the trusted JSON `kind`, same bridge as runtime-notification.ts, un-gated
+        // (host-lifecycle, never sender-controlled prose). Every other relay kind: routed through
+        // the single write choke (h1+h2 tiers only, amendment A's inbound scope — infraAllowlist
+        // is never defaulted here so a local infra literal never blocks mail a remote peer
+        // already sent) and payload_kind is never derived from the imported JSON (amendment D) —
+        // `payloadValueForGate` parses the wire payload once into a value insertGatedMessage can
+        // gate leaf-by-leaf and re-serialize without double-encoding; a caller-supplied top-level
+        // `kind` in that JSON hits the same payload_kind_reserved refusal every other peer-facing
+        // sender does.
+        if (params.relayKind === 'runtime_notification') {
+          let payloadKind: string | null = null
+          if (params.message.payload) {
+            try {
+              const parsed: unknown = JSON.parse(params.message.payload)
+              const kind =
+                parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+                  ? (parsed as Record<string, unknown>).kind
+                  : undefined
+              payloadKind = typeof kind === 'string' ? kind : null
+            } catch {
+              payloadKind = null
+            }
           }
+          message = this.insertMessage({ ...params.message, payloadKind })
+        } else {
+          const inserted = this.insertGatedMessage({
+            id: params.message.id,
+            runId: params.message.runId,
+            from: params.message.from,
+            to: params.message.to,
+            subject: params.message.subject,
+            body: params.message.body,
+            type: params.message.type,
+            priority: params.message.priority,
+            threadId: params.message.threadId,
+            payload: payloadValueForGate(params.message.payload),
+            infraAllowlist: [],
+            verb: 'federation_import'
+          })
+          if (inserted.outcome === 'refused') {
+            throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
+          }
+          message = inserted.message
         }
-        message = this.insertMessage({ ...params.message, payloadKind })
       } else if (
         message.run_id !== params.message.runId ||
         message.to_handle !== params.message.to ||

@@ -104,13 +104,20 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
-// Why null for a quarantined sender (S10-2b, ported from the point-to-point send call site this
-// centralizes): message-withholding (refusing the send outright) is a policy choice for a later
-// slice, but stamping provenance to a quarantined identity is not — a quarantined row's
-// name/role must never reach another pane (CONTAINMENT #7), and sender_agent_id is exactly what
-// formatMessagePointer's resolver looks up to build that pane text. Centralized here (not at
-// each RPC call site) so every insertGatedMessage caller — send, broadcast, reply, peer
-// question, federation import — gets the same guard automatically.
+// Amendment E fix (adversarial review major #3): a quarantined sender's id IS still stamped
+// here — nulling it (the S10-2b original) actively defeated containment rather than protecting
+// it. `message-visibility-filter.ts`'s live-read predicate (liveMessageSqlClause /
+// filterLiveMessageRows) withholds a row from every other reader by re-checking
+// `agents.quarantined` against `sender_agent_id` AT READ TIME — retroactively AND
+// prospectively, on every send made after the quarantine too. That withholding needs the real
+// id in the column; NULL trivially passes its `sender_agent_id IS NULL OR ... NOT IN (...)`
+// clause, so a nulled row was never withheld, only unattributed — the opposite of containment.
+// CONTAINMENT #7 (a quarantined row's name/role must never reach another pane) does not need
+// this column nulled either: orca-runtime.ts's `resolveSenderAgent` callback into
+// `formatMessagePointer` already re-checks `agent.quarantined === 1` at render time and falls
+// back to the raw handle — independent of whether sender_agent_id is stamped. Centralized here
+// (not at each RPC call site) so every insertGatedMessage caller — send, broadcast, reply, peer
+// question, federation import — gets the real id automatically.
 function resolveSenderAgentId(
   db: Database.Database,
   senderPaneKey: string | null | undefined,
@@ -120,7 +127,7 @@ function resolveSenderAgentId(
     return null
   }
   const agent = getAgentByPaneKey(db, senderHostId, senderPaneKey)
-  return agent && agent.quarantined !== 1 ? agent.id : null
+  return agent ? agent.id : null
 }
 
 function writeGateRefusal(

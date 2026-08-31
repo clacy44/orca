@@ -327,6 +327,11 @@ function readMailboxDelivery(
   replayed: boolean
   pendingBehind: number
   acknowledged: string | null
+  // Amendment E fix (adversarial review major #5): db.getOrCreateMailboxDelivery already
+  // computes this (message-visibility-filter.ts, via fetchMessagesByIds) — it was being
+  // dropped on the floor here, so every check call site through this helper had no way to
+  // report a purged/quarantine-withheld row at all.
+  omitted?: { purged: number; withheld: number }
 } {
   // Why ack BEFORE fetching candidates, not after: acknowledging marks the prior delivery's
   // frozen ids `read`. A candidate query run before the ack would still see those ids as
@@ -354,8 +359,34 @@ function readMailboxDelivery(
     messages: current?.messages ?? [],
     replayed: current?.replayed ?? false,
     pendingBehind: current?.pendingBehind ?? 0,
-    acknowledged: acknowledged?.delivery.id ?? null
+    acknowledged: acknowledged?.delivery.id ?? null,
+    ...(current?.omitted ? { omitted: current.omitted } : {})
   }
+}
+
+// Amendment E fix (adversarial review major #5): the omission counts readMailboxDelivery now
+// carries through were computed but never surfaced in the `--format`/`--inject` text either —
+// a piped/injected caller had no way to see them at all, JSON or text.
+function formatOmittedMessagesLine(omitted?: { purged: number; withheld: number }): string {
+  if (!omitted || (omitted.purged === 0 && omitted.withheld === 0)) {
+    return ''
+  }
+  const parts: string[] = []
+  if (omitted.purged > 0) {
+    parts.push(`${omitted.purged} purged`)
+  }
+  if (omitted.withheld > 0) {
+    parts.push(`${omitted.withheld} withheld (author quarantined)`)
+  }
+  return `[${parts.join(', ')} — omitted from this delivery]`
+}
+
+function appendOmittedMessagesLine(
+  formatted: string,
+  omitted?: { purged: number; withheld: number }
+): string {
+  const line = formatOmittedMessagesLine(omitted)
+  return line ? [formatted, line].filter(Boolean).join('\n\n') : formatted
 }
 
 // Why: an ambient pane notice can be lost on hosts whose PTY write path never lands, so the
@@ -586,8 +617,21 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         orchestrationCompatibilityCallerAuthority?.terminalHandle === from
           ? orchestrationCompatibilityCallerAuthority
           : undefined
-      // Why: attested hook identity survives graph remount; caller params never supply lifecycle authority.
-      const senderPaneKey = attestedCaller?.paneKey ?? runtime.getTerminalPaneKey(from) ?? undefined
+      // Why: attested hook identity survives graph remount; caller params never supply lifecycle
+      // authority. Adversarial review major #4 fix: the `getTerminalPaneKey(from)` fallback used
+      // to run unconditionally, so a caller attested as one pane (orchestrationCompatibilityCallerAuthority
+      // present, just for a DIFFERENT handle than params.from) could still get params.from's real
+      // pane — and its real sender_agent_id — resolved and stamped, impersonating that identity
+      // in the pane pointer and escaping quarantine/purge scoping that key off sender_agent_id.
+      // A caller that proved no attestation at all keeps today's unauthenticated-fallback
+      // behavior (`getTerminalPaneKey(from)`, same as before); a caller that proved attestation
+      // for a DIFFERENT handle than it's claiming as `from` gets that disagreeing claim ignored
+      // instead — ends up with no resolved pane, same as an unregistered sender.
+      const senderPaneKey = attestedCaller
+        ? attestedCaller.paneKey
+        : orchestrationCompatibilityCallerAuthority
+          ? undefined
+          : (runtime.getTerminalPaneKey(from) ?? undefined)
       // Why hoisted here (not just the point-to-point branch below): the host id is author
       // provenance on EVERY send — point-to-point and group fan-out alike
       // (messages.sender_agent_id, resolved by insertGatedMessage itself from senderPaneKey —
@@ -1212,6 +1256,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // enforces this ordering internally via `fetchCandidates`).
         let messages: MessageRow[]
         let deliveryMeta: Record<string, unknown> = {}
+        let deliveryOmitted: { purged: number; withheld: number } | undefined
         if (consumeUnread && params.ackMode === 'implicit') {
           const durable = readMailboxDelivery(db, {
             mailboxHandle: address,
@@ -1219,11 +1264,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             ack: params.ack
           })
           messages = durable.messages
+          deliveryOmitted = durable.omitted
           deliveryMeta = {
             deliveryId: durable.deliveryId,
             replayed: durable.replayed,
             pendingBehind: durable.pendingBehind,
-            acknowledged: durable.acknowledged
+            acknowledged: durable.acknowledged,
+            ...(durable.omitted ? { omitted: durable.omitted } : {})
           }
         } else {
           messages = showAll
@@ -1241,7 +1288,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             count: messages.length,
             ...deliveryMeta,
             ...(params.format || params.inject
-              ? { formatted: messages.map(formatMessageBanner).join('\n\n') }
+              ? {
+                  formatted: appendOmittedMessagesLine(
+                    messages.map(formatMessageBanner).join('\n\n'),
+                    deliveryOmitted
+                  )
+                }
               : {})
           }
         }
@@ -1268,6 +1320,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
         let arrived: MessageRow[]
         let arrivedDeliveryMeta: Record<string, unknown> = {}
+        let arrivedOmitted: { purged: number; withheld: number } | undefined
         if (params.ackMode === 'implicit') {
           const durable = readMailboxDelivery(db, {
             mailboxHandle: address,
@@ -1275,11 +1328,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             ack: params.ack
           })
           arrived = durable.messages
+          arrivedOmitted = durable.omitted
           arrivedDeliveryMeta = {
             deliveryId: durable.deliveryId,
             replayed: durable.replayed,
             pendingBehind: durable.pendingBehind,
-            acknowledged: durable.acknowledged
+            acknowledged: durable.acknowledged,
+            ...(durable.omitted ? { omitted: durable.omitted } : {})
           }
         } else {
           arrived = db.getUnreadMessages(address, typeFilter)
@@ -1292,7 +1347,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           count: arrived.length,
           ...arrivedDeliveryMeta,
           ...(params.format || params.inject
-            ? { formatted: arrived.map(formatMessageBanner).join('\n\n') }
+            ? {
+                formatted: appendOmittedMessagesLine(
+                  arrived.map(formatMessageBanner).join('\n\n'),
+                  arrivedOmitted
+                )
+              }
             : {})
         }
       }
@@ -1388,8 +1448,14 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           pendingBehind: durable.pendingBehind,
           legacyPending: durable.legacyPending,
           acknowledged: durable.acknowledged,
+          ...(durable.omitted ? { omitted: durable.omitted } : {}),
           ...(params.format || params.inject
-            ? { formatted: durable.messages.map(formatMessageBanner).join('\n\n') }
+            ? {
+                formatted: appendOmittedMessagesLine(
+                  durable.messages.map(formatMessageBanner).join('\n\n'),
+                  durable.omitted
+                )
+              }
             : {})
         }
       }
@@ -1443,10 +1509,17 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             replayed: durable.replayed,
             pendingBehind: durable.pendingBehind,
             legacyPending,
-            acknowledged: durable.acknowledged
+            acknowledged: durable.acknowledged,
+            ...(durable.omitted ? { omitted: durable.omitted } : {})
           }
           return params.format || params.inject
-            ? { ...result, formatted: durable.messages.map(formatMessageBanner).join('\n\n') }
+            ? {
+                ...result,
+                formatted: appendOmittedMessagesLine(
+                  durable.messages.map(formatMessageBanner).join('\n\n'),
+                  durable.omitted
+                )
+              }
             : result
         }
 
@@ -1721,8 +1794,14 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         orchestrationCompatibilityCallerAuthority?.terminalHandle === replyFrom
           ? orchestrationCompatibilityCallerAuthority
           : undefined
-      const replySenderPaneKey =
-        replyAttestedCaller?.paneKey ?? runtime.getTerminalPaneKey(replyFrom) ?? undefined
+      // Adversarial review major #4 fix — same shape as send's senderPaneKey above: an
+      // attestation that disagrees with the claimed replyFrom must never fall back to trusting
+      // replyFrom's own pane (that resolves and stamps a real, impersonated sender_agent_id).
+      const replySenderPaneKey = replyAttestedCaller
+        ? replyAttestedCaller.paneKey
+        : orchestrationCompatibilityCallerAuthority
+          ? undefined
+          : (runtime.getTerminalPaneKey(replyFrom) ?? undefined)
       const replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
 
       // Amendment A: the plain reply insert routes through the single write choke too.
