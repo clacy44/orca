@@ -21,8 +21,10 @@ import {
   listEnvironments,
   removeEnvironment,
   resolveEnvironment,
+  setEnvironmentEndpoint,
   type EnvironmentAddResult,
-  type EnvironmentRemoveResult
+  type EnvironmentRemoveResult,
+  type EnvironmentSetEndpointResult
 } from '../runtime/environments'
 
 export const ENVIRONMENT_HANDLERS: Record<string, CommandHandler> = {
@@ -82,6 +84,17 @@ export const ENVIRONMENT_HANDLERS: Record<string, CommandHandler> = {
       localSuccess(await collectEnvironmentTerminalRoster(probes, { timeoutMs })),
       json,
       formatEnvironmentTerminalRoster
+    )
+  },
+  'environment set-endpoint': async ({ flags, json }) => {
+    const selector = getRequiredStringFlag(flags, 'environment')
+    const url = getRequiredStringFlag(flags, 'url')
+    const result = await setEnvironmentEndpoint(getDefaultUserDataPath(), selector, { url })
+    printResult(
+      localSuccess(result),
+      json,
+      (r: EnvironmentSetEndpointResult) =>
+        `Reached ${r.environment.name} at ${url} and saved it as the new endpoint.`
     )
   },
   'environment rm': async ({ flags, json }) => {
