@@ -215,6 +215,30 @@ describe('orchestration.thread (BUG 4, hardened per S10-2 ruling 1)', () => {
     expect(result.messages.map((m) => m.subject)).toEqual(['in-thread'])
   })
 
+  // S10-9 R4: a thread replay is where a sender checks on mail they sent — their own messages
+  // carry the same honest `delivery` state `orchestration sent` reports, so a message stuck
+  // behind a withheld pointer-delivery gate never reads the same as one nobody has pushed yet.
+  // Scoped to the caller's own messages only — delivery state is sender-side information.
+  it('annotates the caller’s own messages with delivery state, never the other participant’s', async () => {
+    directory = mkdtempSync(join(tmpdir(), 'orca-thread-delivery-honesty-'))
+    db = new OrchestrationDb(join(directory, 'orchestration.db'))
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['from a', 'from b'])
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-delivery', 'orchestration.thread', { id: threadId }, evidenceFor('term_a'))
+    )
+
+    expect(response.ok).toBe(true)
+    const messages = (
+      response as { result: { messages: { subject: string; delivery?: string }[] } }
+    ).result.messages
+    const mine = messages.find((m) => m.subject === 'from a')
+    const theirs = messages.find((m) => m.subject === 'from b')
+    expect(mine?.delivery).toBe('queued')
+    expect(theirs?.delivery).toBeUndefined()
+  })
+
   // T1 (s10-2-spec.md acceptance table): a caller who does NOT participate in a thread gets a
   // recipient-filtered replay, never the other participants' conversation. Mutation this kills:
   // restoring orchestration-thread.ts's old unguarded `db.getThreadMessages(params.id)` call

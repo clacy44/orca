@@ -2225,6 +2225,9 @@ type PtyWriteFlight = {
   markSettled: () => void
 }
 
+// Why a pane never gets an armed Enter (S10-9 R1+R2 fallback outcomes).
+type WithheldDeliveryReason = 'pane_busy' | 'not_agent_pane' | 'probe_failed' | 'no_hydrated_status'
+
 export type { MessageWaitResult }
 
 function omitUndefinedProperties<T extends Record<string, unknown>>(value: T): Partial<T> {
@@ -4088,6 +4091,11 @@ export class OrcaRuntimeService {
     this.mailPointerRepointScheduler.clear()
     this.lastPointedMessageSequenceByHandle.clear()
     this.pointedMessageIdsByHandle.clear()
+    this.withheldDeliveryAttemptsByHandle.clear()
+    for (const timer of this.agentMailboxSlowRetryTimersByHandle.values()) {
+      clearTimeout(timer)
+    }
+    this.agentMailboxSlowRetryTimersByHandle.clear()
     this._orchestrationDb = db
     this.ensureOrchestrationFederationRelay()
     this.ensureDispatchLivenessMonitor()
@@ -33696,14 +33704,227 @@ export class OrcaRuntimeService {
       // would type a message plus Enter into a working agent. Seeded state waits
       // for a live observation to authorize it.
       if (leaf.lastAgentStatus === 'idle' && leaf.lastAgentStatusObservedLive) {
+        this.withheldDeliveryAttemptsByHandle.delete(handle)
         this.deliverPendingMessages(leaf, {
           mailboxHandle: handle,
           reservedTypes,
           notifiedThreadIdKnown
         })
+        return
+      }
+      // Why gated on !observedLive, not just "not idle": a pane already tracked live this
+      // generation (observedLive true, status merely 'working') has a real idle edge coming —
+      // applyTrackedPtyTitle's own deliverPendingMessagesForLeaf call fires it, no polling
+      // needed, and 'leaves later delivery to the idle edge instead of polling a working
+      // mailbox' pins exactly that. The fallback below exists ONLY for the ROOT CAUSE case: a
+      // pane already idle before the runtime started fires no title event at all, so
+      // lastAgentStatusObservedLive never goes live and no edge is ever coming — R1 hydrated
+      // hook status + R2 probed tui-idle is the only path that can still authorize delivery.
+      // Fire-and-forget: every existing sync caller keeps its exact no-op-when-not-idle return.
+      if (!leaf.lastAgentStatusObservedLive) {
+        void this.attemptHydratedProbedDelivery(leaf.tabId, leaf.leafId, terminalHandle, handle, {
+          reservedTypes,
+          notifiedThreadIdKnown
+        })
+      } else {
+        // Normal live tracking has resumed — any earlier fallback-withheld record is stale;
+        // the standard idle-edge push (not this fallback) owns delivery from here.
+        this.withheldDeliveryAttemptsByHandle.delete(handle)
       }
     } catch {
       // Unknown/stale handles can't be pointed now; the persisted message stays available via explicit check or future idle delivery.
+    }
+  }
+
+  // Why split from deliverPendingMessagesForHandle: R1+R2 both need an await, so this can only
+  // ever run as a fallback tail, never on the hot synchronous path every existing caller relies on.
+  private async attemptHydratedProbedDelivery(
+    tabId: string,
+    leafId: string,
+    terminalHandle: string,
+    mailboxHandle: string,
+    options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
+  ): Promise<void> {
+    // Why (S10-9 review, finding: fire-and-forget with no catch): every existing caller of
+    // this method is `void`-fired outside any enclosing try/catch that can still be live by
+    // the time an await settles, so a rejecting `getForegroundProcess` (a pty read racing an
+    // exit, say) must never become an unhandled promise rejection in the Electron main
+    // process. Treat a throw the same as any other withheld attempt.
+    try {
+      await this.attemptHydratedProbedDeliveryUnguarded(
+        tabId,
+        leafId,
+        terminalHandle,
+        mailboxHandle,
+        options
+      )
+    } catch (error) {
+      console.warn('[orchestration] pointer delivery probe threw', {
+        mailboxHandle,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      // A throw is a withheld attempt like any other (S10-9 verify): record it so the slow
+      // retry is armed and `queued_awaiting_pane` is honest, instead of the mail silently
+      // parking with nothing scheduled to try again.
+      this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
+    }
+  }
+
+  private async attemptHydratedProbedDeliveryUnguarded(
+    tabId: string,
+    leafId: string,
+    terminalHandle: string,
+    mailboxHandle: string,
+    options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
+  ): Promise<void> {
+    const leafKey = this.getLeafKey(tabId, leafId)
+    const leaf = this.leaves.get(leafKey)
+    if (!leaf || !leaf.ptyId || !leaf.writable) {
+      return
+    }
+    if (leaf.lastAgentStatus === 'idle' && leaf.lastAgentStatusObservedLive) {
+      // A live observation landed between the caller's check and here.
+      this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+      this.deliverPendingMessages(leaf, { mailboxHandle, ...options })
+      return
+    }
+    // Why NO authorization cache (S10-9 verify blocker): a cached grant let a later push
+    // deliver without re-running the hydrated-status (pane_busy) check or the probe's own
+    // blocked-modal guard, so a pane that started working inside the window was typed into —
+    // the same hazard in a shorter costume. Every delivery through this fallback re-probes;
+    // an await of a foreground read is cheap next to typing Enter into a working agent.
+    // R1: a fresh hydrated 'done' (mapped to 'idle') status, already excluding restored-but-
+    // unconfirmed hydrate entries and bounded by AGENT_STATUS_STALE_AFTER_MS — same authority
+    // getTerminalAgentStatus reads, so this never trusts anything the desktop sidebar wouldn't.
+    const hydrated = this.getFreshExplicitAgentStatusForHandle(terminalHandle)
+    if (!hydrated) {
+      this.recordWithheldDelivery(mailboxHandle, 'no_hydrated_status')
+      return
+    }
+    if (hydrated.status !== 'idle') {
+      this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
+      return
+    }
+    // Snapshot before the awaits below: resetTrackedTerminalStateForProviderGeneration (a
+    // same-id daemon respawn / cold restore landing mid-probe) clears lastAgentStatus/
+    // lastAgentStatusObservedLive but leaves ptyId, ptyGeneration and writable untouched, so
+    // only the pty lifecycle generation can catch it on the other side of the awaits.
+    const ptyLifecycleGeneration = this.getPtyLifecycleGeneration(leaf.ptyId)
+    // R2 gate 1: never arm Enter into a shell/non-agent pane.
+    const pty = this.ptysById.get(leaf.ptyId)
+    const knownAgentPane = pty ? await this.isPtyRunningAgent(pty, leaf) : false
+    if (!knownAgentPane) {
+      this.recordWithheldDelivery(mailboxHandle, 'not_agent_pane')
+      return
+    }
+    // R2 gate 2: a one-shot read of the same tui-idle machinery the poll fallback uses.
+    const probedIdle = await this.probeTuiIdleForDelivery(leaf)
+    // Re-read: both awaits above can outlive a pty regeneration, an exit, the leaf going
+    // non-writable, or a same-id daemon respawn (caught only by the lifecycle-generation
+    // check) — never act on the closure's stale snapshot.
+    const currentLeaf = this.leaves.get(leafKey)
+    if (
+      !currentLeaf ||
+      currentLeaf.ptyId !== leaf.ptyId ||
+      currentLeaf.ptyGeneration !== leaf.ptyGeneration ||
+      !currentLeaf.writable ||
+      this.getPtyLifecycleGeneration(currentLeaf.ptyId) !== ptyLifecycleGeneration
+    ) {
+      return
+    }
+    if (currentLeaf.lastAgentStatus === 'idle' && currentLeaf.lastAgentStatusObservedLive) {
+      this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+      this.deliverPendingMessages(currentLeaf, { mailboxHandle, ...options })
+      return
+    }
+    if (!probedIdle) {
+      this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
+      return
+    }
+    // R1+R2 authorized for THIS attempt only — nothing is cached (see the no-cache note
+    // above); the next push re-probes from scratch.
+    this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+    this.deliverPendingMessages(currentLeaf, { mailboxHandle, ...options })
+  }
+
+  private async probeTuiIdleForDelivery(leaf: RuntimeLeafRecord): Promise<boolean> {
+    if (!leaf.ptyId) {
+      return false
+    }
+    const waitText = buildTerminalWaitText(leaf.tailBuffer, leaf.tailPartialLine, leaf.preview)
+    if (detectTerminalWaitBlockedReason(waitText)) {
+      return false
+    }
+    if (!this.ptyController) {
+      return false
+    }
+    // Why (S10-9 review, finding: shell-scrollback bypass): a recognized non-shell agent
+    // foreground process is a hard PRECONDITION for every idle signal below, including
+    // ready-prompt text — never an alternative to it. Scrollback text survives verbatim
+    // after the agent that wrote it exits and the shell takes the pty back, so text alone
+    // (the old ordering here, and the `!fg || isShellProcess(fg)` refusal below it was dead
+    // code behind) can never again stand in for what the pane is actually running right now.
+    const fg = await this.ptyController.getForegroundProcess(leaf.ptyId)
+    if (!fg || isShellProcess(fg)) {
+      return false
+    }
+    if (!(await this.isRecognizedForegroundAgentProcess(leaf.ptyId, fg))) {
+      return false
+    }
+    // Why still requiring quiescence even when the tail matches a known ready-prompt banner:
+    // corroborate with output recency, not scrollback alone — the foreground process being a
+    // live, recognized agent rules out the exited-process hazard, but the banner text itself
+    // could still be stale within a still-running session (e.g. it redrew other UI since).
+    const quietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
+    return quietMs >= TUI_IDLE_QUIESCENCE_MS
+  }
+
+  // Why (S10-9 R3/R4): logged and bounded — one retry chain per mailbox, re-armed only while
+  // BOTH unread mail and the withheld record (proof of a live-but-failing pane) still hold at
+  // fire time; anything else (delivered, read, pane gone) lets the chain end on its own.
+  private recordWithheldDelivery(mailboxHandle: string, reason: WithheldDeliveryReason): void {
+    this.withheldDeliveryAttemptsByHandle.set(mailboxHandle, { at: Date.now(), reason })
+    console.warn('[orchestration] pointer delivery withheld', { mailboxHandle, reason })
+    this.scheduleSlowMailboxRetry(mailboxHandle)
+  }
+
+  private scheduleSlowMailboxRetry(mailboxHandle: string): void {
+    if (this.agentMailboxSlowRetryTimersByHandle.has(mailboxHandle)) {
+      return
+    }
+    const jitterMs = Math.floor(Math.random() * AGENT_MAILBOX_SLOW_RETRY_JITTER_MS)
+    const timer = setTimeout(() => {
+      this.agentMailboxSlowRetryTimersByHandle.delete(mailboxHandle)
+      void this.retrySlowMailboxDelivery(mailboxHandle)
+    }, AGENT_MAILBOX_SLOW_RETRY_INTERVAL_MS + jitterMs)
+    timer.unref?.()
+    this.agentMailboxSlowRetryTimersByHandle.set(mailboxHandle, timer)
+  }
+
+  private async retrySlowMailboxDelivery(mailboxHandle: string): Promise<void> {
+    // Why (S10-9 review, finding: fire-and-forget with no catch): fired via `void` from a
+    // bare setTimeout callback, so nothing above this frame can catch a throw — e.g.
+    // getUndeliveredUnreadMessages on a closed/shutting-down db. Treat it the way
+    // repointPendingMessagesForHandle treats the same throw on its own (sync) path: a no-op,
+    // not an unhandled rejection.
+    try {
+      if (!this._orchestrationDb || !this.withheldDeliveryAttemptsByHandle.has(mailboxHandle)) {
+        return
+      }
+      const pending = this._orchestrationDb.getUndeliveredUnreadMessages(mailboxHandle)
+      if (pending.length === 0) {
+        this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+        return
+      }
+      // deliverPendingMessagesForHandle re-arms the next retry (via recordWithheldDelivery)
+      // itself if this attempt withholds again.
+      this.deliverPendingMessagesForHandle(mailboxHandle)
+    } catch (error) {
+      console.warn('[orchestration] slow mailbox retry threw', {
+        mailboxHandle,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
     }
   }
 
@@ -33746,7 +33967,7 @@ export class OrcaRuntimeService {
     delivery: MessageDeliveryState
     recipient: MessageRecipientPresence
   } {
-    const delivery = resolveMessageDeliveryState(
+    const baseDelivery = resolveMessageDeliveryState(
       message,
       this.pointedMessageIdsByHandle.get(message.to_handle)
     )
@@ -33757,6 +33978,13 @@ export class OrcaRuntimeService {
         return null
       }
     })
+    // R4 honesty (S10-9): 'queued' after an actual push attempt was withheld (busy pane,
+    // failed probe, non-agent pane, no hydrated status) must say so — never read the same as
+    // mail nobody has tried to push yet.
+    const delivery: MessageDeliveryState =
+      baseDelivery === 'queued' && this.withheldDeliveryAttemptsByHandle.has(message.to_handle)
+        ? 'queued_awaiting_pane'
+        : baseDelivery
     return { delivery, recipient }
   }
 
@@ -34495,6 +34723,25 @@ export class OrcaRuntimeService {
     >
   >()
 
+  // Why (S10-9 R4): proof an actual delivery attempt was withheld this mailbox — vs. mail
+  // nobody has tried to push yet — so getMessageDeliverySnapshot never conflates the two.
+  private readonly withheldDeliveryAttemptsByHandle = new Map<
+    string,
+    { at: number; reason: WithheldDeliveryReason }
+  >()
+
+  // Why (S10-9 review, finding: forged live-idle stamp): a probe-observed idle authorizes
+  // only THIS fallback's own follow-up pushes — never `leaf.lastAgentStatus`/
+  // `lastAgentStatusObservedLive`, which every title-driven gate elsewhere (the fast path
+  // above, the parked-redelivery re-check, the probe-deferred re-check) trusts as proof a
+  // live title transition was actually observed. Scoped by pty identity + generation +
+  // lifecycle generation and TTL-bounded so a stale authorization can never outlive the
+  // window it was actually observed in, let alone survive a same-id daemon respawn.
+  private readonly agentMailboxSlowRetryTimersByHandle = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >()
+
   private createPtyWriteFlight(): PtyWriteFlight {
     let markSettled!: () => void
     const settled = new Promise<void>((resolve) => {
@@ -34775,6 +35022,7 @@ export class OrcaRuntimeService {
       if (!wrote) {
         return
       }
+      this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
       this.lastPointedMessageSequenceByHandle.set(
         mailboxHandle,
         Math.max(watermark, newestSequence)
@@ -39091,6 +39339,14 @@ async function assertTerminalInputWithinLimitWithYield(text: string | undefined)
 const TUI_IDLE_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
 const TUI_IDLE_POLL_INTERVAL_MS = 2000
 const TUI_IDLE_QUIESCENCE_MS = 3000
+// Why (S10-9 review): how long a probe-observed idle authorizes this fallback's OWN
+// follow-up pushes on the same pty identity/generation before it must re-probe — short
+// enough that it can never stand in for a real live title observation, long enough to
+// dedupe a burst of messages that land in the same instant.
+// Why (S10-9 R3): slow retry for a mailbox stuck behind a withheld gate — bounded and jittered
+// so N stuck mailboxes never synchronize into one thundering sweep.
+const AGENT_MAILBOX_SLOW_RETRY_INTERVAL_MS = 5 * 60 * 1000
+const AGENT_MAILBOX_SLOW_RETRY_JITTER_MS = 60 * 1000
 const EXPLICIT_IDLE_TITLE_RE = /(^|\s)(ready|idle|done)(\s|$|[.!?])/i
 const CLAUDE_IDLE_PREFIX = '\u2733'
 const GEMINI_IDLE_PREFIX = '\u25c7'

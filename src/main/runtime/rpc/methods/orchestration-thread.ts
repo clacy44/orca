@@ -3,6 +3,26 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalString, requiredString } from '../schemas'
 import { parseThreadSinceCursor } from '../../orchestration/thread-replay-since-filter'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import type { MessageRow } from '../../orchestration/types'
+
+// Why (S10-9 R4): a thread replay is where a sender goes to check on mail they sent into it —
+// annotate their OWN messages with the same honest delivery state `orchestration sent` reports,
+// so a stuck-behind-a-pane-gate message never reads identical to one nobody has pushed yet.
+// Never annotates other participants' messages — delivery state is sender-side information.
+function annotateSenderDeliveryHonesty(
+  runtime: Parameters<RpcMethod['handler']>[1]['runtime'],
+  messages: MessageRow[],
+  callerHandle: string | undefined
+): unknown[] {
+  if (!callerHandle) {
+    return messages
+  }
+  return messages.map((message) =>
+    message.from_handle === callerHandle
+      ? { ...message, delivery: runtime.getMessageDeliverySnapshot(message).delivery }
+      : message
+  )
+}
 
 const ThreadParams = z.object({
   id: requiredString('Missing --id'),
@@ -68,7 +88,7 @@ function resolveThreadReplay(
       db.markThreadRead(threadId, participantKey, thread.last_message_sequence)
     }
     return {
-      messages,
+      messages: annotateSenderDeliveryHonesty(runtime, messages, callerHandle),
       count: messages.length,
       degraded: false,
       ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
@@ -89,7 +109,7 @@ function resolveThreadReplay(
     callerHandle
   )
   return {
-    messages,
+    messages: annotateSenderDeliveryHonesty(runtime, messages, callerHandle),
     count: messages.length,
     degraded: true,
     ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})

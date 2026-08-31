@@ -5,6 +5,7 @@ import type { RpcRequest } from '../core'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../../../shared/protocol-version'
+import { makePaneKey } from '../../../../shared/stable-pane-id'
 
 function request(id: string, method: string, params: Record<string, unknown>): RpcRequest {
   return {
@@ -22,9 +23,9 @@ describe('orchestration.sent (BUG 3)', () => {
   let runtime: OrcaRuntimeService | undefined
   let dispatcher: RpcDispatcher
 
-  function setup(): void {
+  function setup(deps?: ConstructorParameters<typeof OrcaRuntimeService>[2]): void {
     db = new OrchestrationDb(':memory:')
-    runtime = new OrcaRuntimeService()
+    runtime = new OrcaRuntimeService(undefined, undefined, deps)
     runtime.setOrchestrationDb(db)
     dispatcher = new RpcDispatcher({ runtime, methods: ORCHESTRATION_METHODS })
   }
@@ -132,5 +133,76 @@ describe('orchestration.sent (BUG 3)', () => {
     expect(response).toMatchObject({ ok: true, result: { delivery: { state: 'pointed' } } })
     // Still unread — pointed is "written into the pane", not "read by the recipient".
     expect(db!.getMessageById(message.id)?.read).toBe(0)
+  })
+
+  // S10-9 R4: 'queued' must not read the same before and after an actual push attempt was
+  // withheld — this is the honest-receipts distinction the sender-side `orchestration sent`
+  // surface exists for.
+  it('reports queued_awaiting_pane once an actual push attempt is withheld by the delivery gate', async () => {
+    const leafId = '33333333-3333-4333-8333-333333333333'
+    const paneKey = makePaneKey('tab-1', leafId)
+    setup({
+      getAgentStatusSnapshot: () => [
+        {
+          paneKey,
+          state: 'working',
+          prompt: '',
+          agentType: 'codex',
+          connectionId: null,
+          receivedAt: Date.now(),
+          stateStartedAt: Date.now(),
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a'
+        }
+      ]
+    })
+    const write = vi.fn().mockReturnValue(true)
+    runtime!.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => 'codex'
+    } as never)
+    runtime!.attachWindow(1)
+    runtime!.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          title: 'Codex',
+          activeLeafId: leafId,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          leafId,
+          paneRuntimeId: 1,
+          ptyId: 'pty-1',
+          paneTitle: null
+        }
+      ]
+    })
+    const [terminal] = (await runtime!.listTerminals()).terminals
+    // Plain output, never an OSC title — no live title observation this generation at all.
+    runtime!.onPtyData('pty-1', 'still working\n', 100)
+
+    const message = db!.insertMessage({ from: 'term_a', to: terminal.handle, subject: 'ping' })
+    const preResponse = await dispatcher.dispatch(
+      request('sent-pre-withheld', 'orchestration.sent', { id: message.id })
+    )
+    expect(preResponse).toMatchObject({ ok: true, result: { delivery: { state: 'queued' } } })
+
+    runtime!.deliverPendingMessagesForHandle(terminal.handle)
+    expect(write).not.toHaveBeenCalled()
+
+    const response = await dispatcher.dispatch(
+      request('sent-withheld', 'orchestration.sent', { id: message.id })
+    )
+    expect(response).toMatchObject({
+      ok: true,
+      result: { delivery: { state: 'queued_awaiting_pane' } }
+    })
   })
 })
