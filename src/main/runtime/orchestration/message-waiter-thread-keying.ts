@@ -1,10 +1,12 @@
 // Why this module: orca-runtime.ts (ratcheted) delegates the composite-key math here.
 // S10-3 pact spec A1 (rev 7 binding) — waiters/reservations keyed by (type, threadId,
 // payloadKind), not type alone, so a step waiter never consumes-and-discards ordinary thread
-// traffic. payload.kind here is still read from caller JSON (extractPayloadKind) behind the
-// assertPayloadKindNotCallerSet refusal at every send-shaped RPC — rev 7's dedicated
-// messages.payload_kind column (v34) that replaces the JSON read entirely is not yet landed
-// (pending S10-2a); this module reads the column instead the moment it exists.
+// traffic. S10-2b amendment D: payloadKind is now read from the dedicated messages.payload_kind
+// COLUMN (v34, S10-2a) at every call site — never from caller JSON. The JSON payload.kind
+// namespace stays reserved for runtime notification kinds (input_not_consumed / liveness_breach
+// / relay_unreachable) and is refused at the write choke (message-gate-writer.ts
+// payloadHasReservedKindField) and, defense-in-depth, at every send-shaped RPC entry
+// (assertPayloadKindNotCallerSet, unchanged by this amendment).
 
 import { OrchestrationError } from './orchestration-error'
 
@@ -154,23 +156,13 @@ export function waiterConsumesArrival(
   )
 }
 
-// Why field-scoped and defensive: payload.kind is host-written only by orchestration.threads.step
-// (A5); every other row's payload, when present, is caller JSON with no kind field, and a
-// malformed/non-object payload must read as "not a step" rather than throw mid-notify.
-export function extractPayloadKind(payload: string | null | undefined): string | null {
-  if (!payload) {
-    return null
-  }
-  try {
-    const parsed: unknown = JSON.parse(payload)
-    if (parsed !== null && typeof parsed === 'object' && 'kind' in parsed) {
-      const kind = (parsed as { kind?: unknown }).kind
-      return typeof kind === 'string' ? kind : null
-    }
-  } catch {
-    // Malformed payload JSON is never a pact_step row.
-  }
-  return null
+// Why a passthrough, not a parser (amendment D): the discriminator now lives in the dedicated
+// messages.payload_kind COLUMN (v34), written only by insertGatedMessage's `hostPayloadKind`
+// (message-gate-writer.ts) — never derived from caller-supplied payload JSON, which a caller
+// could shape to spoof or shadow a step. Every call site passes `row.payload_kind`, not
+// `row.payload`; this function only normalizes `undefined` (pre-v34 in-memory rows) to `null`.
+export function extractPayloadKind(payloadKind: string | null | undefined): string | null {
+  return payloadKind ?? null
 }
 
 // Why (K25, blocker fix): extractPayloadKind trusts whatever `kind` a caller's free-text

@@ -28,6 +28,26 @@ function generateMessageId(): string {
   return `msg_${randomBytes(6).toString('hex')}`
 }
 
+/**
+ * `payload` here is a JSON-serializable VALUE, sanitized field-wise then re-serialized — never
+ * a pre-stringified string, which would be sanitized as one opaque text leaf and then
+ * JSON.stringify'd AGAIN, double-encoding it (a `{"a":1}` object payload would come back as the
+ * literal string `"{\"a\":1}"`, breaking every downstream `JSON.parse(message.payload)` reader).
+ * Every RPC/legacy-compat call site that still carries `payload` as a wire string uses this to
+ * bridge: parses when possible, and falls back to the raw string (one sanitized text leaf) when
+ * it is not JSON — preserving a non-JSON payload's storability.
+ */
+export function payloadValueForGate(payload: string | null | undefined): unknown {
+  if (payload === undefined || payload === null) {
+    return undefined
+  }
+  try {
+    return JSON.parse(payload)
+  } catch {
+    return payload
+  }
+}
+
 const MESSAGE_SUBJECT_MAX_LENGTH = 200
 const MESSAGE_BODY_MAX_LENGTH = 8000
 const MESSAGE_PAYLOAD_FIELD_MAX_LENGTH = 2000
@@ -84,6 +104,13 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
+// Why null for a quarantined sender (S10-2b, ported from the point-to-point send call site this
+// centralizes): message-withholding (refusing the send outright) is a policy choice for a later
+// slice, but stamping provenance to a quarantined identity is not — a quarantined row's
+// name/role must never reach another pane (CONTAINMENT #7), and sender_agent_id is exactly what
+// formatMessagePointer's resolver looks up to build that pane text. Centralized here (not at
+// each RPC call site) so every insertGatedMessage caller — send, broadcast, reply, peer
+// question, federation import — gets the same guard automatically.
 function resolveSenderAgentId(
   db: Database.Database,
   senderPaneKey: string | null | undefined,
@@ -92,7 +119,8 @@ function resolveSenderAgentId(
   if (!senderPaneKey) {
     return null
   }
-  return getAgentByPaneKey(db, senderHostId, senderPaneKey)?.id ?? null
+  const agent = getAgentByPaneKey(db, senderHostId, senderPaneKey)
+  return agent && agent.quarantined !== 1 ? agent.id : null
 }
 
 function writeGateRefusal(

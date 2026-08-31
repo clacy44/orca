@@ -167,7 +167,7 @@ export async function handleLegacyReply(args: {
       committed.question.asker_handle,
       'status',
       committed.message.thread_id,
-      extractPayloadKind(committed.message.payload)
+      extractPayloadKind(committed.message.payload_kind)
     )
   }
   return {

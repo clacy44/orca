@@ -41,6 +41,11 @@ import {
   assertPayloadKindNotCallerSet,
   extractPayloadKind
 } from '../../orchestration/message-waiter-thread-keying'
+import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
+import { payloadValueForGate } from '../../orchestration/message-gate-writer'
+import { deriveThreadSubject } from '../../../../shared/thread-subject'
+import type { OrchestrationCompatibilityEvidence } from '../../../../shared/orchestration-compatibility-evidence'
+import type { QuestionRow } from '../../orchestration/types'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
@@ -110,7 +115,10 @@ const SendParams = z
     waitForLifecycleSettlement: OptionalBoolean,
     // Why: capability-negotiated opt-in; see orchestration-remote-run-mailbox.ts.
     remoteRunMailbox: OptionalBoolean,
-    devMode: OptionalBoolean
+    devMode: OptionalBoolean,
+    // GATE § escape hatch: converts a HARD verdict into a stored-and-flagged send rather than
+    // refusing outright (message-gate-writer.ts InsertGatedMessageParams.acknowledgeGate).
+    acknowledgeGate: OptionalBoolean
   })
   .superRefine((params, ctx) => {
     if (
@@ -175,7 +183,8 @@ const ReplyParams = z.object({
   body: requiredString('Missing --body'),
   from: OptionalString,
   run: OptionalString,
-  remoteRunMailbox: OptionalBoolean
+  remoteRunMailbox: OptionalBoolean,
+  acknowledgeGate: OptionalBoolean
 })
 
 const InboxParams = z.object({
@@ -255,7 +264,8 @@ const AskParams = z
     from: OptionalString,
     run: OptionalString,
     compatibilityCliCommand: z.enum(['orca', 'orca-ide', 'orca-dev']).optional(),
-    compatibilityWindowsCommand: z.enum(['orca', 'orca-ide']).optional()
+    compatibilityWindowsCommand: z.enum(['orca', 'orca-ide']).optional(),
+    acknowledgeGate: OptionalBoolean
   })
   .superRefine((params, ctx) => {
     if ((params.question ? 1 : 0) + (params.resume ? 1 : 0) !== 1) {
@@ -481,6 +491,46 @@ function rejectFederatedExplicitTarget(params: { to?: string; run?: string }): v
   }
 }
 
+// Amendment B: reply must mirror send's `agent:` recipient guards (ruling 3's "reply is a
+// second to_handle writer that can still carry an agent: address via a forged from"). Shared
+// so both write paths enforce the identical rule, quarantine checked FIRST (the derived
+// refusal's nextSteps name the pane's bare handle, and handing that address out for a
+// quarantined row is a working bypass of the quarantine itself).
+function requireAddressableAgentRecipient(
+  db: OrchestrationDb,
+  agentId: string
+): NonNullable<ReturnType<OrchestrationDb['getAgentById']>> {
+  const agentRecipient = db.getAgentById(agentId)
+  if (!agentRecipient) {
+    throw new OrchestrationError('agent_unknown', `Agent ${agentId} was not found.`, {
+      nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
+    })
+  }
+  if (agentRecipient.quarantined === 1) {
+    throw new OrchestrationError(
+      'agent_quarantined',
+      `Agent ${agentRecipient.display_name} is quarantined and cannot receive mail.`,
+      { nextSteps: [`orca agents show --id ${agentRecipient.id}`] }
+    )
+  }
+  if (agentRecipient.derived === 1) {
+    const bareHandle = agentRecipient.terminal_handle
+    throw new OrchestrationError(
+      'derived_agent_unaddressable',
+      `Agent ${agentRecipient.display_name} is not registered — agent:${agentRecipient.id} has no reader.`,
+      {
+        nextSteps: [
+          bareHandle
+            ? `orca orchestration send --to ${bareHandle} --subject "..."`
+            : 'orca agents list',
+          'orca agents register --name <slug> --role "<your role>" (run on that pane to make it addressable)'
+        ]
+      }
+    )
+  }
+  return agentRecipient
+}
+
 export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_RUN_METHODS,
   ...ORCHESTRATION_AGENT_METHODS,
@@ -530,19 +580,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           : undefined
       // Why: attested hook identity survives graph remount; caller params never supply lifecycle authority.
       const senderPaneKey = attestedCaller?.paneKey ?? runtime.getTerminalPaneKey(from) ?? undefined
-      // Why hoisted here (not just the point-to-point branch below): the sender's directory row,
-      // if any, is author provenance on EVERY send — point-to-point and group fan-out alike
-      // (messages.sender_agent_id, S10-3 purge/quarantine target).
+      // Why hoisted here (not just the point-to-point branch below): the host id is author
+      // provenance on EVERY send — point-to-point and group fan-out alike
+      // (messages.sender_agent_id, resolved by insertGatedMessage itself from senderPaneKey —
+      // including the "null for a quarantined sender" guard, message-gate-writer.ts).
       const senderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
-      const senderAgentRow = senderPaneKey
-        ? db.getAgentByPaneKey(senderHostId, senderPaneKey)
-        : undefined
-      // Why null for a quarantined sender: message-withholding (refusing the send outright) is
-      // S10-3, but stamping provenance to a quarantined identity is not — a quarantined row's
-      // name/role must never reach another pane (CONTAINMENT #7), and sender_agent_id is exactly
-      // what formatMessagePointer's resolver looks up to build that pane text.
-      const senderAgentId =
-        senderAgentRow && senderAgentRow.quarantined !== 1 ? senderAgentRow.id : null
       const remoteAttachment = senderPaneKey
         ? db.findActiveRemoteAttachmentForPane(senderPaneKey)
         : undefined
@@ -743,46 +785,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // recipient's `check`, db.ts:2928).
         let agentRecipient: ReturnType<typeof db.getAgentById>
         if (to.startsWith('agent:')) {
-          const agentId = to.slice('agent:'.length)
-          agentRecipient = db.getAgentById(agentId)
-          if (!agentRecipient) {
-            throw new OrchestrationError('agent_unknown', `Agent ${agentId} was not found.`, {
-              nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
-            })
-          }
-          // Why: quarantine is checked FIRST — the derived refusal's nextSteps
-          // name the pane's bare handle, and handing that address out for a
-          // quarantined row is a working bypass of the quarantine itself.
-          if (agentRecipient.quarantined === 1) {
-            throw new OrchestrationError(
-              'agent_quarantined',
-              `Agent ${agentRecipient.display_name} is quarantined and cannot receive mail.`,
-              { nextSteps: [`orca agents show --id ${agentRecipient.id}`] }
-            )
-          }
-          // Why: a derived row has no reader on `agent:<id>` — its owning pane's
-          // attested check only ever reads its bare-handle mailbox, so mail
-          // addressed to the derived directory id is silently unreadable until
-          // that pane runs `orca agents register` (which upgrades the id in
-          // place and clears `derived`). Refuse at send time instead of
-          // accepting mail into a mailbox nothing will ever read. (`reply` is a
-          // second to_handle writer that can still carry an `agent:` address via
-          // a forged `from`; guarded when sends route through the S10-2 choke.)
-          if (agentRecipient.derived === 1) {
-            const bareHandle = agentRecipient.terminal_handle
-            throw new OrchestrationError(
-              'derived_agent_unaddressable',
-              `Agent ${agentRecipient.display_name} is not registered — agent:${agentRecipient.id} has no reader.`,
-              {
-                nextSteps: [
-                  bareHandle
-                    ? `orca orchestration send --to ${bareHandle} --subject "..."`
-                    : 'orca agents list',
-                  'orca agents register --name <slug> --role "<your role>" (run on that pane to make it addressable)'
-                ]
-              }
-            )
-          }
+          agentRecipient = requireAddressableAgentRecipient(db, to.slice('agent:'.length))
         }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()
@@ -795,7 +798,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           : isBareHandleTarget
             ? (runtime.getTerminalPaneKey(to) ?? undefined)
             : undefined
-        const msg = db.insertMessage({
+        // Amendment A: db.insertGatedMessage is the single write choke for point-to-point send
+        // (ruling 2) — never db.insertMessage directly.
+        const inserted = db.insertGatedMessage({
           from,
           to,
           subject: params.subject,
@@ -803,10 +808,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           type: params.type as MessageType,
           priority: params.priority as MessagePriority,
           threadId: params.threadId,
-          payload: params.payload,
+          payload: payloadValueForGate(params.payload),
           senderPaneKey,
           recipientPaneKey,
-          senderAgentId,
+          senderHostId,
           // Why (A4/BUG 6, generalized to bare-handle peers): with no bound Run, a bare
           // terminal-handle send between two hand-started agents defaults to LEGACY_RUN_ID
           // (db.ts insertMessage) exactly like an `agent:<id>` send would — and the
@@ -819,8 +824,14 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             runtime,
             routing.run?.id ?? legacyCoordinatorRunId,
             to
-          )
+          ),
+          acknowledgeGate: params.acknowledgeGate,
+          verb: 'send'
         })
+        if (inserted.outcome === 'refused') {
+          throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
+        }
+        const msg = inserted.message
         const dispatch = routing.dispatchId
           ? db.getDispatchContextById(routing.dispatchId)
           : undefined
@@ -845,7 +856,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               to,
               rejection.type,
               rejection.thread_id,
-              extractPayloadKind(rejection.payload)
+              extractPayloadKind(rejection.payload_kind)
             )
             return {
               message: rejection,
@@ -889,16 +900,26 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               to,
               rejection.type,
               rejection.thread_id,
-              extractPayloadKind(rejection.payload)
+              extractPayloadKind(rejection.payload_kind)
             )
             return { message: rejection, lifecycle: reconciled }
           }
-          runtime.notifyMessageArrived(to, msg.type, msg.thread_id, extractPayloadKind(msg.payload))
+          runtime.notifyMessageArrived(
+            to,
+            msg.type,
+            msg.thread_id,
+            extractPayloadKind(msg.payload_kind)
+          )
           return msg.type === 'worker_done'
             ? { message: msg, lifecycle: reconciled }
             : { message: msg, ...pendingMail }
         }
-        runtime.notifyMessageArrived(to, msg.type, msg.thread_id, extractPayloadKind(msg.payload))
+        runtime.notifyMessageArrived(
+          to,
+          msg.type,
+          msg.thread_id,
+          extractPayloadKind(msg.payload_kind)
+        )
         return { message: msg }
       }
 
@@ -916,8 +937,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
 
       revalidateLegacyCoordinator?.()
       const threadId = params.threadId ?? `thread_${Date.now()}`
-      const messages = handles.map((handle) =>
-        db.insertMessage({
+      // Amendment A: fan-out/broadcast routes through the single write choke too (ruling 2).
+      // Gated once, before expansion (SENSITIVE THREADS §'s "a blocked body is blocked for all
+      // N recipients") — the first recipient's verdict decides the whole batch, so a HARD
+      // refusal inserts zero rows for any of the N handles rather than the first K.
+      const messages: MessageRow[] = []
+      for (const handle of handles) {
+        const inserted = db.insertGatedMessage({
           from,
           to: handle,
           subject: params.subject,
@@ -925,9 +951,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           type: params.type as MessageType,
           priority: params.priority as MessagePriority,
           threadId,
-          payload: params.payload,
+          payload: payloadValueForGate(params.payload),
           senderPaneKey,
-          senderAgentId,
+          senderHostId,
           // Why: group addresses resolve to bare peer handles (BUG 6) — same
           // durable pane-key recording as the point-to-point path above.
           recipientPaneKey: runtime.getTerminalPaneKey(handle) ?? undefined,
@@ -936,15 +962,21 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             runtime,
             routing.run?.id ?? legacyCoordinatorRunId,
             handle
-          )
+          ),
+          acknowledgeGate: params.acknowledgeGate,
+          verb: 'send'
         })
-      )
+        if (inserted.outcome === 'refused') {
+          throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
+        }
+        messages.push(inserted.message)
+      }
       for (const message of messages) {
         runtime.notifyMessageArrived(
           message.to_handle,
           message.type,
           message.thread_id,
-          extractPayloadKind(message.payload)
+          extractPayloadKind(message.payload_kind)
         )
       }
 
@@ -1462,6 +1494,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       params,
       {
         orchestrationCompatibilityEvidence,
+        orchestrationCompatibilityCallerAuthority,
         runtime,
         legacyCoordinatorRunId,
         pairedDeviceId,
@@ -1500,6 +1533,64 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       }
 
       const question = db.getQuestion(params.id)
+      // Amendment F: a peer ask (question_threads.run_id === PEER_RUN_ID) has no Dispatch, no
+      // consumer_generation to fence on — resolveRemoteRunMailboxScope below assumes both and
+      // must never see this row. answerPeerQuestion binds the reply to the attested caller's
+      // directory id, requiring it equal question_threads.to_agent_id (ruling 3, T4) — never
+      // params.from, which a caller fully controls.
+      if (question && question.run_id === PEER_RUN_ID) {
+        const hostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        const attested = runtime.verifyOrchestrationCompatibilityCaller(
+          orchestrationCompatibilityEvidence,
+          { currentRuntimeLaunchSufficient: true }
+        )
+        const callerAgent = attested ? db.getAgentByPaneKey(hostId, attested.paneKey) : undefined
+        if (!callerAgent) {
+          throw new OrchestrationError(
+            'no_pane_identity',
+            'A peer reply requires an attested, registered caller identity.',
+            { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+          )
+        }
+        const answered = db.answerPeerQuestion({
+          runId: PEER_RUN_ID,
+          messageId: question.message_id,
+          callerAgentId: callerAgent.id,
+          body: params.body,
+          senderPaneKey: attested?.paneKey,
+          senderHostId: hostId,
+          acknowledgeGate: params.acknowledgeGate
+        })
+        if (answered.outcome === 'refused') {
+          throw gateVerdictRefusalError(answered.verdict, answered.refusalId)
+        }
+        if (answered.outcome === 'not_the_addressee') {
+          throw new OrchestrationError(
+            'not_the_addressee',
+            `You are not the addressee of question ${question.message_id}.`
+          )
+        }
+        if (answered.outcome === 'closed') {
+          throw new OrchestrationError(
+            'dispatch_inactive',
+            `Question ${question.message_id} is closed.`
+          )
+        }
+        if (answered.outcome === 'not_found') {
+          throw new OrchestrationError('question_not_found', `Question ${params.id} was not found.`)
+        }
+        runtime.notifyMessageArrived(
+          answered.message.to_handle,
+          answered.message.type,
+          answered.message.thread_id,
+          extractPayloadKind(answered.message.payload_kind)
+        )
+        return {
+          message: answered.message,
+          question: answered.question,
+          duplicate: answered.duplicate
+        }
+      }
       if (question) {
         const run = resolveRemoteRunMailboxScope(
           runtime,
@@ -1609,20 +1700,46 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
       }
 
-      const reply = db.insertMessage({
-        from: params.from ?? original.to_handle,
+      // Amendment B: reply mirrors send's guards. `to_handle` is bound to `original.from_handle`
+      // (never caller-supplied) but that address can itself be `agent:<id>` — the recipient of
+      // THIS reply — so the same quarantine-then-derived checks send applies to an `agent:`
+      // recipient apply here too, before the insert (ruling 3: "reply is a second to_handle
+      // writer that can still carry an agent: address via a forged from").
+      if (original.from_handle.startsWith('agent:')) {
+        requireAddressableAgentRecipient(db, original.from_handle.slice('agent:'.length))
+      }
+      const replyFrom = params.from ?? original.to_handle
+      const replyAttestedCaller =
+        orchestrationCompatibilityCallerAuthority?.terminalHandle === replyFrom
+          ? orchestrationCompatibilityCallerAuthority
+          : undefined
+      const replySenderPaneKey =
+        replyAttestedCaller?.paneKey ?? runtime.getTerminalPaneKey(replyFrom) ?? undefined
+      const replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+
+      // Amendment A: the plain reply insert routes through the single write choke too.
+      const insertedReply = db.insertGatedMessage({
+        from: replyFrom,
         to: original.from_handle,
         subject: `Re: ${original.subject}`,
         body: params.body,
         threadId: original.thread_id ?? original.id,
-        runId: original.run_id
+        runId: original.run_id,
+        senderPaneKey: replySenderPaneKey,
+        senderHostId: replySenderHostId,
+        acknowledgeGate: params.acknowledgeGate,
+        verb: 'reply'
       })
+      if (insertedReply.outcome === 'refused') {
+        throw gateVerdictRefusalError(insertedReply.verdict, insertedReply.refusalId)
+      }
+      const reply = insertedReply.message
 
       runtime.notifyMessageArrived(
         original.from_handle,
         reply.type,
         reply.thread_id,
-        extractPayloadKind(reply.payload)
+        extractPayloadKind(reply.payload_kind)
       )
       return { message: reply }
     }
@@ -1923,7 +2040,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     params: AskParams,
     handler: async (
       params,
-      { runtime, signal, orchestrationCapability, recordMutationReceipt }
+      {
+        runtime,
+        signal,
+        orchestrationCapability,
+        recordMutationReceipt,
+        orchestrationCompatibilityEvidence
+      }
     ) => {
       // Why: group addresses have no unambiguous first-answer authority.
       if (params.to && isGroupAddress(params.to)) {
@@ -1936,6 +2059,28 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       const from = params.from ?? 'unknown'
       // Why: echoed on every return so a clamped caller reports the budget actually waited, not the one it asked for.
       const timeoutMs = clampOrchestrationAskTimeoutMs(params.timeoutMs)
+
+      // Amendment F: a peer ask branch taken BEFORE the dispatch check below — `to` starting
+      // with `agent:` (or resuming a question that was already minted as one) has nothing to do
+      // with a supervised Dispatch, so it must never fall into the `dispatch_inactive` throw a
+      // few lines down (s10-2-spec.md:120: "today a peer ask is impossible").
+      const resumedPeerQuestion = params.resume ? db.getQuestion(params.resume) : undefined
+      if (
+        (params.to?.startsWith('agent:') ?? false) ||
+        resumedPeerQuestion?.run_id === PEER_RUN_ID
+      ) {
+        return handlePeerAsk({
+          params,
+          runtime,
+          db,
+          timeoutMs,
+          signal,
+          recordMutationReceipt,
+          orchestrationCompatibilityEvidence,
+          resumedQuestion: resumedPeerQuestion
+        })
+      }
+
       const paneKey = runtime.getTerminalPaneKey(from) ?? undefined
       const remoteAttachment = paneKey ? db.findActiveRemoteAttachmentForPane(paneKey) : undefined
       if (remoteAttachment) {
@@ -2015,7 +2160,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           `run:${run.id}`,
           created.message.type,
           created.message.thread_id,
-          extractPayloadKind(created.message.payload)
+          extractPayloadKind(created.message.payload_kind)
         )
       }
 
@@ -2112,6 +2257,156 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     }
   })
 ]
+
+// Amendment F: the peer-ask counterpart of askRemoteRunHome above — no Dispatch, no
+// consumer_generation, no whileDispatchBlocked marker (there is no dispatch_contexts row to
+// mark). Identity is ONLY runtime.verifyOrchestrationCompatibilityCaller (never params.from),
+// mirroring send/reply/agents.* (s10-2-spec.md:107).
+async function handlePeerAsk(args: {
+  params: z.infer<typeof AskParams>
+  runtime: OrcaRuntimeService
+  db: OrchestrationDb
+  timeoutMs: number
+  signal?: AbortSignal
+  recordMutationReceipt?: (receipt: unknown) => void
+  orchestrationCompatibilityEvidence?: OrchestrationCompatibilityEvidence
+  resumedQuestion?: QuestionRow
+}): Promise<unknown> {
+  const { params, runtime, db, timeoutMs, signal, recordMutationReceipt } = args
+  const hostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+  const attested = runtime.verifyOrchestrationCompatibilityCaller(
+    args.orchestrationCompatibilityEvidence,
+    { currentRuntimeLaunchSufficient: true }
+  )
+  const callerAgent = attested ? db.getAgentByPaneKey(hostId, attested.paneKey) : undefined
+  if (!callerAgent) {
+    throw new OrchestrationError(
+      'no_pane_identity',
+      'orca agents ask requires an attested, registered caller identity.',
+      { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+    )
+  }
+
+  let question = args.resumedQuestion
+  if (question) {
+    if (question.run_id !== PEER_RUN_ID) {
+      throw new OrchestrationError(
+        'question_not_found',
+        `Question ${params.resume} does not belong to a peer ask.`
+      )
+    }
+  } else {
+    if (!params.to) {
+      throw new OrchestrationError('invalid_argument', 'Missing --to for a peer ask.')
+    }
+    const toAgent = requireAddressableAgentRecipient(db, params.to.slice('agent:'.length))
+    const options =
+      params.options
+        ?.split(',')
+        .map((option) => option.trim())
+        .filter(Boolean) ?? []
+    const questionText = params.question as string
+    const { thread } = db.createThread({
+      subject: deriveThreadSubject({ body: questionText }),
+      createdByAgentId: callerAgent.id,
+      origin: 'question',
+      participants: [
+        {
+          participantKey: callerAgent.id,
+          agentId: callerAgent.id,
+          handle: callerAgent.terminal_handle,
+          role: 'owner'
+        },
+        {
+          participantKey: toAgent.id,
+          agentId: toAgent.id,
+          handle: toAgent.terminal_handle,
+          role: 'member'
+        }
+      ]
+    })
+    const created = db.createPeerQuestion({
+      runId: PEER_RUN_ID,
+      threadId: thread.id,
+      askerHandle: `agent:${callerAgent.id}`,
+      toAgentId: toAgent.id,
+      toHandle: `agent:${toAgent.id}`,
+      question: questionText,
+      options,
+      senderPaneKey: attested?.paneKey,
+      senderHostId: hostId,
+      acknowledgeGate: params.acknowledgeGate
+    })
+    if (created.outcome === 'refused') {
+      throw gateVerdictRefusalError(created.verdict, created.refusalId)
+    }
+    question = created.question
+    db.bumpThreadOnMessage(thread.id, created.message)
+    runtime.notifyMessageArrived(
+      created.message.to_handle,
+      created.message.type,
+      created.message.thread_id,
+      extractPayloadKind(created.message.payload_kind)
+    )
+  }
+
+  const questionId = question.message_id
+  const threadId = question.thread_key ?? questionId
+  recordMutationReceipt?.({
+    accepted: true,
+    answer: null,
+    messageId: questionId,
+    threadId,
+    timedOut: false,
+    cancelled: false,
+    connectionLost: false,
+    timeoutMs
+  })
+  const deadline = Date.now() + timeoutMs
+  const waitAddress = `agent:${callerAgent.id}`
+  while (true) {
+    const current = db.getQuestion(questionId)
+    if (!current || current.status === 'closed') {
+      throw new OrchestrationError('dispatch_inactive', `Question ${questionId} closed.`)
+    }
+    if (current.status === 'answered') {
+      return {
+        answer: current.answer_body,
+        messageId: questionId,
+        answerMessageId: current.answer_message_id,
+        threadId,
+        timedOut: false,
+        cancelled: false,
+        connectionLost: false,
+        timeoutMs
+      }
+    }
+    if (signal?.aborted) {
+      return {
+        answer: null,
+        messageId: questionId,
+        threadId,
+        timedOut: false,
+        cancelled: true,
+        connectionLost: true,
+        timeoutMs
+      }
+    }
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) {
+      return {
+        answer: null,
+        messageId: questionId,
+        threadId,
+        timedOut: true,
+        cancelled: false,
+        connectionLost: false,
+        timeoutMs
+      }
+    }
+    await runtime.waitForMessage(waitAddress, { timeoutMs: remainingMs, signal })
+  }
+}
 
 async function askRemoteRunHome(args: {
   params: z.infer<typeof AskParams>

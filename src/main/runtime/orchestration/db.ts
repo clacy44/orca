@@ -89,10 +89,13 @@ import {
 } from './derived-agent-rows'
 import {
   insertGatedMessage as insertGatedMessageImpl,
+  payloadValueForGate,
   type InsertGatedMessageParams,
   type InsertGatedMessageResult
 } from './message-gate-writer'
+import { gateVerdictRefusalError } from './gate-refusal-error'
 import { loadInfraAllowlist } from './infra-allowlist'
+import { filterLiveMessageRows, liveMessageSqlClause } from './message-visibility-filter'
 import {
   createThread as createThreadImpl,
   getThread as getThreadImpl,
@@ -122,6 +125,14 @@ import {
   type PurgeThreadResult,
   type ListMessagesByAuthorParams
 } from './message-purge'
+import {
+  createPeerQuestion as createPeerQuestionImpl,
+  answerPeerQuestion as answerPeerQuestionImpl,
+  type CreatePeerQuestionParams,
+  type CreatePeerQuestionResult,
+  type AnswerPeerQuestionParams,
+  type AnswerPeerQuestionResult
+} from './peer-question'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -3159,18 +3170,27 @@ export class OrchestrationDb {
       | undefined
   }
 
-  private getDeliveryMessages(delivery: DeliveryRow): MessageRow[] {
+  // Why filtered here, not just at mint time (amendment E, PURGE § "Frozen delivery batches"):
+  // message_ids is frozen at creation, so a message purged (or whose author is quarantined)
+  // AFTER this Delivery was minted must still drop out of every replay — the id stays in the
+  // frozen list so the eventual ack still clears it, but the row itself is withheld.
+  private getDeliveryMessages(delivery: DeliveryRow): {
+    messages: MessageRow[]
+    omitted: { purged: number; withheld: number }
+  } {
     const ids = JSON.parse(delivery.message_ids) as string[]
     if (ids.length === 0) {
-      return []
+      return { messages: [], omitted: { purged: 0, withheld: 0 } }
     }
     const rows = this.db
       .prepare(`SELECT * FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`)
       .all(...ids) as MessageRow[]
     const byId = new Map(rows.map((row) => [row.id, row]))
-    return exposeMessageListTimestamps(
-      ids.map((id) => byId.get(id)).filter((row): row is MessageRow => row !== undefined)
-    )
+    const ordered = ids
+      .map((id) => byId.get(id))
+      .filter((row): row is MessageRow => row !== undefined)
+    const { messages, omitted } = filterLiveMessageRows(this.db, ordered)
+    return { messages: exposeMessageListTimestamps(messages), omitted }
   }
 
   // Why: message_ids is frozen at creation, so mail that arrives after an outstanding Delivery
@@ -3194,7 +3214,13 @@ export class OrchestrationDb {
     limit?: number
     wakeTypes?: MessageType[]
   }):
-    | { delivery: DeliveryRow; messages: MessageRow[]; replayed: boolean; pendingBehind: number }
+    | {
+        delivery: DeliveryRow
+        messages: MessageRow[]
+        replayed: boolean
+        pendingBehind: number
+        omitted?: { purged: number; withheld: number }
+      }
     | undefined {
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 50)
     this.db.exec('BEGIN IMMEDIATE')
@@ -3210,7 +3236,7 @@ export class OrchestrationDb {
             'This mailbox Delivery belongs to a fenced consumer generation.'
           )
         }
-        const messages = this.getDeliveryMessages(existing)
+        const { messages, omitted } = this.getDeliveryMessages(existing)
         const pendingBehind = this.countUnreadRunMessagesOutsideDelivery(
           params.runId,
           JSON.parse(existing.message_ids) as string[]
@@ -3220,7 +3246,8 @@ export class OrchestrationDb {
           delivery: exposeDeliveryTimestamps(existing),
           messages,
           replayed: true,
-          pendingBehind
+          pendingBehind,
+          ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
         }
       }
 
@@ -3247,6 +3274,7 @@ export class OrchestrationDb {
             `SELECT * FROM messages
              WHERE run_id = ? AND to_handle = ? AND read = 0
                AND delivery_contract = 'current_delivery'
+               AND ${liveMessageSqlClause()}
              ORDER BY sequence ASC LIMIT ?`
           )
           .all(params.runId, address, limit) as MessageRow[]
@@ -3338,6 +3366,8 @@ export class OrchestrationDb {
     }
   }
 
+  // Live-message clause (amendment E): backs `check --peek/--all`, a read path the PURGE §
+  // table names explicitly ("Every read path... peek/--all").
   getRunMailboxHistory(runId: string, limit = 100, types?: MessageType[]): MessageRow[] {
     const address = `run:${runId}`
     if (types && types.length > 0) {
@@ -3346,7 +3376,8 @@ export class OrchestrationDb {
         this.db
           .prepare(
             `SELECT * FROM messages WHERE run_id = ? AND to_handle = ?
-             AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
+             AND type IN (${placeholders}) AND ${liveMessageSqlClause()}
+             ORDER BY sequence DESC LIMIT ?`
           )
           .all(runId, address, ...types, limit) as MessageRow[]
       )
@@ -3355,6 +3386,7 @@ export class OrchestrationDb {
       this.db
         .prepare(
           `SELECT * FROM messages WHERE run_id = ? AND to_handle = ?
+           AND ${liveMessageSqlClause()}
            ORDER BY sequence DESC LIMIT ?`
         )
         .all(runId, address, limit) as MessageRow[]
@@ -3510,6 +3542,21 @@ export class OrchestrationDb {
     return listMessagesByAuthorImpl(this.db, params)
   }
 
+  // S10-2b amendment F: peer ask/reply (no Dispatch, no consumer_generation to fence on).
+  createPeerQuestion(params: CreatePeerQuestionParams): CreatePeerQuestionResult {
+    return createPeerQuestionImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
+  answerPeerQuestion(params: AnswerPeerQuestionParams): AnswerPeerQuestionResult {
+    return answerPeerQuestionImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
   // ── Messages ──
 
   insertMessage(msg: {
@@ -3527,6 +3574,12 @@ export class OrchestrationDb {
     senderAgentId?: string | null
     runId?: string
     deliveryContract?: MessageDeliveryContract
+    /** Host-only column write (never gated — insertMessage's callers are the host-lifecycle
+     * exemption list): the runtime-notification kinds (input_not_consumed / liveness_breach /
+     * relay_unreachable) that keep living in JSON payload.kind (amendment D) also need the
+     * payload_kind COLUMN populated, since every read-side waiter/reservation lookup
+     * (message-waiter-thread-keying.ts) now reads that column exclusively. */
+    payloadKind?: string | null
   }): MessageRow {
     const runId = msg.runId ?? LEGACY_RUN_ID
     const deliveryContract = msg.deliveryContract ?? 'current_delivery'
@@ -3535,9 +3588,10 @@ export class OrchestrationDb {
     const stmt = this.db.prepare(`
       INSERT INTO messages (
         id, run_id, delivery_contract, from_handle, to_handle, subject, body,
-        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key, sender_agent_id
+        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key, sender_agent_id,
+        payload_kind
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     stmt.run(
       id,
@@ -3553,7 +3607,8 @@ export class OrchestrationDb {
       msg.payload ?? null,
       msg.senderPaneKey ?? null,
       msg.recipientPaneKey ?? null,
-      msg.senderAgentId ?? null
+      msg.senderAgentId ?? null,
+      msg.payloadKind ?? null
     )
     return exposeMessageTimestamps(
       this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
@@ -3669,18 +3724,36 @@ export class OrchestrationDb {
           )
         }
       } else {
-        message = this.insertMessage({
+        // Amendment A: legacy lifecycle sends (heartbeat/worker_done/escalation, imported via
+        // orchestration-legacy-lifecycle.ts) route through the single write choke too — the
+        // wire payload is still a pre-stringified string (payloadValueForGate bridges it, see
+        // that function's doc comment on the double-encoding trap).
+        const insertedLegacy = this.insertGatedMessage({
           from: principal.terminal_handle,
           to: delivery.to,
           subject: params.message.subject,
           body: params.message.body,
           type: params.message.type,
           priority: params.message.priority,
-          payload: params.message.payload,
+          payload: payloadValueForGate(params.message.payload),
           senderPaneKey: principal.pane_key,
+          senderHostId: 'local',
           runId: principal.run_id,
-          deliveryContract: delivery.contract
+          deliveryContract: delivery.contract,
+          verb: 'send'
         })
+        if (insertedLegacy.outcome === 'refused') {
+          // Why COMMIT, not ROLLBACK: insertGatedMessage already wrote its own gate_refusals
+          // audit row as part of THIS ambient transaction (SQLite has no nested transactions,
+          // and this method's own BEGIN IMMEDIATE opened above is still the active one) — a
+          // ROLLBACK here would erase that audit row along with it, the same trap
+          // peer-question.ts's doc comment on createPeerQuestion calls out. Nothing else has
+          // been written yet at this point in the flow, so committing here just persists the
+          // refusal audit and applies no other legacy-lifecycle effect.
+          this.db.exec('COMMIT')
+          throw gateVerdictRefusalError(insertedLegacy.verdict, insertedLegacy.refusalId)
+        }
+        message = insertedLegacy.message
       }
 
       let settlement: WorkerReportSettlement | undefined
@@ -4127,6 +4200,10 @@ export class OrchestrationDb {
     ) as LegacyOperationReceiptRow
   }
 
+  // Why the live-message clause here (amendment E, PURGE §): getUnreadMessages backs
+  // orchestration.check for every mailbox shape (run/dispatch/agent/bare-handle) — filtering
+  // in SQL, not in the RPC formatter, is what keeps a purged body or a quarantined author's row
+  // from ever reaching a --json caller.
   getUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
@@ -4135,7 +4212,7 @@ export class OrchestrationDb {
           .prepare(
             `SELECT * FROM messages
              WHERE to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery'
-               AND type IN (${placeholders}) ORDER BY sequence`
+               AND type IN (${placeholders}) AND ${liveMessageSqlClause()} ORDER BY sequence`
           )
           .all(toHandle, ...types) as MessageRow[]
       )
@@ -4145,6 +4222,7 @@ export class OrchestrationDb {
         .prepare(
           `SELECT * FROM messages
            WHERE to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery'
+             AND ${liveMessageSqlClause()}
            ORDER BY sequence`
         )
         .all(toHandle) as MessageRow[]
@@ -4187,6 +4265,8 @@ export class OrchestrationDb {
   }
 
   // Why: delivered_at IS NULL filter — push-on-idle delivers each row at most once; read (set only by check) wouldn't prevent replay.
+  // Live-message clause (amendment E): this result feeds the ambient pane push
+  // (deliverPendingMessagesForHandle) — a purged/withheld row must never be typed into a pane.
   getUndeliveredUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
@@ -4196,7 +4276,7 @@ export class OrchestrationDb {
             `SELECT * FROM messages
              WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL
                AND delivery_contract = 'current_delivery'
-               AND type IN (${placeholders}) ORDER BY sequence`
+               AND type IN (${placeholders}) AND ${liveMessageSqlClause()} ORDER BY sequence`
           )
           .all(toHandle, ...types) as MessageRow[]
       )
@@ -4207,6 +4287,7 @@ export class OrchestrationDb {
           `SELECT * FROM messages
            WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL
              AND delivery_contract = 'current_delivery'
+             AND ${liveMessageSqlClause()}
            ORDER BY sequence`
         )
         .all(toHandle) as MessageRow[]
@@ -4233,7 +4314,8 @@ export class OrchestrationDb {
         .prepare(
           `SELECT DISTINCT to_handle FROM messages
            WHERE read = 0 AND delivered_at IS NULL
-             AND delivery_contract = 'current_delivery'`
+             AND delivery_contract = 'current_delivery'
+             AND ${liveMessageSqlClause()}`
         )
         .all() as { to_handle: string }[]
     ).map((row) => row.to_handle)
@@ -4286,10 +4368,14 @@ export class OrchestrationDb {
       .run(...ids)
   }
 
+  // Live-message clause (amendment E): orchestration.inbox with no --terminal/--thread-id
+  // passthrough — a purged/withheld row must not leak through the bare operator inbox either.
   getInbox(limit = 20): MessageRow[] {
     return exposeMessageListTimestamps(
       this.db
-        .prepare('SELECT * FROM messages ORDER BY sequence DESC LIMIT ?')
+        .prepare(
+          `SELECT * FROM messages WHERE ${liveMessageSqlClause()} ORDER BY sequence DESC LIMIT ?`
+        )
         .all(limit) as MessageRow[]
     )
   }
@@ -4301,14 +4387,18 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
+            `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders})
+             AND ${liveMessageSqlClause()} ORDER BY sequence DESC LIMIT ?`
           )
           .all(toHandle, ...types, limit) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(
       this.db
-        .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
+        .prepare(
+          `SELECT * FROM messages WHERE to_handle = ? AND ${liveMessageSqlClause()}
+           ORDER BY sequence DESC LIMIT ?`
+        )
         .all(toHandle, limit) as MessageRow[]
     )
   }
@@ -4319,7 +4409,8 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ? ORDER BY sequence ASC'
+            `SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ?
+             AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
           .all(threadId, toHandle, afterSequence) as MessageRow[]
       )
@@ -4327,7 +4418,8 @@ export class OrchestrationDb {
     return exposeMessageListTimestamps(
       this.db
         .prepare(
-          'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC'
+          `SELECT * FROM messages WHERE thread_id = ? AND to_handle = ?
+           AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
         )
         .all(threadId, toHandle) as MessageRow[]
     )
@@ -4346,7 +4438,8 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND sequence > ? ORDER BY sequence ASC'
+            `SELECT * FROM messages WHERE thread_id = ? AND sequence > ?
+             AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
           .all(threadId, since.value) as MessageRow[]
       )
@@ -4355,14 +4448,17 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY sequence ASC'
+            `SELECT * FROM messages WHERE thread_id = ? AND created_at > ?
+             AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
           .all(threadId, since.value) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(
       this.db
-        .prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence ASC')
+        .prepare(
+          `SELECT * FROM messages WHERE thread_id = ? AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
+        )
         .all(threadId) as MessageRow[]
     )
   }
@@ -6172,7 +6268,30 @@ export class OrchestrationDb {
 
       let message = this.getMessageById(params.message.id)
       if (!message) {
-        message = this.insertMessage(params.message)
+        // Why insertMessage, not insertGatedMessage, here: this relay item carries mixed
+        // content — a worker's own free-text worker_done/escalation body (already gated once at
+        // the worker's own local orchestration.send/ask, on its own runtime, before it was ever
+        // relayed) alongside host-generated 'runtime_notification' relay items whose JSON
+        // payload legitimately carries `kind` (input_not_consumed/liveness_breach/
+        // relay_unreachable — amendment D's reserved namespace). insertGatedMessage's
+        // payload_kind_reserved refusal would incorrectly fire on that second, legitimate
+        // shape. payload_kind (the COLUMN) is still populated directly, same bridge as
+        // runtime-notification.ts, so the read-side switch (amendment D) still matches these
+        // rows once they land here.
+        let payloadKind: string | null = null
+        if (params.message.payload) {
+          try {
+            const parsed: unknown = JSON.parse(params.message.payload)
+            const kind =
+              parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+                ? (parsed as Record<string, unknown>).kind
+                : undefined
+            payloadKind = typeof kind === 'string' ? kind : null
+          } catch {
+            payloadKind = null
+          }
+        }
+        message = this.insertMessage({ ...params.message, payloadKind })
       } else if (
         message.run_id !== params.message.runId ||
         message.to_handle !== params.message.to ||

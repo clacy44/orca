@@ -273,7 +273,7 @@ export function monitorWorkerSetup(args: {
         message.to_handle,
         message.type,
         message.thread_id,
-        extractPayloadKind(message.payload)
+        extractPayloadKind(message.payload_kind)
       )
     })
     .catch(() => undefined)

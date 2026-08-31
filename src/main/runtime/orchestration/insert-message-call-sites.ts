@@ -37,13 +37,17 @@ export const INSERT_MESSAGE_CALL_SITES: readonly InsertMessageCallSite[] = [
     count: 1,
     kind: 'host-lifecycle'
   },
-  // pending-reroute — peer-supplied free text (legacy lifecycle ops, dispatch question/answer
-  // bodies, federated relay import); S10-2b moves these onto insertGatedMessage
-  { file: 'main/runtime/orchestration/db.ts', count: 6, kind: 'pending-reroute' },
-  {
-    file: 'main/runtime/orchestration/federation-control-message.ts',
-    count: 1,
-    kind: 'pending-reroute'
-  },
-  { file: 'main/runtime/rpc/methods/orchestration.ts', count: 3, kind: 'pending-reroute' }
+  // pending-reroute — peer-supplied free text still bypassing the gate: the legacy
+  // question/answer dispatcher plumbing (findLegacyQuestionsBySemanticIdentity's reconstruction
+  // path, legacy answerQuestion-equivalent, and the mutation-executor replay path at
+  // params.message) — out of S10-2b's enumerated scope (amendment A names point-to-point send,
+  // broadcast, reply, federation relay import, and orchestration-legacy-lifecycle.ts sends
+  // specifically; commitLegacyLifecycleOperation's own insert — the one backing
+  // orchestration-legacy-lifecycle.ts — has moved onto insertGatedMessage). This remaining
+  // legacy-question/mutation-replay plumbing is a separate, larger reroute left for a
+  // follow-up slice.
+  // orchestration.ts (send point-to-point, broadcast, reply) and
+  // federation-control-message.ts (federation relay import) have moved onto
+  // insertGatedMessage in S10-2b and are no longer on this list.
+  { file: 'main/runtime/orchestration/db.ts', count: 5, kind: 'pending-reroute' }
 ]

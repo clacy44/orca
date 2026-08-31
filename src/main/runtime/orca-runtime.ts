@@ -34569,7 +34569,7 @@ export class OrcaRuntimeService {
       }
     }
     const unread = pending.filter((message) => {
-      const payloadKind = extractPayloadKind(message.payload)
+      const payloadKind = extractPayloadKind(message.payload_kind)
       return (
         !isTypeReserved(options.reservedTypes, message.type, message.thread_id, payloadKind) &&
         !messageTypeHasLiveWaiter(waiters, message.type, message.thread_id, payloadKind, {

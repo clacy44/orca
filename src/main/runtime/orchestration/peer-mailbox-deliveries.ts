@@ -8,21 +8,32 @@ import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import type { MessageRow } from './types'
 import type { MailboxDeliveryRow } from './agent-directory-types'
+import { filterLiveMessageRows, type LiveMessageFilterOmitted } from './message-visibility-filter'
 
 // Local generator (see agent-directory.ts's note): avoids a require cycle with db.ts.
 function generateMailboxDeliveryId(): string {
   return `mdel_${randomBytes(6).toString('hex')}`
 }
 
-function fetchMessagesByIds(db: Database.Database, ids: string[]): MessageRow[] {
+// Why filtered here too (amendment E, same "Frozen delivery batches" rule as db.ts's
+// getDeliveryMessages): message_ids is frozen at mint time, so a purge or quarantine issued
+// after the freeze must still drop the row out of every replay — the id itself stays in the
+// frozen list so an eventual ack still clears it.
+function fetchMessagesByIds(
+  db: Database.Database,
+  ids: string[]
+): { messages: MessageRow[]; omitted: LiveMessageFilterOmitted } {
   if (ids.length === 0) {
-    return []
+    return { messages: [], omitted: { purged: 0, withheld: 0 } }
   }
   const rows = db
     .prepare(`SELECT * FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`)
     .all(...ids) as MessageRow[]
   const byId = new Map(rows.map((row) => [row.id, row]))
-  return ids.map((id) => byId.get(id)).filter((row): row is MessageRow => row !== undefined)
+  const ordered = ids
+    .map((id) => byId.get(id))
+    .filter((row): row is MessageRow => row !== undefined)
+  return filterLiveMessageRows(db, ordered)
 }
 
 export type GetOrCreateMailboxDeliveryParams = {
@@ -36,6 +47,7 @@ export type GetOrCreateMailboxDeliveryResult = {
   messages: MessageRow[]
   replayed: boolean
   pendingBehind: number
+  omitted?: LiveMessageFilterOmitted
 }
 
 /**
@@ -63,9 +75,15 @@ export function getOrCreateMailboxDelivery(
       const frozenIds = JSON.parse(existing.message_ids) as string[]
       const frozenSet = new Set(frozenIds)
       const pendingBehind = params.messageIds.filter((id) => !frozenSet.has(id)).length
-      const messages = fetchMessagesByIds(db, frozenIds)
+      const { messages, omitted } = fetchMessagesByIds(db, frozenIds)
       db.exec('COMMIT')
-      return { delivery: existing, messages, replayed: true, pendingBehind }
+      return {
+        delivery: existing,
+        messages,
+        replayed: true,
+        pendingBehind,
+        ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
+      }
     }
 
     const batch = params.messageIds.slice(0, limit)
@@ -80,10 +98,16 @@ export function getOrCreateMailboxDelivery(
     const delivery = db
       .prepare('SELECT * FROM mailbox_deliveries WHERE id = ?')
       .get(deliveryId) as MailboxDeliveryRow
-    const messages = fetchMessagesByIds(db, batch)
+    const { messages, omitted } = fetchMessagesByIds(db, batch)
     const pendingBehind = params.messageIds.length - batch.length
     db.exec('COMMIT')
-    return { delivery, messages, replayed: false, pendingBehind }
+    return {
+      delivery,
+      messages,
+      replayed: false,
+      pendingBehind,
+      ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
+    }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error

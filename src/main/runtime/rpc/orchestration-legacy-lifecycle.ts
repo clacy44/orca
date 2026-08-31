@@ -109,7 +109,7 @@ export async function handleLegacyLifecycleSend(args: {
       committed.message.to_handle,
       committed.message.type,
       committed.message.thread_id,
-      extractPayloadKind(committed.message.payload)
+      extractPayloadKind(committed.message.payload_kind)
     )
   }
   return {

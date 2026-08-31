@@ -212,17 +212,25 @@ describe('reservation key algebra is closed', () => {
   })
 })
 
-describe('extractPayloadKind', () => {
-  it('reads a host-written kind out of the JSON payload', () => {
-    expect(extractPayloadKind(JSON.stringify({ kind: 'pact_step', ordinal: 1 }))).toBe('pact_step')
+describe('extractPayloadKind (S10-2b amendment D: reads the payload_kind COLUMN, not JSON)', () => {
+  it('passes a column value through unchanged', () => {
+    expect(extractPayloadKind('pact_step')).toBe('pact_step')
   })
 
-  it('is null for absent, non-object, or kind-less payloads', () => {
+  it('normalizes absent (null/undefined) to null', () => {
     expect(extractPayloadKind(null)).toBeNull()
     expect(extractPayloadKind(undefined)).toBeNull()
-    expect(extractPayloadKind(JSON.stringify({ origin: 'runtime' }))).toBeNull()
-    expect(extractPayloadKind('not json')).toBeNull()
-    expect(extractPayloadKind(JSON.stringify('a string payload'))).toBeNull()
+  })
+
+  // Mutation guard: if extractPayloadKind reverts to JSON.parse(payload).kind, a caller-shaped
+  // JSON payload string handed in as the (now-column-typed) argument would be misread as a
+  // literal kind string instead of being ignored — this is what amendment D closes off. A
+  // caller's payload JSON must never again be treated as a source of truth for the
+  // discriminator, even accidentally.
+  it('never re-parses its argument as JSON — a JSON-shaped string is an opaque literal', () => {
+    expect(extractPayloadKind(JSON.stringify({ kind: 'pact_step' }))).toBe(
+      JSON.stringify({ kind: 'pact_step' })
+    )
   })
 })
 

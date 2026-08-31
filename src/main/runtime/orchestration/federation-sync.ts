@@ -134,7 +134,7 @@ async function syncFederatedDispatchPages(
       stored.message.to_handle,
       stored.message.type,
       stored.message.thread_id,
-      extractPayloadKind(stored.message.payload)
+      extractPayloadKind(stored.message.payload_kind)
     )
     imported += stored.duplicate ? 0 : 1
   }
