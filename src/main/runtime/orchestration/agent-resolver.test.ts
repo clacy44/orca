@@ -201,8 +201,24 @@ describe('resolveAgentQuery', () => {
     const query = 'merge restructure'
     const { score } = scoreAgentCandidate(query, stuffed)
     // Naive matched/|Q| would score (2/2)*0.9(idle) = 0.9 here (both query tokens present).
-    // The denominator cap (weight * min(|F|,16)) instead divides by 16, giving ~0.125.
+    // The denominator cap (min(|F|,16)) instead divides by 16, giving ~0.125.
     expect(score).toBeLessThan(0.5)
+  })
+
+  // S10-7 review fix (minor, F-A): FIELD_WEIGHTS previously lived inside the denominator
+  // (`min(weight * |F|, CAP)`), which cancels out whenever `weight * |F| <= CAP` — true for
+  // every realistic name/title field — so an identical partial match scored the same whether it
+  // landed in the 2x-weighted name field or the 1x-weighted role field. The weight now applies
+  // to the numerator, so a name match is worth double a role match on a field of the same size.
+  it('REGRESSION (F-A minor): an identical partial match scores 2x higher in name than in role', () => {
+    const sharedFieldText = 'alpha bravo charlie delta' // 4 distinct tokens, well under the cap
+    const query = 'alpha bravo' // matches 2 of the 4
+    const inName = candidate({ displayName: sharedFieldText, role: null })
+    const inRole = candidate({ displayName: 'unrelated-fixture-name', role: sharedFieldText })
+    const nameFieldScore = scoreAgentCandidate(query, inName).score
+    const roleFieldScore = scoreAgentCandidate(query, inRole).score
+    expect(roleFieldScore).toBeGreaterThan(0)
+    expect(nameFieldScore).toBeCloseTo(2 * roleFieldScore, 5)
   })
 })
 
@@ -269,6 +285,38 @@ describe('F-A acceptance tests', () => {
     expect(scoreAgentCandidate(stuffedOnlyQuery, stuffed).score).toBeLessThan(
       AGENT_RESOLVER_THRESHOLD
     )
+  })
+
+  // S10-7 review fix (F-A T3 extension): the T3 fixture above gives the stuffed candidate a
+  // name sharing no token with the query, so it can't reach the exploit — a stuffed role
+  // "corroborating" a name field it never actually shares tokens with. Here the stuffed
+  // candidate's name DOES partially match (like a real short/generic name would), same shape as
+  // the live regression: a 50-keyword-stuffed role plus real topical tokens the query also hits.
+  it('T3 extended: a stuffed role corroborating a short partial-name match still never outscores an exact-name candidate', () => {
+    const stuffedTopics = Array.from({ length: 50 }, (_, i) => `stuffedkeyword${i}`)
+    stuffedTopics.splice(10, 0, 'services', 'deploys', 'routing', 'certs', 'backups')
+    const stuffed = candidate({
+      id: 'agt_stuffed_named',
+      displayName: 'vps',
+      role: stuffedTopics.join(' ')
+    })
+    const exactName = candidate({
+      id: 'agt_exact_vps_services',
+      displayName: 'vps-services',
+      role: null
+    })
+
+    for (const query of ['vps services', 'vps services deploys', 'services deploys']) {
+      const stuffedScore = scoreAgentCandidate(query, stuffed).score
+      const exactScore = scoreAgentCandidate(query, exactName).score
+      expect(stuffedScore).toBeLessThan(exactScore)
+    }
+
+    // resolveAgentQuery must not flip to ambiguous (or worse, resolve the stuffed candidate)
+    // when both are in play together.
+    const result = resolveAgentQuery('vps services', [stuffed, exactName])
+    expect(result.outcome).toBe('resolved')
+    expect(result.candidates[0]?.id).toBe('agt_exact_vps_services')
   })
 
   it('T4: each of the four charter agents resolves from a natural phrasing of its own name', () => {

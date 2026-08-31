@@ -11,22 +11,32 @@
 // Fix shape (owner ruling F-A, builder-refined): stopword-filter the query; distinct-token
 // matching only (repeated tokens in a field never add extra credit); score every field
 // independently instead of cascading, weighting a NAME token match 2x a role/title/worktree
-// token match; take the best-scoring field per candidate; then multiply by a global
-// `queryCoverage` term (the fraction of the query's distinct tokens found in ANY field) so a
-// detailed role that corroborates a partial name match still lifts the score — detail helps
-// findability instead of only diluting it. Each field's own denominator
-// (`weight * distinct field tokens`, capped at AGENT_RESOLVER_MAX_FIELD_TOKENS) keeps a
-// stuffed field from claiming an exact-match-sized score just because it happens to contain
-// every query token somewhere in a wall of keywords.
+// token match; take the best-scoring field per candidate; then multiply by a `queryCoverage`
+// term so a detailed role that corroborates a partial name match still lifts the score — detail
+// helps findability instead of only diluting it. Each field's own denominator (distinct field
+// tokens, capped at AGENT_RESOLVER_MAX_FIELD_TOKENS) keeps a stuffed field from claiming an
+// exact-match-sized score just because it happens to contain every query token somewhere in a
+// wall of keywords.
+//
+// S10-7 review fix (F-A T3): queryCoverage originally counted every query token found in ANY
+// field at full value, so a stuffed non-best field (typically role) could buy full coverage for
+// tokens the best field never actually matched, letting a 50-keyword-stuffed role outscore an
+// exact-name match. Tokens the best field itself matched still count in full; a token found only
+// in another field counts at AGENT_RESOLVER_CORROBORATION_DISCOUNT — corroboration still helps,
+// it just can't substitute for the best field actually containing the token.
 
 export const AGENT_RESOLVER_THRESHOLD = 0.45
 export const AGENT_RESOLVER_MARGIN = 0.15
 export const AGENT_RESOLVER_DERIVED_PENALTY = 0.85
-// Cap on a single field's *weighted* size (weight * distinct token count) used as that field's
-// scoring denominator. A short honest field (typically name) normalizes against its own small
-// size; a long stuffed field (typically role) is capped here so its score-per-match floor stays
-// bounded no matter how many extra keywords are piled on.
+// Cap on a single field's distinct token count, used as that field's scoring denominator (see
+// scoreField). A short honest field (typically name) normalizes against its own small size; a
+// long stuffed field (typically role) is capped here so its score-per-match floor stays bounded
+// no matter how many extra keywords are piled on.
 export const AGENT_RESOLVER_MAX_FIELD_TOKENS = 16
+// A query token matched only in a field other than the candidate's best-scoring field counts for
+// this fraction of a full match toward queryCoverage (F-A T3 fix). Full-value corroboration let
+// a stuffed secondary field buy coverage for tokens the best field never contained.
+export const AGENT_RESOLVER_CORROBORATION_DISCOUNT = 0.4
 
 // Liveness multiplier: a spamming/idle-forever agent cannot outrank a live one purely by
 // existing longer; 'gone' candidates are expected to be filtered out by the caller before
@@ -79,8 +89,17 @@ const FIELD_WEIGHTS: Record<FieldName, number> = {
 type FieldMatch = { field: FieldName; score: number; matchedTokens: string[] }
 
 // Scores one field independently (no cascade): distinct query tokens matched in this field,
-// weighted by FIELD_WEIGHTS, over this field's own weighted-and-capped size. Returns null when
-// nothing in the field matches.
+// over this field's own capped size, then scaled by FIELD_WEIGHTS and clamped to 1. Returns
+// null when nothing in the field matches.
+//
+// S10-7 review fix (minor, F-A): the weight used to live *inside* the denominator
+// (`min(weight * |F|, CAP)`), which cancels out whenever `weight * |F| <= CAP` — i.e. for every
+// realistic name (up to 8 distinct tokens at weight 2) and worktree (up to 22 at weight 0.7) —
+// making FIELD_WEIGHTS inert for exactly the fields it exists to weight, and let a field earn a
+// bigger *raw* stuffing allowance the higher its weight once the cap did bind. Applying the
+// weight to the numerator and clamping the result keeps a full match saturated at 1 (weight
+// can't inflate past "fully matched") while making a *partial* match on a higher-weighted field
+// score proportionally higher, which is FIELD_WEIGHTS' actual intent.
 function scoreField(field: FieldName, text: string, queryTokenSet: Set<string>): FieldMatch | null {
   const fieldTokens = tokenize(text)
   if (fieldTokens.length === 0 || queryTokenSet.size === 0) {
@@ -92,11 +111,10 @@ function scoreField(field: FieldName, text: string, queryTokenSet: Set<string>):
     return null
   }
   const weight = FIELD_WEIGHTS[field]
-  const weightedFieldSize = Math.min(weight * fieldTokenSet.size, AGENT_RESOLVER_MAX_FIELD_TOKENS)
-  const weightedMatched = weight * matchedTokens.length
+  const cappedFieldSize = Math.min(fieldTokenSet.size, AGENT_RESOLVER_MAX_FIELD_TOKENS)
   return {
     field,
-    score: weightedMatched / weightedFieldSize,
+    score: Math.min(1, (weight * matchedTokens.length) / cappedFieldSize),
     matchedTokens
   }
 }
@@ -150,7 +168,16 @@ export function scoreAgentCandidate(
     ['worktree', worktreeText || null]
   ]
 
-  let best: FieldMatch | null = null
+  // bestScore/bestMatchedTokens track every field tied for the top score, not just the first
+  // one seen: FIELD_WEIGHTS' fix (scoreField, above) makes ties common — a fully-matched role
+  // (weight 1) and a half-matched name (weight 2) can both land exactly at the 1.0 cap. Crediting
+  // only the first-iterated field's tokens as "best" would make the corroboration discount below
+  // depend on field iteration order rather than actual evidence strength, unfairly discounting a
+  // token that a CO-best field matched just because a same-scoring field happened to be checked
+  // first and didn't itself contain that token.
+  let bestScore = 0
+  let bestMatch: FieldMatch | null = null
+  const bestMatchedTokens = new Set<string>()
   const matchedAnywhere = new Set<string>()
   for (const [field, text] of fields) {
     if (!text) {
@@ -163,21 +190,38 @@ export function scoreAgentCandidate(
     for (const token of scored.matchedTokens) {
       matchedAnywhere.add(token)
     }
-    if (!best || scored.score > best.score) {
-      best = scored
+    if (scored.score > bestScore) {
+      bestScore = scored.score
+      bestMatch = scored
+      bestMatchedTokens.clear()
+      for (const token of scored.matchedTokens) {
+        bestMatchedTokens.add(token)
+      }
+    } else if (scored.score === bestScore) {
+      for (const token of scored.matchedTokens) {
+        bestMatchedTokens.add(token)
+      }
     }
   }
-  if (!best) {
+  if (!bestMatch) {
     return { score: 0, why: [] }
   }
 
   // Detail helps findability: a query whose tokens are corroborated across more of the
-  // candidate's fields scores higher, even when no single field alone contains every token.
-  const queryCoverage = matchedAnywhere.size / queryTokenSet.size
+  // candidate's fields scores higher, even when no single field alone contains every token —
+  // but a token found ONLY outside every top-scoring field counts at a discount (F-A T3 fix
+  // above), so a stuffed lower-scoring field can't buy full coverage credit for tokens the
+  // winning field(s) lack.
+  const corroboratingOnlyCount = [...matchedAnywhere].filter(
+    (token) => !bestMatchedTokens.has(token)
+  ).length
+  const queryCoverage =
+    (bestMatchedTokens.size + AGENT_RESOLVER_CORROBORATION_DISCOUNT * corroboratingOnlyCount) /
+    queryTokenSet.size
 
   const liveness = LIVENESS_MULTIPLIER[candidate.state]
   const derivedPenalty = candidate.derived ? AGENT_RESOLVER_DERIVED_PENALTY : 1
-  const score = Math.min(1, queryCoverage * best.score * liveness * derivedPenalty)
+  const score = Math.min(1, queryCoverage * bestScore * liveness * derivedPenalty)
   // Report matched tokens in query order, deduped, across every field that contributed —
   // richer explainability than a single field's matches now that fields aren't cascaded away.
   const why = queryTokens.filter(

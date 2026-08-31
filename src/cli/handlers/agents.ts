@@ -27,6 +27,7 @@ type RegisterResult = {
   created: boolean
   reMinted: boolean
   repointedMessages: number
+  pendingOnOldHandle: number
 }
 type ListResult = {
   agents: AgentView[]
@@ -112,8 +113,12 @@ function formatAgentRegister(result: RegisterResult): string {
     result.repointedMessages > 0
       ? `\n${result.repointedMessages} unread message(s) from your previous terminal handle moved into this mailbox.`
       : ''
+  const pending =
+    result.pendingOnOldHandle > 0
+      ? `\n${result.pendingOnOldHandle} more unread message(s) on your previous terminal handle were NOT moved (backlog too large for one re-mint) and are no longer reachable from this agent.`
+      : ''
   return (
-    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}\n` +
+    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}\n` +
     `Next: orca orchestration send --to agent:${result.agent.id} --subject "..."`
   )
 }

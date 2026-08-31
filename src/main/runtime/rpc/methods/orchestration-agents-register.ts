@@ -137,7 +137,10 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // S10-7 F-C: how many of the OLD terminal_handle's unread bare-handle messages this
         // re-mint just repointed into the row's durable agent:<id> mailbox. Always 0 on a fresh
         // 'created' row (no prior handle to repoint from).
-        repointedMessages: result.outcome === 'reminted' ? result.repointedMessages : 0
+        repointedMessages: result.outcome === 'reminted' ? result.repointedMessages : 0,
+        // Nonzero only past the per-call batch ceiling (agent-mailbox-repoint.ts) — those rows
+        // are not reachable by any other path once this re-mint's transaction commits.
+        pendingOnOldHandle: result.outcome === 'reminted' ? result.pendingOnOldHandle : 0
       }
     }
   })
