@@ -57,6 +57,7 @@ type FindResult = {
   omitted?: { quarantined: number; derived: number }
   hostsAnswered?: string
   unreached?: { host: string; reason: string }[]
+  malformed?: { host: string; dropped: number }[]
   nextSteps: string[]
 }
 type RelinkResult = { environment: string; dispatchIds: string[] }
@@ -148,7 +149,13 @@ function crossHostNote(result: FindResult): string {
     result.unreached && result.unreached.length > 0
       ? `; unreached: ${result.unreached.map((u) => `${u.host} (${u.reason})`).join(', ')}`
       : ''
-  return `\n(hosts answered: ${result.hostsAnswered}${unreached})`
+  const malformed =
+    result.malformed && result.malformed.length > 0
+      ? `; dropped: ${result.malformed
+          .map((m) => `${m.dropped} unparseable row(s) from ${m.host}`)
+          .join(', ')}`
+      : ''
+  return `\n(hosts answered: ${result.hostsAnswered}${unreached}${malformed})`
 }
 
 function formatAgentFind(result: FindResult): string {

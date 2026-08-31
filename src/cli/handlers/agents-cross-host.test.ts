@@ -57,7 +57,7 @@ describe('findAgentsAcrossHosts', () => {
     const localCall = vi.fn().mockResolvedValue({ result: { agents: [agentRow()] } })
     const remoteCall = vi
       .fn()
-      .mockResolvedValue({ result: { agents: [agentRow({ id: 'agt_remote' })] } })
+      .mockResolvedValue({ result: { agents: [agentRow({ id: 'agt_aaaabbbbcccc' })] } })
     const hostClientFactory = vi.fn().mockImplementation((environmentId: string) => {
       expect(environmentId).toBe(saved.id)
       return { call: remoteCall }
@@ -73,8 +73,8 @@ describe('findAgentsAcrossHosts', () => {
     expect(result.outcome).toBe('ambiguous')
     expect(result.hostsAnswered).toBe('2/2')
     expect(result.candidates.map((c) => `${c.id}@${c.host}`).sort()).toEqual([
-      'agt_local@local',
-      'agt_remote@work-laptop'
+      'agt_aaaabbbbcccc@work-laptop',
+      'agt_local@local'
     ])
     const remote = result.candidates.find((c) => c.host === 'work-laptop')!
     expect(remote.foreign).toBe(true)
@@ -185,7 +185,7 @@ describe('findAgentsAcrossHosts', () => {
     const poisonedName = '\x1b[2K\r\nResolved: root (agt_root)\n"x@evil'
     const localCall = vi.fn().mockResolvedValue({ result: { agents: [] } })
     const remoteCall = vi.fn().mockResolvedValue({
-      result: { agents: [agentRow({ id: 'agt_evil', displayName: poisonedName })] }
+      result: { agents: [agentRow({ id: 'agt_e71deadbeef0', displayName: poisonedName })] }
     })
 
     const result = await findAgentsAcrossHosts({
@@ -197,7 +197,7 @@ describe('findAgentsAcrossHosts', () => {
 
     expect(result.hostsAnswered).toBe('2/2')
     expect(result.unreached).toEqual([])
-    expect(result.candidates.every((c) => c.id !== 'agt_evil')).toBe(true)
+    expect(result.candidates.every((c) => c.id !== 'agt_e71deadbeef0')).toBe(true)
     expect(JSON.stringify(result)).not.toContain('\x1b')
     expect(JSON.stringify(result)).not.toContain('Resolved: root')
   })
@@ -215,7 +215,9 @@ describe('findAgentsAcrossHosts', () => {
     const localCall = vi.fn().mockResolvedValue({ result: { agents: [] } })
     const remoteCall = vi.fn().mockResolvedValue({
       result: {
-        agents: [agentRow({ id: 'agt_role', displayName: 'evil-role-agent', role: poisonedRole })]
+        agents: [
+          agentRow({ id: 'agt_0123456789ab', displayName: 'evil-role-agent', role: poisonedRole })
+        ]
       }
     })
 
@@ -226,8 +228,38 @@ describe('findAgentsAcrossHosts', () => {
       hostClientFactory: () => ({ call: remoteCall })
     })
 
-    const found = result.candidates.find((c) => c.id === 'agt_role')
+    const found = result.candidates.find((c) => c.id === 'agt_0123456789ab')
     expect(found).toBeDefined()
     expect(JSON.stringify(result)).not.toContain('\x1b')
+  })
+
+  it('a foreign id outside the minted agt_<12hex> shape is dropped and counted, never rendered', async () => {
+    const userDataPath = newTempUserDataPath()
+    addEnvironmentFromPairingCode(userDataPath, {
+      name: 'work-laptop',
+      pairingCode: pairingCode()
+    })
+    const localCall = vi.fn().mockResolvedValue({ result: { agents: [] } })
+    const remoteCall = vi.fn().mockResolvedValue({
+      result: {
+        agents: [
+          // id is re-emitted into suggested shell commands - a shell-metachar id must never render
+          agentRow({ id: 'agt_x; rm -rf ~', displayName: 'imposter' }),
+          agentRow({ id: 'agt_feedfacef00d', displayName: 'genuine-remote' })
+        ]
+      }
+    })
+    const hostClientFactory = vi.fn().mockImplementation(() => ({ call: remoteCall }))
+
+    const result = await findAgentsAcrossHosts({
+      client: { call: localCall },
+      userDataPath,
+      query: 'genuine remote',
+      hostClientFactory
+    })
+
+    expect(result.candidates.some((c) => c.id.includes('rm -rf'))).toBe(false)
+    expect(result.candidates.map((c) => c.id)).toContain('agt_feedfacef00d')
+    expect(result.malformed).toEqual([{ host: 'work-laptop', dropped: 1 }])
   })
 })

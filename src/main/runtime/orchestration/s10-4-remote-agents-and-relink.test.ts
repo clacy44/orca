@@ -1,6 +1,9 @@
 // S10-4 ruling 1 (remote_agents + relay_seen schema/triggers), ruling 5 (relinkFederatedEnvironment
 // recovery verb). See agent-coordination-s10-4-federation-spec.md ARBITRATION #4, #6.
 import { createHash } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
@@ -409,5 +412,64 @@ describe('S10-4 ruling 5: the authenticated_transport fallback never binds a fed
         }
       })
     ).not.toThrow()
+  })
+
+  // Verify major regression (S10-4): a DB stamped v36 by the PRE-FIX copy of the unshipped
+  // migration has relay_seen with the 2-column PK and no federated_dispatches.relink_generation;
+  // migrate()'s early return must not strand it (mutation guard: removing
+  // repairUnshippedV36RelinkGeneration in db.ts turns the reopen assertions red).
+  it('verify major: a v36 DB without relink_generation is repaired on open', () => {
+    db = new OrchestrationDb(':memory:') // throwaway for the shared afterEach close
+    const dir = mkdtempSync(join(tmpdir(), 'orca-relink-gen-repair-'))
+    const file = join(dir, 'orchestration.db')
+    try {
+      type Raw = {
+        exec(sql: string): void
+        prepare(s: string): { get(...a: unknown[]): unknown; run(...a: unknown[]): unknown }
+      }
+      const first = new OrchestrationDb(file)
+      const raw = (first as unknown as { db: Raw }).db
+      raw.exec(`
+        DROP TRIGGER IF EXISTS trg_relay_seen_no_update;
+        DROP TRIGGER IF EXISTS trg_relay_seen_no_delete;
+        DROP TABLE relay_seen;
+        CREATE TABLE relay_seen (
+          dispatch_id   TEXT NOT NULL,
+          sequence      INTEGER NOT NULL,
+          message_id    TEXT NOT NULL,
+          outcome       TEXT NOT NULL CHECK(outcome IN ('imported', 'refused', 'duplicate')),
+          rule_ids      TEXT,
+          created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(dispatch_id, sequence)
+        );
+        ALTER TABLE federated_dispatches DROP COLUMN relink_generation;
+      `)
+      first.close()
+
+      const reopened = new OrchestrationDb(file)
+      const raw2 = (reopened as unknown as { db: Raw }).db
+      const col = (table: string, name: string) =>
+        (
+          raw2
+            .prepare(`SELECT COUNT(*) AS c FROM pragma_table_info('${table}') WHERE name = ?`)
+            .get(name) as { c: number }
+        ).c
+      expect(col('federated_dispatches', 'relink_generation')).toBe(1)
+      expect(col('relay_seen', 'generation')).toBe(1)
+      // The widened PK admits the same (dispatch, sequence) under a new generation.
+      raw2
+        .prepare(
+          `INSERT INTO relay_seen (dispatch_id, sequence, generation, message_id, outcome) VALUES (?, ?, ?, ?, ?)`
+        )
+        .run('disp_1', 1, 0, 'msg_a', 'imported')
+      raw2
+        .prepare(
+          `INSERT INTO relay_seen (dispatch_id, sequence, generation, message_id, outcome) VALUES (?, ?, ?, ?, ?)`
+        )
+        .run('disp_1', 1, 1, 'msg_b', 'refused')
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

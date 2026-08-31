@@ -942,8 +942,57 @@ export class OrchestrationDb {
     }
   }
 
+  // Unshipped-v36 relink-generation repair (S10-4 verify major, same shape as the v35 pact_era
+  // one directly above): a DB stamped v36 by a pre-fix copy of this same UNSHIPPED migration
+  // never re-enters migrate()'s `current < 36` block, so its relay_seen keeps the 2-column PK
+  // and federated_dispatches lacks relink_generation — every federated relay import then dies.
+  // Guarded on user_version >= 36 so a pre-v36 DB still takes migrate()'s atomic path.
+  private repairUnshippedV36RelinkGeneration(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 36) {
+      return
+    }
+    if (!this.hasColumn('federated_dispatches', 'relink_generation')) {
+      this.db.exec(
+        'ALTER TABLE federated_dispatches ADD COLUMN relink_generation INTEGER NOT NULL DEFAULT 0'
+      )
+    }
+    if (!this.hasColumn('relay_seen', 'generation')) {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS trg_relay_seen_no_update;
+        DROP TRIGGER IF EXISTS trg_relay_seen_no_delete;
+        ALTER TABLE relay_seen RENAME TO relay_seen_pre_generation;
+        CREATE TABLE relay_seen (
+          dispatch_id   TEXT NOT NULL,
+          sequence      INTEGER NOT NULL,
+          generation    INTEGER NOT NULL DEFAULT 0,
+          message_id    TEXT NOT NULL,
+          outcome       TEXT NOT NULL CHECK(outcome IN ('imported', 'refused', 'duplicate')),
+          rule_ids      TEXT,
+          created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(dispatch_id, sequence, generation)
+        );
+        INSERT INTO relay_seen (dispatch_id, sequence, generation, message_id, outcome, rule_ids, created_at)
+          SELECT dispatch_id, sequence, 0, message_id, outcome, rule_ids, created_at
+          FROM relay_seen_pre_generation;
+        DROP TABLE relay_seen_pre_generation;
+        CREATE TRIGGER trg_relay_seen_no_update
+        BEFORE UPDATE ON relay_seen
+        BEGIN
+          SELECT RAISE(ABORT, 'relay_seen is append-only');
+        END;
+        CREATE TRIGGER trg_relay_seen_no_delete
+        BEFORE DELETE ON relay_seen
+        BEGIN
+          SELECT RAISE(ABORT, 'relay_seen is append-only');
+        END;
+      `)
+    }
+  }
+
   private createTables(): void {
     this.repairUnshippedV35PactEra()
+    this.repairUnshippedV36RelinkGeneration()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,

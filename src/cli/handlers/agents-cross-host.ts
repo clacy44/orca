@@ -13,6 +13,7 @@ import {
 import {
   sanitizeDirectoryText,
   sanitizeRole,
+  sanitizeTitle,
   validateDisplayNameCandidate
 } from '../../main/runtime/orchestration/agent-name-sanitizer'
 import { RuntimeClient } from '../runtime-client'
@@ -55,6 +56,8 @@ export type CrossHostFindResult = {
   candidates: CrossHostCandidate[]
   hostsAnswered: string
   unreached: UnreachedHost[]
+  /** Hosts that answered but whose response carried rows the sanitizer refused to render. */
+  malformed: { host: string; dropped: number }[]
   nextSteps: string[]
 }
 
@@ -63,6 +66,7 @@ type RawRow = AgentResolverCandidateInput & { terminalHandle: string | null }
 type HostListing = {
   host: string
   foreign: boolean
+  malformed: number
   rows: RawRow[]
   ok: boolean
   reason: string | null
@@ -105,13 +109,22 @@ const FOREIGN_TERMINAL_HANDLE_MAX_LENGTH = 128
 // register path at all — the render sanitizer alone assumes a shape a peer never guaranteed.
 // A displayName that fails validation is dropped rather than rendered: this host cannot safely
 // address or print an identity it cannot parse back into `name@host`.
+// A peer-supplied id is re-emitted verbatim into suggested shell commands (formatAgentFind's
+// `orca agents ask agt_…@host`), so it must match the ONLY shape a genuine directory id can
+// have (agent-directory.ts mints `agt_` + 12 hex) — anything else is dropped, never rendered.
+const FOREIGN_AGENT_ID_RE = /^agt_[0-9a-f]{12}$/
+
 function sanitizeForeignRow(row: RawAgentListRow): RawAgentListRow | null {
+  if (!FOREIGN_AGENT_ID_RE.test(row.id)) {
+    return null
+  }
   if (!validateDisplayNameCandidate(row.displayName).ok) {
     return null
   }
   return {
     ...row,
     role: sanitizeRole(row.role)?.value ?? null,
+    title: row.title != null ? (sanitizeTitle(row.title)?.value ?? null) : null,
     terminalHandle:
       row.terminalHandle != null
         ? sanitizeDirectoryText(row.terminalHandle, FOREIGN_TERMINAL_HANDLE_MAX_LENGTH).value
@@ -136,9 +149,11 @@ async function listHost(
     )
     const parsed = RAW_AGENT_LIST_RESPONSE_SCHEMA.parse(response.result)
     const rows: RawRow[] = []
+    let malformed = 0
     for (const raw of parsed.agents) {
       const a = foreign ? sanitizeForeignRow(raw) : raw
       if (!a) {
+        malformed += 1
         continue
       }
       rows.push({
@@ -153,9 +168,9 @@ async function listHost(
         terminalHandle: a.terminalHandle ?? null
       })
     }
-    return { host, foreign, rows, ok: true, reason: null }
+    return { host, foreign, rows, malformed, ok: true, reason: null }
   } catch (error) {
-    return { host, foreign, rows: [], ok: false, reason: describeFailure(error) }
+    return { host, foreign, rows: [], malformed: 0, ok: false, reason: describeFailure(error) }
   }
 }
 
@@ -274,6 +289,9 @@ export async function findAgentsAcrossHosts(options: {
   const unreached: UnreachedHost[] = listings
     .filter((listing) => !listing.ok)
     .map((listing) => ({ host: listing.host, reason: listing.reason ?? 'unreachable' }))
+  const malformed = listings
+    .filter((listing) => listing.malformed > 0)
+    .map((listing) => ({ host: listing.host, dropped: listing.malformed }))
 
   const nextSteps =
     resolved.outcome === 'ambiguous'
@@ -290,6 +308,7 @@ export async function findAgentsAcrossHosts(options: {
     candidates,
     hostsAnswered: `${answered}/${listings.length}`,
     unreached,
+    malformed,
     nextSteps
   }
 }
