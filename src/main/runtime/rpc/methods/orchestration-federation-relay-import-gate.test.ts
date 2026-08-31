@@ -3,6 +3,7 @@
 // from any remote-supplied JSON `kind` unconditionally. Split out of orchestration-federation.test.ts
 // (max-lines) — same scaffolding, narrower focus.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ORCHESTRATION_CONTRACT_VERSION } from '../../../../shared/protocol-version'
 import type { RuntimeRpcResponse } from '../../../../shared/runtime-rpc-envelope'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
@@ -266,5 +267,41 @@ describe('federated relay import gate (Amendments A/D)', () => {
       lifecycle: { kind: 'none' }
     })
     expect(stored.message?.payload_kind).toBe('setup_status')
+  })
+
+  // S10-4 ruling 8 (G-3): a coordinator push (reply/control message) targeting a dispatchId this
+  // runtime never attached — never started here, or the remote process restarted and lost its
+  // remote_dispatch_attachments row — keeps the S10-2b sentence instead of a bare not_found, AND
+  // routing resolution (does an attachment exist?) runs BEFORE the item's payload is parsed: a
+  // garbage payload for an unattached dispatch still returns dispatch_never_federated, not a
+  // payload-shape error.
+  it('a push for a never-federated dispatchId is refused with the re-dispatch sentence, before payload validation', async () => {
+    const response = await workerDispatcher.dispatch({
+      id: 'rpc_never_federated_push',
+      authToken: 'run-home-device-token',
+      orchestrationContractVersion: ORCHESTRATION_CONTRACT_VERSION,
+      orchestrationRequestId: 'never_federated_push',
+      method: 'orchestration.federationImport',
+      params: {
+        dispatchId: 'ctx_never_federated',
+        items: [
+          {
+            dispatch_id: 'ctx_never_federated',
+            direction: 'to_worker',
+            sequence: 1,
+            message_id: 'relay_never_federated',
+            kind: 'reply',
+            payload: 'not even JSON, would fail parseFederatedReply if it ever ran'
+          }
+        ]
+      }
+    })
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'dispatch_never_federated',
+        message: expect.stringContaining('worker-start --on')
+      }
+    })
   })
 })
