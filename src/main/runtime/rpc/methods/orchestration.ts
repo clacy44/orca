@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- Why: RPC method definitions co-locate param schemas with handlers; splitting by method would scatter the shared enums and Zod transforms without reducing complexity. */
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, OptionalString, OptionalBoolean, requiredString } from '../schemas'
@@ -52,7 +53,9 @@ import { ORCHESTRATION_PACT_METHODS } from './orchestration-pact'
 import { ORCHESTRATION_PACT_STEP_METHODS } from './orchestration-pact-step'
 import { ORCHESTRATION_THREAD_INVITE_METHODS } from './orchestration-thread-invite'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
-import { NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
+import { NO_PANE_IDENTITY_NEXT_STEPS, resolveCallerAgent } from './orchestration-caller-identity'
+import { requireAddressableAgentRecipient } from '../../orchestration/addressable-agent-recipient'
+import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federated-peer-ask'
 import {
   assertPayloadKindNotCallerSet,
   extractPayloadKind
@@ -280,7 +283,12 @@ const AskParams = z
     run: OptionalString,
     compatibilityCliCommand: z.enum(['orca', 'orca-ide', 'orca-dev']).optional(),
     compatibilityWindowsCommand: z.enum(['orca', 'orca-ide']).optional(),
-    acknowledgeGate: OptionalBoolean
+    acknowledgeGate: OptionalBoolean,
+    // S10-8 R1: set only when `to` names a foreign agent (`name@host` resolved CLI-side) — the
+    // saved-environment selector to relay this ask to. Never opens a second client; see
+    // relayPeerAskToHost below. A new optional field on an existing envelope, so an old CLI (or
+    // one talking to an old runtime that ignores it) degrades to today's local-only behavior.
+    host: OptionalString
   })
   .superRefine((params, ctx) => {
     if ((params.question ? 1 : 0) + (params.resume ? 1 : 0) !== 1) {
@@ -537,62 +545,6 @@ function rejectFederatedExplicitTarget(params: { to?: string; run?: string }): v
   }
 }
 
-// Amendment B: reply must mirror send's `agent:` recipient guards (ruling 3's "reply is a
-// second to_handle writer that can still carry an agent: address via a forged from"). Shared
-// so both write paths enforce the identical rule, quarantine checked FIRST (the derived
-// refusal's nextSteps name the pane's bare handle, and handing that address out for a
-// quarantined row is a working bypass of the quarantine itself).
-function requireAddressableAgentRecipient(
-  db: OrchestrationDb,
-  agentId: string
-): NonNullable<ReturnType<OrchestrationDb['getAgentById']>> {
-  const agentRecipient = db.getAgentById(agentId)
-  if (!agentRecipient) {
-    // S10-7 F-B: tell "never existed" apart from "retired" — a tombstoned row still resolves
-    // via the tombstone-inclusive raw read, so mail to it names the successor (a live row that
-    // reclaimed its display_name) instead of the generic agent_unknown message.
-    const retired = db.getAgentByIdIncludingTombstoned(agentId)
-    if (retired?.tombstoned_at) {
-      const successor = db.getAgentByName(retired.host_id, retired.display_name)
-      throw new OrchestrationError(
-        'agent_retired',
-        `Agent ${retired.display_name} (${agentId}) has been retired and can no longer receive mail.`,
-        {
-          nextSteps: successor
-            ? [`orca orchestration send --to agent:${successor.id} --subject "..."`]
-            : ['orca agents find "<plain English description>"', 'orca agents list']
-        }
-      )
-    }
-    throw new OrchestrationError('agent_unknown', `Agent ${agentId} was not found.`, {
-      nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
-    })
-  }
-  if (agentRecipient.quarantined === 1) {
-    throw new OrchestrationError(
-      'agent_quarantined',
-      `Agent ${agentRecipient.display_name} is quarantined and cannot receive mail.`,
-      { nextSteps: [`orca agents show --id ${agentRecipient.id}`] }
-    )
-  }
-  if (agentRecipient.derived === 1) {
-    const bareHandle = agentRecipient.terminal_handle
-    throw new OrchestrationError(
-      'derived_agent_unaddressable',
-      `Agent ${agentRecipient.display_name} is not registered — agent:${agentRecipient.id} has no reader.`,
-      {
-        nextSteps: [
-          bareHandle
-            ? `orca orchestration send --to ${bareHandle} --subject "..."`
-            : 'orca agents list',
-          'orca agents register --name <slug> --role "<your role>" (run on that pane to make it addressable)'
-        ]
-      }
-    )
-  }
-  return agentRecipient
-}
-
 export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_RUN_METHODS,
   ...ORCHESTRATION_AGENT_METHODS,
@@ -606,6 +558,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_PACT_METHODS,
   ...ORCHESTRATION_PACT_STEP_METHODS,
   ...ORCHESTRATION_THREAD_INVITE_METHODS,
+  ...ORCHESTRATION_FEDERATED_PEER_ASK_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,
@@ -1703,7 +1656,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           throw new OrchestrationError(
             'no_pane_identity',
             'A peer reply requires an attested, registered caller identity.',
-            { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+            { nextSteps: peerNoPaneIdentityNextSteps(pairedDeviceId, clientKind) }
           )
         }
         const answered = db.answerPeerQuestion({
@@ -2214,7 +2167,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         signal,
         orchestrationCapability,
         recordMutationReceipt,
-        orchestrationCompatibilityEvidence
+        orchestrationCompatibilityEvidence,
+        pairedDeviceId,
+        clientKind,
+        orchestrationMutation
       }
     ) => {
       // Why: group addresses have no unambiguous first-answer authority.
@@ -2238,6 +2194,24 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         (params.to?.startsWith('agent:') ?? false) ||
         resumedPeerQuestion?.run_id === PEER_RUN_ID
       ) {
+        // S10-8 R1/R2: `host` names a foreign agent's saved environment (CLI's `name@host`
+        // resolution, agents-cross-host.ts's LOCAL_FIND_HOST sentinel is 'local') — relay
+        // through THIS runtime rather than resolving `to` against this host's own directory.
+        // `--resume` of a cross-host ask is out of scope here (R6 fence: a resumed wait is a
+        // cross-host wait park) — an old/foreign resume id with no `host` falls through to
+        // handlePeerAsk exactly as before and refuses question_not_found if it isn't local.
+        if (params.host && params.host !== LOCAL_PEER_HOST) {
+          return relayPeerAskToHost({
+            params,
+            runtime,
+            db,
+            timeoutMs,
+            signal,
+            recordMutationReceipt,
+            orchestrationCompatibilityEvidence,
+            orchestrationMutation
+          })
+        }
         return handlePeerAsk({
           params,
           runtime,
@@ -2246,7 +2220,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           signal,
           recordMutationReceipt,
           orchestrationCompatibilityEvidence,
-          resumedQuestion: resumedPeerQuestion
+          resumedQuestion: resumedPeerQuestion,
+          pairedDeviceId,
+          clientKind
         })
       }
 
@@ -2427,6 +2403,135 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   })
 ]
 
+// S10-8: agents-cross-host.ts's sentinel for "this host, not a saved environment" — duplicated
+// here (not imported) because CLI code never reaches this main-process module; matches
+// `runtime.getOrchestrationCompatibilityHostId() ?? 'local'`'s own literal a few lines below.
+const LOCAL_PEER_HOST = 'local'
+
+// S10-8 R5: a caller that reached this RPC over a paired runtime link (not a local pane) hitting
+// no_pane_identity is very likely an old CLI that still opens a remote client directly for a
+// `name@host` ask/reply (the R1 bug) instead of relaying through its OWN home runtime — a current
+// CLI never sends this shape from a paired link, so the extra line is safe to always show here.
+function peerNoPaneIdentityNextSteps(
+  pairedDeviceId: string | undefined,
+  clientKind: 'mobile' | 'runtime' | undefined
+): readonly string[] {
+  if (pairedDeviceId && clientKind === 'runtime') {
+    return [
+      ...NO_PANE_IDENTITY_NEXT_STEPS,
+      'this looks like an old orca CLI addressing a remote agent directly — update Orca on the ' +
+        'asking host: a current CLI relays a cross-host ask/reply through your own runtime automatically'
+    ]
+  }
+  return NO_PANE_IDENTITY_NEXT_STEPS
+}
+
+// S10-8 R1/R2: the home-side half of transport inversion. Called instead of handlePeerAsk when
+// `params.host` names a foreign agent's saved environment. Resolves the caller's identity against
+// THIS runtime exactly like handlePeerAsk does (never a second, remote pane-attestation check —
+// there is no pane on the target host to attest), then relays the whole ask over the existing
+// paired-link machinery (`callOrchestrationWorkerServer`, the same transport the dispatch relay
+// and `agents list --all-hosts` probes already use) rather than resolving `to` against this
+// host's own directory. The target host runs its OWN blocking wait (orchestration-federated-
+// peer-ask.ts's `orchestration.federatedAsk`) and this call blocks right alongside it — one round
+// trip carries both the question and, if answered in time, the answer, so no separate reply-relay
+// or durable local question row is needed for this path (R4's "same link, same guards" reply
+// routing falls out for free while this call is still parked; a reply that lands after this call
+// has already timed out is the cross-host resume gap R6 fences off, not a bug here).
+async function relayPeerAskToHost(args: {
+  params: z.infer<typeof AskParams>
+  runtime: OrcaRuntimeService
+  db: OrchestrationDb
+  timeoutMs: number
+  signal?: AbortSignal
+  recordMutationReceipt?: (receipt: unknown) => void
+  orchestrationCompatibilityEvidence?: OrchestrationCompatibilityEvidence
+  // S10-8 review fix (blocker: dedup): this ask's own mutation identity, when the inbound call
+  // carried one — used to derive a deterministic relay requestId (federation-sync.ts's
+  // `relay_ack_${...}`/`relay_import_${...}` idiom) so a client-level retry of the SAME ask
+  // lands on the SAME idempotency key on the receiving host instead of minting a second question.
+  orchestrationMutation?: { requestId: string }
+}): Promise<unknown> {
+  const { params, runtime, db, timeoutMs } = args
+  const caller = resolveCallerAgent(db, runtime, args.orchestrationCompatibilityEvidence)
+  if (!params.to) {
+    throw new OrchestrationError('invalid_argument', 'Missing --to for a peer ask.')
+  }
+  const toAgentId = params.to.slice('agent:'.length)
+  const options =
+    params.options
+      ?.split(',')
+      .map((option) => option.trim())
+      .filter(Boolean) ?? []
+  // Why re-fetch by id: resolveCallerAgent's ResolvedCallerAgent is deliberately the narrow,
+  // pane-bound shape every other call site needs (id/pane_key/host_id) — it carries no
+  // display_name. The registered directory row's display_name is what the target host renders
+  // and what a reply addresses back (`name@origin-host`), never the raw terminal_handle (which
+  // is shaped for a pane, not a display name — e.g. it may carry `_`, which
+  // validateDisplayNameCandidate on the receiving end refuses).
+  const callerRow = db.getAgentById(caller.id)
+  // S10-8 review fix (blocker: quarantine crosses the link): a quarantined caller must never
+  // reach the peer at all — refusing here, before the relay call, is what keeps `--host` from
+  // being a one-flag bypass of local containment (mirrors requireCallerNotQuarantined's read-
+  // at-action-time discipline for pact steps).
+  if (callerRow?.quarantined === 1) {
+    db.writeAgentAudit({
+      agentId: callerRow.id,
+      actorPaneKey: caller.pane_key,
+      actorHostId: caller.host_id,
+      verb: 'federatedAsk',
+      outcome: 'agent_quarantined',
+      reasonCode: null
+    })
+    throw new OrchestrationError(
+      'agent_quarantined',
+      `${callerRow.display_name} is quarantined and cannot ask across hosts.`,
+      { nextSteps: [`orca agents quarantine ${callerRow.display_name} --lift`] }
+    )
+  }
+  const result = (await runtime.callOrchestrationWorkerServer(
+    params.host as string,
+    'orchestration.federatedAsk',
+    {
+      fromAgent: {
+        id: caller.id,
+        displayName: callerRow?.display_name ?? caller.id,
+        role: callerRow?.role ?? null,
+        // S10-8 review fix (blocker: quarantine crosses the link, half 2): carries THIS host's
+        // own quarantine assertion for the caller so the receiving host can refuse it
+        // independently of the check just above (defense in depth — never the only guard).
+        quarantined: callerRow?.quarantined === 1
+      },
+      toAgentId,
+      question: params.question,
+      options,
+      timeoutMs
+    },
+    timeoutMs + 15_000,
+    // S10-8 review fix (blocker: dedup): deterministic when the inbound call carried an
+    // idempotency key of its own, so a client-level retry (same requestId) coalesces on the
+    // receiving host instead of minting a second question. No inbound key to derive from means
+    // no dedup guarantee either way (same as before this fix) — a fresh id per call, never a
+    // content hash, which would wrongly coalesce two deliberately-identical questions.
+    {
+      orchestrationRequestId: args.orchestrationMutation
+        ? `relay_ask_${args.orchestrationMutation.requestId}`
+        : `relay_ask_${randomUUID()}`
+    }
+  )) as {
+    answer: string | null
+    messageId: string
+    answerMessageId?: string | null
+    threadId: string
+    timedOut: boolean
+    cancelled?: boolean
+    connectionLost?: boolean
+    timeoutMs: number
+  }
+  args.recordMutationReceipt?.(result)
+  return result
+}
+
 // Amendment F: the peer-ask counterpart of askRemoteRunHome above — no Dispatch, no
 // consumer_generation, no whileDispatchBlocked marker (there is no dispatch_contexts row to
 // mark). Identity is ONLY runtime.verifyOrchestrationCompatibilityCaller (never params.from),
@@ -2440,6 +2545,8 @@ async function handlePeerAsk(args: {
   recordMutationReceipt?: (receipt: unknown) => void
   orchestrationCompatibilityEvidence?: OrchestrationCompatibilityEvidence
   resumedQuestion?: QuestionRow
+  pairedDeviceId?: string
+  clientKind?: 'mobile' | 'runtime'
 }): Promise<unknown> {
   const { params, runtime, db, timeoutMs, signal, recordMutationReceipt } = args
   const hostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
@@ -2452,7 +2559,7 @@ async function handlePeerAsk(args: {
     throw new OrchestrationError(
       'no_pane_identity',
       'orca agents ask requires an attested, registered caller identity.',
-      { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+      { nextSteps: peerNoPaneIdentityNextSteps(args.pairedDeviceId, args.clientKind) }
     )
   }
 

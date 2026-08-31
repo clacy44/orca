@@ -103,7 +103,11 @@ import {
 } from './message-gate-writer'
 import { gateVerdictRefusalError } from './gate-refusal-error'
 import { loadInfraAllowlist } from './infra-allowlist'
-import { filterLiveMessageRows, liveMessageSqlClause } from './message-visibility-filter'
+import {
+  filterLiveMessageRows,
+  liveMessageSqlClause,
+  remoteSenderQuarantinedSqlClause
+} from './message-visibility-filter'
 import {
   createThread as createThreadImpl,
   getThread as getThreadImpl,
@@ -454,6 +458,13 @@ export const PEER_RUN_ID = 'run_peer_local'
 const UNAUTHENTICATED_LANE_CALLER_FINGERPRINT = createHash('sha256')
   .update(AUTHENTICATED_TRANSPORT_FALLBACK)
   .digest('hex')
+
+// S10-8 R2: same "authenticated_transport fallback must never qualify" rule, exported so the
+// cross-host agent-relay RPCs (orchestration-federated-peer-ask.ts) can refuse it too — a second
+// caller of the exact fingerprint createRemoteDispatchAttachment already refuses, not a new rule.
+export function isUnauthenticatedLaneCallerFingerprint(fingerprint: string | undefined): boolean {
+  return !fingerprint || fingerprint === UNAUTHENTICATED_LANE_CALLER_FINGERPRINT
+}
 
 // v33 (S10-1): agent directory + durable peer mailbox deliveries + provenance audit/rate limiting.
 // Reused verbatim by both createTables() (fresh installs) and migrate()'s `current < 33` block
@@ -4988,7 +4999,8 @@ export class OrchestrationDb {
         .prepare(
           `SELECT COUNT(*) AS n FROM messages
            WHERE thread_id = ? ${toHandleClause} ${cursorClause} AND purged_at IS NULL
-             AND sender_agent_id IN (SELECT id FROM agents WHERE quarantined = 1)`
+             AND (sender_agent_id IN (SELECT id FROM agents WHERE quarantined = 1)
+               OR ${remoteSenderQuarantinedSqlClause('from_handle')})`
         )
         .get(threadId, ...toHandleArgs, ...cursorArgs) as { n: number }
     ).n

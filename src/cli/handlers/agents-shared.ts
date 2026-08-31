@@ -68,7 +68,10 @@ export function parseAgentSelector(value: string): AgentSelector {
 // Why a fresh client per call rather than reusing the caller's: the caller's `client` is bound
 // to whatever `--environment` (if any) the whole invocation targeted, which is orthogonal to a
 // `name@host` address naming a *different* saved environment inline. The resolved client is
-// handed back too so a follow-up RPC (`orchestration.ask`) on the SAME host does not re-resolve.
+// handed back too so a follow-up READ RPC on the SAME host does not re-resolve (e.g. `agents
+// show` fetching more fields there). S10-8 R1: an attested WRITE verb (`agents ask`) must never
+// reuse the returned `client` for anything past this read — it always relays through the
+// caller's own local runtime instead, carrying `host` alongside the resolved `agent:<id>`.
 // Generic over `orchestration.agents.get`'s full result shape: `agents ask` only needs
 // `{ agent: ResolvedAgentIdentity }` (the default), `agents show` wants `{ agent, pushable }`.
 export async function resolveAgentAcrossHost<

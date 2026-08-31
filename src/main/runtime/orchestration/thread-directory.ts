@@ -4,6 +4,7 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
+import { remoteSenderQuarantinedSqlClause } from './message-visibility-filter'
 import type {
   MessageRow,
   ThreadParticipantRow,
@@ -276,6 +277,7 @@ export function getThreadMessagesSince(
          AND m.purged_at IS NULL
          AND t.purged_at IS NULL
          AND (a.id IS NULL OR a.quarantined = 0)
+         AND NOT ${remoteSenderQuarantinedSqlClause('m.from_handle')}
        ORDER BY m.sequence ASC
        LIMIT ?`
     )
@@ -296,9 +298,9 @@ export function getThreadMessagesSince(
       .prepare(
         `SELECT COUNT(*) AS n FROM messages m
          JOIN threads t ON t.id = m.thread_id
-         JOIN agents a ON a.id = m.sender_agent_id
+         LEFT JOIN agents a ON a.id = m.sender_agent_id
          WHERE m.thread_id = ? ${sinceClause} AND m.purged_at IS NULL AND t.purged_at IS NULL
-           AND a.quarantined = 1`
+           AND (a.quarantined = 1 OR ${remoteSenderQuarantinedSqlClause('m.from_handle')})`
       )
       .get(...args) as { n: number }
   ).n

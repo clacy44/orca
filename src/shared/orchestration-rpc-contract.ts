@@ -29,6 +29,15 @@ const ORCHESTRATION_MUTATION_METHODS = new Set([
   'orchestration.workerRelease',
   'orchestration.workerRetain',
   'orchestration.ask',
+  // S10-8 R2/R7 fix (review blocker): the RECEIVING half of a cross-host ask relay. Without this,
+  // `isOrchestrationMutation` is false for it, so the dispatcher's OrchestrationMutationExecutor
+  // never wraps it — no durable mutation receipt, no in-flight coalescing, and
+  // callOrchestrationWorkerServer's pre-relay `status.get` capability precheck (orca-runtime.ts)
+  // never runs for it either. Registering it here fixes all three at once: a retried relay with
+  // the same orchestrationRequestId now dedups/coalesces on the receiving host instead of
+  // minting a second question, and relaying to a pre-S10-8 peer now surfaces the typed
+  // `orchestration_migration_required` disposition instead of a raw method-not-found.
+  'orchestration.federatedAsk',
   'orchestration.gateCreate',
   'orchestration.gateResolve',
   'orchestration.reset',

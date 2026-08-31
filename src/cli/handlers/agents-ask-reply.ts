@@ -12,11 +12,11 @@ import {
   getRequiredStringFlag
 } from '../flags'
 import { printResult } from '../format'
-import type { RuntimeClient } from '../runtime-client'
 import { getDefaultUserDataPath } from '../runtime-client'
 import { RuntimeClientError } from '../runtime/types'
 import { resolveOrchestrationAskClientTimeoutMs } from '../../shared/orchestration-ask-timeout'
 import { requireNonQuarantined, resolveAgentAcrossHost } from './agents-shared'
+import { LOCAL_FIND_HOST } from './agents-cross-host'
 
 type AskResult = {
   answer: string | null
@@ -71,10 +71,7 @@ export const AGENT_ASK_REPLY_HANDLERS: Record<string, CommandHandler> = {
       )
     }
     let to: string | undefined
-    // Why a possibly-different client: `name@host` (S10-4 ruling 3) sends the whole ask - not
-    // just the resolve - to the peer that actually owns the agent, never the local runtime with
-    // a foreign id it has never heard of.
-    let askClient: RuntimeClient = client
+    let host: string | undefined
     if (!resume) {
       if (!name) {
         throw new RuntimeClientError(
@@ -82,17 +79,24 @@ export const AGENT_ASK_REPLY_HANDLERS: Record<string, CommandHandler> = {
           'Pass an agent name: orca agents ask <name> "<question>"'
         )
       }
+      // R1 (transport inversion, chair ruling): `name@host` (S10-4 ruling 3) resolves the id via
+      // a direct read on the target's own client — `orchestration.agents.get` tolerates an
+      // unattested caller — but the ask itself is an attested write verb and NEVER opens a
+      // second, remote client (a pane on THIS host is unverifiable by construction on a socket
+      // aimed directly at the remote runtime). It always calls the LOCAL `client` below, carrying
+      // the resolved remote target (agentId + host) for the local runtime to relay.
       const resolved = await resolveAgentAcrossHost(client, getDefaultUserDataPath(), name)
       const agent = requireNonQuarantined(resolved.agent)
-      askClient = resolved.client
       to = `agent:${agent.id}`
+      host = resolved.host === LOCAL_FIND_HOST ? undefined : resolved.host
     }
     const timeoutMsNumber = getOptionalPositiveIntegerFlag(flags, 'timeout-ms')
     const startedAt = Date.now()
-    const result = await askClient.call<AskResult>(
+    const result = await client.call<AskResult>(
       'orchestration.ask',
       {
         to,
+        host,
         question,
         resume,
         options: getOptionalStringFlag(flags, 'options'),
