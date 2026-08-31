@@ -9,8 +9,11 @@ export type AgentHookEndpoint = {
   version: string
   // S10-6 (R1): optional — AgentHookServer has no terminalHandle<->paneKey mapping to
   // populate these from today, so the writer never emits them yet. Parsed defensively so a
-  // future writer can add them without a second file-format bump; readers fall back to their
-  // caller's own evidence when absent (see orchestration-compatibility-reattest.ts).
+  // future writer can add them without a second file-format bump. This file is runtime-wide
+  // (identical for every pane), so a future writer MUST NOT populate these from a single
+  // "current" pane — readers treat these as a fallback only, used strictly after the caller's
+  // own process-env evidence (see orchestration-compatibility-reattest.ts), never preferred
+  // over it.
   paneKey?: string
   terminalHandle?: string
 }

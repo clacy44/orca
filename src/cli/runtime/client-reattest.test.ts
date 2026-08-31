@@ -315,16 +315,17 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
     })
   })
 
-  it('reason: pane-not-admitted — the retry after a "successful" 204 still refuses', async () => {
+  it('reason: still-unattested-after-reattest — the retry after a "successful" 204 still refuses, with a cause-neutral message (S10-6 review correction)', async () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-client-reattest-r4-'))
     const rpc = await startAlwaysRefusingRpcServer(userDataPath)
     setEvidenceEnv()
     // Why 204: handleReattestRequest returns this same status for a genuine success and for a
     // disposition-not-'accept' pane (server.ts:2826) — deliberately, so a caller can't use the
     // status to enumerate which paneKeys are open. This stub reproduces that exact status; the
-    // rpc stub above always refuses no_pane_identity on the retry too, which is what actually
-    // happens when the pane was never admitted (see the DEVIATION comment on
-    // handleReattestRequest for why the runtime can't attest a pane like this).
+    // rpc stub above always refuses no_pane_identity on the retry too. That combination has
+    // several possible real causes (disposition-not-'accept', no hydrated commitment for the
+    // pane, a live-recheck conjunct failing, attestation ambiguity) — this test only asserts
+    // the client can't tell which, so its message must not name one.
     await startStubReattestServer(userDataPath, 204)
 
     const client = new RuntimeClient(userDataPath, 2_000)
@@ -334,7 +335,7 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
       code: 'no_pane_identity',
       data: {
         nextSteps: [
-          'this pane cannot re-attest (reason: pane-not-admitted); relaunch this agent in a fresh Orca pane (claude --resume keeps its context)'
+          're-attestation was accepted but this pane still has no attested identity; relaunch this agent in a fresh Orca pane (claude --resume keeps its context)'
         ]
       }
     })

@@ -153,12 +153,17 @@ export class RuntimeClient {
             throw attachMutationRecovery(error, orchestrationRequestId)
           }
           if (retried.ok === false) {
-            // Why (S10-6 R4): reattest reported success (204) yet the identical retry still
-            // refused with no_pane_identity — handleReattestRequest returns that same 204 for a
-            // disposition-not-'accept' pane, so this is the only point that can infer it.
+            // Why (S10-6 R4, corrected by S10-6 review): reattest reported success (204) yet
+            // the identical retry still refused with no_pane_identity. handleReattestRequest
+            // returns that same 204 both for a genuine success and for a disposition-not-
+            // 'accept' pane, so this point can infer only that reattest didn't help — NOT why.
+            // At least three other causes land here with the pane genuinely admitted (no
+            // hydrated commitment for it, an R3 live-recheck conjunct failing, attestation
+            // ambiguity), so the nextStep must stay cause-neutral rather than assert
+            // "not admitted" as fact.
             throw new RuntimeRpcFailureError(
               retried.error.code === 'no_pane_identity'
-                ? withReattestFailureNextStep(retried, 'pane-not-admitted')
+                ? withReattestFailureNextStep(retried, 'still-unattested-after-reattest')
                 : retried
             )
           }

@@ -102,7 +102,12 @@ describe('attemptOrchestrationReattest', () => {
     })
   })
 
-  it('prefers the endpoint file paneKey/terminalHandle when present (S10-6 R1)', async () => {
+  it("prefers evidence (the pane's own env) over the endpoint file paneKey/terminalHandle when both are present (S10-6 review correction)", async () => {
+    // Why: the endpoint file is one shared, runtime-wide secret — identical for every pane's
+    // spawn env — so a paneKey/terminalHandle recorded in it can only ever name ONE pane. If the
+    // file's values won, a future writer that populates them would make every OTHER pane's
+    // reattest resolve to that one pane's identity — a cross-pane identity swap. Evidence (this
+    // pane's own process env) must always win when present.
     dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
     let receivedBody: unknown
     const filePaneKey = 'tab-9:99999999-9999-4999-8999-999999999999'
@@ -124,6 +129,39 @@ describe('attemptOrchestrationReattest', () => {
     process.env.ORCA_AGENT_HOOK_ENDPOINT = endpointPath
 
     await expect(attemptOrchestrationReattest(EVIDENCE)).resolves.toEqual({ ok: true })
+    expect(receivedBody).toEqual({
+      paneKey: EVIDENCE.paneKey,
+      terminalHandle: EVIDENCE.terminalHandle,
+      launchToken: EVIDENCE.launchToken
+    })
+  })
+
+  it('falls back to the endpoint file paneKey/terminalHandle only when evidence lacks them (S10-6 R1)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
+    let receivedBody: unknown
+    const filePaneKey = 'tab-9:99999999-9999-4999-8999-999999999999'
+    const port = await startReattestServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk) => chunks.push(chunk))
+      req.on('end', () => {
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        res.writeHead(204)
+        res.end()
+      })
+    })
+    const endpointPath = join(dir, 'endpoint.env')
+    writeFileSync(
+      endpointPath,
+      endpointBody(port, 'the-hook-token', { paneKey: filePaneKey, terminalHandle: 'term-file' }),
+      'utf8'
+    )
+    process.env.ORCA_AGENT_HOOK_ENDPOINT = endpointPath
+
+    // Why: evidence with no paneKey/terminalHandle of its own — the only case the file's values
+    // may legitimately be used for.
+    await expect(
+      attemptOrchestrationReattest({ launchToken: EVIDENCE.launchToken })
+    ).resolves.toEqual({ ok: true })
     expect(receivedBody).toEqual({
       paneKey: filePaneKey,
       terminalHandle: 'term-file',

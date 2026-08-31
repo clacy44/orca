@@ -170,21 +170,28 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
     })
   })
 
-  // S10-6 (R3 + R5 reproduction, adjusted scope): the field scenario from the chair's ruling —
-  // hook server "generation 2" (a fresh AgentHookServer instance), a live pty restored WITHOUT a
-  // launchTokenHash (terminal.launchTokenHash null) and WITHOUT a restored receipt
-  // (restoredOrchestrationAuthorityByPtyId has no entry for PTY_ID), the agent process presenting
-  // a "generation 1" (pre-restart) token via /reattest, the endpoint file being this generation's
-  // (postReattest always uses server.buildPtyEnv()'s current token, matching R1's header
-  // behavior) — reproduced faithfully, with ONE adjustment from the ruling's literal wording:
-  // the pane DOES carry a genuinely disk-hydrated commitment (seeded exactly like the "actual
-  // fix" test above, i.e. as a real prior session would have persisted it), rather than none at
-  // all. See the DEVIATION comment on handleReattestRequest in server.ts for why "no hydrated
-  // commitment for the pane" specifically cannot be the passing case: traced against the very
-  // next test below (kept from S10-5, still passing), making it pass would mean a caller with no
-  // receipt and no genuine history for a paneKey can manufacture its own attestation by choosing
-  // its own /reattest launchToken and later claiming the identical value — which is exactly what
-  // that test exists to refuse.
+  // S10-6 (R3 + R5 reproduction — ONE of two candidate field shapes, NOT a confirmed fix of the
+  // reported failure): the ruling's R5 acceptance bar named "hook server generation 2 (fresh
+  // instance, no hydrated commitment for the pane)" as the shape to reproduce. This suite covers
+  // BOTH candidate shapes for a daemon-survived, no-receipt pane in generation 2, because the
+  // ruling's literal wording is ambiguous between them and this branch cannot determine which one
+  // the actual failing field session was in (that would need that session's last-status.json,
+  // which review did not have):
+  //   (A) the pane DOES have a genuine disk-hydrated commitment from before the restart (a real
+  //       hook fired for it at some point in a prior generation) — the "succeeds" test below.
+  //       R1 + R3 + R4 fix this shape.
+  //   (B) the pane has NO hydrated commitment at all — never observed before this runtime's
+  //       start(), or evicted — the "negative control" test below, matching the ruling's literal
+  //       wording exactly. This shape is still refused; see the DEVIATION comment on
+  //       handleReattestRequest in server.ts for why closing it is not safe with a
+  //       caller-suppliable secret (traced against the negative-control test itself: making it
+  //       pass would mean a caller with no receipt and no genuine history for a paneKey can
+  //       manufacture its own attestation by choosing its own /reattest launchToken and later
+  //       claiming the identical value).
+  // Do not read the "succeeds" test as proof R5's field failure is resolved — it establishes
+  // shape (A) is fixed and shape (B) is not; whether the field pane was actually in shape (A) or
+  // (B) is undetermined. Landing this branch is a partial, honestly-scoped fix pending that
+  // confirmation, not a closure of R5.
   describe('S10-6 (R3): live recheck when the exact-surface-restore moment never minted a receipt', () => {
     function seedHydratedCommitment(hookServer: AgentHookServer, launchToken: string): void {
       const hydratedEntry = {
@@ -200,7 +207,7 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
       hookServer._getStateForTests().lastStatusByPaneKey.set(PANE_KEY, hydratedEntry)
     }
 
-    it('succeeds: reattest recovers a genuinely hydrated pane from a stale blocking observation, with no receipt', async () => {
+    it('shape (A) succeeds: reattest recovers a genuinely hydrated pane from a stale blocking observation, with no receipt', async () => {
       server = new AgentHookServer()
       const generation1Token = 'agent-process-env-generation-1-token'
       seedHydratedCommitment(server, generation1Token)
@@ -253,7 +260,7 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
       // with a real ptysById entry in orchestration-compatibility-authority.test.ts.
     })
 
-    it('negative control: the exact same shape with NO hydrated commitment still refuses (residual gap, unchanged)', async () => {
+    it('shape (B) negative control: the exact same scenario with NO hydrated commitment still refuses (residual gap, unchanged)', async () => {
       server = new AgentHookServer()
       // Why: deliberately skip seedHydratedCommitment — this is the literal "no hydrated
       // commitment for the pane" case from the ruling's R5 wording, which the DEVIATION comment
