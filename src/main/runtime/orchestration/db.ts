@@ -49,6 +49,7 @@ import type {
 } from './types'
 import type { RemoteAgentRow } from './remote-agent-directory-types'
 import type { RelaySeenRow, RelaySeenOutcome } from './federation-relay-seen-types'
+import { AUTHENTICATED_TRANSPORT_FALLBACK } from '../principal-link-fingerprint-binding'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
@@ -441,6 +442,13 @@ export const LEGACY_RUN_ID = ORCHESTRATION_LEGACY_RUN_ID
 // defaulting to LEGACY_RUN_ID, so a recipient's `check` sees the row instead of hitting the
 // legacy-read-only fence. Not a coordinator Run — orchestration.runUse refuses it (bindRun below).
 export const PEER_RUN_ID = 'run_peer_local'
+
+// S10-4 ruling 5: the fingerprint every tokenless caller collapses onto (matches
+// `authenticatedCallerFingerprint`'s fallback, rpc/orchestration-mutation-executor.ts) — never
+// bindable as a federation home peer. See createRemoteDispatchAttachment below.
+const UNAUTHENTICATED_LANE_CALLER_FINGERPRINT = createHash('sha256')
+  .update(AUTHENTICATED_TRANSPORT_FALLBACK)
+  .digest('hex')
 
 // v33 (S10-1): agent directory + durable peer mailbox deliveries + provenance audit/rate limiting.
 // Reused verbatim by both createTables() (fresh installs) and migrate()'s `current < 33` block
@@ -5973,6 +5981,18 @@ export class OrchestrationDb {
   }): RemoteDispatchAttachmentRow {
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      // S10-4 ruling 5: authenticatedCallerFingerprint falls back to
+      // sha256('authenticated_transport') when a request carries neither an auth token nor a
+      // device token — every tokenless local caller (the `orca` CLI, the renderer, a shared-box
+      // peer) collapses onto that ONE value, which names no federation link at all. Binding it
+      // here would let a caller with no per-link credential attach itself as "the home peer" for
+      // ANY dispatch id it can guess.
+      if (params.homePeerFingerprint === UNAUTHENTICATED_LANE_CALLER_FINGERPRINT) {
+        throw new OrchestrationError(
+          'unauthenticated_lane',
+          'This caller presented no per-link credential and cannot be bound as a federation home peer.'
+        )
+      }
       if (params.homePeerFingerprint !== params.mutationReceipt.callerFingerprint) {
         throw new OrchestrationError(
           'resource_server_mismatch',

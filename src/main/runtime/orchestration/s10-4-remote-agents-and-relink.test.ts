@@ -1,5 +1,6 @@
 // S10-4 ruling 1 (remote_agents + relay_seen schema/triggers), ruling 5 (relinkFederatedEnvironment
 // recovery verb). See agent-coordination-s10-4-federation-spec.md ARBITRATION #4, #6.
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
@@ -265,5 +266,63 @@ describe('S10-4 ruling 5: relinkFederatedEnvironment', () => {
     // Unaffected because it was never touched, not because it started at 0 — prove relink
     // for a different environment id truly returns nothing for this one.
     expect(db.relinkFederatedEnvironment('env_stale').dispatchIds).not.toContain(other.id)
+  })
+})
+
+describe('S10-4 ruling 5: the authenticated_transport fallback never binds a federation link', () => {
+  let db: OrchestrationDb | undefined
+  // Mirrors authenticatedCallerFingerprint's fallback (rpc/orchestration-mutation-executor.ts):
+  // sha256(authToken || deviceToken || 'authenticated_transport').
+  const UNAUTHENTICATED_LANE_CALLER_FINGERPRINT = createHash('sha256')
+    .update('authenticated_transport')
+    .digest('hex')
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('refuses to bind a tokenless caller as a federation home peer', () => {
+    db = new OrchestrationDb(':memory:')
+    expect(() =>
+      db!.createRemoteDispatchAttachment({
+        dispatchId: 'ctx_1',
+        taskId: 'task_1',
+        homePeerFingerprint: UNAUTHENTICATED_LANE_CALLER_FINGERPRINT,
+        protocolVersion: 3,
+        runtimeEpoch: 'epoch_1',
+        mutationReceipt: {
+          callerFingerprint: UNAUTHENTICATED_LANE_CALLER_FINGERPRINT,
+          requestId: 'req_1',
+          method: 'orchestration.federationAttachStart',
+          payloadHash: 'hash_1'
+        }
+      })
+    ).toThrow(/no per-link credential/)
+  })
+
+  it('still binds a real per-link fingerprint fine', () => {
+    db = new OrchestrationDb(':memory:')
+    const run = db.createRun({
+      objective: 'x',
+      coordinatorHandle: 'term_coord',
+      coordinatorPaneKey: 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    })
+    const task = db.createTask({ spec: 'y', runId: run.id })
+    expect(() =>
+      db!.createRemoteDispatchAttachment({
+        dispatchId: 'ctx_1',
+        taskId: task.id,
+        homePeerFingerprint: 'real_paired_link_fingerprint',
+        protocolVersion: 3,
+        runtimeEpoch: 'epoch_1',
+        mutationReceipt: {
+          callerFingerprint: 'real_paired_link_fingerprint',
+          requestId: 'req_1',
+          method: 'orchestration.federationAttachStart',
+          payloadHash: 'hash_1'
+        }
+      })
+    ).not.toThrow()
   })
 })
