@@ -109,11 +109,17 @@ describe('orchestration RPC methods', () => {
 
   it('registers all expected methods', () => {
     const registry = buildRegistry(ORCHESTRATION_METHODS)
-    // S10-2b adds orchestration.messages.purge and orchestration.agents.review
-    // (orchestration-containment.ts).
-    expect(registry.size).toBe(47)
+    // S10-2b adds orchestration.messages.purge / orchestration.agents.review
+    // (orchestration-containment.ts) and orchestration.threads.create/get/list/leave +
+    // orchestration.wait (orchestration-threads.ts).
+    expect(registry.size).toBe(52)
     expect(registry.has('orchestration.messages.purge')).toBe(true)
     expect(registry.has('orchestration.agents.review')).toBe(true)
+    expect(registry.has('orchestration.threads.create')).toBe(true)
+    expect(registry.has('orchestration.threads.get')).toBe(true)
+    expect(registry.has('orchestration.threads.list')).toBe(true)
+    expect(registry.has('orchestration.threads.leave')).toBe(true)
+    expect(registry.has('orchestration.wait')).toBe(true)
     expect(registry.has('orchestration.agents.register')).toBe(true)
     expect(registry.has('orchestration.agents.list')).toBe(true)
     expect(registry.has('orchestration.agents.get')).toBe(true)
