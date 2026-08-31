@@ -1,4 +1,5 @@
 import type { CommandHandler } from './dispatch'
+import { AGENTS_HANDLER_GROUPS } from './agents-handler-groups'
 import { BROWSER_HANDLER_GROUPS } from './browser-handler-groups'
 
 export type HandlerGroup = {
@@ -167,38 +168,7 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     ],
     load: async () => (await import('./handlers/orchestration.js')).ORCHESTRATION_HANDLERS
   },
-  {
-    name: 'agents',
-    keys: [
-      'agents register',
-      'agents list',
-      'agents show',
-      'agents find',
-      'agents relink',
-      'agents quarantine'
-    ],
-    load: async () => (await import('./handlers/agents.js')).AGENT_HANDLERS
-  },
-  {
-    name: 'agents-threads',
-    keys: ['agents threads', 'agents thread', 'agents wait'],
-    load: async () => (await import('./handlers/agents-threads.js')).AGENT_THREAD_HANDLERS
-  },
-  {
-    name: 'agents-ask-reply',
-    keys: ['agents ask', 'agents reply'],
-    load: async () => (await import('./handlers/agents-ask-reply.js')).AGENT_ASK_REPLY_HANDLERS
-  },
-  {
-    name: 'agents-pact',
-    keys: ['agents pact', 'agents step', 'agents invite'],
-    load: async () => (await import('./handlers/agents-pact.js')).AGENT_PACT_HANDLERS
-  },
-  {
-    name: 'agents-containment',
-    keys: ['agents purge', 'agents review'],
-    load: async () => (await import('./handlers/agents-containment.js')).AGENT_CONTAINMENT_HANDLERS
-  },
+  ...AGENTS_HANDLER_GROUPS,
   {
     name: 'emulator',
     keys: [
