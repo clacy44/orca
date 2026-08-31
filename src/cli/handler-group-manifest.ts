@@ -169,7 +169,14 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
   },
   {
     name: 'agents',
-    keys: ['agents register', 'agents list', 'agents show', 'agents find', 'agents quarantine'],
+    keys: [
+      'agents register',
+      'agents list',
+      'agents show',
+      'agents find',
+      'agents relink',
+      'agents quarantine'
+    ],
     load: async () => (await import('./handlers/agents.js')).AGENT_HANDLERS
   },
   {

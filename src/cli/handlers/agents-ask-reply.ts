@@ -12,9 +12,11 @@ import {
   getRequiredStringFlag
 } from '../flags'
 import { printResult } from '../format'
+import type { RuntimeClient } from '../runtime-client'
+import { getDefaultUserDataPath } from '../runtime-client'
 import { RuntimeClientError } from '../runtime/types'
 import { resolveOrchestrationAskClientTimeoutMs } from '../../shared/orchestration-ask-timeout'
-import { requireNonQuarantined, resolveAgentByNameOrId } from './agents-shared'
+import { requireNonQuarantined, resolveAgentAcrossHost } from './agents-shared'
 
 type AskResult = {
   answer: string | null
@@ -69,6 +71,10 @@ export const AGENT_ASK_REPLY_HANDLERS: Record<string, CommandHandler> = {
       )
     }
     let to: string | undefined
+    // Why a possibly-different client: `name@host` (S10-4 ruling 3) sends the whole ask - not
+    // just the resolve - to the peer that actually owns the agent, never the local runtime with
+    // a foreign id it has never heard of.
+    let askClient: RuntimeClient = client
     if (!resume) {
       if (!name) {
         throw new RuntimeClientError(
@@ -76,12 +82,14 @@ export const AGENT_ASK_REPLY_HANDLERS: Record<string, CommandHandler> = {
           'Pass an agent name: orca agents ask <name> "<question>"'
         )
       }
-      const agent = requireNonQuarantined(await resolveAgentByNameOrId(client, name))
+      const resolved = await resolveAgentAcrossHost(client, getDefaultUserDataPath(), name)
+      const agent = requireNonQuarantined(resolved.agent)
+      askClient = resolved.client
       to = `agent:${agent.id}`
     }
     const timeoutMsNumber = getOptionalPositiveIntegerFlag(flags, 'timeout-ms')
     const startedAt = Date.now()
-    const result = await client.call<AskResult>(
+    const result = await askClient.call<AskResult>(
       'orchestration.ask',
       {
         to,
