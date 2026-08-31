@@ -11568,6 +11568,7 @@ export class OrcaRuntimeService {
     this.providerBufferAcquisitionsByPtyId.delete(ptyId)
     this.providerVisibleStateByPtyId.delete(ptyId)
     this.providerVisibleRetryAtByPtyId.delete(ptyId)
+    this.probedDeliveryAuthorizationByPtyId.delete(ptyId)
   }
 
   synchronizePtyOutputSequenceFromProvider(
@@ -14520,6 +14521,7 @@ export class OrcaRuntimeService {
     this.providerBufferAcquisitionsByPtyId.delete(ptyId)
     this.providerVisibleStateByPtyId.delete(ptyId)
     this.providerVisibleRetryAtByPtyId.delete(ptyId)
+    this.probedDeliveryAuthorizationByPtyId.delete(ptyId)
     this.agentStatusOscProcessorsByPtyId.delete(ptyId)
     this.terminalSpawnCommandsByPtyId.delete(ptyId)
     this.disposePtyTitleTracker(ptyId)
@@ -31656,6 +31658,7 @@ export class OrcaRuntimeService {
     this.providerBufferAcquisitionsByPtyId.delete(ptyId)
     this.providerVisibleStateByPtyId.delete(ptyId)
     this.providerVisibleRetryAtByPtyId.delete(ptyId)
+    this.probedDeliveryAuthorizationByPtyId.delete(ptyId)
     this.agentStatusOscProcessorsByPtyId.delete(ptyId)
     this.terminalSpawnCommandsByPtyId.delete(ptyId)
     this.disposePtyTitleTracker(ptyId)
@@ -33693,6 +33696,34 @@ export class OrcaRuntimeService {
     mailboxHandle: string,
     options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
   ): Promise<void> {
+    // Why (S10-9 review, finding: fire-and-forget with no catch): every existing caller of
+    // this method is `void`-fired outside any enclosing try/catch that can still be live by
+    // the time an await settles, so a rejecting `getForegroundProcess` (a pty read racing an
+    // exit, say) must never become an unhandled promise rejection in the Electron main
+    // process. Treat a throw the same as any other withheld attempt.
+    try {
+      await this.attemptHydratedProbedDeliveryUnguarded(
+        tabId,
+        leafId,
+        terminalHandle,
+        mailboxHandle,
+        options
+      )
+    } catch (error) {
+      console.warn('[orchestration] pointer delivery probe threw', {
+        mailboxHandle,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  private async attemptHydratedProbedDeliveryUnguarded(
+    tabId: string,
+    leafId: string,
+    terminalHandle: string,
+    mailboxHandle: string,
+    options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
+  ): Promise<void> {
     const leafKey = this.getLeafKey(tabId, leafId)
     const leaf = this.leaves.get(leafKey)
     if (!leaf || !leaf.ptyId || !leaf.writable) {
@@ -33700,6 +33731,23 @@ export class OrcaRuntimeService {
     }
     if (leaf.lastAgentStatus === 'idle' && leaf.lastAgentStatusObservedLive) {
       // A live observation landed between the caller's check and here.
+      this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+      this.deliverPendingMessages(leaf, { mailboxHandle, ...options })
+      return
+    }
+    // Why (S10-9 review, finding: forged live-idle stamp): consult this fallback's OWN
+    // short-lived authorization cache before re-probing — never `lastAgentStatus`/
+    // `lastAgentStatusObservedLive`, which is title-driven authority this probe must not
+    // manufacture. Scoped to the exact pty identity/generation/lifecycle-generation this
+    // probe would otherwise re-observe, so a same-id daemon respawn (which bumps lifecycle
+    // generation but leaves ptyId/ptyGeneration untouched) can never inherit a stale grant.
+    const cached = this.probedDeliveryAuthorizationByPtyId.get(leaf.ptyId)
+    if (
+      cached &&
+      cached.ptyGeneration === leaf.ptyGeneration &&
+      cached.ptyLifecycleGeneration === this.getPtyLifecycleGeneration(leaf.ptyId) &&
+      cached.expiresAt > Date.now()
+    ) {
       this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
       this.deliverPendingMessages(leaf, { mailboxHandle, ...options })
       return
@@ -33716,6 +33764,11 @@ export class OrcaRuntimeService {
       this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
       return
     }
+    // Snapshot before the awaits below: resetTrackedTerminalStateForProviderGeneration (a
+    // same-id daemon respawn / cold restore landing mid-probe) clears lastAgentStatus/
+    // lastAgentStatusObservedLive but leaves ptyId, ptyGeneration and writable untouched, so
+    // only the pty lifecycle generation can catch it on the other side of the awaits.
+    const ptyLifecycleGeneration = this.getPtyLifecycleGeneration(leaf.ptyId)
     // R2 gate 1: never arm Enter into a shell/non-agent pane.
     const pty = this.ptysById.get(leaf.ptyId)
     const knownAgentPane = pty ? await this.isPtyRunningAgent(pty, leaf) : false
@@ -33725,14 +33778,16 @@ export class OrcaRuntimeService {
     }
     // R2 gate 2: a one-shot read of the same tui-idle machinery the poll fallback uses.
     const probedIdle = await this.probeTuiIdleForDelivery(leaf)
-    // Re-read: both awaits above can outlive a pty regeneration, an exit, or the leaf going
-    // non-writable — never act on the closure's stale snapshot.
+    // Re-read: both awaits above can outlive a pty regeneration, an exit, the leaf going
+    // non-writable, or a same-id daemon respawn (caught only by the lifecycle-generation
+    // check) — never act on the closure's stale snapshot.
     const currentLeaf = this.leaves.get(leafKey)
     if (
       !currentLeaf ||
       currentLeaf.ptyId !== leaf.ptyId ||
       currentLeaf.ptyGeneration !== leaf.ptyGeneration ||
-      !currentLeaf.writable
+      !currentLeaf.writable ||
+      this.getPtyLifecycleGeneration(currentLeaf.ptyId) !== ptyLifecycleGeneration
     ) {
       return
     }
@@ -33745,10 +33800,16 @@ export class OrcaRuntimeService {
       this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
       return
     }
-    // R1+R2 authorized: record the observation so subsequent pushes on this pty generation
-    // take the fast path above instead of re-probing.
-    currentLeaf.lastAgentStatus = 'idle'
-    currentLeaf.lastAgentStatusObservedLive = true
+    // R1+R2 authorized: record the observation in this fallback's own cache — never in
+    // lastAgentStatus/lastAgentStatusObservedLive — so a follow-up push on this exact pty
+    // identity/generation/lifecycle-generation can skip re-probing without any other gate
+    // (the parked-redelivery re-check, the probe-deferred re-check, or the fast path above)
+    // inheriting a probe-derived authority it never asked for and has no updater to correct.
+    this.probedDeliveryAuthorizationByPtyId.set(currentLeaf.ptyId, {
+      ptyGeneration: currentLeaf.ptyGeneration,
+      ptyLifecycleGeneration,
+      expiresAt: Date.now() + PROBED_DELIVERY_AUTHORIZATION_TTL_MS
+    })
     this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
     this.deliverPendingMessages(currentLeaf, { mailboxHandle, ...options })
   }
@@ -33761,16 +33822,26 @@ export class OrcaRuntimeService {
     if (detectTerminalWaitBlockedReason(waitText)) {
       return false
     }
-    if (isKnownReadyPromptPreview(waitText)) {
-      return true
-    }
     if (!this.ptyController) {
       return false
     }
+    // Why (S10-9 review, finding: shell-scrollback bypass): a recognized non-shell agent
+    // foreground process is a hard PRECONDITION for every idle signal below, including
+    // ready-prompt text — never an alternative to it. Scrollback text survives verbatim
+    // after the agent that wrote it exits and the shell takes the pty back, so text alone
+    // (the old ordering here, and the `!fg || isShellProcess(fg)` refusal below it was dead
+    // code behind) can never again stand in for what the pane is actually running right now.
     const fg = await this.ptyController.getForegroundProcess(leaf.ptyId)
     if (!fg || isShellProcess(fg)) {
       return false
     }
+    if (!(await this.isRecognizedForegroundAgentProcess(leaf.ptyId, fg))) {
+      return false
+    }
+    // Why still requiring quiescence even when the tail matches a known ready-prompt banner:
+    // corroborate with output recency, not scrollback alone — the foreground process being a
+    // live, recognized agent rules out the exited-process hazard, but the banner text itself
+    // could still be stale within a still-running session (e.g. it redrew other UI since).
     const quietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
     return quietMs >= TUI_IDLE_QUIESCENCE_MS
   }
@@ -33798,17 +33869,29 @@ export class OrcaRuntimeService {
   }
 
   private async retrySlowMailboxDelivery(mailboxHandle: string): Promise<void> {
-    if (!this._orchestrationDb || !this.withheldDeliveryAttemptsByHandle.has(mailboxHandle)) {
-      return
+    // Why (S10-9 review, finding: fire-and-forget with no catch): fired via `void` from a
+    // bare setTimeout callback, so nothing above this frame can catch a throw — e.g.
+    // getUndeliveredUnreadMessages on a closed/shutting-down db. Treat it the way
+    // repointPendingMessagesForHandle treats the same throw on its own (sync) path: a no-op,
+    // not an unhandled rejection.
+    try {
+      if (!this._orchestrationDb || !this.withheldDeliveryAttemptsByHandle.has(mailboxHandle)) {
+        return
+      }
+      const pending = this._orchestrationDb.getUndeliveredUnreadMessages(mailboxHandle)
+      if (pending.length === 0) {
+        this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+        return
+      }
+      // deliverPendingMessagesForHandle re-arms the next retry (via recordWithheldDelivery)
+      // itself if this attempt withholds again.
+      this.deliverPendingMessagesForHandle(mailboxHandle)
+    } catch (error) {
+      console.warn('[orchestration] slow mailbox retry threw', {
+        mailboxHandle,
+        error: error instanceof Error ? error.message : String(error)
+      })
     }
-    const pending = this._orchestrationDb.getUndeliveredUnreadMessages(mailboxHandle)
-    if (pending.length === 0) {
-      this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
-      return
-    }
-    // deliverPendingMessagesForHandle re-arms the next retry (via recordWithheldDelivery)
-    // itself if this attempt withholds again.
-    this.deliverPendingMessagesForHandle(mailboxHandle)
   }
 
   private scheduleRestoredMessageRepoints(): void {
@@ -34611,6 +34694,18 @@ export class OrcaRuntimeService {
   private readonly withheldDeliveryAttemptsByHandle = new Map<
     string,
     { at: number; reason: WithheldDeliveryReason }
+  >()
+
+  // Why (S10-9 review, finding: forged live-idle stamp): a probe-observed idle authorizes
+  // only THIS fallback's own follow-up pushes — never `leaf.lastAgentStatus`/
+  // `lastAgentStatusObservedLive`, which every title-driven gate elsewhere (the fast path
+  // above, the parked-redelivery re-check, the probe-deferred re-check) trusts as proof a
+  // live title transition was actually observed. Scoped by pty identity + generation +
+  // lifecycle generation and TTL-bounded so a stale authorization can never outlive the
+  // window it was actually observed in, let alone survive a same-id daemon respawn.
+  private readonly probedDeliveryAuthorizationByPtyId = new Map<
+    string,
+    { ptyGeneration: number; ptyLifecycleGeneration: number; expiresAt: number }
   >()
 
   private readonly agentMailboxSlowRetryTimersByHandle = new Map<
@@ -39215,6 +39310,11 @@ async function assertTerminalInputWithinLimitWithYield(text: string | undefined)
 const TUI_IDLE_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
 const TUI_IDLE_POLL_INTERVAL_MS = 2000
 const TUI_IDLE_QUIESCENCE_MS = 3000
+// Why (S10-9 review): how long a probe-observed idle authorizes this fallback's OWN
+// follow-up pushes on the same pty identity/generation before it must re-probe — short
+// enough that it can never stand in for a real live title observation, long enough to
+// dedupe a burst of messages that land in the same instant.
+const PROBED_DELIVERY_AUTHORIZATION_TTL_MS = 5000
 // Why (S10-9 R3): slow retry for a mailbox stuck behind a withheld gate — bounded and jittered
 // so N stuck mailboxes never synchronize into one thundering sweep.
 const AGENT_MAILBOX_SLOW_RETRY_INTERVAL_MS = 5 * 60 * 1000
