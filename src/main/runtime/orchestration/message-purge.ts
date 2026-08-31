@@ -98,6 +98,18 @@ function purgeLinkedAnswer(db: Database.Database, messageId: string): void {
   ).run(sha256Hex(row.answer_body ?? ''), row.message_id)
 }
 
+// S10-3 pact spec CONTAINMENT §: "purge keeps the row and loses the words" — blanks
+// pact_steps.summary for the row whose message_id is the purged message, storing
+// summary_sha256 first (it already IS the sanitized-text hash, set at appendPactStep time) and
+// stamping summary_purged_at. trg_pact_steps_append_only permits exactly this one transition;
+// every other column (ordinal, actor, kind, timestamp) survives untouched — ruling 2, F5.
+function purgeLinkedPactStep(db: Database.Database, messageId: string): void {
+  db.prepare(
+    `UPDATE pact_steps SET summary = NULL, summary_purged_at = datetime('now')
+     WHERE message_id = ? AND summary IS NOT NULL`
+  ).run(messageId)
+}
+
 function purgeMessageRowInTxn(
   db: Database.Database,
   message: MessageRow,
@@ -111,6 +123,7 @@ function purgeMessageRowInTxn(
      WHERE id = ?`
   ).run(sanitizedReason, purgedByAgentId, PURGED_SUBJECT, message.id)
   purgeLinkedAnswer(db, message.id)
+  purgeLinkedPactStep(db, message.id)
 }
 
 export type PurgeMessageParams = {

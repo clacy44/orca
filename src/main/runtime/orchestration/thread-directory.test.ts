@@ -129,13 +129,16 @@ describe('setThreadState / setThreadPact / markThreadRead', () => {
   it('setThreadPact writes pact columns', () => {
     const db = freshDb()
     const { thread } = db.createThread({ subject: 's', createdByAgentId: null, participants: [] })
+    // v35's trg_pact_turn_membership (S10-3) requires an engaged pact's turn to be held by a
+    // participant; this one-shot legacy path (wired to no RPC — see thread-directory.ts's own
+    // comment) never sets pact_proposer_agent_id, so the turn must be pact_with_agent_id.
     const updated = db.setThreadPact(thread.id, {
       pactWithAgentId: 'agt_b',
       pactState: 'engaged',
-      pactTurnAgentId: 'agt_a'
+      pactTurnAgentId: 'agt_b'
     })
     expect(updated.pact_state).toBe('engaged')
-    expect(updated.pact_turn_agent_id).toBe('agt_a')
+    expect(updated.pact_turn_agent_id).toBe('agt_b')
     db.close()
   })
 
