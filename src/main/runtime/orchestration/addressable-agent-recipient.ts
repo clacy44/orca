@@ -17,6 +17,22 @@ export function requireAddressableAgentRecipient(
 ): NonNullable<ReturnType<OrchestrationDb['getAgentById']>> {
   const agentRecipient = db.getAgentById(agentId)
   if (!agentRecipient) {
+    // S10-7 F-B: tell "never existed" apart from "retired" — a tombstoned row still resolves
+    // via the tombstone-inclusive raw read, so mail to it names the successor (a live row that
+    // reclaimed its display_name) instead of the generic agent_unknown message.
+    const retired = db.getAgentByIdIncludingTombstoned(agentId)
+    if (retired?.tombstoned_at) {
+      const successor = db.getAgentByName(retired.host_id, retired.display_name)
+      throw new OrchestrationError(
+        'agent_retired',
+        `Agent ${retired.display_name} (${agentId}) has been retired and can no longer receive mail.`,
+        {
+          nextSteps: successor
+            ? [`orca orchestration send --to agent:${successor.id} --subject "..."`]
+            : ['orca agents find "<plain English description>"', 'orca agents list']
+        }
+      )
+    }
     throw new OrchestrationError('agent_unknown', `Agent ${agentId} was not found.`, {
       nextSteps: ['orca agents find "<plain English description>"', 'orca agents list']
     })
