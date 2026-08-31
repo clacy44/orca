@@ -169,6 +169,39 @@ describe('bare-handle peer mail (A4/BUG 6, generalized past agent:<id>)', () => 
     const stored = db.getAllMessagesForHandle('term_c')[0]
     expect(stored?.read).toBe(1)
   })
+
+  // Adversarial review S10-2b major #5: db.getOrCreateMailboxDelivery computes omitted counts
+  // but readMailboxDelivery discarded them — a purged/withheld row silently disappeared with no
+  // way for the caller to know, in JSON or --format text.
+  it('ackMode:"implicit" surfaces omitted.purged (on a replay of a batch purged after freezing) in JSON and --format text', async () => {
+    setup()
+    await call('orchestration.send', { from: 'term_a', to: 'term_c', subject: 'keep' })
+    const toPurge = (await call('orchestration.send', {
+      from: 'term_a',
+      to: 'term_c',
+      subject: 'purge me'
+    })) as { message: { id: string } }
+    // Freeze the delivery batch (both messages) before purging — mirrors the T6 "frozen delivery
+    // batch" scenario: getUnreadMessages already filters purged rows in SQL, so `omitted` can
+    // only surface on a REPLAY of an already-frozen batch, not the initial mint.
+    await call('orchestration.check', { terminal: 'term_c', ackMode: 'implicit' })
+    db.purgeMessage({ messageId: toPurge.message.id, reason: 'oops', purgedByAgentId: null })
+
+    const checked = (await call('orchestration.check', {
+      terminal: 'term_c',
+      ackMode: 'implicit',
+      format: true
+    })) as {
+      messages: { subject: string }[]
+      replayed: boolean
+      omitted?: { purged: number; withheld: number }
+      formatted?: string
+    }
+    expect(checked.replayed).toBe(true)
+    expect(checked.messages.map((m) => m.subject)).toEqual(['keep'])
+    expect(checked.omitted).toEqual({ purged: 1, withheld: 0 })
+    expect(checked.formatted).toContain('1 purged')
+  })
 })
 
 describe('dispatch: mailbox ackMode dual behaviour', () => {

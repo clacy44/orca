@@ -1,6 +1,14 @@
 import type { MessageRow } from './types'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { sanitizeDirectoryText } from './agent-name-sanitizer'
+import { sanitizeMessageText } from '../../../shared/message-text'
+
+// Why generous, not the write-side MESSAGE_BODY_MAX_LENGTH/SUBJECT_MAX_LENGTH
+// (message-gate-writer.ts): these render-side sanitizer calls exist for defense-in-depth against
+// a row that predates the write-side sanitizer, or a future write-side regression (ruling 4) —
+// they must strip control/escape/newline structure without re-truncating a normal, already
+// write-sanitized row a second time.
+const RENDER_SANITIZE_MAX_LENGTH = 4000
 
 const BANNER_WIDTH = 60
 const SEPARATOR = '─'.repeat(BANNER_WIDTH)
@@ -68,22 +76,26 @@ export function formatMessageBanner(
         : authority === 'legacy_read_only'
           ? ' [LEGACY READ-ONLY]'
           : ''
-  const senderName = msg.from_handle.toUpperCase()
+  // Ruling 4 (S10-2 GATE §, generalized from S10-1 ruling A2): sanitize at write AND at every
+  // render — a legacy row (predates the write-side sanitizer) or a federation-imported row must
+  // never inject multiple lines or terminal escapes into a coordinator's transcript here either.
+  const sanitizedFromHandle = sanitizeMessageText(msg.from_handle, RENDER_SANITIZE_MAX_LENGTH).value
+  const senderName = sanitizedFromHandle.toUpperCase()
 
-  const header = `──── From: ${senderName} (${msg.from_handle})${priorityTag}${authorityTag} (${msg.type}) ────`
+  const header = `──── From: ${senderName} (${sanitizedFromHandle})${priorityTag}${authorityTag} (${msg.type}) ────`
 
   const lines: string[] = [header]
-  lines.push(`Subject: ${msg.subject}`)
+  lines.push(`Subject: ${sanitizeMessageText(msg.subject, RENDER_SANITIZE_MAX_LENGTH).value}`)
   if (authority !== 'current') {
     appendLegacyGuidance(lines, authority, options.supportedActionHints ?? [])
   }
 
   if (msg.body) {
-    lines.push(msg.body)
+    lines.push(sanitizeMessageText(msg.body, RENDER_SANITIZE_MAX_LENGTH).value)
   }
 
   if (msg.payload) {
-    lines.push(`[Payload: ${msg.payload}]`)
+    lines.push(`[Payload: ${sanitizeMessageText(msg.payload, RENDER_SANITIZE_MAX_LENGTH).value}]`)
   }
 
   if (authority === 'current') {
@@ -114,11 +126,36 @@ const POINTER_SUBJECT_MAX = 80
 
 // Why: bounded per §6 poison containment — a subject can carry attacker-shaped
 // text, but never enough of it to trip a reader; the body is never touched.
+// Why sanitize-then-slice (S10-2 DELIVERY §, ruling 4) and not slice-then-sanitize (the bug this
+// closes): slicing alone is not sanitizing — a subject under 80 raw chars can still carry a `\n`
+// or a CSI sequence, which is exactly what breaks "never more than 3 lines" (T5). Sanitizing
+// first collapses any embedded newline/escape structure into the one printable line the 80-char
+// cut then bounds.
 function truncatePointerSubject(subject: string): string {
-  if (subject.length <= POINTER_SUBJECT_MAX) {
-    return subject
+  const sanitized = sanitizeMessageText(subject, RENDER_SANITIZE_MAX_LENGTH).value
+  if (sanitized.length <= POINTER_SUBJECT_MAX) {
+    return sanitized
   }
-  return `${subject.slice(0, POINTER_SUBJECT_MAX - 1)}…`
+  return `${sanitized.slice(0, POINTER_SUBJECT_MAX - 1)}…`
+}
+
+// WAIT/ASK § mechanical difference #1: a peer ask is `type==='question'` — derivable from the
+// row alone, no thread lookup needed.
+function isPeerAskMessage(msg: MessageRow): boolean {
+  return msg.type === 'question'
+}
+
+// Why a caller-injected resolver and not a column on MessageRow: sensitivity lives on `threads`,
+// not `messages` — the same "identity/authority resolved by the caller, formatter stays pure"
+// shape as `resolveSenderAgent` above. Absent (an old call site, or a message with no thread_id)
+// reads as "not sensitive" — never fail OPEN the other way (never sensitive when it might be).
+export type ResolveThreadSensitive = (threadId: string) => boolean
+
+function threadIsSensitive(
+  msg: MessageRow,
+  resolveThreadSensitive?: ResolveThreadSensitive
+): boolean {
+  return msg.thread_id != null && (resolveThreadSensitive?.(msg.thread_id) ?? false)
 }
 
 /** Directory identity for the sender of one message (S10-1: pointer wires role). Both fields
@@ -137,11 +174,22 @@ export type ResolveMessagePointerSenderAgent = (msg: MessageRow) => MessagePoint
 const POINTER_ROLE_MAX_LENGTH = 40
 const POINTER_NAME_MAX_LENGTH = 32
 
+// SENSITIVE THREADS §: no subject at all — never the body, never even the truncated subject a
+// non-sensitive pointer shows. `count` is how many queued messages share this sensitive thread
+// (of the full unread set, not just what's shown) so the reader knows there is more than one.
+function formatSensitiveThreadPointerLine(threadId: string, count: number): string {
+  return `[sensitive thread ${threadId} — ${count} message${count === 1 ? '' : 's'}]`
+}
+
 function formatMessagePointerLine(
   msg: MessageRow,
-  resolveSenderAgent?: ResolveMessagePointerSenderAgent
+  resolveSenderAgent?: ResolveMessagePointerSenderAgent,
+  sensitiveThreadCount?: number
 ): string {
   const thread = msg.thread_id ?? 'none'
+  if (msg.thread_id != null && sensitiveThreadCount !== undefined) {
+    return formatSensitiveThreadPointerLine(msg.thread_id, sensitiveThreadCount)
+  }
   const agent = resolveSenderAgent?.(msg) ?? null
   const sanitizedName = agent
     ? sanitizeDirectoryText(agent.displayName, POINTER_NAME_MAX_LENGTH).value
@@ -152,28 +200,63 @@ function formatMessagePointerLine(
   const from =
     agent && sanitizedName.length > 0
       ? `${sanitizedName}${sanitizedRole ? ` (${sanitizedRole})` : ''}`
-      : msg.from_handle
-  return `[from: ${from}] "${truncatePointerSubject(msg.subject)}" thread:${thread}`
+      : sanitizeMessageText(msg.from_handle, RENDER_SANITIZE_MAX_LENGTH).value
+  // DELIVERY § mechanical difference #2: a peer ask's pointer line is prefixed so a reader
+  // triaging a flood of mail can see at a glance that someone is blocked on them.
+  const askPrefix = isPeerAskMessage(msg) ? '[ASK — sender is blocked] ' : ''
+  return `${askPrefix}[from: ${from}] "${truncatePointerSubject(msg.subject)}" thread:${thread}`
+}
+
+// Per-kind trailer (DELIVERY §): the footer line reflects the LAST shown message's kind — a
+// peer ask's "Answer:" hint always wins the footer slot over the generic overflow count (ruling:
+// "always shown even as the 3rd message, it displaces the overflow line, never widens past 3"),
+// a sensitive thread's footer never repeats the subject, and a plain message's footer is the
+// concrete resume command rather than the old, non-specific "Run `orca orchestration check`."
+function buildPointerFooter(
+  lastShown: MessageRow,
+  overflow: number,
+  resolveThreadSensitive?: ResolveThreadSensitive
+): string {
+  if (threadIsSensitive(lastShown, resolveThreadSensitive) && lastShown.thread_id != null) {
+    return `orca agents thread --id ${lastShown.thread_id}`
+  }
+  if (isPeerAskMessage(lastShown)) {
+    const threadId = lastShown.thread_id ?? lastShown.id
+    return `Answer: orca agents reply --thread ${threadId} --body "..."`
+  }
+  if (overflow > 0) {
+    return `— ${overflow} more; run orca orchestration check`
+  }
+  if (lastShown.thread_id != null) {
+    return `Read: orca agents thread --id ${lastShown.thread_id} --since ${lastShown.sequence}`
+  }
+  return 'Run `orca orchestration check`.'
 }
 
 // Why content-bearing but bounded (§6): an agent mid-flow reads a contentless
 // pointer as a low-value interrupt and defers it. Sender/subject/thread let it
 // triage without a round trip; only the first two are shown so a flood of
-// queued mail can never widen what gets typed into the pane.
+// queued mail can never widen what gets typed into the pane. Never more than 3 lines total
+// (DELIVERY §), no matter how much mail is queued: at most POINTER_MAX_SHOWN message lines plus
+// exactly one contextual footer line.
 export function formatMessagePointer(
   messages: readonly MessageRow[],
-  resolveSenderAgent?: ResolveMessagePointerSenderAgent
+  resolveSenderAgent?: ResolveMessagePointerSenderAgent,
+  resolveThreadSensitive?: ResolveThreadSensitive
 ): string {
   if (messages.length === 0) {
     return ''
   }
   const shown = messages.slice(0, POINTER_MAX_SHOWN)
-  const lines = shown.map((msg) => formatMessagePointerLine(msg, resolveSenderAgent))
   const overflow = messages.length - shown.length
-  lines.push(
-    overflow > 0
-      ? `— ${overflow} more; run orca orchestration check`
-      : 'Run `orca orchestration check`.'
-  )
+  const lines = shown.map((msg) => {
+    const sensitive = threadIsSensitive(msg, resolveThreadSensitive)
+    const sensitiveCount = sensitive
+      ? messages.filter((m) => m.thread_id === msg.thread_id).length
+      : undefined
+    return formatMessagePointerLine(msg, resolveSenderAgent, sensitiveCount)
+  })
+  const lastShown = shown.at(-1) as MessageRow
+  lines.push(buildPointerFooter(lastShown, overflow, resolveThreadSensitive))
   return `\n${lines.join('\n')}\n`
 }

@@ -178,7 +178,7 @@ describe('post-ready dispatch input observer', () => {
       dispatchId,
       taskId
     })
-    expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation')
+    expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation', null, 'input_not_consumed')
   })
 
   it('reports a gate the agent never got past, once its dwell has elapsed', async () => {
@@ -648,7 +648,7 @@ describe('post-ready dispatch input observer', () => {
         dispatchId,
         taskId
       })
-      expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation')
+      expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation', null, 'input_not_consumed')
     })
   })
 

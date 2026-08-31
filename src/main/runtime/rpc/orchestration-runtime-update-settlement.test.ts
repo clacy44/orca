@@ -367,8 +367,13 @@ describe('orchestration runtime update settlement', () => {
       )
     )
 
+    // Why not WORK_BYTES verbatim: this send now routes through insertGatedMessage (S10-2b
+    // amendment A), whose write-side sanitizer (message-text.ts sanitizeMessageText) collapses
+    // a trailing newline to a space and then trims it — by design (GATE §), not a regression;
+    // the file-content-preservation assertion this test actually cares about is
+    // expectIdentityAndWorkPreserved's raw-file read below, not the mail body round-trip.
     expect(resultOf(response)).toMatchObject({
-      message: { type: 'status', body: WORK_BYTES.toString('utf8') }
+      message: { type: 'status', body: WORK_BYTES.toString('utf8').trim() }
     })
     expect(harness.db.getTask(harness.taskId)).toMatchObject({ status: 'dispatched' })
     expect(harness.db.getDispatchContextById(harness.dispatchId)).toMatchObject({

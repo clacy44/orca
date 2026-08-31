@@ -1,6 +1,7 @@
 import { MESSAGE_TYPES, type MessagePriority, type MessageType } from './types'
 import type { OrchestrationDb } from './db'
 import { OrchestrationError } from './orchestration-error'
+import { gateVerdictRefusalError } from './gate-refusal-error'
 
 const MESSAGE_TYPE_SET = new Set<MessageType>(MESSAGE_TYPES)
 
@@ -79,7 +80,13 @@ export function importFederatedControlMessage(
     }
     return { imported: false, type: message.type }
   }
-  db.insertMessage({
+  // Amendment A: the federation relay import path routes through the single write choke too
+  // (GATE §: "at db.insertGatedMessage and at encodeFederatedControlMessage" — the encode side
+  // gates outbound; this is the matching inbound gate on import). Amendment A also scopes it:
+  // "inbound runs h1+h2 tiers only — h3 infra-allowlist is outbound-only" — infraAllowlist is
+  // omitted (never defaulted) so a local infra literal never blocks mail a remote peer already
+  // sent; h1 (containment headings) and h2 (secret-shaped values) still apply.
+  const inserted = db.insertGatedMessage({
     id: params.messageId,
     from: message.from,
     to: recipient,
@@ -88,7 +95,12 @@ export function importFederatedControlMessage(
     type: message.type,
     priority: message.priority,
     threadId: message.threadId ?? undefined,
-    payload: message.payload ?? undefined
+    payload: message.payload ?? undefined,
+    infraAllowlist: [],
+    verb: 'federation_import'
   })
+  if (inserted.outcome === 'refused') {
+    throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
+  }
   return { imported: true, type: message.type }
 }

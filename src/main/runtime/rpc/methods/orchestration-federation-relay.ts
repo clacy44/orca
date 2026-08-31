@@ -225,9 +225,14 @@ function requireHomeAttachment(
 ) {
   const attachment = runtime.getOrchestrationDb().getRemoteDispatchAttachment(dispatchId)
   if (!attachment || attachment.home_peer_fingerprint !== callerFingerprint) {
+    // Amendment G-1: a worker_done/ask push whose dispatchId exists on no reachable runtime
+    // (no attachment on THIS home for this caller) gets the specific re-dispatch sentence, not
+    // a generic not_found — "not found" reads as "typo the id"; this dispatch id may be
+    // perfectly real, just never federated to (or no longer attached on) this home.
     throw new OrchestrationError(
-      'dispatch_not_found',
-      `Remote Dispatch ${dispatchId} was not found for this Run home.`
+      'dispatch_never_federated',
+      `Dispatch ${dispatchId}: this dispatch was never federated; the coordinator must ` +
+        're-dispatch with worker-start --on <env>.'
     )
   }
   return attachment

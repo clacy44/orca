@@ -160,11 +160,16 @@ describe('messages.sender_agent_id populated on every send', () => {
     expect(db.getMessageById(result.message.id)?.sender_agent_id).toBeNull()
   })
 
-  // MUTATION PROOF (adversarial review major #4, CONTAINMENT #7): a quarantined sender's row
-  // must never be stamped as provenance — that id is exactly what formatMessagePointer's
-  // resolver looks up to type a name/role into the recipient's PTY, and quarantine must hold in
-  // both directions. Reverting to stamping unconditionally reproduces the leak.
-  it('a quarantined sender leaves sender_agent_id null even though the row still exists', async () => {
+  // MUTATION PROOF (adversarial review S10-2b major #3): a quarantined sender's row must STILL
+  // be stamped with its real sender_agent_id — the S10-2b original nulled it here, which reads
+  // like containment but is the opposite: message-visibility-filter.ts's live-read predicate
+  // only withholds a row when sender_agent_id resolves to a currently-quarantined agent, so a
+  // nulled column made every post-quarantine send from that sender pass the withholding filter
+  // instead of being caught by it (quarantine held for the past, never for the future).
+  // Reverting to nulling here reproduces that gap. The CONTAINMENT #7 pane-name concern this
+  // used to cite is handled independently, at render time, by orca-runtime.ts's
+  // resolveSenderAgent callback re-checking `agent.quarantined === 1`.
+  it('a quarantined sender still gets sender_agent_id stamped with its real directory row id', async () => {
     const { senderHandle, recipientHandle, senderAgentId } = await setup()
     db.setAgentQuarantine({ id: senderAgentId, quarantined: true, reasonCode: 'flagged' })
 
@@ -174,6 +179,34 @@ describe('messages.sender_agent_id populated on every send', () => {
       subject: 'still talking while quarantined'
     })) as { message: { id: string } }
 
-    expect(db.getMessageById(result.message.id)?.sender_agent_id).toBeNull()
+    expect(db.getMessageById(result.message.id)?.sender_agent_id).toBe(senderAgentId)
+  })
+
+  // MUTATION PROOF (adversarial review S10-2b major #3, LIVE PROBE E): the whole point of
+  // stamping through quarantine is that the live-read withholding filter (getUnreadMessages /
+  // orchestration.check, message-visibility-filter.ts) then actually catches every send made
+  // AFTER quarantine, not just the ones made before it. Nulling sender_agent_id on the
+  // quarantined branch (or any regression that stops stamping it) makes this delivered instead
+  // of withheld.
+  it('quarantine withholds a message sent to another pane AFTER the sender was quarantined', async () => {
+    const { senderHandle, recipientHandle, senderAgentId } = await setup()
+
+    await call('orchestration.send', {
+      from: senderHandle,
+      to: recipientHandle,
+      subject: 'before',
+      body: 'BEFORE-BODY'
+    })
+    db.setAgentQuarantine({ id: senderAgentId, quarantined: true, reasonCode: 'flagged' })
+    await call('orchestration.send', {
+      from: senderHandle,
+      to: recipientHandle,
+      subject: 'after',
+      body: 'AFTER-BODY'
+    })
+
+    const unread = db.getUnreadMessages(recipientHandle)
+    expect(unread.map((m) => m.subject)).toEqual([])
+    expect(unread.map((m) => m.body)).toEqual([])
   })
 })

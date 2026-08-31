@@ -42,7 +42,10 @@ import type {
   MailboxDeliveryRow,
   MailboxDeliveryStatus,
   AgentAuditRow,
-  AgentRateRow
+  AgentRateRow,
+  ThreadRow,
+  ThreadParticipantRow,
+  ThreadState
 } from './types'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
@@ -84,6 +87,52 @@ import {
   pruneStaleDerivedAgents as pruneStaleDerivedAgentsImpl,
   type UpsertDerivedAgentForPaneParams
 } from './derived-agent-rows'
+import {
+  insertGatedMessage as insertGatedMessageImpl,
+  payloadValueForGate,
+  type InsertGatedMessageParams,
+  type InsertGatedMessageResult
+} from './message-gate-writer'
+import { gateVerdictRefusalError } from './gate-refusal-error'
+import { loadInfraAllowlist } from './infra-allowlist'
+import { filterLiveMessageRows, liveMessageSqlClause } from './message-visibility-filter'
+import {
+  createThread as createThreadImpl,
+  getThread as getThreadImpl,
+  listThreadsForParticipant as listThreadsForParticipantImpl,
+  upsertThreadParticipant as upsertThreadParticipantImpl,
+  leaveThread as leaveThreadImpl,
+  bumpThreadOnMessage as bumpThreadOnMessageImpl,
+  setThreadState as setThreadStateImpl,
+  setThreadPact as setThreadPactImpl,
+  markThreadRead as markThreadReadImpl,
+  getThreadMessagesSince as getThreadMessagesSinceImpl,
+  listThreadParticipants as listThreadParticipantsImpl,
+  isThreadParticipant as isThreadParticipantImpl,
+  type CreateThreadParams,
+  type ListThreadsForParticipantParams,
+  type UpsertThreadParticipantParams,
+  type SetThreadPactParams,
+  type GetThreadMessagesSinceOmitted
+} from './thread-directory'
+import {
+  purgeMessage as purgeMessageImpl,
+  purgeThread as purgeThreadImpl,
+  listMessagesByAuthor as listMessagesByAuthorImpl,
+  type PurgeMessageParams,
+  type PurgeMessageResult,
+  type PurgeThreadParams,
+  type PurgeThreadResult,
+  type ListMessagesByAuthorParams
+} from './message-purge'
+import {
+  createPeerQuestion as createPeerQuestionImpl,
+  answerPeerQuestion as answerPeerQuestionImpl,
+  type CreatePeerQuestionParams,
+  type CreatePeerQuestionResult,
+  type AnswerPeerQuestionParams,
+  type AnswerPeerQuestionResult
+} from './peer-question'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -450,6 +499,144 @@ const AGENT_DIRECTORY_SCHEMA_SQL = `
       );
 `
 
+// v34 (S10-2): durable threads, thread participants, and the gate refusal audit trail — tables
+// and triggers only, no data. Reused by both createTables() (every open, idempotent via IF NOT
+// EXISTS, same discipline as AGENT_DIRECTORY_SCHEMA_SQL above) and migrate()'s `current < 34`
+// block. The messages/question_threads column additions are baked into their own CREATE TABLE
+// definitions (fresh installs) and ALTERed under `current < 34` (existing installs), matching
+// how v33's sender_agent_id landed. The backfill (THREAD_DIRECTORY_BACKFILL_SQL below) is
+// deliberately NOT part of this constant: it reads `question_threads`, which createTables()'s
+// own exec runs before that table exists (question_threads is minted only inside migrate()'s
+// `current < 8` block) — running it here would throw "no such table" on every fresh install.
+const THREAD_DIRECTORY_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS threads (
+        id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        created_by_agent_id TEXT,
+        origin TEXT NOT NULL DEFAULT 'peer' CHECK(origin IN ('peer','question','fanout','legacy')),
+        state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','paused','closed')),
+        sensitive INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_message_at TEXT,
+        last_message_id TEXT,
+        last_message_sequence INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        pact_with_agent_id TEXT,
+        pact_state TEXT CHECK(pact_state IS NULL OR pact_state IN ('proposed','engaged','released')),
+        pact_turn_agent_id TEXT,
+        pact_at TEXT,
+        purged_at TEXT,
+        purge_reason TEXT,
+        purged_by_agent_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_threads_recent ON threads(state, last_message_at) WHERE purged_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS thread_participants (
+        thread_id TEXT NOT NULL,
+        participant_key TEXT NOT NULL,
+        agent_id TEXT,
+        handle TEXT,
+        role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner','member')),
+        joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+        left_at TEXT,
+        invited_by_agent_id TEXT,
+        invite_state TEXT CHECK(invite_state IS NULL OR invite_state IN ('pending','accepted','declined')),
+        last_read_sequence INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(thread_id, participant_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_thread_participants_agent
+        ON thread_participants(participant_key) WHERE left_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS gate_refusals (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_agent_id TEXT,
+        actor_pane_key TEXT,
+        actor_host_id TEXT,
+        verb TEXT NOT NULL,
+        rule_ids TEXT NOT NULL,
+        acknowledged INTEGER NOT NULL DEFAULT 0,
+        body_sha256 TEXT NOT NULL,
+        body_bytes INTEGER NOT NULL,
+        subject_sha256 TEXT NOT NULL,
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TRIGGER IF NOT EXISTS trg_threads_provenance_immutable
+      BEFORE UPDATE ON threads
+      WHEN OLD.id <> NEW.id
+        OR OLD.created_at <> NEW.created_at
+        OR IFNULL(OLD.created_by_agent_id, '') <> IFNULL(NEW.created_by_agent_id, '')
+        OR OLD.origin <> NEW.origin
+        OR (OLD.sensitive = 1 AND NEW.sensitive = 0)
+      BEGIN
+        SELECT RAISE(ABORT, 'thread provenance is immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_gate_refusals_no_update
+      BEFORE UPDATE ON gate_refusals
+      BEGIN
+        SELECT RAISE(ABORT, 'gate_refusals is append-only');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_gate_refusals_no_delete
+      BEFORE DELETE ON gate_refusals
+      BEGIN
+        SELECT RAISE(ABORT, 'gate_refusals is append-only');
+      END;
+
+      -- Pulled forward from the S10-4 ruling (agent-coordination-s10-4-federation-spec.md:18,
+      -- :91-94): 'paired_runtime' stays in the CHECK for wire compat (a rebuild is forbidden,
+      -- S10-1 test M3) but is refused at insert/update time — no code path mints one yet, and
+      -- closing the door now is cheaper than an S10-1 RISKS correction later.
+      CREATE TRIGGER IF NOT EXISTS trg_agents_no_foreign_origin
+      BEFORE INSERT ON agents
+      WHEN NEW.origin_kind NOT IN ('pane', 'derived')
+      BEGIN
+        SELECT RAISE(ABORT, 'foreign agents live in remote_agents');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_agents_no_foreign_origin_update
+      BEFORE UPDATE ON agents
+      WHEN NEW.origin_kind NOT IN ('pane', 'derived')
+      BEGIN
+        SELECT RAISE(ABORT, 'foreign agents live in remote_agents');
+      END;
+`
+
+// Separate from THREAD_DIRECTORY_SCHEMA_SQL (not folded into it): its WHEN clause references
+// messages.purged_at, so creating it unconditionally in createTables() would succeed (SQLite
+// does not validate a trigger's column references until it fires) but then abort the very next
+// UPDATE an EARLIER migrate() version block runs against a pre-v34 `messages` table that does
+// not have the column yet — "no such column: OLD.purged_at". Guarded by the same
+// hasColumn('messages', 'purged_at') check as the indexes below.
+const MESSAGES_PURGE_TRIGGER_SQL = `
+      CREATE TRIGGER IF NOT EXISTS trg_messages_purge_final
+      BEFORE UPDATE ON messages
+      WHEN OLD.purged_at IS NOT NULL
+        AND (NEW.purged_at IS NULL OR NEW.body <> '' OR NEW.subject <> '[purged]' OR IFNULL(NEW.payload, '') <> '')
+      BEGIN
+        SELECT RAISE(ABORT, 'purge is final');
+      END;
+`
+
+// Runs only inside migrate()'s `current < 34` block, after `question_threads` is guaranteed to
+// exist (created at `current < 8`, earlier in the same migration transaction for a fresh
+// install). Idempotent (INSERT OR IGNORE) and a no-op against an empty `messages` table.
+// Legacy subjects are the fixed literal, never derived from `messages.subject` (s10-2-spec.md:97
+// — those rows predate the write-side sanitizer, so promoting them would import unsanitized
+// author text into a new render surface).
+const THREAD_DIRECTORY_BACKFILL_SQL = `
+      INSERT OR IGNORE INTO threads (id, subject, origin, state, created_at, last_message_at,
+          last_message_sequence, message_count)
+        SELECT m.thread_id, '(legacy thread)',
+          CASE WHEN EXISTS(SELECT 1 FROM question_threads q WHERE q.message_id = m.thread_id) THEN 'question'
+               WHEN COUNT(DISTINCT m.to_handle) > 2 THEN 'fanout' ELSE 'legacy' END,
+          CASE WHEN COUNT(DISTINCT m.to_handle) > 2 THEN 'closed' ELSE 'open' END,
+          MIN(m.created_at), MAX(m.created_at), MAX(m.sequence), COUNT(*)
+        FROM messages m WHERE m.thread_id IS NOT NULL GROUP BY m.thread_id;
+      INSERT OR IGNORE INTO thread_participants (thread_id, participant_key, handle)
+        SELECT thread_id, from_handle, from_handle FROM messages WHERE thread_id IS NOT NULL
+        UNION SELECT thread_id, to_handle, to_handle FROM messages WHERE thread_id IS NOT NULL;
+`
+
 export const LEGACY_CONTRACT_VERSION = 0
 export const CURRENT_CONTRACT_VERSION = ORCHESTRATION_CONTRACT_VERSION
 
@@ -470,8 +657,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1).
-const SCHEMA_VERSION = 33
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a).
+const SCHEMA_VERSION = 34
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -496,6 +683,9 @@ export class OrchestrationDb {
   // per-terminal fan-out. Only createDispatchContext flips this false→true.
   private hasAnyDispatchContextsCache: boolean | undefined
 
+  // GATE § h3 (s10-2-spec.md:150): loaded once here, not per-call — see infra-allowlist.ts.
+  private readonly infraAllowlist: readonly string[]
+
   constructor(dbPath: (string & {}) | ':memory:') {
     this.db = new Database(dbPath)
     this.db.pragma('journal_mode = WAL')
@@ -504,6 +694,7 @@ export class OrchestrationDb {
     this.createTables()
     this.migrate()
     hardenOrchestrationDatabaseFiles(dbPath)
+    this.infraAllowlist = loadInfraAllowlist(dbPath)
   }
 
   private createTables(): void {
@@ -544,7 +735,18 @@ export class OrchestrationDb {
         delivered_at  TEXT,
         sender_pane_key TEXT,
         recipient_pane_key TEXT,
-        sender_agent_id TEXT
+        sender_agent_id TEXT,
+        purged_at TEXT,
+        purge_reason TEXT,
+        purged_by_agent_id TEXT,
+        gate_flags TEXT,
+        thread_sequence INTEGER,
+        -- payload_kind (v34, S10-2/pact rev 7): a dedicated discriminator column for the
+        -- pact-step kind. The JSON payload.kind namespace is already used by runtime
+        -- notifications (input_not_consumed / liveness_breach / relay_unreachable), so the
+        -- pact-step discriminator gets its own column instead of overloading that namespace;
+        -- callers can never set it (see insertGatedMessage's payload_kind_reserved refusal).
+        payload_kind TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -807,8 +1009,10 @@ export class OrchestrationDb {
       );
 
       ${AGENT_DIRECTORY_SCHEMA_SQL}
+      ${THREAD_DIRECTORY_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
+    this.createThreadDirectoryIndexesIfPossible()
   }
 
   // Why: CREATE TABLE IF NOT EXISTS won't alter existing DBs; migrate in a txn that bumps user_version only on success (atomic all-or-nothing).
@@ -953,7 +1157,12 @@ export class OrchestrationDb {
         answered_by_generation    INTEGER,
         created_at                TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at               TEXT,
-        closed_at                 TEXT
+        closed_at                 TEXT,
+        to_agent_id               TEXT,
+        answered_by_agent_id      TEXT,
+        answer_body_sha256        TEXT,
+        answer_purged_at          TEXT,
+        thread_key                TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_questions_dispatch_status
@@ -1240,6 +1449,45 @@ export class OrchestrationDb {
              ) VALUES (?, ?, 'this_database', 0, 0)`
           )
           .run(PEER_RUN_ID, 'Peer agent mail (S10)')
+      }
+      // v33 -> v34 (S10-2): durable threads, gate refusal audit, purge tombstone columns on
+      // messages, the payload_kind pact-step discriminator column on messages, peer-question
+      // binding columns on question_threads. `question_threads` only
+      // ever gets created above (`current < 8`), never in createTables() — the same is true
+      // here: THREAD_DIRECTORY_SCHEMA_SQL's backfill reads `question_threads`, so it must run
+      // after that block, which sequential `if (current < N)` execution within one migrate()
+      // call already guarantees for both a fresh install (current starts at 0) and an upgrade.
+      if (current < 34) {
+        for (const column of [
+          ['purged_at', 'TEXT'],
+          ['purge_reason', 'TEXT'],
+          ['purged_by_agent_id', 'TEXT'],
+          ['gate_flags', 'TEXT'],
+          ['thread_sequence', 'INTEGER'],
+          // payload_kind (pact rev 7): dedicated pact-step discriminator column, additive and
+          // separate from the JSON payload.kind namespace already used by runtime
+          // notifications (input_not_consumed / liveness_breach / relay_unreachable). Callers
+          // can never set it directly; see insertGatedMessage's payload_kind_reserved refusal.
+          ['payload_kind', 'TEXT']
+        ] as const) {
+          if (!this.hasColumn('messages', column[0])) {
+            this.db.exec(`ALTER TABLE messages ADD COLUMN ${column[0]} ${column[1]}`)
+          }
+        }
+        for (const column of [
+          ['to_agent_id', 'TEXT'],
+          ['answered_by_agent_id', 'TEXT'],
+          ['answer_body_sha256', 'TEXT'],
+          ['answer_purged_at', 'TEXT'],
+          ['thread_key', 'TEXT']
+        ] as const) {
+          if (!this.hasColumn('question_threads', column[0])) {
+            this.db.exec(`ALTER TABLE question_threads ADD COLUMN ${column[0]} ${column[1]}`)
+          }
+        }
+        this.db.exec(THREAD_DIRECTORY_SCHEMA_SQL)
+        this.createThreadDirectoryIndexesIfPossible()
+        this.db.exec(THREAD_DIRECTORY_BACKFILL_SQL)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -1637,6 +1885,26 @@ export class OrchestrationDb {
       CREATE INDEX IF NOT EXISTS idx_messages_undelivered_inbox
         ON messages(to_handle, read, delivered_at, sequence)
     `)
+  }
+
+  // Why guarded (not baked into createTables()'s messages CREATE TABLE index list): an existing
+  // pre-v34 DB's `messages` table lacks `purged_at`/`thread_sequence` until migrate()'s
+  // `current < 34` ALTERs run, and createTables() executes BEFORE migrate() on every open —
+  // an unconditional CREATE INDEX/TRIGGER referencing those columns would throw "no such
+  // column" the moment an EARLIER migrate() version block (e.g. `current < 19`) touches
+  // `messages` and fires the trigger before the column exists. Same precedent as
+  // createUndeliveredInboxIndexIfPossible above.
+  private createThreadDirectoryIndexesIfPossible(): void {
+    if (!this.hasColumn('messages', 'purged_at')) {
+      return
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_inbox_live ON messages(to_handle, read) WHERE purged_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_thread_live ON messages(thread_id, sequence) WHERE purged_at IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_thread_sequence
+        ON messages(thread_id, thread_sequence) WHERE thread_sequence IS NOT NULL;
+    `)
+    this.db.exec(MESSAGES_PURGE_TRIGGER_SQL)
   }
 
   // Why: sqlite_master holds the table's CREATE SQL incl. the CHECK — cheapest reliable probe for whether it already allows 'heartbeat'.
@@ -2902,18 +3170,27 @@ export class OrchestrationDb {
       | undefined
   }
 
-  private getDeliveryMessages(delivery: DeliveryRow): MessageRow[] {
+  // Why filtered here, not just at mint time (amendment E, PURGE § "Frozen delivery batches"):
+  // message_ids is frozen at creation, so a message purged (or whose author is quarantined)
+  // AFTER this Delivery was minted must still drop out of every replay — the id stays in the
+  // frozen list so the eventual ack still clears it, but the row itself is withheld.
+  private getDeliveryMessages(delivery: DeliveryRow): {
+    messages: MessageRow[]
+    omitted: { purged: number; withheld: number }
+  } {
     const ids = JSON.parse(delivery.message_ids) as string[]
     if (ids.length === 0) {
-      return []
+      return { messages: [], omitted: { purged: 0, withheld: 0 } }
     }
     const rows = this.db
       .prepare(`SELECT * FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`)
       .all(...ids) as MessageRow[]
     const byId = new Map(rows.map((row) => [row.id, row]))
-    return exposeMessageListTimestamps(
-      ids.map((id) => byId.get(id)).filter((row): row is MessageRow => row !== undefined)
-    )
+    const ordered = ids
+      .map((id) => byId.get(id))
+      .filter((row): row is MessageRow => row !== undefined)
+    const { messages, omitted } = filterLiveMessageRows(this.db, ordered)
+    return { messages: exposeMessageListTimestamps(messages), omitted }
   }
 
   // Why: message_ids is frozen at creation, so mail that arrives after an outstanding Delivery
@@ -2937,7 +3214,13 @@ export class OrchestrationDb {
     limit?: number
     wakeTypes?: MessageType[]
   }):
-    | { delivery: DeliveryRow; messages: MessageRow[]; replayed: boolean; pendingBehind: number }
+    | {
+        delivery: DeliveryRow
+        messages: MessageRow[]
+        replayed: boolean
+        pendingBehind: number
+        omitted?: { purged: number; withheld: number }
+      }
     | undefined {
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 50)
     this.db.exec('BEGIN IMMEDIATE')
@@ -2953,7 +3236,7 @@ export class OrchestrationDb {
             'This mailbox Delivery belongs to a fenced consumer generation.'
           )
         }
-        const messages = this.getDeliveryMessages(existing)
+        const { messages, omitted } = this.getDeliveryMessages(existing)
         const pendingBehind = this.countUnreadRunMessagesOutsideDelivery(
           params.runId,
           JSON.parse(existing.message_ids) as string[]
@@ -2963,7 +3246,8 @@ export class OrchestrationDb {
           delivery: exposeDeliveryTimestamps(existing),
           messages,
           replayed: true,
-          pendingBehind
+          pendingBehind,
+          ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
         }
       }
 
@@ -2990,6 +3274,7 @@ export class OrchestrationDb {
             `SELECT * FROM messages
              WHERE run_id = ? AND to_handle = ? AND read = 0
                AND delivery_contract = 'current_delivery'
+               AND ${liveMessageSqlClause()}
              ORDER BY sequence ASC LIMIT ?`
           )
           .all(params.runId, address, limit) as MessageRow[]
@@ -3081,6 +3366,8 @@ export class OrchestrationDb {
     }
   }
 
+  // Live-message clause (amendment E): backs `check --peek/--all`, a read path the PURGE §
+  // table names explicitly ("Every read path... peek/--all").
   getRunMailboxHistory(runId: string, limit = 100, types?: MessageType[]): MessageRow[] {
     const address = `run:${runId}`
     if (types && types.length > 0) {
@@ -3089,7 +3376,8 @@ export class OrchestrationDb {
         this.db
           .prepare(
             `SELECT * FROM messages WHERE run_id = ? AND to_handle = ?
-             AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
+             AND type IN (${placeholders}) AND ${liveMessageSqlClause()}
+             ORDER BY sequence DESC LIMIT ?`
           )
           .all(runId, address, ...types, limit) as MessageRow[]
       )
@@ -3098,6 +3386,7 @@ export class OrchestrationDb {
       this.db
         .prepare(
           `SELECT * FROM messages WHERE run_id = ? AND to_handle = ?
+           AND ${liveMessageSqlClause()}
            ORDER BY sequence DESC LIMIT ?`
         )
         .all(runId, address, limit) as MessageRow[]
@@ -3163,6 +3452,111 @@ export class OrchestrationDb {
     return pruneStaleDerivedAgentsImpl(this.db, hostId)
   }
 
+  // ── Durable threads, gated messages, purge (S10-2a) — logic lives in message-gate-writer.ts /
+  // thread-directory.ts / message-purge.ts; these are delegating calls only (this file is
+  // ratcheted). `insertGatedMessage` is the single write choke for peer-facing content
+  // (ruling 2). `insertMessage` below is NOT yet host-lifecycle-only: this series lands no
+  // handler edits (s10-2-spec.md:119, 213), so several of its own internal callers and several
+  // external ones still write peer-supplied free text ungated. Its exact caller set — which
+  // callers are genuinely host-generated and which are pending reroute onto
+  // `insertGatedMessage` in S10-2b — is enumerated and CI-pinned in
+  // `insert-message-call-sites.ts` / `insert-message-call-site-audit.test.ts`, not asserted
+  // here.
+  insertGatedMessage(params: InsertGatedMessageParams): InsertGatedMessageResult {
+    return insertGatedMessageImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
+  createThread(params: CreateThreadParams): ReturnType<typeof createThreadImpl> {
+    return createThreadImpl(this.db, params)
+  }
+
+  getThread(threadId: string): ThreadRow | undefined {
+    return getThreadImpl(this.db, threadId)
+  }
+
+  listThreadParticipants(threadId: string): ThreadParticipantRow[] {
+    return listThreadParticipantsImpl(this.db, threadId)
+  }
+
+  isThreadParticipant(threadId: string, participantKey: string): boolean {
+    return isThreadParticipantImpl(this.db, threadId, participantKey)
+  }
+
+  listThreadsForParticipant(params: ListThreadsForParticipantParams): ThreadRow[] {
+    return listThreadsForParticipantImpl(this.db, params)
+  }
+
+  upsertThreadParticipant(params: UpsertThreadParticipantParams): ThreadParticipantRow {
+    return upsertThreadParticipantImpl(this.db, params)
+  }
+
+  leaveThread(threadId: string, participantKey: string): void {
+    leaveThreadImpl(this.db, threadId, participantKey)
+  }
+
+  bumpThreadOnMessage(
+    threadId: string,
+    message: Pick<MessageRow, 'id' | 'sequence' | 'created_at'>
+  ): void {
+    bumpThreadOnMessageImpl(this.db, threadId, message)
+  }
+
+  setThreadState(threadId: string, state: ThreadState): ThreadRow {
+    return setThreadStateImpl(this.db, threadId, state)
+  }
+
+  setThreadPact(threadId: string, params: SetThreadPactParams): ThreadRow {
+    return setThreadPactImpl(this.db, threadId, params)
+  }
+
+  markThreadRead(threadId: string, participantKey: string, sequence: number): void {
+    markThreadReadImpl(this.db, threadId, participantKey, sequence)
+  }
+
+  getThreadMessagesSince(
+    threadId: string,
+    afterSequence?: number,
+    limit?: number
+  ): { messages: MessageRow[]; omitted: GetThreadMessagesSinceOmitted } {
+    return getThreadMessagesSinceImpl(this.db, threadId, afterSequence, limit)
+  }
+
+  purgeMessage(params: PurgeMessageParams): PurgeMessageResult {
+    return purgeMessageImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
+  purgeThread(params: PurgeThreadParams): PurgeThreadResult {
+    return purgeThreadImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
+  listMessagesByAuthor(params: ListMessagesByAuthorParams): MessageRow[] {
+    return listMessagesByAuthorImpl(this.db, params)
+  }
+
+  // S10-2b amendment F: peer ask/reply (no Dispatch, no consumer_generation to fence on).
+  createPeerQuestion(params: CreatePeerQuestionParams): CreatePeerQuestionResult {
+    return createPeerQuestionImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
+  answerPeerQuestion(params: AnswerPeerQuestionParams): AnswerPeerQuestionResult {
+    return answerPeerQuestionImpl(this.db, {
+      ...params,
+      infraAllowlist: params.infraAllowlist ?? this.infraAllowlist
+    })
+  }
+
   // ── Messages ──
 
   insertMessage(msg: {
@@ -3180,6 +3574,12 @@ export class OrchestrationDb {
     senderAgentId?: string | null
     runId?: string
     deliveryContract?: MessageDeliveryContract
+    /** Host-only column write (never gated — insertMessage's callers are the host-lifecycle
+     * exemption list): the runtime-notification kinds (input_not_consumed / liveness_breach /
+     * relay_unreachable) that keep living in JSON payload.kind (amendment D) also need the
+     * payload_kind COLUMN populated, since every read-side waiter/reservation lookup
+     * (message-waiter-thread-keying.ts) now reads that column exclusively. */
+    payloadKind?: string | null
   }): MessageRow {
     const runId = msg.runId ?? LEGACY_RUN_ID
     const deliveryContract = msg.deliveryContract ?? 'current_delivery'
@@ -3188,9 +3588,10 @@ export class OrchestrationDb {
     const stmt = this.db.prepare(`
       INSERT INTO messages (
         id, run_id, delivery_contract, from_handle, to_handle, subject, body,
-        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key, sender_agent_id
+        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key, sender_agent_id,
+        payload_kind
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     stmt.run(
       id,
@@ -3206,7 +3607,8 @@ export class OrchestrationDb {
       msg.payload ?? null,
       msg.senderPaneKey ?? null,
       msg.recipientPaneKey ?? null,
-      msg.senderAgentId ?? null
+      msg.senderAgentId ?? null,
+      msg.payloadKind ?? null
     )
     return exposeMessageTimestamps(
       this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
@@ -3322,18 +3724,36 @@ export class OrchestrationDb {
           )
         }
       } else {
-        message = this.insertMessage({
+        // Amendment A: legacy lifecycle sends (heartbeat/worker_done/escalation, imported via
+        // orchestration-legacy-lifecycle.ts) route through the single write choke too — the
+        // wire payload is still a pre-stringified string (payloadValueForGate bridges it, see
+        // that function's doc comment on the double-encoding trap).
+        const insertedLegacy = this.insertGatedMessage({
           from: principal.terminal_handle,
           to: delivery.to,
           subject: params.message.subject,
           body: params.message.body,
           type: params.message.type,
           priority: params.message.priority,
-          payload: params.message.payload,
+          payload: payloadValueForGate(params.message.payload),
           senderPaneKey: principal.pane_key,
+          senderHostId: 'local',
           runId: principal.run_id,
-          deliveryContract: delivery.contract
+          deliveryContract: delivery.contract,
+          verb: 'send'
         })
+        if (insertedLegacy.outcome === 'refused') {
+          // Why COMMIT, not ROLLBACK: insertGatedMessage already wrote its own gate_refusals
+          // audit row as part of THIS ambient transaction (SQLite has no nested transactions,
+          // and this method's own BEGIN IMMEDIATE opened above is still the active one) — a
+          // ROLLBACK here would erase that audit row along with it, the same trap
+          // peer-question.ts's doc comment on createPeerQuestion calls out. Nothing else has
+          // been written yet at this point in the flow, so committing here just persists the
+          // refusal audit and applies no other legacy-lifecycle effect.
+          this.db.exec('COMMIT')
+          throw gateVerdictRefusalError(insertedLegacy.verdict, insertedLegacy.refusalId)
+        }
+        message = insertedLegacy.message
       }
 
       let settlement: WorkerReportSettlement | undefined
@@ -3780,6 +4200,10 @@ export class OrchestrationDb {
     ) as LegacyOperationReceiptRow
   }
 
+  // Why the live-message clause here (amendment E, PURGE §): getUnreadMessages backs
+  // orchestration.check for every mailbox shape (run/dispatch/agent/bare-handle) — filtering
+  // in SQL, not in the RPC formatter, is what keeps a purged body or a quarantined author's row
+  // from ever reaching a --json caller.
   getUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
@@ -3788,7 +4212,7 @@ export class OrchestrationDb {
           .prepare(
             `SELECT * FROM messages
              WHERE to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery'
-               AND type IN (${placeholders}) ORDER BY sequence`
+               AND type IN (${placeholders}) AND ${liveMessageSqlClause()} ORDER BY sequence`
           )
           .all(toHandle, ...types) as MessageRow[]
       )
@@ -3798,6 +4222,7 @@ export class OrchestrationDb {
         .prepare(
           `SELECT * FROM messages
            WHERE to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery'
+             AND ${liveMessageSqlClause()}
            ORDER BY sequence`
         )
         .all(toHandle) as MessageRow[]
@@ -3840,6 +4265,8 @@ export class OrchestrationDb {
   }
 
   // Why: delivered_at IS NULL filter — push-on-idle delivers each row at most once; read (set only by check) wouldn't prevent replay.
+  // Live-message clause (amendment E): this result feeds the ambient pane push
+  // (deliverPendingMessagesForHandle) — a purged/withheld row must never be typed into a pane.
   getUndeliveredUnreadMessages(toHandle: string, types?: MessageType[]): MessageRow[] {
     if (types && types.length > 0) {
       const placeholders = types.map(() => '?').join(',')
@@ -3849,7 +4276,7 @@ export class OrchestrationDb {
             `SELECT * FROM messages
              WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL
                AND delivery_contract = 'current_delivery'
-               AND type IN (${placeholders}) ORDER BY sequence`
+               AND type IN (${placeholders}) AND ${liveMessageSqlClause()} ORDER BY sequence`
           )
           .all(toHandle, ...types) as MessageRow[]
       )
@@ -3860,6 +4287,7 @@ export class OrchestrationDb {
           `SELECT * FROM messages
            WHERE to_handle = ? AND read = 0 AND delivered_at IS NULL
              AND delivery_contract = 'current_delivery'
+             AND ${liveMessageSqlClause()}
            ORDER BY sequence`
         )
         .all(toHandle) as MessageRow[]
@@ -3886,7 +4314,8 @@ export class OrchestrationDb {
         .prepare(
           `SELECT DISTINCT to_handle FROM messages
            WHERE read = 0 AND delivered_at IS NULL
-             AND delivery_contract = 'current_delivery'`
+             AND delivery_contract = 'current_delivery'
+             AND ${liveMessageSqlClause()}`
         )
         .all() as { to_handle: string }[]
     ).map((row) => row.to_handle)
@@ -3939,10 +4368,14 @@ export class OrchestrationDb {
       .run(...ids)
   }
 
+  // Live-message clause (amendment E): orchestration.inbox with no --terminal/--thread-id
+  // passthrough — a purged/withheld row must not leak through the bare operator inbox either.
   getInbox(limit = 20): MessageRow[] {
     return exposeMessageListTimestamps(
       this.db
-        .prepare('SELECT * FROM messages ORDER BY sequence DESC LIMIT ?')
+        .prepare(
+          `SELECT * FROM messages WHERE ${liveMessageSqlClause()} ORDER BY sequence DESC LIMIT ?`
+        )
         .all(limit) as MessageRow[]
     )
   }
@@ -3954,14 +4387,18 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders}) ORDER BY sequence DESC LIMIT ?`
+            `SELECT * FROM messages WHERE to_handle = ? AND type IN (${placeholders})
+             AND ${liveMessageSqlClause()} ORDER BY sequence DESC LIMIT ?`
           )
           .all(toHandle, ...types, limit) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(
       this.db
-        .prepare('SELECT * FROM messages WHERE to_handle = ? ORDER BY sequence DESC LIMIT ?')
+        .prepare(
+          `SELECT * FROM messages WHERE to_handle = ? AND ${liveMessageSqlClause()}
+           ORDER BY sequence DESC LIMIT ?`
+        )
         .all(toHandle, limit) as MessageRow[]
     )
   }
@@ -3972,7 +4409,8 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ? ORDER BY sequence ASC'
+            `SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ?
+             AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
           .all(threadId, toHandle, afterSequence) as MessageRow[]
       )
@@ -3980,7 +4418,8 @@ export class OrchestrationDb {
     return exposeMessageListTimestamps(
       this.db
         .prepare(
-          'SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? ORDER BY sequence ASC'
+          `SELECT * FROM messages WHERE thread_id = ? AND to_handle = ?
+           AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
         )
         .all(threadId, toHandle) as MessageRow[]
     )
@@ -3999,7 +4438,8 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND sequence > ? ORDER BY sequence ASC'
+            `SELECT * FROM messages WHERE thread_id = ? AND sequence > ?
+             AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
           .all(threadId, since.value) as MessageRow[]
       )
@@ -4008,16 +4448,61 @@ export class OrchestrationDb {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            'SELECT * FROM messages WHERE thread_id = ? AND created_at > ? ORDER BY sequence ASC'
+            `SELECT * FROM messages WHERE thread_id = ? AND created_at > ?
+             AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
           .all(threadId, since.value) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(
       this.db
-        .prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY sequence ASC')
+        .prepare(
+          `SELECT * FROM messages WHERE thread_id = ? AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
+        )
         .all(threadId) as MessageRow[]
     )
+  }
+
+  // Adversarial review S10-2b major #5 fix: getThreadMessages/getThreadMessagesFor above filter
+  // purged/quarantine-withheld rows straight in SQL (liveMessageSqlClause) but never counted
+  // what they excluded — resolveThreadReplay (orchestration-thread.ts) declares an `omitted`
+  // field on its return type and had no way to populate it. Same cursor/to_handle shape as
+  // whichever of the two queries the caller just ran, so the counts match exactly what that
+  // query excluded. Two separate COUNT queries (not a single CASE-summed one) so a row that is
+  // both purged AND from a quarantined sender is never double-counted: the withheld count
+  // explicitly excludes purged rows, same split as getThreadMessagesSince (thread-directory.ts).
+  getThreadMessagesOmitted(
+    threadId: string,
+    since?: ThreadSinceCursor,
+    toHandle?: string
+  ): { purged: number; withheld: number } {
+    const cursorClause =
+      since?.kind === 'sequence'
+        ? 'AND sequence > ?'
+        : since?.kind === 'timestamp'
+          ? 'AND created_at > ?'
+          : ''
+    const cursorArgs = since ? [since.value] : []
+    const toHandleClause = toHandle !== undefined ? 'AND to_handle = ?' : ''
+    const toHandleArgs = toHandle !== undefined ? [toHandle] : []
+    const purged = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages
+           WHERE thread_id = ? ${toHandleClause} ${cursorClause} AND purged_at IS NOT NULL`
+        )
+        .get(threadId, ...toHandleArgs, ...cursorArgs) as { n: number }
+    ).n
+    const withheld = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages
+           WHERE thread_id = ? ${toHandleClause} ${cursorClause} AND purged_at IS NULL
+             AND sender_agent_id IN (SELECT id FROM agents WHERE quarantined = 1)`
+        )
+        .get(threadId, ...toHandleArgs, ...cursorArgs) as { n: number }
+    ).n
+    return { purged, withheld }
   }
 
   createQuestion(params: {
@@ -4107,7 +4592,21 @@ export class OrchestrationDb {
         )
       }
       if (question.status === 'answered') {
-        if (question.answer_body !== params.body || !question.answer_message_id) {
+        // T7 / PURGE § ruling 10: a purged answer blanks answer_body to '' and stores
+        // answer_body_sha256 first — an ordinary at-least-once retry of the ORIGINAL body must
+        // still dedup to `duplicate:true`, not throw answer_conflict just because the live
+        // column no longer holds the text to compare against.
+        const purgedMatch =
+          question.answer_purged_at != null &&
+          question.answer_body_sha256 ===
+            createHash('sha256').update(params.body, 'utf8').digest('hex')
+        if (!purgedMatch && question.answer_body !== params.body) {
+          throw new OrchestrationError(
+            'answer_conflict',
+            `Question ${params.messageId} already has a different answer.`
+          )
+        }
+        if (!question.answer_message_id) {
           throw new OrchestrationError(
             'answer_conflict',
             `Question ${params.messageId} already has a different answer.`
@@ -5773,6 +6272,12 @@ export class OrchestrationDb {
   importFederatedRelayItem(params: {
     dispatchId: string
     sequence: number
+    /** federation_relay_items.kind for this item (federation-sync.ts's `item.kind`) — the
+     * peer-host-attested provenance discriminator (Amendment A/D fix): 'runtime_notification'
+     * only for rows the peer's own trusted runtime code enqueued; every other value (a
+     * MESSAGE_TYPES literal, or 'question') is reachable from the dispatched agent's own
+     * orchestration.send/ask. See the call site below for the full rationale. */
+    relayKind: string
     message: {
       id: string
       runId: string
@@ -5796,9 +6301,10 @@ export class OrchestrationDb {
         }
       | { kind: 'rejected'; code: string; reason: string }
   }): {
-    message: MessageRow
+    message: MessageRow | null
     duplicate: boolean
     lifecycle?: WorkerReportSettlement | { action: 'rejected'; code: string; reason: string }
+    refused?: { refusalId: number; ruleIds: readonly string[] }
   } {
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -5825,7 +6331,79 @@ export class OrchestrationDb {
 
       let message = this.getMessageById(params.message.id)
       if (!message) {
-        message = this.insertMessage(params.message)
+        // Amendment A fix: this relay item carries mixed content — a worker's own free-text
+        // worker_done/escalation/status body (a dispatched agent's own orchestration.send/ask
+        // params, queued straight into federation_relay_items with NO gate check anywhere on
+        // that path — the "already gated once at the worker's own local orchestration.send"
+        // this comment used to claim is not true; that RPC branch only calls
+        // db.enqueueFederationRelay) alongside host-generated 'runtime_notification' relay
+        // items (dispatch-input-observer.ts / orchestration-federation-setup.ts) whose JSON
+        // payload legitimately carries `kind` (input_not_consumed/liveness_breach/
+        // relay_unreachable/setup status — amendment D's reserved namespace). The two shapes are
+        // told apart by `params.relayKind` — federation_relay_items.kind, threaded through from
+        // federation-sync.ts's `item.kind` — which is peer-host-attested provenance, not a value
+        // the dispatched agent can set: its own orchestration.send/ask can only pick a
+        // MESSAGE_TYPES value for the relay kind (`kind: type`, orchestration.ts), never the
+        // literal 'runtime_notification' that only the peer's own trusted runtime code enqueues.
+        //
+        // 'runtime_notification' rows: same as before — payload_kind (the COLUMN) populated
+        // directly from the trusted JSON `kind`, same bridge as runtime-notification.ts, un-gated
+        // (host-lifecycle, never sender-controlled prose). Every other relay kind: routed through
+        // the single write choke (h1+h2 tiers only, amendment A's inbound scope — infraAllowlist
+        // is never defaulted here so a local infra literal never blocks mail a remote peer
+        // already sent) and payload_kind is never derived from the imported JSON (amendment D) —
+        // `payloadValueForGate` parses the wire payload once into a value insertGatedMessage can
+        // gate leaf-by-leaf and re-serialize without double-encoding; a caller-supplied top-level
+        // `kind` in that JSON hits the same payload_kind_reserved refusal every other peer-facing
+        // sender does.
+        if (params.relayKind === 'runtime_notification') {
+          let payloadKind: string | null = null
+          if (params.message.payload) {
+            try {
+              const parsed: unknown = JSON.parse(params.message.payload)
+              const kind =
+                parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+                  ? (parsed as Record<string, unknown>).kind
+                  : undefined
+              payloadKind = typeof kind === 'string' ? kind : null
+            } catch {
+              payloadKind = null
+            }
+          }
+          message = this.insertMessage({ ...params.message, payloadKind })
+        } else {
+          const inserted = this.insertGatedMessage({
+            id: params.message.id,
+            runId: params.message.runId,
+            from: params.message.from,
+            to: params.message.to,
+            subject: params.message.subject,
+            body: params.message.body,
+            type: params.message.type,
+            priority: params.message.priority,
+            threadId: params.message.threadId,
+            payload: payloadValueForGate(params.message.payload),
+            infraAllowlist: [],
+            verb: 'federation_import'
+          })
+          if (inserted.outcome === 'refused') {
+            // A relay refusal is a DISPOSITION, not an exception (S10-4 ruling: a refusal MUST
+            // advance the cursor). Throwing here rolled back the gate_refusals audit row this
+            // same transaction had just written AND left to_home_imported_sequence behind the
+            // item, so the identical poisoned item re-imported forever. Commit the audit row
+            // and the cursor; store no message row, settle no lifecycle. (`duplicate` is
+            // provably false on this path: a duplicate with a missing message row threw
+            // operation_unknown above.)
+            this.setFederatedHomeImportSequence(params.dispatchId, params.sequence)
+            this.db.exec('COMMIT')
+            return {
+              message: null,
+              duplicate: false,
+              refused: { refusalId: inserted.refusalId, ruleIds: inserted.verdict.ruleIds }
+            }
+          }
+          message = inserted.message
+        }
       } else if (
         message.run_id !== params.message.runId ||
         message.to_handle !== params.message.to ||

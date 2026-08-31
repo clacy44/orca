@@ -109,7 +109,17 @@ describe('orchestration RPC methods', () => {
 
   it('registers all expected methods', () => {
     const registry = buildRegistry(ORCHESTRATION_METHODS)
-    expect(registry.size).toBe(45)
+    // S10-2b adds orchestration.messages.purge / orchestration.agents.review
+    // (orchestration-containment.ts) and orchestration.threads.create/get/list/leave +
+    // orchestration.wait (orchestration-threads.ts).
+    expect(registry.size).toBe(52)
+    expect(registry.has('orchestration.messages.purge')).toBe(true)
+    expect(registry.has('orchestration.agents.review')).toBe(true)
+    expect(registry.has('orchestration.threads.create')).toBe(true)
+    expect(registry.has('orchestration.threads.get')).toBe(true)
+    expect(registry.has('orchestration.threads.list')).toBe(true)
+    expect(registry.has('orchestration.threads.leave')).toBe(true)
+    expect(registry.has('orchestration.wait')).toBe(true)
     expect(registry.has('orchestration.agents.register')).toBe(true)
     expect(registry.has('orchestration.agents.list')).toBe(true)
     expect(registry.has('orchestration.agents.get')).toBe(true)
@@ -387,6 +397,58 @@ describe('orchestration RPC methods', () => {
       ).rejects.toMatchObject({ code: 'invalid_argument' })
     })
 
+    // K25 (blocker fix): a caller-supplied payload.kind is the exact channel extractPayloadKind
+    // reads for the lock-step discriminator — refusing it here closes the forgery proven live
+    // against orchestration.send (notifyMessageArrived receiving a caller-chosen 'pact_step').
+    it("refuses a caller-supplied payload.kind ('pact_step' forgery, K25)", async () => {
+      setup()
+      await expect(
+        call('orchestration.send', {
+          from: 'term_worker',
+          to: 'term_coord',
+          subject: 'status update',
+          type: 'status',
+          payload: JSON.stringify({ kind: 'pact_step' })
+        })
+      ).rejects.toMatchObject({ code: 'payload_kind_reserved' })
+    })
+
+    it('refuses any caller-supplied payload.kind, not only pact_step', async () => {
+      setup()
+      await expect(
+        call('orchestration.send', {
+          from: 'term_worker',
+          to: 'term_coord',
+          subject: 'status update',
+          type: 'status',
+          payload: JSON.stringify({ kind: 'liveness_breach' })
+        })
+      ).rejects.toMatchObject({ code: 'payload_kind_reserved' })
+    })
+
+    it('negative control: a payload with no kind field sends normally', async () => {
+      setup()
+      const result = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: 'term_coord',
+        subject: 'status update',
+        type: 'status',
+        payload: JSON.stringify({ dispatchId: 'ctx_1' })
+      })) as { message: { id: string } }
+      expect(result.message.id).toMatch(/^msg_/)
+    })
+
+    it('negative control: malformed payload JSON is left to lifecycle validation, not refused here', async () => {
+      setup()
+      const result = (await call('orchestration.send', {
+        from: 'term_worker',
+        to: 'term_coord',
+        subject: 'not json',
+        payload: 'not-json{'
+      })) as { message: { id: string } }
+      expect(result.message.id).toMatch(/^msg_/)
+    })
+
     it('stores the runtime-observed sender pane key on the message row', async () => {
       setup()
       vi.spyOn(runtime, 'getTerminalPaneKey').mockReturnValue('tab_runtime:leaf_runtime')
@@ -503,7 +565,12 @@ describe('orchestration RPC methods', () => {
       expect(db.getUnreadMessages(`run:${activeRunId}`)).toEqual([
         expect.objectContaining({ id: result.message.id, type: 'worker_done' })
       ])
-      expect(runtime.notifyMessageArrived).toHaveBeenCalledWith(`run:${activeRunId}`, 'worker_done')
+      expect(runtime.notifyMessageArrived).toHaveBeenCalledWith(
+        `run:${activeRunId}`,
+        'worker_done',
+        null,
+        null
+      )
     })
 
     it('requires the minted capability, exact pane, and process incarnation', async () => {
@@ -628,7 +695,7 @@ describe('orchestration RPC methods', () => {
         payload: JSON.stringify({ dispatchId: dispatch.id })
       })
 
-      expect(notify).toHaveBeenCalledWith(`run:${activeRunId}`, 'heartbeat')
+      expect(notify).toHaveBeenCalledWith(`run:${activeRunId}`, 'heartbeat', null, null)
       // Negative control: a live heartbeat carries no verdict, so the CLI still prints Sent <id>.
       expect(result).not.toHaveProperty('lifecycle')
     })
@@ -1887,7 +1954,7 @@ describe('orchestration RPC methods', () => {
       // Negative control: a purely local Dispatch enqueues nothing on the relay.
       expect(result.message.to_handle).toBe(`dispatch:${dispatch.id}`)
       expect(db.listPendingFederationRelay(dispatch.id, 'to_worker')).toHaveLength(0)
-      expect(notify).toHaveBeenCalledWith(`dispatch:${dispatch.id}`, 'status')
+      expect(notify).toHaveBeenCalledWith(`dispatch:${dispatch.id}`, 'status', escalation.id, null)
     })
 
     it('answers legacy_read_only before resolving the Dispatch sender', async () => {

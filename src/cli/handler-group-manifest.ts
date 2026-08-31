@@ -173,6 +173,21 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/agents.js')).AGENT_HANDLERS
   },
   {
+    name: 'agents-threads',
+    keys: ['agents threads', 'agents thread', 'agents wait'],
+    load: async () => (await import('./handlers/agents-threads.js')).AGENT_THREAD_HANDLERS
+  },
+  {
+    name: 'agents-ask-reply',
+    keys: ['agents ask', 'agents reply'],
+    load: async () => (await import('./handlers/agents-ask-reply.js')).AGENT_ASK_REPLY_HANDLERS
+  },
+  {
+    name: 'agents-containment',
+    keys: ['agents purge', 'agents review'],
+    load: async () => (await import('./handlers/agents-containment.js')).AGENT_CONTAINMENT_HANDLERS
+  },
+  {
     name: 'emulator',
     keys: [
       'emulator list',

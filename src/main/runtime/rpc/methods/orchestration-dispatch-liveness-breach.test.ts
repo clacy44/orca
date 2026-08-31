@@ -144,7 +144,7 @@ describe('per-dispatch liveness window', () => {
       lastHeartbeatAt: null,
       windowMs: DISPATCH_LIVENESS_DEFAULT_WINDOW_MS
     })
-    expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation')
+    expect(notify).toHaveBeenCalledWith(`run:${runId}`, 'escalation', null, 'liveness_breach')
   })
 
   it('never fails the Dispatch it reports on', () => {

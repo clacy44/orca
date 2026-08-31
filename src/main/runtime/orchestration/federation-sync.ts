@@ -14,6 +14,7 @@ import {
   recordFederationAckCheckpoint
 } from './federation-ack-checkpoints'
 import { parseFederatedWorkerReportPayload } from './federation-worker-report-payload'
+import { extractPayloadKind } from './message-waiter-thread-keying'
 
 const MESSAGE_TYPE_SET = new Set<MessageType>(MESSAGE_TYPES)
 const FEDERATION_PULL_PAGE_SIZE = 50
@@ -102,6 +103,7 @@ async function syncFederatedDispatchPages(
     const stored = db.importFederatedRelayItem({
       dispatchId,
       sequence: item.sequence,
+      relayKind: item.kind,
       message: {
         id: item.message_id,
         runId: dispatch.run_id,
@@ -116,6 +118,16 @@ async function syncFederatedDispatchPages(
       },
       lifecycle: parseFederatedLifecycle(message, item.message_id, dispatchId, dispatch.task_id)
     })
+    if (stored.refused || !stored.message) {
+      // The containment gate refused this item: the import already committed the
+      // gate_refusals audit row and advanced its cursor — deliver nothing, keep draining.
+      console.warn(
+        `federation relay item ${item.sequence} for ${dispatchId} was refused by the ` +
+          `containment gate (refusal #${stored.refused?.refusalId}); cursor advanced`
+      )
+      cursor = item.sequence
+      continue
+    }
     if (stored.lifecycle && supportsLifecycleSettlement) {
       settlements.push({
         sequence: item.sequence,
@@ -129,7 +141,12 @@ async function syncFederatedDispatchPages(
       })
     }
     cursor = item.sequence
-    runtime.notifyMessageArrived(stored.message.to_handle, stored.message.type)
+    runtime.notifyMessageArrived(
+      stored.message.to_handle,
+      stored.message.type,
+      stored.message.thread_id,
+      extractPayloadKind(stored.message.payload_kind)
+    )
     imported += stored.duplicate ? 0 : 1
   }
 

@@ -441,7 +441,7 @@ describe('orchestration federation control mail', () => {
       }
     })
     expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
-    expect(notify).toHaveBeenCalledWith('term_other', 'status')
+    expect(notify).toHaveBeenCalledWith('term_other', 'status', local.id, null)
   })
 
   it('wakes only waiters whose filter matches an imported control message', async () => {

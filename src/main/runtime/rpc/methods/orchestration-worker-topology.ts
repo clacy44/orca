@@ -3,6 +3,7 @@ import type { TuiAgent } from '../../../../shared/tui-agent'
 import type { PaneCredentialLane } from '../../pane-credential-lane-registry'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationDb } from '../../orchestration/db'
+import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 
 export type WorkerEffect = {
   kind: 'worktree' | 'terminal' | 'setup' | 'dispatch_input'
@@ -268,7 +269,12 @@ export function monitorWorkerSetup(args: {
           terminalHandle: setupTerminal.id
         })
       })
-      args.runtime.notifyMessageArrived(message.to_handle, message.type)
+      args.runtime.notifyMessageArrived(
+        message.to_handle,
+        message.type,
+        message.thread_id,
+        extractPayloadKind(message.payload_kind)
+      )
     })
     .catch(() => undefined)
 }
