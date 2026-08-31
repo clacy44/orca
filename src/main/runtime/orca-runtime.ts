@@ -11568,7 +11568,6 @@ export class OrcaRuntimeService {
     this.providerBufferAcquisitionsByPtyId.delete(ptyId)
     this.providerVisibleStateByPtyId.delete(ptyId)
     this.providerVisibleRetryAtByPtyId.delete(ptyId)
-    this.probedDeliveryAuthorizationByPtyId.delete(ptyId)
   }
 
   synchronizePtyOutputSequenceFromProvider(
@@ -14521,7 +14520,6 @@ export class OrcaRuntimeService {
     this.providerBufferAcquisitionsByPtyId.delete(ptyId)
     this.providerVisibleStateByPtyId.delete(ptyId)
     this.providerVisibleRetryAtByPtyId.delete(ptyId)
-    this.probedDeliveryAuthorizationByPtyId.delete(ptyId)
     this.agentStatusOscProcessorsByPtyId.delete(ptyId)
     this.terminalSpawnCommandsByPtyId.delete(ptyId)
     this.disposePtyTitleTracker(ptyId)
@@ -31658,7 +31656,6 @@ export class OrcaRuntimeService {
     this.providerBufferAcquisitionsByPtyId.delete(ptyId)
     this.providerVisibleStateByPtyId.delete(ptyId)
     this.providerVisibleRetryAtByPtyId.delete(ptyId)
-    this.probedDeliveryAuthorizationByPtyId.delete(ptyId)
     this.agentStatusOscProcessorsByPtyId.delete(ptyId)
     this.terminalSpawnCommandsByPtyId.delete(ptyId)
     this.disposePtyTitleTracker(ptyId)
@@ -33714,6 +33711,10 @@ export class OrcaRuntimeService {
         mailboxHandle,
         error: error instanceof Error ? error.message : String(error)
       })
+      // A throw is a withheld attempt like any other (S10-9 verify): record it so the slow
+      // retry is armed and `queued_awaiting_pane` is honest, instead of the mail silently
+      // parking with nothing scheduled to try again.
+      this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
     }
   }
 
@@ -33735,23 +33736,11 @@ export class OrcaRuntimeService {
       this.deliverPendingMessages(leaf, { mailboxHandle, ...options })
       return
     }
-    // Why (S10-9 review, finding: forged live-idle stamp): consult this fallback's OWN
-    // short-lived authorization cache before re-probing — never `lastAgentStatus`/
-    // `lastAgentStatusObservedLive`, which is title-driven authority this probe must not
-    // manufacture. Scoped to the exact pty identity/generation/lifecycle-generation this
-    // probe would otherwise re-observe, so a same-id daemon respawn (which bumps lifecycle
-    // generation but leaves ptyId/ptyGeneration untouched) can never inherit a stale grant.
-    const cached = this.probedDeliveryAuthorizationByPtyId.get(leaf.ptyId)
-    if (
-      cached &&
-      cached.ptyGeneration === leaf.ptyGeneration &&
-      cached.ptyLifecycleGeneration === this.getPtyLifecycleGeneration(leaf.ptyId) &&
-      cached.expiresAt > Date.now()
-    ) {
-      this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
-      this.deliverPendingMessages(leaf, { mailboxHandle, ...options })
-      return
-    }
+    // Why NO authorization cache (S10-9 verify blocker): a cached grant let a later push
+    // deliver without re-running the hydrated-status (pane_busy) check or the probe's own
+    // blocked-modal guard, so a pane that started working inside the window was typed into —
+    // the same hazard in a shorter costume. Every delivery through this fallback re-probes;
+    // an await of a foreground read is cheap next to typing Enter into a working agent.
     // R1: a fresh hydrated 'done' (mapped to 'idle') status, already excluding restored-but-
     // unconfirmed hydrate entries and bounded by AGENT_STATUS_STALE_AFTER_MS — same authority
     // getTerminalAgentStatus reads, so this never trusts anything the desktop sidebar wouldn't.
@@ -33800,16 +33789,8 @@ export class OrcaRuntimeService {
       this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
       return
     }
-    // R1+R2 authorized: record the observation in this fallback's own cache — never in
-    // lastAgentStatus/lastAgentStatusObservedLive — so a follow-up push on this exact pty
-    // identity/generation/lifecycle-generation can skip re-probing without any other gate
-    // (the parked-redelivery re-check, the probe-deferred re-check, or the fast path above)
-    // inheriting a probe-derived authority it never asked for and has no updater to correct.
-    this.probedDeliveryAuthorizationByPtyId.set(currentLeaf.ptyId, {
-      ptyGeneration: currentLeaf.ptyGeneration,
-      ptyLifecycleGeneration,
-      expiresAt: Date.now() + PROBED_DELIVERY_AUTHORIZATION_TTL_MS
-    })
+    // R1+R2 authorized for THIS attempt only — nothing is cached (see the no-cache note
+    // above); the next push re-probes from scratch.
     this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
     this.deliverPendingMessages(currentLeaf, { mailboxHandle, ...options })
   }
@@ -33891,6 +33872,7 @@ export class OrcaRuntimeService {
         mailboxHandle,
         error: error instanceof Error ? error.message : String(error)
       })
+      this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
     }
   }
 
@@ -34703,11 +34685,6 @@ export class OrcaRuntimeService {
   // live title transition was actually observed. Scoped by pty identity + generation +
   // lifecycle generation and TTL-bounded so a stale authorization can never outlive the
   // window it was actually observed in, let alone survive a same-id daemon respawn.
-  private readonly probedDeliveryAuthorizationByPtyId = new Map<
-    string,
-    { ptyGeneration: number; ptyLifecycleGeneration: number; expiresAt: number }
-  >()
-
   private readonly agentMailboxSlowRetryTimersByHandle = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -39314,7 +39291,6 @@ const TUI_IDLE_QUIESCENCE_MS = 3000
 // follow-up pushes on the same pty identity/generation before it must re-probe — short
 // enough that it can never stand in for a real live title observation, long enough to
 // dedupe a burst of messages that land in the same instant.
-const PROBED_DELIVERY_AUTHORIZATION_TTL_MS = 5000
 // Why (S10-9 R3): slow retry for a mailbox stuck behind a withheld gate — bounded and jittered
 // so N stuck mailboxes never synchronize into one thundering sweep.
 const AGENT_MAILBOX_SLOW_RETRY_INTERVAL_MS = 5 * 60 * 1000

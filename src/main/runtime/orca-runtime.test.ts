@@ -20468,6 +20468,55 @@ describe('OrcaRuntimeService', () => {
   // fallback (forged live-idle stamp, shell-scrollback bypass, same-id mid-probe regen,
   // uncaught fire-and-forget rejections, and the surviving-mutant guard).
 
+  // Verify finding (surviving mutant): the recognized-agent PRECONDITION is what actually
+  // closes the shell-scrollback bypass — deleting that conjunct must turn this red. A plain
+  // shell whose scrollback still holds an agent's ready banner is the exact field hazard.
+  it('review finding (shell-scrollback bypass): a shell foreground process is refused even when the tail still shows an agent ready banner', async () => {
+    vi.useFakeTimers()
+    try {
+      const paneKey = makePaneKey('tab-1', HEADLESS_LEAF_ID)
+      const runtime = new OrcaRuntimeService(store, undefined, {
+        getAgentStatusSnapshot: () => hydratedDoneStatusSnapshot(paneKey)
+      })
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        // The agent exited and an editor now owns the pane. Not a shell (so the
+        // isShellProcess conjunct does not fire) and not a recognized agent, so ONLY the
+        // recognized-agent precondition can refuse it — while the scrollback below still
+        // reads exactly like a live agent session.
+        getForegroundProcess: async () => 'vim'
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+      runtime.onPtyData(
+        'pty-1',
+        'OpenAI Codex\nModel: gpt-5.4\nDirectory: /tmp/worktree-a\n\nuser@host worktree-a % ',
+        Date.now()
+      )
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const message = db.insertMessage({
+        from: 'term_sender',
+        to: terminal.handle,
+        subject: 'stale banner hazard'
+      })
+
+      await vi.advanceTimersByTimeAsync(3_100)
+      runtime.deliverPendingMessagesForHandle(terminal.handle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      // Nothing typed at all — no pointer, and above all no armed Enter into a shell.
+      expect(write).not.toHaveBeenCalled()
+      expect(runtime.getMessageDeliverySnapshot(message).delivery).toBe('queued_awaiting_pane')
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('review finding (forged live-idle stamp): a probe-authorized delivery must not permanently mark the pane live-idle for a later, unrelated message', async () => {
     vi.useFakeTimers()
     try {
@@ -20553,7 +20602,7 @@ describe('OrcaRuntimeService', () => {
       const message = db.insertMessage({
         from: 'term_sender',
         to: terminal.handle,
-        subject: 'shell hazard'
+        subject: 'stale banner hazard'
       })
 
       await vi.advanceTimersByTimeAsync(3_100)
