@@ -20296,6 +20296,211 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  // S10-9: a pane idle since before the current runtime generation fires no title event, so
+  // lastAgentStatusObservedLive never goes live and the fast gate withholds forever. R1+R2 is
+  // the fallback that can still authorize delivery: a fresh hydrated hook 'done' status (R1)
+  // plus an independently probed live tui-idle read on a known agent pane (R2).
+  function hydratedDoneStatusSnapshot(
+    paneKey: string,
+    state: 'done' | 'working' = 'done'
+  ): {
+    paneKey: string
+    state: 'done' | 'working'
+    prompt: string
+    agentType: string
+    connectionId: null
+    receivedAt: number
+    stateStartedAt: number
+    tabId: string
+    worktreeId: string
+  }[] {
+    return [
+      {
+        paneKey,
+        state,
+        prompt: '',
+        agentType: 'codex',
+        connectionId: null,
+        receivedAt: Date.now(),
+        stateStartedAt: Date.now(),
+        tabId: 'tab-1',
+        worktreeId: TEST_WORKTREE_ID
+      }
+    ]
+  }
+
+  it('R1+R2: delivers via hydrated hook status + a probed tui-idle read with no live title observation this generation', async () => {
+    vi.useFakeTimers()
+    try {
+      const paneKey = makePaneKey('tab-1', HEADLESS_LEAF_ID)
+      const runtime = new OrcaRuntimeService(store, undefined, {
+        getAgentStatusSnapshot: () => hydratedDoneStatusSnapshot(paneKey)
+      })
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        getForegroundProcess: async () => 'codex'
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+      // Plain output only — never an OSC title, so no live status observation ever lands.
+      runtime.onPtyData('pty-1', 'ready\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      db.insertMessage({ from: 'term_sender', to: terminal.handle, subject: 'wake up' })
+
+      // Past TUI_IDLE_QUIESCENCE_MS so the probe's foreground-quiet read confirms idle.
+      await vi.advanceTimersByTimeAsync(3_100)
+      runtime.deliverPendingMessagesForHandle(terminal.handle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).toHaveBeenCalledWith('pty-1', expect.stringContaining('wake up'))
+      expect(write).toHaveBeenCalledWith('pty-1', '\r')
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('R1 negative: a fresh hydrated working status withholds delivery and reports queued_awaiting_pane (R4)', async () => {
+    const paneKey = makePaneKey('tab-1', HEADLESS_LEAF_ID)
+    const runtime = new OrcaRuntimeService(store, undefined, {
+      getAgentStatusSnapshot: () => hydratedDoneStatusSnapshot(paneKey, 'working')
+    })
+    const db = new InMemoryOrchestrationMessages()
+    const write = vi.fn().mockReturnValue(true)
+    setInMemoryOrchestrationMessages(runtime, db)
+    runtime.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => 'codex'
+    })
+    syncSinglePtyWithStableLeaf(runtime)
+    runtime.onPtyData('pty-1', 'working...\n', 100)
+
+    const [terminal] = (await runtime.listTerminals()).terminals
+    const message = db.insertMessage({
+      from: 'term_sender',
+      to: terminal.handle,
+      subject: 'mid-turn'
+    })
+
+    // Before any attempt: honestly 'queued', not yet distinguishable from an offline recipient.
+    expect(runtime.getMessageDeliverySnapshot(message).delivery).toBe('queued')
+    runtime.deliverPendingMessagesForHandle(terminal.handle)
+    expect(write).not.toHaveBeenCalled()
+    // After a withheld attempt: honestly reports it was tried and blocked, not silently parked.
+    expect(runtime.getMessageDeliverySnapshot(message).delivery).toBe('queued_awaiting_pane')
+    db.close()
+  })
+
+  it('R2 negative: a hydrated-idle pane whose foreground has not gone quiet yet stays withheld', async () => {
+    const paneKey = makePaneKey('tab-1', HEADLESS_LEAF_ID)
+    const runtime = new OrcaRuntimeService(store, undefined, {
+      getAgentStatusSnapshot: () => hydratedDoneStatusSnapshot(paneKey)
+    })
+    const db = new InMemoryOrchestrationMessages()
+    const write = vi.fn().mockReturnValue(true)
+    setInMemoryOrchestrationMessages(runtime, db)
+    runtime.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => 'codex'
+    })
+    syncSinglePtyWithStableLeaf(runtime)
+    // Output just landed — not quiet long enough for the probe to call it idle.
+    runtime.onPtyData('pty-1', 'still rendering...\n', Date.now())
+
+    const [terminal] = (await runtime.listTerminals()).terminals
+    db.insertMessage({ from: 'term_sender', to: terminal.handle, subject: 'not yet' })
+
+    runtime.deliverPendingMessagesForHandle(terminal.handle)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(write).not.toHaveBeenCalled()
+    db.close()
+  })
+
+  it('R2 negative: a non-agent foreground process never gets pointer+Enter armed, even quiet and hydrated idle', async () => {
+    vi.useFakeTimers()
+    try {
+      const paneKey = makePaneKey('tab-1', HEADLESS_LEAF_ID)
+      const runtime = new OrcaRuntimeService(store, undefined, {
+        getAgentStatusSnapshot: () => hydratedDoneStatusSnapshot(paneKey)
+      })
+      const db = new InMemoryOrchestrationMessages()
+      const write = vi.fn().mockReturnValue(true)
+      setInMemoryOrchestrationMessages(runtime, db)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        // Not a shell (so the R2 quiet-foreground probe alone would pass) and not a
+        // recognized agent either — isolates gate 1 (isPtyRunningAgent) from gate 2 (the probe).
+        getForegroundProcess: async () => 'vim'
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+      runtime.onPtyData('pty-1', 'editing\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const message = db.insertMessage({
+        from: 'term_sender',
+        to: terminal.handle,
+        subject: 'never submit here'
+      })
+
+      // Past TUI_IDLE_QUIESCENCE_MS — the probe alone would already read this as idle.
+      await vi.advanceTimersByTimeAsync(3_100)
+      runtime.deliverPendingMessagesForHandle(terminal.handle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).not.toHaveBeenCalled()
+      expect(runtime.getMessageDeliverySnapshot(message).delivery).toBe('queued_awaiting_pane')
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('R3: the boot sweep delivers pre-existing unread mail through R1+R2 with no new arrival trigger', async () => {
+    vi.useFakeTimers()
+    try {
+      const paneKey = makePaneKey('tab-1', HEADLESS_LEAF_ID)
+      const runtime = new OrcaRuntimeService(store, undefined, {
+        getAgentStatusSnapshot: () => hydratedDoneStatusSnapshot(paneKey)
+      })
+      const write = vi.fn().mockReturnValue(true)
+      runtime.setPtyController({
+        write,
+        kill: vi.fn(),
+        getForegroundProcess: async () => 'codex'
+      })
+      syncSinglePtyWithStableLeaf(runtime)
+      // Already quiet well before the repoint scheduler's 2s delay fires.
+      runtime.onPtyData('pty-1', 'ready\n', Date.now() - 10_000)
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const db = new InMemoryOrchestrationMessages()
+      db.insertMessage({ from: 'term_sender', to: terminal.handle, subject: 'boot resweep' })
+
+      // Attaching the db is the only trigger here — no notifyMessageArrived, no explicit
+      // deliverPendingMessagesForHandle call. scheduleRestoredMessageRepoints (called from
+      // setOrchestrationDb, mirroring the real lazy-init boot path) must do the rest.
+      setInMemoryOrchestrationMessages(runtime, db)
+
+      await vi.advanceTimersByTimeAsync(2_100)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS)
+
+      expect(write).toHaveBeenCalledWith('pty-1', expect.stringContaining('boot resweep'))
+      expect(write).toHaveBeenCalledWith('pty-1', '\r')
+      db.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('adopts preallocated ORCA_TERMINAL_HANDLE as a valid runtime handle', async () => {
     const runtime = new OrcaRuntimeService(store)
     const handle = runtime.preAllocateHandleForPty('pty-1')
