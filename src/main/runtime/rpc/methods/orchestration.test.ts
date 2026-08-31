@@ -114,8 +114,10 @@ describe('orchestration RPC methods', () => {
     // orchestration.wait (orchestration-threads.ts). S10-3 adds orchestration.threads.pact/
     // .step/.pactLedger (orchestration-pact.ts/orchestration-pact-step.ts) and the deferred
     // .invite/.join (orchestration-thread-invite.ts). S10-4 adds orchestration.agents.relink
-    // (orchestration-agents-relink.ts, ruling 5).
-    expect(registry.size).toBe(58)
+    // (orchestration-agents-relink.ts, ruling 5). S10-8 adds orchestration.federatedAsk
+    // (orchestration-federated-peer-ask.ts, R2/R3: the receiving half of cross-host ask relay).
+    expect(registry.size).toBe(59)
+    expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.agents.relink')).toBe(true)
     expect(registry.has('orchestration.threads.invite')).toBe(true)
     expect(registry.has('orchestration.threads.join')).toBe(true)
