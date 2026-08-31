@@ -782,6 +782,13 @@ const PACT_PAIR_LIVE_SQL = `
 // agent_links table exists in this tree and S10-4's scope here does not add one). No column
 // dependency on anything created later, so — unlike PACT_PAIR_LIVE_SQL above — this runs
 // unconditionally in createTables() same as AGENT_DIRECTORY_SCHEMA_SQL/THREAD_DIRECTORY_SCHEMA_SQL.
+//
+// relink-generation fix (post-ruling-1 review): dispatchId+sequence alone is NOT unique across
+// a relink epoch — relinkFederatedEnvironment (ruling 5) zeroes federated_dispatches's
+// to_home_imported_sequence, so the peer replays sequence 1 in the new epoch and would silently
+// collide (INSERT OR IGNORE) with whatever sequence 1 recorded before the relink, refusals
+// included. relay_seen's key grows a `generation` column, matching federated_dispatches's new
+// relink_generation counter above — see recordRelaySeen/importFederatedRelayItem.
 const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS remote_agents (
         environment_id          TEXT NOT NULL,   -- local KnownRuntimeEnvironment.id (the saved pairing)
@@ -813,11 +820,15 @@ const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS relay_seen (
         dispatch_id   TEXT NOT NULL,
         sequence      INTEGER NOT NULL,
+        -- federated_dispatches.relink_generation at the time this row was recorded (0 for a
+        -- link that has never been relinked). Part of the PK: see relink-generation fix note
+        -- above this table's schema block.
+        generation    INTEGER NOT NULL DEFAULT 0,
         message_id    TEXT NOT NULL,
         outcome       TEXT NOT NULL CHECK(outcome IN ('imported', 'refused', 'duplicate')),
         rule_ids      TEXT,   -- JSON array of gate rule ids; only set when outcome = 'refused'
         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-        PRIMARY KEY(dispatch_id, sequence)
+        PRIMARY KEY(dispatch_id, sequence, generation)
       );
       CREATE TRIGGER IF NOT EXISTS trg_relay_seen_no_update
       BEFORE UPDATE ON relay_seen
@@ -1095,6 +1106,11 @@ export class OrchestrationDb {
         remote_terminal_handle  TEXT,
         to_home_imported_sequence INTEGER NOT NULL DEFAULT 0,
         to_home_acknowledged_sequence INTEGER NOT NULL DEFAULT 0,
+        -- Bumped by relinkFederatedEnvironment (S10-4 ruling 5) each time this dispatch's
+        -- cursors are zeroed for a reimaged/reinstalled peer. relay_seen's PK includes this so
+        -- a post-relink sequence 1 lands as a NEW row instead of colliding (INSERT OR IGNORE)
+        -- with whatever sequence 1 recorded before the relink.
+        relink_generation       INTEGER NOT NULL DEFAULT 0,
         last_sync_at            TEXT,
         last_error              TEXT,
         consecutive_failures    INTEGER NOT NULL DEFAULT 0,
@@ -1771,6 +1787,55 @@ export class OrchestrationDb {
       // transaction.
       if (current < 36) {
         this.db.exec(S10_4_FEDERATION_SCHEMA_SQL)
+        // relink-generation fix (post-ruling-1 review), same "unshipped version, patch in
+        // place" discipline as pact_era's `current < 35` block above: federated_dispatches
+        // predates relink_generation whenever the table was created by an EARLIER migrate()
+        // block (v14, or a dev DB that already ran a pre-fix copy of this same unshipped v36),
+        // since S10_4_FEDERATION_SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS` above is then a
+        // no-op. ALTER unconditionally covers both: a genuinely fresh createTables() run
+        // already has the column (created inline), so this is a guarded no-op there.
+        if (!this.hasColumn('federated_dispatches', 'relink_generation')) {
+          this.db.exec(
+            'ALTER TABLE federated_dispatches ADD COLUMN relink_generation INTEGER NOT NULL DEFAULT 0'
+          )
+        }
+        // relay_seen's PK cannot be widened via ALTER — only a dev DB that already created the
+        // table under a pre-fix copy of this same unshipped v36 (relay_seen's own header
+        // above) hits this; a fresh createTables() run already has the 3-column PK inline, so
+        // this whole block is a no-op there. Rows are back-filled at generation 0, the same
+        // epoch they were always recorded under (no relink had run yet on any DB old enough to
+        // need this patch).
+        if (!this.hasColumn('relay_seen', 'generation')) {
+          this.db.exec(`
+            DROP TRIGGER IF EXISTS trg_relay_seen_no_update;
+            DROP TRIGGER IF EXISTS trg_relay_seen_no_delete;
+            ALTER TABLE relay_seen RENAME TO relay_seen_pre_generation;
+            CREATE TABLE relay_seen (
+              dispatch_id   TEXT NOT NULL,
+              sequence      INTEGER NOT NULL,
+              generation    INTEGER NOT NULL DEFAULT 0,
+              message_id    TEXT NOT NULL,
+              outcome       TEXT NOT NULL CHECK(outcome IN ('imported', 'refused', 'duplicate')),
+              rule_ids      TEXT,
+              created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(dispatch_id, sequence, generation)
+            );
+            INSERT INTO relay_seen (dispatch_id, sequence, generation, message_id, outcome, rule_ids, created_at)
+              SELECT dispatch_id, sequence, 0, message_id, outcome, rule_ids, created_at
+              FROM relay_seen_pre_generation;
+            DROP TABLE relay_seen_pre_generation;
+            CREATE TRIGGER trg_relay_seen_no_update
+            BEFORE UPDATE ON relay_seen
+            BEGIN
+              SELECT RAISE(ABORT, 'relay_seen is append-only');
+            END;
+            CREATE TRIGGER trg_relay_seen_no_delete
+            BEFORE DELETE ON relay_seen
+            BEGIN
+              SELECT RAISE(ABORT, 'relay_seen is append-only');
+            END;
+          `)
+        }
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -6647,23 +6712,29 @@ export class OrchestrationDb {
   // S10-4 ruling 2: the durable half of importFederatedRelayItem's disposition. No own
   // BEGIN/COMMIT (same discipline as setFederatedHomeImportSequence just above) so it commits
   // atomically inside that method's enclosing transaction; INSERT OR IGNORE makes a retried call
-  // against an already-recorded (dispatch_id, sequence) a no-op rather than a PK error, so a
-  // second call for the same item (a replayed relay page) never overwrites the first outcome.
+  // against an already-recorded (dispatch_id, sequence, generation) a no-op rather than a PK
+  // error, so a second call for the same item (a replayed relay page) never overwrites the
+  // first outcome. `generation` defaults to 0 (a link that has never been relinked) so callers
+  // outside the relay-import transaction — a test, or a pre-relink caller with no reason to
+  // know its dispatch's current epoch — don't need to plumb it through; importFederatedRelayItem
+  // always passes the dispatch's actual current `relink_generation` explicitly.
   recordRelaySeen(params: {
     dispatchId: string
     sequence: number
     messageId: string
     outcome: RelaySeenOutcome
     ruleIds?: readonly string[]
+    generation?: number
   }): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO relay_seen (dispatch_id, sequence, message_id, outcome, rule_ids)
-         VALUES (?, ?, ?, ?, ?)`
+        `INSERT OR IGNORE INTO relay_seen (dispatch_id, sequence, generation, message_id, outcome, rule_ids)
+         VALUES (?, ?, ?, ?, ?, ?)`
       )
       .run(
         params.dispatchId,
         params.sequence,
+        params.generation ?? 0,
         params.messageId,
         params.outcome,
         params.ruleIds && params.ruleIds.length > 0 ? JSON.stringify(params.ruleIds) : null
@@ -6672,7 +6743,9 @@ export class OrchestrationDb {
 
   listRelaySeen(dispatchId: string): RelaySeenRow[] {
     return this.db
-      .prepare(`SELECT * FROM relay_seen WHERE dispatch_id = ? ORDER BY sequence ASC`)
+      .prepare(
+        `SELECT * FROM relay_seen WHERE dispatch_id = ? ORDER BY generation ASC, sequence ASC`
+      )
       .all(dispatchId) as RelaySeenRow[]
   }
 
@@ -6771,8 +6844,12 @@ export class OrchestrationDb {
   // named environment — the same tolerance federation-sync.ts already applies automatically on
   // a `remote_runtime_epoch` change (a peer's own epoch bump), offered here as a manual escape
   // hatch for the case a human has to force (the epoch string didn't change, or the peer is
-  // gone and unreachable so the automatic path never fires). Never touches relay_seen — a
-  // replayed id after relink still hits it and is caught as before.
+  // gone and unreachable so the automatic path never fires). Also bumps `relink_generation`
+  // (relink-generation fix): relay_seen's key includes it, so every relay_seen row this host
+  // records after this point lands in a new generation rather than colliding with — and being
+  // silently dropped against, via INSERT OR IGNORE — whatever the SAME sequence number recorded
+  // before the relink. relay_seen rows from the prior generation are left exactly as they were:
+  // this method never writes to relay_seen directly, only to the counter that keys it.
   relinkFederatedEnvironment(environmentId: string): { dispatchIds: string[] } {
     const dispatchIds = this.db
       .prepare(
@@ -6789,7 +6866,8 @@ export class OrchestrationDb {
       const reset = this.db.prepare(
         `UPDATE federated_dispatches
          SET to_home_imported_sequence = 0, to_home_acknowledged_sequence = 0,
-             remote_runtime_epoch = NULL, updated_at = datetime('now')
+             remote_runtime_epoch = NULL, relink_generation = relink_generation + 1,
+             updated_at = datetime('now')
          WHERE dispatch_id = ?`
       )
       for (const dispatchId of dispatchIds) {
@@ -6931,13 +7009,17 @@ export class OrchestrationDb {
             this.setFederatedHomeImportSequence(params.dispatchId, params.sequence)
             // S10-4 ruling 2: the durable relay_seen outcome row lands in the SAME transaction
             // as the audit row and the cursor advance above — the refusal disposition is now
-            // three durable writes committed atomically, not two.
+            // three durable writes committed atomically, not two. `generation` is the epoch
+            // this sequence number belongs to (relink-generation fix) — without it, a refusal
+            // replayed after a relink would silently no-op against a pre-relink row for the
+            // same sequence instead of being recorded.
             this.recordRelaySeen({
               dispatchId: params.dispatchId,
               sequence: params.sequence,
               messageId: params.message.id,
               outcome: 'refused',
-              ruleIds: inserted.verdict.ruleIds
+              ruleIds: inserted.verdict.ruleIds,
+              generation: federated.relink_generation
             })
             this.db.exec('COMMIT')
             return {
@@ -7004,12 +7086,14 @@ export class OrchestrationDb {
         // S10-4 ruling 2: record the successful-import outcome too, same transaction. Skipped
         // on the `duplicate` branch on purpose — a duplicate replay's relay_seen row was
         // already written the first time this sequence landed (imported or refused), and
-        // INSERT OR IGNORE would just no-op against it anyway.
+        // INSERT OR IGNORE would just no-op against it anyway. `generation` per the
+        // relink-generation fix, same reasoning as the refused branch above.
         this.recordRelaySeen({
           dispatchId: params.dispatchId,
           sequence: params.sequence,
           messageId: params.message.id,
-          outcome: 'imported'
+          outcome: 'imported',
+          generation: federated.relink_generation
         })
       }
       this.db.exec('COMMIT')

@@ -160,9 +160,10 @@ trusting a cached address.
 
 `orca agents relink --env <name>` (S10-4 ruling 5) is the named recovery verb for a peer that was
 reimaged/reinstalled inside the same pairing: it resets this host's own relay import/ack cursors
-for that environment's active federated dispatches (never `relay_seen`, so a byte-identical
-replay under the old sequence is still caught). A genuinely new install still needs `orca
-environment rm` + re-add, not relink.
+for that environment's active federated dispatches and bumps their relink generation, so
+`relay_seen` records the next contact's per-item outcomes (incl. refusals) under a fresh
+generation instead of colliding with this link's pre-relink history under the same sequence
+number. A genuinely new install still needs `orca environment rm` + re-add, not relink.
 
 ## Agents & Threads (peer command reference)
 

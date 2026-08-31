@@ -57,8 +57,10 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     notes: [
       'For a peer that was reimaged/reinstalled inside the same pairing (a new install needs ' +
         "`orca environment rm` + re-add instead): zeroes this host's import/ack cursors and " +
-        'runtime epoch for every active dispatch federated to that environment. `relay_seen` ' +
-        'is never touched, so a byte-identical replay under the old sequence is still caught.',
+        'runtime epoch for every active dispatch federated to that environment, and bumps that ' +
+        "dispatch's relink generation so `relay_seen` records the next contact's outcomes " +
+        '(incl. refusals) fresh, never colliding with — or being silently dropped against — ' +
+        "this link's pre-relink history under the same sequence number.",
       'A no-op returning an empty list when the environment has no active federated dispatch.'
     ]
   },

@@ -186,8 +186,8 @@ function formatAgentRelink(result: RelinkResult): string {
   return (
     `Relinked ${result.environment}: reset the relay cursors on ${result.dispatchIds.length} ` +
     `dispatch(es) (${result.dispatchIds.join(', ')}).\n` +
-    'Every item already imported from this link will be re-checked against relay_seen, never ' +
-    're-run blind, on the next contact.'
+    'Items that arrive from here on are imported under a new relink generation, so their ' +
+    "relay_seen outcomes (incl. refusals) never collide with this link's pre-relink history."
   )
 }
 
