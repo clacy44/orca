@@ -5,6 +5,7 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalBoolean, OptionalString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { hostIdFor, rateLimited, toPublicAgentView } from './agent-directory-rpc-view'
+import { wakePactThreadBoth } from './orchestration-pact-wake'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -73,6 +74,20 @@ export const ORCHESTRATION_AGENTS_QUARANTINE_METHODS: RpcMethod[] = [
         outcome: 'ok',
         reasonCode: params.reasonCode ?? null
       })
+      // Liveness § (K17): a quarantined side's step summaries are withheld, so its pacts can
+      // only starve — auto-pause every engaged one and wake the counterpart now, with a
+      // reason, instead of letting it run to the clamp. Never on lift: only quarantining pauses.
+      if (!params.lift) {
+        for (const outcome of db.autoPausePactsForAgent(target.id, 'counterpart_quarantined')) {
+          wakePactThreadBoth(
+            runtime,
+            outcome.threadId,
+            [outcome.proposerAgentId, outcome.withAgentId],
+            'paused',
+            [`orca agents pact --release --on ${outcome.threadId}`]
+          )
+        }
+      }
       return { agent: toPublicAgentView(updated, isSelf) }
     }
   })

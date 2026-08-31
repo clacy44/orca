@@ -163,6 +163,7 @@ import {
   getPactState as getPactStateImpl,
   getTurnsHeldBy as getTurnsHeldByImpl,
   getPactLedger as getPactLedgerImpl,
+  getIncomingUnansweredProposal as getIncomingUnansweredProposalImpl,
   type GetPactLedgerParams
 } from './pact-queries'
 import type { PactLedgerResult, PactPauseReason } from './pact-types'
@@ -3724,6 +3725,10 @@ export class OrchestrationDb {
 
   getPactLedger(params: GetPactLedgerParams): PactLedgerResult {
     return getPactLedgerImpl(this.db, params)
+  }
+
+  getIncomingUnansweredProposal(agentId: string): ThreadRow | undefined {
+    return getIncomingUnansweredProposalImpl(this.db, agentId)
   }
 
   // Liveness/leave/thread-state auto-pause hooks (K6/K16/K17) — called by the RPC layer, never

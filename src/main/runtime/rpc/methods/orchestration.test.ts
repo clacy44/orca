@@ -111,8 +111,9 @@ describe('orchestration RPC methods', () => {
     const registry = buildRegistry(ORCHESTRATION_METHODS)
     // S10-2b adds orchestration.messages.purge / orchestration.agents.review
     // (orchestration-containment.ts) and orchestration.threads.create/get/list/leave +
-    // orchestration.wait (orchestration-threads.ts).
-    expect(registry.size).toBe(52)
+    // orchestration.wait (orchestration-threads.ts). S10-3 adds orchestration.threads.pact/
+    // .step/.pactLedger (orchestration-pact.ts/orchestration-pact-step.ts).
+    expect(registry.size).toBe(55)
     expect(registry.has('orchestration.messages.purge')).toBe(true)
     expect(registry.has('orchestration.agents.review')).toBe(true)
     expect(registry.has('orchestration.threads.create')).toBe(true)
@@ -120,6 +121,9 @@ describe('orchestration RPC methods', () => {
     expect(registry.has('orchestration.threads.list')).toBe(true)
     expect(registry.has('orchestration.threads.leave')).toBe(true)
     expect(registry.has('orchestration.wait')).toBe(true)
+    expect(registry.has('orchestration.threads.pact')).toBe(true)
+    expect(registry.has('orchestration.threads.step')).toBe(true)
+    expect(registry.has('orchestration.threads.pactLedger')).toBe(true)
     expect(registry.has('orchestration.agents.register')).toBe(true)
     expect(registry.has('orchestration.agents.list')).toBe(true)
     expect(registry.has('orchestration.agents.get')).toBe(true)

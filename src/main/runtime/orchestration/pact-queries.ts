@@ -11,6 +11,21 @@ export function getPactState(db: Database.Database, threadId: string): ThreadRow
     | undefined
 }
 
+// K23 (proposal ring, answer_first): any pact where `agentId` is the addressee of an
+// unanswered PROPOSAL. Not scoped to a particular thread — the caller owes an answer regardless
+// of which thread they try to park `wait --for pact` on.
+export function getIncomingUnansweredProposal(
+  db: Database.Database,
+  agentId: string
+): ThreadRow | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state = 'proposed' AND pact_with_agent_id = ?
+       ORDER BY pact_at ASC LIMIT 1`
+    )
+    .get(agentId) as ThreadRow | undefined
+}
+
 // K5/K24: a paused pact's turn is frozen — excluded here so its holder may park elsewhere
 // (rev 4). Ordering (seq/thread id) is not meaningful; callers print every entry.
 export function getTurnsHeldBy(db: Database.Database, agentId: string): string[] {

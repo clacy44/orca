@@ -5,6 +5,7 @@ import { classifyAgentLiveness } from '../../orchestration/agent-directory'
 import { sanitizeTitle } from '../../orchestration/agent-name-sanitizer'
 import { deriveAgentLabelSlug } from '../../orchestration/agent-derivation'
 import type { AgentRow, AgentState } from '../../orchestration/types'
+import { wakePactThreadBoth } from './orchestration-pact-wake'
 
 export async function findLiveTerminalByHandle(
   runtime: OrcaRuntimeService,
@@ -80,6 +81,20 @@ export function refreshLiveness(
     terminalHandle: liveness.terminalHandle,
     processIncarnation: liveness.processIncarnation
   })
+  // Liveness § (K6): S10-2 only detected 'gone'; S10-3 acts on a fresh transition into it —
+  // auto-pause every engaged pact this agent is party to and wake the counterpart immediately,
+  // far inside the 30-minute clamp, instead of leaving a silent park.
+  if (liveness.state === 'gone' && row.state !== 'gone') {
+    for (const outcome of db.autoPausePactsForAgent(row.id, 'counterpart_gone')) {
+      wakePactThreadBoth(
+        runtime,
+        outcome.threadId,
+        [outcome.proposerAgentId, outcome.withAgentId],
+        'paused',
+        [`orca agents pact --release --on ${outcome.threadId}`]
+      )
+    }
+  }
   return { row: updated, pushable: liveness.pushable }
 }
 
