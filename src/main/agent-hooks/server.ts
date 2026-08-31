@@ -749,6 +749,12 @@ export class AgentHookServer {
     )
   }
 
+  /** Test/diagnostic accessor (S10-5 review F3): lets tests assert the reattest rate-limit map
+   *  is bounded/evicted/reset without reaching into private state. */
+  getReattestRateWindowEntryCount(): number {
+    return this.reattestRateWindowByPaneKey.size
+  }
+
   attestCompatibilityAuthority(candidate: {
     paneKey: string
     launchTokenHash: string
@@ -2258,6 +2264,7 @@ export class AgentHookServer {
     this.persistedAuthorityCommitmentsByPaneKey.clear()
     this.revokedHydratedAuthorityCommitments = new WeakSet()
     this.currentAuthorityObservations.clear()
+    this.reattestRateWindowByPaneKey.clear()
     this.promptSentDedupeByPaneKey.clear()
     this.closedAgentStatusTabIds.clear()
     this.closedAgentStatusPaneKeys.clear()
@@ -2766,11 +2773,27 @@ export class AgentHookServer {
    *  that hit `no_pane_identity` because a runtime restart wiped `currentAuthorityObservations`
    *  before any real agent hook happened to refire and rebuild it. SECURITY EQUIVALENCE: this
    *  handler feeds the identical `recordCurrentAuthorityObservation` used by every real hook POST
-   *  (no relaxed variant) and is gated by the same X-Orca-Agent-Hook-Token loopback channel every
-   *  other route requires — it can prove no more than a real hook POST already could. It creates
-   *  an observation ONLY; `verifyOrchestrationCompatibilityCaller`'s other conjuncts (restored
-   *  receipt match, live pty, paneKey/handle/incarnation/hostScope equality) stay fully load-bearing
-   *  on the caller's retried RPC — a forged paneKey with no matching receipt still refuses there. */
+   *  (no relaxed variant), is gated by the same X-Orca-Agent-Hook-Token loopback channel every
+   *  other route requires, AND (S10-5 review F1) is gated by the same `getAgentStatusDisposition`
+   *  admission check the ordinary hook POST path applies (server.ts:1830) — a closed-tab pane
+   *  refuses here exactly as it refuses a forged hook POST. It creates an observation ONLY;
+   *  `verifyOrchestrationCompatibilityCaller`'s other conjuncts (restored receipt match, live pty,
+   *  paneKey/incarnation/hostScope equality, and terminal-handle equality) stay fully load-bearing
+   *  on the caller's retried RPC — a forged paneKey with no matching receipt still refuses there.
+   *  `terminalHandle` in the request body below is shape-validated only (bounded length); it is
+   *  NOT recorded into evidence and handle equality is NOT enforced by this route — it is enforced
+   *  by the restored-receipt check in `verifyOrchestrationCompatibilityCaller`
+   *  (orca-runtime.ts:13072-13081), same as for every other reattestation path.
+   *
+   *  RESIDUAL GAP (S10-5 review F5, by design — not a defect): a pane with no hydrated commitment
+   *  on disk (never observed before this runtime's `start()`, or evicted) cannot be bootstrapped
+   *  by `/reattest`. `hydratedAuthorityCommitments` is populated once at `start()` from disk and is
+   *  otherwise immutable for the life of this server instance (reassigned only by `captureHydrated-
+   *  AuthorityCommitments()` at start and by the reset block) — `/reattest` only ever writes
+   *  `currentAuthorityObservations` / `persistedAuthorityCommitmentsByPaneKey`, it never reaches
+   *  into `hydratedAuthorityCommitments`. Such a pane stays unbootstrappable until a real agent
+   *  hook fires for it. Widening this (e.g. allowing /reattest to seed a fresh hydrated commitment)
+   *  is out of scope for S10-5 and tracked as S10-6. */
   private handleReattestRequest(body: unknown): { status: number; retryAfterMs?: number } {
     if (typeof body !== 'object' || body === null) {
       return { status: 400 }
@@ -2794,6 +2817,14 @@ export class AgentHookServer {
     if (!rate.allowed) {
       return { status: 429, retryAfterMs: rate.retryAfterMs }
     }
+    // Why: mirror the ordinary hook POST path's admission gate (server.ts:1830) so a closed-tab
+    // pane can't be reattested any more than a forged hook POST could. Called with no `event`,
+    // the disposition's 'restart' branch is unreachable (it requires a UserPromptSubmit/
+    // SessionStart event object), so this can only narrow /reattest to the hook path's admission
+    // set ('accept' only) — it never widens what /reattest can do.
+    if (this.getAgentStatusDisposition(paneKey) !== 'accept') {
+      return { status: 204 }
+    }
     // Why: this route is loopback-only and never crosses the SSH relay mux, so connectionId is
     // always local (null) — matches the local hook POST path's own connectionId semantics. The
     // `payload` stub below is never read by recordCurrentAuthorityObservation/toAuthorityEvidence
@@ -2811,6 +2842,21 @@ export class AgentHookServer {
   private checkAndBumpReattestRate(paneKey: string): { allowed: boolean; retryAfterMs?: number } {
     const nowMs = Date.now()
     const windowStart = Math.floor(nowMs / REATTEST_RATE_WINDOW_MS) * REATTEST_RATE_WINDOW_MS
+    // Why (S10-5 review F3): this map is keyed by attacker-chosen paneKey with no other bound —
+    // evict every stale-window entry on each check so a burst of distinct forged paneKeys can't
+    // accumulate unboundedly, matching the closedAgentStatusPaneKeys cap idiom (server.ts:1041).
+    for (const [key, entry] of this.reattestRateWindowByPaneKey) {
+      if (entry.windowStart !== windowStart && key !== paneKey) {
+        this.reattestRateWindowByPaneKey.delete(key)
+      }
+    }
+    while (this.reattestRateWindowByPaneKey.size > CLOSED_AGENT_STATUS_PANE_KEYS_MAX) {
+      const oldest = this.reattestRateWindowByPaneKey.keys().next().value
+      if (oldest === undefined) {
+        break
+      }
+      this.reattestRateWindowByPaneKey.delete(oldest)
+    }
     const existing = this.reattestRateWindowByPaneKey.get(paneKey)
     if (!existing || existing.windowStart !== windowStart) {
       this.reattestRateWindowByPaneKey.set(paneKey, { windowStart, count: 1 })
