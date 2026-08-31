@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalString, requiredString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
 import {
   sanitizeRole,
   sanitizeTitle,
@@ -33,7 +34,8 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       if (!authority) {
         throw new OrchestrationError(
           'no_pane_identity',
-          'This command must run inside a live, attested Orca terminal.'
+          'This command must run inside a live, attested Orca terminal.',
+          { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
         )
       }
       const db = runtime.getOrchestrationDb()

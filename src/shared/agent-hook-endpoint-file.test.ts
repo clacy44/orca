@@ -62,4 +62,20 @@ describe('agent hook endpoint files', () => {
       'Agent hook endpoint file is missing required fields'
     )
   })
+
+  it.each(['1234/hook/claude?x=', '1234@host:9', 'abc', '123456'])(
+    'throws when the port field is not a bare 1-5 digit number (%s)',
+    (port) => {
+      expect(() =>
+        parseAgentHookEndpointFile(
+          [
+            `ORCA_AGENT_HOOK_PORT=${port}`,
+            'ORCA_AGENT_HOOK_TOKEN=token-123',
+            'ORCA_AGENT_HOOK_ENV=production',
+            'ORCA_AGENT_HOOK_VERSION=1'
+          ].join('\n')
+        )
+      ).toThrow('Agent hook endpoint file has a malformed port')
+    }
+  )
 })

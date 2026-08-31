@@ -33,6 +33,13 @@ export function parseAgentHookEndpointFile(contents: string): AgentHookEndpoint 
   ) {
     throw new Error('Agent hook endpoint file is missing required fields')
   }
+  // Why (S10-5 review F2): the port is interpolated directly into a request URL by callers
+  // (orchestration-compatibility-reattest.ts); an unvalidated value like `1234/hook/claude?x=`
+  // or a userinfo-form host lets a malformed endpoint file steer the request path. Reject
+  // anything that isn't a bare 1-5 digit port up front so callers never build a malformed URL.
+  if (!/^\d{1,5}$/.test(values.ORCA_AGENT_HOOK_PORT)) {
+    throw new Error('Agent hook endpoint file has a malformed port')
+  }
   return {
     port: values.ORCA_AGENT_HOOK_PORT,
     token: values.ORCA_AGENT_HOOK_TOKEN,

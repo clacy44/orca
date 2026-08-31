@@ -9,6 +9,7 @@ import { OptionalFiniteNumber, OptionalString, requiredString } from '../schemas
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { hostIdFor, toPublicAgentView } from './agent-directory-rpc-view'
+import { NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
 import type { OrchestrationDb } from '../../orchestration/db'
 import type { MessageRow, ThreadParticipantRow } from '../../orchestration/types'
 
@@ -58,7 +59,7 @@ function resolvePurgeActor(
     throw new OrchestrationError(
       'no_pane_identity',
       'orca agents purge requires an attested caller identity.',
-      { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+      { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
     )
   }
   const agent = db.getAgentByPaneKey(hostId, attested.paneKey)

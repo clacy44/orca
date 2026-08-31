@@ -52,6 +52,7 @@ import { ORCHESTRATION_PACT_METHODS } from './orchestration-pact'
 import { ORCHESTRATION_PACT_STEP_METHODS } from './orchestration-pact-step'
 import { ORCHESTRATION_THREAD_INVITE_METHODS } from './orchestration-thread-invite'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
 import {
   assertPayloadKindNotCallerSet,
   extractPayloadKind
@@ -1686,7 +1687,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           throw new OrchestrationError(
             'no_pane_identity',
             'A peer reply requires an attested, registered caller identity.',
-            { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+            { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
           )
         }
         const answered = db.answerPeerQuestion({
@@ -2435,7 +2436,7 @@ async function handlePeerAsk(args: {
     throw new OrchestrationError(
       'no_pane_identity',
       'orca agents ask requires an attested, registered caller identity.',
-      { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+      { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
     )
   }
 

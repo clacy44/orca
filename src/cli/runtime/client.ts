@@ -18,6 +18,7 @@ import {
 } from '../../shared/protocol-version'
 import { RemoteRuntimeCompatGate } from './remote-runtime-compat-gate'
 import { createOrchestrationCompatibilityEnvelope } from './orchestration-compatibility-envelope'
+import { attemptOrchestrationReattest } from './orchestration-compatibility-reattest'
 import { getTimeoutMsParam, isWaitingCheck } from './runtime-request-timeout'
 
 // Why: for long-poll methods the caller's method-level
@@ -127,6 +128,34 @@ export class RuntimeClient {
       throw attachMutationRecovery(error, orchestrationRequestId)
     }
     if (response.ok === false) {
+      // Why: S10-5 single choke — a daemon-survived pane's env can be correct but unattested in
+      // this runtime generation after a restart. Re-attest once via the local hook endpoint and
+      // retry the exact same call once; any other failure (including a failed/absent reattest)
+      // surfaces the original refusal and its nextSteps unchanged. No further retries.
+      if (
+        response.error.code === 'no_pane_identity' &&
+        method.startsWith('orchestration.') &&
+        (await attemptOrchestrationReattest(
+          this.orchestrationCompatibility.orchestrationCompatibilityEvidence
+        ))
+      ) {
+        let retried
+        try {
+          retried = await sendRequest<TResult>(
+            metadata,
+            method,
+            params,
+            effectiveTimeoutMs,
+            envelope
+          )
+        } catch (error) {
+          throw attachMutationRecovery(error, orchestrationRequestId)
+        }
+        if (retried.ok === false) {
+          throw new RuntimeRpcFailureError(retried)
+        }
+        return retried
+      }
       throw new RuntimeRpcFailureError(response)
     }
     return response

@@ -127,7 +127,15 @@ describe('orchestration.agents.* RPC methods', () => {
     setup()
     await expect(
       call('orchestration.agents.register', { name: 'foo-agent' }, ctx())
-    ).rejects.toMatchObject({ code: 'no_pane_identity' })
+    ).rejects.toMatchObject({
+      code: 'no_pane_identity',
+      data: {
+        nextSteps: expect.arrayContaining([
+          expect.stringContaining('re-attests this pane automatically'),
+          expect.stringContaining('relaunch this agent in a fresh Orca pane')
+        ])
+      }
+    })
     expect(db.listAgents({}).agents).toHaveLength(0)
   })
 
