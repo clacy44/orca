@@ -356,6 +356,151 @@ describe('orchestration skill guidance', () => {
     expect(messaging).toContain('never writes to terminal input or remotely wakes another terminal')
     expect(messaging).toContain('Use `orchestration dispatch --inject` to deliver a tracked task')
   })
+
+  it('opens with the Peer Path before Tool Boundary, reachable with zero scrolling', () => {
+    const skill = readSkill()
+    const peerPathIndex = skill.indexOf('## Peer Path')
+    const toolBoundaryIndex = skill.indexOf('## Tool Boundary')
+
+    expect(peerPathIndex).toBeGreaterThan(-1)
+    expect(toolBoundaryIndex).toBeGreaterThan(-1)
+    expect(peerPathIndex).toBeLessThan(toolBoundaryIndex)
+
+    const peerPath = getSection(
+      skill,
+      'Peer Path (read this first if two agents need to coordinate as equals)'
+    )
+    expect(peerPath).toContain('orca agents register --name <my-name> --role "<one line>"')
+    expect(peerPath).toContain('orca agents find "<plain-English description of the peer>" --json')
+    expect(peerPath).toContain('orca agents ask <name> "<question>" --json')
+    expect(peerPath).toContain('orca agents reply --thread <t> --body "<text>"')
+    expect(peerPath).toContain('orca agents wait --thread <t> --for reply')
+    expect(peerPath).toContain('orca agents threads')
+    expect(peerPath).toContain('orca agents thread --id thr_9fk2')
+  })
+
+  it('routes lock-step coordination language to the pact primitive, not a silent ask/wait substitution', () => {
+    const skill = readSkill()
+    const peerPath = getSection(
+      skill,
+      'Peer Path (read this first if two agents need to coordinate as equals)'
+    )
+
+    expect(peerPath).toContain('in lock step')
+    expect(peerPath).toContain('orca agents pact --with <name> --on <thread>')
+    expect(peerPath).toContain('orca agents step --thread <t> --done "<what you did>"')
+    expect(peerPath).toContain('orca agents wait --thread <t> --for step')
+    expect(peerPath).toContain('orca agents pact --show <t>')
+    expect(skill).toContain(
+      'never guess or\nremember one. "Lock step" resolves to `orca agents pact`, a named primitive'
+    )
+  })
+
+  it('When To Use sends peer coordination to the Peer Path, not just terminal-handle messaging', () => {
+    const skill = readSkill()
+    const whenToUse = getSection(skill, 'When To Use')
+
+    expect(whenToUse).toContain('Two already-running agents that need to coordinate as equals')
+    expect(whenToUse).toContain('This is the Peer Path')
+    expect(whenToUse).toContain('orca agents find "<plain-English description>"')
+    expect(whenToUse).not.toContain(
+      '- Send/reply/ask between agent terminals with persistent messages.\n- Dispatch'
+    )
+  })
+
+  it('documents the Mental Model, Containment, and Cross-Host sections', () => {
+    const skill = readSkill()
+
+    expect(skill).toContain('## Mental Model')
+    const mentalModel = getSection(skill, 'Mental Model')
+    expect(mentalModel).toContain('Agent ids are durable identity')
+    expect(mentalModel).toContain('never the other')
+
+    expect(skill).toContain('## Containment')
+    const containment = getSection(skill, 'Containment (what happens to what you send)')
+    expect(containment).toContain('HARD block')
+    expect(containment).toContain('SOFT warn')
+    expect(containment).toContain('--acknowledge-gate')
+    expect(containment).toContain('orca agents purge')
+    expect(containment).toContain('orca agents quarantine')
+    expect(containment).toContain('--sensitive')
+    expect(containment).toContain('orca agents invite --thread <t> --agent <name>')
+
+    expect(skill).toContain('## Cross-Host')
+    const crossHost = getSection(
+      skill,
+      'Cross-Host (not yet landed on this line; reserved shape only)'
+    )
+    expect(crossHost).toContain('--all-hosts')
+    expect(crossHost).toContain('name@host')
+  })
+
+  it('documents the S10 pact verb family in the Agents & Threads reference', () => {
+    const skill = readSkill()
+    const reference = getSection(skill, 'Agents & Threads (peer command reference)')
+
+    expect(reference).toContain(
+      'orca agents pact --with <name> --on <thread> [--steps <n>|--open] [--json]'
+    )
+    expect(reference).toContain(
+      'orca agents pact --on <t> --accept|--decline [--reason <code>] [--json]'
+    )
+    expect(reference).toContain('orca agents pact --pause --on <t> [--reason <code>] [--json]')
+    expect(reference).toContain('orca agents pact --resume --on <t> [--json]')
+    expect(reference).toContain('orca agents pact --release --on <t> [--reason <code>] [--json]')
+    expect(reference).toContain('orca agents pact --show <t> [--json]')
+    expect(reference).toContain(
+      'orca agents step --thread <t> --done "<what>" [--acknowledge-gate] [--json]'
+    )
+    expect(reference).toContain('orca agents invite --thread <t> --agent <name> [--json]')
+    expect(reference).toContain(
+      'orca agents wait --thread <t> --for reply|message|pact|step [--timeout-ms <n>] [--resume <token>] [--json]'
+    )
+    expect(reference).toContain('`pact --resume` is a boolean on the `pact` noun')
+    expect(reference).toContain('takes a value on the `wait` noun')
+    expect(reference).toContain('refused every `wait` park')
+    expect(reference).toContain('answer_first')
+  })
+
+  it('adds a When It Goes Wrong table covering find/quarantine/timeout/pact-stall/cross-host recovery', () => {
+    const skill = readSkill()
+    const table = getSection(skill, 'When It Goes Wrong')
+
+    expect(table).toContain('| Symptom | Exact recovery command |')
+    expect(table).toContain('`find` returns `ambiguous`')
+    expect(table).toContain('`find` returns `no_match`')
+    expect(table).toContain('Peer is quarantined')
+    expect(table).toContain('nowhere to route')
+    expect(table).toContain('`wait`/`ask` timed out')
+    expect(table).toContain('never re-ask')
+    expect(table).toContain('pane never woke')
+    expect(table).toContain('Handle looks stale')
+    expect(table).toContain('refused by the gate')
+    expect(table).toContain('Peer is on another host')
+    expect(table).toContain('Lock-step pact stalled')
+    expect(table).toContain('orca agents pact --release --on <t>')
+    expect(table).toContain('A pact is paused and `--resume` keeps refusing')
+    expect(table).toContain('durable record after losing context')
+
+    // Placed after the reference command list, before Tool Boundary (rev 2 layout).
+    const referenceIndex = skill.indexOf('## Agents & Threads')
+    const tableIndex = skill.indexOf('## When It Goes Wrong')
+    const toolBoundaryIndex = skill.indexOf('## Tool Boundary')
+    expect(referenceIndex).toBeLessThan(tableIndex)
+    expect(tableIndex).toBeLessThan(toolBoundaryIndex)
+  })
+
+  it('ties durable agent identity to registration, not routing metadata, in Ownership', () => {
+    const skill = readSkill()
+    const ownership = getSection(skill, 'Ownership')
+
+    expect(ownership).toContain(
+      'Agent ids (`orca agents register`) are durable identity; terminal handles are a cache the directory re-derives.'
+    )
+    expect(ownership).not.toContain(
+      'terminal handles remain routing metadata rather than durable identity'
+    )
+  })
 })
 
 describe('orchestration install stub', () => {
