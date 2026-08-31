@@ -7,6 +7,18 @@ import type { RpcMethod } from '../core'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { OrchestrationDb } from '../../orchestration/db'
 
+// Why: shared across every no_pane_identity refusal (agents/threads/pact/containment) so the
+// disposition — not a bare failure — always names the recovery path, not copy-pasted per site.
+// S10-5: the CLI already retries once through an automatic reattest (see
+// src/cli/runtime/orchestration-compatibility-reattest.ts) before this error ever surfaces, so
+// the wording here is platform-agnostic guidance for what's left once that retry has also failed
+// — never shell-specific sourcing instructions (killed per the chair's S10-5 wording ruling).
+export const NO_PANE_IDENTITY_NEXT_STEPS: readonly string[] = Object.freeze([
+  're-run the command — the CLI re-attests this pane automatically after a runtime restart',
+  'if it persists, relaunch this agent in a fresh Orca pane (claude --resume keeps its context)',
+  'orca agents register --name <slug> --role "<your role>"'
+])
+
 export type ResolvedCallerAgent = {
   id: string
   terminal_handle: string | null
@@ -33,7 +45,7 @@ export function resolveCallerAgent(
     throw new OrchestrationError(
       'no_pane_identity',
       'This requires an attested, registered caller identity.',
-      { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+      { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
     )
   }
   return {

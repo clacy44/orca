@@ -8,7 +8,7 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { PEER_RUN_ID } from '../../orchestration/db'
 import { pactWaiterHandle } from '../../orchestration/pact-shared'
-import { resolveCallerAgent } from './orchestration-caller-identity'
+import { NO_PANE_IDENTITY_NEXT_STEPS, resolveCallerAgent } from './orchestration-caller-identity'
 import { wakeTurnArrived } from './orchestration-pact-wake'
 
 const StepParams = z.object({
@@ -95,7 +95,7 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
           throw new OrchestrationError(
             'no_pane_identity',
             'This requires an attested, registered caller identity.',
-            { nextSteps: ['orca agents register --name <slug> --role "<your role>"'] }
+            { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
           )
         }
         // The local-operator carve-out: no agents row, so no participant check to make —
