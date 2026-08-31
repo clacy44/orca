@@ -1,10 +1,47 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeClient } from '../runtime-client'
+import type * as RuntimeClientModule from '../runtime-client'
+import { encodePairingOffer } from '../../shared/pairing'
+import { addEnvironmentFromPairingCode } from '../runtime/environments'
 import { AGENT_ASK_REPLY_HANDLERS } from './agents-ask-reply'
+
+// S10-8 R1 (transport inversion): a `name@host` ask must resolve the remote id over a direct
+// read on the target's own client (fine — reads tolerate an unattested caller) but never send
+// the ask itself over that client. `getDefaultUserDataPath` is stubbed to a real temp env store
+// (mirrors agents-shared.test.ts's own fixture) so `resolveAgentAcrossHost`'s DEFAULT
+// `hostClientFactory` runs unmodified; `RuntimeClient` is stubbed only so that factory never
+// opens a real socket — its `.call` is a spy this file asserts against directly.
+const remoteClientCall = vi.fn()
+vi.mock('../runtime-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof RuntimeClientModule>()
+  class FakeRuntimeClient {
+    call = remoteClientCall
+  }
+  return {
+    ...actual,
+    getDefaultUserDataPath: () => testUserDataPath,
+    RuntimeClient: FakeRuntimeClient
+  }
+})
+
+let testUserDataPath = ''
+
+function pairingCode(): string {
+  return encodePairingOffer({
+    v: 2,
+    endpoint: 'ws://127.0.0.1:6768',
+    deviceToken: 'device-token',
+    publicKeyB64: Buffer.from(new Uint8Array(32).fill(1)).toString('base64')
+  })
+}
 
 describe('agents ask/reply CLI', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    remoteClientCall.mockReset()
     process.exitCode = undefined
   })
 
@@ -44,6 +81,54 @@ describe('agents ask/reply CLI', () => {
     const printed = String(log.mock.calls[0]?.[0])
     expect(printed).toContain('rebase onto 12ddb0a first')
     expect(printed).toContain('Continue: orca agents reply --thread thr_9fk2 --body "..."')
+  })
+
+  it('ask: `name@host` resolves the id over the REMOTE client but sends the ask over the LOCAL client, carrying `host` (R1)', async () => {
+    testUserDataPath = mkdtempSync(join(tmpdir(), 'orca-agents-ask-reply-'))
+    const saved = addEnvironmentFromPairingCode(testUserDataPath, {
+      name: 'Private VPS',
+      pairingCode: pairingCode()
+    })
+    remoteClientCall.mockResolvedValue({
+      result: { agent: { id: 'agt_them', displayName: 'backend-merge', quarantined: false } }
+    })
+    const localCall = vi.fn().mockResolvedValue({
+      result: {
+        answer: 'yes',
+        messageId: 'msg_a1',
+        threadId: 'thr_9fk2',
+        timedOut: false,
+        timeoutMs: 1_000
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_ASK_REPLY_HANDLERS['agents ask']({
+      flags: new Map<string, string | boolean>([
+        ['name', 'backend-merge@Private VPS'],
+        ['question', 'did db.ts land yet?']
+      ]),
+      client: { call: localCall } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    // The read went to the remote client the saved environment resolves to...
+    expect(remoteClientCall).toHaveBeenCalledWith('orchestration.agents.get', {
+      name: 'backend-merge'
+    })
+    // ...but the ask itself went ONLY to the caller's own local client, never remoteClientCall,
+    // carrying the resolved id AND the host for the local runtime to relay.
+    expect(remoteClientCall).not.toHaveBeenCalledWith('orchestration.ask', expect.anything())
+    expect(localCall).toHaveBeenCalledWith(
+      'orchestration.ask',
+      expect.objectContaining({
+        to: 'agent:agt_them',
+        host: 'Private VPS',
+        question: 'did db.ts land yet?'
+      }),
+      expect.anything()
+    )
+    void saved
+    expect(String(log.mock.calls[0]?.[0])).toContain('yes')
   })
 
   it('ask: refuses a quarantined target before ever calling orchestration.ask', async () => {
