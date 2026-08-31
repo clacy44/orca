@@ -1833,10 +1833,12 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
     })
     // Why: sweep tab agent status through its suppressor-aware removal path.
     // Why: Pi can leave a completed row keyed under an already-missing tab id; pass the worktree to sweep that orphan while preserving active pre-render child rows.
-    get().dropAgentStatusByTabPrefix(
-      tabId,
-      closingWorktreeId ? { worktreeId: closingWorktreeId } : undefined
-    )
+    get().dropAgentStatusByTabPrefix(tabId, {
+      ...(closingWorktreeId ? { worktreeId: closingWorktreeId } : {}),
+      // Why: an explicit user close is the acknowledgment; a lifecycle/programmatic
+      // close (pty-exit, cleanup) must leave any retained "done" row for the user to see.
+      preserveRetainedSnapshot: closeReason !== 'user'
+    })
     // Why: retired pane keys never recur, so stranded foreground entries would accumulate for the renderer's whole lifetime.
     get().clearPaneForegroundAgentByTabPrefix(tabId)
     // Why: closing a tab permanently retires its panes (reopen mints a fresh leafId), so drop hibernation output epochs to keep the module map from growing forever.

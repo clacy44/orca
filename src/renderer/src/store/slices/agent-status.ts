@@ -80,6 +80,9 @@ type DropHibernatedAgentPaneOptions = {
 
 type DropAgentStatusByTabPrefixOptions = {
   worktreeId?: string
+  /** Keep retained "done" snapshots for this tab's panes — set for lifecycle/programmatic
+   *  closes so an unseen result survives; a user-initiated close omits this to dismiss it. */
+  preserveRetainedSnapshot?: boolean
 }
 
 type AgentLaunchConfigRegistrationMetadata = {
@@ -271,7 +274,8 @@ export type AgentStatusSlice = {
   /** Remove a single entry AND suppress re-retention on its next disappearance (user-initiated teardown: X button, pane close). */
   dropAgentStatus: (paneKey: string) => void
 
-  /** Remove all entries under a tab AND suppress re-retention for each (tab close — no rows may reappear). */
+  /** Remove all live entries under a tab AND suppress re-retention for each. Also drops the tab's
+   *  retained "done" snapshots unless opts.preserveRetainedSnapshot keeps them for a non-user close. */
   dropAgentStatusByTabPrefix: (
     tabIdPrefix: string,
     opts?: DropAgentStatusByTabPrefixOptions
@@ -2680,9 +2684,13 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
         const launchConfigKeys = Object.keys(s.agentLaunchConfigByPaneKey).filter(
           (k) => k.startsWith(prefix) || completedOrphanKeySet.has(k)
         )
-        const retainedKeys = Object.keys(s.retainedAgentsByPaneKey).filter(
-          (k) => k.startsWith(prefix) || completedOrphanKeySet.has(k)
-        )
+        // Why: only a user-initiated close counts as acknowledgment; lifecycle/programmatic
+        // closes (pty-exit, cleanup) must not erase a "done" row the user hasn't seen yet.
+        const retainedKeys = opts?.preserveRetainedSnapshot
+          ? []
+          : Object.keys(s.retainedAgentsByPaneKey).filter(
+              (k) => k.startsWith(prefix) || completedOrphanKeySet.has(k)
+            )
         const migrationUnsupported = pruneMigrationUnsupportedEntries(
           s.migrationUnsupportedByPtyId,
           (entry) => entry.paneKey?.startsWith(prefix) ?? false
