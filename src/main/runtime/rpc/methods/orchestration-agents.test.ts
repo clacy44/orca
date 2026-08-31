@@ -329,4 +329,86 @@ describe('orchestration.agents.* RPC methods', () => {
     expect(found.outcome).toBe('no_match')
     expect(found.omitted.quarantined).toBe(1)
   })
+
+  describe('orchestration.agents.relink (S10-4 ruling 5)', () => {
+    function federatedDispatch(environmentId: string) {
+      const run = db.createRun({
+        objective: 'cross-host work',
+        coordinatorHandle: 'term_coord',
+        coordinatorPaneKey: 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      })
+      const task = db.createTask({ spec: 'do the thing', runId: run.id })
+      const { dispatch } = db.createStartingWorkerDispatch({
+        taskId: task.id,
+        startOptions: {},
+        federation: {
+          environmentId,
+          environmentName: 'work-laptop',
+          peerFingerprint: 'peer_fingerprint_1',
+          protocolVersion: 3
+        }
+      })
+      return dispatch
+    }
+
+    it('resets the relay cursors for a local caller', async () => {
+      setup()
+      const dispatch = federatedDispatch('env_stale')
+      db.importFederatedRelayItem({
+        dispatchId: dispatch.id,
+        sequence: 1,
+        relayKind: 'status',
+        message: {
+          id: 'relay_1',
+          runId: dispatch.run_id,
+          from: `dispatch:${dispatch.id}`,
+          to: `run:${dispatch.run_id}`,
+          subject: 'progress',
+          body: 'still going',
+          type: 'status',
+          priority: 'normal'
+        },
+        lifecycle: { kind: 'none' }
+      })
+      expect(db.getFederatedDispatch(dispatch.id)!.to_home_imported_sequence).toBe(1)
+
+      const result = (await call(
+        'orchestration.agents.relink',
+        { environmentId: 'env_stale' },
+        ctx()
+      )) as { dispatchIds: string[] }
+      expect(result.dispatchIds).toEqual([dispatch.id])
+      expect(db.getFederatedDispatch(dispatch.id)!.to_home_imported_sequence).toBe(0)
+    })
+
+    it('is a no-op for an environment with no active federated dispatch', async () => {
+      setup()
+      const result = (await call(
+        'orchestration.agents.relink',
+        { environmentId: 'env_unknown' },
+        ctx()
+      )) as { dispatchIds: string[] }
+      expect(result.dispatchIds).toEqual([])
+    })
+
+    it('refuses a federated caller; the local operator can still relink afterward', async () => {
+      setup()
+      const dispatch = federatedDispatch('env_stale')
+      await expect(
+        call(
+          'orchestration.agents.relink',
+          { environmentId: 'env_stale' },
+          { runtime, orchestrationCompatibilityEvidence: undefined, pairedDeviceId: 'device-1' }
+        )
+      ).rejects.toMatchObject({ code: 'forbidden' })
+      expect(db.getFederatedDispatch(dispatch.id)!.to_home_imported_sequence).toBe(0)
+
+      const result = (await call(
+        'orchestration.agents.relink',
+        { environmentId: 'env_stale' },
+        ctx()
+      )) as { dispatchIds: string[] }
+      expect(result.dispatchIds).toEqual([dispatch.id])
+    })
+  })
 })
