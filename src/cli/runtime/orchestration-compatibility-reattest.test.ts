@@ -110,6 +110,25 @@ describe('attemptOrchestrationReattest', () => {
     await expect(attemptOrchestrationReattest(EVIDENCE)).resolves.toBe(false)
   })
 
+  it('returns false and never fetches when the port field is non-numeric (S10-5 review F2)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
+    const endpointPath = join(dir, 'endpoint.env')
+    writeFileSync(
+      endpointPath,
+      [
+        'ORCA_AGENT_HOOK_PORT=1234/hook/claude?x=',
+        'ORCA_AGENT_HOOK_TOKEN=the-hook-token',
+        'ORCA_AGENT_HOOK_ENV=production',
+        'ORCA_AGENT_HOOK_VERSION=1',
+        ''
+      ].join('\n'),
+      'utf8'
+    )
+    process.env.ORCA_AGENT_HOOK_ENDPOINT = endpointPath
+
+    await expect(attemptOrchestrationReattest(EVIDENCE)).resolves.toBe(false)
+  })
+
   it('returns false when the endpoint file is oversized', async () => {
     dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
     const endpointPath = join(dir, 'endpoint.env')
@@ -132,6 +151,15 @@ describe('attemptOrchestrationReattest', () => {
       await expect(attemptOrchestrationReattest(EVIDENCE)).resolves.toBe(false)
     }
   )
+
+  it('returns false when the endpoint path has an unrecognized basename', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
+    const endpointPath = join(dir, 'not-an-endpoint-file.txt')
+    writeFileSync(endpointPath, endpointBody(1, 'x'), 'utf8')
+    process.env.ORCA_AGENT_HOOK_ENDPOINT = endpointPath
+
+    await expect(attemptOrchestrationReattest(EVIDENCE)).resolves.toBe(false)
+  })
 
   it('returns false when the endpoint file does not exist', async () => {
     dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
