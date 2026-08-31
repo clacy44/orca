@@ -845,7 +845,28 @@ export class OrchestrationDb {
     this.infraAllowlist = loadInfraAllowlist(dbPath)
   }
 
+  // Unshipped-v35 pact_era repair (S10-3b verify blocker): a DB stamped v35 by an earlier copy
+  // of this same UNSHIPPED migration (no artifact ever carried v35) has threads/pact_steps
+  // WITHOUT pact_era — and createTables()'s own idx_pact_step_ordinal SQL references the column,
+  // so the open crashes before migrate() could repair anything. Runs first, version-agnostic:
+  // only a pre-fix-v35 DB can have either table existing without the column; everything else
+  // no-ops on two cheap probes.
+  private repairUnshippedV35PactEra(): void {
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+    if (hasTable('threads') && !this.hasColumn('threads', 'pact_era')) {
+      this.db.exec(`ALTER TABLE threads ADD COLUMN pact_era INTEGER NOT NULL DEFAULT 0`)
+    }
+    if (hasTable('pact_steps') && !this.hasColumn('pact_steps', 'pact_era')) {
+      this.db.exec(`ALTER TABLE pact_steps ADD COLUMN pact_era INTEGER NOT NULL DEFAULT 0`)
+      // createTables()'s CREATE UNIQUE INDEX IF NOT EXISTS re-creates it era-keyed right after.
+      this.db.exec(`DROP INDEX IF EXISTS idx_pact_step_ordinal`)
+    }
+  }
+
   private createTables(): void {
+    this.repairUnshippedV35PactEra()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,

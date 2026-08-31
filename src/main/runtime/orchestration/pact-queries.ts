@@ -39,6 +39,7 @@ export function getTurnsHeldBy(db: Database.Database, agentId: string): string[]
 }
 
 type PactStepQueryRow = {
+  era: number
   ordinal: number
   kind: PactStepKind
   actor_agent_id: string | null
@@ -68,7 +69,7 @@ export function getPactLedger(
 ): PactLedgerResult {
   const rows = db
     .prepare(
-      `SELECT ps.ordinal, ps.kind, ps.actor_agent_id, a.display_name AS actor_display_name,
+      `SELECT ps.pact_era AS era, ps.ordinal, ps.kind, ps.actor_agent_id, a.display_name AS actor_display_name,
               a.quarantined AS actor_quarantined, ps.at, ps.summary, ps.summary_sha256,
               ps.summary_purged_at, ps.reason_code
        FROM pact_steps ps
@@ -93,6 +94,7 @@ export function getPactLedger(
       withheldCount++
     }
     return {
+      era: row.era,
       ordinal: row.ordinal,
       kind: row.kind,
       actorAgentId: row.actor_agent_id,

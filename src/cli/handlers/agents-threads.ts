@@ -80,8 +80,9 @@ type ThreadGetResult = {
   omitted?: ThreadOmitted
 }
 // S10-3: `for:'step'` (ruling 5) plus the non-message pact outcomes a `--for pact|step|reply`
-// park can be woken with (resolvePactWaiters / K24's host-wide turn guard) — `threadId` is set
-// only on those detail-driven wakes (null for a turn_arrived wake per A4; absent otherwise).
+// park can be woken with (resolvePactWaiters / K24's host-wide turn guard) — every detail-driven
+// wake carries the ACTING thread's id in `threadId` (K19 fix: turn_arrived included; absent only
+// on plain message wakes).
 type WaitResult = {
   outcome:
     | 'reply'

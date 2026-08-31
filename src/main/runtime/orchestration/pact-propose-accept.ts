@@ -8,6 +8,7 @@ import {
   otherPactParticipant,
   requireAccountablePeer,
   requireNoEngagedPactWithPeer,
+  requireCallerNotQuarantined,
   requirePactParticipant,
   requireSensitiveMembership,
   requireThread,
@@ -26,6 +27,9 @@ export type ProposePactParams = PactActorContext & {
 export function proposePact(db: Database.Database, params: ProposePactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
   requireThreadParticipant(db, thread.id, params.callerAgentId)
+  // Verify major (S10-3b): the CALLER's own quarantine refuses propose too — otherwise a
+  // quarantined agent mints fresh engaged pacts while every auto-pause guards only old ones.
+  requireCallerNotQuarantined(db, params.callerAgentId, thread.id, 'propose')
   const peer = requireAccountablePeer(db, params.callerAgentId, params.peerAgentId)
   requireSensitiveMembership(db, thread, peer.id, peer.display_name)
   requireUnclaimedPact(thread)
@@ -76,6 +80,7 @@ export type AcceptPactParams = PactActorContext & { threadId: string }
 export function acceptPact(db: Database.Database, params: AcceptPactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
   requireProposedTo(thread, params.callerAgentId)
+  requireCallerNotQuarantined(db, params.callerAgentId, thread.id, 'accept')
 
   db.exec('BEGIN IMMEDIATE')
   try {

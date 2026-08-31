@@ -54,6 +54,7 @@ export type PactStepRow = {
 // never stored), `[summary purged]` once purged. `pact --show`'s renderer (S10-3b, CLI series)
 // prints these fields; this worktree only produces them.
 export type PactLedgerEntry = {
+  era: number
   ordinal: number
   kind: PactStepKind
   actorAgentId: string | null

@@ -1,6 +1,9 @@
 // S10-3 pact spec — propose/accept/decline through the public OrchestrationDb API.
 // Mutation-guard comments match the pact-spec TESTS table ids (K#).
 import { afterEach, describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { OrchestrationDb } from './db'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
 
@@ -252,5 +255,68 @@ describe('pact propose/accept/decline', () => {
       d.proposePact({ ...actor(a), threadId, peerAgentId: 'b@otherhost', stepsTotal: null })
     ).toThrow(/host-local/)
     expect(d.getThread(threadId)?.pact_state).toBeNull()
+  })
+
+  it('verify major: a QUARANTINED CALLER may not propose - refused agent_quarantined, pact_state stays NULL', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    d.setAgentQuarantine({ id: a, quarantined: true, reasonCode: 'test' })
+    const threadId = seedThreadWithParticipants(d, [a, b])
+    expect(() =>
+      d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: null })
+    ).toThrow(/quarantined participant may not propose/)
+    expect(d.getThread(threadId)?.pact_state).toBeNull()
+  })
+
+  it('verify major: a QUARANTINED CALLER may not accept - the proposal stays proposed', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = seedThreadWithParticipants(d, [a, b])
+    d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: null })
+    d.setAgentQuarantine({ id: b, quarantined: true, reasonCode: 'test' })
+    expect(() => d.acceptPact({ ...actor(b), threadId })).toThrow(
+      /quarantined participant may not accept/
+    )
+    expect(d.getThread(threadId)?.pact_state).toBe('proposed')
+  })
+
+  // Verify blocker regression: a DB stamped v35 by the PRE-FIX copy of the unshipped migration
+  // has no pact_era anywhere; migrate()'s early return must not strand it (mutation guard:
+  // removing the storedVersion>=35 repair in db.ts turns this red on the reopen assertions).
+  it('verify blocker: a v35 DB without pact_era is repaired on open', () => {
+    freshDb() // registers a throwaway :memory: db for the shared afterEach close
+    const dir = mkdtempSync(join(tmpdir(), 'orca-pact-era-repair-'))
+    const file = join(dir, 'orchestration.db')
+    try {
+      type Raw = { exec(sql: string): void; prepare(s: string): { get(...a: unknown[]): unknown } }
+      const first = new OrchestrationDb(file)
+      const raw = (first as unknown as { db: Raw }).db
+      raw.exec(`DROP INDEX IF EXISTS idx_pact_step_ordinal`)
+      raw.exec(`ALTER TABLE pact_steps DROP COLUMN pact_era`)
+      raw.exec(`ALTER TABLE threads DROP COLUMN pact_era`)
+      first.close()
+
+      const reopened = new OrchestrationDb(file)
+      const raw2 = (reopened as unknown as { db: Raw }).db
+      const col = (table: string) =>
+        (
+          raw2
+            .prepare(
+              `SELECT COUNT(*) AS c FROM pragma_table_info('${table}') WHERE name = 'pact_era'`
+            )
+            .get() as { c: number }
+        ).c
+      expect(col('threads')).toBe(1)
+      expect(col('pact_steps')).toBe(1)
+      const idx = raw2
+        .prepare(`SELECT group_concat(name) AS g FROM pragma_index_info('idx_pact_step_ordinal')`)
+        .get() as { g: string | null }
+      expect(idx.g ?? '').toContain('pact_era')
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

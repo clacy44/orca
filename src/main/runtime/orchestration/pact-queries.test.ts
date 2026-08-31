@@ -144,4 +144,20 @@ describe('pact queries', () => {
       raw.prepare('UPDATE threads SET pact_turn_agent_id = NULL WHERE id = ?').run(threadId)
     ).toThrow(/turn held by a participant/)
   })
+
+  it('verify minor: ledger rows expose era, so repeated ordinals across re-proposes stay distinguishable', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = threadWith(d, [a, b])
+    d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: null })
+    d.declinePact({ ...actor(b), threadId, reasonCode: 'not_now' })
+    d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: null })
+    const rows = d.getPactLedger({ threadId, revealSummaries: false }).entries
+    const proposeEras = rows.filter((r) => r.kind === 'propose').map((r) => r.era)
+    expect(proposeEras).toEqual([1, 2])
+    for (const row of rows) {
+      expect(typeof row.era).toBe('number')
+    }
+  })
 })

@@ -200,20 +200,21 @@ export function requireEngaged(thread: ThreadRow): void {
 export function requireCallerNotQuarantined(
   db: Database.Database,
   agentId: string,
-  threadId: string
+  threadId: string,
+  verb: 'step' | 'propose' | 'accept' = 'step'
 ): void {
   const agent = getAgentById(db, agentId)
   if (agent?.quarantined === 1) {
+    // For propose/accept there is no engaged pact to release yet, so the release
+    // suggestion only accompanies a refused step.
+    const releaseSteps = verb === 'step' ? [`orca agents pact --release --on ${threadId}`] : []
+    const releaseClause =
+      verb === 'step' ? ` or release the pact (orca agents pact --release --on ${threadId})` : ''
     throw new OrchestrationError(
       'agent_quarantined',
-      `Refused: ${agent.display_name} is quarantined and a quarantined participant may not step. ` +
-        `Lift it (orca agents quarantine ${agent.display_name} --lift) or release the pact ` +
-        `(orca agents pact --release --on ${threadId}).`,
+      `Refused: ${agent.display_name} is quarantined and a quarantined participant may not ${verb}. Lift it (orca agents quarantine ${agent.display_name} --lift)${releaseClause}.`,
       {
-        nextSteps: [
-          `orca agents quarantine ${agent.display_name} --lift`,
-          `orca agents pact --release --on ${threadId}`
-        ]
+        nextSteps: [`orca agents quarantine ${agent.display_name} --lift`, ...releaseSteps]
       }
     )
   }

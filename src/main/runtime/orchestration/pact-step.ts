@@ -133,8 +133,14 @@ export function appendPactStep(
       verb: 'pact_step',
       outcome: 'stepped'
     })
-    db.exec('COMMIT')
+    // Read-backs run INSIDE the transaction: anything throwing after COMMIT but before this
+    // try's catch would issue a second ROLLBACK on a closed transaction and mask the real
+    // error with ERR_SQLITE_ERROR (the S10-1 ack / relay-import lesson).
     const updated = requireThread(db, thread.id)
+    const gateFlags = inserted.message.gate_flags
+      ? (JSON.parse(inserted.message.gate_flags) as string[])
+      : null
+    db.exec('COMMIT')
     return {
       outcome: 'stepped',
       thread: updated,
@@ -142,9 +148,7 @@ export function appendPactStep(
       of: updated.pact_steps_total,
       turn: other,
       message: inserted.message,
-      gateFlags: inserted.message.gate_flags
-        ? (JSON.parse(inserted.message.gate_flags) as string[])
-        : null
+      gateFlags
     }
   } catch (err) {
     db.exec('ROLLBACK')
