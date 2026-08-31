@@ -1,5 +1,15 @@
 # Windows shared-host deployment and pairing checklist
 
+> **Branch note:** this runbook (and every doc under `docs/reference/`) lives on the DOCS
+> branch, `feat/orchestration-resilience-phase1`. The BUILD SOURCE named in Stage 1 is the
+> CODE branch, `feat/resilience-presence-integration` — it does not carry these docs, by
+> design (`docs/**` is gitignored on code branches). Read here, build there.
+>
+> **Install-target note:** Stage 1 builds on a Windows 11 desktop; Stage 2 targets the SHARED
+> Windows Server host once it exists. To upgrade a developer'''s OWN desktop app, run the
+> Stage-1 installer locally (replaces %LOCALAPPDATA%\Programs\orca) — after copying
+> %APPDATA%\orca\orchestration.db aside, since schema migrations are one-way.
+
 Owner-facing runbook for deploying Orca on a Windows Server box shared by
 two people, and pairing each person into their own credential lane. Written
 for an operator who has not read the design docs — every command is exact
