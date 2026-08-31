@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- Why: RPC method definitions co-locate param schemas with handlers; splitting by method would scatter the shared enums and Zod transforms without reducing complexity. */
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, OptionalString, OptionalBoolean, requiredString } from '../schemas'
@@ -2168,7 +2169,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         recordMutationReceipt,
         orchestrationCompatibilityEvidence,
         pairedDeviceId,
-        clientKind
+        clientKind,
+        orchestrationMutation
       }
     ) => {
       // Why: group addresses have no unambiguous first-answer authority.
@@ -2206,7 +2208,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             timeoutMs,
             signal,
             recordMutationReceipt,
-            orchestrationCompatibilityEvidence
+            orchestrationCompatibilityEvidence,
+            orchestrationMutation
           })
         }
         return handlePeerAsk({
@@ -2443,6 +2446,11 @@ async function relayPeerAskToHost(args: {
   signal?: AbortSignal
   recordMutationReceipt?: (receipt: unknown) => void
   orchestrationCompatibilityEvidence?: OrchestrationCompatibilityEvidence
+  // S10-8 review fix (blocker: dedup): this ask's own mutation identity, when the inbound call
+  // carried one — used to derive a deterministic relay requestId (federation-sync.ts's
+  // `relay_ack_${...}`/`relay_import_${...}` idiom) so a client-level retry of the SAME ask
+  // lands on the SAME idempotency key on the receiving host instead of minting a second question.
+  orchestrationMutation?: { requestId: string }
 }): Promise<unknown> {
   const { params, runtime, db, timeoutMs } = args
   const caller = resolveCallerAgent(db, runtime, args.orchestrationCompatibilityEvidence)
@@ -2462,6 +2470,25 @@ async function relayPeerAskToHost(args: {
   // is shaped for a pane, not a display name — e.g. it may carry `_`, which
   // validateDisplayNameCandidate on the receiving end refuses).
   const callerRow = db.getAgentById(caller.id)
+  // S10-8 review fix (blocker: quarantine crosses the link): a quarantined caller must never
+  // reach the peer at all — refusing here, before the relay call, is what keeps `--host` from
+  // being a one-flag bypass of local containment (mirrors requireCallerNotQuarantined's read-
+  // at-action-time discipline for pact steps).
+  if (callerRow?.quarantined === 1) {
+    db.writeAgentAudit({
+      agentId: callerRow.id,
+      actorPaneKey: caller.pane_key,
+      actorHostId: caller.host_id,
+      verb: 'federatedAsk',
+      outcome: 'agent_quarantined',
+      reasonCode: null
+    })
+    throw new OrchestrationError(
+      'agent_quarantined',
+      `${callerRow.display_name} is quarantined and cannot ask across hosts.`,
+      { nextSteps: [`orca agents quarantine ${callerRow.display_name} --lift`] }
+    )
+  }
   const result = (await runtime.callOrchestrationWorkerServer(
     params.host as string,
     'orchestration.federatedAsk',
@@ -2469,14 +2496,28 @@ async function relayPeerAskToHost(args: {
       fromAgent: {
         id: caller.id,
         displayName: callerRow?.display_name ?? caller.id,
-        role: callerRow?.role ?? null
+        role: callerRow?.role ?? null,
+        // S10-8 review fix (blocker: quarantine crosses the link, half 2): carries THIS host's
+        // own quarantine assertion for the caller so the receiving host can refuse it
+        // independently of the check just above (defense in depth — never the only guard).
+        quarantined: callerRow?.quarantined === 1
       },
       toAgentId,
       question: params.question,
       options,
       timeoutMs
     },
-    timeoutMs + 15_000
+    timeoutMs + 15_000,
+    // S10-8 review fix (blocker: dedup): deterministic when the inbound call carried an
+    // idempotency key of its own, so a client-level retry (same requestId) coalesces on the
+    // receiving host instead of minting a second question. No inbound key to derive from means
+    // no dedup guarantee either way (same as before this fix) — a fresh id per call, never a
+    // content hash, which would wrongly coalesce two deliberately-identical questions.
+    {
+      orchestrationRequestId: args.orchestrationMutation
+        ? `relay_ask_${args.orchestrationMutation.requestId}`
+        : `relay_ask_${randomUUID()}`
+    }
   )) as {
     answer: string | null
     messageId: string

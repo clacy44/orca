@@ -98,7 +98,11 @@ import {
 } from './message-gate-writer'
 import { gateVerdictRefusalError } from './gate-refusal-error'
 import { loadInfraAllowlist } from './infra-allowlist'
-import { filterLiveMessageRows, liveMessageSqlClause } from './message-visibility-filter'
+import {
+  filterLiveMessageRows,
+  liveMessageSqlClause,
+  remoteSenderQuarantinedSqlClause
+} from './message-visibility-filter'
 import {
   createThread as createThreadImpl,
   getThread as getThreadImpl,
@@ -4982,7 +4986,8 @@ export class OrchestrationDb {
         .prepare(
           `SELECT COUNT(*) AS n FROM messages
            WHERE thread_id = ? ${toHandleClause} ${cursorClause} AND purged_at IS NULL
-             AND sender_agent_id IN (SELECT id FROM agents WHERE quarantined = 1)`
+             AND (sender_agent_id IN (SELECT id FROM agents WHERE quarantined = 1)
+               OR ${remoteSenderQuarantinedSqlClause('from_handle')})`
         )
         .get(threadId, ...toHandleArgs, ...cursorArgs) as { n: number }
     ).n

@@ -7,13 +7,31 @@
 import type Database from '../../sqlite/sync-database'
 import type { MessageRow } from './types'
 
+// S10-8 review fix (blocker: quarantine does not cross the link at read time). A cross-host peer
+// question's `from_handle` is the synthetic `remote:<environmentId>:<remoteAgentId>` literal
+// (orchestration-federated-peer-ask.ts) — there is no local `agents` row for it, so
+// `sender_agent_id` is NULL and the local-only clause above always passes it. Reconstructing the
+// candidate handle from each `remote_agents` row and comparing by equality (never substring-
+// parsing `from_handle`) keeps this correct without a schema change: a row is withheld if EITHER
+// its origin host currently asserts it quarantined (`remote_quarantined`) or this host has
+// defensively quarantined it after an earlier contact (`local_quarantined`) — re-read every call,
+// same "retroactive AND prospective" discipline as the local clause beside it.
+export function remoteSenderQuarantinedSqlClause(fromHandleExpr: string): string {
+  return (
+    `EXISTS (SELECT 1 FROM remote_agents ra WHERE ` +
+    `('remote:' || ra.environment_id || ':' || ra.remote_agent_id) = ${fromHandleExpr} ` +
+    `AND (ra.remote_quarantined = 1 OR ra.local_quarantined = 1))`
+  )
+}
+
 /** SQL predicate fragment for a `messages` table reference aliased `m` (or unaliased when
  * `alias` is omitted). AND this into every WHERE clause that reads `messages` directly. */
 export function liveMessageSqlClause(alias?: string): string {
   const col = alias ? `${alias}.` : ''
+  const remoteClause = remoteSenderQuarantinedSqlClause(`${col}from_handle`)
   return (
     `${col}purged_at IS NULL AND (${col}sender_agent_id IS NULL OR ${col}sender_agent_id NOT IN ` +
-    `(SELECT id FROM agents WHERE quarantined = 1))`
+    `(SELECT id FROM agents WHERE quarantined = 1)) AND NOT ${remoteClause}`
   )
 }
 
@@ -41,6 +59,19 @@ export function filterLiveMessageRows(
       (row) => row.id
     )
   )
+  // Cross-host counterpart of quarantinedIds above (see remoteSenderQuarantinedSqlClause's
+  // header note) — a remote asker has no `agents` row, so its containment state lives here
+  // instead, keyed by the exact synthetic `from_handle` literal it was stored under.
+  const quarantinedRemoteHandles = new Set(
+    (
+      db
+        .prepare(
+          `SELECT ('remote:' || environment_id || ':' || remote_agent_id) AS handle
+           FROM remote_agents WHERE remote_quarantined = 1 OR local_quarantined = 1`
+        )
+        .all() as { handle: string }[]
+    ).map((row) => row.handle)
+  )
   let purged = 0
   let withheld = 0
   const messages: MessageRow[] = []
@@ -50,6 +81,10 @@ export function filterLiveMessageRows(
       continue
     }
     if (row.sender_agent_id && quarantinedIds.has(row.sender_agent_id)) {
+      withheld++
+      continue
+    }
+    if (quarantinedRemoteHandles.has(row.from_handle)) {
       withheld++
       continue
     }

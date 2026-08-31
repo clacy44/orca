@@ -14,7 +14,12 @@ import {
   OrcaRuntimeService,
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
-import type { RpcContext } from '../core'
+import type { RpcContext, RpcRequest } from '../core'
+import {
+  getOrchestrationMutationExecutor,
+  type DurableMutationInvocation
+} from '../orchestration-mutation-executor'
+import { isOrchestrationMutation } from '../../../../shared/orchestration-rpc-contract'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -358,6 +363,219 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     const nextSteps = (plainRejection as { data?: { nextSteps?: string[] } }).data?.nextSteps ?? []
     expect(nextSteps.some((step) => step.includes('update Orca'))).toBe(false)
   })
+
+  it('S10-8 review fix (blocker): a caller quarantined on the ASKING host is refused before the relay reaches the peer', async () => {
+    setup()
+    const agentA = await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    await call('orchestration.agents.quarantine', { id: agentA }, homeCtx(evidenceA))
+    const relaySpy = vi.spyOn(homeRuntime, 'callOrchestrationWorkerServer')
+
+    await expect(
+      call(
+        'orchestration.ask',
+        { to: `agent:${agentB}`, host: 'windows', question: 'hi', timeoutMs: 10 },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    expect(relaySpy).not.toHaveBeenCalled()
+    expect(findPendingPeerQuestion(workerDb, { allowNone: true })).toBeUndefined()
+  })
+
+  it("S10-8 review fix (blocker): the origin host's quarantine assertion (fromAgent.quarantined) is honored independently on the receiving host", async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000001', displayName: 'ghost', quarantined: true },
+          toAgentId: agentB,
+          question: 'hi',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+    const [row] = workerDb.listRemoteAgents({ includeQuarantined: true })
+    expect(row).toMatchObject({ remote_quarantined: 1 })
+  })
+
+  it('S10-8 review fix (major): a relayed sender id colliding with a LOCAL agent on the receiving host is refused, never stamped into remote_agents', async () => {
+    setup()
+    const localAgentOnWorker = await registerAgent(workerRuntime, 'trusted-lead', evidenceB)
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: localAgentOnWorker, displayName: 'trusted-lead' },
+          toAgentId: localAgentOnWorker,
+          question: 'hi',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(workerDb.listRemoteAgents({ includeQuarantined: true })).toHaveLength(0)
+  })
+
+  it('S10-8 review fix (major): a peer-asserted host label of exactly the local sentinel is never stored verbatim', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    await call(
+      'orchestration.federatedAsk',
+      {
+        fromAgent: { id: 'agt_000000000002', displayName: 'sneaky', host: 'local' },
+        toAgentId: agentB,
+        question: 'hi',
+        timeoutMs: 5
+      },
+      workerLinkCtx()
+    )
+    const [row] = workerDb.listRemoteAgents({ includeQuarantined: true })
+    expect(row.environment_name).not.toBe('local')
+    expect(row.environment_name).toBe(HOME_LINK_DEVICE_ID)
+  })
+
+  it('S10-8 review fix (blocker): every relayed refusal writes an agent_audit row and carries nextSteps', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    const before = countFederatedAskAudits(workerDb)
+
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000001', displayName: 'ghost' },
+          toAgentId: agentB,
+          question: 'hi',
+          timeoutMs: 10
+        },
+        { runtime: workerRuntime }
+      )
+    ).rejects.toMatchObject({
+      code: 'unauthenticated_lane',
+      data: expect.objectContaining({ nextSteps: expect.arrayContaining([expect.any(String)]) })
+    })
+
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'not-a-real-id', displayName: 'ghost' },
+          toAgentId: agentB,
+          question: 'hi',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({
+      code: 'invalid_argument',
+      data: expect.objectContaining({ nextSteps: expect.arrayContaining([expect.any(String)]) })
+    })
+
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000003', displayName: '_' },
+          toAgentId: agentB,
+          question: 'hi',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({
+      code: 'invalid_argument',
+      data: expect.objectContaining({ nextSteps: expect.arrayContaining([expect.any(String)]) })
+    })
+
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000004', displayName: 'ok-name' },
+          toAgentId: 'agt_deadbeef0000',
+          question: 'hi',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_unknown' })
+
+    expect(countFederatedAskAudits(workerDb)).toBe(before + 4)
+  })
+
+  it('S10-8 review fix (major, R4): a timed-out cross-host question is closed, so a late reply is refused instead of vanishing silently', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    const asked = (await call(
+      'orchestration.ask',
+      { to: `agent:${agentB}`, host: 'windows', question: 'anyone home?', timeoutMs: 10 },
+      homeCtx(evidenceA)
+    )) as { timedOut: boolean }
+    expect(asked.timedOut).toBe(true)
+
+    // The question is CLOSED now, not left pending forever.
+    expect(findPendingPeerQuestion(workerDb, { allowNone: true })).toBeUndefined()
+    const closedId = findLatestPeerQuestion(workerDb).message_id
+
+    await expect(
+      call(
+        'orchestration.reply',
+        { id: closedId, body: 'sorry, saw this late' },
+        workerLocalCtx(evidenceB)
+      )
+    ).rejects.toMatchObject({ code: 'dispatch_inactive' })
+  })
+
+  it('S10-8 review fix (blocker: dedup): orchestration.federatedAsk is a registered mutation, and a retried relay coalesces instead of minting a duplicate question', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    expect(isOrchestrationMutation('orchestration.federatedAsk', {})).toBe(true)
+
+    const executor = getOrchestrationMutationExecutor(workerRuntime)
+    const request = {
+      id: 'relay-req-1',
+      authToken: 'link-token',
+      method: 'orchestration.federatedAsk',
+      orchestrationRequestId: 'relay_ask_fixed_1'
+    } as RpcRequest
+    const params = {
+      fromAgent: { id: 'agt_000000000005', displayName: 'retrying-asker' },
+      toAgentId: agentB,
+      question: 'are you there?',
+      timeoutMs: 15
+    }
+    const invoke = (mutation?: DurableMutationInvocation) =>
+      call('orchestration.federatedAsk', params, {
+        ...workerLinkCtx(),
+        orchestrationMutation: mutation?.identity,
+        recordMutationReceipt: mutation?.recordReceipt
+      })
+
+    const first = (await executor.run(request, params, invoke)) as {
+      messageId: string
+      timedOut: boolean
+      mutation?: { replayed: boolean }
+    }
+    expect(first.timedOut).toBe(true)
+
+    // A retry with the SAME orchestrationRequestId — the whole point of the fix — must not
+    // re-run the handler (no second real wait, no second question).
+    const second = (await executor.run(request, params, invoke)) as {
+      messageId: string
+      timedOut: boolean
+      mutation?: { replayed: boolean }
+    }
+    expect(second.messageId).toBe(first.messageId)
+    expect(second.mutation?.replayed).toBe(true)
+
+    expect(countPeerQuestions(workerDb)).toBe(1)
+  })
 })
 
 function findPendingPeerQuestion(
@@ -380,4 +598,38 @@ function findPendingPeerQuestion(
     throw new Error('no pending peer question found')
   }
   return row
+}
+
+function rawDb(db: OrchestrationDb): {
+  prepare: (sql: string) => { get: (...args: unknown[]) => unknown }
+} {
+  return (
+    db as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }
+  ).db
+}
+
+function findLatestPeerQuestion(db: OrchestrationDb): { message_id: string } {
+  const row = rawDb(db)
+    .prepare(
+      `SELECT message_id FROM question_threads WHERE run_id = '${PEER_RUN_ID}' ORDER BY rowid DESC LIMIT 1`
+    )
+    .get() as { message_id: string } | undefined
+  if (!row) {
+    throw new Error('no peer question found')
+  }
+  return row
+}
+
+function countPeerQuestions(db: OrchestrationDb): number {
+  const row = rawDb(db)
+    .prepare(`SELECT COUNT(*) AS n FROM question_threads WHERE run_id = '${PEER_RUN_ID}'`)
+    .get() as { n: number }
+  return row.n
+}
+
+function countFederatedAskAudits(db: OrchestrationDb): number {
+  const row = rawDb(db)
+    .prepare(`SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'federatedAsk'`)
+    .get() as { n: number }
+  return row.n
 }
