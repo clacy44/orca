@@ -325,6 +325,7 @@ const WorktreeCardAgentsBody = React.memo(function WorktreeCardAgentsBody({
           onActivate={
             agent.rowSource === 'retained' ? handleActivateRetainedAgent : handleActivateAgentTab
           }
+          onDismiss={handleDismissAgent}
           sendTargetStatus={sendTarget?.status}
           sendTargetDisabledReason={sendTarget?.disabledReason}
           onSendTargetClick={isAgentSendTargetModeActive ? handleSendTargetClick : undefined}

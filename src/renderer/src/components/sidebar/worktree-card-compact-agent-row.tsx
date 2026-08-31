@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, X } from 'lucide-react'
 import { AgentStateDot, agentStateLabel } from '@/components/AgentStateDot'
 import type { DashboardAgentRow as DashboardAgentRowData } from '@/components/dashboard/useDashboardData'
 import { AgentIcon } from '@/lib/agent-catalog'
@@ -94,6 +94,7 @@ type CompactAgentRowProps = {
   isFocusedPane?: boolean
   hideIdentityIcon?: boolean
   cacheTimerActive?: boolean
+  onDismiss?: (paneKey: string) => void
 }
 
 export const CompactAgentRow = React.memo(function CompactAgentRow({
@@ -109,7 +110,8 @@ export const CompactAgentRow = React.memo(function CompactAgentRow({
   reserveDisclosureGutter = false,
   isFocusedPane = false,
   hideIdentityIcon = false,
-  cacheTimerActive = true
+  cacheTimerActive = true,
+  onDismiss
 }: CompactAgentRowProps) {
   const hasChildDisclosure =
     typeof childAgentCount === 'number' &&
@@ -165,6 +167,23 @@ export const CompactAgentRow = React.memo(function CompactAgentRow({
     },
     [onToggleChildAgents]
   )
+  // Why: subagent child rows have no store entry of their own to dismiss, and the
+  // send-target affordance takes priority over dismiss (mirrors DashboardAgentRowTrailingControls).
+  const canDismiss =
+    agent.rowSource === 'retained' && typeof onDismiss === 'function' && !sendTargetStatus
+  const handleDismiss = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation()
+      onDismiss?.(agent.paneKey)
+    },
+    [agent.paneKey, onDismiss]
+  )
+  const stopDismissMouseDown = useCallback((e: React.MouseEvent) => e.stopPropagation(), [])
+  const stopDismissKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.stopPropagation()
+    }
+  }, [])
 
   const rowBody = (
     <>
@@ -237,16 +256,52 @@ export const CompactAgentRow = React.memo(function CompactAgentRow({
         </span>
       )}
       {cacheTimer && <CacheTimer startedAt={cacheTimer.startedAt} ttlMs={cacheTimer.ttlMs} />}
-      {shortTime && (
-        <span
-          className={cn(
-            'shrink-0 text-[10px] tabular-nums',
-            // Why: the muted timestamp drops out against the selected-row fill.
-            isFocusedPane ? 'text-foreground/70' : 'text-muted-foreground/60'
+      {canDismiss ? (
+        <span className="relative grid grid-cols-1 grid-rows-1 shrink-0 items-center justify-items-end">
+          {shortTime && (
+            <span
+              className={cn(
+                '[grid-area:1/1] pointer-events-none text-[10px] leading-none tabular-nums',
+                'transition-opacity duration-150',
+                'group-hover/compact-agent-row:opacity-0 [@media(hover:none)]:opacity-0',
+                isFocusedPane ? 'text-foreground/70' : 'text-muted-foreground/60'
+              )}
+              aria-hidden
+            >
+              {shortTime}
+            </span>
           )}
-        >
-          {shortTime}
+          <button
+            type="button"
+            onClick={handleDismiss}
+            onMouseDown={stopDismissMouseDown}
+            onKeyDown={stopDismissKeyDown}
+            className={cn(
+              '[grid-area:1/1] inline-flex items-center justify-center text-muted-foreground/70 hover:text-foreground',
+              'can-hover:opacity-0 transition-opacity duration-150',
+              'group-hover/compact-agent-row:opacity-100 focus-visible:opacity-100'
+            )}
+            aria-label={translate(
+              'auto.components.dashboard.DashboardAgentRow.b06e13fcf7',
+              'Dismiss agent'
+            )}
+            title={translate('auto.components.dashboard.DashboardAgentRow.5ae84475cc', 'Dismiss')}
+          >
+            <X className="size-3.5" />
+          </button>
         </span>
+      ) : (
+        shortTime && (
+          <span
+            className={cn(
+              'shrink-0 text-[10px] tabular-nums',
+              // Why: the muted timestamp drops out against the selected-row fill.
+              isFocusedPane ? 'text-foreground/70' : 'text-muted-foreground/60'
+            )}
+          >
+            {shortTime}
+          </span>
+        )
       )}
     </>
   )
