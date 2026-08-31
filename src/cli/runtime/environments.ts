@@ -6,11 +6,13 @@ import {
   removeEnvironment as removeEnvironmentFromStore,
   resolveEnvironment as resolveEnvironmentFromStore,
   resolveEnvironmentPairingOffer as resolveEnvironmentPairingOfferFromStore,
-  setEnvironmentEndpoint as setEnvironmentEndpointInStore,
-  assertValidEnvironmentEndpointUrl,
   RuntimeEnvironmentStoreError,
   type RuntimeEnvironmentStoreErrorCode
 } from '../../shared/runtime-environment-store'
+import {
+  setEnvironmentEndpoint as setEnvironmentEndpointInStore,
+  assertValidEnvironmentEndpointUrl
+} from '../../shared/runtime-environment-endpoint-override'
 import type {
   KnownRuntimeEnvironment,
   PublicKnownRuntimeEnvironment

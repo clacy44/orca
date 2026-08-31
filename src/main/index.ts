@@ -78,6 +78,7 @@ import {
 } from './runtime/orchestration/environment-transport'
 import { callRuntimeEnvironment } from './ipc/runtime-environment-transport-routing'
 import { resolveEnvironment } from '../shared/runtime-environment-store'
+import { markEnvironmentPairingStale } from '../shared/runtime-environment-endpoint-override'
 import { getPreferredPairingOffer } from '../shared/runtime-environments'
 import { OrcaRuntimeRpcServer } from './runtime/runtime-rpc'
 import {
@@ -2538,7 +2539,10 @@ void app.whenReady().then(async () => {
         timeoutMs,
         undefined,
         envelope
-      )
+      ),
+    markPairingStale: (selector) => {
+      markEnvironmentPairingStale(app.getPath('userData'), selector)
+    }
   }
   const runtimeService = new OrcaRuntimeService(store, stats, {
     agentSessionClaimSigner: loadAgentSessionClaimSigner(

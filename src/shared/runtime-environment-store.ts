@@ -153,48 +153,6 @@ export function updateEnvironmentFromPairingCode(
   return next
 }
 
-// S10-4 ruling 6: a tunnel deployment (SSH port-forward, Tailscale, etc.) needs an address
-// override that doesn't touch the pairing's security material (deviceToken/publicKeyB64) or
-// the peer's own identity — only where this host reaches it. Persists onto the environment's
-// preferred endpoint; the caller (CLI) is responsible for probing reachability first (this
-// function has no network access, matching every other function in this file).
-// Split out so a caller (the CLI's reachability probe) can run the same refusal BEFORE any
-// network call without persisting anything — setEnvironmentEndpoint below calls this too, so
-// the two can never drift.
-export function assertValidEnvironmentEndpointUrl(url: string): void {
-  if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-    throw new RuntimeEnvironmentStoreError(
-      'invalid_argument',
-      `Endpoint must be a ws:// or wss:// URL, not "${url}".`
-    )
-  }
-}
-
-export function setEnvironmentEndpoint(
-  userDataPath: string,
-  selector: string,
-  args: { url: string; now?: number }
-): KnownRuntimeEnvironment {
-  assertValidEnvironmentEndpointUrl(args.url)
-  const store = readEnvironmentStore(userDataPath)
-  const existing = resolveEnvironmentFromStore(store, selector)
-  const now = args.now ?? Date.now()
-  const next: KnownRuntimeEnvironment = {
-    ...existing,
-    updatedAt: now,
-    endpoints: existing.endpoints.map((endpoint) =>
-      endpoint.id === existing.preferredEndpointId ? { ...endpoint, endpoint: args.url } : endpoint
-    )
-  }
-  writeEnvironmentStore(userDataPath, {
-    version: 1,
-    environments: store.environments
-      .map((entry) => (entry.id === existing.id ? next : entry))
-      .sort((a, b) => a.name.localeCompare(b.name))
-  })
-  return next
-}
-
 function getPairingConnectionDependency(
   dependency: 'ssh-tunnel' | undefined,
   offer: PairingOffer
@@ -246,7 +204,10 @@ export function markEnvironmentUsed(
     environment.lastUsedAt != null &&
     now >= environment.lastUsedAt &&
     now - environment.lastUsedAt < LAST_USED_PERSIST_INTERVAL_MS
-  if (!runtimeIdChanged && !pairedDeviceIdChanged && lastUsedIsFresh) {
+  // S10-4 ruling 7: any successful round trip self-heals a stale-pairing mark — a call that
+  // reaches this point already got past authentication.
+  const clearsStalePairing = environment.pairingState === 'stale_pairing'
+  if (!runtimeIdChanged && !pairedDeviceIdChanged && !clearsStalePairing && lastUsedIsFresh) {
     return
   }
   const next = store.environments.map((entry) =>
@@ -256,14 +217,15 @@ export function markEnvironmentUsed(
           runtimeId: args.runtimeId ?? entry.runtimeId,
           ...(args.pairedDeviceId ? { pairedDeviceId: args.pairedDeviceId } : {}),
           lastUsedAt: now,
-          updatedAt: now
+          updatedAt: now,
+          pairingState: 'ok' as const
         }
       : entry
   )
   writeEnvironmentStore(userDataPath, { version: 1, environments: next })
 }
 
-function resolveEnvironmentFromStore(
+export function resolveEnvironmentFromStore(
   store: RuntimeEnvironmentStore,
   selector: string
 ): KnownRuntimeEnvironment {
@@ -284,7 +246,7 @@ function resolveEnvironmentFromStore(
   throw new RuntimeEnvironmentStoreError('invalid_argument', `Unknown environment: ${selector}`)
 }
 
-function readEnvironmentStore(userDataPath: string): RuntimeEnvironmentStore {
+export function readEnvironmentStore(userDataPath: string): RuntimeEnvironmentStore {
   const path = getEnvironmentStorePath(userDataPath)
   if (!existsSync(path)) {
     return { version: 1, environments: [] }
@@ -312,7 +274,7 @@ function readEnvironmentStore(userDataPath: string): RuntimeEnvironmentStore {
   }
 }
 
-function writeEnvironmentStore(userDataPath: string, store: RuntimeEnvironmentStore): void {
+export function writeEnvironmentStore(userDataPath: string, store: RuntimeEnvironmentStore): void {
   const path = getEnvironmentStorePath(userDataPath)
   try {
     writeSecureJsonFileWithinLimit(

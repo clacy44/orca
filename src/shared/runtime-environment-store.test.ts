@@ -6,12 +6,10 @@ import { encodePairingOffer } from './pairing'
 import {
   RuntimeEnvironmentStoreError,
   addEnvironmentFromPairingCode,
-  assertValidEnvironmentEndpointUrl,
   getEnvironmentStorePath,
   listEnvironments,
   MAX_RUNTIME_ENVIRONMENT_STORE_FILE_BYTES,
   markEnvironmentUsed,
-  setEnvironmentEndpoint,
   updateEnvironmentFromPairingCode
 } from './runtime-environment-store'
 
@@ -93,52 +91,6 @@ describe('runtime environment store', () => {
       })
     ).toThrow(RuntimeEnvironmentStoreError)
     expect(listEnvironments(userDataPath)).toEqual([first])
-  })
-
-  // S10-4 ruling 6: a tunnel deployment needs an address override; scheme is refused up front.
-  it('assertValidEnvironmentEndpointUrl refuses a scheme other than ws/wss', () => {
-    expect(() => assertValidEnvironmentEndpointUrl('http://tunnel.example:8443')).toThrow(
-      /must be a ws:\/\/ or wss:\/\/ URL/
-    )
-    expect(() => assertValidEnvironmentEndpointUrl('wss://tunnel.example:8443')).not.toThrow()
-    expect(() => assertValidEnvironmentEndpointUrl('ws://127.0.0.1:9999')).not.toThrow()
-  })
-
-  it('setEnvironmentEndpoint overrides the preferred endpoint address only, credentials untouched', () => {
-    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
-    tempDirs.push(userDataPath)
-    const saved = addEnvironmentFromPairingCode(userDataPath, {
-      name: 'dev box',
-      pairingCode: pairingCode('ws://127.0.0.1:6768')
-    })
-
-    const updated = setEnvironmentEndpoint(userDataPath, 'dev box', {
-      url: 'wss://tunnel.example:8443',
-      now: saved.updatedAt + 1000
-    })
-
-    expect(updated.endpoints).toHaveLength(1)
-    expect(updated.endpoints[0]).toMatchObject({
-      endpoint: 'wss://tunnel.example:8443',
-      deviceToken: saved.endpoints[0]!.deviceToken,
-      publicKeyB64: saved.endpoints[0]!.publicKeyB64
-    })
-    expect(updated.updatedAt).toBe(saved.updatedAt + 1000)
-    expect(listEnvironments(userDataPath)).toEqual([updated])
-  })
-
-  it('setEnvironmentEndpoint refuses a bad scheme without touching the saved environment', () => {
-    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
-    tempDirs.push(userDataPath)
-    const saved = addEnvironmentFromPairingCode(userDataPath, {
-      name: 'dev box',
-      pairingCode: pairingCode('ws://127.0.0.1:6768')
-    })
-
-    expect(() =>
-      setEnvironmentEndpoint(userDataPath, 'dev box', { url: 'http://tunnel.example:8443' })
-    ).toThrow(RuntimeEnvironmentStoreError)
-    expect(listEnvironments(userDataPath)).toEqual([saved])
   })
 
   it('advances pairing revisions across equal and backward clock readings', () => {

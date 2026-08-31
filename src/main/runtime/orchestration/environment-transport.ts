@@ -19,6 +19,10 @@ export type OrchestrationEnvironmentTransport = {
     timeoutMs?: number,
     envelope?: RuntimeOrchestrationEnvelope
   ): Promise<RuntimeRpcResponse<unknown>>
+  // S10-4 ruling 7: called when a call to `selector` came back with the peer rejecting our
+  // pairing token, so `orca environment list`/`show` can surface it. Optional so every existing
+  // test-only transport stub keeps compiling unchanged.
+  markPairingStale?(selector: string): void
 }
 
 export function fingerprintOrchestrationPeer(publicKeyB64: string): string {

@@ -32,7 +32,12 @@ export const KnownRuntimeEnvironmentSchema = z.object({
   source: RuntimeEnvironmentSourceSchema.optional(),
   connectionDependency: z.literal('ssh-tunnel').optional(),
   endpoints: z.array(RuntimeAccessEndpointSchema).min(1),
-  preferredEndpointId: z.string().min(1)
+  preferredEndpointId: z.string().min(1),
+  // S10-4 ruling 7: set when an RPC to this environment came back with the peer rejecting our
+  // pairing token — surfaced by `orca environment list`/`show` instead of staying buried inside
+  // a relay loop's generic `unauthorized`. Cleared automatically the next time any call to this
+  // environment succeeds (markEnvironmentUsed).
+  pairingState: z.enum(['ok', 'stale_pairing']).optional()
 })
 
 export type KnownRuntimeEnvironment = z.infer<typeof KnownRuntimeEnvironmentSchema>
