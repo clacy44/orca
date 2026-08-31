@@ -176,6 +176,14 @@ module.exports = {
     'out/package.json',
     'out/cli/**',
     'out/shared/**',
+    // Why: S10-4 cross-host `agents find --all-hosts` resolves candidates with the
+    // same local resolver every host runs (skill-guides/orchestration.md "Cross-Host"),
+    // so the CLI handler imports these two leaf modules straight from out/main/runtime/
+    // orchestration/. Same ELECTRON_RUN_AS_NODE asar-blindness as the other CLI runtime
+    // deps above — unpack them or `orca agents find --all-hosts` throws
+    // MODULE_NOT_FOUND in packaged builds.
+    'out/main/runtime/orchestration/agent-resolver.js',
+    'out/main/runtime/orchestration/agent-name-sanitizer.js',
     'out/main/agent-hooks/**',
     'out/main/antigravity/**',
     'out/main/claude/**',
