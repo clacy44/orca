@@ -13061,6 +13061,9 @@ export class OrcaRuntimeService {
     }
     const launchTokenHash = createHash('sha256').update(launchToken).digest('hex')
     let terminalProvenance: 'current_runtime' | 'restored'
+    // S10-6 (R3): true only on the no-receipt branch below, once its live conjuncts already
+    // passed — set so a receipt is minted after attestation independently corroborates too.
+    let mintReceiptOnSuccess = false
     if (terminal.launchTokenHash) {
       if (launchTokenHash !== terminal.launchTokenHash) {
         return null
@@ -13068,16 +13071,31 @@ export class OrcaRuntimeService {
       terminalProvenance = 'current_runtime'
     } else {
       const receipt = this.restoredOrchestrationAuthorityByPtyId.get(terminal.ptyId)
-      if (
-        !receipt ||
-        receipt.ptyId !== terminal.ptyId ||
-        receipt.worktreeId !== terminal.worktreeId ||
-        receipt.terminalHandle !== terminal.terminalHandle ||
-        receipt.paneKey !== terminal.paneKey ||
-        receipt.processIncarnation !== terminal.processIncarnation ||
-        !this.orchestrationCompatibilityHostScopesEqual(receipt.hostScope, terminal.hostScope)
-      ) {
+      if (receipt) {
+        if (
+          receipt.ptyId !== terminal.ptyId ||
+          receipt.worktreeId !== terminal.worktreeId ||
+          receipt.terminalHandle !== terminal.terminalHandle ||
+          receipt.paneKey !== terminal.paneKey ||
+          receipt.processIncarnation !== terminal.processIncarnation ||
+          !this.orchestrationCompatibilityHostScopesEqual(receipt.hostScope, terminal.hostScope)
+        ) {
+          return null
+        }
+      } else if (claimedPaneKey !== terminal.paneKey) {
         return null
+      } else {
+        // Why: no restored receipt exists for this pty in this server generation — the
+        // exact-surface-restore moment (orca-runtime.ts ~31463-31474) never ran for this
+        // pane, so nothing ever called rememberRestoredOrchestrationAuthority for it. Every
+        // conjunct that receipt would have bound is re-checkable live instead: `terminal` is
+        // already a connected pty resolved by terminalHandle (getOrchestrationDispatchAuthority
+        // above), its hostScope was already verified against the caller's claimed host, and
+        // claimedPaneKey === terminal.paneKey is checked on this branch. Fall through to hook
+        // attestation as normal — a forged paneKey with no attestation still refuses there,
+        // same as the receipt path; only mint the receipt once attestation independently
+        // confirms this pane, so future calls take the normal (receipt-backed) path.
+        mintReceiptOnSuccess = true
       }
       terminalProvenance = 'restored'
     }
@@ -13105,6 +13123,9 @@ export class OrcaRuntimeService {
     if (!attestation || attestation.paneKey !== terminal.paneKey) {
       return null
     }
+    if (mintReceiptOnSuccess) {
+      this.mintRestoredOrchestrationAuthorityReceipt(terminal)
+    }
     return this.freezeOrchestrationCompatibilityCallerAuthority(
       terminal,
       terminal.processIncarnation,
@@ -13112,6 +13133,22 @@ export class OrcaRuntimeService {
       terminalHandle,
       launchTokenHash
     )
+  }
+
+  /** S10-6 (R3): mint a receipt for a pty that just passed verification via the live-recheck
+   *  branch above, so a subsequent call takes the normal receipt-backed path instead of
+   *  re-attesting every time. Looks up the live pty + its current incarnationId directly
+   *  (same fields getTerminalProcessIncarnation reads) rather than trusting anything from the
+   *  caller; a pty that's gone or has no live incarnationId is silently skipped — the caller's
+   *  current RPC already succeeded on its own merits, and the next call just re-verifies live. */
+  private mintRestoredOrchestrationAuthorityReceipt(
+    terminal: OrchestrationCompatibilityTerminalAuthority
+  ): void {
+    const pty = this.ptysById.get(terminal.ptyId)
+    const incarnationId = pty?.incarnationId
+    if (pty && incarnationId) {
+      this.rememberRestoredOrchestrationAuthority(pty, terminal.terminalHandle, incarnationId)
+    }
   }
 
   private freezeOrchestrationCompatibilityCallerAuthority(

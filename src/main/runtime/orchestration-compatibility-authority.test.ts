@@ -322,6 +322,142 @@ describe('orchestration compatibility runtime authority', () => {
     ).toBeNull()
   })
 
+  // S10-6 (R3): no restored receipt exists at all for this pty (not merely a mismatched one —
+  // restoredOrchestrationAuthorityByPtyId has no entry for 'pty-1'). verifyOrchestrationCompatibilityCaller
+  // must not refuse solely for that; it re-checks the receipt's conjuncts live (terminal resolvable
+  // + connected, paneKey match, hostScope match — all already true given `terminal` itself resolved)
+  // and still requires hook attestation to independently succeed.
+  describe('S10-6 (R3): no restored receipt, live recheck', () => {
+    function createRuntimeWithoutReceipt(
+      attest: (candidate: {
+        paneKey: string
+        launchTokenHash: string
+        connectionId: string | null
+        terminalProvenance: 'current_runtime' | 'restored'
+      }) => { paneKey: string; source: 'current_hook' | 'hydrated_commitment' } | null
+    ) {
+      const runtime = new OrcaRuntimeService(null, undefined, {
+        attestAgentHookCompatibilityAuthority: attest
+      })
+      ;(runtime as unknown as TerminalAuthorityResolver).getOrchestrationDispatchAuthority =
+        () => ({
+          runtimeId: 'runtime-1',
+          terminalHandle: 'term-1',
+          ptyId: 'pty-1',
+          worktreeId: 'repo-1::/worktree',
+          // Why: matches what rememberRestoredOrchestrationAuthority would mint
+          // (`${pty.ptyId}:${incarnationId}`) so a receipt minted mid-test stays consistent with
+          // this mocked live terminal on any later call in the same test.
+          processIncarnation: 'pty-1:incarnation-1',
+          paneKey: PANE_KEY,
+          launchTokenHash: null,
+          hostScope: { kind: 'local', hostId: 'local' }
+        })
+      // Why: deliberately no restoredOrchestrationAuthorityByPtyId entry — the "never observed
+      // this generation" case, not the "mismatched receipt" case covered above.
+      return runtime
+    }
+
+    it('mints a receipt and succeeds once live recheck + attestation both pass', () => {
+      const runtime = createRuntimeWithoutReceipt(({ paneKey, launchTokenHash, connectionId }) =>
+        paneKey === PANE_KEY && launchTokenHash === TOKEN_HASH && connectionId === null
+          ? { paneKey, source: 'current_hook' }
+          : null
+      )
+      const internals = runtime as unknown as TerminalAuthorityResolver
+      expect(internals.restoredOrchestrationAuthorityByPtyId.has('pty-1')).toBe(false)
+
+      const authority = runtime.verifyOrchestrationCompatibilityCaller({
+        terminalHandle: 'term-1',
+        paneKey: PANE_KEY,
+        launchToken: TOKEN
+      })
+
+      expect(authority).toMatchObject({ paneKey: PANE_KEY, terminalHandle: 'term-1' })
+      // Why: pty-1 is never registered in this bare runtime's ptysById, so
+      // mintRestoredOrchestrationAuthorityReceipt's live pty lookup finds nothing and silently
+      // skips minting — the RPC still succeeds on its own merits either way. Real callers resolve
+      // through a live pty that IS in ptysById (see the client-reattest-generation-2 integration
+      // test), where minting does populate this map.
+      expect(internals.restoredOrchestrationAuthorityByPtyId.has('pty-1')).toBe(false)
+    })
+
+    it('populates restoredOrchestrationAuthorityByPtyId when the live pty is registered', () => {
+      const runtime = createRuntimeWithoutReceipt(({ paneKey, launchTokenHash, connectionId }) =>
+        paneKey === PANE_KEY && launchTokenHash === TOKEN_HASH && connectionId === null
+          ? { paneKey, source: 'current_hook' }
+          : null
+      )
+      const internals = runtime as unknown as TerminalAuthorityResolver & {
+        ptysById: Map<string, Record<string, unknown>>
+      }
+      // Why: the minimal fields mintRestoredOrchestrationAuthorityReceipt and
+      // rememberRestoredOrchestrationAuthority actually read (ptyId, incarnationId, paneKey,
+      // worktreeId, connectionId, isWsl, wslDistro) — a real pty carries many more, irrelevant here.
+      internals.ptysById.set('pty-1', {
+        ptyId: 'pty-1',
+        incarnationId: 'incarnation-1',
+        paneKey: PANE_KEY,
+        worktreeId: 'repo-1::/worktree',
+        connectionId: null,
+        isWsl: false,
+        wslDistro: null
+      })
+
+      const authority = runtime.verifyOrchestrationCompatibilityCaller({
+        terminalHandle: 'term-1',
+        paneKey: PANE_KEY,
+        launchToken: TOKEN
+      })
+
+      expect(authority).not.toBeNull()
+      expect(internals.restoredOrchestrationAuthorityByPtyId.get('pty-1')).toMatchObject({
+        ptyId: 'pty-1',
+        paneKey: PANE_KEY,
+        terminalHandle: 'term-1',
+        processIncarnation: 'pty-1:incarnation-1',
+        hostScope: { kind: 'local', hostId: 'local' }
+      })
+
+      // Why: the second call now finds a matching receipt and takes the ordinary receipt-checked
+      // branch instead of the no-receipt live-recheck branch — same outcome either way.
+      expect(
+        runtime.verifyOrchestrationCompatibilityCaller({
+          terminalHandle: 'term-1',
+          paneKey: PANE_KEY,
+          launchToken: TOKEN
+        })
+      ).not.toBeNull()
+    })
+
+    it('still refuses when attestation refuses, even with no receipt to blame', () => {
+      const runtime = createRuntimeWithoutReceipt(() => null)
+
+      expect(
+        runtime.verifyOrchestrationCompatibilityCaller({
+          terminalHandle: 'term-1',
+          paneKey: PANE_KEY,
+          launchToken: TOKEN
+        })
+      ).toBeNull()
+    })
+
+    it('refuses when the claimed paneKey does not match the live terminal, with no receipt', () => {
+      const runtime = createRuntimeWithoutReceipt(() => ({
+        paneKey: 'forged-pane',
+        source: 'current_hook'
+      }))
+
+      expect(
+        runtime.verifyOrchestrationCompatibilityCaller({
+          terminalHandle: 'term-1',
+          paneKey: '99999999-9999-4999-8999-999999999999:88888888-8888-4888-8888-888888888888',
+          launchToken: TOKEN
+        })
+      ).toBeNull()
+    })
+  })
+
   it('accepts only a live runtime-issued SSH attachment', () => {
     const runtime = createRuntime({ kind: 'ssh', targetId: 'saved-target' })
     const host = runtime.registerOrchestrationCompatibilitySshAttachment(
