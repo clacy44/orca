@@ -1,12 +1,16 @@
-// S10-2c: `orca agents threads|thread|wait` — the durable-thread read/write/blocking-wait
-// surface (orchestration.threads.create/.get/.list/.leave, orchestration.wait). Split out of
-// agents.ts to stay under the repo's max-lines ratchet (config/scripts/check-max-lines-ratchet.mjs).
+// S10-2c/S10-3b: `orca agents threads|thread|wait` — the durable-thread read/write/blocking-wait
+// surface (orchestration.threads.create/.get/.list/.leave, orchestration.wait, now completed with
+// `--for step` per ruling 5). Split out of agents.ts to stay under the repo's max-lines ratchet
+// (config/scripts/check-max-lines-ratchet.mjs). Pact verbs (`--for pact`, `orca agents
+// pact|step`) live in agents-pact.ts; `orca agents invite` lives in agents-invite.ts — both
+// separate CommandHandler groups per the max-lines ratchet, not missing surface.
 //
-// Deviation, documented rather than silently dropped: the spec's `--close`/`--pause`/`--pact`
-// thread mutation flags and `--since`'s full omitted:{...,sensitive} shape have no RPC method in
-// this tree yet (orchestration-threads.ts's own header note defers `.invite`/`.join`/`.receipts`/
-// `.pact`, and `db.setThreadState`/`setThreadPact` are wired to no RPC at all) — those flags are
-// not implemented here; `db.getThread`/`.list`/`.leave`/`.get`/`orchestration.wait` are.
+// Deviation, documented rather than silently dropped: the spec's `--close`/`--pause` thread
+// mutation flags and `--since`'s full omitted:{...,sensitive} shape have no RPC method in this
+// tree yet (`db.setThreadState` is wired to no RPC at all) — those flags are not implemented
+// here; `db.getThread`/`.list`/`.leave`/`.get`/`orchestration.wait` are. Read receipts (ruling 8)
+// need no CLI surface of their own — a full participant read already moves `last_read_sequence`
+// server-side on every `.get` (orchestration-thread.ts).
 import type { CommandHandler } from '../dispatch'
 import type { RuntimeClient } from '../runtime-client'
 import {
@@ -75,10 +79,25 @@ type ThreadGetResult = {
   degraded: boolean
   omitted?: ThreadOmitted
 }
+// S10-3: `for:'step'` (ruling 5) plus the non-message pact outcomes a `--for pact|step|reply`
+// park can be woken with (resolvePactWaiters / K24's host-wide turn guard) — `threadId` is set
+// only on those detail-driven wakes (null for a turn_arrived wake per A4; absent otherwise).
 type WaitResult = {
-  outcome: 'reply' | 'message' | 'timeout' | 'cancelled'
+  outcome:
+    | 'reply'
+    | 'message'
+    | 'step'
+    | 'timeout'
+    | 'cancelled'
+    | 'your_turn'
+    | 'accepted'
+    | 'declined'
+    | 'paused'
+    | 'released'
+    | 'turn_arrived'
+  threadId?: string | null
   messages: ThreadMessageRow[]
-  resumeToken: string
+  resumeToken: string | null
   waitedMs: number
   nextSteps: string[]
 }
@@ -176,18 +195,30 @@ function formatThreadRead(result: ThreadGetResult, id: string): string {
   return `${lines}${omissionLine}${degradedNote}${resumeHint}`
 }
 
-function formatWait(result: WaitResult, threadId: string): string {
-  if (result.outcome === 'timeout') {
-    return (
-      `Still pending on thread ${threadId} (waited ${result.waitedMs}ms).\n` +
-      `Resume without re-asking: orca agents wait --thread ${threadId} --for reply --resume ${result.resumeToken}`
-    )
-  }
+// Fix, not just an addition: the pre-existing timeout/message hints hardcoded `--for reply`
+// even for a `--for message`/`--for pact` wait — every branch below instead echoes the RPC's
+// own nextSteps (already `--for <the actual param>`) or, absent one, `result.outcome`, which
+// equals `params.for` on every message/reply/step outcome (orchestration-wait.ts).
+function formatWait(result: WaitResult, threadId: string, forParam: string): string {
   if (result.outcome === 'cancelled') {
     return `wait cancelled on thread ${threadId}.`
   }
-  const lines = result.messages.map(formatThreadMessageLine).join('\n')
-  return `${lines}\nContinue: orca agents wait --thread ${threadId} --for reply --resume ${result.resumeToken}`
+  if (result.outcome === 'timeout') {
+    const hint =
+      result.nextSteps[0] ??
+      `orca agents wait --thread ${threadId} --for ${forParam} --resume ${result.resumeToken}`
+    return `Still pending on thread ${threadId} (waited ${result.waitedMs}ms).\nResume without re-asking: ${hint}`
+  }
+  if (result.messages.length > 0) {
+    const lines = result.messages.map(formatThreadMessageLine).join('\n')
+    return `${lines}\nContinue: orca agents wait --thread ${threadId} --for ${result.outcome} --resume ${result.resumeToken}`
+  }
+  // Non-message pact outcomes (your_turn / accepted / declined / paused / released /
+  // turn_arrived) carry nothing to replay — only the RPC's own nextSteps say what's next.
+  const target = result.threadId ?? threadId
+  const steps = result.nextSteps.map((s) => `Next: ${s}`).join('\n')
+  const headline = `pact ${result.outcome}${result.threadId !== undefined ? ` on thread ${target}` : ''}.`
+  return steps ? `${headline}\n${steps}` : headline
 }
 
 async function resolveWithParam(client: RuntimeClient, raw: string): Promise<string> {
@@ -255,8 +286,11 @@ export const AGENT_THREAD_HANDLERS: Record<string, CommandHandler> = {
   'agents wait': async ({ flags, client, json }) => {
     const threadId = getRequiredStringFlag(flags, 'thread')
     const forParam = getOptionalStringFlag(flags, 'for') ?? 'message'
-    if (forParam !== 'reply' && forParam !== 'message' && forParam !== 'pact') {
-      throw new RuntimeClientError('invalid_argument', '--for must be one of reply|message|pact')
+    if (!['reply', 'message', 'pact', 'step'].includes(forParam)) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        '--for must be one of reply|message|pact|step'
+      )
     }
     const parsedTimeoutMs = getOptionalPositiveIntegerFlag(flags, 'timeout-ms')
     const result = await client.call<WaitResult>(
@@ -269,7 +303,7 @@ export const AGENT_THREAD_HANDLERS: Record<string, CommandHandler> = {
       },
       { timeoutMs: resolveOrchestrationAskClientTimeoutMs(parsedTimeoutMs) }
     )
-    printResult(result, json, (r) => formatWait(r, threadId))
+    printResult(result, json, (r) => formatWait(r, threadId, forParam))
     if (result.result.outcome === 'cancelled') {
       process.exitCode = 1
     }

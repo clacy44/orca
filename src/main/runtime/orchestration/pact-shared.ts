@@ -3,8 +3,7 @@
 import { createHash } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
-import { getAgentById } from './agent-directory'
-import { writeAgentAudit } from './agent-directory'
+import { getAgentById, writeAgentAudit } from './agent-directory'
 import type { AgentRow, ThreadRow } from './types'
 import type { PactStepKind } from './pact-types'
 

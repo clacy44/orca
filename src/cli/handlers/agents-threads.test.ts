@@ -248,4 +248,93 @@ describe('agents threads CLI', () => {
     ).rejects.toMatchObject({ code: 'invalid_argument' })
     expect(call).not.toHaveBeenCalled()
   })
+
+  it('wait --for step: accepts the new enum value and prints a pending step, resume hint echoes "step" not "reply"', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        outcome: 'step',
+        messages: [
+          threadMessage({ from_handle: 'agent:agt_them', body: 'v35 DDL + triggers landed' })
+        ],
+        resumeToken: 'wait_thr_9fk2_182',
+        waitedMs: 500,
+        nextSteps: []
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_THREAD_HANDLERS['agents wait']({
+      flags: new Map<string, string | boolean>([
+        ['thread', 'thr_9fk2'],
+        ['for', 'step']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(call).toHaveBeenCalledWith(
+      'orchestration.wait',
+      expect.objectContaining({ threadId: 'thr_9fk2', for: 'step' }),
+      expect.anything()
+    )
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain('v35 DDL + triggers landed')
+    // Regression: the pre-existing hint always said `--for reply` even for message/step waits.
+    expect(printed).toContain(
+      'Continue: orca agents wait --thread thr_9fk2 --for step --resume wait_thr_9fk2_182'
+    )
+    expect(printed).not.toContain('--for reply')
+  })
+
+  it('wait: a pact-detail wake (turn_arrived, no message to replay) prints the outcome and nextSteps, not a crash', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        outcome: 'turn_arrived',
+        threadId: null,
+        messages: [],
+        resumeToken: 'wait_thr_9fk2_182',
+        waitedMs: 900,
+        nextSteps: ['orca agents step --thread thr_1 --done "…"']
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_THREAD_HANDLERS['agents wait']({
+      flags: new Map<string, string | boolean>([
+        ['thread', 'thr_9fk2'],
+        ['for', 'step']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain('pact turn_arrived')
+    expect(printed).toContain('Next: orca agents step --thread thr_1 --done "…"')
+  })
+
+  it('wait: a timeout on a non-reply --for echoes the correct value in the resume hint (regression)', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        outcome: 'timeout',
+        messages: [],
+        resumeToken: 'wait_thr_9fk2_180',
+        waitedMs: 60_000,
+        nextSteps: ['orca agents wait --thread thr_9fk2 --for pact --resume wait_thr_9fk2_180']
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_THREAD_HANDLERS['agents wait']({
+      flags: new Map<string, string | boolean>([
+        ['thread', 'thr_9fk2'],
+        ['for', 'pact']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain(
+      'orca agents wait --thread thr_9fk2 --for pact --resume wait_thr_9fk2_180'
+    )
+    expect(printed).not.toContain('--for reply')
+  })
 })

@@ -96,11 +96,60 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
   },
   {
     path: ['agents', 'wait'],
-    summary: 'Block until a thread gets a reply, a message, or a pact change',
+    summary: 'Block until a thread gets a reply, a message, a pact change, or a step',
     usage:
-      'orca agents wait --thread <t> --for reply|message|pact [--timeout-ms] [--resume <token>] [--json]',
+      'orca agents wait --thread <t> --for reply|message|pact|step [--timeout-ms <n>] ' +
+      '[--resume <token>] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'thread', 'for', 'timeout-ms', 'resume'],
-    notes: ['The resume token is stateless — safe to re-pass after a killed process restarts.']
+    notes: [
+      'The resume token is stateless — safe to re-pass after a killed process restarts.',
+      "--for step blocks for the counterpart's next step on an engaged pact.",
+      'A caller holding the turn in any engaged pact is refused every park (outcome: your_turn) — step first.'
+    ]
+  },
+  {
+    path: ['agents', 'pact'],
+    summary: 'Propose, accept, decline, pause, resume, release, or show a lock-step pact',
+    usage:
+      'orca agents pact --with <name> --on <thread> [--steps <n>|--open] [--json] | ' +
+      'orca agents pact --on <t> --accept|--decline [--reason <code>] [--json] | ' +
+      'orca agents pact --pause --on <t> [--reason <code>] [--json] | ' +
+      'orca agents pact --resume --on <t> [--json] | ' +
+      'orca agents pact --release --on <t> [--reason <code>] [--json] | ' +
+      'orca agents pact --show <t> [--json]',
+    allowedFlags: [
+      ...GLOBAL_FLAGS,
+      'with',
+      'on',
+      'steps',
+      'open',
+      'accept',
+      'decline',
+      'pause',
+      'resume',
+      'release',
+      'show',
+      'reason'
+    ],
+    notes: [
+      'One engaged pact per agent pair at a time — release or finish an existing one first.',
+      '--steps and --open are mutually exclusive.',
+      'Neither side may advance past a step until the other confirms — use for lock-step work, not ordinary coordination.'
+    ]
+  },
+  {
+    path: ['agents', 'step'],
+    summary: 'Record your step on an engaged pact and pass the turn',
+    usage: 'orca agents step --thread <t> --done "<what>" [--acknowledge-gate] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'thread', 'done', 'acknowledge-gate'],
+    notes: ['Refused off-turn, and while the pact is paused.']
+  },
+  {
+    path: ['agents', 'invite'],
+    summary: 'Invite an agent to join a durable thread',
+    usage: 'orca agents invite --thread <t> --agent <name> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'thread', 'agent'],
+    notes: ['Needed to bring a third party into a sensitive thread before a pact can involve them.']
   },
   {
     path: ['agents', 'purge'],

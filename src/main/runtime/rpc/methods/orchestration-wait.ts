@@ -41,7 +41,6 @@ function parseWaitResumeToken(
   return value
 }
 
-type WaitHandlerParams = Parameters<RpcMethod['handler']>[0]
 type WaitHandlerContext = Parameters<RpcMethod['handler']>[1]
 
 // K24 (P4', RISK-4): a caller holding the turn in ANY engaged, non-paused pact is refused every
@@ -99,7 +98,7 @@ function assertNoIncomingProposalOwed(
 }
 
 async function handlePactOrStepWait(
-  params: WaitHandlerParams & {
+  params: {
     threadId: string
     for: 'pact' | 'step'
     resumeToken?: string
