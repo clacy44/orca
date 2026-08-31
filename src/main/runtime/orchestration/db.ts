@@ -167,6 +167,11 @@ import {
   type GetPactLedgerParams
 } from './pact-queries'
 import type { PactLedgerResult, PactPauseReason } from './pact-types'
+import {
+  findOrCreatePeerThread as findOrCreatePeerThreadImpl,
+  type FindOrCreatePeerThreadParams,
+  type FindOrCreatePeerThreadResult
+} from './peer-thread-mint'
 import type { DispatchInputEvidence } from './dispatch-input-evidence'
 import type { DispatchInputObservationTargetRow } from './dispatch-input-observation'
 import type { DispatchLivenessCandidateRow } from './dispatch-liveness-window'
@@ -3729,6 +3734,10 @@ export class OrchestrationDb {
 
   getIncomingUnansweredProposal(agentId: string): ThreadRow | undefined {
     return getIncomingUnansweredProposalImpl(this.db, agentId)
+  }
+
+  findOrCreatePeerThread(params: FindOrCreatePeerThreadParams): FindOrCreatePeerThreadResult {
+    return findOrCreatePeerThreadImpl(this.db, params)
   }
 
   // Liveness/leave/thread-state auto-pause hooks (K6/K16/K17) — called by the RPC layer, never

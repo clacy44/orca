@@ -112,8 +112,11 @@ describe('orchestration RPC methods', () => {
     // S10-2b adds orchestration.messages.purge / orchestration.agents.review
     // (orchestration-containment.ts) and orchestration.threads.create/get/list/leave +
     // orchestration.wait (orchestration-threads.ts). S10-3 adds orchestration.threads.pact/
-    // .step/.pactLedger (orchestration-pact.ts/orchestration-pact-step.ts).
-    expect(registry.size).toBe(55)
+    // .step/.pactLedger (orchestration-pact.ts/orchestration-pact-step.ts) and the deferred
+    // .invite/.join (orchestration-thread-invite.ts).
+    expect(registry.size).toBe(57)
+    expect(registry.has('orchestration.threads.invite')).toBe(true)
+    expect(registry.has('orchestration.threads.join')).toBe(true)
     expect(registry.has('orchestration.messages.purge')).toBe(true)
     expect(registry.has('orchestration.agents.review')).toBe(true)
     expect(registry.has('orchestration.threads.create')).toBe(true)
