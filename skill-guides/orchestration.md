@@ -124,7 +124,15 @@ before it is stored:
   future messages from every reader; self-quarantine is always allowed, quarantining someone
   else is local/non-federated-operator only. A quarantined peer cannot be reached — `send`/`ask`
   to it is refused with `agent_quarantined`, and a pact cannot be proposed with, or joined by, a
-  quarantined agent — coordinate without a pact using `orca agents ask` instead.
+  quarantined agent — coordinate without a pact using `orca agents ask` instead. Quarantine
+  alone does not free the agent's name for reuse; `orca agents retire` is the deliberate second
+  step for that.
+- `orca agents retire <name|id> [--force]` tombstones an agent and frees its `display_name` for
+  a fresh `orca agents register` to reclaim — local/non-federated-operator only, and refused for
+  a currently live, attested agent unless `--force`. Idempotent by id (retiring an
+  already-retired agent returns `already_retired`, never an error). A retired agent is never
+  listed or resolvable again; mail to its old `agent:<id>` refuses with `agent_retired`, naming
+  a same-name successor when one has since reclaimed the name.
 - `--sensitive` threads keep bodies (and subjects) on-box: never federated, never pushed into a
   pane, never in a roster. Only named participants can pull them — bring a third party in with
   `orca agents invite --thread <t> --agent <name>` before a pact can involve them.
@@ -173,6 +181,7 @@ orca agents list [--state live|idle|gone] [--include-quarantined] [--limit <n>] 
 orca agents find "<plain-English description>" [--limit <n>] [--all-hosts] [--json]
 orca agents show <name|id|name@host> [--json]
 orca agents quarantine <name|id> --reason-code <code> [--lift] [--json]
+orca agents retire <name|id> [--force] [--json]
 orca agents relink --env <name> [--json]
 
 orca agents threads [--state open|paused|closed|all] [--limit 25] [--json]

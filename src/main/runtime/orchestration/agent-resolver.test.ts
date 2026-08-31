@@ -186,8 +186,14 @@ describe('resolveAgentQuery', () => {
 
   // Mutation proof: reverting the denominator to matched/|Q| (the original A3 bug) makes a
   // heavily-stuffed role score 1.0 whenever every query token happens to appear in it.
+  //
+  // displayName is explicitly overridden (not the shared 'merge-restructure-backend' default)
+  // so this stays an isolated test of the role field's own denominator cap. Under F-A's
+  // multi-field scoring (S10-7) the default displayName would itself exact-match the query and
+  // dominate via the name field's 2x weight, masking the role-field regression this test guards.
   it('MUTATION PROOF: denominator cap defeats the naive matched/|Q| scoring', () => {
     const stuffed = candidate({
+      displayName: 'unrelated-fixture-name',
       role: Array.from({ length: 20 }, (_, i) => `topic${i}`)
         .concat(['merge', 'restructure'])
         .join(' ')
@@ -195,8 +201,169 @@ describe('resolveAgentQuery', () => {
     const query = 'merge restructure'
     const { score } = scoreAgentCandidate(query, stuffed)
     // Naive matched/|Q| would score (2/2)*0.9(idle) = 0.9 here (both query tokens present).
-    // The denominator cap (max(|Q|, min(|F|,12))) instead divides by 12, giving ~0.15.
+    // The denominator cap (min(|F|,16)) instead divides by 16, giving ~0.125.
     expect(score).toBeLessThan(0.5)
+  })
+
+  // S10-7 review fix (minor, F-A): FIELD_WEIGHTS previously lived inside the denominator
+  // (`min(weight * |F|, CAP)`), which cancels out whenever `weight * |F| <= CAP` — true for
+  // every realistic name/title field — so an identical partial match scored the same whether it
+  // landed in the 2x-weighted name field or the 1x-weighted role field. The weight now applies
+  // to the numerator, so a name match is worth double a role match on a field of the same size.
+  it('REGRESSION (F-A minor): an identical partial match scores 2x higher in name than in role', () => {
+    const sharedFieldText = 'alpha bravo charlie delta' // 4 distinct tokens, well under the cap
+    const query = 'alpha bravo' // matches 2 of the 4
+    const inName = candidate({ displayName: sharedFieldText, role: null })
+    const inRole = candidate({ displayName: 'unrelated-fixture-name', role: sharedFieldText })
+    const nameFieldScore = scoreAgentCandidate(query, inName).score
+    const roleFieldScore = scoreAgentCandidate(query, inRole).score
+    expect(roleFieldScore).toBeGreaterThan(0)
+    expect(nameFieldScore).toBeCloseTo(2 * roleFieldScore, 5)
+  })
+})
+
+// F-A acceptance tests (owner ruling, non-negotiable). Fixed field text lifted verbatim from
+// the live measurement cited in the ruling where practical, so these stay tied to the reported
+// regression rather than a convenient synthetic case.
+describe('F-A acceptance tests', () => {
+  // Live evidence: name 'vps-services-live', role a nine-clause description of the job. Under
+  // the old cascade this scored 0.15 for "vps services" because role (checked first) matched
+  // and diluted against its own length, and name never got a chance to score at all.
+  const vpsServicesLive = candidate({
+    id: 'agt_vps_live',
+    displayName: 'vps-services-live',
+    role: 'production VPS: services, deploys, watchers, routing, certs, backups, docs-bus watcher, box half of every rollout',
+    state: 'live'
+  })
+
+  it('T1: the live vps-services-live case resolves at or above threshold for all three fixture queries', () => {
+    for (const query of [
+      'vps services',
+      'the VPS services agent',
+      'production VPS services and deploys'
+    ]) {
+      const { score } = scoreAgentCandidate(query, vpsServicesLive)
+      expect(score).toBeGreaterThanOrEqual(AGENT_RESOLVER_THRESHOLD)
+    }
+  })
+
+  it('T2: parity — the S1 honest fixture stays at or above 0.85', () => {
+    const honest = candidate({
+      id: 'agt_honest_parity',
+      displayName: 'merge-restructure-backend',
+      role: 'backend for the merge restructure'
+    })
+    const { score } = scoreAgentCandidate('the merge restructure backend agent', honest)
+    expect(score).toBeGreaterThanOrEqual(0.85)
+  })
+
+  it('T3: a 50-keyword-stuffed role never outscores an exact-name-match candidate on a 2-3 token query', () => {
+    const stuffedTopics = Array.from({ length: 50 }, (_, i) => `stuffedkeyword${i}`)
+    // Splice a handful of real-looking topical tokens in among the noise so 2-3 of them can
+    // legitimately match a query, same as a real (if overzealous) role write-up would.
+    stuffedTopics.splice(10, 0, 'metrics', 'deploy', 'pipeline')
+    const stuffed = candidate({
+      id: 'agt_stuffed_50',
+      displayName: 'stuffed-agent-zz',
+      role: stuffedTopics.join(' ')
+    })
+    const exactName = candidate({
+      id: 'agt_exact_metrics',
+      displayName: 'metrics-deploy-pipeline',
+      role: null
+    })
+
+    for (const query of ['metrics deploy', 'metrics deploy pipeline', 'deploy pipeline']) {
+      const stuffedScore = scoreAgentCandidate(query, stuffed).score
+      const exactScore = scoreAgentCandidate(query, exactName).score
+      expect(stuffedScore).toBeLessThan(exactScore)
+    }
+
+    // A query matching ONLY stuffed-role tokens (nothing a real name/title would plausibly
+    // contain) must stay under threshold — stuffing alone cannot buy a resolve.
+    const stuffedOnlyQuery = 'stuffedkeyword3 stuffedkeyword4'
+    expect(scoreAgentCandidate(stuffedOnlyQuery, stuffed).score).toBeLessThan(
+      AGENT_RESOLVER_THRESHOLD
+    )
+  })
+
+  // S10-7 review fix (F-A T3 extension): the T3 fixture above gives the stuffed candidate a
+  // name sharing no token with the query, so it can't reach the exploit — a stuffed role
+  // "corroborating" a name field it never actually shares tokens with. Here the stuffed
+  // candidate's name DOES partially match (like a real short/generic name would), same shape as
+  // the live regression: a 50-keyword-stuffed role plus real topical tokens the query also hits.
+  it('T3 extended: a stuffed role corroborating a short partial-name match still never outscores an exact-name candidate', () => {
+    const stuffedTopics = Array.from({ length: 50 }, (_, i) => `stuffedkeyword${i}`)
+    stuffedTopics.splice(10, 0, 'services', 'deploys', 'routing', 'certs', 'backups')
+    const stuffed = candidate({
+      id: 'agt_stuffed_named',
+      displayName: 'vps',
+      role: stuffedTopics.join(' ')
+    })
+    const exactName = candidate({
+      id: 'agt_exact_vps_services',
+      displayName: 'vps-services',
+      role: null
+    })
+
+    for (const query of ['vps services', 'vps services deploys', 'services deploys']) {
+      const stuffedScore = scoreAgentCandidate(query, stuffed).score
+      const exactScore = scoreAgentCandidate(query, exactName).score
+      expect(stuffedScore).toBeLessThan(exactScore)
+    }
+
+    // resolveAgentQuery must not flip to ambiguous (or worse, resolve the stuffed candidate)
+    // when both are in play together.
+    const result = resolveAgentQuery('vps services', [stuffed, exactName])
+    expect(result.outcome).toBe('resolved')
+    expect(result.candidates[0]?.id).toBe('agt_exact_vps_services')
+  })
+
+  it('T4: each of the four charter agents resolves from a natural phrasing of its own name', () => {
+    const charterAgents: [string, AgentResolverCandidateInput, string][] = [
+      [
+        'backend-dll',
+        candidate({
+          id: 'agt_backend_dll',
+          displayName: 'backend-dll',
+          role: 'backend DLL: native module boundary, IPC bridge, build packaging, native rebuilds across platforms, worker threads'
+        }),
+        'the backend dll agent'
+      ],
+      [
+        'frontend-stack',
+        candidate({
+          id: 'agt_frontend_stack',
+          displayName: 'frontend-stack',
+          role: 'frontend stack: renderer UI, component library, IPC client, theming, terminal panes'
+        }),
+        'the frontend agent'
+      ],
+      [
+        'player-overlay',
+        candidate({
+          id: 'agt_player_overlay',
+          displayName: 'player-overlay',
+          role: 'player overlay: in-game HUD, capture pipeline, overlay window management, hotkeys, streaming layer'
+        }),
+        'the player overlay agent'
+      ],
+      [
+        'vps-services',
+        candidate({
+          id: 'agt_vps_services',
+          displayName: 'vps-services',
+          role: 'production VPS: services, deploys, watchers, routing, certs, backups, docs-bus watcher, box half of every rollout'
+        }),
+        'the vps services agent'
+      ]
+    ]
+
+    for (const [name, agent, query] of charterAgents) {
+      const result = resolveAgentQuery(query, [agent])
+      expect(result.outcome, `${name} should resolve for "${query}"`).toBe('resolved')
+      expect(result.candidates[0]?.confidence ?? 0).toBeGreaterThanOrEqual(AGENT_RESOLVER_THRESHOLD)
+    }
   })
 })
 

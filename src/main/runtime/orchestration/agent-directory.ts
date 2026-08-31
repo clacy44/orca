@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
+import { repointMailboxOnReMint } from './agent-mailbox-repoint'
 import type { AgentAuditRow, AgentRow, AgentState } from './types'
 
 // Why a local generator, not db.ts's generateId: importing it back from db.ts (which will
@@ -34,7 +35,7 @@ export type UpsertAgentByPaneSuffixParams = {
 
 export type UpsertAgentByPaneSuffixResult =
   | { outcome: 'created'; agent: AgentRow }
-  | { outcome: 'reminted'; agent: AgentRow }
+  | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
   | { outcome: 'name_taken'; alternative: string }
 
 function paneSuffix(paneKey: string): string {
@@ -113,8 +114,10 @@ export function upsertAgentByPaneSuffix(
         existing.id
       )
       const reminted = db.prepare('SELECT * FROM agents WHERE id = ?').get(existing.id) as AgentRow
+      // S10-7 F-C: pending mail follows the agent across a re-mint, same as its identity does.
+      const { repointedMessages, pendingOnOldHandle } = repointMailboxOnReMint(db, existing, params)
       db.exec('COMMIT')
-      return { outcome: 'reminted', agent: reminted }
+      return { outcome: 'reminted', agent: reminted, repointedMessages, pendingOnOldHandle }
     }
 
     const nameHolder = findByName(db, params.hostId, params.displayName)

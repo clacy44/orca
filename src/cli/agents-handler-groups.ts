@@ -17,6 +17,11 @@ export const AGENTS_HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/agents.js')).AGENT_HANDLERS
   },
   {
+    name: 'agents-retire',
+    keys: ['agents retire'],
+    load: async () => (await import('./handlers/agents-retire.js')).AGENT_RETIRE_HANDLERS
+  },
+  {
     name: 'agents-threads',
     keys: ['agents threads', 'agents thread', 'agents wait'],
     load: async () => (await import('./handlers/agents-threads.js')).AGENT_THREAD_HANDLERS

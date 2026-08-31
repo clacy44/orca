@@ -72,6 +72,11 @@ import {
   type WriteAgentAuditParams
 } from './agent-directory'
 import {
+  getAgentByIdIncludingTombstoned as getAgentByIdIncludingTombstonedImpl,
+  retireAgent as retireAgentImpl,
+  type RetireAgentResult
+} from './agent-retire'
+import {
   checkAndBumpRate as checkAndBumpRateImpl,
   type CheckAndBumpRateParams,
   type RateLimitResult
@@ -3825,6 +3830,14 @@ export class OrchestrationDb {
 
   setAgentQuarantine(params: SetAgentQuarantineParams): AgentRow {
     return setAgentQuarantineImpl(this.db, params)
+  }
+
+  getAgentByIdIncludingTombstoned(id: string): AgentRow | undefined {
+    return getAgentByIdIncludingTombstonedImpl(this.db, id)
+  }
+
+  retireAgent(id: string): RetireAgentResult {
+    return retireAgentImpl(this.db, id)
   }
 
   writeAgentAudit(params: WriteAgentAuditParams): void {

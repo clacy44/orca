@@ -12,6 +12,7 @@ import {
   writeAgentAudit,
   type UpsertAgentByPaneSuffixParams
 } from './agent-directory'
+import { getAgentByIdIncludingTombstoned, retireAgent } from './agent-retire'
 
 describe('agent-directory', () => {
   let orchestrationDb: OrchestrationDb | undefined
@@ -113,6 +114,194 @@ describe('agent-directory', () => {
     })
   })
 
+  describe('mailbox repoint on re-mint (S10-7 F-C)', () => {
+    function unreadCountFor(db: Database.Database, toHandle: string): number {
+      return (
+        db
+          .prepare('SELECT COUNT(*) AS n FROM messages WHERE to_handle = ? AND read = 0')
+          .get(toHandle) as { n: number }
+      ).n
+    }
+
+    // Fast bulk insert for backlog-sized fixtures — insertMessage() prepares a fresh statement
+    // per call, too slow for thousands of rows. Defaults (run_id, delivery_contract,
+    // body/type/priority) match insertMessage's own defaults.
+    function bulkInsertUnread(db: Database.Database, toHandle: string, count: number): void {
+      const stmt = db.prepare(
+        `INSERT INTO messages (id, from_handle, to_handle, subject) VALUES (?, 'peer', ?, ?)`
+      )
+      db.exec('BEGIN')
+      for (let i = 0; i < count; i += 1) {
+        stmt.run(`msg_bulk_${toHandle}_${i}`, toHandle, `msg${i}`)
+      }
+      db.exec('COMMIT')
+    }
+
+    it('repoints unread bare-handle mail from the old terminal_handle into agent:<id>, reports the count, and audits it', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_old' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_old', subject: 'msg1' })
+      const readAlready = orchestrationDb!.insertMessage({
+        from: 'peer',
+        to: 'term_old',
+        subject: 'already read'
+      })
+      db.prepare('UPDATE messages SET read = 1 WHERE id = ?').run(readAlready.id)
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_old', subject: 'msg2' })
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_unrelated', subject: 'not mine' })
+
+      // Re-mint: same pane, terminal_handle changes (pane relaunch).
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_new' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(2)
+        expect(reminted.pendingOnOldHandle).toBe(0)
+      }
+
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(2)
+      expect(unreadCountFor(db, 'term_old')).toBe(0) // the two unread rows moved
+      expect(
+        (
+          db.prepare('SELECT to_handle FROM messages WHERE id = ?').get(readAlready.id) as {
+            to_handle: string
+          }
+        ).to_handle
+      ).toBe('term_old') // already-read mail is left alone
+      expect(unreadCountFor(db, 'term_unrelated')).toBe(1) // untouched
+
+      const audit = db
+        .prepare("SELECT * FROM agent_audit WHERE verb = 'mailbox_repoint'")
+        .all() as { agent_id: string; outcome: string }[]
+      expect(audit).toHaveLength(1)
+      expect(audit[0]?.agent_id).toBe(id)
+      expect(audit[0]?.outcome).toBe('ok')
+    })
+
+    it('does nothing and audits nothing when terminal_handle is unchanged across a re-mint', () => {
+      const db = rawDb()
+      upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_stable' }))
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_stable', subject: 'msg1' })
+
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_stable' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(0)
+        expect(reminted.pendingOnOldHandle).toBe(0)
+      }
+      expect(unreadCountFor(db, 'term_stable')).toBe(1) // left in place
+      const audit = db.prepare("SELECT * FROM agent_audit WHERE verb = 'mailbox_repoint'").all()
+      expect(audit).toHaveLength(0)
+    })
+
+    // REGRESSION (F-C major): a backlog bigger than one MAILBOX_REPOINT_BATCH_SIZE (200) used
+    // to strand everything past the 200th row on the old handle forever — nothing else ever
+    // remembers that handle once this transaction commits. The repoint now loops batches within
+    // the same re-mint call to drain the backlog in full.
+    it('drains a backlog spanning multiple batches in one re-mint, leaving nothing on the old handle', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_flood' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      bulkInsertUnread(db, 'term_flood', 205)
+
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_flood_2' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(205)
+        expect(reminted.pendingOnOldHandle).toBe(0)
+      }
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(205)
+      expect(unreadCountFor(db, 'term_flood')).toBe(0)
+    })
+
+    // REGRESSION (F-C major): a backlog past the defensive per-call ceiling (bounds pathological
+    // inline work) is reported honestly via pendingOnOldHandle rather than silently dropped —
+    // and those rows are genuinely gone from any documented read path once this commits, so the
+    // count must reflect that, not a false "still reachable at the old handle" promise.
+    it('reports a truthful pendingOnOldHandle when a backlog exceeds the per-call ceiling', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_megaflood' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      bulkInsertUnread(db, 'term_megaflood', 2005)
+
+      const reminted = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ terminalHandle: 'term_megaflood_2' })
+      )
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(2000)
+        expect(reminted.pendingOnOldHandle).toBe(5)
+      }
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(2000)
+      expect(unreadCountFor(db, 'term_megaflood')).toBe(5)
+    })
+
+    // REGRESSION (F-C major): moving a legacy_direct row off its bare handle breaks the
+    // handle-keyed legacy lookups (findLegacyWorkerCompletion, promoteLegacyCoordinatorMailFor
+    // Takeover) it depends on, for a mailbox no current_delivery read path ever surfaces it
+    // from anyway.
+    it('leaves legacy_direct mail on the old handle untouched', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_legacy' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      orchestrationDb!.insertMessage({
+        from: 'peer',
+        to: 'term_legacy',
+        subject: 'legacy worker_done',
+        deliveryContract: 'legacy_direct'
+      })
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_legacy', subject: 'ordinary mail' })
+
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_legacy_2' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(1) // only the current_delivery row moves
+        expect(reminted.pendingOnOldHandle).toBe(0) // legacy_direct isn't "pending" — it's not repointable at all
+      }
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(1)
+      expect(unreadCountFor(db, 'term_legacy')).toBe(1) // the legacy_direct row stays put
+      const stillLegacy = db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM messages WHERE to_handle = ? AND delivery_contract = 'legacy_direct'"
+        )
+        .get('term_legacy') as { n: number }
+      expect(stillLegacy.n).toBe(1)
+    })
+
+    // REGRESSION (F-C minor): a purged-but-unread row (purge doesn't set read) is unreadable
+    // everywhere and must neither be moved nor counted — moving it wastes a batch slot on mail
+    // nobody can ever see, and counting it made repointedMessages lie about what actually
+    // became reachable.
+    it('leaves purged-but-unread mail on the old handle and excludes it from the count', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_purged' }))
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      const purged = orchestrationDb!.insertMessage({
+        from: 'peer',
+        to: 'term_purged',
+        subject: 'to be purged'
+      })
+      db.prepare("UPDATE messages SET purged_at = datetime('now') WHERE id = ?").run(purged.id)
+      orchestrationDb!.insertMessage({ from: 'peer', to: 'term_purged', subject: 'ordinary mail' })
+
+      const reminted = upsertAgentByPaneSuffix(db, baseParams({ terminalHandle: 'term_purged_2' }))
+      expect(reminted.outcome).toBe('reminted')
+      if (reminted.outcome === 'reminted') {
+        expect(reminted.repointedMessages).toBe(1)
+      }
+      expect(unreadCountFor(db, `agent:${id}`)).toBe(1)
+      expect(
+        (
+          db.prepare('SELECT to_handle FROM messages WHERE id = ?').get(purged.id) as {
+            to_handle: string
+          }
+        ).to_handle
+      ).toBe('term_purged')
+    })
+  })
+
   describe('reads filter tombstoned_at', () => {
     it('getAgentById / getAgentByName / listAgents never return a tombstoned row', () => {
       const db = rawDb()
@@ -197,6 +386,48 @@ describe('agent-directory', () => {
       const lifted = setAgentQuarantine(db, { id, quarantined: false, reasonCode: null })
       expect(lifted.quarantined).toBe(0)
       expect(lifted.quarantined_at).toBeNull()
+    })
+  })
+
+  describe('retireAgent (S10-7 F-B)', () => {
+    it('tombstones the row and frees its display_name for a fresh registration', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams())
+      const id = created.outcome === 'created' ? created.agent.id : ''
+
+      const result = retireAgent(db, id)
+      expect(result.outcome).toBe('retired')
+      expect(result.agent.tombstoned_at).not.toBeNull()
+      expect(getAgentById(db, id)).toBeUndefined() // filtered read never sees it
+      expect(getAgentByIdIncludingTombstoned(db, id)?.tombstoned_at).not.toBeNull()
+
+      // Name reclaim: register.ts's findByName-based uniqueness check is unaffected by the
+      // presence of the tombstoned row (idx_agents_name is WHERE tombstoned_at IS NULL).
+      const reclaimed = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab2:leaf-zzz', terminalHandle: 'term_zzz' })
+      )
+      expect(reclaimed.outcome).toBe('created')
+      if (reclaimed.outcome === 'created') {
+        expect(reclaimed.agent.id).not.toBe(id)
+        expect(reclaimed.agent.display_name).toBe('merge-restructure-backend')
+      }
+    })
+
+    it('idempotent: retiring an already-tombstoned id returns already_retired, never throws', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams())
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      const first = retireAgent(db, id)
+      expect(first.outcome).toBe('retired')
+      const second = retireAgent(db, id)
+      expect(second.outcome).toBe('already_retired')
+      expect(second.agent.id).toBe(id)
+    })
+
+    it('throws agent_unknown for an id that never existed', () => {
+      const db = rawDb()
+      expect(() => retireAgent(db, 'agt_does_not_exist')).toThrow(/not found/)
     })
   })
 

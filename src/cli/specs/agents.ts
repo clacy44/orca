@@ -11,7 +11,9 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'name', 'role'],
     notes: [
       '--name is a lowercase ASCII slug, 3-32 chars (e.g. merge-restructure-backend).',
-      'Idempotent: re-registering from the same terminal after a restart updates the same agent.'
+      'Idempotent: re-registering from the same terminal after a restart updates the same agent.',
+      'If the terminal handle changed since last registration, unread mail still addressed to ' +
+        'the old handle moves into this mailbox automatically (reported as repointedMessages).'
     ]
   },
   {
@@ -72,6 +74,21 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'id', 'name', 'lift', 'reason-code'],
     positionalArgs: ['name'],
     notes: ['Local and non-federated only, except self-quarantine which is always allowed.']
+  },
+  {
+    path: ['agents', 'retire'],
+    destructive: true,
+    summary:
+      'Retire an agent and free its name for reclaim (the quarantine -> retire cleanup step)',
+    usage: 'orca agents retire <name|id> [--force] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id', 'name', 'force'],
+    positionalArgs: ['name'],
+    notes: [
+      'Local operator only, never a federated peer.',
+      'Refuses a currently live, attested agent unless --force.',
+      'Idempotent by --id: retiring an already-retired agent succeeds with outcome already_retired.',
+      'Frees the display_name immediately for a new `orca agents register` to reclaim.'
+    ]
   },
   {
     path: ['agents', 'threads'],
