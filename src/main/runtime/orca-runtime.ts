@@ -34662,16 +34662,25 @@ export class OrcaRuntimeService {
     let settlesInEnterCallback = false
     try {
       const db = this._orchestrationDb
-      const payload = formatMessagePointer(unread, (msg) => {
-        const agent = msg.sender_agent_id ? db?.getAgentById(msg.sender_agent_id) : undefined
-        // Why excluded here: a quarantined agent's name/role must never be typed into another
-        // agent's pane (CONTAINMENT #7 — quarantine is bidirectional); getAgentById only filters
-        // tombstoned rows, so quarantine is checked explicitly at this render boundary.
-        if (!agent || agent.quarantined === 1) {
-          return null
-        }
-        return { displayName: agent.display_name, role: agent.role }
-      })
+      const payload = formatMessagePointer(
+        unread,
+        (msg) => {
+          const agent = msg.sender_agent_id ? db?.getAgentById(msg.sender_agent_id) : undefined
+          // Why excluded here: a quarantined agent's name/role must never be typed into another
+          // agent's pane (CONTAINMENT #7 — quarantine is bidirectional); getAgentById only filters
+          // tombstoned rows, so quarantine is checked explicitly at this render boundary.
+          if (!agent || agent.quarantined === 1) {
+            return null
+          }
+          return { displayName: agent.display_name, role: agent.role }
+        },
+        // SENSITIVE THREADS §: bodies and subjects stay on-box, never in a pane push — this is
+        // the pane-push half of that rule (S10-2 DELIVERY §); resolveThreadReplay/threads.get
+        // enforce the read-side half. `db?.getThread?.` (not just `db?.getThread(...)`): a test
+        // double or a runtime attached to a pre-v34 db may not implement it at all — absence
+        // reads as "not sensitive", never a thrown exception that would abort the whole push.
+        (threadId) => db?.getThread?.(threadId)?.sensitive === 1
+      )
       const wrote = this.ptyController?.write(deliveryPtyId, payload) ?? false
       if (!wrote) {
         return

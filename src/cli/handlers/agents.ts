@@ -2,6 +2,7 @@ import type { CommandHandler } from '../dispatch'
 import { getOptionalStringFlag, getRequiredStringFlag } from '../flags'
 import { printResult } from '../format'
 import { RuntimeClientError } from '../runtime/types'
+import { nameOrId } from './agents-shared'
 
 type AgentView = {
   id: string
@@ -44,12 +45,6 @@ type FindResult = {
   candidates: FindCandidate[]
   omitted: { quarantined: number; derived: number }
   nextSteps: string[]
-}
-
-// Why: `agents show <name|id>` and `agents quarantine <name|id>` take one positional that can
-// be either — id is the only shape a display_name (ASCII slug, no underscore) can never take.
-function nameOrId(value: string): { name?: string; id?: string } {
-  return value.startsWith('agt_') ? { id: value } : { name: value }
 }
 
 // Why: `agent:<id>` has no reader for a derived (un-registered) row — point the

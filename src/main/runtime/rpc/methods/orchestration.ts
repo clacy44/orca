@@ -10,7 +10,12 @@ import {
   type OrchestrationDb,
   type TaskStatus
 } from '../../orchestration/db'
-import { MESSAGE_TYPES, type MessageRow, type RunRow } from '../../orchestration/types'
+import {
+  MESSAGE_TYPES,
+  type MessageRow,
+  type QuestionRow,
+  type RunRow
+} from '../../orchestration/types'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { formatMessageBanner } from '../../orchestration/formatter'
 import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
@@ -47,7 +52,6 @@ import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { payloadValueForGate } from '../../orchestration/message-gate-writer'
 import { deriveThreadSubject } from '../../../../shared/thread-subject'
 import type { OrchestrationCompatibilityEvidence } from '../../../../shared/orchestration-compatibility-evidence'
-import type { QuestionRow } from '../../orchestration/types'
 import { requireActiveDispatchForWorkerMail } from '../../orchestration/dispatch-mail-fence'
 import { whileDispatchBlocked } from '../../orchestration/dispatch-blocked-window'
 import { requireFederatedDispatchAcceptsWorkerMail } from '../../orchestration/federation-worker-mail-fence'
