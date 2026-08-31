@@ -633,6 +633,12 @@ export class AgentHookServer {
   // agent-rate-limit.ts's checkAndBumpRate, without the DB dependency this process-wide
   // hook server doesn't have) keyed by pane so one runaway caller can't hammer the identity path.
   private reattestRateWindowByPaneKey = new Map<string, { windowStart: number; count: number }>()
+  // S10-6 corroboration: runtime-side anchor consulted before an observation may persist as
+  // authority or displace existing authority state. Wired from index.ts after the runtime is
+  // constructed; null (tests, early boot) means only continuity-corroboration applies.
+  private paneLaunchAuthorityVerifier:
+    | ((paneKey: string, launchTokenHash: string) => boolean)
+    | null = null
   private legacyPaneKeyAliases = new Map<string, PaneKeyAliasEntry>()
   private paneKeyAliasPersistenceListener: PaneKeyAliasPersistenceListener | null = null
   // Why: on-disk last-status cache path; null without a userDataPath (tests), where persistence is a no-op and only in-memory replay applies.
@@ -648,6 +654,12 @@ export class AgentHookServer {
   private connectionTimestampWatermarkById = new Map<string, number>()
   // Why: skip disk writes when the JSON exactly matches the last write; guards against re-firing trailing timers when nothing changed.
   private lastWrittenJson: string | null = null
+
+  setPaneLaunchAuthorityVerifier(
+    verifier: ((paneKey: string, launchTokenHash: string) => boolean) | null
+  ): void {
+    this.paneLaunchAuthorityVerifier = verifier
+  }
 
   setListener(listener: ((payload: EnrichedAgentHookEventPayload) => void) | null): void {
     this.onAgentStatus = listener
@@ -2836,7 +2848,15 @@ export class AgentHookServer {
    *  observing a caller-chosen value once. Left for a follow-up ruling; R3 below still lands (it
    *  never touches `hydratedAuthorityCommitments` and requires the SAME attestation this gap
    *  still blocks, so it cannot widen what a never-hydrated pane can do on its own — see the
-   *  negative control in the R3 describe block in orchestration-compatibility-reattest.test.ts). */
+   *  negative control in the R3 describe block in orchestration-compatibility-reattest.test.ts). *
+   *  S10-6 CORROBORATION UPDATE — the seeding route above is now closed on BOTH doors: an
+   *  authority observation persists (and may displace existing authority state) ONLY when its
+   *  (paneKey, launchTokenHash) is corroborated — verified by the runtime against the LIVE pty's
+   *  actual launch token, or continuity-matched to the pane's already-hydrated/persisted
+   *  commitment. An uncorroborated POST (hook or /reattest) is status-only: it seeds nothing,
+   *  survives no restart, and never displaces a corroborated entry — a self-chosen token can
+   *  neither become next-generation hydrated proof nor revoke a genuine pane's live authority.
+   */
   private handleReattestRequest(body: unknown): { status: number; retryAfterMs?: number } {
     if (typeof body !== 'object' || body === null) {
       return { status: 400 }
@@ -2880,7 +2900,10 @@ export class AgentHookServer {
         connectionId: null,
         payload: { state: 'waiting', prompt: '' }
       },
-      { persist: false }
+      // S10-6 corroboration gate: persistence is decided inside the recorder now — a
+      // corroborated (continuity-matched) reattest persists so an idle-but-alive pane
+      // survives a THIRD restart; an uncorroborated one stays status-only regardless.
+      { persist: true }
     )
     return { status: 204 }
   }
@@ -2924,17 +2947,50 @@ export class AgentHookServer {
   // required. Real hook POSTs (this.recordCurrentAuthorityObservation(event) at the two call
   // sites above) keep persisting, since that observation is corroborated by genuine agent
   // activity, not merely self-asserted over the shared loopback channel.
+  // S10-6: true when (paneKey, launchTokenHash) is anchored to something a forger over the
+  // shared loopback channel cannot have — the LIVE pty's actual launch token (runtime verifier),
+  // or continuity with the pane's already-hydrated/persisted commitment.
+  private isCorroboratedAuthority(paneKey: string, launchTokenHash: string): boolean {
+    if (this.paneLaunchAuthorityVerifier?.(paneKey, launchTokenHash)) {
+      return true
+    }
+    if (this.hydratedLaunchTokenHashByPaneKey.get(paneKey) === launchTokenHash) {
+      return true
+    }
+    return (
+      this.persistedAuthorityCommitmentsByPaneKey.get(paneKey)?.launchTokenHash === launchTokenHash
+    )
+  }
+
+  private hasAnyAuthorityEntry(paneKey: string): boolean {
+    return (
+      this.currentAuthorityObservations.has(paneKey) ||
+      this.persistedAuthorityCommitmentsByPaneKey.has(paneKey) ||
+      this.hydratedLaunchTokenHashByPaneKey.has(paneKey)
+    )
+  }
+
   private recordCurrentAuthorityObservation(
     payload: AgentHookEventPayload,
     options?: { persist?: boolean }
   ): void {
     const evidence = this.toAuthorityEvidence(payload)
-    if (evidence) {
-      this.currentAuthorityObservations.set(evidence.paneKey, evidence)
-      if (options?.persist !== false) {
-        this.persistedAuthorityCommitmentsByPaneKey.set(evidence.paneKey, evidence)
-        this.hydratedLaunchTokenHashByPaneKey.set(evidence.paneKey, evidence.launchTokenHash)
-      }
+    if (!evidence) {
+      return
+    }
+    const corroborated = this.isCorroboratedAuthority(evidence.paneKey, evidence.launchTokenHash)
+    // An uncorroborated claim never DISPLACES existing authority state (the forged-/reattest
+    // revocation lever) — it may only fill a void, observation-only.
+    if (!corroborated && this.hasAnyAuthorityEntry(evidence.paneKey)) {
+      return
+    }
+    this.currentAuthorityObservations.set(evidence.paneKey, evidence)
+    // Persistence (what the NEXT generation hydrates into authority) requires corroboration on
+    // EVERY door — hook POST and /reattest alike; `persist: false` remains a belt for callers
+    // that never want durability regardless.
+    if (options?.persist !== false && corroborated) {
+      this.persistedAuthorityCommitmentsByPaneKey.set(evidence.paneKey, evidence)
+      this.hydratedLaunchTokenHashByPaneKey.set(evidence.paneKey, evidence.launchTokenHash)
     }
   }
 

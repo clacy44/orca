@@ -138,13 +138,18 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
       terminalHandle: TERMINAL_HANDLE,
       launchToken: 'a-different-stale-token'
     })
+    // S10-6 corroboration: the mismatched observation seeded above is refused ENTRY (it can
+    // neither be verified against the live pty nor continuity-matched to the hydrated
+    // commitment), so it can no longer block the genuine pane — attestation succeeds via the
+    // hydrated commitment immediately, with no reconciliation step needed (the P5 revocation
+    // lever is gone).
     expect(
       runtime.verifyOrchestrationCompatibilityCaller({
         terminalHandle: TERMINAL_HANDLE,
         paneKey: PANE_KEY,
         launchToken: originalLaunchToken
       })
-    ).toBeNull()
+    ).not.toBeNull()
 
     const reattestRes = await postReattest(
       Number(env.ORCA_AGENT_HOOK_PORT),
@@ -236,7 +241,8 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
           paneKey: PANE_KEY,
           launchToken: generation1Token
         })
-      ).toBeNull() // blocked by the stale observation seeded just above.
+      ).not.toBeNull() // S10-6 corroboration refuses the stale observation entry itself, so
+      // nothing blocks the genuinely hydrated pane even before the reattest below runs.
 
       // The actual R5 shape: reattest with the stale-but-genuine generation-1 token, against this
       // generation's fresh (generation-2) hook token — mirrors what attemptOrchestrationReattest

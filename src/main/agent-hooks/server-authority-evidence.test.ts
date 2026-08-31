@@ -57,6 +57,14 @@ describe('AgentHookServer authority evidence', () => {
       })
     ).toEqual({ paneKey: PANE_KEY, source: 'hydrated_commitment' })
 
+    // S10-6 corroboration: in production the runtime verifies a fresh launch token against the
+    // LIVE pty before the observation may land/persist — stub that anchor exactly as index.ts
+    // wires it, scoped to the new token (the gate refuses everything else).
+    server.setPaneLaunchAuthorityVerifier(
+      (paneKey, hash) =>
+        paneKey === PANE_KEY &&
+        hash === createHash('sha256').update('launch-after-restart').digest('hex')
+    )
     server.ingestRemote(
       {
         paneKey: PANE_KEY,
@@ -115,6 +123,10 @@ describe('AgentHookServer authority evidence', () => {
       })
     ).toEqual({ paneKey: PANE_KEY, source: 'current_hook' })
 
+    // S10-6 corroboration: a late post bearing the SUPERSEDED token is refused entry — the
+    // verifier anchors the pane to its live token ('launch-after-restart'), and the
+    // continuity anchor moved with the verified occupant when it persisted. Old-token
+    // displacement was the last-writer-wins revocation lever this gate closes.
     server.ingestRemote(
       {
         paneKey: PANE_KEY,
@@ -126,6 +138,9 @@ describe('AgentHookServer authority evidence', () => {
       'ssh-target'
     )
 
+    expect(JSON.stringify(server.getCurrentAuthorityObservations())).not.toContain(
+      createHash('sha256').update('launch-before-restart').digest('hex')
+    )
     expect(
       server.attestCompatibilityAuthority({
         paneKey: PANE_KEY,
@@ -133,7 +148,9 @@ describe('AgentHookServer authority evidence', () => {
         connectionId: 'ssh-target',
         terminalProvenance: 'restored'
       })
-    ).toEqual({ paneKey: PANE_KEY, source: 'current_hook' })
+      // The superseded token no longer attests: its observation was refused entry and the
+      // hydrated-continuity anchor now belongs to the verified occupant.
+    ).toBeNull()
 
     server.ingestRemote(
       {

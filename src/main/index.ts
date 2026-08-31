@@ -2596,6 +2596,11 @@ void app.whenReady().then(async () => {
     orchestrationEnvironmentTransport
   })
   runtime = runtimeService
+  // S10-6: reverse wiring — the hook server consults the runtime before letting an authority
+  // observation persist or displace existing state (corroboration against the live pty's token).
+  agentHookServer.setPaneLaunchAuthorityVerifier((paneKey, launchTokenHash) =>
+    runtimeService.verifyLivePaneLaunchTokenHash(paneKey, launchTokenHash)
+  )
   // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
   // which is constructed after them. A post arriving before this lands falls back to the
   // config-dir map, which is the pre-S9b behaviour (S9 §2k).

@@ -13039,6 +13039,21 @@ export class OrcaRuntimeService {
     this.orchestrationCompatibilitySshAttachments.delete(attachmentId)
   }
 
+  /** S10-6 corroboration anchor: true only when a CONNECTED pty currently bound to `paneKey`
+   * holds a launch token whose sha256 equals `launchTokenHash` — what the agent-hook server
+   * consults before an observation may persist as authority (see server.ts corroboration gate). */
+  verifyLivePaneLaunchTokenHash(paneKey: string, launchTokenHash: string): boolean {
+    for (const pty of this.ptysById.values()) {
+      if (!pty.connected || pty.paneKey !== paneKey || !pty.launchToken) {
+        continue
+      }
+      if (createHash('sha256').update(pty.launchToken).digest('hex') === launchTokenHash) {
+        return true
+      }
+    }
+    return false
+  }
+
   verifyOrchestrationCompatibilityCaller(
     evidence: OrchestrationCompatibilityEvidence | null | undefined,
     options?: { currentRuntimeLaunchSufficient?: boolean }
