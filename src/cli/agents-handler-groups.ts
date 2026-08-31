@@ -12,7 +12,8 @@ export const AGENTS_HANDLER_GROUPS: readonly HandlerGroup[] = [
       'agents show',
       'agents find',
       'agents relink',
-      'agents quarantine'
+      'agents quarantine',
+      'agents retire'
     ],
     load: async () => (await import('./handlers/agents.js')).AGENT_HANDLERS
   },

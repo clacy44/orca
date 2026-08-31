@@ -457,4 +457,72 @@ describe('agent: routing + durability', () => {
     const restored = toPublicAgentView(db.getAgentById(derived!.id)!, false)
     expect(restored.terminalHandle).toBe('term_q')
   })
+
+  // S10-7 F-B: mail to a retired agent's old id must name the successor (a fresh row that
+  // reclaimed the retired agent's display_name), never the generic agent_unknown message a
+  // never-existed id gets.
+  it('send to a retired agent refuses with agent_retired, naming the successor that reclaimed its name', async () => {
+    setup()
+    const retiredId = agentBId
+    const outcome = db.retireAgent(retiredId)
+    expect(outcome.outcome).toBe('retired')
+
+    const successor = db.upsertAgentByPaneSuffix({
+      displayName: 'peer-b',
+      role: 'the new peer-b',
+      hostId: 'local',
+      paneKey: 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      terminalHandle: 'term_c',
+      processIncarnation: 'proc-1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_c',
+      originHostId: 'local'
+    })
+    if (successor.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+
+    let caught: unknown
+    try {
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${retiredId}`,
+        subject: 'mail for the old row'
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(OrchestrationError)
+    expect((caught as OrchestrationError).code).toBe('agent_retired')
+    const nextSteps = (caught as OrchestrationError & { data?: { nextSteps?: string[] } }).data
+      ?.nextSteps
+    expect(nextSteps?.some((step) => step.includes(successor.agent.id))).toBe(true)
+    expect(db.getUnreadMessages(`agent:${retiredId}`)).toHaveLength(0)
+  })
+
+  it('send to a retired agent with no successor refuses with agent_retired and generic nextSteps', async () => {
+    setup()
+    const retiredId = agentBId
+    db.retireAgent(retiredId)
+
+    let caught: unknown
+    try {
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${retiredId}`,
+        subject: 'mail for the old row'
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(OrchestrationError)
+    expect((caught as OrchestrationError).code).toBe('agent_retired')
+    const nextSteps = (caught as OrchestrationError & { data?: { nextSteps?: string[] } }).data
+      ?.nextSteps
+    expect(nextSteps).toContain('orca agents list')
+  })
 })

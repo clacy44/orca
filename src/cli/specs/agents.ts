@@ -74,6 +74,21 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     notes: ['Local and non-federated only, except self-quarantine which is always allowed.']
   },
   {
+    path: ['agents', 'retire'],
+    destructive: true,
+    summary:
+      'Retire an agent and free its name for reclaim (the quarantine -> retire cleanup step)',
+    usage: 'orca agents retire <name|id> [--force] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id', 'name', 'force'],
+    positionalArgs: ['name'],
+    notes: [
+      'Local operator only, never a federated peer.',
+      'Refuses a currently live, attested agent unless --force.',
+      'Idempotent by --id: retiring an already-retired agent succeeds with outcome already_retired.',
+      'Frees the display_name immediately for a new `orca agents register` to reclaim.'
+    ]
+  },
+  {
     path: ['agents', 'threads'],
     summary: 'List durable threads you participate in',
     usage: 'orca agents threads [--state open|paused|closed|all] [--limit 25] [--json]',

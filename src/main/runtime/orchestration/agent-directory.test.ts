@@ -12,6 +12,7 @@ import {
   writeAgentAudit,
   type UpsertAgentByPaneSuffixParams
 } from './agent-directory'
+import { getAgentByIdIncludingTombstoned, retireAgent } from './agent-retire'
 
 describe('agent-directory', () => {
   let orchestrationDb: OrchestrationDb | undefined
@@ -197,6 +198,48 @@ describe('agent-directory', () => {
       const lifted = setAgentQuarantine(db, { id, quarantined: false, reasonCode: null })
       expect(lifted.quarantined).toBe(0)
       expect(lifted.quarantined_at).toBeNull()
+    })
+  })
+
+  describe('retireAgent (S10-7 F-B)', () => {
+    it('tombstones the row and frees its display_name for a fresh registration', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams())
+      const id = created.outcome === 'created' ? created.agent.id : ''
+
+      const result = retireAgent(db, id)
+      expect(result.outcome).toBe('retired')
+      expect(result.agent.tombstoned_at).not.toBeNull()
+      expect(getAgentById(db, id)).toBeUndefined() // filtered read never sees it
+      expect(getAgentByIdIncludingTombstoned(db, id)?.tombstoned_at).not.toBeNull()
+
+      // Name reclaim: register.ts's findByName-based uniqueness check is unaffected by the
+      // presence of the tombstoned row (idx_agents_name is WHERE tombstoned_at IS NULL).
+      const reclaimed = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab2:leaf-zzz', terminalHandle: 'term_zzz' })
+      )
+      expect(reclaimed.outcome).toBe('created')
+      if (reclaimed.outcome === 'created') {
+        expect(reclaimed.agent.id).not.toBe(id)
+        expect(reclaimed.agent.display_name).toBe('merge-restructure-backend')
+      }
+    })
+
+    it('idempotent: retiring an already-tombstoned id returns already_retired, never throws', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams())
+      const id = created.outcome === 'created' ? created.agent.id : ''
+      const first = retireAgent(db, id)
+      expect(first.outcome).toBe('retired')
+      const second = retireAgent(db, id)
+      expect(second.outcome).toBe('already_retired')
+      expect(second.agent.id).toBe(id)
+    })
+
+    it('throws agent_unknown for an id that never existed', () => {
+      const db = rawDb()
+      expect(() => retireAgent(db, 'agt_does_not_exist')).toThrow(/not found/)
     })
   })
 

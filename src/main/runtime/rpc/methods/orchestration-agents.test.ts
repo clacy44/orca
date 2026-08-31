@@ -338,6 +338,132 @@ describe('orchestration.agents.* RPC methods', () => {
     expect(found.omitted.quarantined).toBe(1)
   })
 
+  describe('orchestration.agents.retire (S10-7 F-B)', () => {
+    it('a local caller retires an idle agent and its name is immediately free to reclaim', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+
+      const retired = (await call(
+        'orchestration.agents.retire',
+        { id: registered.agent.id },
+        ctx(evidenceB)
+      )) as { agent: { id: string }; outcome: string }
+      expect(retired.outcome).toBe('retired')
+
+      // Never resolvable again under its old id.
+      await expect(
+        call('orchestration.agents.get', { id: registered.agent.id }, ctx())
+      ).rejects.toMatchObject({ code: 'not_found' })
+
+      // The freed name reclaims under a fresh registration (a different id).
+      const reclaimed = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'someone else now' },
+        ctx(evidenceB)
+      )) as { agent: { id: string; displayName: string } }
+      expect(reclaimed.agent.displayName).toBe('merge-backend')
+      expect(reclaimed.agent.id).not.toBe(registered.agent.id)
+    })
+
+    it('is idempotent by id: retiring twice returns already_retired, never throws', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+
+      await call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+      const second = (await call(
+        'orchestration.agents.retire',
+        { id: registered.agent.id },
+        ctx(evidenceB)
+      )) as { outcome: string }
+      expect(second.outcome).toBe('already_retired')
+    })
+
+    it('refuses a federated caller', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+
+      await expect(
+        call(
+          'orchestration.agents.retire',
+          { id: registered.agent.id },
+          { runtime, orchestrationCompatibilityEvidence: evidenceB, pairedDeviceId: 'device-1' }
+        )
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
+    it('refuses a currently live, attested agent unless --force', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockReturnValue({
+        terminalHandle: 'term_a',
+        lastAgentStatus: 'working',
+        observedLive: true
+      })
+
+      await expect(
+        call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+      ).rejects.toMatchObject({ code: 'agent_live' })
+
+      const forced = (await call(
+        'orchestration.agents.retire',
+        { id: registered.agent.id, force: true },
+        ctx(evidenceB)
+      )) as { outcome: string }
+      expect(forced.outcome).toBe('retired')
+    })
+
+    it('quarantine -> retire: a quarantined row stays name-locked until retired', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+      await call(
+        'orchestration.agents.quarantine',
+        { id: registered.agent.id, reasonCode: 'suspicious' },
+        ctx(evidenceB)
+      )
+
+      // Quarantine alone does not free the name.
+      await expect(
+        call(
+          'orchestration.agents.register',
+          { name: 'merge-backend', role: 'impersonating' },
+          ctx(evidenceB)
+        )
+      ).rejects.toMatchObject({ code: 'name_taken' })
+
+      await call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+
+      // Retire is the cleanup step that frees it.
+      const reclaimed = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'fresh row' },
+        ctx(evidenceB)
+      )) as { created: boolean; agent: { displayName: string } }
+      expect(reclaimed.created).toBe(true)
+      expect(reclaimed.agent.displayName).toBe('merge-backend')
+    })
+  })
+
   describe('orchestration.agents.relink (S10-4 ruling 5)', () => {
     function federatedDispatch(environmentId: string) {
       const run = db.createRun({
