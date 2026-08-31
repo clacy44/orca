@@ -36,6 +36,7 @@ import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
 import { ORCHESTRATION_THREAD_METHODS, resolveThreadReplay } from './orchestration-thread'
+import { ORCHESTRATION_CONTAINMENT_METHODS } from './orchestration-containment'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   assertPayloadKindNotCallerSet,
@@ -538,6 +539,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_FEDERATION_METHODS,
   ...ORCHESTRATION_SENT_METHODS,
   ...ORCHESTRATION_THREAD_METHODS,
+  ...ORCHESTRATION_CONTAINMENT_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,

@@ -6,11 +6,16 @@
 // `dispatch_id` is `'peer:' + threadId` (s10-2-spec.md:120) — passed in by the db.ts wrapper
 // rather than imported here, to avoid a require cycle with db.ts. Kept out of db.ts per that
 // file's ratchet rule (same precedent as thread-directory.ts/message-purge.ts).
+import { createHash } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import { insertGatedMessage, type InsertGatedMessageParams } from './message-gate-writer'
 import type { GateVerdict } from '../../../shared/message-body-gate'
 import type { MessageRow, QuestionRow } from './types'
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
 
 type CommonGateOptions = Pick<
   InsertGatedMessageParams,
@@ -124,7 +129,18 @@ export function answerPeerQuestion(
     return { outcome: 'closed' }
   }
   if (question.status === 'answered') {
-    if (question.answer_body !== params.body || !question.answer_message_id) {
+    // T7 / PURGE § ruling 10: mirrors db.ts's dispatch-generation answerQuestion — a purged
+    // answer blanks answer_body to '' and stores answer_body_sha256 first, so an at-least-once
+    // retry of the ORIGINAL body still dedups to `duplicate:true` instead of answer_conflict.
+    const purgedMatch =
+      question.answer_purged_at != null && question.answer_body_sha256 === sha256Hex(params.body)
+    if (!purgedMatch && question.answer_body !== params.body) {
+      throw new OrchestrationError(
+        'answer_conflict',
+        `Question ${params.messageId} already has a different answer.`
+      )
+    }
+    if (!question.answer_message_id) {
       throw new OrchestrationError(
         'answer_conflict',
         `Question ${params.messageId} already has a different answer.`

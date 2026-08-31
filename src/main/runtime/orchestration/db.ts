@@ -4550,7 +4550,21 @@ export class OrchestrationDb {
         )
       }
       if (question.status === 'answered') {
-        if (question.answer_body !== params.body || !question.answer_message_id) {
+        // T7 / PURGE § ruling 10: a purged answer blanks answer_body to '' and stores
+        // answer_body_sha256 first — an ordinary at-least-once retry of the ORIGINAL body must
+        // still dedup to `duplicate:true`, not throw answer_conflict just because the live
+        // column no longer holds the text to compare against.
+        const purgedMatch =
+          question.answer_purged_at != null &&
+          question.answer_body_sha256 ===
+            createHash('sha256').update(params.body, 'utf8').digest('hex')
+        if (!purgedMatch && question.answer_body !== params.body) {
+          throw new OrchestrationError(
+            'answer_conflict',
+            `Question ${params.messageId} already has a different answer.`
+          )
+        }
+        if (!question.answer_message_id) {
           throw new OrchestrationError(
             'answer_conflict',
             `Question ${params.messageId} already has a different answer.`

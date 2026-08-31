@@ -23,7 +23,7 @@ type GateActor = {
 
 type GateReasonResult =
   | { ok: true; sanitizedReason: string }
-  | { ok: false; verdict: GateVerdict; refusalId: number }
+  | { ok: false; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
 
 function gateReason(
   db: Database.Database,
@@ -126,7 +126,7 @@ export type PurgeMessageParams = {
 export type PurgeMessageResult =
   | { outcome: 'purged'; message: MessageRow; alreadyPurged: false }
   | { outcome: 'already_purged'; message: MessageRow; alreadyPurged: true }
-  | { outcome: 'refused'; verdict: GateVerdict; refusalId: number }
+  | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
   | { outcome: 'not_found' }
 
 export function purgeMessage(
@@ -196,7 +196,7 @@ export type PurgeThreadParams = {
 
 export type PurgeThreadResult =
   | { outcome: 'purged'; purgedCount: number }
-  | { outcome: 'refused'; verdict: GateVerdict; refusalId: number }
+  | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
 
 // Gates the reason ONCE before touching any row (same "gate before expansion" discipline as a
 // sensitive-thread broadcast) rather than once per message.

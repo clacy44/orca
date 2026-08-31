@@ -121,7 +121,12 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'body_gate_refused',
   'not_a_participant',
   'not_the_addressee',
-  'dispatch_never_federated'
+  'dispatch_never_federated',
+  // Pre-existing gaps also caught by this series' containment RPC tests: `not_found` and
+  // `forbidden` are the quarantine/purge/review authority codes (orchestration-agents-
+  // quarantine.ts predates S10-2b; orchestration-containment.ts is new).
+  'not_found',
+  'forbidden'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {
