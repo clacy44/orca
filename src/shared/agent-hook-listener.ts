@@ -101,6 +101,17 @@ const MAX_WARNED_KEYS = 32
 /** Slowloris cap: drop requests that have not finished sending after 5 s. */
 export const HOOK_REQUEST_SLOWLORIS_MS = 5_000
 
+// Why: S10-5 stale-attestation recovery — the CLI POSTs here (same loopback host+
+// X-Orca-Agent-Hook-Token channel as every other hook event) to re-establish this pane's
+// current-runtime authority observation after a restart rotates it out of memory, without
+// waiting on the next incidental agent lifecycle hook to do it implicitly.
+export const AGENT_HOOK_REATTEST_PATHNAME = '/reattest'
+
+// Why: bound the reattest body fields to the same shapes their real-path counterparts enforce
+// (pane key length via MAX_PANE_KEY_LEN elsewhere, launch token length via the pty spawn cap).
+export const AGENT_HOOK_REATTEST_TERMINAL_HANDLE_MAX_LEN = 256
+export const AGENT_HOOK_REATTEST_LAUNCH_TOKEN_MAX_LEN = 128
+
 /** Why: old OpenCode plugin builds re-post the full accumulated reply on every streamed part (O(n²) bytes/turn); cap at ingest to bound per-event cost. */
 export const OPENCODE_HOOK_TEXT_MAX_CHARS = 8_000
 
