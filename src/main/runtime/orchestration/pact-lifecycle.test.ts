@@ -155,6 +155,65 @@ describe('pact pause/resume/release', () => {
     expect(thread?.pact_paused_at).not.toBeNull()
   })
 
+  it('major fix: a quarantined participant cannot lift its own counterpart_quarantined auto-pause', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = engagedPact(d, a, b)
+    d.setAgentQuarantine({ id: b, quarantined: true, reasonCode: 'test' })
+    d.autoPausePactsForAgent(b, 'counterpart_quarantined')
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+    // B (still quarantined) tries to lift its own containment auto-pause unilaterally.
+    expect(() => d.resumePactOrRequest({ ...actor(b), threadId })).toThrow(
+      /condition has not cleared/
+    )
+    // A (the counterpart) cannot lift it either, while B is still quarantined.
+    expect(() => d.resumePactOrRequest({ ...actor(a), threadId })).toThrow(
+      /condition has not cleared/
+    )
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+    // Once the quarantine is actually lifted, either side may resume.
+    d.setAgentQuarantine({ id: b, quarantined: false, reasonCode: null })
+    const outcome = d.resumePactOrRequest({ ...actor(a), threadId })
+    expect(outcome.kind).toBe('resumed')
+    expect(d.getThread(threadId)?.pact_paused_at).toBeNull()
+  })
+
+  it('major fix: a quarantined participant may not step, even off-turn checks aside', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = engagedPact(d, a, b) // a holds the turn
+    d.setAgentQuarantine({ id: a, quarantined: true, reasonCode: 'test' })
+    expect(() =>
+      d.appendPactStep({ ...actor(a), threadId, done: 'x', runId: 'run_peer_local' })
+    ).toThrow(/quarantined and a quarantined participant may not step/)
+    expect(d.getThread(threadId)?.pact_ordinal).toBe(0)
+  })
+
+  it('major fix: resume for counterpart_left is refused until the leaver rejoins the thread', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = engagedPact(d, a, b)
+    d.leaveThread(threadId, b)
+    const outcome = d.autoPausePactOnThread(threadId, 'counterpart_left')
+    expect(outcome).not.toBeNull()
+
+    // A resuming unilaterally while B is still gone from the thread is refused — this is the
+    // probe Q2 shape: A must not be able to resume, step, and hand the turn to an unreachable B.
+    expect(() => d.resumePactOrRequest({ ...actor(a), threadId })).toThrow(
+      /condition has not cleared/
+    )
+
+    // Once B rejoins (left_at cleared), the condition has cleared and either side may resume.
+    d.upsertThreadParticipant({ threadId, participantKey: b, agentId: b })
+    const resumed = d.resumePactOrRequest({ ...actor(a), threadId })
+    expect(resumed.kind).toBe('resumed')
+  })
+
   it('K17: a thread close auto-pauses with thread_closed, and resume is refused forever (release only)', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')

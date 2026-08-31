@@ -33854,18 +33854,34 @@ export class OrcaRuntimeService {
   // so notifyMessageArrived (message-insert driven) never fires for them. threadId null wakes
   // every for:'pact'|'step' waiter of this agent on any thread (the turn_arrived case); a
   // specific threadId wakes only the waiter parked on that thread.
+  //
+  // detailThreadId (K19 blocker fix, S10-3b review): `threadId` is MATCH-SCOPE only — null means
+  // "any thread" (turn_arrived) and is never itself a real thread id. Before this fix it was
+  // also reused verbatim as the resolved detail's `threadId`, so a turn_arrived wake returned
+  // `threadId: null` to the caller even though a real acting thread exists — orchestration-wait.ts
+  // forwarded that null, and agents-threads.ts's headline then fell back to the PARKED thread
+  // (its own ternary default), printing "pact turn_arrived on thread <wrong thread>." directly
+  // above a `Next:` line naming the right one. `detailThreadId` is the separate, real thread this
+  // outcome is actually about; it defaults to `threadId` so every specific-thread call
+  // (wakePactThread's accept/decline/release/paused) is unaffected — only wakeTurnArrived, which
+  // matches with `threadId: null` but always has a real acting thread, needs to pass it.
   resolvePactWaiters(
     agentId: string,
     threadId: string | null,
     outcome: string,
-    nextSteps: string[]
+    nextSteps: string[],
+    detailThreadId?: string | null
   ): void {
     const handle = pactWaiterHandleForAgent(agentId)
     const waiters = this.messageWaitersByHandle.get(handle)
     if (!waiters) {
       return
     }
-    const detail: PactWaitDetail = { outcome, threadId, nextSteps }
+    const detail: PactWaitDetail = {
+      outcome,
+      threadId: detailThreadId !== undefined ? detailThreadId : threadId,
+      nextSteps
+    }
     for (const waiter of [...waiters]) {
       if (waiterMatchesPactResolution(waiter, threadId)) {
         this.resolveMessageWaiter(waiter, 'resolved', detail)

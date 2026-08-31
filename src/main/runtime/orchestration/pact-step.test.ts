@@ -134,6 +134,49 @@ describe('pact step', () => {
     ).toThrow(/UNIQUE constraint/)
   })
 
+  it('blocker fix: a step that fails idx_pact_step_ordinal leaves no orphaned message — the gated insert and the ledger append are one transaction', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = engagedPact(d, a, b) // turn starts with a; this pact's era is 1
+    const raw = (
+      d as unknown as {
+        db: {
+          prepare: (s: string) => {
+            run: (...args: unknown[]) => unknown
+            get: (...a: unknown[]) => unknown
+          }
+        }
+      }
+    ).db
+    // Force the collision appendPactStep is about to hit: era 1, ordinal 1 already taken.
+    raw
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, pact_era, ordinal, kind, actor_agent_id, summary_sha256) VALUES (?, 1, 1, 'step', ?, '')`
+      )
+      .run(threadId, b)
+
+    expect(() =>
+      d.appendPactStep({
+        ...actor(a),
+        threadId,
+        done: 'should not survive',
+        runId: 'run_peer_local'
+      })
+    ).toThrow(/UNIQUE constraint/)
+
+    // Nothing else from the failed attempt survived: no orphaned message, turn/ordinal untouched.
+    const messageCountRow = raw
+      .prepare(
+        `SELECT COUNT(*) AS n FROM messages WHERE thread_id = ? AND payload_kind = 'pact_step'`
+      )
+      .get(threadId) as { n: number }
+    expect(messageCountRow.n).toBe(0)
+    const thread = d.getThread(threadId)
+    expect(thread?.pact_ordinal).toBe(0)
+    expect(thread?.pact_turn_agent_id).toBe(a)
+  })
+
   it('K3: a HARD-gated --done stores no message, appends no ledger row, leaves the turn where it was', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')

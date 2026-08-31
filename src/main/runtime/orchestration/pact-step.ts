@@ -13,6 +13,7 @@ import {
   insertPactStepRow,
   otherPactParticipant,
   pactWaiterHandle,
+  requireCallerNotQuarantined,
   requireEngaged,
   requirePactParticipant,
   requirePaused,
@@ -48,9 +49,10 @@ export type AppendPactStepResult =
     }
   | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
 
-// Refused not_your_turn (K1) / pact_paused (K16, F4) BEFORE the gate ever runs — an off-turn or
-// paused caller's text is never even evaluated, let alone stored (containment's "same choke, no
-// side door" is about the store path, not an excuse to gate text nobody was allowed to send).
+// Refused not_your_turn (K1) / pact_paused (K16, F4) / agent_quarantined (AUTHORITY §) BEFORE
+// the gate ever runs — an off-turn, paused or quarantined caller's text is never even evaluated,
+// let alone stored (containment's "same choke, no side door" is about the store path, not an
+// excuse to gate text nobody was allowed to send).
 export function appendPactStep(
   db: Database.Database,
   params: AppendPactStepParams
@@ -59,6 +61,7 @@ export function appendPactStep(
   requirePactParticipant(thread, params.callerAgentId)
   requireEngaged(thread)
   requirePaused(thread)
+  requireCallerNotQuarantined(db, params.callerAgentId, thread.id)
   if (thread.pact_turn_agent_id !== params.callerAgentId) {
     throw new OrchestrationError(
       'not_your_turn',
@@ -67,37 +70,44 @@ export function appendPactStep(
     )
   }
   const other = otherPactParticipant(thread, params.callerAgentId)
-
-  // K3: a HARD-gated --done stores no message, appends no ledger row, leaves the turn where it
-  // was — insertGatedMessage's own refusal path writes its gate_refusals audit row (GATE §) and
-  // returns rather than throwing; nothing below this point has run yet, so there's nothing to
-  // roll back (same precedent as peer-question.ts's createPeerQuestion).
-  const inserted = insertGatedMessage(db, {
-    from: pactWaiterHandle(params.callerAgentId),
-    to: pactWaiterHandle(other),
-    subject: 'pact step',
-    body: params.done,
-    type: 'status',
-    threadId: thread.id,
-    hostPayloadKind: 'pact_step',
-    runId: params.runId,
-    senderPaneKey: params.senderPaneKey ?? params.callerPaneKey,
-    senderHostId: params.callerHostId,
-    acknowledgeGate: params.acknowledgeGate,
-    infraAllowlist: params.infraAllowlist,
-    verb: 'step'
-  })
-  if (inserted.outcome === 'refused') {
-    return { outcome: 'refused', verdict: inserted.verdict, refusalId: inserted.refusalId }
-  }
-
   const nextOrdinal = thread.pact_ordinal + 1
   const summary = sanitizeMessageText(params.done, PACT_STEP_SUMMARY_MAX_LENGTH).value
 
-  // P1: the ledger append and the turn flip commit atomically in one BEGIN IMMEDIATE — K2's
-  // partial unique index (idx_pact_step_ordinal) is the backstop, not the primary guarantee.
+  // P1 (blocker fix, S10-3b review): the gated message insert, the ledger append and the turn
+  // flip commit atomically in ONE BEGIN IMMEDIATE, per spec RPCS § ("One transaction:
+  // insertGatedMessage -> pact_steps append -> UPDATE threads"). The prior split — the message
+  // insert committed on its own before this transaction opened — let a step that failed here
+  // (idx_pact_step_ordinal, or any other mid-transaction error) leave an orphaned, already-
+  // committed pact_step message with no ledger row and no turn flip: a step the counterpart's
+  // pane and `wait --for step` could observe that the ledger, the third-party check this whole
+  // spec exists for, never recorded. K3's HARD-gate refusal is still not a rollback case —
+  // insertGatedMessage returns 'refused' as a normal value (its own gate_refusals row is the
+  // audit trail) rather than throwing, so that branch below still commits just that row and
+  // returns, never touching the ledger or the turn.
   db.exec('BEGIN IMMEDIATE')
   try {
+    const inserted = insertGatedMessage(db, {
+      from: pactWaiterHandle(params.callerAgentId),
+      to: pactWaiterHandle(other),
+      subject: 'pact step',
+      body: params.done,
+      type: 'status',
+      threadId: thread.id,
+      hostPayloadKind: 'pact_step',
+      runId: params.runId,
+      senderPaneKey: params.senderPaneKey ?? params.callerPaneKey,
+      senderHostId: params.callerHostId,
+      acknowledgeGate: params.acknowledgeGate,
+      infraAllowlist: params.infraAllowlist,
+      verb: 'step'
+    })
+    if (inserted.outcome === 'refused') {
+      // K3: no message, no ledger row, no turn flip — only the gate_refusals audit row inserted
+      // above. Commit it (it must survive) and stop; nothing else in this transaction was written.
+      db.exec('COMMIT')
+      return { outcome: 'refused', verdict: inserted.verdict, refusalId: inserted.refusalId }
+    }
+
     db.prepare(`UPDATE threads SET pact_ordinal = ?, pact_turn_agent_id = ? WHERE id = ?`).run(
       nextOrdinal,
       other,
@@ -124,20 +134,20 @@ export function appendPactStep(
       outcome: 'stepped'
     })
     db.exec('COMMIT')
+    const updated = requireThread(db, thread.id)
+    return {
+      outcome: 'stepped',
+      thread: updated,
+      ordinal: nextOrdinal,
+      of: updated.pact_steps_total,
+      turn: other,
+      message: inserted.message,
+      gateFlags: inserted.message.gate_flags
+        ? (JSON.parse(inserted.message.gate_flags) as string[])
+        : null
+    }
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
-  }
-  const updated = requireThread(db, thread.id)
-  return {
-    outcome: 'stepped',
-    thread: updated,
-    ordinal: nextOrdinal,
-    of: updated.pact_steps_total,
-    turn: other,
-    message: inserted.message,
-    gateFlags: inserted.message.gate_flags
-      ? (JSON.parse(inserted.message.gate_flags) as string[])
-      : null
   }
 }

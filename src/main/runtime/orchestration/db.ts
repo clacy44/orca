@@ -569,6 +569,12 @@ const THREAD_DIRECTORY_SCHEMA_SQL = `
         pact_proposer_agent_id TEXT,
         pact_steps_total INTEGER,                 -- NULL = --open
         pact_ordinal INTEGER NOT NULL DEFAULT 0,   -- last committed step; reset to 0 on re-propose
+        -- pact_era (blocker fix, S10-3b review): bumped on every propose. pact_steps.ordinal
+        -- resets to 0 on re-propose but the ledger is append-only (ruling 2), so a released
+        -- pact's era-1 step rows are never removed; idx_pact_step_ordinal below is keyed on
+        -- (thread_id, pact_era, ordinal), never (thread_id, ordinal) alone, or a re-propose's
+        -- ordinal 1 collides with the still-present era-1 ordinal 1 row.
+        pact_era INTEGER NOT NULL DEFAULT 0,
         pact_paused_at TEXT,
         pact_pause_reason TEXT                     -- enum code ONLY, never free text (CONTAINMENT)
           CHECK(pact_pause_reason IS NULL OR pact_pause_reason IN
@@ -589,6 +595,10 @@ const THREAD_DIRECTORY_SCHEMA_SQL = `
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         thread_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL,                  -- 0 for non-step kinds; 1..n for step
+        -- pact_era (blocker fix): the thread's pact_era at write time — every row this era was
+        -- written under, stamped by insertPactStepRow from threads.pact_era. Not part of any
+        -- CHECK; only idx_pact_step_ordinal below reads it.
+        pact_era INTEGER NOT NULL DEFAULT 0,
         kind TEXT NOT NULL CHECK(kind IN ('propose','accept','decline','step',
                                           'pause','resume_request','resume','release')),
         -- no who-paused column: the pausing side is the latest 'pause' row's actor_agent_id
@@ -606,8 +616,12 @@ const THREAD_DIRECTORY_SCHEMA_SQL = `
         -- table-level CHECK must trail every column def (SQLite grammar) — see F6.
         CHECK(actor_agent_id IS NOT NULL OR kind IN ('pause','resume'))
       );
+      -- (thread_id, pact_era, ordinal), not (thread_id, ordinal) alone (blocker fix): a
+      -- re-propose after release starts a new era at ordinal 1 while the released era's own
+      -- ordinal-1 step row is still in this append-only table (ruling 2) — without the era
+      -- column the two collide and every step after a re-propose throws a raw UNIQUE violation.
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pact_step_ordinal
-        ON pact_steps(thread_id, ordinal) WHERE kind = 'step';
+        ON pact_steps(thread_id, pact_era, ordinal) WHERE kind = 'step';
       CREATE INDEX IF NOT EXISTS idx_pact_steps_thread ON pact_steps(thread_id, seq);
 
       CREATE TRIGGER IF NOT EXISTS trg_pact_steps_no_delete
@@ -1634,6 +1648,7 @@ export class OrchestrationDb {
           ['pact_proposer_agent_id', 'TEXT'],
           ['pact_steps_total', 'INTEGER'],
           ['pact_ordinal', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_era', 'INTEGER NOT NULL DEFAULT 0'],
           ['pact_paused_at', 'TEXT'],
           [
             'pact_pause_reason',
@@ -1644,6 +1659,19 @@ export class OrchestrationDb {
           if (!this.hasColumn('threads', column)) {
             this.db.exec(`ALTER TABLE threads ADD COLUMN ${column} ${ddl}`)
           }
+        }
+        // Blocker fix (S10-3b review): pact_steps itself was already created above via
+        // THREAD_DIRECTORY_SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS`, which is a no-op against a
+        // DB that already ran an earlier (pre-fix) copy of this same unshipped v35 — such a DB's
+        // pact_steps lacks pact_era and idx_pact_step_ordinal still lacks the era column, so
+        // "IF NOT EXISTS" alone would leave the ordinal-collision bug in place. Patch both.
+        if (!this.hasColumn('pact_steps', 'pact_era')) {
+          this.db.exec(`ALTER TABLE pact_steps ADD COLUMN pact_era INTEGER NOT NULL DEFAULT 0`)
+          this.db.exec(`DROP INDEX IF EXISTS idx_pact_step_ordinal`)
+          this.db.exec(
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_pact_step_ordinal
+               ON pact_steps(thread_id, pact_era, ordinal) WHERE kind = 'step'`
+          )
         }
         this.createPactSchemaIndexesIfPossible()
       }

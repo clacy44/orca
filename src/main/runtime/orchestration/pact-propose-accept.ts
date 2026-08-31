@@ -26,17 +26,20 @@ export type ProposePactParams = PactActorContext & {
 export function proposePact(db: Database.Database, params: ProposePactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
   requireThreadParticipant(db, thread.id, params.callerAgentId)
-  const peer = requireAccountablePeer(db, params.peerAgentId)
+  const peer = requireAccountablePeer(db, params.callerAgentId, params.peerAgentId)
   requireSensitiveMembership(db, thread, peer.id, peer.display_name)
   requireUnclaimedPact(thread)
   requireNoEngagedPactWithPeer(db, params.callerAgentId, peer.id, peer.display_name)
 
   db.exec('BEGIN IMMEDIATE')
   try {
+    // pact_era + 1 (blocker fix): a fresh era per propose, so idx_pact_step_ordinal's
+    // (thread_id, pact_era, ordinal) never collides with a prior, released era's step rows —
+    // the ledger keeps them (ruling 2), so pact_ordinal resetting to 0 alone is not enough.
     db.prepare(
       `UPDATE threads SET
          pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',
-         pact_steps_total = ?, pact_ordinal = 0, pact_turn_agent_id = NULL,
+         pact_steps_total = ?, pact_ordinal = 0, pact_era = pact_era + 1, pact_turn_agent_id = NULL,
          pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now')
        WHERE id = ?`
     ).run(params.callerAgentId, peer.id, params.stepsTotal, thread.id)

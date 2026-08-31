@@ -34,7 +34,10 @@ export function wakePactThreadBoth(
 }
 
 /** Turn-transfer wake (A4): `threadId: null` matches a resolvable waiter of `agentId` parked on
- * ANY thread — accept/step/resume all call this for the agent the turn just moved to. */
+ * ANY thread — accept/step/resume all call this for the agent the turn just moved to.
+ * `arrivedOnThreadId` is passed as the separate detailThreadId (K19 blocker fix) so the resolved
+ * wake's own `threadId` names the thread the turn actually arrived on, not null — the match
+ * scope (any thread) and the reported acting thread are different things. */
 export function wakeTurnArrived(
   runtime: OrcaRuntimeService,
   agentId: string | null,
@@ -43,7 +46,11 @@ export function wakeTurnArrived(
   if (!agentId) {
     return
   }
-  runtime.resolvePactWaiters(agentId, null, 'turn_arrived', [
-    `orca agents step --thread ${arrivedOnThreadId} --done "…"`
-  ])
+  runtime.resolvePactWaiters(
+    agentId,
+    null,
+    'turn_arrived',
+    [`orca agents step --thread ${arrivedOnThreadId} --done "…"`],
+    arrivedOnThreadId
+  )
 }

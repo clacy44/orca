@@ -118,8 +118,12 @@ function handleDecline(
   reasonCode: string | null
 ): unknown {
   const thread = db.declinePact({ ...actor, threadId, reasonCode })
-  wakePactThread(runtime, thread.pact_proposer_agent_id, threadId, 'declined', [])
-  return { thread, nextSteps: [] }
+  // Major fix (S10-3b review, K22): every non-message outcome must carry nextSteps — an empty
+  // array left the woken proposer's `wait --for pact` print a bare "pact declined." with no
+  // `Next:` line (agents-threads.ts's formatWait only prints one when nextSteps is non-empty).
+  const nextSteps = [`orca agents pact --show ${threadId}`]
+  wakePactThread(runtime, thread.pact_proposer_agent_id, threadId, 'declined', nextSteps)
+  return { thread, nextSteps }
 }
 
 function handlePause(
@@ -178,9 +182,12 @@ function handleRelease(
     before?.pact_proposer_agent_id === actor.callerAgentId
       ? before?.pact_with_agent_id
       : before?.pact_proposer_agent_id
+  // Major fix (S10-3b review, K22): every non-message outcome must carry nextSteps (same as
+  // handleDecline above) — a released pact's woken waiter otherwise prints a bare dead end.
+  const nextSteps = [`orca agents pact --show ${threadId}`]
   // Release wakes a parked proposer AND a `--for reply` park on this thread — resolvePactWaiters
   // resolves every for:'pact'|'step'|'reply' waiter of this agent registered on `threadId`
   // uniformly (message-waiter-thread-keying.ts), so one call covers all three.
-  wakePactThread(runtime, other ?? null, threadId, 'released', [])
-  return { thread, nextSteps: [] }
+  wakePactThread(runtime, other ?? null, threadId, 'released', nextSteps)
+  return { thread, nextSteps }
 }

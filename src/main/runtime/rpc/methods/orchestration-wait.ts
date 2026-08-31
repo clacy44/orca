@@ -147,10 +147,9 @@ async function handlePactOrStepWait(
   })
 
   if (result === 'resolved' && detail) {
-    // detail.threadId is null for a turn_arrived wake (A4: the resolvePactWaiters call that
-    // reaches a waiter parked on a DIFFERENT thread than the one whose turn just transferred
-    // scopes its match with threadId=null by design) — the acting thread is named in nextSteps
-    // instead, not in this field.
+    // K19 blocker fix: detail.threadId now names the real acting thread even for a turn_arrived
+    // wake (resolvePactWaiters's match scope for that case is threadId=null — "any thread of
+    // this agent" — but its separate detailThreadId carries the real thread through to here).
     return {
       outcome: detail.outcome,
       threadId: detail.threadId,

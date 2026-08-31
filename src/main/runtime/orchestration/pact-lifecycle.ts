@@ -53,6 +53,48 @@ export function pausePact(db: Database.Database, params: PausePactParams): Threa
   return requireThread(db, thread.id)
 }
 
+// Major fix (S10-3b review): AUTHORITY § — "either participant [may resume] when the pause row
+// is a host row (actor_agent_id IS NULL) AND its condition has cleared." Only host-row reasons
+// (autoPauseOneThread's three liveness reasons; thread_closed/thread_paused are refused earlier
+// as NEVER_RESUMABLE) reach this check. Checked against BOTH participants, not just the one who
+// triggered the pause — the host row never records which side that was, and requiring the whole
+// pair to be clear is what stops the quarantined/gone/left side from lifting its own pause: if
+// it is still quarantined/gone/left, the condition has not cleared, no matter who calls resume.
+function pauseConditionCleared(db: Database.Database, thread: ThreadRow): boolean {
+  const proposer = thread.pact_proposer_agent_id
+  const withAgent = thread.pact_with_agent_id
+  if (!proposer || !withAgent) {
+    return false
+  }
+  const reason = thread.pact_pause_reason
+  if (reason === 'counterpart_quarantined') {
+    const row = db
+      .prepare(
+        `SELECT 1 FROM agents WHERE id IN (?, ?) AND quarantined = 1 AND tombstoned_at IS NULL`
+      )
+      .get(proposer, withAgent)
+    return !row
+  }
+  if (reason === 'counterpart_gone') {
+    const row = db
+      .prepare(`SELECT 1 FROM agents WHERE id IN (?, ?) AND state = 'gone'`)
+      .get(proposer, withAgent)
+    return !row
+  }
+  if (reason === 'counterpart_left') {
+    const activeCount = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM thread_participants
+         WHERE thread_id = ? AND participant_key IN (?, ?) AND left_at IS NULL`
+      )
+      .get(thread.id, proposer, withAgent) as { n: number }
+    return activeCount.n === 2
+  }
+  // thread_closed/thread_paused never reach here (refused earlier); an unexpected/'operator'/null
+  // reason on a host row has no clearable condition to check — never auto-resumable.
+  return false
+}
+
 function latestPausingAgentId(db: Database.Database, threadId: string): string | null {
   const row = db
     .prepare(
@@ -103,6 +145,18 @@ export function resumePactOrRequest(
   if (pausingAgentId !== null && pausingAgentId !== params.callerAgentId) {
     const updated = requestPactResume(db, params)
     return { kind: 'requested', thread: updated, pausingAgentId }
+  }
+  // Major fix (S10-3b review): pausingAgentId === null is a HOST row (auto-pause), not "anyone
+  // may resume unconditionally" — AUTHORITY § grants either participant that authority only
+  // once the pause's own condition has cleared. Without this check a quarantined/gone/left
+  // participant lifts its own containment auto-pause and keeps driving the pact.
+  if (pausingAgentId === null && !pauseConditionCleared(db, thread)) {
+    throw new OrchestrationError(
+      'pact_paused',
+      `Refused: this pact is paused (${thread.pact_pause_reason}) and the condition has not ` +
+        `cleared yet. Release it: orca agents pact --release --on ${thread.id}.`,
+      { nextSteps: [`orca agents pact --release --on ${thread.id}`] }
+    )
   }
   return { kind: 'resumed', thread: resumePact(db, params) }
 }

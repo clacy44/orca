@@ -151,6 +151,51 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
     expect(stepEntry?.summary).toBe('first step done')
   })
 
+  it('blocker fix (RPC): propose -> accept -> step -> release -> re-propose -> accept -> step succeeds end to end', async () => {
+    setup()
+    await registerAgent('agent-a', evidenceA)
+    const b = await registerAgent('agent-b', evidenceB)
+    const threadId = await threadWith(evidenceA, [b])
+
+    await call(
+      'orchestration.threads.pact',
+      { id: threadId, with: `agent:${b}`, open: true },
+      ctx(evidenceA)
+    )
+    await call('orchestration.threads.pact', { id: threadId, accept: true }, ctx(evidenceB))
+    await call('orchestration.threads.step', { threadId, done: 'era 1 step' }, ctx(evidenceA))
+    await call(
+      'orchestration.threads.pact',
+      { id: threadId, release: true, reasonCode: 'done' },
+      ctx(evidenceA)
+    )
+
+    await call(
+      'orchestration.threads.pact',
+      { id: threadId, with: `agent:${b}`, open: true },
+      ctx(evidenceA)
+    )
+    await call('orchestration.threads.pact', { id: threadId, accept: true }, ctx(evidenceB))
+    // Previously threw a raw ERR_SQLITE_ERROR (UNIQUE constraint on idx_pact_step_ordinal), not
+    // an OrchestrationError, leaving A holding the turn forever and B's wait host-wide-refused.
+    const stepped = (await call(
+      'orchestration.threads.step',
+      { threadId, done: 'era 2 step' },
+      ctx(evidenceA)
+    )) as { ordinal: number; turn: string }
+    expect(stepped.ordinal).toBe(1)
+    expect(stepped.turn).toBe(b)
+
+    // The lock-step turn genuinely advanced (not left stuck on A forever, as the collision bug
+    // caused): B now legitimately holds the turn host-wide.
+    const bWaited = (await call(
+      'orchestration.wait',
+      { threadId, for: 'message' },
+      ctx(evidenceB)
+    )) as { outcome: string }
+    expect(bWaited.outcome).toBe('your_turn')
+  })
+
   it('K9 (RPC): a thread participant outside the pact sees the skeleton but no summaries', async () => {
     setup()
     await registerAgent('agent-a', evidenceA)
@@ -217,9 +262,17 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
     // A steps on thr1, handing the turn to B — B's thr2 park must wake with turn_arrived.
     await call('orchestration.threads.step', { threadId: thr1, done: 'a steps' }, ctx(evidenceA))
 
-    const bWaited = (await bWaitPromise) as { outcome: string; nextSteps: string[] }
+    const bWaited = (await bWaitPromise) as {
+      outcome: string
+      threadId: string | null
+      nextSteps: string[]
+    }
     expect(bWaited.outcome).toBe('turn_arrived')
     expect(bWaited.nextSteps.some((s) => s.includes(thr1))).toBe(true)
+    // Blocker-adjacent fix (K19): the resolved wake's own `threadId` names the thread the turn
+    // actually arrived on (thr1) — not null (the old bug: a CLI headline built on this field
+    // fell back to the PARKED thread, thr2, and printed the wrong thread name).
+    expect(bWaited.threadId).toBe(thr1)
 
     // A's later wait on thr1 for the next step is not refused (still admitted, times out cleanly).
     const aWaited = (await call(
@@ -278,8 +331,11 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
       { id: thr2, decline: true, reasonCode: 'not_now' },
       ctx(evidenceC)
     )
-    const waited2 = (await waitPromise2) as { outcome: string }
+    const waited2 = (await waitPromise2) as { outcome: string; nextSteps: string[] }
     expect(waited2.outcome).toBe('declined')
+    // K22 (major fix): every non-message outcome carries nextSteps — a declined wake used to
+    // return [] and the CLI's formatWait would print a bare "pact declined." dead end.
+    expect(waited2.nextSteps.length).toBeGreaterThan(0)
   })
 
   it('K20/K11: release wakes a parked proposer too', async () => {
@@ -305,8 +361,10 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
       { id: thr1, release: true, reasonCode: 'done' },
       ctx(evidenceA)
     )
-    const waited = (await waitPromise) as { outcome: string }
+    const waited = (await waitPromise) as { outcome: string; nextSteps: string[] }
     expect(waited.outcome).toBe('released')
+    // K22 (major fix): a released wake used to return [] the same way declined did.
+    expect(waited.nextSteps.length).toBeGreaterThan(0)
   })
 
   it("K23: A->B, B->C, C->A proposed — each wait --for pact is refused answer_first; admitted after B accepts A's", async () => {

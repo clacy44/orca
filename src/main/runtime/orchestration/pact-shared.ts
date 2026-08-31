@@ -68,11 +68,28 @@ export function otherPactParticipant(thread: ThreadRow, agentId: string): string
     : (thread.pact_proposer_agent_id as string)
 }
 
-export function requireAccountablePeer(db: Database.Database, peerAgentId: string): AgentRow {
+export function requireAccountablePeer(
+  db: Database.Database,
+  callerAgentId: string,
+  peerAgentId: string
+): AgentRow {
   if (peerAgentId.includes('@')) {
     throw new OrchestrationError(
       'pact_not_federated',
       `Refused: pacts are host-local; ${peerAgentId} names a different host. Coordinate without a pact using orca agents ask.`,
+      { nextSteps: ['orca agents ask'] }
+    )
+  }
+  // Major fix (S10-3b review, RISK 3): a pact needs two accountable participants — a pact with
+  // yourself engages with turn = self, otherPactParticipant() returns self, and every `step`
+  // hands the turn right back, so getTurnsHeldBy(self) is permanently non-empty and K24's
+  // host-wide turn guard refuses this agent's every `wait` park, on every thread, forever.
+  // Refused before the lookup below so a typo'd `--with <own name>` cannot even resolve.
+  if (peerAgentId === callerAgentId) {
+    throw new OrchestrationError(
+      'pact_self',
+      'Refused: a pact needs two accountable participants — you cannot propose a pact with yourself. ' +
+        'Coordinate without a pact using orca agents ask.',
       { nextSteps: ['orca agents ask'] }
     )
   }
@@ -177,6 +194,31 @@ export function requireEngaged(thread: ThreadRow): void {
   }
 }
 
+// Major fix (S10-3b review): AUTHORITY § — "a quarantined participant may not step." Read at
+// step time (quarantine is a read-time filter, same discipline as CONTAINMENT's ledger
+// withholding) so a step made before a quarantine still stands but no new one lands after.
+export function requireCallerNotQuarantined(
+  db: Database.Database,
+  agentId: string,
+  threadId: string
+): void {
+  const agent = getAgentById(db, agentId)
+  if (agent?.quarantined === 1) {
+    throw new OrchestrationError(
+      'agent_quarantined',
+      `Refused: ${agent.display_name} is quarantined and a quarantined participant may not step. ` +
+        `Lift it (orca agents quarantine ${agent.display_name} --lift) or release the pact ` +
+        `(orca agents pact --release --on ${threadId}).`,
+      {
+        nextSteps: [
+          `orca agents quarantine ${agent.display_name} --lift`,
+          `orca agents pact --release --on ${threadId}`
+        ]
+      }
+    )
+  }
+}
+
 export function requirePaused(thread: ThreadRow): void {
   if (thread.pact_paused_at !== null) {
     throw new OrchestrationError(
@@ -206,14 +248,24 @@ export type InsertPactStepRowParams = {
   reasonCode: string | null
 }
 
+// pact_era (blocker fix, S10-3b review): stamped from threads.pact_era at write time, never
+// passed in by callers — every proposePact/acceptPact/appendPactStep/etc. call already runs
+// inside the row's own BEGIN IMMEDIATE after the era (re-)propose bump, so this read always
+// sees the era the row is actually being written under. idx_pact_step_ordinal keys on it so a
+// re-propose's ordinal 1 never collides with a still-present prior era's ordinal 1 (ruling 2:
+// the ledger is append-only, so the prior era's rows are never gone).
 export function insertPactStepRow(db: Database.Database, params: InsertPactStepRowParams): void {
+  const eraRow = db.prepare('SELECT pact_era FROM threads WHERE id = ?').get(params.threadId) as
+    | { pact_era: number }
+    | undefined
   db.prepare(
     `INSERT INTO pact_steps
-       (thread_id, ordinal, kind, actor_agent_id, actor_pane_key, actor_host_id,
+       (thread_id, pact_era, ordinal, kind, actor_agent_id, actor_pane_key, actor_host_id,
         message_id, summary, summary_sha256, turn_after_agent_id, reason_code)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.threadId,
+    eraRow?.pact_era ?? 0,
     params.ordinal,
     params.kind,
     params.actorAgentId,

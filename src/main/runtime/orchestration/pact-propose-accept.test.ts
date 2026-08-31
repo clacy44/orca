@@ -200,6 +200,50 @@ describe('pact propose/accept/decline', () => {
     expect(reproposed.pact_ordinal).toBe(0)
   })
 
+  it("blocker fix: re-propose after release is steppable again — era-2 ordinal 1 no longer collides with era-1's", () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = seedThreadWithParticipants(d, [a, b])
+    d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: null })
+    d.acceptPact({ ...actor(b), threadId })
+    d.appendPactStep({ ...actor(a), threadId, done: 'era 1 step', runId: 'run_peer_local' })
+    d.releasePact({ ...actor(a), threadId, reasonCode: 'done' })
+
+    d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: 3 })
+    d.acceptPact({ ...actor(b), threadId })
+    // Previously threw: "UNIQUE constraint failed: pact_steps.thread_id, pact_steps.ordinal" —
+    // era-2's ordinal 1 collided with era-1's still-present (append-only) ordinal-1 step row.
+    const stepped = d.appendPactStep({
+      ...actor(a),
+      threadId,
+      done: 'era 2 step',
+      runId: 'run_peer_local'
+    })
+    expect(stepped.outcome).toBe('stepped')
+    if (stepped.outcome !== 'stepped') {
+      throw new Error('unreachable')
+    }
+    expect(stepped.ordinal).toBe(1)
+    expect(d.getThread(threadId)?.pact_turn_agent_id).toBe(b)
+
+    // Both eras' step rows survive in the append-only ledger (ruling 2) — no ordinal was elided,
+    // and neither collided with the other.
+    const ledger = d.getPactLedger({ threadId, revealSummaries: true })
+    const stepSummaries = ledger.entries.filter((e) => e.kind === 'step').map((e) => e.summary)
+    expect(stepSummaries).toEqual(['era 1 step', 'era 2 step'])
+  })
+
+  it('major fix: propose refuses a pact with yourself (pact_self), before any write', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const threadId = seedThreadWithParticipants(d, [a])
+    expect(() =>
+      d.proposePact({ ...actor(a), threadId, peerAgentId: a, stepsTotal: null })
+    ).toThrow(/cannot propose a pact with yourself/)
+    expect(d.getThread(threadId)?.pact_state).toBeNull()
+  })
+
   it('pact_not_federated: a peer address naming a different host is refused before any write', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')
