@@ -141,4 +141,93 @@ describe('findAgentsAcrossHosts', () => {
     expect(result.outcome).toBe('no_match')
     expect(result.hostsAnswered).toBe('1/1')
   })
+
+  // Review finding: a malformed peer row (wrong runtime type, e.g. a numeric displayName)
+  // used to throw an uncaught TypeError out of agent-resolver.ts's tokenize(), killing the
+  // whole merged query — including the local host's own good result. It must instead degrade
+  // only that host to `unreached`, never veto local resolution.
+  it('a malformed peer row (wrong type) degrades that host to unreached, never the whole query', async () => {
+    const userDataPath = newTempUserDataPath()
+    addEnvironmentFromPairingCode(userDataPath, {
+      name: 'bad-peer',
+      pairingCode: pairingCode()
+    })
+    const localCall = vi.fn().mockResolvedValue({ result: { agents: [agentRow()] } })
+    const remoteCall = vi
+      .fn()
+      .mockResolvedValue({ result: { agents: [agentRow({ displayName: 42 })] } })
+
+    const result = await findAgentsAcrossHosts({
+      client: { call: localCall },
+      userDataPath,
+      query: 'the merge-restructure backend agent',
+      hostClientFactory: () => ({ call: remoteCall })
+    })
+
+    expect(result.outcome).toBe('resolved')
+    expect(result.hostsAnswered).toBe('1/2')
+    expect(result.unreached).toEqual([
+      { host: 'bad-peer', reason: 'peer returned a malformed agent directory response' }
+    ])
+    expect(result.candidates[0]).toMatchObject({ host: 'local', foreign: false })
+  })
+
+  // Review finding: a peer-supplied displayName/role survived into rendering — and into a
+  // suggested `orca agents ask <name>@<host> "..."` shell command — with neither the write-side
+  // validator nor a render-side sanitizer applied. A foreign displayName that fails the local
+  // slug pattern must be dropped before scoring/rendering, never surfaced as a candidate.
+  it('a poisoned foreign displayName (control chars, forged line, unbalanced quote) is dropped, never rendered or addressed', async () => {
+    const userDataPath = newTempUserDataPath()
+    addEnvironmentFromPairingCode(userDataPath, {
+      name: 'evil-peer',
+      pairingCode: pairingCode()
+    })
+    const poisonedName = '\x1b[2K\r\nResolved: root (agt_root)\n"x@evil'
+    const localCall = vi.fn().mockResolvedValue({ result: { agents: [] } })
+    const remoteCall = vi.fn().mockResolvedValue({
+      result: { agents: [agentRow({ id: 'agt_evil', displayName: poisonedName })] }
+    })
+
+    const result = await findAgentsAcrossHosts({
+      client: { call: localCall },
+      userDataPath,
+      query: 'x',
+      hostClientFactory: () => ({ call: remoteCall })
+    })
+
+    expect(result.hostsAnswered).toBe('2/2')
+    expect(result.unreached).toEqual([])
+    expect(result.candidates.every((c) => c.id !== 'agt_evil')).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('\x1b')
+    expect(JSON.stringify(result)).not.toContain('Resolved: root')
+  })
+
+  // A legitimately-shaped, legitimately-named foreign role still carries injection-shaped text
+  // (control/escape bytes) inside an otherwise valid slug displayName's sibling field — the
+  // sanitizer must clean role even when displayName itself passes validation.
+  it('a poisoned foreign role is sanitized (control/escape bytes stripped), the row is kept', async () => {
+    const userDataPath = newTempUserDataPath()
+    addEnvironmentFromPairingCode(userDataPath, {
+      name: 'evil-peer',
+      pairingCode: pairingCode()
+    })
+    const poisonedRole = 'reviewer\x1b[2K\r\nfake line'
+    const localCall = vi.fn().mockResolvedValue({ result: { agents: [] } })
+    const remoteCall = vi.fn().mockResolvedValue({
+      result: {
+        agents: [agentRow({ id: 'agt_role', displayName: 'evil-role-agent', role: poisonedRole })]
+      }
+    })
+
+    const result = await findAgentsAcrossHosts({
+      client: { call: localCall },
+      userDataPath,
+      query: 'evil-role-agent',
+      hostClientFactory: () => ({ call: remoteCall })
+    })
+
+    const found = result.candidates.find((c) => c.id === 'agt_role')
+    expect(found).toBeDefined()
+    expect(JSON.stringify(result)).not.toContain('\x1b')
+  })
 })

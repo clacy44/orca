@@ -257,6 +257,11 @@ export const electronViteConfig: UserConfig = {
           // resolver, so it must survive rebuilds.
           'runtime/orchestration/agent-resolver': resolve(
             'src/main/runtime/orchestration/agent-resolver.ts'
+          ),
+          // Why: same `--all-hosts` CLI path above also sanitizes/validates each foreign row
+          // (review fix) through this module before scoring/rendering it.
+          'runtime/orchestration/agent-name-sanitizer': resolve(
+            'src/main/runtime/orchestration/agent-name-sanitizer.ts'
           )
         },
         // Why: Rolldown's SSR default is ESM, but Electron and sidecar launchers

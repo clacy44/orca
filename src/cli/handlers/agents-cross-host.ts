@@ -5,10 +5,16 @@
 // row-capped) and re-scored together, once, by the same local resolver every host runs. Ruling
 // 11: `resolved` is allowed among ANSWERED hosts only - a silent peer never vetoes local
 // resolution, but it is always named in `unreached` with `hostsAnswered: n/m` alongside it.
+import { z } from 'zod'
 import {
   resolveAgentQuery,
   type AgentResolverCandidateInput
 } from '../../main/runtime/orchestration/agent-resolver'
+import {
+  sanitizeDirectoryText,
+  sanitizeRole,
+  validateDisplayNameCandidate
+} from '../../main/runtime/orchestration/agent-name-sanitizer'
 import { RuntimeClient } from '../runtime-client'
 import { listEnvironments } from '../runtime/environments'
 
@@ -64,16 +70,53 @@ type HostListing = {
 
 type ListCallClient = { call: RuntimeClient['call'] }
 
-type RawAgentListRow = {
-  id: string
-  displayName: string
-  role: string | null
-  title: string | null
-  worktreePath: string | null
-  branch: string | null
-  state: 'live' | 'idle' | 'gone'
-  derived: boolean
-  terminalHandle?: string | null
+// Runtime shape guard for the peer's `orchestration.agents.list` response (finding: a peer
+// row is compile-time typed as RawAgentListRow but never runtime-checked, so a malformed field
+// — e.g. a numeric displayName — reached agent-resolver.ts's `tokenize()` and threw
+// `TypeError: text.normalize is not a function` OUTSIDE any try/catch, killing the whole merged
+// query including the local host's own good result). A parse failure is caught below the same
+// way an RPC failure already is, so a malformed peer degrades to `unreached` with a reason
+// instead of vetoing local resolution.
+const RAW_AGENT_LIST_ROW_SCHEMA = z.object({
+  id: z.string().min(1),
+  displayName: z.string(),
+  role: z.string().nullable(),
+  title: z.string().nullable(),
+  worktreePath: z.string().nullable(),
+  branch: z.string().nullable(),
+  state: z.enum(['live', 'idle', 'gone']),
+  derived: z.boolean(),
+  terminalHandle: z.string().nullable().optional()
+})
+const RAW_AGENT_LIST_RESPONSE_SCHEMA = z.object({ agents: z.array(RAW_AGENT_LIST_ROW_SCHEMA) })
+
+type RawAgentListRow = z.infer<typeof RAW_AGENT_LIST_ROW_SCHEMA>
+
+// Foreign terminalHandle is never structurally bounded the way a local pane key is (no
+// `agent_links` table, no write-side validator this host controls) — a generous cap keeps
+// sanitizeDirectoryText's collapse/trim behavior meaningful without truncating a real handle.
+const FOREIGN_TERMINAL_HANDLE_MAX_LENGTH = 128
+
+// Trust boundary (finding: peer-supplied displayName/role/terminalHandle reached rendering —
+// and a suggested `orca agents ask <name>@<host> "..."` shell command — with neither the
+// write-side validator nor agent-name-sanitizer.ts's render-side sanitizer applied). Mirrors
+// formatter.ts's render-side pass but ALSO enforces the write-side displayName shape
+// (validateDisplayNameCandidate), because a foreign row never went through this host's own
+// register path at all — the render sanitizer alone assumes a shape a peer never guaranteed.
+// A displayName that fails validation is dropped rather than rendered: this host cannot safely
+// address or print an identity it cannot parse back into `name@host`.
+function sanitizeForeignRow(row: RawAgentListRow): RawAgentListRow | null {
+  if (!validateDisplayNameCandidate(row.displayName).ok) {
+    return null
+  }
+  return {
+    ...row,
+    role: sanitizeRole(row.role)?.value ?? null,
+    terminalHandle:
+      row.terminalHandle != null
+        ? sanitizeDirectoryText(row.terminalHandle, FOREIGN_TERMINAL_HANDLE_MAX_LENGTH).value
+        : (row.terminalHandle ?? null)
+  }
 }
 
 async function listHost(
@@ -84,24 +127,32 @@ async function listHost(
 ): Promise<HostListing> {
   try {
     const response = await withTimeout(
-      client.call<{ agents: RawAgentListRow[] }>('orchestration.agents.list', {
+      client.call<unknown>('orchestration.agents.list', {
         includeDerived: true,
         includeQuarantined: false,
         limit: CROSS_HOST_ROW_CAP
       }),
       timeoutMs
     )
-    const rows = response.result.agents.map((a) => ({
-      id: a.id,
-      displayName: a.displayName,
-      role: a.role,
-      title: a.title,
-      worktreePath: a.worktreePath,
-      branch: a.branch,
-      state: a.state,
-      derived: a.derived,
-      terminalHandle: a.terminalHandle ?? null
-    }))
+    const parsed = RAW_AGENT_LIST_RESPONSE_SCHEMA.parse(response.result)
+    const rows: RawRow[] = []
+    for (const raw of parsed.agents) {
+      const a = foreign ? sanitizeForeignRow(raw) : raw
+      if (!a) {
+        continue
+      }
+      rows.push({
+        id: a.id,
+        displayName: a.displayName,
+        role: a.role,
+        title: a.title,
+        worktreePath: a.worktreePath,
+        branch: a.branch,
+        state: a.state,
+        derived: a.derived,
+        terminalHandle: a.terminalHandle ?? null
+      })
+    }
     return { host, foreign, rows, ok: true, reason: null }
   } catch (error) {
     return { host, foreign, rows: [], ok: false, reason: describeFailure(error) }
@@ -133,6 +184,9 @@ function describeFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof ProbeTimeoutError) {
     return message
+  }
+  if (error instanceof z.ZodError) {
+    return 'peer returned a malformed agent directory response'
   }
   const code = errorCode(error)
   if (code && CAPABILITY_MISSING_ERROR_CODES.has(code)) {
