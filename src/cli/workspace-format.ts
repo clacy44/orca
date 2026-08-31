@@ -94,7 +94,7 @@ export function formatEnvironmentList(result: {
   return result.environments
     .map(
       (environment) =>
-        `${environment.id}  ${environment.name}  ${environment.endpoints[0]?.endpoint ?? 'no-endpoint'}`
+        `${environment.id}  ${environment.name}  ${environment.endpoints[0]?.endpoint ?? 'no-endpoint'}${environment.pairingState === 'stale_pairing' ? '  [stale pairing]' : ''}`
     )
     .join('\n')
 }
@@ -106,6 +106,13 @@ export function formatEnvironment(environment: PublicKnownRuntimeEnvironment): s
     `runtimeId: ${environment.runtimeId ?? 'unknown'}`,
     `lastUsedAt: ${environment.lastUsedAt ?? 'never'}`,
     `preferredEndpointId: ${environment.preferredEndpointId}`,
+    // S10-4 ruling 7: printed only when set — the peer rejected our pairing token on a recent
+    // call and no call has succeeded since.
+    ...(environment.pairingState === 'stale_pairing'
+      ? [
+          `pairingState: stale — run "orca environment rm --environment ${environment.name}" and re-add it with a fresh link, or "orca environment set-endpoint" if only the address changed`
+        ]
+      : []),
     ...environment.endpoints.map(
       (endpoint) => `endpoint: ${endpoint.id} ${endpoint.kind} ${endpoint.endpoint}`
     )

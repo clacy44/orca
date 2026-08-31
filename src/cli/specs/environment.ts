@@ -34,6 +34,20 @@ export const ENVIRONMENT_COMMAND_SPECS: CommandSpec[] = [
     examples: ['orca environment roster --json', 'orca environment roster --timeout-ms 3000']
   },
   {
+    path: ['environment', 'set-endpoint'],
+    summary: 'Override where a saved environment is reached (e.g. a tunnel address)',
+    usage: 'orca environment set-endpoint --environment <selector> --url <ws-or-wss-url> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'url'],
+    notes: [
+      'Refuses a scheme other than ws:// or wss://.',
+      'Probes the new address before saving it; an unreachable address is refused and nothing is written.',
+      'Leaves the pairing credentials (device token, public key) untouched — only the address changes.'
+    ],
+    examples: [
+      'orca environment set-endpoint --environment work-laptop --url wss://tunnel.example:8443'
+    ]
+  },
+  {
     path: ['environment', 'rm'],
     destructive: true,
     summary: 'Remove one saved Orca runtime environment',

@@ -427,12 +427,17 @@ describe('orchestration skill guidance', () => {
     expect(containment).toContain('orca agents invite --thread <t> --agent <name>')
 
     expect(skill).toContain('## Cross-Host')
-    const crossHost = getSection(
-      skill,
-      'Cross-Host (not yet landed on this line; reserved shape only)'
-    )
-    expect(crossHost).toContain('--all-hosts')
+    // S10-4 ruling 3: landed (was "not yet landed on this line; reserved shape only").
+    const crossHost = getSection(skill, 'Cross-Host')
+    expect(crossHost).toContain('orca agents find "<description>" --all-hosts')
     expect(crossHost).toContain('name@host')
+    expect(crossHost).toContain('foreign:true')
+    expect(crossHost).toContain('unreached')
+    expect(crossHost).toContain('hostsAnswered')
+    expect(crossHost).toContain('orca agents show <name>@<host>')
+    expect(crossHost).toContain('orca agents ask <name>@<host>')
+    expect(crossHost).toContain('Quarantine stays host-local')
+    expect(crossHost).toContain('orca agents relink --env <name>')
   })
 
   it('documents the S10 pact verb family in the Agents & Threads reference', () => {

@@ -24,17 +24,45 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['agents', 'show'],
     summary: 'Show one agent by id or name',
-    usage: 'orca agents show <name|id> [--json]',
+    usage: 'orca agents show <name|id|name@host> [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'id', 'name'],
-    positionalArgs: ['name']
+    positionalArgs: ['name'],
+    notes: [
+      'A `name@host` positional (from `agents find --all-hosts`) resolves against that saved ' +
+        'environment directly; `--id`/`--name` stay local-only.'
+    ]
   },
   {
     path: ['agents', 'find'],
     summary: 'Find an agent from a plain-English description',
-    usage: 'orca agents find "<plain English description>" [--limit <n>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'query', 'limit'],
+    usage: 'orca agents find "<plain English description>" [--limit <n>] [--all-hosts] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'query', 'limit', 'all-hosts'],
     positionalArgs: ['query'],
-    examples: ['orca agents find "the merge-restructure backend agent"']
+    examples: [
+      'orca agents find "the merge-restructure backend agent"',
+      'orca agents find "the merge-restructure backend agent" --all-hosts'
+    ],
+    notes: [
+      '--all-hosts unions the directory across every saved environment (bounded, live probes; ' +
+        'a peer that does not answer in time is listed in `unreached`, never silently dropped ' +
+        'nor allowed to veto a local resolution). A name matching 2+ hosts is `ambiguous` and ' +
+        'candidates print as `name@host`.'
+    ]
+  },
+  {
+    path: ['agents', 'relink'],
+    summary: 'Reset the relay cursors on a stale federated environment link (S10-4 ruling 5)',
+    usage: 'orca agents relink --env <name> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'env'],
+    notes: [
+      'For a peer that was reimaged/reinstalled inside the same pairing (a new install needs ' +
+        "`orca environment rm` + re-add instead): zeroes this host's import/ack cursors and " +
+        'runtime epoch for every active dispatch federated to that environment, and bumps that ' +
+        "dispatch's relink generation so `relay_seen` records the next contact's outcomes " +
+        '(incl. refusals) fresh, never colliding with — or being silently dropped against — ' +
+        "this link's pre-relink history under the same sequence number.",
+      'A no-op returning an empty list when the environment has no active federated dispatch.'
+    ]
   },
   {
     path: ['agents', 'quarantine'],
@@ -69,7 +97,7 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     path: ['agents', 'ask'],
     summary: 'Ask another agent a blocking question',
     usage:
-      'orca agents ask <name> "<question>" [--options a,b,c] [--timeout-ms 600000] ' +
+      'orca agents ask <name|name@host> "<question>" [--options a,b,c] [--timeout-ms 600000] ' +
       '[--acknowledge-gate] [--json]',
     allowedFlags: [
       ...GLOBAL_FLAGS,
@@ -84,7 +112,8 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     examples: ['orca agents ask backend-merge "did db.ts land yet?"'],
     notes: [
       'No create, no join, no id needed — the first message to a new peer mints its own thread.',
-      'A timeout exits 0 with outcome:"timeout"; resume via orca agents wait, do not re-ask.'
+      'A timeout exits 0 with outcome:"timeout"; resume via orca agents wait, do not re-ask.',
+      'A `name@host` address sends the whole ask to that saved environment directly.'
     ]
   },
   {

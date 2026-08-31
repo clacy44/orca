@@ -129,33 +129,51 @@ before it is stored:
   pane, never in a roster. Only named participants can pull them — bring a third party in with
   `orca agents invite --thread <t> --agent <name>` before a pact can involve them.
 
-## Cross-Host (not yet landed on this line; reserved shape only)
+## Cross-Host
 
-`agents` rows already carry `host_id`/`origin_host_id`, and `name@host` is a reserved address
-form. Once cross-host directory federation lands:
+`orca agents find "<description>" --all-hosts` unions the directory across every saved
+environment:
 
-- `orca agents find "<description>" --all-hosts` unions the directory across every saved
-  environment.
+- Every host (local plus each saved environment) is probed live and bounded — never a stale
+  mirror. A peer that does not answer in time lands in `unreached` with a reason and is counted
+  in `hostsAnswered: n/m`; it is printed, never silently dropped, and it never vetoes a local
+  resolution (a silent peer is not a "no").
+- Every candidate is scored by the exact same resolver every host runs, on the *raw* rows pulled
+  from each host — a peer's own claimed confidence is never trusted directly.
 - A bare name that matches agents on 2+ hosts is `ambiguous` — local never wins the tie
-  implicitly; address the peer as `name@host`.
+  implicitly; a foreign candidate carries `foreign:true` and its address is `name@host`.
+- `orca agents show <name>@<host>` and `orca agents ask <name>@<host> "<question>"` resolve and
+  route straight to that saved environment, no `--environment` flag needed. `--id`/`--name` on
+  `show` stay local-only (an id you copied off a local `list` row can never be a foreign one by
+  accident).
 - Quarantine stays host-local: a remote host can neither fence nor un-fence an agent registered
   here.
+- Dispatch federation is a separate, narrower mechanism (`worker-start --on <env>`): a genuinely
+  foreign agent id still has no reader on this host, so `agent:<id>` sends and `dispatch
+  --inject` to it refuse — `ask`/`show` work by routing to the peer directly instead.
 
-Do not invent an `@host` address or a `--all-hosts` flag against a runtime that does not
-advertise it — check the negotiated capability the same way today's agent-directory/threads
-capabilities work, and fall back to `orca agents list` per host if the peer capability is
-absent. A same-name hit that used to resolve locally may be a stale pairing once a second host
-registers the same `display_name` — re-run `find` and read a `foreign:true` marker rather than
+A peer that does not advertise the agent directory at all (an older runtime) degrades the same
+way the roster does: it is skipped and named in `unreached`, never a hard error for the whole
+query. A same-name hit that used to resolve locally may be a stale pairing once a second host
+registers the same `display_name` — re-run `find` and read the `foreign` marker rather than
 trusting a cached address.
+
+`orca agents relink --env <name>` (S10-4 ruling 5) is the named recovery verb for a peer that was
+reimaged/reinstalled inside the same pairing: it resets this host's own relay import/ack cursors
+for that environment's active federated dispatches and bumps their relink generation, so
+`relay_seen` records the next contact's per-item outcomes (incl. refusals) under a fresh
+generation instead of colliding with this link's pre-relink history under the same sequence
+number. A genuinely new install still needs `orca environment rm` + re-add, not relink.
 
 ## Agents & Threads (peer command reference)
 
 ```bash
 orca agents register --name <slug> --role "<one line>" [--json]
 orca agents list [--state live|idle|gone] [--include-quarantined] [--limit <n>] [--json]
-orca agents find "<plain-English description>" [--limit <n>] [--json]
-orca agents show <name|id> [--json]
+orca agents find "<plain-English description>" [--limit <n>] [--all-hosts] [--json]
+orca agents show <name|id|name@host> [--json]
 orca agents quarantine <name|id> --reason-code <code> [--lift] [--json]
+orca agents relink --env <name> [--json]
 
 orca agents threads [--state open|paused|closed|all] [--limit 25] [--json]
 orca agents thread --id <t> [--since <seq|ts>] [--json]
@@ -163,7 +181,7 @@ orca agents thread --new --with <name>[,<name>...] [--subject "<text>"] [--sensi
 orca agents thread --id <t> --leave [--json]
 orca agents invite --thread <t> --agent <name> [--json]
 
-orca agents ask <name> "<question>" [--options a,b,c] [--timeout-ms <n>] [--acknowledge-gate] [--json]
+orca agents ask <name|name@host> "<question>" [--options a,b,c] [--timeout-ms <n>] [--acknowledge-gate] [--json]
 orca agents ask --resume <question-id> [--json]
 orca agents reply (--thread <t>|--id <msg>) --body "<text>" [--acknowledge-gate] [--json]
 orca agents wait --thread <t> --for reply|message|pact|step [--timeout-ms <n>] [--resume <token>] [--json]

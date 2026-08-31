@@ -4997,11 +4997,7 @@ export class OrcaRuntimeService {
         timeoutMs
       )
       if (statusResponse.ok === false) {
-        throw new OrchestrationError(
-          statusResponse.error.code,
-          statusResponse.error.message,
-          statusResponse.error.data
-        )
+        this.throwOrchestrationWorkerServerError(selector, statusResponse.error)
       }
       const status = statusResponse.result as RuntimeStatus
       if (!status.capabilities?.includes(ORCHESTRATION_CONTRACT_RUNTIME_CAPABILITY)) {
@@ -5022,9 +5018,35 @@ export class OrcaRuntimeService {
         : envelope
     )
     if (response.ok === false) {
-      throw new OrchestrationError(response.error.code, response.error.message, response.error.data)
+      this.throwOrchestrationWorkerServerError(selector, response.error)
     }
     return response.result
+  }
+
+  // S10-4 ruling 7: an `unauthorized` from a saved environment's RPC means the peer rejected our
+  // pairing token — surface a typed error naming the environment and the fix, never a generic
+  // `unauthorized` buried in the federation relay loop, and mark the link so `orca environment
+  // list`/`show` shows it without waiting for the caller to notice a failed sync.
+  private throwOrchestrationWorkerServerError(
+    selector: string,
+    error: { code: string; message: string; data?: unknown }
+  ): never {
+    if (error.code === 'unauthorized') {
+      this.orchestrationEnvironmentTransport?.markPairingStale?.(selector)
+      let name = selector
+      try {
+        name = this.resolveOrchestrationWorkerServer(selector).name
+      } catch {
+        // Best effort — fall back to the raw selector if it no longer resolves.
+      }
+      throw new OrchestrationError(
+        'stale_environment_pairing',
+        `Environment "${name}" rejected its pairing token. Run "orca environment rm --environment ${name}" ` +
+          `and re-add it with a fresh link, or "orca environment set-endpoint --environment ${name} --url <ws-url>" ` +
+          `if only the address changed.`
+      )
+    }
+    throw new OrchestrationError(error.code, error.message, error.data)
   }
 
   async syncOrchestrationFederation(runId?: string): Promise<void> {

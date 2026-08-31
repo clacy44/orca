@@ -17,6 +17,7 @@ export const BOOLEAN_FLAGS = new Set([
   'accept-unverified-platform',
   'acknowledge-gate',
   'all',
+  'all-hosts',
   'attachments',
   'cancel',
   'children',

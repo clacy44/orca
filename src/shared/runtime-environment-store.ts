@@ -204,7 +204,10 @@ export function markEnvironmentUsed(
     environment.lastUsedAt != null &&
     now >= environment.lastUsedAt &&
     now - environment.lastUsedAt < LAST_USED_PERSIST_INTERVAL_MS
-  if (!runtimeIdChanged && !pairedDeviceIdChanged && lastUsedIsFresh) {
+  // S10-4 ruling 7: any successful round trip self-heals a stale-pairing mark — a call that
+  // reaches this point already got past authentication.
+  const clearsStalePairing = environment.pairingState === 'stale_pairing'
+  if (!runtimeIdChanged && !pairedDeviceIdChanged && !clearsStalePairing && lastUsedIsFresh) {
     return
   }
   const next = store.environments.map((entry) =>
@@ -214,14 +217,15 @@ export function markEnvironmentUsed(
           runtimeId: args.runtimeId ?? entry.runtimeId,
           ...(args.pairedDeviceId ? { pairedDeviceId: args.pairedDeviceId } : {}),
           lastUsedAt: now,
-          updatedAt: now
+          updatedAt: now,
+          pairingState: 'ok' as const
         }
       : entry
   )
   writeEnvironmentStore(userDataPath, { version: 1, environments: next })
 }
 
-function resolveEnvironmentFromStore(
+export function resolveEnvironmentFromStore(
   store: RuntimeEnvironmentStore,
   selector: string
 ): KnownRuntimeEnvironment {
@@ -242,7 +246,7 @@ function resolveEnvironmentFromStore(
   throw new RuntimeEnvironmentStoreError('invalid_argument', `Unknown environment: ${selector}`)
 }
 
-function readEnvironmentStore(userDataPath: string): RuntimeEnvironmentStore {
+export function readEnvironmentStore(userDataPath: string): RuntimeEnvironmentStore {
   const path = getEnvironmentStorePath(userDataPath)
   if (!existsSync(path)) {
     return { version: 1, environments: [] }
@@ -270,7 +274,7 @@ function readEnvironmentStore(userDataPath: string): RuntimeEnvironmentStore {
   }
 }
 
-function writeEnvironmentStore(userDataPath: string, store: RuntimeEnvironmentStore): void {
+export function writeEnvironmentStore(userDataPath: string, store: RuntimeEnvironmentStore): void {
   const path = getEnvironmentStorePath(userDataPath)
   try {
     writeSecureJsonFileWithinLimit(

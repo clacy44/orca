@@ -251,7 +251,18 @@ export const electronViteConfig: UserConfig = {
             'src/main/agent-hooks/managed-agent-hook-controls.ts'
           ),
           // Why: account import mutates the user's macOS Keychain from the CLI.
-          'claude-accounts/keychain': resolve('src/main/claude-accounts/keychain.ts')
+          'claude-accounts/keychain': resolve('src/main/claude-accounts/keychain.ts'),
+          // Why: electron-vite cleans out/main in dev. `orca agents find --all-hosts` (S10-4
+          // ruling 3) imports this path from the CLI so every host is scored by the exact same
+          // resolver, so it must survive rebuilds.
+          'runtime/orchestration/agent-resolver': resolve(
+            'src/main/runtime/orchestration/agent-resolver.ts'
+          ),
+          // Why: same `--all-hosts` CLI path above also sanitizes/validates each foreign row
+          // (review fix) through this module before scoring/rendering it.
+          'runtime/orchestration/agent-name-sanitizer': resolve(
+            'src/main/runtime/orchestration/agent-name-sanitizer.ts'
+          )
         },
         // Why: Rolldown's SSR default is ESM, but Electron and sidecar launchers
         // consume these stable CommonJS paths.

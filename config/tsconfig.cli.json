@@ -76,6 +76,13 @@
     "../src/main/kimi/kimi-hook-config-toml.ts",
     "../src/main/openclaude/hook-service.ts",
     "../src/main/rolling-file-backup.ts",
+    // Why: agents-cross-host.ts re-scores every host's raw rows with the exact resolver every
+    // host runs (S10-4 ruling 3/ARBITRATION #10, never a peer-asserted confidence); the module
+    // has no imports, so listing it pulls in nothing else.
+    "../src/main/runtime/orchestration/agent-resolver.ts",
+    // Why: agents-cross-host.ts also sanitizes/validates every foreign row through this module
+    // before scoring/rendering it (review fix); no imports, so listing it pulls in nothing else.
+    "../src/main/runtime/orchestration/agent-name-sanitizer.ts",
     "../src/main/startup/hydrate-shell-path.ts",
     "../src/main/startup/windows-shell-path-ownership.ts",
     // Why: serve-electron-flag-parity.test.ts checks the Electron-side serve argv rewrite against this

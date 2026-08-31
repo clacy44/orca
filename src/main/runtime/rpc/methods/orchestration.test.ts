@@ -113,8 +113,10 @@ describe('orchestration RPC methods', () => {
     // (orchestration-containment.ts) and orchestration.threads.create/get/list/leave +
     // orchestration.wait (orchestration-threads.ts). S10-3 adds orchestration.threads.pact/
     // .step/.pactLedger (orchestration-pact.ts/orchestration-pact-step.ts) and the deferred
-    // .invite/.join (orchestration-thread-invite.ts).
-    expect(registry.size).toBe(57)
+    // .invite/.join (orchestration-thread-invite.ts). S10-4 adds orchestration.agents.relink
+    // (orchestration-agents-relink.ts, ruling 5).
+    expect(registry.size).toBe(58)
+    expect(registry.has('orchestration.agents.relink')).toBe(true)
     expect(registry.has('orchestration.threads.invite')).toBe(true)
     expect(registry.has('orchestration.threads.join')).toBe(true)
     expect(registry.has('orchestration.messages.purge')).toBe(true)
