@@ -633,6 +633,12 @@ export class AgentHookServer {
   // agent-rate-limit.ts's checkAndBumpRate, without the DB dependency this process-wide
   // hook server doesn't have) keyed by pane so one runaway caller can't hammer the identity path.
   private reattestRateWindowByPaneKey = new Map<string, { windowStart: number; count: number }>()
+  // S10-6 corroboration: runtime-side anchor consulted before an observation may persist as
+  // authority or displace existing authority state. Wired from index.ts after the runtime is
+  // constructed; null (tests, early boot) means only continuity-corroboration applies.
+  private paneLaunchAuthorityVerifier:
+    | ((paneKey: string, launchTokenHash: string) => boolean)
+    | null = null
   private legacyPaneKeyAliases = new Map<string, PaneKeyAliasEntry>()
   private paneKeyAliasPersistenceListener: PaneKeyAliasPersistenceListener | null = null
   // Why: on-disk last-status cache path; null without a userDataPath (tests), where persistence is a no-op and only in-memory replay applies.
@@ -648,6 +654,12 @@ export class AgentHookServer {
   private connectionTimestampWatermarkById = new Map<string, number>()
   // Why: skip disk writes when the JSON exactly matches the last write; guards against re-firing trailing timers when nothing changed.
   private lastWrittenJson: string | null = null
+
+  setPaneLaunchAuthorityVerifier(
+    verifier: ((paneKey: string, launchTokenHash: string) => boolean) | null
+  ): void {
+    this.paneLaunchAuthorityVerifier = verifier
+  }
 
   setListener(listener: ((payload: EnrichedAgentHookEventPayload) => void) | null): void {
     this.onAgentStatus = listener
@@ -2788,12 +2800,63 @@ export class AgentHookServer {
    *  RESIDUAL GAP (S10-5 review F5, by design — not a defect): a pane with no hydrated commitment
    *  on disk (never observed before this runtime's `start()`, or evicted) cannot be bootstrapped
    *  by `/reattest`. `hydratedAuthorityCommitments` is populated once at `start()` from disk and is
-   *  otherwise immutable for the life of this server instance (reassigned only by `captureHydrated-
-   *  AuthorityCommitments()` at start and by the reset block) — `/reattest` only ever writes
-   *  `currentAuthorityObservations` / `persistedAuthorityCommitmentsByPaneKey`, it never reaches
-   *  into `hydratedAuthorityCommitments`. Such a pane stays unbootstrappable until a real agent
-   *  hook fires for it. Widening this (e.g. allowing /reattest to seed a fresh hydrated commitment)
-   *  is out of scope for S10-5 and tracked as S10-6. */
+   *  otherwise immutable for the life of this server instance — `/reattest` only ever writes
+   *  `currentAuthorityObservations` (see `recordCurrentAuthorityObservation`'s `persist: false`
+   *  call below), it never reaches into `hydratedAuthorityCommitments` or the disk-persisted
+   *  `authorityCommitments` map that seeds it on the NEXT restart. Such a pane stays
+   *  unbootstrappable until a real agent hook fires for it.
+   *
+   *  S10-6 (R2) DEVIATION — NOT implemented as the chair's ruling specified, with reasons
+   *  corrected by S10-6 review (the original version of this paragraph claimed closing the gap
+   *  "would need an independent, restart-surviving proof of a pane's launch secret ... that does
+   *  not exist in this codebase today" — that was FALSE: before this correction,
+   *  `recordCurrentAuthorityObservation` wrote every `/reattest` observation into
+   *  `persistedAuthorityCommitmentsByPaneKey` unconditionally, the same map `serializeStatusFile`
+   *  persists to disk as `authorityCommitments` and `hydrateLastStatusFromDisk` +
+   *  `captureHydratedAuthorityCommitments` promote into a bona-fide `hydratedAuthorityCommitment`
+   *  on the NEXT restart — i.e. a restart-surviving proof already existed, it just wasn't
+   *  trustworthy, since it was seeded from a caller-chosen token with no corroboration. A gen1 ->
+   *  disk -> gen2 probe confirmed a caller could `/reattest` an arbitrary paneKey with a
+   *  self-chosen token in one generation and have that same token attest via the
+   *  `hydrated_commitment` fast path in the next, with zero receipt and zero genuine hook
+   *  history. That promotion path is now cut off: `handleReattestRequest`'s call below passes
+   *  `{ persist: false }`, so a `/reattest` observation lives only in `currentAuthorityObservations`
+   *  for the life of this generation and never reaches disk. See the regression test "reattest-
+   *  only observations never survive a restart into a hydrated commitment" in
+   *  server-reattest.test.ts.
+   *
+   *  The ruling's literal ask — seed `hydratedAuthorityCommitments` directly, in the SAME
+   *  generation, from whatever this handler records — is still correctly not implemented, and
+   *  this part of the original reasoning holds: traced against
+   *  `orchestration-compatibility-reattest.test.ts`'s "refuses a forged pane with no matching
+   *  restored receipt, even after a successful reattest" case, same-generation seeding makes
+   *  `attestCompatibilityAuthority`'s 'restored' branch a no-op check for exactly the pane
+   *  population it's meant to protect: a caller with no receipt and no genuine prior history for
+   *  a paneKey can `/reattest` with a launchToken *of its own choosing*, since this route never
+   *  validates the token against anything (same as every real hook POST — see the SECURITY
+   *  EQUIVALENCE paragraph above); once that self-chosen value is also a same-generation hydrated
+   *  commitment, the caller's own subsequent claim of the identical value always matches both
+   *  `commitments` and `currentAuthorityObservations` — attestation cannot refuse a
+   *  self-consistent forgery, because it IS the forgery, fed back to itself. This is not specific
+   *  to a hostile actor: `/reattest`'s only gates (shared loopback hook token +
+   *  disposition==='accept') are the same ones a legitimate same-user, different-pane caller
+   *  already clears, since every pane's spawn env carries the identical shared hook token (see
+   *  the DEVIATION note on `attemptOrchestrationReattest`). The real trust-anchor problem R2
+   *  literal runs into is that the endpoint file/token this route is gated by is runtime-wide,
+   *  not pane-private — closing the gap for real would need an independent, per-pane,
+   *  restart-surviving proof of a pane's launch secret that this route cannot itself mint by
+   *  observing a caller-chosen value once. Left for a follow-up ruling; R3 below still lands (it
+   *  never touches `hydratedAuthorityCommitments` and requires the SAME attestation this gap
+   *  still blocks, so it cannot widen what a never-hydrated pane can do on its own — see the
+   *  negative control in the R3 describe block in orchestration-compatibility-reattest.test.ts). *
+   *  S10-6 CORROBORATION UPDATE — the seeding route above is now closed on BOTH doors: an
+   *  authority observation persists (and may displace existing authority state) ONLY when its
+   *  (paneKey, launchTokenHash) is corroborated — verified by the runtime against the LIVE pty's
+   *  actual launch token, or continuity-matched to the pane's already-hydrated/persisted
+   *  commitment. An uncorroborated POST (hook or /reattest) is status-only: it seeds nothing,
+   *  survives no restart, and never displaces a corroborated entry — a self-chosen token can
+   *  neither become next-generation hydrated proof nor revoke a genuine pane's live authority.
+   */
   private handleReattestRequest(body: unknown): { status: number; retryAfterMs?: number } {
     if (typeof body !== 'object' || body === null) {
       return { status: 400 }
@@ -2830,12 +2893,18 @@ export class AgentHookServer {
     // `payload` stub below is never read by recordCurrentAuthorityObservation/toAuthorityEvidence
     // (only paneKey/launchToken/connectionId/tabId/worktreeId are) — it exists only to satisfy
     // AgentHookEventPayload's shape without inventing a second, relaxed evidence-recording path.
-    this.recordCurrentAuthorityObservation({
-      paneKey,
-      launchToken,
-      connectionId: null,
-      payload: { state: 'waiting', prompt: '' }
-    })
+    this.recordCurrentAuthorityObservation(
+      {
+        paneKey,
+        launchToken,
+        connectionId: null,
+        payload: { state: 'waiting', prompt: '' }
+      },
+      // S10-6 corroboration gate: persistence is decided inside the recorder now — a
+      // corroborated (continuity-matched) reattest persists so an idle-but-alive pane
+      // survives a THIRD restart; an uncorroborated one stays status-only regardless.
+      { persist: true }
+    )
     return { status: 204 }
   }
 
@@ -2869,10 +2938,57 @@ export class AgentHookServer {
     return { allowed: true }
   }
 
-  private recordCurrentAuthorityObservation(payload: AgentHookEventPayload): void {
+  // Why (S10-6 R2 follow-up): `persist` is false ONLY for /reattest (handleReattestRequest) —
+  // a caller-supplied, unverified launchToken must never enter `persistedAuthorityCommitmentsByPaneKey`,
+  // because that map is what serializeStatusFile writes to disk as `authorityCommitments`, and
+  // hydrateLastStatusFromDisk + captureHydratedAuthorityCommitments promote disk entries into a
+  // bona-fide `hydratedAuthorityCommitment` on the NEXT restart — a self-chosen /reattest token
+  // would then attest itself via the hydrated_commitment fast path one restart later, no receipt
+  // required. Real hook POSTs (this.recordCurrentAuthorityObservation(event) at the two call
+  // sites above) keep persisting, since that observation is corroborated by genuine agent
+  // activity, not merely self-asserted over the shared loopback channel.
+  // S10-6: true when (paneKey, launchTokenHash) is anchored to something a forger over the
+  // shared loopback channel cannot have — the LIVE pty's actual launch token (runtime verifier),
+  // or continuity with the pane's already-hydrated/persisted commitment.
+  private isCorroboratedAuthority(paneKey: string, launchTokenHash: string): boolean {
+    if (this.paneLaunchAuthorityVerifier?.(paneKey, launchTokenHash)) {
+      return true
+    }
+    if (this.hydratedLaunchTokenHashByPaneKey.get(paneKey) === launchTokenHash) {
+      return true
+    }
+    return (
+      this.persistedAuthorityCommitmentsByPaneKey.get(paneKey)?.launchTokenHash === launchTokenHash
+    )
+  }
+
+  private hasAnyAuthorityEntry(paneKey: string): boolean {
+    return (
+      this.currentAuthorityObservations.has(paneKey) ||
+      this.persistedAuthorityCommitmentsByPaneKey.has(paneKey) ||
+      this.hydratedLaunchTokenHashByPaneKey.has(paneKey)
+    )
+  }
+
+  private recordCurrentAuthorityObservation(
+    payload: AgentHookEventPayload,
+    options?: { persist?: boolean }
+  ): void {
     const evidence = this.toAuthorityEvidence(payload)
-    if (evidence) {
-      this.currentAuthorityObservations.set(evidence.paneKey, evidence)
+    if (!evidence) {
+      return
+    }
+    const corroborated = this.isCorroboratedAuthority(evidence.paneKey, evidence.launchTokenHash)
+    // An uncorroborated claim never DISPLACES existing authority state (the forged-/reattest
+    // revocation lever) — it may only fill a void, observation-only.
+    if (!corroborated && this.hasAnyAuthorityEntry(evidence.paneKey)) {
+      return
+    }
+    this.currentAuthorityObservations.set(evidence.paneKey, evidence)
+    // Persistence (what the NEXT generation hydrates into authority) requires corroboration on
+    // EVERY door — hook POST and /reattest alike; `persist: false` remains a belt for callers
+    // that never want durability regardless.
+    if (options?.persist !== false && corroborated) {
       this.persistedAuthorityCommitmentsByPaneKey.set(evidence.paneKey, evidence)
       this.hydratedLaunchTokenHashByPaneKey.set(evidence.paneKey, evidence.launchTokenHash)
     }

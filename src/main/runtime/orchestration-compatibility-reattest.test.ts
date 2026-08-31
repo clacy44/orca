@@ -138,13 +138,18 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
       terminalHandle: TERMINAL_HANDLE,
       launchToken: 'a-different-stale-token'
     })
+    // S10-6 corroboration: the mismatched observation seeded above is refused ENTRY (it can
+    // neither be verified against the live pty nor continuity-matched to the hydrated
+    // commitment), so it can no longer block the genuine pane — attestation succeeds via the
+    // hydrated commitment immediately, with no reconciliation step needed (the P5 revocation
+    // lever is gone).
     expect(
       runtime.verifyOrchestrationCompatibilityCaller({
         terminalHandle: TERMINAL_HANDLE,
         paneKey: PANE_KEY,
         launchToken: originalLaunchToken
       })
-    ).toBeNull()
+    ).not.toBeNull()
 
     const reattestRes = await postReattest(
       Number(env.ORCA_AGENT_HOOK_PORT),
@@ -167,6 +172,126 @@ describe('/reattest end-to-end against verifyOrchestrationCompatibilityCaller', 
       terminalHandle: TERMINAL_HANDLE,
       processIncarnation: PROCESS_INCARNATION,
       launchTokenHash: createHash('sha256').update(originalLaunchToken).digest('hex')
+    })
+  })
+
+  // S10-6 (R3 + R5 reproduction — ONE of two candidate field shapes, NOT a confirmed fix of the
+  // reported failure): the ruling's R5 acceptance bar named "hook server generation 2 (fresh
+  // instance, no hydrated commitment for the pane)" as the shape to reproduce. This suite covers
+  // BOTH candidate shapes for a daemon-survived, no-receipt pane in generation 2, because the
+  // ruling's literal wording is ambiguous between them and this branch cannot determine which one
+  // the actual failing field session was in (that would need that session's last-status.json,
+  // which review did not have):
+  //   (A) the pane DOES have a genuine disk-hydrated commitment from before the restart (a real
+  //       hook fired for it at some point in a prior generation) — the "succeeds" test below.
+  //       R1 + R3 + R4 fix this shape.
+  //   (B) the pane has NO hydrated commitment at all — never observed before this runtime's
+  //       start(), or evicted — the "negative control" test below, matching the ruling's literal
+  //       wording exactly. This shape is still refused; see the DEVIATION comment on
+  //       handleReattestRequest in server.ts for why closing it is not safe with a
+  //       caller-suppliable secret (traced against the negative-control test itself: making it
+  //       pass would mean a caller with no receipt and no genuine history for a paneKey can
+  //       manufacture its own attestation by choosing its own /reattest launchToken and later
+  //       claiming the identical value).
+  // Do not read the "succeeds" test as proof R5's field failure is resolved — it establishes
+  // shape (A) is fixed and shape (B) is not; whether the field pane was actually in shape (A) or
+  // (B) is undetermined. Landing this branch is a partial, honestly-scoped fix pending that
+  // confirmation, not a closure of R5.
+  describe('S10-6 (R3): live recheck when the exact-surface-restore moment never minted a receipt', () => {
+    function seedHydratedCommitment(hookServer: AgentHookServer, launchToken: string): void {
+      const hydratedEntry = {
+        paneKey: PANE_KEY,
+        launchToken,
+        tabId: 'tab-restored',
+        worktreeId: WORKTREE_ID,
+        connectionId: null,
+        payload: { state: 'working', prompt: 'before restart', agentType: 'codex' },
+        receivedAt: 100,
+        stateStartedAt: 100
+      } satisfies AgentHookEventPayload & { receivedAt: number; stateStartedAt: number }
+      hookServer._getStateForTests().lastStatusByPaneKey.set(PANE_KEY, hydratedEntry)
+    }
+
+    it('shape (A) succeeds: reattest recovers a genuinely hydrated pane from a stale blocking observation, with no receipt', async () => {
+      server = new AgentHookServer()
+      const generation1Token = 'agent-process-env-generation-1-token'
+      seedHydratedCommitment(server, generation1Token)
+      await server.start({ env: 'production' })
+      const env = server.buildPtyEnv() // "generation 2" coordinates — fresh port + token
+      const runtime = wireRuntime(server)
+      // Why: WITHOUT a launchTokenHash (daemon-survived) AND WITHOUT a restored receipt — the
+      // exact scenario named in the ruling. wireRuntime's mock terminal already has
+      // launchTokenHash: null; restoredOrchestrationAuthorityByPtyId is left empty here.
+
+      // Why this extra step: with zero currentAuthorityObservations, a hydrated commitment alone
+      // already attests via the 'hydrated_commitment' fast path (see
+      // orchestration-compatibility-authority.test.ts's "mints a receipt..." case) — that would
+      // make this test pass without reattest doing any work, which isn't the field failure R5
+      // describes. A stale observation for the SAME pane (e.g. an earlier, unrelated event in
+      // this generation) blocks that fast path exactly as it did in the "actual fix" test above —
+      // this is what makes the pre-restart, no-receipt caller genuinely dependent on reattest.
+      await postReattest(Number(env.ORCA_AGENT_HOOK_PORT), env.ORCA_AGENT_HOOK_TOKEN!, {
+        paneKey: PANE_KEY,
+        terminalHandle: TERMINAL_HANDLE,
+        launchToken: 'a-different-stale-token'
+      })
+      expect(
+        runtime.verifyOrchestrationCompatibilityCaller({
+          terminalHandle: TERMINAL_HANDLE,
+          paneKey: PANE_KEY,
+          launchToken: generation1Token
+        })
+      ).not.toBeNull() // S10-6 corroboration refuses the stale observation entry itself, so
+      // nothing blocks the genuinely hydrated pane even before the reattest below runs.
+
+      // The actual R5 shape: reattest with the stale-but-genuine generation-1 token, against this
+      // generation's fresh (generation-2) hook token — mirrors what attemptOrchestrationReattest
+      // posts today (X-Orca-Agent-Hook-Token: this generation's file token; body.launchToken: the
+      // caller's own env-sourced value, unaffected by generation).
+      const reattestRes = await postReattest(
+        Number(env.ORCA_AGENT_HOOK_PORT),
+        env.ORCA_AGENT_HOOK_TOKEN!,
+        { paneKey: PANE_KEY, terminalHandle: TERMINAL_HANDLE, launchToken: generation1Token }
+      )
+      expect(reattestRes.status).toBe(204)
+
+      const authority = runtime.verifyOrchestrationCompatibilityCaller({
+        terminalHandle: TERMINAL_HANDLE,
+        paneKey: PANE_KEY,
+        launchToken: generation1Token
+      })
+      expect(authority).toMatchObject({ paneKey: PANE_KEY, terminalHandle: TERMINAL_HANDLE })
+      // Why (R3): the receipt is minted as a side effect of this success, even though
+      // wireRuntime's runtime has no live ptysById entry for PTY_ID to mint against — covered
+      // with a real ptysById entry in orchestration-compatibility-authority.test.ts.
+    })
+
+    it('shape (B) negative control: the exact same scenario with NO hydrated commitment still refuses (residual gap, unchanged)', async () => {
+      server = new AgentHookServer()
+      // Why: deliberately skip seedHydratedCommitment — this is the literal "no hydrated
+      // commitment for the pane" case from the ruling's R5 wording, which the DEVIATION comment
+      // on handleReattestRequest explains is not safe to close with a caller-suppliable secret.
+      await server.start({ env: 'production' })
+      const env = server.buildPtyEnv()
+      const runtime = wireRuntime(server)
+      const generation1Token = 'agent-process-env-generation-1-token'
+
+      const reattestRes = await postReattest(
+        Number(env.ORCA_AGENT_HOOK_PORT),
+        env.ORCA_AGENT_HOOK_TOKEN!,
+        { paneKey: PANE_KEY, terminalHandle: TERMINAL_HANDLE, launchToken: generation1Token }
+      )
+      // Why: handleReattestRequest itself has no opinion on hydration — 204 either way (see
+      // the SECURITY EQUIVALENCE / R4 comments on why this status can't distinguish the cases).
+      expect(reattestRes.status).toBe(204)
+
+      expect(
+        runtime.verifyOrchestrationCompatibilityCaller({
+          terminalHandle: TERMINAL_HANDLE,
+          paneKey: PANE_KEY,
+          launchToken: generation1Token
+        })
+      ).toBeNull()
     })
   })
 })

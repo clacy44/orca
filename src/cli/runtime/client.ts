@@ -18,7 +18,10 @@ import {
 } from '../../shared/protocol-version'
 import { RemoteRuntimeCompatGate } from './remote-runtime-compat-gate'
 import { createOrchestrationCompatibilityEnvelope } from './orchestration-compatibility-envelope'
-import { attemptOrchestrationReattest } from './orchestration-compatibility-reattest'
+import {
+  attemptOrchestrationReattest,
+  withReattestFailureNextStep
+} from './orchestration-compatibility-reattest'
 import { getTimeoutMsParam, isWaitingCheck } from './runtime-request-timeout'
 
 // Why: for long-poll methods the caller's method-level
@@ -132,29 +135,46 @@ export class RuntimeClient {
       // this runtime generation after a restart. Re-attest once via the local hook endpoint and
       // retry the exact same call once; any other failure (including a failed/absent reattest)
       // surfaces the original refusal and its nextSteps unchanged. No further retries.
-      if (
-        response.error.code === 'no_pane_identity' &&
-        method.startsWith('orchestration.') &&
-        (await attemptOrchestrationReattest(
+      if (response.error.code === 'no_pane_identity' && method.startsWith('orchestration.')) {
+        const reattest = await attemptOrchestrationReattest(
           this.orchestrationCompatibility.orchestrationCompatibilityEvidence
-        ))
-      ) {
-        let retried
-        try {
-          retried = await sendRequest<TResult>(
-            metadata,
-            method,
-            params,
-            effectiveTimeoutMs,
-            envelope
-          )
-        } catch (error) {
-          throw attachMutationRecovery(error, orchestrationRequestId)
+        )
+        if (reattest.ok) {
+          let retried
+          try {
+            retried = await sendRequest<TResult>(
+              metadata,
+              method,
+              params,
+              effectiveTimeoutMs,
+              envelope
+            )
+          } catch (error) {
+            throw attachMutationRecovery(error, orchestrationRequestId)
+          }
+          if (retried.ok === false) {
+            // Why (S10-6 R4, corrected by S10-6 review): reattest reported success (204) yet
+            // the identical retry still refused with no_pane_identity. handleReattestRequest
+            // returns that same 204 both for a genuine success and for a disposition-not-
+            // 'accept' pane, so this point can infer only that reattest didn't help — NOT why.
+            // At least three other causes land here with the pane genuinely admitted (no
+            // hydrated commitment for it, an R3 live-recheck conjunct failing, attestation
+            // ambiguity), so the nextStep must stay cause-neutral rather than assert
+            // "not admitted" as fact.
+            throw new RuntimeRpcFailureError(
+              retried.error.code === 'no_pane_identity'
+                ? withReattestFailureNextStep(retried, 'still-unattested-after-reattest')
+                : retried
+            )
+          }
+          return retried
         }
-        if (retried.ok === false) {
-          throw new RuntimeRpcFailureError(retried)
-        }
-        return retried
+        // Why (S10-6 R4): a known reason means reattest definitively could not help — swap the
+        // misleading "re-run the command" nextStep for the accurate one instead of throwing the
+        // server's original refusal unchanged.
+        throw new RuntimeRpcFailureError(
+          reattest.reason ? withReattestFailureNextStep(response, reattest.reason) : response
+        )
       }
       throw new RuntimeRpcFailureError(response)
     }

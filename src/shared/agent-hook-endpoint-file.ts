@@ -7,6 +7,15 @@ export type AgentHookEndpoint = {
   token: string
   env: string
   version: string
+  // S10-6 (R1): optional — AgentHookServer has no terminalHandle<->paneKey mapping to
+  // populate these from today, so the writer never emits them yet. Parsed defensively so a
+  // future writer can add them without a second file-format bump. This file is runtime-wide
+  // (identical for every pane), so a future writer MUST NOT populate these from a single
+  // "current" pane — readers treat these as a fallback only, used strictly after the caller's
+  // own process-env evidence (see orchestration-compatibility-reattest.ts), never preferred
+  // over it.
+  paneKey?: string
+  terminalHandle?: string
 }
 
 export function isAgentHookEndpointFileName(name: string): name is AgentHookEndpointFileName {
@@ -44,6 +53,10 @@ export function parseAgentHookEndpointFile(contents: string): AgentHookEndpoint 
     port: values.ORCA_AGENT_HOOK_PORT,
     token: values.ORCA_AGENT_HOOK_TOKEN,
     env: values.ORCA_AGENT_HOOK_ENV,
-    version: values.ORCA_AGENT_HOOK_VERSION
+    version: values.ORCA_AGENT_HOOK_VERSION,
+    ...(values.ORCA_AGENT_HOOK_PANE_KEY ? { paneKey: values.ORCA_AGENT_HOOK_PANE_KEY } : {}),
+    ...(values.ORCA_AGENT_HOOK_TERMINAL_HANDLE
+      ? { terminalHandle: values.ORCA_AGENT_HOOK_TERMINAL_HANDLE }
+      : {})
   }
 }

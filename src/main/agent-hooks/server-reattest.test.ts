@@ -231,4 +231,66 @@ describe('/reattest', () => {
       }
     })
   })
+
+  // S10-6 review (R2 blocker): formalizes the gen1 -> disk -> gen2 probe that disproved the R2
+  // DEVIATION comment's original claim. A /reattest observation must never survive into a NEXT
+  // generation's `hydratedAuthorityCommitments` (the 'restored'/hydrated_commitment attestation
+  // fast path) purely from a caller-chosen token — that would let a caller manufacture its own
+  // attestation by choosing its own /reattest launchToken, one restart later, for a paneKey it
+  // never had any genuine hook history for.
+  describe('reattest-only observations never survive a restart into a hydrated commitment (S10-6 R2 blocker)', () => {
+    let userDataPath: string
+
+    beforeEach(() => {
+      userDataPath = mkdtempSync(join(tmpdir(), 'orca-reattest-no-cross-restart-'))
+    })
+
+    afterEach(() => {
+      rmSync(userDataPath, { recursive: true, force: true })
+    })
+
+    it('does not persist a commitment for a pane with no genuine hook history, and gen2 has no hydrated commitment for it', async () => {
+      const pane = makePaneKey('tab-never-hooked', LEAF)
+      const attackerToken = 'attacker-chosen-token'
+      const attackerHash = createHash('sha256').update(attackerToken).digest('hex')
+
+      // Generation 1: only a /reattest call for `pane` — never a real hook POST.
+      const { post } = await startServer(userDataPath)
+      const res = await post({
+        paneKey: pane,
+        terminalHandle: 'term-1',
+        launchToken: attackerToken
+      })
+      expect(res.status).toBe(204)
+      expect(server!.getCurrentAuthorityObservations()[0]).toMatchObject({
+        paneKey: pane,
+        launchTokenHash: attackerHash
+      })
+
+      server!.flushStatusPersistSync()
+      const onDisk = JSON.parse(readFileSync(server!.lastStatusPath!, 'utf8'))
+      // Why: this is the crux — a reattest-only observation must not appear in the persisted
+      // authorityCommitments map at all, since that map is exactly what the next generation
+      // hydrates into a bona-fide `hydratedAuthorityCommitment`.
+      expect(onDisk.authorityCommitments[pane]).toBeUndefined()
+
+      server!.stop()
+      server = null
+
+      // Generation 2: fresh instance, same userDataPath — hydrates from the same disk file.
+      server = new AgentHookServer()
+      await server.start({ env: 'production', userDataPath })
+      const hydrated = server.getHydratedAuthorityCommitments()
+      expect(hydrated.find((c) => c.paneKey === pane)).toBeUndefined()
+
+      // The attacker's original token must not attest via the hydrated_commitment fast path.
+      const attestation = server.attestCompatibilityAuthority({
+        paneKey: pane,
+        launchTokenHash: attackerHash,
+        connectionId: null,
+        terminalProvenance: 'restored'
+      })
+      expect(attestation).toBeNull()
+    })
+  })
 })

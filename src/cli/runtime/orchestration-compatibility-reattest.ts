@@ -13,13 +13,21 @@ import {
 } from '../../shared/agent-hook-endpoint-file'
 import { AGENT_HOOK_REATTEST_PATHNAME } from '../../shared/agent-hook-listener'
 import type { OrchestrationCompatibilityEvidence } from '../../shared/orchestration-compatibility-evidence'
+import type { RuntimeRpcFailure } from '../../shared/runtime-rpc-envelope'
 
 // Why: the file is a handful of `KEY=VALUE` lines; bound reads generously above that so a
 // tampered/enormous file can't be read wholesale, without needing to guess an exact byte count.
 const MAX_ENDPOINT_FILE_BYTES = 4_096
 const REATTEST_TIMEOUT_MS = 2_000
 
-function readHookEndpointCoordinates(endpointPath: string): { port: string; token: string } | null {
+type HookEndpointCoordinates = {
+  port: string
+  token: string
+  paneKey?: string
+  terminalHandle?: string
+}
+
+function readHookEndpointCoordinates(endpointPath: string): HookEndpointCoordinates | null {
   if (!isAgentHookEndpointFileName(basename(endpointPath))) {
     return null
   }
@@ -46,23 +54,141 @@ function readHookEndpointCoordinates(endpointPath: string): { port: string; toke
   }
   try {
     const fields = parseAgentHookEndpointFile(raw)
-    return { port: fields.port, token: fields.token }
+    return {
+      port: fields.port,
+      token: fields.token,
+      ...(fields.paneKey ? { paneKey: fields.paneKey } : {}),
+      ...(fields.terminalHandle ? { terminalHandle: fields.terminalHandle } : {})
+    }
   } catch {
     return null
   }
 }
 
-/** Best-effort — never throws. Returns true only when the runtime accepted the reattest. */
+// S10-6 (R4): 'no-endpoint-file' and 'stale-endpoint-token' are the two reasons
+// attemptOrchestrationReattest can determine for itself below — one without a round trip, one
+// from an unambiguous 403 (the header token it has is not this generation's, regardless of
+// whose pane it's for). 'still-unattested-after-reattest' is NOT produced here:
+// handleReattestRequest returns the identical 204 for a genuine success and for a
+// disposition-not-'accept' refusal (deliberately — a distinguishable status would let a caller
+// enumerate which paneKeys are currently open), so only client.ts — after seeing the retried
+// RPC still fail post-"success" — can infer that reattest didn't help; it's included in this
+// shared type so client.ts's substitution uses the same message-builder as this module.
+//
+// S10-6 review correction: that post-204 case was originally labeled 'pane-not-admitted' and
+// asserted as fact in the nextStep sentence. It has at least four causes — disposition wasn't
+// 'accept' (genuinely not admitted) is only one; the others (no hydrated commitment for the
+// pane, a live-recheck conjunct failing, attestation ambiguity) all mean the pane IS admitted.
+// This client-inferred case can only ever tell that reattest didn't help, never why — so its
+// name and message are cause-neutral now; only 'no-endpoint-file'/'stale-endpoint-token' assert
+// a specific cause, because those two really are determined unambiguously above.
+//
+// A 404 (older runtime, no /reattest route) and other outcomes (429 rate-limited,
+// network/timeout, malformed shape) intentionally produce no reason: client.ts leaves the
+// server's original nextSteps untouched for those, same as pre-S10-6 behavior, since "re-run
+// the command" is still reasonably accurate advice for them.
+export type OrchestrationReattestFailureReason =
+  | 'no-endpoint-file'
+  | 'stale-endpoint-token'
+  | 'still-unattested-after-reattest'
+
+export type OrchestrationReattestOutcome =
+  | { ok: true }
+  | {
+      ok: false
+      reason?: Exclude<OrchestrationReattestFailureReason, 'still-unattested-after-reattest'>
+    }
+
+const CAUSE_NEUTRAL_NEXT_STEP =
+  're-attestation was accepted but this pane still has no attested identity; relaunch this agent in a fresh Orca pane (claude --resume keeps its context)'
+
+/** S10-6 (R4): swap in the accurate first nextStep — the server's canned
+ *  `NO_PANE_IDENTITY_NEXT_STEPS[0]` ("re-run the command — the CLI re-attests this pane
+ *  automatically...") is actively misleading once we already know reattest ran and didn't
+ *  help. Only index 0 is replaced; the remaining nextSteps (register/relaunch guidance) are
+ *  left as the server sent them. Returns `response` unchanged if it carries no
+ *  `{ nextSteps: string[] }` data shape to patch (defensive — every no_pane_identity refusal
+ *  sets one today via orchestration-caller-identity.ts). */
+export function withReattestFailureNextStep(
+  response: RuntimeRpcFailure,
+  reason: OrchestrationReattestFailureReason
+): RuntimeRpcFailure {
+  const data = response.error.data
+  if (
+    typeof data !== 'object' ||
+    data === null ||
+    !('nextSteps' in data) ||
+    !Array.isArray((data as { nextSteps: unknown }).nextSteps)
+  ) {
+    return response
+  }
+  const nextSteps = (data as { nextSteps: unknown[] }).nextSteps
+  // Why: only 'no-endpoint-file'/'stale-endpoint-token' are a specific, client-determined cause
+  // — state them. 'still-unattested-after-reattest' is inferred, not determined (see the Why
+  // above the type), so its sentence never claims a specific cause.
+  const nextStep =
+    reason === 'still-unattested-after-reattest'
+      ? CAUSE_NEUTRAL_NEXT_STEP
+      : `this pane cannot re-attest (reason: ${reason}); relaunch this agent in a fresh Orca pane (claude --resume keeps its context)`
+  return {
+    ...response,
+    error: {
+      ...response.error,
+      data: {
+        ...data,
+        nextSteps: [nextStep, ...nextSteps.slice(1)]
+      }
+    }
+  }
+}
+
+/** Best-effort — never throws. `ok: true` only when the runtime accepted the reattest.
+ *
+ *  S10-6 (R1): no longer requires paneKey/terminalHandle/launchToken to all already be
+ *  present in the caller's own env-sourced evidence — paneKey/terminalHandle now fall back to
+ *  the endpoint file's values ONLY when the caller's own evidence lacks them; evidence always
+ *  wins when present. (S10-6 review correction: an earlier version of this code preferred the
+ *  endpoint file's values over evidence. The endpoint file is one shared, runtime-wide secret —
+ *  identical for every pane's spawn env, see the launchToken DEVIATION paragraph below — so a
+ *  paneKey/terminalHandle recorded in it can only ever name ONE pane; file-first precedence
+ *  would let every other pane's reattest resolve to that same pane's identity the moment a
+ *  future writer starts populating those optional fields, which agent-hook-endpoint-file.ts
+ *  explicitly invites. Evidence-first keeps each pane resolving its own identity from its own
+ *  process env, same as pre-R1, and only reaches for the file when a pane's own env is missing
+ *  a field — today the file never carries these fields either, so this fallback is dormant.)
+ *
+ *  DEVIATION from the literal chair ruling: launchToken is NOT sourced from the endpoint
+ *  file's token. That file is one shared, runtime-wide secret (single `endpoint.env` per
+ *  Orca instance, `this.token` in AgentHookServer, injected into every pane's spawn env
+ *  identically — see server.ts buildPtyEnv/AGENT_HOOK_ENDPOINT) gating the loopback HTTP
+ *  listener itself, not a per-pane credential; ORCA_AGENT_LAUNCH_TOKEN is the actual
+ *  per-pane secret (a fresh randomUUID minted per pty launch, orca-runtime.ts:27018-27019,
+ *  living only in that pane's own process env). Using the shared file token as "the launch
+ *  credential" would make every pane's reattest launchToken identical and caller-known,
+ *  which — once the server seeds a hydrated authority commitment from whatever /reattest
+ *  presents (R2) — would let any pane assert authority for any other open pane's paneKey
+ *  merely by knowing its live terminalHandle. Keeping launchToken env-sourced preserves the
+ *  existing per-pane-secret property; a caller with no env launchToken still can't reattest
+ *  (nothing here regresses — that caller could not have reattested before this change either).
+ */
 export async function attemptOrchestrationReattest(
   evidence: OrchestrationCompatibilityEvidence | undefined
-): Promise<boolean> {
+): Promise<OrchestrationReattestOutcome> {
   const endpointPath = process.env.ORCA_AGENT_HOOK_ENDPOINT
-  if (!endpointPath || !evidence?.paneKey || !evidence.terminalHandle || !evidence.launchToken) {
-    return false
+  if (!endpointPath || !evidence?.launchToken) {
+    return { ok: false, reason: 'no-endpoint-file' }
   }
   const coordinates = readHookEndpointCoordinates(endpointPath)
   if (!coordinates) {
-    return false
+    return { ok: false, reason: 'no-endpoint-file' }
+  }
+  // Why (S10-6 review correction): evidence (the pane's own process env) must win over the
+  // endpoint file — see the DEVIATION paragraph above. The file is only a fallback for a field
+  // evidence doesn't carry.
+  const paneKey = evidence.paneKey ?? coordinates.paneKey
+  const terminalHandle = evidence.terminalHandle ?? coordinates.terminalHandle
+  if (!paneKey || !terminalHandle) {
+    return { ok: false, reason: 'no-endpoint-file' }
   }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REATTEST_TIMEOUT_MS)
@@ -76,18 +202,25 @@ export async function attemptOrchestrationReattest(
           'X-Orca-Agent-Hook-Token': coordinates.token
         },
         body: JSON.stringify({
-          paneKey: evidence.paneKey,
-          terminalHandle: evidence.terminalHandle,
+          paneKey,
+          terminalHandle,
           launchToken: evidence.launchToken
         }),
         signal: controller.signal
       }
     )
+    if (response.status === 204) {
+      return { ok: true }
+    }
+    if (response.status === 403) {
+      return { ok: false, reason: 'stale-endpoint-token' }
+    }
     // Why: a 404 means an older runtime with no /reattest route — the caller keeps its original
-    // refusal and its nextSteps rather than treating this as a retryable condition.
-    return response.status === 204
+    // refusal and its nextSteps rather than treating this as a retryable condition. 429/400 are
+    // left equally reason-less (see the type's Why above).
+    return { ok: false }
   } catch {
-    return false
+    return { ok: false }
   } finally {
     clearTimeout(timer)
   }
