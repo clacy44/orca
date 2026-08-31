@@ -105,7 +105,23 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   ARTIFACT_SHARING_DISABLED_CODE,
   // Why: every lane refusal carries a complete human sentence; the client has no code table for
   // them, so the code must pass through with its message rather than collapse to runtime_error.
-  ...CLAUDE_LANE_REFUSAL_CODES
+  ...CLAUDE_LANE_REFUSAL_CODES,
+  // S10-1/S10-2b: agent-directory and containment refusals, all thrown with `data.nextSteps` a
+  // caller (CLI or programmatic) needs verbatim — collapsing to runtime_error would erase both
+  // the discriminator and the recovery guidance. no_pane_identity/agent_quarantined/
+  // agent_unknown/derived_agent_unaddressable predate S10-2b (orchestration-agents-*.ts,
+  // orchestration.ts send's `agent:` guard) but were never exercised through the real
+  // dispatcher in tests until this series' hardened orchestration.thread/peer ask-reply
+  // coverage caught the gap; the rest are new S10-2b codes.
+  'no_pane_identity',
+  'agent_quarantined',
+  'agent_unknown',
+  'derived_agent_unaddressable',
+  'payload_kind_reserved',
+  'body_gate_refused',
+  'not_a_participant',
+  'not_the_addressee',
+  'dispatch_never_federated'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

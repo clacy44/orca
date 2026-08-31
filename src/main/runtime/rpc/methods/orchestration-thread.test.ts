@@ -1,32 +1,97 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { RpcDispatcher } from '../dispatcher'
 import type { RpcRequest } from '../core'
 import { OrchestrationDb } from '../../orchestration/db'
-import { OrcaRuntimeService } from '../../orca-runtime'
+import {
+  OrcaRuntimeService,
+  type OrchestrationCompatibilityCallerAuthority
+} from '../../orca-runtime'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../../../shared/protocol-version'
 
-function request(id: string, method: string, params: Record<string, unknown>): RpcRequest {
+type Evidence = { terminalHandle: string; paneKey: string; launchToken: string }
+
+function evidenceFor(handle: string): Evidence {
+  return { terminalHandle: handle, paneKey: `pane_${handle}`, launchToken: `lt_${handle}` }
+}
+
+function request(
+  id: string,
+  method: string,
+  params: Record<string, unknown>,
+  evidence?: Evidence
+): RpcRequest {
   return {
     id: `rpc_${id}`,
     authToken: 'worker-token',
     orchestrationContractVersion: ORCHESTRATION_CONTRACT_VERSION,
     orchestrationRequestId: `request_${id}`,
     method,
-    params
+    params,
+    ...(evidence ? { orchestrationCompatibilityEvidence: evidence } : {})
   }
 }
 
-function dispatcherFor(db: OrchestrationDb): RpcDispatcher {
-  const runtime = new OrcaRuntimeService()
-  runtime.setOrchestrationDb(db)
-  return new RpcDispatcher({ runtime, methods: ORCHESTRATION_METHODS })
+// Why every attested handle "works" (no per-pane allow-list, unlike orchestration-agents.test.ts
+// and orchestration-peer-ask-reply.test.ts): these tests exercise participant/degrade/sensitive
+// behavior keyed on BARE terminal handles (thread_participants rows created directly by
+// db.createThread, never via `agents register`) — there is no forged-identity scenario here to
+// gate against, only "does resolveThreadReplay use the attested handle correctly".
+function mockAttestation(runtime: OrcaRuntimeService): void {
+  vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+    if (!evidence?.terminalHandle || !evidence.paneKey || !evidence.launchToken) {
+      return null
+    }
+    const authority: OrchestrationCompatibilityCallerAuthority = {
+      hostScope: { kind: 'local', hostId: 'local' },
+      paneKey: evidence.paneKey,
+      terminalHandle: evidence.terminalHandle,
+      processIncarnation: 'proc-1',
+      launchTokenHash: 'hash'
+    }
+    return authority
+  })
 }
 
-describe('orchestration.thread (BUG 4)', () => {
+function dispatcherFor(db: OrchestrationDb): {
+  runtime: OrcaRuntimeService
+  dispatcher: RpcDispatcher
+} {
+  const runtime = new OrcaRuntimeService()
+  runtime.setOrchestrationDb(db)
+  mockAttestation(runtime)
+  return { runtime, dispatcher: new RpcDispatcher({ runtime, methods: ORCHESTRATION_METHODS }) }
+}
+
+/** Mints a real threads/thread_participants row (bare-handle participants) and posts `subjects`
+ * alternating from participants[0] -> participants[1] -> ... on that thread, mirroring how
+ * `db.createThread` + `bumpThreadOnMessage` are used together elsewhere in this series. */
+function seedParticipantThread(
+  db: OrchestrationDb,
+  participants: [string, string],
+  subjects: readonly string[]
+): string {
+  const { thread } = db.createThread({
+    subject: 'test thread',
+    createdByAgentId: null,
+    participants: participants.map((handle) => ({ participantKey: handle, handle }))
+  })
+  let sequence: number | undefined
+  subjects.forEach((subject, i) => {
+    const from = participants[i % 2]
+    const to = participants[(i + 1) % 2]
+    const message = db.insertMessage({ from, to, subject, threadId: thread.id })
+    db.bumpThreadOnMessage(thread.id, message)
+    sequence = message.sequence
+  })
+  void sequence
+  return thread.id
+}
+
+describe('orchestration.thread (BUG 4, hardened per S10-2 ruling 1)', () => {
   let directory: string | undefined
   let db: OrchestrationDb | undefined
 
@@ -39,29 +104,29 @@ describe('orchestration.thread (BUG 4)', () => {
     }
   })
 
-  it('replays every message on a thread, in order, after a runtime restart', async () => {
+  it('a full participant replays every message on a thread, in order, after a runtime restart', async () => {
     directory = mkdtempSync(join(tmpdir(), 'orca-thread-replay-'))
     const dbPath = join(directory, 'orchestration.db')
     db = new OrchestrationDb(dbPath)
-
-    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 'thread_1' })
-    db.insertMessage({ from: 'term_b', to: 'term_a', subject: 'two', threadId: 'thread_1' })
-    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'three', threadId: 'thread_1' })
-    // A different thread must never leak into the replay.
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two', 'three'])
     db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'unrelated', threadId: 'thread_2' })
 
     // Restart: close and reopen the same on-disk database.
     db.close()
     db = new OrchestrationDb(dbPath)
-    const dispatcher = dispatcherFor(db)
+    const { dispatcher } = dispatcherFor(db)
 
     const response = await dispatcher.dispatch(
-      request('thread-1', 'orchestration.thread', { id: 'thread_1' })
+      request('thread-1', 'orchestration.thread', { id: threadId }, evidenceFor('term_a'))
     )
 
     expect(response.ok).toBe(true)
-    const result = (response as { result: { messages: { subject: string }[]; count: number } })
-      .result
+    const result = (
+      response as {
+        result: { messages: { subject: string }[]; count: number; degraded: boolean }
+      }
+    ).result
+    expect(result.degraded).toBe(false)
     expect(result.count).toBe(3)
     expect(result.messages.map((m) => m.subject)).toEqual(['one', 'two', 'three'])
   })
@@ -69,17 +134,16 @@ describe('orchestration.thread (BUG 4)', () => {
   it('filters to messages strictly after --since (a sequence cursor)', async () => {
     directory = mkdtempSync(join(tmpdir(), 'orca-thread-since-'))
     db = new OrchestrationDb(join(directory, 'orchestration.db'))
-    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
-    const second = db.insertMessage({
-      from: 'term_b',
-      to: 'term_a',
-      subject: 'two',
-      threadId: 't1'
-    })
-    const dispatcher = dispatcherFor(db)
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])
+    const { dispatcher } = dispatcherFor(db)
 
     const beforeAll = await dispatcher.dispatch(
-      request('thread-2a', 'orchestration.thread', { id: 't1', since: '0' })
+      request(
+        'thread-2a',
+        'orchestration.thread',
+        { id: threadId, since: '0' },
+        evidenceFor('term_a')
+      )
     )
     expect(
       (beforeAll as { result: { messages: { subject: string }[] } }).result.messages.map(
@@ -87,8 +151,14 @@ describe('orchestration.thread (BUG 4)', () => {
       )
     ).toEqual(['one', 'two'])
 
+    const secondSeq = db.getThreadMessages(threadId).at(-1)?.sequence
     const afterAll = await dispatcher.dispatch(
-      request('thread-2b', 'orchestration.thread', { id: 't1', since: String(second.sequence) })
+      request(
+        'thread-2b',
+        'orchestration.thread',
+        { id: threadId, since: String(secondSeq) },
+        evidenceFor('term_a')
+      )
     )
     expect((afterAll as { result: { messages: unknown[] } }).result.messages).toEqual([])
   })
@@ -100,18 +170,16 @@ describe('orchestration.thread (BUG 4)', () => {
   it('also accepts an ISO timestamp --since cursor (pre-migration wire compatibility)', async () => {
     directory = mkdtempSync(join(tmpdir(), 'orca-thread-since-timestamp-'))
     db = new OrchestrationDb(join(directory, 'orchestration.db'))
-    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
-    db.insertMessage({ from: 'term_b', to: 'term_a', subject: 'two', threadId: 't1' })
-    const dispatcher = dispatcherFor(db)
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])
+    const { dispatcher } = dispatcherFor(db)
 
-    // A cursor from well before either insert: the old sequence-only parser threw
-    // `invalid_argument` on any non-integer string — this must instead resolve as a
-    // `created_at` filter and replay everything.
     const past = await dispatcher.dispatch(
-      request('thread-ts-past', 'orchestration.thread', {
-        id: 't1',
-        since: '2000-01-01T00:00:00Z'
-      })
+      request(
+        'thread-ts-past',
+        'orchestration.thread',
+        { id: threadId, since: '2000-01-01T00:00:00Z' },
+        evidenceFor('term_a')
+      )
     )
     expect(past.ok).toBe(true)
     expect(
@@ -120,69 +188,147 @@ describe('orchestration.thread (BUG 4)', () => {
       )
     ).toEqual(['one', 'two'])
 
-    // A cursor from well after both inserts filters everything out — proves the timestamp
-    // branch actually reaches `created_at > ?`, not just that it fails to throw.
     const future = await dispatcher.dispatch(
-      request('thread-ts-future', 'orchestration.thread', {
-        id: 't1',
-        since: '2099-01-01T00:00:00Z'
-      })
+      request(
+        'thread-ts-future',
+        'orchestration.thread',
+        { id: threadId, since: '2099-01-01T00:00:00Z' },
+        evidenceFor('term_a')
+      )
     )
     expect(future.ok).toBe(true)
     expect((future as { result: { messages: unknown[] } }).result.messages).toEqual([])
   })
 
-  // MUTATION PROOF (S10-0 review minor): two messages inserted synchronously in the same test
-  // necessarily share `created_at`'s whole-second resolution — a `created_at`-keyed --since would
-  // be unable to tell them apart, either re-including or permanently dropping the second one. The
-  // monotonic `sequence` cursor resumes exactly regardless: if `getThreadMessages` reverted to
-  // filtering on `created_at > sinceCreatedAt`, this assertion would fail (both messages share the
-  // same created_at, so `sequence > first.sequence` is the only boundary that isolates "two").
-  it('MUTATION PROOF: two messages in the same wall-clock second both resume correctly by sequence', async () => {
-    directory = mkdtempSync(join(tmpdir(), 'orca-thread-since-tie-'))
-    db = new OrchestrationDb(join(directory, 'orchestration.db'))
-    const first = db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
-    const second = db.insertMessage({
-      from: 'term_b',
-      to: 'term_a',
-      subject: 'two',
-      threadId: 't1'
-    })
-    expect(second.created_at).toBe(first.created_at)
-    const dispatcher = dispatcherFor(db)
-
-    const resumeFromFirst = await dispatcher.dispatch(
-      request('thread-tie-1', 'orchestration.thread', { id: 't1', since: String(first.sequence) })
-    )
-    expect(
-      (resumeFromFirst as { result: { messages: { subject: string }[] } }).result.messages.map(
-        (m) => m.subject
-      )
-    ).toEqual(['two'])
-
-    const resumeFromSecond = await dispatcher.dispatch(
-      request('thread-tie-2', 'orchestration.thread', { id: 't1', since: String(second.sequence) })
-    )
-    expect((resumeFromSecond as { result: { messages: unknown[] } }).result.messages).toEqual([])
-  })
-
   it('never returns a different thread’s messages', async () => {
     directory = mkdtempSync(join(tmpdir(), 'orca-thread-isolation-'))
     db = new OrchestrationDb(join(directory, 'orchestration.db'))
-    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'in-thread', threadId: 't1' })
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['in-thread'])
     db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'other-thread', threadId: 't2' })
-    const dispatcher = dispatcherFor(db)
+    const { dispatcher } = dispatcherFor(db)
 
     const response = await dispatcher.dispatch(
-      request('thread-3', 'orchestration.thread', { id: 't1' })
+      request('thread-3', 'orchestration.thread', { id: threadId }, evidenceFor('term_a'))
     )
 
     const result = (response as { result: { messages: { subject: string }[] } }).result
     expect(result.messages.map((m) => m.subject)).toEqual(['in-thread'])
   })
+
+  // T1 (s10-2-spec.md acceptance table): a caller who does NOT participate in a thread gets a
+  // recipient-filtered replay, never the other participants' conversation. Mutation this kills:
+  // restoring orchestration-thread.ts's old unguarded `db.getThreadMessages(params.id)` call
+  // (dropping resolveThreadReplay's participant check) — this test would then see BOTH
+  // messages, not zero.
+  it('T1: a non-participant on a non-sensitive thread degrades to a recipient-filtered replay, never the full conversation', async () => {
+    db = new OrchestrationDb(':memory:')
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['secret plan', 'reply'])
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-outsider', 'orchestration.thread', { id: threadId }, evidenceFor('term_c'))
+    )
+    expect(response.ok).toBe(true)
+    const result = (response as { result: { messages: unknown[]; degraded: boolean } }).result
+    expect(result.degraded).toBe(true)
+    expect(result.messages).toEqual([])
+  })
+
+  it('T1: a non-participant addressed on a raw (non-thread-directory) thread id sees only their own recipient view', async () => {
+    db = new OrchestrationDb(':memory:')
+    // No db.createThread call: this thread id has no `threads` row at all — the shape a raw
+    // pre-thread-directory insertMessage call produces.
+    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 'legacy_t1' })
+    db.insertMessage({ from: 'term_b', to: 'term_a', subject: 'two', threadId: 'legacy_t1' })
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-legacy', 'orchestration.thread', { id: 'legacy_t1' }, evidenceFor('term_b'))
+    )
+    const result = (response as { result: { messages: { subject: string }[]; degraded: boolean } })
+      .result
+    expect(result.degraded).toBe(true)
+    // term_b is the `to_handle` of exactly one of the two messages.
+    expect(result.messages.map((m) => m.subject)).toEqual(['one'])
+  })
+
+  it('an unattested caller (no evidence at all) gets nothing, never the unfiltered dump', async () => {
+    db = new OrchestrationDb(':memory:')
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-anon', 'orchestration.thread', { id: threadId })
+    )
+    const result = (response as { result: { messages: unknown[]; degraded: boolean } }).result
+    expect(result.degraded).toBe(true)
+    expect(result.messages).toEqual([])
+  })
+
+  // T1's other half: sensitive threads refuse a non-participant outright rather than degrading
+  // (ruling 8's one exception, s10-2-spec.md:110/179).
+  it('T1: a non-participant is refused not_a_participant on a sensitive thread — no bodies, no degrade', async () => {
+    db = new OrchestrationDb(':memory:')
+    const { thread } = db.createThread({
+      subject: 'sensitive matter',
+      createdByAgentId: null,
+      sensitive: true,
+      participants: [
+        { participantKey: 'term_a', handle: 'term_a' },
+        { participantKey: 'term_b', handle: 'term_b' }
+      ]
+    })
+    const message = db.insertMessage({
+      from: 'term_a',
+      to: 'term_b',
+      subject: 'do not leak',
+      threadId: thread.id
+    })
+    db.bumpThreadOnMessage(thread.id, message)
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request('thread-sensitive', 'orchestration.thread', { id: thread.id }, evidenceFor('term_c'))
+    )
+    expect(response.ok).toBe(false)
+    expect((response as { error: { code: string } }).error.code).toBe('not_a_participant')
+  })
+
+  it('a participant on a sensitive thread still gets the full replay', async () => {
+    db = new OrchestrationDb(':memory:')
+    const { thread } = db.createThread({
+      subject: 'sensitive matter',
+      createdByAgentId: null,
+      sensitive: true,
+      participants: [
+        { participantKey: 'term_a', handle: 'term_a' },
+        { participantKey: 'term_b', handle: 'term_b' }
+      ]
+    })
+    const message = db.insertMessage({
+      from: 'term_a',
+      to: 'term_b',
+      subject: 'sensitive body',
+      threadId: thread.id
+    })
+    db.bumpThreadOnMessage(thread.id, message)
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request(
+        'thread-sensitive-ok',
+        'orchestration.thread',
+        { id: thread.id },
+        evidenceFor('term_b')
+      )
+    )
+    expect(response.ok).toBe(true)
+    const result = (response as { result: { messages: { subject: string }[] } }).result
+    expect(result.messages.map((m) => m.subject)).toEqual(['sensitive body'])
+  })
 })
 
-describe('orchestration.inbox --thread-id (BUG 4)', () => {
+describe('orchestration.inbox --thread-id (BUG 4, hardened)', () => {
   let db: OrchestrationDb | undefined
 
   afterEach(() => {
@@ -190,19 +336,41 @@ describe('orchestration.inbox --thread-id (BUG 4)', () => {
     db = undefined
   })
 
-  it('wins over --terminal and replays the whole thread', async () => {
+  it('wins over --terminal and replays the whole thread for a participant', async () => {
     db = new OrchestrationDb(':memory:')
-    db.insertMessage({ from: 'term_a', to: 'term_b', subject: 'one', threadId: 't1' })
-    db.insertMessage({ from: 'term_b', to: 'term_a', subject: 'two', threadId: 't1' })
-    const dispatcher = dispatcherFor(db)
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])
+    const { dispatcher } = dispatcherFor(db)
 
     const response = await dispatcher.dispatch(
-      request('inbox-1', 'orchestration.inbox', { terminal: 'term_a', threadId: 't1' })
+      request(
+        'inbox-1',
+        'orchestration.inbox',
+        { terminal: 'term_a', threadId },
+        evidenceFor('term_a')
+      )
     )
 
     const result = (response as { result: { messages: { subject: string }[]; count: number } })
       .result
     expect(result.count).toBe(2)
     expect(result.messages.map((m) => m.subject)).toEqual(['one', 'two'])
+  })
+
+  it('a non-participant querying --thread-id gets the same recipient-filtered degrade as orchestration.thread', async () => {
+    db = new OrchestrationDb(':memory:')
+    const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])
+    const { dispatcher } = dispatcherFor(db)
+
+    const response = await dispatcher.dispatch(
+      request(
+        'inbox-2',
+        'orchestration.inbox',
+        { terminal: 'term_a', threadId },
+        evidenceFor('term_c')
+      )
+    )
+    const result = (response as { result: { messages: unknown[]; degraded: boolean } }).result
+    expect(result.degraded).toBe(true)
+    expect(result.messages).toEqual([])
   })
 })

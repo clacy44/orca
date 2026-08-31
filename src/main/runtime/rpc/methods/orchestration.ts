@@ -35,7 +35,7 @@ import { ORCHESTRATION_AGENT_METHODS } from './orchestration-agents'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
 import { ORCHESTRATION_FEDERATION_METHODS } from './orchestration-federation-methods'
 import { ORCHESTRATION_SENT_METHODS } from './orchestration-sent'
-import { ORCHESTRATION_THREAD_METHODS } from './orchestration-thread'
+import { ORCHESTRATION_THREAD_METHODS, resolveThreadReplay } from './orchestration-thread'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   assertPayloadKindNotCallerSet,
@@ -1748,14 +1748,23 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.inbox',
     params: InboxParams,
-    handler: (params, { runtime }) => {
+    handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
       const db = runtime.getOrchestrationDb()
       // Why: stale/unknown handles return empty rather than error — historical rows survive handle deletion (design doc §3.3).
-      const messages = params.threadId
-        ? db.getThreadMessages(params.threadId)
-        : params.terminal
-          ? db.getAllMessagesForHandle(params.terminal, params.limit)
-          : db.getInbox(params.limit)
+      // Why threadId routes through resolveThreadReplay (ruling 1): `--thread-id` used to call
+      // the recipient-unfiltered db.getThreadMessages directly, the same full-body leak
+      // orchestration.thread had — hardened once, shared by both call sites.
+      if (params.threadId) {
+        return resolveThreadReplay(
+          runtime,
+          orchestrationCompatibilityEvidence,
+          params.threadId,
+          undefined
+        )
+      }
+      const messages = params.terminal
+        ? db.getAllMessagesForHandle(params.terminal, params.limit)
+        : db.getInbox(params.limit)
       return { messages, count: messages.length }
     }
   }),
