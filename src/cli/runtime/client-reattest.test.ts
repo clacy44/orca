@@ -200,13 +200,13 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest choke', ()
 })
 
 // S10-6 (R4): the CLI must swap the server's canned "re-run the command" nextStep for an
-// accurate one once it already knows reattest couldn't help — using a REAL AgentHookServer for
-// the reattest leg. The HTTP status codes stubbed below (403, 204) are exactly what a real
-// AgentHookServer returns for a stale token and a disposition-not-'accept' refusal respectively
-// — see src/main/agent-hooks/server.test.ts and orchestration-compatibility-reattest.test.ts
-// (main/runtime) for those gates proven against the real server; this file stays scoped to
-// src/cli's own tsconfig project boundary (server.ts is deliberately not on tsconfig.cli.json's
-// allowlist — it would pull in most of src/main).
+// accurate one once it already knows reattest couldn't help. The HTTP status codes stubbed
+// below (403, 204) are exactly what a real AgentHookServer returns for a stale token and a
+// disposition-not-'accept' refusal respectively — see server.test.ts and
+// orchestration-compatibility-reattest.test.ts (main/runtime) for those gates proven against
+// the real server; this file stays scoped to src/cli's own tsconfig project boundary
+// (server.ts is deliberately not on tsconfig.cli.json's allowlist — it would pull in most of
+// src/main).
 describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4) nextStep', () => {
   async function startAlwaysRefusingRpcServer(
     userDataPath: string
