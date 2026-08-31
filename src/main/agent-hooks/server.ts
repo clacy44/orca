@@ -2788,12 +2788,33 @@ export class AgentHookServer {
    *  RESIDUAL GAP (S10-5 review F5, by design — not a defect): a pane with no hydrated commitment
    *  on disk (never observed before this runtime's `start()`, or evicted) cannot be bootstrapped
    *  by `/reattest`. `hydratedAuthorityCommitments` is populated once at `start()` from disk and is
-   *  otherwise immutable for the life of this server instance (reassigned only by `captureHydrated-
-   *  AuthorityCommitments()` at start and by the reset block) — `/reattest` only ever writes
+   *  otherwise immutable for the life of this server instance — `/reattest` only ever writes
    *  `currentAuthorityObservations` / `persistedAuthorityCommitmentsByPaneKey`, it never reaches
    *  into `hydratedAuthorityCommitments`. Such a pane stays unbootstrappable until a real agent
-   *  hook fires for it. Widening this (e.g. allowing /reattest to seed a fresh hydrated commitment)
-   *  is out of scope for S10-5 and tracked as S10-6. */
+   *  hook fires for it.
+   *
+   *  S10-6 (R2) DEVIATION — NOT implemented as the chair's ruling specified, with reasons: the
+   *  ruling asked `/reattest` to seed `hydratedAuthorityCommitments` directly from whatever this
+   *  handler records. Traced end-to-end against `orchestration-compatibility-reattest.test.ts`'s
+   *  existing "refuses a forged pane with no matching restored receipt, even after a successful
+   *  reattest" case, that seeding makes `attestCompatibilityAuthority`'s 'restored' branch a
+   *  no-op check for exactly the pane population it's meant to protect: a caller with no receipt
+   *  and no genuine prior history for a paneKey can `/reattest` with a launchToken *of its own
+   *  choosing*, since this route never validates the token against anything (same as every real
+   *  hook POST — see the SECURITY EQUIVALENCE paragraph above); once that self-chosen value is
+   *  also a hydrated commitment, the caller's own subsequent claim of the identical value always
+   *  matches both `commitments` and `currentAuthorityObservations` — attestation cannot refuse a
+   *  self-consistent forgery, because it IS the forgery, fed back to itself. This is not
+   *  specific to a hostile actor: `/reattest`'s only gates (shared loopback hook token +
+   *  disposition==='accept') are the same ones a legitimate same-user, different-pane caller
+   *  already clears, since every pane's spawn env carries the identical shared hook token (see
+   *  the DEVIATION note on `attemptOrchestrationReattest`). Closing this gap for real would need
+   *  an independent, restart-surviving proof of a pane's launch secret (e.g. the daemon
+   *  persisting and re-attesting the original token itself) that does not exist in this
+   *  codebase today — a materially bigger change than extending this HTTP handler, and out of
+   *  scope for a same-day S10-6 pass. Left for a follow-up ruling; R3 below still lands (it
+   *  never touches `hydratedAuthorityCommitments` and requires the SAME attestation this gap
+   *  still blocks, so it cannot widen what a never-hydrated pane can do on its own). */
   private handleReattestRequest(body: unknown): { status: number; retryAfterMs?: number } {
     if (typeof body !== 'object' || body === null) {
       return { status: 400 }
