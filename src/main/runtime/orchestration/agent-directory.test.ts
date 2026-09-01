@@ -88,6 +88,143 @@ describe('agent-directory', () => {
       }
     })
 
+    it('T1 (S10-11 R1): dead-pane name collision rebinds in place — same id, mailbox follows, reMinted', () => {
+      const db = rawDb()
+      const first = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      const originalId = first.outcome === 'created' ? first.agent.id : ''
+      db.prepare(
+        `INSERT INTO messages (id, from_handle, to_handle, subject) VALUES ('msg_1', 'peer', ?, 'while you were away')`
+      ).run(`agent:${originalId}`)
+
+      // A full relaunch: brand-new pane suffix (not just a new terminal_handle on the old
+      // pane), the exact shape findByPaneSuffix cannot match. The old pane is confirmed dead.
+      const rebind = upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab9:leaf-relaunched',
+          terminalHandle: 'term_relaunched',
+          isPaneLive: () => false
+        })
+      )
+      expect(rebind.outcome).toBe('reminted')
+      if (rebind.outcome === 'reminted') {
+        expect(rebind.agent.id).toBe(originalId)
+        expect(rebind.agent.pane_key).toBe('tab9:leaf-relaunched')
+        expect(rebind.agent.terminal_handle).toBe('term_relaunched')
+      }
+      // Mail addressed to the durable id is untouched — it was never on a bare handle.
+      expect(db.prepare('SELECT to_handle FROM messages WHERE id = ?').get('msg_1')).toEqual({
+        to_handle: `agent:${originalId}`
+      })
+
+      // Only one row for this name — never a second, anonymous identity left behind.
+      const rows = db
+        .prepare('SELECT id FROM agents WHERE host_id = ? AND display_name = ?')
+        .all('local', 'merge-restructure-backend') as { id: string }[]
+      expect(rows).toEqual([{ id: originalId }])
+    })
+
+    it('T2 (S10-11 R1): a name held by a genuinely LIVE pane still refuses name_taken, naming the live pane', () => {
+      const db = rawDb()
+      upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab1:leaf-aaa', terminalHandle: 'term_live' })
+      )
+
+      const collision = upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab9:leaf-newcomer',
+          terminalHandle: 'term_newcomer',
+          isPaneLive: (paneKey) => paneKey === 'tab1:leaf-aaa'
+        })
+      )
+      expect(collision.outcome).toBe('name_taken')
+      if (collision.outcome === 'name_taken') {
+        expect(collision.livePaneKey).toBe('tab1:leaf-aaa')
+        expect(collision.liveTerminalHandle).toBe('term_live')
+      }
+      // Never a raw INSERT / constraint failure, and never a second anonymous row for the name.
+      const rows = db
+        .prepare('SELECT id FROM agents WHERE host_id = ? AND display_name = ?')
+        .all('local', 'merge-restructure-backend') as { id: string }[]
+      expect(rows).toHaveLength(1)
+    })
+
+    it('omitting isPaneLive defaults conservative (assumed live -> name_taken, never a mistaken rebind)', () => {
+      const db = rawDb()
+      upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      const collision = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab9:leaf-newcomer', terminalHandle: 'term_newcomer' })
+      )
+      expect(collision.outcome).toBe('name_taken')
+    })
+
+    it('a quarantined name holder stays locked regardless of pane liveness (existing semantics)', () => {
+      const db = rawDb()
+      const first = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      const holderId = first.outcome === 'created' ? first.agent.id : ''
+      db.prepare('UPDATE agents SET quarantined = 1 WHERE id = ?').run(holderId)
+
+      const collision = upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab9:leaf-newcomer',
+          terminalHandle: 'term_newcomer',
+          isPaneLive: () => false // even a confirmed-dead pane must not reclaim a quarantined name
+        })
+      )
+      expect(collision.outcome).toBe('name_taken')
+      if (collision.outcome === 'name_taken') {
+        expect(collision.livePaneKey).toBeNull()
+        expect(collision.liveTerminalHandle).toBeNull()
+      }
+    })
+
+    it("T3 (S10-11 R2): retire then re-register (fresh successor id) adopts the tombstoned predecessor's thread membership", () => {
+      const db = rawDb()
+      const first = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      const predecessorId = first.outcome === 'created' ? first.agent.id : ''
+      const { thread } = orchestrationDb!.createThread({
+        subject: 'merge plan',
+        createdByAgentId: predecessorId,
+        participants: [{ participantKey: predecessorId, agentId: predecessorId, role: 'owner' }]
+      })
+
+      db.prepare(
+        `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL WHERE id = ?`
+      ).run(predecessorId)
+
+      // A fresh pane re-registers the same name after the predecessor is gone (findByName
+      // excludes tombstoned rows, so this is the ordinary 'created' path, not a rebind).
+      const successor = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab9:leaf-newcomer', terminalHandle: 'term_newcomer' })
+      )
+      expect(successor.outcome).toBe('created')
+      if (successor.outcome !== 'created') {
+        return
+      }
+      expect(successor.agent.id).not.toBe(predecessorId)
+      expect(successor.adoptedThreads).toBe(1)
+
+      const participant = db
+        .prepare('SELECT participant_key, agent_id FROM thread_participants WHERE thread_id = ?')
+        .get(thread.id) as { participant_key: string; agent_id: string }
+      expect(participant.participant_key).toBe(successor.agent.id)
+      expect(participant.agent_id).toBe(successor.agent.id)
+    })
+
+    it('adoptedThreads is 0 when no tombstoned predecessor shares the name', () => {
+      const db = rawDb()
+      const created = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      expect(created.outcome).toBe('created')
+      if (created.outcome === 'created') {
+        expect(created.adoptedThreads).toBe(0)
+      }
+    })
+
     it('reclaims a name held by a gone+derived row (tombstones it, then inserts fresh)', () => {
       const db = rawDb()
       const derivedHolder = upsertAgentByPaneSuffix(

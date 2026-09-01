@@ -10,6 +10,9 @@ import type { RuntimeTerminalSummary } from '../../../../shared/runtime-types'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_A_MOVED = 'tabA2:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+// A relaunch, not a moved tab: a brand-new leaf suffix (unlike PANE_A_MOVED, which keeps
+// PANE_A's leaf), the exact shape findByPaneSuffix cannot match — the S10-11 THE ONE BUG case.
+const PANE_A_RELAUNCH = 'tabA9:dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 
 function makeAuthority(
@@ -85,6 +88,13 @@ describe('orchestration.agents.* RPC methods', () => {
       ) {
         return makeAuthority(PANE_B, 'term_b')
       }
+      if (
+        evidence?.terminalHandle === 'term_a_relaunched' &&
+        evidence.paneKey === PANE_A_RELAUNCH &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_A_RELAUNCH, 'term_a_relaunched')
+      }
       return null
     })
   }
@@ -122,6 +132,11 @@ describe('orchestration.agents.* RPC methods', () => {
     launchToken: 'lt-a'
   }
   const evidenceB = { terminalHandle: 'term_b', paneKey: PANE_B, launchToken: 'lt-b' }
+  const evidenceARelaunch = {
+    terminalHandle: 'term_a_relaunched',
+    paneKey: PANE_A_RELAUNCH,
+    launchToken: 'lt-a'
+  }
 
   it('R1: register with no evidence refuses with no_pane_identity and writes zero rows', async () => {
     setup()
@@ -247,6 +262,43 @@ describe('orchestration.agents.* RPC methods', () => {
     )) as { agent: { id: string }; reMinted: boolean }
     expect(second.reMinted).toBe(true)
     expect(second.agent.id).toBe(first.agent.id)
+  })
+
+  describe('S10-11 R1: dead-pane rebind on register', () => {
+    // T1 (register + threads/mail resolution together) and T3/T4 (thread membership succession
+    // and outsider degradation) need orchestration.threads.* alongside agents.* — covered in
+    // orchestration-threads.test.ts, which registers the full ORCHESTRATION_METHODS aggregate.
+    it('T2: a name held by a genuinely LIVE pane still refuses name_taken, naming the live pane', async () => {
+      setup()
+      await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )
+
+      // PANE_A is still live this time — a real second agent trying to steal a live name.
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
+        paneKey === PANE_A
+          ? { terminalHandle: 'term_a', lastAgentStatus: 'idle', observedLive: true }
+          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
+      )
+
+      await expect(
+        call(
+          'orchestration.agents.register',
+          { name: 'merge-backend', role: 'someone else' },
+          ctx(evidenceARelaunch)
+        )
+      ).rejects.toMatchObject({
+        code: 'name_taken',
+        message: expect.stringContaining('term_a'),
+        data: {
+          nextSteps: expect.arrayContaining([
+            expect.stringContaining('orca agents register --name')
+          ])
+        }
+      })
+    })
   })
 
   it('list: derived rows are flagged derived and ranked lower than registered rows', async () => {
