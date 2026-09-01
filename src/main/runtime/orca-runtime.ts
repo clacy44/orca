@@ -2225,13 +2225,16 @@ type PtyWriteFlight = {
 }
 
 // Why a pane never gets an armed Enter (S10-9 R1+R2 fallback outcomes; 'no_live_pane' added
-// S10-15 F8 for an unresolvable/stale handle — no live leaf or pty backs it at all).
+// S10-15 F8 for an unresolvable/stale handle — no live leaf or pty backs it at all;
+// 'blocked_modal' added S10-15 F9 — a busy Claude Code pane still refuses to inject into a
+// live permission/trust prompt, where an Enter would answer the dialog instead of the pane).
 type WithheldDeliveryReason =
   | 'pane_busy'
   | 'not_agent_pane'
   | 'probe_failed'
   | 'no_hydrated_status'
   | 'no_live_pane'
+  | 'blocked_modal'
 
 // Why (S10-15 F8): the pointer/Enter push targets either a live leaf or a leafless pty record
 // — no renderer leaf exists for it, e.g. a headless `orca serve` session or a desktop pane
@@ -33870,6 +33873,42 @@ export class OrcaRuntimeService {
     return ptyId !== undefined && this.ptysById.has(ptyId) && !this.leafExistsForPty(ptyId)
   }
 
+  // Why (S10-15 F9, owner-ruled): Claude Code natively queues stdin typed mid-turn and
+  // surfaces it at the model's own next tool boundary, so the busy gate below is redundant
+  // for it and only starves long-running coordinator turns waiting on background work. Same
+  // launchAgent-first, foregroundAgent-fallback authority createClaudeAgentPromptRenderGate
+  // already trusts (line ~18503); a bare "some agent" signal (isPtyRunningAgent) is not
+  // authoritative enough to name the specific agent, so it stays conservative — NOT Claude.
+  private isClaudeCodePane(
+    pty: Pick<RuntimePtyWorktreeRecord, 'launchAgent' | 'foregroundAgent'> | null | undefined
+  ): boolean {
+    return (pty?.launchAgent ?? pty?.foregroundAgent) === 'claude'
+  }
+
+  // Why (S10-15 F9): the one hard gate that survives relaxing the busy check for Claude
+  // panes — an injected Enter into a live permission/trust prompt would answer the dialog,
+  // not the pane. Same modal detection probeTuiIdleForDelivery uses (detectTerminalWaitBlockedReason
+  // over the tail), but synchronous: no foreground-process probe, since we already know via
+  // isClaudeCodePane which agent owns this pane.
+  private attemptMidTurnClaudeDelivery(
+    target: PendingMessageDeliveryTarget,
+    waitSource: { tailBuffer: string[]; tailPartialLine: string; preview: string },
+    mailboxHandle: string,
+    options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
+  ): void {
+    const waitText = buildTerminalWaitText(
+      waitSource.tailBuffer,
+      waitSource.tailPartialLine,
+      waitSource.preview
+    )
+    if (detectTerminalWaitBlockedReason(waitText)) {
+      this.recordWithheldDelivery(mailboxHandle, 'blocked_modal')
+      return
+    }
+    this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+    this.deliverPendingMessages(target, { mailboxHandle, ...options })
+  }
+
   deliverPendingMessagesForHandle(
     handle: string,
     reservedTypes?: ReadonlySet<string>,
@@ -33907,6 +33946,14 @@ export class OrcaRuntimeService {
             { deliveryKind: 'pty', ptyId: pty.ptyId },
             { mailboxHandle: handle, reservedTypes, notifiedThreadIdKnown }
           )
+        } else if (pty.lastAgentStatusObservedLive && pty.connected && this.isClaudeCodePane(pty)) {
+          // S10-15 F9: a busy Claude pane injects mid-turn instead of waiting for the idle edge.
+          this.attemptMidTurnClaudeDelivery(
+            { deliveryKind: 'pty', ptyId: pty.ptyId },
+            pty,
+            handle,
+            { reservedTypes, notifiedThreadIdKnown }
+          )
         } else {
           // Normal live tracking has resumed — any earlier fallback-withheld record is stale.
           // (The R1/R2 hydrated-probe fallback below stays leaf-scoped; a leafless pane's own
@@ -33941,6 +33988,15 @@ export class OrcaRuntimeService {
       // Fire-and-forget: every existing sync caller keeps its exact no-op-when-not-idle return.
       if (!leaf.lastAgentStatusObservedLive) {
         void this.attemptHydratedProbedDelivery(leaf.tabId, leaf.leafId, terminalHandle, handle, {
+          reservedTypes,
+          notifiedThreadIdKnown
+        })
+      } else if (
+        leaf.writable &&
+        this.isClaudeCodePane(leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null)
+      ) {
+        // S10-15 F9: a busy Claude pane injects mid-turn instead of waiting for the idle edge.
+        this.attemptMidTurnClaudeDelivery(leaf, leaf, handle, {
           reservedTypes,
           notifiedThreadIdKnown
         })
@@ -34023,6 +34079,11 @@ export class OrcaRuntimeService {
       return
     }
     if (hydrated.status !== 'idle') {
+      // S10-15 F9: a busy Claude pane injects mid-turn instead of waiting for the idle edge.
+      if (this.isClaudeCodePane(this.ptysById.get(leaf.ptyId))) {
+        this.attemptMidTurnClaudeDelivery(leaf, leaf, mailboxHandle, options)
+        return
+      }
       this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
       return
     }
