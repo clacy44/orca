@@ -3578,5 +3578,49 @@ describe('orchestration RPC methods', () => {
       expect(db.getInbox()).toHaveLength(0)
       expect(db.listTasks()).toHaveLength(1)
     })
+
+    // S10-15 (chair-verified finding): reset is a local operator action — a paired federated
+    // caller must be refused BEFORE any write, for all three scopes.
+    it.each([
+      ['all', { all: true }],
+      ['tasks', { tasks: true }],
+      ['messages', { messages: true }]
+    ])(
+      'refuses a federated (paired) caller for scope %s, touching nothing',
+      async (_name, params) => {
+        setup()
+        seedResetState()
+        ctx = { runtime, pairedDeviceId: 'dev_paired_peer', clientKind: 'runtime' }
+
+        await expect(call('orchestration.reset', params)).rejects.toMatchObject({
+          code: 'forbidden'
+        })
+        expect(db.getInbox()).toHaveLength(1)
+        expect(db.listTasks()).toHaveLength(1)
+      }
+    )
+
+    it('refuses a mobile-scope caller too', async () => {
+      setup()
+      seedResetState()
+      ctx = { runtime, clientKind: 'mobile' }
+
+      await expect(call('orchestration.reset', { all: true })).rejects.toMatchObject({
+        code: 'forbidden'
+      })
+      expect(db.getInbox()).toHaveLength(1)
+      expect(db.listTasks()).toHaveLength(1)
+    })
+
+    it('a local (non-federated) caller still resets normally', async () => {
+      setup()
+      seedResetState()
+
+      const result = (await call('orchestration.reset', { all: true })) as { reset: string }
+
+      expect(result.reset).toBe('all')
+      expect(db.getInbox()).toHaveLength(0)
+      expect(db.listTasks()).toHaveLength(0)
+    })
   })
 })

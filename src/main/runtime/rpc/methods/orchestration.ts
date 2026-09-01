@@ -2516,7 +2516,20 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.reset',
     params: ResetParams,
-    handler: (params, { runtime }) => {
+    handler: (params, { runtime, pairedDeviceId, clientKind }) => {
+      // S10-15 (chair-verified finding): reset is a local operator action — same guard shape
+      // as orchestration-agents-retire.ts's isFederatedCaller check. Runtime-scope paired peers
+      // are not restricted by the mobile allowlist, so without this any paired machine could
+      // call reset {all|tasks|messages} and wipe runs/messages/tasks/dispatches/question
+      // threads/the remote_agents mirror. Committed disposition: typed throw before any write.
+      const isFederatedCaller = pairedDeviceId != null || clientKind === 'mobile'
+      if (isFederatedCaller) {
+        throw new OrchestrationError(
+          'forbidden',
+          'Reset must be issued locally by the operator, never by a federated peer.',
+          { nextSteps: ['run this reset on the host itself, not over a paired link'] }
+        )
+      }
       const db = runtime.getOrchestrationDb()
       if (params.all) {
         runtime.stopOrchestrationFederationRelay()
@@ -2532,7 +2545,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         db.resetMessages()
         return { reset: 'messages' }
       }
-      throw new Error('Invalid reset scope')
+      throw new OrchestrationError('invalid_argument', 'Invalid reset scope.')
     }
   })
 ]
