@@ -1271,6 +1271,7 @@ type RuntimeStore = {
   forgetPaneCredentialLane?: Store['forgetPaneCredentialLane']
   getPaneCredentialLanes?: Store['getPaneCredentialLanes']
   persistTerminalRole?: Store['persistTerminalRole']
+  persistTerminalLaunchTokenHash?: Store['persistTerminalLaunchTokenHash']
   getTerminalRoles?: Store['getTerminalRoles']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
@@ -13047,19 +13048,36 @@ export class OrcaRuntimeService {
     this.orchestrationCompatibilitySshAttachments.delete(attachmentId)
   }
 
-  /** S10-6 corroboration anchor: true only when a CONNECTED pty currently bound to `paneKey`
-   * holds a launch token whose sha256 equals `launchTokenHash` — what the agent-hook server
-   * consults before an observation may persist as authority (see server.ts corroboration gate). */
+  /** S10-6/S10-10 corroboration anchor: true when either (a) a CONNECTED pty currently bound to
+   * `paneKey` holds a launch token whose sha256 equals `launchTokenHash`, or (b) no live pty has
+   * a token (e.g. a daemon-survived pty restored after a runtime restart, which never regains
+   * its launchToken) but the hash persisted at launch for `paneKey` equals `launchTokenHash` —
+   * only the genuine agent's process env can reproduce the matching token to hash again, so this
+   * is what lets a restored pane still corroborate (see server.ts corroboration gate). Live-pty
+   * check runs first and short-circuits; the persisted-hash fallback is consulted only after it
+   * finds no match. */
   verifyLivePaneLaunchTokenHash(paneKey: string, launchTokenHash: string): boolean {
+    let matchedConnectionId: string | null | undefined
     for (const pty of this.ptysById.values()) {
-      if (!pty.connected || pty.paneKey !== paneKey || !pty.launchToken) {
+      if (pty.paneKey !== paneKey) {
         continue
       }
-      if (createHash('sha256').update(pty.launchToken).digest('hex') === launchTokenHash) {
-        return true
+      if (pty.connected) {
+        matchedConnectionId ??= pty.connectionId
+        if (
+          pty.launchToken &&
+          createHash('sha256').update(pty.launchToken).digest('hex') === launchTokenHash
+        ) {
+          return true
+        }
       }
     }
-    return false
+    const hostId = matchedConnectionId
+      ? toSshExecutionHostId(matchedConnectionId)
+      : LOCAL_EXECUTION_HOST_ID
+    const persistedHash =
+      this.store?.getWorkspaceSession?.(hostId)?.terminalLaunchTokenHashesByPaneKey?.[paneKey]
+    return persistedHash !== undefined && persistedHash === launchTokenHash
   }
 
   verifyOrchestrationCompatibilityCaller(
@@ -13121,6 +13139,27 @@ export class OrcaRuntimeService {
         mintReceiptOnSuccess = true
       }
       terminalProvenance = 'restored'
+    }
+    // S10-10: the persisted launch-token-hash anchor is a runtime-owned secret the hook channel
+    // cannot forge — a caller presenting the token whose sha256 equals what THIS runtime
+    // persisted at mint time for this exact paneKey is verified independently of any hook POST,
+    // receipt, or hydrated-commitment disk history. Scoped to the no-receipt restored branch
+    // (mintReceiptOnSuccess) — a receipt or a live launchTokenHash already has an equal-or-
+    // stronger guarantee via their own branches above, and this is exactly what lets a
+    // daemon-survived pane (no receipt, no prior-restart commitment on disk) attest the moment
+    // its restored generation sees the genuine token, instead of only on the restart after next.
+    if (
+      mintReceiptOnSuccess &&
+      this.verifyLivePaneLaunchTokenHash(terminal.paneKey, launchTokenHash)
+    ) {
+      this.mintRestoredOrchestrationAuthorityReceipt(terminal)
+      return this.freezeOrchestrationCompatibilityCallerAuthority(
+        terminal,
+        terminal.processIncarnation,
+        claimedPaneKey,
+        terminalHandle,
+        launchTokenHash
+      )
     }
     if (
       options?.currentRuntimeLaunchSufficient &&
@@ -27306,6 +27345,19 @@ export class OrcaRuntimeService {
             pty.launchToken = launchToken ?? null
             pty.launchIncarnationId = launchToken ? pty.incarnationId : null
             pty.launchAgent = launchOpts.launchAgent ?? null
+            // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
+            // restart — which has no live launchToken, only its own process env — can still
+            // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
+            if (launchToken) {
+              this.store?.persistTerminalLaunchTokenHash?.(
+                {
+                  tabId,
+                  leafId,
+                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
+                },
+                workspace.connectionId ? toSshExecutionHostId(workspace.connectionId) : undefined
+              )
+            }
           }
           pty.tabId = tabId
           pty.paneKey = paneKey
