@@ -6319,8 +6319,12 @@ export class OrcaRuntimeService {
         // NOT gate on the existing record's `connected` bit alone: a same-id respawn under a
         // still-live daemon must keep flipping optimistically true here (see that helper's
         // own comment on why the per-pty mirror isn't a safe signal by itself).
+        // S10-12 verify: no prior-record condition — a pty FIRST SEEN after the death (no
+        // ptysById entry yet) must seed disconnected too, or list/send disagree for exactly
+        // the panes a dead daemon leaves behind. Remote-scoped ptys stay excluded (their
+        // transport is not the local daemon's).
         const resurrectsConfirmedDeadTransport =
-          this.ptysById.get(leaf.ptyId)?.connected === false &&
+          !this.isRemoteScopedPtyId(leaf.ptyId) &&
           this.isPtyProviderTransportConfirmedDown(leaf.ptyId)
         this.recordPtyWorktree(leaf.ptyId, leaf.worktreeId, {
           connected: !resurrectsConfirmedDeadTransport,
@@ -31888,11 +31892,13 @@ export class OrcaRuntimeService {
           pty.disconnectedAt = null
           this.refreshPtyForegroundAgent(ptyId)
         }
-      } else if (pty) {
+      } else if (pty && !this.isRemoteScopedPtyId(pty.ptyId)) {
         // S10-12 R1: daemon-attested only, same as the general sweep loop — a laid-out
         // floating pane the controller's own hasPty just proved dead is not connected.
         // leafExistsForPty still gates pruning below (via pruneDisconnectedPtyRecords), just
         // not this flag; gating the flag itself on layout was the bug R1 was ruled to remove.
+        // remote:-scoped panes are excluded (verify): the LOCAL controller's hasPty proving
+        // nothing about a federated pane is expected, not evidence of death.
         pty.connected = false
         pty.disconnectedAt ??= Date.now()
       }

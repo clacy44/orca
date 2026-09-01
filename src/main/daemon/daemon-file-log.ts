@@ -221,7 +221,9 @@ export function classifyPredecessorLogEnd(filePath: string): PredecessorEndVerdi
     }
     const lastPid = typeof parsed.pid === 'number' ? parsed.pid : undefined
     if (pendingCleanClose) {
-      const abnormal = ABNORMAL_EVENTS_BEFORE_CLOSE[event]
+      const abnormal = Object.hasOwn(ABNORMAL_EVENTS_BEFORE_CLOSE, event)
+        ? ABNORMAL_EVENTS_BEFORE_CLOSE[event]
+        : undefined
       if (abnormal) {
         return { classification: abnormal, lastEvent: event, lastPid }
       }

@@ -13225,6 +13225,13 @@ describe('OrcaRuntimeService', () => {
         connected: true,
         writable: true
       })
+      // Mutation guard (S10-12 verify): probe the RECORD the direct mark loop writes —
+      // higher layers (summary fallback, send's own remote exemption) can mask a reverted
+      // carve-out at the list/send level, but this field cannot lie about it.
+      const record = (
+        runtime as unknown as { ptysById: Map<string, { connected: boolean }> }
+      ).ptysById.get('remote:pty-2')
+      expect(record?.connected).toBe(true)
     })
 
     it('still accepts sends on a federated remote: pane after the local daemon transport drops', async () => {
