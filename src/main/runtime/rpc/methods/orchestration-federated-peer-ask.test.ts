@@ -507,7 +507,12 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     expect(countFederatedAskAudits(workerDb)).toBe(before + 4)
   })
 
-  it('S10-8 review fix (major, R4): a timed-out cross-host question is closed, so a late reply is refused instead of vanishing silently', async () => {
+  // S10-15 F5 (chair ruling 5) supersedes this test's original assertion: close-on-timeout is
+  // now bounded-DEFERRED (timeoutMs + RESUME_GRACE_MS), not immediate — a late reply inside the
+  // grace window is accepted, not refused. This is a deliberate behavior change mandated by the
+  // ruling (findings 5/13), not a weakening: the question is still bounded (never held open
+  // forever) via PEER_ASK_PENDING_CAP, and it is exercised separately below.
+  it('S10-15 F5 (ruling 5): a timed-out cross-host question stays answerable inside the grace window, not closed immediately', async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
@@ -519,17 +524,17 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     )) as { timedOut: boolean }
     expect(asked.timedOut).toBe(true)
 
-    // The question is CLOSED now, not left pending forever.
-    expect(findPendingPeerQuestion(workerDb, { allowNone: true })).toBeUndefined()
-    const closedId = findLatestPeerQuestion(workerDb).message_id
+    // The question is still PENDING (bounded grace window), not closed immediately.
+    const pendingRow = findPendingPeerQuestion(workerDb, { allowNone: true })
+    expect(pendingRow).toBeDefined()
 
     await expect(
       call(
         'orchestration.reply',
-        { id: closedId, body: 'sorry, saw this late' },
+        { id: pendingRow!.message_id, body: 'sorry, saw this late' },
         workerLocalCtx(evidenceB)
       )
-    ).rejects.toMatchObject({ code: 'dispatch_inactive' })
+    ).resolves.toMatchObject({ message: { body: 'sorry, saw this late' } })
   })
 
   it('S10-8 review fix (blocker: dedup): orchestration.federatedAsk is a registered mutation, and a retried relay coalesces instead of minting a duplicate question', async () => {
@@ -643,6 +648,119 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
       )
     ).rejects.toMatchObject({ code: 'invalid_argument' })
     expect(workerDb.hasRemoteAgent('dev_home_link_2', 'agt_000000000009')).toBe(false)
+  })
+
+  it('S10-15 F5 (ruling 5, finding 13): relayPeerAskToHost overrides threadId with the LOCAL thread id on the TIMEOUT return path', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    const asked = (await call(
+      'orchestration.ask',
+      { to: `agent:${agentB}`, host: 'windows', question: 'anyone home?', timeoutMs: 10 },
+      homeCtx(evidenceA)
+    )) as { timedOut: boolean; threadId: string }
+    expect(asked.timedOut).toBe(true)
+
+    // The returned thread id must resolve on the ASKER's own host (home), not the far host's id.
+    const localThread = rawDb(homeDb)
+      .prepare(`SELECT id FROM threads WHERE id = ?`)
+      .get(asked.threadId) as { id: string } | undefined
+    expect(localThread?.id).toBe(asked.threadId)
+
+    const farQuestion = findLatestPeerQuestion(workerDb)
+    expect(asked.threadId).not.toBe(farQuestion.message_id)
+  })
+
+  it('S10-15 F5 (ruling 5, finding 5): a link already at the pending-question cap refuses a further relayed ask, typed', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    for (let i = 0; i < 32; i++) {
+      await call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: {
+            id: `agt_0000000${i.toString().padStart(5, '0')}`,
+            displayName: `peer-agent-${i}`
+          },
+          toAgentId: agentB,
+          question: `q${i}`,
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    }
+    expect(countPeerQuestions(workerDb)).toBe(32)
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_0000000c0000', displayName: 'one-too-many' },
+          toAgentId: agentB,
+          question: 'over the cap',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(countPeerQuestions(workerDb)).toBe(32)
+  })
+
+  it("S10-15 F5 (ruling 5, finding 6): a local agent cannot resume another agent's pending peer question", async () => {
+    setup()
+    const PANE_C = 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    const evidenceC: Evidence = { terminalHandle: 'term_c', paneKey: PANE_C, launchToken: 'lt-c' }
+    vi.spyOn(homeRuntime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((ev) => {
+      const evidence = ev as { terminalHandle?: string; paneKey?: string } | null | undefined
+      if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === PANE_A) {
+        return makeAuthority(PANE_A, 'term_a')
+      }
+      if (evidence?.terminalHandle === 'term_b' && evidence.paneKey === PANE_B) {
+        return makeAuthority(PANE_B, 'term_b')
+      }
+      if (evidence?.terminalHandle === 'term_c' && evidence.paneKey === PANE_C) {
+        return makeAuthority(PANE_C, 'term_c')
+      }
+      return null
+    })
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    await registerAgent(homeRuntime, 'other', evidenceC)
+    const answerer = await registerAgent(homeRuntime, 'answerer-local', evidenceB)
+
+    // A purely LOCAL (same-host, no `host`) peer ask — handlePeerAsk's ordinary local branch,
+    // the pre-existing hole the finding names.
+    const askPromise = call(
+      'orchestration.ask',
+      { to: `agent:${answerer}`, question: 'private question', timeoutMs: 5_000 },
+      homeCtx(evidenceA)
+    ) as Promise<{ messageId: string }>
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    const questionRow = findPendingPeerQuestion(homeDb)
+
+    // The genuine asker CAN resume.
+    await expect(
+      call(
+        'orchestration.ask',
+        { resume: questionRow.message_id, timeoutMs: 10 },
+        homeCtx(evidenceA)
+      )
+    ).resolves.toMatchObject({ timedOut: true })
+
+    // A different local agent must NOT be able to resume the same question.
+    await expect(
+      call(
+        'orchestration.ask',
+        { resume: questionRow.message_id, timeoutMs: 10 },
+        homeCtx(evidenceC)
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+
+    await call(
+      'orchestration.reply',
+      { id: questionRow.message_id, body: 'ok' },
+      homeCtx(evidenceB)
+    )
+    await askPromise
   })
 })
 

@@ -4182,6 +4182,19 @@ export class OrchestrationDb {
     return listMessagesByAuthorImpl(this.db, params)
   }
 
+  // S10-15 F5 (chair ruling 5): the count the per-link pending-question cap is checked against
+  // — every still-pending PEER_RUN_ID question whose synthetic asker handle names this link,
+  // regardless of which local agent it targets.
+  countPendingPeerQuestionsForLink(pairedDeviceId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM question_threads
+         WHERE run_id = ? AND status = 'pending' AND asker_handle LIKE ?`
+      )
+      .get(PEER_RUN_ID, `remote:${pairedDeviceId}:%`) as { n: number }
+    return row.n
+  }
+
   // S10-2b amendment F: peer ask/reply (no Dispatch, no consumer_generation to fence on).
   createPeerQuestion(params: CreatePeerQuestionParams): CreatePeerQuestionResult {
     return createPeerQuestionImpl(this.db, {

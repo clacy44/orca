@@ -2614,6 +2614,26 @@ async function relayPeerAskToHost(args: {
       { nextSteps: [`orca agents quarantine ${callerRow.display_name} --lift`] }
     )
   }
+  // S10-15 F5 (chair ruling 5, finding 13): mint a LOCAL thread for this ask before relaying —
+  // the far side mints its own thread id (federatedAsk's own `createThread`), and printing THAT
+  // id back to the asker (`orca agents wait --thread <id>`) fails with "Thread ... was not
+  // found" on this host. A local thread id is minted unconditionally so every return path below,
+  // including a timeout, can report an id that actually resolves here.
+  const peerHandle = `remote:${params.host}:${toAgentId}`
+  const localThread = db.createThread({
+    subject: deriveThreadSubject({ body: params.question ?? '' }),
+    createdByAgentId: caller.id,
+    origin: 'question',
+    participants: [
+      {
+        participantKey: caller.id,
+        agentId: caller.id,
+        handle: caller.terminal_handle,
+        role: 'owner'
+      },
+      { participantKey: peerHandle, agentId: null, handle: peerHandle, role: 'member' }
+    ]
+  })
   const result = (await runtime.callOrchestrationWorkerServer(
     params.host as string,
     'orchestration.federatedAsk',
@@ -2656,8 +2676,11 @@ async function relayPeerAskToHost(args: {
     connectionLost?: boolean
     timeoutMs: number
   }
-  args.recordMutationReceipt?.(result)
-  return result
+  // Ruling 5: override threadId with the LOCAL thread id on EVERY return path — including a
+  // timeout — never the far side's own id verbatim.
+  const overridden = { ...result, threadId: localThread.thread.id }
+  args.recordMutationReceipt?.(overridden)
+  return overridden
 }
 
 // Amendment F: the peer-ask counterpart of askRemoteRunHome above — no Dispatch, no
@@ -2705,6 +2728,16 @@ async function handlePeerAsk(args: {
       throw new OrchestrationError(
         'question_not_found',
         `Question ${params.resume} does not belong to a peer ask.`
+      )
+    }
+    // S10-15 F5 (chair ruling 5, finding 6): the resume branch never checked that the resuming
+    // caller is the one who ASKED — any registered agent on this host could resume any pending
+    // question and read its answer. Tightens a pre-existing local hole (not new with this
+    // slice's local thread-minting on the relay path).
+    if (question.asker_handle !== `agent:${callerAgent.id}`) {
+      throw new OrchestrationError(
+        'not_the_addressee',
+        `You are not the asker of question ${params.resume}.`
       )
     }
   } else {

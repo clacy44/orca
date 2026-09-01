@@ -21,6 +21,15 @@ import {
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
 
+// S10-15 F5 (chair ruling 5): the per-link cap on PENDING relayed questions.
+const PEER_ASK_PENDING_CAP = 32
+// S10-15 F5 (chair ruling 5, findings 5/13): a bounded grace window past the asker's own
+// timeout during which this host still holds the question open rather than closing it
+// immediately — findings 5/13's fix, replacing Design A R10's unbounded-pending removal of the
+// close-on-timeout. Bounded, not removed: a peer can still only accumulate PEER_ASK_PENDING_CAP
+// of these per link at any moment.
+const RESUME_GRACE_MS = 10 * 60 * 1000
+
 const FederatedAskParams = z.object({
   fromAgent: FederatedSenderIdentitySchema,
   toAgentId: requiredString('Missing target agent id'),
@@ -122,6 +131,18 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         // askerHandle; 'capped' (ruling 3b) never blocks the ask itself, only the mirror write.
         const { askerHandle } = imported
 
+        // S10-15 F5 (chair ruling 5): a per-link cap on PENDING questions — independent of the
+        // remote_agents mirror cap (ruling 3b) — so a peer cannot mint unbounded pending
+        // question_threads/threads/messages rows by relaying asks that time out (finding 5's
+        // hazard). Refused before any row is minted.
+        if (db.countPendingPeerQuestionsForLink(pairedDeviceId) >= PEER_ASK_PENDING_CAP) {
+          throw new OrchestrationError(
+            'invalid_argument',
+            `This link already has ${PEER_ASK_PENDING_CAP} pending cross-host questions; answer or let them resolve before asking more.`,
+            { nextSteps: ['wait for pending questions on this link to answer or expire'] }
+          )
+        }
+
         timeoutMs = clampOrchestrationAskTimeoutMs(params.timeoutMs)
         const { thread } = db.createThread({
           subject: deriveThreadSubject({ body: params.question }),
@@ -221,8 +242,16 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         }
         const remainingMs = deadline - Date.now()
         if (remainingMs <= 0) {
-          // Same close-on-give-up as the abort branch above.
-          db.closeQuestionsForDispatch(`peer:${threadId}`)
+          // S10-15 F5 (chair ruling 5, findings 5/13): the asker's own blocking call returns
+          // `timedOut: true` at its requested deadline (never held open past what it asked
+          // for), but the question itself is only CLOSED once the bounded RESUME_GRACE_MS past
+          // that deadline has also elapsed — a late answer arriving inside that window still
+          // lands on a `pending` row instead of a `dispatch_inactive` refusal. Still bounded,
+          // never unbounded: PEER_ASK_PENDING_CAP caps how many such rows a link can hold open
+          // at once regardless of how long any one of them lingers.
+          if (Date.now() >= deadline + RESUME_GRACE_MS) {
+            db.closeQuestionsForDispatch(`peer:${threadId}`)
+          }
           const result: FederatedAskResult = {
             answer: null,
             messageId: questionId,
