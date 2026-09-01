@@ -182,4 +182,57 @@ describe('classifyPredecessorLogEnd', () => {
     writeFileSync(filePath, 'not json at all\n')
     expect(classifyPredecessorLogEnd(filePath)).toEqual({ classification: 'no_predecessor' })
   })
+
+  it('classifies a predecessor that died racing the endpoint-occupied check as aborted_start, not silent_death', () => {
+    const filePath = join(dir, 'daemon.log')
+    const log = createDaemonFileLog(filePath)
+    // Mirrors daemon-entry.ts's main(): 'startup' then 'predecessor-end' are written before
+    // startDaemon() runs; losing the endpoint-occupied race exits with no close() and no
+    // further marker, leaving 'predecessor-end' as the file's last line.
+    log.log('startup', { protocolVersion: 18, pid: 111 })
+    log.log('predecessor-end', { classification: 'no_predecessor' })
+    // No further lines — process.exit(DAEMON_EXIT_ENDPOINT_OCCUPIED) with no daemonLog.close().
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'aborted_start',
+      lastEvent: 'predecessor-end'
+    })
+  })
+
+  it('classifies a predecessor that died with only a startup line as aborted_start', () => {
+    const filePath = join(dir, 'daemon.log')
+    createDaemonFileLog(filePath).log('startup', { protocolVersion: 18, pid: 222 })
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'aborted_start',
+      lastEvent: 'startup',
+      lastPid: 222
+    })
+  })
+
+  it('classifies the login-session-dead-retire crash-style exit distinctly from clean_shutdown, despite sharing the same terminal marker', () => {
+    const filePath = join(dir, 'daemon.log')
+    const log = createDaemonFileLog(filePath)
+    log.log('startup', { protocolVersion: 18 })
+    log.log('login-session-dead-retire', { reason: 'rejected' })
+    log.close()
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'login_session_retired',
+      lastEvent: 'login-session-dead-retire'
+    })
+  })
+
+  it('still classifies an ordinary shutdown()-driven exit as clean_shutdown when it directly precedes the close marker', () => {
+    const filePath = join(dir, 'daemon.log')
+    const log = createDaemonFileLog(filePath)
+    log.log('startup', { protocolVersion: 18 })
+    log.log('shutdown', { reason: 'SIGTERM' })
+    log.close()
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'clean_shutdown',
+      lastEvent: 'daemon-log-closed'
+    })
+  })
 })

@@ -6313,8 +6313,17 @@ export class OrcaRuntimeService {
       })
 
       if (leaf.ptyId) {
+        // S10-12 R1: a resync must not resurrect a pty whose provider transport is
+        // daemon-attested dead — isPtyProviderTransportConfirmedDown is the same signal
+        // sendTerminal already refuses on, so the seed and the refusal now agree. This does
+        // NOT gate on the existing record's `connected` bit alone: a same-id respawn under a
+        // still-live daemon must keep flipping optimistically true here (see that helper's
+        // own comment on why the per-pty mirror isn't a safe signal by itself).
+        const resurrectsConfirmedDeadTransport =
+          this.ptysById.get(leaf.ptyId)?.connected === false &&
+          this.isPtyProviderTransportConfirmedDown(leaf.ptyId)
         this.recordPtyWorktree(leaf.ptyId, leaf.worktreeId, {
-          connected: true,
+          connected: !resurrectsConfirmedDeadTransport,
           lastOutputAt: existing?.ptyId === leaf.ptyId ? existing.lastOutputAt : null,
           preview: existing?.ptyId === leaf.ptyId ? existing.preview : '',
           tabId: leaf.tabId,
@@ -10934,7 +10943,12 @@ export class OrcaRuntimeService {
     const now = Date.now()
     let affected = 0
     for (const pty of this.ptysById.values()) {
-      if (pty.connectionId !== connectionId) {
+      // S10-12 R2: the remote: scheme has no local/SSH connectionId of its own — it lands in
+      // the same connectionId=null bucket as the local daemon (parseAppSshPtyId does not
+      // recognize it). A federated pane is not owned by this transport; the sweep loop and
+      // buildTerminalSummary already carve it out the same way — mirror that here so a local
+      // daemon socket drop can't mark a healthy remote pane disconnected.
+      if (pty.connectionId !== connectionId || this.isRemoteScopedPtyId(pty.ptyId)) {
         continue
       }
       if (pty.connected) {
@@ -17750,8 +17764,14 @@ export class OrcaRuntimeService {
    *  up. Deliberately NOT the per-pty ptysById/leaf.connected mirror — graph sync stamps that
    *  optimistically for every leaf ptyId including a prior process's (see isLeafPtyProvenAbsent's
    *  own comment), so a same-id respawn while the daemon is alive must keep writing through it.
-   *  A confirmed-down transport has no live daemon to respawn under, so leniency doesn't apply. */
+   *  A confirmed-down transport has no live daemon to respawn under, so leniency doesn't apply.
+   *  S10-12 R2: a remote: id resolves to the same connectionId=null bucket as the local daemon
+   *  (parseAppSshPtyId doesn't recognize the scheme either) but is not owned by it — never
+   *  treat it as confirmed down off a local (or any parsed) connectionId's down-marker. */
   private isPtyProviderTransportConfirmedDown(ptyId: string): boolean {
+    if (this.isRemoteScopedPtyId(ptyId)) {
+      return false
+    }
     const connectionId =
       this.ptysById.get(ptyId)?.connectionId ?? parseAppSshPtyId(ptyId)?.connectionId ?? null
     return this.ptyProviderTransportDownConnectionIds.has(connectionId)
@@ -31868,7 +31888,11 @@ export class OrcaRuntimeService {
           pty.disconnectedAt = null
           this.refreshPtyForegroundAgent(ptyId)
         }
-      } else if (pty && !this.leafExistsForPty(ptyId)) {
+      } else if (pty) {
+        // S10-12 R1: daemon-attested only, same as the general sweep loop — a laid-out
+        // floating pane the controller's own hasPty just proved dead is not connected.
+        // leafExistsForPty still gates pruning below (via pruneDisconnectedPtyRecords), just
+        // not this flag; gating the flag itself on layout was the bug R1 was ruled to remove.
         pty.connected = false
         pty.disconnectedAt ??= Date.now()
       }
