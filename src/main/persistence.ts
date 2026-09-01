@@ -7045,6 +7045,22 @@ export class Store {
     this.flushOrThrow()
   }
 
+  // Why sync-flush: revocation (S10-10/F1) must survive a restart the same way mint does above —
+  // otherwise a killed-mid-revoke process leaves the stale anchor readable on the next boot.
+  forgetTerminalLaunchTokenHash(paneKey: string, hostId?: string | null): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
+    session.terminalLaunchTokenHashesByPaneKey = rest
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.flushOrThrow()
+  }
+
   // Why: sync-flush the pty binding before pty:spawn returns to close the spawn/persist SIGKILL race (Issue #217).
   persistPtyBinding(
     args: {

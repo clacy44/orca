@@ -121,6 +121,13 @@ function createSharedStore(): {
         ...session.terminalLaunchTokenHashesByPaneKey,
         [makePaneKey(args.tabId, args.leafId)]: args.launchTokenHash
       }
+    },
+    // Why real semantics matter: F1's revoke path and F4's null-relaunch path both call this to
+    // clear a stale anchor — faking its storage medium is fine, faking its behavior would defeat
+    // the test.
+    forgetTerminalLaunchTokenHash: (paneKey: string) => {
+      const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
+      session.terminalLaunchTokenHashesByPaneKey = rest
     }
   }
   return { store, sessionSnapshot: () => session }
@@ -277,5 +284,115 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
         launchToken: generation1Token!
       })
     ).toBeNull()
+  })
+
+  it('F1: retirePtyAgentLaunchAuthority deletes the persisted anchor, so a revoked pane cannot corroborate its old token after a restart', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime1 = new OrcaRuntimeService(store)
+    let capturedEnv: Record<string, string> | undefined
+    runtime1.setPtyController(fakePtyController((env) => (capturedEnv = env)))
+    runtime1.attachWindow(1)
+    runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'anchor-agent'
+    })
+    const generation1Token = capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(generation1Token).toBeTruthy()
+    const generation1Hash = createHash('sha256').update(generation1Token!).digest('hex')
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(generation1Hash)
+
+    // Regression baseline: before F1, the anchor survived retirement and still verified live.
+    expect(runtime1.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(true)
+
+    // The explicit revocation lever: command completion retires this pty's launch authority.
+    runtime1.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+    // F1: the persisted hash must be gone, not just the live pty.launchToken.
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+    expect(runtime1.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
+
+    // End-to-end: even after a restart with no live pty, the retired token must never corroborate.
+    const runtime2 = new OrcaRuntimeService(store)
+    runtime2.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    runtime2.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: GEN2_INCARNATION_ID,
+      isReattach: true
+    })
+    expect(runtime2.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
+  })
+
+  it('F2: a live connected pty holding a different (fresh cold-restore) token refuses the stale on-disk anchor without consulting it', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const staleToken = 'stale-previous-generation-token'
+    const staleHash = createHash('sha256').update(staleToken).digest('hex')
+    const freshToken = 'fresh-cold-restore-token'
+    const freshHash = createHash('sha256').update(freshToken).digest('hex')
+
+    // Seed the on-disk anchor as if a previous generation minted it for this pane.
+    store?.persistTerminalLaunchTokenHash?.({
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      launchTokenHash: staleHash
+    })
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(staleHash)
+
+    const runtime = new OrcaRuntimeService(store)
+    runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    // Cold restore into the existing pane mints a FRESH token on the live, connected pty —
+    // the on-disk anchor still holds the previous generation's hash.
+    runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: GEN2_INCARNATION_ID,
+      agentLaunchAuthority: { launchToken: freshToken, launchAgent: 'claude' }
+    })
+
+    // The fresh, live token verifies.
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, freshHash)).toBe(true)
+    // F2: the stale on-disk anchor must NOT also verify while a live pty holds a different token.
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, staleHash)).toBe(false)
+  })
+
+  it("F4: a null-token relaunch (plain shell) deletes the pane's previous anchor", async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    let capturedEnv: Record<string, string> | undefined
+    runtime.setPtyController(fakePtyController((env) => (capturedEnv = env)))
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'anchor-agent'
+    })
+    const generation1Token = capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(generation1Token).toBeTruthy()
+    const generation1Hash = createHash('sha256').update(generation1Token!).digest('hex')
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(generation1Hash)
+
+    // Relaunch the SAME pane as a plain shell — no launchToken this time.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'bash',
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'plain-shell'
+    })
+
+    // F4: the previous agent's anchor must not survive a null-token relaunch of the same pane.
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
   })
 })

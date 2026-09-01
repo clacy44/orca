@@ -1272,6 +1272,7 @@ type RuntimeStore = {
   getPaneCredentialLanes?: Store['getPaneCredentialLanes']
   persistTerminalRole?: Store['persistTerminalRole']
   persistTerminalLaunchTokenHash?: Store['persistTerminalLaunchTokenHash']
+  forgetTerminalLaunchTokenHash?: Store['forgetTerminalLaunchTokenHash']
   getTerminalRoles?: Store['getTerminalRoles']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
@@ -10235,6 +10236,24 @@ export class OrcaRuntimeService {
       pty.launchToken = agentLaunchAuthority.launchToken
       pty.launchIncarnationId = binding.incarnationId
       pty.launchAgent = agentLaunchAuthority.launchAgent
+      // S10-10/F3: this is the renderer-owned pty:spawn path (desktop agent panes) — the only
+      // other site a launch token reaches a pty env, and it must persist the anchor too so a
+      // restart-survived pane on this path can still corroborate (mirrors the createTerminal
+      // persist below). F8: a flush failure here must not abort a pty that already spawned.
+      try {
+        this.store?.persistTerminalLaunchTokenHash?.(
+          {
+            tabId: binding.tabId,
+            leafId: binding.leafId,
+            launchTokenHash: createHash('sha256')
+              .update(agentLaunchAuthority.launchToken)
+              .digest('hex')
+          },
+          connectionId ? toSshExecutionHostId(connectionId) : undefined
+        )
+      } catch (error) {
+        console.warn('[runtime] registerPty: failed to persist launch-token-hash anchor', error)
+      }
     }
     const pendingIncarnation = this.pendingPtyRegistrationIncarnations.get(ptyId)
     if (
@@ -13049,32 +13068,36 @@ export class OrcaRuntimeService {
   }
 
   /** S10-6/S10-10 corroboration anchor: true when either (a) a CONNECTED pty currently bound to
-   * `paneKey` holds a launch token whose sha256 equals `launchTokenHash`, or (b) no live pty has
-   * a token (e.g. a daemon-survived pty restored after a runtime restart, which never regains
-   * its launchToken) but the hash persisted at launch for `paneKey` equals `launchTokenHash` —
-   * only the genuine agent's process env can reproduce the matching token to hash again, so this
-   * is what lets a restored pane still corroborate (see server.ts corroboration gate). Live-pty
-   * check runs first and short-circuits; the persisted-hash fallback is consulted only after it
-   * finds no match. */
-  verifyLivePaneLaunchTokenHash(paneKey: string, launchTokenHash: string): boolean {
-    let matchedConnectionId: string | null | undefined
+   * `paneKey` holds a launch token whose sha256 equals `launchTokenHash`, or (b) NO connected pty
+   * for `paneKey` holds ANY launch token at all (e.g. a daemon-survived pty restored after a
+   * runtime restart, which never regains its launchToken) but the hash persisted at launch for
+   * `paneKey` equals `launchTokenHash` — only the genuine agent's process env can reproduce the
+   * matching token to hash again, so this is what lets a restored pane still corroborate (see
+   * server.ts corroboration gate). Live-pty check runs first and short-circuits on a match; if a
+   * connected pty instead holds a launch token that does NOT match (F2: a fresh cold-restore
+   * token supersedes the old on-disk anchor), the fallback is never consulted and this refuses —
+   * the persisted-hash fallback only applies when there is nothing live to contradict it.
+   * `connectionId` (F5) is the caller's own host claim — never inferred from a matched live pty's
+   * `connectionId`, so an SSH pane with no connected pty still resolves its own partition. */
+  verifyLivePaneLaunchTokenHash(
+    paneKey: string,
+    launchTokenHash: string,
+    connectionId: string | null = null
+  ): boolean {
+    let sawMismatchedLiveLaunchToken = false
     for (const pty of this.ptysById.values()) {
-      if (pty.paneKey !== paneKey) {
+      if (pty.paneKey !== paneKey || !pty.connected || !pty.launchToken) {
         continue
       }
-      if (pty.connected) {
-        matchedConnectionId ??= pty.connectionId
-        if (
-          pty.launchToken &&
-          createHash('sha256').update(pty.launchToken).digest('hex') === launchTokenHash
-        ) {
-          return true
-        }
+      if (createHash('sha256').update(pty.launchToken).digest('hex') === launchTokenHash) {
+        return true
       }
+      sawMismatchedLiveLaunchToken = true
     }
-    const hostId = matchedConnectionId
-      ? toSshExecutionHostId(matchedConnectionId)
-      : LOCAL_EXECUTION_HOST_ID
+    if (sawMismatchedLiveLaunchToken) {
+      return false
+    }
+    const hostId = connectionId ? toSshExecutionHostId(connectionId) : LOCAL_EXECUTION_HOST_ID
     const persistedHash =
       this.store?.getWorkspaceSession?.(hostId)?.terminalLaunchTokenHashesByPaneKey?.[paneKey]
     return persistedHash !== undefined && persistedHash === launchTokenHash
@@ -13148,15 +13171,25 @@ export class OrcaRuntimeService {
     // stronger guarantee via their own branches above, and this is exactly what lets a
     // daemon-survived pane (no receipt, no prior-restart commitment on disk) attest the moment
     // its restored generation sees the genuine token, instead of only on the restart after next.
+    // F6 (deliberate deviation): unlike attestCompatibilityAuthority's hook-attested path below,
+    // this direct-anchor check does NOT require the observation to be unique to this pane (no
+    // hasUniqueCurrentObservation-equivalent conjunct) — the anchor is a runtime-owned secret
+    // compared directly, not an attacker-postable hook observation, so there is nothing for a
+    // decoy pane's POST to displace here.
     if (
       mintReceiptOnSuccess &&
-      this.verifyLivePaneLaunchTokenHash(terminal.paneKey, launchTokenHash)
+      claimedPaneKey === terminal.paneKey &&
+      this.verifyLivePaneLaunchTokenHash(
+        terminal.paneKey,
+        launchTokenHash,
+        terminal.hostScope.kind === 'ssh' ? terminal.hostScope.targetId : null
+      )
     ) {
       this.mintRestoredOrchestrationAuthorityReceipt(terminal)
       return this.freezeOrchestrationCompatibilityCallerAuthority(
         terminal,
         terminal.processIncarnation,
-        claimedPaneKey,
+        terminal.paneKey,
         terminalHandle,
         launchTokenHash
       )
@@ -13364,8 +13397,12 @@ export class OrcaRuntimeService {
         paneKeys.add(makePaneKey(leaf.tabId, leaf.leafId))
       }
     }
+    const hostId = pty.connectionId ? toSshExecutionHostId(pty.connectionId) : undefined
     for (const paneKey of paneKeys) {
       this.retireAgentHookCompatibilityAuthorityFn?.(paneKey)
+      // S10-10/F1: the revoked pty's launch secret must not keep corroborating via the
+      // persisted-hash fallback after this explicit revocation lever fires.
+      this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
     }
   }
 
@@ -27348,14 +27385,29 @@ export class OrcaRuntimeService {
             // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
             // restart — which has no live launchToken, only its own process env — can still
             // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
-            if (launchToken) {
-              this.store?.persistTerminalLaunchTokenHash?.(
-                {
-                  tabId,
-                  leafId,
-                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
-                },
-                workspace.connectionId ? toSshExecutionHostId(workspace.connectionId) : undefined
+            // F8: a spawned pty must not abort its launch over a persistence flush failure.
+            const launchTokenHostId = workspace.connectionId
+              ? toSshExecutionHostId(workspace.connectionId)
+              : undefined
+            try {
+              if (launchToken) {
+                this.store?.persistTerminalLaunchTokenHash?.(
+                  {
+                    tabId,
+                    leafId,
+                    launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
+                  },
+                  launchTokenHostId
+                )
+              } else {
+                // F4: a null-token relaunch (plain shell) must not leave the previous agent's
+                // anchor live for this pane — it would still verify against a stale token.
+                this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
+              }
+            } catch (error) {
+              console.warn(
+                '[runtime] createTerminal: failed to update launch-token-hash anchor',
+                error
               )
             }
           }

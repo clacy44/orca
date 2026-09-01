@@ -637,7 +637,7 @@ export class AgentHookServer {
   // authority or displace existing authority state. Wired from index.ts after the runtime is
   // constructed; null (tests, early boot) means only continuity-corroboration applies.
   private paneLaunchAuthorityVerifier:
-    | ((paneKey: string, launchTokenHash: string) => boolean)
+    | ((paneKey: string, launchTokenHash: string, connectionId: string | null) => boolean)
     | null = null
   private legacyPaneKeyAliases = new Map<string, PaneKeyAliasEntry>()
   private paneKeyAliasPersistenceListener: PaneKeyAliasPersistenceListener | null = null
@@ -656,7 +656,9 @@ export class AgentHookServer {
   private lastWrittenJson: string | null = null
 
   setPaneLaunchAuthorityVerifier(
-    verifier: ((paneKey: string, launchTokenHash: string) => boolean) | null
+    verifier:
+      | ((paneKey: string, launchTokenHash: string, connectionId: string | null) => boolean)
+      | null
   ): void {
     this.paneLaunchAuthorityVerifier = verifier
   }
@@ -2950,8 +2952,12 @@ export class AgentHookServer {
   // S10-6: true when (paneKey, launchTokenHash) is anchored to something a forger over the
   // shared loopback channel cannot have — the LIVE pty's actual launch token (runtime verifier),
   // or continuity with the pane's already-hydrated/persisted commitment.
-  private isCorroboratedAuthority(paneKey: string, launchTokenHash: string): boolean {
-    if (this.paneLaunchAuthorityVerifier?.(paneKey, launchTokenHash)) {
+  private isCorroboratedAuthority(
+    paneKey: string,
+    launchTokenHash: string,
+    connectionId: string | null
+  ): boolean {
+    if (this.paneLaunchAuthorityVerifier?.(paneKey, launchTokenHash, connectionId)) {
       return true
     }
     if (this.hydratedLaunchTokenHashByPaneKey.get(paneKey) === launchTokenHash) {
@@ -2978,7 +2984,11 @@ export class AgentHookServer {
     if (!evidence) {
       return
     }
-    const corroborated = this.isCorroboratedAuthority(evidence.paneKey, evidence.launchTokenHash)
+    const corroborated = this.isCorroboratedAuthority(
+      evidence.paneKey,
+      evidence.launchTokenHash,
+      evidence.connectionId
+    )
     // An uncorroborated claim never DISPLACES existing authority state (the forged-/reattest
     // revocation lever) — it may only fill a void, observation-only.
     if (!corroborated && this.hasAnyAuthorityEntry(evidence.paneKey)) {
@@ -3043,7 +3053,15 @@ export class AgentHookServer {
         ...(launchTokenHash ? { launchTokenHash } : {})
       }
       const commitment = this.toAuthorityEvidence(payload, launchTokenHash)
-      if (commitment && !conflictedCommitments.has(paneKey)) {
+      // F9: this loop's own commitment must clear the same corroboration gate
+      // recordCurrentAuthorityObservation enforces before persisting — otherwise a status entry
+      // alone (e.g. a hydrated but never-corroborated pane) writes an authorityCommitment on
+      // disk that never earned one, undermining the S10-6 gate's disk story.
+      if (
+        commitment &&
+        !conflictedCommitments.has(paneKey) &&
+        this.isCorroboratedAuthority(paneKey, commitment.launchTokenHash, commitment.connectionId)
+      ) {
         const existing = authorityCommitments[paneKey]
         if (existing && !authorityCommitmentsMatch(existing, commitment)) {
           delete authorityCommitments[paneKey]
