@@ -6793,6 +6793,9 @@ describe('Last-status persistence', () => {
 
   it('writes last-status.json after a hook event', async () => {
     const server = new AgentHookServer()
+    // S10-10 closeout: the entry launchTokenHash persists only when corroborated — stub the
+    // runtime verifier exactly as index.ts wires it (a live pty holding this launch token).
+    server.setPaneLaunchAuthorityVerifier(() => true)
     await server.start({
       env: 'production',
       userDataPath

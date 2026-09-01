@@ -3048,9 +3048,17 @@ export class AgentHookServer {
       const launchTokenHash = launchToken?.trim()
         ? createHash('sha256').update(launchToken.trim()).digest('hex')
         : this.hydratedLaunchTokenHashByPaneKey.get(paneKey)
+      // S10-10 closeout (F9 second door): the ENTRY hash is authority-bearing too — hydrate
+      // promotes it straight into hydratedLaunchTokenHashByPaneKey + a commitment next
+      // generation, so an uncorroborated hash written here bypasses the commitments-loop gate
+      // below one restart later. Same gate, both doors: only a corroborated (paneKey, hash)
+      // pair persists at all.
+      const entryHashCorroborated =
+        launchTokenHash !== undefined &&
+        this.isCorroboratedAuthority(paneKey, launchTokenHash, payload.connectionId ?? null)
       entries[paneKey] = {
         ...persistedPayload,
-        ...(launchTokenHash ? { launchTokenHash } : {})
+        ...(entryHashCorroborated && launchTokenHash ? { launchTokenHash } : {})
       }
       const commitment = this.toAuthorityEvidence(payload, launchTokenHash)
       // F9: this loop's own commitment must clear the same corroboration gate

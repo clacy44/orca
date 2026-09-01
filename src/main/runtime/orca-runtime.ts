@@ -13379,12 +13379,6 @@ export class OrcaRuntimeService {
       return
     }
     const receipt = this.restoredOrchestrationAuthorityByPtyId.get(ptyId)
-    if (!pty.launchToken && !receipt) {
-      return
-    }
-    this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
-    pty.launchToken = null
-    pty.launchIncarnationId = null
     const paneKeys = new Set<string>()
     if (pty.paneKey && parsePaneKey(pty.paneKey)) {
       paneKeys.add(pty.paneKey)
@@ -13398,11 +13392,29 @@ export class OrcaRuntimeService {
       }
     }
     const hostId = pty.connectionId ? toSshExecutionHostId(pty.connectionId) : undefined
+    // S10-10 closeout (F1 residual): the anchor delete runs BEFORE the token/receipt early
+    // return. A daemon-survived pane in a restored generation has neither a live token nor a
+    // receipt, yet its PERSISTED hash is exactly what keeps the inherited env token
+    // corroborating - retiring it here is the whole point of the lever. Guarded like the mint
+    // sites: a flush failure on the teardown path logs, never throws (verify MEDIUM).
+    for (const paneKey of paneKeys) {
+      try {
+        this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
+      } catch (error) {
+        console.warn('[agent-authority] forgetting launch-token anchor failed', {
+          paneKey,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+    if (!pty.launchToken && !receipt) {
+      return
+    }
+    this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
+    pty.launchToken = null
+    pty.launchIncarnationId = null
     for (const paneKey of paneKeys) {
       this.retireAgentHookCompatibilityAuthorityFn?.(paneKey)
-      // S10-10/F1: the revoked pty's launch secret must not keep corroborating via the
-      // persisted-hash fallback after this explicit revocation lever fires.
-      this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
     }
   }
 

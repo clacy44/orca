@@ -99,6 +99,42 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
     )
   })
 
+  // S10-10 closeout (F1 residual): in a RESTORED generation the pty has neither a live
+  // launchToken nor a receipt — the old early return skipped the anchor delete for exactly
+  // that population, leaving the revocation lever dead where it matters most. Mutation guard:
+  // moving the forget call back below the early return turns this red.
+  it('F1 residual: retiring launch authority in a restored generation still deletes the persisted anchor', () => {
+    const { store, sessionSnapshot } = createMultiHostStore()
+    const runtime = new OrcaRuntimeService(store)
+    runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+
+    // Generation-1 leftover: anchor on disk; generation-2 pty restored WITHOUT a token or receipt.
+    const staleHash = createHash('sha256').update('generation-1-token').digest('hex')
+    store?.persistTerminalLaunchTokenHash?.(
+      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: staleHash },
+      undefined
+    )
+    runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: 'restored-gen-2'
+      // no agentLaunchAuthority: restored pty, launchToken null, no receipt
+    })
+    expect(sessionSnapshot(undefined).terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(
+      staleHash
+    )
+
+    ;(
+      runtime as unknown as { retirePtyAgentLaunchAuthority(ptyId: string): void }
+    ).retirePtyAgentLaunchAuthority(PTY_ID)
+
+    expect(
+      sessionSnapshot(undefined).terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]
+    ).toBeUndefined()
+    // And the retired hash no longer corroborates through the anchor fallback.
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, staleHash, null)).toBe(false)
+  })
+
   it("F3: registerPty's renderer-owned agentLaunchAuthority path persists the anchor too", () => {
     const { store, sessionSnapshot } = createMultiHostStore()
     const runtime = new OrcaRuntimeService(store)

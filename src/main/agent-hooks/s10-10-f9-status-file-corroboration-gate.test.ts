@@ -89,4 +89,42 @@ describe('S10-10/F9: last-status entries only become authorityCommitments when c
     const onDisk = JSON.parse(readFileSync(server.lastStatusPath!, 'utf8'))
     expect(onDisk.authorityCommitments[pane]).toBeDefined()
   })
+
+  // S10-10 closeout (F9 second door): the ENTRY hash is authority-bearing at hydrate — an
+  // uncorroborated pane's serialized entry must carry NO launchTokenHash, or one restart later
+  // it is promoted into hydratedLaunchTokenHashByPaneKey + a commitment, bypassing the
+  // commitments-loop gate entirely.
+  it('an uncorroborated entry serializes WITHOUT its launchTokenHash, so hydrate cannot promote it', async () => {
+    server = new AgentHookServer()
+    // No verifier wired and no prior commitment: everything is uncorroborated.
+    await server.start({ env: 'production', userDataPath })
+    const env = server.buildPtyEnv()
+    const pane = makePaneKey('tab-f9-entry-hash', LEAF)
+
+    const res = await fetch(`http://127.0.0.1:${env.ORCA_AGENT_HOOK_PORT}/hook/claude`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Orca-Agent-Hook-Token': env.ORCA_AGENT_HOOK_TOKEN!
+      },
+      body: JSON.stringify({
+        paneKey: pane,
+        tabId: 'tab-f9-entry-hash',
+        worktreeId: 'wt-f9',
+        launchToken: 'self-chosen-ghost-token',
+        env: 'production',
+        payload: { hook_event_name: 'UserPromptSubmit', prompt: 'ghost' }
+      })
+    })
+    expect(res.status).toBe(204)
+
+    server.flushStatusPersistSync()
+    const onDisk = JSON.parse(readFileSync(server.lastStatusPath!, 'utf8'))
+    // The status entry lands (observation-only) — but with NO authority-bearing hash, so the
+    // next generation's hydrate has nothing to promote (mutation guard: dropping the
+    // entryHashCorroborated gate in serializeStatusFile turns this red).
+    expect(onDisk.entries[pane]).toBeDefined()
+    expect(onDisk.entries[pane].launchTokenHash).toBeUndefined()
+    expect(onDisk.authorityCommitments?.[pane]).toBeUndefined()
+  })
 })
