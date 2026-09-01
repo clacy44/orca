@@ -221,6 +221,13 @@ Rules:
   held, instead of ever letting a turn holder park past its own pending step.
 - `wait --for pact` is refused `answer_first` while the caller owes an answer to an *incoming*
   proposal — accept or decline it first with the exact command the refusal prints.
+- `register` re-adopts your own row in place — same id, same threads, same mail — whenever the
+  name you ask for is already held by a row whose pane is dead (a relaunch always lands on a
+  fresh pane, not just a fresh terminal_handle on the old one). Only a name genuinely held by
+  another *live* pane refuses `name_taken`, and that refusal now names the live pane it collided
+  with. Never work around a `name_taken` by registering under a different name unless the
+  refusal's own suggested alternative is what you want — the identity you actually own is
+  waiting to be re-adopted, not lost.
 
 ## When It Goes Wrong
 
@@ -366,6 +373,7 @@ Rules:
 - `check --wait` returns one bounded Delivery, not every future completion. Process every message, acknowledge it, then keep waiting until every expected Dispatch settles.
 - Group addresses include `@all`, `@idle`, `@claude`, `@codex`, `@opencode`, `@gemini`, `@droid`, `@grok`, `@cursor`, and `@worktree:<id>`.
 - Message types include `status`, `dispatch`, `worker_done`, `merge_ready`, `escalation`, `handoff`, `question`, `decision_gate` (legacy/gates), and `heartbeat`.
+- `orchestration sent --id`'s `delivery.state` is one vocabulary everywhere it appears (this command, a thread replay's per-message annotation on your own sent messages): `queued` (nothing attempted yet), `queued_awaiting_pane` (a push was attempted and withheld — pane busy or unconfirmed idle), `pointed` (written into the recipient's pane, not yet read), or `read`. A message relayed to a peer host (cross-host `agents ask`) lives only in that host's own store — `sent --id` for it here answers a typed `message_not_found` naming `--environment <name of that host>` to retry against, never a bare "not found".
 - Use group addresses only for messages that are genuinely useful to many terminals, such as `status` broadcasts or intentional fan-out questions. Do not send dispatch lifecycle messages to groups.
 - `worker_done` belongs to the active Dispatch and defaults to its Run mailbox; never target a group.
 - A valid `worker_done` for the active `taskId` + `dispatchId` marks the task and dispatch completed automatically. Do not follow it with `task-update --status completed`; reserve manual updates for explicit recovery or overrides.

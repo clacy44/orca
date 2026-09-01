@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_AGENT_METHODS } from './orchestration-agents'
 import { OrchestrationDb } from '../../orchestration/db'
+import type Database from '../../../sqlite/sync-database'
 import {
   OrcaRuntimeService,
   type OrchestrationCompatibilityCallerAuthority
@@ -10,6 +11,9 @@ import type { RuntimeTerminalSummary } from '../../../../shared/runtime-types'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_A_MOVED = 'tabA2:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+// A relaunch, not a moved tab: a brand-new leaf suffix (unlike PANE_A_MOVED, which keeps
+// PANE_A's leaf), the exact shape findByPaneSuffix cannot match — the S10-11 THE ONE BUG case.
+const PANE_A_RELAUNCH = 'tabA9:dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 
 function makeAuthority(
@@ -85,6 +89,13 @@ describe('orchestration.agents.* RPC methods', () => {
       ) {
         return makeAuthority(PANE_B, 'term_b')
       }
+      if (
+        evidence?.terminalHandle === 'term_a_relaunched' &&
+        evidence.paneKey === PANE_A_RELAUNCH &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_A_RELAUNCH, 'term_a_relaunched')
+      }
       return null
     })
   }
@@ -122,6 +133,11 @@ describe('orchestration.agents.* RPC methods', () => {
     launchToken: 'lt-a'
   }
   const evidenceB = { terminalHandle: 'term_b', paneKey: PANE_B, launchToken: 'lt-b' }
+  const evidenceARelaunch = {
+    terminalHandle: 'term_a_relaunched',
+    paneKey: PANE_A_RELAUNCH,
+    launchToken: 'lt-a'
+  }
 
   it('R1: register with no evidence refuses with no_pane_identity and writes zero rows', async () => {
     setup()
@@ -247,6 +263,123 @@ describe('orchestration.agents.* RPC methods', () => {
     )) as { agent: { id: string }; reMinted: boolean }
     expect(second.reMinted).toBe(true)
     expect(second.agent.id).toBe(first.agent.id)
+  })
+
+  describe('S10-11 R1: dead-pane rebind on register', () => {
+    // T1 (register + threads/mail resolution together) and T3/T4 (thread membership succession
+    // and outsider degradation) need orchestration.threads.* alongside agents.* — covered in
+    // orchestration-threads.test.ts, which registers the full ORCHESTRATION_METHODS aggregate.
+    it('T2: a name held by a genuinely LIVE pane still refuses name_taken, naming the live pane', async () => {
+      setup()
+      await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )
+
+      // PANE_A is still live this time — a real second agent trying to steal a live name.
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
+        paneKey === PANE_A
+          ? { terminalHandle: 'term_a', lastAgentStatus: 'idle', observedLive: true }
+          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
+      )
+
+      await expect(
+        call(
+          'orchestration.agents.register',
+          { name: 'merge-backend', role: 'someone else' },
+          ctx(evidenceARelaunch)
+        )
+      ).rejects.toMatchObject({
+        code: 'name_taken',
+        message: expect.stringContaining('term_a'),
+        data: {
+          nextSteps: expect.arrayContaining([
+            expect.stringContaining('orca agents register --name')
+          ])
+        }
+      })
+    })
+
+    it('R1 fix: an already-registered pane renaming itself into a name a LIVE different pane holds gets typed name_taken, never a raw UNIQUE constraint error', async () => {
+      setup()
+      await call('orchestration.agents.register', { name: 'agent-a' }, ctx(evidenceA))
+      await call('orchestration.agents.register', { name: 'agent-b' }, ctx(evidenceB))
+
+      // Both panes genuinely live this time — the rename target's own row is not reclaimable.
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
+        paneKey === PANE_B
+          ? { terminalHandle: 'term_b', lastAgentStatus: 'idle', observedLive: true }
+          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
+      )
+
+      // Pane A re-registers under agent-b's name — the rename path (findByPaneSuffix matches
+      // its own row), not the fresh-name path T2 above covers.
+      await expect(
+        call('orchestration.agents.register', { name: 'agent-b' }, ctx(evidenceA))
+      ).rejects.toMatchObject({ code: 'name_taken', message: expect.stringContaining('term_b') })
+
+      // Both original rows survive, agent-a's row untouched by the failed rename.
+      expect(db.getAgentByName('local', 'agent-a')?.terminal_handle).toBe('term_a')
+      expect(db.getAgentByName('local', 'agent-b')?.terminal_handle).toBe('term_b')
+    })
+
+    it('R1 corroboration: a holder recently observed live is not a takeover target even when its pty momentarily reads unconnected', async () => {
+      setup()
+      await call('orchestration.agents.register', { name: 'merge-backend' }, ctx(evidenceA))
+
+      // No connected pty for PANE_A (terminalHandle null — the raw signal alone would say
+      // "dead") but the leaf was last observed genuinely working — a transient reconnect blip,
+      // not a gone pane.
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
+        paneKey === PANE_A
+          ? { terminalHandle: null, lastAgentStatus: 'working', observedLive: true }
+          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
+      )
+
+      await expect(
+        call(
+          'orchestration.agents.register',
+          { name: 'merge-backend', role: 'impersonating' },
+          ctx(evidenceARelaunch)
+        )
+      ).rejects.toMatchObject({ code: 'name_taken' })
+      // Original row untouched — no takeover happened.
+      const holder = db.getAgentByName('local', 'merge-backend')
+      expect(holder?.pane_key).toBe(PANE_A)
+    })
+
+    it('auditability: a dead-pane identity takeover writes a distinct reason_code; an ordinary self re-register does not', async () => {
+      setup()
+      const rawDb = (db as unknown as { db: Database.Database }).db
+
+      // Ordinary case: same pane re-registering (R4 scenario) — never a "takeover".
+      await call('orchestration.agents.register', { name: 'agent-b' }, ctx(evidenceA))
+      await call('orchestration.agents.register', { name: 'agent-b' }, ctx(evidenceA))
+      const selfReminted = rawDb
+        .prepare(
+          "SELECT reason_code FROM agent_audit WHERE verb = 'register' AND outcome = 'reminted'"
+        )
+        .all() as { reason_code: string | null }[]
+      expect(selfReminted).toHaveLength(1)
+      expect(selfReminted[0].reason_code).toBeNull()
+
+      // Takeover case: PANE_A confirmed dead, a different pane reclaims its name.
+      await call('orchestration.agents.register', { name: 'agent-a' }, ctx(evidenceA))
+      await call(
+        'orchestration.agents.register',
+        { name: 'agent-a', role: 'take two' },
+        ctx(evidenceARelaunch)
+      )
+      const takeover = rawDb
+        .prepare(
+          "SELECT agent_id, reason_code FROM agent_audit WHERE verb = 'register' AND outcome = 'reminted' AND reason_code IS NOT NULL"
+        )
+        .all() as { agent_id: string; reason_code: string }[]
+      expect(takeover).toHaveLength(1)
+      expect(takeover[0].reason_code).toContain('dead-pane identity takeover')
+      expect(takeover[0].agent_id).toBe(db.getAgentByName('local', 'agent-a')?.id)
+    })
   })
 
   it('list: derived rows are flagged derived and ranked lower than registered rows', async () => {

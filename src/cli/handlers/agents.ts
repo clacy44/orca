@@ -28,6 +28,7 @@ type RegisterResult = {
   reMinted: boolean
   repointedMessages: number
   pendingOnOldHandle: number
+  adoptedThreads: number
 }
 type ListResult = {
   agents: AgentView[]
@@ -117,8 +118,13 @@ function formatAgentRegister(result: RegisterResult): string {
     result.pendingOnOldHandle > 0
       ? `\n${result.pendingOnOldHandle} more unread message(s) on your previous terminal handle were NOT moved (backlog too large for one re-mint) and are no longer reachable from this agent.`
       : ''
+  // R2 (S10-11): only on a fresh id (never reMinted — a rebind's threads were never orphaned).
+  const adopted =
+    result.adoptedThreads > 0
+      ? `\nInherited ${result.adoptedThreads} thread(s) from a previous registration under this name.`
+      : ''
   return (
-    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}\n` +
+    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}${adopted}\n` +
     `Next: orca orchestration send --to agent:${result.agent.id} --subject "..."`
   )
 }

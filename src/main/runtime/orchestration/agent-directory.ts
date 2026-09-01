@@ -5,9 +5,9 @@
 // rows with `[quarantined]`, per CONTAINMENT #7).
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
-import { OrchestrationError } from './orchestration-error'
-import { repointMailboxOnReMint } from './agent-mailbox-repoint'
-import type { AgentAuditRow, AgentRow, AgentState } from './types'
+import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
+import { adoptPredecessorThreadMembership } from './agent-thread-succession'
+import type { AgentRow, AgentState } from './types'
 
 // Why a local generator, not db.ts's generateId: importing it back from db.ts (which will
 // import this module to delegate) would create a require cycle between the two files.
@@ -31,12 +31,28 @@ export type UpsertAgentByPaneSuffixParams = {
   agentLabel: string | null
   originHandle: string | null
   originHostId: string
+  // R1: ground truth for "is the NAME HOLDER's own pane still alive" — never the stored
+  // `state` column, which is refreshed lazily and can lag well past an actual pane relaunch.
+  // Omitted defaults to "assume live": the conservative direction, since it can only ever
+  // fall back to the pre-R1 name_taken refusal, never mistakenly steal a still-live identity.
+  isPaneLive?: (paneKey: string) => boolean
 }
 
 export type UpsertAgentByPaneSuffixResult =
-  | { outcome: 'created'; agent: AgentRow }
+  | { outcome: 'created'; agent: AgentRow; adoptedThreads: number }
   | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
-  | { outcome: 'name_taken'; alternative: string }
+  | {
+      outcome: 'name_taken'
+      alternative: string
+      // R1: set only when the collision is against a row whose pane resolved live — names the
+      // pane a caller can go inspect, never populated for the quarantined-row lock case.
+      livePaneKey: string | null
+      liveTerminalHandle: string | null
+      // S10-11 verify: true only on the RENAME path when the holder is a DIFFERENT row whose
+      // pane is dead — register never destroys that identity to free the name (the operator
+      // decides, via `orca agents retire`); this flag lets the refusal say so.
+      holderPaneDead: boolean
+    }
 
 function paneSuffix(paneKey: string): string {
   const idx = paneKey.indexOf(':')
@@ -85,7 +101,12 @@ function nextFreeAlternative(db: Database.Database, hostId: string, base: string
 }
 
 /** Idempotent on the pane-key suffix (CONTAINMENT precedent: tabId changes when a pane moves
- * tabs, the leaf identity does not). Never silently renames the caller on a name collision. */
+ * tabs, the leaf identity does not). Never silently renames the caller on a name collision.
+ *
+ * R1 (S10-11, agent-pane-rebind.ts): a same-name register whose existing holder's pane is
+ * confirmed dead/unresolvable re-adopts that row in place (remintRow) instead of refusing —
+ * same id, so every caller that resolves identity via getAgentByPaneKey(hostId, thisPaneKey)
+ * (agents threads, thread replay, reply, pact, wake delivery) finds the original row again. */
 export function upsertAgentByPaneSuffix(
   db: Database.Database,
   params: UpsertAgentByPaneSuffixParams
@@ -94,43 +115,62 @@ export function upsertAgentByPaneSuffix(
   try {
     const existing = findByPaneSuffix(db, params.hostId, params.paneKey)
     if (existing) {
-      db.prepare(
-        `UPDATE agents SET
-           display_name = ?, role = ?, terminal_handle = ?, process_incarnation = ?,
-           worktree_id = ?, worktree_path = ?, branch = ?, title = ?, agent_label = ?,
-           pane_key = ?, derived = 0, last_seen_at = datetime('now')
-         WHERE id = ?`
-      ).run(
-        params.displayName,
-        params.role,
-        params.terminalHandle,
-        params.processIncarnation,
-        params.worktreeId,
-        params.worktreePath,
-        params.branch,
-        params.title,
-        params.agentLabel,
-        params.paneKey,
-        existing.id
-      )
-      const reminted = db.prepare('SELECT * FROM agents WHERE id = ?').get(existing.id) as AgentRow
-      // S10-7 F-C: pending mail follows the agent across a re-mint, same as its identity does.
-      const { repointedMessages, pendingOnOldHandle } = repointMailboxOnReMint(db, existing, params)
-      db.exec('COMMIT')
-      return { outcome: 'reminted', agent: reminted, repointedMessages, pendingOnOldHandle }
+      // R1 name-collision guard, rename path: an already-registered pane re-registering with a
+      // NEW display_name can collide with a name a *different* row holds. remintRow's UPDATE
+      // writes display_name unconditionally, so without this check that collision reached raw
+      // SQLite (`UNIQUE constraint failed: agents.host_id, agents.display_name`) instead of the
+      // typed name_taken the chair's ruling requires. Same decision the no-pane-match branch
+      // below makes, applied here before the UPDATE runs.
+      if (params.displayName !== existing.display_name) {
+        const nameHolder = findByName(db, params.hostId, params.displayName)
+        if (nameHolder && nameHolder.id !== existing.id) {
+          // A DIFFERENT agent's row holds the requested name. Register never destroys that
+          // identity to free a name — live, dead, or in between (S10-11 verify blocker: the
+          // prior draft tombstoned a dead-pane holder here, stranding its queued mail and
+          // erasing its forensic record). Dead holders are the OPERATOR's call: retire frees
+          // the name; the typed refusal below says exactly that.
+          const holderDead =
+            nameHolder.quarantined !== 1 && !holderPaneIsLive(nameHolder, params.isPaneLive)
+          const alternative = nextFreeAlternative(db, params.hostId, params.displayName)
+          db.exec('COMMIT')
+          return {
+            outcome: 'name_taken',
+            alternative,
+            livePaneKey: nameHolder.quarantined === 1 || holderDead ? null : nameHolder.pane_key,
+            liveTerminalHandle:
+              nameHolder.quarantined === 1 || holderDead ? null : nameHolder.terminal_handle,
+            holderPaneDead: holderDead
+          }
+        }
+      }
+      return remintRow(db, existing, params)
     }
 
     const nameHolder = findByName(db, params.hostId, params.displayName)
     if (nameHolder) {
-      if (!reclaimableHolder(nameHolder)) {
+      // Quarantined: name stays locked regardless of pane liveness — existing semantics.
+      if (nameHolder.quarantined !== 1 && reclaimableHolder(nameHolder)) {
+        db.prepare(
+          `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL,
+             role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
+        ).run(nameHolder.id)
+      } else if (nameHolder.quarantined === 1 || holderPaneIsLive(nameHolder, params.isPaneLive)) {
+        // Locked (quarantined) or the holder's pane is genuinely still live: refuse, never
+        // silently rename, never a raw INSERT that could hit the UNIQUE constraint.
         const alternative = nextFreeAlternative(db, params.hostId, params.displayName)
         db.exec('COMMIT')
-        return { outcome: 'name_taken', alternative }
+        return {
+          outcome: 'name_taken',
+          alternative,
+          livePaneKey: nameHolder.quarantined === 1 ? null : nameHolder.pane_key,
+          liveTerminalHandle: nameHolder.quarantined === 1 ? null : nameHolder.terminal_handle,
+          holderPaneDead: false
+        }
+      } else {
+        // R1: non-derived holder, not quarantined, pane confirmed dead/unresolvable (or the
+        // row never had one) — rebind in place rather than mint a second, anonymous identity.
+        return remintRow(db, nameHolder, params)
       }
-      db.prepare(
-        `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL,
-           role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
-      ).run(nameHolder.id)
     }
 
     const id = generateAgentId()
@@ -158,8 +198,16 @@ export function upsertAgentByPaneSuffix(
       params.originHostId
     )
     const created = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as AgentRow
+    // R2: a tombstoned predecessor under this same host+name (retired, or just tombstoned
+    // above by the reclaim branch) leaves its thread membership behind unless adopted here.
+    const { adoptedThreads } = adoptPredecessorThreadMembership(
+      db,
+      params.hostId,
+      params.displayName,
+      id
+    )
     db.exec('COMMIT')
-    return { outcome: 'created', agent: created }
+    return { outcome: 'created', agent: created, adoptedThreads }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
@@ -236,109 +284,13 @@ export function listAgents(db: Database.Database, params: ListAgentsParams = {})
   }
 }
 
-export type AgentLivenessSignals = {
-  paneResolves: boolean
-  lastAgentStatus: 'working' | 'permission' | 'idle' | null
-  observedLive: boolean
-  lastSeenAt: string
-  now: string
-  goneAfterMs?: number
-}
+export {
+  classifyAgentLiveness,
+  refreshAgentLiveness,
+  setAgentQuarantine,
+  type SetAgentQuarantineParams,
+  type AgentLivenessSignals,
+  type RefreshAgentLivenessParams
+} from './agent-liveness-classification'
 
-const DEFAULT_GONE_AFTER_MS = 15 * 60 * 1000
-
-/** Pure classifier for the spec's liveness predicate (never claimed by register). `pushable`
- * mirrors the exact ambient-push gate: only a truly-idle, live-observed pane is pushable —
- * a cold-restored idle row (observedLive===false) must never read as `live` or `pushable`. */
-export function classifyAgentLiveness(signals: AgentLivenessSignals): {
-  state: AgentState
-  pushable: boolean
-} {
-  if (!signals.paneResolves) {
-    const goneAfterMs = signals.goneAfterMs ?? DEFAULT_GONE_AFTER_MS
-    const ageMs = Date.parse(signals.now) - Date.parse(signals.lastSeenAt)
-    return { state: ageMs > goneAfterMs ? 'gone' : 'idle', pushable: false }
-  }
-  if (!signals.observedLive) {
-    return { state: 'idle', pushable: false } // cold restore
-  }
-  if (signals.lastAgentStatus === 'working' || signals.lastAgentStatus === 'permission') {
-    return { state: 'live', pushable: false }
-  }
-  return { state: 'idle', pushable: true }
-}
-
-export type RefreshAgentLivenessParams = {
-  id: string
-  state: AgentState
-  terminalHandle: string | null
-  processIncarnation: string | null
-}
-
-export function refreshAgentLiveness(
-  db: Database.Database,
-  params: RefreshAgentLivenessParams
-): AgentRow {
-  db.prepare(
-    `UPDATE agents SET state = ?, terminal_handle = ?, process_incarnation = ?,
-       last_seen_at = datetime('now')
-     WHERE id = ? AND tombstoned_at IS NULL`
-  ).run(params.state, params.terminalHandle, params.processIncarnation, params.id)
-  const row = getAgentById(db, params.id)
-  if (!row) {
-    throw new OrchestrationError('agent_unknown', `Agent ${params.id} was not found.`)
-  }
-  return row
-}
-
-export type SetAgentQuarantineParams = {
-  id: string
-  quarantined: boolean
-  reasonCode: string | null
-}
-
-export function setAgentQuarantine(
-  db: Database.Database,
-  params: SetAgentQuarantineParams
-): AgentRow {
-  db.prepare(
-    `UPDATE agents SET quarantined = ?, quarantine_reason_code = ?,
-       quarantined_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
-     WHERE id = ? AND tombstoned_at IS NULL`
-  ).run(params.quarantined ? 1 : 0, params.reasonCode, params.quarantined ? 1 : 0, params.id)
-  const row = getAgentById(db, params.id)
-  if (!row) {
-    throw new OrchestrationError('agent_unknown', `Agent ${params.id} was not found.`)
-  }
-  return row
-}
-
-export type WriteAgentAuditParams = {
-  agentId: string | null
-  actorPaneKey: string | null
-  actorHostId: string | null
-  verb: string
-  outcome: string
-  reasonCode: string | null
-}
-
-export function writeAgentAudit(
-  db: Database.Database,
-  params: WriteAgentAuditParams
-): AgentAuditRow {
-  db.prepare(
-    `INSERT INTO agent_audit (agent_id, actor_pane_key, actor_host_id, verb, outcome, reason_code)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    params.agentId,
-    params.actorPaneKey,
-    params.actorHostId,
-    params.verb,
-    params.outcome,
-    params.reasonCode
-  )
-  return db.prepare('SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1').get() as AgentAuditRow
-}
-
-// checkAndBumpRate / CheckAndBumpRateParams / RateLimitResult moved to ./agent-rate-limit.ts
-// (kept out of this file to stay under the max-lines ratchet); db.ts imports it directly.
+export { writeAgentAudit, type WriteAgentAuditParams } from './agent-audit-log'
