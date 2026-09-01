@@ -13166,18 +13166,31 @@ export class OrcaRuntimeService {
     // S10-10: the persisted launch-token-hash anchor is a runtime-owned secret the hook channel
     // cannot forge — a caller presenting the token whose sha256 equals what THIS runtime
     // persisted at mint time for this exact paneKey is verified independently of any hook POST,
-    // receipt, or hydrated-commitment disk history. Scoped to the no-receipt restored branch
-    // (mintReceiptOnSuccess) — a receipt or a live launchTokenHash already has an equal-or-
-    // stronger guarantee via their own branches above, and this is exactly what lets a
-    // daemon-survived pane (no receipt, no prior-restart commitment on disk) attest the moment
-    // its restored generation sees the genuine token, instead of only on the restart after next.
+    // receipt, or hydrated-commitment disk history. This is exactly what lets a daemon-survived
+    // pane (no live launch token, no prior-restart commitment on disk) attest the moment its
+    // restored generation sees the genuine token, instead of only on the restart after next.
+    // S10-13 CORRECTION: this gate was originally scoped to the no-receipt restored branch
+    // (`mintReceiptOnSuccess`) on the premise that "a receipt already has an equal-or-stronger
+    // guarantee via its own branch above". That premise was false and made the branch dead in
+    // the field: the receipt branch has NO early return — it only re-checks that the restored
+    // receipt still matches the live pty, then falls through to hook attestation, which a
+    // restarted AgentHookServer can never satisfy for a pane with no hydrated commitment on
+    // disk. And the daemon-survived restart ALWAYS mints that receipt: the controller inventory
+    // reports the pty's original ORCA_TERMINAL_HANDLE + unchanged incarnationId, the persisted
+    // surface matches exactly, so refreshPtyWorktreeRecordsWithControllerInventory calls
+    // rememberRestoredOrchestrationAuthority for it. Result: the one state this anchor was
+    // written for was the one state that could never reach it. Scoping to
+    // `terminalProvenance === 'restored'` admits the receipt-backed case, whose preconditions
+    // are a strict superset of the no-receipt case's (ptyId/worktreeId/terminalHandle/paneKey/
+    // processIncarnation/hostScope all re-verified above), so this cannot admit anything the
+    // no-receipt branch already refused. `current_runtime` is unaffected — it never reaches here.
     // F6 (deliberate deviation): unlike attestCompatibilityAuthority's hook-attested path below,
     // this direct-anchor check does NOT require the observation to be unique to this pane (no
     // hasUniqueCurrentObservation-equivalent conjunct) — the anchor is a runtime-owned secret
     // compared directly, not an attacker-postable hook observation, so there is nothing for a
     // decoy pane's POST to displace here.
     if (
-      mintReceiptOnSuccess &&
+      terminalProvenance === 'restored' &&
       claimedPaneKey === terminal.paneKey &&
       this.verifyLivePaneLaunchTokenHash(
         terminal.paneKey,
