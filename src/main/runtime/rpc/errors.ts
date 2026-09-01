@@ -127,6 +127,9 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // reasoning as the S10-2b block above, just not caught by dispatcher-level tests until now.
   'name_taken',
   'message_not_found',
+  // S10-12 R1: daemon-attested-absent pty refusal, thrown with `data.nextSteps` — same
+  // reasoning as the S10-2b block above (a discriminator + recovery guidance a caller acts on).
+  'no_connected_pty',
   // Pre-existing gaps also caught by this series' containment RPC tests: `not_found` and
   // `forbidden` are the quarantine/purge/review authority codes (orchestration-agents-
   // quarantine.ts predates S10-2b; orchestration-containment.ts is new).

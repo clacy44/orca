@@ -2735,6 +2735,24 @@ class RuntimeLineageError extends Error {
   }
 }
 
+// S10-12 R1: distinct from terminal_not_writable — daemon-attested-absent, not a recorded exit.
+class TerminalNotConnectedError extends Error {
+  readonly code = 'no_connected_pty'
+  readonly data: { nextSteps: string[] }
+
+  constructor() {
+    super(
+      'The daemon no longer reports this terminal as live; its write was refused rather than accepted silently.'
+    )
+    this.data = {
+      nextSteps: [
+        'Run `orca terminal list --json` to confirm current connectivity, then retry the send.',
+        'If the pane still shows disconnected, reopen or reattach the terminal before sending more input.'
+      ]
+    }
+  }
+}
+
 class WorktreeIdRequiresFullPathError extends Error {
   readonly code = 'worktree_id_requires_full_path'
 
@@ -10906,6 +10924,42 @@ export class OrcaRuntimeService {
     this.disposeHeadlessTerminal(ptyId)
   }
 
+  /** S10-12 R2: a provider's authenticated transport just closed (daemon death). Mark every
+   *  pty it owns disconnected immediately — not waiting on the next poll-driven liveness
+   *  sweep — then trigger exactly one confirming sweep (no reconnect-storm: this fires once
+   *  per drop, and the sweep itself is a single best-effort round trip). `connectionId` is
+   *  null for the local daemon, a connection id for an SSH host's daemon. */
+  async notifyPtyProviderTransportDisconnected(connectionId: string | null): Promise<void> {
+    this.ptyProviderTransportDownConnectionIds.add(connectionId)
+    const now = Date.now()
+    let affected = 0
+    for (const pty of this.ptysById.values()) {
+      if (pty.connectionId !== connectionId) {
+        continue
+      }
+      if (pty.connected) {
+        pty.connected = false
+        pty.disconnectedAt ??= now
+        affected++
+      }
+    }
+    console.warn('[daemon] provider transport disconnected — marked ptys disconnected', {
+      connectionId,
+      affected
+    })
+    try {
+      const { worktrees } = await this.listResolvedWorktreeSnapshot()
+      await this.refreshPtyWorktreeRecordsWithControllerInventory(
+        worktrees,
+        null,
+        undefined,
+        connectionId
+      )
+    } catch {
+      // Why: the direct mark above is already authoritative; this is best-effort reconciliation.
+    }
+  }
+
   /** Record one derived side-effect fact: batched per chunk while applying
    *  bytes, emitted immediately for between-chunk facts (stale-title timer). */
   private recordTerminalSideEffectFact(ptyId: string, fact: TerminalSideEffectFact): void {
@@ -17676,6 +17730,8 @@ export class OrcaRuntimeService {
   // verdict per ptyId serves the burst instead of a probe round-trip each call.
   private readonly provenAbsentLeafPtyVerdicts = new Map<string, number>()
   private readonly leafPtyAbsenceProbes = new Map<string, Promise<boolean>>()
+  // S10-12 R2: provider scopes (null = local) whose transport is currently confirmed down.
+  private readonly ptyProviderTransportDownConnectionIds = new Set<string | null>()
   // Why: probe dedupe shares one promise across callers, but each caller's
   // continuation would re-deliver the same unread rows; arm one per pty.
   private readonly probeDeferredDeliveryPtyIds = new Set<string>()
@@ -17687,6 +17743,18 @@ export class OrcaRuntimeService {
       // Why: liveness lookup failures are doubt; doubt never gates a write.
       return false
     }
+  }
+
+  /** S10-12 R1/R2: true only once the owning provider's transport has been OBSERVED to close
+   *  (notifyPtyProviderTransportDisconnected) and no later inventory fetch has proven it back
+   *  up. Deliberately NOT the per-pty ptysById/leaf.connected mirror — graph sync stamps that
+   *  optimistically for every leaf ptyId including a prior process's (see isLeafPtyProvenAbsent's
+   *  own comment), so a same-id respawn while the daemon is alive must keep writing through it.
+   *  A confirmed-down transport has no live daemon to respawn under, so leniency doesn't apply. */
+  private isPtyProviderTransportConfirmedDown(ptyId: string): boolean {
+    const connectionId =
+      this.ptysById.get(ptyId)?.connectionId ?? parseAppSshPtyId(ptyId)?.connectionId ?? null
+    return this.ptyProviderTransportDownConnectionIds.has(connectionId)
   }
 
   /** True only on controller-proven absence; live, unknown, and probe errors all answer false. */
@@ -17750,6 +17818,11 @@ export class OrcaRuntimeService {
     const pty = this.getLivePtyForHandle(handle)
     if (pty) {
       if (!pty.pty.connected) {
+        // Why: lastExitCode null means no exit was ever recorded — the daemon simply stopped
+        // attesting this pty (R1) — vs a confirmed process exit, which stays terminal_not_writable.
+        if (pty.pty.lastExitCode === null) {
+          throw new TerminalNotConnectedError()
+        }
         throw new Error('terminal_not_writable')
       }
       const payload = buildSendPayload(action)
@@ -17768,6 +17841,11 @@ export class OrcaRuntimeService {
     const { leaf } = this.getLiveLeafForHandle(handle)
     if (!leaf.writable || !leaf.ptyId) {
       throw new Error('terminal_not_writable')
+    }
+    // S10-12 R1/R2: the owning provider's transport is confirmed down — refuse typed rather
+    // than fall through to the probe below, which can only error/hang against a dead socket.
+    if (this.isPtyProviderTransportConfirmedDown(leaf.ptyId)) {
+      throw new TerminalNotConnectedError()
     }
     const payload = buildSendPayload(action)
     if (payload === null) {
@@ -17814,6 +17892,9 @@ export class OrcaRuntimeService {
     const { leaf } = this.getLiveLeafForHandle(handle)
     if (!leaf.writable || !leaf.ptyId) {
       throw new Error('terminal_not_writable')
+    }
+    if (this.isPtyProviderTransportConfirmedDown(leaf.ptyId)) {
+      throw new TerminalNotConnectedError()
     }
     await assertTerminalInputWithinLimitWithYield(payload)
     // Why: same absence gate as sendTerminal — a stale graph mirror must not
@@ -31501,6 +31582,13 @@ export class OrcaRuntimeService {
       // Why: a transient controller failure is not evidence that retained PTYs exited.
       return null
     }
+    // S10-12 R2: a successful fetch proves the transport answered — self-heal the confirmed-down
+    // gate. Unscoped (undefined) succeeds only when every registered provider answered.
+    if (connectionId === undefined) {
+      this.ptyProviderTransportDownConnectionIds.clear()
+    } else {
+      this.ptyProviderTransportDownConnectionIds.delete(connectionId)
+    }
     const isCurrentInventory =
       connectionId === undefined
         ? this.ptyControllerAggregateInventoryGeneration === inventoryGeneration &&
@@ -31670,7 +31758,19 @@ export class OrcaRuntimeService {
       if (connectionId !== undefined && pty.connectionId !== connectionId) {
         continue
       }
-      if (!allLivePtyIds.has(pty.ptyId) && !this.leafExistsForPty(pty.ptyId)) {
+      // S10-12 R1: daemon-attested only — a laid-out pane absent from listSessions is not
+      // connected. leafExistsForPty still gates pruning below, just not this flag.
+      if (!allLivePtyIds.has(pty.ptyId)) {
+        // Why: neither a remote:-scheme id (no local/SSH sweep ever speaks for it) nor an
+        // SSH-scoped id under an UNSCOPED sweep (the aggregate inventory may not cover every
+        // registered SSH provider, e.g. mid-reconnect) may be downgraded from an inventory
+        // that isn't authoritative for it — mirrors buildTerminalSummary's own exclusion.
+        if (
+          this.isRemoteScopedPtyId(pty.ptyId) ||
+          (connectionId === undefined && pty.connectionId !== null)
+        ) {
+          continue
+        }
         if (this.ptyController.hasPty?.(pty.ptyId) === true) {
           // Why: an SSH spawn can become addressable before an overlapping relay list includes it.
           allLivePtyIds.add(pty.ptyId)
@@ -31850,6 +31950,12 @@ export class OrcaRuntimeService {
     return (this.leavesByPtyId.get(ptyId)?.length ?? 0) > 0
   }
 
+  // S10-12: the remote: scheme is a distinct id space no local/SSH liveness sweep speaks for —
+  // parseAppSshPtyId does not recognize it either, so it must be checked separately.
+  private isRemoteScopedPtyId(ptyId: string): boolean {
+    return ptyId.startsWith('remote:')
+  }
+
   private rebuildLeafPtyIndex(): void {
     const next = new Map<string, RuntimeLeafRecord[]>()
     for (const leaf of this.leaves.values()) {
@@ -31919,13 +32025,22 @@ export class OrcaRuntimeService {
     // The sync hasPty rescue closes the spawn/list race: a just-spawned PTY can
     // register after the inventory snapshot, and federation reads one
     // connected:false as exited.
-    const provenAbsent =
-      provenLivePtyIds !== null &&
+    const isLocallyScopedLeafPty =
       leaf.ptyId !== null &&
-      !provenLivePtyIds.has(leaf.ptyId) &&
-      !leaf.ptyId.startsWith('remote:') &&
-      parseAppSshPtyId(leaf.ptyId) === null &&
-      this.ptyController?.hasPty?.(leaf.ptyId) !== true
+      !this.isRemoteScopedPtyId(leaf.ptyId) &&
+      parseAppSshPtyId(leaf.ptyId) === null
+    const provenAbsent =
+      (provenLivePtyIds !== null &&
+        leaf.ptyId !== null &&
+        !provenLivePtyIds.has(leaf.ptyId) &&
+        isLocallyScopedLeafPty &&
+        this.ptyController?.hasPty?.(leaf.ptyId) !== true) ||
+      // S10-12 R1: this call's own sweep can be unavailable (provenLivePtyIds null is exactly
+      // what a fully dead daemon produces — listProcesses can't succeed against it), but the
+      // sweep-maintained pty record persists across calls. A daemon-attested-absent record
+      // (:31673) must still demote here, not just for sendTerminal's separate refusal — same
+      // local-only scoping as above, since the sweep loop guards SSH/remote the same way.
+      (isLocallyScopedLeafPty && pty !== undefined && !pty.connected)
     return {
       handle: this.issueHandle(leaf),
       ptyId: leaf.ptyId,
