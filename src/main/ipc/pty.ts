@@ -2140,6 +2140,7 @@ let localDataUnsub: (() => void) | null = null
 let localExitUnsub: (() => void) | null = null
 let localBackgroundStreamUnsub: (() => void) | null = null
 let localWriteUnavailableUnsub: (() => void) | null = null
+let localTransportDisconnectedUnsub: (() => void) | null = null
 let didFinishLoadHandler: (() => void) | null = null
 let didFinishLoadWebContents: WebContents | null = null
 let rendererLifecycleResetWebContents: WebContents | null = null
@@ -2350,10 +2351,12 @@ export function unbindLocalProviderListeners(): void {
   localExitUnsub?.()
   localBackgroundStreamUnsub?.()
   localWriteUnavailableUnsub?.()
+  localTransportDisconnectedUnsub?.()
   localDataUnsub = null
   localExitUnsub = null
   localBackgroundStreamUnsub = null
   localWriteUnavailableUnsub = null
+  localTransportDisconnectedUnsub = null
 }
 
 // ─── IPC Registration ───────────────────────────────────────────────
@@ -3987,6 +3990,15 @@ export function registerPtyHandlers(
     localExitUnsub?.()
     localBackgroundStreamUnsub?.()
     localWriteUnavailableUnsub?.()
+    localTransportDisconnectedUnsub?.()
+
+    // S10-12 R2: the provider's authenticated transport itself closed — mark every pty it
+    // owns disconnected now, not on the next poll-driven liveness sweep (STA-2373's sibling
+    // gap: onWriteUnavailable above reacts to a rejected write, this reacts to the raw close).
+    localTransportDisconnectedUnsub =
+      localProvider.onTransportDisconnected?.(() => {
+        void runtime?.notifyPtyProviderTransportDisconnected(null)
+      }) ?? null
 
     // Why: a daemon death takes down every session at once. The provider signals
     // each affected pane here so background panes remount + re-attach too, not

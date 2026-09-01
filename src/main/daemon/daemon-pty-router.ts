@@ -218,6 +218,10 @@ export class DaemonPtyRouter implements IPtyProvider {
     return this.subscriptions.onWriteUnavailable(callback)
   }
 
+  onTransportDisconnected(callback: () => void): () => void {
+    return this.subscriptions.onTransportDisconnected(callback)
+  }
+
   onReplay(callback: (payload: { id: string; data: string }) => void): () => void {
     return this.subscriptions.onReplay(callback)
   }

@@ -421,6 +421,17 @@ const daemonLifecycleSchema = z.discriminatedUnion('transition', [
     .strict()
 ])
 
+// S10-12 R3: at-risk-only signal — the daemon (or the exiting serve process that spawned it)
+// is running from inside an AppImage's FUSE mount, which is torn down when its owning serve
+// process exits, leaving a still-running daemon on an unmapped binary (silent SIGBUS/EIO death).
+// No path/version reaches the wire, just which lifecycle moment observed the condition.
+const DAEMON_LINUX_MOUNT_RISK_STAGES = ['daemon_spawn', 'serve_exit'] as const
+const daemonLinuxMountRiskSchema = z
+  .object({
+    stage: z.enum(DAEMON_LINUX_MOUNT_RISK_STAGES)
+  })
+  .strict()
+
 const daemonAuditEligibilityBaseSchema = z.object({
   state: z.enum(DAEMON_AUDIT_STATE_VALUES),
   reason: z.enum(DAEMON_AUDIT_REASON_VALUES),
@@ -1448,6 +1459,7 @@ export const eventSchemas = {
   daemon_start_failed: daemonStartFailedSchema,
   main_thread_hang_detected: mainThreadHangDetectedSchema,
   daemon_lifecycle: daemonLifecycleSchema,
+  daemon_linux_mount_risk: daemonLinuxMountRiskSchema,
   daemon_audit_eligibility: daemonAuditEligibilitySchema,
   runtime_rpc_start_failed: runtimeRpcStartFailedSchema,
   remote_outbound_budget_close: remoteOutboundBudgetCloseSchema,

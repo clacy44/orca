@@ -9,7 +9,10 @@ export const DAEMON_REPLACE_REASONS = [
   'stale_bundle',
   'different_app_path',
   'failed_health_check',
-  'severed_tcc_attribution'
+  'severed_tcc_attribution',
+  // S10-12 R3: Linux mirror of severed_tcc_attribution — the daemon's own entry
+  // path is gone (a /tmp/.mount_* AppImage mount torn down under a still-running daemon).
+  'severed_linux_binary'
 ] as const
 export type DaemonReplaceReason = (typeof DAEMON_REPLACE_REASONS)[number]
 

@@ -753,6 +753,27 @@ describe('DaemonPtyAdapter (IPtyProvider)', () => {
       }
     })
 
+    // S10-12 R2: distinct from onWriteUnavailable above — this fires on the raw transport
+    // close itself, with no write required, so the runtime can mark ptys disconnected
+    // immediately rather than waiting for a caller to type into a dead pane first.
+    it('fires onTransportDisconnected exactly once when the daemon socket closes', async () => {
+      const healingAdapter = new DaemonPtyAdapter({ socketPath, tokenPath })
+      const disconnects: number[] = []
+      healingAdapter.onTransportDisconnected(() => disconnects.push(Date.now()))
+      try {
+        const client = (healingAdapter as unknown as { client: DaemonClient }).client
+        await healingAdapter.spawn({ cols: 80, rows: 24 })
+
+        await server.shutdown()
+        await waitFor(() => !client.isConnected())
+        await waitFor(() => disconnects.length > 0)
+
+        expect(disconnects).toHaveLength(1)
+      } finally {
+        healingAdapter.dispose()
+      }
+    })
+
     it('keeps dropping writes silently on an adapter that cannot respawn', async () => {
       // Why revert-sensitive: legacy adapters are built with no respawn, so a remount
       // reattaches to nothing and rebuilds the pane EMPTY, losing scrollback the user

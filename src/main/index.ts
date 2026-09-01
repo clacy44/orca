@@ -38,6 +38,7 @@ import {
   listLiveDaemonPtyIds,
   shutdownDaemon
 } from './daemon/daemon-init'
+import { warnIfServeExitAtRiskOnAppImageMount } from './daemon/linux-appimage-mount-risk'
 import {
   type CodexPaneHomeRoute,
   getCodexPaneAccount,
@@ -3239,6 +3240,11 @@ app.on('before-quit', () => {
     recordUpdaterLifecycle('before_quit_allowed', undefined, {
       message: 'before-quit allowed for update install'
     })
+  }
+  // S10-12 R3(iii): a headless serve exiting from inside its own AppImage FUSE mount is about
+  // to unmount the filesystem any daemon it left running is still executing from.
+  if (isServeMode) {
+    warnIfServeExitAtRiskOnAppImageMount(process.execPath)
   }
   isQuitting = true
   desktopRelayService?.fenceAndCloseNow()

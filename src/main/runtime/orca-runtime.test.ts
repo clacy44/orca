@@ -13008,6 +13008,321 @@ describe('OrcaRuntimeService', () => {
     expect(afterWrite).toHaveBeenCalledOnce()
   })
 
+  // S10-12 R1: connected must be daemon-attested, not layout-inferred (orca-runtime.ts:31673).
+  describe('daemon-attested pty liveness (S10-12 R1)', () => {
+    it('downgrades connected=false for a laid-out pane the daemon no longer lists', async () => {
+      const runtime = createRuntime()
+      syncSinglePty(runtime, 'pty-1')
+      expect(
+        (runtime as unknown as { ptysById: Map<string, { connected: boolean }> }).ptysById.get(
+          'pty-1'
+        )
+      ).toMatchObject({ connected: true })
+
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        // Why: the daemon's inventory no longer includes this session — it died —
+        // while the layout leaf still binds the pane to it (the cert's exact shape).
+        listProcesses: async () => []
+      })
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      expect(terminal).toMatchObject({ connected: false, writable: false })
+      // The record stays addressable (leafExistsForPty still gates pruning, not the flag).
+      expect(
+        (runtime as unknown as { ptysById: Map<string, { connected: boolean }> }).ptysById.get(
+          'pty-1'
+        )
+      ).toMatchObject({ connected: false })
+    })
+
+    // S10-12 R2: a leaf-bound pty (the common laid-out-pane shape) is gated on the
+    // provider's observed transport state, not the layout-optimistic connected mirror —
+    // see terminal-send-stale-leaf-liveness.test.ts for why that mirror stays lenient.
+    it('refuses terminal send once the owning provider transport is confirmed disconnected', async () => {
+      const runtime = createRuntime()
+      syncSinglePty(runtime, 'pty-1')
+      const [terminal] = (await runtime.listTerminals()).terminals
+
+      await runtime.notifyPtyProviderTransportDisconnected(null)
+
+      await expect(runtime.sendTerminal(terminal.handle, { text: 'hello' })).rejects.toMatchObject({
+        code: 'no_connected_pty',
+        data: { nextSteps: expect.arrayContaining([expect.any(String)]) }
+      })
+    })
+
+    // S10-12 R1 blocker: a renderer graph resync after the daemon dies must not resurrect
+    // `connected: true` for the pane it just correctly downgraded — the exact cert shape
+    // (terminal list says connected+writable, terminal send refuses no_connected_pty).
+    it('does not resurrect connected=true on a renderer graph resync after the provider transport is confirmed dead', async () => {
+      const runtime = createRuntime()
+      syncSinglePty(runtime, 'pty-1')
+      const [beforeTerminal] = (await runtime.listTerminals()).terminals
+      expect(beforeTerminal).toMatchObject({ connected: true, writable: true })
+
+      await runtime.notifyPtyProviderTransportDisconnected(null)
+      const [downgraded] = (await runtime.listTerminals()).terminals
+      expect(downgraded).toMatchObject({ connected: false, writable: false })
+
+      // The renderer's title/agent-status/layout-driven resync (scheduleRuntimeGraphSync)
+      // re-publishes the same laid-out leaf — this must not flip the seed back to true.
+      syncSinglePty(runtime, 'pty-1')
+
+      const [afterResync] = (await runtime.listTerminals()).terminals
+      expect(afterResync).toMatchObject({ connected: false, writable: false })
+      expect(
+        (runtime as unknown as { ptysById: Map<string, { connected: boolean }> }).ptysById.get(
+          'pty-1'
+        )
+      ).toMatchObject({ connected: false })
+
+      await expect(
+        runtime.sendTerminal(afterResync.handle, { text: 'hello' })
+      ).rejects.toMatchObject({ code: 'no_connected_pty' })
+    })
+
+    it('resumes accepting sends once a later inventory fetch proves the provider back up', async () => {
+      const runtime = createRuntime()
+      syncSinglePty(runtime, 'pty-1')
+      const [terminal] = (await runtime.listTerminals()).terminals
+      await runtime.notifyPtyProviderTransportDisconnected(null)
+      await expect(runtime.sendTerminal(terminal.handle, { text: 'hello' })).rejects.toMatchObject({
+        code: 'no_connected_pty'
+      })
+
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        listProcesses: async () => [{ id: 'pty-1', cwd: TEST_WORKTREE_PATH, title: 'Codex' }]
+      })
+      await runtime.listTerminals()
+
+      await expect(runtime.sendTerminal(terminal.handle, { text: 'hello' })).resolves.toMatchObject(
+        { accepted: true }
+      )
+    })
+
+    it('refuses send on an orphaned (rendererless) pty the daemon no longer attests', async () => {
+      const ptyId = `${TEST_WORKTREE_ID}@@pty-orphan`
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        listProcesses: async () => [{ id: ptyId, cwd: TEST_WORKTREE_PATH, title: 'shell' }]
+      })
+      runtime.attachWindow(1)
+      runtime.markGraphReady(1)
+      const [terminal] = (await runtime.listTerminals()).terminals
+
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        listProcesses: async () => []
+      })
+      await runtime.listTerminals()
+
+      await expect(runtime.sendTerminal(terminal.handle, { text: 'hello' })).rejects.toMatchObject({
+        code: 'no_connected_pty'
+      })
+    })
+
+    it('keeps a confirmed process exit on the existing terminal_not_writable contract', async () => {
+      const runtime = createRuntime()
+      syncSinglePty(runtime, 'pty-1')
+      const [terminal] = (await runtime.listTerminals()).terminals
+      runtime.onPtyExit('pty-1', 0)
+
+      await expect(runtime.sendTerminal(terminal.handle, { text: 'hello' })).rejects.toThrow(
+        'terminal_not_writable'
+      )
+    })
+  })
+
+  // S10-12 R2 major: a federated `remote:`-scheme pane resolves to the same connectionId=null
+  // scope as the local daemon (parseAppSshPtyId doesn't recognize the scheme either), so a
+  // local daemon socket drop must not disconnect or refuse it.
+  describe('federated remote pty transport isolation (S10-12 R2)', () => {
+    function syncLocalAndRemotePty(runtime: OrcaRuntimeService): void {
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, {
+        tabs: [
+          {
+            tabId: 'tab-1',
+            worktreeId: TEST_WORKTREE_ID,
+            title: 'local',
+            activeLeafId: 'pane:1',
+            layout: null
+          },
+          {
+            tabId: 'tab-2',
+            worktreeId: TEST_WORKTREE_ID,
+            title: 'remote',
+            activeLeafId: 'pane:2',
+            layout: null
+          }
+        ],
+        leaves: [
+          {
+            tabId: 'tab-1',
+            worktreeId: TEST_WORKTREE_ID,
+            leafId: 'pane:1',
+            paneRuntimeId: 1,
+            ptyId: 'pty-1'
+          },
+          {
+            tabId: 'tab-2',
+            worktreeId: TEST_WORKTREE_ID,
+            leafId: 'pane:2',
+            paneRuntimeId: 2,
+            ptyId: 'remote:pty-2'
+          }
+        ]
+      })
+    }
+
+    it('does not mark a federated remote: pane disconnected when the local daemon transport drops', async () => {
+      const runtime = createRuntime()
+      // Why a daemonAlive flag, not an unconditionally-succeeding listProcesses: a transport
+      // drop with a still-answering inventory is a self-healing-eligible state, not what a
+      // dead daemon actually produces (mirrors s10-12-daemon-death-acceptance.test.ts's T1).
+      let daemonAlive = true
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        listProcesses: async () => {
+          if (!daemonAlive) {
+            throw new Error('endpoint unreachable')
+          }
+          return [{ id: 'pty-1', cwd: TEST_WORKTREE_PATH, title: 'shell' }]
+        }
+      })
+      syncLocalAndRemotePty(runtime)
+
+      const before = (await runtime.listTerminals()).terminals
+      expect(before).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ ptyId: 'pty-1', connected: true, writable: true }),
+          expect.objectContaining({ ptyId: 'remote:pty-2', connected: true, writable: true })
+        ])
+      )
+
+      daemonAlive = false
+      await runtime.notifyPtyProviderTransportDisconnected(null)
+
+      const after = (await runtime.listTerminals()).terminals
+      expect(after.find((t) => t.ptyId === 'pty-1')).toMatchObject({
+        connected: false,
+        writable: false
+      })
+      expect(after.find((t) => t.ptyId === 'remote:pty-2')).toMatchObject({
+        connected: true,
+        writable: true
+      })
+      // Mutation guard (S10-12 verify): probe the RECORD the direct mark loop writes —
+      // higher layers (summary fallback, send's own remote exemption) can mask a reverted
+      // carve-out at the list/send level, but this field cannot lie about it.
+      const record = (
+        runtime as unknown as { ptysById: Map<string, { connected: boolean }> }
+      ).ptysById.get('remote:pty-2')
+      expect(record?.connected).toBe(true)
+    })
+
+    it('still accepts sends on a federated remote: pane after the local daemon transport drops', async () => {
+      const writes: string[] = []
+      const runtime = createRuntime()
+      let daemonAlive = true
+      runtime.setPtyController({
+        write: (id, data) => {
+          writes.push(`${id}:${data}`)
+          return true
+        },
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        listProcesses: async () => {
+          if (!daemonAlive) {
+            throw new Error('endpoint unreachable')
+          }
+          return [{ id: 'pty-1', cwd: TEST_WORKTREE_PATH, title: 'shell' }]
+        }
+      })
+      syncLocalAndRemotePty(runtime)
+      const remoteBefore = (await runtime.listTerminals()).terminals.find(
+        (t) => t.ptyId === 'remote:pty-2'
+      )
+
+      daemonAlive = false
+      await runtime.notifyPtyProviderTransportDisconnected(null)
+
+      await expect(
+        runtime.sendTerminal(remoteBefore!.handle, { text: 'still here' })
+      ).resolves.toMatchObject({ accepted: true })
+      expect(writes).toEqual(['remote:pty-2:still here'])
+    })
+  })
+
+  // S10-12 R1 minor: the floating-terminal liveness path had its own layout-inferred gate
+  // (only demoting `connected` when no leaf referenced the pty) that R1's daemon-attested rule
+  // was ruled to remove from the general sweep loop — this path had not been brought in line.
+  describe('floating terminal daemon-attested liveness (S10-12 R1 minor)', () => {
+    it('downgrades connected=false for a laid-out floating pane the controller no longer attests, even though a leaf still references it', async () => {
+      const floatingPtyId = `${FLOATING_TERMINAL_WORKTREE_ID}@@pty-float-1`
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => null,
+        // Why hasPty and not listProcesses: the floating liveness path checks synchronous
+        // per-id liveness directly, deliberately avoiding a general inventory fetch.
+        hasPty: () => false,
+        listProcesses: async () => []
+      })
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, {
+        tabs: [
+          {
+            tabId: 'float-tab',
+            worktreeId: FLOATING_TERMINAL_WORKTREE_ID,
+            title: 'Floating',
+            activeLeafId: 'pane:1',
+            layout: null
+          }
+        ],
+        leaves: [
+          {
+            tabId: 'float-tab',
+            worktreeId: FLOATING_TERMINAL_WORKTREE_ID,
+            leafId: 'pane:1',
+            paneRuntimeId: 1,
+            ptyId: floatingPtyId
+          }
+        ]
+      })
+      expect(
+        (runtime as unknown as { ptysById: Map<string, { connected: boolean }> }).ptysById.get(
+          floatingPtyId
+        )
+      ).toMatchObject({ connected: true })
+
+      await runtime.listTerminals(`id:${FLOATING_TERMINAL_WORKTREE_ID}`)
+
+      // The layout leaf still exists (leafExistsForPty stays true — pruning is unaffected,
+      // per pruneDisconnectedPtyRecords' own filter), but the daemon-attested flag itself
+      // must demote regardless of that layout fact.
+      expect(
+        (runtime as unknown as { ptysById: Map<string, { connected: boolean }> }).ptysById.get(
+          floatingPtyId
+        )
+      ).toMatchObject({ connected: false })
+    })
+  })
+
   it('creates visible terminal sessions without asking the renderer to focus a tab', async () => {
     const spawn = vi.fn().mockResolvedValue({ id: 'pty-bg' })
     const createTerminal = vi.fn()
@@ -34040,7 +34355,9 @@ describe('OrcaRuntimeService', () => {
         write: () => true,
         kill,
         getForegroundProcess: async () => null,
-        listProcesses: async () => []
+        // S10-12 R1: connected is daemon-attested now — list the still-live sibling so a
+        // sweep doesn't sweep it too; 'serve-right' is killed per-test via onPtyExit.
+        listProcesses: async () => [{ id: 'serve-left', cwd: TEST_WORKTREE_PATH, title: 'L' }]
       })
       runtime.setNotifier({ closeTerminal } as never)
       runtime.syncWindowGraph(1, {

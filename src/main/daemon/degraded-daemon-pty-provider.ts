@@ -236,6 +236,13 @@ export class DegradedDaemonPtyProvider implements IPtyProvider {
     )
   }
 
+  // S10-12 R2: same daemon-adapters-only scope as onWriteUnavailable above.
+  onTransportDisconnected(callback: () => void): () => void {
+    return combineUnsubscribes(
+      this.allDaemonAdapters().map((adapter) => adapter.onTransportDisconnected(callback))
+    )
+  }
+
   onReplay(callback: (payload: { id: string; data: string }) => void): () => void {
     const unsubscribes = this.allProviders().map((provider) => provider.onReplay(callback))
     let active = true
