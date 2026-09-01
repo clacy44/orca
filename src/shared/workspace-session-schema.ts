@@ -13,13 +13,8 @@
  */
 import { z } from 'zod'
 import type { WorkspaceKey } from './folder-workspace-types'
-import type { TabGroupLayoutNode } from './tab-types'
-import type { TerminalPaneLayoutNode } from './terminal-tab-types'
-import type { TuiAgent } from './tui-agent'
 import type { WorkspaceSessionState } from './workspace-session-state-types'
-import { isValidTerminalTabId } from './terminal-tab-id'
 import { parseExecutionHostId, type ExecutionHostId } from './execution-host'
-import { isTuiAgent } from './tui-agent-config'
 import { isWorkspaceKey } from './workspace-scope'
 import {
   browserHistoryEntriesSchema,
@@ -27,155 +22,22 @@ import {
   browserWorkspaceSchema
 } from './workspace-session-browser-schema'
 import { sleepingAgentSessionsByPaneKeySchema } from './workspace-session-sleeping-agents'
+import {
+  tabGroupLayoutNodeSchema,
+  tabGroupSchema,
+  tabSchema,
+  workspaceVisibleTabTypeSchema
+} from './workspace-session-tab-group-schema'
+import {
+  leafStringsSchema,
+  terminalLayoutSnapshotSchema,
+  terminalTabIdSchema,
+  terminalTabSchema
+} from './workspace-session-terminal-schema'
 import { salvagedField, salvagedOptional, salvagingArray, salvagingRecord } from './zod-salvage'
 
-// ─── Terminal pane layout (recursive) ───────────────────────────────
-
-const terminalPaneSplitDirectionSchema = z.enum(['vertical', 'horizontal'])
-const terminalTabIdSchema = z
-  .string()
-  .min(1)
-  .refine(isValidTerminalTabId, 'terminal tab id must not contain ":"')
 const workspaceKeySchema = z.custom<WorkspaceKey>(
   (value) => typeof value === 'string' && isWorkspaceKey(value)
-)
-
-// Why: z.lazy + type annotation keeps the recursive inference working without
-// forcing zod to resolve the whole tree at definition time.
-const terminalPaneLayoutNodeSchema: z.ZodType<TerminalPaneLayoutNode> = z.lazy(() =>
-  z.union([
-    z.object({
-      type: z.literal('leaf'),
-      leafId: z.string()
-    }),
-    z.object({
-      type: z.literal('split'),
-      direction: terminalPaneSplitDirectionSchema,
-      first: terminalPaneLayoutNodeSchema,
-      second: terminalPaneLayoutNodeSchema,
-      ratio: z.number().optional()
-    })
-  ])
-)
-
-const leafStringsSchema = salvagingRecord(z.string(), z.string())
-
-const terminalLayoutSnapshotSchema = z.object({
-  root: terminalPaneLayoutNodeSchema.nullable(),
-  activeLeafId: z.string().nullable(),
-  expandedLeafId: z.string().nullable(),
-  ptyIdsByLeafId: salvagedOptional('ptyIdsByLeafId', leafStringsSchema),
-  buffersByLeafId: salvagedOptional('buffersByLeafId', leafStringsSchema),
-  scrollbackRefsByLeafId: salvagedOptional('scrollbackRefsByLeafId', leafStringsSchema),
-  titlesByLeafId: salvagedOptional('titlesByLeafId', leafStringsSchema)
-})
-
-// ─── Terminal tab (legacy) ──────────────────────────────────────────
-
-const terminalTabSchema = z.object({
-  id: terminalTabIdSchema,
-  ptyId: z.string().nullable(),
-  worktreeId: z.string(),
-  title: z.string(),
-  defaultTitle: z.string().optional(),
-  generatedTitle: z.string().nullable().optional(),
-  aiVaultTitle: z
-    .object({
-      agent: z.enum(['claude', 'codex']),
-      sessionId: z.string(),
-      title: z.string()
-    })
-    .nullable()
-    .optional()
-    .catch(undefined),
-  quickCommandLabel: z.string().nullable().optional(),
-  customTitle: z.string().nullable(),
-  color: z.string().nullable(),
-  isPinned: z.boolean().optional(),
-  sortOrder: z.number(),
-  createdAt: z.number(),
-  generation: z.number().optional(),
-  startupCwd: z.string().min(1).optional(),
-  // Why: persist the launched agent so a restored idle agent tab keeps its
-  // provider icon before any hook fires. `.catch(undefined)` keeps a stale or
-  // unknown agent id from failing the whole-session parse (which would reset
-  // every terminal/editor/browser to defaults).
-  launchAgent: z
-    .custom<TuiAgent>((v) => isTuiAgent(v))
-    .optional()
-    .catch(undefined)
-})
-
-// ─── Unified tab model ──────────────────────────────────────────────
-
-const tabContentTypeSchema = z.enum([
-  'terminal',
-  'editor',
-  'diff',
-  'conflict-review',
-  'check-details',
-  'browser',
-  'simulator'
-])
-
-const workspaceVisibleTabTypeSchema = z.enum(['terminal', 'editor', 'browser', 'simulator'])
-
-const tabSchema = z.object({
-  id: z.string(),
-  entityId: z.string(),
-  groupId: z.string(),
-  worktreeId: z.string(),
-  contentType: tabContentTypeSchema,
-  label: z.string(),
-  generatedLabel: z.string().nullable().optional(),
-  aiVaultTitle: z
-    .object({
-      agent: z.enum(['claude', 'codex']),
-      sessionId: z.string(),
-      title: z.string()
-    })
-    .nullable()
-    .optional()
-    .catch(undefined),
-  quickCommandLabel: z.string().nullable().optional(),
-  customLabel: z.string().nullable(),
-  color: z.string().nullable(),
-  sortOrder: z.number(),
-  createdAt: z.number(),
-  isPreview: z.boolean().optional(),
-  isPinned: z.boolean().optional(),
-  // Why: persist the per-tab native-chat view mode so 'chat' survives reload /
-  // session restore. `.catch('terminal')` tolerates unknown future values (a
-  // newer build that wrote an unrecognized mode) by degrading to the safe
-  // default instead of failing the whole-session parse. Legacy/missing stays
-  // undefined → 'terminal' in the renderer.
-  viewMode: z.enum(['terminal', 'chat']).catch('terminal').optional()
-})
-
-const tabGroupSchema = z.object({
-  id: z.string(),
-  worktreeId: z.string(),
-  activeTabId: z.string().nullable(),
-  tabOrder: z.array(z.string()),
-  recentTabIds: z.array(z.string()).optional()
-})
-
-const tabGroupSplitDirectionSchema = z.enum(['horizontal', 'vertical'])
-
-const tabGroupLayoutNodeSchema: z.ZodType<TabGroupLayoutNode> = z.lazy(() =>
-  z.union([
-    z.object({
-      type: z.literal('leaf'),
-      groupId: z.string()
-    }),
-    z.object({
-      type: z.literal('split'),
-      direction: tabGroupSplitDirectionSchema,
-      first: tabGroupLayoutNodeSchema,
-      second: tabGroupLayoutNodeSchema,
-      ratio: z.number().optional()
-    })
-  ])
 )
 
 // ─── Editor ─────────────────────────────────────────────────────────
