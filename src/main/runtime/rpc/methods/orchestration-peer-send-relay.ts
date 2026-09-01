@@ -72,10 +72,21 @@ export async function relayPeerSendToHost(args: {
     )
   }
 
+  // R3 (finding 16): three distinct failure modes map to three distinct codes — collapsing them
+  // all into `remote_mailbox_unpaired` destroys the actionable difference between "no transport
+  // at all" (server_required, already a structured passthrough), "that name matches more than
+  // one saved environment" (the store's own `invalid_argument`, whose message already names the
+  // fix — use the id), and "no environment by that name" (the only genuine unpaired case).
   let server
   try {
     server = runtime.resolveOrchestrationWorkerServer(params.host)
-  } catch {
+  } catch (error) {
+    if (error instanceof OrchestrationError && error.code === 'server_required') {
+      throw error
+    }
+    if (error instanceof Error && /is ambiguous/.test(error.message)) {
+      throw new OrchestrationError('invalid_argument', error.message)
+    }
     throw new OrchestrationError(
       'remote_mailbox_unpaired',
       `No saved environment named "${params.host}" is paired with this host.`,

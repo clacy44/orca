@@ -8,6 +8,7 @@ import {
   OrcaRuntimeService,
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
+import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { RpcContext } from '../core'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -182,6 +183,44 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
 
     const after = raw(homeDb).prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }
     expect(after.n).toBe(before.n)
+  })
+
+  // S10-15 finding 16 / R3: three distinct failure modes must map to three distinct codes, not
+  // all collapse into remote_mailbox_unpaired.
+  it('no transport at all -> server_required passthrough (not remote_mailbox_unpaired)', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    vi.spyOn(homeRuntime, 'resolveOrchestrationWorkerServer').mockImplementation(() => {
+      throw new OrchestrationError(
+        'server_required',
+        'Connected-server orchestration is unavailable in this runtime.'
+      )
+    })
+    await expect(
+      call(
+        'orchestration.send',
+        { to: 'agent:agt_000000000000', host: 'windows', subject: 'hi' },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toMatchObject({ code: 'server_required' })
+  })
+
+  it('an ambiguous environment name -> invalid_argument passthrough (not remote_mailbox_unpaired)', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    vi.spyOn(homeRuntime, 'resolveOrchestrationWorkerServer').mockImplementation(() => {
+      throw new Error('Environment name "windows" is ambiguous; use the environment id.')
+    })
+    await expect(
+      call(
+        'orchestration.send',
+        { to: 'agent:agt_000000000000', host: 'windows', subject: 'hi' },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toMatchObject({
+      code: 'invalid_argument',
+      message: expect.stringContaining('ambiguous')
+    })
   })
 
   it('quarantined caller -> agent_quarantined before any transport call, with an agent_audit row', async () => {
