@@ -67,6 +67,58 @@ describe('orchestration.sent (BUG 3)', () => {
     expect(response).toMatchObject({ ok: true, result: { delivery: { state: 'read' } } })
   })
 
+  // S10-15 verifier F4: a relayed-send mirror row (S10-15 F1 R6, to_handle
+  // `remote:<environmentId>:<agentId>`) is never pointed to a live pane on this host — it must
+  // report a truthful relay state, never plain 'queued' forever.
+  it('reports relay_pending for an accepted-but-not-yet-relayed cross-host mirror row', async () => {
+    setup()
+    const message = db!.insertMessage({
+      from: 'agent:agt_local1',
+      to: 'remote:env_windows_1:agt_them',
+      subject: 'hi'
+    })
+
+    const response = await dispatcher.dispatch(
+      request('sent-relay-pending', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        delivery: {
+          state: 'relay_pending',
+          recipient: { state: 'unresolved', lastSeenAt: null },
+          environment: 'env_windows_1'
+        }
+      }
+    })
+  })
+
+  it('reports relayed once the peer has accepted the relay (peer_relayed_at set)', async () => {
+    setup()
+    const message = db!.insertMessage({
+      from: 'agent:agt_local1',
+      to: 'remote:env_windows_1:agt_them',
+      subject: 'hi'
+    })
+    db!.markPeerRelayAccepted(message.id, null)
+
+    const response = await dispatcher.dispatch(
+      request('sent-relayed', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        delivery: {
+          state: 'relayed',
+          recipient: { state: 'unresolved', lastSeenAt: null },
+          environment: 'env_windows_1'
+        }
+      }
+    })
+  })
+
   it('rejects an unknown message id', async () => {
     setup()
 

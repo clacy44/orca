@@ -134,13 +134,22 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         // askerHandle; 'capped' (ruling 3b) never blocks the ask itself, only the mirror write.
         const { askerHandle } = imported
 
-        // S10-15 review B-1: a time-deferred close inside the blocking-wait loop below can
+        // S10-15 review F3: `expiresAt` below is Ruling 5's actual bound (this ask's OWN
+        // clamped timeoutMs + RESUME_GRACE_MS) — clamp first so the sweep, the cap check, and
+        // the mint all see the same value.
+        timeoutMs = clampOrchestrationAskTimeoutMs(params.timeoutMs)
+        const expiresAt = new Date(Date.now() + timeoutMs + RESUME_GRACE_MS).toISOString()
+
+        // S10-15 review B-1/F3: a time-deferred close inside the blocking-wait loop below can
         // never observe elapsed time past `deadline` (waitForMessage/the loop return AT the
         // deadline, never after it) — so closing has to happen as a lazy sweep at the next
         // ingest instead. Run it BEFORE the cap check so an expired link's rows are reclaimed
-        // before they can wedge a new ask against the cap.
+        // before they can wedge a new ask against the cap. `nowIso` sweeps every row whose OWN
+        // per-ask `expires_at` has passed; `fallbackThresholdIso` (max-clamp+grace) only ever
+        // matches a pre-F3 row with no `expires_at` of its own.
         db.closeExpiredPeerQuestionsForLink(
           pairedDeviceId,
+          new Date().toISOString(),
           new Date(Date.now() - (ORCHESTRATION_ASK_MAX_TIMEOUT_MS + RESUME_GRACE_MS)).toISOString()
         )
 
@@ -148,6 +157,9 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         // remote_agents mirror cap (ruling 3b) — so a peer cannot mint unbounded pending
         // question_threads/threads/messages rows by relaying asks that time out (finding 5's
         // hazard). Refused before any row is minted.
+        // S10-15 review F3: no dedicated capacity/too-many/limit passthrough code exists in
+        // errors.ts (grepped) — keeping invalid_argument, stated here per the finding's own
+        // instruction not to mint a new code for this.
         if (db.countPendingPeerQuestionsForLink(pairedDeviceId) >= PEER_ASK_PENDING_CAP) {
           throw new OrchestrationError(
             'invalid_argument',
@@ -160,7 +172,6 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
           )
         }
 
-        timeoutMs = clampOrchestrationAskTimeoutMs(params.timeoutMs)
         const { thread } = db.createThread({
           subject: deriveThreadSubject({ body: params.question }),
           createdByAgentId: null,
@@ -185,7 +196,8 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
           options: params.options ?? [],
           // R3 standing inbound rule: a local infra literal never blocks mail a remote peer
           // already sent — h3 does not run on the import path (mirrors importFederatedRelayItem).
-          infraAllowlist: []
+          infraAllowlist: [],
+          expiresAt
         })
         if (created.outcome === 'refused') {
           // Gate refusal already wrote its own durable audit row (gate_refusals) inside

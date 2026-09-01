@@ -1866,12 +1866,33 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // mobile client) reaching this branch is refused first, before the routing disposition —
       // a reply to a foreign-origin row must be issued locally.
       if (original.peer_link_device_id) {
+        // S10-15 review F6: audit before throwing, mirroring relayPeerAskToHost's
+        // agent_quarantined audit shape (writeAgentAudit, orchestration.ts) — verb 'reply' matches
+        // this same handler's own insertGatedMessage verb further down, so every disposition
+        // this handler can produce for a reply — accepted or refused — shares one verb.
+        const replyHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
         if (pairedDeviceId != null || clientKind === 'mobile') {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: pairedDeviceId ?? replyHostId,
+            verb: 'reply',
+            outcome: 'forbidden',
+            reasonCode: null
+          })
           throw new OrchestrationError(
             'forbidden',
             'A reply to a foreign-origin message must be issued locally.'
           )
         }
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: replyHostId,
+          verb: 'reply',
+          outcome: 'no_return_route',
+          reasonCode: null
+        })
         throw new OrchestrationError(
           'no_return_route',
           `Message ${original.id} arrived from another host; this host has no automatic route back to its sender.`,
@@ -2617,11 +2638,12 @@ async function relayPeerAskToHost(args: {
       { nextSteps: [`orca agents quarantine ${callerRow.display_name} --lift`] }
     )
   }
-  // S10-15 review M-6: resolve the worker server BEFORE minting anything local — an
-  // unknown/unpaired/unreachable host must never leave an orphan threads row + participants
-  // behind. `callOrchestrationWorkerServer` below re-resolves internally regardless (it owns
-  // the actual transport call), so this is purely a fail-fast that keeps the resolve error's
-  // existing shape unchanged, just raised before any local write.
+  // S10-15 review M-6/F5: resolve the worker server BEFORE minting anything local — an
+  // unknown/unpaired host (a resolve-time failure: no saved environment by that name, or no
+  // transport at all) never reaches the thread mint below. This does NOT cover a genuinely
+  // paired host that is merely unreachable right now (resolve is a local, no-network read of
+  // saved config) — that failure surfaces only from the actual transport call further down,
+  // wrapped separately (F5) to clean up the thread THAT case would otherwise orphan.
   const server = runtime.resolveOrchestrationWorkerServer(params.host as string)
   // S10-15 F5 (chair ruling 5, finding 13): mint a LOCAL thread for this ask before relaying —
   // the far side mints its own thread id (federatedAsk's own `createThread`), and printing THAT
@@ -2647,39 +2669,7 @@ async function relayPeerAskToHost(args: {
       { participantKey: peerHandle, agentId: null, handle: peerHandle, role: 'member' }
     ]
   })
-  const result = (await runtime.callOrchestrationWorkerServer(
-    params.host as string,
-    'orchestration.federatedAsk',
-    {
-      // D1: single-sourced from federated-sender-identity.ts. `resolveCallerAgent` above already
-      // guarantees a row exists, so the fallback branch is dead code that preserves today's
-      // literal for review, never actually exercised.
-      fromAgent: buildFederatedSenderIdentity(db, caller.id) ?? {
-        id: caller.id,
-        displayName: callerRow?.display_name ?? caller.id,
-        role: callerRow?.role ?? null,
-        // S10-8 review fix (blocker: quarantine crosses the link, half 2): carries THIS host's
-        // own quarantine assertion for the caller so the receiving host can refuse it
-        // independently of the check just above (defense in depth — never the only guard).
-        quarantined: callerRow?.quarantined === 1
-      },
-      toAgentId,
-      question: params.question,
-      options,
-      timeoutMs
-    },
-    timeoutMs + 15_000,
-    // S10-8 review fix (blocker: dedup): deterministic when the inbound call carried an
-    // idempotency key of its own, so a client-level retry (same requestId) coalesces on the
-    // receiving host instead of minting a second question. No inbound key to derive from means
-    // no dedup guarantee either way (same as before this fix) — a fresh id per call, never a
-    // content hash, which would wrongly coalesce two deliberately-identical questions.
-    {
-      orchestrationRequestId: args.orchestrationMutation
-        ? `relay_ask_${args.orchestrationMutation.requestId}`
-        : `relay_ask_${randomUUID()}`
-    }
-  )) as {
+  let result: {
     answer: string | null
     messageId: string
     answerMessageId?: string | null
@@ -2688,6 +2678,48 @@ async function relayPeerAskToHost(args: {
     cancelled?: boolean
     connectionLost?: boolean
     timeoutMs: number
+  }
+  try {
+    result = (await runtime.callOrchestrationWorkerServer(
+      params.host as string,
+      'orchestration.federatedAsk',
+      {
+        // D1: single-sourced from federated-sender-identity.ts. `resolveCallerAgent` above
+        // already guarantees a row exists, so the fallback branch is dead code that preserves
+        // today's literal for review, never actually exercised.
+        fromAgent: buildFederatedSenderIdentity(db, caller.id) ?? {
+          id: caller.id,
+          displayName: callerRow?.display_name ?? caller.id,
+          role: callerRow?.role ?? null,
+          // S10-8 review fix (blocker: quarantine crosses the link, half 2): carries THIS
+          // host's own quarantine assertion for the caller so the receiving host can refuse it
+          // independently of the check just above (defense in depth — never the only guard).
+          quarantined: callerRow?.quarantined === 1
+        },
+        toAgentId,
+        question: params.question,
+        options,
+        timeoutMs
+      },
+      timeoutMs + 15_000,
+      // S10-8 review fix (blocker: dedup): deterministic when the inbound call carried an
+      // idempotency key of its own, so a client-level retry (same requestId) coalesces on the
+      // receiving host instead of minting a second question. No inbound key to derive from
+      // means no dedup guarantee either way (same as before this fix) — a fresh id per call,
+      // never a content hash, which would wrongly coalesce two deliberately-identical questions.
+      {
+        orchestrationRequestId: args.orchestrationMutation
+          ? `relay_ask_${args.orchestrationMutation.requestId}`
+          : `relay_ask_${randomUUID()}`
+      }
+    )) as typeof result
+  } catch (error) {
+    // S10-15 review F5: a genuinely unreachable/timed-out host (as opposed to the resolve-time
+    // unknown/unpaired refusal above) must not leave the just-minted local thread + participants
+    // behind as an orphan — nothing else will ever reference this thread if the relay call
+    // itself never completed.
+    db.deleteOrphanRelayAskThread(localThread.thread.id)
+    throw error
   }
   // Ruling 5: override threadId with the LOCAL thread id on EVERY return path — including a
   // timeout — never the far side's own id verbatim.

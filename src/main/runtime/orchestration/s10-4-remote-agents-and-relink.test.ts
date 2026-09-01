@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
-import { OrchestrationDb } from './db'
+import { OrchestrationDb, REMOTE_AGENTS_PER_LINK_CAP } from './db'
 
 describe('S10-4 schema v36: remote_agents + relay_seen', () => {
   let db: OrchestrationDb | undefined
@@ -689,5 +689,69 @@ describe('S10-15 D5: remote_agents.link_kind + peer_fingerprint (schema v37)', (
       .find((r) => r.remote_agent_id === 'agent_remote_1')!
     expect(row.local_quarantined).toBe(1)
     expect(row.display_name).toBe('peer-one-renamed')
+  })
+})
+
+describe('S10-15 review F8: db.upsertRemoteAgent enforces REMOTE_AGENTS_PER_LINK_CAP itself', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it("refuses a NEW row past the cap (defense in depth, independent of the importer's own pre-check), while an update to an already-mirrored row is never capped", () => {
+    db = new OrchestrationDb(':memory:')
+    for (let i = 0; i < REMOTE_AGENTS_PER_LINK_CAP; i++) {
+      const outcome = db.upsertRemoteAgent({
+        environmentId: 'env_cap_test',
+        environmentName: 'peer-host',
+        linkKind: 'paired_device',
+        remoteAgentId: `agt_cap_${String(i).padStart(9, '0')}`,
+        displayName: `peer-${i}`,
+        role: null,
+        state: 'live',
+        derived: false,
+        remoteQuarantined: false
+      })
+      expect(outcome).toEqual({ outcome: 'upserted' })
+    }
+    // One more DISTINCT remote agent id — a genuinely new row — refuses.
+    const capped = db.upsertRemoteAgent({
+      environmentId: 'env_cap_test',
+      environmentName: 'peer-host',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agt_cap_one_too_many',
+      displayName: 'one-too-many',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    expect(capped).toEqual({ outcome: 'capped' })
+    expect(
+      db
+        .listRemoteAgents({ environmentId: 'env_cap_test', includeQuarantined: true })
+        .find((r) => r.remote_agent_id === 'agt_cap_one_too_many')
+    ).toBeUndefined()
+
+    // An update to an EXISTING row (already at the cap) is never capped.
+    const updated = db.upsertRemoteAgent({
+      environmentId: 'env_cap_test',
+      environmentName: 'peer-host',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agt_cap_000000000',
+      displayName: 'peer-0-renamed',
+      role: null,
+      state: 'idle',
+      derived: false,
+      remoteQuarantined: false
+    })
+    expect(updated).toEqual({ outcome: 'upserted' })
+    expect(
+      db
+        .listRemoteAgents({ environmentId: 'env_cap_test', includeQuarantined: true })
+        .find((r) => r.remote_agent_id === 'agt_cap_000000000')?.display_name
+    ).toBe('peer-0-renamed')
   })
 })

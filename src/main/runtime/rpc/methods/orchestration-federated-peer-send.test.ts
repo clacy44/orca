@@ -312,6 +312,82 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     ).rejects.toMatchObject({ code: 'forbidden' })
   })
 
+  // S10-15 verifier F1: mirrors orchestration.send's two pre-existing federation egresses — a
+  // sensitive thread's content must never leave this host over the --host relay either.
+  it('F1: a --host send with --thread-id of a SENSITIVE thread refuses sensitive_thread_no_federation, no local row written, transport stub not called', async () => {
+    setup()
+    // A third local pane on home, so the sensitive thread has a real second participant.
+    const PANE_C = 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    const evidenceC: Evidence = { terminalHandle: 'term_c', paneKey: PANE_C, launchToken: 'lt-c' }
+    vi.spyOn(homeRuntime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((ev) => {
+      const evidence = ev as { terminalHandle?: string; paneKey?: string } | null | undefined
+      if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === PANE_A) {
+        return makeAuthority(PANE_A, 'term_a')
+      }
+      if (evidence?.terminalHandle === 'term_c' && evidence.paneKey === PANE_C) {
+        return makeAuthority(PANE_C, 'term_c')
+      }
+      return null
+    })
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const confidantId = await registerAgent(homeRuntime, 'confidant', evidenceC)
+    // orchestration.threads.create resolves --with as agent:<id> (never a bare display name).
+    const created = (await call(
+      'orchestration.threads.create',
+      { with: `agent:${confidantId}`, sensitive: true },
+      homeCtx(evidenceA)
+    )) as { thread: { id: string; sensitive: number } }
+    // Raw sqlite integer, not a JS boolean (matches db.getThread's own row shape elsewhere).
+    expect(created.thread.sensitive).toBe(1)
+
+    const before = raw(homeDb).prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }
+
+    await expect(
+      call(
+        'orchestration.send',
+        {
+          to: 'agent:agt_000000000000',
+          host: 'windows',
+          subject: 'hi',
+          threadId: created.thread.id
+        },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toMatchObject({ code: 'sensitive_thread_no_federation' })
+
+    const after = raw(homeDb).prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }
+    expect(after.n).toBe(before.n)
+    expect(relayCalls).toHaveLength(0)
+  })
+
+  // S10-15 verifier F2: the receiver has no local thread for the sender's own threadId — storing
+  // it verbatim would point messages.thread_id at a thread row that is never minted on this host.
+  it("F2: the imported row on the far host has thread_id NULL; peer_thread_id carries the sender's threadId", async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    await call(
+      'orchestration.send',
+      {
+        to: `agent:${agentB}`,
+        host: 'windows',
+        subject: 'hi',
+        body: 'hello',
+        threadId: 'thr_sender_local_only'
+      },
+      homeCtx(evidenceA)
+    )
+
+    const farRow = raw(workerDb)
+      .prepare('SELECT * FROM messages WHERE to_handle = ?')
+      .get(`agent:${agentB}`) as
+      | { thread_id: string | null; peer_thread_id: string | null }
+      | undefined
+    expect(farRow?.thread_id).toBeNull()
+    expect(farRow?.peer_thread_id).toBe('thr_sender_local_only')
+  })
+
   it('a reply to a foreign-origin message refuses with no_return_route, never throwing an unstructured error', async () => {
     setup()
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
@@ -346,5 +422,12 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       read: number
     }
     expect(row.read).toBe(0)
+
+    // S10-15 review F6: an audit row is written before the throw (verb 'reply', matching this
+    // same handler's own insertGatedMessage verb for an accepted reply).
+    const audit = raw(workerDb)
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'reply' AND outcome = 'no_return_route'`)
+      .get()
+    expect(audit).toBeTruthy()
   })
 })

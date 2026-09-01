@@ -90,11 +90,14 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           peerAgentId = params.fromAgent?.id ?? null
         } else {
           if (imported.outcome === 'invalid') {
+            // S10-15 review F8: unified with the importer's own cap-path audit verb
+            // (federated-sender-identity.ts) — one name for every class-B/cap identity-rejection
+            // audit, distinct from the outer catch's broader 'federatedSend' (any refusal).
             db.writeAgentAudit({
               agentId: toAgentIdForAudit,
               actorPaneKey: null,
               actorHostId: pairedDeviceId,
-              verb: 'federatedSend',
+              verb: 'federatedSendIdentity',
               outcome: `identity_rejected:${imported.reason}`,
               reasonCode: null
             })
@@ -150,7 +153,10 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           body: params.body,
           type: (params.type ?? 'status') as MessageType,
           priority: params.priority,
-          threadId: params.threadId ?? null,
+          // S10-15 verifier F2: no local thread exists on the receiver for the sender's own
+          // threadId — storing it verbatim would point messages.thread_id at a thread row that
+          // is never minted here. peer_thread_id (below) is the correct home for the peer's id.
+          threadId: null,
           payload: payloadValueForGate(
             params.payload === undefined ? undefined : JSON.stringify(params.payload)
           ),

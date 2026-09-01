@@ -36,8 +36,10 @@ export const ORCHESTRATION_SENT_METHODS: RpcMethod[] = [
           }
         )
       }
-      const { delivery, recipient } = runtime.getMessageDeliverySnapshot(message)
-      return { delivery: { state: delivery, recipient } }
+      const { delivery, recipient, environment } = runtime.getMessageDeliverySnapshot(message)
+      return {
+        delivery: { state: delivery, recipient, ...(environment ? { environment } : {}) }
+      }
     }
   })
 ]

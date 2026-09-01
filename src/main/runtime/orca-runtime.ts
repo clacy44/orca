@@ -34283,10 +34283,29 @@ export class OrcaRuntimeService {
 
   // Why here and not the RPC handler: `pointedMessageIdsByHandle` and live-leaf resolution are
   // both private runtime state; `orchestration.sent` (BUG 3) reads them through this one method.
-  getMessageDeliverySnapshot(message: { id: string; to_handle: string; read: number }): {
+  getMessageDeliverySnapshot(message: {
+    id: string
+    to_handle: string
+    read: number
+    peer_relayed_at?: string | null
+  }): {
     delivery: MessageDeliveryState
     recipient: MessageRecipientPresence
+    environment?: string
   } {
+    // S10-15 verifier F4: a relayed-send mirror row (to_handle `remote:<environmentId>:<agentId>`,
+    // S10-15 F1 R6) is never "pointed" to a live pane on this host — the pointed/queued
+    // vocabulary below does not apply to it at all. Truthful state instead: 'relayed' once the
+    // peer accepted it (peer_relayed_at set), 'relay_pending' until then. Checked BEFORE the
+    // ordinary pointed/queued resolution so a relayed row is never misreported as plain 'queued'.
+    if (message.to_handle.startsWith('remote:')) {
+      const environment = message.to_handle.split(':')[1]
+      return {
+        delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',
+        recipient: { state: 'unresolved', lastSeenAt: null },
+        ...(environment ? { environment } : {})
+      }
+    }
     const baseDelivery = resolveMessageDeliveryState(
       message,
       this.pointedMessageIdsByHandle.get(message.to_handle)

@@ -1079,6 +1079,11 @@ export class OrchestrationDb {
         this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} TEXT`)
       }
     }
+    // S10-15 verifier F3: same unshipped-repair discipline for question_threads.expires_at —
+    // hasTable probed separately since it is a different table than messages.
+    if (hasTable('question_threads') && !this.hasColumn('question_threads', 'expires_at')) {
+      this.db.exec(`ALTER TABLE question_threads ADD COLUMN expires_at TEXT`)
+    }
     // S10-15 review m-3: an unshipped-v38 DB never re-enters migrate()'s `current < 38` block
     // either — the F7a data repair that block performs must also run here, or a DB stamped v38
     // by an earlier build of this branch keeps its stranded rows forever.
@@ -1593,7 +1598,8 @@ export class OrchestrationDb {
         answered_by_agent_id      TEXT,
         answer_body_sha256        TEXT,
         answer_purged_at          TEXT,
-        thread_key                TEXT
+        thread_key                TEXT,
+        expires_at                TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_questions_dispatch_status
@@ -2045,6 +2051,13 @@ export class OrchestrationDb {
           if (!this.hasColumn('messages', column)) {
             this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} TEXT`)
           }
+        }
+        // S10-15 verifier F3: per-ask expiry (Ruling 5's own bound, not the coarse
+        // max-clamp+grace sweep) — question_threads predates this column (minted only inside
+        // migrate()'s current<9 block, never in createTables()), so this is a genuine ALTER, not
+        // a fresh-DB no-op.
+        if (!this.hasColumn('question_threads', 'expires_at')) {
+          this.db.exec(`ALTER TABLE question_threads ADD COLUMN expires_at TEXT`)
         }
         // F7a data repair: a pre-S10-15 send/reply to a display-name-shaped recipient with no
         // directory hit fell through to the bare-handle path (isBarePeerHandle,
@@ -4209,20 +4222,32 @@ export class OrchestrationDb {
     return row.n
   }
 
-  // S10-15 review B-1: the far side's own blocking wait always returns AT (never past)
+  // S10-15 review F3: the far side's own blocking wait always returns AT (never past)
   // `deadline`, so a time-deferred close inside that same handler can never observe
   // `deadline + grace` — a lazy sweep at the next ingest is the only place that elapsed time can
-  // actually be observed. `thresholdIso` is the caller's precomputed
-  // `now - (maxClampMs + graceMs)` — any pending row older than that is expired regardless of
-  // its own (per-ask) timeoutMs, since every ask's timeoutMs is clamped to at most maxClampMs.
-  closeExpiredPeerQuestionsForLink(pairedDeviceId: string, thresholdIso: string): string[] {
+  // actually be observed. Per Ruling 5 this must be the ASK'S OWN timeoutMs + RESUME_GRACE_MS,
+  // not a coarse max-clamp+grace bound — `expires_at` (set at mint, federatedAsk) carries that
+  // exact per-row deadline. `fallbackThresholdIso` (the caller's precomputed
+  // `now - (maxClampMs + graceMs)`) is used ONLY for rows minted before this column existed
+  // (expires_at IS NULL) — a pre-migration row has no per-ask deadline to read, so it falls back
+  // to the old coarse bound rather than never expiring.
+  closeExpiredPeerQuestionsForLink(
+    pairedDeviceId: string,
+    nowIso: string,
+    fallbackThresholdIso: string
+  ): string[] {
     const rows = this.db
       .prepare(
         `SELECT message_id FROM question_threads
          WHERE run_id = ? AND status = 'pending' AND asker_handle LIKE ?
-           AND julianday(created_at) < julianday(?)`
+           AND (
+             (expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?))
+             OR (expires_at IS NULL AND julianday(created_at) < julianday(?))
+           )`
       )
-      .all(PEER_RUN_ID, `remote:${pairedDeviceId}:%`, thresholdIso) as { message_id: string }[]
+      .all(PEER_RUN_ID, `remote:${pairedDeviceId}:%`, nowIso, fallbackThresholdIso) as {
+      message_id: string
+    }[]
     if (rows.length === 0) {
       return []
     }
@@ -4230,10 +4255,30 @@ export class OrchestrationDb {
       .prepare(
         `UPDATE question_threads SET status = 'closed', closed_at = datetime('now')
          WHERE run_id = ? AND status = 'pending' AND asker_handle LIKE ?
-           AND julianday(created_at) < julianday(?)`
+           AND (
+             (expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?))
+             OR (expires_at IS NULL AND julianday(created_at) < julianday(?))
+           )`
       )
-      .run(PEER_RUN_ID, `remote:${pairedDeviceId}:%`, thresholdIso)
+      .run(PEER_RUN_ID, `remote:${pairedDeviceId}:%`, nowIso, fallbackThresholdIso)
     return rows.map((row) => row.message_id)
+  }
+
+  // S10-15 review F5: the smallest delete available — no general-purpose thread-delete method
+  // exists (purgeThread scrubs content but keeps the row). Scoped to the ONE caller that needs
+  // it: relayPeerAskToHost's just-minted local thread when the relay transport call itself
+  // throws (an unreachable/timed-out host) — never call this on a thread anything else may
+  // already reference (a message, a pact, a purge record).
+  deleteOrphanRelayAskThread(threadId: string): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM thread_participants WHERE thread_id = ?').run(threadId)
+      this.db.prepare('DELETE FROM threads WHERE id = ?').run(threadId)
+      this.db.exec('COMMIT')
+    } catch (err) {
+      this.db.exec('ROLLBACK')
+      throw err
+    }
   }
 
   // S10-2b amendment F: peer ask/reply (no Dispatch, no consumer_generation to fence on).
@@ -7025,6 +7070,12 @@ export class OrchestrationDb {
   // statement must NEVER name `local_quarantined` in its column list or DO UPDATE SET: THAT
   // omission, not the trigger, is what makes a remote assertion structurally unable to clear a
   // local quarantine in the common (non-simultaneous) case the trigger doesn't cover.
+  // S10-15 review F8 (Ruling 3(b)): the cap is enforced HERE too, not only by the importer's
+  // own pre-check (federated-sender-identity.ts) — this is the defense-in-depth backstop for
+  // any future caller that forgets to pre-check; the importer's own check stays (it is what
+  // gives a caller the richer 'capped' outcome, including displayName/hostLabel/askerHandle,
+  // BEFORE doing any of its other work). Only a genuinely NEW row counts against the cap — an
+  // update to an already-mirrored row never evicts and is never capped.
   upsertRemoteAgent(params: {
     environmentId: string
     environmentName: string
@@ -7039,7 +7090,14 @@ export class OrchestrationDb {
      *  none to offer (e.g. a future 'environment'-kind writer) — an existing bound value is
      *  preserved, never clobbered with NULL. */
     peerFingerprint?: string | null
-  }): void {
+  }): { outcome: 'upserted' } | { outcome: 'capped' } {
+    const isNewRow = !this.hasRemoteAgent(params.environmentId, params.remoteAgentId)
+    if (
+      isNewRow &&
+      this.countRemoteAgentsForLink(params.environmentId) >= REMOTE_AGENTS_PER_LINK_CAP
+    ) {
+      return { outcome: 'capped' }
+    }
     this.db
       .prepare(
         `INSERT INTO remote_agents (
@@ -7069,6 +7127,7 @@ export class OrchestrationDb {
         params.remoteQuarantined ? 1 : 0,
         params.peerFingerprint ?? null
       )
+    return { outcome: 'upserted' }
   }
 
   listRemoteAgents(params?: {

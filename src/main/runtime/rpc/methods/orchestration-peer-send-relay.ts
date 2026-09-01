@@ -5,6 +5,7 @@
 // must not be orphaned by an exception) — only local guard failures throw.
 import { randomUUID } from 'node:crypto'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { assertThreadNotSensitiveForFederation } from './orchestration-sensitive-thread-guard'
 import {
   PEER_RUN_ID,
   type OrchestrationDb,
@@ -44,6 +45,10 @@ export async function relayPeerSendToHost(args: {
   if (args.pairedDeviceId != null || args.clientKind === 'mobile') {
     throw new OrchestrationError('forbidden', 'A cross-host relay must be issued locally.')
   }
+  // S10-15 verifier F1: mirrors orchestration.send's two pre-existing federation egresses — a
+  // sensitive thread's content must never leave this host, including over the --host relay.
+  // Before any local write (the mirror insert below).
+  assertThreadNotSensitiveForFederation(db, params.threadId)
   if (!params.to.startsWith('agent:')) {
     throw new OrchestrationError(
       'invalid_argument',
