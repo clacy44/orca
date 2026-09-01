@@ -114,9 +114,23 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // dispatcher in tests until this series' hardened orchestration.thread/peer ask-reply
   // coverage caught the gap; the rest are new S10-2b codes.
   'no_pane_identity',
+  // S10-15 D6: the pane IS attested but has no registered `agents` row — a distinct code from
+  // no_pane_identity so the CLI's auto-reattest gate (keyed on exact code equality) never fires
+  // for a case reattestation cannot fix.
+  'no_registered_identity',
   'agent_quarantined',
   'agent_unknown',
   'derived_agent_unaddressable',
+  // S10-15 F6 (finding 18/D8): `agent_retired` (addressable-agent-recipient.ts) was omitted when
+  // S10-7 F-B added it — same family as the three above, and its nextSteps carry the successor
+  // agent's id, which the runtime_error fallthrough dropped.
+  'agent_retired',
+  // S10-15 finding 18: two more codes reachable from the same new hot paths (federatedAsk's
+  // auth-lane check, every stale-environment relay) whose structured data (nextSteps /
+  // retryAfterMs) the runtime_error fallthrough would otherwise drop.
+  'unauthenticated_lane',
+  'stale_environment_pairing',
+  'rate_limited',
   'payload_kind_reserved',
   'body_gate_refused',
   'not_a_participant',

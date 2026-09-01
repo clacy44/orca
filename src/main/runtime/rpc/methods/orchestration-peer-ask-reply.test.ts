@@ -255,4 +255,46 @@ describe('peer ask/reply (amendments A, B, F)', () => {
 
     expect(db.getAllMessagesForHandle(`agent:${agentB}`)).toHaveLength(0)
   })
+
+  // S10-15 D6/D7 test 2: handlePeerAsk and the peer-reply site split no_pane_identity vs
+  // no_registered_identity the same way pactLedger does.
+  describe('S10-15 D6/D7: no_pane_identity vs no_registered_identity split', () => {
+    it('orchestration.ask: attested but unregistered caller -> no_registered_identity, nextSteps[0] starts "orca agents register"', async () => {
+      setup()
+      const agentB = await registerAgent('answerer', evidenceB)
+
+      const rejection = await call(
+        'orchestration.ask',
+        { to: `agent:${agentB}`, question: 'hi', timeoutMs: 10 },
+        ctx(evidenceC)
+      ).catch((error: unknown) => error)
+      expect(rejection).toMatchObject({ code: 'no_registered_identity' })
+      const nextSteps = (rejection as { data?: { nextSteps?: string[] } }).data?.nextSteps ?? []
+      expect(nextSteps[0]).toMatch(/^orca agents register/)
+    })
+
+    it('orchestration.ask: unattested caller still gets no_pane_identity (unchanged)', async () => {
+      setup()
+      const agentB = await registerAgent('answerer', evidenceB)
+
+      await expect(
+        call('orchestration.ask', { to: `agent:${agentB}`, question: 'hi', timeoutMs: 10 }, ctx())
+      ).rejects.toMatchObject({ code: 'no_pane_identity' })
+    })
+
+    it('peer reply: attested but unregistered caller -> no_registered_identity', async () => {
+      setup()
+      await registerAgent('asker', evidenceA)
+      const agentB = await registerAgent('answerer', evidenceB)
+      const asked = (await call(
+        'orchestration.ask',
+        { to: `agent:${agentB}`, question: 'ok to merge?', timeoutMs: 10 },
+        ctx(evidenceA)
+      )) as { messageId: string }
+
+      await expect(
+        call('orchestration.reply', { id: asked.messageId, body: 'yes' }, ctx(evidenceC))
+      ).rejects.toMatchObject({ code: 'no_registered_identity' })
+    })
+  })
 })

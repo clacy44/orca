@@ -17,40 +17,12 @@ import { deriveThreadSubject } from '../../../../shared/thread-subject'
 import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 import { clampOrchestrationAskTimeoutMs } from '../../../../shared/orchestration-ask-timeout'
 import {
-  sanitizeDirectoryText,
-  sanitizeRole,
-  validateDisplayNameCandidate
-} from '../../orchestration/agent-name-sanitizer'
-
-// Mirrors agents-cross-host.ts's FOREIGN_AGENT_ID_RE / FOREIGN_TERMINAL_HANDLE_MAX_LENGTH: a
-// peer-supplied id is re-emitted verbatim into this host's own thread/message rows (the
-// synthetic `remote:<link>:<id>` from-handle below), so it must match the only shape a genuine
-// directory id can have — anything else is refused, never rendered or stored.
-const FOREIGN_AGENT_ID_RE = /^agt_[0-9a-f]{12}$/
-const FOREIGN_HOST_LABEL_MAX_LENGTH = 128
-
-// S10-8 review fix (blocker: agents-cross-host.ts's LOCAL_FIND_HOST sentinel, duplicated here —
-// same reasoning as orchestration.ts's own LOCAL_PEER_HOST): a peer-asserted `host` of exactly
-// this string is indistinguishable from "this host's own name" to anything that later renders
-// it, so it is never stored verbatim (falls back to the link's own device id instead, same as
-// an empty host).
-const LOCAL_PEER_HOST_SENTINEL = 'local'
+  FederatedSenderIdentitySchema,
+  importFederatedSenderIdentity
+} from '../../orchestration/federated-sender-identity'
 
 const FederatedAskParams = z.object({
-  fromAgent: z.object({
-    id: requiredString('Missing sender agent id'),
-    displayName: requiredString('Missing sender display name'),
-    role: z.string().nullable().optional(),
-    // Self-reported label for the asker's own environment — display/provenance only (S10-4
-    // TRUST BOUNDARY: peer self-report, unverifiable here, forever). Namespacing stays
-    // receiver-relative; this is never treated as one of THIS host's own environment names.
-    host: z.string().optional(),
-    // S10-8 review fix (blocker: quarantine crosses the link): the origin host's own assertion
-    // that this caller is currently quarantined there — carried so the receiver can refuse
-    // independently of relayPeerAskToHost's own pre-relay check (defense in depth, never the
-    // only guard: a hostile/buggy peer could always send `false`).
-    quarantined: z.boolean().optional()
-  }),
+  fromAgent: FederatedSenderIdentitySchema,
   toAgentId: requiredString('Missing target agent id'),
   question: requiredString('Missing question'),
   options: z.array(z.string()).optional(),
@@ -116,7 +88,26 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         const toAgent = requireAddressableAgentRecipient(db, params.toAgentId)
         toAgentIdForAudit = toAgent.id
 
-        if (!FOREIGN_AGENT_ID_RE.test(params.fromAgent.id)) {
+        // D2: the shared importer (federated-sender-identity.ts) runs the id-shape check, the
+        // local-collision refusal, display-name validation, the fingerprint<->link binding
+        // (ruling 2) and per-link cap (ruling 3b) checks, and the upsert-then-quarantine-reread
+        // — in that exact load-bearing order — and never throws. This ask path adapts the result
+        // back into today's byte-identical throw shape; `absent` is unreachable here because
+        // `fromAgent` stays required on federatedAsk (only the future relayed-send method makes
+        // it optional, with D3's deliver-on-invalid policy).
+        const imported = importFederatedSenderIdentity(db, {
+          identity: params.fromAgent,
+          linkKey: pairedDeviceId,
+          peerFingerprint: authenticatedCallerFingerprint as string
+        })
+        if (
+          imported.outcome === 'invalid' ||
+          imported.outcome === 'quarantined' ||
+          imported.outcome === 'fingerprint_conflict'
+        ) {
+          throw imported.error
+        }
+        if (imported.outcome === 'absent') {
           throw new OrchestrationError(
             'invalid_argument',
             'The relayed sender id is not a valid agent directory id.',
@@ -127,96 +118,11 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
             }
           )
         }
-        // S10-8 review fix (blocker: peer-controlled identity collides with the local
-        // namespace): a peer that claims a LOCAL agent's own id must never be trusted — S10-4
-        // ruling 1 keeps foreign claims out of the `agents` id namespace specifically so a
-        // remote_agents row can never be mistaken for (or shadow) a real local one. Also closes
-        // a self-relay loop: a runtime relaying into itself presents an id this same check
-        // already owns locally.
-        if (db.getAgentById(params.fromAgent.id)) {
-          throw new OrchestrationError(
-            'invalid_argument',
-            'The relayed sender id collides with an agent already registered on this host.',
-            {
-              nextSteps: [
-                'verify the paired link is a genuine remote peer, not a loop back to this same host'
-              ]
-            }
-          )
-        }
-        const displayNameCandidate = sanitizeDirectoryText(params.fromAgent.displayName, 80).value
-        if (!displayNameCandidate || !validateDisplayNameCandidate(displayNameCandidate).ok) {
-          throw new OrchestrationError(
-            'invalid_argument',
-            'The relayed sender display name is not addressable.',
-            {
-              nextSteps: [
-                'this indicates a version-mismatched or malformed peer relay — update Orca on the asking host'
-              ]
-            }
-          )
-        }
-        const role = sanitizeRole(params.fromAgent.role ?? null)?.value ?? null
-        const hostLabelCandidate = params.fromAgent.host
-          ? sanitizeDirectoryText(params.fromAgent.host, FOREIGN_HOST_LABEL_MAX_LENGTH).value
-          : ''
-        // S10-8 review fix (major: peer picks its own host label): a self-reported label of
-        // exactly the local sentinel is never stored verbatim — see LOCAL_PEER_HOST_SENTINEL.
-        const hostLabel =
-          hostLabelCandidate.toLowerCase() === LOCAL_PEER_HOST_SENTINEL ? '' : hostLabelCandidate
-        // Why `pairedDeviceId` as the remote_agents key, not a KnownRuntimeEnvironment.id: this
-        // host was called INTO, so it has no saved environment of its own for the caller — only
-        // the stable per-link device identity the pairing/socket layer already resolved. It
-        // satisfies the same invariant the column protects (uniquely names "which link"); a real
-        // environment-id linkage needs an explicit link/consent step (full S10-4c), out of scope
-        // here (R6). Documented as a deviation in the S10-8 report.
-        db.upsertRemoteAgent({
-          environmentId: pairedDeviceId,
-          environmentName: hostLabel || pairedDeviceId,
-          remoteAgentId: params.fromAgent.id,
-          displayName: displayNameCandidate,
-          role,
-          state: 'live',
-          derived: false,
-          // S10-8 review fix (blocker: quarantine crosses the link): the origin host's own
-          // assertion, carried in the envelope — never hardcoded false. A remote-asserted LIFT
-          // is still fenced by trg_remote_lift_scope (db.ts), so this can never clear a local
-          // defensive quarantine on its own.
-          remoteQuarantined: params.fromAgent.quarantined === true
-        })
-        const remoteRow = db
-          .listRemoteAgents({ environmentId: pairedDeviceId, includeQuarantined: true })
-          .find((row) => row.remote_agent_id === params.fromAgent.id)
-        if (remoteRow?.local_quarantined) {
-          throw new OrchestrationError(
-            'agent_quarantined',
-            `${displayNameCandidate}@${hostLabel || pairedDeviceId} is quarantined on this host and cannot ask.`,
-            {
-              nextSteps: [
-                `this host quarantined ${displayNameCandidate}@${hostLabel || pairedDeviceId} after an earlier contact`,
-                'orca agents list --all-hosts'
-              ]
-            }
-          )
-        }
-        if (remoteRow?.remote_quarantined) {
-          throw new OrchestrationError(
-            'agent_quarantined',
-            `${displayNameCandidate}@${hostLabel || pairedDeviceId} is quarantined on its origin host and cannot ask.`,
-            {
-              nextSteps: [
-                `${displayNameCandidate} is quarantined on its own host — lift it there with "orca agents quarantine ${displayNameCandidate} --lift"`
-              ]
-            }
-          )
-        }
+        // `imported.outcome` is now 'imported' | 'capped' — both carry displayName/hostLabel/
+        // askerHandle; 'capped' (ruling 3b) never blocks the ask itself, only the mirror write.
+        const { askerHandle } = imported
 
         timeoutMs = clampOrchestrationAskTimeoutMs(params.timeoutMs)
-        // R3: the sender's directory identity so a reply can address `name@origin-host` — never a
-        // local `agent:<id>` handle, so it can never collide with, or be mistaken for, a locally
-        // registered agent (agent-name-sanitizer's DISPLAY_NAME_PATTERN already refuses `:`/`@`
-        // in a real display name, so this synthetic prefix can never be produced by a local row).
-        const askerHandle = `remote:${pairedDeviceId}:${params.fromAgent.id}`
         const { thread } = db.createThread({
           subject: deriveThreadSubject({ body: params.question }),
           createdByAgentId: null,

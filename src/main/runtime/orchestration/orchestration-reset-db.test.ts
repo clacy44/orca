@@ -69,6 +69,28 @@ describe('OrchestrationDb reset scopes', () => {
     ).toEqual([])
   })
 
+  // S10-15 ruling 3(a) / breaker finding 2: remote_agents was unpurgeable before this slice —
+  // no DELETE anywhere in the tree.
+  it('resetAll purges remote_agents (S10-15 ruling 3a)', () => {
+    createState()
+    db!.upsertRemoteAgent({
+      environmentId: 'env_reset_test',
+      environmentName: 'env_reset_test',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_reset',
+      displayName: 'reset-target',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    expect(db!.listRemoteAgents({ includeQuarantined: true })).toHaveLength(1)
+
+    db!.resetAll()
+
+    expect(db!.listRemoteAgents({ includeQuarantined: true })).toHaveLength(0)
+  })
+
   it('resetTasks preserves Runs and messages while clearing every worker attachment', () => {
     const state = createState()
 

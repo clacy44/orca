@@ -19,7 +19,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
   it('a fresh database lands at user_version 36 with both new tables', () => {
     db = new OrchestrationDb(':memory:')
     const raw = (db as unknown as { db: Database.Database }).db
-    expect(raw.pragma('user_version', { simple: true })).toBe(36)
+    expect(raw.pragma('user_version', { simple: true })).toBe(37)
     const tables = new Set(
       (
         raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
@@ -36,6 +36,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
     db.upsertRemoteAgent({
       environmentId: 'env_a',
       environmentName: 'work-laptop',
+      linkKind: 'paired_device',
       remoteAgentId: 'agent_remote_1',
       displayName: 'peer-one',
       role: null,
@@ -70,6 +71,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
     db.upsertRemoteAgent({
       environmentId: 'env_a',
       environmentName: 'work-laptop',
+      linkKind: 'paired_device',
       remoteAgentId: 'agent_remote_1',
       displayName: 'peer-one',
       role: 'coordinator',
@@ -80,6 +82,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
     db.upsertRemoteAgent({
       environmentId: 'env_a',
       environmentName: 'work-laptop-renamed',
+      linkKind: 'paired_device',
       remoteAgentId: 'agent_remote_1',
       displayName: 'peer-one',
       role: 'coordinator',
@@ -100,6 +103,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
     db.upsertRemoteAgent({
       environmentId: 'env_a',
       environmentName: 'work-laptop',
+      linkKind: 'paired_device',
       remoteAgentId: 'agent_remote_1',
       displayName: 'peer-one',
       role: null,
@@ -116,6 +120,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
     db.upsertRemoteAgent({
       environmentId: 'env_a',
       environmentName: 'work-laptop',
+      linkKind: 'paired_device',
       remoteAgentId: 'agent_remote_1',
       displayName: 'peer-one',
       role: null,
@@ -471,5 +476,218 @@ describe('S10-4 ruling 5: the authenticated_transport fallback never binds a fed
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('S10-15 D5: remote_agents.link_kind + peer_fingerprint (schema v37)', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('a fresh database lands at user_version 37 with link_kind and peer_fingerprint present', () => {
+    db = new OrchestrationDb(':memory:')
+    const raw = (db as unknown as { db: Database.Database }).db
+    expect(raw.pragma('user_version', { simple: true })).toBe(37)
+    const columns = new Set(
+      (
+        raw.prepare(`SELECT name FROM pragma_table_info('remote_agents')`).all() as {
+          name: string
+        }[]
+      ).map((r) => r.name)
+    )
+    expect(columns.has('link_kind')).toBe(true)
+    expect(columns.has('peer_fingerprint')).toBe(true)
+  })
+
+  // S10-15 breaker finding 22: repairUnshippedV37RemoteAgentIdentity, same shape as the v35/v36
+  // repairs above.
+  it('verify major: a v37 DB without link_kind/peer_fingerprint is repaired on open (finding 22)', () => {
+    db = new OrchestrationDb(':memory:') // throwaway for the shared afterEach close
+    const dir = mkdtempSync(join(tmpdir(), 'orca-remote-agent-identity-repair-'))
+    const file = join(dir, 'orchestration.db')
+    try {
+      type Raw = {
+        exec(sql: string): void
+        prepare(s: string): { get(...a: unknown[]): unknown; run(...a: unknown[]): unknown }
+      }
+      const first = new OrchestrationDb(file)
+      const raw = (first as unknown as { db: Raw }).db
+      raw.exec(`
+        DROP TABLE remote_agents;
+        CREATE TABLE remote_agents (
+          environment_id          TEXT NOT NULL,
+          environment_name        TEXT NOT NULL,
+          remote_agent_id         TEXT NOT NULL,
+          display_name            TEXT NOT NULL,
+          role                    TEXT,
+          state                   TEXT NOT NULL DEFAULT 'idle',
+          derived                 INTEGER NOT NULL DEFAULT 0,
+          remote_quarantined      INTEGER NOT NULL DEFAULT 0,
+          local_quarantined       INTEGER NOT NULL DEFAULT 0,
+          quarantine_reason_code  TEXT,
+          last_seen_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(environment_id, remote_agent_id)
+        );
+      `)
+      first.close()
+
+      const reopened = new OrchestrationDb(file)
+      const raw2 = (reopened as unknown as { db: Raw }).db
+      const col = (table: string, name: string) =>
+        (
+          raw2
+            .prepare(`SELECT COUNT(*) AS c FROM pragma_table_info('${table}') WHERE name = ?`)
+            .get(name) as { c: number }
+        ).c
+      expect(col('remote_agents', 'link_kind')).toBe(1)
+      expect(col('remote_agents', 'peer_fingerprint')).toBe(1)
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('same peer agent seen on both links -> listAddressableRemoteAgents returns exactly the environment-kind row (D5 test 2)', () => {
+    db = new OrchestrationDb(':memory:')
+    db.upsertRemoteAgent({
+      environmentId: 'dev_paired_link_1',
+      environmentName: 'dev_paired_link_1',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_shared',
+      displayName: 'shared-peer',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    db.upsertRemoteAgent({
+      environmentId: 'env_saved_1',
+      environmentName: 'work-laptop',
+      linkKind: 'environment',
+      remoteAgentId: 'agent_remote_shared',
+      displayName: 'shared-peer',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    const addressable = db!.listAddressableRemoteAgents({ environmentId: 'env_saved_1' })
+    expect(addressable).toHaveLength(1)
+    expect(addressable[0]).toMatchObject({
+      link_kind: 'environment',
+      environment_id: 'env_saved_1'
+    })
+    // The paired_device row is never addressable under its own key either.
+    expect(db!.listAddressableRemoteAgents({ environmentId: 'dev_paired_link_1' })).toHaveLength(0)
+  })
+
+  it('operator sets local_quarantined via allLinks: true on the environment row -> withholds the paired_device row too (D5 test 3, the containment-hole regression test)', () => {
+    db = new OrchestrationDb(':memory:')
+    db.upsertRemoteAgent({
+      environmentId: 'dev_paired_link_2',
+      environmentName: 'dev_paired_link_2',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_dual',
+      displayName: 'dual-peer',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    db.upsertRemoteAgent({
+      environmentId: 'env_saved_2',
+      environmentName: 'other-laptop',
+      linkKind: 'environment',
+      remoteAgentId: 'agent_remote_dual',
+      displayName: 'dual-peer',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    const lifted = db.setLocalRemoteAgentQuarantine({
+      remoteAgentId: 'agent_remote_dual',
+      quarantined: true,
+      reasonCode: 'operator_review',
+      allLinks: true
+    })
+    expect(lifted).toHaveLength(2)
+    expect(lifted.every((row) => row.local_quarantined === 1)).toBe(true)
+    // The paired_device row (the one containment reads join against) is withheld too.
+    expect(db.isRemoteAgentLocallyQuarantined('agent_remote_dual')).toBe(true)
+  })
+
+  it('inverse DoS guard: remote_quarantined never unions across links (D5 test 4)', () => {
+    db = new OrchestrationDb(':memory:')
+    db.upsertRemoteAgent({
+      environmentId: 'link_a',
+      environmentName: 'link_a',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_dos',
+      displayName: 'dos-peer',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    db.upsertRemoteAgent({
+      environmentId: 'link_b',
+      environmentName: 'link_b',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_dos',
+      displayName: 'dos-peer',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: true
+    })
+    const linkARow = db
+      .listRemoteAgents({ environmentId: 'link_a', includeQuarantined: true })
+      .find((r) => r.remote_agent_id === 'agent_remote_dos')!
+    expect(linkARow.remote_quarantined).toBe(0)
+    expect(db.isRemoteAgentLocallyQuarantined('agent_remote_dos')).toBe(false)
+  })
+
+  // S10-15 breaker finding 8: the load-bearing constraint on upsertRemoteAgent's column list.
+  it('finding 8 survival test: a locally-quarantined row survives an upsert asserting quarantined: false', () => {
+    db = new OrchestrationDb(':memory:')
+    db.upsertRemoteAgent({
+      environmentId: 'env_a',
+      environmentName: 'work-laptop',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_1',
+      displayName: 'peer-one',
+      role: null,
+      state: 'idle',
+      derived: false,
+      remoteQuarantined: false
+    })
+    db.setLocalRemoteAgentQuarantine({
+      environmentId: 'env_a',
+      remoteAgentId: 'agent_remote_1',
+      quarantined: true,
+      reasonCode: 'operator_review'
+    })
+    // A further contact reasserting remoteQuarantined: false (the peer claiming it's fine) must
+    // never clear the LOCAL quarantine — upsertRemoteAgent never names local_quarantined.
+    db.upsertRemoteAgent({
+      environmentId: 'env_a',
+      environmentName: 'work-laptop',
+      linkKind: 'paired_device',
+      remoteAgentId: 'agent_remote_1',
+      displayName: 'peer-one-renamed',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    const row = db
+      .listRemoteAgents({ environmentId: 'env_a', includeQuarantined: true })
+      .find((r) => r.remote_agent_id === 'agent_remote_1')!
+    expect(row.local_quarantined).toBe(1)
+    expect(row.display_name).toBe('peer-one-renamed')
   })
 })

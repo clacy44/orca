@@ -53,7 +53,12 @@ import { ORCHESTRATION_PACT_METHODS } from './orchestration-pact'
 import { ORCHESTRATION_PACT_STEP_METHODS } from './orchestration-pact-step'
 import { ORCHESTRATION_THREAD_INVITE_METHODS } from './orchestration-thread-invite'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
-import { NO_PANE_IDENTITY_NEXT_STEPS, resolveCallerAgent } from './orchestration-caller-identity'
+import {
+  NO_PANE_IDENTITY_NEXT_STEPS,
+  NO_REGISTERED_IDENTITY_NEXT_STEPS,
+  resolveCallerAgent
+} from './orchestration-caller-identity'
+import { buildFederatedSenderIdentity } from '../../orchestration/federated-sender-identity'
 import { requireAddressableAgentRecipient } from '../../orchestration/addressable-agent-recipient'
 import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federated-peer-ask'
 import {
@@ -1651,12 +1656,20 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           orchestrationCompatibilityEvidence,
           { currentRuntimeLaunchSufficient: true }
         )
-        const callerAgent = attested ? db.getAgentByPaneKey(hostId, attested.paneKey) : undefined
-        if (!callerAgent) {
+        // S10-15 D6: split by cause — unattested vs attested-but-unregistered.
+        if (!attested) {
           throw new OrchestrationError(
             'no_pane_identity',
             'A peer reply requires an attested, registered caller identity.',
             { nextSteps: peerNoPaneIdentityNextSteps(pairedDeviceId, clientKind) }
+          )
+        }
+        const callerAgent = db.getAgentByPaneKey(hostId, attested.paneKey)
+        if (!callerAgent) {
+          throw new OrchestrationError(
+            'no_registered_identity',
+            'A peer reply requires a registered caller identity.',
+            { nextSteps: peerNoRegisteredIdentityNextSteps(pairedDeviceId, clientKind) }
           )
         }
         const answered = db.answerPeerQuestion({
@@ -2426,6 +2439,21 @@ function peerNoPaneIdentityNextSteps(
   return NO_PANE_IDENTITY_NEXT_STEPS
 }
 
+// S10-15 D6: same paired-link condition as peerNoPaneIdentityNextSteps, for the
+// attested-but-unregistered case.
+function peerNoRegisteredIdentityNextSteps(
+  pairedDeviceId: string | undefined,
+  clientKind: 'mobile' | 'runtime' | undefined
+): readonly string[] {
+  if (pairedDeviceId && clientKind === 'runtime') {
+    return [
+      ...NO_REGISTERED_IDENTITY_NEXT_STEPS,
+      'this pane is attested on its own host but has no registered agent row — run "orca agents register" there'
+    ]
+  }
+  return NO_REGISTERED_IDENTITY_NEXT_STEPS
+}
+
 // S10-8 R1/R2: the home-side half of transport inversion. Called instead of handlePeerAsk when
 // `params.host` names a foreign agent's saved environment. Resolves the caller's identity against
 // THIS runtime exactly like handlePeerAsk does (never a second, remote pane-attestation check —
@@ -2493,7 +2521,10 @@ async function relayPeerAskToHost(args: {
     params.host as string,
     'orchestration.federatedAsk',
     {
-      fromAgent: {
+      // D1: single-sourced from federated-sender-identity.ts. `resolveCallerAgent` above already
+      // guarantees a row exists, so the fallback branch is dead code that preserves today's
+      // literal for review, never actually exercised.
+      fromAgent: buildFederatedSenderIdentity(db, caller.id) ?? {
         id: caller.id,
         displayName: callerRow?.display_name ?? caller.id,
         role: callerRow?.role ?? null,
@@ -2554,12 +2585,20 @@ async function handlePeerAsk(args: {
     args.orchestrationCompatibilityEvidence,
     { currentRuntimeLaunchSufficient: true }
   )
-  const callerAgent = attested ? db.getAgentByPaneKey(hostId, attested.paneKey) : undefined
-  if (!callerAgent) {
+  // S10-15 D6: split by cause — unattested vs attested-but-unregistered.
+  if (!attested) {
     throw new OrchestrationError(
       'no_pane_identity',
       'orca agents ask requires an attested, registered caller identity.',
       { nextSteps: peerNoPaneIdentityNextSteps(args.pairedDeviceId, args.clientKind) }
+    )
+  }
+  const callerAgent = db.getAgentByPaneKey(hostId, attested.paneKey)
+  if (!callerAgent) {
+    throw new OrchestrationError(
+      'no_registered_identity',
+      'orca agents ask requires a registered caller identity.',
+      { nextSteps: peerNoRegisteredIdentityNextSteps(args.pairedDeviceId, args.clientKind) }
     )
   }
 

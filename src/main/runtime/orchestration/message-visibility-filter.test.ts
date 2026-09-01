@@ -75,6 +75,7 @@ describe('cross-host quarantine at read time (S10-8 review fix)', () => {
     db.upsertRemoteAgent({
       environmentId: ENV_ID,
       environmentName: ENV_ID,
+      linkKind: 'paired_device',
       remoteAgentId: REMOTE_AGENT_ID,
       displayName: 'quarantined-remote',
       role: null,
@@ -92,6 +93,7 @@ describe('cross-host quarantine at read time (S10-8 review fix)', () => {
     db.upsertRemoteAgent({
       environmentId: ENV_ID,
       environmentName: ENV_ID,
+      linkKind: 'paired_device',
       remoteAgentId: REMOTE_AGENT_ID,
       displayName: 'quarantined-remote',
       role: null,
@@ -139,5 +141,37 @@ describe('cross-host quarantine at read time (S10-8 review fix)', () => {
   it('a message from a NEVER-quarantined remote sender is unaffected (no false-positive withholding)', () => {
     const { toHandle } = setupRecipientAndCrossHostMessage()
     expect(db.getUnreadMessages(toHandle)).toHaveLength(1)
+  })
+
+  // S10-15 D5 Rule 3 / breaker finding 7's read-time companion: a message stored under the
+  // paired_device row's handle must be withheld once the operator locally quarantines the SAME
+  // peer agent's environment-kind row — this is the containment hole a naive second keying
+  // opens, and the reason the local_quarantined union exists.
+  it('a message under the paired_device handle is withheld once the same peer agent is locally quarantined on its OTHER (environment) row', () => {
+    const { toHandle } = setupRecipientAndCrossHostMessage()
+    expect(db.getUnreadMessages(toHandle)).toHaveLength(1)
+
+    // The same remote_agent_id, mirrored a second time under an 'environment' link — the only
+    // addressable kind (D5 Rule 2) and the row an operator would actually quarantine.
+    db.upsertRemoteAgent({
+      environmentId: 'env_saved_dual',
+      environmentName: 'saved-environment',
+      linkKind: 'environment',
+      remoteAgentId: REMOTE_AGENT_ID,
+      displayName: 'quarantined-remote',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+
+    db.setLocalRemoteAgentQuarantine({
+      remoteAgentId: REMOTE_AGENT_ID,
+      quarantined: true,
+      reasonCode: 'operator_review',
+      allLinks: true
+    })
+
+    expect(db.getUnreadMessages(toHandle)).toHaveLength(0)
   })
 })

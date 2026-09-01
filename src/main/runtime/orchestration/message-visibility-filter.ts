@@ -16,11 +16,22 @@ import type { MessageRow } from './types'
 // its origin host currently asserts it quarantined (`remote_quarantined`) or this host has
 // defensively quarantined it after an earlier contact (`local_quarantined`) — re-read every call,
 // same "retroactive AND prospective" discipline as the local clause beside it.
+// S10-15 D5 Rule 3 (breaker finding 7's companion at read time): `remote_quarantined` stays
+// strictly per-row (peer-asserted; unioning it would let one link deny another's genuine
+// traffic by asserting quarantine for a colliding remote_agent_id — a cross-link DoS).
+// `local_quarantined` is unioned ACROSS every row sharing `remote_agent_id` (the second EXISTS,
+// self-join included) — the operator's own defensive act is trustworthy regardless of which
+// link_kind a message actually arrived over, and this must hold even though only one of a peer
+// agent's rows is ever addressable (D5 Rule 2).
 export function remoteSenderQuarantinedSqlClause(fromHandleExpr: string): string {
   return (
-    `EXISTS (SELECT 1 FROM remote_agents ra WHERE ` +
+    `(EXISTS (SELECT 1 FROM remote_agents ra WHERE ` +
     `('remote:' || ra.environment_id || ':' || ra.remote_agent_id) = ${fromHandleExpr} ` +
-    `AND (ra.remote_quarantined = 1 OR ra.local_quarantined = 1))`
+    `AND ra.remote_quarantined = 1) ` +
+    `OR EXISTS (SELECT 1 FROM remote_agents ra JOIN remote_agents rb ` +
+    `ON rb.remote_agent_id = ra.remote_agent_id ` +
+    `WHERE ('remote:' || ra.environment_id || ':' || ra.remote_agent_id) = ${fromHandleExpr} ` +
+    `AND rb.local_quarantined = 1))`
   )
 }
 
@@ -66,8 +77,13 @@ export function filterLiveMessageRows(
     (
       db
         .prepare(
-          `SELECT ('remote:' || environment_id || ':' || remote_agent_id) AS handle
-           FROM remote_agents WHERE remote_quarantined = 1 OR local_quarantined = 1`
+          `SELECT ('remote:' || ra.environment_id || ':' || ra.remote_agent_id) AS handle
+           FROM remote_agents ra
+           WHERE ra.remote_quarantined = 1
+              OR EXISTS (
+                   SELECT 1 FROM remote_agents rb
+                   WHERE rb.remote_agent_id = ra.remote_agent_id AND rb.local_quarantined = 1
+                 )`
         )
         .all() as { handle: string }[]
     ).map((row) => row.handle)

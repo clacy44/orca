@@ -576,6 +576,74 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
 
     expect(countPeerQuestions(workerDb)).toBe(1)
   })
+
+  // S10-15 ruling 2 (finding 4): new coverage, not a modification of any test above.
+  it('S10-15 ruling 2: a link that previously spoke with one fingerprint is refused when it asserts a different one', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    // First contact binds HOME_LINK_FINGERPRINT to HOME_LINK_DEVICE_ID.
+    await call(
+      'orchestration.federatedAsk',
+      {
+        fromAgent: { id: 'agt_000000000006', displayName: 'first-contact' },
+        toAgentId: agentB,
+        question: 'first',
+        timeoutMs: 10
+      },
+      workerLinkCtx()
+    )
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000007', displayName: 'second-contact' },
+          toAgentId: agentB,
+          question: 'second',
+          timeoutMs: 10
+        },
+        {
+          runtime: workerRuntime,
+          pairedDeviceId: HOME_LINK_DEVICE_ID,
+          clientKind: 'runtime',
+          authenticatedCallerFingerprint: 'fp_rotated_impostor'
+        }
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(workerDb.hasRemoteAgent(HOME_LINK_DEVICE_ID, 'agt_000000000007')).toBe(false)
+  })
+
+  it('S10-15 ruling 2: a fingerprint already bound to a different link is refused on the second link (cross-link duplicate)', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    await call(
+      'orchestration.federatedAsk',
+      {
+        fromAgent: { id: 'agt_000000000008', displayName: 'link-one-peer' },
+        toAgentId: agentB,
+        question: 'from link one',
+        timeoutMs: 10
+      },
+      workerLinkCtx()
+    )
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000009', displayName: 'link-two-peer' },
+          toAgentId: agentB,
+          question: 'from link two',
+          timeoutMs: 10
+        },
+        {
+          runtime: workerRuntime,
+          pairedDeviceId: 'dev_home_link_2',
+          clientKind: 'runtime',
+          authenticatedCallerFingerprint: HOME_LINK_FINGERPRINT
+        }
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(workerDb.hasRemoteAgent('dev_home_link_2', 'agt_000000000009')).toBe(false)
+  })
 })
 
 function findPendingPeerQuestion(

@@ -47,7 +47,7 @@ import type {
   ThreadParticipantRow,
   ThreadState
 } from './types'
-import type { RemoteAgentRow } from './remote-agent-directory-types'
+import type { RemoteAgentRow, RemoteAgentLinkKind } from './remote-agent-directory-types'
 import type { RelaySeenRow, RelaySeenOutcome } from './federation-relay-seen-types'
 import { AUTHENTICATED_TRANSPORT_FALLBACK } from '../principal-link-fingerprint-binding'
 import { buildOrchestrationTaskDisplayMetadata } from '../../../shared/orchestration-task-display'
@@ -809,8 +809,13 @@ const PACT_PAIR_LIVE_SQL = `
 // relink_generation counter above — see recordRelaySeen/importFederatedRelayItem.
 const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS remote_agents (
-        environment_id          TEXT NOT NULL,   -- local KnownRuntimeEnvironment.id (the saved pairing)
+        environment_id          TEXT NOT NULL,   -- local link key (D5: paired_device = pairedDeviceId, environment = KnownRuntimeEnvironment.id)
         environment_name        TEXT NOT NULL,   -- provenance only, for printing; never an address
+        -- S10-15 D5: which key space environment_id lives in. Only 'environment' rows are ever
+        -- addressable (db.listAddressableRemoteAgents) — 'paired_device' rows are inbound-only
+        -- provenance/containment, never a send target.
+        link_kind                TEXT NOT NULL DEFAULT 'paired_device'
+          CHECK(link_kind IN ('paired_device', 'environment')),
         remote_agent_id         TEXT NOT NULL,   -- the peer's own agents.id
         display_name            TEXT NOT NULL,
         role                    TEXT,
@@ -819,10 +824,15 @@ const S10_4_FEDERATION_SCHEMA_SQL = `
         remote_quarantined      INTEGER NOT NULL DEFAULT 0,  -- asserted by the origin host
         local_quarantined       INTEGER NOT NULL DEFAULT 0,  -- this host's own defensive act
         quarantine_reason_code  TEXT,
+        -- S10-15 ruling 2: the link's own authenticated fingerprint, bound to environment_id on
+        -- first contact (TOFU) — never a peer-body-asserted value.
+        peer_fingerprint        TEXT,
         last_seen_at            TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY(environment_id, remote_agent_id)
       );
       CREATE INDEX IF NOT EXISTS idx_remote_agents_name ON remote_agents(display_name);
+      -- D5 Rule 3's local-quarantine union query needs this.
+      CREATE INDEX IF NOT EXISTS idx_remote_agents_peer ON remote_agents(remote_agent_id);
 
       -- A remote-asserted lift must never clear a local defensive quarantine (mirrors the
       -- correction s10-4-federation-spec.md notes the trust draft's version missed): a
@@ -900,8 +910,14 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2).
-const SCHEMA_VERSION = 36
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15).
+const SCHEMA_VERSION = 37
+
+// S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
+// NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
+// disposition + audit. No eviction-by-recency: a flood of distinct bogus ids must never evict
+// the legitimate row.
+export const REMOTE_AGENTS_PER_LINK_CAP = 64
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -1008,9 +1024,41 @@ export class OrchestrationDb {
     }
   }
 
+  // Unshipped-v37 remote_agents identity repair (S10-15 breaker finding 22, same shape as the
+  // v35/v36 repairs above): a DB stamped v37 by a pre-fix copy of this same UNSHIPPED migration
+  // never re-enters migrate()'s `current < 37` block. Guarded on user_version >= 37 so a pre-v37
+  // DB still takes migrate()'s atomic path — AND, per finding 22, on a `hasTable('remote_agents')`
+  // probe first: unlike v36's repair (whose storedVersion >= 36 guard alone guarantees the table
+  // exists), a refactor of this ordering is one step away from an ALTER on a missing table, so
+  // this repair does not lean on that assumption.
+  private repairUnshippedV37RemoteAgentIdentity(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 37) {
+      return
+    }
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+    if (!hasTable('remote_agents')) {
+      return
+    }
+    if (!this.hasColumn('remote_agents', 'link_kind')) {
+      this.db.exec(
+        `ALTER TABLE remote_agents ADD COLUMN link_kind TEXT NOT NULL DEFAULT 'paired_device'`
+      )
+    }
+    if (!this.hasColumn('remote_agents', 'peer_fingerprint')) {
+      this.db.exec(`ALTER TABLE remote_agents ADD COLUMN peer_fingerprint TEXT`)
+    }
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_remote_agents_peer ON remote_agents(remote_agent_id);`
+    )
+  }
+
   private createTables(): void {
     this.repairUnshippedV35PactEra()
     this.repairUnshippedV36RelinkGeneration()
+    this.repairUnshippedV37RemoteAgentIdentity()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,
@@ -1903,6 +1951,23 @@ export class OrchestrationDb {
             END;
           `)
         }
+      }
+      // v36 -> v37 (S10-15 D5 + ruling 2): remote_agents gains link_kind + peer_fingerprint.
+      // hasColumn-guarded so a fresh createTables() run (already has both inline, above) is a
+      // no-op here — same "version bump and schema land in the same atomic migration" discipline
+      // as the v36 block just above.
+      if (current < 37) {
+        if (!this.hasColumn('remote_agents', 'link_kind')) {
+          this.db.exec(
+            `ALTER TABLE remote_agents ADD COLUMN link_kind TEXT NOT NULL DEFAULT 'paired_device'`
+          )
+        }
+        if (!this.hasColumn('remote_agents', 'peer_fingerprint')) {
+          this.db.exec(`ALTER TABLE remote_agents ADD COLUMN peer_fingerprint TEXT`)
+        }
+        this.db.exec(
+          `CREATE INDEX IF NOT EXISTS idx_remote_agents_peer ON remote_agents(remote_agent_id);`
+        )
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -6825,49 +6890,64 @@ export class OrchestrationDb {
       .all(dispatchId) as RelaySeenRow[]
   }
 
-  // S10-4 ruling 1: upsert a peer-asserted agent-directory row into the SEPARATE remote_agents
-  // table, keyed by the saved local environment (never a link_id — this tree has no agent_links
-  // table). A remote-quarantine flip is honored; a local quarantine is never cleared by this
-  // path (trg_remote_lift_scope enforces it even if a caller forgets to check).
+  // S10-4 ruling 1, keying amended by S10-15 D5: upsert a peer-asserted agent-directory row into
+  // the SEPARATE remote_agents table, keyed by the LINK (`environmentId` is a link key here —
+  // `pairedDeviceId` for a 'paired_device' link, a saved KnownRuntimeEnvironment.id for an
+  // 'environment' link; see remote-agent-directory-types.ts). A remote-quarantine flip is
+  // honored; a local quarantine is never cleared by this path — trg_remote_lift_scope enforces
+  // it even if a caller forgets to check, and (S10-15 breaker finding 8, load-bearing) this
+  // statement must NEVER name `local_quarantined` in its column list or DO UPDATE SET: THAT
+  // omission, not the trigger, is what makes a remote assertion structurally unable to clear a
+  // local quarantine in the common (non-simultaneous) case the trigger doesn't cover.
   upsertRemoteAgent(params: {
     environmentId: string
     environmentName: string
+    linkKind: RemoteAgentLinkKind
     remoteAgentId: string
     displayName: string
     role: string | null
     state: 'live' | 'idle' | 'gone'
     derived: boolean
     remoteQuarantined: boolean
+    /** S10-15 ruling 2: the link's own authenticated fingerprint. Omit for a writer that has
+     *  none to offer (e.g. a future 'environment'-kind writer) — an existing bound value is
+     *  preserved, never clobbered with NULL. */
+    peerFingerprint?: string | null
   }): void {
     this.db
       .prepare(
         `INSERT INTO remote_agents (
-           environment_id, environment_name, remote_agent_id, display_name, role, state,
-           derived, remote_quarantined, last_seen_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           environment_id, environment_name, link_kind, remote_agent_id, display_name, role,
+           state, derived, remote_quarantined, peer_fingerprint, last_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(environment_id, remote_agent_id) DO UPDATE SET
            environment_name = excluded.environment_name,
+           link_kind = excluded.link_kind,
            display_name = excluded.display_name,
            role = excluded.role,
            state = excluded.state,
            derived = excluded.derived,
            remote_quarantined = excluded.remote_quarantined,
+           peer_fingerprint = COALESCE(excluded.peer_fingerprint, remote_agents.peer_fingerprint),
            last_seen_at = datetime('now')`
       )
       .run(
         params.environmentId,
         params.environmentName,
+        params.linkKind,
         params.remoteAgentId,
         params.displayName,
         params.role,
         params.state,
         params.derived ? 1 : 0,
-        params.remoteQuarantined ? 1 : 0
+        params.remoteQuarantined ? 1 : 0,
+        params.peerFingerprint ?? null
       )
   }
 
   listRemoteAgents(params?: {
     environmentId?: string
+    linkKind?: RemoteAgentLinkKind
     includeQuarantined?: boolean
   }): RemoteAgentRow[] {
     const clauses: string[] = []
@@ -6875,6 +6955,10 @@ export class OrchestrationDb {
     if (params?.environmentId) {
       clauses.push('environment_id = ?')
       args.push(params.environmentId)
+    }
+    if (params?.linkKind) {
+      clauses.push('link_kind = ?')
+      args.push(params.linkKind)
     }
     if (!params?.includeQuarantined) {
       clauses.push('remote_quarantined = 0 AND local_quarantined = 0')
@@ -6885,12 +6969,126 @@ export class OrchestrationDb {
       .all(...args) as RemoteAgentRow[]
   }
 
+  // S10-15 D5 interface point for the routing slice's `name@host` resolution: only 'environment'
+  // rows are ever an address source, and the local-quarantine union (Rule 3) is applied here too
+  // — a peer agent quarantined on its OTHER (paired_device) row must not resolve as a target.
+  listAddressableRemoteAgents(params: { environmentId: string }): RemoteAgentRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_agents
+         WHERE link_kind = 'environment' AND environment_id = ? AND remote_quarantined = 0
+           AND NOT EXISTS (
+             SELECT 1 FROM remote_agents q
+             WHERE q.remote_agent_id = remote_agents.remote_agent_id AND q.local_quarantined = 1
+           )
+         ORDER BY display_name ASC`
+      )
+      .all(params.environmentId) as RemoteAgentRow[]
+  }
+
+  // S10-15 breaker finding 7: the local-quarantine union in ONE accessor, used at the ingest
+  // refusal (never a per-key read there) — a peer agent quarantined on one link_kind row must be
+  // refused when it arrives over the OTHER. `remote_quarantined` deliberately stays per-row
+  // (D5 Rule 3): unioning IT would let one link's assertion deny another link's genuine traffic.
+  isRemoteAgentLocallyQuarantined(remoteAgentId: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM remote_agents WHERE remote_agent_id = ? AND local_quarantined = 1`)
+        .get(remoteAgentId) !== undefined
+    )
+  }
+
+  // S10-15 ruling 2: the link's own currently-bound fingerprint, or null if this link has never
+  // asserted one (first contact — binds on the next upsertRemoteAgent call).
+  getBoundPeerFingerprintForLink(environmentId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT peer_fingerprint FROM remote_agents
+         WHERE environment_id = ? AND peer_fingerprint IS NOT NULL LIMIT 1`
+      )
+      .get(environmentId) as { peer_fingerprint: string } | undefined
+    return row?.peer_fingerprint ?? null
+  }
+
+  // S10-15 ruling 2: is this fingerprint already speaking for a DIFFERENT link? A hostile-or-
+  // compromised (but legitimately paired) peer must never be able to claim an identity another
+  // link already bound.
+  findEnvironmentIdForPeerFingerprint(
+    fingerprint: string,
+    excludingEnvironmentId: string
+  ): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT environment_id FROM remote_agents WHERE peer_fingerprint = ? AND environment_id != ? LIMIT 1`
+      )
+      .get(fingerprint, excludingEnvironmentId) as { environment_id: string } | undefined
+    return row?.environment_id ?? null
+  }
+
+  // S10-15 ruling 3(b): whether this exact (link, remote agent) pair is already mirrored — an
+  // update to an existing row never counts against, or is blocked by, the per-link cap.
+  hasRemoteAgent(environmentId: string, remoteAgentId: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`)
+        .get(environmentId, remoteAgentId) !== undefined
+    )
+  }
+
+  // S10-15 ruling 3(b): the count the per-link cap (REMOTE_AGENTS_PER_LINK_CAP) is checked
+  // against — every row under this link key, regardless of link_kind or quarantine state.
+  countRemoteAgentsForLink(environmentId: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM remote_agents WHERE environment_id = ?`)
+      .get(environmentId) as { n: number }
+    return row.n
+  }
+
   setLocalRemoteAgentQuarantine(params: {
     environmentId: string
     remoteAgentId: string
     quarantined: boolean
     reasonCode?: string | null
-  }): RemoteAgentRow {
+  }): RemoteAgentRow
+  // S10-15 D5: the operator does not have to know which link_kind a peer arrived over — updates
+  // every row sharing this remote_agent_id.
+  setLocalRemoteAgentQuarantine(params: {
+    remoteAgentId: string
+    quarantined: boolean
+    reasonCode?: string | null
+    allLinks: true
+  }): RemoteAgentRow[]
+  setLocalRemoteAgentQuarantine(params: {
+    environmentId?: string
+    remoteAgentId: string
+    quarantined: boolean
+    reasonCode?: string | null
+    allLinks?: boolean
+  }): RemoteAgentRow | RemoteAgentRow[] {
+    if (params.allLinks) {
+      this.db
+        .prepare(
+          `UPDATE remote_agents
+           SET local_quarantined = ?, quarantine_reason_code = ?
+           WHERE remote_agent_id = ?`
+        )
+        .run(
+          params.quarantined ? 1 : 0,
+          params.quarantined ? (params.reasonCode ?? null) : null,
+          params.remoteAgentId
+        )
+      return this.db
+        .prepare(
+          `SELECT * FROM remote_agents WHERE remote_agent_id = ? ORDER BY environment_id ASC`
+        )
+        .all(params.remoteAgentId) as RemoteAgentRow[]
+    }
+    if (!params.environmentId) {
+      throw new OrchestrationError(
+        'invalid_argument',
+        'setLocalRemoteAgentQuarantine requires environmentId unless allLinks is set.'
+      )
+    }
     this.db
       .prepare(
         `UPDATE remote_agents
@@ -8916,6 +9114,8 @@ export class OrchestrationDb {
       DELETE FROM federation_relay_items;
       DELETE FROM remote_dispatch_attachments;
       DELETE FROM federated_dispatches;
+      -- S10-15 ruling 3(a): remote_agents was unpurgeable before this slice (breaker finding 2).
+      DELETE FROM remote_agents;
       DELETE FROM worker_terminal_archives;
       DELETE FROM worker_terminal_resources;
       DELETE FROM worker_dispatches;
