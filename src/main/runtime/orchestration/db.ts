@@ -60,17 +60,19 @@ import {
   getAgentById as getAgentByIdImpl,
   getAgentByName as getAgentByNameImpl,
   listAgents as listAgentsImpl,
-  refreshAgentLiveness as refreshAgentLivenessImpl,
-  setAgentQuarantine as setAgentQuarantineImpl,
   writeAgentAudit as writeAgentAuditImpl,
   type UpsertAgentByPaneSuffixParams,
   type UpsertAgentByPaneSuffixResult,
   type ListAgentsParams,
   type ListAgentsResult,
-  type RefreshAgentLivenessParams,
-  type SetAgentQuarantineParams,
   type WriteAgentAuditParams
 } from './agent-directory'
+import {
+  refreshAgentLiveness as refreshAgentLivenessImpl,
+  setAgentQuarantine as setAgentQuarantineImpl,
+  type RefreshAgentLivenessParams,
+  type SetAgentQuarantineParams
+} from './agent-liveness-classification'
 import {
   getAgentByIdIncludingTombstoned as getAgentByIdIncludingTombstonedImpl,
   retireAgent as retireAgentImpl,

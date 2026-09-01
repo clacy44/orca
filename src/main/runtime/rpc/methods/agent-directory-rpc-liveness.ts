@@ -1,7 +1,7 @@
 // S10-1b: RPC-layer liveness refresh + derived-row upkeep for the agent directory. Split out of
 // orchestration-agents.ts to stay under the max-lines ratchet.
 import type { OrcaRuntimeService } from '../../orca-runtime'
-import { classifyAgentLiveness } from '../../orchestration/agent-directory'
+import { classifyAgentLiveness } from '../../orchestration/agent-liveness-classification'
 import { sanitizeTitle } from '../../orchestration/agent-name-sanitizer'
 import { deriveAgentLabelSlug } from '../../orchestration/agent-derivation'
 import type { AgentRow, AgentState } from '../../orchestration/types'

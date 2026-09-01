@@ -284,13 +284,4 @@ export function listAgents(db: Database.Database, params: ListAgentsParams = {})
   }
 }
 
-export {
-  classifyAgentLiveness,
-  refreshAgentLiveness,
-  setAgentQuarantine,
-  type SetAgentQuarantineParams,
-  type AgentLivenessSignals,
-  type RefreshAgentLivenessParams
-} from './agent-liveness-classification'
-
 export { writeAgentAudit, type WriteAgentAuditParams } from './agent-audit-log'

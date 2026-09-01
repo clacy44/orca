@@ -2,16 +2,18 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import {
-  classifyAgentLiveness,
   getAgentById,
   getAgentByName,
   listAgents,
-  refreshAgentLiveness,
-  setAgentQuarantine,
   upsertAgentByPaneSuffix,
   writeAgentAudit,
   type UpsertAgentByPaneSuffixParams
 } from './agent-directory'
+import {
+  classifyAgentLiveness,
+  refreshAgentLiveness,
+  setAgentQuarantine
+} from './agent-liveness-classification'
 import { getAgentByIdIncludingTombstoned, retireAgent } from './agent-retire'
 
 describe('agent-directory', () => {
