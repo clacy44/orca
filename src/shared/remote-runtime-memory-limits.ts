@@ -66,6 +66,15 @@ export function serializeRemoteRuntimeRpcRequest(args: {
   params: unknown
   envelope?: RuntimeOrchestrationEnvelope
 }): string {
+  // S10-18: this is the only egress of orchestrationCompatibilityEvidence to a REMOTE runtime —
+  // omit launchToken and host. The receiving runtime cannot attest a foreign handle with either;
+  // forwarding the launchToken preimage only creates a replay risk under mutual pairing, and the
+  // host stamp carries connectionIncarnation/attachmentId, which are themselves classified as
+  // secrets and which orca-runtime.ts's ssh attachment map treats as a bearer lookup key. The
+  // local unix socket / Windows named pipe egress (src/cli/runtime/transport.ts:183-195) is a
+  // separate, attested path and must keep both fields intact.
+  const evidence = args.envelope?.orchestrationCompatibilityEvidence
+  const { launchToken: _launchToken, host: _host, ...evidenceWithoutSecrets } = evidence ?? {}
   return serializeRemoteRuntimePayload({
     id: args.requestId,
     deviceToken: args.deviceToken,
@@ -75,7 +84,7 @@ export function serializeRemoteRuntimeRpcRequest(args: {
     orchestrationContractVersion: args.envelope?.orchestrationContractVersion,
     orchestrationRequestId: args.envelope?.orchestrationRequestId,
     compatibilityInvocationId: args.envelope?.compatibilityInvocationId,
-    orchestrationCompatibilityEvidence: args.envelope?.orchestrationCompatibilityEvidence
+    orchestrationCompatibilityEvidence: evidence ? evidenceWithoutSecrets : undefined
   })
 }
 
