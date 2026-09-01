@@ -250,7 +250,7 @@ export function importFederatedSenderIdentity(
   // db.ts's `link_kind` comment). A remote-quarantine flip is honored; a local quarantine is
   // never cleared by this path (trg_remote_lift_scope enforces it even if a caller forgets to
   // check, and finding 8's constraint keeps upsertRemoteAgent from ever naming the column).
-  db.upsertRemoteAgent({
+  const upsertResult = db.upsertRemoteAgent({
     environmentId: linkKey,
     environmentName: hostLabel || linkKey,
     linkKind: 'paired_device',
@@ -262,6 +262,25 @@ export function importFederatedSenderIdentity(
     remoteQuarantined: identity.quarantined === true,
     peerFingerprint
   })
+
+  // V-2 fix: the pre-check above (isNewRow && countRemoteAgentsForLink >= CAP) is a TOCTOU
+  // race with this upsert — a concurrent insert for this same link can push the row count over
+  // the cap between the pre-check and the upsert. upsertRemoteAgent re-checks atomically and
+  // reports 'capped' itself in that case; honor it exactly like the pre-check's own capped
+  // branch (same audit fields, same return shape) instead of discarding it and falling through
+  // to the "row must exist" branch below, which would misreport this as `id_shape`.
+  if (upsertResult.outcome === 'capped') {
+    const askerHandle = `remote:${linkKey}:${identity.id}`
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: linkKey,
+      verb: 'federatedSendIdentity',
+      outcome: 'identity_rejected:remote_agents_cap',
+      reasonCode: null
+    })
+    return { outcome: 'capped', displayName: displayNameCandidate, hostLabel, askerHandle }
+  }
 
   // Finding 7: the local-quarantine union lives in ONE accessor — a peer agent quarantined on
   // its `link_kind='environment'` row must still be refused when it arrives over its

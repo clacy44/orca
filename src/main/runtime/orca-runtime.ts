@@ -34288,17 +34288,31 @@ export class OrcaRuntimeService {
     to_handle: string
     read: number
     peer_relayed_at?: string | null
+    peer_agent_id?: string | null
   }): {
     delivery: MessageDeliveryState
     recipient: MessageRecipientPresence
     environment?: string
   } {
-    // S10-15 verifier F4: a relayed-send mirror row (to_handle `remote:<environmentId>:<agentId>`,
-    // S10-15 F1 R6) is never "pointed" to a live pane on this host — the pointed/queued
-    // vocabulary below does not apply to it at all. Truthful state instead: 'relayed' once the
-    // peer accepted it (peer_relayed_at set), 'relay_pending' until then. Checked BEFORE the
-    // ordinary pointed/queued resolution so a relayed row is never misreported as plain 'queued'.
-    if (message.to_handle.startsWith('remote:')) {
+    // S10-15 verifier V-4 (was F4): a relayed-send mirror row (to_handle
+    // `remote:<environmentId>:<agentId>`, S10-15 F1 R6) is never "pointed" to a live pane on
+    // this host — the pointed/queued vocabulary below does not apply to it at all. Truthful
+    // state instead: 'relayed' once the peer accepted it (peer_relayed_at set), 'relay_pending'
+    // until then. Checked BEFORE the ordinary pointed/queued resolution so a relayed row is
+    // never misreported as plain 'queued'.
+    //
+    // Keyed on peer_agent_id IS NOT NULL — the outbound send-relay mirror row's own marker
+    // (relayPeerSendToHost sets peerAgentId: toAgentId) — rather than a bare to_handle prefix
+    // check. A `remote:<deviceId>:<agt>` to_handle is NOT unique to that mirror row: a LOCAL
+    // reply to an inbound cross-host question (answerPeerQuestion, peer-question.ts) addresses
+    // its answer to the original asker's imported identity handle
+    // (`from: original.to_handle, to: original.from_handle` where from_handle was minted as
+    // `remote:${linkKey}:${identity.id}` by federated-sender-identity.ts) — same prefix, but
+    // this row is already fully delivered locally (consumed by the far side's poll) and never
+    // goes through the peer_relayed_at relay-accept path, so it was wrongly reported as
+    // 'relay_pending' forever. answerPeerQuestion's insertGatedMessage call never passes
+    // peerAgentId, so that row's peer_agent_id is NULL and correctly falls through below.
+    if (message.peer_agent_id != null) {
       const environment = message.to_handle.split(':')[1]
       return {
         delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',

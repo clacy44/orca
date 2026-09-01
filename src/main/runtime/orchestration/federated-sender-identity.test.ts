@@ -1,7 +1,8 @@
 // S10-15 D2/D3/ruling 2/ruling 3(b): the shared inbound-identity importer, extracted byte-
 // identically out of orchestration-federated-peer-ask.ts, plus its ruling-2 (peer-fingerprint
 // binding) and ruling-3(b) (per-link cap) amendments.
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb, REMOTE_AGENTS_PER_LINK_CAP } from './db'
 import {
   buildFederatedSenderIdentity,
@@ -438,5 +439,39 @@ describe('S10-15 ruling 3(b): REMOTE_AGENTS_PER_LINK_CAP', () => {
     })
     expect(result.outcome).toBe('imported')
     expect(db.countRemoteAgentsForLink(LINK)).toBe(REMOTE_AGENTS_PER_LINK_CAP)
+  })
+
+  // V-2 regression: the pre-check (isNewRow && countRemoteAgentsForLink >= CAP) is a TOCTOU
+  // race with the upsert itself — a concurrent insert on the same link can push the count over
+  // the cap between the pre-check and the upsert. upsertRemoteAgent re-checks atomically and
+  // can report 'capped' even when the importer's own pre-check passed. Force that by stubbing
+  // upsertRemoteAgent to return 'capped' while the pre-check sees plenty of headroom.
+  it('V-2: honors a capped outcome from upsertRemoteAgent even when the pre-check passed', () => {
+    db = new OrchestrationDb(':memory:')
+    const LINK = 'race_link'
+    const upsertSpy = vi.spyOn(db, 'upsertRemoteAgent').mockReturnValue({ outcome: 'capped' })
+
+    const result = importFederatedSenderIdentity(db, {
+      identity: { id: 'agt_0ace000001ee', displayName: 'racer' },
+      linkKey: LINK,
+      peerFingerprint: 'fp_race'
+    })
+
+    expect(result.outcome).toBe('capped')
+    if (result.outcome !== 'capped') {
+      throw new Error('unreachable')
+    }
+    expect(result.askerHandle).toBe(`remote:${LINK}:agt_0ace000001ee`)
+
+    const rawDb = (db as unknown as { db: Database.Database }).db
+    const auditRows = rawDb
+      .prepare('SELECT outcome FROM agent_audit WHERE actor_host_id = ?')
+      .all(LINK) as { outcome: string }[]
+    expect(auditRows.length).toBe(1)
+    expect(auditRows[0].outcome).toBe('identity_rejected:remote_agents_cap')
+    expect(auditRows.some((r) => r.outcome.includes('invalid'))).toBe(false)
+    expect(auditRows.some((r) => r.outcome.includes('id_shape'))).toBe(false)
+
+    upsertSpy.mockRestore()
   })
 })

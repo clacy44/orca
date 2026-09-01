@@ -51,6 +51,12 @@ describe('v37 -> v38 peer routing migration + F7a stranded-row repair', () => {
     const oldRow = db.getMessageById('msg_old00000001')
     expect(oldRow?.peer_link_device_id ?? null).toBeNull()
     expect(oldRow?.peer_agent_id ?? null).toBeNull()
+    // V-3: question_threads.expires_at (the v38 ALTER at db.ts's current<38 block) must also
+    // land when migrating up from a v36-stamped fixture — never asserted before.
+    const hasExpiresAt = (
+      raw2.prepare(`PRAGMA table_info(question_threads)`).all() as { name: string }[]
+    ).some((c) => c.name === 'expires_at')
+    expect(hasExpiresAt).toBe(true)
     raw2.close()
   })
 
@@ -118,6 +124,12 @@ describe('v37 -> v38 peer routing migration + F7a stranded-row repair', () => {
       raw2.prepare(`PRAGMA table_info(messages)`).all() as { name: string }[]
     ).some((c) => c.name === 'peer_link_device_id')
     expect(hasColumn).toBe(true)
+    // V-3: the unshipped-v38-repair branch (db.ts ~1084) restores question_threads.expires_at
+    // too, separately from the current<38 migration block — never asserted before.
+    const hasExpiresAt = (
+      raw2.prepare(`PRAGMA table_info(question_threads)`).all() as { name: string }[]
+    ).some((c) => c.name === 'expires_at')
+    expect(hasExpiresAt).toBe(true)
     raw2.close()
 
     const repaired = db!.getMessageById('msg_m3stranded1')

@@ -67,16 +67,26 @@ describe('orchestration.sent (BUG 3)', () => {
     expect(response).toMatchObject({ ok: true, result: { delivery: { state: 'read' } } })
   })
 
-  // S10-15 verifier F4: a relayed-send mirror row (S10-15 F1 R6, to_handle
-  // `remote:<environmentId>:<agentId>`) is never pointed to a live pane on this host — it must
-  // report a truthful relay state, never plain 'queued' forever.
+  // S10-15 verifier F4 (V-4 fix): a relayed-send mirror row (S10-15 F1 R6, to_handle
+  // `remote:<environmentId>:<agentId>`, minted with peerAgentId set — see
+  // relayPeerSendToHost/orchestration-peer-send-relay.ts) is never pointed to a live pane on
+  // this host — it must report a truthful relay state, never plain 'queued' forever. Uses
+  // insertGatedMessage with peerAgentId set (not the bare insertMessage helper) so the row
+  // matches the real send-relay mirror row's shape — the V-4 fix keys the branch on
+  // peer_agent_id IS NOT NULL, not on the to_handle prefix alone.
   it('reports relay_pending for an accepted-but-not-yet-relayed cross-host mirror row', async () => {
     setup()
-    const message = db!.insertMessage({
+    const inserted = db!.insertGatedMessage({
       from: 'agent:agt_local1',
       to: 'remote:env_windows_1:agt_them',
-      subject: 'hi'
+      subject: 'hi',
+      verb: 'send',
+      peerAgentId: 'agt_them'
     })
+    if (inserted.outcome !== 'stored') {
+      throw new Error('unreachable: gate refused a plain test message')
+    }
+    const message = inserted.message
 
     const response = await dispatcher.dispatch(
       request('sent-relay-pending', 'orchestration.sent', { id: message.id })
@@ -96,11 +106,17 @@ describe('orchestration.sent (BUG 3)', () => {
 
   it('reports relayed once the peer has accepted the relay (peer_relayed_at set)', async () => {
     setup()
-    const message = db!.insertMessage({
+    const inserted = db!.insertGatedMessage({
       from: 'agent:agt_local1',
       to: 'remote:env_windows_1:agt_them',
-      subject: 'hi'
+      subject: 'hi',
+      verb: 'send',
+      peerAgentId: 'agt_them'
     })
+    if (inserted.outcome !== 'stored') {
+      throw new Error('unreachable: gate refused a plain test message')
+    }
+    const message = inserted.message
     db!.markPeerRelayAccepted(message.id, null)
 
     const response = await dispatcher.dispatch(
@@ -127,6 +143,51 @@ describe('orchestration.sent (BUG 3)', () => {
     )
 
     expect(response).toMatchObject({ ok: false })
+  })
+
+  // V-4 regression: a LOCAL reply to an inbound cross-host question (answerPeerQuestion,
+  // peer-question.ts) addresses its answer `to` the original asker's imported identity handle,
+  // which is also shaped `remote:<linkKey>:<identity.id>` — same to_handle prefix as a genuine
+  // send-relay mirror row, but this row is already fully delivered locally (consumed via the
+  // far side's poll) and never goes through the peer_relayed_at accept path. Before the V-4
+  // fix (keying on to_handle prefix) this reported 'relay_pending' forever; the fix keys on
+  // peer_agent_id IS NOT NULL instead, and answerPeerQuestion's insertGatedMessage call never
+  // sets peerAgentId, so this row must report the PRE-F4 plain non-remote state instead.
+  it('V-4: a local answer row to an inbound cross-host question does NOT report relay_pending (peer_agent_id is null)', async () => {
+    setup()
+    const inserted = db!.insertGatedMessage({
+      from: 'agent:agt_local_answerer',
+      // Same shape a genuine send-relay mirror row's to_handle takes, but this row is the
+      // reply half written by answerPeerQuestion — peerAgentId is deliberately omitted, exactly
+      // as answerPeerQuestion's own insertGatedMessage call omits it.
+      to: 'remote:env_windows_1:agt_asker',
+      subject: 'Re: Question',
+      verb: 'reply'
+    })
+    if (inserted.outcome !== 'stored') {
+      throw new Error('unreachable: gate refused a plain test message')
+    }
+    const message = inserted.message
+    expect(message.peer_agent_id ?? null).toBeNull()
+
+    const response = await dispatcher.dispatch(
+      request('sent-local-answer', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({ ok: true })
+    if (!response.ok) {
+      throw new Error('unreachable')
+    }
+    expect(response).toMatchObject({
+      result: {
+        delivery: {
+          state: 'queued',
+          recipient: { state: 'unresolved', lastSeenAt: null }
+        }
+      }
+    })
+    const delivery = (response.result as { delivery: { environment?: string } }).delivery
+    expect(delivery.environment).toBeUndefined()
   })
 
   // S10-11 R4: a message relayed cross-host (relayPeerAskToHost) mints its id on the TARGET
