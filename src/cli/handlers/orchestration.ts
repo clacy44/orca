@@ -142,6 +142,18 @@ type OrchestrationSendResult = (
       }
       lifecycle?: LifecycleSendResult
     }
+  | {
+      // relayPeerSendToHost's cross-host relay shape (orchestration-peer-send-relay.ts).
+      message: { id: string; run_id?: string }
+      relay: {
+        destination: 'peer_agent'
+        environment: string
+        accepted: boolean
+        code?: string
+        reason?: string
+        peerMessageId?: string
+      }
+    }
 ) &
   // Why: additive and optional on every send shape — runtimes that predate it simply omit it.
   { pendingMail?: number }

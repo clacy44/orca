@@ -19,7 +19,7 @@ describe('S10-4 schema v36: remote_agents + relay_seen', () => {
   it('a fresh database lands at user_version 36 with both new tables', () => {
     db = new OrchestrationDb(':memory:')
     const raw = (db as unknown as { db: Database.Database }).db
-    expect(raw.pragma('user_version', { simple: true })).toBe(37)
+    expect(raw.pragma('user_version', { simple: true })).toBe(38)
     const tables = new Set(
       (
         raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
@@ -490,7 +490,7 @@ describe('S10-15 D5: remote_agents.link_kind + peer_fingerprint (schema v37)', (
   it('a fresh database lands at user_version 37 with link_kind and peer_fingerprint present', () => {
     db = new OrchestrationDb(':memory:')
     const raw = (db as unknown as { db: Database.Database }).db
-    expect(raw.pragma('user_version', { simple: true })).toBe(37)
+    expect(raw.pragma('user_version', { simple: true })).toBe(38)
     const columns = new Set(
       (
         raw.prepare(`SELECT name FROM pragma_table_info('remote_agents')`).all() as {
