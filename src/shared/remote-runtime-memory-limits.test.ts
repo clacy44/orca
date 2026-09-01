@@ -47,10 +47,11 @@ describe('remote runtime memory limits', () => {
     ).toBe(false)
   })
 
-  // S10-18: this is the only production egress of orchestrationCompatibilityEvidence — a
-  // launch-token preimage must never reach the wire, even though it was present in the
-  // envelope handed in.
-  it('drops launchToken from orchestrationCompatibilityEvidence and keeps the other fields', () => {
+  // S10-18: this is the only egress of orchestrationCompatibilityEvidence to a REMOTE runtime —
+  // a launch-token preimage and the host stamp (connectionIncarnation/attachmentId are
+  // classified as secrets and attachmentId is a bearer lookup key) must never reach the wire,
+  // even though both were present in the envelope handed in.
+  it('drops launchToken and host from orchestrationCompatibilityEvidence and keeps the other fields', () => {
     const serialized = serializeRemoteRuntimeRpcRequest({
       requestId: 'req-1',
       deviceToken: 'device-token',
@@ -73,10 +74,10 @@ describe('remote runtime memory limits', () => {
     const parsed = JSON.parse(serialized)
     expect(parsed.orchestrationCompatibilityEvidence).toEqual({
       terminalHandle: 'term-1',
-      paneKey: 'pane-1',
-      host: { kind: 'wsl', hostId: 'host-1', distro: 'ubuntu' }
+      paneKey: 'pane-1'
     })
     expect(serialized).not.toContain('launch-1')
+    expect(serialized).not.toContain('host-1')
     expect(parsed.orchestrationCapability).toBe('capability')
     expect(parsed.compatibilityInvocationId).toBe('compatibility-1')
   })

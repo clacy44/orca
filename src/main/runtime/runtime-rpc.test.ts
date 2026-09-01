@@ -2591,7 +2591,7 @@ describe('OrcaRuntimeRpcServer', () => {
       return { server, db, entry, capturedRequests, dispatchWs, dispatchUnixSocket }
     }
 
-    it('strips launchToken from a WS frame from a paired device but keeps terminalHandle/paneKey', async () => {
+    it('strips launchToken and host from a WS frame from a paired device but keeps terminalHandle/paneKey', async () => {
       const { db, entry, capturedRequests, dispatchWs, server } = makeEvidenceTestServer()
       try {
         await dispatchWs(
@@ -2603,7 +2603,13 @@ describe('OrcaRuntimeRpcServer', () => {
               orchestrationCompatibilityEvidence: {
                 terminalHandle: 'term_1',
                 paneKey: 'tab_a:leaf_a',
-                launchToken: 'launch-secret-1'
+                launchToken: 'launch-secret-1',
+                host: {
+                  kind: 'ssh',
+                  targetId: 'target_1',
+                  connectionIncarnation: 'incarnation-1',
+                  attachmentId: 'attachment-1'
+                }
               }
             })
           )
@@ -2620,7 +2626,7 @@ describe('OrcaRuntimeRpcServer', () => {
       }
     })
 
-    it('leaves a unix-socket request evidence untouched, launchToken included', async () => {
+    it('leaves a unix-socket request evidence untouched, launchToken and host included', async () => {
       const { db, entry, capturedRequests, dispatchUnixSocket, server } = makeEvidenceTestServer()
       void entry
       try {
@@ -2633,7 +2639,13 @@ describe('OrcaRuntimeRpcServer', () => {
               orchestrationCompatibilityEvidence: {
                 terminalHandle: 'term_1',
                 paneKey: 'tab_a:leaf_a',
-                launchToken: 'launch-secret-1'
+                launchToken: 'launch-secret-1',
+                host: {
+                  kind: 'ssh',
+                  targetId: 'target_1',
+                  connectionIncarnation: 'incarnation-1',
+                  attachmentId: 'attachment-1'
+                }
               }
             })
           )
@@ -2643,7 +2655,13 @@ describe('OrcaRuntimeRpcServer', () => {
         expect(request.orchestrationCompatibilityEvidence).toEqual({
           terminalHandle: 'term_1',
           paneKey: 'tab_a:leaf_a',
-          launchToken: 'launch-secret-1'
+          launchToken: 'launch-secret-1',
+          host: {
+            kind: 'ssh',
+            targetId: 'target_1',
+            connectionIncarnation: 'incarnation-1',
+            attachmentId: 'attachment-1'
+          }
         })
       } finally {
         db.close()
