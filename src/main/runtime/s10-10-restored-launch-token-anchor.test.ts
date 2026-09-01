@@ -395,4 +395,132 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
     expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
   })
+
+  // ── S10-13 regression: the daemon-survived restart ALWAYS mints a restored receipt ─────────
+  // Field cert16803/cert16804 measured this exact state and got `no_pane_identity` while the
+  // on-disk anchor was verifiably correct. Cause: the S10-10 gate above was scoped to the
+  // no-receipt branch (`mintReceiptOnSuccess`), but a serve restart over a surviving daemon
+  // reports the pty's ORIGINAL ORCA_TERMINAL_HANDLE and its UNCHANGED incarnationId, which makes
+  // refreshPtyWorktreeRecordsWithControllerInventory take the exact-surface-restore branch and
+  // mint a receipt for the pane — so `mintReceiptOnSuccess` was false and the anchor was never
+  // consulted. The receipt branch has no early return of its own; it falls through to hook
+  // attestation, which a restarted AgentHookServer cannot satisfy for a pane with no hydrated
+  // commitment. This test drives the REAL restore sweep so the receipt is present, and asserts
+  // the pane still attests from its genuine process-env token.
+  it('S10-13: attests a daemon-survived pane whose restored receipt was minted by the real controller-inventory sweep', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime1 = new OrcaRuntimeService(store)
+    let capturedEnv: Record<string, string> | undefined
+    runtime1.setPtyController(fakePtyController((env) => (capturedEnv = env)))
+    runtime1.attachWindow(1)
+    runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'anchor-agent'
+    })
+    const generation1Token = capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(generation1Token).toBeTruthy()
+    const generation1Hash = createHash('sha256').update(generation1Token!).digest('hex')
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(generation1Hash)
+
+    // The surface bindings a real restart reads back off disk: tab -> pty, layout leaf -> pty, and
+    // the pane's incarnation. Together with a controller session reporting the SAME incarnationId
+    // these are exactly the `restoresExactSurface && controllerIdentity` preconditions that make
+    // the sweep mint a restored receipt.
+    const session = sessionSnapshot()
+    session.tabsByWorktree = {
+      [WORKTREE_ID]: [
+        {
+          id: TAB_ID,
+          ptyId: PTY_ID,
+          worktreeId: WORKTREE_ID,
+          title: 'anchor-agent',
+          defaultTitle: 'anchor-agent',
+          customTitle: null,
+          color: null,
+          sortOrder: 0,
+          createdAt: 1
+        }
+      ]
+    } as WorkspaceSessionState['tabsByWorktree']
+    session.terminalLayoutsByTabId = {
+      [TAB_ID]: {
+        root: { type: 'leaf', leafId: LEAF_ID },
+        activeLeafId: LEAF_ID,
+        expandedLeafId: null,
+        ptyIdsByLeafId: { [LEAF_ID]: PTY_ID }
+      }
+    } as WorkspaceSessionState['terminalLayoutsByTabId']
+    session.terminalPtyIncarnationsByPaneKey = { [PANE_KEY]: GEN2_INCARNATION_ID }
+
+    // ── Restart: fresh runtime + fresh hook server (nothing hydrated from disk) ───────────────
+    agentHookServer = new AgentHookServer()
+    await agentHookServer.start({ env: 'production' })
+    const runtime2 = new OrcaRuntimeService(store, undefined, {
+      attestAgentHookCompatibilityAuthority: (candidate) =>
+        agentHookServer!.attestCompatibilityAuthority(candidate)
+    })
+    runtime2.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    // The surviving daemon reports the pane's ORIGINAL exported handle and unchanged incarnation.
+    runtime2.setPtyController({
+      ...fakePtyController(() => {}),
+      listProcesses: async () => [
+        {
+          id: PTY_ID,
+          incarnationId: GEN2_INCARNATION_ID,
+          cwd: WORKTREE_PATH,
+          title: 'anchor-agent',
+          worktreeId: WORKTREE_ID,
+          terminalHandle: RESTORED_TERMINAL_HANDLE
+        }
+      ]
+    } as Parameters<typeof runtime2.setPtyController>[0])
+
+    await runtime2.refreshRestoredOrchestrationAuthority(null)
+
+    // Proves the sweep took the receipt-minting branch: the controller handle was adopted
+    // (controllerIdentity present) AND the persisted pane surface was restored onto the pty
+    // (restoresExactSurface) — that conjunction is exactly what mints the restored receipt.
+    const dispatch = runtime2.getOrchestrationDispatchAuthority(RESTORED_TERMINAL_HANDLE)
+    expect(dispatch?.ptyId).toBe(PTY_ID)
+    expect(dispatch?.paneKey).toBe(PANE_KEY)
+    // A daemon-survived pty never regains its launch token — the anchor is the only proof left.
+    expect(dispatch?.launchTokenHash).toBeNull()
+    // The hook lane genuinely cannot help here: nothing hydrated, so attestation must refuse.
+    expect(agentHookServer.getHydratedAuthorityCommitments()).toHaveLength(0)
+
+    // ── Acceptance: the genuine process-env token attests through the anchor ─────────────────
+    expect(
+      runtime2.verifyOrchestrationCompatibilityCaller({
+        terminalHandle: RESTORED_TERMINAL_HANDLE,
+        paneKey: PANE_KEY,
+        launchToken: generation1Token!
+      })
+    ).toMatchObject({
+      paneKey: PANE_KEY,
+      terminalHandle: RESTORED_TERMINAL_HANDLE,
+      launchTokenHash: generation1Hash
+    })
+
+    // Negative controls — the receipt must not become a bypass for the token itself.
+    expect(
+      runtime2.verifyOrchestrationCompatibilityCaller({
+        terminalHandle: RESTORED_TERMINAL_HANDLE,
+        paneKey: PANE_KEY,
+        launchToken: 'attacker-chosen-token'
+      })
+    ).toBeNull()
+    expect(
+      runtime2.verifyOrchestrationCompatibilityCaller({
+        terminalHandle: RESTORED_TERMINAL_HANDLE,
+        paneKey: makePaneKey('tab-unrelated', LEAF_ID),
+        launchToken: generation1Token!
+      })
+    ).toBeNull()
+  })
 })
