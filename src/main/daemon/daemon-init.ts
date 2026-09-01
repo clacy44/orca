@@ -21,6 +21,7 @@ import { DAEMON_EXIT_ENDPOINT_OCCUPIED } from './daemon-endpoint-ownership'
 import { DaemonPtyAdapter, type DaemonRespawnReason } from './daemon-pty-adapter'
 import { DaemonPtyRouter } from './daemon-pty-router'
 import { DaemonClient } from './client'
+import { warnIfDaemonSpawnAtRiskOnAppImageMount } from './linux-appimage-mount-risk'
 import {
   CLEAN_DISCONNECT_PROTOCOL_VERSION,
   PREVIOUS_DAEMON_PROTOCOL_VERSIONS,
@@ -30,6 +31,7 @@ import {
 import {
   getMacDaemonSystemResolverHealth,
   getMacDaemonTccAttributionHealth,
+  getLinuxDaemonBinaryHealth,
   getDaemonLaunchIdentity,
   checkDaemonHealth,
   isDaemonStaleForCurrentBundle,
@@ -512,6 +514,10 @@ function createOutOfProcessLauncher(
             .cleaned
         } else {
           // Why: a protocol-healthy daemon can outlive its launching app bundle (dev worktree rebuild, or packaged update replacing the app path).
+          // Linux-AppImage caveat (S10-12 R3): that premise assumes a real directory. An AppImage's
+          // app path is a FUSE mount (/tmp/.mount_*) torn down the instant its serve process exits,
+          // so a daemon "outliving" it there is left executing an unmapped binary, not a stale-but-
+          // present one — see getLinuxDaemonBinaryHealth below, the mirror of the macOS TCC check.
           const identity = await getDaemonLaunchIdentity(
             runtimeDir,
             socketPath,
@@ -554,6 +560,11 @@ function createOutOfProcessLauncher(
               socketPath,
               tokenPath
             )
+            const linuxBinaryHealth = await getLinuxDaemonBinaryHealth(
+              runtimeDir,
+              socketPath,
+              tokenPath
+            )
             if (attributionHealth === 'severed') {
               // Why: replacing with live sessions would kill them; Settings → Developer
               // Permissions surfaces the Manage Sessions → Restart remedy instead.
@@ -567,6 +578,24 @@ function createOutOfProcessLauncher(
                   await cleanupDaemonForProtocol(runtimeDir, PROTOCOL_VERSION)
                 ).cleaned
               } else {
+                return preserveDaemon()
+              }
+            } else if (linuxBinaryHealth === 'severed') {
+              // S10-12 R3: Linux mirror of the TCC-severed branch above — the daemon's own
+              // entry path is gone (its /tmp/.mount_* AppImage mount was torn down under it).
+              const liveSessionCount = await getAliveDaemonSessionCount(socketPath, tokenPath)
+              if (liveSessionCount === 0) {
+                console.warn(
+                  '[daemon] Replacing daemon whose entry path no longer exists (its AppImage mount was torn down)'
+                )
+                pendingReplacement = { reason: 'severed_linux_binary', liveSessionCount }
+                confirmedReplacement = (
+                  await cleanupDaemonForProtocol(runtimeDir, PROTOCOL_VERSION)
+                ).cleaned
+              } else {
+                console.warn(
+                  `[daemon] Preserving daemon whose entry path no longer exists because it owns ${liveSessionCount} live session${liveSessionCount === 1 ? '' : 's'} — it is running an unmapped binary and may die silently at any time`
+                )
                 return preserveDaemon()
               }
             } else {
@@ -667,6 +696,7 @@ function createOutOfProcessLauncher(
       const relocatedHost = materializeRelocatedDaemonHost()
       // Fork the relocated entry when available; otherwise the install-dir entry.
       const forkEntryPath = relocatedHost ? relocatedHost.entryPath : entryPath
+      warnIfDaemonSpawnAtRiskOnAppImageMount(forkEntryPath)
       const child = fork(
         forkEntryPath,
         [

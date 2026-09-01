@@ -817,6 +817,30 @@ export async function getMacDaemonTccAttributionHealth(
   return health
 }
 
+// S10-12 R3: Linux mirror of getMacDaemonTccAttributionHealth above — a different mechanism
+// (no TCC), same shape (the daemon's own backing binary can go missing while it keeps running).
+// An AppImage's FUSE mount is torn down the instant its owning serve process exits; a daemon
+// still executing from inside /tmp/.mount_* is then running an unmapped-on-demand binary
+// (latent SIGBUS/EIO — silent death, no log line). 'severed' here means entryPath itself is
+// gone, not a forking app's path, so this checks the daemon's own recorded entry, not spawnerExecPath.
+export type LinuxDaemonBinaryHealth = 'intact' | 'severed' | 'unknown'
+
+export async function getLinuxDaemonBinaryHealth(
+  runtimeDir: string,
+  socketPath: string,
+  tokenPath: string,
+  protocolVersion = PROTOCOL_VERSION
+): Promise<LinuxDaemonBinaryHealth> {
+  if (process.platform !== 'linux') {
+    return 'unknown'
+  }
+  const parsedPid = await readVerifiedDaemonPid(runtimeDir, socketPath, tokenPath, protocolVersion)
+  if (!parsedPid?.entryPath) {
+    return 'unknown'
+  }
+  return existsSync(parsedPid.entryPath) ? 'intact' : 'severed'
+}
+
 function isNoSuchProcessError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ESRCH'
 }

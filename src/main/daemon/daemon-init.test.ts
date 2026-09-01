@@ -25,6 +25,7 @@ const {
   healthCheckDaemonMock,
   getMacDaemonSystemResolverHealthMock,
   getMacDaemonTccAttributionHealthMock,
+  getLinuxDaemonBinaryHealthMock,
   getDaemonLaunchIdentityMock,
   isDaemonStaleForCurrentBundleMock,
   killStaleDaemonMock,
@@ -89,6 +90,7 @@ const {
   const healthCheckDaemonMock = vi.fn(async () => true)
   const getMacDaemonSystemResolverHealthMock = vi.fn(() => 'healthy')
   const getMacDaemonTccAttributionHealthMock = vi.fn(async () => 'unknown')
+  const getLinuxDaemonBinaryHealthMock = vi.fn(async () => 'unknown')
   const getDaemonLaunchIdentityMock = vi.fn(() => 'match')
   const isDaemonStaleForCurrentBundleMock = vi.fn(() => false)
   const killStaleDaemonMock = vi.fn(async () => ({
@@ -193,6 +195,7 @@ const {
     healthCheckDaemonMock,
     getMacDaemonSystemResolverHealthMock,
     getMacDaemonTccAttributionHealthMock,
+    getLinuxDaemonBinaryHealthMock,
     getDaemonLaunchIdentityMock,
     isDaemonStaleForCurrentBundleMock,
     killStaleDaemonMock,
@@ -289,6 +292,7 @@ vi.mock('./daemon-health', () => ({
   getDaemonLaunchIdentity: getDaemonLaunchIdentityMock,
   getMacDaemonSystemResolverHealth: getMacDaemonSystemResolverHealthMock,
   getMacDaemonTccAttributionHealth: getMacDaemonTccAttributionHealthMock,
+  getLinuxDaemonBinaryHealth: getLinuxDaemonBinaryHealthMock,
   healthCheckDaemon: healthCheckDaemonMock,
   isDaemonStaleForCurrentBundle: isDaemonStaleForCurrentBundleMock,
   killStaleDaemon: killStaleDaemonMock,
@@ -456,6 +460,8 @@ async function importFresh() {
   getMacDaemonSystemResolverHealthMock.mockReturnValue('healthy')
   getMacDaemonTccAttributionHealthMock.mockReset()
   getMacDaemonTccAttributionHealthMock.mockResolvedValue('unknown')
+  getLinuxDaemonBinaryHealthMock.mockReset()
+  getLinuxDaemonBinaryHealthMock.mockResolvedValue('unknown')
   getDaemonLaunchIdentityMock.mockClear()
   isDaemonStaleForCurrentBundleMock.mockReset()
   isDaemonStaleForCurrentBundleMock.mockReturnValue(false)
