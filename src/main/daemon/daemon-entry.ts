@@ -11,7 +11,11 @@ import { startDaemon, type DaemonHandle } from './daemon-main'
 import { createPtySubprocess } from './pty-subprocess'
 import { warmWindowsConptyOnce } from './windows-conpty-warmup'
 import { warmPwshAvailabilityCache } from '../pwsh'
-import { createDaemonFileLog, createNoopDaemonFileLog } from './daemon-file-log'
+import {
+  classifyPredecessorLogEnd,
+  createDaemonFileLog,
+  createNoopDaemonFileLog
+} from './daemon-file-log'
 import { PROTOCOL_VERSION } from './types'
 import {
   DAEMON_EXIT_ENDPOINT_OCCUPIED,
@@ -122,9 +126,15 @@ async function main(): Promise<void> {
   } = parseArgs(process.argv.slice(2))
   const startedAtMs = Date.now() - process.uptime() * 1000
   const readyIdentity = await readCurrentDaemonReadyIdentity(startedAtMs)
+  // S10-12 R4: classify the predecessor's end from the shared log file's existing tail —
+  // BEFORE this generation's own 'startup' line is appended below.
+  const predecessorEnd = logFilePath ? classifyPredecessorLogEnd(logFilePath) : null
   // Fail-open: a broken log path must never block daemon startup.
   const daemonLog = logFilePath ? createDaemonFileLog(logFilePath) : createNoopDaemonFileLog()
   daemonLog.log('startup', { protocolVersion: PROTOCOL_VERSION, socketPath })
+  if (predecessorEnd) {
+    daemonLog.log('predecessor-end', predecessorEnd)
+  }
   void warmPwshAvailabilityCache()
 
   // Why: detached daemons destroy stderr, so the preflight's console.warn is lost;
@@ -203,6 +213,11 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
   process.on('SIGINT', () => void shutdown('SIGINT'))
+  // S10-12 R4: SIGHUP/SIGQUIT default to killing Node with no log line (SIGQUIT also cores).
+  // Route them through the same shutdown() so an abrupt signal still writes a shutdown record —
+  // "no shutdown line" should not be the only forensic signal for how a generation ended.
+  process.on('SIGHUP', () => void shutdown('SIGHUP'))
+  process.on('SIGQUIT', () => void shutdown('SIGQUIT'))
 
   // Why: a dead macOS login session cannot be fabricated without root (PAM owns
   // audit-session teardown), so e2e drives the oracles from a verdict file:

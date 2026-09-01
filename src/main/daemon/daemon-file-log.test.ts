@@ -1,8 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createDaemonFileLog, createNoopDaemonFileLog } from './daemon-file-log'
+import {
+  classifyPredecessorLogEnd,
+  createDaemonFileLog,
+  createNoopDaemonFileLog
+} from './daemon-file-log'
 
 let dir: string
 
@@ -96,5 +107,79 @@ describe('createNoopDaemonFileLog', () => {
       log.log('startup', { x: 1 })
       log.close()
     }).not.toThrow()
+  })
+})
+
+// S10-12 R4/T4: "no shutdown line" must stop being the only forensic signal — every predecessor
+// shape gets classified on the NEXT generation's start.
+describe('classifyPredecessorLogEnd', () => {
+  it('classifies a real shutdown()-driven exit as clean_shutdown (SIGTERM/SIGINT/SIGHUP/SIGQUIT)', () => {
+    const filePath = join(dir, 'daemon.log')
+    const log = createDaemonFileLog(filePath)
+    log.log('startup', { protocolVersion: 18 })
+    log.log('shutdown', { reason: 'SIGHUP' })
+    log.close()
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'clean_shutdown',
+      lastEvent: 'daemon-log-closed'
+    })
+  })
+
+  it('classifies a SIGKILL-shaped predecessor (no shutdown line at all) as silent_death', () => {
+    const filePath = join(dir, 'daemon.log')
+    const log = createDaemonFileLog(filePath)
+    log.log('startup', { protocolVersion: 18, pid: 12345 })
+    log.log('client-hello-accepted', { pid: 12345 })
+    // No shutdown/close line: this is exactly what SIGKILL leaves behind.
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'silent_death',
+      lastEvent: 'client-hello-accepted',
+      lastPid: 12345
+    })
+  })
+
+  it('classifies an attributed-but-abrupt exit distinctly from a silent one', () => {
+    const filePath = join(dir, 'daemon.log')
+    createDaemonFileLog(filePath).log('uncaught-exception-fatal', { name: 'Error' })
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'fatal_exception'
+    })
+
+    writeFileSync(filePath, '')
+    createDaemonFileLog(filePath).log('endpoint-ownership-lost')
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'endpoint_lost'
+    })
+  })
+
+  it('reads no_predecessor for a missing, empty, or unparseable-trailing-line file', () => {
+    const missing = join(dir, 'never-written.log')
+    expect(classifyPredecessorLogEnd(missing)).toEqual({ classification: 'no_predecessor' })
+
+    const empty = join(dir, 'empty.log')
+    writeFileSync(empty, '')
+    expect(classifyPredecessorLogEnd(empty)).toEqual({ classification: 'no_predecessor' })
+  })
+
+  it('skips a truncated trailing line (death mid-write) and classifies the last complete one', () => {
+    const filePath = join(dir, 'daemon.log')
+    const log = createDaemonFileLog(filePath)
+    log.log('startup')
+    log.close()
+    // Simulate the next generation dying mid-write on its own first line.
+    appendFileSync(filePath, '{"src":"daemon","event":"star')
+
+    expect(classifyPredecessorLogEnd(filePath)).toMatchObject({
+      classification: 'clean_shutdown',
+      lastEvent: 'daemon-log-closed'
+    })
+  })
+
+  it('reports unknown for a log file that exists but never resolved to a real event', () => {
+    const filePath = join(dir, 'daemon.log')
+    writeFileSync(filePath, 'not json at all\n')
+    expect(classifyPredecessorLogEnd(filePath)).toEqual({ classification: 'no_predecessor' })
   })
 })
