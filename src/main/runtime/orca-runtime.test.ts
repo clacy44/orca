@@ -13086,12 +13086,21 @@ describe('OrcaRuntimeService', () => {
   it('retires inherited launch authority when the agent command exits', async () => {
     const spawn = vi.fn().mockResolvedValue({ id: 'pty-authority', incarnationId: 'process-1' })
     const retireAuthority = vi.fn()
+    // Why the stub tracks retirement: AgentHookServer.retirePaneAuthority (server.ts) revokes the
+    // pane's hydrated commitments and drops its currentAuthorityObservations, which makes
+    // attestCompatibilityAuthority return null for that pane on BOTH provenance branches. A stub
+    // that always grants models a hook server that never retires, and would let the assertions
+    // below pass or fail for reasons unrelated to the invariant under test.
+    const retiredPaneKeys = new Set<string>()
     const runtime = new OrcaRuntimeService(store, undefined, {
-      attestAgentHookCompatibilityAuthority: (candidate) => ({
-        paneKey: candidate.paneKey,
-        source: 'current_hook'
-      }),
-      retireAgentHookCompatibilityAuthority: retireAuthority
+      attestAgentHookCompatibilityAuthority: (candidate) =>
+        retiredPaneKeys.has(candidate.paneKey)
+          ? null
+          : { paneKey: candidate.paneKey, source: 'current_hook' },
+      retireAgentHookCompatibilityAuthority: (paneKey) => {
+        retireAuthority(paneKey)
+        retiredPaneKeys.add(paneKey)
+      }
     })
     runtime.setPtyController({
       spawn,
