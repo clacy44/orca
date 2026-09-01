@@ -162,6 +162,14 @@ export type IPtyProvider = {
    * only respawnable endpoints like the daemon adapter can signal it.
    */
   onWriteUnavailable?: (callback: (payload: { id: string }) => void) => () => void
+  /**
+   * S10-12 R2: the provider's authenticated transport itself closed or errored
+   * (daemon socket death) — distinct from onWriteUnavailable (write-failure-driven,
+   * with respawn recovery). Fires once per drop so the runtime can mark every pty
+   * of this provider disconnected immediately rather than waiting on the next
+   * poll-driven liveness sweep. Optional: only transport-backed providers signal it.
+   */
+  onTransportDisconnected?: (callback: () => void) => () => void
   /** Authoritative provider-owned model snapshot. Daemon providers expose this
    * after their monitoring stream gaps; other providers may omit it. */
   getBufferSnapshot?: (

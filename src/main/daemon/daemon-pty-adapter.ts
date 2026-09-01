@@ -1883,6 +1883,12 @@ export class DaemonPtyAdapter implements IPtyProvider {
     }
   }
 
+  // S10-12 R2: forwards the client's raw transport-close signal — fires on every socket
+  // close/error, independent of the write-failure-driven recovery path above.
+  onTransportDisconnected(callback: () => void): () => void {
+    return this.client.onDisconnected(callback)
+  }
+
   dispose(): void {
     this.respawnAdoptionClosed = true
     this.sessionsAwaitingDaemonRecovery.clear()

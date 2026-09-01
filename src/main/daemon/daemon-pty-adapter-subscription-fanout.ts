@@ -55,6 +55,13 @@ export class DaemonPtyAdapterSubscriptionFanout {
     return combineUnsubscribes(this.adapters.map((adapter) => adapter.onWriteUnavailable(callback)))
   }
 
+  // S10-12 R2: fan out the raw transport-close signal the same way as onWriteUnavailable.
+  onTransportDisconnected(callback: () => void): () => void {
+    return combineUnsubscribes(
+      this.adapters.map((adapter) => adapter.onTransportDisconnected(callback))
+    )
+  }
+
   onReplay(_callback: (payload: { id: string; data: string }) => void): () => void {
     return () => {}
   }
