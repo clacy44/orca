@@ -33894,7 +33894,14 @@ export class OrcaRuntimeService {
     target: PendingMessageDeliveryTarget,
     waitSource: { tailBuffer: string[]; tailPartialLine: string; preview: string },
     mailboxHandle: string,
-    options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
+    options: {
+      reservedTypes?: ReadonlySet<string>
+      notifiedThreadIdKnown?: boolean
+      // S10-15 MF-1: the absence-probe continuation already proved liveness by other means
+      // (the probe itself) before routing here — re-running the probe would risk re-arming
+      // another deferred continuation instead of delivering.
+      skipAbsenceProbe?: boolean
+    }
   ): void {
     const waitText = buildTerminalWaitText(
       waitSource.tailBuffer,
@@ -35366,16 +35373,40 @@ export class OrcaRuntimeService {
               // an id-only check would type the pointer plus Enter into a process
               // whose idle was never observed. Re-read the live-idle gate.
               const current = this.resolveLiveDeliveryTarget(target)
-              if (
-                current?.ptyId === probedPtyId &&
-                current.lastAgentStatus === 'idle' &&
-                current.lastAgentStatusObservedLive
-              ) {
+              if (current?.ptyId !== probedPtyId) {
+                // S10-15 MF-1: no longer resolvable at all (exit/respawn/regraph during the
+                // probe window) — parity with the main path's own unresolvable-handle branch:
+                // a withheld attempt, not silence, so the slow retry is armed.
+                this.recordWithheldDelivery(mailboxHandle, 'no_live_pane')
+                return
+              }
+              if (current.lastAgentStatus === 'idle' && current.lastAgentStatusObservedLive) {
                 this.deliverPendingMessages(current.target, {
                   mailboxHandle,
                   skipAbsenceProbe: true
                 })
+                return
               }
+              // S10-15 MF-1 (parity with S10-15 F9's main-path branches, e.g.
+              // deliverPendingMessagesForHandle's pty branch): a busy-but-live Claude Code pane
+              // still injects mid-turn instead of waiting for an idle edge that this probe
+              // continuation has no way to observe. Any other disposition — not yet observed
+              // live, not a Claude pane, or blocked by attemptMidTurnClaudeDelivery's own modal
+              // guard — is a withheld attempt, not a silent drop.
+              const probedPty = this.ptysById.get(probedPtyId)
+              if (
+                current.lastAgentStatusObservedLive &&
+                current.writable &&
+                this.isClaudeCodePane(probedPty)
+              ) {
+                if (probedPty) {
+                  this.attemptMidTurnClaudeDelivery(current.target, probedPty, mailboxHandle, {
+                    skipAbsenceProbe: true
+                  })
+                  return
+                }
+              }
+              this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
             }, 0)
           }
         })
