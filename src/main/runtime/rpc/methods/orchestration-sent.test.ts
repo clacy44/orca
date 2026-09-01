@@ -77,6 +77,27 @@ describe('orchestration.sent (BUG 3)', () => {
     expect(response).toMatchObject({ ok: false })
   })
 
+  // S10-11 R4: a message relayed cross-host (relayPeerAskToHost) mints its id on the TARGET
+  // host's own store — this host never has a row for it. That must read as a typed, actionable
+  // hint (retry with --environment <peer>), never the bare "Message not found" a raw Error gave.
+  it('R4: an unknown message id answers a typed message_not_found hint naming --environment, not a bare "not found"', async () => {
+    setup()
+
+    const response = await dispatcher.dispatch(
+      request('sent-cross-host', 'orchestration.sent', { id: 'msg_on_a_peer' })
+    )
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'message_not_found',
+        data: {
+          nextSteps: expect.arrayContaining([expect.stringContaining('--environment')])
+        }
+      }
+    })
+  })
+
   // RPC-level integration (S10-0 review minor): drives the real ambient-push machinery
   // (deliverPendingMessagesForHandle against a live, idle leaf) rather than asserting on
   // runtime-private state directly, and reads the result back through the actual

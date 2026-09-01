@@ -122,6 +122,11 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'not_a_participant',
   'not_the_addressee',
   'dispatch_never_federated',
+  // S10-11 R1/R4: thrown with `data.nextSteps` a caller acts on verbatim (name_taken's
+  // alternative-name suggestion; message_not_found's cross-host --environment hint) — same
+  // reasoning as the S10-2b block above, just not caught by dispatcher-level tests until now.
+  'name_taken',
+  'message_not_found',
   // Pre-existing gaps also caught by this series' containment RPC tests: `not_found` and
   // `forbidden` are the quarantine/purge/review authority codes (orchestration-agents-
   // quarantine.ts predates S10-2b; orchestration-containment.ts is new).
