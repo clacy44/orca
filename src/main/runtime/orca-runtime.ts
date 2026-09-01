@@ -1273,6 +1273,7 @@ type RuntimeStore = {
   persistTerminalRole?: Store['persistTerminalRole']
   persistTerminalLaunchTokenHash?: Store['persistTerminalLaunchTokenHash']
   forgetTerminalLaunchTokenHash?: Store['forgetTerminalLaunchTokenHash']
+  isWritesFrozen?: Store['isWritesFrozen']
   getTerminalRoles?: Store['getTerminalRoles']
   getSshRemotePtyLeases?: Store['getSshRemotePtyLeases']
   getUI?: Store['getUI']
@@ -2899,6 +2900,8 @@ export class OrcaRuntimeService {
     { tabId: string; leafId: string; launchTokenHash: string; hostId?: string | null }
   >()
   private static readonly LAUNCH_TOKEN_ANCHOR_RETRY_CAP = 256
+  // S10-17/F2: bound the per-drain retry burst — the rest stay queued for the next success.
+  private static readonly LAUNCH_TOKEN_ANCHOR_DRAIN_LIMIT = 8
   // Why: the lane is a property of the pane record, bound at the paneKey mint (S9 §2a).
   private readonly paneLanes = new PaneLaneAuthority({
     rendererLeafExists: (tabId, leafId) => this.leaves.has(this.getLeafKey(tabId, leafId)),
@@ -10204,18 +10207,57 @@ export class OrcaRuntimeService {
   // right after any anchor persist succeeds — that success is itself a successful store
   // flush (persistTerminalLaunchTokenHash flushes synchronously), so this is the "next
   // successful flush" the retry set drains on.
+  // F2: bounded per call — the rest stay queued for the next successful persist, rather
+  // than forcing up to LAUNCH_TOKEN_ANCHOR_RETRY_CAP durable writes in one tick.
   private drainLaunchTokenAnchorRetryQueue(): void {
-    for (const [key, entry] of [...this.launchTokenAnchorRetryQueue]) {
+    const entries = [...this.launchTokenAnchorRetryQueue].slice(
+      0,
+      OrcaRuntimeService.LAUNCH_TOKEN_ANCHOR_DRAIN_LIMIT
+    )
+    for (const [key, entry] of entries) {
+      // F7: an absent store/method is not a successful persist — keep the entry queued.
+      if (!this.store?.persistTerminalLaunchTokenHash) {
+        console.warn('[runtime] launch-token-hash anchor retry: store unavailable', key)
+        continue
+      }
       try {
-        this.store?.persistTerminalLaunchTokenHash?.(
+        this.store.persistTerminalLaunchTokenHash(
           { tabId: entry.tabId, leafId: entry.leafId, launchTokenHash: entry.launchTokenHash },
           entry.hostId
         )
+        // F3: a frozen store flushes nothing and throws nothing — detect it explicitly.
+        if (this.store.isWritesFrozen?.()) {
+          throw new Error('writes frozen')
+        }
         this.launchTokenAnchorRetryQueue.delete(key)
       } catch (error) {
         console.warn('[runtime] launch-token-hash anchor retry failed', key, error)
       }
     }
+  }
+
+  // S10-17/F1: a deliberate forget must also drop any queued retry for this pane, or a
+  // later successful drain would resurrect the anchor the forget just deleted.
+  private handleFailedLaunchTokenHashAnchor(
+    key: string,
+    args: { tabId: string; leafId: string; launchTokenHash: string },
+    hostId: string | null | undefined,
+    logContext: string,
+    error: unknown
+  ): void {
+    console.warn(`[runtime] ${logContext}: failed to persist launch-token-hash anchor`, error)
+    if (
+      !this.launchTokenAnchorRetryQueue.has(key) &&
+      this.launchTokenAnchorRetryQueue.size >= OrcaRuntimeService.LAUNCH_TOKEN_ANCHOR_RETRY_CAP
+    ) {
+      const oldestKey = this.launchTokenAnchorRetryQueue.keys().next().value
+      if (oldestKey !== undefined) {
+        // F6: eviction is otherwise silent — name the pane that just lost its retry.
+        console.warn('[runtime] launch-token-hash anchor retry queue full, evicting', oldestKey)
+        this.launchTokenAnchorRetryQueue.delete(oldestKey)
+      }
+    }
+    this.launchTokenAnchorRetryQueue.set(key, { ...args, hostId })
   }
 
   // S10-17/F8: never aborts a launch on failure — logs loudly, queues the write for retry.
@@ -10227,20 +10269,15 @@ export class OrcaRuntimeService {
     const key = `${makePaneKey(args.tabId, args.leafId)}::${hostId ?? ''}`
     try {
       this.store?.persistTerminalLaunchTokenHash?.(args, hostId)
+      // F3: a frozen store flushes nothing and throws nothing — detect it explicitly and
+      // treat it as a failed persist, same as the thrown path.
+      if (this.store?.isWritesFrozen?.()) {
+        throw new Error('writes frozen')
+      }
       this.launchTokenAnchorRetryQueue.delete(key)
       this.drainLaunchTokenAnchorRetryQueue()
     } catch (error) {
-      console.warn(`[runtime] ${logContext}: failed to persist launch-token-hash anchor`, error)
-      if (
-        !this.launchTokenAnchorRetryQueue.has(key) &&
-        this.launchTokenAnchorRetryQueue.size >= OrcaRuntimeService.LAUNCH_TOKEN_ANCHOR_RETRY_CAP
-      ) {
-        const oldestKey = this.launchTokenAnchorRetryQueue.keys().next().value
-        if (oldestKey !== undefined) {
-          this.launchTokenAnchorRetryQueue.delete(oldestKey)
-        }
-      }
-      this.launchTokenAnchorRetryQueue.set(key, { ...args, hostId })
+      this.handleFailedLaunchTokenHashAnchor(key, args, hostId, logContext, error)
     }
   }
 
@@ -13493,6 +13530,9 @@ export class OrcaRuntimeService {
     // corroborating - retiring it here is the whole point of the lever. Guarded like the mint
     // sites: a flush failure on the teardown path logs, never throws (verify MEDIUM).
     for (const paneKey of paneKeys) {
+      // S10-17/F1: drop any queued retry for this pane too, or a later successful drain
+      // could resurrect the anchor this forget is about to delete.
+      this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${hostId ?? ''}`)
       try {
         this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
       } catch (error) {
@@ -27420,6 +27460,10 @@ export class OrcaRuntimeService {
           reportPtySpawnCommitted()
         }
         const adoptedStablePane = Boolean(result.stablePaneOwner)
+        // S10-17/F5: agentSessionEnsure adoption resumes an already-LIVE agent without
+        // spawning (claimed-agent-pty-owner.ts ensure()) — distinct from a genuine
+        // fresh/plain-shell launch, which also runs with adoptedStablePane===false.
+        const resumedLiveAgentSession = result.agentSessionEnsure?.disposition === 'adopted'
         const mintedPaneKey = paneKey
         if (result.agentSessionEnsure) {
           const canonicalSurface = result.agentSessionEnsure.owner.surface
@@ -27489,37 +27533,48 @@ export class OrcaRuntimeService {
             pty.launchConfig = effectiveLaunchConfig
               ? copySleepingAgentLaunchConfig(effectiveLaunchConfig)
               : null
-            pty.launchToken = launchToken ?? null
-            pty.launchIncarnationId = launchToken ? pty.incarnationId : null
-            pty.launchAgent = launchOpts.launchAgent ?? null
-            // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
-            // restart — which has no live launchToken, only its own process env — can still
-            // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
-            // F8: a spawned pty must not abort its launch over a persistence flush failure;
-            // S10-17: failure is queued for retry instead of being silently lost.
-            const launchTokenHostId = workspace.connectionId
-              ? toSshExecutionHostId(workspace.connectionId)
-              : undefined
-            if (launchToken) {
-              this.persistLaunchTokenHashAnchorWithRetry(
-                {
-                  tabId,
-                  leafId,
-                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
-                },
-                launchTokenHostId,
-                'createTerminal'
-              )
-            } else {
-              try {
-                // F4: a null-token relaunch (plain shell) must not leave the previous agent's
-                // anchor live for this pane — it would still verify against a stale token.
-                this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
-              } catch (error) {
-                console.warn(
-                  '[runtime] createTerminal: failed to update launch-token-hash anchor',
-                  error
+            // S10-17/F5: agentSessionEnsure resume-adopt (claimed-agent-pty-owner.ts
+            // ensure()) returns 'adopted' without spawning, so `!adoptedStablePane` is also
+            // true here for a LIVE agent this call never launched. Guard like registerPty's
+            // sibling site (:10298, pty.launchToken === null): a genuine launch/plain-shell
+            // relaunch (resumedLiveAgentSession false) always writes as before; a resumed
+            // live agent that already holds a token keeps it instead of being clobbered.
+            if (!resumedLiveAgentSession || pty.launchToken === null) {
+              pty.launchToken = launchToken ?? null
+              pty.launchIncarnationId = launchToken ? pty.incarnationId : null
+              pty.launchAgent = launchOpts.launchAgent ?? null
+              // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
+              // restart — which has no live launchToken, only its own process env — can still
+              // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
+              // F8: a spawned pty must not abort its launch over a persistence flush failure;
+              // S10-17: failure is queued for retry instead of being silently lost.
+              const launchTokenHostId = workspace.connectionId
+                ? toSshExecutionHostId(workspace.connectionId)
+                : undefined
+              if (launchToken) {
+                this.persistLaunchTokenHashAnchorWithRetry(
+                  {
+                    tabId,
+                    leafId,
+                    launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
+                  },
+                  launchTokenHostId,
+                  'createTerminal'
                 )
+              } else {
+                // S10-17/F1: drop any queued retry for this pane too, or a later successful
+                // drain could resurrect the anchor this forget is about to delete.
+                this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${launchTokenHostId ?? ''}`)
+                try {
+                  // F4: a null-token relaunch (plain shell) must not leave the previous agent's
+                  // anchor live for this pane — it would still verify against a stale token.
+                  this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
+                } catch (error) {
+                  console.warn(
+                    '[runtime] createTerminal: failed to update launch-token-hash anchor',
+                    error
+                  )
+                }
               }
             }
           }

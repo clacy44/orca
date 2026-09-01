@@ -48,6 +48,11 @@ const PANE_KEY = makePaneKey(TAB_ID, LEAF_ID)
 const TAB_ID_2 = 'tab-s10-17-second'
 const LEAF_ID_2 = '33333333-3333-4333-8333-333333333333'
 const PANE_KEY_2 = makePaneKey(TAB_ID_2, LEAF_ID_2)
+const TAB_ID_3 = 'tab-s10-17-third'
+const LEAF_ID_3 = '44444444-4444-4444-8444-444444444444'
+const PANE_KEY_3 = makePaneKey(TAB_ID_3, LEAF_ID_3)
+const TAB_ID_4 = 'tab-s10-17-fourth'
+const LEAF_ID_4 = '55555555-5555-4555-8555-555555555555'
 const PTY_ID = 'pty-s10-17-1'
 const PTY_ID_2 = 'pty-s10-17-2'
 
@@ -58,12 +63,16 @@ function createSharedStore(): {
   store: ConstructorParameters<typeof OrcaRuntimeService>[0]
   sessionSnapshot: () => WorkspaceSessionState
   setFlushFailuresRemaining: (n: number) => void
+  setWritesFrozen: (frozen: boolean) => void
 } {
   const session: WorkspaceSessionState = {
     ...getDefaultWorkspaceSession(),
     terminalLaunchTokenHashesByPaneKey: {}
   }
   let flushFailuresRemaining = 0
+  // S10-17/F3: mirrors persistence.ts's writeToDiskSync — a frozen store writes nothing
+  // and throws nothing, the one case flushOrThrow's caller cannot detect by exception alone.
+  let writesFrozen = false
   const store = {
     getRepo: (id: string) => store.getRepos().find((repo) => repo.id === id),
     getRepos: () => [
@@ -111,6 +120,10 @@ function createSharedStore(): {
         flushFailuresRemaining -= 1
         throw new Error('simulated flush failure')
       }
+      if (writesFrozen) {
+        // Mirrors writeToDiskSync: returns silently, writes nothing, throws nothing.
+        return
+      }
       session.terminalLaunchTokenHashesByPaneKey = {
         ...session.terminalLaunchTokenHashesByPaneKey,
         [makePaneKey(args.tabId, args.leafId)]: args.launchTokenHash
@@ -119,13 +132,17 @@ function createSharedStore(): {
     forgetTerminalLaunchTokenHash: (paneKey: string) => {
       const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
       session.terminalLaunchTokenHashesByPaneKey = rest
-    }
+    },
+    isWritesFrozen: () => writesFrozen
   }
   return {
     store,
     sessionSnapshot: () => session,
     setFlushFailuresRemaining: (n: number) => {
       flushFailuresRemaining = n
+    },
+    setWritesFrozen: (frozen: boolean) => {
+      writesFrozen = frozen
     }
   }
 }
@@ -153,10 +170,7 @@ function fakePtyController(onSpawn: (env: Record<string, string> | undefined) =>
  *  pty.ts's real stable-pane path does — this is what flips `adoptedStablePane` to true
  *  in createTerminal (orca-runtime.ts, mirrors the adoption fixture in orca-runtime.test.ts). */
 function fakeAdoptingPtyController(onSpawn: (args: { env?: Record<string, string> }) => void): {
-  adoptStablePane: (opts: {
-    tabId: string
-    leafId: string
-  }) => Promise<{
+  adoptStablePane: (opts: { tabId: string; leafId: string }) => Promise<{
     result: { id: string }
     owner: { tabId: string; leafId: string; ptyId: string }
   } | null>
@@ -197,6 +211,46 @@ function fakeAdoptingPtyController(onSpawn: (args: { env?: Record<string, string
     getForegroundProcess: async () => null,
     armAdoption: (armed: boolean) => {
       adoptionArmed = armed
+    }
+  }
+}
+
+/** S10-17/F4: models pty.ts's IN-SPAWN adoption — `spawn` itself resolves a stable owner
+ *  and reports `stablePaneOwner` on its result, independent of any `adoptedStablePane` hint
+ *  the caller passed in (`adoptStablePane` never resolves one ahead of the spawn, so
+ *  `adoptedBeforeLaunch` stays falsy and E1 still mints). This is the case E2 exists for:
+ *  `fakeAdoptingPtyController` above only reports an owner when the caller already told it
+ *  to, which cannot fail without E2 since the mint is already suppressed by E1. */
+function fakeInSpawnAdoptingPtyController(
+  onSpawn: (args: { env?: Record<string, string> }) => void
+): {
+  adoptStablePane: () => Promise<null>
+  spawn: (args: { env?: Record<string, string>; tabId?: string; leafId?: string }) => Promise<{
+    id: string
+    stablePaneOwner?: { handle: string; tabId: string; leafId: string }
+  }>
+  write: () => boolean
+  kill: () => boolean
+  getForegroundProcess: () => Promise<null>
+  armAdoption: (armed: boolean) => void
+} {
+  let adoptOnSpawn = false
+  return {
+    adoptStablePane: async () => null,
+    spawn: async (args) => {
+      onSpawn(args)
+      return adoptOnSpawn
+        ? {
+            id: PTY_ID,
+            stablePaneOwner: { handle: PTY_ID, tabId: args.tabId!, leafId: args.leafId! }
+          }
+        : { id: PTY_ID }
+    },
+    write: () => true,
+    kill: () => true,
+    getForegroundProcess: async () => null,
+    armAdoption: (armed: boolean) => {
+      adoptOnSpawn = armed
     }
   }
 }
@@ -330,7 +384,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     ).toBeNull()
   })
 
-  it('adopted pane with no delivered token is refused at the evidence-shape gate and gains no anchor', async () => {
+  it('adopted pane with no delivered token is refused by the anchor logic and gains no anchor', async () => {
     const { store, sessionSnapshot } = createSharedStore()
     const runtime = new OrcaRuntimeService(store)
     const spawnCalls: { env?: Record<string, string>; adoptedStablePane?: unknown }[] = []
@@ -358,12 +412,13 @@ describe('S10-17: launch-token anchor correctness', () => {
     })
     const hashBeforeEmptyAttempt = sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]
 
-    // Evidence-shape gate: an empty/undelivered token refuses before any anchor lookup runs.
+    // F9: a well-formed but wrong token exercises the anchor/live-token logic itself,
+    // not the evidence-shape gate (an empty string would refuse before reaching it).
     expect(
       runtime.verifyOrchestrationCompatibilityCaller({
         terminalHandle: adopted.handle,
         paneKey: PANE_KEY,
-        launchToken: ''
+        launchToken: 'well-formed-but-wrong-launch-token'
       })
     ).toBeNull()
     // The adoption itself must not have written a fresh (undeliverable) anchor.
@@ -422,6 +477,72 @@ describe('S10-17: launch-token anchor correctness', () => {
     expect(revealCalls[1]).not.toHaveProperty('launchToken')
   })
 
+  it('F4: in-spawn adoption (owner resolved inside spawn, not pre-flighted) delivers no token and writes no anchor', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const spawnCalls: { env?: Record<string, string> }[] = []
+    const controller = fakeInSpawnAdoptingPtyController((args) => spawnCalls.push(args))
+    runtime.setPtyController(controller)
+    const revealCalls: Record<string, unknown>[] = []
+    runtime.setNotifier({
+      worktreesChanged: vi.fn(),
+      reposChanged: vi.fn(),
+      activateWorktree: vi.fn(),
+      createTerminal: vi.fn(),
+      revealTerminalSession: async (_worktreeId: string, payload: Record<string, unknown>) => {
+        revealCalls.push(payload)
+        return { tabId: payload.tabId as string }
+      },
+      splitTerminal: vi.fn(),
+      renameTerminal: vi.fn(),
+      focusTerminal: vi.fn(),
+      closeTerminal: vi.fn(),
+      sleepWorktree: vi.fn(),
+      terminalFitOverrideChanged: vi.fn(),
+      terminalDriverChanged: vi.fn()
+    } as Parameters<typeof runtime.setNotifier>[0])
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    // Generation 1: adoptStablePane never resolves an owner and spawn does not report one
+    // either — a genuine mint, so pane P is left with a live token/anchor.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1',
+      presentation: 'focused'
+    })
+    const hashAfterGenuineMint = sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]
+    expect(hashAfterGenuineMint).toBeTruthy()
+
+    // Generation 2: adoptStablePane STILL resolves nothing beforehand (adoptedBeforeLaunch
+    // stays falsy, so E1 mints), but this time spawn itself reports stablePaneOwner — the
+    // in-spawn adoption E2 exists for. Without E2 this reveal would carry a dead-on-arrival
+    // token.
+    controller.armAdoption(true)
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1-reattach',
+      presentation: 'focused'
+    })
+
+    expect(revealCalls[0]).toHaveProperty('launchToken')
+    // F4: this is the assertion that fails without E2 — in-spawn adoption still minted
+    // (E1's gate never saw it coming), so only the publish gate can stop delivery.
+    expect(revealCalls[1]).not.toHaveProperty('launchToken')
+    // The genuine generation-1 anchor must be untouched by the in-spawn adoption.
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(
+      hashAfterGenuineMint
+    )
+  })
+
   it('E3: a failed anchor flush does not abort the launch, and the anchor lands after the next successful flush', async () => {
     const { store, sessionSnapshot, setFlushFailuresRemaining } = createSharedStore()
     const runtime = new OrcaRuntimeService(store)
@@ -458,6 +579,261 @@ describe('S10-17: launch-token anchor correctness', () => {
       title: 'agent-t2'
     })
 
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
+  })
+
+  it('F1: forgetting an anchor also drops its queued retry, at both forget sites', async () => {
+    const { store, sessionSnapshot, setFlushFailuresRemaining } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    let spawnCount = 0
+    runtime.setPtyController({
+      spawn: async () => {
+        spawnCount += 1
+        return { id: `pty-f1-${spawnCount}` }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    // --- Case 1: the S10-10/F1 retire lever (orca-runtime.ts ~:13497). ---
+    setFlushFailuresRemaining(1)
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1'
+    })
+    // Queued, not yet anchored — the only flush attempt so far failed.
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+    // command-finished fires the retire lever, which forgets pane P's anchor.
+    runtime.emitDaemonPtyTransientFact('pty-f1-1', { kind: 'command-finished', exitCode: 0 })
+
+    // An unrelated successful anchor persist must not resurrect P's retired anchor.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID_2,
+      leafId: LEAF_ID_2,
+      title: 'agent-t2'
+    })
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+
+    // --- Case 2: the F4 plain-shell relaunch forget (orca-runtime.ts ~:27517). ---
+    setFlushFailuresRemaining(1)
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID_3,
+      leafId: LEAF_ID_3,
+      title: 'agent-t3'
+    })
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY_3]).toBeUndefined()
+    // Relaunch the same pane as a plain shell (no launchConfig) — the forget branch fires.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'bash',
+      tabId: TAB_ID_3,
+      leafId: LEAF_ID_3,
+      title: 'plain-shell'
+    })
+
+    // Another unrelated successful anchor persist must not resurrect P3's forgotten anchor.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID_4,
+      leafId: LEAF_ID_4,
+      title: 'agent-t4'
+    })
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY_3]).toBeUndefined()
+  })
+
+  it('F2: the drain retries at most 8 entries per successful persist, the rest stay queued', async () => {
+    const { store, sessionSnapshot, setFlushFailuresRemaining } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    let spawnCount = 0
+    runtime.setPtyController({
+      spawn: async () => {
+        spawnCount += 1
+        return { id: `pty-f2-${spawnCount}` }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    const FAILED_PANE_COUNT = 9
+    const paneKeys: string[] = []
+    for (let i = 0; i < FAILED_PANE_COUNT; i++) {
+      const tabId = `tab-s10-17-f2-${i}`
+      const leafId = `66666666-6666-4666-8666-66666666666${i}`
+      paneKeys.push(makePaneKey(tabId, leafId))
+      setFlushFailuresRemaining(1)
+      await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        credentialLane: { kind: 'shared' },
+        command: 'claude',
+        launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+        tabId,
+        leafId,
+        title: `agent-f2-${i}`
+      })
+    }
+    for (const key of paneKeys) {
+      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[key]).toBeUndefined()
+    }
+
+    // One more launch succeeds on the first attempt, triggering exactly one bounded drain.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID_4,
+      leafId: LEAF_ID_4,
+      title: 'agent-f2-trigger'
+    })
+
+    const drainedCount = paneKeys.filter(
+      (key) => sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[key] !== undefined
+    ).length
+    const stillQueuedCount = paneKeys.length - drainedCount
+    expect(drainedCount).toBe(8)
+    expect(stillQueuedCount).toBe(1)
+  })
+
+  it('F3: a frozen store (writes silently no-op) is treated as a failed persist, not a success', async () => {
+    const { store, sessionSnapshot, setWritesFrozen } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    let capturedEnv: Record<string, string> | undefined
+    runtime.setPtyController(fakePtyController((env) => (capturedEnv = env)))
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    setWritesFrozen(true)
+    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1'
+    })
+    // F8: never abort the launch even though the store is frozen.
+    expect(terminal.handle).toBeTruthy()
+    const token1 = capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(token1).toBeTruthy()
+    const hash1 = createHash('sha256').update(token1!).digest('hex')
+    // The frozen write returned normally with nothing on disk — must not be read as success.
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+
+    // Unfreeze and cause an unrelated anchor persist to succeed — must drain the queued retry.
+    setWritesFrozen(false)
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID_2,
+      leafId: LEAF_ID_2,
+      title: 'agent-t2'
+    })
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
+  })
+
+  it('F5: agent-session resume-adopt of a live pty keeps its existing token/anchor and delivers no new mint', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const spawnCalls: {
+      env?: Record<string, string>
+      tabId?: string
+      leafId?: string
+      preAllocatedHandle?: string
+      agentSessionEnsure?: {
+        claim: unknown
+        surface: { worktreeId: string; tabId: string; leafId: string; terminalHandle: string }
+      }
+    }[] = []
+    runtime.setPtyController({
+      spawn: async (args) => {
+        spawnCalls.push(args)
+        // Models claimed-agent-pty-owner.ts's ensure(): a live owner is adopted WITHOUT
+        // calling the provider's spawn — the env (and any freshly minted token in it) is
+        // never delivered anywhere.
+        if (args.agentSessionEnsure) {
+          return {
+            id: PTY_ID,
+            agentSessionEnsure: {
+              disposition: 'adopted' as const,
+              owner: {
+                claim: args.agentSessionEnsure.claim,
+                generation: 'live-gen-1',
+                phase: 'live' as const,
+                ptyId: PTY_ID,
+                surface: {
+                  worktreeId: WORKTREE_ID,
+                  tabId: args.tabId!,
+                  leafId: args.leafId!,
+                  terminalHandle: args.preAllocatedHandle!
+                }
+              }
+            }
+          }
+        }
+        return { id: PTY_ID }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    // Generation 1: a genuine spawn mints and anchors a live token for pane P.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1'
+    })
+    const token1 = spawnCalls[0]?.env?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(token1).toBeTruthy()
+    const hash1 = createHash('sha256').update(token1!).digest('hex')
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
+
+    // Resume: agentSessionEnsure adopts the SAME live pty without spawning.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1-resume',
+      agentSessionClaim: {
+        digestVersion: 1,
+        keyId: 'k1',
+        identityDigest: 'd1',
+        worktreeScopeDigest: 'w1',
+        agent: 'claude'
+      }
+    })
+    const token2 = spawnCalls[1]?.env?.ORCA_AGENT_LAUNCH_TOKEN
+    // A second mint DID happen (E1's gate only fires on adoptStablePane, which this
+    // controller has none of) — the point of F5 is that it must go nowhere.
+    expect(token2).toBeTruthy()
+    expect(token2).not.toBe(token1)
+
+    // F5: the live agent's token and anchor must be unchanged — no clobber, no new
+    // mint delivered.
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
   })
 })
