@@ -43,6 +43,7 @@ export const WORKSPACE_SESSION_FIELD_OWNERSHIP = {
   terminalPtyIncarnationsByPaneKey: 'paneKeyed',
   terminalCredentialLanesByPaneKey: 'paneKeyed',
   terminalRolesByPaneKey: 'paneKeyed',
+  terminalLaunchTokenHashesByPaneKey: 'paneKeyed',
   // Why: this host-issued fence must never collide while unified renderer state merges equal repo ids across hosts.
   terminalTopologyRevisionByRepoId: 'hostPrivate',
   terminalSurfaceTombstonesByPaneKey: 'surfaceTombstoneKeyed'

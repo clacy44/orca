@@ -89,6 +89,10 @@ export function mergeWorkspaceSessions(
       ...base.terminalPtyIncarnationsByPaneKey,
       ...incoming.terminalPtyIncarnationsByPaneKey
     },
+    terminalLaunchTokenHashesByPaneKey: {
+      ...base.terminalLaunchTokenHashesByPaneKey,
+      ...incoming.terminalLaunchTokenHashesByPaneKey
+    },
     terminalTopologyRevisionByRepoId: mergeTerminalTopologyRevisions(
       base.terminalTopologyRevisionByRepoId,
       incoming.terminalTopologyRevisionByRepoId
@@ -178,6 +182,14 @@ export function removeRepoFromWorkspaceSession(
   if (next.terminalPtyIncarnationsByPaneKey) {
     next.terminalPtyIncarnationsByPaneKey = Object.fromEntries(
       Object.entries(next.terminalPtyIncarnationsByPaneKey).filter(([paneKey]) => {
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTerminalTabIds.has(paneKey.slice(0, separator))
+      })
+    )
+  }
+  if (next.terminalLaunchTokenHashesByPaneKey) {
+    next.terminalLaunchTokenHashesByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalLaunchTokenHashesByPaneKey).filter(([paneKey]) => {
         const separator = paneKey.lastIndexOf(':')
         return separator < 1 || !removedTerminalTabIds.has(paneKey.slice(0, separator))
       })

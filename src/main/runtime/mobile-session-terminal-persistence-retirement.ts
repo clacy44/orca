@@ -51,11 +51,16 @@ function recordTerminalSurfaceRetirement(
     ...session.terminalSurfaceTombstonesByPaneKey
   }
   delete terminalSurfaceTombstonesByPaneKey[paneKey]
+  const terminalLaunchTokenHashesByPaneKey = {
+    ...session.terminalLaunchTokenHashesByPaneKey
+  }
+  delete terminalLaunchTokenHashesByPaneKey[paneKey]
   return advanceTerminalTopologyRevision(
     {
       ...session,
       terminalPtyIncarnationsByPaneKey,
-      terminalSurfaceTombstonesByPaneKey
+      terminalSurfaceTombstonesByPaneKey,
+      terminalLaunchTokenHashesByPaneKey
     },
     surface.worktreeId
   )

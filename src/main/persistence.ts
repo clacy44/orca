@@ -2680,6 +2680,14 @@ function deleteScannedSessionFieldsForOwners(
       })
     )
   }
+  if (next.terminalLaunchTokenHashesByPaneKey) {
+    next.terminalLaunchTokenHashesByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalLaunchTokenHashesByPaneKey).filter(([paneKey]) => {
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTabIds.has(paneKey.slice(0, separator))
+      })
+    )
+  }
   if (next.terminalSurfaceTombstonesByPaneKey) {
     next.terminalSurfaceTombstonesByPaneKey = Object.fromEntries(
       Object.entries(next.terminalSurfaceTombstonesByPaneKey).filter(
@@ -7012,6 +7020,29 @@ export class Store {
 
   getTerminalRoles(hostId?: string | null): Record<string, string> {
     return { ...this.getWorkspaceSession(this.resolveHostId(hostId)).terminalRolesByPaneKey }
+  }
+
+  // Why sync-flush: the anchor exists precisely to survive a restart that kills the process
+  // between mint and any later write — the same SIGKILL race persistPtyBinding closes below
+  // (S10-10). Never stores the token itself, only its sha256.
+  persistTerminalLaunchTokenHash(
+    args: { tabId: string; leafId: string; launchTokenHash: string },
+    hostId?: string | null
+  ): void {
+    const resolvedHostId = this.resolveHostId(hostId)
+    const session = this.getWorkspaceSession(resolvedHostId)
+    const paneKey = makePaneKey(args.tabId, args.leafId)
+    session.terminalLaunchTokenHashesByPaneKey = {
+      ...session.terminalLaunchTokenHashesByPaneKey,
+      [paneKey]: args.launchTokenHash
+    }
+    if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
+      this.state.workspaceSessionsByHostId = {
+        ...this.state.workspaceSessionsByHostId,
+        [resolvedHostId]: session
+      }
+    }
+    this.flushOrThrow()
   }
 
   // Why: sync-flush the pty binding before pty:spawn returns to close the spawn/persist SIGKILL race (Issue #217).

@@ -77,6 +77,11 @@ export function migrateTerminalTabId(
     oldTabId,
     newTabId
   )
+  session.terminalLaunchTokenHashesByPaneKey = rekeyPaneKeyPrefix(
+    session.terminalLaunchTokenHashesByPaneKey,
+    oldTabId,
+    newTabId
+  )
   session.terminalSurfaceTombstonesByPaneKey = rekeyPaneKeyPrefix(
     session.terminalSurfaceTombstonesByPaneKey,
     oldTabId,

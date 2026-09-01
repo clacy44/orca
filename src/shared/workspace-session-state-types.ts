@@ -100,6 +100,10 @@ export type WorkspaceSessionState = {
   /** Agent-set purpose for a terminal (S10 BUG 2), keyed by paneKey so it survives restart
    *  and handle reissue. Independent of title — a rename never touches this map. */
   terminalRolesByPaneKey?: Record<string, string>
+  /** sha256 of the ORCA_AGENT_LAUNCH_TOKEN minted at launch for each pane (S10-10). Never the
+   *  token itself — a daemon-survived pty has no live token, only its process env does, so this
+   *  anchor is what lets a restored pane corroborate against the genuine hook activity later. */
+  terminalLaunchTokenHashesByPaneKey?: Record<string, string>
   /** Monotonic host authority watermark for terminal membership in each repo. */
   terminalTopologyRevisionByRepoId?: Record<string, number>
   /** Legacy per-surface fences migrated into terminalTopologyRevisionByRepoId on load. */
