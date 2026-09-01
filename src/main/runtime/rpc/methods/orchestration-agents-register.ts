@@ -102,7 +102,12 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         title: sanitizedTitle?.value ?? null,
         agentLabel: deriveAgentLabelSlug(liveTerminal?.title ?? null),
         originHandle: authority.terminalHandle,
-        originHostId: hostId
+        originHostId: hostId,
+        // R1: same liveness read the periodic refresh uses (agent-directory-rpc-liveness.ts's
+        // `paneResolves`) — a name held by a row whose pane no longer resolves to a live pty is
+        // dead, never a reason to refuse this register or mint a second, anonymous identity.
+        isPaneLive: (paneKey) =>
+          runtime.getAgentDirectoryLivenessSignals(paneKey).terminalHandle !== null
       })
 
       if (result.outcome === 'name_taken') {
@@ -114,9 +119,14 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
           outcome: 'name_taken',
           reasonCode: null
         })
+        // R1: name the live pane so the caller can tell "someone else is genuinely using this
+        // name right now" from a stale refusal, instead of one indistinguishable message either way.
+        const heldByNote = result.liveTerminalHandle
+          ? ` It is currently live on pane ${result.liveTerminalHandle}.`
+          : ''
         throw new OrchestrationError(
           'name_taken',
-          `The name "${params.name}" is already registered.`,
+          `The name "${params.name}" is already registered.${heldByNote}`,
           { nextSteps: [`orca agents register --name ${result.alternative} --role "<your role>"`] }
         )
       }
@@ -140,7 +150,11 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         repointedMessages: result.outcome === 'reminted' ? result.repointedMessages : 0,
         // Nonzero only past the per-call batch ceiling (agent-mailbox-repoint.ts) — those rows
         // are not reachable by any other path once this re-mint's transaction commits.
-        pendingOnOldHandle: result.outcome === 'reminted' ? result.pendingOnOldHandle : 0
+        pendingOnOldHandle: result.outcome === 'reminted' ? result.pendingOnOldHandle : 0,
+        // R2: a tombstoned predecessor under this same host+name whose thread membership this
+        // fresh id just inherited. Always 0 on a 'reminted' row (its id, and so its membership,
+        // was never orphaned in the first place).
+        adoptedThreads: result.outcome === 'created' ? result.adoptedThreads : 0
       }
     }
   })

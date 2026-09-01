@@ -6,7 +6,8 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
-import { repointMailboxOnReMint } from './agent-mailbox-repoint'
+import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
+import { adoptPredecessorThreadMembership } from './agent-thread-succession'
 import type { AgentAuditRow, AgentRow, AgentState } from './types'
 
 // Why a local generator, not db.ts's generateId: importing it back from db.ts (which will
@@ -31,12 +32,24 @@ export type UpsertAgentByPaneSuffixParams = {
   agentLabel: string | null
   originHandle: string | null
   originHostId: string
+  // R1: ground truth for "is the NAME HOLDER's own pane still alive" — never the stored
+  // `state` column, which is refreshed lazily and can lag well past an actual pane relaunch.
+  // Omitted defaults to "assume live": the conservative direction, since it can only ever
+  // fall back to the pre-R1 name_taken refusal, never mistakenly steal a still-live identity.
+  isPaneLive?: (paneKey: string) => boolean
 }
 
 export type UpsertAgentByPaneSuffixResult =
-  | { outcome: 'created'; agent: AgentRow }
+  | { outcome: 'created'; agent: AgentRow; adoptedThreads: number }
   | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
-  | { outcome: 'name_taken'; alternative: string }
+  | {
+      outcome: 'name_taken'
+      alternative: string
+      // R1: set only when the collision is against a row whose pane resolved live — names the
+      // pane a caller can go inspect, never populated for the quarantined-row lock case.
+      livePaneKey: string | null
+      liveTerminalHandle: string | null
+    }
 
 function paneSuffix(paneKey: string): string {
   const idx = paneKey.indexOf(':')
@@ -85,7 +98,12 @@ function nextFreeAlternative(db: Database.Database, hostId: string, base: string
 }
 
 /** Idempotent on the pane-key suffix (CONTAINMENT precedent: tabId changes when a pane moves
- * tabs, the leaf identity does not). Never silently renames the caller on a name collision. */
+ * tabs, the leaf identity does not). Never silently renames the caller on a name collision.
+ *
+ * R1 (S10-11, agent-pane-rebind.ts): a same-name register whose existing holder's pane is
+ * confirmed dead/unresolvable re-adopts that row in place (remintRow) instead of refusing —
+ * same id, so every caller that resolves identity via getAgentByPaneKey(hostId, thisPaneKey)
+ * (agents threads, thread replay, reply, pact, wake delivery) finds the original row again. */
 export function upsertAgentByPaneSuffix(
   db: Database.Database,
   params: UpsertAgentByPaneSuffixParams
@@ -94,43 +112,33 @@ export function upsertAgentByPaneSuffix(
   try {
     const existing = findByPaneSuffix(db, params.hostId, params.paneKey)
     if (existing) {
-      db.prepare(
-        `UPDATE agents SET
-           display_name = ?, role = ?, terminal_handle = ?, process_incarnation = ?,
-           worktree_id = ?, worktree_path = ?, branch = ?, title = ?, agent_label = ?,
-           pane_key = ?, derived = 0, last_seen_at = datetime('now')
-         WHERE id = ?`
-      ).run(
-        params.displayName,
-        params.role,
-        params.terminalHandle,
-        params.processIncarnation,
-        params.worktreeId,
-        params.worktreePath,
-        params.branch,
-        params.title,
-        params.agentLabel,
-        params.paneKey,
-        existing.id
-      )
-      const reminted = db.prepare('SELECT * FROM agents WHERE id = ?').get(existing.id) as AgentRow
-      // S10-7 F-C: pending mail follows the agent across a re-mint, same as its identity does.
-      const { repointedMessages, pendingOnOldHandle } = repointMailboxOnReMint(db, existing, params)
-      db.exec('COMMIT')
-      return { outcome: 'reminted', agent: reminted, repointedMessages, pendingOnOldHandle }
+      return remintRow(db, existing, params)
     }
 
     const nameHolder = findByName(db, params.hostId, params.displayName)
     if (nameHolder) {
-      if (!reclaimableHolder(nameHolder)) {
+      // Quarantined: name stays locked regardless of pane liveness — existing semantics.
+      if (nameHolder.quarantined !== 1 && reclaimableHolder(nameHolder)) {
+        db.prepare(
+          `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL,
+             role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
+        ).run(nameHolder.id)
+      } else if (nameHolder.quarantined === 1 || holderPaneIsLive(nameHolder, params.isPaneLive)) {
+        // Locked (quarantined) or the holder's pane is genuinely still live: refuse, never
+        // silently rename, never a raw INSERT that could hit the UNIQUE constraint.
         const alternative = nextFreeAlternative(db, params.hostId, params.displayName)
         db.exec('COMMIT')
-        return { outcome: 'name_taken', alternative }
+        return {
+          outcome: 'name_taken',
+          alternative,
+          livePaneKey: nameHolder.quarantined === 1 ? null : nameHolder.pane_key,
+          liveTerminalHandle: nameHolder.quarantined === 1 ? null : nameHolder.terminal_handle
+        }
+      } else {
+        // R1: non-derived holder, not quarantined, pane confirmed dead/unresolvable (or the
+        // row never had one) — rebind in place rather than mint a second, anonymous identity.
+        return remintRow(db, nameHolder, params)
       }
-      db.prepare(
-        `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL,
-           role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
-      ).run(nameHolder.id)
     }
 
     const id = generateAgentId()
@@ -158,8 +166,16 @@ export function upsertAgentByPaneSuffix(
       params.originHostId
     )
     const created = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as AgentRow
+    // R2: a tombstoned predecessor under this same host+name (retired, or just tombstoned
+    // above by the reclaim branch) leaves its thread membership behind unless adopted here.
+    const { adoptedThreads } = adoptPredecessorThreadMembership(
+      db,
+      params.hostId,
+      params.displayName,
+      id
+    )
     db.exec('COMMIT')
-    return { outcome: 'created', agent: created }
+    return { outcome: 'created', agent: created, adoptedThreads }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
