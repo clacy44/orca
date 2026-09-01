@@ -17,10 +17,29 @@ export function adoptPredecessorThreadMembership(
   displayName: string,
   successorId: string
 ): ThreadSuccessionOutcome {
+  // R2 fix: quarantine must survive retire. A quarantined row's own thread membership never
+  // transfers (the `quarantined = 0` conjunct below) — but a quarantined predecessor sharing
+  // this name also refuses succession OUTRIGHT (both conjuncts, no adoption from any
+  // predecessor at all) so a chain of tombstoned rows under the same name cannot launder the
+  // locked identity's access onto a fresh registration through an unrelated legitimate
+  // predecessor's membership. Retire still frees the NAME (documented two-step); it must never
+  // also free the quarantined row's THREADS onto whoever reclaims it.
+  const anyQuarantinedPredecessor = db
+    .prepare(
+      `SELECT 1 FROM agents
+       WHERE host_id = ? AND display_name = ? AND tombstoned_at IS NOT NULL
+         AND quarantined = 1 AND id != ?`
+    )
+    .get(hostId, displayName, successorId)
+  if (anyQuarantinedPredecessor) {
+    return { adoptedThreads: 0 }
+  }
+
   const predecessors = db
     .prepare(
       `SELECT id FROM agents
-       WHERE host_id = ? AND display_name = ? AND tombstoned_at IS NOT NULL AND id != ?`
+       WHERE host_id = ? AND display_name = ? AND tombstoned_at IS NOT NULL
+         AND quarantined = 0 AND id != ?`
     )
     .all(hostId, displayName, successorId) as { id: string }[]
   if (predecessors.length === 0) {

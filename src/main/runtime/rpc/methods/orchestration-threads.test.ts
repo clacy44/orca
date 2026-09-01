@@ -291,6 +291,39 @@ describe('orchestration.threads.* / orchestration.wait', () => {
       expect(replay.degraded).toBe(false)
     })
 
+    it('R2 fix: quarantine then retire never hands a sensitive thread to the next registrant of the freed name', async () => {
+      setup()
+      const predecessor = await registerAgent('agent-a', evidenceA)
+      const agentB = await registerAgent('agent-b', evidenceB)
+      const created = (await call(
+        'orchestration.threads.create',
+        { subject: 'credential rotation', with: `agent:${agentB}`, sensitive: true },
+        ctx(evidenceA)
+      )) as { thread: { id: string } }
+
+      await call(
+        'orchestration.agents.quarantine',
+        { id: predecessor, reasonCode: 'suspicious' },
+        ctx(evidenceB)
+      )
+      await call('orchestration.agents.retire', { id: predecessor, force: true }, ctx(evidenceB))
+
+      const successor = (await call(
+        'orchestration.agents.register',
+        { name: 'agent-a', role: 'take two' },
+        ctx(evidenceARelaunch)
+      )) as { agent: { id: string }; created: boolean; adoptedThreads: number }
+      expect(successor.created).toBe(true)
+      expect(successor.agent.id).not.toBe(predecessor)
+      expect(successor.adoptedThreads).toBe(0)
+
+      // Still refused, exactly like any other outsider — no widening from the quarantined
+      // predecessor's own membership.
+      await expect(
+        call('orchestration.threads.get', { id: created.thread.id }, ctx(evidenceARelaunch))
+      ).rejects.toMatchObject({ code: 'not_a_participant' })
+    })
+
     it('T4: a true outsider (never a participant, never held the name) still gets the degraded view — no widening', async () => {
       setup()
       await registerAgent('agent-a', evidenceA)

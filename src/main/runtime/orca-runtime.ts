@@ -33973,7 +33973,18 @@ export class OrcaRuntimeService {
     )
     const recipient = resolveMessageRecipientPresence(message.to_handle, (handle) => {
       try {
-        return this.getLiveLeafForHandle(handle).leaf
+        // R4/T1: to_handle is a durable mailbox address (agent:<id>, run:<id>, dispatch:<id>)
+        // for most of the mail this method is asked about, never a live terminal handle by
+        // itself — same resolution the push path (resolveMailboxTerminalHandle, used by
+        // deliverPendingMessagesForHandle) already runs before it looks up a leaf. Without it
+        // this always read 'unresolved'/lastSeenAt null for that mail even when the recipient's
+        // pane is live and pushes succeed. A bare, already-live terminal handle has no prefix
+        // match and falls through to the handle itself unchanged.
+        // S10-11 verify: mirror the push path's FULL mapping — resolveStalePeerHandle covers
+        // the re-minted-pane handle the mailbox resolver alone misses.
+        const resolvedHandle =
+          this.resolveMailboxTerminalHandle(handle) ?? this.resolveStalePeerHandle(handle) ?? handle
+        return this.getLiveLeafForHandle(resolvedHandle).leaf
       } catch {
         return null
       }

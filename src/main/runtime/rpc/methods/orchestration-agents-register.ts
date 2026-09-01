@@ -106,8 +106,24 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // R1: same liveness read the periodic refresh uses (agent-directory-rpc-liveness.ts's
         // `paneResolves`) — a name held by a row whose pane no longer resolves to a live pty is
         // dead, never a reason to refuse this register or mint a second, anonymous identity.
-        isPaneLive: (paneKey) =>
-          runtime.getAgentDirectoryLivenessSignals(paneKey).terminalHandle !== null
+        //
+        // Corroborated, not a single instantaneous bit: `terminalHandle !== null` alone is one
+        // read of the connected-pty map, which can transiently miss a pane that is still
+        // genuinely alive (a reload/reconnect blip). `observedLive`/`lastAgentStatus` come from
+        // the last-known leaf record independently of whether a pty is connected *right now* —
+        // classifyAgentLiveness (agent-directory.ts) already treats these as corroborating
+        // signals for a row's own liveness; an identity handover gets at least the same bar.
+        // Every extra condition here only ever makes a holder read MORE live (harder to take
+        // over), never less — this cannot turn a genuinely-dead holder into a live one.
+        // S10-11 verify + fix-round synthesis: the paneResolves signal plus the TRANSIENT
+        // observedLive guard (a reconnect blip must not read as a dead pane and become a
+        // takeover window). Deliberately NOT lastAgentStatus — that value is sticky and a
+        // long-dead pane retaining one would block its own legitimate rebind, the exact
+        // field failure this slice exists to fix.
+        isPaneLive: (paneKey) => {
+          const signals = runtime.getAgentDirectoryLivenessSignals(paneKey)
+          return signals.terminalHandle !== null || signals.observedLive
+        }
       })
 
       if (result.outcome === 'name_taken') {
@@ -123,21 +139,40 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // name right now" from a stale refusal, instead of one indistinguishable message either way.
         const heldByNote = result.liveTerminalHandle
           ? ` It is currently live on pane ${result.liveTerminalHandle}.`
-          : ''
+          : result.holderPaneDead
+            ? " Its holder's pane is gone; retiring it frees the name."
+            : ''
         throw new OrchestrationError(
           'name_taken',
           `The name "${params.name}" is already registered.${heldByNote}`,
-          { nextSteps: [`orca agents register --name ${result.alternative} --role "<your role>"`] }
+          {
+            nextSteps: [
+              ...(result.holderPaneDead
+                ? [`orca agents retire ${params.name} --force  (frees the name; operator's call)`]
+                : []),
+              `orca agents register --name ${result.alternative} --role "<your role>"`
+            ]
+          }
         )
       }
 
+      // Auditability: `existingForPane` (computed above, before the upsert) already tells apart
+      // the two ways a 'reminted' outcome happens — the SAME pane re-registering (its own row,
+      // found by pane-suffix, no identity change of hands) vs. a DIFFERENT pane taking over a
+      // name-holder row whose pane read dead (an actual identity handover). Both used to write
+      // the same outcome with no reason — indistinguishable in the audit trail from each other,
+      // and from any other 'reminted' row. Only the handover case gets the descriptive code.
+      const isDeadPaneIdentityTakeover = result.outcome === 'reminted' && !existingForPane
       db.writeAgentAudit({
         agentId: result.agent.id,
         actorPaneKey: authority.paneKey,
         actorHostId: hostId,
         verb: 'register',
         outcome: result.outcome,
-        reasonCode: null
+        reasonCode: isDeadPaneIdentityTakeover
+          ? `dead-pane identity takeover: name "${params.name}" reclaimed by a new pane after ` +
+            'its previous holder pane stopped resolving live'
+          : null
       })
 
       return {

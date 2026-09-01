@@ -12,11 +12,17 @@ function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
 }
 
-function tombstone(db: Database.Database, id: string, hostId: string, displayName: string): void {
+function tombstone(
+  db: Database.Database,
+  id: string,
+  hostId: string,
+  displayName: string,
+  quarantined = 0
+): void {
   db.prepare(
-    `INSERT INTO agents (id, display_name, host_id, state, derived, origin_kind, origin_host_id, tombstoned_at)
-     VALUES (?, ?, ?, 'gone', 0, 'pane', ?, datetime('now'))`
-  ).run(id, displayName, hostId, hostId)
+    `INSERT INTO agents (id, display_name, host_id, state, derived, quarantined, origin_kind, origin_host_id, tombstoned_at)
+     VALUES (?, ?, ?, 'gone', 0, ?, 'pane', ?, datetime('now'))`
+  ).run(id, displayName, hostId, quarantined, hostId)
 }
 
 describe('adoptPredecessorThreadMembership', () => {
@@ -129,5 +135,45 @@ describe('adoptPredecessorThreadMembership', () => {
     expect(audit.agent_id).toBe('agt_succ')
     expect(audit.outcome).toBe('ok')
     expect(audit.reason_code).toContain('1 thread(s)')
+  })
+
+  // R2 fix: quarantine must survive retire — a quarantined predecessor's own thread membership
+  // never transfers to whoever next reclaims its name.
+  it("never transfers a quarantined predecessor's thread membership, even after it is retired", () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 'credential rotation',
+      createdByAgentId: 'agt_pred',
+      sensitive: true,
+      participants: [{ participantKey: 'agt_pred', agentId: 'agt_pred', role: 'owner' }]
+    })
+    tombstone(raw, 'agt_pred', 'local', 'agent-a', 1)
+
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'agent-a', 'agt_succ')
+    expect(outcome.adoptedThreads).toBe(0)
+    expect(db.isThreadParticipant(thread.id, 'agt_succ')).toBe(false)
+    expect(db.isThreadParticipant(thread.id, 'agt_pred')).toBe(true)
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM agent_audit').get()).toEqual({ n: 0 })
+    db.close()
+  })
+
+  // Defense-in-depth against laundering: a quarantined predecessor sharing a name blocks
+  // adoption from EVERY predecessor under that name, not only its own membership.
+  it('a quarantined predecessor blocks adoption from a different, non-quarantined predecessor sharing the same name', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 'ok thread',
+      createdByAgentId: 'agt_pred_clean',
+      participants: [{ participantKey: 'agt_pred_clean', agentId: 'agt_pred_clean', role: 'owner' }]
+    })
+    tombstone(raw, 'agt_pred_clean', 'local', 'agent-a', 0)
+    tombstone(raw, 'agt_pred_quarantined', 'local', 'agent-a', 1)
+
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'agent-a', 'agt_succ')
+    expect(outcome.adoptedThreads).toBe(0)
+    expect(db.isThreadParticipant(thread.id, 'agt_succ')).toBe(false)
+    db.close()
   })
 })

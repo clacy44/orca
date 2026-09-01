@@ -151,6 +151,99 @@ describe('agent-directory', () => {
       expect(rows).toHaveLength(1)
     })
 
+    it('R1 fix: an already-registered pane RENAMING itself into a name a LIVE different row holds gets typed name_taken, never a raw UNIQUE constraint error', () => {
+      const db = rawDb()
+      // The pane whose register we're about to retry, already registered under its own name.
+      upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab1:leaf-aaa',
+          terminalHandle: 'term_a',
+          displayName: 'agent-a'
+        })
+      )
+      // A different, LIVE row already owns the name it's about to try renaming into.
+      upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab2:leaf-bbb',
+          terminalHandle: 'term_b',
+          displayName: 'agent-b'
+        })
+      )
+
+      // Same pane (findByPaneSuffix matches tab1:leaf-aaa) re-registers with a NEW display
+      // name that collides with agent-b's row, whose pane reads live.
+      const rename = upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab1:leaf-aaa',
+          terminalHandle: 'term_a',
+          displayName: 'agent-b',
+          isPaneLive: (paneKey) => paneKey === 'tab2:leaf-bbb'
+        })
+      )
+      expect(rename.outcome).toBe('name_taken')
+      if (rename.outcome === 'name_taken') {
+        expect(rename.livePaneKey).toBe('tab2:leaf-bbb')
+        expect(rename.liveTerminalHandle).toBe('term_b')
+      }
+      // Both original rows survive untouched — no UPDATE ran, no raw constraint error thrown.
+      const names = db
+        .prepare('SELECT display_name FROM agents WHERE host_id = ? ORDER BY display_name')
+        .all('local') as { display_name: string }[]
+      expect(names.map((r) => r.display_name)).toEqual(['agent-a', 'agent-b'])
+    })
+
+    it('S10-11 verify blocker: renaming onto a DEAD different row REFUSES typed — register never destroys another identity to free a name', () => {
+      const db = rawDb()
+      upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab1:leaf-aaa', terminalHandle: 'term_a', displayName: 'agent-a' })
+      )
+      const deadHolder = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab2:leaf-bbb', terminalHandle: 'term_b', displayName: 'agent-b' })
+      )
+      const deadHolderId = deadHolder.outcome === 'created' ? deadHolder.agent.id : ''
+      // Queue mail for the dead holder: the refusal must strand NOTHING.
+      db.prepare(
+        `INSERT INTO messages (id, run_id, from_handle, to_handle, subject, type, priority)
+         VALUES ('msg_holdermail', 'run_peer_local', 'term_a', 'agent:' || ?, 'still yours', 'status', 'normal')`
+      ).run(deadHolderId)
+
+      const rename = upsertAgentByPaneSuffix(
+        db,
+        baseParams({
+          paneKey: 'tab1:leaf-aaa',
+          terminalHandle: 'term_a',
+          displayName: 'agent-b',
+          isPaneLive: () => false // agent-b's own pane is confirmed dead
+        })
+      )
+      // Typed refusal with the operator hint — never a tombstone, never a raw UNIQUE error
+      // (mutation guard: restoring the old destructive branch turns all three of these red).
+      expect(rename.outcome).toBe('name_taken')
+      if (rename.outcome === 'name_taken') {
+        expect(rename.holderPaneDead).toBe(true)
+        expect(rename.livePaneKey).toBeNull()
+      }
+      const holderRow = db
+        .prepare('SELECT tombstoned_at, display_name FROM agents WHERE id = ?')
+        .get(deadHolderId) as { tombstoned_at: string | null; display_name: string }
+      expect(holderRow.tombstoned_at).toBeNull()
+      expect(holderRow.display_name).toBe('agent-b')
+      const mail = db
+        .prepare(`SELECT COUNT(*) AS c FROM messages WHERE to_handle = 'agent:' || ?`)
+        .get(deadHolderId) as { c: number }
+      expect(mail.c).toBe(1)
+      // The caller keeps its own identity untouched.
+      const caller = db
+        .prepare(`SELECT display_name FROM agents WHERE pane_key = 'tab1:leaf-aaa'`)
+        .get() as { display_name: string }
+      expect(caller.display_name).toBe('agent-a')
+    })
+
     it('omitting isPaneLive defaults conservative (assumed live -> name_taken, never a mistaken rebind)', () => {
       const db = rawDb()
       upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
@@ -214,6 +307,38 @@ describe('agent-directory', () => {
         .get(thread.id) as { participant_key: string; agent_id: string }
       expect(participant.participant_key).toBe(successor.agent.id)
       expect(participant.agent_id).toBe(successor.agent.id)
+    })
+
+    it("R2 fix: quarantine then retire never hands the quarantined row's sensitive-thread membership to the next registrant of its name", () => {
+      const db = rawDb()
+      const first = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      const predecessorId = first.outcome === 'created' ? first.agent.id : ''
+      const { thread } = orchestrationDb!.createThread({
+        subject: 'credential rotation',
+        createdByAgentId: predecessorId,
+        sensitive: true,
+        participants: [{ participantKey: predecessorId, agentId: predecessorId, role: 'owner' }]
+      })
+
+      // The documented two-step: quarantine withholds mail, retire is the operator deciding
+      // it's really gone and freeing the name — this must not also free its thread membership.
+      db.prepare('UPDATE agents SET quarantined = 1 WHERE id = ?').run(predecessorId)
+      db.prepare(
+        `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL WHERE id = ?`
+      ).run(predecessorId)
+
+      const successor = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab9:leaf-newcomer', terminalHandle: 'term_newcomer' })
+      )
+      expect(successor.outcome).toBe('created')
+      if (successor.outcome !== 'created') {
+        return
+      }
+      expect(successor.agent.id).not.toBe(predecessorId)
+      expect(successor.adoptedThreads).toBe(0)
+      expect(orchestrationDb!.isThreadParticipant(thread.id, successor.agent.id)).toBe(false)
+      expect(orchestrationDb!.isThreadParticipant(thread.id, predecessorId)).toBe(true)
     })
 
     it('adoptedThreads is 0 when no tombstoned predecessor shares the name', () => {
