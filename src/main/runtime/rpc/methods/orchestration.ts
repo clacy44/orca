@@ -60,7 +60,10 @@ import {
 } from './orchestration-caller-identity'
 import { buildFederatedSenderIdentity } from '../../orchestration/federated-sender-identity'
 import { requireAddressableAgentRecipient } from '../../orchestration/addressable-agent-recipient'
+import { validateDisplayNameCandidate } from '../../orchestration/agent-name-sanitizer'
 import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federated-peer-ask'
+import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-federated-peer-send'
+import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
   extractPayloadKind
@@ -113,6 +116,9 @@ function isWorkerReportOutcome(value: unknown): value is 'succeeded' | 'failed' 
 const SendParams = z
   .object({
     to: OptionalString,
+    // S10-15 F1: set only when `to` names a foreign agent (`name@host` resolved CLI-side) — the
+    // saved-environment selector to relay this send to. Never opens a second client.
+    host: OptionalString,
     subject: requiredString('Missing --subject'),
     from: OptionalString,
     body: OptionalString,
@@ -564,6 +570,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_PACT_STEP_METHODS,
   ...ORCHESTRATION_THREAD_INVITE_METHODS,
   ...ORCHESTRATION_FEDERATED_PEER_ASK_METHODS,
+  ...ORCHESTRATION_FEDERATED_PEER_SEND_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,
@@ -575,6 +582,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         legacyCoordinatorRunId,
         revalidateLegacyCoordinator,
         orchestrationCompatibilityCallerAuthority,
+        orchestrationCompatibilityEvidence,
+        orchestrationMutation,
         pairedDeviceId,
         clientKind,
         signal
@@ -585,6 +594,43 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // both federation relay directions) forwards params.payload verbatim — one guard at the
       // single entry closes the forgery for all of them at once.
       assertPayloadKindNotCallerSet(params.payload)
+      // S10-15 F1 R3: `host` names a foreign agent's saved environment — relay through THIS
+      // runtime rather than resolving `to` against this host's own directory. Guarded before
+      // every other branch (group fan-out, remote-run mailbox, lifecycle mail) — a cross-host
+      // relay is only ever a point-to-point `agent:` send.
+      if (params.host && params.host !== LOCAL_PEER_HOST) {
+        if (!params.to?.startsWith('agent:')) {
+          throw new OrchestrationError(
+            'invalid_argument',
+            '--host is only valid with an agent: recipient.'
+          )
+        }
+        if (params.type === 'worker_done' || params.type === 'heartbeat') {
+          throw new OrchestrationError(
+            'invalid_argument',
+            'Dispatch lifecycle messages (worker_done/heartbeat) cannot cross a peer link.'
+          )
+        }
+        return relayPeerSendToHost({
+          params: {
+            to: params.to,
+            host: params.host,
+            subject: params.subject,
+            body: params.body,
+            type: params.type,
+            priority: params.priority,
+            threadId: params.threadId,
+            payload: params.payload,
+            acknowledgeGate: params.acknowledgeGate
+          },
+          runtime,
+          db,
+          orchestrationCompatibilityEvidence,
+          pairedDeviceId,
+          clientKind,
+          orchestrationMutation
+        })
+      }
       const remoteRunMailbox = {
         remoteRunMailbox: params.remoteRunMailbox,
         pairedDeviceId,
@@ -834,6 +880,31 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // later graph reload (BUG 6) — record its pane key now so the ambient
         // push can re-resolve it once the handle goes stale.
         const isBareHandleTarget = isBarePeerHandle(to)
+        // S10-15 finding 11: a display-name-shaped recipient with no live pane AND no directory
+        // hit stops queuing into the void (the reported "queued / recipient unresolved" symptom)
+        // — runtime-side, not CLI-side, because only the runtime holds the live terminal-handle
+        // map needed to tell a legacy bare handle (e.g. `worker-one`, still delivered via the
+        // bare-handle path below) apart from a genuinely unaddressable name.
+        if (
+          !agentRecipient &&
+          isBareHandleTarget &&
+          !routing.run &&
+          validateDisplayNameCandidate(to).ok &&
+          runtime.getTerminalPaneKey(to) == null &&
+          db.getAgentByName(senderHostId, to) == null
+        ) {
+          throw new OrchestrationError(
+            'agent_unknown',
+            `No agent named "${to}" is registered on this host.`,
+            {
+              nextSteps: [
+                `orca agents find --all-hosts "${to}"`,
+                'orca agents list --all-hosts',
+                `orca orchestration send --to ${to}@<host> … (a peer on another host)`
+              ]
+            }
+          )
+        }
         const recipientPaneKey = agentRecipient
           ? (agentRecipient.pane_key ?? undefined)
           : isBareHandleTarget
@@ -1818,6 +1889,32 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // relay accepted — the reply lands and the coordinator never learns it did.
           message: { id: relay.message_id }
         }
+      }
+
+      // S10-15 (chair ruling 7, replacing Design A R8): a foreign-origin row (imported by
+      // federatedSend/federatedAsk — the "authored remotely" discriminator) has no automatic
+      // route back (R9 was cut: no locally-derivable, non-spoofable fingerprint->environment
+      // resolution exists — see Task 0). Refuse with a typed, actionable disposition rather than
+      // silently writing a reply nobody on the peer will ever see. Finding 14: a paired peer (or
+      // mobile client) reaching this branch is refused first, before the routing disposition —
+      // a reply to a foreign-origin row must be issued locally.
+      if (original.peer_link_device_id) {
+        if (pairedDeviceId != null || clientKind === 'mobile') {
+          throw new OrchestrationError(
+            'forbidden',
+            'A reply to a foreign-origin message must be issued locally.'
+          )
+        }
+        throw new OrchestrationError(
+          'no_return_route',
+          `Message ${original.id} arrived from another host; this host has no automatic route back to its sender.`,
+          {
+            nextSteps: [
+              'orca agents ask <name>@<host> "…" — start a fresh cross-host thread with the sender instead',
+              'orca environment list'
+            ]
+          }
+        )
       }
 
       // Amendment B: reply mirrors send's guards. `to_handle` is bound to `original.from_handle`

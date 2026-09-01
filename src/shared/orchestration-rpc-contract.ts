@@ -38,6 +38,10 @@ const ORCHESTRATION_MUTATION_METHODS = new Set([
   // minting a second question, and relaying to a pre-S10-8 peer now surfaces the typed
   // `orchestration_migration_required` disposition instead of a raw method-not-found.
   'orchestration.federatedAsk',
+  // S10-15 (chair ruling 7): the receiving half of a cross-host relayed SEND — same reasoning
+  // as federatedAsk just above (durable mutation receipt, in-flight coalescing, and the
+  // pre-relay `status.get` capability precheck all need this registered).
+  'orchestration.federatedSend',
   'orchestration.gateCreate',
   'orchestration.gateResolve',
   'orchestration.reset',

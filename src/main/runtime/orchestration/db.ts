@@ -910,8 +910,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15).
-const SCHEMA_VERSION = 37
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2).
+const SCHEMA_VERSION = 38
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
 // NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
@@ -1055,10 +1055,37 @@ export class OrchestrationDb {
     )
   }
 
+  // Unshipped-v38 repair (same shape as v35/v36/v37 above): a DB stamped v38 by a pre-fix copy of
+  // this same UNSHIPPED migration never re-enters migrate()'s `current < 38` block. Guarded on
+  // user_version >= 38, plus a hasTable probe (finding 22's discipline) before any ALTER.
+  private repairUnshippedV38PeerRouting(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 38) {
+      return
+    }
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+    if (!hasTable('messages')) {
+      return
+    }
+    for (const column of [
+      'peer_link_device_id',
+      'peer_agent_id',
+      'peer_thread_id',
+      'peer_relayed_at'
+    ]) {
+      if (!this.hasColumn('messages', column)) {
+        this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} TEXT`)
+      }
+    }
+  }
+
   private createTables(): void {
     this.repairUnshippedV35PactEra()
     this.repairUnshippedV36RelinkGeneration()
     this.repairUnshippedV37RemoteAgentIdentity()
+    this.repairUnshippedV38PeerRouting()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,
@@ -1107,7 +1134,17 @@ export class OrchestrationDb {
         -- notifications (input_not_consumed / liveness_breach / relay_unreachable), so the
         -- pact-step discriminator gets its own column instead of overloading that namespace;
         -- callers can never set it (see insertGatedMessage's payload_kind_reserved refusal).
-        payload_kind TEXT
+        payload_kind TEXT,
+        -- v38 (S10-15, chair ruling 7): cross-host send/reply provenance. peer_link_device_id is
+        -- set ONLY on an inbound-imported row (the "authored remotely" discriminator, never on an
+        -- outbound relay's local mirror); peer_agent_id/peer_thread_id are the counterpart's own
+        -- directory/thread ids; peer_relayed_at is set once a peer accepted an outbound relay. No
+        -- peer_fingerprint column: R9's automatic fingerprint->environment route resolution was
+        -- cut (Task 0 escalation, ruling 7) — it carried no routing assurance without it anyway.
+        peer_link_device_id TEXT,
+        peer_agent_id TEXT,
+        peer_thread_id TEXT,
+        peer_relayed_at TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
@@ -1968,6 +2005,41 @@ export class OrchestrationDb {
         this.db.exec(
           `CREATE INDEX IF NOT EXISTS idx_remote_agents_peer ON remote_agents(remote_agent_id);`
         )
+      }
+      // v37 -> v38 (S10-15, chair ruling 7): messages gains cross-host provenance columns; no
+      // peer_fingerprint (R9 cut). hasColumn-guarded so a fresh createTables() run (already has
+      // these inline, above) is a no-op here.
+      if (current < 38) {
+        for (const column of [
+          'peer_link_device_id',
+          'peer_agent_id',
+          'peer_thread_id',
+          'peer_relayed_at'
+        ]) {
+          if (!this.hasColumn('messages', column)) {
+            this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} TEXT`)
+          }
+        }
+        // F7a data repair: a pre-S10-15 send/reply to a display-name-shaped recipient with no
+        // directory hit fell through to the bare-handle path (isBarePeerHandle,
+        // stale-handle-resolution.ts) and stored the raw name in to_handle instead of
+        // `agent:<id>` — stranding it once that agent registers. Re-point ONLY the exact shape:
+        // an unread, pane-unresolved row whose to_handle equals a currently-registered agent's
+        // display_name exactly (never a substring/LIKE match, and never a row already delivered
+        // to a pane or already read, which a live bare-handle send/reply legitimately produces).
+        this.db.exec(`
+          UPDATE messages
+          SET to_handle = 'agent:' || (
+            SELECT a.id FROM agents a
+            WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL
+          )
+          WHERE recipient_pane_key IS NULL
+            AND read = 0
+            AND EXISTS (
+              SELECT 1 FROM agents a
+              WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL
+            )
+        `)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -6996,6 +7068,18 @@ export class OrchestrationDb {
         .prepare(`SELECT 1 FROM remote_agents WHERE remote_agent_id = ? AND local_quarantined = 1`)
         .get(remoteAgentId) !== undefined
     )
+  }
+
+  // S10-15 R6: marks the sender's local mirror row as accepted by the peer, and records the
+  // peer's own thread id for the conversation (COALESCE preserves an already-stored value on a
+  // retry that reports no threadId).
+  markPeerRelayAccepted(messageId: string, peerThreadId: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE messages SET peer_relayed_at = datetime('now'),
+           peer_thread_id = COALESCE(?, peer_thread_id) WHERE id = ?`
+      )
+      .run(peerThreadId, messageId)
   }
 
   // S10-15 ruling 2: the link's own currently-bound fingerprint, or null if this link has never

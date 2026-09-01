@@ -8,7 +8,8 @@ import {
   getOptionalStringFlag,
   getRequiredStringFlag
 } from '../flags'
-import { RuntimeClientError } from '../runtime-client'
+import { RuntimeClientError, getDefaultUserDataPath } from '../runtime-client'
+import { resolveSendTarget } from './orchestration-send-target'
 import { requireWorkerDoneSettlement } from './orchestration-worker-settlement'
 import {
   formatHeartbeatAge,
@@ -607,7 +608,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   },
 
   'orchestration send': async ({ flags, client, cwd, json }) => {
-    const to = getOptionalStringFlag(flags, 'to')
+    const rawTo = getOptionalStringFlag(flags, 'to')
+    const resolvedTarget = rawTo
+      ? await resolveSendTarget(client, getDefaultUserDataPath(), rawTo)
+      : undefined
+    const to = resolvedTarget?.to ?? rawTo
     const type = getOptionalStringFlag(flags, 'type')
     if (to) {
       rejectLifecycleGroupRecipient(type, to)
@@ -639,6 +644,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const sendParams = {
       from,
       to,
+      host: resolvedTarget?.host,
       run,
       remoteRunMailbox: remoteRunMailbox.param,
       subject: getRequiredStringFlag(flags, 'subject'),

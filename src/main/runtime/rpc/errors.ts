@@ -145,7 +145,10 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // `forbidden` are the quarantine/purge/review authority codes (orchestration-agents-
   // quarantine.ts predates S10-2b; orchestration-containment.ts is new).
   'not_found',
-  'forbidden'
+  'forbidden',
+  // S10-15 (chair ruling 7): thrown by orchestration.reply against a foreign-origin message row
+  // (no automatic route resolution — R9 was cut) with `data.nextSteps` naming the working path.
+  'no_return_route'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

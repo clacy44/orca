@@ -62,6 +62,11 @@ export type MessageV34ColumnsRow = {
   // JSON payload.kind namespace already used by runtime notifications. Callers can never set it
   // directly; only insertGatedMessage's hostPayloadKind option writes it.
   payload_kind?: string | null
+  // v38 (S10-15, chair ruling 7): cross-host provenance — see db.ts's messages column comment.
+  peer_link_device_id?: string | null
+  peer_agent_id?: string | null
+  peer_thread_id?: string | null
+  peer_relayed_at?: string | null
 }
 
 export type GateRefusalRow = {

@@ -117,8 +117,11 @@ describe('orchestration RPC methods', () => {
     // (orchestration-agents-relink.ts, ruling 5). S10-7 F-B adds orchestration.agents.retire
     // (orchestration-agents-retire.ts). S10-8 adds orchestration.federatedAsk
     // (orchestration-federated-peer-ask.ts, R2/R3: the receiving half of cross-host ask relay).
-    expect(registry.size).toBe(60)
+    // S10-15 adds orchestration.federatedSend (orchestration-federated-peer-send.ts, chair
+    // ruling 7: the receiving half of a cross-host relayed send).
+    expect(registry.size).toBe(61)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
+    expect(registry.has('orchestration.federatedSend')).toBe(true)
     expect(registry.has('orchestration.agents.relink')).toBe(true)
     expect(registry.has('orchestration.agents.retire')).toBe(true)
     expect(registry.has('orchestration.threads.invite')).toBe(true)
