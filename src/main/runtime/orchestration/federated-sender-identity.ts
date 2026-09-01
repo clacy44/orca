@@ -263,12 +263,13 @@ export function importFederatedSenderIdentity(
     peerFingerprint
   })
 
-  // V-2 fix: the pre-check above (isNewRow && countRemoteAgentsForLink >= CAP) is a TOCTOU
-  // race with this upsert — a concurrent insert for this same link can push the row count over
-  // the cap between the pre-check and the upsert. upsertRemoteAgent re-checks atomically and
-  // reports 'capped' itself in that case; honor it exactly like the pre-check's own capped
-  // branch (same audit fields, same return shape) instead of discarding it and falling through
-  // to the "row must exist" branch below, which would misreport this as `id_shape`.
+  // V-2 fix: the pre-check above (isNewRow && countRemoteAgentsForLink >= CAP) guards only
+  // this call site — better-sqlite3 is synchronous in-process, so no concurrent insert can
+  // interleave here. The backstop is for a future caller that skips the pre-check.
+  // upsertRemoteAgent re-checks atomically and reports 'capped' itself in that case; honor it
+  // exactly like the pre-check's own capped branch (same audit fields, same return shape)
+  // instead of discarding it and falling through to the "row must exist" branch below, which
+  // would misreport this as `id_shape`.
   if (upsertResult.outcome === 'capped') {
     const askerHandle = `remote:${linkKey}:${identity.id}`
     db.writeAgentAudit({

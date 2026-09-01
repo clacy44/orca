@@ -135,6 +135,50 @@ describe('orchestration.sent (BUG 3)', () => {
     })
   })
 
+  // S10-15 verifier round 3 finding 1: federatedSend's INBOUND-imported row (a peer's mail
+  // TO this host, orchestration-federated-peer-send.ts) also sets peerAgentId (the remote
+  // sender's own id), so the bare `peer_agent_id != null` branch wrongly treated it as an
+  // outbound relay mirror and reported relay_pending/relayed with `environment` set to the
+  // LOCAL recipient's own agent id. peer_link_device_id is set ONLY on such an inbound-imported
+  // row (db.ts's column comment); the fix requires it NULL too, so this row must fall through
+  // to the plain local delivery state instead.
+  it('an inbound cross-host imported row (peer_link_device_id set) reports plain local delivery state, not relay', async () => {
+    setup()
+    const inserted = db!.insertGatedMessage({
+      from: 'remote:env_windows_1:agt_them',
+      to: 'agent:agt_local1',
+      subject: 'hi',
+      verb: 'federation_import',
+      peerLinkDeviceId: 'env_windows_1',
+      peerAgentId: 'agt_them'
+    })
+    if (inserted.outcome !== 'stored') {
+      throw new Error('unreachable: gate refused a plain test message')
+    }
+    const message = inserted.message
+    expect(message.peer_link_device_id).toBe('env_windows_1')
+    expect(message.peer_agent_id).toBe('agt_them')
+
+    const response = await dispatcher.dispatch(
+      request('sent-inbound-imported', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({ ok: true })
+    if (!response.ok) {
+      throw new Error('unreachable')
+    }
+    expect(response).toMatchObject({
+      result: {
+        delivery: {
+          state: 'queued',
+          recipient: { state: 'unresolved', lastSeenAt: null }
+        }
+      }
+    })
+    const delivery = (response.result as { delivery: { environment?: string } }).delivery
+    expect(delivery.environment).toBeUndefined()
+  })
+
   it('rejects an unknown message id', async () => {
     setup()
 

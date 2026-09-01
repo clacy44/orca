@@ -56,6 +56,9 @@ export function checkAndBumpRate(
     // Opportunistic prune, same transaction: scoped to this caller's own verb (V-1 fix) so a
     // bump from one verb/window can never delete another verb's rows. Never touches the current
     // window's own row (its window_start is never older than the retention threshold).
+    // Assumes one windowMs per verb (true for every current caller: register=HOUR,
+    // find/directory=MINUTE, quarantine=DAY) — a caller reusing a verb name with a smaller
+    // window would prune the larger window's rows.
     const pruneThreshold = new Date(nowMs - params.windowMs).toISOString()
     db.prepare('DELETE FROM agent_rate WHERE verb = ? AND window_start < ?').run(
       params.verb,

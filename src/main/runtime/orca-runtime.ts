@@ -34289,6 +34289,7 @@ export class OrcaRuntimeService {
     read: number
     peer_relayed_at?: string | null
     peer_agent_id?: string | null
+    peer_link_device_id?: string | null
   }): {
     delivery: MessageDeliveryState
     recipient: MessageRecipientPresence
@@ -34312,7 +34313,17 @@ export class OrcaRuntimeService {
     // goes through the peer_relayed_at relay-accept path, so it was wrongly reported as
     // 'relay_pending' forever. answerPeerQuestion's insertGatedMessage call never passes
     // peerAgentId, so that row's peer_agent_id is NULL and correctly falls through below.
-    if (message.peer_agent_id != null) {
+    //
+    // Also keyed on peer_link_device_id IS NULL: federatedSend's INBOUND-imported row (the mail
+    // a peer sent TO this host, orchestration-federated-peer-send.ts) sets peerAgentId to the
+    // remote sender's own id AND peerLinkDeviceId to the pairing device (db.ts's
+    // peer_link_device_id column comment: set ONLY on an inbound-imported row), with to_handle
+    // `agent:<local recipient>` — not a relay mirror at all. Without this second condition that
+    // row entered the relay branch too and reported relay_pending/relayed with `environment` set
+    // to the local recipient's own agent id. The outbound relay mirror this branch exists for
+    // never sets peer_link_device_id (relayPeerSendToHost sets only peerAgentId), so requiring it
+    // NULL isolates the outbound mirror without disturbing that row's relay reporting.
+    if (message.peer_agent_id != null && message.peer_link_device_id == null) {
       const environment = message.to_handle.split(':')[1]
       return {
         delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',
