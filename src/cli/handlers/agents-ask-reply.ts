@@ -34,17 +34,20 @@ type ReplyResult = {
   duplicate?: boolean
 }
 
-function formatAsk(r: AskResult, waitedMs: number): string {
+function formatAsk(r: AskResult, waitedMs: number, isCrossHost: boolean): string {
   if (r.cancelled) {
     return r.connectionLost
       ? `ask connection closed (question ${r.messageId ?? '?'}, thread ${r.threadId}).`
       : `ask cancelled (question ${r.messageId ?? '?'}, thread ${r.threadId}).`
   }
   if (r.timedOut) {
-    return (
-      `Still pending after ${Math.round(waitedMs / 1000)}s (thread ${r.threadId}).\n` +
-      `Resume without re-asking: orca agents wait --thread ${r.threadId} --for reply`
-    )
+    // S10-15 review M-6: a cross-host ask has no local `orchestration.wait --thread` to resume
+    // — R9/R10/R11's reply-relay/resume machinery was cut (chair ruling 7) — so advertising it
+    // parks the operator on a second wait that can never resolve. Point at re-asking instead.
+    const resumeHint = isCrossHost
+      ? `A cross-host ask cannot be resumed with "wait" — re-issue it: orca agents ask <name>@<host> "<question>"`
+      : `Resume without re-asking: orca agents wait --thread ${r.threadId} --for reply`
+    return `Still pending after ${Math.round(waitedMs / 1000)}s (thread ${r.threadId}).\n${resumeHint}`
   }
   return (
     `${r.answer}\n` +
@@ -111,7 +114,7 @@ export const AGENT_ASK_REPLY_HANDLERS: Record<string, CommandHandler> = {
     if (json) {
       console.log(JSON.stringify(result.result))
     } else {
-      console.log(formatAsk(result.result, waitedMs))
+      console.log(formatAsk(result.result, waitedMs, Boolean(host)))
     }
     // s10-2-spec.md WAIT/ASK §: "A timeout is exit 0... a re-ask is a second question the peer
     // must answer twice" — only a genuine cancellation (interrupted connection) is exit 1.

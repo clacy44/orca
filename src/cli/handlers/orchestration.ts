@@ -687,6 +687,36 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         suppressedDispatchRecoveryData(from)
       )
     }
+    // S10-15 review B-2: relayPeerSendToHost returns `{message, relay}` on BOTH an accepted AND
+    // a refused/unreachable outcome — checking `'message' in r` first (below) would print "Sent
+    // <id>" and exit 0 for a peer that refused, never received, or 404'd the method. This branch
+    // must run FIRST, before the generic `'message' in r` check.
+    if (
+      'relay' in result.result &&
+      result.result.relay &&
+      typeof result.result.relay === 'object' &&
+      'destination' in result.result.relay &&
+      result.result.relay.destination === 'peer_agent'
+    ) {
+      const relay = result.result.relay as {
+        destination: 'peer_agent'
+        environment: string
+        accepted: boolean
+        code?: string
+        reason?: string
+      }
+      if (!relay.accepted) {
+        process.exitCode = 1
+      }
+      printResult(result, json, (r) => {
+        const message = 'message' in r ? (r as { message: { id: string } }).message : undefined
+        const id = message?.id ?? 'unknown'
+        return relay.accepted
+          ? `Relayed ${id} to ${relay.environment}`
+          : `Warning: ${id} was NOT delivered to ${relay.environment}: ${relay.reason ?? relay.code ?? 'unknown reason'}`
+      })
+      return
+    }
     printResult(result, json, (r) => {
       const mailHint = pendingMailHint(r)
       if ('message' in r) {

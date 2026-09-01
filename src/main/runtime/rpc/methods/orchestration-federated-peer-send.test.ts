@@ -168,6 +168,38 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(farRow?.peer_link_device_id).toBe(LINK_DEVICE_ID)
   })
 
+  it('a same-id retry with matching type is an idempotent replay; a same-id collision with a DIFFERENT type refuses request_mismatch (m-1)', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    const envelope = {
+      fromAgent: { id: 'agt_00000000ab01', displayName: 'peer-sender' },
+      toAgentId: agentB,
+      messageId: 'msg_0000000abc11',
+      subject: 'hi',
+      body: 'hello',
+      type: 'status'
+    }
+
+    const first = (await call('orchestration.federatedSend', envelope, workerLinkCtx())) as {
+      accepted: boolean
+      messageId: string
+    }
+    expect(first.accepted).toBe(true)
+
+    // Genuine idempotent retry: identical shape, including type -> accepted, no new row.
+    const replay = (await call('orchestration.federatedSend', envelope, workerLinkCtx())) as {
+      accepted: boolean
+      messageId: string
+    }
+    expect(replay.accepted).toBe(true)
+    expect(replay.messageId).toBe(first.messageId)
+
+    // Same id, DIFFERENT type -> refused, not silently swallowed as accepted.
+    await expect(
+      call('orchestration.federatedSend', { ...envelope, type: 'question' }, workerLinkCtx())
+    ).rejects.toMatchObject({ code: 'request_mismatch' })
+  })
+
   it('unknown host -> remote_mailbox_unpaired, no local row written', async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)
@@ -305,5 +337,14 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
         { runtime: workerRuntime, orchestrationCompatibilityEvidence: evidenceB }
       )
     ).rejects.toMatchObject({ code: 'no_return_route' })
+
+    // S10-15 review M-1: a refused reply must not first mark the original read — that is a
+    // mutation implying acceptance ahead of a refusal that sends nothing.
+    const row = raw(workerDb)
+      .prepare('SELECT read FROM messages WHERE id = ?')
+      .get(imported.id) as {
+      read: number
+    }
+    expect(row.read).toBe(0)
   })
 })

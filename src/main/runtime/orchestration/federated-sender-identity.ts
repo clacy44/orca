@@ -126,9 +126,13 @@ export function importFederatedSenderIdentity(
      *  peer-body-asserted value — ruling 2's binding is over THIS, not over anything the
      *  `FederatedSenderIdentity` envelope carries. */
     peerFingerprint: string
+    /** S10-15 review m-5/m-6: the quarantine refusal text below names the verb the caller
+     *  actually invoked — 'ask' (default, preserves federatedAsk's existing wording
+     *  byte-for-byte) or 'send' (federatedSend, which was wrongly saying "cannot ask"). */
+    verb?: 'ask' | 'send'
   }
 ): RemoteIdentityImport {
-  const { identity, linkKey, peerFingerprint } = args
+  const { identity, linkKey, peerFingerprint, verb = 'ask' } = args
   if (!identity) {
     return { outcome: 'absent' }
   }
@@ -268,7 +272,7 @@ export function importFederatedSenderIdentity(
       scope: 'local',
       error: new OrchestrationError(
         'agent_quarantined',
-        `${displayNameCandidate}@${hostLabel || linkKey} is quarantined on this host and cannot ask.`,
+        `${displayNameCandidate}@${hostLabel || linkKey} is quarantined on this host and cannot ${verb}.`,
         {
           nextSteps: [
             `this host quarantined ${displayNameCandidate}@${hostLabel || linkKey} after an earlier contact`,
@@ -288,7 +292,7 @@ export function importFederatedSenderIdentity(
       scope: 'remote',
       error: new OrchestrationError(
         'agent_quarantined',
-        `${displayNameCandidate}@${hostLabel || linkKey} is quarantined on its origin host and cannot ask.`,
+        `${displayNameCandidate}@${hostLabel || linkKey} is quarantined on its origin host and cannot ${verb}.`,
         {
           nextSteps: [
             `${displayNameCandidate} is quarantined on its own host — lift it there with "orca agents quarantine ${displayNameCandidate} --lift"`

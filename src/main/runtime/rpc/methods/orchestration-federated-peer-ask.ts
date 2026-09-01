@@ -15,7 +15,10 @@ import { requireAddressableAgentRecipient } from '../../orchestration/addressabl
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { deriveThreadSubject } from '../../../../shared/thread-subject'
 import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
-import { clampOrchestrationAskTimeoutMs } from '../../../../shared/orchestration-ask-timeout'
+import {
+  clampOrchestrationAskTimeoutMs,
+  ORCHESTRATION_ASK_MAX_TIMEOUT_MS
+} from '../../../../shared/orchestration-ask-timeout'
 import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
@@ -131,6 +134,16 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         // askerHandle; 'capped' (ruling 3b) never blocks the ask itself, only the mirror write.
         const { askerHandle } = imported
 
+        // S10-15 review B-1: a time-deferred close inside the blocking-wait loop below can
+        // never observe elapsed time past `deadline` (waitForMessage/the loop return AT the
+        // deadline, never after it) — so closing has to happen as a lazy sweep at the next
+        // ingest instead. Run it BEFORE the cap check so an expired link's rows are reclaimed
+        // before they can wedge a new ask against the cap.
+        db.closeExpiredPeerQuestionsForLink(
+          pairedDeviceId,
+          new Date(Date.now() - (ORCHESTRATION_ASK_MAX_TIMEOUT_MS + RESUME_GRACE_MS)).toISOString()
+        )
+
         // S10-15 F5 (chair ruling 5): a per-link cap on PENDING questions — independent of the
         // remote_agents mirror cap (ruling 3b) — so a peer cannot mint unbounded pending
         // question_threads/threads/messages rows by relaying asks that time out (finding 5's
@@ -138,8 +151,12 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         if (db.countPendingPeerQuestionsForLink(pairedDeviceId) >= PEER_ASK_PENDING_CAP) {
           throw new OrchestrationError(
             'invalid_argument',
-            `This link already has ${PEER_ASK_PENDING_CAP} pending cross-host questions; answer or let them resolve before asking more.`,
-            { nextSteps: ['wait for pending questions on this link to answer or expire'] }
+            `This link already has ${PEER_ASK_PENDING_CAP} pending cross-host questions; answer or let them expire (closed automatically after they age past their timeout) before asking more.`,
+            {
+              nextSteps: [
+                'wait for pending questions on this link to be answered or to age out and close automatically'
+              ]
+            }
           )
         }
 
@@ -242,16 +259,14 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         }
         const remainingMs = deadline - Date.now()
         if (remainingMs <= 0) {
-          // S10-15 F5 (chair ruling 5, findings 5/13): the asker's own blocking call returns
-          // `timedOut: true` at its requested deadline (never held open past what it asked
-          // for), but the question itself is only CLOSED once the bounded RESUME_GRACE_MS past
-          // that deadline has also elapsed — a late answer arriving inside that window still
-          // lands on a `pending` row instead of a `dispatch_inactive` refusal. Still bounded,
-          // never unbounded: PEER_ASK_PENDING_CAP caps how many such rows a link can hold open
-          // at once regardless of how long any one of them lingers.
-          if (Date.now() >= deadline + RESUME_GRACE_MS) {
-            db.closeQuestionsForDispatch(`peer:${threadId}`)
-          }
+          // S10-15 review B-1: the asker's own blocking call returns `timedOut: true` at its
+          // requested deadline (never held open past what it asked for) — this handler cannot
+          // itself observe RESUME_GRACE_MS elapsing (it returns now, at the deadline). The
+          // question stays `pending` so a late answer arriving inside the grace window still
+          // lands; `closeExpiredPeerQuestionsForLink` (run at the top of every ask on this link,
+          // above) is what actually closes it once it ages past timeoutMs + RESUME_GRACE_MS.
+          // Bounded, never unbounded, in the meantime: PEER_ASK_PENDING_CAP caps how many such
+          // rows a link can hold open at once regardless of how long any one of them lingers.
           const result: FederatedAskResult = {
             answer: null,
             messageId: questionId,

@@ -54,7 +54,7 @@ describe('v37 -> v38 peer routing migration + F7a stranded-row repair', () => {
     raw2.close()
   })
 
-  it('a v38-stamped fixture with the columns dropped (unshipped-copy case) repairs without throwing', () => {
+  it('a v38-stamped fixture with the columns dropped (unshipped-copy case) repairs without throwing, INCLUDING the F7a data repair (m-3)', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'orca-peer-routing-repair-'))
     dbPath = join(tempDir, 'orca.db')
     db = new OrchestrationDb(dbPath)
@@ -62,6 +62,21 @@ describe('v37 -> v38 peer routing migration + F7a stranded-row repair', () => {
     db = undefined
 
     const raw = new Database(dbPath)
+    // S10-15 review m-3: an unshipped-v38 DB (stamped v38 by an earlier build of this branch,
+    // never re-entering migrate()'s current<38 block) must ALSO get the F7a data repair, not
+    // only the column restore.
+    raw
+      .prepare(
+        `INSERT INTO agents (id, display_name, origin_kind, origin_host_id)
+         VALUES ('agt_m3target01', 'carol', 'pane', 'local')`
+      )
+      .run()
+    raw
+      .prepare(
+        `INSERT INTO messages (id, run_id, from_handle, to_handle, subject, body, type, priority, read, recipient_pane_key)
+         VALUES ('msg_m3stranded1', 'run_legacy_local', 'someone', 'carol', 'hi', 'hi there', 'status', 'normal', 0, NULL)`
+      )
+      .run()
     raw.exec(`
       DROP INDEX IF EXISTS idx_messages_id;
       ALTER TABLE messages RENAME TO messages_old;
@@ -104,6 +119,9 @@ describe('v37 -> v38 peer routing migration + F7a stranded-row repair', () => {
     ).some((c) => c.name === 'peer_link_device_id')
     expect(hasColumn).toBe(true)
     raw2.close()
+
+    const repaired = db!.getMessageById('msg_m3stranded1')
+    expect(repaired?.to_handle).toBe('agent:agt_m3target01')
   })
 
   it('F7a: a stranded name-addressed row (recipient_pane_key NULL, unread) migrates to agent:<id> once that name registers', () => {

@@ -267,6 +267,12 @@ export function registerEphemeralVmHandlers(store: Store, pluginService?: Plugin
   )
 }
 
+// S10-15 review M-3: `repoName` is free text (e.g. a scoped package name like "@scope/app") that
+// the S10-15 finding-16 door validator (runtime-environment-store.ts) now refuses on '@'/':' —
+// sanitize here, at generation time, rather than loosen that validator. The " VM <8 hex>" suffix
+// this always appends structurally rules out an exact "local" collision, so only the two
+// characters need replacing.
 function buildEphemeralEnvironmentName(repoName: string, runtimeId: string): string {
-  return `${repoName} VM ${runtimeId.slice(-8)}`
+  const sanitizedRepoName = repoName.replace(/[@:]/g, '-')
+  return `${sanitizedRepoName} VM ${runtimeId.slice(-8)}`
 }

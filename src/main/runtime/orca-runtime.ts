@@ -34087,7 +34087,20 @@ export class OrcaRuntimeService {
     }
     if (hydrated.status !== 'idle') {
       // S10-15 F9: a busy Claude pane injects mid-turn instead of waiting for the idle edge.
-      if (this.isClaudeCodePane(this.ptysById.get(leaf.ptyId))) {
+      // S10-15 review M-4: R2 gate 1 (isPtyRunningAgent) must run ahead of this call, not only
+      // ahead of the idle continuation below — Ruling 8 relaxed the BUSY gate for a Claude pane,
+      // not the IS-THIS-AN-AGENT-PANE gate, and `isClaudeCodePane` reads a spawn-time record
+      // that survives the agent exiting to a shell. Scoped to the Claude branch only: a
+      // non-Claude busy pane keeps its existing 'pane_busy' withhold, unchanged.
+      const busyPty = this.ptysById.get(leaf.ptyId)
+      if (this.isClaudeCodePane(busyPty)) {
+        const knownAgentPaneForMidTurn = busyPty
+          ? await this.isPtyRunningAgent(busyPty, leaf)
+          : false
+        if (!knownAgentPaneForMidTurn) {
+          this.recordWithheldDelivery(mailboxHandle, 'not_agent_pane')
+          return
+        }
         this.attemptMidTurnClaudeDelivery(leaf, leaf, mailboxHandle, options)
         return
       }
@@ -35174,19 +35187,33 @@ export class OrcaRuntimeService {
       // handed its task. Typing a pointer plus Enter into a worker that went busy
       // inside the span is the hazard the push exists to avoid.
       const resolved = this.resolveLiveDeliveryTarget(delivery.target)
-      if (
-        !resolved ||
-        resolved.ptyId !== ptyId ||
-        resolved.lastAgentStatus !== 'idle' ||
-        !resolved.lastAgentStatusObservedLive
-      ) {
+      if (!resolved || resolved.ptyId !== ptyId) {
+        // Identity changed under this pty id (exit/respawn) — retirePendingMessageDeliveryForPty
+        // already owns cleanup for that case; not a withheld attempt against a still-live pane.
         continue
       }
-      this.deliverPendingMessages(resolved.target, {
-        mailboxHandle,
-        reservedTypes: delivery.reservedTypes,
-        notifiedThreadIdKnown: delivery.notifiedThreadIdKnown
-      })
+      if (resolved.lastAgentStatus === 'idle' && resolved.lastAgentStatusObservedLive) {
+        this.deliverPendingMessages(resolved.target, {
+          mailboxHandle,
+          reservedTypes: delivery.reservedTypes,
+          notifiedThreadIdKnown: delivery.notifiedThreadIdKnown
+        })
+        continue
+      }
+      // S10-15 review m-7: parity with the main path (S10-15 F9) — a busy-but-live Claude pane
+      // still gets mid-turn delivery instead of being silently dropped here; anything else is a
+      // withheld attempt, never silence.
+      const pty = this.ptysById.get(ptyId)
+      if (resolved.lastAgentStatusObservedLive && resolved.writable && this.isClaudeCodePane(pty)) {
+        if (pty) {
+          this.attemptMidTurnClaudeDelivery(resolved.target, pty, mailboxHandle, {
+            reservedTypes: delivery.reservedTypes,
+            notifiedThreadIdKnown: delivery.notifiedThreadIdKnown
+          })
+          continue
+        }
+      }
+      this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
     }
   }
 
@@ -35357,7 +35384,16 @@ export class OrcaRuntimeService {
       void this.isLeafPtyProvenAbsent(probedPtyId)
         .then((absent) => {
           this.probeDeferredDeliveryPtyIds.delete(probedPtyId)
-          if (!absent) {
+          if (absent) {
+            // S10-15 review m-8: controller-proven absence silently returned here with no
+            // withheld record — a genuine disposition (the row stays queued for a future
+            // surface), not a drop, so record it like every other withheld outcome.
+            this.recordWithheldDelivery(mailboxHandle, 'no_live_pane')
+            return
+          }
+          {
+            // absent === false (unknown or proven-live liveness): continue with the deferred
+            // re-check below.
             // Why a macrotask and not the stale reservation snapshot: a `remote:`
             // pty answers the probe null before its first await, so this chain can
             // settle in microtasks and overtake the resumption of a check resolved
@@ -35412,6 +35448,10 @@ export class OrcaRuntimeService {
         })
         .catch(() => {
           this.probeDeferredDeliveryPtyIds.delete(probedPtyId)
+          // S10-15 review m-8: a throwing probe silently dropped here too — treat it the same
+          // as any other withheld attempt (matches attemptHydratedProbedDelivery's own
+          // catch -> recordWithheldDelivery('probe_failed') precedent for a throwing probe).
+          this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
         })
       return
     }

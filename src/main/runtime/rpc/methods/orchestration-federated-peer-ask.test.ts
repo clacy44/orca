@@ -133,6 +133,15 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     vi.spyOn(workerRuntime, 'verifyOrchestrationCompatibilityCaller').mockImplementation(
       verifyEitherPane
     )
+    // S10-15 review M-6: relayPeerAskToHost now resolves the worker server BEFORE minting the
+    // local thread — stub the same 'windows' selector every test in this file already relays
+    // to; a genuinely unknown selector still throws, matching the real transport's shape.
+    vi.spyOn(homeRuntime, 'resolveOrchestrationWorkerServer').mockImplementation((selector) => {
+      if (selector !== 'windows') {
+        throw new Error(`Unknown environment: ${selector}`)
+      }
+      return { environmentId: 'env_windows_1', name: 'windows', peerFingerprint: 'fp_windows_1' }
+    })
     // R2: home relays over `callOrchestrationWorkerServer` — stubbed here to call the WORKER's
     // real `orchestration.federatedAsk` handler with a genuine paired-link ctx, the same seam
     // orchestration-federation.test.ts stubs `orchestrationEnvironmentTransport` at, one layer up.
@@ -537,6 +546,69 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     ).resolves.toMatchObject({ message: { body: 'sorry, saw this late' } })
   })
 
+  // S10-15 review B-1: restores the original close-on-expiry regression test, now driven by the
+  // lazy sweep (closeExpiredPeerQuestionsForLink, run at the top of every federatedAsk on the
+  // link) instead of a time-deferred close inside the blocking-wait handler, which can never
+  // observe elapsed time past its own deadline.
+  it('S10-15 review M-6: an unknown host refuses BEFORE minting a local thread — no orphan row', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const before = rawDb(homeDb).prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number }
+
+    await expect(
+      call(
+        'orchestration.ask',
+        { to: 'agent:agt_deadbeef0000', host: 'nowhere', question: 'anyone?', timeoutMs: 10 },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toThrow(/Unknown environment/)
+
+    const after = rawDb(homeDb).prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number }
+    expect(after.n).toBe(before.n)
+  })
+
+  it('S10-15 review B-1: a question aged past timeoutMs + RESUME_GRACE_MS is closed by the next ask on that link, refusing a late reply', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    const asked = (await call(
+      'orchestration.ask',
+      { to: `agent:${agentB}`, host: 'windows', question: 'anyone home?', timeoutMs: 10 },
+      homeCtx(evidenceA)
+    )) as { timedOut: boolean }
+    expect(asked.timedOut).toBe(true)
+    const staleRow = findPendingPeerQuestion(workerDb)
+
+    // Backdate created_at well past timeoutMs + RESUME_GRACE_MS (10 minutes) + the max clamp
+    // (30 minutes) — simulates real elapsed time without a fake-timer harness.
+    rawDb(workerDb)
+      .prepare(
+        `UPDATE question_threads SET created_at = datetime('now', '-50 minutes') WHERE message_id = ?`
+      )
+      .run(staleRow.message_id)
+
+    // A fresh ask on the SAME link runs the sweep before minting its own question.
+    await call(
+      'orchestration.federatedAsk',
+      {
+        fromAgent: { id: 'agt_00000000ee11', displayName: 'sweep-trigger' },
+        toAgentId: agentB,
+        question: 'triggers the sweep',
+        timeoutMs: 10
+      },
+      workerLinkCtx()
+    )
+
+    await expect(
+      call(
+        'orchestration.reply',
+        { id: staleRow.message_id, body: 'sorry, saw this way too late' },
+        workerLocalCtx(evidenceB)
+      )
+    ).rejects.toMatchObject({ code: 'dispatch_inactive' })
+  })
+
   it('S10-8 review fix (blocker: dedup): orchestration.federatedAsk is a registered mutation, and a retried relay coalesces instead of minting a duplicate question', async () => {
     setup()
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
@@ -787,10 +859,20 @@ function findPendingPeerQuestion(
 }
 
 function rawDb(db: OrchestrationDb): {
-  prepare: (sql: string) => { get: (...args: unknown[]) => unknown }
+  prepare: (sql: string) => {
+    get: (...args: unknown[]) => unknown
+    run: (...args: unknown[]) => unknown
+  }
 } {
   return (
-    db as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }
+    db as unknown as {
+      db: {
+        prepare: (sql: string) => {
+          get: (...args: unknown[]) => unknown
+          run: (...args: unknown[]) => unknown
+        }
+      }
+    }
   ).db
 }
 

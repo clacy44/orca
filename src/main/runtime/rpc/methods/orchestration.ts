@@ -1855,6 +1855,35 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         requireActiveDispatchForWorkerMail(db, workerDispatchId)
       }
 
+      // S10-15 review M-1: this refusal must run BEFORE markAsRead — a reply that gets refused
+      // must not first remove the original message from `orca orchestration check` (a mutation
+      // implying acceptance, followed by a refusal that sends nothing).
+      // S10-15 (chair ruling 7, replacing Design A R8): a foreign-origin row (imported by
+      // federatedSend/federatedAsk — the "authored remotely" discriminator) has no automatic
+      // route back (R9 was cut: no locally-derivable, non-spoofable fingerprint->environment
+      // resolution exists — see Task 0). Refuse with a typed, actionable disposition rather than
+      // silently writing a reply nobody on the peer will ever see. Finding 14: a paired peer (or
+      // mobile client) reaching this branch is refused first, before the routing disposition —
+      // a reply to a foreign-origin row must be issued locally.
+      if (original.peer_link_device_id) {
+        if (pairedDeviceId != null || clientKind === 'mobile') {
+          throw new OrchestrationError(
+            'forbidden',
+            'A reply to a foreign-origin message must be issued locally.'
+          )
+        }
+        throw new OrchestrationError(
+          'no_return_route',
+          `Message ${original.id} arrived from another host; this host has no automatic route back to its sender.`,
+          {
+            nextSteps: [
+              'orca agents ask <name>@<host> "…" — start a fresh cross-host thread with the sender instead',
+              'orca environment list'
+            ]
+          }
+        )
+      }
+
       db.markAsRead([original.id])
 
       if (workerDispatchId && federatedWorker) {
@@ -1889,32 +1918,6 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // relay accepted — the reply lands and the coordinator never learns it did.
           message: { id: relay.message_id }
         }
-      }
-
-      // S10-15 (chair ruling 7, replacing Design A R8): a foreign-origin row (imported by
-      // federatedSend/federatedAsk — the "authored remotely" discriminator) has no automatic
-      // route back (R9 was cut: no locally-derivable, non-spoofable fingerprint->environment
-      // resolution exists — see Task 0). Refuse with a typed, actionable disposition rather than
-      // silently writing a reply nobody on the peer will ever see. Finding 14: a paired peer (or
-      // mobile client) reaching this branch is refused first, before the routing disposition —
-      // a reply to a foreign-origin row must be issued locally.
-      if (original.peer_link_device_id) {
-        if (pairedDeviceId != null || clientKind === 'mobile') {
-          throw new OrchestrationError(
-            'forbidden',
-            'A reply to a foreign-origin message must be issued locally.'
-          )
-        }
-        throw new OrchestrationError(
-          'no_return_route',
-          `Message ${original.id} arrived from another host; this host has no automatic route back to its sender.`,
-          {
-            nextSteps: [
-              'orca agents ask <name>@<host> "…" — start a fresh cross-host thread with the sender instead',
-              'orca environment list'
-            ]
-          }
-        )
       }
 
       // Amendment B: reply mirrors send's guards. `to_handle` is bound to `original.from_handle`
@@ -2614,12 +2617,22 @@ async function relayPeerAskToHost(args: {
       { nextSteps: [`orca agents quarantine ${callerRow.display_name} --lift`] }
     )
   }
+  // S10-15 review M-6: resolve the worker server BEFORE minting anything local — an
+  // unknown/unpaired/unreachable host must never leave an orphan threads row + participants
+  // behind. `callOrchestrationWorkerServer` below re-resolves internally regardless (it owns
+  // the actual transport call), so this is purely a fail-fast that keeps the resolve error's
+  // existing shape unchanged, just raised before any local write.
+  const server = runtime.resolveOrchestrationWorkerServer(params.host as string)
   // S10-15 F5 (chair ruling 5, finding 13): mint a LOCAL thread for this ask before relaying —
   // the far side mints its own thread id (federatedAsk's own `createThread`), and printing THAT
   // id back to the asker (`orca agents wait --thread <id>`) fails with "Thread ... was not
   // found" on this host. A local thread id is minted unconditionally so every return path below,
   // including a timeout, can report an id that actually resolves here.
-  const peerHandle = `remote:${params.host}:${toAgentId}`
+  // S10-15 review m-4: keyed on server.environmentId (the stable, non-operator-mutable id), not
+  // params.host (the operator-renameable environment NAME) — matches the inbound
+  // `remote:<environmentId>:<agentId>` convention; purely a display-only participant label, read
+  // back nowhere, so the rename carries no ripple.
+  const peerHandle = `remote:${server.environmentId}:${toAgentId}`
   const localThread = db.createThread({
     subject: deriveThreadSubject({ body: params.question ?? '' }),
     createdByAgentId: caller.id,

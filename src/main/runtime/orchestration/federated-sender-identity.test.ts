@@ -189,6 +189,55 @@ describe('importFederatedSenderIdentity — refactor-fidelity table (D2 test 1)'
     )
   })
 
+  // S10-15 review m-5/m-6: the shared refusal text hardcoded "cannot ask" even when the caller
+  // was federatedSend (the SEND path) — verb is now caller-supplied, default 'ask' preserving
+  // federatedAsk's existing wording byte-for-byte.
+  it('verb: "send" renders "cannot send" for a locally-quarantined sender (m-5/m-6)', () => {
+    db = new OrchestrationDb(':memory:')
+    importFederatedSenderIdentity(db, {
+      identity: { id: 'agt_000000000005', displayName: 'peer-five' },
+      linkKey: LINK,
+      peerFingerprint: FP,
+      verb: 'send'
+    })
+    db.setLocalRemoteAgentQuarantine({
+      environmentId: LINK,
+      remoteAgentId: 'agt_000000000005',
+      quarantined: true,
+      reasonCode: 'operator_review'
+    })
+    const result = importFederatedSenderIdentity(db, {
+      identity: { id: 'agt_000000000005', displayName: 'peer-five' },
+      linkKey: LINK,
+      peerFingerprint: FP,
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('quarantined')
+    if (result.outcome !== 'quarantined') {
+      throw new Error('unreachable')
+    }
+    expect(result.error.message).toBe(
+      `peer-five@${LINK} is quarantined on this host and cannot send.`
+    )
+  })
+
+  it('verb: "send" renders "cannot send" for a remote-quarantined sender (m-5/m-6)', () => {
+    db = new OrchestrationDb(':memory:')
+    const result = importFederatedSenderIdentity(db, {
+      identity: { id: 'agt_000000000006', displayName: 'ghost-send', quarantined: true },
+      linkKey: LINK,
+      peerFingerprint: FP,
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('quarantined')
+    if (result.outcome !== 'quarantined') {
+      throw new Error('unreachable')
+    }
+    expect(result.error.message).toBe(
+      `ghost-send@${LINK} is quarantined on its origin host and cannot send.`
+    )
+  })
+
   it("host: 'local' (any case) never renders — D1 amendment means host is never sent or read; environment_name always falls back to the link key (D2 test 3)", () => {
     db = new OrchestrationDb(':memory:')
     const result = importFederatedSenderIdentity(db, {

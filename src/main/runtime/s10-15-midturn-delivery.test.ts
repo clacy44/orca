@@ -336,3 +336,133 @@ describe('S10-15 F9: mid-turn mail delivery into Claude Code panes', () => {
     }
   })
 })
+
+// S10-15 review M-4: the hydrated-probe fallback path (attemptHydratedProbedDeliveryUnguarded,
+// used for a leaf whose lastAgentStatusObservedLive has never gone true this session — a cold
+// restore or a pane already idle before the runtime started) used to jump straight to
+// attemptMidTurnClaudeDelivery on a hydrated 'busy' read, skipping the R2-gate-1 isPtyRunningAgent
+// check that the idle continuation just past it already runs. isClaudeCodePane reads a spawn-time
+// record that survives the agent exiting to a shell, so that skip could arm an Enter into a shell.
+describe('S10-15 review M-4: hydrated-probe fallback gates isPtyRunningAgent before the busy-Claude branch', () => {
+  const TAB_ID = 'tab-mf4'
+  const LEAF_ID = '44444444-4444-4444-8444-444444444444'
+  const WORKTREE_ID_M4 = 'repo-1::/tmp/probe-worktree-m4'
+
+  type PrivateRuntime = {
+    attemptHydratedProbedDeliveryUnguarded: (
+      tabId: string,
+      leafId: string,
+      terminalHandle: string,
+      mailboxHandle: string,
+      options: Record<string, never>
+    ) => Promise<void>
+    getFreshExplicitAgentStatusForHandle: (handle: string) => unknown
+    isPtyRunningAgent: (pty: unknown, leaf: unknown) => Promise<boolean>
+    ptysById: Map<string, PtyRecordForTest>
+    recordPtyWorktree: (
+      ptyId: string,
+      worktreeId: string,
+      state?: { connected?: boolean }
+    ) => PtyRecordForTest
+    issuePtyHandle: (pty: unknown) => string
+  }
+
+  function privates(runtime: OrcaRuntimeService): PrivateRuntime {
+    return runtime as unknown as PrivateRuntime
+  }
+
+  function setUpLeaf(
+    runtime: OrcaRuntimeService,
+    write: ReturnType<typeof vi.fn>,
+    ptyId: string
+  ): void {
+    runtime.setPtyController(makeController(write) as never)
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID_M4,
+          title: 'Claude',
+          activeLeafId: LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID_M4,
+          leafId: LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId,
+          paneTitle: null,
+          title: ''
+        }
+      ]
+    })
+  }
+
+  it('a hydrated-busy Claude-launched pane whose agent has exited to a shell (isPtyRunningAgent=false) never arms an Enter', async () => {
+    const runtime = new OrcaRuntimeService()
+    const write = vi.fn(() => true)
+    const pty = privates(runtime).recordPtyWorktree('pty-m4-exited-1', WORKTREE_ID_M4, {
+      connected: true
+    })
+    pty.launchAgent = 'claude'
+    // Mints the handle BEFORE syncing — the leaf loop's adoptPreAllocatedHandle picks it up and
+    // binds it into handleByLeafKey, matching registerHeadlessPty's precedent.
+    const handle = privates(runtime).issuePtyHandle(pty)
+    setUpLeaf(runtime, write, 'pty-m4-exited-1')
+
+    // Never observed live this session — the exact precondition that routes into the
+    // hydrated-probe fallback rather than the hot main path.
+    vi.spyOn(privates(runtime), 'getFreshExplicitAgentStatusForHandle').mockReturnValue({
+      status: 'working',
+      updatedAt: Date.now()
+    })
+    const isPtyRunningAgentSpy = vi
+      .spyOn(privates(runtime), 'isPtyRunningAgent')
+      .mockResolvedValue(false)
+
+    await privates(runtime).attemptHydratedProbedDeliveryUnguarded(
+      TAB_ID,
+      LEAF_ID,
+      handle,
+      handle,
+      {}
+    )
+
+    expect(isPtyRunningAgentSpy).toHaveBeenCalled()
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('a hydrated-busy Claude-launched pane still running the agent (isPtyRunningAgent=true) delivers mid-turn', async () => {
+    const runtime = new OrcaRuntimeService()
+    const write = vi.fn(() => true)
+    const pty = privates(runtime).recordPtyWorktree('pty-m4-live-1', WORKTREE_ID_M4, {
+      connected: true
+    })
+    pty.launchAgent = 'claude'
+    const handle = privates(runtime).issuePtyHandle(pty)
+    setUpLeaf(runtime, write, 'pty-m4-live-1')
+    const stub = makeOrchestrationDbStub(() => handle)
+    runtime.setOrchestrationDb(stub.db as never)
+    stub.insert('mf4 still-running status')
+
+    vi.spyOn(privates(runtime), 'getFreshExplicitAgentStatusForHandle').mockReturnValue({
+      status: 'working',
+      updatedAt: Date.now()
+    })
+    vi.spyOn(privates(runtime), 'isPtyRunningAgent').mockResolvedValue(true)
+
+    await privates(runtime).attemptHydratedProbedDeliveryUnguarded(
+      TAB_ID,
+      LEAF_ID,
+      handle,
+      handle,
+      {}
+    )
+
+    expect(pointerCalls(write, 'pty-m4-live-1')).toHaveLength(1)
+  })
+})

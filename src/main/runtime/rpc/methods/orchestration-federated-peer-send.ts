@@ -74,7 +74,8 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         const imported = importFederatedSenderIdentity(db, {
           identity: params.fromAgent,
           linkKey: pairedDeviceId,
-          peerFingerprint: authenticatedCallerFingerprint as string
+          peerFingerprint: authenticatedCallerFingerprint as string,
+          verb: 'send'
         })
         // Ruling 1: quarantined / fingerprint-conflicting sender -> refuse the mail outright.
         if (imported.outcome === 'quarantined' || imported.outcome === 'fingerprint_conflict') {
@@ -120,9 +121,14 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         // enumeration impractical) and stated here per the Gate-1 justification.
         const existing = db.getMessageById(params.messageId)
         if (existing) {
+          // S10-15 review m-1: R7 step 2 also required matching `type` — without it, a real id
+          // collision with a DIFFERENT type (e.g. a genuine msg_* clash presenting a different
+          // message shape under the same id) was silently swallowed as an idempotent "accepted"
+          // replay instead of refusing request_mismatch.
           if (
             existing.to_handle === `agent:${toAgent.id}` &&
-            existing.peer_link_device_id === pairedDeviceId
+            existing.peer_link_device_id === pairedDeviceId &&
+            existing.type === (params.type ?? 'status')
           ) {
             return {
               accepted: true,

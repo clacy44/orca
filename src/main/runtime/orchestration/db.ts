@@ -1079,6 +1079,32 @@ export class OrchestrationDb {
         this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} TEXT`)
       }
     }
+    // S10-15 review m-3: an unshipped-v38 DB never re-enters migrate()'s `current < 38` block
+    // either — the F7a data repair that block performs must also run here, or a DB stamped v38
+    // by an earlier build of this branch keeps its stranded rows forever.
+    this.repointStrandedDisplayNameAddressedMessages()
+  }
+
+  // S10-15 review m-2: scoped to host_id and capped at one match — deterministic today only
+  // because host_id is the constant 'local' for every row this DB ever writes; defense in depth
+  // against a future multi-host-per-db writer, and keeps the scalar subquery from ever throwing
+  // "more than one row returned" if that invariant is ever loosened. Idempotent: re-running finds
+  // nothing left to repoint once every stranded row has been.
+  private repointStrandedDisplayNameAddressedMessages(): void {
+    this.db.exec(`
+      UPDATE messages
+      SET to_handle = 'agent:' || (
+        SELECT a.id FROM agents a
+        WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL AND a.host_id = 'local'
+        LIMIT 1
+      )
+      WHERE recipient_pane_key IS NULL
+        AND read = 0
+        AND EXISTS (
+          SELECT 1 FROM agents a
+          WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL AND a.host_id = 'local'
+        )
+    `)
   }
 
   private createTables(): void {
@@ -2027,19 +2053,7 @@ export class OrchestrationDb {
         // an unread, pane-unresolved row whose to_handle equals a currently-registered agent's
         // display_name exactly (never a substring/LIKE match, and never a row already delivered
         // to a pane or already read, which a live bare-handle send/reply legitimately produces).
-        this.db.exec(`
-          UPDATE messages
-          SET to_handle = 'agent:' || (
-            SELECT a.id FROM agents a
-            WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL
-          )
-          WHERE recipient_pane_key IS NULL
-            AND read = 0
-            AND EXISTS (
-              SELECT 1 FROM agents a
-              WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL
-            )
-        `)
+        this.repointStrandedDisplayNameAddressedMessages()
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -4193,6 +4207,33 @@ export class OrchestrationDb {
       )
       .get(PEER_RUN_ID, `remote:${pairedDeviceId}:%`) as { n: number }
     return row.n
+  }
+
+  // S10-15 review B-1: the far side's own blocking wait always returns AT (never past)
+  // `deadline`, so a time-deferred close inside that same handler can never observe
+  // `deadline + grace` — a lazy sweep at the next ingest is the only place that elapsed time can
+  // actually be observed. `thresholdIso` is the caller's precomputed
+  // `now - (maxClampMs + graceMs)` — any pending row older than that is expired regardless of
+  // its own (per-ask) timeoutMs, since every ask's timeoutMs is clamped to at most maxClampMs.
+  closeExpiredPeerQuestionsForLink(pairedDeviceId: string, thresholdIso: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT message_id FROM question_threads
+         WHERE run_id = ? AND status = 'pending' AND asker_handle LIKE ?
+           AND julianday(created_at) < julianday(?)`
+      )
+      .all(PEER_RUN_ID, `remote:${pairedDeviceId}:%`, thresholdIso) as { message_id: string }[]
+    if (rows.length === 0) {
+      return []
+    }
+    this.db
+      .prepare(
+        `UPDATE question_threads SET status = 'closed', closed_at = datetime('now')
+         WHERE run_id = ? AND status = 'pending' AND asker_handle LIKE ?
+           AND julianday(created_at) < julianday(?)`
+      )
+      .run(PEER_RUN_ID, `remote:${pairedDeviceId}:%`, thresholdIso)
+    return rows.map((row) => row.message_id)
   }
 
   // S10-2b amendment F: peer ask/reply (no Dispatch, no consumer_generation to fence on).
