@@ -2891,6 +2891,14 @@ export class OrcaRuntimeService {
   private readonly runtimeId = randomUUID()
   private readonly startedAt = Date.now()
   private readonly store: RuntimeStore | null
+  // S10-17/F8: a flush failure must never abort a launch, so a failed anchor persist is
+  // queued here (bounded, drop-oldest) and retried on the next successful anchor flush —
+  // the one gap where a pane could hold a live token with no durable anchor until restart.
+  private readonly launchTokenAnchorRetryQueue = new Map<
+    string,
+    { tabId: string; leafId: string; launchTokenHash: string; hostId?: string | null }
+  >()
+  private static readonly LAUNCH_TOKEN_ANCHOR_RETRY_CAP = 256
   // Why: the lane is a property of the pane record, bound at the paneKey mint (S9 §2a).
   private readonly paneLanes = new PaneLaneAuthority({
     rendererLeafExists: (tabId, leafId) => this.leaves.has(this.getLeafKey(tabId, leafId)),
@@ -10192,6 +10200,50 @@ export class OrcaRuntimeService {
     }
   }
 
+  // S10-17: drains queued anchor writes left behind by an earlier flush failure. Called
+  // right after any anchor persist succeeds — that success is itself a successful store
+  // flush (persistTerminalLaunchTokenHash flushes synchronously), so this is the "next
+  // successful flush" the retry set drains on.
+  private drainLaunchTokenAnchorRetryQueue(): void {
+    for (const [key, entry] of [...this.launchTokenAnchorRetryQueue]) {
+      try {
+        this.store?.persistTerminalLaunchTokenHash?.(
+          { tabId: entry.tabId, leafId: entry.leafId, launchTokenHash: entry.launchTokenHash },
+          entry.hostId
+        )
+        this.launchTokenAnchorRetryQueue.delete(key)
+      } catch (error) {
+        console.warn('[runtime] launch-token-hash anchor retry failed', key, error)
+      }
+    }
+  }
+
+  // S10-17/F8: never aborts a launch on failure — logs loudly, queues the write for retry.
+  private persistLaunchTokenHashAnchorWithRetry(
+    args: { tabId: string; leafId: string; launchTokenHash: string },
+    hostId: string | null | undefined,
+    logContext: string
+  ): void {
+    const key = `${makePaneKey(args.tabId, args.leafId)}::${hostId ?? ''}`
+    try {
+      this.store?.persistTerminalLaunchTokenHash?.(args, hostId)
+      this.launchTokenAnchorRetryQueue.delete(key)
+      this.drainLaunchTokenAnchorRetryQueue()
+    } catch (error) {
+      console.warn(`[runtime] ${logContext}: failed to persist launch-token-hash anchor`, error)
+      if (
+        !this.launchTokenAnchorRetryQueue.has(key) &&
+        this.launchTokenAnchorRetryQueue.size >= OrcaRuntimeService.LAUNCH_TOKEN_ANCHOR_RETRY_CAP
+      ) {
+        const oldestKey = this.launchTokenAnchorRetryQueue.keys().next().value
+        if (oldestKey !== undefined) {
+          this.launchTokenAnchorRetryQueue.delete(oldestKey)
+        }
+      }
+      this.launchTokenAnchorRetryQueue.set(key, { ...args, hostId })
+    }
+  }
+
   registerPty(
     ptyId: string,
     worktreeId: string,
@@ -10254,21 +10306,19 @@ export class OrcaRuntimeService {
       // S10-10/F3: this is the renderer-owned pty:spawn path (desktop agent panes) — the only
       // other site a launch token reaches a pty env, and it must persist the anchor too so a
       // restart-survived pane on this path can still corroborate (mirrors the createTerminal
-      // persist below). F8: a flush failure here must not abort a pty that already spawned.
-      try {
-        this.store?.persistTerminalLaunchTokenHash?.(
-          {
-            tabId: binding.tabId,
-            leafId: binding.leafId,
-            launchTokenHash: createHash('sha256')
-              .update(agentLaunchAuthority.launchToken)
-              .digest('hex')
-          },
-          connectionId ? toSshExecutionHostId(connectionId) : undefined
-        )
-      } catch (error) {
-        console.warn('[runtime] registerPty: failed to persist launch-token-hash anchor', error)
-      }
+      // persist below). F8: a flush failure here must not abort a pty that already spawned;
+      // S10-17: failure is queued for retry instead of being silently lost.
+      this.persistLaunchTokenHashAnchorWithRetry(
+        {
+          tabId: binding.tabId,
+          leafId: binding.leafId,
+          launchTokenHash: createHash('sha256')
+            .update(agentLaunchAuthority.launchToken)
+            .digest('hex')
+        },
+        connectionId ? toSshExecutionHostId(connectionId) : undefined,
+        'registerPty'
+      )
     }
     const pendingIncarnation = this.pendingPtyRegistrationIncarnations.get(ptyId)
     if (
@@ -27208,9 +27258,12 @@ export class OrcaRuntimeService {
           tabId,
           leafId
         })
-        const launchToken = launchOpts.launchConfig
-          ? (launchOpts.launchToken ?? randomUUID())
-          : undefined
+        // S10-17: an adopted pane is attach-only (pty.ts spawns adoptedStablePane
+        // with attachOnly:true, no env) — a token minted here can never reach its process.
+        const launchToken =
+          launchOpts.launchConfig && !adoptedBeforeLaunch
+            ? (launchOpts.launchToken ?? randomUUID())
+            : undefined
         const baseEnv = {
           ...launchOpts.env,
           ...(launchToken ? { ORCA_AGENT_LAUNCH_TOKEN: launchToken } : {})
@@ -27442,30 +27495,32 @@ export class OrcaRuntimeService {
             // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
             // restart — which has no live launchToken, only its own process env — can still
             // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
-            // F8: a spawned pty must not abort its launch over a persistence flush failure.
+            // F8: a spawned pty must not abort its launch over a persistence flush failure;
+            // S10-17: failure is queued for retry instead of being silently lost.
             const launchTokenHostId = workspace.connectionId
               ? toSshExecutionHostId(workspace.connectionId)
               : undefined
-            try {
-              if (launchToken) {
-                this.store?.persistTerminalLaunchTokenHash?.(
-                  {
-                    tabId,
-                    leafId,
-                    launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
-                  },
-                  launchTokenHostId
-                )
-              } else {
+            if (launchToken) {
+              this.persistLaunchTokenHashAnchorWithRetry(
+                {
+                  tabId,
+                  leafId,
+                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
+                },
+                launchTokenHostId,
+                'createTerminal'
+              )
+            } else {
+              try {
                 // F4: a null-token relaunch (plain shell) must not leave the previous agent's
                 // anchor live for this pane — it would still verify against a stale token.
                 this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
+              } catch (error) {
+                console.warn(
+                  '[runtime] createTerminal: failed to update launch-token-hash anchor',
+                  error
+                )
               }
-            } catch (error) {
-              console.warn(
-                '[runtime] createTerminal: failed to update launch-token-hash anchor',
-                error
-              )
             }
           }
           pty.tabId = tabId
@@ -27498,7 +27553,9 @@ export class OrcaRuntimeService {
               title: launchOpts.title ?? null,
               ...(cwd !== workspace.path ? { cwd } : {}),
               ...(effectiveLaunchConfig ? { launchConfig: effectiveLaunchConfig } : {}),
-              ...(launchToken ? { launchToken } : {}),
+              // S10-17: never publish a launch token for an adopted pane — it was never
+              // minted (E1) and would be undeliverable to the already-running process.
+              ...(launchToken && !adoptedStablePane ? { launchToken } : {}),
               ...(launchOpts.launchAgent ? { launchAgent: launchOpts.launchAgent } : {}),
               ...(launchOpts.viewMode ? { viewMode: launchOpts.viewMode } : {}),
               activate: presentation === 'focused',
