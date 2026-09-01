@@ -51,7 +51,16 @@ export const ORCHESTRATION_GATE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.run',
     params: RunParams,
-    handler: (params, { runtime }) => {
+    handler: (params, { runtime, pairedDeviceId, clientKind }) => {
+      // S10-15: the coordinator loop is a local operator action — a paired/mobile caller has no
+      // handle to target here (unlike send/ask/check/reply) and must never start one.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.run must be issued locally by the operator, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
       const db = runtime.getOrchestrationDb()
 
       const existing = db.getActiveCoordinatorRun()
@@ -92,7 +101,16 @@ export const ORCHESTRATION_GATE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.runStop',
     params: RunStopParams,
-    handler: (_params, { runtime }) => {
+    handler: (_params, { runtime, pairedDeviceId, clientKind }) => {
+      // S10-15: same local-operator gate as orchestration.run — this stops the in-process
+      // coordinator loop, which a federated peer/mobile client has no business signaling.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.runStop must be issued locally by the operator, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
       const db = runtime.getOrchestrationDb()
       const run = db.getActiveCoordinatorRun()
       if (!run) {

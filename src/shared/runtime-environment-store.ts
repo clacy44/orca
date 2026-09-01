@@ -8,6 +8,11 @@ import { classifyRemotePairingHostname } from './remote-pairing-address'
 import { writeSecureJsonFileWithinLimit } from './bounded-secure-json-file'
 import { hardenExistingSecureFile } from './secure-file'
 import {
+  assertAddressableEnvironmentName,
+  RuntimeEnvironmentStoreError,
+  type RuntimeEnvironmentStoreErrorCode
+} from './runtime-environment-name'
+import {
   createEnvironmentFromPairingOffer,
   getPreferredPairingOffer,
   KnownRuntimeEnvironmentSchema,
@@ -20,17 +25,8 @@ import {
 const ENVIRONMENTS_FILE = 'orca-environments.json'
 export const MAX_RUNTIME_ENVIRONMENT_STORE_FILE_BYTES = 1024 * 1024
 
-export type RuntimeEnvironmentStoreErrorCode = 'invalid_argument' | 'runtime_error'
-
-export class RuntimeEnvironmentStoreError extends Error {
-  readonly code: RuntimeEnvironmentStoreErrorCode
-
-  constructor(code: RuntimeEnvironmentStoreErrorCode, message: string) {
-    super(message)
-    this.name = 'RuntimeEnvironmentStoreError'
-    this.code = code
-  }
-}
+// Re-exported for existing consumers that import the error from this module.
+export { RuntimeEnvironmentStoreError, type RuntimeEnvironmentStoreErrorCode }
 
 export function getEnvironmentStorePath(userDataPath: string): string {
   return join(userDataPath, ENVIRONMENTS_FILE)
@@ -64,6 +60,7 @@ export function addEnvironmentFromPairingCode(
     connectionDependency?: 'ssh-tunnel'
   }
 ): KnownRuntimeEnvironment {
+  assertAddressableEnvironmentName(args.name)
   const offer = parsePairingCode(args.pairingCode)
   if (!offer) {
     throw new RuntimeEnvironmentStoreError(

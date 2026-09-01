@@ -8,7 +8,11 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { PEER_RUN_ID } from '../../orchestration/db'
 import { pactWaiterHandle } from '../../orchestration/pact-shared'
-import { NO_PANE_IDENTITY_NEXT_STEPS, resolveCallerAgent } from './orchestration-caller-identity'
+import {
+  NO_PANE_IDENTITY_NEXT_STEPS,
+  NO_REGISTERED_IDENTITY_NEXT_STEPS,
+  resolveCallerAgent
+} from './orchestration-caller-identity'
 import { wakeTurnArrived } from './orchestration-pact-wake'
 
 const StepParams = z.object({
@@ -91,11 +95,21 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
       const isLocalNonFederatedOperator = pairedDeviceId === undefined && clientKind !== 'mobile'
 
       if (!agent) {
-        if (!attested || !isLocalNonFederatedOperator) {
+        // S10-15 D6: split by cause — unattested (no_pane_identity) vs attested-but-unregistered
+        // and not the local-operator carve-out (no_registered_identity). The carve-out below is
+        // untouched.
+        if (!attested) {
           throw new OrchestrationError(
             'no_pane_identity',
             'This requires an attested, registered caller identity.',
             { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+          )
+        }
+        if (!isLocalNonFederatedOperator) {
+          throw new OrchestrationError(
+            'no_registered_identity',
+            'This requires a registered agent identity for this pane.',
+            { nextSteps: NO_REGISTERED_IDENTITY_NEXT_STEPS }
           )
         }
         // The local-operator carve-out: no agents row, so no participant check to make —

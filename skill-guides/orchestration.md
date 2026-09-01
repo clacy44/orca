@@ -194,6 +194,7 @@ orca agents ask <name|name@host> "<question>" [--options a,b,c] [--timeout-ms <n
 orca agents ask --resume <question-id> [--json]
 orca agents reply (--thread <t>|--id <msg>) --body "<text>" [--acknowledge-gate] [--json]
 orca agents wait --thread <t> --for reply|message|pact|step [--timeout-ms <n>] [--resume <token>] [--json]
+orca orchestration send --to <name>@<host> --subject <text> [--body <text>] [--type <type>] [--priority <level>] [--thread-id <id>] [--payload <json>] [--json]
 
 orca agents pact --with <name> --on <thread> [--steps <n>|--open] [--json]
 orca agents pact --on <t> --accept|--decline [--reason <code>] [--json]

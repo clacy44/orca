@@ -19,6 +19,17 @@ export const NO_PANE_IDENTITY_NEXT_STEPS: readonly string[] = Object.freeze([
   'orca agents register --name <slug> --role "<your role>"'
 ])
 
+// S10-15 D6 (finding: no_pane_identity conflated two distinct causes): the pane IS attested —
+// re-attesting or relaunching cannot help, only registration can. Register-first, and say so
+// explicitly, so a caller does not waste a retry cycle on the wrong fix (the misdirection this
+// code exists to kill: "relaunch this agent in a fresh pane" when the pane was never the
+// problem).
+export const NO_REGISTERED_IDENTITY_NEXT_STEPS: readonly string[] = Object.freeze([
+  'orca agents register --name <slug> --role "<your role>"',
+  'orca agents list — to check whether this pane already registered under another name',
+  'this pane IS attested; relaunching it will not help — only registration will'
+])
+
 export type ResolvedCallerAgent = {
   id: string
   terminal_handle: string | null
@@ -40,12 +51,21 @@ export function resolveCallerAgent(
     orchestrationCompatibilityEvidence,
     { currentRuntimeLaunchSufficient: true }
   )
-  const agent = attested ? db.getAgentByPaneKey(hostId, attested.paneKey) : undefined
-  if (!agent || !attested) {
+  // S10-15 D6: split by cause — unattested (no_pane_identity, re-attest/relaunch can help) vs
+  // attested-but-unregistered (no_registered_identity, only `orca agents register` can help).
+  if (!attested) {
     throw new OrchestrationError(
       'no_pane_identity',
       'This requires an attested, registered caller identity.',
       { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+    )
+  }
+  const agent = db.getAgentByPaneKey(hostId, attested.paneKey)
+  if (!agent) {
+    throw new OrchestrationError(
+      'no_registered_identity',
+      'This requires a registered agent identity for this pane.',
+      { nextSteps: NO_REGISTERED_IDENTITY_NEXT_STEPS }
     )
   }
   return {

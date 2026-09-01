@@ -8,7 +8,8 @@ import {
   getOptionalStringFlag,
   getRequiredStringFlag
 } from '../flags'
-import { RuntimeClientError } from '../runtime-client'
+import { RuntimeClientError, getDefaultUserDataPath } from '../runtime-client'
+import { resolveSendTarget } from './orchestration-send-target'
 import { requireWorkerDoneSettlement } from './orchestration-worker-settlement'
 import {
   formatHeartbeatAge,
@@ -140,6 +141,18 @@ type OrchestrationSendResult = (
         accepted: true
       }
       lifecycle?: LifecycleSendResult
+    }
+  | {
+      // relayPeerSendToHost's cross-host relay shape (orchestration-peer-send-relay.ts).
+      message: { id: string; run_id?: string }
+      relay: {
+        destination: 'peer_agent'
+        environment: string
+        accepted: boolean
+        code?: string
+        reason?: string
+        peerMessageId?: string
+      }
     }
 ) &
   // Why: additive and optional on every send shape — runtimes that predate it simply omit it.
@@ -607,7 +620,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   },
 
   'orchestration send': async ({ flags, client, cwd, json }) => {
-    const to = getOptionalStringFlag(flags, 'to')
+    const rawTo = getOptionalStringFlag(flags, 'to')
+    const resolvedTarget = rawTo
+      ? await resolveSendTarget(client, getDefaultUserDataPath(), rawTo)
+      : undefined
+    const to = resolvedTarget?.to ?? rawTo
     const type = getOptionalStringFlag(flags, 'type')
     if (to) {
       rejectLifecycleGroupRecipient(type, to)
@@ -639,6 +656,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const sendParams = {
       from,
       to,
+      host: resolvedTarget?.host,
       run,
       remoteRunMailbox: remoteRunMailbox.param,
       subject: getRequiredStringFlag(flags, 'subject'),
@@ -680,6 +698,36 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         `${type === 'heartbeat' ? 'Heartbeat' : 'Message'} suppressed: Dispatch ${suppressed.dispatchId ?? 'unknown'} is no longer active — stop work and do not send worker_done for this Dispatch.`,
         suppressedDispatchRecoveryData(from)
       )
+    }
+    // S10-15 review B-2: relayPeerSendToHost returns `{message, relay}` on BOTH an accepted AND
+    // a refused/unreachable outcome — checking `'message' in r` first (below) would print "Sent
+    // <id>" and exit 0 for a peer that refused, never received, or 404'd the method. This branch
+    // must run FIRST, before the generic `'message' in r` check.
+    if (
+      'relay' in result.result &&
+      result.result.relay &&
+      typeof result.result.relay === 'object' &&
+      'destination' in result.result.relay &&
+      result.result.relay.destination === 'peer_agent'
+    ) {
+      const relay = result.result.relay as {
+        destination: 'peer_agent'
+        environment: string
+        accepted: boolean
+        code?: string
+        reason?: string
+      }
+      if (!relay.accepted) {
+        process.exitCode = 1
+      }
+      printResult(result, json, (r) => {
+        const message = 'message' in r ? (r as { message: { id: string } }).message : undefined
+        const id = message?.id ?? 'unknown'
+        return relay.accepted
+          ? `Relayed ${id} to ${relay.environment}`
+          : `Warning: ${id} was NOT delivered to ${relay.environment}: ${relay.reason ?? relay.code ?? 'unknown reason'}`
+      })
+      return
     }
     printResult(result, json, (r) => {
       const mailHint = pendingMailHint(r)

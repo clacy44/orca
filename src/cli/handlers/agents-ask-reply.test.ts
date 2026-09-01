@@ -188,6 +188,45 @@ describe('agents ask/reply CLI', () => {
     )
   })
 
+  // S10-15 review M-6: a cross-host ask has no local `orchestration.wait --thread` that can
+  // ever resolve (R9/R10/R11's reply-relay/resume machinery was cut) — the timeout hint must
+  // not advertise a wait that can never come back.
+  it('ask: a cross-host (name@host) timeout points at re-asking, never "agents wait" (M-6)', async () => {
+    testUserDataPath = mkdtempSync(join(tmpdir(), 'orca-agents-ask-reply-'))
+    addEnvironmentFromPairingCode(testUserDataPath, {
+      name: 'Private VPS',
+      pairingCode: pairingCode()
+    })
+    remoteClientCall.mockResolvedValue({
+      result: { agent: { id: 'agt_them', displayName: 'backend-merge', quarantined: false } }
+    })
+    const localCall = vi.fn().mockResolvedValue({
+      result: {
+        answer: null,
+        messageId: 'msg_a1',
+        threadId: 'thr_9fk2',
+        timedOut: true,
+        timeoutMs: 600_000
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = undefined
+    await AGENT_ASK_REPLY_HANDLERS['agents ask']({
+      flags: new Map<string, string | boolean>([
+        ['name', 'backend-merge@Private VPS'],
+        ['question', 'hi']
+      ]),
+      client: { call: localCall } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(process.exitCode).toBeUndefined()
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).not.toContain('orca agents wait --thread')
+    expect(printed).toContain('cannot be resumed with "wait"')
+    expect(printed).toContain('orca agents ask <name>@<host>')
+  })
+
   it('ask --json emits the bare RPC result, not an envelope', async () => {
     const call = vi.fn().mockImplementation((method: string) => {
       if (method === 'orchestration.agents.get') {

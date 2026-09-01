@@ -31,7 +31,18 @@ export const ORCHESTRATION_WORKER_RELEASE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.workerRelease',
     params: WorkerDispatchParams,
-    handler: async (params, { runtime }): Promise<WorkerReleaseReceipt> => {
+    handler: async (
+      params,
+      { runtime, pairedDeviceId, clientKind }
+    ): Promise<WorkerReleaseReceipt> => {
+      // S10-15: worker-release is a local operator/coordinator action.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.workerRelease must be issued locally by the operator/coordinator, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
       const db = runtime.getOrchestrationDb()
       if (db.getFederatedDispatch(params.dispatch)) {
         // Fail closed: the worker server owns that terminal; a home-side close would be a guess.
@@ -98,7 +109,15 @@ export const ORCHESTRATION_WORKER_RELEASE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.workerRetain',
     params: WorkerDispatchParams,
-    handler: (params, { runtime }) => {
+    handler: (params, { runtime, pairedDeviceId, clientKind }) => {
+      // S10-15: worker-retain is a local operator/coordinator action.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.workerRetain must be issued locally by the operator/coordinator, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
       const db = runtime.getOrchestrationDb()
       if (!db.getWorkerDispatch(params.dispatch)) {
         throw new OrchestrationError(
@@ -182,8 +201,17 @@ export const ORCHESTRATION_WORKER_RELEASE_METHODS: RpcMethod[] = [
     params: z.object({ paneKey: requiredString('Missing paneKey') }),
     // Real user keystrokes durably relinquish orchestration ownership on the owning runtime, so
     // restarts, SSH drops, remote viewing, and renderer remounts cannot erase the takeover.
-    handler: (params, { runtime }) => ({
-      changed: runtime.getOrchestrationDb().markWorkerTerminalUserOwned(params.paneKey)
-    })
+    handler: (params, { runtime, pairedDeviceId, clientKind }) => {
+      // S10-15: this signals a real keystroke into a LOCAL pane — a federated peer/mobile
+      // client has no pane here and no business relinquishing ownership of one.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.workerTerminalUserInput must be issued locally, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
+      return { changed: runtime.getOrchestrationDb().markWorkerTerminalUserOwned(params.paneKey) }
+    }
   })
 ]

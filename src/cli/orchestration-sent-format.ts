@@ -15,8 +15,12 @@ export function formatOrchestrationSent(
       ? 'queued, delivery withheld (pane busy or unconfirmed idle)'
       : delivery.state
   const headline = `${messageId}: ${state} (${recipient}).`
+  // V-6: `environment` is set only for a 'relayed'/'relay_pending' row (the saved-environment
+  // id parsed out of its `remote:<environmentId>:<agentId>` to_handle) — print it on its own
+  // line, same terse style as the rest of this formatter, whenever the snapshot carries it.
+  const environmentLine = delivery.environment ? `\nenvironment: ${delivery.environment}` : ''
   if (delivery.state === 'read') {
-    return headline
+    return `${headline}${environmentLine}`
   }
-  return `${headline}\nNext step: ${cliCommand} orchestration sent --id ${messageId} --json — check again for a state change.`
+  return `${headline}${environmentLine}\nNext step: ${cliCommand} orchestration sent --id ${messageId} --json — check again for a state change.`
 }

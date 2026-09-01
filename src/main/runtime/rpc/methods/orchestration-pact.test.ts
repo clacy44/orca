@@ -611,4 +611,53 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
     expect(bWaited.outcome).toBe('paused')
     expect(db.getThread(thr1)?.pact_pause_reason).toBe('counterpart_quarantined')
   })
+
+  // S10-15 D6/D7 test 3: pactLedger's identity split.
+  describe('S10-15 D6/D7: pactLedger no_pane_identity vs no_registered_identity split', () => {
+    it('unattested -> no_pane_identity', async () => {
+      setup()
+      await registerAgent('agent-a', evidenceA)
+      const b = await registerAgent('agent-b', evidenceB)
+      const threadId = await threadWith(evidenceA, [b])
+
+      await expect(
+        call('orchestration.threads.pactLedger', { threadId }, { runtime })
+      ).rejects.toMatchObject({ code: 'no_pane_identity' })
+    })
+
+    it('attested + unregistered + a paired-link caller (not the local-operator carve-out) -> no_registered_identity', async () => {
+      setup()
+      await registerAgent('agent-a', evidenceA)
+      const b = await registerAgent('agent-b', evidenceB)
+      const threadId = await threadWith(evidenceA, [b])
+
+      await expect(
+        call(
+          'orchestration.threads.pactLedger',
+          { threadId },
+          {
+            runtime,
+            orchestrationCompatibilityEvidence: evidenceD,
+            pairedDeviceId: 'dev_paired_caller',
+            clientKind: 'runtime'
+          }
+        )
+      ).rejects.toMatchObject({ code: 'no_registered_identity' })
+    })
+
+    it('attested + unregistered + local non-federated operator -> succeeds (carve-out preserved)', async () => {
+      setup()
+      await registerAgent('agent-a', evidenceA)
+      const b = await registerAgent('agent-b', evidenceB)
+      const threadId = await threadWith(evidenceA, [b])
+
+      const result = (await call(
+        'orchestration.threads.pactLedger',
+        { threadId },
+        ctx(evidenceD)
+      )) as { entries: unknown[]; nextSteps: string[] }
+      expect(result.nextSteps).toEqual([])
+      expect(Array.isArray(result.entries)).toBe(true)
+    })
+  })
 })

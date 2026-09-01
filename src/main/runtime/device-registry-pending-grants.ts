@@ -20,6 +20,8 @@ export function isMintedPendingDevice(device: {
 
 // Why: the deadline is only meaningful while the row is still an un-scanned invite. A scanned row is a
 // real pairing and a row without a deadline predates the field, so neither can expire.
+// Footgun: only ever true when lastSeenAt === 0 (via isMintedPendingDevice); never combine with a
+// lastSeenAt !== 0 filter — the conjunction is always false.
 export function isExpiredPendingDevice(device: DeviceEntry, now: number): boolean {
   return isMintedPendingDevice(device) && (device.pendingExpiresAt ?? 0) <= now
 }

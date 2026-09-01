@@ -31,6 +31,10 @@ export type CreatePeerQuestionParams = CommonGateOptions & {
   toHandle: string
   question: string
   options?: string[]
+  /** S10-15 verifier F3: ISO timestamp — created_at + this ask's OWN clamped timeoutMs +
+   *  RESUME_GRACE_MS. Only the federated relay's per-link sweep (closeExpiredPeerQuestionsForLink)
+   *  reads this; a local (non-relayed) peer ask omits it and is unaffected. */
+  expiresAt?: string
 }
 
 export type CreatePeerQuestionResult =
@@ -68,15 +72,16 @@ export function createPeerQuestion(
   try {
     db.prepare(
       `INSERT INTO question_threads
-         (message_id, run_id, dispatch_id, asker_handle, to_agent_id, thread_key)
-       VALUES (?, ?, ?, ?, ?, ?)`
+         (message_id, run_id, dispatch_id, asker_handle, to_agent_id, thread_key, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       inserted.message.id,
       params.runId,
       `peer:${params.threadId}`,
       params.askerHandle,
       params.toAgentId,
-      params.threadId
+      params.threadId,
+      params.expiresAt ?? null
     )
     const question = db
       .prepare('SELECT * FROM question_threads WHERE message_id = ?')

@@ -1787,6 +1787,13 @@ export class OrcaRuntimeRpcServer {
       reply(JSON.stringify(this.buildError(request.id, 'unauthorized', 'Invalid device token')))
       return
     }
+    // S10-15 credential fix (verified adversarial review): authenticatedCallerFingerprint
+    // (orchestration-mutation-executor.ts) hashes request.authToken || request.deviceToken —
+    // strip-and-stamp so that fingerprint is server-derived by construction for every WS
+    // caller, never a peer-chosen value. Stamping (not just stripping) also closes the
+    // omitted/empty-deviceToken escapes a bare strip would leave open.
+    delete (request as Record<string, unknown>).authToken
+    ;(request as Record<string, unknown>).deviceToken = token
     if (device.scope === 'mobile' && !MOBILE_RPC_METHOD_ALLOWLIST.has(request.method)) {
       reply(
         JSON.stringify(

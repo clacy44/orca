@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mapRuntimeError } from './errors'
+import { OrchestrationError } from '../orchestration/orchestration-error'
 import {
   ARTIFACT_SHARING_DISABLED_CODE,
   ARTIFACT_SHARING_DISABLED_MESSAGE,
@@ -179,6 +180,53 @@ describe('mapRuntimeError', () => {
         }
       },
       _meta: { runtimeId: 'runtime-1' }
+    })
+  })
+})
+
+describe('S10-15 D8: agent_retired and its family survive mapRuntimeError with data intact', () => {
+  it('preserves agent_retired and its successor nextSteps', () => {
+    const error = new OrchestrationError(
+      'agent_retired',
+      'Agent peer-b (agt_0123456789ab) has been retired and can no longer receive mail.',
+      { nextSteps: ['orca orchestration send --to agent:agt_ffffffffffff --subject "..."'] }
+    )
+    const response = mapRuntimeError('req_1', { runtimeId: 'runtime-1' }, error)
+    expect(response).toMatchObject({ ok: false, error: { code: 'agent_retired' } })
+    expect(
+      (response as { error: { data?: { nextSteps: string[] } } }).error.data?.nextSteps[0]
+    ).toContain('agt_ffffffffffff')
+  })
+
+  // The guard that stops the next sibling from being forgotten: every code
+  // requireAddressableAgentRecipient can throw must survive with `data` intact.
+  it.each(['agent_retired', 'agent_unknown', 'agent_quarantined', 'derived_agent_unaddressable'])(
+    'preserves %s with data intact',
+    (code) => {
+      const error = new OrchestrationError(code, `message for ${code}`, {
+        nextSteps: ['a next step']
+      })
+      const response = mapRuntimeError('req_1', { runtimeId: 'runtime-1' }, error)
+      expect(response).toMatchObject({
+        ok: false,
+        error: { code, data: { nextSteps: ['a next step'] } }
+      })
+    }
+  )
+
+  it.each([
+    'no_registered_identity',
+    'unauthenticated_lane',
+    'stale_environment_pairing',
+    'rate_limited'
+  ])('preserves %s (S10-15 finding 18) with data intact', (code) => {
+    const error = new OrchestrationError(code, `message for ${code}`, {
+      nextSteps: ['a next step']
+    })
+    const response = mapRuntimeError('req_1', { runtimeId: 'runtime-1' }, error)
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code, data: { nextSteps: ['a next step'] } }
     })
   })
 })

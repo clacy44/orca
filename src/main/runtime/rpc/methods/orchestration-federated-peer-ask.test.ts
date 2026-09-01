@@ -133,6 +133,15 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     vi.spyOn(workerRuntime, 'verifyOrchestrationCompatibilityCaller').mockImplementation(
       verifyEitherPane
     )
+    // S10-15 review M-6: relayPeerAskToHost now resolves the worker server BEFORE minting the
+    // local thread — stub the same 'windows' selector every test in this file already relays
+    // to; a genuinely unknown selector still throws, matching the real transport's shape.
+    vi.spyOn(homeRuntime, 'resolveOrchestrationWorkerServer').mockImplementation((selector) => {
+      if (selector !== 'windows') {
+        throw new Error(`Unknown environment: ${selector}`)
+      }
+      return { environmentId: 'env_windows_1', name: 'windows', peerFingerprint: 'fp_windows_1' }
+    })
     // R2: home relays over `callOrchestrationWorkerServer` — stubbed here to call the WORKER's
     // real `orchestration.federatedAsk` handler with a genuine paired-link ctx, the same seam
     // orchestration-federation.test.ts stubs `orchestrationEnvironmentTransport` at, one layer up.
@@ -298,6 +307,39 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
         homeCtx(evidenceA)
       )
     ).rejects.toThrow(/unreachable/)
+  })
+
+  // S10-15 F5: an unreachable host must not orphan the just-minted local thread.
+  it('F5: an unreachable host cleans up the just-minted local thread instead of orphaning it', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    vi.spyOn(homeRuntime, 'callOrchestrationWorkerServer').mockRejectedValue(
+      new Error('Environment "windows" is unreachable (no response within 10000ms).')
+    )
+    const before = rawDb(homeDb).prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number }
+    const beforeParticipants = rawDb(homeDb)
+      .prepare('SELECT COUNT(*) AS n FROM thread_participants')
+      .get() as { n: number }
+
+    await expect(
+      call(
+        'orchestration.ask',
+        {
+          to: 'agent:agt_deadbeef0000',
+          host: 'windows',
+          question: 'are you there?',
+          timeoutMs: 10
+        },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toThrow(/unreachable/)
+
+    const after = rawDb(homeDb).prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number }
+    const afterParticipants = rawDb(homeDb)
+      .prepare('SELECT COUNT(*) AS n FROM thread_participants')
+      .get() as { n: number }
+    expect(after.n).toBe(before.n)
+    expect(afterParticipants.n).toBe(beforeParticipants.n)
   })
 
   it('R2 unauthenticated_lane: federatedAsk refuses a caller with no paired-link identity', async () => {
@@ -507,7 +549,12 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     expect(countFederatedAskAudits(workerDb)).toBe(before + 4)
   })
 
-  it('S10-8 review fix (major, R4): a timed-out cross-host question is closed, so a late reply is refused instead of vanishing silently', async () => {
+  // S10-15 F5 (chair ruling 5) supersedes this test's original assertion: close-on-timeout is
+  // now bounded-DEFERRED (timeoutMs + RESUME_GRACE_MS), not immediate — a late reply inside the
+  // grace window is accepted, not refused. This is a deliberate behavior change mandated by the
+  // ruling (findings 5/13), not a weakening: the question is still bounded (never held open
+  // forever) via PEER_ASK_PENDING_CAP, and it is exercised separately below.
+  it('S10-15 F5 (ruling 5): a timed-out cross-host question stays answerable inside the grace window, not closed immediately', async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
@@ -519,17 +566,34 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     )) as { timedOut: boolean }
     expect(asked.timedOut).toBe(true)
 
-    // The question is CLOSED now, not left pending forever.
-    expect(findPendingPeerQuestion(workerDb, { allowNone: true })).toBeUndefined()
-    const closedId = findLatestPeerQuestion(workerDb).message_id
+    // The question is still PENDING (bounded grace window), not closed immediately.
+    const pendingRow = findPendingPeerQuestion(workerDb, { allowNone: true })
+    expect(pendingRow).toBeDefined()
 
     await expect(
       call(
         'orchestration.reply',
-        { id: closedId, body: 'sorry, saw this late' },
+        { id: pendingRow!.message_id, body: 'sorry, saw this late' },
         workerLocalCtx(evidenceB)
       )
-    ).rejects.toMatchObject({ code: 'dispatch_inactive' })
+    ).resolves.toMatchObject({ message: { body: 'sorry, saw this late' } })
+  })
+
+  it('S10-15 review M-6: an unknown host refuses BEFORE minting a local thread — no orphan row', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const before = rawDb(homeDb).prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number }
+
+    await expect(
+      call(
+        'orchestration.ask',
+        { to: 'agent:agt_deadbeef0000', host: 'nowhere', question: 'anyone?', timeoutMs: 10 },
+        homeCtx(evidenceA)
+      )
+    ).rejects.toThrow(/Unknown environment/)
+
+    const after = rawDb(homeDb).prepare('SELECT COUNT(*) AS n FROM threads').get() as { n: number }
+    expect(after.n).toBe(before.n)
   })
 
   it('S10-8 review fix (blocker: dedup): orchestration.federatedAsk is a registered mutation, and a retried relay coalesces instead of minting a duplicate question', async () => {
@@ -576,6 +640,187 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
 
     expect(countPeerQuestions(workerDb)).toBe(1)
   })
+
+  // S10-15 ruling 2 (finding 4): new coverage, not a modification of any test above.
+  it('S10-15 ruling 2: a link that previously spoke with one fingerprint is refused when it asserts a different one', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    // First contact binds HOME_LINK_FINGERPRINT to HOME_LINK_DEVICE_ID.
+    await call(
+      'orchestration.federatedAsk',
+      {
+        fromAgent: { id: 'agt_000000000006', displayName: 'first-contact' },
+        toAgentId: agentB,
+        question: 'first',
+        timeoutMs: 10
+      },
+      workerLinkCtx()
+    )
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000007', displayName: 'second-contact' },
+          toAgentId: agentB,
+          question: 'second',
+          timeoutMs: 10
+        },
+        {
+          runtime: workerRuntime,
+          pairedDeviceId: HOME_LINK_DEVICE_ID,
+          clientKind: 'runtime',
+          authenticatedCallerFingerprint: 'fp_rotated_impostor'
+        }
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(workerDb.hasRemoteAgent(HOME_LINK_DEVICE_ID, 'agt_000000000007')).toBe(false)
+  })
+
+  it('S10-15 ruling 2: a fingerprint already bound to a different link is refused on the second link (cross-link duplicate)', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    await call(
+      'orchestration.federatedAsk',
+      {
+        fromAgent: { id: 'agt_000000000008', displayName: 'link-one-peer' },
+        toAgentId: agentB,
+        question: 'from link one',
+        timeoutMs: 10
+      },
+      workerLinkCtx()
+    )
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_000000000009', displayName: 'link-two-peer' },
+          toAgentId: agentB,
+          question: 'from link two',
+          timeoutMs: 10
+        },
+        {
+          runtime: workerRuntime,
+          pairedDeviceId: 'dev_home_link_2',
+          clientKind: 'runtime',
+          authenticatedCallerFingerprint: HOME_LINK_FINGERPRINT
+        }
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(workerDb.hasRemoteAgent('dev_home_link_2', 'agt_000000000009')).toBe(false)
+  })
+
+  it('S10-15 F5 (ruling 5, finding 13): relayPeerAskToHost overrides threadId with the LOCAL thread id on the TIMEOUT return path', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    const asked = (await call(
+      'orchestration.ask',
+      { to: `agent:${agentB}`, host: 'windows', question: 'anyone home?', timeoutMs: 10 },
+      homeCtx(evidenceA)
+    )) as { timedOut: boolean; threadId: string }
+    expect(asked.timedOut).toBe(true)
+
+    // The returned thread id must resolve on the ASKER's own host (home), not the far host's id.
+    const localThread = rawDb(homeDb)
+      .prepare(`SELECT id FROM threads WHERE id = ?`)
+      .get(asked.threadId) as { id: string } | undefined
+    expect(localThread?.id).toBe(asked.threadId)
+
+    const farQuestion = findLatestPeerQuestion(workerDb)
+    expect(asked.threadId).not.toBe(farQuestion.message_id)
+  })
+
+  it('S10-15 F5 (ruling 5, finding 5): a link already at the pending-question cap refuses a further relayed ask, typed', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    for (let i = 0; i < 32; i++) {
+      await call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: {
+            id: `agt_0000000${i.toString().padStart(5, '0')}`,
+            displayName: `peer-agent-${i}`
+          },
+          toAgentId: agentB,
+          question: `q${i}`,
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    }
+    expect(countPeerQuestions(workerDb)).toBe(32)
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_0000000c0000', displayName: 'one-too-many' },
+          toAgentId: agentB,
+          question: 'over the cap',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(countPeerQuestions(workerDb)).toBe(32)
+  })
+
+  it("S10-15 F5 (ruling 5, finding 6): a local agent cannot resume another agent's pending peer question", async () => {
+    setup()
+    const PANE_C = 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    const evidenceC: Evidence = { terminalHandle: 'term_c', paneKey: PANE_C, launchToken: 'lt-c' }
+    vi.spyOn(homeRuntime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((ev) => {
+      const evidence = ev as { terminalHandle?: string; paneKey?: string } | null | undefined
+      if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === PANE_A) {
+        return makeAuthority(PANE_A, 'term_a')
+      }
+      if (evidence?.terminalHandle === 'term_b' && evidence.paneKey === PANE_B) {
+        return makeAuthority(PANE_B, 'term_b')
+      }
+      if (evidence?.terminalHandle === 'term_c' && evidence.paneKey === PANE_C) {
+        return makeAuthority(PANE_C, 'term_c')
+      }
+      return null
+    })
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    await registerAgent(homeRuntime, 'other', evidenceC)
+    const answerer = await registerAgent(homeRuntime, 'answerer-local', evidenceB)
+
+    // A purely LOCAL (same-host, no `host`) peer ask — handlePeerAsk's ordinary local branch,
+    // the pre-existing hole the finding names.
+    const askPromise = call(
+      'orchestration.ask',
+      { to: `agent:${answerer}`, question: 'private question', timeoutMs: 5_000 },
+      homeCtx(evidenceA)
+    ) as Promise<{ messageId: string }>
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    const questionRow = findPendingPeerQuestion(homeDb)
+
+    // The genuine asker CAN resume.
+    await expect(
+      call(
+        'orchestration.ask',
+        { resume: questionRow.message_id, timeoutMs: 10 },
+        homeCtx(evidenceA)
+      )
+    ).resolves.toMatchObject({ timedOut: true })
+
+    // A different local agent must NOT be able to resume the same question.
+    await expect(
+      call(
+        'orchestration.ask',
+        { resume: questionRow.message_id, timeoutMs: 10 },
+        homeCtx(evidenceC)
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+
+    await call(
+      'orchestration.reply',
+      { id: questionRow.message_id, body: 'ok' },
+      homeCtx(evidenceB)
+    )
+    await askPromise
+  })
 })
 
 function findPendingPeerQuestion(
@@ -601,10 +846,20 @@ function findPendingPeerQuestion(
 }
 
 function rawDb(db: OrchestrationDb): {
-  prepare: (sql: string) => { get: (...args: unknown[]) => unknown }
+  prepare: (sql: string) => {
+    get: (...args: unknown[]) => unknown
+    run: (...args: unknown[]) => unknown
+  }
 } {
   return (
-    db as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }
+    db as unknown as {
+      db: {
+        prepare: (sql: string) => {
+          get: (...args: unknown[]) => unknown
+          run: (...args: unknown[]) => unknown
+        }
+      }
+    }
   ).db
 }
 

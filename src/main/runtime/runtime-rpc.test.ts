@@ -4,6 +4,7 @@ import { rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection, type Socket } from 'node:net'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
@@ -30,6 +31,7 @@ import { DeviceRegistry } from './device-registry'
 import { DEVICE_REGISTRY_FILENAME, E2EE_KEYPAIR_FILENAME } from './mobile-pairing-files'
 import { PAIRING_DEVICE_NAME_MAX_LENGTH } from '../../shared/pairing-device-name'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../shared/protocol-version'
+import { authenticatedCallerFingerprint } from './rpc/orchestration-mutation-executor'
 
 vi.mock('../git/worktree', () => {
   const worktrees = [
@@ -2397,6 +2399,151 @@ describe('OrcaRuntimeRpcServer', () => {
       db.close()
       await server.stop()
     }
+  })
+
+  describe('S10-15 credential fix: WS caller fingerprint is server-derived', () => {
+    // Why spy-and-capture, not a real dispatch: authenticatedCallerFingerprint
+    // (orchestration-mutation-executor.ts) is a pure function of the `request` object
+    // dispatchStreaming receives — capturing that exact object and calling the real function on
+    // it is the most direct assertion available without adding a fake RPC method to the
+    // production registry.
+    function makeFingerprintTestServer(): {
+      server: OrcaRuntimeRpcServer
+      db: OrchestrationDb
+      entry: { token: string }
+      capturedRequests: Record<string, unknown>[]
+      dispatch: (
+        rawMessage: string,
+        authenticatedDeviceToken?: string
+      ) => ReturnType<OrcaRuntimeRpcServer['handleWebSocketMessage']>
+    } {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const server = new OrcaRuntimeRpcServer({ runtime, userDataPath, enableWebSocket: false })
+      server['deviceRegistry'] = new DeviceRegistry(userDataPath)
+      const entry = server['deviceRegistry']!.addDevice('runtime-test', 'runtime')
+      const ws = new FakeWebSocket()
+      server['mobileSocketWiring'] = {
+        getConnectionId: () => 'conn-test'
+      } as unknown as NonNullable<(typeof server)['mobileSocketWiring']>
+      const capturedRequests: Record<string, unknown>[] = []
+      vi.spyOn(server['dispatcher'], 'dispatchStreaming').mockImplementation(async (request) => {
+        capturedRequests.push(request as unknown as Record<string, unknown>)
+      })
+      const dispatch = (rawMessage: string, authenticatedDeviceToken?: string) =>
+        server['handleWebSocketMessage'](
+          rawMessage,
+          () => {},
+          () => {},
+          undefined,
+          ws as unknown as WebSocket,
+          authenticatedDeviceToken
+        )
+      return { server, db, entry, capturedRequests, dispatch }
+    }
+
+    it('ignores a peer-chosen authToken — the fingerprint is sha256 of the SERVER-validated deviceToken', async () => {
+      const { db, entry, capturedRequests, dispatch, server } = makeFingerprintTestServer()
+      try {
+        await dispatch(
+          JSON.stringify(
+            withCurrentOrchestrationContract({
+              id: 'req_forged_authtoken',
+              method: 'status.get',
+              deviceToken: entry.token,
+              authToken: 'peer-chosen-value-attempting-to-pick-its-own-fingerprint'
+            })
+          )
+        )
+        expect(capturedRequests).toHaveLength(1)
+        const request = capturedRequests[0]
+        expect(request.authToken).toBeUndefined()
+        expect(request.deviceToken).toBe(entry.token)
+        expect(authenticatedCallerFingerprint(request as never)).toBe(
+          createHash('sha256').update(entry.token).digest('hex')
+        )
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
+    it('a body that OMITS deviceToken (authenticated by the socket itself) still fingerprints as sha256 of the validated deviceToken, never the "authenticated_transport" fallback', async () => {
+      const { db, entry, capturedRequests, dispatch, server } = makeFingerprintTestServer()
+      try {
+        // authenticatedDeviceToken (6th arg) mirrors onText's `socket.device.deviceToken` — an
+        // already-authenticated E2EE socket, independent of anything the body itself carries.
+        await dispatch(
+          JSON.stringify(
+            withCurrentOrchestrationContract({
+              id: 'req_omitted_devicetoken',
+              method: 'status.get'
+            })
+          ),
+          entry.token
+        )
+        expect(capturedRequests).toHaveLength(1)
+        const request = capturedRequests[0]
+        expect(request.deviceToken).toBe(entry.token)
+        expect(authenticatedCallerFingerprint(request as never)).toBe(
+          createHash('sha256').update(entry.token).digest('hex')
+        )
+        expect(authenticatedCallerFingerprint(request as never)).not.toBe(
+          createHash('sha256').update('authenticated_transport').digest('hex')
+        )
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
+    it('an empty-string deviceToken in the body is likewise overwritten by the stamp, not trusted as-is', async () => {
+      const { db, entry, capturedRequests, dispatch, server } = makeFingerprintTestServer()
+      try {
+        await dispatch(
+          JSON.stringify(
+            withCurrentOrchestrationContract({
+              id: 'req_empty_devicetoken',
+              method: 'status.get',
+              deviceToken: ''
+            })
+          ),
+          entry.token
+        )
+        expect(capturedRequests).toHaveLength(1)
+        expect(capturedRequests[0].deviceToken).toBe(entry.token)
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
+    it('an honest request (deviceToken only, no authToken) is byte-identical in behavior', async () => {
+      const { db, entry, capturedRequests, dispatch, server } = makeFingerprintTestServer()
+      try {
+        await dispatch(
+          JSON.stringify(
+            withCurrentOrchestrationContract({
+              id: 'req_honest',
+              method: 'status.get',
+              deviceToken: entry.token
+            })
+          )
+        )
+        expect(capturedRequests).toHaveLength(1)
+        const request = capturedRequests[0]
+        expect(request.deviceToken).toBe(entry.token)
+        expect(request.authToken).toBeUndefined()
+        expect(authenticatedCallerFingerprint(request as never)).toBe(
+          createHash('sha256').update(entry.token).digest('hex')
+        )
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
   })
 
   it('applies the ask sub-cap on the WebSocket path and releases both counters on close', async () => {

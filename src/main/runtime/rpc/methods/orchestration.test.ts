@@ -117,8 +117,11 @@ describe('orchestration RPC methods', () => {
     // (orchestration-agents-relink.ts, ruling 5). S10-7 F-B adds orchestration.agents.retire
     // (orchestration-agents-retire.ts). S10-8 adds orchestration.federatedAsk
     // (orchestration-federated-peer-ask.ts, R2/R3: the receiving half of cross-host ask relay).
-    expect(registry.size).toBe(60)
+    // S10-15 adds orchestration.federatedSend (orchestration-federated-peer-send.ts, chair
+    // ruling 7: the receiving half of a cross-host relayed send).
+    expect(registry.size).toBe(61)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
+    expect(registry.has('orchestration.federatedSend')).toBe(true)
     expect(registry.has('orchestration.agents.relink')).toBe(true)
     expect(registry.has('orchestration.agents.retire')).toBe(true)
     expect(registry.has('orchestration.threads.invite')).toBe(true)
@@ -3574,6 +3577,91 @@ describe('orchestration RPC methods', () => {
       expect(result.reset).toBe('messages')
       expect(db.getInbox()).toHaveLength(0)
       expect(db.listTasks()).toHaveLength(1)
+    })
+
+    // S10-15 (chair-verified finding): reset is a local operator action — a paired federated
+    // caller must be refused BEFORE any write, for all three scopes.
+    it.each([
+      ['all', { all: true }],
+      ['tasks', { tasks: true }],
+      ['messages', { messages: true }]
+    ])(
+      'refuses a federated (paired) caller for scope %s, touching nothing',
+      async (_name, params) => {
+        setup()
+        seedResetState()
+        ctx = { runtime, pairedDeviceId: 'dev_paired_peer', clientKind: 'runtime' }
+
+        await expect(call('orchestration.reset', params)).rejects.toMatchObject({
+          code: 'forbidden'
+        })
+        expect(db.getInbox()).toHaveLength(1)
+        expect(db.listTasks()).toHaveLength(1)
+      }
+    )
+
+    it('refuses a mobile-scope caller too', async () => {
+      setup()
+      seedResetState()
+      ctx = { runtime, clientKind: 'mobile' }
+
+      await expect(call('orchestration.reset', { all: true })).rejects.toMatchObject({
+        code: 'forbidden'
+      })
+      expect(db.getInbox()).toHaveLength(1)
+      expect(db.listTasks()).toHaveLength(1)
+    })
+
+    it('a local (non-federated) caller still resets normally', async () => {
+      setup()
+      seedResetState()
+
+      const result = (await call('orchestration.reset', { all: true })) as { reset: string }
+
+      expect(result.reset).toBe('all')
+      expect(db.getInbox()).toHaveLength(0)
+      expect(db.listTasks()).toHaveLength(0)
+    })
+  })
+
+  // S10-15: the no-handle coordinator/worker verbs — a paired/mobile caller has no local
+  // pane/dispatch to target and must be refused before any read or write. Bogus
+  // dispatch/paneKey ids prove the gate runs FIRST: if it did not (or ran after a read), these
+  // calls would fail with dispatch_not_found instead of forbidden.
+  describe('federated-caller gate on no-handle coordinator/worker verbs', () => {
+    it.each([
+      ['orchestration.run', { spec: 'test spec' }],
+      ['orchestration.runStop', {}],
+      ['orchestration.workerStop', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerAbandon', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerRelease', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerRetain', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerTerminalUserInput', { paneKey: 'tab_nonexistent:leaf-1' }]
+    ])(
+      '%s refuses a paired caller with forbidden, before any read/write',
+      async (method, params) => {
+        setup()
+        ctx = { runtime, pairedDeviceId: 'dev_paired_peer', clientKind: 'runtime' }
+
+        await expect(call(method, params)).rejects.toMatchObject({ code: 'forbidden' })
+      }
+    )
+
+    it('a mobile-scope caller is refused the same way', async () => {
+      setup()
+      ctx = { runtime, clientKind: 'mobile' }
+
+      await expect(
+        call('orchestration.workerAbandon', { dispatch: 'dispatch_x' })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
+    it('a local (non-federated) caller reaches past the gate (gets dispatch_not_found, not forbidden)', async () => {
+      setup()
+
+      await expect(
+        call('orchestration.workerAbandon', { dispatch: 'dispatch_nonexistent' })
+      ).rejects.not.toMatchObject({ code: 'forbidden' })
     })
   })
 })

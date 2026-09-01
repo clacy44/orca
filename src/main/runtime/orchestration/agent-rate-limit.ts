@@ -16,6 +16,15 @@ function rateWindowStart(nowMs: number, windowMs: number): number {
   return Math.floor(nowMs / windowMs) * windowMs
 }
 
+// S10-15 (INV-P-006): agent_rate is a peer-writable, otherwise-unbounded-growth table (every
+// distinct subject_key/verb/window_start triple a caller can provoke mints a row) — pruned
+// opportunistically on every bump rather than requiring a separate reaper. The prune is scoped
+// to the CALLER'S OWN verb (verifier V-1): an unscoped prune keyed only on window_start lets a
+// short-window bump (e.g. MINUTE_MS) from any subject delete another verb's longer-window rows
+// (e.g. a DAY_MS quarantine counter) before they are stale for their own verb. Retention is
+// exactly that verb's windowMs — the current window's own row is never older than the
+// threshold, so it is never pruned mid-window.
+
 /** Fixed-window rate limiter over agent_rate. Refuses with a retryAfterMs, never a partial
  * result — the caller must not bump the counter and then act as if it had been refused. */
 export function checkAndBumpRate(
@@ -24,6 +33,9 @@ export function checkAndBumpRate(
 ): RateLimitResult {
   const nowMs = Date.now()
   const windowStartMs = rateWindowStart(nowMs, params.windowMs)
+  // window_start is ISO-8601 (unlike most of this schema's TEXT timestamps, which are
+  // datetime('now') — 'YYYY-MM-DD HH:MM:SS'); any cross-column comparison against those must go
+  // through julianday(), never a bare TEXT compare, or the differing formats sort wrong.
   const windowStart = new Date(windowStartMs).toISOString()
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -41,6 +53,17 @@ export function checkAndBumpRate(
       `INSERT INTO agent_rate (subject_key, verb, window_start, count) VALUES (?, ?, ?, 1)
        ON CONFLICT(subject_key, verb, window_start) DO UPDATE SET count = count + 1`
     ).run(params.subjectKey, params.verb, windowStart)
+    // Opportunistic prune, same transaction: scoped to this caller's own verb (V-1 fix) so a
+    // bump from one verb/window can never delete another verb's rows. Never touches the current
+    // window's own row (its window_start is never older than the retention threshold).
+    // Assumes one windowMs per verb (true for every current caller: register=HOUR,
+    // find/directory=MINUTE, quarantine=DAY) — a caller reusing a verb name with a smaller
+    // window would prune the larger window's rows.
+    const pruneThreshold = new Date(nowMs - params.windowMs).toISOString()
+    db.prepare('DELETE FROM agent_rate WHERE verb = ? AND window_start < ?').run(
+      params.verb,
+      pruneThreshold
+    )
     db.exec('COMMIT')
     return { allowed: true }
   } catch (error) {

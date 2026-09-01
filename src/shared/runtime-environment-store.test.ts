@@ -75,6 +75,45 @@ describe('runtime environment store', () => {
     ).toThrow(/mobile-only access/)
   })
 
+  // S10-15 finding 16: '@'/':' break `name@host` addressing and the agent:/run:/dispatch:
+  // prefix namespace; 'local' collides with the LOCAL_FIND_HOST/LOCAL_PEER_HOST sentinel.
+  it('refuses an environment name containing "@"', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+    expect(() =>
+      addEnvironmentFromPairingCode(userDataPath, { name: 'peer@vps', pairingCode: pairingCode() })
+    ).toThrow(/cannot contain "@"/)
+    expect(listEnvironments(userDataPath)).toEqual([])
+  })
+
+  it('refuses an environment name containing ":"', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+    expect(() =>
+      addEnvironmentFromPairingCode(userDataPath, { name: 'agent:x', pairingCode: pairingCode() })
+    ).toThrow(/cannot contain ":"/)
+    expect(listEnvironments(userDataPath)).toEqual([])
+  })
+
+  it('refuses the reserved environment name "local" (case-insensitive)', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+    expect(() =>
+      addEnvironmentFromPairingCode(userDataPath, { name: 'Local', pairingCode: pairingCode() })
+    ).toThrow(/reserved/)
+    expect(listEnvironments(userDataPath)).toEqual([])
+  })
+
+  it('still accepts an ordinary free-text name (spaces/mixed case unaffected)', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+    const saved = addEnvironmentFromPairingCode(userDataPath, {
+      name: 'Private VPS',
+      pairingCode: pairingCode()
+    })
+    expect(saved.name).toBe('Private VPS')
+  })
+
   it('rejects duplicate server names instead of silently replacing the saved server', () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
     tempDirs.push(userDataPath)

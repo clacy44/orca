@@ -81,6 +81,12 @@ export type InsertGatedMessageParams = {
   infraAllowlist?: readonly string[]
   /** Audit verb recorded on a refusal — 'send' | 'ask' | 'reply' | 'purge_reason' | etc. */
   verb?: string
+  // S10-15 (chair ruling 7) cross-host provenance — see db.ts's v38 messages column comment.
+  /** Set ONLY on an inbound-imported row — the "authored remotely" discriminator. */
+  peerLinkDeviceId?: string | null
+  peerAgentId?: string | null
+  peerThreadId?: string | null
+  peerRelayedAt?: string | null
 }
 
 export type InsertGatedMessageResult =
@@ -270,9 +276,10 @@ export function insertGatedMessage(
     `INSERT INTO messages (
        id, run_id, delivery_contract, from_handle, to_handle, subject, body,
        type, priority, thread_id, payload, sender_pane_key, recipient_pane_key,
-       sender_agent_id, gate_flags, payload_kind
+       sender_agent_id, gate_flags, payload_kind,
+       peer_link_device_id, peer_agent_id, peer_thread_id, peer_relayed_at
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     params.runId ?? ORCHESTRATION_LEGACY_RUN_ID,
@@ -289,7 +296,11 @@ export function insertGatedMessage(
     params.recipientPaneKey ?? null,
     senderAgentId,
     gateFlags,
-    params.hostPayloadKind ?? null
+    params.hostPayloadKind ?? null,
+    params.peerLinkDeviceId ?? null,
+    params.peerAgentId ?? null,
+    params.peerThreadId ?? null,
+    params.peerRelayedAt ?? null
   )
 
   const message = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
