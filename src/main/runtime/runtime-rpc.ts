@@ -1794,6 +1794,13 @@ export class OrcaRuntimeRpcServer {
     // omitted/empty-deviceToken escapes a bare strip would leave open.
     delete (request as Record<string, unknown>).authToken
     ;(request as Record<string, unknown>).deviceToken = token
+    // S10-18: `device` is validated non-null above — every WS caller is a paired peer, never
+    // the local socket. A launch-token preimage is never accepted over a pairing; the local
+    // unix socket is the attested path. Strip it from the evidence before it reaches dispatch,
+    // keeping terminalHandle/paneKey/host for provenance.
+    if (request.orchestrationCompatibilityEvidence?.launchToken !== undefined) {
+      delete (request.orchestrationCompatibilityEvidence as Record<string, unknown>).launchToken
+    }
     if (device.scope === 'mobile' && !MOBILE_RPC_METHOD_ALLOWLIST.has(request.method)) {
       reply(
         JSON.stringify(

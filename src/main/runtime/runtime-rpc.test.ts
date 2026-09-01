@@ -2546,6 +2546,112 @@ describe('OrcaRuntimeRpcServer', () => {
     })
   })
 
+  describe('S10-18: a launch-token preimage is never accepted over a pairing', () => {
+    function makeEvidenceTestServer(): {
+      server: OrcaRuntimeRpcServer
+      db: OrchestrationDb
+      entry: { token: string }
+      capturedRequests: Record<string, unknown>[]
+      dispatchWs: (
+        rawMessage: string,
+        authenticatedDeviceToken?: string
+      ) => ReturnType<OrcaRuntimeRpcServer['handleWebSocketMessage']>
+      dispatchUnixSocket: (rawMessage: string) => Promise<unknown>
+    } {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const server = new OrcaRuntimeRpcServer({ runtime, userDataPath, enableWebSocket: false })
+      server['deviceRegistry'] = new DeviceRegistry(userDataPath)
+      const entry = server['deviceRegistry']!.addDevice('runtime-test', 'runtime')
+      const ws = new FakeWebSocket()
+      server['mobileSocketWiring'] = {
+        getConnectionId: () => 'conn-test'
+      } as unknown as NonNullable<(typeof server)['mobileSocketWiring']>
+      const capturedRequests: Record<string, unknown>[] = []
+      vi.spyOn(server['dispatcher'], 'dispatchStreaming').mockImplementation(async (request) => {
+        capturedRequests.push(request as unknown as Record<string, unknown>)
+      })
+      vi.spyOn(server['dispatcher'], 'dispatch').mockImplementation(async (request) => {
+        const req = request as unknown as Record<string, unknown>
+        capturedRequests.push(req)
+        return { id: req.id, ok: true, result: {}, _meta: {} } as never
+      })
+      const dispatchWs = (rawMessage: string, authenticatedDeviceToken?: string) =>
+        server['handleWebSocketMessage'](
+          rawMessage,
+          () => {},
+          () => {},
+          undefined,
+          ws as unknown as WebSocket,
+          authenticatedDeviceToken
+        )
+      const dispatchUnixSocket = (rawMessage: string) => server['handleMessage'](rawMessage)
+      return { server, db, entry, capturedRequests, dispatchWs, dispatchUnixSocket }
+    }
+
+    it('strips launchToken from a WS frame from a paired device but keeps terminalHandle/paneKey', async () => {
+      const { db, entry, capturedRequests, dispatchWs, server } = makeEvidenceTestServer()
+      try {
+        await dispatchWs(
+          JSON.stringify(
+            withCurrentOrchestrationContract({
+              id: 'req_ws_evidence',
+              method: 'status.get',
+              deviceToken: entry.token,
+              orchestrationCompatibilityEvidence: {
+                terminalHandle: 'term_1',
+                paneKey: 'tab_a:leaf_a',
+                launchToken: 'launch-secret-1'
+              }
+            })
+          )
+        )
+        expect(capturedRequests).toHaveLength(1)
+        const request = capturedRequests[0]
+        expect(request.orchestrationCompatibilityEvidence).toEqual({
+          terminalHandle: 'term_1',
+          paneKey: 'tab_a:leaf_a'
+        })
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
+    it('leaves a unix-socket request evidence untouched, launchToken included', async () => {
+      const { db, entry, capturedRequests, dispatchUnixSocket, server } = makeEvidenceTestServer()
+      void entry
+      try {
+        await dispatchUnixSocket(
+          JSON.stringify(
+            withCurrentOrchestrationContract({
+              id: 'req_unix_evidence',
+              method: 'status.get',
+              authToken: server['authToken'],
+              orchestrationCompatibilityEvidence: {
+                terminalHandle: 'term_1',
+                paneKey: 'tab_a:leaf_a',
+                launchToken: 'launch-secret-1'
+              }
+            })
+          )
+        )
+        expect(capturedRequests).toHaveLength(1)
+        const request = capturedRequests[0]
+        expect(request.orchestrationCompatibilityEvidence).toEqual({
+          terminalHandle: 'term_1',
+          paneKey: 'tab_a:leaf_a',
+          launchToken: 'launch-secret-1'
+        })
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+  })
+
   it('applies the ask sub-cap on the WebSocket path and releases both counters on close', async () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
     const runtime = new OrcaRuntimeService()

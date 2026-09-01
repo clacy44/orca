@@ -58,10 +58,12 @@ describe('federated read RPC transport routing', () => {
       orchestrationContractVersion: 1,
       orchestrationRequestId: 'request-1',
       compatibilityInvocationId: 'compatibility-1',
+      // S10-18: launchToken is stripped before this envelope ever reaches this routing layer
+      // (WS ingress strips it in runtime-rpc.ts; the wire egress strips it again in
+      // serializeRemoteRuntimeRpcRequest) — this test only proves other fields forward intact.
       orchestrationCompatibilityEvidence: {
         terminalHandle: 'term-1',
-        paneKey: 'pane-1',
-        launchToken: 'launch-1'
+        paneKey: 'pane-1'
       }
     }
     sendRemoteRuntimeRequestMock.mockResolvedValue({

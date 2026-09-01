@@ -2,12 +2,14 @@ import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalBoolean, OptionalString, requiredString } from '../schemas'
 import { ORCHESTRATION_RUN_PAGE_LIMIT } from '../../../../shared/orchestration-run-pagination'
+import type { OrchestrationCompatibilityEvidence } from '../../../../shared/orchestration-compatibility-evidence'
 import type {
   OrcaRuntimeService,
   OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { assertCallerHandleMatchesEvidence } from './orchestration-run-scope'
+import { NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
 
 const RunCreateParams = z.object({
   objective: requiredString('Missing --objective'),
@@ -45,12 +47,42 @@ function requireCallerPane(
   return paneKey
 }
 
+// S10-18: runCreate/runUse REBIND a pane's current Run — the two verbs where a wrong caller
+// identity has a durable effect. A paired (non-local) caller's declared `from` is untrusted
+// user input; refuse before any write unless the caller's own evidence independently attests
+// it AS that handle. Read paths (runCurrent, mailbox reads) keep trusting the declared handle
+// — see orchestration-remote-run-mailbox.ts's trust argument; only rebinding is refused here.
+function refusePairedCallerUnlessAttestedForHandle(
+  runtime: OrcaRuntimeService,
+  pairedDeviceId: string | undefined,
+  handle: string,
+  evidence?: OrchestrationCompatibilityEvidence
+): void {
+  if (pairedDeviceId == null) {
+    return
+  }
+  const attested = runtime.verifyOrchestrationCompatibilityCaller(evidence)
+  if (!attested || attested.terminalHandle !== handle) {
+    throw new OrchestrationError(
+      'no_pane_identity',
+      'This requires an attested, registered caller identity.',
+      { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+    )
+  }
+}
+
 export const ORCHESTRATION_RUN_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.runCreate',
     params: RunCreateParams,
-    handler: (params, { orchestrationCompatibilityEvidence, runtime }) => {
+    handler: (params, { orchestrationCompatibilityEvidence, runtime, pairedDeviceId }) => {
       assertCallerHandleMatchesEvidence(runtime, params.from, orchestrationCompatibilityEvidence)
+      refusePairedCallerUnlessAttestedForHandle(
+        runtime,
+        pairedDeviceId,
+        params.from,
+        orchestrationCompatibilityEvidence
+      )
       const paneKey = requireCallerPane(runtime, params.from)
       const db = runtime.getOrchestrationDb()
       const priorRun = db.getCurrentRunForPane(paneKey)
@@ -74,7 +106,8 @@ export const ORCHESTRATION_RUN_METHODS: RpcMethod[] = [
         runtime,
         legacyCoordinatorAuthority,
         orchestrationCompatibilityEvidence,
-        orchestrationCompatibilityCallerAuthority: callerAuthority
+        orchestrationCompatibilityCallerAuthority: callerAuthority,
+        pairedDeviceId
       }
     ) => {
       const paneKey = requireCallerPane(runtime, params.from, callerAuthority)
@@ -89,6 +122,12 @@ export const ORCHESTRATION_RUN_METHODS: RpcMethod[] = [
         )
       }
       assertCallerHandleMatchesEvidence(runtime, params.from, orchestrationCompatibilityEvidence)
+      refusePairedCallerUnlessAttestedForHandle(
+        runtime,
+        pairedDeviceId,
+        params.from,
+        orchestrationCompatibilityEvidence
+      )
       const db = runtime.getOrchestrationDb()
       const priorRun = db.getCurrentRunForPane(paneKey)
       const run = db.bindRun({

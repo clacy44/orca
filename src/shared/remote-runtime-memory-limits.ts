@@ -66,6 +66,11 @@ export function serializeRemoteRuntimeRpcRequest(args: {
   params: unknown
   envelope?: RuntimeOrchestrationEnvelope
 }): string {
+  // S10-18: this is the only production egress of orchestrationCompatibilityEvidence — omit
+  // launchToken. The receiving runtime cannot attest a foreign handle with it; forwarding the
+  // preimage only creates a replay risk under mutual pairing.
+  const evidence = args.envelope?.orchestrationCompatibilityEvidence
+  const { launchToken: _launchToken, ...evidenceWithoutLaunchToken } = evidence ?? {}
   return serializeRemoteRuntimePayload({
     id: args.requestId,
     deviceToken: args.deviceToken,
@@ -75,7 +80,7 @@ export function serializeRemoteRuntimeRpcRequest(args: {
     orchestrationContractVersion: args.envelope?.orchestrationContractVersion,
     orchestrationRequestId: args.envelope?.orchestrationRequestId,
     compatibilityInvocationId: args.envelope?.compatibilityInvocationId,
-    orchestrationCompatibilityEvidence: args.envelope?.orchestrationCompatibilityEvidence
+    orchestrationCompatibilityEvidence: evidence ? evidenceWithoutLaunchToken : undefined
   })
 }
 

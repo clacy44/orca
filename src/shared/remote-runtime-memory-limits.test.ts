@@ -5,7 +5,8 @@ import {
   REMOTE_RUNTIME_MAX_OUTBOUND_BINARY_FRAME_BYTES,
   REMOTE_RUNTIME_MAX_OUTBOUND_JSON_BYTES,
   REMOTE_RUNTIME_MAX_SUBSCRIPTION_PARAM_BYTES,
-  serializeRemoteRuntimePayload
+  serializeRemoteRuntimePayload,
+  serializeRemoteRuntimeRpcRequest
 } from './remote-runtime-memory-limits'
 
 describe('remote runtime memory limits', () => {
@@ -44,5 +45,51 @@ describe('remote runtime memory limits', () => {
         new Uint8Array(REMOTE_RUNTIME_MAX_OUTBOUND_BINARY_FRAME_BYTES + 1)
       )
     ).toBe(false)
+  })
+
+  // S10-18: this is the only production egress of orchestrationCompatibilityEvidence — a
+  // launch-token preimage must never reach the wire, even though it was present in the
+  // envelope handed in.
+  it('drops launchToken from orchestrationCompatibilityEvidence and keeps the other fields', () => {
+    const serialized = serializeRemoteRuntimeRpcRequest({
+      requestId: 'req-1',
+      deviceToken: 'device-token',
+      method: 'orchestration.federationPull',
+      params: { dispatchId: 'dispatch-1' },
+      envelope: {
+        orchestrationCapability: 'capability',
+        orchestrationContractVersion: 1,
+        orchestrationRequestId: 'request-1',
+        compatibilityInvocationId: 'compatibility-1',
+        orchestrationCompatibilityEvidence: {
+          terminalHandle: 'term-1',
+          paneKey: 'pane-1',
+          launchToken: 'launch-1',
+          host: { kind: 'wsl', hostId: 'host-1', distro: 'ubuntu' }
+        }
+      }
+    })
+
+    const parsed = JSON.parse(serialized)
+    expect(parsed.orchestrationCompatibilityEvidence).toEqual({
+      terminalHandle: 'term-1',
+      paneKey: 'pane-1',
+      host: { kind: 'wsl', hostId: 'host-1', distro: 'ubuntu' }
+    })
+    expect(serialized).not.toContain('launch-1')
+    expect(parsed.orchestrationCapability).toBe('capability')
+    expect(parsed.compatibilityInvocationId).toBe('compatibility-1')
+  })
+
+  it('leaves orchestrationCompatibilityEvidence undefined when no envelope evidence is given', () => {
+    const serialized = serializeRemoteRuntimeRpcRequest({
+      requestId: 'req-2',
+      deviceToken: 'device-token',
+      method: 'status.get',
+      params: undefined
+    })
+
+    const parsed = JSON.parse(serialized)
+    expect(parsed.orchestrationCompatibilityEvidence).toBeUndefined()
   })
 })
