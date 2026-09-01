@@ -1426,12 +1426,9 @@ type RuntimeLeafRecord = RuntimeSyncedLeaf & {
   paneTitleUpdatedAt: number | null
 }
 
-function isCursorAgentOrchestrationTarget(
-  leaf: RuntimeLeafRecord,
-  tabTitle: string | null | undefined
-): boolean {
-  return [leaf.lastOscTitle, leaf.paneTitle, tabTitle].some(isCursorAgentTitle)
-}
+// Why (S10-15 F8): every mail-push site that used to take a bare RuntimeLeafRecord now takes
+// either a live leaf or a leafless pty-only target — see PendingPtyOnlyDeliveryTarget.
+type PendingMessageDeliveryTarget = RuntimeLeafRecord | PendingPtyOnlyDeliveryTarget
 
 type RuntimePtyWorktreeRecord = {
   ptyId: string
@@ -2227,8 +2224,23 @@ type PtyWriteFlight = {
   markSettled: () => void
 }
 
-// Why a pane never gets an armed Enter (S10-9 R1+R2 fallback outcomes).
-type WithheldDeliveryReason = 'pane_busy' | 'not_agent_pane' | 'probe_failed' | 'no_hydrated_status'
+// Why a pane never gets an armed Enter (S10-9 R1+R2 fallback outcomes; 'no_live_pane' added
+// S10-15 F8 for an unresolvable/stale handle — no live leaf or pty backs it at all).
+type WithheldDeliveryReason =
+  | 'pane_busy'
+  | 'not_agent_pane'
+  | 'probe_failed'
+  | 'no_hydrated_status'
+  | 'no_live_pane'
+
+// Why (S10-15 F8): the pointer/Enter push targets either a live leaf or a leafless pty record
+// — no renderer leaf exists for it, e.g. a headless `orca serve` session or a desktop pane
+// hidden from the renderer graph. This is the pty-only half of that union; the leaf half is
+// just a bare RuntimeLeafRecord (declared below, after RuntimeLeafRecord exists).
+type PendingPtyOnlyDeliveryTarget = {
+  readonly deliveryKind: 'pty'
+  readonly ptyId: string
+}
 
 export type { MessageWaitResult }
 
@@ -11215,6 +11227,10 @@ export class OrcaRuntimeService {
     if (pty) {
       const prevStatus = pty.lastAgentStatus
       const prevTitle = pty.lastOscTitle
+      // Why captured before the mutation below (S10-15 F8 fix A): mirrors the leaf loop's own
+      // prevObservedLive capture — an agent whose first live title is already idle (no
+      // transition) still needs the delivery edge to fire once observed live.
+      const prevObservedLive = pty.lastAgentStatusObservedLive
       const observedAt = this.nextTitleObservationSequence()
       const observedAtEpochMs = identityOnlyTitle ? null : Date.now()
       pty.lastOscTitle = recordedTitle
@@ -11241,6 +11257,19 @@ export class OrcaRuntimeService {
       ptyRecordChanged = prevTitle !== recordedTitle || prevStatus !== agentStatus
       if (agentStatus === 'idle' && prevStatus !== 'idle') {
         this.resolvePtyTuiIdleWaiters(pty, ptyId)
+      }
+      // Why gated on no-leaf, not unconditional (S10-15 F8 fix A): a headless run or a
+      // desktop pane hidden from the renderer graph has NO leaves at all, so the leaf-scoped
+      // trigger in the loop below never fires for it — this covers exactly that gap. A pty
+      // WITH a leaf keeps using its own trigger below (a leaf-keyed mailbox is not always the
+      // same handle as the pty-keyed one — e.g. no ORCA_TERMINAL_HANDLE pre-allocation — so
+      // this pty-only path cannot substitute for it).
+      if (
+        agentStatus === 'idle' &&
+        (prevStatus !== 'idle' || !prevObservedLive) &&
+        !this.leafExistsForPty(ptyId)
+      ) {
+        this.deliverPendingMessagesForPty(pty)
       }
       const shouldDelayMobileSnapshot =
         ptyRecordChanged &&
@@ -33809,8 +33838,38 @@ export class OrcaRuntimeService {
     return dispatchId ? `dispatch:${dispatchId}` : null
   }
 
+  // Why (S10-15 F8 fix A): the pty-only mirror of resolveDispatchMailboxForLeaf — a leafless
+  // pty still carries its own paneKey when one was bound at spawn time, even with no live leaf.
+  private resolveDispatchMailboxForPty(pty: RuntimePtyWorktreeRecord): string | null {
+    const db = this._orchestrationDb
+    if (!db || !pty.paneKey) {
+      return null
+    }
+    const handle = this.handleByPtyId.get(pty.ptyId)
+    const dispatchId =
+      (handle ? db.getActiveDispatchForIdentity(handle, pty.paneKey)?.id : undefined) ??
+      db.findActiveRemoteAttachmentForPane(pty.paneKey)?.dispatch_id
+    return dispatchId ? `dispatch:${dispatchId}` : null
+  }
+
   // Why notifiedThreadIdKnown (message-loss blocker fix, S10-3a): defaults true so every
   // caller but notifyMessageArrived's no-consumer branch keeps today's exact filtering.
+  // Why a read-only pre-check, not just calling getLivePtyForHandle directly (S10-15 F8 fix
+  // A): that method's own reverse-handleByPtyId self-heal mutates `this.handles` and assumes
+  // a pty-only shape — correct for a genuinely leafless pty, but WRONG for a handle a live
+  // leaf still owns mid-reload. beginGraphReload deliberately clears `this.handles` so a
+  // reloading leaf's handle goes stale immediately (see its own comment); resurrecting it
+  // here as pty-only would silently defeat that invalidation the instant a background retry
+  // (slow mailbox retry, notifyMessageArrived) fires during the reload window. Only a pty
+  // with NO leaf at all may self-heal through the pty ladder.
+  private canSelfHealAsLeaflessPtyHandle(handle: string): boolean {
+    if (this.handles.has(handle)) {
+      return false
+    }
+    const ptyId = [...this.handleByPtyId.entries()].find(([, mapped]) => mapped === handle)?.[0]
+    return ptyId !== undefined && this.ptysById.has(ptyId) && !this.leafExistsForPty(ptyId)
+  }
+
   deliverPendingMessagesForHandle(
     handle: string,
     reservedTypes?: ReadonlySet<string>,
@@ -33820,12 +33879,42 @@ export class OrcaRuntimeService {
     if (!this.handles.has(terminalHandle)) {
       const mailboxTerminal =
         this.resolveMailboxTerminalHandle(handle) ?? this.resolveStalePeerHandle(handle)
-      if (!mailboxTerminal || !this.handles.has(mailboxTerminal)) {
+      if (mailboxTerminal && this.handles.has(mailboxTerminal)) {
+        terminalHandle = mailboxTerminal
+      } else if (!this.canSelfHealAsLeaflessPtyHandle(terminalHandle)) {
+        // Why recordWithheldDelivery (S10-15 F8 fix B): no live pane backs this handle at
+        // all — that is a withheld attempt like any other, not silence. Arms the slow retry
+        // and makes `orchestration sent` say queued_awaiting_pane instead of plain queued.
+        this.recordWithheldDelivery(handle, 'no_live_pane')
         return
       }
-      terminalHandle = mailboxTerminal
+      // Why no reassignment of terminalHandle here: canSelfHealAsLeaflessPtyHandle only
+      // proved eligibility; getLivePtyForHandle below performs the actual self-heal (it
+      // mutates `this.handles` for `terminalHandle` itself, so the name stays correct).
     }
     try {
+      // Why pty-record first (S10-15 F8 fix A): a leafless pane — a headless `orca serve`
+      // session, or a desktop pane hidden from the renderer graph — has no leaf at all, so
+      // getLiveLeafForHandle always throws for it even though the process is live and idle.
+      // Mirrors the ladder getTerminal/readTerminal/sendToTerminal already use.
+      const livePty = this.getLivePtyForHandle(terminalHandle)
+      if (livePty) {
+        const { pty } = livePty
+        // Same live-observation gate as the leaf branch below, read off the pty record.
+        if (pty.lastAgentStatus === 'idle' && pty.lastAgentStatusObservedLive) {
+          this.withheldDeliveryAttemptsByHandle.delete(handle)
+          this.deliverPendingMessages(
+            { deliveryKind: 'pty', ptyId: pty.ptyId },
+            { mailboxHandle: handle, reservedTypes, notifiedThreadIdKnown }
+          )
+        } else {
+          // Normal live tracking has resumed — any earlier fallback-withheld record is stale.
+          // (The R1/R2 hydrated-probe fallback below stays leaf-scoped; a leafless pane's own
+          // idle-edge trigger in applyTrackedPtyTitle is the delivery edge for this case.)
+          this.withheldDeliveryAttemptsByHandle.delete(handle)
+        }
+        return
+      }
       const { leaf } = this.getLiveLeafForHandle(terminalHandle)
       // Why lastAgentStatusObservedLive: a cold restore seeds `idle` from the
       // title persisted at snapshot time, so an agent that went busy across the
@@ -33861,7 +33950,10 @@ export class OrcaRuntimeService {
         this.withheldDeliveryAttemptsByHandle.delete(handle)
       }
     } catch {
-      // Unknown/stale handles can't be pointed now; the persisted message stays available via explicit check or future idle delivery.
+      // Unknown/stale handles can't be pointed now; the persisted message stays available via
+      // explicit check or future idle delivery. recordWithheldDelivery (S10-15 F8 fix B) arms
+      // the slow retry and reports queued_awaiting_pane instead of a silent plain queued.
+      this.recordWithheldDelivery(handle, 'no_live_pane')
     }
   }
 
@@ -34090,6 +34182,24 @@ export class OrcaRuntimeService {
     }
   }
 
+  // Why (S10-15 F8 fix A): the pty-only mirror of deliverPendingMessagesForLeaf, for a pty
+  // with no live leaf at all — the applyTrackedPtyTitle idle edge fires this instead.
+  private deliverPendingMessagesForPty(pty: RuntimePtyWorktreeRecord): void {
+    const target: PendingMessageDeliveryTarget = { deliveryKind: 'pty', ptyId: pty.ptyId }
+    this.deliverPendingMessages(target)
+    if (!this._orchestrationDb) {
+      return
+    }
+    const run = pty.paneKey ? this._orchestrationDb.getCurrentRunForPane?.(pty.paneKey) : undefined
+    if (run) {
+      this.deliverPendingMessages(target, { mailboxHandle: `run:${run.id}` })
+    }
+    const dispatchMailbox = this.resolveDispatchMailboxForPty(pty)
+    if (dispatchMailbox) {
+      this.deliverPendingMessages(target, { mailboxHandle: dispatchMailbox })
+    }
+  }
+
   // Why here and not the RPC handler: `pointedMessageIdsByHandle` and live-leaf resolution are
   // both private runtime state; `orchestration.sent` (BUG 3) reads them through this one method.
   getMessageDeliverySnapshot(message: { id: string; to_handle: string; read: number }): {
@@ -34113,6 +34223,21 @@ export class OrcaRuntimeService {
         // the re-minted-pane handle the mailbox resolver alone misses.
         const resolvedHandle =
           this.resolveMailboxTerminalHandle(handle) ?? this.resolveStalePeerHandle(handle) ?? handle
+        // Why pty-record first (S10-15 F8 fix A): a leafless pane's mailbox otherwise always
+        // read 'unresolved' here even while the push path above delivers to it successfully —
+        // mirror the same ladder deliverPendingMessagesForHandle uses. Gated the same way
+        // that ladder is: `this.handles.has` covers the fast (already-resolved) path, and
+        // canSelfHealAsLeaflessPtyHandle covers a genuinely leafless pty's un-issued
+        // pre-allocated handle without resurrecting a leaf-owned handle mid-reload.
+        if (
+          this.handles.has(resolvedHandle) ||
+          this.canSelfHealAsLeaflessPtyHandle(resolvedHandle)
+        ) {
+          const livePty = this.getLivePtyForHandle(resolvedHandle)
+          if (livePty) {
+            return { connected: livePty.pty.connected, lastOutputAt: livePty.pty.lastOutputAt }
+          }
+        }
         return this.getLiveLeafForHandle(resolvedHandle).leaf
       } catch {
         return null
@@ -34856,7 +34981,7 @@ export class OrcaRuntimeService {
     Map<
       string,
       {
-        leaf: RuntimeLeafRecord
+        target: PendingMessageDeliveryTarget
         reservedTypes?: ReadonlySet<string>
         notifiedThreadIdKnown: boolean
       }
@@ -34909,6 +35034,59 @@ export class OrcaRuntimeService {
     return flight
   }
 
+  // Why (S10-15 F8): the one resolver every "what's the live state now" re-check site uses —
+  // initial dispatch, the probe-deferred continuation, a parked replay, and the enter-timer
+  // refire. A leaf and a pty-only target expose the same authorizing facts under different
+  // field names; this is the single place that normalizes them.
+  private resolveLiveDeliveryTarget(target: PendingMessageDeliveryTarget): {
+    target: PendingMessageDeliveryTarget
+    handle: string | undefined
+    ptyId: string | null
+    writable: boolean
+    tabTitle: string | null | undefined
+    cursorTitleSources: (string | null | undefined)[]
+    lastAgentStatus: AgentStatus | null
+    lastAgentStatusObservedLive: boolean
+  } | null {
+    if (this.isPtyOnlyDeliveryTarget(target)) {
+      const pty = this.ptysById.get(target.ptyId)
+      if (!pty) {
+        return null
+      }
+      return {
+        target,
+        handle: this.handleByPtyId.get(pty.ptyId),
+        ptyId: pty.ptyId,
+        writable: pty.connected,
+        tabTitle: null,
+        cursorTitleSources: [pty.lastOscTitle, null, null],
+        lastAgentStatus: pty.lastAgentStatus,
+        lastAgentStatusObservedLive: pty.lastAgentStatusObservedLive
+      }
+    }
+    const currentLeaf = this.leaves.get(this.getLeafKey(target.tabId, target.leafId))
+    if (!currentLeaf) {
+      return null
+    }
+    const tabTitle = this.tabs.get(currentLeaf.tabId)?.title
+    return {
+      target: currentLeaf,
+      handle: this.handleByLeafKey.get(this.getLeafKey(currentLeaf.tabId, currentLeaf.leafId)),
+      ptyId: currentLeaf.ptyId,
+      writable: currentLeaf.writable,
+      tabTitle,
+      cursorTitleSources: [currentLeaf.lastOscTitle, currentLeaf.paneTitle, tabTitle],
+      lastAgentStatus: currentLeaf.lastAgentStatus,
+      lastAgentStatusObservedLive: currentLeaf.lastAgentStatusObservedLive
+    }
+  }
+
+  private isPtyOnlyDeliveryTarget(
+    target: PendingMessageDeliveryTarget
+  ): target is PendingPtyOnlyDeliveryTarget {
+    return 'deliveryKind' in target && target.deliveryKind === 'pty'
+  }
+
   private settlePendingMessageDelivery(ptyId: string, flight: PtyWriteFlight): void {
     // Why unconditional: a claim waiting on this flight must be released even when
     // an exit retire already dropped it from the map, or that write hangs forever.
@@ -34927,17 +35105,16 @@ export class OrcaRuntimeService {
       // live idle that authorized this delivery was observed before the pane was
       // handed its task. Typing a pointer plus Enter into a worker that went busy
       // inside the span is the hazard the push exists to avoid.
-      const currentLeaf = this.leaves.get(
-        this.getLeafKey(delivery.leaf.tabId, delivery.leaf.leafId)
-      )
+      const resolved = this.resolveLiveDeliveryTarget(delivery.target)
       if (
-        currentLeaf?.ptyId !== ptyId ||
-        currentLeaf.lastAgentStatus !== 'idle' ||
-        !currentLeaf.lastAgentStatusObservedLive
+        !resolved ||
+        resolved.ptyId !== ptyId ||
+        resolved.lastAgentStatus !== 'idle' ||
+        !resolved.lastAgentStatusObservedLive
       ) {
         continue
       }
-      this.deliverPendingMessages(currentLeaf, {
+      this.deliverPendingMessages(resolved.target, {
         mailboxHandle,
         reservedTypes: delivery.reservedTypes,
         notifiedThreadIdKnown: delivery.notifiedThreadIdKnown
@@ -34954,6 +35131,16 @@ export class OrcaRuntimeService {
     flight?.markSettled()
     this.messageDeliveryFlightsByPtyId.delete(ptyId)
     this.parkedMessageRedeliveriesByPtyId.delete(ptyId)
+    // Why also the pty's own primary handle (S10-15 F8): a leafless pty's mailbox is keyed
+    // directly off handleByPtyId — getLeavesForPty below yields nothing for it to clear via a
+    // leaf. Harmless overlap when a leaf shares this same pre-allocated handle: both deletes
+    // target the identical entry.
+    const ptyHandle = this.handleByPtyId.get(ptyId)
+    if (ptyHandle) {
+      this.lastPointedMessageSequenceByHandle.delete(ptyHandle)
+      this.pointedMessageIdsByHandle.delete(ptyHandle)
+      this.mailPointerRepointScheduler.schedule(ptyHandle)
+    }
     for (const leaf of this.getLeavesForPty(ptyId)) {
       const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
       if (handle) {
@@ -34980,7 +35167,7 @@ export class OrcaRuntimeService {
 
   // Why: normal delivery stays event-driven; the bounded mailbox retry only repairs missed liveness edges.
   private deliverPendingMessages(
-    leaf: RuntimeLeafRecord,
+    target: PendingMessageDeliveryTarget,
     options: {
       mailboxHandle?: string
       reservedTypes?: ReadonlySet<string>
@@ -34996,18 +35183,22 @@ export class OrcaRuntimeService {
       return
     }
 
-    const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
-    if (!handle) {
+    // Why resolved, not the raw target (S10-15 F8 fix A): normalizes a leaf or a leafless pty
+    // record to one shape; every read below comes off this instead of `leaf.` directly.
+    const resolved = this.resolveLiveDeliveryTarget(target)
+    if (!resolved?.handle) {
       return
     }
+    const handle = resolved.handle
     const mailboxHandle = options.mailboxHandle ?? handle
     const notifiedThreadIdKnown = options.notifiedThreadIdKnown ?? true
+    const ptyId = resolved.ptyId
 
-    if (leaf.ptyId && this.messageDeliveryFlightsByPtyId.has(leaf.ptyId)) {
-      let parked = this.parkedMessageRedeliveriesByPtyId.get(leaf.ptyId)
+    if (ptyId && this.messageDeliveryFlightsByPtyId.has(ptyId)) {
+      let parked = this.parkedMessageRedeliveriesByPtyId.get(ptyId)
       if (!parked) {
         parked = new Map()
-        this.parkedMessageRedeliveriesByPtyId.set(leaf.ptyId, parked)
+        this.parkedMessageRedeliveriesByPtyId.set(ptyId, parked)
       }
       const priorEntry = parked.get(mailboxHandle)
       const priorReservedTypes = priorEntry?.reservedTypes
@@ -35019,7 +35210,7 @@ export class OrcaRuntimeService {
       // was threadId-less, or a known-thread notify parked after an unknown one would
       // silently re-arm withholding the unknown one earned an exemption from.
       parked.set(mailboxHandle, {
-        leaf,
+        target: resolved.target,
         reservedTypes,
         notifiedThreadIdKnown: (priorEntry?.notifiedThreadIdKnown ?? true) && notifiedThreadIdKnown
       })
@@ -35058,7 +35249,10 @@ export class OrcaRuntimeService {
       return
     }
 
+    // Why watermarkWasSet captured (S10-15 F8 fix C): an Enter-timer rollback must restore
+    // "no watermark recorded" as absence, not as the -1 default sentinel becoming a real entry.
     const watermark = this.lastPointedMessageSequenceByHandle.get(mailboxHandle) ?? -1
+    const watermarkWasSet = this.lastPointedMessageSequenceByHandle.has(mailboxHandle)
     const priorPointedIds = this.pointedMessageIdsByHandle.get(mailboxHandle)
     if (
       !unread.some(
@@ -35068,7 +35262,7 @@ export class OrcaRuntimeService {
       return
     }
 
-    if (!leaf.writable || !leaf.ptyId) {
+    if (!resolved.writable || !ptyId) {
       return
     }
     const newestSequence = unread.at(-1)?.sequence
@@ -35079,12 +35273,12 @@ export class OrcaRuntimeService {
     if (
       !options.skipAbsenceProbe &&
       this.ptyController?.probePtyLiveness &&
-      !this.controllerKnowsPtyIsLive(leaf.ptyId)
+      !this.controllerKnowsPtyIsLive(ptyId)
     ) {
       // Why: a fire-and-forget write to a prior process's ptyId reports success
       // and would mark these delivered while losing them. Proven absence keeps
       // them queued for a future surface; unknown liveness still delivers.
-      const probedPtyId = leaf.ptyId
+      const probedPtyId = ptyId
       // Why: triggers arriving mid-probe must not each arm a continuation — the
       // Every continuation would re-read the same unread rows. The single armed
       // continuation re-reads fresh rows when it fires, so nothing is lost.
@@ -35095,7 +35289,7 @@ export class OrcaRuntimeService {
       void this.isLeafPtyProvenAbsent(probedPtyId)
         .then((absent) => {
           this.probeDeferredDeliveryPtyIds.delete(probedPtyId)
-          if (!absent && leaf.ptyId === probedPtyId) {
+          if (!absent) {
             // Why a macrotask and not the stale reservation snapshot: a `remote:`
             // pty answers the probe null before its first await, so this chain can
             // settle in microtasks and overtake the resumption of a check resolved
@@ -35107,16 +35301,16 @@ export class OrcaRuntimeService {
             setTimeout(() => {
               // Why current state, not the closure: the gate that authorized this
               // push ran before the probe. A same-id cold restore inside the probe
-              // window keeps ptyId identical and makes the leaf writable again, so
+              // window keeps ptyId identical and makes the pane writable again, so
               // an id-only check would type the pointer plus Enter into a process
               // whose idle was never observed. Re-read the live-idle gate.
-              const currentLeaf = this.leaves.get(this.getLeafKey(leaf.tabId, leaf.leafId))
+              const current = this.resolveLiveDeliveryTarget(target)
               if (
-                currentLeaf?.ptyId === probedPtyId &&
-                currentLeaf.lastAgentStatus === 'idle' &&
-                currentLeaf.lastAgentStatusObservedLive
+                current?.ptyId === probedPtyId &&
+                current.lastAgentStatus === 'idle' &&
+                current.lastAgentStatusObservedLive
               ) {
-                this.deliverPendingMessages(currentLeaf, {
+                this.deliverPendingMessages(current.target, {
                   mailboxHandle,
                   skipAbsenceProbe: true
                 })
@@ -35130,7 +35324,7 @@ export class OrcaRuntimeService {
       return
     }
 
-    const deliveryPtyId = leaf.ptyId
+    const deliveryPtyId = ptyId
     const flight = this.createPtyWriteFlight()
     this.messageDeliveryFlightsByPtyId.set(deliveryPtyId, flight)
     // Why: every sync outcome — failed write, Cursor branch, or a throw —
@@ -35174,8 +35368,10 @@ export class OrcaRuntimeService {
       }
       this.pointedMessageIdsByHandle.set(mailboxHandle, pointedIdsAfterWrite)
 
-      const tabTitle = this.tabs.get(leaf.tabId)?.title
-      if (isCursorAgentOrchestrationTarget(leaf, tabTitle)) {
+      // Why no title→not-Cursor default holds for a leafless target too: cursorTitleSources is
+      // [pty.lastOscTitle, null, null] there — no tab title exists, so it reads exactly as
+      // "not Cursor" the way an unset paneTitle/tabTitle already does for a leaf.
+      if (resolved.cursorTitleSources.some(isCursorAgentTitle)) {
         // Why: Cursor Agent treats injected PTY text as editable prompt input, so submitting must stay under user control.
         return
       }
@@ -35183,14 +35379,39 @@ export class OrcaRuntimeService {
       // Why: agent TUIs can swallow a \r in the same PTY write; submit separately after a delay.
       flight.enterTimer = setTimeout(() => {
         try {
-          // Why current state, not the closure: graph resync replaces leaf
-          // objects, so the captured record can read writable=true after the
-          // pty died, and an exit retire may have superseded this flight.
+          // Why current state, not the closure: graph resync can drop or replace the leaf, and
+          // an exit retire may have superseded this flight.
           if (this.messageDeliveryFlightsByPtyId.get(deliveryPtyId) !== flight) {
+            // Why NO rollback here (S10-15 F8 fix C): this identity mismatch IS the proven
+            // exit/respawn signal — retirePendingMessageDeliveryForPty already cleared this
+            // pty's watermark/pointed rows synchronously inside onPtyExit, and a same-id
+            // respawn owns its own fresh delivery. Re-pointing here would race that reset.
             return
           }
-          const currentLeaf = this.leaves.get(this.getLeafKey(leaf.tabId, leaf.leafId))
-          if (!currentLeaf || currentLeaf.ptyId !== deliveryPtyId || !currentLeaf.writable) {
+          const current = this.resolveLiveDeliveryTarget(target)
+          if (!current || current.ptyId !== deliveryPtyId || !current.writable) {
+            // Why rollback here (fix C): the flight-identity check above just proved this is
+            // NOT an exit/respawn on this pty — most commonly a graph resync that dropped the
+            // leaf out from under a still-live pane, or hid it from the renderer graph. The
+            // pointer already landed in the pane with no Enter behind it; un-point exactly
+            // these rows and restore the pre-flight watermark so the next authorized push
+            // re-delivers instead of stranding them pointed-but-never-submitted. A duplicated
+            // banner on the eventual resend is acceptable; an invisible strand is not.
+            const pointedIdsToRollback = this.pointedMessageIdsByHandle.get(mailboxHandle)
+            if (pointedIdsToRollback) {
+              for (const message of unread) {
+                pointedIdsToRollback.delete(message.id)
+              }
+              if (pointedIdsToRollback.size === 0) {
+                this.pointedMessageIdsByHandle.delete(mailboxHandle)
+              }
+            }
+            if (watermarkWasSet) {
+              this.lastPointedMessageSequenceByHandle.set(mailboxHandle, watermark)
+            } else {
+              this.lastPointedMessageSequenceByHandle.delete(mailboxHandle)
+            }
+            this.mailPointerRepointScheduler.schedule(mailboxHandle)
             return
           }
           this.ptyController?.write(deliveryPtyId, '\r')
