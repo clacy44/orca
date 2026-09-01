@@ -63,4 +63,26 @@ describe('checkAndBumpRate', () => {
       .get('pane:x', 'find') as { count: number }
     expect(row.count).toBe(1)
   })
+
+  // S10-15 (INV-P-006): agent_rate is peer-writable and must never grow forever — pruned
+  // opportunistically inside checkAndBumpRate's own transaction.
+  it('prunes an old-window row on the next bump, while keeping the current window', () => {
+    const db = rawDb()
+    db.prepare(
+      `INSERT INTO agent_rate (subject_key, verb, window_start, count) VALUES (?, ?, ?, ?)`
+    ).run('pane:old', 'register', new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), 1)
+
+    expect(
+      checkAndBumpRate(db, { subjectKey: 'pane:new', verb: 'register', windowMs: 60_000, limit: 5 })
+    ).toEqual({ allowed: true })
+
+    const oldRow = db
+      .prepare('SELECT count FROM agent_rate WHERE subject_key = ?')
+      .get('pane:old') as { count: number } | undefined
+    expect(oldRow).toBeUndefined()
+    const newRow = db
+      .prepare('SELECT count FROM agent_rate WHERE subject_key = ?')
+      .get('pane:new') as { count: number } | undefined
+    expect(newRow?.count).toBe(1)
+  })
 })

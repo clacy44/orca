@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import type Database from '../../sqlite/sync-database'
 import { LEGACY_RUN_ID, OrchestrationDb } from './db'
+import { checkAndBumpRate } from './agent-rate-limit'
 
 describe('OrchestrationDb reset scopes', () => {
   let db: OrchestrationDb | undefined
@@ -89,6 +91,26 @@ describe('OrchestrationDb reset scopes', () => {
     db!.resetAll()
 
     expect(db!.listRemoteAgents({ includeQuarantined: true })).toHaveLength(0)
+  })
+
+  it('resetAll purges agent_rate (S10-15 INV-P-006)', () => {
+    createState()
+    const rawDb = (db as unknown as { db: Database.Database }).db
+    checkAndBumpRate(rawDb, {
+      subjectKey: 'pane:reset_test',
+      verb: 'register',
+      windowMs: 60_000,
+      limit: 5
+    })
+    expect(rawDb.prepare('SELECT COUNT(*) AS n FROM agent_rate').get() as { n: number }).toEqual({
+      n: 1
+    })
+
+    db!.resetAll()
+
+    expect(rawDb.prepare('SELECT COUNT(*) AS n FROM agent_rate').get() as { n: number }).toEqual({
+      n: 0
+    })
   })
 
   it('resetTasks preserves Runs and messages while clearing every worker attachment', () => {

@@ -9313,6 +9313,9 @@ export class OrchestrationDb {
       DELETE FROM federated_dispatches;
       -- S10-15 ruling 3(a): remote_agents was unpurgeable before this slice (breaker finding 2).
       DELETE FROM remote_agents;
+      -- S10-15 (INV-P-006): agent_rate is peer-writable (checkAndBumpRate, agent-rate-limit.ts)
+      -- and must be purgeable like every other coordination-bus table.
+      DELETE FROM agent_rate;
       DELETE FROM worker_terminal_archives;
       DELETE FROM worker_terminal_resources;
       DELETE FROM worker_dispatches;

@@ -240,7 +240,15 @@ export const ORCHESTRATION_WORKER_CONTROL_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.workerAbandon',
     params: WorkerDispatchParams,
-    handler: (params, { runtime }) => {
+    handler: (params, { runtime, pairedDeviceId, clientKind }) => {
+      // S10-15: worker-abandon is a local operator/coordinator action.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.workerAbandon must be issued locally by the operator/coordinator, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
       const abandoned = runtime.getOrchestrationDb().abandonWorkerDispatch(params.dispatch)
       if (abandoned.disposition === 'context_only') {
         if (!abandoned.alreadySettled) {

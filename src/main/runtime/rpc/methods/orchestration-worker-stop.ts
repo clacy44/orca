@@ -13,7 +13,18 @@ export const ORCHESTRATION_WORKER_STOP_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.workerStop',
     params: WorkerDispatchParams,
-    handler: async (params, { runtime, orchestrationMutation }) => {
+    handler: async (params, { runtime, orchestrationMutation, pairedDeviceId, clientKind }) => {
+      // S10-15: worker-stop is a local coordinator/operator action — a paired/mobile CALLER is
+      // refused here regardless of whether the dispatch itself is federated (that `federated`
+      // branch below is this HOST relaying a stop OUT to a peer server, issued by a local
+      // caller; it must stay reachable for local callers).
+      if (pairedDeviceId != null || clientKind === 'mobile') {
+        throw new OrchestrationError(
+          'forbidden',
+          'orchestration.workerStop must be issued locally by the operator/coordinator, never by a federated peer.',
+          { nextSteps: ['run this on the host itself, not over a paired link'] }
+        )
+      }
       const db = runtime.getOrchestrationDb()
       const federated = db.getFederatedDispatch(params.dispatch)
       if (federated) {

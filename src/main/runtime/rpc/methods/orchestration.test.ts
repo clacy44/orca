@@ -3623,4 +3623,45 @@ describe('orchestration RPC methods', () => {
       expect(db.listTasks()).toHaveLength(0)
     })
   })
+
+  // S10-15: the no-handle coordinator/worker verbs — a paired/mobile caller has no local
+  // pane/dispatch to target and must be refused before any read or write. Bogus
+  // dispatch/paneKey ids prove the gate runs FIRST: if it did not (or ran after a read), these
+  // calls would fail with dispatch_not_found instead of forbidden.
+  describe('federated-caller gate on no-handle coordinator/worker verbs', () => {
+    it.each([
+      ['orchestration.run', { spec: 'test spec' }],
+      ['orchestration.runStop', {}],
+      ['orchestration.workerStop', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerAbandon', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerRelease', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerRetain', { dispatch: 'dispatch_nonexistent' }],
+      ['orchestration.workerTerminalUserInput', { paneKey: 'tab_nonexistent:leaf-1' }]
+    ])(
+      '%s refuses a paired caller with forbidden, before any read/write',
+      async (method, params) => {
+        setup()
+        ctx = { runtime, pairedDeviceId: 'dev_paired_peer', clientKind: 'runtime' }
+
+        await expect(call(method, params)).rejects.toMatchObject({ code: 'forbidden' })
+      }
+    )
+
+    it('a mobile-scope caller is refused the same way', async () => {
+      setup()
+      ctx = { runtime, clientKind: 'mobile' }
+
+      await expect(
+        call('orchestration.workerAbandon', { dispatch: 'dispatch_x' })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
+    it('a local (non-federated) caller reaches past the gate (gets dispatch_not_found, not forbidden)', async () => {
+      setup()
+
+      await expect(
+        call('orchestration.workerAbandon', { dispatch: 'dispatch_nonexistent' })
+      ).rejects.not.toMatchObject({ code: 'forbidden' })
+    })
+  })
 })
