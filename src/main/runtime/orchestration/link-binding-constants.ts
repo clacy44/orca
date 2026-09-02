@@ -8,6 +8,15 @@
 // --- A1: constants this slice owns -----------------------------------------------------------
 
 export const LINK_BINDING_PROBE_SLOTS = 8
+// C3: byte/char lengths for the proof module's hex/base64url shape guards and nonce sizes — THE
+// REGISTER owns these too (link-binding-proof.ts builds its regexes from these via `new RegExp`,
+// never an inline quantifier, so test 77's scan has nothing to catch there).
+export const LINK_BINDING_HEX32_LENGTH = 32
+export const LINK_BINDING_HEX64_LENGTH = 64
+// sha256 digest as unpadded base64url.
+export const LINK_BINDING_B64URL_SHA256_LENGTH = 43
+// R7.3 step 9: nonceP's byte width, and the incident-id hex length (lifecycle m4).
+export const LINK_BINDING_NONCE_BYTES = 32
 export const LINK_BINDING_MAX_PAGES_PER_ROUND = 1
 export const LINK_BINDING_SCAN_CONCURRENCY = 4
 export const LINK_BINDING_RPC_BUDGET_MS = 12_000

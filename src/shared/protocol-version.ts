@@ -126,6 +126,11 @@ export const ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY =
 // S10-19: orchestration.federationAnswerPrompt (the prompt-answer choke) exists.
 export const ORCHESTRATION_PEER_PROMPT_ANSWER_RUNTIME_CAPABILITY =
   'orchestration.peer-prompt-answer.v1' as const
+// S10-16 R23.1: orchestration.federatedLinkProbe/federatedLinkConfirm exist and this host can
+// compute its own self-view (R9). Old peers self-deny by omitting it; a peer claiming it without
+// implementing it yields method_not_found, which the prover maps to `unsupported` (R23.3).
+export const ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY =
+  'orchestration.link-binding.v1' as const
 
 export const RUNTIME_CAPABILITIES = [
   'runtime.status.compat.v1',
@@ -169,7 +174,8 @@ export const RUNTIME_CAPABILITIES = [
   AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY,
   ORCHESTRATION_AGENT_DIRECTORY_RUNTIME_CAPABILITY,
   ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY,
-  ORCHESTRATION_PEER_PROMPT_ANSWER_RUNTIME_CAPABILITY
+  ORCHESTRATION_PEER_PROMPT_ANSWER_RUNTIME_CAPABILITY,
+  ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})

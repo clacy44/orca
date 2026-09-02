@@ -154,7 +154,16 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'forbidden',
   // S10-15 (chair ruling 7): thrown by orchestration.reply against a foreign-origin message row
   // (no automatic route resolution — R9 was cut) with `data.nextSteps` naming the working path.
-  'no_return_route'
+  'no_return_route',
+  // S10-16 R25: exactly three new link-binding codes, each with a self-contained guidance
+  // sentence at its throw site (principal-lane-consent-service.ts:210-213's rule) — an old
+  // client has no string for a new code. `protocol_violation` is deliberately NOT added here
+  // (Ruling 23(f)): it is a local `peer_link_scan_facts.outcome` CHECK member only, never a wire
+  // code, and its absence from this set is load-bearing for R23 point 3 (`method_not_found`
+  // staying unpropagated).
+  'link_binding_conflict',
+  'link_store_unreadable',
+  'link_store_empty'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

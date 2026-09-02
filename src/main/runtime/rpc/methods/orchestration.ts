@@ -84,6 +84,7 @@ import { requireAddressableAgentRecipient } from '../../orchestration/addressabl
 import { validateDisplayNameCandidate } from '../../orchestration/agent-name-sanitizer'
 import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federated-peer-ask'
 import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-federated-peer-send'
+import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
 import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
@@ -614,6 +615,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_THREAD_INVITE_METHODS,
   ...ORCHESTRATION_FEDERATED_PEER_ASK_METHODS,
   ...ORCHESTRATION_FEDERATED_PEER_SEND_METHODS,
+  ...ORCHESTRATION_LINK_BINDING_PEER_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,

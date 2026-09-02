@@ -138,6 +138,7 @@ import {
   runPeerAttachmentRuntimePrune as runPeerAttachmentRuntimePruneImpl,
   type PeerGrantProfileLookup
 } from './peer-owned-pane-lifecycle'
+import type { LinkBindingSelfView } from './device-registry-link-credential'
 import {
   tickDispatchInputObserver as runDispatchInputObserverTick,
   tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
@@ -3155,6 +3156,10 @@ export class OrcaRuntimeService {
   // both non-success arms, beside detachPrincipalLaneHost). null at boot, by construction —
   // the boot sweep (below) never reads this and never should (Ruling 24 addendum 2(o)).
   private peerGrantProfileLookup: PeerGrantProfileLookup | null = null
+  // S10-16 R9: installed by runtime-rpc.ts beside attachPrincipalLaneHost (and cleared on both
+  // non-success arms). Public — handlers (which see only OrcaRuntimeService, never
+  // RuntimeRpcServer) read it directly, matching the design's `runtime.linkBindingSelfView` shape.
+  linkBindingSelfView: LinkBindingSelfView | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4336,6 +4341,12 @@ export class OrcaRuntimeService {
   // DeviceRegistry lookup; this class only ever calls through the function it is handed).
   setPeerGrantProfileLookup(lookup: PeerGrantProfileLookup | null): void {
     this.peerGrantProfileLookup = lookup
+  }
+
+  // S10-16 R9: install/clear the link-binding self-view (runtime-rpc.ts owns the actual
+  // DeviceRegistry/E2EEKeypair; this class only ever calls through the accessor it is handed).
+  setLinkBindingSelfView(view: LinkBindingSelfView | null): void {
+    this.linkBindingSelfView = view
   }
 
   // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.

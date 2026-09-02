@@ -34,6 +34,7 @@ import {
 import { ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { PEER_LONG_POLL_PER_DEVICE_CAP } from './peer-profile-constants'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
+import { createLinkBindingSelfView } from './device-registry-link-credential'
 import {
   createPrincipalLaneConnectionJoin,
   removeLaneOnGrantRevoked,
@@ -1361,6 +1362,8 @@ export class OrcaRuntimeRpcServer {
       detachPrincipalLaneHost(this.runtime)
       // S10-19 W-2 (ops MN-4): no pairing transport means no grant rows to resolve a profile from.
       this.runtime.setPeerGrantProfileLookup?.(null)
+      // S10-16 R9: no DeviceRegistry/E2EEKeypair to compute a self-view from.
+      this.runtime.setLinkBindingSelfView?.(null)
     }
     // Why: WebSocket uses per-device tokens + E2EE (tweetnacl) instead of TLS since React Native can't pin self-signed certs.
     if (this.enableWebSocket) {
@@ -1378,6 +1381,8 @@ export class OrcaRuntimeRpcServer {
         this.runtime.setLegacySweepAuditSource?.(null)
         // S10-19 W-2 (ops MN-4): pairing init failed — no DeviceRegistry to resolve a profile from.
         this.runtime.setPeerGrantProfileLookup?.(null)
+        // S10-16 R9: no DeviceRegistry/E2EEKeypair — self-view refuses `capability_unsupported`.
+        this.runtime.setLinkBindingSelfView?.(null)
       } else {
         this.deviceRegistry = pairingIdentity.deviceRegistry
         this.e2eeKeypair = pairingIdentity.e2eeKeypair
@@ -1412,6 +1417,11 @@ export class OrcaRuntimeRpcServer {
             .find((d) => createHash('sha256').update(d.token).digest('hex') === fingerprint)
           return device ? effectiveAccessProfile(device, this.legacyGrantProfile) : null
         })
+        // S10-16 R9: armed in the same block as attachPrincipalLaneHost, beside the peer-grant
+        // profile resolver — a DeviceRegistry and an E2EEKeypair both exist here by construction.
+        this.runtime.setLinkBindingSelfView?.(
+          createLinkBindingSelfView(this.deviceRegistry, () => this.getE2EEPublicKey())
+        )
         this.runtime.runPeerAttachmentRuntimePrune?.()
         try {
           const host = this.resolveInitialWebSocketBindHost()
