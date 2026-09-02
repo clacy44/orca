@@ -35,7 +35,8 @@ import {
   assertPeerMailDestinationAllowed,
   assertRemoteRunMailboxCaller,
   isRemoteRunMailboxRequest,
-  resolveRemoteRunMailboxScope
+  resolveRemoteRunMailboxScope,
+  type PeerMailDestination
 } from './orchestration-remote-run-mailbox'
 import { meterPeerLink } from '../../runtime-peer-rpc-allowlist'
 
@@ -457,6 +458,28 @@ function pendingDispatchMail(
   return count > 0 ? { pendingMail: count } : {}
 }
 
+// Review D2 (2026-09-02): the peer-destination classification evaluated on the RAW,
+// peer-supplied `to`/`run` fields ONLY — never on a rewritten `to` and never behind any db
+// lookup. A peer caller is already required (earlier in `send`) to pass an explicit --to or
+// --run, so `to`/`run` both absent here means a non-peer caller with neither, which is
+// deliberately `{ kind: 'other' }` (assertPeerMailDestinationAllowed no-ops for a non-peer
+// profile; a peer with neither already threw invalid_argument before reaching this call).
+function classifyRawPeerMailDestination(params: {
+  to?: string
+  run?: string
+}): PeerMailDestination {
+  if (params.to?.startsWith('run:')) {
+    return { kind: 'run', runId: params.to.slice('run:'.length) }
+  }
+  if (params.to?.startsWith('dispatch:')) {
+    return { kind: 'dispatch', dispatchId: params.to.slice('dispatch:'.length) }
+  }
+  if (!params.to && params.run) {
+    return { kind: 'run', runId: params.run }
+  }
+  return { kind: 'other' }
+}
+
 function resolveMessageRun(
   runtime: OrcaRuntimeService,
   params: {
@@ -829,6 +852,21 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             : {})
         }
       }
+      // Review D2 (2026-09-02): the AUTHORITATIVE peer-destination constraint, evaluated on the
+      // RAW peer-supplied `params.to`/`params.run` — BEFORE resolveMessageRun (which rewrites
+      // `to` for worker_done/heartbeat and performs the first dispatch_contexts lookup) and
+      // before any db lookup keyed on a peer-chosen id. This is what stops a peer from labeling
+      // a message as a routine worker_done/heartbeat to launder a foreign `dispatch:<id>` into
+      // the `run:<id>` the post-rewrite `to` would otherwise present, and it is what makes the
+      // refusal for a nonexistent dispatch byte-identical to the refusal for a foreign one — both
+      // fall through assertPeerMailDestinationAllowed's single `forbidden` throw, never
+      // resolveMessageRun's distinguishable `dispatch_not_found`.
+      assertPeerMailDestinationAllowed(
+        db,
+        accessProfile,
+        authenticatedCallerFingerprint,
+        classifyRawPeerMailDestination(params)
+      )
       const routing = resolveMessageRun(runtime, {
         from,
         senderPaneKey,
@@ -867,10 +905,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           orchestrationSkillRecoveryData()
         )
       }
-      // W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): the destination is now
-      // constrained SERVER-SIDE for a peer caller, not by params.remoteRunMailbox alone —
-      // this closes agent:/bare-handle/group-fan-out/foreign-dispatch reach that the mode
-      // flag never bounded.
+      // W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): kept as defence in depth against
+      // the post-rewrite `to` — the authoritative check is the raw-params call above (D2).
       assertPeerMailDestinationAllowed(
         db,
         accessProfile,

@@ -11,6 +11,7 @@ import {
   assertPeerWorktreeMetadataBounded,
   clampPeerAttachTimeoutMs,
   peerRefusal,
+  recordPeerAdmissionFault,
   RESERVED_PENDING_S10_16,
   RUNTIME_PEER_RPC_METHOD_ALLOWLIST,
   type PeerAdmissionContext
@@ -186,6 +187,41 @@ describe('S10-19 W-5: admitRuntimePeerMethod (§3)', () => {
     })
     expect(result).toMatchObject({ refused: true, code: 'admission_unavailable' })
     expect(auditSpy).not.toHaveBeenCalled()
+  })
+
+  // Review Q4 (2026-09-02): the audit row recordPeerAdmissionFault writes must never carry the
+  // raw, peer-supplied method through unbounded — only a KNOWN allowlist key is stored.
+  it('Q4: a fault on a KNOWN method audits the real method name, capped', async () => {
+    const s = setup()
+    db = s.db
+    vi.spyOn(db, 'checkAndBumpRate').mockImplementation(() => {
+      throw new Error('meter store unreadable')
+    })
+    const auditSpy = vi.spyOn(db, 'writeAgentAudit')
+    const result = await admitRuntimePeerMethod({
+      runtime: s.runtime,
+      callerFingerprint: 'fp1',
+      method: 'status.get'
+    })
+    expect(result).toMatchObject({ refused: true, code: 'admission_unavailable' })
+    expect(auditSpy).toHaveBeenCalledWith(expect.objectContaining({ verb: 'peer_link:status.get' }))
+  })
+
+  it('Q4: recordPeerAdmissionFault with a 10 KB control-byte method name (not a registered key) audits unknown_method, never the raw string, length-capped', () => {
+    const s = setup()
+    db = s.db
+    const auditSpy = vi.spyOn(db, 'writeAgentAudit')
+    const hostile = `files.${'x'.repeat(10_000)}${String.fromCharCode(0x1b, 0x00, 0x07)}`
+    expect(RUNTIME_PEER_RPC_METHOD_ALLOWLIST.has(hostile)).toBe(false)
+    recordPeerAdmissionFault(
+      { runtime: s.runtime, callerFingerprint: 'fp1', method: hostile },
+      new Error('boom')
+    )
+    expect(auditSpy).toHaveBeenCalledTimes(1)
+    const call = auditSpy.mock.calls[0]?.[0] as { verb: string }
+    expect(call.verb).toBe('peer_link:unknown_method')
+    expect(call.verb).not.toContain(hostile)
+    expect(call.verb.length).toBeLessThanOrEqual(128)
   })
 })
 

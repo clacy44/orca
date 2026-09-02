@@ -357,7 +357,11 @@ describe('S10-19 W-4: single-shot reservation (T-5, T-5d, T-5r)', () => {
       dispatchId: 'disp_retry',
       choice: 'accept_trust'
     })
-    expect(first).toMatchObject({ refused: true, code: 'pane_write_unavailable' })
+    expect(first).toMatchObject({
+      refused: true,
+      code: 'pane_write_unavailable',
+      effectsApplied: false
+    })
     expect(db.getRemoteDispatchAttachment('disp_retry')?.blocked_consumed_at).toBeNull()
     const second = await writeToPeerOwnedPane({
       ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
@@ -391,7 +395,9 @@ describe('S10-19 W-4: single-shot reservation (T-5, T-5d, T-5r)', () => {
       dispatchId: 'disp_partial',
       choice: 'accept_trust'
     })
-    expect(first).toMatchObject({ refused: true })
+    // Review Minor (2026-09-02): bytes landed before the suffix refused — the refusal must
+    // report effectsApplied:true, never the blanket false a clean no-op refusal gets.
+    expect(first).toMatchObject({ refused: true, effectsApplied: true })
     expect(db.getRemoteDispatchAttachment('disp_partial')?.blocked_consumed_at).not.toBeNull()
     const second = await writeToPeerOwnedPane({
       ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },

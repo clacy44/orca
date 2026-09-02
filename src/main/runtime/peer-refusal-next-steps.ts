@@ -19,9 +19,13 @@ const FEDERATED_REPLACEMENT_METHODS = new Set([
   'terminal.wait'
 ])
 
+// Review Q4 (2026-09-02): `method` is peer-supplied and the ingress bounds it only as a
+// non-empty string — no length cap, no charset. Never interpolate it: a closed vocabulary
+// sentence names the CLASS of alternative without echoing the raw string back to the peer's
+// own CLI (which would otherwise carry an unbounded/control-byte payload through unchanged).
 export function nextStepsForRefusedMethod(method: string): readonly string[] {
   if (HOST_MUTATING_METHOD_PREFIXES.some((prefix) => method.startsWith(prefix))) {
-    return [`run it on that host: the local orca command for '${method}'`]
+    return ['run it on that host: the local orca command for the equivalent host-mutating action']
   }
   if (FEDERATED_REPLACEMENT_METHODS.has(method)) {
     return [

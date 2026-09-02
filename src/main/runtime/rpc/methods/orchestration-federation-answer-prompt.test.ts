@@ -97,4 +97,33 @@ describe('S10-19 W-4 review finding 9: orchestration.federationAnswerPrompt refu
       vi.restoreAllMocks()
     }
   })
+
+  // Review Minor (2026-09-02): a refusal raised AFTER a partial write (Ruling 20(b) — bytes
+  // landed, the suffix's re-check refused) must report effectsApplied:true, not the blanket
+  // false every clean no-op refusal above gets.
+  it('Minor: a refusal after a PARTIAL write forwards effectsApplied:true', async () => {
+    const peerWrite = await import('../../peer-owned-pane-write')
+    vi.spyOn(peerWrite, 'writeToPeerOwnedPane').mockResolvedValue({
+      refused: true,
+      code: 'pane_write_unavailable',
+      wireCode: 'forbidden',
+      message: 'agent no longer live for the suffix',
+      nextSteps: [],
+      effectsApplied: true
+    })
+    try {
+      const runtime = new OrcaRuntimeService()
+      await expect(
+        method.handler({ dispatchId: 'disp_partial', choice: 'accept_trust' }, {
+          runtime,
+          authenticatedCallerFingerprint: 'fp_peer'
+        } as never)
+      ).rejects.toMatchObject({
+        code: 'forbidden',
+        data: { effectsApplied: true }
+      })
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
 })

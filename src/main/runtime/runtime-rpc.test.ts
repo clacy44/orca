@@ -7103,6 +7103,67 @@ describe('W-5..W-7 review finding 1 (Ruling 24 addendum 4(aa)): peer mail destin
     }
   })
 
+  // Review D2 (2026-09-02): assertPeerMailDestinationAllowed now runs on the RAW params.to
+  // BEFORE resolveMessageRun and before the worker_done/heartbeat `to` rewrite — so a peer
+  // cannot launder a foreign `dispatch:<id>` into an admitted `run:<id>` by labeling the
+  // message as lifecycle mail, and the refusal is byte-identical for "foreign" vs
+  // "nonexistent" (never the distinguishable dispatch_not_found).
+  for (const type of ['heartbeat', 'worker_done'] as const) {
+    it(`peer send type '${type}' to dispatch:<foreign> is REFUSED with the same envelope as dispatch:<nonexistent>`, async () => {
+      const { server, runtime, db, peerToken, stop } = await startServerWithGrants()
+      try {
+        const foreignDispatchId = createAttachedDispatch(db, runtime, 'fp_a_different_link')
+        const payload =
+          type === 'worker_done' ? JSON.stringify({ outcome: 'succeeded' }) : undefined
+        const foreignReply = await sendFrame(server, peerToken, 'orchestration.send', {
+          to: `dispatch:${foreignDispatchId}`,
+          subject: 'hi',
+          body: 'body',
+          type,
+          remoteRunMailbox: true,
+          ...(payload ? { payload } : {})
+        })
+        const nonexistentReply = await sendFrame(server, peerToken, 'orchestration.send', {
+          to: 'dispatch:disp_does_not_exist',
+          subject: 'hi',
+          body: 'body',
+          type,
+          remoteRunMailbox: true,
+          ...(payload ? { payload } : {})
+        })
+        expect(foreignReply.ok).toBe(false)
+        expect(nonexistentReply.ok).toBe(false)
+        // Byte-identical: same code, same message, same nextSteps — never dispatch_not_found.
+        expect(foreignReply.error).toEqual(nonexistentReply.error)
+        expect((foreignReply.error as { code: string }).code).toBe('forbidden')
+        expect((foreignReply.error as { code: string }).code).not.toBe('dispatch_not_found')
+      } finally {
+        await stop()
+      }
+    })
+
+    it(`peer send type '${type}' to its OWN Dispatch is ADMITTED`, async () => {
+      const { server, runtime, db, peerToken, peerFingerprint, stop } =
+        await startServerWithGrants()
+      try {
+        const dispatchId = createAttachedDispatch(db, runtime, peerFingerprint)
+        const payload =
+          type === 'worker_done' ? JSON.stringify({ dispatchId, outcome: 'succeeded' }) : undefined
+        const reply = await sendFrame(server, peerToken, 'orchestration.send', {
+          to: `dispatch:${dispatchId}`,
+          subject: 'hi',
+          body: 'body',
+          type,
+          remoteRunMailbox: true,
+          ...(payload ? { payload } : {})
+        })
+        expect(reply.ok).toBe(true)
+      } finally {
+        await stop()
+      }
+    })
+  }
+
   it('peer reply to a message row addressed from a Dispatch owned by ANOTHER link refuses', async () => {
     const { server, runtime, db, peerToken, stop } = await startServerWithGrants()
     try {

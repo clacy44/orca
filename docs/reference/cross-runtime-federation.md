@@ -269,7 +269,11 @@ is unchanged — new methods and new optional params are additive.
   Enter — a real keystroke that dismisses the prompt, not a no-op (Claude has no authored
   decline keystroke and refuses `prompt_state_unknown` instead). It works identically for a
   `full` grant too — prefer it over a raw `terminal send` regardless of profile, since it
-  does not race the host's own liveness check.
+  does not race the host's own liveness check. The prompt detector now fails closed on a
+  pane with no title evidence at all — so the two-runtime pairing-transport smoke test
+  above (install-day drill 2) is no longer only the verifier of Claude's `y` keystroke; it
+  is also the first proof that a codex pane's folder-trust gate, which can fire before its
+  own OSC title is ever published, is answerable by this path at all.
 - **`orca serve` binds every interface.** `--pairing-address` sets only the advertised
   address; the listener opens on `0.0.0.0` and there is no bind/host flag. Block direct
   ingress to the port with a host or network firewall (a private tunnel is an additional

@@ -28,8 +28,12 @@ export const ORCHESTRATION_FEDERATION_ANSWER_PROMPT_METHODS: RpcMethod[] = [
         // W-5..W-7 review finding 4 (Ruling 24 addendum 4(dd)): the choke previously discarded
         // result.nextSteps entirely — every §9.1 refusal must carry effectsApplied:false and its
         // nextSteps, and this is the one caller that used to drop the field on the floor.
+        // Review Minor (2026-09-02): a partial write (text landed, the suffix's re-check
+        // refused — Ruling 20(b)) sets effectsApplied on the refusal itself; every other
+        // refusal here is a clean no-op and result.effectsApplied is absent, so `?? false`
+        // preserves the prior blanket-false behavior for those.
         throw new OrchestrationError(result.wireCode, result.message, {
-          effectsApplied: false,
+          effectsApplied: result.effectsApplied ?? false,
           nextSteps: result.nextSteps,
           ...(result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {})
         })

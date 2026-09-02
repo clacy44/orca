@@ -9,6 +9,7 @@ import { OrchestrationDb } from './orchestration/db'
 import {
   accessProfileOfAttachment,
   closePeerOwnedPaneOnAgentExit,
+  peerOwnedPaneDisposition,
   runPeerAttachmentBootSweep,
   runPeerAttachmentRuntimePrune,
   type PeerOwnedPaneRuntime
@@ -65,6 +66,15 @@ describe('S10-19 W-2: accessProfileOfAttachment', () => {
   it('a resolved profile passes through', () => {
     expect(accessProfileOfAttachment({ home_peer_fingerprint: 'fp' }, () => 'peer')).toBe('peer')
     expect(accessProfileOfAttachment({ home_peer_fingerprint: 'fp' }, () => 'full')).toBe('full')
+  })
+})
+
+describe('S10-19 W-2 review D1: peerOwnedPaneDisposition', () => {
+  it('full stays full, positive peer stays peer, everything else (absent lookup or no matching device) is unresolved', () => {
+    expect(peerOwnedPaneDisposition({ home_peer_fingerprint: 'fp' }, () => 'full')).toBe('full')
+    expect(peerOwnedPaneDisposition({ home_peer_fingerprint: 'fp' }, () => 'peer')).toBe('peer')
+    expect(peerOwnedPaneDisposition({ home_peer_fingerprint: 'fp' }, () => null)).toBe('unresolved')
+    expect(peerOwnedPaneDisposition({ home_peer_fingerprint: 'fp' }, null)).toBe('unresolved')
   })
 })
 
@@ -433,28 +443,115 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
   })
 
-  // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): a REVOKED/rotated grant (the lookup
-  // finds no matching device, resolving null — not 'full') is treated as peer-owned, not
-  // skipped: close, stamp, delete, same as a genuine 'peer' row.
-  it('finding 2 / 24(bb): a row whose grant is REVOKED (lookup resolves null) is treated as peer-owned — closed, stamped, then deleted', async () => {
+  // Review D1 (2026-09-02) REPLACES the prior "finding 2 / 24(bb): a row whose grant is
+  // REVOKED ... is treated as peer-owned — closed, stamped, then deleted" test above, which
+  // pinned the destructive-regression inversion: "unresolved" (grant rotated/revoked/expired,
+  // or registry load failure) is not a synonym for "was a peer" — it is equally what a FULL
+  // grant looks like after rotation. Only a POSITIVE 'peer' resolution may ever close/delete.
+  // (a) a full-profile pane whose grant was rotated away is NOT closed and gets the
+  // owner_unresolved audit.
+  it('D1 (a): a FULL-profile pane whose grant was rotated away (lookup now resolves null) is NOT closed, NOT deleted, and gets the owner_unresolved audit', async () => {
     db = new OrchestrationDb(':memory:')
     const dispatchId = insertAttachment(db, {
-      homeFingerprint: 'fp_revoked',
-      terminalHandle: 'term_revoked',
-      processIncarnation: 'pty_revoked:inc_1',
+      homeFingerprint: 'fp_full_rotated',
+      terminalHandle: 'term_full_rotated',
+      processIncarnation: 'pty_full_rotated:inc_1',
       state: 'ready'
     })
     const closeTerminal = vi.fn().mockResolvedValue({})
     const runtime: PeerOwnedPaneRuntime = {
-      resolveLivePeerPaneHandle: () => 'term_revoked_reconnected',
+      resolveLivePeerPaneHandle: () => 'term_full_rotated_reconnected',
       inspectTerminalProcessIncarnationLiveness: async () => 'live',
       closeTerminal,
       isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
       getRuntimeId: () => 'epoch-current'
     }
+    // Rotated/revoked/expired: the registry no longer has a matching device, so the lookup
+    // resolves null — indistinguishable, by construction, from a rotated PEER grant.
     await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => null })
-    expect(closeTerminal).toHaveBeenCalledWith('term_revoked_reconnected')
+    expect(closeTerminal).not.toHaveBeenCalled()
+    const row = db.getRemoteDispatchAttachment(dispatchId)
+    expect(row).toBeDefined()
+    expect(row?.agent_exited_at).not.toBeNull()
+    const audit = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'peerPaneClose'`)
+      .all() as { outcome: string }[]
+    expect(audit).toHaveLength(1)
+    expect(audit[0]?.outcome).toBe('owner_unresolved')
+    void dispatchId
+  })
+
+  // (b) a positively-peer row is closed/stamped/deleted (unchanged behavior — kept from before,
+  // restated against a POSITIVE resolution rather than a null one).
+  it('D1 (b): a row that POSITIVELY resolves to peer is closed, stamped, then deleted', async () => {
+    db = new OrchestrationDb(':memory:')
+    const dispatchId = insertAttachment(db, {
+      homeFingerprint: 'fp_peer_positive',
+      terminalHandle: 'term_peer_positive',
+      processIncarnation: 'pty_peer_positive:inc_1',
+      state: 'ready'
+    })
+    const closeTerminal = vi.fn().mockResolvedValue({})
+    const runtime: PeerOwnedPaneRuntime = {
+      resolveLivePeerPaneHandle: () => 'term_peer_positive_reconnected',
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
+      closeTerminal,
+      isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
+      getRuntimeId: () => 'epoch-current'
+    }
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
+    expect(closeTerminal).toHaveBeenCalledWith('term_peer_positive_reconnected')
     expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+  })
+
+  // (c) the exit hook and the prune produce identical outcomes for the same unresolved row —
+  // proof the two paths share one helper (markOwnerUnresolved) and cannot diverge again.
+  it('D1 (c): the exit hook and the runtime prune produce identical outcomes for the same unresolved row', async () => {
+    const exitDb = new OrchestrationDb(':memory:')
+    const exitDispatchId = insertAttachment(exitDb, {
+      homeFingerprint: 'fp_unresolved',
+      terminalHandle: 'term_unresolved',
+      processIncarnation: 'pty_unresolved:inc_1',
+      state: 'ready'
+    })
+    await closePeerOwnedPaneOnAgentExit({
+      db: exitDb,
+      runtime: { closeTerminal: vi.fn().mockResolvedValue({}) },
+      lookup: () => null,
+      handle: 'term_unresolved',
+      cause: 'command_finished'
+    })
+    const exitRow = exitDb.getRemoteDispatchAttachment(exitDispatchId)
+    const exitAudit = rawDb(exitDb)
+      .prepare(`SELECT verb, outcome, reason_code FROM agent_audit WHERE verb = 'peerPaneClose'`)
+      .all()
+    exitDb.close()
+
+    db = new OrchestrationDb(':memory:')
+    const pruneDispatchId = insertAttachment(db, {
+      homeFingerprint: 'fp_unresolved',
+      terminalHandle: 'term_unresolved_prune',
+      processIncarnation: 'pty_unresolved_prune:inc_1',
+      state: 'ready'
+    })
+    const runtime: PeerOwnedPaneRuntime = {
+      resolveLivePeerPaneHandle: () => 'term_unresolved_prune_reconnected',
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
+      closeTerminal: vi.fn().mockResolvedValue({}),
+      isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
+      getRuntimeId: () => 'epoch-current'
+    }
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => null })
+    const pruneRow = db.getRemoteDispatchAttachment(pruneDispatchId)
+    const pruneAudit = rawDb(db)
+      .prepare(`SELECT verb, outcome, reason_code FROM agent_audit WHERE verb = 'peerPaneClose'`)
+      .all()
+
+    expect(pruneRow?.agent_exited_at).not.toBeNull()
+    expect(exitRow?.agent_exited_at).not.toBeNull()
+    expect(pruneRow?.state).toBe(exitRow?.state)
+    expect(pruneRow?.stage).toBe(exitRow?.stage)
+    expect(pruneAudit).toEqual(exitAudit)
   })
 
   // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): the RE-RUN property — a row

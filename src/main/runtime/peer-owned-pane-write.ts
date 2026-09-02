@@ -55,7 +55,14 @@ export class PeerPaneReboundError extends Error {}
 // write flight, immediately before a byte lands.
 export class PeerPaneAgentNotLiveError extends Error {}
 
-export type PeerPaneWriteRefusal = ReturnType<typeof peerRefusal>
+// Review Minor (2026-09-02): `effectsApplied`, when present, distinguishes a clean no-op
+// refusal (every early refusal above the write attempt — absent, treat as false) from one
+// raised AFTER bytes already landed on the pane (Ruling 20(b)'s partial write — text written,
+// the suffix's re-check refused). The shot is consumed either way, but a client trusting a
+// blanket `effectsApplied:false` would treat a burnt shot as though nothing happened.
+export type PeerPaneWriteRefusal = ReturnType<typeof peerRefusal> & {
+  readonly effectsApplied?: boolean
+}
 export type PeerPaneWrite = { readonly refused: false }
 
 function lookUpKeystroke(
@@ -233,6 +240,8 @@ export async function writeToPeerOwnedPane(args: {
       ctx.runtime.getOrchestrationDb().releasePeerPromptAnswer(dispatchId)
     }
     await sendGuardedRecoveryInterrupt(ctx.runtime, dispatchId, handle, state.reason)
-    return classifyPeerPaneWriteFailure(error)
+    // Review Minor (2026-09-02): sawWrite is exactly "bytes already landed" — surface it as
+    // effectsApplied so a partial write is never reported as a clean no-op.
+    return { ...classifyPeerPaneWriteFailure(error), effectsApplied: sawWrite }
   }
 }

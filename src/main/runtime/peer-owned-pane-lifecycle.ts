@@ -43,6 +43,46 @@ export function accessProfileOfAttachment(
   return lookup ? lookup(row.home_peer_fingerprint) : null
 }
 
+// Review D1 (2026-09-02): the ONE place both agent-exit-hook and runtime-prune paths decide what
+// an attachment row's grant resolution MEANS for whether the pane may ever be force-closed.
+// 'unresolved' is NOT a synonym for 'was a peer' — a rotated, revoked, or expired FULL grant
+// resolves null exactly the same way a revoked PEER grant does (accessProfileOfAttachment cannot
+// tell them apart; the registry has genuinely forgotten). Only a lookup that POSITIVELY resolves
+// 'peer' may ever destructively close/delete. An unresolved row takes the exit hook's third
+// branch: stamp + owner_unresolved audit, never close, never delete — a full-profile adopted pane
+// is never closed by any path, resolved or not.
+export type PeerOwnedPaneDisposition = 'full' | 'peer' | 'unresolved'
+
+export function peerOwnedPaneDisposition(
+  row: Pick<RemoteDispatchAttachmentRow, 'home_peer_fingerprint'>,
+  lookup: PeerGrantProfileLookup | null
+): PeerOwnedPaneDisposition {
+  const profile = accessProfileOfAttachment(row, lookup)
+  if (profile === 'full') {
+    return 'full'
+  }
+  if (profile === 'peer') {
+    return 'peer'
+  }
+  return 'unresolved'
+}
+
+// Shared by both destructive-decision paths (D1): the non-destructive outcome for a row this
+// host cannot positively prove was peer-owned. Stamps agent_exited_at (releases the cap slot,
+// makes the row visible to sweeps) and writes one owner_unresolved audit row — never closes,
+// never deletes.
+function markOwnerUnresolved(db: OrchestrationDb, dispatchId: string, cause: string): void {
+  db.markPeerOwnedAttachmentAgentExited(dispatchId, cause)
+  db.writeAgentAudit({
+    agentId: null,
+    actorPaneKey: null,
+    actorHostId: null,
+    verb: 'peerPaneClose',
+    outcome: 'owner_unresolved',
+    reasonCode: cause
+  })
+}
+
 // W-2 rule 3 (Ruling 20(c) / attacker 4): wired at the four runtime-time agent-exit hooks. A
 // resolved 'peer' profile closes then stamps; an unresolved profile (lookup absent, or grant
 // revoked/rotated) stamps only and audits owner_unresolved — the stamp is not destructive (the
@@ -60,11 +100,11 @@ export async function closePeerOwnedPaneOnAgentExit(args: {
   if (!row) {
     return
   }
-  const profile = accessProfileOfAttachment(row, args.lookup)
-  if (profile === 'full') {
+  const disposition = peerOwnedPaneDisposition(row, args.lookup)
+  if (disposition === 'full') {
     return
   }
-  if (profile === 'peer') {
+  if (disposition === 'peer') {
     try {
       await args.runtime.closeTerminal(args.handle)
     } catch (error) {
@@ -73,15 +113,7 @@ export async function closePeerOwnedPaneOnAgentExit(args: {
     args.db.markPeerOwnedAttachmentAgentExited(row.dispatch_id, args.cause)
     return
   }
-  args.db.markPeerOwnedAttachmentAgentExited(row.dispatch_id, args.cause)
-  args.db.writeAgentAudit({
-    agentId: null,
-    actorPaneKey: null,
-    actorHostId: null,
-    verb: 'peerPaneClose',
-    outcome: 'owner_unresolved',
-    reasonCode: args.cause
-  })
+  markOwnerUnresolved(args.db, row.dispatch_id, args.cause)
 }
 
 // W-2 rule 1 (Ruling 24 addendum 2(o)): runs at BOOT, before the profile lookup exists (index.ts,
@@ -135,12 +167,18 @@ export async function runPeerAttachmentBootSweep(args: {
 // (the pty graph had not yet re-adopted it) is retried on the next, rather than left alone
 // forever.
 //
-// A row whose grant profile does NOT resolve to 'full' is treated as peer-owned: this covers a
-// genuine 'peer' grant AND a REVOKED/rotated one (accessProfileOfAttachment returns null when
-// the lookup finds no matching device) — the pane was created for that peer, so a revoked grant
-// does not turn it into a full-profile pane that must never be force-closed; it removes the only
-// party who could ever have reached it. Only a row that resolves to an ACTUAL 'full' grant is
-// skipped, unclosed.
+// Review D1 (2026-09-02, replaces the pre-review "unresolved === peer-owned" rule this comment
+// used to state): ONLY a row that resolves POSITIVELY to 'peer' is ever force-closed here. A
+// row whose grant is unresolved (lookup absent, or the registry has no matching device —
+// rotated, revoked, or expired) shares the SAME disposition ('unresolved') whether the grant
+// was originally 'peer' or 'full' — accessProfileOfAttachment cannot and must not be trusted to
+// tell them apart, because "the registry forgot" is not evidence of which profile it forgot. An
+// unresolved row therefore takes exactly closePeerOwnedPaneOnAgentExit's third branch (shared
+// via markOwnerUnresolved so the two paths cannot diverge again): stamp agent_exited_at + one
+// owner_unresolved audit row, never close, never delete. This still makes the row visible to
+// every sweep and releases the cap slot — finding 2's whole ask — without ever force-closing a
+// pane this host cannot prove was peer-owned. A row that resolves to an ACTUAL 'full' grant is
+// skipped entirely, exactly as before.
 export async function runPeerAttachmentRuntimePrune(args: {
   db: OrchestrationDb
   runtime: PeerOwnedPaneRuntime
@@ -154,10 +192,15 @@ export async function runPeerAttachmentRuntimePrune(args: {
     if (!liveHandle) {
       continue
     }
-    if (accessProfileOfAttachment(row, args.lookup) === 'full') {
+    const disposition = peerOwnedPaneDisposition(row, args.lookup)
+    if (disposition === 'full') {
       continue
     }
     if (await args.runtime.isTerminalRunningAgent(liveHandle)) {
+      continue
+    }
+    if (disposition === 'unresolved') {
+      markOwnerUnresolved(args.db, row.dispatch_id, 'command_finished')
       continue
     }
     try {

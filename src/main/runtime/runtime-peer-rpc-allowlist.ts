@@ -253,6 +253,17 @@ export const REFUSE_ADMISSION_UNAVAILABLE: PeerRefusal = peerRefusal(
   'The peer admission check is temporarily unavailable; retry shortly.'
 )
 
+// Review Q4 (2026-09-02): `ctx.method` is peer-supplied and the ingress bounds it only as a
+// non-empty string — no length cap, no charset. This operator-facing audit row must never carry
+// that raw string through unchanged: only a KNOWN registered peer method name (a key of
+// RUNTIME_PEER_RPC_METHOD_ALLOWLIST) is stored; anything else — including a garbage/oversized/
+// control-byte name that somehow reached this catch — is recorded as the fixed literal
+// 'unknown_method', length-capped defensively regardless.
+function auditSafeMethodVerb(method: string): string {
+  const known = RUNTIME_PEER_RPC_METHOD_ALLOWLIST.has(method) ? method : 'unknown_method'
+  return `peer_link:${known}`.slice(0, 128)
+}
+
 export function recordPeerAdmissionFault(
   ctx: PeerAdmissionContext & { method: string },
   error: unknown
@@ -262,7 +273,7 @@ export function recordPeerAdmissionFault(
       agentId: null,
       actorPaneKey: null,
       actorHostId: ctx.callerFingerprint,
-      verb: `peer_link:${ctx.method}`,
+      verb: auditSafeMethodVerb(ctx.method),
       outcome: 'admission_unavailable',
       reasonCode: error instanceof Error ? error.message.slice(0, 200) : 'unknown_fault'
     })
