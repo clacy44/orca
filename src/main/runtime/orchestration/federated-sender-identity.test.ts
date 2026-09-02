@@ -1,13 +1,20 @@
 // S10-15 D2/D3/ruling 2/ruling 3(b): the shared inbound-identity importer, extracted byte-
 // identically out of orchestration-federated-peer-ask.ts, plus its ruling-2 (peer-fingerprint
 // binding) and ruling-3(b) (per-link cap) amendments.
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../../sqlite/sync-database'
+import { AUTHENTICATED_TRANSPORT_FALLBACK } from '../principal-link-fingerprint-binding'
 import { OrchestrationDb, REMOTE_AGENTS_PER_LINK_CAP } from './db'
 import {
   buildFederatedSenderIdentity,
   importFederatedSenderIdentity
 } from './federated-sender-identity'
+
+// Mirrors db.ts's own UNAUTHENTICATED_LANE_CALLER_FINGERPRINT derivation (not exported).
+const UNAUTHENTICATED_LANE_FINGERPRINT = createHash('sha256')
+  .update(AUTHENTICATED_TRANSPORT_FALLBACK)
+  .digest('hex')
 
 describe('buildFederatedSenderIdentity', () => {
   let db: OrchestrationDb | undefined
@@ -76,6 +83,39 @@ describe('importFederatedSenderIdentity — refactor-fidelity table (D2 test 1)'
     expect((result.error.data as { nextSteps: string[] }).nextSteps).toEqual([
       'this indicates a version-mismatched or malformed peer relay — update Orca on the asking host'
     ])
+  })
+
+  // S10-16 R25 (Ruling 7(vi)) / C1 review finding 6: an identity carried over a lane that never
+  // proved a real caller credential must never be bound to a link — effect-free (before the DB
+  // upsert), and it must not fire for a genuinely-authenticated fingerprint.
+  it.each([
+    ['a falsy fingerprint', ''],
+    ['the authenticated_transport fallback hash', UNAUTHENTICATED_LANE_FINGERPRINT]
+  ])('unbindable_fingerprint: refuses %s before any write', (_name, peerFingerprint) => {
+    db = new OrchestrationDb(':memory:')
+    const result = importFederatedSenderIdentity(db, {
+      identity: { id: 'agt_000000000009', displayName: 'peer-nine' },
+      linkKey: LINK,
+      peerFingerprint
+    })
+    expect(result.outcome).toBe('invalid')
+    if (result.outcome !== 'invalid') {
+      throw new Error('unreachable')
+    }
+    expect(result.reason).toBe('unbindable_fingerprint')
+    expect(result.error.code).toBe('unauthenticated_lane')
+    // Effect-free: the guard fires before the upsert, so no remote_agents row was written.
+    expect(db.listRemoteAgents({ includeQuarantined: true })).toEqual([])
+  })
+
+  it('a real authenticated fingerprint is never refused as unbindable', () => {
+    db = new OrchestrationDb(':memory:')
+    const result = importFederatedSenderIdentity(db, {
+      identity: { id: 'agt_000000000009', displayName: 'peer-nine' },
+      linkKey: LINK,
+      peerFingerprint: FP
+    })
+    expect(result.outcome).not.toBe('invalid')
   })
 
   it('local_collision: an id colliding with a local agents row refuses invalid_argument', () => {

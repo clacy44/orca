@@ -11,17 +11,55 @@ export const PENDING_GRANT_TTL_MS = 24 * 60 * 60 * 1000
 export const MAX_LIVE_MINTED_GRANTS = 16
 
 // S10-16 R1.1: which minted-grant eviction budget an invite counts against, keyed by the LANE that
-// issued it (not by name). 'legacy' is the function-parameter default only — a row minted before
-// this field existed and persisted with no `pendingBudgetClass` at all; nothing evicts it (it is
-// excluded from retainNewestMintedGrants entirely, below).
-export type BudgetClass = 'legacy' | 'host_auto' | 'serve_named' | 'ui_named' | 'lane_invite'
+// issued it (not by name). 'legacy' means "no field at all on disk" — a row persisted before this
+// field existed; nothing evicts it (excluded from retainNewestMintedGrants entirely, below).
+// 'unspecified' (S10-16 C1 review F7/finding 8) is the FAIL-CLOSED default a mint gets when its
+// caller omits the parameter: unlike 'legacy' it is a real, capped partition, so a future mint lane
+// that forgets to declare a class shares 'unspecified''s budget instead of disabling the cap.
+export type BudgetClass =
+  | 'legacy'
+  | 'unspecified'
+  | 'host_auto'
+  | 'serve_named'
+  | 'ui_named'
+  | 'lane_invite'
 
-/** A never-connected row carrying its own deadline — i.e. one the always-mint lane created. */
+/**
+ * A never-connected row carrying its own deadline — i.e. one the always-mint lane created.
+ * S10-16 C1 review F1: keys on `grantClass` (a mint-time fact) first, so a legacy-sweep-stamped row
+ * (`grantClass: 'legacy_coalesced'`) can never read as minted. Falls back to the pre-existing
+ * pendingExpiresAt-presence heuristic ONLY when grantClass is absent — i.e. a row minted before this
+ * field existed. Safe: the sweep has never written pendingExpiresAt (F1), so an absent grantClass
+ * with a present pendingExpiresAt can only mean a genuine pre-existing mint.
+ */
 export function isMintedPendingDevice(device: {
   lastSeenAt: number
   pendingExpiresAt?: number
+  grantClass?: 'minted' | 'legacy_coalesced'
 }): boolean {
-  return device.lastSeenAt === 0 && device.pendingExpiresAt !== undefined
+  if (device.lastSeenAt !== 0) {
+    return false
+  }
+  return device.grantClass !== undefined
+    ? device.grantClass === 'minted'
+    : device.pendingExpiresAt !== undefined
+}
+
+/**
+ * A swept legacy-coalesced row past its stamped-from-pairedAt deadline, still un-consumed —
+ * S10-16 R1.4/F4: refuse it at validation, never delete it (link-status must still list it). Once
+ * consumed (lastSeenAt !== 0) it is a real pairing and this always reads false, same rule as a
+ * genuine minted grant.
+ */
+export function isExpiredLegacyCoalescedGrant(
+  device: { lastSeenAt: number; pairedAt: number; grantClass?: 'minted' | 'legacy_coalesced' },
+  now: number
+): boolean {
+  return (
+    device.grantClass === 'legacy_coalesced' &&
+    device.lastSeenAt === 0 &&
+    device.pairedAt + PENDING_GRANT_TTL_MS <= now
+  )
 }
 
 // Why: the deadline is only meaningful while the row is still an un-scanned invite. A scanned row is a

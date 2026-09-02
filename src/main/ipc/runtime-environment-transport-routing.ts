@@ -170,9 +170,10 @@ export async function callRuntimeEnvironment(
       }
       // Why: startup/control-plane RPCs use the proven one-shot path so repo
       // hydration cannot be coupled to a stale terminal-control connection.
-      // Why the nested ternary instead of always passing 6 args: an omitted trailing
-      // `maxDurationMs` must produce the exact same call shape as before S10-16 (zero blast
-      // radius at HEAD, proven — not merely functionally equivalent).
+      // S10-16 C1 review finding 11: always pass `maxDurationMs` explicitly (a trailing `undefined`
+      // when absent) rather than varying arity — the envelope branch above already passes a 6th
+      // arg unconditionally, so arity was never actually preserved end-to-end; a trailing
+      // `undefined` argument is behaviorally inert in JS either way (finding 12).
       const response = sharedControlEnvelope
         ? await sendRemoteRuntimeRequest(
             pairing,
@@ -182,16 +183,14 @@ export async function callRuntimeEnvironment(
             sharedControlEnvelope,
             maxDurationMs
           )
-        : maxDurationMs === undefined
-          ? await sendRemoteRuntimeRequest(pairing, method, params, effectiveTimeoutMs)
-          : await sendRemoteRuntimeRequest(
-              pairing,
-              method,
-              params,
-              effectiveTimeoutMs,
-              undefined,
-              maxDurationMs
-            )
+        : await sendRemoteRuntimeRequest(
+            pairing,
+            method,
+            params,
+            effectiveTimeoutMs,
+            undefined,
+            maxDurationMs
+          )
       markEnvironmentUsedFromResponse(userDataPath, currentEnvironment.id, response)
       return response
     })

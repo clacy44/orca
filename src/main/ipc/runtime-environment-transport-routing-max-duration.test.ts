@@ -61,7 +61,38 @@ describe('callRuntimeEnvironment maxDurationMs branch selection (S10-16 R4.3/R4.
     rmSync(userDataPath, { recursive: true, force: true })
   })
 
-  it('federatedLinkProbe takes the one-shot branch and carries maxDurationMs', async () => {
+  // S10-16 C1 review finding 9: production's callPinnedEnvironment always attaches an envelope for
+  // `orchestration.*` methods, including a non-mutation like the probe (isOrchestrationMutation is
+  // false for it) — so the arm this test must exercise is the sharedControlEnvelope one, not the
+  // bare `undefined` one, which production never actually takes for this method.
+  it('federatedLinkProbe with a production-shaped envelope takes the one-shot branch and carries maxDurationMs', async () => {
+    const envelope = { orchestrationContractVersion: 1 }
+
+    await callRuntimeEnvironment(
+      userDataPath,
+      environmentId,
+      'orchestration.federatedLinkProbe',
+      { probeId: 'p1' },
+      1000,
+      undefined,
+      envelope,
+      500
+    )
+
+    expect(sendRemoteRuntimeRequestMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      'orchestration.federatedLinkProbe',
+      { probeId: 'p1' },
+      1000,
+      envelope,
+      500
+    )
+    expect(sendRemoteRuntimeSharedControlRequestMock).not.toHaveBeenCalled()
+  })
+
+  // Negative control retained: the bare arm (no envelope at all) still carries maxDurationMs too,
+  // even though production does not actually reach it for this method (finding 9).
+  it('federatedLinkProbe with no envelope still takes the one-shot branch and carries maxDurationMs', async () => {
     await callRuntimeEnvironment(
       userDataPath,
       environmentId,

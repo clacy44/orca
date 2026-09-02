@@ -1282,10 +1282,16 @@ export class OrcaRuntimeRpcServer {
         this.principalGrantBindings = null
         // Without grant rows nothing can resolve to a principal; fall back to pre-S9 behaviour.
         detachPrincipalLaneHost(this.runtime)
+        // S10-16 C1 review F3: no registry, nothing to flush.
+        this.runtime.setLegacySweepAuditSource?.(null)
       } else {
         this.deviceRegistry = pairingIdentity.deviceRegistry
         this.e2eeKeypair = pairingIdentity.e2eeKeypair
         this.pairingInitializationFailure = null
+        // S10-16 C1 review F3: the R1.4 legacy-sweep audit rows this registry's load() queued have
+        // no sink until the orchestration DB attaches — hand the registry to the runtime so
+        // whichever of getOrchestrationDb()/setOrchestrationDb() runs first can drain it.
+        this.runtime.setLegacySweepAuditSource?.(this.deviceRegistry)
         // Why here and not at construction: the registry's grant rows ARE the pairing registry,
         // and attaching it is what arms `terminal.lane_link_unbound` (S9 §2a, §6).
         // Held: S9c's close and revoke wipes need `principalOf` and the survivor query, and both

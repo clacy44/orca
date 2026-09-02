@@ -124,6 +124,7 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import { OrchestrationDb } from './orchestration/db'
+import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import {
   DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
   sweepDispatchLivenessBreaches
@@ -3135,6 +3136,12 @@ export class OrcaRuntimeService {
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
+  // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
+  // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
+  // per queued batch at both attach sites below (Ruling 23 addendum (p)).
+  private legacySweepAuditSource: { getPendingLegacySweepAudit(): LegacySweepAuditRow[] } | null =
+    null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4127,8 +4134,44 @@ export class OrcaRuntimeService {
       this.ensureDispatchLivenessMonitor()
       this.resumeDispatchInputObservers()
       this.scheduleRestoredMessageRepoints()
+      this.flushLegacySweepAudit()
     }
     return this._orchestrationDb
+  }
+
+  // S10-16 C1 review F3: registered by RuntimeRpcServer once its DeviceRegistry is live, so
+  // whichever of getOrchestrationDb()/setOrchestrationDb() attaches first can drain it.
+  setLegacySweepAuditSource(
+    source: { getPendingLegacySweepAudit(): LegacySweepAuditRow[] } | null
+  ): void {
+    this.legacySweepAuditSource = source
+    this.flushLegacySweepAudit()
+  }
+
+  // Drains the registered source (a no-op with none registered, or nothing queued) into
+  // agent_audit. The drain in DeviceRegistry.getPendingLegacySweepAudit() is itself exactly-once
+  // (it swaps the buffer for an empty one), so calling this from either attach site is safe.
+  private flushLegacySweepAudit(): void {
+    const source = this.legacySweepAuditSource
+    const db = this._orchestrationDb
+    if (!source || !db) {
+      return
+    }
+    for (const row of source.getPendingLegacySweepAudit()) {
+      db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: null,
+        actorHostId: null,
+        verb: 'deviceRegistryLegacySweep',
+        outcome: 'legacy_coalesced_stamped',
+        reasonCode: JSON.stringify({
+          deviceId: row.deviceId,
+          name: row.name,
+          pairedAt: row.pairedAt,
+          legacyExpiresAt: row.legacyExpiresAt
+        })
+      })
+    }
   }
 
   setOrchestrationDb(db: OrchestrationDb): void {
@@ -4148,6 +4191,7 @@ export class OrcaRuntimeService {
     this.ensureDispatchLivenessMonitor()
     this.resumeDispatchInputObservers()
     this.scheduleRestoredMessageRepoints()
+    this.flushLegacySweepAudit()
   }
 
   // Why armed with the database rather than with each worker-start: the breach fence lives in a

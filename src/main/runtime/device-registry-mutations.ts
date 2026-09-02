@@ -36,7 +36,9 @@ export function buildDeviceEntry(
     lastSeenAt: 0,
     pairingReach,
     // Why: omit the key entirely when absent so a coalesced grant's persisted shape is unchanged.
-    ...(pendingExpiresAt === undefined ? {} : { pendingExpiresAt }),
+    // grantClass: 'minted' rides with pendingExpiresAt (S10-16 C1 review F1) — the mint-time fact
+    // isMintedPendingDevice keys on first, so a later legacy-sweep stamp can never be confused with it.
+    ...(pendingExpiresAt === undefined ? {} : { pendingExpiresAt, grantClass: 'minted' as const }),
     ...(pendingBudgetClass === undefined || pendingBudgetClass === 'legacy'
       ? {}
       : { pendingBudgetClass })
@@ -65,15 +67,24 @@ export function withLastSeenAt(
   return devices.map((d) => (d.deviceId === deviceId ? { ...d, lastSeenAt: seenAt } : d))
 }
 
+// S10-16 C1 review finding 10: null on a not-found id, like its four siblings, so the caller never
+// has to fall back to a non-null assertion that could type an absent row as a present DeviceEntry.
 export function withPairingReach(
   devices: DeviceEntry[],
   deviceId: string,
   pairingReach: RuntimePairingReach
-): DeviceEntry[] {
+): DeviceEntry[] | null {
+  if (!devices.some((d) => d.deviceId === deviceId)) {
+    return null
+  }
   return devices.map((d) => (d.deviceId === deviceId ? { ...d, pairingReach } : d))
 }
 
-/** Rotate's retain filter: drops the ONE shared, possibly-screenshotted pending row of `scope`. */
+// Rotate's retain filter: drops the ONE shared, possibly-screenshotted pending row of `scope`.
+// S10-16 C1 review F2: a legacy-sweep-stamped row (grantClass: 'legacy_coalesced') reads
+// isMintedPendingDevice() === false (F1), so it is NOT retained here — a "Regenerate" click still
+// revokes it exactly as it did before R1.4, restoring the one-click revocation path the review
+// found missing when the sweep wrote pendingExpiresAt directly.
 export function rotateRetainedDevices(
   devices: DeviceEntry[],
   scope: DeviceEntry['scope']

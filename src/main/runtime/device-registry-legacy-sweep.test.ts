@@ -2,6 +2,10 @@
 // grant the deadline it should always have had — before R1, such a row (lastSeenAt===0, no
 // pendingExpiresAt) is unreachable by rotatePendingDevice/retainNewestMintedGrants/
 // retainUnexpiredPendingDevices and accepted forever by validateToken, a stranded bearer credential.
+//
+// S10-16 C1 review F1/F4: the sweep never writes `pendingExpiresAt` (INV-P-010 stays "written only
+// by mintPendingDevice") — it stamps `grantClass: 'legacy_coalesced'` + `legacySweptAt` instead, and
+// an already-past-deadline row is KEPT (never deleted by the sweep), refused only at validateToken.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,7 +31,7 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
     writeFileSync(registryFilePath(), JSON.stringify(devices), 'utf-8')
   }
 
-  it('stamps a legacy coalesced runtime row on construction, with no mint ever called', () => {
+  it('stamps a legacy coalesced runtime row on construction, with no mint ever called — never pendingExpiresAt (F1/INV-P-010)', () => {
     writeRegistryFile([
       {
         deviceId: 'legacy-runtime',
@@ -40,22 +44,24 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
     ])
 
     const registry = new DeviceRegistry(userDataPath)
-    const pairedAt = registry.getDevice('legacy-runtime')!.pairedAt
+    const device = registry.getDevice('legacy-runtime')
+    const pairedAt = device!.pairedAt
 
-    expect(registry.getDevice('legacy-runtime')?.pendingExpiresAt).toBe(
-      pairedAt + PENDING_GRANT_TTL_MS
-    )
+    expect(device?.grantClass).toBe('legacy_coalesced')
+    expect(device?.legacySweptAt).toBeDefined()
+    // F1: the sweep must NEVER write pendingExpiresAt — that field is minted-grant-only evidence.
+    expect(device?.pendingExpiresAt).toBeUndefined()
     expect(registry.getPendingLegacySweepAudit()).toEqual([
       {
         deviceId: 'legacy-runtime',
         name: 'Legacy runtime link',
         pairedAt,
-        pendingExpiresAt: pairedAt + PENDING_GRANT_TTL_MS
+        legacyExpiresAt: pairedAt + PENDING_GRANT_TTL_MS
       }
     ])
   })
 
-  it('removes an ALREADY-EXPIRED legacy row at load (same in-memory prune every minted row goes through), with the audit row still recorded', () => {
+  it('F4: keeps an ALREADY-EXPIRED legacy row at load (never deleted by the sweep) but refuses it at validateToken, and it stays listable', () => {
     writeRegistryFile([
       {
         deviceId: 'stale-legacy-runtime',
@@ -70,15 +76,44 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
 
     const registry = new DeviceRegistry(userDataPath)
 
-    expect(registry.getDevice('stale-legacy-runtime')).toBeNull()
+    const device = registry.getDevice('stale-legacy-runtime')
+    expect(device).not.toBeNull()
+    expect(device?.grantClass).toBe('legacy_coalesced')
+    expect(registry.listDevices().some((d) => d.deviceId === 'stale-legacy-runtime')).toBe(true)
+    expect(registry.validateToken('stale-legacy-runtime-token')).toBeNull()
     expect(registry.getPendingLegacySweepAudit()).toEqual([
       {
         deviceId: 'stale-legacy-runtime',
         name: 'Stale legacy runtime link',
         pairedAt: 1_000,
-        pendingExpiresAt: 1_000 + PENDING_GRANT_TTL_MS
+        legacyExpiresAt: 1_000 + PENDING_GRANT_TTL_MS
       }
     ])
+  })
+
+  it('F1: a swept row that is then CONSUMED (updateLastSeen) stays legacy_coalesced, never reads as minted', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-runtime',
+        name: 'Legacy runtime link',
+        token: 'legacy-runtime-token',
+        scope: 'runtime',
+        pairedAt: Date.now(),
+        lastSeenAt: 0
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+    expect(registry.getDevice('legacy-runtime')?.grantClass).toBe('legacy_coalesced')
+
+    registry.updateLastSeen('legacy-runtime')
+    const consumed = registry.getDevice('legacy-runtime')
+
+    expect(consumed?.lastSeenAt).not.toBe(0)
+    expect(consumed?.grantClass).toBe('legacy_coalesced')
+    expect(consumed?.pendingExpiresAt).toBeUndefined()
+    // A consumed row is a real pairing — never expired/refused, regardless of its class.
+    expect(registry.validateToken('legacy-runtime-token')?.deviceId).toBe('legacy-runtime')
   })
 
   it('leaves a mobile row of the same shape untouched', () => {
@@ -95,6 +130,7 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
 
     const registry = new DeviceRegistry(userDataPath)
 
+    expect(registry.getDevice('legacy-mobile')?.grantClass).toBeUndefined()
     expect(registry.getDevice('legacy-mobile')?.pendingExpiresAt).toBeUndefined()
     expect(registry.getPendingLegacySweepAudit()).toEqual([])
   })
@@ -118,6 +154,7 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
 
     const registry = new DeviceRegistry(userDataPath)
 
+    expect(registry.getDevice('legacy-relay')?.grantClass).toBeUndefined()
     expect(registry.getDevice('legacy-relay')?.pendingExpiresAt).toBeUndefined()
     expect(registry.getPendingLegacySweepAudit()).toEqual([])
   })
@@ -136,6 +173,7 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
 
     const registry = new DeviceRegistry(userDataPath)
 
+    expect(registry.getDevice('scanned-runtime')?.grantClass).toBeUndefined()
     expect(registry.getDevice('scanned-runtime')?.pendingExpiresAt).toBeUndefined()
     expect(registry.getPendingLegacySweepAudit()).toEqual([])
   })
@@ -155,15 +193,14 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
 
     new DeviceRegistry(userDataPath).getPendingLegacySweepAudit()
     // No save() happened, so the file on disk is still the un-stamped legacy shape — the sweep
-    // re-derives the SAME stamp from `pairedAt` every load, it does not skip an already-stamped row.
+    // re-derives the SAME classification every load, it does not skip an already-stamped row.
     const second = new DeviceRegistry(userDataPath)
     expect(second.getPendingLegacySweepAudit()).toHaveLength(1)
-    expect(second.getDevice('legacy-runtime')?.pendingExpiresAt).toBe(
-      pairedAt + PENDING_GRANT_TTL_MS
-    )
+    expect(second.getDevice('legacy-runtime')?.grantClass).toBe('legacy_coalesced')
+    expect(second.getDevice('legacy-runtime')?.pendingExpiresAt).toBeUndefined()
   })
 
-  it('★ the stamp is byte-identical across constructions with no intervening save() (v6, protocol M7)', () => {
+  it('★ the recomputed deadline is byte-identical across constructions with no intervening save() (v6, protocol M7)', () => {
     const pairedAt = Date.now()
     writeRegistryFile([
       {
@@ -177,15 +214,16 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
     ])
 
     const first = new DeviceRegistry(userDataPath)
-    const firstStamp = first.getDevice('legacy-runtime')?.pendingExpiresAt
+    const firstAudit = first.getPendingLegacySweepAudit()
 
-    // No save() in between: the file on disk is still the un-stamped legacy shape. A stamp
-    // derived from `now` would slide forward here; one derived from `pairedAt` cannot.
+    // No save() in between: the file on disk is still the un-stamped legacy shape. Nothing is
+    // persisted onto pendingExpiresAt (F1) — the deadline is recomputed from the immutable
+    // `pairedAt` every load, so it is byte-identical by construction regardless of restart cadence.
     const second = new DeviceRegistry(userDataPath)
-    const secondStamp = second.getDevice('legacy-runtime')?.pendingExpiresAt
+    const secondAudit = second.getPendingLegacySweepAudit()
 
-    expect(firstStamp).toBe(pairedAt + PENDING_GRANT_TTL_MS)
-    expect(secondStamp).toBe(firstStamp)
+    expect(firstAudit[0]?.legacyExpiresAt).toBe(pairedAt + PENDING_GRANT_TTL_MS)
+    expect(secondAudit[0]?.legacyExpiresAt).toBe(firstAudit[0]?.legacyExpiresAt)
   })
 
   it('sweep safety: stamps nothing when the registry load failed (loadSucceeded === false)', () => {

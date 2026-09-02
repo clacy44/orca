@@ -7,6 +7,7 @@ import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
 import {
   MAX_LIVE_MINTED_GRANTS,
   isExpiredPendingDevice,
+  isExpiredLegacyCoalescedGrant,
   isMintedPendingDevice,
   retainNewestMintedGrants,
   retainUnexpiredPendingDevices,
@@ -113,10 +114,11 @@ export class DeviceRegistry {
     // Why clamped to (0, PENDING_GRANT_TTL_MS] rather than accepted verbatim: an invite can only be
     // SHORTENED, never extended past the design's leak control (S9 §2a's 24h ceiling).
     ttlMs?: number,
-    // S10-16 R1.1: the issuing lane's eviction budget. Defaults to 'legacy' so a pre-S10-16 caller
-    // (none remain in this repo, but the default keeps the signature backward-compatible) is never
-    // silently placed in a budget it never asked to share.
-    budgetClass: BudgetClass = 'legacy'
+    // S10-16 C1 review F7 (finding 8): the default is FAIL-CLOSED. 'legacy' means "no field at all
+    // on disk", exempt from the cap entirely — a caller that omits this must NOT land there, or a
+    // future mint lane that forgets to declare its class gets an uncapped credential store instead
+    // of a compile error. 'unspecified' is a real, capped partition.
+    budgetClass: BudgetClass = 'unspecified'
   ): DeviceEntry {
     const now = Date.now()
     const clampedTtlMs = clampMintTtlMs(ttlMs)
@@ -138,12 +140,17 @@ export class DeviceRegistry {
   }
 
   // Why persist before the memory swap: a failed write must not leave the bind decision reading a
-  // reach that never reached disk.
+  // reach that never reached disk. The caller always passes a row it just found in `this.devices`
+  // (S10-16 C1 review finding 10), so the not-found branch is unreachable in practice; it exists so
+  // `withPairingReach`'s contract never needs a non-null assertion at this call site.
   private setPairingReach(existing: DeviceEntry, pairingReach: RuntimePairingReach): DeviceEntry {
     const nextDevices = withPairingReach(this.devices, existing.deviceId, pairingReach)
+    if (!nextDevices) {
+      return existing
+    }
     this.save(nextDevices)
     this.devices = nextDevices
-    return nextDevices.find((d) => d.deviceId === existing.deviceId)!
+    return nextDevices.find((d) => d.deviceId === existing.deviceId) ?? existing
   }
 
   // Why: explicit rotation path for "Regenerate QR" — invalidates any existing never-scanned token
@@ -227,7 +234,14 @@ export class DeviceRegistry {
     // Why: the sweep only runs on load and on the next mint, so a headless serve that mints once at
     // startup would keep a stale invite usable for the whole process lifetime. The deadline has to bind
     // where the credential is consumed — this is the single authorization lookup for every socket.
-    return device && isExpiredPendingDevice(device, Date.now()) ? null : device
+    // S10-16 C1 review F1/F4: a legacy-sweep-stamped row carries no pendingExpiresAt (isExpiredPendingDevice
+    // never matches it), so its own deadline check is a second, independent clause — never deleted at
+    // load, refused here instead once past pairedAt + PENDING_GRANT_TTL_MS.
+    const now = Date.now()
+    return device &&
+      (isExpiredPendingDevice(device, now) || isExpiredLegacyCoalescedGrant(device, now))
+      ? null
+      : device
   }
 
   // Why persist before memory swap: a failed write must not leave a scanned device looking
