@@ -17798,6 +17798,8 @@ export class OrcaRuntimeService {
   // Why: probe dedupe shares one promise across callers, but each caller's
   // continuation would re-deliver the same unread rows; arm one per pty.
   private readonly probeDeferredDeliveryPtyIds = new Set<string>()
+  // S10-20: re-entrancy guard for the delivery foreground guard's own confirm-and-continue.
+  private readonly foregroundGuardPendingPtyIds = new Set<string>()
 
   private controllerKnowsPtyIsLive(ptyId: string): boolean {
     try {
@@ -33874,6 +33876,41 @@ export class OrcaRuntimeService {
     })
   }
 
+  // S10-20: three-valued on purpose. 'not_agent' is a PROOF and is the only verdict that holds.
+  // 'unknown' delivers — the same rule the absence probe states two hundred lines below
+  // ("Proven absence keeps them queued for a future surface; unknown liveness still delivers",
+  // :35562-35564) — because a controller with no confirmForegroundProcess (remote/ssh/degraded
+  // providers, pty.ts:5739-5743, degraded-daemon-pty-provider.ts:187-188 both return null when
+  // unsupported) must not have its mail stopped. What makes 'unknown' acceptable is S10-20 (1)+(2):
+  // after those, every byte in the pointer is host-constant or grammar/length-bounded.
+  private async confirmDeliveryForegroundIsAgent(
+    ptyId: string
+  ): Promise<'agent' | 'not_agent' | 'unknown'> {
+    const controller = this.ptyController
+    if (!controller?.confirmForegroundProcess) {
+      return 'unknown'
+    }
+    let confirmed: string | null
+    try {
+      confirmed = await controller.confirmForegroundProcess(ptyId)
+    } catch {
+      return 'unknown'
+    }
+    if (!confirmed) {
+      return 'unknown'
+    }
+    if (recognizeAgentProcess(confirmed) !== null) {
+      return 'agent'
+    }
+    // A wrapper (node/npx) reported before the cmdline cache resolves is not proof of absence —
+    // isRecognizedForegroundAgentProcess (:33889) treats it the same way, with a retry this guard
+    // deliberately does not run: it sits in front of EVERY delivery and must stay cheap.
+    if (isAgentForegroundWrapperProcess(confirmed)) {
+      return 'unknown'
+    }
+    return 'not_agent'
+  }
+
   private async isRecognizedForegroundAgentProcess(
     ptyId: string,
     foregroundProcess: string,
@@ -35461,6 +35498,9 @@ export class OrcaRuntimeService {
       // threadId arg was omitted — several dispatch: pokes carry no specific row — so the
       // still-live waiter check below cannot assume this row is what that waiter is about.
       notifiedThreadIdKnown?: boolean
+      // S10-20 (Ruling 22 scope 3): set ONLY by the guard's own continuation below, after a fresh
+      // confirmForegroundProcess read proved an agent owns this pty. Never set by an external caller.
+      foregroundConfirmed?: boolean
     } = {}
   ): void {
     if (!this._orchestrationDb) {
@@ -35640,6 +35680,59 @@ export class OrcaRuntimeService {
           // S10-15 review m-8: a throwing probe silently dropped here too — treat it the same
           // as any other withheld attempt (matches attemptHydratedProbedDelivery's own
           // catch -> recordWithheldDelivery('probe_failed') precedent for a throwing probe).
+          this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
+        })
+      return
+    }
+
+    // S10-20 (Ruling 22 scope 3; INV-P-012 clause 5, INV-P-013 corollary): a stale 'idle' status
+    // alone never authorises a write. lastAgentStatus is written ONLY by the OSC-title handler
+    // (:11314-11315 / :11389-11390) and cleared ONLY by a provider-generation reset (:11437-11450),
+    // so a login shell that emits no title after its agent exits leaves 'idle' + observedLive
+    // standing indefinitely (S10-19 T-10). Take a FRESH, cache-bypassing, non-sticky read here —
+    // confirmForegroundProcess (fresh:true, local-pty-provider.ts:1419-1438 /
+    // pty-subprocess.ts:1118-1140), never getForegroundProcess (1000ms cache at pty-subprocess.ts:87;
+    // sticky lastRecognizedAgent via stable-foreground-process.ts:36-39) and never isPtyRunningAgent
+    // (:33847-33854 returns true on exactly the stale-status state this guard exists to catch).
+    // Deferral shape copies the absence probe directly above.
+    // Chair ruling (S10-20 escalation finding 2): a controller with no confirmForegroundProcess
+    // at all can only ever resolve 'unknown' (confirmDeliveryForegroundIsAgent's own first
+    // branch), which already delivers per §3.4 — so this case takes a SYNCHRONOUS fast path,
+    // preserving every pre-S10-20 caller's exact timing (remote/ssh/degraded providers, and every
+    // test controller built without the capability). Security semantics are unchanged: the
+    // verdict here is deterministically 'unknown' either way. Only a controller that CAN take a
+    // fresh read goes through the async confirm-and-continue below.
+    if (!options.foregroundConfirmed && this.ptyController?.confirmForegroundProcess) {
+      const guardedPtyId = ptyId
+      if (this.foregroundGuardPendingPtyIds.has(guardedPtyId)) {
+        return
+      }
+      this.foregroundGuardPendingPtyIds.add(guardedPtyId)
+      void this.confirmDeliveryForegroundIsAgent(guardedPtyId)
+        .then((verdict) => {
+          this.foregroundGuardPendingPtyIds.delete(guardedPtyId)
+          if (verdict === 'not_agent') {
+            // Proven: the pane's foreground is not its agent. HELD, never typed.
+            this.recordWithheldDelivery(mailboxHandle, 'not_agent_pane')
+            this.mailPointerRepointScheduler.schedule(mailboxHandle)
+            return
+          }
+          // Why re-resolve (same reason the absence continuation does above): an
+          // exit/respawn/regraph inside the read window must not be typed into on a stale closure.
+          const current = this.resolveLiveDeliveryTarget(target)
+          if (!current || current.ptyId !== guardedPtyId || !current.writable) {
+            this.recordWithheldDelivery(mailboxHandle, 'no_live_pane')
+            return
+          }
+          this.deliverPendingMessages(current.target, {
+            ...options,
+            mailboxHandle,
+            skipAbsenceProbe: true,
+            foregroundConfirmed: true
+          })
+        })
+        .catch(() => {
+          this.foregroundGuardPendingPtyIds.delete(guardedPtyId)
           this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
         })
       return

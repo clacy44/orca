@@ -367,7 +367,7 @@ describe('orchestration federation lifecycle settlement', () => {
           dispatch_id: dispatch.id,
           direction: 'to_home',
           sequence: 1,
-          message_id: `msg_legacy_protocol_${protocolVersion}`,
+          message_id: `msg_${String(protocolVersion).padStart(12, '0')}`,
           kind: 'worker_done',
           payload: JSON.stringify({
             from: 'term_legacy_worker',

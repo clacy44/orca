@@ -10,6 +10,7 @@ import {
 } from '../../orchestration/federation-lifecycle-settlement'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, requiredString } from '../schemas'
+import { requireHostMessageId } from '../../orchestration/orchestration-id-grammar'
 
 const FederationPullParams = z.object({
   dispatchId: requiredString('Missing Dispatch ID'),
@@ -164,6 +165,19 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
         if (item.sequence <= cursor) {
           continue
         }
+        try {
+          requireHostMessageId(item.message_id, 'message id')
+        } catch (error) {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: authenticatedCallerFingerprint ?? null,
+            verb: 'federationImport',
+            outcome: 'invalid_argument',
+            reasonCode: 'malformed_message_id'
+          })
+          throw error
+        }
         const currentAttachment = requireHomeAttachment(
           runtime,
           params.dispatchId,
@@ -195,11 +209,27 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
               `Remote Dispatch ${params.dispatchId} does not support coordinator control mail.`
             )
           }
-          const controlMessage = importFederatedControlMessage(db, {
-            dispatchId: params.dispatchId,
-            messageId: item.message_id,
-            payload: item.payload
-          })
+          let controlMessage: ReturnType<typeof importFederatedControlMessage>
+          try {
+            controlMessage = importFederatedControlMessage(db, {
+              dispatchId: params.dispatchId,
+              messageId: item.message_id,
+              payload: item.payload
+            })
+          } catch (error) {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: null,
+              actorHostId: authenticatedCallerFingerprint ?? null,
+              verb: 'federationImport',
+              outcome: 'invalid_argument',
+              reasonCode:
+                error instanceof OrchestrationError && error.code === 'invalid_argument'
+                  ? 'malformed_thread_id'
+                  : 'malformed_message_id'
+            })
+            throw error
+          }
           imported += controlMessage.imported ? 1 : 0
           if (controlMessage.imported) {
             runtime.notifyMessageArrived(`dispatch:${params.dispatchId}`, controlMessage.type)
@@ -260,7 +290,7 @@ function parseFederatedReply(payload: string): {
   }
   return {
     questionId: reply.questionId,
-    answerMessageId: reply.answerMessageId,
+    answerMessageId: requireHostMessageId(reply.answerMessageId, 'answer message id'),
     body: reply.body
   }
 }

@@ -174,6 +174,18 @@ export type ResolveMessagePointerSenderAgent = (msg: MessageRow) => MessagePoint
 const POINTER_ROLE_MAX_LENGTH = 40
 const POINTER_NAME_MAX_LENGTH = 32
 
+// S10-20 (Ruling 22 scope 2): ids render at the host grammar's own length; a longer value is not a
+// host id at all, so truncating it is the correct render.
+const POINTER_ID_MAX_LENGTH = 16
+// Ruling 22 fixes 64, NOT the 32 of POINTER_NAME_MAX_LENGTH: a federation from_handle is
+// `remote:<link>:<agt_xxxxxxxxxxxx>` (federated-sender-identity.ts:236) or `dispatch:<id>`, which 32
+// would cut mid-identifier and make the sender unidentifiable to the reader.
+const POINTER_FROM_HANDLE_MAX_LENGTH = 64
+
+function pointerId(value: string | null | undefined): string {
+  return value == null ? 'none' : sanitizeDirectoryText(value, POINTER_ID_MAX_LENGTH).value
+}
+
 // SENSITIVE THREADS §: no subject at all — never the body, never even the truncated subject a
 // non-sensitive pointer shows. `count` is how many queued messages share this sensitive thread
 // (of the full unread set, not just what's shown) so the reader knows there is more than one.
@@ -186,9 +198,9 @@ function formatMessagePointerLine(
   resolveSenderAgent?: ResolveMessagePointerSenderAgent,
   sensitiveThreadCount?: number
 ): string {
-  const thread = msg.thread_id ?? 'none'
+  const thread = pointerId(msg.thread_id)
   if (msg.thread_id != null && sensitiveThreadCount !== undefined) {
-    return formatSensitiveThreadPointerLine(msg.thread_id, sensitiveThreadCount)
+    return formatSensitiveThreadPointerLine(pointerId(msg.thread_id), sensitiveThreadCount)
   }
   const agent = resolveSenderAgent?.(msg) ?? null
   const sanitizedName = agent
@@ -200,7 +212,7 @@ function formatMessagePointerLine(
   const from =
     agent && sanitizedName.length > 0
       ? `${sanitizedName}${sanitizedRole ? ` (${sanitizedRole})` : ''}`
-      : sanitizeMessageText(msg.from_handle, RENDER_SANITIZE_MAX_LENGTH).value
+      : sanitizeDirectoryText(msg.from_handle, POINTER_FROM_HANDLE_MAX_LENGTH).value
   // DELIVERY § mechanical difference #2: a peer ask's pointer line is prefixed so a reader
   // triaging a flood of mail can see at a glance that someone is blocked on them.
   const askPrefix = isPeerAskMessage(msg) ? '[ASK — sender is blocked] ' : ''
@@ -218,17 +230,17 @@ function buildPointerFooter(
   resolveThreadSensitive?: ResolveThreadSensitive
 ): string {
   if (threadIsSensitive(lastShown, resolveThreadSensitive) && lastShown.thread_id != null) {
-    return `orca agents thread --id ${lastShown.thread_id}`
+    return `orca agents thread --id ${pointerId(lastShown.thread_id)}`
   }
   if (isPeerAskMessage(lastShown)) {
-    const threadId = lastShown.thread_id ?? lastShown.id
+    const threadId = pointerId(lastShown.thread_id ?? lastShown.id)
     return `Answer: orca agents reply --thread ${threadId} --body "..."`
   }
   if (overflow > 0) {
     return `— ${overflow} more; run orca orchestration check`
   }
   if (lastShown.thread_id != null) {
-    return `Read: orca agents thread --id ${lastShown.thread_id} --since ${lastShown.sequence}`
+    return `Read: orca agents thread --id ${pointerId(lastShown.thread_id)} --since ${Number(lastShown.sequence) || 0}`
   }
   return 'Run `orca orchestration check`.'
 }

