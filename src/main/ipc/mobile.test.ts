@@ -507,7 +507,8 @@ describe('registerMobileHandlers', () => {
       rotate: true,
       name: expect.stringMatching(/^Runtime /),
       scope: 'runtime',
-      reach: 'network'
+      reach: 'network',
+      accessProfile: 'full'
     })
     // Why: STA-2370 — generating a runtime offer must widen the listener BEFORE advertising its endpoint,
     // or a client could read the URL and connect before the LAN bind exists. Assert call ORDER, not just
@@ -688,7 +689,8 @@ describe('registerMobileHandlers', () => {
             lastSeenAt: 0
           }
         ]
-      })
+      }),
+      getLegacyGrantProfile: () => 'full' as const
     }
 
     registerMobileHandlers(rpcServer as never)
@@ -699,13 +701,17 @@ describe('registerMobileHandlers', () => {
           deviceId: 'pending-runtime',
           name: 'Copied link',
           createdAt: 5,
-          lastSeenAt: null
+          lastSeenAt: null,
+          effective: 'full',
+          enforcedByThisRuntime: true
         },
         {
           deviceId: 'runtime-1',
           name: 'Browser',
           createdAt: 3,
-          lastSeenAt: 4
+          lastSeenAt: 4,
+          effective: 'full',
+          enforcedByThisRuntime: true
         }
       ]
     })

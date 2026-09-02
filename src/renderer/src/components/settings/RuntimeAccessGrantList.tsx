@@ -112,6 +112,18 @@ export function RuntimeAccessGrantList({
                           'Not used yet'
                         )}
                   </div>
+                  {grant.effective ? (
+                    <div className="text-muted-foreground text-xs">
+                      {translate(
+                        'auto.components.settings.RuntimeAccessGrantList.profileLine',
+                        '{{value0}} profile · enforced by this runtime: {{value1}}',
+                        {
+                          value0: grant.effective,
+                          value1: grant.enforcedByThisRuntime ? 'yes' : 'no'
+                        }
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <Tooltip>
                   <TooltipTrigger asChild>

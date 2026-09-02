@@ -91,7 +91,9 @@ describe('DeviceRegistry pending grants', () => {
     const persistedCoalesced = readRegistryFile().find(
       (device) => device.deviceId === coalesced.deviceId
     )
+    // S10-19 (R10): accessProfile is now always written, unlike pendingExpiresAt above.
     expect(Object.keys(persistedCoalesced ?? {}).sort()).toEqual([
+      'accessProfile',
       'deviceId',
       'lastSeenAt',
       'name',

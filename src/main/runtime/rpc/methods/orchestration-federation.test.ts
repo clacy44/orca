@@ -206,8 +206,18 @@ describe('orchestration federation', () => {
     expect([create.activate, create.runHooks]).toEqual([false, false])
     expect(workerRuntime.sendTerminalAgentPrompt).toHaveBeenCalledWith(
       'term_windows_worker',
-      expect.stringContaining(`Your task ID is: ${task.id}`)
+      expect.stringContaining(`Your task ID is: ${task.id}`),
+      expect.objectContaining({ beforeWrite: expect.any(Function) })
     )
+    // Strictly stronger than "a function was passed": the third argument IS the fresh-foreground
+    // conjunct (Ruling 24(a) FULL profile) — invoking it drives isPeerPaneForegroundAgentLive for
+    // the same handle, not some other guard.
+    const isForegroundLive = vi
+      .spyOn(workerRuntime, 'isPeerPaneForegroundAgentLive')
+      .mockResolvedValue(true)
+    const options = vi.mocked(workerRuntime.sendTerminalAgentPrompt).mock.calls[0]?.[2]
+    await options?.beforeWrite?.('pty-windows-worker')
+    expect(isForegroundLive).toHaveBeenCalledWith('term_windows_worker')
   })
 
   it('does not report remotely rejected preferences as effective', async () => {

@@ -14,6 +14,11 @@ import {
   HostIdGrammarError,
   requireHostMessageId
 } from '../../orchestration/orchestration-id-grammar'
+import {
+  assertFederationRelayMetered,
+  FEDERATION_RELAY_ITEMS_MAX,
+  FEDERATION_RELAY_PAYLOAD_MAX_LENGTH
+} from './orchestration-federation-relay-metering'
 
 const FederationPullParams = z.object({
   dispatchId: requiredString('Missing Dispatch ID'),
@@ -48,16 +53,18 @@ const FederationAckParams = z.object({
 
 const FederationImportParams = z.object({
   dispatchId: requiredString('Missing Dispatch ID'),
-  items: z.array(
-    z.object({
-      dispatch_id: requiredString('Missing item Dispatch ID'),
-      direction: z.literal('to_worker'),
-      sequence: z.number().int().positive(),
-      message_id: requiredString('Missing relay message ID'),
-      kind: requiredString('Missing relay kind'),
-      payload: requiredString('Missing relay payload')
-    })
-  )
+  items: z
+    .array(
+      z.object({
+        dispatch_id: requiredString('Missing item Dispatch ID'),
+        direction: z.literal('to_worker'),
+        sequence: z.number().int().positive(),
+        message_id: requiredString('Missing relay message ID'),
+        kind: requiredString('Missing relay kind'),
+        payload: z.string().min(1, 'Missing relay payload').max(FEDERATION_RELAY_PAYLOAD_MAX_LENGTH)
+      })
+    )
+    .max(FEDERATION_RELAY_ITEMS_MAX)
 })
 
 export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
@@ -66,6 +73,7 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
     params: FederationPullParams,
     handler: (params, { runtime, authenticatedCallerFingerprint }) => {
       requireHomeAttachment(runtime, params.dispatchId, authenticatedCallerFingerprint)
+      assertFederationRelayMetered(runtime, authenticatedCallerFingerprint)
       return {
         dispatchId: params.dispatchId,
         runtimeEpoch: runtime.getRuntimeId(),
@@ -87,6 +95,7 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
     params: FederationAckParams,
     handler: (params, { runtime, authenticatedCallerFingerprint }) => {
       requireHomeAttachment(runtime, params.dispatchId, authenticatedCallerFingerprint)
+      assertFederationRelayMetered(runtime, authenticatedCallerFingerprint)
       const receivedSettlements = (params.settlements ?? []).filter(
         (settlement) => settlement.sequence <= params.throughSequence
       )
@@ -156,6 +165,7 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
         params.dispatchId,
         authenticatedCallerFingerprint
       )
+      assertFederationRelayMetered(runtime, authenticatedCallerFingerprint)
       let cursor = attachment.to_worker_imported_sequence
       let imported = 0
       for (const item of params.items) {

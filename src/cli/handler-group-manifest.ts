@@ -153,6 +153,9 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
       'orchestration worker-read',
       'orchestration worker-stop',
       'orchestration worker-abandon',
+      // S10-19 W-4/C-8: orchestration.federationAnswerPrompt's only CLI caller — orphaned from
+      // this manifest when the handler landed (registry-parity/handler-group-manifest drift).
+      'orchestration worker-answer-prompt',
       'orchestration worker-release',
       'orchestration worker-retain',
       'orchestration worker-list',

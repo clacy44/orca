@@ -217,9 +217,14 @@ import {
   ensureMutationReceiptCapacity,
   migrateMutationReceiptCapacity
 } from './mutation-receipt-capacity'
+import {
+  PEER_ATTACHMENT_RETENTION_MS,
+  PEER_ATTACHMENTS_RETAINED_PER_LINK
+} from '../peer-profile-constants'
 
 // Why: leaf UUID is the remint-stable pane identity (tab half changes on break-out); exact match covers legacy/unparseable keys.
-function isEquivalentPaneKey(a: string, b: string): boolean {
+// S10-19 m11: exported so a peer-owned-pane lookup outside this module can use the same equivalence.
+export function isEquivalentPaneKey(a: string, b: string): boolean {
   if (a === b) {
     return true
   }
@@ -910,14 +915,27 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2).
-const SCHEMA_VERSION = 38
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24).
+const SCHEMA_VERSION = 39
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
 // NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
 // disposition + audit. No eviction-by-recency: a flood of distinct bogus ids must never evict
 // the legitimate row.
 export const REMOTE_AGENTS_PER_LINK_CAP = 64
+
+// S10-19 (Ruling 24(e) / attacker 5 / ops BL-3): the ONE settled-state list for
+// remote_dispatch_attachments.state. beginRemoteAttachmentStop (below) and
+// orchestration-federation-control.ts's federationStop handler must agree on exactly this set —
+// 'agent_exited' included, so federationStop on an already-exited row returns alreadySettled
+// instead of throwing dispatch_inactive.
+export const PEER_ATTACHMENT_SETTLED_STATES = [
+  'succeeded',
+  'failed',
+  'stopped',
+  'abandoned',
+  'agent_exited'
+] as const
 
 function hardenOrchestrationDatabaseFiles(dbPath: (string & {}) | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -1313,7 +1331,7 @@ export class OrchestrationDb {
         state                   TEXT NOT NULL DEFAULT 'starting'
           CHECK(state IN (
             'starting', 'ready', 'start_unknown', 'failed', 'succeeded',
-            'stopping', 'stop_unknown', 'stopped', 'abandoned'
+            'stopping', 'stop_unknown', 'stopped', 'abandoned', 'agent_exited'
           )),
         stage                   TEXT NOT NULL DEFAULT 'accepted',
         worktree_id             TEXT,
@@ -1323,8 +1341,28 @@ export class OrchestrationDb {
         residual_resources      TEXT NOT NULL DEFAULT '[]',
         to_worker_imported_sequence INTEGER NOT NULL DEFAULT 0,
         last_error              TEXT,
+        -- v39 (S10-19): peer-owned-pane close/prune bookkeeping. blocked_* serialize the
+        -- prompt-answer choke's single-shot reservation; handle_bound_at / agent_exited_at are
+        -- INV-P-013's close ordering facts (agent_exited_at is the only durable exit fact).
+        blocked_reason          TEXT,
+        blocked_at              TEXT,
+        blocked_consumed_at     TEXT,
+        handle_bound_at         TEXT,
+        agent_exited_at         TEXT,
         created_at              TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_rda_terminal_handle
+        ON remote_dispatch_attachments(terminal_handle);
+
+      -- v39 (S10-19): peer run-mailbox sharing grants. Created empty; the reader is behind
+      -- peerRunMailboxScoped:false, and the operator writer is not built by this slice
+      -- (§G.1 of the S10-19 implementation plan — chair decision pending).
+      CREATE TABLE IF NOT EXISTS peer_run_grants (
+        run_id                  TEXT NOT NULL,
+        peer_link_device_id     TEXT NOT NULL,
+        granted_at              TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (run_id, peer_link_device_id)
       );
 
       CREATE TABLE IF NOT EXISTS federation_relay_items (
@@ -2068,6 +2106,87 @@ export class OrchestrationDb {
         // to a pane or already read, which a live bare-handle send/reply legitimately produces).
         this.repointStrandedDisplayNameAddressedMessages()
       }
+      // v38 -> v39 (S10-19, chair rulings 20/22/24): peer-owned-pane close/prune bookkeeping
+      // columns on remote_dispatch_attachments, the 'agent_exited' state (its own CHECK rebuild
+      // — SQLite can't ALTER a CHECK), and the (empty, reader-gated) peer_run_grants table.
+      // hasColumn-guarded so a fresh createTables() run (already has these inline, above) is a
+      // no-op here — same discipline as every migration block above.
+      if (current < 39) {
+        for (const column of [
+          'blocked_reason',
+          'blocked_at',
+          'blocked_consumed_at',
+          'handle_bound_at',
+          'agent_exited_at'
+        ]) {
+          if (!this.hasColumn('remote_dispatch_attachments', column)) {
+            this.db.exec(`ALTER TABLE remote_dispatch_attachments ADD COLUMN ${column} TEXT`)
+          }
+        }
+        this.db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_rda_terminal_handle
+            ON remote_dispatch_attachments(terminal_handle);
+          CREATE TABLE IF NOT EXISTS peer_run_grants (
+            run_id                  TEXT NOT NULL,
+            peer_link_device_id     TEXT NOT NULL,
+            granted_at              TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (run_id, peer_link_device_id)
+          );
+        `)
+        if (!this.remoteDispatchAttachmentsCheckAllowsAgentExited()) {
+          this.db.exec(`
+            CREATE TABLE remote_dispatch_attachments_new (
+              dispatch_id             TEXT PRIMARY KEY,
+              task_id                 TEXT NOT NULL,
+              home_peer_fingerprint   TEXT NOT NULL,
+              protocol_version        INTEGER NOT NULL DEFAULT 1,
+              runtime_epoch           TEXT NOT NULL,
+              capability_hash         TEXT,
+              pane_key                TEXT,
+              process_incarnation     TEXT,
+              state                   TEXT NOT NULL DEFAULT 'starting'
+                CHECK(state IN (
+                  'starting', 'ready', 'start_unknown', 'failed', 'succeeded',
+                  'stopping', 'stop_unknown', 'stopped', 'abandoned', 'agent_exited'
+                )),
+              stage                   TEXT NOT NULL DEFAULT 'accepted',
+              worktree_id             TEXT,
+              terminal_handle         TEXT,
+              setup_state             TEXT NOT NULL DEFAULT 'not_applicable',
+              effects                 TEXT NOT NULL DEFAULT '[]',
+              residual_resources      TEXT NOT NULL DEFAULT '[]',
+              to_worker_imported_sequence INTEGER NOT NULL DEFAULT 0,
+              last_error              TEXT,
+              blocked_reason          TEXT,
+              blocked_at              TEXT,
+              blocked_consumed_at     TEXT,
+              handle_bound_at         TEXT,
+              agent_exited_at         TEXT,
+              created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO remote_dispatch_attachments_new (
+              dispatch_id, task_id, home_peer_fingerprint, protocol_version, runtime_epoch,
+              capability_hash, pane_key, process_incarnation, state, stage, worktree_id,
+              terminal_handle, setup_state, effects, residual_resources,
+              to_worker_imported_sequence, last_error, blocked_reason, blocked_at,
+              blocked_consumed_at, handle_bound_at, agent_exited_at, created_at, updated_at
+            )
+            SELECT
+              dispatch_id, task_id, home_peer_fingerprint, protocol_version, runtime_epoch,
+              capability_hash, pane_key, process_incarnation, state, stage, worktree_id,
+              terminal_handle, setup_state, effects, residual_resources,
+              to_worker_imported_sequence, last_error, blocked_reason, blocked_at,
+              blocked_consumed_at, handle_bound_at, agent_exited_at, created_at, updated_at
+            FROM remote_dispatch_attachments;
+            DROP TABLE remote_dispatch_attachments;
+            ALTER TABLE remote_dispatch_attachments_new RENAME TO remote_dispatch_attachments;
+
+            CREATE INDEX IF NOT EXISTS idx_rda_terminal_handle
+              ON remote_dispatch_attachments(terminal_handle);
+          `)
+        }
+      }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
           ON dispatch_contexts(${DISPATCH_PANE_KEY_MATCH_SUFFIX_SQL})
@@ -2503,6 +2622,16 @@ export class OrchestrationDb {
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
       .get() as { sql: string } | undefined
     return !!row && row.sql.includes("'heartbeat'")
+  }
+
+  // Why: sqlite_master holds the table's CREATE SQL incl. the CHECK — cheapest reliable probe for whether it already allows 'agent_exited'.
+  private remoteDispatchAttachmentsCheckAllowsAgentExited(): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'remote_dispatch_attachments'"
+      )
+      .get() as { sql: string } | undefined
+    return !!row && row.sql.includes("'agent_exited'")
   }
 
   private messagesTypeCheckAllowsQuestion(): boolean {
@@ -6430,6 +6559,151 @@ export class OrchestrationDb {
       .get(dispatchId) as RemoteDispatchAttachmentRow | undefined
   }
 
+  // S10-19 W-2 (INV-P-013): the row a peer-owned-pane exit hook should act on — no state filter
+  // (attacker/Ruling 20(c): the close must fire regardless of succeeded/stopped/abandoned/
+  // failed/ready), scoped to the terminal and to a row that has not already been marked exited.
+  findPeerOwnedAttachmentForHandle(handle: string): RemoteDispatchAttachmentRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE terminal_handle = ? AND agent_exited_at IS NULL
+         ORDER BY COALESCE(handle_bound_at, created_at) DESC, rowid DESC LIMIT 1`
+      )
+      .get(handle) as RemoteDispatchAttachmentRow | undefined
+  }
+
+  // S10-19 W-2 (ops MJ-1 / §D): agent_exited_at is stamped in EVERY case — the only durable fact
+  // of the exit. `state`/`stage` move to 'agent_exited' ONLY from ready/start_unknown/failed
+  // (§D — never from 'starting', where recordRemoteAttachmentStage/failRemoteAttachment are the
+  // unguarded in-flight writers) — succeeded/stopping/stop_unknown/stopped/abandoned rows keep
+  // their own more specific terminal state, but still get the stamp.
+  markPeerOwnedAttachmentAgentExited(
+    dispatchId: string,
+    cause: string
+  ): RemoteDispatchAttachmentRow | undefined {
+    this.db
+      .prepare(
+        `UPDATE remote_dispatch_attachments
+         SET agent_exited_at = COALESCE(agent_exited_at, datetime('now')),
+             state = CASE WHEN state IN ('ready', 'start_unknown', 'failed') THEN 'agent_exited' ELSE state END,
+             stage = CASE WHEN state IN ('ready', 'start_unknown', 'failed') THEN 'agent_exited' ELSE stage END,
+             last_error = CASE WHEN state IN ('ready', 'start_unknown', 'failed') THEN ? ELSE last_error END,
+             updated_at = datetime('now')
+         WHERE dispatch_id = ? AND agent_exited_at IS NULL`
+      )
+      .run(`peer pane closed: ${cause}`, dispatchId)
+    return this.getRemoteDispatchAttachment(dispatchId)
+  }
+
+  // S10-19 W-2 (ops MN-7): the per-link live-attachment count the ingress cap
+  // (PEER_LIVE_ATTACHMENTS_PER_LINK, W-3) checks before admitting a new attach.
+  countLivePeerAttachments(fingerprint: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM remote_dispatch_attachments
+         WHERE home_peer_fingerprint = ? AND agent_exited_at IS NULL
+           AND state IN ('starting', 'ready', 'start_unknown', 'stopping', 'stop_unknown')`
+      )
+      .get(fingerprint) as { n: number }
+    return row.n
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(o)): every stale-epoch row not yet marked exited — the
+  // caller (runPeerAttachmentBootSweep) decides per row, from its OWN pty table, whether the
+  // PTY is provably gone; this query never filters on that (db.ts has no pty visibility).
+  findStaleEpochAttachments(currentEpoch: string): RemoteDispatchAttachmentRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE runtime_epoch != ? AND agent_exited_at IS NULL`
+      )
+      .all(currentEpoch) as RemoteDispatchAttachmentRow[]
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(p)/(q)): candidates for the runtime-time prune — a live,
+  // still-bound terminal handle whose attachment has not been marked exited. The caller filters
+  // to peer-profile rows and to ones whose agent has actually exited (isTerminalRunningAgent).
+  findLivePeerCandidateAttachments(): RemoteDispatchAttachmentRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE terminal_handle IS NOT NULL AND agent_exited_at IS NULL`
+      )
+      .all() as RemoteDispatchAttachmentRow[]
+  }
+
+  // S10-19 W-4 (the choke's single-shot claim): the ONE conditional UPDATE that lets exactly one
+  // federationAnswerPrompt call proceed to write a keystroke for a given blocked-prompt
+  // occurrence. Returns whether THIS call won the claim.
+  reservePeerPromptAnswer(dispatchId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE remote_dispatch_attachments
+         SET blocked_consumed_at = datetime('now')
+         WHERE dispatch_id = ? AND agent_exited_at IS NULL AND blocked_consumed_at IS NULL`
+      )
+      .run(dispatchId)
+    return Number(result.changes) === 1
+  }
+
+  // S10-19 W-4 (Ruling 20(b)): un-burns the single shot — called only when the reserved write
+  // itself failed, so a failed answer never costs the caller their one opportunity.
+  releasePeerPromptAnswer(dispatchId: string): void {
+    this.db
+      .prepare(
+        `UPDATE remote_dispatch_attachments
+         SET blocked_consumed_at = NULL
+         WHERE dispatch_id = ? AND blocked_consumed_at IS NOT NULL`
+      )
+      .run(dispatchId)
+  }
+
+  deleteRemoteDispatchAttachment(dispatchId: string): void {
+    this.db.prepare(`DELETE FROM remote_dispatch_attachments WHERE dispatch_id = ?`).run(dispatchId)
+  }
+
+  // S10-19 W-2 (§8.6, ops MO-2): garbage-collects rows that are ALREADY settled — every row this
+  // deletes either went through a close-then-stamp path already (agent_exited_at set) or reached
+  // a terminal dispatch state with no pane ever bound in that state, so this never needs to
+  // close anything itself. Retention window first, then the per-link cap on the remainder.
+  pruneSettledRemoteAttachments(): number {
+    const settledPredicate = `(
+      agent_exited_at IS NOT NULL
+      OR state IN (${PEER_ATTACHMENT_SETTLED_STATES.map(() => '?').join(', ')}, 'stop_unknown', 'start_unknown')
+    )`
+    const settledParams = [...PEER_ATTACHMENT_SETTLED_STATES]
+    const retentionDeleted = Number(
+      this.db
+        .prepare(
+          `DELETE FROM remote_dispatch_attachments
+           WHERE ${settledPredicate}
+             AND COALESCE(agent_exited_at, updated_at) < datetime('now', ?)`
+        )
+        .run(...settledParams, `-${Math.floor(PEER_ATTACHMENT_RETENTION_MS / 1000)} seconds`)
+        .changes
+    )
+    const capDeleted = Number(
+      this.db
+        .prepare(
+          `DELETE FROM remote_dispatch_attachments
+           WHERE dispatch_id IN (
+             SELECT dispatch_id FROM (
+               SELECT dispatch_id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY home_peer_fingerprint
+                        ORDER BY COALESCE(agent_exited_at, updated_at) DESC, rowid DESC
+                      ) AS rn
+               FROM remote_dispatch_attachments
+               WHERE ${settledPredicate}
+             )
+             WHERE rn > ?
+           )`
+        )
+        .run(...settledParams, PEER_ATTACHMENTS_RETAINED_PER_LINK).changes
+    )
+    return retentionDeleted + capDeleted
+  }
+
   recordRemoteAttachmentStage(params: {
     dispatchId: string
     stage: string
@@ -6448,11 +6722,18 @@ export class OrchestrationDb {
         `Remote Dispatch ${params.dispatchId} was not found.`
       )
     }
+    // S10-19 W-2/INV-P-013: the first time this stage write attaches a terminal_handle, stamp
+    // handle_bound_at — the boot sweep's ordering rule (Ruling 24(c)) resolves a stale peer row's
+    // handle "in this process" and needs to tell a freshly-bound handle from one that was already
+    // bound before the restart.
+    const bindsHandleNow = Boolean(params.terminalHandle) && !current.terminal_handle
     this.db
       .prepare(
         `UPDATE remote_dispatch_attachments
          SET stage = ?, state = ?, worktree_id = ?, terminal_handle = ?, setup_state = ?,
-             effects = ?, residual_resources = ?, last_error = ?, updated_at = datetime('now')
+             effects = ?, residual_resources = ?, last_error = ?,
+             handle_bound_at = CASE WHEN ? THEN datetime('now') ELSE handle_bound_at END,
+             updated_at = datetime('now')
          WHERE dispatch_id = ?`
       )
       .run(
@@ -6466,6 +6747,7 @@ export class OrchestrationDb {
           ? JSON.stringify(params.residualResources)
           : current.residual_resources,
         params.lastError ?? current.last_error,
+        bindsHandleNow ? 1 : 0,
         params.dispatchId
       )
     return this.getRemoteDispatchAttachment(params.dispatchId) as RemoteDispatchAttachmentRow
@@ -6575,14 +6857,17 @@ export class OrchestrationDb {
     unknown: boolean
   ): RemoteDispatchAttachmentRow {
     const state = unknown ? 'start_unknown' : 'failed'
+    // S10-19 W-1: blocked_reason/blocked_at also record a terminal failure — the columns read
+    // generically ("this attachment is blocked, and why") and a failed attachment has nothing
+    // further to unblock, so stamping them here finalizes any would-be prompt-answer wait.
     const result = this.db
       .prepare(
         `UPDATE remote_dispatch_attachments
          SET state = ?, stage = ?, last_error = ?, capability_hash = NULL,
-             updated_at = datetime('now')
+             blocked_reason = ?, blocked_at = datetime('now'), updated_at = datetime('now')
          WHERE dispatch_id = ? AND state = 'starting'`
       )
-      .run(state, stage, reason, dispatchId)
+      .run(state, stage, reason, reason, dispatchId)
     if (result.changes !== 1) {
       throw new OrchestrationError(
         'dispatch_inactive',
@@ -6638,7 +6923,7 @@ export class OrchestrationDb {
         `Remote Dispatch ${dispatchId} was not found.`
       )
     }
-    if (['succeeded', 'failed', 'stopped', 'abandoned'].includes(attachment.state)) {
+    if ((PEER_ATTACHMENT_SETTLED_STATES as readonly string[]).includes(attachment.state)) {
       return attachment
     }
     if (!['ready', 'start_unknown'].includes(attachment.state)) {
@@ -9310,6 +9595,8 @@ export class OrchestrationDb {
       DELETE FROM legacy_adoptions;
       DELETE FROM federation_relay_items;
       DELETE FROM remote_dispatch_attachments;
+      -- S10-19: peer_run_grants is dispatch-scoped federation state, purged alongside attachments.
+      DELETE FROM peer_run_grants;
       DELETE FROM federated_dispatches;
       -- S10-15 ruling 3(a): remote_agents was unpurgeable before this slice (breaker finding 2).
       DELETE FROM remote_agents;
@@ -9341,6 +9628,8 @@ export class OrchestrationDb {
       DELETE FROM legacy_adoptions;
       DELETE FROM federation_relay_items;
       DELETE FROM remote_dispatch_attachments;
+      -- S10-19: peer_run_grants is dispatch-scoped federation state, purged alongside attachments.
+      DELETE FROM peer_run_grants;
       DELETE FROM federated_dispatches;
       DELETE FROM worker_terminal_archives;
       DELETE FROM worker_terminal_resources;

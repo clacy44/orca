@@ -42,6 +42,10 @@ const MintInviteParams = z
     principalId: PrincipalIdParam.optional(),
     displayName: z.string().min(1).max(PRINCIPAL_DISPLAY_NAME_MAX_LENGTH).optional(),
     scope: z.enum(['runtime', 'mobile']).default('runtime'),
+    // S10-19 W-6: required, no default — an operator must choose explicitly every time an
+    // invite is minted (Ruling 20(d)). `orca lane invite --profile peer|full` is the CLI's own
+    // required flag; this is the wire-level enforcement underneath it.
+    accessProfile: z.enum(['full', 'peer']),
     ttlHours: z.number().int().min(1).max(24).optional(),
     address: z.string().min(1).max(255).optional()
   })
@@ -126,6 +130,7 @@ export const PRINCIPAL_LANE_METHODS: readonly RpcAnyMethod[] = [
         return service.mintInvite(consent, {
           principalId,
           scope: params.scope,
+          accessProfile: params.accessProfile,
           ...(params.ttlHours !== undefined ? { ttlHours: params.ttlHours } : {}),
           ...(params.address !== undefined ? { address: params.address } : {})
         })

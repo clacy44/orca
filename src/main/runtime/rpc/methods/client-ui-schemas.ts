@@ -160,7 +160,10 @@ export const SettingsUpdate = z
     prBotAuthorOverrides: z
       .unknown()
       .transform((value) => normalizePRBotAuthorOverrides(value))
-      .optional()
+      .optional(),
+    // S10-19 (ops MJ-3): the write surface for federationDispatchRepos — the peer allowlist's
+    // repo predicate has no other path to reach settings.
+    federationDispatchRepos: z.array(z.string()).optional()
   })
   .strict()
   .default({})

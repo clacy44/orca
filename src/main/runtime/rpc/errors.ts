@@ -136,6 +136,9 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'not_a_participant',
   'not_the_addressee',
   'dispatch_never_federated',
+  // S10-19 R24 (§8.7): a peer's orchestration.check --wait against a locally-bound Run — the
+  // CLI needs the distinct code, not a collapsed runtime_error, to print the right guidance.
+  'run_wait_local_only',
   // S10-11 R1/R4: thrown with `data.nextSteps` a caller acts on verbatim (name_taken's
   // alternative-name suggestion; message_not_found's cross-host --environment hint) — same
   // reasoning as the S10-2b block above, just not caught by dispatcher-level tests until now.

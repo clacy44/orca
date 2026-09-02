@@ -22,7 +22,7 @@ import {
 } from './orchestration-worker-launch-preferences'
 import {
   federatedUnknownReceipt,
-  isKnownRemoteStartFailure,
+  classifyRemoteStartFailure,
   type RemoteStartReceipt
 } from './orchestration-federated-start-outcome'
 import { validateFederatedWorkerStartPlacement } from './orchestration-worker-start-validation'
@@ -250,7 +250,7 @@ export async function startFederatedWorker(args: {
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    if (error instanceof OrchestrationError && isKnownRemoteStartFailure(error.code)) {
+    if (error instanceof OrchestrationError && classifyRemoteStartFailure(error) === 'known') {
       const worker = db.failWorkerStart(started.dispatch.id, 'remote_attach', reason)
       return {
         runId,

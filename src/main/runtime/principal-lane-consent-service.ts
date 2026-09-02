@@ -37,6 +37,10 @@ export type PairingInviteOfferArgs = {
   scope: DeviceScope
   reach: 'network'
   ttlMs?: number
+  // S10-19 W-6: threaded straight to RuntimeRpcServer.createPairingOffer, which already
+  // defaults 'full' and refuses peer+non-runtime scope (W-1). Required here — mintInvite has no
+  // default of its own; the CLI/desktop callers are the ones that must choose.
+  accessProfile: 'full' | 'peer'
 }
 
 export type PairingInviteOfferResult =
@@ -165,13 +169,20 @@ export class PrincipalLaneConsentService {
    */
   mintInvite(
     consent: HostConsent,
-    params: { principalId: string; scope: DeviceScope; ttlHours?: number; address?: string }
+    params: {
+      principalId: string
+      scope: DeviceScope
+      accessProfile: 'full' | 'peer'
+      ttlHours?: number
+      address?: string
+    }
   ): {
     deviceId: string
     deviceIdPrefix: string
     principalId: string
     displayName: string
     scope: DeviceScope
+    accessProfile: 'full' | 'peer'
     expiresAt: number
     pairingUrl: string
     webClientUrl: string | null
@@ -205,6 +216,7 @@ export class PrincipalLaneConsentService {
       mint: 'always',
       scope: params.scope,
       reach: 'network',
+      accessProfile: params.accessProfile,
       ...(params.ttlHours !== undefined ? { ttlMs: params.ttlHours * 3_600_000 } : {})
     })
     if (!offer.available) {
@@ -223,6 +235,7 @@ export class PrincipalLaneConsentService {
       principalId: params.principalId,
       displayName: person.displayName,
       scope: params.scope,
+      accessProfile: params.accessProfile,
       expiresAt,
       pairingUrl: offer.pairingUrl,
       webClientUrl: offer.webClientUrl,

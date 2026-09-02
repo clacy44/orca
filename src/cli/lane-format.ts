@@ -58,6 +58,9 @@ export type LaneInvite = {
   principalId: string
   displayName: string
   scope: 'runtime' | 'mobile'
+  // S10-19 W-6: echoed back so the printed invite states what was actually minted, never left
+  // to be inferred from scope alone.
+  accessProfile: 'full' | 'peer'
   expiresAt: number
   pairingUrl: string
   webClientUrl: string | null
@@ -233,7 +236,7 @@ function formatInviteExpiry(expiresAt: number): string {
 
 export function formatInvite(invite: LaneInvite): string {
   const lines = [
-    `Invite for ${invite.displayName} — ${invite.scope} scope, expires ${formatInviteExpiry(invite.expiresAt)}`,
+    `Invite for ${invite.displayName} — ${invite.scope} scope, ${invite.accessProfile} profile, expires ${formatInviteExpiry(invite.expiresAt)}`,
     `  device  ${invite.deviceIdPrefix}`,
     `  link    ${invite.pairingUrl}`,
     ...(invite.webClientUrl ? [`  web     ${invite.webClientUrl}     (runtime scope only)`] : []),

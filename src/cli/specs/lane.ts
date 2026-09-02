@@ -27,17 +27,19 @@ export const LANE_COMMAND_SPECS: CommandSpec[] = [
     path: ['lane', 'invite'],
     summary: 'Mint a per-person pairing invite for someone to redeem on their own machine',
     usage:
-      'orca lane invite --person <idOrName> [--scope runtime|mobile] [--ttl <hours>] [--address <host>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'person', 'scope', 'ttl', 'address'],
+      'orca lane invite --person <idOrName> --profile peer|full [--scope runtime|mobile] [--ttl <hours>] [--address <host>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'person', 'scope', 'profile', 'ttl', 'address'],
     notes: [
       PERSON_NOTE,
+      '--profile is REQUIRED, no default (Ruling 20(d)): "full" for ordinary runtime access, "peer" for a least-privilege federation-dispatch-only grant. --scope mobile --profile peer is refused.',
       '--scope defaults to runtime — the only scope admitted on the lane push/pull/clear/status RPCs.',
       '--ttl is in hours, 1..24, and can only shorten the 24h default.',
       '--address advertises the endpoint the invited machine will dial; it defaults to the address this serve was started with.'
     ],
     examples: [
-      'orca lane invite --person "Ana Ng"',
-      'orca lane invite --person "Ana Ng" --scope runtime --ttl 4 --address example.com'
+      'orca lane invite --person "Ana Ng" --profile full',
+      'orca lane invite --person "Ana Ng" --profile peer --scope runtime',
+      'orca lane invite --person "Ana Ng" --profile full --scope runtime --ttl 4 --address example.com'
     ]
   },
   {

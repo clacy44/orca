@@ -12,12 +12,18 @@ export type RemoteRunMailboxNegotiation = {
   param: true | undefined
   remote: boolean
   supported: boolean
+  // S10-19 §9.3: cached off the same status.get round trip — true only when the remote runtime
+  // stamped a peerAccess block, i.e. this call is against a federation-peer grant (never a full
+  // pairing). Lets check/send/reply suppress local pane identity fields it already knows the
+  // server will refuse, without a second probe.
+  peerAccess: boolean
 }
 
 const LOCAL_NEGOTIATION: RemoteRunMailboxNegotiation = {
   param: undefined,
   remote: false,
-  supported: false
+  supported: false,
+  peerAccess: false
 }
 
 // Why: an old peer strips remoteRunMailbox and then refuses the call as an unbound
@@ -39,7 +45,8 @@ export async function negotiateRemoteRunMailbox(
   const supported =
     status.result.capabilities?.includes(ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY) ===
     true
-  return { param: supported ? true : undefined, remote: true, supported }
+  const peerAccess = (status.result as { peerAccess?: unknown }).peerAccess !== undefined
+  return { param: supported ? true : undefined, remote: true, supported, peerAccess }
 }
 
 // Why: without this the user sees "No Run is bound" from a runtime they never bound a pane on.

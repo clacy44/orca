@@ -62,7 +62,7 @@ describe('resolveDispatchMailboxTerminalHandle', () => {
   it.each(WORKER_SETTLED_STATES)('refuses a %s peer attachment', (state) => {
     expect(
       resolveDispatchMailboxTerminalHandle({
-        attachment: { state, terminal_handle: 'term_peer_worker' },
+        attachment: { state, terminal_handle: 'term_peer_worker', agent_exited_at: null },
         isAttachmentProcessCurrent: true
       })
     ).toBeNull()
@@ -71,7 +71,7 @@ describe('resolveDispatchMailboxTerminalHandle', () => {
   it('points a live peer attachment whose pane process is still current', () => {
     expect(
       resolveDispatchMailboxTerminalHandle({
-        attachment: { state: 'ready', terminal_handle: 'term_peer_worker' },
+        attachment: { state: 'ready', terminal_handle: 'term_peer_worker', agent_exited_at: null },
         isAttachmentProcessCurrent: true
       })
     ).toBe('term_peer_worker')
@@ -81,13 +81,13 @@ describe('resolveDispatchMailboxTerminalHandle', () => {
     // check() answers dispatch_inactive for exactly this row; the push must not be laxer.
     expect(
       resolveDispatchMailboxTerminalHandle({
-        attachment: { state: 'ready', terminal_handle: 'term_peer_worker' },
+        attachment: { state: 'ready', terminal_handle: 'term_peer_worker', agent_exited_at: null },
         isAttachmentProcessCurrent: false
       })
     ).toBeNull()
     expect(
       resolveDispatchMailboxTerminalHandle({
-        attachment: { state: 'ready', terminal_handle: 'term_peer_worker' }
+        attachment: { state: 'ready', terminal_handle: 'term_peer_worker', agent_exited_at: null }
       })
     ).toBeNull()
   })
@@ -98,7 +98,7 @@ describe('resolveDispatchMailboxTerminalHandle', () => {
     expect(
       resolveDispatchMailboxTerminalHandle({
         dispatch: { status: 'dispatched', assignee_handle: 'term_assignee' },
-        attachment: { state: 'ready', terminal_handle: 'term_peer_worker' },
+        attachment: { state: 'ready', terminal_handle: 'term_peer_worker', agent_exited_at: null },
         isAttachmentProcessCurrent: false
       })
     ).toBe('term_assignee')
@@ -109,7 +109,7 @@ describe('resolveDispatchMailboxTerminalHandle', () => {
       resolveDispatchMailboxTerminalHandle({
         dispatch: { status: 'dispatched', assignee_handle: null },
         worker: { state: 'ready', agent_terminal_handle: null },
-        attachment: { state: 'ready', terminal_handle: null },
+        attachment: { state: 'ready', terminal_handle: null, agent_exited_at: null },
         isAttachmentProcessCurrent: true
       })
     ).toBeNull()

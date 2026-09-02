@@ -53,8 +53,8 @@ describe('naming a runtime pairing link', () => {
     await handlers.get('mobile:getRuntimePairingUrl')?.(null, args)
 
   it('mints a distinct grant for each named link', async () => {
-    await generate({ address: '100.64.1.20', name: 'Ana' })
-    await generate({ address: '100.64.1.20', name: 'Ben' })
+    await generate({ address: '100.64.1.20', name: 'Ana', accessProfile: 'full' })
+    await generate({ address: '100.64.1.20', name: 'Ben', accessProfile: 'peer' })
 
     expect(createPairingOffer.mock.calls.map(([args]) => args)).toEqual([
       {
@@ -63,7 +63,8 @@ describe('naming a runtime pairing link', () => {
         name: 'Ana',
         mint: 'always',
         scope: 'runtime',
-        reach: 'network'
+        reach: 'network',
+        accessProfile: 'full'
       },
       {
         address: '100.64.1.20',
@@ -71,9 +72,21 @@ describe('naming a runtime pairing link', () => {
         name: 'Ben',
         mint: 'always',
         scope: 'runtime',
-        reach: 'network'
+        reach: 'network',
+        accessProfile: 'peer'
       }
     ])
+  })
+
+  // S10-19 W-6 (M5-1): a named link with no accessProfile is refused before any offer is minted.
+  it('refuses a named link with no accessProfile', async () => {
+    const result = await generate({ address: '100.64.1.20', name: 'Ana' })
+    expect(result).toEqual({
+      available: false,
+      reason: 'profile_required',
+      guidance: 'Choose Full runtime access or Federation peer before generating a named link.'
+    })
+    expect(createPairingOffer).not.toHaveBeenCalled()
   })
 
   it('treats a blank or whitespace-only name as unnamed', async () => {
@@ -86,7 +99,8 @@ describe('naming a runtime pairing link', () => {
       rotate: undefined,
       name: expect.stringMatching(/^Runtime /),
       scope: 'runtime',
-      reach: 'network'
+      reach: 'network',
+      accessProfile: 'full'
     })
   })
 })

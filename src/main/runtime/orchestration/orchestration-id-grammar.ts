@@ -40,6 +40,21 @@ export const HOST_THREAD_ID_RE = /^(?:thr|msg|relay)_[0-9a-f]{12}$/
 // = 18 chars) — the single render-clamp bound so a legitimate id is never truncated in a pointer.
 export const HOST_ID_MAX_LENGTH = 18
 
+// S10-19 (E.2, RISK 1): one grammar for every host-minted id shape (`generateId(prefix)` =
+// `${prefix}_${randomBytes(6).toString('hex')}`), parameterised over the allowed prefixes — the
+// caller states which prefixes it accepts rather than this module hardcoding a new regex per
+// caller. S10-19's assertPeerDispatchIds is the first consumer (dispatchId~'ctx', taskId~'task').
+export function isHostScopedId(
+  value: unknown,
+  allowedPrefixes: readonly string[]
+): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const pattern = new RegExp(`^(?:${allowedPrefixes.join('|')})_[0-9a-f]{12}$`)
+  return pattern.test(value)
+}
+
 export function isHostMessageId(value: unknown): value is string {
   return typeof value === 'string' && HOST_MESSAGE_ID_RE.test(value)
 }
