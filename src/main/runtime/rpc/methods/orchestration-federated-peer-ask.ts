@@ -223,6 +223,10 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
           created.message.thread_id,
           extractPayloadKind(created.message.payload_kind)
         )
+        // R13.1: an authenticated inbound call is proof of liveness — after the ask has been
+        // fully admitted (never before), and before the blocking wait below. Ruling 23(j)/FC-1:
+        // clamps next_attempt_after only, never resets consecutive_failures.
+        runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
       } catch (error) {
         // C3a delta D2: exclude by ORIGIN, not by code. `refuseIfQuarantined` throws the marked
         // `LinkContainmentRefusal` subclass and already handles its own audit write under its own

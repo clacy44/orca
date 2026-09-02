@@ -44,6 +44,15 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   let roundInFlight = false
   let sweepTimer: ReturnType<typeof setTimeout> | null = null
   let kickTimer: ReturnType<typeof setTimeout> | null = null
+  // S10-16 C4a: arm()'s one-shot startup-delay timer, tracked separately from `sweepTimer` (its
+  // own periodic re-arm) so disarm()/stop() can actually cancel it — previously fired-and-
+  // forgot via the untracked `scheduleTimer` helper, which leaked a live timer past disarm()
+  // whenever arm() ran but the startup delay hadn't elapsed yet.
+  let startupTimer: ReturnType<typeof setTimeout> | null = null
+  // S10-16 C4a: the partial-completeness retry timer (below) — same leak, same fix. A round with
+  // no `linkBindingSelfView` installed yet returns `partial` immediately, so this fires on the
+  // very first armed startup round of any runtime that hasn't wired R9 yet (most tests).
+  let partialRetryTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
 
   // R10.2: keyed per purpose (`prover:<envId>`) — the pump (C5) keys its own guard
@@ -89,19 +98,21 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       .catch(() => undefined)
       .then((outcome) => {
         roundInFlight = false
-        if (outcome && outcome.completeness === 'partial') {
-          scheduleTimer(LINK_BINDING_PARTIAL_RETRY_MS, () => attemptRound('sweep'))
+        if (outcome && outcome.completeness === 'partial' && !stopped) {
+          if (partialRetryTimer) {
+            clearTimeout(partialRetryTimer)
+          }
+          partialRetryTimer = setTimeout(() => {
+            partialRetryTimer = null
+            attemptRound('sweep')
+          }, LINK_BINDING_PARTIAL_RETRY_MS)
+          partialRetryTimer.unref?.()
         }
         if (rerun.wanted) {
           const nextMode = rerun.consume()
           attemptRound(nextMode)
         }
       })
-  }
-
-  function scheduleTimer(delayMs: number, run: () => void): void {
-    const timer = setTimeout(run, delayMs)
-    timer.unref?.()
   }
 
   return {
@@ -137,7 +148,11 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       if (sweepTimer || stopped) {
         return
       }
-      scheduleTimer(LINK_BINDING_STARTUP_DELAY_MS, () => attemptRound('sweep'))
+      startupTimer = setTimeout(() => {
+        startupTimer = null
+        attemptRound('sweep')
+      }, LINK_BINDING_STARTUP_DELAY_MS)
+      startupTimer.unref?.()
       const tick = (): void => {
         if (stopped) {
           return
@@ -150,6 +165,10 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       sweepTimer.unref?.()
     },
     disarm(): void {
+      if (startupTimer) {
+        clearTimeout(startupTimer)
+        startupTimer = null
+      }
       if (sweepTimer) {
         clearTimeout(sweepTimer)
         sweepTimer = null
@@ -157,6 +176,10 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       if (kickTimer) {
         clearTimeout(kickTimer)
         kickTimer = null
+      }
+      if (partialRetryTimer) {
+        clearTimeout(partialRetryTimer)
+        partialRetryTimer = null
       }
     },
     requestRerun(mode: RoundMode): void {
@@ -167,14 +190,22 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
     },
     stop(): void {
       stopped = true
+      if (startupTimer) {
+        clearTimeout(startupTimer)
+      }
       if (sweepTimer) {
         clearTimeout(sweepTimer)
       }
       if (kickTimer) {
         clearTimeout(kickTimer)
       }
+      if (partialRetryTimer) {
+        clearTimeout(partialRetryTimer)
+      }
+      startupTimer = null
       sweepTimer = null
       kickTimer = null
+      partialRetryTimer = null
     }
   }
 }

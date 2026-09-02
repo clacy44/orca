@@ -37891,8 +37891,11 @@ describe('OrcaRuntimeService', () => {
       await vi.advanceTimersByTimeAsync(20_000)
       expect(pendingReads).not.toHaveBeenCalled()
       // Why stopped first: the assertion is about the repoint scheduler having nothing queued, and
-      // the runtime's own liveness sweep is an unrelated interval that would otherwise be counted.
+      // the runtime's own liveness sweep AND the link-binding prover's auto-armed schedule
+      // (S10-16 C4a, R13 — arm() runs at every DB attach) are unrelated intervals that would
+      // otherwise be counted.
       runtime.stopDispatchLivenessMonitor()
+      runtime.getLinkBindingProver().disarm()
       expect(vi.getTimerCount()).toBe(0)
 
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
@@ -37971,8 +37974,11 @@ describe('OrcaRuntimeService', () => {
         )
       ).toHaveLength(1)
       // Why stopped first: the assertion is about the repoint scheduler having nothing queued, and
-      // the runtime's own liveness sweep is an unrelated interval that would otherwise be counted.
+      // the runtime's own liveness sweep AND the link-binding prover's auto-armed schedule
+      // (S10-16 C4a, R13 — arm() runs at every DB attach) are unrelated intervals that would
+      // otherwise be counted.
       runtime.stopDispatchLivenessMonitor()
+      runtime.getLinkBindingProver().disarm()
       expect(vi.getTimerCount()).toBe(0)
       db.close()
     } finally {

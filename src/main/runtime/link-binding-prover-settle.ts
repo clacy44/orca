@@ -22,10 +22,23 @@ export function settleOneLink(args: {
   winners: LinkRoundWinner[]
   peerDuplicateCount: number
   attempted: boolean
+  // R10-E: whether THIS link's winning slot survived the winner re-probe + batched
+  // federatedLinkConfirm (link-binding-prover-reconfirm.ts). `null` when the classification
+  // isn't a bind-family outcome (no winner exists to reconfirm) — never read in that branch.
+  reconfirmed: boolean | null
   now: number
 }): void {
-  const { db, selfView, linkDeviceId, grantClass, winners, peerDuplicateCount, attempted, now } =
-    args
+  const {
+    db,
+    selfView,
+    linkDeviceId,
+    grantClass,
+    winners,
+    peerDuplicateCount,
+    attempted,
+    reconfirmed,
+    now
+  } = args
   const classification = classifyLinkRound(winners, peerDuplicateCount)
   const priorAttempt = db.getBindingAttempt(linkDeviceId)
   let lastOutcome: LinkBindingLastOutcome = priorAttempt?.lastOutcome ?? 'pending'
@@ -38,26 +51,39 @@ export function settleOneLink(args: {
     classification.outcome === 'duplicate_environment' ||
     classification.outcome === 'multi_grant'
   ) {
-    // R12.2's persisted vocabulary has no 'bind' member — a clean single-winner round is
-    // recorded 'proven' ("it is the winner"); duplicate_environment/multi_grant keep their own
-    // names, matching the CHECK in peer_link_attempts.last_outcome.
-    lastOutcome = classification.outcome === 'bind' ? 'proven' : classification.outcome
-    lastDetail = classification.detail
-    consecutiveNoWinner = 0
-    db.putPeerLinkBinding({
-      linkDeviceId,
-      environmentId: classification.winner.environmentId,
-      boundEndpointId: classification.winner.boundEndpointId,
-      boundPairingRevision: classification.winner.boundPairingRevision,
-      linkCredentialFp: selfView.registryCredentialFingerprint(linkDeviceId) ?? '',
-      peerCredentialFp: classification.winner.peerCredentialFp,
-      peerKeyFingerprint: classification.winner.peerKeyFingerprint,
-      grantClass,
-      scanCompleteness: attempted ? 'complete' : 'partial',
-      proofProtocol: LINK_BINDING_PROTOCOL,
-      provedAt: now,
-      lastVerifiedAt: now
-    })
+    if (reconfirmed === false) {
+      // R10-E: the winner re-probe/confirm failed (fresh proof did not re-verify, or the peer's
+      // federatedLinkConfirm never acknowledged this link's slot) — single-writer property
+      // preserved: NOTHING is written to peer_link_bindings. Recorded with the register's own
+      // vocabulary, exactly as a failed probe would be, and counted toward the park predicate
+      // like any other no-surviving-winner round.
+      lastOutcome = 'unreachable'
+      lastDetail = `reconfirm_failed:${classification.winner.environmentId}`
+      if (attempted) {
+        consecutiveNoWinner += 1
+      }
+    } else {
+      // R12.2's persisted vocabulary has no 'bind' member — a clean single-winner round is
+      // recorded 'proven' ("it is the winner"); duplicate_environment/multi_grant keep their own
+      // names, matching the CHECK in peer_link_attempts.last_outcome.
+      lastOutcome = classification.outcome === 'bind' ? 'proven' : classification.outcome
+      lastDetail = classification.detail
+      consecutiveNoWinner = 0
+      db.putPeerLinkBinding({
+        linkDeviceId,
+        environmentId: classification.winner.environmentId,
+        boundEndpointId: classification.winner.boundEndpointId,
+        boundPairingRevision: classification.winner.boundPairingRevision,
+        linkCredentialFp: selfView.registryCredentialFingerprint(linkDeviceId) ?? '',
+        peerCredentialFp: classification.winner.peerCredentialFp,
+        peerKeyFingerprint: classification.winner.peerKeyFingerprint,
+        grantClass,
+        scanCompleteness: attempted ? 'complete' : 'partial',
+        proofProtocol: LINK_BINDING_PROTOCOL,
+        provedAt: now,
+        lastVerifiedAt: now
+      })
+    }
   } else if (classification.outcome === 'contested') {
     lastOutcome = 'contested'
     lastDetail = classification.detail

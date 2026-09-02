@@ -142,6 +142,10 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
             existing.peer_link_device_id === pairedDeviceId &&
             existing.type === (params.type ?? 'status')
           ) {
+            // R13.1: an authenticated inbound call is proof of liveness — after admission
+            // (a replay is still an admitted call), never before. Ruling 23(j)/FC-1: clamps
+            // next_attempt_after only, never resets consecutive_failures.
+            runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
             return {
               accepted: true,
               messageId: existing.id,
@@ -187,6 +191,10 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           message.thread_id,
           extractPayloadKind(message.payload_kind)
         )
+        // R13.1: an authenticated inbound call is proof of liveness — tail of the handler,
+        // after the mail has been fully admitted. Ruling 23(j)/FC-1: clamps next_attempt_after
+        // only, never resets consecutive_failures.
+        runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
         return {
           accepted: true,
           messageId: message.id,

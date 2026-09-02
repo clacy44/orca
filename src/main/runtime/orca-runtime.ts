@@ -3161,12 +3161,15 @@ export class OrcaRuntimeService {
   // non-success arms). Public — handlers (which see only OrcaRuntimeService, never
   // RuntimeRpcServer) read it directly, matching the design's `runtime.linkBindingSelfView` shape.
   linkBindingSelfView: LinkBindingSelfView | null = null
-  // S10-16 C4: lazily constructed (it needs `this`, unlike linkBindingSelfView which runtime-rpc.ts
-  // builds externally) and NOT auto-armed from getOrchestrationDb()/setOrchestrationDb() — R13's
-  // "runtime start / DB attach" trigger names that hook, but wiring `arm()` there touches the one
-  // hook hundreds of existing tests call via setOrchestrationDb(); left for a follow-up commit
-  // that can afford the full-suite regression run this one's time budget could not (recorded in
-  // the C4 return as a forced deviation). `getLinkBindingProver()` is ready for that wiring.
+  // S10-16 C4a, R13: lazily constructed (it needs `this`, unlike linkBindingSelfView which
+  // runtime-rpc.ts builds externally). Auto-armed from BOTH getOrchestrationDb() and
+  // setOrchestrationDb() below (R13's "runtime start / DB attach" trigger) — `arm()` itself only
+  // schedules timers (LINK_BINDING_STARTUP_DELAY_MS then the sweep interval), never runs a round
+  // synchronously inside attach, and is idempotent (a second `arm()` while already armed is a
+  // no-op), so calling it from both attach sites is safe. A runtime with no `linkBindingSelfView`
+  // installed yet, or no runtime-scope link candidates, stays inert — `runOneRound` returns
+  // `{completeness:'complete', evaluatedLinkIds:[]}` before any network call the moment its
+  // candidate page is empty (link-binding-prover-round.ts).
   private _linkBindingProver: LinkBindingProver | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
@@ -4161,6 +4164,9 @@ export class OrcaRuntimeService {
       this.resumeDispatchInputObservers()
       this.scheduleRestoredMessageRepoints()
       this.flushLegacySweepAudit()
+      // S10-16 C4a, R13: arm the verifier's own schedule at the DB attach site — idempotent,
+      // never runs a round synchronously (see the field doc comment above).
+      this.getLinkBindingProver().arm()
     }
     return this._orchestrationDb
   }
@@ -4218,6 +4224,8 @@ export class OrcaRuntimeService {
     this.resumeDispatchInputObservers()
     this.scheduleRestoredMessageRepoints()
     this.flushLegacySweepAudit()
+    // S10-16 C4a, R13: same auto-arm as getOrchestrationDb() — idempotent, timers only.
+    this.getLinkBindingProver().arm()
   }
 
   // Why armed with the database rather than with each worker-start: the breach fence lives in a

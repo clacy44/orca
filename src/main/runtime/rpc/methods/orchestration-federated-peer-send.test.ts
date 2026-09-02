@@ -168,6 +168,38 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(farRow?.peer_link_device_id).toBe(LINK_DEVICE_ID)
   })
 
+  it('R13.1: a send from a paired peer clamps the link-binding schedule, never resets the failure counter', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    // Pre-seed the WORKER's own binding-attempt row for the caller's link (LINK_DEVICE_ID) with
+    // a far-future backoff and a non-zero failure counter — exactly the state R13.1's inbound-
+    // contact kick must clamp, and exactly the state it must NEVER touch (Ruling 23(j)/FC-1).
+    workerDb.putBindingAttempt(LINK_DEVICE_ID)
+    const farFuture = Date.now() + 10_000_000
+    workerDb.settleBindingAttempt(LINK_DEVICE_ID, {
+      lastAttemptAt: 0,
+      lastRoundAt: 0,
+      lastOutcome: 'unreachable',
+      lastDetail: null,
+      consecutiveFailures: 5,
+      consecutiveNoWinner: 0,
+      nextAttemptAfter: farFuture
+    })
+
+    await call(
+      'orchestration.send',
+      { to: `agent:${agentB}`, host: 'windows', subject: 'hi', body: 'hello from home' },
+      homeCtx(evidenceA)
+    )
+
+    const attempt = workerDb.getBindingAttempt(LINK_DEVICE_ID)
+    expect(attempt?.nextAttemptAfter).toBeLessThan(farFuture)
+    expect(attempt?.consecutiveFailures).toBe(5)
+    workerRuntime.getLinkBindingProver().stop()
+  })
+
   it('a same-id retry with matching type is an idempotent replay; a same-id collision with a DIFFERENT type refuses request_mismatch (m-1)', async () => {
     setup()
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)

@@ -7,6 +7,7 @@ import type { KnownRuntimeEnvironment } from '../../shared/runtime-environments'
 import type { LinkBindingSelfView } from './device-registry-link-credential'
 import {
   PROOF_LABEL,
+  LINK_BINDING_HEX32_RE,
   LINK_BINDING_HEX64_RE,
   linkBindingMacEquals
 } from './orchestration/link-binding-proof'
@@ -25,11 +26,37 @@ export type ProbeOneEnvironmentResult = {
   // R12.2's "attempted" column. A `busy` environment (never reached the wire) contributes none.
   attemptedLinkIds: string[]
   fullyAttempted: boolean
+  // R11.5: this environment's validated advisory, if any — null on every path with no live wire
+  // response (busy, local failure, unsupported, cached-fact skip) or a malformed/absent advisory.
+  advisory: ProbeAdvisory | null
 }
 
 export type SlotProbeResult =
   | { slotIndex: number; matched: true; nonceP: string; proof: string }
   | { slotIndex: number; matched: false; reason: 'peer_duplicate' }
+
+// R11.5/R7.8/C-9: the responder's cross-host contest-advisory RECEIPT. Validated the same way
+// (closed `kind` enum, LINK_BINDING_HEX32_RE id) as every other response field — a malformed
+// advisory is DROPPED, never a `protocol_violation` (an advisory can never fail a round).
+export type ProbeAdvisory = { kind: 'link_contested' | 'link_quarantined'; incidentId: string }
+
+export function parseProbeAdvisory(raw: unknown): ProbeAdvisory | null {
+  if (raw === null || typeof raw !== 'object') {
+    return null
+  }
+  const advisory = (raw as { advisory?: unknown }).advisory
+  if (advisory === undefined || advisory === null || typeof advisory !== 'object') {
+    return null
+  }
+  const a = advisory as Record<string, unknown>
+  if (a.kind !== 'link_contested' && a.kind !== 'link_quarantined') {
+    return null
+  }
+  if (typeof a.incidentId !== 'string' || !LINK_BINDING_HEX32_RE.test(a.incidentId)) {
+    return null
+  }
+  return { kind: a.kind, incidentId: a.incidentId }
+}
 
 // R7.8: shape-validate the response before any MAC evaluation. A violation is `protocol_violation`
 // for that environment, never a throw.
@@ -107,7 +134,13 @@ export function settleProbeFailure(args: {
   const { db, selfView, page, environmentId, expectedRevision, error, now } = args
   const code = error instanceof Error && 'code' in error ? (error as { code: string }).code : null
   if (code === 'runtime_environment_changed') {
-    return { winners: [], duplicateLinkIds: [], attemptedLinkIds: [], fullyAttempted: false }
+    return {
+      winners: [],
+      duplicateLinkIds: [],
+      attemptedLinkIds: [],
+      fullyAttempted: false,
+      advisory: null
+    }
   }
   // capability_unsupported / link_store_unreadable / link_store_empty / rate_limited /
   // runtime_rpc_queue_overloaded all map to `unavailable` — none of them are `unreachable`
@@ -130,7 +163,8 @@ export function settleProbeFailure(args: {
     winners: [],
     duplicateLinkIds: [],
     attemptedLinkIds: page.map((l) => l.linkDeviceId),
-    fullyAttempted: true
+    fullyAttempted: true,
+    advisory: null
   }
 }
 
@@ -148,6 +182,7 @@ export function settleProbeResults(args: {
   nonceH: string
   roundEpoch: number
   parsed: SlotProbeResult[]
+  advisory: ProbeAdvisory | null
   now: number
 }): ProbeOneEnvironmentResult {
   const {
@@ -164,6 +199,7 @@ export function settleProbeResults(args: {
     nonceH,
     roundEpoch,
     parsed,
+    advisory,
     now
   } = args
   const winners: { linkDeviceId: string; winner: LinkRoundWinner }[] = []
@@ -233,6 +269,7 @@ export function settleProbeResults(args: {
     winners,
     duplicateLinkIds,
     attemptedLinkIds: page.map((l) => l.linkDeviceId),
-    fullyAttempted: true
+    fullyAttempted: true,
+    advisory
   }
 }

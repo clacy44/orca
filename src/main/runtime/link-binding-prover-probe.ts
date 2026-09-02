@@ -23,6 +23,7 @@ import type { LinkRoundWinner } from './orchestration/link-binding-classify'
 import type { PageCandidateLink, RoundMode } from './orchestration/link-binding-schedule'
 import {
   parseProbeResults,
+  parseProbeAdvisory,
   writeScanFact,
   settleProbeFailure,
   settleProbeResults,
@@ -127,7 +128,8 @@ export async function probeOneEnvironment(args: {
         winners,
         duplicateLinkIds,
         attemptedLinkIds: page.map((l) => l.linkDeviceId),
-        fullyAttempted: true
+        fullyAttempted: true,
+        advisory: null
       }
     }
   }
@@ -155,7 +157,8 @@ export async function probeOneEnvironment(args: {
       winners: [],
       duplicateLinkIds: [],
       attemptedLinkIds: page.map((l) => l.linkDeviceId),
-      fullyAttempted: true
+      fullyAttempted: true,
+      advisory: null
     }
   }
 
@@ -194,7 +197,13 @@ export async function probeOneEnvironment(args: {
   }
   if (guarded === 'busy') {
     // R10.2/L3: this host's own scheduling — excluded from R13.3's attempted/park test entirely.
-    return { winners: [], duplicateLinkIds: [], attemptedLinkIds: [], fullyAttempted: false }
+    return {
+      winners: [],
+      duplicateLinkIds: [],
+      attemptedLinkIds: [],
+      fullyAttempted: false,
+      advisory: null
+    }
   }
 
   const parsed = parseProbeResults(guarded)
@@ -214,7 +223,8 @@ export async function probeOneEnvironment(args: {
       winners: [],
       duplicateLinkIds: [],
       attemptedLinkIds: page.map((l) => l.linkDeviceId),
-      fullyAttempted: true
+      fullyAttempted: true,
+      advisory: null
     }
   }
   return settleProbeResults({
@@ -231,6 +241,7 @@ export async function probeOneEnvironment(args: {
     nonceH,
     roundEpoch,
     parsed,
+    advisory: parseProbeAdvisory(guarded),
     now
   })
 }

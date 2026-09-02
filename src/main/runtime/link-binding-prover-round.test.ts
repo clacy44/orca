@@ -17,7 +17,8 @@ import { fingerprintOrchestrationPeer } from './orchestration/environment-transp
 import { SELECTOR_LABEL, PROOF_LABEL, linkBindingMac } from './orchestration/link-binding-proof'
 import {
   LINK_BINDING_MAX_ROUNDS_PER_MIN,
-  LINK_BINDING_UNPAIRED_PARK_ROUNDS
+  LINK_BINDING_UNPAIRED_PARK_ROUNDS,
+  LINK_BINDING_SCAN_CONCURRENCY
 } from './orchestration/link-binding-constants'
 import { ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
@@ -62,10 +63,13 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
   }
 
   function saveNonMatchingEnvironment(): string {
+    // A distinct deviceToken per call — R10-B's credential collapse groups candidate
+    // environments by peer_credential_fp (derived from this token), so callers that need
+    // MULTIPLE surviving (uncollapsed) candidates must vary it.
     const code = encodePairingOffer({
       v: PAIRING_OFFER_VERSION,
       endpoint: 'ws://other.example:16768',
-      deviceToken: 'not-the-link-token',
+      deviceToken: `not-the-link-token-${randomBytes(8).toString('hex')}`,
       publicKeyB64: peerE2ee.publicKeyB64
     })
     const env = addEnvironmentFromPairingCode(userDataPath, {
@@ -83,14 +87,34 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     throwWith?: OrchestrationError
     supported?: boolean
     probeCallCounter?: { count: number }
+    confirmCallCounter?: { count: number }
     // Answers `peer_duplicate` for every slotIndex named here, instead of a real proof.
     peerDuplicateSlots?: number[]
+    // R10-E: a well-behaved peer acknowledges every confirm slot it is sent by default — set
+    // this to simulate a refused/empty confirm (the R10-E failure path).
+    confirmAcknowledgeNone?: boolean
+    confirmThrowWith?: OrchestrationError
+    // C-9/R11.5: attaches this advisory to every `orchestration.federatedLinkProbe` answer.
+    advisory?: { kind: 'link_contested' | 'link_quarantined'; incidentId: string }
   }) {
     return vi.fn(async (args: { method: string; params: unknown }) => {
       if (args.method === 'status.get') {
         return {
           capabilities:
             overrides.supported === false ? [] : [ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY]
+        }
+      }
+      if (args.method === 'orchestration.federatedLinkConfirm') {
+        if (overrides.confirmCallCounter) {
+          overrides.confirmCallCounter.count += 1
+        }
+        if (overrides.confirmThrowWith) {
+          throw overrides.confirmThrowWith
+        }
+        const p = args.params as { confirms: { slotIndex: number; confirm: string }[] }
+        return {
+          protocol: 'orca.link-binding.v1',
+          acknowledged: overrides.confirmAcknowledgeNone ? [] : p.confirms.map((c) => c.slotIndex)
         }
       }
       if (args.method === 'orchestration.federatedLinkProbe') {
@@ -149,7 +173,11 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
             })
           }
         }
-        return { protocol: 'orca.link-binding.v1', results }
+        return {
+          protocol: 'orca.link-binding.v1',
+          results,
+          ...(overrides.advisory ? { advisory: overrides.advisory } : {})
+        }
       }
       throw new Error(`unexpected method ${args.method}`)
     })
@@ -281,16 +309,20 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
       fakeResponder({ probeCallCounter: counter })
     )
     let now = Date.now()
+    // Every round that selects a winner issues its own scan-pass probe PLUS R10-E's winner
+    // re-probe — two `federatedLinkProbe` calls per winning round, whether or not the scan
+    // pass itself hit the fact cache.
     await runOneRound(freshRoundArgs(undefined, undefined, now))
-    expect(counter.count).toBe(1)
-    now += 120_000 // past R10-A's own backoff exclusion, still well inside the 24h fact TTL.
-    // Sweep mode: the fresh 'proven' fact is live -> skipped, no second probe call.
-    await runOneRound(freshRoundArgs(undefined, undefined, now))
-    expect(counter.count).toBe(1)
-    now += 120_000
-    // contest_search mode: bypasses the cache entirely -> probes again.
-    await runOneRound(freshRoundArgs(undefined, undefined, now, 'contest_search'))
     expect(counter.count).toBe(2)
+    now += 120_000 // past R10-A's own backoff exclusion, still well inside the 24h fact TTL.
+    // Sweep mode: the fresh 'proven' fact is live -> the SCAN pass is skipped, but R10-E still
+    // re-probes before re-writing the (already-existing) binding — one more call.
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBe(3)
+    now += 120_000
+    // contest_search mode: bypasses the cache entirely -> a fresh scan pass PLUS its own re-probe.
+    await runOneRound(freshRoundArgs(undefined, undefined, now, 'contest_search'))
+    expect(counter.count).toBe(5)
   })
 
   it('credential-identical candidate environments collapse to the newest; the dropped one gets NO scan fact (Ruling 23(d)/23(e))', async () => {
@@ -304,9 +336,9 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
       fakeResponder({ probeCallCounter: counter })
     )
     await runOneRound(freshRoundArgs())
-    // Exactly one probe call for this page — the collapse reduced two credential-identical
-    // candidates to one before the probe pass.
-    expect(counter.count).toBe(1)
+    // Exactly one SCAN-PASS probe call for this page — the collapse reduced two credential-
+    // identical candidates to one before the probe pass — plus R10-E's own winner re-probe.
+    expect(counter.count).toBe(2)
     const firstFact = db.getScanFact(linkId, first)
     const secondFact = db.getScanFact(linkId, second)
     // Exactly one of the two has a scan fact (the survivor, 'proven'); the other has NONE — a
@@ -321,6 +353,100 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     expect(db.getPeerLinkBinding(linkId)?.environmentId).toBe(
       facts[0] === firstFact ? first : second
     )
+  })
+
+  it('R10-E: a winning slot that survives the re-probe + confirm gets its binding written', async () => {
+    saveMatchingEnvironment()
+    const probeCounter = { count: 0 }
+    const confirmCounter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ probeCallCounter: probeCounter, confirmCallCounter: confirmCounter })
+    )
+    const outcome = await runOneRound(freshRoundArgs())
+    expect(outcome.evaluatedLinkIds).toContain(linkId)
+    // One probe for the round's own scan pass, ONE MORE for R10-E's winner re-probe (fresh
+    // nonce/probeId), and exactly one batched confirm call.
+    expect(probeCounter.count).toBe(2)
+    expect(confirmCounter.count).toBe(1)
+    expect(db.getPeerLinkBinding(linkId)).not.toBeNull()
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('proven')
+  })
+
+  it('R10-E: a refused confirm writes NO binding and records the outcome via the register vocabulary', async () => {
+    saveMatchingEnvironment()
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ confirmAcknowledgeNone: true })
+    )
+    await runOneRound(freshRoundArgs())
+    // Single-writer property preserved: NOTHING was written to peer_link_bindings.
+    expect(db.getPeerLinkBinding(linkId)).toBeNull()
+    const attempt = db.getBindingAttempt(linkId)
+    expect(attempt?.lastOutcome).toBe('unreachable')
+    expect(attempt?.lastDetail).toMatch(/^reconfirm_failed:/)
+  })
+
+  it('R10-E: a re-probe that throws (peer unreachable on the second dial) also writes NO binding', async () => {
+    saveMatchingEnvironment()
+    let calls = 0
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async (args) => {
+      const a = args as { method: string; params: unknown }
+      if (a.method === 'orchestration.federatedLinkProbe') {
+        calls += 1
+        if (calls === 2) {
+          throw new OrchestrationError('unreachable', 'peer went away')
+        }
+      }
+      return fakeResponder({})(a)
+    })
+    await runOneRound(freshRoundArgs())
+    expect(db.getPeerLinkBinding(linkId)).toBeNull()
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('unreachable')
+  })
+
+  it('R11.5/C-9: a probe advisory is recorded onto the bound link as a labelled remote claim, never last_outcome', async () => {
+    saveMatchingEnvironment()
+    const incidentId = randomBytes(16).toString('hex')
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ advisory: { kind: 'link_contested', incidentId } })
+    )
+    await runOneRound(freshRoundArgs())
+    const attempt = db.getBindingAttempt(linkId)
+    // The round still bound cleanly — the advisory never gates the round or last_outcome.
+    expect(attempt?.lastOutcome).toBe('proven')
+    expect(attempt?.lastAdvisory).toEqual({
+      kind: 'peer_reports_contest',
+      incidentId,
+      environmentId: expect.any(String)
+    })
+    expect(attempt?.lastAdvisoryAt).not.toBeNull()
+  })
+
+  it('R10.1: a bounded worker pool never runs more than LINK_BINDING_SCAN_CONCURRENCY probes at once, and a slow candidate does not block the others', async () => {
+    const envIds = Array.from({ length: LINK_BINDING_SCAN_CONCURRENCY + 2 }, () =>
+      saveNonMatchingEnvironment()
+    )
+    let inFlight = 0
+    let maxInFlight = 0
+    const finishedOrder: string[] = []
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async (args) => {
+      const a = args as { method: string; params: unknown; selector?: string }
+      if (a.method !== 'status.get') {
+        return { capabilities: [] }
+      }
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      // The FIRST environment probed is deliberately slow — it must not hold up the others.
+      const isSlow = finishedOrder.length === 0 && inFlight === 1
+      await new Promise((resolve) => setTimeout(resolve, isSlow ? 30 : 0))
+      inFlight -= 1
+      finishedOrder.push(String(a.selector))
+      return { capabilities: [] }
+    })
+    await runOneRound(freshRoundArgs())
+    expect(maxInFlight).toBeLessThanOrEqual(LINK_BINDING_SCAN_CONCURRENCY)
+    expect(finishedOrder).toHaveLength(envIds.length)
+    // The slow candidate did not finish first — the pool kept the other workers moving.
+    expect(finishedOrder.at(0)).not.toBe(finishedOrder.at(-1))
   })
 })
 

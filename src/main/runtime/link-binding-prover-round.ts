@@ -13,12 +13,10 @@ import {
 import { hashCallerCredential } from './principal-link-fingerprint-binding'
 import { fingerprintOrchestrationPeer } from './orchestration/environment-transport'
 import { resolveUserDataPath } from './rpc/methods/orchestration-link-binding-pending'
-import type { LinkBindingSelfView } from './device-registry-link-credential'
 import { CONFIRM_LABEL } from './orchestration/link-binding-proof'
-import { LINK_BINDING_SCAN_CONCURRENCY } from './orchestration/link-binding-constants'
 import {
   collapseCredentialIdenticalCandidates,
-  type LinkRoundWinner
+  classifyLinkRound
 } from './orchestration/link-binding-classify'
 import {
   selectRoundPage,
@@ -27,13 +25,11 @@ import {
   type PageCandidateLink,
   type RoundMode
 } from './orchestration/link-binding-schedule'
-import {
-  probeOneEnvironment,
-  type EnvCandidate,
-  type GuardedProbe,
-  type CapabilityCache
-} from './link-binding-prover-probe'
+import type { EnvCandidate, GuardedProbe, CapabilityCache } from './link-binding-prover-probe'
 import { settleOneLink } from './link-binding-prover-settle'
+import { reconfirmWinners, type ReconfirmCandidate } from './link-binding-prover-reconfirm'
+import { recordContestAdvisoryReceipt } from './link-binding-prover-advisory'
+import { probePage } from './link-binding-prover-scan'
 
 export { CONFIRM_LABEL }
 export type { GuardedProbe, CapabilityCache }
@@ -118,19 +114,53 @@ export async function runOneRound(args: {
     recordCollapsedDuplicates(db, page, collapsed.dropped, now)
   }
 
-  const { winnersByLink, peerDuplicateCountByLink, attemptedEnvironmentCount, anyPartial } =
-    await probePage({
-      runtime,
-      db,
-      selfView,
-      page,
-      mode,
-      now,
-      roundEpoch,
-      guardedProbe,
-      capabilityCache,
-      environments: collapsed.kept
-    })
+  const {
+    winnersByLink,
+    peerDuplicateCountByLink,
+    attemptedEnvironmentCount,
+    anyPartial,
+    advisoryByEnvironment
+  } = await probePage({
+    runtime,
+    db,
+    selfView,
+    page,
+    mode,
+    now,
+    roundEpoch,
+    guardedProbe,
+    capabilityCache,
+    environments: collapsed.kept
+  })
+
+  // R10-E: re-probe + batched confirm every bind-family winner BEFORE any peer_link_bindings
+  // write — gathered across the whole page so links that won the SAME environment share one
+  // re-probe + one confirm call (link-binding-prover-reconfirm.ts).
+  const reconfirmCandidates: ReconfirmCandidate[] = []
+  for (const link of page) {
+    const winners = winnersByLink.get(link.linkDeviceId) ?? []
+    const classification = classifyLinkRound(
+      winners,
+      peerDuplicateCountByLink.get(link.linkDeviceId) ?? 0
+    )
+    if (
+      classification.outcome === 'bind' ||
+      classification.outcome === 'duplicate_environment' ||
+      classification.outcome === 'multi_grant'
+    ) {
+      reconfirmCandidates.push({
+        linkDeviceId: link.linkDeviceId,
+        winner: classification.winner
+      })
+    }
+  }
+  const reconfirmed = await reconfirmWinners({
+    runtime,
+    selfView,
+    guardedProbe,
+    roundEpoch,
+    candidates: reconfirmCandidates
+  })
 
   for (const link of page) {
     const meta = linkMeta.get(link.linkDeviceId)
@@ -142,8 +172,16 @@ export async function runOneRound(args: {
       winners: winnersByLink.get(link.linkDeviceId) ?? [],
       peerDuplicateCount: peerDuplicateCountByLink.get(link.linkDeviceId) ?? 0,
       attempted: (attemptedEnvironmentCount.get(link.linkDeviceId) ?? 0) >= collapsed.kept.length,
+      reconfirmed: reconfirmed.get(link.linkDeviceId) ?? null,
       now
     })
+  }
+
+  // R11.5: applied AFTER the settle loop above — a same-round winner's peer_link_bindings row
+  // must already exist (findBindingsByEnvironment reads it) for the receipt on that environment
+  // to have anywhere to attach to. Never gates the round, never touches last_outcome.
+  for (const [environmentId, advisory] of advisoryByEnvironment) {
+    recordContestAdvisoryReceipt(db, environmentId, advisory, now)
   }
 
   return {
@@ -203,74 +241,4 @@ function recordCollapsedDuplicates(
       nextAttemptAfter: attempt?.nextAttemptAfter ?? null
     })
   }
-}
-
-async function probePage(args: {
-  runtime: OrcaRuntimeService
-  db: OrchestrationDb
-  selfView: LinkBindingSelfView
-  page: PageCandidateLink[]
-  mode: RoundMode
-  now: number
-  roundEpoch: number
-  guardedProbe: GuardedProbe
-  capabilityCache: CapabilityCache
-  environments: EnvCandidate[]
-}): Promise<{
-  winnersByLink: Map<string, LinkRoundWinner[]>
-  peerDuplicateCountByLink: Map<string, number>
-  attemptedEnvironmentCount: Map<string, number>
-  anyPartial: boolean
-}> {
-  const {
-    runtime,
-    db,
-    selfView,
-    page,
-    mode,
-    now,
-    roundEpoch,
-    guardedProbe,
-    capabilityCache,
-    environments
-  } = args
-  const winnersByLink = new Map<string, LinkRoundWinner[]>()
-  const peerDuplicateCountByLink = new Map<string, number>()
-  const attemptedEnvironmentCount = new Map<string, number>()
-  let anyPartial = false
-
-  for (let i = 0; i < environments.length; i += LINK_BINDING_SCAN_CONCURRENCY) {
-    const batch = environments.slice(i, i + LINK_BINDING_SCAN_CONCURRENCY)
-    await Promise.all(
-      batch.map(async (candidate) => {
-        const result = await probeOneEnvironment({
-          runtime,
-          db,
-          selfView,
-          candidate,
-          page,
-          mode,
-          now,
-          roundEpoch,
-          guardedProbe,
-          capabilityCache
-        })
-        for (const win of result.winners) {
-          const arr = winnersByLink.get(win.linkDeviceId) ?? []
-          arr.push(win.winner)
-          winnersByLink.set(win.linkDeviceId, arr)
-        }
-        for (const linkId of result.duplicateLinkIds) {
-          peerDuplicateCountByLink.set(linkId, (peerDuplicateCountByLink.get(linkId) ?? 0) + 1)
-        }
-        for (const linkId of result.attemptedLinkIds) {
-          attemptedEnvironmentCount.set(linkId, (attemptedEnvironmentCount.get(linkId) ?? 0) + 1)
-        }
-        if (!result.fullyAttempted) {
-          anyPartial = true
-        }
-      })
-    )
-  }
-  return { winnersByLink, peerDuplicateCountByLink, attemptedEnvironmentCount, anyPartial }
 }
