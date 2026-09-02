@@ -61,11 +61,15 @@ export function buildDeviceEntry(
 // drops it (F2) — this clause only stops it being re-advertised as the answer here.
 // S10-19: a pending row coalesces only within its own access profile — a peer-scoped pending link
 // must never silently widen into (or be silently narrowed from) a full-access one.
+// S10-16 C2 carry-forward (a): the ONE coalescing predicate — device-registry.ts's getPendingDevice
+// used to restate this base clause without the expiry check, so an expired legacy-coalesced row
+// could be returned as "pending". `accessProfile` omitted keeps every pre-existing untargeted
+// caller's lookup (device-registry.ts:238's prior behaviour); given, it narrows to that profile.
 export function findCoalescedPendingDevice(
   devices: DeviceEntry[],
   scope: DeviceEntry['scope'],
   now: number,
-  accessProfile: 'full' | 'peer',
+  accessProfile: 'full' | 'peer' | undefined,
   legacyGrantProfile: 'full' | 'peer'
 ): DeviceEntry | undefined {
   return devices.find(
@@ -74,7 +78,8 @@ export function findCoalescedPendingDevice(
       d.scope === scope &&
       !isMintedPendingDevice(d) &&
       !isExpiredLegacyCoalescedGrant(d, now) &&
-      effectiveAccessProfile(d, legacyGrantProfile) === accessProfile
+      (accessProfile === undefined ||
+        effectiveAccessProfile(d, legacyGrantProfile) === accessProfile)
   )
 }
 

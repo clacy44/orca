@@ -48,10 +48,12 @@ function toRuntimeAccessGrant(
     name: device.name,
     createdAt: device.pairedAt,
     lastSeenAt: device.lastSeenAt > 0 ? device.lastSeenAt : null,
-    // S10-16 C1 review round 2 D3: absent grantClass means a row minted before this field existed —
-    // that predates the sweep/mint split, so it maps to 'legacy_coalesced' (the same "not provably
-    // minted" fallback isMintedPendingDevice uses), never to 'minted'.
-    grantClass: device.grantClass === 'minted' ? 'minted' : 'legacy_coalesced',
+    // S10-16 C2 carry-forward (a): absent grantClass means a row minted before this field
+    // existed — that predates the sweep/mint split, so it derives from pendingExpiresAt's
+    // presence (the same fact buildDeviceEntry used to decide whether to stamp 'minted' at all)
+    // rather than collapsing every non-'minted' value to 'legacy_coalesced'.
+    grantClass:
+      device.grantClass ?? (device.pendingExpiresAt !== undefined ? 'minted' : 'legacy_coalesced'),
     expiresAt: device.pendingExpiresAt ?? null,
     ...(device.accessProfile !== undefined ? { profile: device.accessProfile } : {}),
     effective: effectiveAccessProfile(device, legacyGrantProfile),

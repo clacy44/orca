@@ -8,7 +8,6 @@ import {
   MAX_LIVE_MINTED_GRANTS,
   isExpiredPendingDevice,
   isExpiredLegacyCoalescedGrant,
-  isMintedPendingDevice,
   retainNewestMintedGrants,
   retainUnexpiredPendingDevices,
   type BudgetClass
@@ -230,14 +229,15 @@ export class DeviceRegistry {
     accessProfile?: 'full' | 'peer',
     legacyGrantProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry | null {
+    // S10-16 C2 carry-forward (a): shares findCoalescedPendingDevice's ONE predicate (which
+    // includes the expiry clause) instead of restating it without that clause.
     return (
-      this.devices.find(
-        (device) =>
-          device.lastSeenAt === 0 &&
-          device.scope === scope &&
-          !isMintedPendingDevice(device) &&
-          (accessProfile === undefined ||
-            effectiveAccessProfile(device, legacyGrantProfile) === accessProfile)
+      findCoalescedPendingDevice(
+        this.devices,
+        scope,
+        Date.now(),
+        accessProfile,
+        legacyGrantProfile
       ) ?? null
     )
   }

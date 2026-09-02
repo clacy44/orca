@@ -38,7 +38,7 @@ describe('v37 -> v38 peer routing migration + F7a stranded-row repair', () => {
     const raw2 = new Database(dbPath)
     // S10-19: SCHEMA_VERSION is now 39 (v38 -> v39, peer attachment columns) — a v36-stamped
     // fixture migrates all the way to the CURRENT version, not a version this slice predates.
-    expect(raw2.pragma('user_version', { simple: true })).toBe(39)
+    expect(raw2.pragma('user_version', { simple: true })).toBe(40)
     for (const column of [
       'peer_link_device_id',
       'peer_agent_id',

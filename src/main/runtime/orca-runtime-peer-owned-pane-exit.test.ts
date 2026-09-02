@@ -192,13 +192,11 @@ describe('W-5..W-7 review findings 2/5: tickDispatchLivenessMonitor re-runs the 
 
       vi.spyOn(runtime, 'resolveLivePeerPaneHandle').mockReturnValue('term_tick_reconnected')
       vi.spyOn(runtime, 'isTerminalRunningAgent').mockResolvedValue(false)
-      const closeTerminal = vi
-        .spyOn(runtime, 'closeTerminal')
-        .mockResolvedValue({
-          handle: 'term_tick_reconnected',
-          accepted: true,
-          exited: true
-        } as never)
+      const closeTerminal = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({
+        handle: 'term_tick_reconnected',
+        accepted: true,
+        exited: true
+      } as never)
       const pruneSettled = vi.spyOn(db, 'pruneSettledRemoteAttachments')
 
       runtime.tickDispatchLivenessMonitor()
