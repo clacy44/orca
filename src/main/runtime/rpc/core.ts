@@ -75,6 +75,10 @@ export type RpcContext = {
   pairedDeviceId?: string
   // Why: lets handlers gate mobile payload truncation to phones only; undefined for in-process callers → treat as full-class (no clip).
   clientKind?: 'mobile' | 'runtime'
+  // S10-19: the server-derived least-privilege access profile of this caller. Undefined means "not
+  // a paired peer" — the local socket and every WS caller minted before this slice. Never sourced
+  // from request params; the WS ingress derives it once from the authenticated device.
+  accessProfile?: 'full' | 'peer'
   // Why: negotiation is bound to the authenticated socket, never asserted by a destructive request.
   clientCapabilities?: readonly RuntimeCapability[]
   // Why: Dispatch authority rides in the authenticated RPC envelope, never in user payload fields.

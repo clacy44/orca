@@ -31,6 +31,9 @@ import type { RelayDeviceBinding } from './relay/relay-revoke-outbox'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
 import type { DeviceEntry, DeviceScope } from './device-registry-types'
+import { effectiveAccessProfile } from './device-registry-field-normalizers'
+
+export { effectiveAccessProfile }
 
 export type { DeviceScope, DeviceEntry }
 export type { LegacySweepAuditRow }
@@ -60,9 +63,10 @@ export class DeviceRegistry {
   addDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    accessProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
-    return this.createAndPersistDevice(this.devices, name, scope, pairingReach)
+    return this.createAndPersistDevice(this.devices, name, scope, pairingReach, accessProfile)
   }
 
   // Entry construction is pure (device-registry-mutations.ts); this owns only persistence — a
@@ -72,11 +76,21 @@ export class DeviceRegistry {
     name: string,
     scope: DeviceScope,
     pairingReach: RuntimePairingReach,
+    // S10-19 R10: always written, never omitted — unlike pendingExpiresAt, a missing accessProfile
+    // on a freshly-minted row would be indistinguishable from a pre-S10-19 legacy grant.
+    accessProfile: 'full' | 'peer' = 'full',
     pendingExpiresAt?: number,
     // S10-16 R1.1: only ever passed by mintPendingDevice; omitted key ⇒ 'legacy' effective class.
     pendingBudgetClass?: BudgetClass
   ): DeviceEntry {
-    const entry = buildDeviceEntry(name, scope, pairingReach, pendingExpiresAt, pendingBudgetClass)
+    const entry = buildDeviceEntry(
+      name,
+      scope,
+      pairingReach,
+      accessProfile,
+      pendingExpiresAt,
+      pendingBudgetClass
+    )
     const nextDevices = [...existingDevices, entry]
     this.save(nextDevices)
     this.devices = nextDevices
@@ -90,9 +104,19 @@ export class DeviceRegistry {
   getOrCreatePendingDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    accessProfile: 'full' | 'peer' = 'full',
+    // Why: resolves a legacy (pre-S10-19) pending row's effective profile for the coalescing
+    // comparison below; the host's legacyGrantProfile config, ships 'full'.
+    legacyGrantProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
-    const existing = findCoalescedPendingDevice(this.devices, scope, Date.now())
+    const existing = findCoalescedPendingDevice(
+      this.devices,
+      scope,
+      Date.now(),
+      accessProfile,
+      legacyGrantProfile
+    )
     if (existing) {
       // Why: the same pending token can be re-advertised at a broader reach; widen it but never narrow it,
       // or a link already handed out for off-host use would stop being served after the next launch.
@@ -100,7 +124,7 @@ export class DeviceRegistry {
         ? this.setPairingReach(existing, 'network')
         : existing
     }
-    return this.addDevice(name, scope, pairingReach)
+    return this.addDevice(name, scope, pairingReach, accessProfile)
   }
 
   // Why: two humans handed one coalesced link land on one deviceId/token, so nothing downstream can
@@ -114,6 +138,7 @@ export class DeviceRegistry {
     // Why clamped to (0, PENDING_GRANT_TTL_MS] rather than accepted verbatim: an invite can only be
     // SHORTENED, never extended past the design's leak control (S9 §2a's 24h ceiling).
     ttlMs?: number,
+    accessProfile: 'full' | 'peer' = 'full',
     // S10-16 C1 review F7 (finding 8): the default is FAIL-CLOSED. 'legacy' means "no field at all
     // on disk", exempt from the cap entirely — a caller that omits this must NOT land there, or a
     // future mint lane that forgets to declare its class gets an uncapped credential store instead
@@ -134,6 +159,7 @@ export class DeviceRegistry {
       name,
       scope,
       pairingReach,
+      accessProfile,
       now + clampedTtlMs,
       budgetClass
     )
@@ -160,16 +186,21 @@ export class DeviceRegistry {
   rotatePendingDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    accessProfile: 'full' | 'peer' = 'full',
+    legacyGrantProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
     // Why: rotation revokes the ONE shared token that may have been screenshotted; a minted invite is
     // named, individually revocable (mobile:revokeRuntimeAccess), and must survive an unrelated
     // "Regenerate" click — the desktop generator sends rotate on every unnamed link.
+    // S10-19: never drop a sibling pending row minted under a DIFFERENT access profile — rotation
+    // is scoped to the profile being regenerated, same discipline as the coalescing predicate.
     return this.createAndPersistDevice(
-      rotateRetainedDevices(this.devices, scope),
+      rotateRetainedDevices(this.devices, scope, accessProfile, legacyGrantProfile),
       name,
       scope,
-      pairingReach
+      pairingReach,
+      accessProfile
     )
   }
 
@@ -189,12 +220,24 @@ export class DeviceRegistry {
     return this.devices.find((d) => d.deviceId === deviceId) ?? null
   }
 
-  /** The shared, regenerable pending row of a scope — never a minted named invite. */
-  getPendingDevice(scope: DeviceScope = 'mobile'): DeviceEntry | null {
+  /**
+   * The shared, regenerable pending row of a scope — never a minted named invite.
+   * accessProfile, when given, narrows to a row of exactly that effective profile (S10-19); omitted
+   * preserves every pre-existing caller's untargeted lookup.
+   */
+  getPendingDevice(
+    scope: DeviceScope = 'mobile',
+    accessProfile?: 'full' | 'peer',
+    legacyGrantProfile: 'full' | 'peer' = 'full'
+  ): DeviceEntry | null {
     return (
       this.devices.find(
         (device) =>
-          device.lastSeenAt === 0 && device.scope === scope && !isMintedPendingDevice(device)
+          device.lastSeenAt === 0 &&
+          device.scope === scope &&
+          !isMintedPendingDevice(device) &&
+          (accessProfile === undefined ||
+            effectiveAccessProfile(device, legacyGrantProfile) === accessProfile)
       ) ?? null
     )
   }

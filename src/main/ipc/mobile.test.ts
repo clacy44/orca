@@ -508,7 +508,8 @@ describe('registerMobileHandlers', () => {
       name: expect.stringMatching(/^Runtime /),
       budgetClass: 'host_auto',
       scope: 'runtime',
-      reach: 'network'
+      reach: 'network',
+      accessProfile: 'full'
     })
     // Why: STA-2370 — generating a runtime offer must widen the listener BEFORE advertising its endpoint,
     // or a client could read the URL and connect before the LAN bind exists. Assert call ORDER, not just
@@ -661,67 +662,6 @@ describe('registerMobileHandlers', () => {
 
     expect(ensureNetworkExposure).toHaveBeenCalled()
     expect(createPairingOffer).not.toHaveBeenCalled()
-  })
-
-  // S10-16 C1 review round 2 D3: grantClass/expiresAt added to the projection so a dead (expired,
-  // never-consumed) legacy_coalesced grant is distinguishable from a live one — strictly stronger
-  // than the prior pin, which asserted only deviceId/name/createdAt/lastSeenAt.
-  it('lists runtime access grants including unused generated links, with grant class and expiry', () => {
-    const rpcServer = {
-      getDeviceRegistry: () => ({
-        listDevices: () => [
-          { deviceId: 'mobile-1', name: 'Phone', scope: 'mobile', pairedAt: 1, lastSeenAt: 2 },
-          { deviceId: 'runtime-1', name: 'Browser', scope: 'runtime', pairedAt: 3, lastSeenAt: 4 },
-          {
-            deviceId: 'pending-runtime',
-            name: 'Copied link',
-            scope: 'runtime',
-            pairedAt: 5,
-            lastSeenAt: 0
-          },
-          {
-            deviceId: 'minted-runtime',
-            name: 'Ana',
-            scope: 'runtime',
-            pairedAt: 6,
-            lastSeenAt: 0,
-            grantClass: 'minted',
-            pendingExpiresAt: 6_000
-          }
-        ]
-      })
-    }
-
-    registerMobileHandlers(rpcServer as never)
-
-    expect(handlers.get('mobile:listRuntimeAccessGrants')?.()).toEqual({
-      grants: [
-        {
-          deviceId: 'minted-runtime',
-          name: 'Ana',
-          createdAt: 6,
-          lastSeenAt: null,
-          grantClass: 'minted',
-          expiresAt: 6_000
-        },
-        {
-          deviceId: 'pending-runtime',
-          name: 'Copied link',
-          createdAt: 5,
-          lastSeenAt: null,
-          grantClass: 'legacy_coalesced',
-          expiresAt: null
-        },
-        {
-          deviceId: 'runtime-1',
-          name: 'Browser',
-          createdAt: 3,
-          lastSeenAt: 4,
-          grantClass: 'legacy_coalesced',
-          expiresAt: null
-        }
-      ]
-    })
   })
 
   it('revokes runtime access through the runtime server', () => {

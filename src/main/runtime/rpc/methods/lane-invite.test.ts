@@ -117,11 +117,13 @@ describe('accounts.lane.mintInvite', () => {
     const result = (await call('accounts.lane.mintInvite', {
       principalId: principal.principalId,
       scope: 'runtime',
+      accessProfile: 'full',
       ttlHours: 2
     })) as {
       deviceId: string
       deviceIdPrefix: string
       scope: string
+      accessProfile: string
       expiresAt: number
       pairingUrl: string
     }
@@ -129,6 +131,7 @@ describe('accounts.lane.mintInvite', () => {
     expect(result.deviceId).toBe(deviceId)
     expect(result.deviceIdPrefix).toBe(deviceId.slice(0, 8))
     expect(result.scope).toBe('runtime')
+    expect(result.accessProfile).toBe('full')
     expect(result.expiresAt).toBe(expiresAt)
     expect(offerCalls).toEqual([
       {
@@ -138,6 +141,7 @@ describe('accounts.lane.mintInvite', () => {
         scope: 'runtime',
         reach: 'network',
         budgetClass: 'lane_invite',
+        accessProfile: 'full',
         ttlMs: 7_200_000
       }
     ])
@@ -165,14 +169,27 @@ describe('accounts.lane.mintInvite', () => {
       deviceId,
       webClientUrl: null
     }
-    await call('accounts.lane.mintInvite', { principalId: principal.principalId })
+    await call('accounts.lane.mintInvite', {
+      principalId: principal.principalId,
+      accessProfile: 'full'
+    })
     expect(offerCalls[0].ttlMs).toBeUndefined()
   })
 
   it('refuses an unknown person before any offer is created', async () => {
-    await expect(call('accounts.lane.mintInvite', { principalId: randomUUID() })).rejects.toThrow(
-      /no record of that person/
-    )
+    await expect(
+      call('accounts.lane.mintInvite', { principalId: randomUUID(), accessProfile: 'full' })
+    ).rejects.toThrow(/no record of that person/)
+    expect(offerCalls).toEqual([])
+  })
+
+  it('S10-19 W-6: refuses to mint when accessProfile is omitted — no default', async () => {
+    const principal = (await call('accounts.lane.createPrincipal', {
+      displayName: 'NoProfile'
+    })) as { principalId: string }
+    await expect(
+      call('accounts.lane.mintInvite', { principalId: principal.principalId })
+    ).rejects.toThrow()
     expect(offerCalls).toEqual([])
   })
 
@@ -186,7 +203,10 @@ describe('accounts.lane.mintInvite', () => {
       guidance: 'WebSocket pairing is unavailable. Inspect preceding runtime errors.'
     }
     await expect(
-      call('accounts.lane.mintInvite', { principalId: principal.principalId })
+      call('accounts.lane.mintInvite', {
+        principalId: principal.principalId,
+        accessProfile: 'full'
+      })
     ).rejects.toThrow('WebSocket pairing is unavailable. Inspect preceding runtime errors.')
   })
 
@@ -205,11 +225,18 @@ describe('accounts.lane.mintInvite', () => {
     }
     for (const clientKind of ['mobile', 'runtime'] as const) {
       await expect(
-        call('accounts.lane.mintInvite', { principalId: principal.principalId }, { clientKind })
+        call(
+          'accounts.lane.mintInvite',
+          { principalId: principal.principalId, accessProfile: 'full' },
+          { clientKind }
+        )
       ).rejects.toThrow(/decisions made at the host machine/)
     }
     await expect(
-      call('accounts.lane.mintInvite', { principalId: principal.principalId })
+      call('accounts.lane.mintInvite', {
+        principalId: principal.principalId,
+        accessProfile: 'full'
+      })
     ).resolves.toBeTruthy()
   })
 
@@ -218,13 +245,25 @@ describe('accounts.lane.mintInvite', () => {
       displayName: 'Eve'
     })) as { principalId: string }
     await expect(
-      call('accounts.lane.mintInvite', { principalId: principal.principalId, scope: 'desktop' })
+      call('accounts.lane.mintInvite', {
+        principalId: principal.principalId,
+        scope: 'desktop',
+        accessProfile: 'full'
+      })
     ).rejects.toThrow()
     await expect(
-      call('accounts.lane.mintInvite', { principalId: principal.principalId, ttlHours: 0 })
+      call('accounts.lane.mintInvite', {
+        principalId: principal.principalId,
+        ttlHours: 0,
+        accessProfile: 'full'
+      })
     ).rejects.toThrow()
     await expect(
-      call('accounts.lane.mintInvite', { principalId: principal.principalId, ttlHours: 25 })
+      call('accounts.lane.mintInvite', {
+        principalId: principal.principalId,
+        ttlHours: 25,
+        accessProfile: 'full'
+      })
     ).rejects.toThrow()
     expect(offerCalls).toEqual([])
   })

@@ -43,6 +43,30 @@ export function buildAgentPromptSubmitBytes(): string {
   return AGENT_PROMPT_SUBMIT
 }
 
+// S10-19 W-3 (Ruling 24(a) FULL profile): the ONE byte set stripped from a peer-supplied taskSpec
+// before the full-profile paste, so exactly one host submit ('\r', the paste's own trailing
+// Enter) ever reaches the pane — sanitizeAgentPromptText (above) neutralises ESC only and is not
+// sufficient on its own (a raw '\r'/'\n' self-submits at a cooked-mode shell; '\x04' is EOF).
+export const AGENT_PROMPT_SUBMIT_BYTES: readonly string[] = [
+  '\r',
+  '\n',
+  '\x04',
+  ESCAPE,
+  ...Array.from({ length: 0x20 }, (_, code) => String.fromCharCode(code)).filter(
+    (c) => c !== '\r' && c !== '\n' && c !== ESCAPE
+  )
+]
+
+export function stripAgentPromptSubmitBytes(text: string): string {
+  let result = ''
+  for (const char of text) {
+    if (!AGENT_PROMPT_SUBMIT_BYTES.includes(char)) {
+      result += char
+    }
+  }
+  return result
+}
+
 export function* iterateAgentPromptPasteChunks(
   prompt: string,
   maxChunkBytes = TERMINAL_INPUT_CHUNK_MAX_BYTES

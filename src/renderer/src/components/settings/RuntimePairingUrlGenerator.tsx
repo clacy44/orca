@@ -42,6 +42,7 @@ export function RuntimePairingUrlGenerator({
     runtimePairingLinkCache.runtimePairingDeviceId
   )
   const [deviceName, setDeviceName] = useState(runtimePairingLinkCache.deviceName)
+  const [profile, setProfile] = useState<'full' | 'peer' | null>(runtimePairingLinkCache.profile)
   const [runtimeAccessGrants, setRuntimeAccessGrants] = useState<RuntimeAccessGrant[]>([])
   const [isLoadingAccessGrants, setIsLoadingAccessGrants] = useState(false)
   const [refreshingNetworkInterfaces, setRefreshingNetworkInterfaces] = useState(false)
@@ -175,6 +176,10 @@ export function RuntimePairingUrlGenerator({
         rotate: true,
         // Why: omitted when blank so an unnamed link keeps today's coalescing behavior exactly.
         ...(pairedDeviceName ? { name: pairedDeviceName } : {}),
+        // S10-19 W-6: required whenever a name is given — main refuses profile_required
+        // otherwise. The Generate button is itself disabled in that state (below), so this call
+        // only reaches main with a null profile if that guard is somehow bypassed.
+        ...(pairedDeviceName && profile ? { accessProfile: profile } : {}),
         // Why: main gates the one-way network widen on this, so the declared choice must travel with the
         // address — the address alone cannot tell "This computer only" from a loopback tunnel front-end.
         reach: runtimePairingReachForIntent(intent)
@@ -313,6 +318,11 @@ export function RuntimePairingUrlGenerator({
     setDeviceName(name)
   }
 
+  const updateProfile = (nextProfile: 'full' | 'peer'): void => {
+    runtimePairingLinkCache.profile = nextProfile
+    setProfile(nextProfile)
+  }
+
   const updateIntent = (nextIntent: RuntimePairingIntent): void => {
     setIntent(nextIntent)
     setSelectedAddress(
@@ -345,6 +355,7 @@ export function RuntimePairingUrlGenerator({
       {showGeneratorForm ? (
         <RuntimePairingGeneratorForm
           deviceName={deviceName}
+          profile={profile}
           intent={intent}
           loopbackAddress={RUNTIME_PAIRING_LOOPBACK_ADDRESS}
           networkInterfaces={networkInterfaces}
@@ -356,6 +367,7 @@ export function RuntimePairingUrlGenerator({
           copiedTarget={copiedTarget}
           generatedAddress={generatedAddress}
           onDeviceNameChange={updateDeviceName}
+          onProfileChange={updateProfile}
           onIntentChange={updateIntent}
           onSelectedAddressChange={updateSelectedAddress}
           onRefreshNetworkInterfaces={() => void loadNetworkInterfaces({ showToastOnError: true })}

@@ -208,6 +208,31 @@ describe('serve-mode-argv', () => {
   })
 })
 
+describe('S10-19 W-6: --pairing-profile translation', () => {
+  it('rewrites the CLI-form flag and reads it back positionally with --pair-name', () => {
+    const rewritten = normalizeServeModeArgv([
+      '/AppRun',
+      'serve',
+      '--pair-name',
+      'Ana',
+      '--pairing-profile',
+      'full',
+      '--pair-name',
+      'Ben',
+      '--pairing-profile',
+      'peer'
+    ])
+    expect(readServeFlagValues(rewritten, '--serve-pair-name')).toEqual({
+      values: ['Ana', 'Ben'],
+      dropped: 0
+    })
+    expect(readServeFlagValues(rewritten, '--serve-pairing-profile')).toEqual({
+      values: ['full', 'peer'],
+      dropped: 0
+    })
+  })
+})
+
 describe('readServeFlagValues', () => {
   it('reads every occurrence of a repeated serve flag in argv order', () => {
     expect(

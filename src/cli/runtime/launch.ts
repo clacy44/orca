@@ -81,6 +81,7 @@ export function serveOrcaApp(
     port?: string | null
     pairingAddress?: string | null
     pairNames?: readonly string[]
+    pairingProfiles?: readonly string[]
     noPairing?: boolean
     mobilePairing?: boolean
     recipeJson?: boolean
@@ -104,6 +105,10 @@ export function serveOrcaApp(
   }
   for (const pairName of args.pairNames ?? []) {
     childArgs.push('--serve-pair-name', pairName)
+  }
+  // S10-19 W-6: matched positionally with --serve-pair-name, one occurrence per name, in order.
+  for (const pairingProfile of args.pairingProfiles ?? []) {
+    childArgs.push('--serve-pairing-profile', pairingProfile)
   }
   if (args.noPairing) {
     childArgs.push('--serve-no-pairing')

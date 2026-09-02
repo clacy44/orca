@@ -1,8 +1,11 @@
 import type { TuiAgent } from '../../../../shared/tui-agent'
-import { buildDispatchPreamble } from '../../orchestration/preamble'
-import { captureDispatchInputEvidence } from '../../orchestration/dispatch-input-evidence'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
+import {
+  assertPeerDispatchIds,
+  assertPeerWorktreeMetadataBounded,
+  clampPeerAttachTimeoutMs
+} from '../../runtime-peer-rpc-allowlist'
 import { assertOrchestrationWorktreeCreationSupported } from './orchestration-folder-worktree-placement'
 import {
   appendFederationSetupEffect,
@@ -19,17 +22,46 @@ import {
 import { FederationAttachStartParams } from './orchestration-federation-start-schema'
 import { failFederatedAttachmentWithReceipt } from './orchestration-federation-start-receipt'
 import { prepareFederationAttachmentWorkerStart } from './orchestration-worker-start-validation'
+import {
+  sendFullDispatchPaste,
+  sendPeerDispatchMailPointer
+} from './orchestration-federation-dispatch-input-send'
+import { resolveExistingFederatedWorktree } from './orchestration-federation-existing-worktree'
 
 export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.federationAttachStart',
     params: FederationAttachStartParams,
-    handler: async (params, { runtime, orchestrationMutation }) => {
+    handler: async (params, { runtime, orchestrationMutation, accessProfile }) => {
       if (!orchestrationMutation) {
         throw new OrchestrationError(
           'invalid_argument',
           'Federated worker attachment requires a durable retry request.'
         )
+      }
+      const isPeerCaller = accessProfile === 'peer'
+      // RISK 1 (S10-19 §0.2 / E.2): dispatchId/taskId are peer-chosen and become preamble
+      // interpolations under the peer profile below — validated against the host's own id
+      // grammar BEFORE any row is created or any effect runs, effect-free.
+      if (isPeerCaller) {
+        const idsAdmission = assertPeerDispatchIds({
+          dispatchId: params.dispatchId,
+          taskId: params.taskId
+        })
+        if (idsAdmission.refused) {
+          throw new OrchestrationError(idsAdmission.wireCode, idsAdmission.message)
+        }
+        // Ruling 24 addendum (h): enforce-before-mint — checked before any effect runs, same as
+        // the id grammar above.
+        const metadataAdmission = assertPeerWorktreeMetadataBounded({
+          name: params.name,
+          repo: params.repo,
+          displayName: params.displayName,
+          comment: params.comment
+        })
+        if (metadataAdmission.refused) {
+          throw new OrchestrationError(metadataAdmission.wireCode, metadataAdmission.message)
+        }
       }
       if (params.worktree === 'current' || params.worktree === 'new-child') {
         throw new OrchestrationError(
@@ -38,6 +70,9 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
         )
       }
       const createsWorktree = params.worktree === 'new-top-level'
+      // §4.1 (frozen predicate): new-top-level is admitted unconditionally for a peer caller — no
+      // repo check is possible before it exists. The exact-existing-worktree branch is checked
+      // after resolution, below (worktree.repoId is not known until then).
       const { agent, launch } = prepareFederationAttachmentWorkerStart({
         params,
         createsWorktree,
@@ -136,55 +171,22 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           )
           appendFederationSetupEffect(effects, setup)
         } else {
-          worktree = await runtime.showManagedTerminalWorkspace(params.worktree).catch(() => {
-            throw new OrchestrationError(
-              'worktree_not_found_on_server',
-              `Worktree ${params.worktree} was not found on the selected worker server.`
-            )
+          const resolved = await resolveExistingFederatedWorktree({
+            runtime,
+            worktreeSelector: params.worktree,
+            isPeerCaller,
+            credentialLane,
+            agent,
+            launch,
+            terminalHandle,
+            taskId: params.taskId,
+            effects,
+            setFailedStage: (stage) => {
+              failedStage = stage
+            }
           })
-          effects.push(
-            { kind: 'worktree', action: 'reused', id: worktree.id },
-            { kind: 'setup', action: 'not_applicable', state: 'not_applicable' }
-          )
-          if (terminalHandle) {
-            const terminal = await runtime.showTerminal(terminalHandle)
-            if (terminal.worktreeId !== worktree.id) {
-              throw new OrchestrationError(
-                'terminal_worktree_mismatch',
-                `Terminal ${terminalHandle} does not belong to worktree ${worktree.id}.`
-              )
-            }
-            if (!(await runtime.isTerminalRunningAgent(terminalHandle))) {
-              throw new OrchestrationError(
-                'agent_unconfigured',
-                `Terminal ${terminalHandle} is not running a recognized agent.`
-              )
-            }
-            effects.push({
-              kind: 'terminal',
-              role: 'agent',
-              action: 'reused',
-              id: terminalHandle
-            })
-          } else {
-            failedStage = 'terminal_create'
-            const terminal = await runtime.createTerminal(`id:${worktree.id}`, {
-              credentialLane,
-              // Why: agent ids are not shell commands (`cursor` is the desktop app,
-              // its CLI is `cursor-agent`); resolve through the TUI agent config.
-              startupAgent: agent as TuiAgent,
-              ...(launch.preferences ? { launchPreferences: launch.preferences } : {}),
-              title: `worker-${params.taskId}`,
-              presentation: 'background'
-            })
-            terminalHandle = terminal.handle
-            effects.push({
-              kind: 'terminal',
-              role: 'agent',
-              action: 'created',
-              id: terminal.handle
-            })
-          }
+          worktree = resolved.worktree
+          terminalHandle = resolved.terminalHandle
         }
         if (!worktree || !terminalHandle) {
           throw new Error('Federated worker topology did not resolve.')
@@ -203,9 +205,13 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
         }
         persistFederatedReadinessStage(setupStage)
         failedStage = 'agent_readiness'
+        // §14B: a peer-supplied timeoutMs is clamped, never extended past the host's ceiling
+        // (G-5) — a paired FULL caller keeps today's plain default, unclamped.
         const wait = await runtime.waitForTerminal(terminalHandle, {
           condition: 'tui-idle',
-          timeoutMs: params.timeoutMs ?? 60_000
+          timeoutMs: isPeerCaller
+            ? clampPeerAttachTimeoutMs(params.timeoutMs)
+            : (params.timeoutMs ?? 60_000)
         })
         persistFederatedSetupWaitOutcome({ ...setupStage, wait })
         if (!wait.satisfied) {
@@ -233,29 +239,22 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           effects
         })
         failedStage = 'dispatch_input'
-        await runtime.sendTerminalAgentPrompt(
+        const cliCommand = runtime.getTerminalOrchestrationCliCommand(terminalHandle)
+        const sendArgs = {
+          db,
+          runtime,
+          dispatchId: params.dispatchId,
+          taskId: params.taskId,
+          taskSpec: params.taskSpec,
           terminalHandle,
-          buildDispatchPreamble({
-            taskId: params.taskId,
-            dispatchId: params.dispatchId,
-            taskSpec: params.taskSpec,
-            coordinatorHandle: 'Run home (relayed by Orca)',
-            workerHandle: terminalHandle,
-            dispatchCapability: capability,
-            devMode: params.devMode,
-            cliCommand: runtime.getTerminalOrchestrationCliCommand(terminalHandle)
-          })
-        )
-        // Why the peer reads its own terminal: the home never sees this PTY, so the only runtime
-        // that can say what was on screen at the submit is the one that wrote it (A1 section 2).
-        const inputEvidence = captureDispatchInputEvidence(runtime, terminalHandle)
-        effects.push({
-          kind: 'dispatch_input',
-          role: 'agent',
-          id: terminalHandle,
-          state: 'accepted'
-        })
-        const attachment = db.markRemoteAttachmentReady(params.dispatchId, effects)
+          capability,
+          cliCommand
+        }
+        // Ruling 24(a): PEER never types taskSpec (mail pointer only); FULL keeps the paste,
+        // stripped of submit bytes and gated on live foreground agent ownership.
+        const { attachment, inputEvidence } = isPeerCaller
+          ? await sendPeerDispatchMailPointer({ ...sendArgs, effects })
+          : await sendFullDispatchPaste({ ...sendArgs, devMode: params.devMode, effects })
         monitorFederatedSetup({ ...setupStage, runtime })
         // Why the peer arms it: the home has no way to look at this terminal, so an observation
         // about it can only be made here and reaches the coordinator through the relay queue.

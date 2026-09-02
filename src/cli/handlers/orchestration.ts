@@ -649,12 +649,13 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     // Why: lifecycle senders preserve ORCA_TERMINAL_HANDLE across restarts for older runtimes.
     const from = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from')
     const run = getOptionalStringFlag(flags, 'run')
-    const remoteRunMailbox = await negotiateRemoteRunMailbox(
-      client,
-      run !== undefined || to?.startsWith('run:') === true
-    )
+    // W-5..W-7 review F5 / Ruling 24(w): probe peerAccess for EVERY remote send, not only
+    // --run/--to run: — `--to dispatch:<id> --environment <peer>` must also negotiate and
+    // suppress `from`, or a peer send is refused by the server (negotiateRemoteRunMailbox is a
+    // no-op unless client.isRemote is true, so this never adds a round trip for a local call).
+    const remoteRunMailbox = await negotiateRemoteRunMailbox(client, true)
     const sendParams = {
-      from,
+      from: remoteRunMailbox.peerAccess ? undefined : from,
       to,
       host: resolvedTarget?.host,
       run,
@@ -666,7 +667,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       threadId: getOptionalStringFlag(flags, 'thread-id'),
       payload: getOptionalStructuredMessagePayload(flags),
       // Why: pane key is the remint-stable sender identity the runtime verifies lifecycle ownership against; older runtimes strip it.
-      senderPaneKey: process.env.ORCA_PANE_KEY || undefined,
+      // S10-19 C-2: never offered to a federation-peer grant — it names nothing there.
+      senderPaneKey: remoteRunMailbox.peerAccess
+        ? undefined
+        : process.env.ORCA_PANE_KEY || undefined,
       waitForLifecycleSettlement: type === 'worker_done' ? true : undefined,
       devMode: isDevCliInvocation()
     }
@@ -793,7 +797,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     try {
       result = await withRemoteRunMailboxDegradation(remoteRunMailbox, () =>
         callMutation<CheckResult>(client, flags, 'orchestration.check', {
-          terminal,
+          // S10-19 C-1: a federation-peer grant refuses `terminal` outright (§8.1); it names a
+          // pane on THIS host, which means nothing on that server.
+          terminal: remoteRunMailbox.peerAccess ? undefined : terminal,
           // Why: a local pane key names nothing on the peer, so never offer it as identity there.
           terminalPaneKey:
             explicitTerminal || remoteRunMailbox.remote
@@ -859,8 +865,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const compatibilityAck = result.result.legacyCompatibility?.ackMessageIds
     if (compatibilityAck && compatibilityAck.length > 0) {
       await flushStdout()
+      // S10-19 C-4: this is a second call on the same possibly-remote client with no mode param
+      // of its own — pass remoteRunMailbox.param here too, or R4 refuses it.
       await client.call('orchestration.check', {
-        terminal,
+        terminal: remoteRunMailbox.peerAccess ? undefined : terminal,
+        remoteRunMailbox: remoteRunMailbox.param,
         compatibilityAck: JSON.stringify({
           messageIds: compatibilityAck,
           types: getOptionalStringFlag(flags, 'types')
@@ -882,7 +891,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         body: getRequiredStringFlag(flags, 'body'),
         run: getOptionalStringFlag(flags, 'run'),
         remoteRunMailbox: remoteRunMailbox.param,
-        from
+        // S10-19 C-3: a federation-peer grant refuses `from` (§8.2) — it names a pane on this
+        // host, which means nothing on that server.
+        from: remoteRunMailbox.peerAccess ? undefined : from
       })
     )
     printResult(result, json, (r) =>
@@ -1166,6 +1177,24 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       json,
       (value) => `Worker ${value.dispatchId} [${value.state}]\nWarning: ${value.warning}`
     )
+  },
+
+  // S10-19 W-4 (C-8): the choke's only CLI entry — prints the server's nextSteps unchanged, no
+  // client-side fallback, no retry through another verb (C-9, W-5). Review finding 9: a refusal
+  // now arrives as a THROWN error carrying §D's frozen wire code (not an {available:false}
+  // response) — left to propagate to the CLI's own top-level reportCliError/formatCliError
+  // (src/cli/format.ts), which already formats a RuntimeClientError/RuntimeRpcFailureError's
+  // code/message/nextSteps and sets the process exit code. No local try/catch needed or wanted.
+  'orchestration worker-answer-prompt': async ({ flags, client, json }) => {
+    const choice = getRequiredStringFlag(flags, 'choice')
+    if (choice !== 'accept_trust' && choice !== 'decline') {
+      throw new RuntimeClientError('invalid_argument', '--choice must be accept_trust or decline')
+    }
+    const result = await client.call<{ available: true; dispatchId: string; choice: string }>(
+      'orchestration.federationAnswerPrompt',
+      { dispatchId: getRequiredStringFlag(flags, 'dispatch'), choice }
+    )
+    printResult(result, json, (value) => `Answered ${value.dispatchId} with ${value.choice}`)
   },
 
   'orchestration worker-release': async ({ flags, client, json }) => {

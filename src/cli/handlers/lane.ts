@@ -113,6 +113,23 @@ export const LANE_HANDLERS: Record<string, CommandHandler> = {
       ttlHours = parsed
     }
     const address = optionalStringFlag(ctx, 'address')
+    // S10-19 W-6 (Ruling 20(d)): REQUIRED, no default — an operator must choose explicitly every
+    // time. `--scope mobile --profile peer` is refused here: a federation-peer grant is
+    // runtime-scoped only (the server would refuse it too, but naming the refusal at the CLI
+    // means the operator never even sees a wasted round trip).
+    const profileFlag = requireStringFlag(ctx, 'profile')
+    if (profileFlag !== 'peer' && profileFlag !== 'full') {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        `--profile must be "peer" or "full", not "${profileFlag}".`
+      )
+    }
+    if (profileFlag === 'peer' && scopeFlag !== 'runtime') {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        'A federation-peer grant is runtime-scoped only; omit --scope mobile with --profile peer.'
+      )
+    }
     await assertLaneSupported(ctx.client)
     // Why resolved before the mint: an unknown/ambiguous --person must fail before any credential
     // is minted, not after.
@@ -121,6 +138,7 @@ export const LANE_HANDLERS: Record<string, CommandHandler> = {
     const result = await ctx.client.call<LaneInvite>('accounts.lane.mintInvite', {
       principalId,
       scope: scopeFlag,
+      accessProfile: profileFlag,
       ...(ttlHours !== undefined ? { ttlHours } : {}),
       ...(address ? { address } : {})
     })

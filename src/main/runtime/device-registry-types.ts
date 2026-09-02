@@ -42,4 +42,8 @@ export type DeviceEntry = {
   // guard + audit provenance): the actual TTL deadline for an un-consumed legacy_coalesced row is
   // always recomputed from the immutable `pairedAt` (protocol M7), never stored here.
   legacySweptAt?: number
+  // S10-19: the least-privilege peer access profile this grant was minted under. Absent means
+  // "minted before this slice existed" — effectiveAccessProfile() resolves that case against the
+  // host's legacyGrantProfile config (ships 'full'), which is the install-day no-op property.
+  accessProfile?: 'full' | 'peer'
 }

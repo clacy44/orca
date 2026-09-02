@@ -187,6 +187,7 @@ export class RpcDispatcher {
             clientId: options?.clientId,
             pairedDeviceId: options?.pairedDeviceId,
             clientKind: options?.clientKind,
+            accessProfile: options?.accessProfile,
             clientCapabilities: options?.clientCapabilities,
             orchestrationCapability: request.orchestrationCapability,
             authenticatedCallerFingerprint:
@@ -249,6 +250,7 @@ export class RpcDispatcher {
           clientId: options?.clientId,
           pairedDeviceId: options?.pairedDeviceId,
           clientKind: options?.clientKind,
+          accessProfile: options?.accessProfile,
           clientCapabilities: options?.clientCapabilities,
           orchestrationCapability: request.orchestrationCapability,
           pairing: options?.pairing,

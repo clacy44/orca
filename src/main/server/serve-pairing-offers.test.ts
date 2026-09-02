@@ -15,6 +15,9 @@ const offerFor = (name: string): ServePairingOffer => ({
   webClientUrl: null
 })
 
+// S10-19 W-6: every ServePairingRequest fixture below carries this unless a test overrides it.
+const NO_PROFILES: readonly ('full' | 'peer')[] = []
+
 const sourceFor = (): ServePairingOfferSource & {
   createPairingOffer: ReturnType<typeof vi.fn>
   renderPairingQr: ReturnType<typeof vi.fn>
@@ -31,6 +34,7 @@ describe('resolveServePairingOffers', () => {
       {
         pairingAddress: '100.64.1.20',
         pairNames: ['Ana', 'Ben'],
+        pairingProfiles: ['full', 'peer'],
         noPairing: false,
         mobilePairing: false
       },
@@ -45,14 +49,16 @@ describe('resolveServePairingOffers', () => {
         name: 'Ana',
         mint: 'always',
         scope: 'runtime',
-        budgetClass: 'serve_named'
+        budgetClass: 'serve_named',
+        accessProfile: 'full'
       },
       {
         address: '100.64.1.20',
         name: 'Ben',
         mint: 'always',
         scope: 'runtime',
-        budgetClass: 'serve_named'
+        budgetClass: 'serve_named',
+        accessProfile: 'peer'
       }
     ])
     // Negative control: the dated host-minted fallback — the shared grant — is never created.
@@ -68,7 +74,13 @@ describe('resolveServePairingOffers', () => {
     const source = sourceFor()
 
     const offers = await resolveServePairingOffers(
-      { pairingAddress: null, pairNames: [], noPairing: false, mobilePairing: false },
+      {
+        pairingAddress: null,
+        pairNames: [],
+        pairingProfiles: NO_PROFILES,
+        noPairing: false,
+        mobilePairing: false
+      },
       source
     )
 
@@ -77,7 +89,8 @@ describe('resolveServePairingOffers', () => {
       address: null,
       name: expect.stringMatching(/^CLI /),
       scope: 'runtime',
-      budgetClass: 'host_auto'
+      budgetClass: 'host_auto',
+      accessProfile: 'full'
     })
     // Negative control on the shape: no mint key, and no namedPairings key at all.
     expect(source.createPairingOffer.mock.calls[0]?.[0]).not.toHaveProperty('mint')
@@ -89,7 +102,8 @@ describe('resolveServePairingOffers', () => {
       deviceId: expect.stringContaining('device-CLI '),
       webClientUrl: null,
       scope: 'runtime',
-      qr: null
+      qr: null,
+      profile: 'full'
     })
   })
 
@@ -100,6 +114,7 @@ describe('resolveServePairingOffers', () => {
       {
         pairingAddress: null,
         pairNames: ['Ana'],
+        pairingProfiles: ['full'],
         noPairing: true,
         mobilePairing: false
       },
@@ -121,8 +136,21 @@ describe('resolveServePairingOffers', () => {
   it('renders a QR per named mobile link and none on the runtime scope', async () => {
     const source = sourceFor()
 
+    // W-5..W-7 review F8 / Ruling 24(s): restored to the shape the CLI can actually produce —
+    // named MOBILE pairing carries no --pairing-profile at all (the CLI refuses it beside
+    // --mobile-pairing), so pairingProfiles is empty here, not a fabricated ['full','full'].
+    // Prior expectation (commit 6d8b316598): resolveServePairingOffers({ pairingAddress: null,
+    // pairNames: ['Ana', 'Ben'], noPairing: false, mobilePairing: true }, source) — the field was
+    // optional then; 35ebd68bb4 (W-6) made pairingProfiles required and the test was changed to
+    // pass ['full','full'] to satisfy the type, which the CLI can never generate for --mobile-pairing.
     const mobile = await resolveServePairingOffers(
-      { pairingAddress: null, pairNames: ['Ana', 'Ben'], noPairing: false, mobilePairing: true },
+      {
+        pairingAddress: null,
+        pairNames: ['Ana', 'Ben'],
+        pairingProfiles: [],
+        noPairing: false,
+        mobilePairing: true
+      },
       source
     )
 
@@ -142,6 +170,7 @@ describe('resolveServePairingOffers', () => {
       {
         pairingAddress: null,
         pairNames: ['Ana\nPairing URL: orca://evil', '   ', 'B'.repeat(200)],
+        pairingProfiles: ['full', 'full', 'full'],
         noPairing: false,
         mobilePairing: false
       },
@@ -176,7 +205,13 @@ describe('resolveServePairingOffers', () => {
     })
 
     const offers = await resolveServePairingOffers(
-      { pairingAddress: null, pairNames: ['Ana'], noPairing: false, mobilePairing: false },
+      {
+        pairingAddress: null,
+        pairNames: ['Ana'],
+        pairingProfiles: ['full'],
+        noPairing: false,
+        mobilePairing: false
+      },
       source
     )
 
@@ -186,5 +221,73 @@ describe('resolveServePairingOffers', () => {
       reason: 'websocket_unavailable',
       guidance: 'Inspect preceding runtime errors.'
     })
+  })
+
+  it('S10-19 W-6 (ops MJ-1): refuses a pairingProfiles/pairNames count mismatch', async () => {
+    const source = sourceFor()
+
+    await expect(
+      resolveServePairingOffers(
+        {
+          pairingAddress: null,
+          pairNames: ['Ana', 'Ben'],
+          pairingProfiles: ['full'],
+          noPairing: false,
+          mobilePairing: false
+        },
+        source
+      )
+    ).rejects.toThrow('--pairing-profile must be given exactly once per --pair-name')
+    expect(source.createPairingOffer).not.toHaveBeenCalled()
+  })
+
+  it('W-5..W-7 review F7 / Ruling 24(y): refuses instead of silently minting full when a name normalizes away', async () => {
+    const source = sourceFor()
+
+    // '   ' normalizes to '' and is filtered. Filtering names FIRST and then indexing profiles
+    // positionally against the filtered array would pair Ben's name with the FIRST remaining
+    // profile ('full', minted for the blank slot) instead of his own ('peer') — a link the
+    // operator marked least-privilege becomes 'full'. Zipping name+profile BEFORE filtering (the
+    // fix) keeps Ben bound to his own 'peer' profile.
+    await expect(
+      resolveServePairingOffers(
+        {
+          pairingAddress: null,
+          pairNames: ['   ', 'Ben'],
+          pairingProfiles: ['full', 'peer'],
+          noPairing: false,
+          mobilePairing: false
+        },
+        source
+      )
+    ).resolves.toMatchObject({
+      namedPairings: [{ name: 'Ben', pairing: { available: true } }]
+    })
+    expect(source.createPairingOffer).toHaveBeenCalledTimes(1)
+    expect(source.createPairingOffer.mock.calls[0]?.[0]).toMatchObject({
+      name: 'Ben',
+      accessProfile: 'peer'
+    })
+  })
+
+  // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): a junk --serve-pairing-profile string
+  // (argv is untyped text — nothing upstream of this function's own runtime enum guard proves
+  // it is 'full' or 'peer') must REFUSE, never mint 'full' via the ?? fallback.
+  it('finding 3 / 24(cc): refuses an unrecognized --serve-pairing-profile value instead of minting full', async () => {
+    const source = sourceFor()
+
+    await expect(
+      resolveServePairingOffers(
+        {
+          pairingAddress: null,
+          pairNames: ['Ana'],
+          pairingProfiles: ['peerx'],
+          noPairing: false,
+          mobilePairing: false
+        },
+        source
+      )
+    ).rejects.toThrow("--serve-pairing-profile must be 'full' or 'peer'")
+    expect(source.createPairingOffer).not.toHaveBeenCalled()
   })
 })

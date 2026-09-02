@@ -12,6 +12,7 @@ import {
   isMintedPendingDevice,
   type BudgetClass
 } from './device-registry-pending-grants'
+import { effectiveAccessProfile } from './device-registry-field-normalizers'
 
 /** An invite can only be SHORTENED, never extended past the design's 24h leak-control ceiling. */
 export function clampMintTtlMs(ttlMs: number | undefined): number {
@@ -24,6 +25,9 @@ export function buildDeviceEntry(
   name: string,
   scope: DeviceEntry['scope'],
   pairingReach: RuntimePairingReach,
+  // S10-19 R10: always written, never omitted — unlike pendingExpiresAt, a missing accessProfile on
+  // a freshly-minted row would be indistinguishable from a pre-S10-19 legacy grant.
+  accessProfile: 'full' | 'peer',
   pendingExpiresAt?: number,
   // S10-16 R1.1: only ever passed by mintPendingDevice; omitted key ⇒ 'legacy' effective class.
   pendingBudgetClass?: BudgetClass
@@ -36,6 +40,7 @@ export function buildDeviceEntry(
     pairedAt: Date.now(),
     lastSeenAt: 0,
     pairingReach,
+    accessProfile,
     // Why: omit the key entirely when absent so a coalesced grant's persisted shape is unchanged.
     // grantClass: 'minted' rides with pendingExpiresAt (S10-16 C1 review F1) — the mint-time fact
     // isMintedPendingDevice keys on first, so a later legacy-sweep stamp can never be confused with it.
@@ -54,17 +59,22 @@ export function buildDeviceEntry(
 // clause), so coalescing onto it would hand out a pairing link that can never authenticate. A
 // fresh row is minted instead; the dead one stays listed and revocable (F4) and rotate still
 // drops it (F2) — this clause only stops it being re-advertised as the answer here.
+// S10-19: a pending row coalesces only within its own access profile — a peer-scoped pending link
+// must never silently widen into (or be silently narrowed from) a full-access one.
 export function findCoalescedPendingDevice(
   devices: DeviceEntry[],
   scope: DeviceEntry['scope'],
-  now: number
+  now: number,
+  accessProfile: 'full' | 'peer',
+  legacyGrantProfile: 'full' | 'peer'
 ): DeviceEntry | undefined {
   return devices.find(
     (d) =>
       d.lastSeenAt === 0 &&
       d.scope === scope &&
       !isMintedPendingDevice(d) &&
-      !isExpiredLegacyCoalescedGrant(d, now)
+      !isExpiredLegacyCoalescedGrant(d, now) &&
+      effectiveAccessProfile(d, legacyGrantProfile) === accessProfile
   )
 }
 
@@ -98,11 +108,21 @@ export function withPairingReach(
 // isMintedPendingDevice() === false (F1), so it is NOT retained here — a "Regenerate" click still
 // revokes it exactly as it did before R1.4, restoring the one-click revocation path the review
 // found missing when the sweep wrote pendingExpiresAt directly.
+// S10-19: never drop a sibling pending row minted under a DIFFERENT access profile — rotation is
+// scoped to the profile being regenerated, same discipline as the coalescing predicate above.
 export function rotateRetainedDevices(
   devices: DeviceEntry[],
-  scope: DeviceEntry['scope']
+  scope: DeviceEntry['scope'],
+  accessProfile: 'full' | 'peer',
+  legacyGrantProfile: 'full' | 'peer'
 ): DeviceEntry[] {
-  return devices.filter((d) => d.lastSeenAt !== 0 || d.scope !== scope || isMintedPendingDevice(d))
+  return devices.filter(
+    (d) =>
+      d.lastSeenAt !== 0 ||
+      d.scope !== scope ||
+      isMintedPendingDevice(d) ||
+      effectiveAccessProfile(d, legacyGrantProfile) !== accessProfile
+  )
 }
 
 export function withRelayBinding(

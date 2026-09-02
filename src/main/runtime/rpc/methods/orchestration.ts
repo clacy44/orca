@@ -32,10 +32,31 @@ import { clampOrchestrationAskTimeoutMs } from '../../../../shared/orchestration
 import { ORCHESTRATION_GATE_METHODS } from './orchestration-gates'
 import { resolveRunScope } from './orchestration-run-scope'
 import {
+  assertPeerMailDestinationAllowed,
   assertRemoteRunMailboxCaller,
   isRemoteRunMailboxRequest,
-  resolveRemoteRunMailboxScope
+  resolveRemoteRunMailboxScope,
+  type PeerMailDestination
 } from './orchestration-remote-run-mailbox'
+import { meterPeerLink } from '../../runtime-peer-rpc-allowlist'
+
+// S10-19 §8.6/§8.7: the mail trio (check/send/reply) share one meter, PEER_MAILBOX_PER_MINUTE,
+// keyed on the caller's own fingerprint — a no-op for a non-peer caller.
+function assertPeerMailboxMeter(
+  runtime: Parameters<typeof meterPeerLink>[0]['runtime'],
+  accessProfile: 'full' | 'peer' | undefined,
+  callerFingerprint: string | undefined
+): void {
+  if (accessProfile !== 'peer') {
+    return
+  }
+  const metered = meterPeerLink({ runtime, callerFingerprint: callerFingerprint ?? '' }, 'mailbox')
+  if (metered.refused) {
+    throw new OrchestrationError('rate_limited', metered.message, {
+      retryAfterMs: metered.retryAfterMs
+    })
+  }
+}
 import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_AGENT_METHODS } from './orchestration-agents'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
@@ -437,6 +458,28 @@ function pendingDispatchMail(
   return count > 0 ? { pendingMail: count } : {}
 }
 
+// Review D2 (2026-09-02): the peer-destination classification evaluated on the RAW,
+// peer-supplied `to`/`run` fields ONLY — never on a rewritten `to` and never behind any db
+// lookup. A peer caller is already required (earlier in `send`) to pass an explicit --to or
+// --run, so `to`/`run` both absent here means a non-peer caller with neither, which is
+// deliberately `{ kind: 'other' }` (assertPeerMailDestinationAllowed no-ops for a non-peer
+// profile; a peer with neither already threw invalid_argument before reaching this call).
+function classifyRawPeerMailDestination(params: {
+  to?: string
+  run?: string
+}): PeerMailDestination {
+  if (params.to?.startsWith('run:')) {
+    return { kind: 'run', runId: params.to.slice('run:'.length) }
+  }
+  if (params.to?.startsWith('dispatch:')) {
+    return { kind: 'dispatch', dispatchId: params.to.slice('dispatch:'.length) }
+  }
+  if (!params.to && params.run) {
+    return { kind: 'run', runId: params.run }
+  }
+  return { kind: 'other' }
+}
+
 function resolveMessageRun(
   runtime: OrcaRuntimeService,
   params: {
@@ -586,9 +629,46 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         orchestrationMutation,
         pairedDeviceId,
         clientKind,
+        accessProfile,
+        authenticatedCallerFingerprint,
         signal
       }
     ) => {
+      // S10-19 §8.1/§8.2 (R7 extended to mail): a federation-peer grant may not name a local
+      // pane on this host — `from`/`senderPaneKey` name nothing here. Refused up front, before
+      // any branch below reads them.
+      if (
+        accessProfile === 'peer' &&
+        (params.from !== undefined || params.senderPaneKey !== undefined)
+      ) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer may not name a sender pane on this host; omit --from and rely on the mailbox identity.',
+          {
+            effectsApplied: false,
+            nextSteps: [
+              'a terminal handle or pane key from your runtime names nothing here; update Orca on the calling host'
+            ]
+          }
+        )
+      }
+      // S10-19 §8.1/§8.2, W-5..W-7 review F2 / Ruling 24(t): a peer must use the remote-run-mailbox
+      // mode on ALL THREE mail verbs, not just `check` — otherwise a peer with no remoteRunMailbox
+      // falls into the ordinary local send path (agent:/dispatch:/bare handles/group fan-out,
+      // thread minting, cross-host relay).
+      if (accessProfile === 'peer' && params.remoteRunMailbox !== true) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+          {
+            effectsApplied: false,
+            nextSteps: [
+              'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+            ]
+          }
+        )
+      }
+      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       // Why first (K25, blocker fix): every branch below (point-to-point, group fan-out, and
       // both federation relay directions) forwards params.payload verbatim — one guard at the
@@ -772,6 +852,21 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             : {})
         }
       }
+      // Review D2 (2026-09-02): the AUTHORITATIVE peer-destination constraint, evaluated on the
+      // RAW peer-supplied `params.to`/`params.run` — BEFORE resolveMessageRun (which rewrites
+      // `to` for worker_done/heartbeat and performs the first dispatch_contexts lookup) and
+      // before any db lookup keyed on a peer-chosen id. This is what stops a peer from labeling
+      // a message as a routine worker_done/heartbeat to launder a foreign `dispatch:<id>` into
+      // the `run:<id>` the post-rewrite `to` would otherwise present, and it is what makes the
+      // refusal for a nonexistent dispatch byte-identical to the refusal for a foreign one — both
+      // fall through assertPeerMailDestinationAllowed's single `forbidden` throw, never
+      // resolveMessageRun's distinguishable `dispatch_not_found`.
+      assertPeerMailDestinationAllowed(
+        db,
+        accessProfile,
+        authenticatedCallerFingerprint,
+        classifyRawPeerMailDestination(params)
+      )
       const routing = resolveMessageRun(runtime, {
         from,
         senderPaneKey,
@@ -810,6 +905,18 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           orchestrationSkillRecoveryData()
         )
       }
+      // W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): kept as defence in depth against
+      // the post-rewrite `to` — the authoritative check is the raw-params call above (D2).
+      assertPeerMailDestinationAllowed(
+        db,
+        accessProfile,
+        authenticatedCallerFingerprint,
+        to.startsWith('run:')
+          ? { kind: 'run', runId: to.slice('run:'.length) }
+          : to.startsWith('dispatch:')
+            ? { kind: 'dispatch', dispatchId: to.slice('dispatch:'.length) }
+            : { kind: 'other' }
+      )
 
       if (!isGroupAddress(to)) {
         const federatedDispatchId = routing.dispatchId
@@ -1151,9 +1258,43 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         revalidateLegacyCoordinator,
         recordMutationReceipt,
         pairedDeviceId,
-        clientKind
+        clientKind,
+        accessProfile,
+        authenticatedCallerFingerprint
       }
     ) => {
+      // S10-19 §8.1: a federation peer must use the remote-run-mailbox mode and may not name a
+      // local pane — `terminal`/`terminalPaneKey` name nothing here. Ruling 24 addendum 4(aa):
+      // this refusal IS check's server-side destination constraint — with terminal/terminalPaneKey
+      // refused, the only destination `check` can ever resolve for a peer is an explicit
+      // `run:<id>` mailbox (params.run), the same bearer-capability route `send`/`reply` allow.
+      if (accessProfile === 'peer') {
+        if (params.terminal !== undefined || params.terminalPaneKey !== undefined) {
+          throw new OrchestrationError(
+            'forbidden',
+            'A federation peer may not name a pane on this host; omit --terminal and use --run with remoteRunMailbox.',
+            {
+              effectsApplied: false,
+              nextSteps: [
+                'a terminal handle or pane key from your runtime names nothing here; update Orca on the calling host'
+              ]
+            }
+          )
+        }
+        if (params.remoteRunMailbox !== true) {
+          throw new OrchestrationError(
+            'forbidden',
+            'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+            {
+              effectsApplied: false,
+              nextSteps: [
+                'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+              ]
+            }
+          )
+        }
+      }
+      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       const handle = params.terminal ?? 'unknown'
       const typeFilter = parseMessageTypes(params.types)
@@ -1248,6 +1389,15 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
         }
 
+        // S10-19 R24 (§8.7): a peer never fences a locally-bound Run — two exclusive waiters were
+        // never going to coexist (waiter_exists), so a typed refusal beats a race the peer can
+        // win. A peer may still read/consume its own mail on this Run without --wait.
+        if (accessProfile === 'peer' && run.coordinator_pane_key !== null) {
+          throw new OrchestrationError(
+            'run_wait_local_only',
+            'This Run has a locally-bound coordinator; a federation peer may read mail here but may not --wait, which would fence the local coordinator.'
+          )
+        }
         const waitResult = await runtime.waitForMessage(address, {
           typeFilter: typeFilter as string[] | undefined,
           timeoutMs: params.timeoutMs ?? undefined,
@@ -1681,9 +1831,40 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         runtime,
         legacyCoordinatorRunId,
         pairedDeviceId,
-        clientKind
+        clientKind,
+        accessProfile,
+        authenticatedCallerFingerprint
       }
     ) => {
+      // S10-19 §8.2: a federation peer may not name a local sender pane via `from`.
+      if (accessProfile === 'peer' && params.from !== undefined) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer may not name a sender pane on this host; omit --from.',
+          {
+            effectsApplied: false,
+            nextSteps: [
+              'a terminal handle or pane key from your runtime names nothing here; update Orca on the calling host'
+            ]
+          }
+        )
+      }
+      // W-5..W-7 review F2 / Ruling 24(t): all three mail verbs require remoteRunMailbox mode for
+      // peer callers — without this, `reply` could reach db.getMessageById for any non-legacy
+      // message row on the host instead of only its own mailbox rows.
+      if (accessProfile === 'peer' && params.remoteRunMailbox !== true) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+          {
+            effectsApplied: false,
+            nextSteps: [
+              'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+            ]
+          }
+        )
+      }
+      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       if (isRemoteRunMailboxRequest({ remoteRunMailbox: params.remoteRunMailbox })) {
         assertRemoteRunMailboxCaller({ pairedDeviceId, clientKind })
@@ -1692,6 +1873,18 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (!original) {
         throw new Error(`Message not found: ${params.id}`)
       }
+      // W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): a peer may only reply into a row
+      // whose mailbox is its own — an explicit Run mailbox (bearer capability, unchanged) or a
+      // Dispatch this link's own attachment owns. Enumerating params.id to reach a row addressed
+      // to `agent:<id>` or a Dispatch owned by a DIFFERENT link now refuses here.
+      assertPeerMailDestinationAllowed(
+        db,
+        accessProfile,
+        authenticatedCallerFingerprint,
+        original.from_handle.startsWith('dispatch:')
+          ? { kind: 'dispatch', dispatchId: original.from_handle.slice('dispatch:'.length) }
+          : { kind: 'run', runId: original.run_id }
+      )
       if (
         legacyCoordinatorRunId &&
         (original.run_id !== legacyCoordinatorRunId ||

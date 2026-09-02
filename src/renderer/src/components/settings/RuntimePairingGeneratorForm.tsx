@@ -7,6 +7,7 @@ import { AddressPicker, type AddressOption } from '../network/AddressPicker'
 import { parseServerShareAddress } from '../../../../shared/network/server-share-address'
 import { GeneratedUrlRow, UnavailableUrlRow } from './RuntimePairingGeneratedUrlRows'
 import { RuntimePairingDeviceNameField } from './RuntimePairingDeviceNameField'
+import { RuntimePairingProfileField } from './RuntimePairingProfileField'
 import type { RuntimePairingIntent } from './runtime-pairing-link-state'
 import { translate } from '@/i18n/i18n'
 
@@ -14,6 +15,9 @@ export type { RuntimePairingIntent } from './runtime-pairing-link-state'
 
 type RuntimePairingGeneratorFormProps = {
   deviceName: string
+  // S10-19 W-6: null means no choice made yet — no preselection. Shown only once a name is
+  // entered; Generate stays disabled while a name is present and this is still null.
+  profile: 'full' | 'peer' | null
   intent: RuntimePairingIntent
   loopbackAddress: string
   networkInterfaces: { name: string; address: string }[]
@@ -25,6 +29,7 @@ type RuntimePairingGeneratorFormProps = {
   copiedTarget: 'web' | 'pairing' | null
   generatedAddress: string | null
   onDeviceNameChange: (name: string) => void
+  onProfileChange: (profile: 'full' | 'peer') => void
   onIntentChange: (intent: RuntimePairingIntent) => void
   onSelectedAddressChange: (address: string) => void
   onRefreshNetworkInterfaces: () => void
@@ -34,6 +39,7 @@ type RuntimePairingGeneratorFormProps = {
 
 export function RuntimePairingGeneratorForm({
   deviceName,
+  profile,
   intent,
   loopbackAddress,
   networkInterfaces,
@@ -45,6 +51,7 @@ export function RuntimePairingGeneratorForm({
   copiedTarget,
   generatedAddress,
   onDeviceNameChange,
+  onProfileChange,
   onIntentChange,
   onSelectedAddressChange,
   onRefreshNetworkInterfaces,
@@ -60,12 +67,24 @@ export function RuntimePairingGeneratorForm({
   const customAddressResult =
     intent === 'custom' ? parseServerShareAddress(selectedAddress) : { ok: true as const }
   const customAddressInvalid = selectedAddress !== '' && !customAddressResult.ok
-  const canGenerate = selectedAddress !== '' && (intent !== 'custom' || customAddressResult.ok)
+  const trimmedDeviceName = deviceName.trim()
+  // S10-19 W-6: the required-choice rule binds NAMED mints only (Ruling 18(g)) — an unnamed link
+  // is exempt and keeps generating exactly as before this slice.
+  const profileChoicePending = trimmedDeviceName !== '' && profile === null
+  const canGenerate =
+    selectedAddress !== '' &&
+    (intent !== 'custom' || customAddressResult.ok) &&
+    !profileChoicePending
 
   return (
     <>
       <div className="space-y-3">
         <RuntimePairingDeviceNameField value={deviceName} onChange={onDeviceNameChange} />
+        <RuntimePairingProfileField
+          deviceName={deviceName}
+          profile={profile}
+          onProfileChange={onProfileChange}
+        />
         <fieldset className="space-y-2">
           <legend className="text-sm font-medium">
             {translate(

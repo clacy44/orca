@@ -19,6 +19,8 @@ const CLI_TO_SERVE_VALUE_FLAG = new Map([
   ['--port', '--serve-port'],
   ['--pairing-address', '--serve-pairing-address'],
   ['--pair-name', '--serve-pair-name'],
+  // S10-19 W-6 (ops MJ-1): matched positionally with --pair-name/--serve-pair-name.
+  ['--pairing-profile', '--serve-pairing-profile'],
   ['--project-root', '--serve-project-root']
 ])
 
@@ -32,6 +34,7 @@ const VALUE_TAKING_FLAGS = new Set([
   '--serve-port',
   '--serve-pairing-address',
   '--serve-pair-name',
+  '--serve-pairing-profile',
   '--serve-project-root',
   '--user-data-dir',
   '--environment',

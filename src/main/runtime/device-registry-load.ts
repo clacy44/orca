@@ -10,45 +10,17 @@ import {
   sweepLegacyCoalescedRuntimeGrants,
   type LegacySweepAuditRow
 } from './device-registry-legacy-sweep'
-import type { RelayDeviceBinding } from './relay/relay-revoke-outbox'
+import { normalizeLoadedDeviceEntryFields } from './device-registry-field-normalizers'
 
-function validRelayBinding(value: unknown, deviceId: string): RelayDeviceBinding | undefined {
-  if (!value || typeof value !== 'object') {
-    return undefined
-  }
-  const binding = value as Partial<RelayDeviceBinding>
-  return binding.relayDeviceId === deviceId &&
-    typeof binding.relayHostId === 'string' &&
-    typeof binding.ownerIdentityKey === 'string'
-    ? {
-        relayHostId: binding.relayHostId,
-        relayDeviceId: binding.relayDeviceId,
-        ownerIdentityKey: binding.ownerIdentityKey,
-        ...(typeof binding.inviteExpiresAt === 'number' && Number.isFinite(binding.inviteExpiresAt)
-          ? { inviteExpiresAt: binding.inviteExpiresAt }
-          : {})
-      }
-    : undefined
-}
-
+// Why one delegated call rather than the per-field block that used to live here: S10-19 owns the
+// per-field disk->memory normalization (device-registry-field-normalizers.ts), including
+// `accessProfile`'s fail-closed rule (an unrecognized value on disk becomes 'peer', never 'full').
+// Two copies of that logic would drift, and the fail-closed clause is exactly the one that must
+// not be missed on this path — load() is the only route a persisted profile takes into memory.
 function normalizeLoadedDeviceEntry(device: DeviceEntry): DeviceEntry {
   return {
     ...device,
-    // Why: older registries only existed for phone pairing. Treat missing
-    // scope as mobile so legacy device tokens do not gain new CLI powers.
-    scope: device.scope === 'runtime' ? 'runtime' : 'mobile',
-    relayBinding: validRelayBinding(device.relayBinding, device.deviceId),
-    mobilePairingConnectionMode:
-      device.mobilePairingConnectionMode === 'local-only' ? 'local-only' : 'automatic',
-    // Why: registries written before this field existed only ever held network-reach grants (phones and
-    // LAN links), so a missing value must keep binding every interface on reconnect.
-    pairingReach: device.pairingReach === 'this-computer' ? 'this-computer' : 'network',
-    // Why: a non-finite value on disk would make every comparison false and pin the row forever, so
-    // normalize anything unusable back to the legacy "never expires" shape.
-    pendingExpiresAt:
-      typeof device.pendingExpiresAt === 'number' && Number.isFinite(device.pendingExpiresAt)
-        ? device.pendingExpiresAt
-        : undefined
+    ...normalizeLoadedDeviceEntryFields(device)
   }
 }
 

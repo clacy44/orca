@@ -8,6 +8,7 @@ export type RpcDispatchStreamingOptions = {
   clientId?: string
   pairedDeviceId?: string
   clientKind?: 'mobile' | 'runtime'
+  accessProfile?: 'full' | 'peer'
   clientCapabilities?: readonly RuntimeCapability[]
   pairing?: PairingRpcContext
   sendBinary?: (bytes: Uint8Array<ArrayBufferLike>) => boolean | void

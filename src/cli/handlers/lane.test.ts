@@ -123,6 +123,7 @@ const defaultImpl: CallImpl = (method) => {
       principalId: ANA,
       displayName: 'Ana Ng',
       scope: 'runtime',
+      accessProfile: 'full',
       expiresAt: Date.now() + 86_400_000,
       pairingUrl: 'orca://pair?code=abc',
       webClientUrl: null,
@@ -281,27 +282,39 @@ describe('lane CLI handlers', () => {
   it('resolves --person to a principalId and mints the invite', async () => {
     const { client, calls } = makeClient(defaultImpl)
     await LANE_HANDLERS['lane invite'](
-      context(client, { person: 'Ana Ng', scope: 'runtime', ttl: '2', address: 'example.com' })
+      context(client, {
+        person: 'Ana Ng',
+        scope: 'runtime',
+        profile: 'full',
+        ttl: '2',
+        address: 'example.com'
+      })
     )
     expect(calls).toContainEqual([
       'accounts.lane.mintInvite',
-      { principalId: ANA, scope: 'runtime', ttlHours: 2, address: 'example.com' }
+      {
+        principalId: ANA,
+        scope: 'runtime',
+        accessProfile: 'full',
+        ttlHours: 2,
+        address: 'example.com'
+      }
     ])
   })
 
   it('defaults --scope to runtime and omits ttl/address when not given', async () => {
     const { client, calls } = makeClient(defaultImpl)
-    await LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng' }))
+    await LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', profile: 'full' }))
     expect(calls).toContainEqual([
       'accounts.lane.mintInvite',
-      { principalId: ANA, scope: 'runtime' }
+      { principalId: ANA, scope: 'runtime', accessProfile: 'full' }
     ])
   })
 
   it('refuses an unknown --person before minting anything', async () => {
     const { client, calls } = makeClient(defaultImpl)
     await expect(
-      LANE_HANDLERS['lane invite'](context(client, { person: 'Nobody' }))
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Nobody', profile: 'full' }))
     ).rejects.toThrow(/No person matches/)
     expect(calls.some(([method]) => method === 'accounts.lane.mintInvite')).toBe(false)
   })
@@ -309,24 +322,66 @@ describe('lane CLI handlers', () => {
   it('rejects an invalid --scope', async () => {
     const { client } = makeClient(defaultImpl)
     await expect(
-      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', scope: 'desktop' }))
+      LANE_HANDLERS['lane invite'](
+        context(client, { person: 'Ana Ng', scope: 'desktop', profile: 'full' })
+      )
     ).rejects.toThrow(/--scope must be/)
   })
 
   it('rejects a --ttl outside 1..24', async () => {
     const { client } = makeClient(defaultImpl)
     await expect(
-      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', ttl: '0' }))
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', ttl: '0', profile: 'full' }))
     ).rejects.toThrow(/--ttl must be/)
     await expect(
-      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', ttl: '25' }))
+      LANE_HANDLERS['lane invite'](
+        context(client, { person: 'Ana Ng', ttl: '25', profile: 'full' })
+      )
     ).rejects.toThrow(/--ttl must be/)
   })
 
   it('rejects --environment on lane invite like every other lane verb', async () => {
     const { client } = makeClient(defaultImpl)
     await expect(
-      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', environment: 'homelab' }))
+      LANE_HANDLERS['lane invite'](
+        context(client, { person: 'Ana Ng', environment: 'homelab', profile: 'full' })
+      )
     ).rejects.toThrow(/does not retarget/)
+  })
+
+  it('S10-19 W-6: --profile is required, no default', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng' }))
+    ).rejects.toThrow(/--profile/)
+    expect(calls.some(([method]) => method === 'accounts.lane.mintInvite')).toBe(false)
+  })
+
+  it('S10-19 W-6: rejects an invalid --profile value', async () => {
+    const { client } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](context(client, { person: 'Ana Ng', profile: 'admin' }))
+    ).rejects.toThrow(/--profile must be/)
+  })
+
+  it('S10-19 W-6 (NEG-20): refuses --scope mobile --profile peer at the CLI', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await expect(
+      LANE_HANDLERS['lane invite'](
+        context(client, { person: 'Ana Ng', scope: 'mobile', profile: 'peer' })
+      )
+    ).rejects.toThrow(/runtime-scoped only/)
+    expect(calls.some(([method]) => method === 'accounts.lane.mintInvite')).toBe(false)
+  })
+
+  it('S10-19 W-6: --profile peer --scope runtime mints', async () => {
+    const { client, calls } = makeClient(defaultImpl)
+    await LANE_HANDLERS['lane invite'](
+      context(client, { person: 'Ana Ng', scope: 'runtime', profile: 'peer' })
+    )
+    expect(calls).toContainEqual([
+      'accounts.lane.mintInvite',
+      { principalId: ANA, scope: 'runtime', accessProfile: 'peer' }
+    ])
   })
 })

@@ -11,6 +11,9 @@ export type ServePairingReadiness =
       webClientUrl: string | null
       scope: 'runtime' | 'mobile'
       qr: string | null
+      // S10-19 W-6: printed on the banner/--json so an operator can see what was minted without
+      // a separate `orca lane status` round trip.
+      profile: 'full' | 'peer'
     }
   | {
       available: false
@@ -126,6 +129,7 @@ function renderPairingLines(pairing: ServePairingReadiness, name: string | null)
     lines.push(`Mobile pairing QR${suffix}:\n${pairing.qr}`)
   }
   lines.push(`Pairing URL${suffix}: ${pairing.url}`)
+  lines.push(`Access profile${suffix}: ${pairing.profile}`)
   return lines
 }
 

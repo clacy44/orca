@@ -4,7 +4,7 @@ import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-co
 import { classifyRemotePairingHostname } from '../../shared/remote-pairing-address'
 import { normalizePairingDeviceName } from '../../shared/pairing-device-name'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
-import type { DeviceEntry } from '../runtime/device-registry'
+import { effectiveAccessProfile, type DeviceEntry } from '../runtime/device-registry'
 import { NETWORK_EXPOSURE_FAILED_GUIDANCE } from '../runtime/network-exposure-guidance'
 import {
   getDefaultPairingAddress,
@@ -36,7 +36,13 @@ function servesThisComputerOnly(reach: RuntimePairingReach | undefined, address:
   return hostname !== null && classifyRemotePairingHostname(hostname) === 'loopback'
 }
 
-function toRuntimeAccessGrant(device: DeviceEntry): RuntimeAccessGrant {
+// S10-19 W-6 (§7.5): profile/effective/enforcedByThisRuntime so the grant list shows what was
+// minted, what this runtime actually resolves it to (the two can differ for a pre-slice grant
+// under `legacyGrantProfile`), and whether this process is the one enforcing it at all.
+function toRuntimeAccessGrant(
+  device: DeviceEntry,
+  legacyGrantProfile: 'full' | 'peer'
+): RuntimeAccessGrant {
   return {
     deviceId: device.deviceId,
     name: device.name,
@@ -46,7 +52,10 @@ function toRuntimeAccessGrant(device: DeviceEntry): RuntimeAccessGrant {
     // that predates the sweep/mint split, so it maps to 'legacy_coalesced' (the same "not provably
     // minted" fallback isMintedPendingDevice uses), never to 'minted'.
     grantClass: device.grantClass === 'minted' ? 'minted' : 'legacy_coalesced',
-    expiresAt: device.pendingExpiresAt ?? null
+    expiresAt: device.pendingExpiresAt ?? null,
+    ...(device.accessProfile !== undefined ? { profile: device.accessProfile } : {}),
+    effective: effectiveAccessProfile(device, legacyGrantProfile),
+    enforcedByThisRuntime: true
   }
 }
 
@@ -155,8 +164,35 @@ export function registerMobileHandlers(
     'mobile:getRuntimePairingUrl',
     async (
       _event,
-      args?: { address?: string; rotate?: boolean; reach?: RuntimePairingReach; name?: string }
+      args?: {
+        address?: string
+        rotate?: boolean
+        reach?: RuntimePairingReach
+        name?: string
+        // S10-19 W-6 (M5-1/M5-2): required whenever `name` is present — a named link is handed
+        // to one person and that person's grant must be an explicit choice, never inferred.
+        accessProfile?: 'full' | 'peer'
+      }
     ) => {
+      const deviceNameArg = normalizePairingDeviceName(args?.name)
+      if (deviceNameArg && args?.accessProfile === undefined) {
+        return {
+          available: false as const,
+          reason: 'profile_required' as const,
+          guidance: 'Choose Full runtime access or Federation peer before generating a named link.'
+        }
+      }
+      // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): the IPC arg's TS type
+      // (`accessProfile?: 'full' | 'peer'`) is a compile-time annotation only — an IPC caller
+      // is not bound by it at runtime. An unrecognized value must REFUSE, never fall through to
+      // the `as 'full' | 'peer'` cast below (which would read a junk string as a real profile).
+      if (deviceNameArg && args?.accessProfile !== 'full' && args?.accessProfile !== 'peer') {
+        return {
+          available: false as const,
+          reason: 'profile_required' as const,
+          guidance: 'Choose Full runtime access or Federation peer before generating a named link.'
+        }
+      }
       const ip = args?.address ?? (await getDefaultPairingAddress(getDefaultRouteInterfaceNames))
       if (!ip) {
         return { available: false as const }
@@ -188,15 +224,14 @@ export function registerMobileHandlers(
 
       // Why: web/desktop runtime clients need full runtime access, not the
       // mobile allowlist used by phone QR pairing.
-      const deviceName = normalizePairingDeviceName(args?.name)
       const offer = rpcServer.createPairingOffer({
         address: ip,
         rotate: args?.rotate,
         // Why: a named link is handed to one person, so it gets its own revocable grant instead of
         // coalescing onto the shared pending row — two named links are two distinct devices. Both keys
         // are omitted when blank so an unnamed link makes exactly today's call.
-        ...(deviceName
-          ? { name: deviceName, mint: 'always' as const, budgetClass: 'ui_named' as const }
+        ...(deviceNameArg
+          ? { name: deviceNameArg, mint: 'always' as const, budgetClass: 'ui_named' as const }
           : {
               name: `Runtime ${new Date().toLocaleDateString()}`,
               budgetClass: 'host_auto' as const
@@ -204,7 +239,10 @@ export function registerMobileHandlers(
         scope: 'runtime',
         // Why: a grant that only ever pointed at loopback must not make the next launch bind every
         // interface when its local client reconnects (that would restore the exposure one restart later).
-        reach: thisComputerOnly ? 'this-computer' : 'network'
+        reach: thisComputerOnly ? 'this-computer' : 'network',
+        // S10-19 W-6: the unnamed branch mints 'full' exactly as before this slice — required
+        // choice binds NAMED mints only (Ruling 18(g)).
+        accessProfile: deviceNameArg ? (args!.accessProfile as 'full' | 'peer') : 'full'
       })
       if (!offer.available) {
         return { available: false as const }
@@ -253,7 +291,7 @@ export function registerMobileHandlers(
         .listDevices()
         .filter((d) => d.scope === 'runtime')
         .sort((a, b) => b.pairedAt - a.pairedAt)
-        .map(toRuntimeAccessGrant)
+        .map((d) => toRuntimeAccessGrant(d, rpcServer.getLegacyGrantProfile()))
     }
   })
 

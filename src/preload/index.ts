@@ -4874,8 +4874,14 @@ const api = {
       reach?: RuntimePairingReach
       // Why: the human names the person this link is for, and that name is what host-side presence shows.
       name?: string
+      // S10-19 W-6: required whenever `name` is present.
+      accessProfile?: 'full' | 'peer'
     }): Promise<
-      | { available: false; reason?: 'network_exposure_failed'; guidance?: string }
+      | {
+          available: false
+          reason?: 'network_exposure_failed' | 'profile_required'
+          guidance?: string
+        }
       | {
           available: true
           pairingUrl: string

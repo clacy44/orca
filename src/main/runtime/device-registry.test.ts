@@ -91,7 +91,9 @@ describe('DeviceRegistry pending grants', () => {
     const persistedCoalesced = readRegistryFile().find(
       (device) => device.deviceId === coalesced.deviceId
     )
+    // S10-19 (R10): accessProfile is now always written, unlike pendingExpiresAt above.
     expect(Object.keys(persistedCoalesced ?? {}).sort()).toEqual([
+      'accessProfile',
       'deviceId',
       'lastSeenAt',
       'name',
@@ -347,6 +349,10 @@ describe('DeviceRegistry pending grants', () => {
       'runtime',
       'network',
       undefined,
+      // Merge of the S10-19 integration tip: accessProfile is the 5th positional parameter and
+      // budgetClass the 6th, so `undefined` here keeps the S10-19 default ('full') while
+      // 'ui_named' stays the budget partition this test is actually about.
+      undefined,
       'ui_named'
     )
     registry.updateLastSeen(scanned.deviceId)
@@ -356,7 +362,14 @@ describe('DeviceRegistry pending grants', () => {
     // the capping test must too (an omitted budgetClass now means the un-evictable 'legacy' lane,
     // covered by the negative control below).
     const minted = Array.from({ length: MAX_LIVE_MINTED_GRANTS + 4 }, (_, index) =>
-      registry.mintPendingDevice(`Person ${index}`, 'runtime', 'network', undefined, 'ui_named')
+      registry.mintPendingDevice(
+        `Person ${index}`,
+        'runtime',
+        'network',
+        undefined,
+        undefined,
+        'ui_named'
+      )
     )
 
     const live = registry

@@ -1828,6 +1828,8 @@ type ServeOptions = {
   // Why: one entry per `--pair-name`, in flag order — each becomes its own revocable grant so two people
   // handed two links are two distinct pairedDeviceIds on this runtime.
   pairNames: string[]
+  // S10-19 W-6: matched positionally with pairNames — pairingProfiles[i] is pairNames[i]'s profile.
+  pairingProfiles: string[]
   noPairing: boolean
   mobilePairing: boolean
   recipeJson: boolean
@@ -1851,6 +1853,12 @@ function getServeOptions(argv = process.argv): ServeOptions {
       `[serve] Ignored ${pairNames.dropped} --serve-pair-name occurrence(s) with no name.`
     )
   }
+  const pairingProfiles = readServeFlagValues(argv, '--serve-pairing-profile')
+  if (pairingProfiles.dropped > 0) {
+    console.warn(
+      `[serve] Ignored ${pairingProfiles.dropped} --serve-pairing-profile occurrence(s) with no value.`
+    )
+  }
   const rawPort = valueAfter('--serve-port')
   let wsPort: number | undefined
   if (rawPort) {
@@ -1865,6 +1873,7 @@ function getServeOptions(argv = process.argv): ServeOptions {
     ...(wsPort !== undefined ? { wsPort } : {}),
     pairingAddress: valueAfter('--serve-pairing-address'),
     pairNames: pairNames.values,
+    pairingProfiles: pairingProfiles.values,
     noPairing: argv.includes('--serve-no-pairing'),
     mobilePairing: argv.includes('--serve-mobile-pairing'),
     recipeJson: argv.includes('--serve-recipe-json'),
@@ -1925,6 +1934,10 @@ async function printServeReady(options: ServeOptions): Promise<void> {
     {
       pairingAddress: options.pairingAddress,
       pairNames: options.pairNames,
+      // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): no `as ('full'|'peer')[]` cast —
+      // argv is untyped text; resolveServePairingOffers enum-validates it and refuses anything
+      // else, never reading an unrecognized value as 'full'.
+      pairingProfiles: options.pairingProfiles,
       noPairing: options.noPairing,
       mobilePairing: options.mobilePairing
     },
@@ -2634,6 +2647,9 @@ void app.whenReady().then(async () => {
   // Why: federated mail queued before the restart resumes here instead of waiting for
   // an RPC to touch the Run.
   runtimeService.resumeOrchestrationFederationRelayAfterRestart()
+  // S10-19 W-2 (INV-P-013, Ruling 24 addendum 2(o)): before the profile lookup exists — stamps
+  // only rows whose PTY is provably gone; closes nothing.
+  runtimeService.runPeerAttachmentBootSweep()
   publishProviderSessionChanges(agentHookServer.getProviderSessionIdentities())
   browserManager.setBrowserGuestStateChangedListener((worktreeId) => {
     runtimeService.notifyMobileSessionTabsChanged(worktreeId)

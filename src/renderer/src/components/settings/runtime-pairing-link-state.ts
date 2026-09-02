@@ -24,6 +24,9 @@ export const runtimePairingLinkCache: {
   // Why: the name the human typed for this link, kept beside the address so navigating away from
   // Settings mid-flow does not silently drop it and mint an unnamed grant on the next click.
   deviceName: string
+  // S10-19 W-6: initialised null — no preselection. Shown only once a name is entered; Generate
+  // stays disabled while a name is present and this is still null (no silent default).
+  profile: 'full' | 'peer' | null
   intent: RuntimePairingIntent
   generatedAddress: string | null
   runtimePairingUrl: string | null
@@ -33,6 +36,7 @@ export const runtimePairingLinkCache: {
   selectedAddress: '',
   customAddress: '',
   deviceName: '',
+  profile: null,
   intent: 'another',
   generatedAddress: null,
   runtimePairingUrl: null,

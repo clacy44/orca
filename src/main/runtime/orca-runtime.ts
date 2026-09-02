@@ -125,11 +125,19 @@ import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
+import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 import {
   DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
   sweepDispatchLivenessBreaches
 } from './orchestration/dispatch-liveness-monitor'
 import { DISPATCH_INPUT_OBSERVER_INTERVAL_MS } from './orchestration/dispatch-input-observation'
+import {
+  accessProfileOfAttachment as accessProfileOfAttachmentImpl,
+  closePeerOwnedPaneOnAgentExit as closePeerOwnedPaneOnAgentExitImpl,
+  runPeerAttachmentBootSweep as runPeerAttachmentBootSweepImpl,
+  runPeerAttachmentRuntimePrune as runPeerAttachmentRuntimePruneImpl,
+  type PeerGrantProfileLookup
+} from './peer-owned-pane-lifecycle'
 import {
   tickDispatchInputObserver as runDispatchInputObserverTick,
   tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
@@ -1329,6 +1337,7 @@ type RuntimeStore = {
     terminalMainSideEffectAuthority?: GlobalSettings['terminalMainSideEffectAuthority']
     terminalHiddenDeliveryGate?: GlobalSettings['terminalHiddenDeliveryGate']
     terminalModelQueryAuthority?: GlobalSettings['terminalModelQueryAuthority']
+    federationDispatchRepos?: GlobalSettings['federationDispatchRepos']
   }
   // Why: narrow to `unknown` return so test mocks can return void without
   // a cast. The runtime never reads the return value — the persisted value
@@ -3142,6 +3151,10 @@ export class OrcaRuntimeService {
   // per queued batch at both attach sites below (Ruling 23 addendum (p)).
   private legacySweepAuditSource: { getPendingLegacySweepAudit(): LegacySweepAuditRow[] } | null =
     null
+  // S10-19 W-2: installed by runtime-rpc.ts beside attachPrincipalLaneHost (and cleared on
+  // both non-success arms, beside detachPrincipalLaneHost). null at boot, by construction —
+  // the boot sweep (below) never reads this and never should (Ruling 24 addendum 2(o)).
+  private peerGrantProfileLookup: PeerGrantProfileLookup | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4307,6 +4320,112 @@ export class OrcaRuntimeService {
     } catch (error) {
       console.warn('[orchestration] dispatch liveness sweep failed', error)
     }
+    // W-5..W-7 review findings 2/5 (Ruling 24 addendum 4(bb)/(ee)): the existing periodic tick
+    // is where the peer-attachment runtime prune RE-RUNS (a row unresolvable on one pass is
+    // retried here) and where pruneSettledRemoteAttachments gets its first production caller —
+    // no new timer.
+    this.runPeerAttachmentRuntimePrune()
+    try {
+      db.pruneSettledRemoteAttachments()
+    } catch (error) {
+      console.warn('[orchestration] settled remote attachment prune failed', error)
+    }
+  }
+
+  // S10-19 W-2: install/clear the peer-grant-profile resolver (runtime-rpc.ts owns the actual
+  // DeviceRegistry lookup; this class only ever calls through the function it is handed).
+  setPeerGrantProfileLookup(lookup: PeerGrantProfileLookup | null): void {
+    this.peerGrantProfileLookup = lookup
+  }
+
+  // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.
+  accessProfileOfAttachment(row: RemoteDispatchAttachmentRow): 'full' | 'peer' | null {
+    return accessProfileOfAttachmentImpl(row, this.peerGrantProfileLookup)
+  }
+
+  // S10-19 W-3: never throws (§4.1's target predicate reads this before any settings write
+  // exists — an absent/malformed store must read as "nothing allowlisted", not crash the check).
+  getFederationDispatchRepos(): readonly string[] {
+    return this.store?.getSettings()?.federationDispatchRepos ?? []
+  }
+
+  // S10-19 W-3 (Ruling 24(a) FULL profile, D-2): the ONLY liveness read the full-profile paste's
+  // beforeWrite trusts. Prefers the OS-backed confirmForegroundProcess (daemon-pty-adapter.ts,
+  // the local provider's fresh:true path) — unlike terminalHasShellForegroundProcess (which
+  // assumes still-agent when the optional method is absent, erring toward "not yet stale"), this
+  // FAILS CLOSED on an absent confirmForegroundProcess: about to type peer-chosen bytes, "cannot
+  // prove it" must read as "not live", never as "assume live".
+  async isPeerPaneForegroundAgentLive(handle: string): Promise<boolean> {
+    const pty = this.getLivePtyForHandle(handle)
+    const ptyId = pty?.pty.ptyId
+    if (!ptyId || !this.ptyController?.confirmForegroundProcess) {
+      return false
+    }
+    let confirmedProcess: string | null
+    try {
+      confirmedProcess = await this.ptyController.confirmForegroundProcess(ptyId)
+    } catch {
+      return false
+    }
+    return confirmedProcess !== null && recognizeAgentProcess(confirmedProcess) !== null
+  }
+
+  // Why fire-and-forget at every call site (below): the four exit hooks are synchronous event
+  // handlers and must not block the scanner/relay/pty-exit path on a peer-pane close.
+  private closePeerOwnedPaneOnAgentExit(ptyId: string, cause: string): void {
+    const db = this._orchestrationDb
+    // Why the function-existence probe: many existing tests install a partial OrchestrationDb
+    // stub via setOrchestrationDb({...}) carrying only the methods that test needs — this hook
+    // fires on every pty exit unconditionally and must be a silent no-op against those, not an
+    // unhandled rejection.
+    if (!db || typeof db.findPeerOwnedAttachmentForHandle !== 'function') {
+      return
+    }
+    // S10-19 W-2 review B1: the row is keyed on the terminal HANDLE, not the ptyId every call
+    // site here owns — resolve it before delegating, or there is nothing to close.
+    const handle = this.handleByPtyId.get(ptyId)
+    if (!handle) {
+      return
+    }
+    closePeerOwnedPaneOnAgentExitImpl({
+      db,
+      runtime: this,
+      lookup: this.peerGrantProfileLookup,
+      handle,
+      cause
+    }).catch((error) => {
+      console.warn('[orchestration] peer-owned pane exit hook failed', error)
+    })
+    // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): re-run the runtime prune from every
+    // exit hook too — a restart-orphaned row whose pty graph only just re-adopted the handle at
+    // THIS exit becomes resolvable here, not only on the periodic tick.
+    this.runPeerAttachmentRuntimePrune()
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(o)): called once from main/index.ts beside
+  // resumeOrchestrationFederationRelayAfterRestart(), before the RPC server (and so the profile
+  // lookup) exists. Closes nothing — see peer-owned-pane-lifecycle.ts's own doc comment.
+  runPeerAttachmentBootSweep(): void {
+    const db = this._orchestrationDb
+    if (!db) {
+      return
+    }
+    runPeerAttachmentBootSweepImpl({ db, runtime: this }).catch((error) => {
+      console.warn('[orchestration] peer attachment boot sweep failed', error)
+    })
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(p)/(q)): called once from runtime-rpc.ts right after the
+  // profile lookup is installed. Catches a peer-owned pane whose PTY survived the restart.
+  runPeerAttachmentRuntimePrune(): void {
+    const db = this._orchestrationDb
+    const lookup = this.peerGrantProfileLookup
+    if (!db || !lookup) {
+      return
+    }
+    void runPeerAttachmentRuntimePruneImpl({ db, runtime: this, lookup }).catch((error) => {
+      console.warn('[orchestration] peer attachment runtime prune failed', error)
+    })
   }
 
   private getLegacyWorkerTerminalRecoveryPlan(): LegacyWorkerTerminalRecoveryPlan {
@@ -11145,6 +11264,8 @@ export class OrcaRuntimeService {
         return
       case 'command-finished':
         this.retirePtyAgentLaunchAuthority(ptyId)
+        // S10-19 W-2: daemon relay exit hook (site 1/4).
+        this.closePeerOwnedPaneOnAgentExit(ptyId, 'command_finished')
         this.recordTerminalSideEffectFact(ptyId, {
           kind: 'command-finished',
           exitCode: fact.exitCode
@@ -11475,6 +11596,8 @@ export class OrcaRuntimeService {
         },
         onCommandFinished: (exitCode: number | null) => {
           this.retirePtyAgentLaunchAuthority(ptyId)
+          // S10-19 W-2: main scanner exit hook (site 2/4).
+          this.closePeerOwnedPaneOnAgentExit(ptyId, 'command_finished')
           this.recordTerminalSideEffectFact(ptyId, { kind: 'command-finished', exitCode })
         },
         onBell: () => {
@@ -14947,6 +15070,9 @@ export class OrcaRuntimeService {
       this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
     } else {
       this.retirePtyAgentLaunchAuthority(ptyId)
+      // S10-19 W-2: pty-exit hook (site 4/4) — excluded on the abnormal-SSH branch, which
+      // preserves the surface rather than tearing it down.
+      this.closePeerOwnedPaneOnAgentExit(ptyId, 'pty_exit')
     }
     const incarnationId =
       exitIncarnationId ??
@@ -16964,6 +17090,25 @@ export class OrcaRuntimeService {
     return classifyWorkerTerminalProcessIncarnation(processIncarnation, listed.value)
   }
 
+  // S10-19 W-2 review B3: a peer-owned attachment row's terminal_handle is minted by a prior
+  // process and never resolves again after a restart — process_incarnation (`${ptyId}:${incarnationId}`)
+  // encodes the stable identity instead (ptyId is persisted per pane in the workspace session
+  // store, pty.ts's resolvePersistedStablePaneOwner). Once this process's pty graph has
+  // reconnected that same ptyId, re-derive whatever handle currently names it.
+  resolveLivePeerPaneHandle(processIncarnation: string): string | null {
+    const colonIndex = processIncarnation.indexOf(':')
+    if (colonIndex <= 0) {
+      return null
+    }
+    const ptyId = processIncarnation.slice(0, colonIndex)
+    const pty = this.ptysById.get(ptyId)
+    if (!pty) {
+      return null
+    }
+    const handle = this.handleByPtyId.get(ptyId) ?? this.issuePtyHandle(pty)
+    return this.getTerminalProcessIncarnation(handle) === processIncarnation ? handle : null
+  }
+
   private getTerminalTopologyRevision(worktreeId: string): number {
     const repoId = getRepoIdFromWorktreeId(worktreeId)
     return (
@@ -18479,6 +18624,8 @@ export class OrcaRuntimeService {
     const titleObservedAt = pty?.lastOscTitleAt ?? null
     const foregroundRead = this.readPtyForegroundProcessFromController(ptyId, titleObservedAt ?? 0)
     if (!pty?.connected || !foregroundRead) {
+      // S10-19 W-2: confirmed-agent-exit hook (site 3/4).
+      this.closePeerOwnedPaneOnAgentExit(ptyId, 'agent_exited')
       this.recordTerminalSideEffectFact(ptyId, { kind: 'agent-exited' })
       return
     }
@@ -18513,6 +18660,8 @@ export class OrcaRuntimeService {
         }
         return
       }
+      // S10-19 W-2: confirmed-agent-exit hook, async continuation (still site 3/4).
+      this.closePeerOwnedPaneOnAgentExit(ptyId, 'agent_exited')
       this.recordTerminalSideEffectFact(ptyId, { kind: 'agent-exited' })
     })
   }
@@ -33685,16 +33834,88 @@ export class OrcaRuntimeService {
   // the post-ready observer needs the tail that verdict came from, and neither may touch the PTY —
   // both run off the buffer already in memory. Every failure reads as unknown (null), never as a
   // verdict, so a stale or exited handle can never be reported as evidence about the worker.
-  getTerminalWaitEvidence(
-    handle: string
-  ): { tailText: string; blockedReason: RuntimeTerminalWaitBlockedReason | null } | null {
+  getTerminalWaitEvidence(handle: string): {
+    tailText: string
+    blockedReason: RuntimeTerminalWaitBlockedReason | null
+    // Optional (not absent) — review M5's addition, additive so pre-existing mocks that predate
+    // it still typecheck; the real implementation always sets it.
+    title?: string | null
+  } | null {
     try {
       const ptyId = this.getTerminalAgentStatusPtyId(handle)
-      const tailText = this.getTerminalAgentStatusSnapshot(handle, ptyId).waitText
-      return { tailText, blockedReason: detectTerminalWaitBlockedReason(tailText) }
+      const snapshot = this.getTerminalAgentStatusSnapshot(handle, ptyId)
+      return {
+        tailText: snapshot.waitText,
+        blockedReason: detectTerminalWaitBlockedReason(snapshot.waitText),
+        title: snapshot.title
+      }
     } catch {
       return null
     }
+  }
+
+  // S10-19 W-4 (Ruling 24(d) / ops BL-2; review M5): the choke's only source of (blockedReason,
+  // launchAgent). `agent: null` (unauthored TuiAgent kind, or the pty record has none) ⇒ the
+  // caller refuses prompt_state_unknown — never a private field access from outside this class,
+  // no new accessor. Wires findPeerDismissedStartupModalIndex (Ruling 20(b)'s peer-specific
+  // hardening) beside the shared detector's own index-ordered suppression: the shared scan
+  // already suppresses a blocked signal it finds a LATER dismissal for in the tail, but that
+  // tail is exactly what a peer's own task text can make the agent print. The pane's OSC TITLE
+  // is not something task text can set, so a title that no longer looks like a live prompt is
+  // treated as anchoring past the startup phase — the blocked reason is stale, never typed into.
+  getPeerPromptState(
+    handle: string
+  ):
+    | { state: 'blocked'; reason: RuntimeTerminalWaitBlockedReason; agent: TuiAgent | null }
+    | { state: 'clear' }
+    | { state: 'unknown' } {
+    const evidence = this.getTerminalWaitEvidence(handle)
+    if (!evidence) {
+      return { state: 'unknown' }
+    }
+    if (!evidence.blockedReason) {
+      return { state: 'clear' }
+    }
+    // W-5..W-7 review finding 7 (Ruling 24 addendum 4(ee)): with no OSC title evidence, the ONLY
+    // signal left is the output tail — which is exactly what a peer's own task text can make the
+    // agent print. Refuse prompt_state_unknown rather than trust the tail alone; the OSC title is
+    // the one signal task text cannot set.
+    if (!evidence.title) {
+      return { state: 'unknown' }
+    }
+    const normalized = evidence.tailText.toLowerCase()
+    const blockedSignal = findTerminalWaitBlockedSignal(normalized)
+    const peerDismissedIndex = this.findPeerDismissedStartupModalIndex(
+      normalized,
+      evidence.title ?? ''
+    )
+    if (
+      blockedSignal !== null &&
+      peerDismissedIndex !== null &&
+      peerDismissedIndex > blockedSignal.index
+    ) {
+      return { state: 'clear' }
+    }
+    const live = this.getLivePtyForHandle(handle)
+    return {
+      state: 'blocked',
+      reason: evidence.blockedReason,
+      agent: live?.pty.launchAgent ?? null
+    }
+  }
+
+  // S10-19 W-4 (Ruling 20(b)): a peer-only, ADDITIVE dismissal check beside the shared one — a
+  // peer-owned pane can run any of the 36 TuiAgent kinds, not only the codex/antigravity/cursor
+  // families findDismissedStartupModalIndex targets. Never narrows what the shared detector
+  // already found (T-D1: that function is untouched); this can only WIDEN "dismissed", which is
+  // the safe direction here — it can only make the choke refuse a write, never authorize one.
+  findPeerDismissedStartupModalIndex(normalized: string, title: string): number | null {
+    const shared = findDismissedStartupModalIndex(normalized)
+    const titleLooksLikeLivePrompt = /trust|prompt|confirm|yes\s*\/\s*no|proceed\?/i.test(title)
+    if (title.trim().length > 0 && !titleLooksLikeLivePrompt) {
+      return normalized.length
+    }
+    return shared
   }
 
   // Why: the gate's first-sighting stamp lives on the PTY snapshot; observation callers need it as
