@@ -140,6 +140,7 @@ import {
 } from './peer-owned-pane-lifecycle'
 import type { LinkBindingSelfView } from './device-registry-link-credential'
 import { createLinkBindingProver, type LinkBindingProver } from './link-binding-prover'
+import { createReplyOutboxPump, type ReplyOutboxPump } from './orchestration/reply-outbox-pump'
 import {
   tickDispatchInputObserver as runDispatchInputObserverTick,
   tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
@@ -3171,6 +3172,10 @@ export class OrcaRuntimeService {
   // `{completeness:'complete', evaluatedLinkIds:[]}` before any network call the moment its
   // candidate page is empty (link-binding-prover-round.ts).
   private _linkBindingProver: LinkBindingProver | null = null
+  // S10-16 C5, R18.7: same lazy-singleton/auto-arm pattern as `_linkBindingProver` — armed from
+  // BOTH getOrchestrationDb() and setOrchestrationDb(). Public so RPC handlers (which see only
+  // OrcaRuntimeService) can reach `runtime.replyOutbox?.kick(...)` directly (design's own shape).
+  replyOutbox: ReplyOutboxPump | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4167,6 +4172,12 @@ export class OrcaRuntimeService {
       // S10-16 C4a, R13: arm the verifier's own schedule at the DB attach site — idempotent,
       // never runs a round synchronously (see the field doc comment above).
       this.getLinkBindingProver().arm()
+      // S10-16 C5, R18.7: the resume SCAN's own site — NOT nested inside
+      // resumeOrchestrationFederationRelayAfterRestart (that returns early with no transport).
+      if (!this.replyOutbox) {
+        this.replyOutbox = createReplyOutboxPump(this)
+      }
+      this.replyOutbox.resumeAfterRestart()
     }
     return this._orchestrationDb
   }
@@ -4226,6 +4237,12 @@ export class OrcaRuntimeService {
     this.flushLegacySweepAudit()
     // S10-16 C4a, R13: same auto-arm as getOrchestrationDb() — idempotent, timers only.
     this.getLinkBindingProver().arm()
+    // S10-16 C5, R18.7: same two call sites as the prover's own arm — a swapped DB (a fresh
+    // in-memory harness, a test fixture) still gets its own reclaim + resume scan.
+    if (!this.replyOutbox) {
+      this.replyOutbox = createReplyOutboxPump(this)
+    }
+    this.replyOutbox.resumeAfterRestart()
   }
 
   // Why armed with the database rather than with each worker-start: the breach fence lives in a
@@ -35041,6 +35058,30 @@ export class OrcaRuntimeService {
     // NULL isolates the outbound mirror without disturbing that row's relay reporting.
     if (message.peer_agent_id != null && message.peer_link_device_id == null) {
       const environment = message.to_handle.split(':')[1]
+      // S10-16 C5, R19.2/PART 0.7: a reply-relay row (this message has a `peer_reply_outbox`
+      // entry, keyed on `local_message_id` — UNIQUE) reports the OUTBOX row's own state, a
+      // lookup on this same branch rather than a second one. Every other relay row (the plain
+      // federation-relay mirror, which has none) keeps the two-state shape above unchanged.
+      const outboxItem = this.getOrchestrationDb().getReplyOutboxItemByLocalMessageId(message.id)
+      if (outboxItem) {
+        const delivery: MessageDeliveryState =
+          outboxItem.state === 'queued'
+            ? 'queued'
+            : outboxItem.state === 'sending'
+              ? 'sending'
+              : outboxItem.state === 'delivered'
+                ? 'relayed'
+                : outboxItem.state === 'refused'
+                  ? 'refused'
+                  : outboxItem.state === 'abandoned'
+                    ? 'abandoned'
+                    : 'cancelled'
+        return {
+          delivery,
+          recipient: { state: 'unresolved', lastSeenAt: null },
+          ...(environment ? { environment } : {})
+        }
+      }
       return {
         delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',
         recipient: { state: 'unresolved', lastSeenAt: null },

@@ -8,6 +8,8 @@
 // row is never "pointed" to a live pane on THIS host, so the pane-delivery states above never
 // apply to it; reporting 'queued' forever for an accepted relay was the exact "queued into the
 // void" symptom this slice exists to remove.
+// S10-16 C5, R19.2: 'sending'/'refused'/'abandoned'/'cancelled' — the reply-outbox's own state
+// union, surfaced on a row that has a `peer_reply_outbox` entry (orca-runtime.ts's relay branch).
 export type OrchestrationDeliveryState =
   | 'queued'
   | 'queued_awaiting_pane'
@@ -15,6 +17,10 @@ export type OrchestrationDeliveryState =
   | 'read'
   | 'relayed'
   | 'relay_pending'
+  | 'sending'
+  | 'refused'
+  | 'abandoned'
+  | 'cancelled'
 
 export type OrchestrationMessageDelivery = {
   state: OrchestrationDeliveryState

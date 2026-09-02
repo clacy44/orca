@@ -1,6 +1,7 @@
-// S10-16 C3, R7.3 (design v6, frozen): the `orchestration.federatedLinkProbe` handler body — split
-// out of orchestration-link-binding-peer.ts to stay under the max-lines ratchet. Order is
-// load-bearing: lane gate, quarantine, rate limit, self-view, store precondition, scan, answer.
+// S10-16 C3, R7.3 (design v6, frozen); reordered by C5 R27.2 (Ruling 23 Addendum 3): the
+// `orchestration.federatedLinkProbe` handler body — split out of orchestration-link-binding-
+// peer.ts to stay under the max-lines ratchet. Order is load-bearing: lane gate, rate limit,
+// quarantine, self-view, store precondition, scan, answer.
 import { randomBytes } from 'node:crypto'
 import { defineMethod, type RpcMethod } from '../core'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
@@ -62,10 +63,9 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
     // refuses a mobile-scope grant and a nonexistent row (no clientKind is set without one), so
     // no second DeviceRegistry lookup is needed here.
 
-    // Step 2: link quarantine.
-    refuseIfQuarantined(runtime, pairedDeviceId, 'probe')
-
-    // Step 3: rate limit — private per-link namespace, own verb.
+    // Step 2 (R27.2, Ruling 23 Addendum 3: rate -> containment): rate limit first — private
+    // per-link namespace, own verb — so the one caller class already decided hostile does not
+    // get an unbounded call rate ahead of the containment gate.
     const rate = runtime.getOrchestrationDb().checkAndBumpRate({
       subjectKey: `linkbind:${pairedDeviceId}`,
       verb: 'federatedLinkProbe',
@@ -79,6 +79,9 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
         { retryAfterMs: rate.retryAfterMs }
       )
     }
+
+    // Step 3: link quarantine.
+    refuseIfQuarantined(runtime, pairedDeviceId, 'probe')
 
     // Step 4: self-view (R9). A null accessor, or a null return from either member, refuses
     // `capability_unsupported` — never a fallback, never `'authenticated_transport'`.

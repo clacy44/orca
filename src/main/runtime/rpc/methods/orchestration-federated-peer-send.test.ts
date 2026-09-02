@@ -530,9 +530,13 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(relayCalls).toHaveLength(0)
   })
 
-  // S10-15 verifier F2: the receiver has no local thread for the sender's own threadId — storing
-  // it verbatim would point messages.thread_id at a thread row that is never minted on this host.
-  it("F2: the imported row on the far host has thread_id NULL; peer_thread_id carries the sender's threadId", async () => {
+  // S10-15 verifier F2 (SUPERSEDED by S10-16 R28.1 rule 3 / design v6 PART 10 test 48 — Ruling
+  // 13 F2 explicitly deferred this mint "to S10-16 with the reply/thread model"; v4 replaces the
+  // NULL with a host-minted local thread id and keeps peer_thread_id unchanged for exactly this
+  // reason). The receiver now mints its OWN local thread for a foreign-origin row with no
+  // resolvable `inReplyToMessageId`/`(link,peerThreadId)` match — asserted NOT equal to the
+  // peer's own id (never writing a peer-chosen id into `messages.thread_id`, Class rule C-11).
+  it("F2/test 48: the imported row on the far host mints its OWN local thread_id; peer_thread_id carries the sender's threadId", async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
@@ -554,7 +558,8 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       .get(`agent:${agentB}`) as
       | { thread_id: string | null; peer_thread_id: string | null }
       | undefined
-    expect(farRow?.thread_id).toBeNull()
+    expect(farRow?.thread_id).toBeTruthy()
+    expect(farRow?.thread_id).not.toBe('thr_aaaaaaaaaaaa')
     expect(farRow?.peer_thread_id).toBe('thr_aaaaaaaaaaaa')
   })
 
@@ -628,5 +633,65 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'reply' AND outcome = 'no_return_route'`)
       .get()
     expect(audit).toBeTruthy()
+  })
+
+  it('test 81 (protocol m3): a quarantined link past the send rate limit gets rate_limited, not agent_quarantined — and the audit write is metered', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    workerDb.putContainment({
+      subjectKind: 'link',
+      subjectId: LINK_DEVICE_ID,
+      action: 'quarantine',
+      reasonCode: 'test',
+      reasonText: null,
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+
+    // Below the limit: still refused agent_quarantined (Ruling 10's ordering is untouched).
+    await expect(
+      call(
+        'orchestration.federatedSend',
+        {
+          fromAgent: { id: 'agt_aaaaaaaaaaaa', displayName: 'asker' },
+          toAgentId: agentB,
+          messageId: 'msg_bbbbbbbbbbb1',
+          subject: 'hi',
+          body: 'hi'
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    // Drive the link past FEDERATED_SEND_RATE_LIMIT (256) inbound sends in this window.
+    let lastError: unknown
+    for (let i = 0; i < 260; i++) {
+      try {
+        await call(
+          'orchestration.federatedSend',
+          {
+            fromAgent: { id: 'agt_aaaaaaaaaaaa', displayName: 'asker' },
+            toAgentId: agentB,
+            messageId: `msg_ccccccccc${String(i).padStart(3, '0')}`,
+            subject: 'hi',
+            body: 'hi'
+          },
+          workerLinkCtx()
+        )
+      } catch (error) {
+        lastError = error
+      }
+    }
+    expect(lastError).toMatchObject({ code: 'rate_limited' })
+
+    // The audit write is metered to at most a handful of rows regardless of call volume — the
+    // C3 F1 undeletable-table DoS this pattern exists to close.
+    const auditCount = (
+      raw(workerDb).prepare(
+        `SELECT COUNT(*) AS n FROM agent_audit WHERE actor_host_id = ?`
+      ) as unknown as { get: (...a: unknown[]) => { n: number } }
+    ).get(LINK_DEVICE_ID)
+    expect(auditCount.n).toBeLessThan(10)
   })
 })

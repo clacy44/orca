@@ -28,6 +28,9 @@ export type LinkBindingSelfView = {
    *  (`scope==='runtime' && lastSeenAt !== 0`), with the grant-class fact R15.1's `routingClass`
    *  needs at bind time. Never a token. */
   listRuntimeLinkCandidates(): readonly LinkBindingCandidateLink[]
+  /** S10-16 C5, R15.3/R18.4(a): `deviceRegistry.loadSucceeded` — false only on a genuine parse/
+   *  read failure of `orca-devices.json`, never on an empty/missing file. */
+  registryLoadSucceeded(): boolean
 }
 
 export function createLinkBindingSelfView(
@@ -60,6 +63,9 @@ export function createLinkBindingSelfView(
           pairedAt: d.pairedAt,
           grantClass: deriveGrantClassAtBind(d)
         }))
+    },
+    registryLoadSucceeded(): boolean {
+      return deviceRegistry.loadSucceeded
     }
   }
 }

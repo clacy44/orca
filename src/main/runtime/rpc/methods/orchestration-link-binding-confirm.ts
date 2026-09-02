@@ -52,8 +52,7 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
       )
     }
 
-    refuseIfQuarantined(runtime, pairedDeviceId, 'confirm')
-
+    // R27.2 (Ruling 23 Addendum 3): rate -> containment.
     const rate = runtime.getOrchestrationDb().checkAndBumpRate({
       subjectKey: `linkbind:${pairedDeviceId}`,
       verb: 'federatedLinkConfirm',
@@ -67,6 +66,8 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
         { retryAfterMs: rate.retryAfterMs }
       )
     }
+
+    refuseIfQuarantined(runtime, pairedDeviceId, 'confirm')
 
     const seen = new Set<number>()
     for (const entry of params.confirms) {

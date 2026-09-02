@@ -23,7 +23,13 @@ import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
-import { refuseIfQuarantined, LinkContainmentRefusal } from './orchestration-link-binding-pending'
+import {
+  refuseIfQuarantined,
+  refuseIfRateLimited,
+  LinkContainmentRefusal,
+  LinkRateRefusal
+} from './orchestration-link-binding-pending'
+import { FEDERATED_ASK_RATE_LIMIT } from '../../orchestration/link-binding-constants'
 
 // S10-15 F5 (chair ruling 5): the per-link cap on PENDING relayed questions.
 const PEER_ASK_PENDING_CAP = 32
@@ -96,6 +102,8 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
             }
           )
         }
+        // R27.1/R27.2 (Ruling 23 Addendum 3): rate -> containment -> identity shape -> recipient.
+        refuseIfRateLimited(runtime, pairedDeviceId, 'federatedAsk', FEDERATED_ASK_RATE_LIMIT)
         // R3 (Ruling 23 Addendum 2(n)): link containment before identity — a quarantined link
         // refuses BEFORE the identity importer runs, effect-free, on peer_link_containment alone
         // (no peer-supplied value in the read). Same gate, same order as the probe/confirm RPCs.
@@ -235,7 +243,11 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
         // (addressable-agent-recipient.ts) — is a plain `OrchestrationError`, not the marker, and
         // must still reach this audit write every time (it was silently dropped by the old
         // code-based exclusion, which could not tell the two apart).
-        if (error instanceof OrchestrationError && !(error instanceof LinkContainmentRefusal)) {
+        if (
+          error instanceof OrchestrationError &&
+          !(error instanceof LinkContainmentRefusal) &&
+          !(error instanceof LinkRateRefusal)
+        ) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

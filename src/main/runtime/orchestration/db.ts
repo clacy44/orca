@@ -129,6 +129,9 @@ import {
   countPendingReplyOutbox as countPendingReplyOutboxImpl,
   cancelQueuedReplyOutbox as cancelQueuedReplyOutboxImpl,
   kickReplyOutboxForLink as kickReplyOutboxForLinkImpl,
+  getReplyOutboxItemByLocalMessageId as getReplyOutboxItemByLocalMessageIdImpl,
+  markReplyOutboxNotified as markReplyOutboxNotifiedImpl,
+  nextReplyOutboxWakeAt as nextReplyOutboxWakeAtImpl,
   type EnqueueReplyOutboxParams,
   type ReplyOutboxRow
 } from './reply-outbox-store'
@@ -137,6 +140,8 @@ import {
   claimNextReplyOutboxItem as claimNextReplyOutboxItemImpl,
   settleReplyOutboxItem as settleReplyOutboxItemImpl,
   holdReplyOutboxItem as holdReplyOutboxItemImpl,
+  holdReplyOutboxItemLocalEvidence as holdReplyOutboxItemLocalEvidenceImpl,
+  retryReplyOutboxItem as retryReplyOutboxItemImpl,
   retargetReplyOutboxItem as retargetReplyOutboxItemImpl,
   type ReplyOutboxSettle
 } from './reply-outbox-lifecycle'
@@ -4738,6 +4743,27 @@ export class OrchestrationDb {
     return enqueueReplyOutboxImpl(this.db, params)
   }
 
+  // R16.2(2): audit + enqueue + markAsRead, ONE `BEGIN IMMEDIATE` — plain statements only, no
+  // network. `insertGatedMessage` (R16.2(1)) already ran OUTSIDE this transaction, in the
+  // caller, so its own `gate_refusals` audit row survives a refusal here undisturbed.
+  enqueueForeignReplyIntent(params: {
+    audit: WriteAgentAuditParams
+    outbox: EnqueueReplyOutboxParams
+    markAsReadIds: string[]
+  }): string {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.writeAgentAudit(params.audit)
+      const outboxId = enqueueReplyOutboxImpl(this.db, params.outbox)
+      this.markAsRead(params.markAsReadIds)
+      this.db.exec('COMMIT')
+      return outboxId
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   getReplyOutboxItem(id: string): ReplyOutboxRow | null {
     return getReplyOutboxItemImpl(this.db, id)
   }
@@ -4756,6 +4782,18 @@ export class OrchestrationDb {
 
   kickReplyOutboxForLink(linkDeviceId: string, now: number): void {
     kickReplyOutboxForLinkImpl(this.db, linkDeviceId, now)
+  }
+
+  getReplyOutboxItemByLocalMessageId(localMessageId: string): ReplyOutboxRow | null {
+    return getReplyOutboxItemByLocalMessageIdImpl(this.db, localMessageId)
+  }
+
+  markReplyOutboxNotified(id: string, now: number): void {
+    markReplyOutboxNotifiedImpl(this.db, id, now)
+  }
+
+  nextReplyOutboxWakeAt(): number | null {
+    return nextReplyOutboxWakeAtImpl(this.db)
   }
 
   reclaimExpiredReplyOutboxLeases(now: number): number {
@@ -4777,6 +4815,30 @@ export class OrchestrationDb {
     lastErrorCode: string
   ): void {
     holdReplyOutboxItemImpl(this.db, id, now, nextAttemptAfter, lastErrorCode)
+  }
+
+  // `now` kept in the public signature for call-site symmetry with the other lifecycle methods;
+  // the impl no longer writes it (first_held_at is deliberately never advanced — R18.4(a)/L4).
+  holdReplyOutboxItemLocalEvidence(id: string, _now: number, nextAttemptAfter: number): void {
+    holdReplyOutboxItemLocalEvidenceImpl(this.db, id, nextAttemptAfter)
+  }
+
+  retryReplyOutboxItem(
+    id: string,
+    _now: number,
+    nextAttemptAfter: number,
+    consecutiveFailures: number,
+    lastErrorCode: string | null,
+    lastError: string | null
+  ): boolean {
+    return retryReplyOutboxItemImpl(
+      this.db,
+      id,
+      nextAttemptAfter,
+      consecutiveFailures,
+      lastErrorCode,
+      lastError
+    )
   }
 
   retargetReplyOutboxItem(
@@ -8116,6 +8178,42 @@ export class OrchestrationDb {
            peer_thread_id = COALESCE(?, peer_thread_id) WHERE id = ?`
       )
       .run(peerThreadId, messageId)
+  }
+
+  // S10-16 C5, R28.1 rule 2: the continuation path for a multi-message exchange — a prior
+  // INBOUND-imported row (peer_link_device_id set) on the same link naming the same peer thread
+  // id, already carrying a local thread. `peer_thread_id IS NOT NULL` is load-bearing (L2): SQL
+  // equality on NULL matches nothing on its own, but this clause makes that explicit rather than
+  // relying on the implicit behaviour.
+  findForeignRowByLinkAndPeerThread(
+    linkDeviceId: string,
+    peerThreadId: string
+  ): MessageRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+          WHERE peer_link_device_id = ? AND peer_thread_id = ? AND peer_thread_id IS NOT NULL
+            AND thread_id IS NOT NULL
+          ORDER BY sequence DESC LIMIT 1`
+      )
+      .get(linkDeviceId, peerThreadId) as MessageRow | undefined
+  }
+
+  // S10-16 C5, R28.1(1b): mint a local thread, then back-fill a NULL-thread row's `thread_id`.
+  // `createThread` already owns its own `BEGIN IMMEDIATE`/COMMIT (thread-directory.ts), so the
+  // mint and the back-fill are two statements, not one nested transaction — SQLite has none. The
+  // `AND thread_id IS NULL` guard on the UPDATE is what stays load-bearing: it protects the ROW
+  // (a concurrent mint loses the backfill race and its thread becomes an unreferenced orphan,
+  // never a correctness fault) even though the two writes are not atomic with each other.
+  mintThreadAndBackfillMessage(
+    backfillMessageId: string,
+    threadParams: CreateThreadParams
+  ): { threadId: string; backfilled: boolean } {
+    const { thread } = this.createThread(threadParams)
+    const result = this.db
+      .prepare('UPDATE messages SET thread_id = ? WHERE id = ? AND thread_id IS NULL')
+      .run(thread.id, backfillMessageId)
+    return { threadId: thread.id, backfilled: result.changes === 1 }
   }
 
   // S10-15 ruling 2: the link's own currently-bound fingerprint, or null if this link has never

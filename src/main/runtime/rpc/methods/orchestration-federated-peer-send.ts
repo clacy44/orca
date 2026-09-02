@@ -10,7 +10,8 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   PEER_RUN_ID,
   isUnauthenticatedLaneCallerFingerprint,
-  type MessageType
+  type MessageType,
+  type OrchestrationDb
 } from '../../orchestration/db'
 import { requireAddressableAgentRecipient } from '../../orchestration/addressable-agent-recipient'
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
@@ -18,13 +19,24 @@ import { payloadValueForGate } from '../../orchestration/message-gate-writer'
 import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 import {
   isHostMessageId,
+  requireHostMessageId,
   requireOptionalThreadId
 } from '../../orchestration/orchestration-id-grammar'
 import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
-import { refuseIfQuarantined, LinkContainmentRefusal } from './orchestration-link-binding-pending'
+import {
+  refuseIfQuarantined,
+  refuseIfRateLimited,
+  LinkContainmentRefusal,
+  LinkRateRefusal
+} from './orchestration-link-binding-pending'
+import { FEDERATED_SEND_RATE_LIMIT } from '../../orchestration/link-binding-constants'
+import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
+import { deriveThreadSubject } from '../../../../shared/thread-subject'
+import type { OrcaRuntimeService } from '../../orca-runtime'
+import type { MessageRow } from '../../orchestration/types'
 
 const FederatedSendParams = z.object({
   // Optional (D3): an old sender, or one whose pane has no registered `agents` row, omits it.
@@ -32,6 +44,9 @@ const FederatedSendParams = z.object({
   toAgentId: requiredString('Missing target agent id'),
   messageId: requiredString('Missing relayed message id'),
   threadId: OptionalString,
+  // S10-16 R20.1: optional, sent only behind ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY on
+  // the SENDER's side — this receiver runs the detector whenever the field is present.
+  inReplyToMessageId: OptionalString,
   subject: requiredString('Missing subject'),
   body: OptionalString,
   type: z.string().optional(),
@@ -43,6 +58,108 @@ type FederatedSendResult = {
   accepted: true
   messageId: string
   threadId: string | null
+  authorshipUnconfirmed?: true
+}
+
+// S10-16 C5, R28.1: the ONE thread selector — rule 1 (reply to a locally-authored outbound row,
+// gated by clauses (i)/(ii)), rule 2 (continuation on (link, peerThreadId)), rule 3 (mint fresh).
+// Also computes R20.1's authorshipUnconfirmed flag (a lookup this function already performs).
+function resolveForeignThread(
+  db: OrchestrationDb,
+  runtime: OrcaRuntimeService,
+  args: {
+    toAgent: NonNullable<ReturnType<OrchestrationDb['getAgentById']>>
+    askerHandle: string
+    pairedDeviceId: string
+    inReplyToMessageId: string | undefined
+    peerThreadId: string | null
+    subject: string
+    body: string | undefined
+  }
+): { threadId: string; authorshipUnconfirmed: boolean } {
+  const participants = [
+    {
+      participantKey: args.askerHandle,
+      agentId: null,
+      handle: args.askerHandle,
+      role: 'owner' as const
+    },
+    {
+      participantKey: args.toAgent.id,
+      agentId: args.toAgent.id,
+      handle: args.toAgent.terminal_handle,
+      role: 'member' as const
+    }
+  ]
+  const mintFresh = (): { threadId: string; authorshipUnconfirmed: boolean } => {
+    const { thread } = db.createThread({
+      subject: deriveThreadSubject({ body: args.body ?? '' }),
+      createdByAgentId: null,
+      origin: 'peer',
+      participants
+    })
+    return { threadId: thread.id, authorshipUnconfirmed: false }
+  }
+
+  if (args.inReplyToMessageId !== undefined) {
+    const r: MessageRow | undefined = db.getMessageById(args.inReplyToMessageId)
+    // R20.1's predicate: locally authored here, addressed outward — independent of whether an
+    // acknowledgement came back (v4 wrongly also required peer_relayed_at != null).
+    const authorshipOk =
+      r !== undefined && r.from_handle.startsWith('agent:') && r.to_handle.startsWith('remote:')
+    if (!authorshipOk) {
+      // L5: the receiver STORES the reply; it does not refuse. Falls through to rule 2/3.
+      const rest = args.peerThreadId != null ? resolveByPeerThread() : mintFresh()
+      return { threadId: rest.threadId, authorshipUnconfirmed: true }
+    }
+    const row = r as MessageRow
+    // R28.1(1a) clause (i): the row is addressed back to THIS reply's recipient.
+    const clauseI = row.from_handle === `agent:${args.toAgent.id}`
+    let clauseII = false
+    if (clauseI) {
+      const toEnv = row.to_handle.split(':')[1]
+      const callerBinding = getRoutableLinkBinding(db, runtime, args.pairedDeviceId)
+      if (toEnv && callerBinding) {
+        if (toEnv === callerBinding.environmentId) {
+          clauseII = true
+        } else {
+          const retargeted = db.findRoutableBindingByKeyFingerprint(
+            callerBinding.peerKeyFingerprint
+          )
+          clauseII = retargeted?.environmentId === toEnv
+        }
+      }
+    }
+    if (clauseI && clauseII) {
+      if (row.thread_id) {
+        return { threadId: row.thread_id, authorshipUnconfirmed: false }
+      }
+      // R28.1(1b): mint + back-fill the NULL-thread row this reply answers.
+      const { threadId } = db.mintThreadAndBackfillMessage(row.id, {
+        subject: deriveThreadSubject({ body: args.body ?? '' }),
+        createdByAgentId: null,
+        origin: 'peer',
+        participants
+      })
+      return { threadId, authorshipUnconfirmed: false }
+    }
+    // Authorship passed but the thread-selection clauses did not — a well-formed reply that
+    // simply gets its own thread (never a refusal, never authorshipUnconfirmed).
+    const rest = args.peerThreadId != null ? resolveByPeerThread() : mintFresh()
+    return { threadId: rest.threadId, authorshipUnconfirmed: false }
+  }
+
+  function resolveByPeerThread(): { threadId: string; authorshipUnconfirmed: boolean } {
+    if (args.peerThreadId != null) {
+      const prior = db.findForeignRowByLinkAndPeerThread(args.pairedDeviceId, args.peerThreadId)
+      if (prior?.thread_id) {
+        return { threadId: prior.thread_id, authorshipUnconfirmed: false }
+      }
+    }
+    return mintFresh()
+  }
+
+  return resolveByPeerThread()
 }
 
 export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
@@ -71,6 +188,9 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
             }
           )
         }
+        // R27.2 (Ruling 23 Addendum 3): rate -> containment -> identity shape -> recipient. The
+        // one caller class already decided hostile must not have an unbounded call rate either.
+        refuseIfRateLimited(runtime, pairedDeviceId, 'federatedSend', FEDERATED_SEND_RATE_LIMIT)
         // R3 (Ruling 23 Addendum 2(n)): link containment before identity — a quarantined link
         // refuses BEFORE the identity importer runs, effect-free, on peer_link_containment alone
         // (no peer-supplied value in the read). Same gate, same order as the probe/confirm RPCs.
@@ -126,6 +246,10 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           )
         }
         requireOptionalThreadId(params.threadId, 'thread id')
+        const inReplyToMessageId =
+          params.inReplyToMessageId === undefined
+            ? undefined
+            : requireHostMessageId(params.inReplyToMessageId, 'in-reply-to message id')
         // Idempotent replay vs conflict (mirrors importFederatedRelayItem's conflict rule,
         // db.ts): a peer-chosen id that already exists on this host either matches (a retry —
         // return the stored receipt) or conflicts (refuse). Finding 21: this distinction is a
@@ -133,13 +257,29 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         // enumeration impractical) and stated here per the Gate-1 justification.
         const existing = db.getMessageById(params.messageId)
         if (existing) {
+          // S10-16 R17.2 (v5, P8): the replay predicate is LINK-scoped, and a re-pair on the
+          // RECEIVING side must not turn an already-delivered reply into `request_mismatch`.
+          // `getRoutableLinkBinding` — ROUTABLE rows only (P8) — on both links; matching key
+          // fingerprints under a live, unrevoked, unquarantined binding of THIS host's own
+          // proving means "the same runtime, by INV-P-008", purely local.
+          const sameOriginHost = (storedLink: string | null, callerLink: string): boolean => {
+            if (storedLink === null) {
+              return false
+            }
+            if (storedLink === callerLink) {
+              return true
+            }
+            const a = getRoutableLinkBinding(db, runtime, storedLink)
+            const b = getRoutableLinkBinding(db, runtime, callerLink)
+            return a !== null && b !== null && a.peerKeyFingerprint === b.peerKeyFingerprint
+          }
           // S10-15 review m-1: R7 step 2 also required matching `type` — without it, a real id
           // collision with a DIFFERENT type (e.g. a genuine msg_* clash presenting a different
           // message shape under the same id) was silently swallowed as an idempotent "accepted"
           // replay instead of refusing request_mismatch.
           if (
             existing.to_handle === `agent:${toAgent.id}` &&
-            existing.peer_link_device_id === pairedDeviceId &&
+            sameOriginHost(existing.peer_link_device_id ?? null, pairedDeviceId) &&
             existing.type === (params.type ?? 'status')
           ) {
             // R13.1: an authenticated inbound call is proof of liveness — after admission
@@ -158,6 +298,22 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           )
         }
 
+        // S10-16 R28.1/R20.1: resolved BEFORE insertGatedMessage — a local thread for every
+        // foreign-origin row, and the authorship predicate (L5: a failed lookup still stores).
+        const { threadId: resolvedThreadId, authorshipUnconfirmed } = resolveForeignThread(
+          db,
+          runtime,
+          {
+            toAgent,
+            askerHandle,
+            pairedDeviceId,
+            inReplyToMessageId,
+            peerThreadId: params.threadId ?? null,
+            subject: params.subject,
+            body: params.body
+          }
+        )
+
         const inserted = db.insertGatedMessage({
           id: params.messageId,
           from: askerHandle,
@@ -166,10 +322,9 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           body: params.body,
           type: (params.type ?? 'status') as MessageType,
           priority: params.priority,
-          // S10-15 verifier F2: no local thread exists on the receiver for the sender's own
-          // threadId — storing it verbatim would point messages.thread_id at a thread row that
-          // is never minted here. peer_thread_id (below) is the correct home for the peer's id.
-          threadId: null,
+          // R28: the LOCAL thread this host minted or resolved above — the peer's own id is
+          // never written to `messages.thread_id`; it lives in peer_thread_id below.
+          threadId: resolvedThreadId,
           payload: payloadValueForGate(
             params.payload === undefined ? undefined : JSON.stringify(params.payload)
           ),
@@ -185,6 +340,7 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
         }
         const message = inserted.message
+        db.bumpThreadOnMessage(resolvedThreadId, message)
         runtime.notifyMessageArrived(
           message.to_handle,
           message.type,
@@ -198,7 +354,8 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         return {
           accepted: true,
           messageId: message.id,
-          threadId: message.thread_id
+          threadId: message.thread_id,
+          ...(authorshipUnconfirmed ? { authorshipUnconfirmed: true as const } : {})
         } satisfies FederatedSendResult
       } catch (error) {
         // C3a delta D2 — see the identical exclusion in orchestration-federated-peer-ask.ts's own
@@ -207,7 +364,11 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         // by code alone — a quarantined-SENDER refusal from federated-sender-identity.ts is a
         // plain `OrchestrationError` with the same `agent_quarantined` code and must still reach
         // this audit write every time.
-        if (error instanceof OrchestrationError && !(error instanceof LinkContainmentRefusal)) {
+        if (
+          error instanceof OrchestrationError &&
+          !(error instanceof LinkContainmentRefusal) &&
+          !(error instanceof LinkRateRefusal)
+        ) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

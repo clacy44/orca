@@ -145,3 +145,57 @@ export function refuseIfQuarantined(
     }
   )
 }
+
+// S10-16 C5, R27/R27.1/R27.2 (Ruling 23 Addendum 3, coordinator note on the C4/C4a review): the
+// per-link inbound rate limiter for `federatedSend`/`federatedAsk`. Runs BEFORE
+// `refuseIfQuarantined` on every caller (R27.2's ordering: rate -> containment -> identity shape
+// -> recipient), and — same shape as `refuseIfQuarantined`'s own audit meter — the refusal fires
+// on EVERY over-cap call while its `agent_audit` WRITE is metered to `limit: 1` per
+// `LINK_BINDING_RATE_WINDOW_MS` per verb per link, so a caller driving this past its cap cannot
+// reopen the C3 F1 undeletable-table audit DoS. `LinkRateRefusal` is a marker subclass, exactly
+// like `LinkContainmentRefusal`: the caller's own outer catch excludes it from ITS OWN
+// per-refusal audit write (this gate already wrote — or, under its own meter, deliberately
+// withheld — the row).
+export class LinkRateRefusal extends OrchestrationError {}
+
+export function refuseIfRateLimited(
+  runtime: OrcaRuntimeService,
+  pairedDeviceId: string,
+  verb: string,
+  limit: number
+): void {
+  const db = runtime.getOrchestrationDb()
+  const rate = db.checkAndBumpRate({
+    subjectKey: `fed:${verb}:${pairedDeviceId}`,
+    verb,
+    windowMs: LINK_BINDING_RATE_WINDOW_MS,
+    limit
+  })
+  if (rate.allowed) {
+    return
+  }
+  const auditGate = db.checkAndBumpRate({
+    subjectKey: `linkbind:${pairedDeviceId}`,
+    verb: `linkRateAudit:${verb}`,
+    windowMs: LINK_BINDING_RATE_WINDOW_MS,
+    limit: 1
+  })
+  if (auditGate.allowed) {
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: pairedDeviceId,
+      verb: 'federatedLink',
+      outcome: 'rate_limited',
+      reasonCode: verb
+    })
+  }
+  throw new LinkRateRefusal(
+    'rate_limited',
+    `This link has exceeded its inbound ${verb} rate on this host.`,
+    {
+      retryAfterMs: rate.retryAfterMs,
+      nextSteps: ['wait for the current window to close, then resend']
+    }
+  )
+}

@@ -32,6 +32,15 @@ import { clampOrchestrationAskTimeoutMs } from '../../../../shared/orchestration
 import { ORCHESTRATION_GATE_METHODS } from './orchestration-gates'
 import { resolveRunScope } from './orchestration-run-scope'
 import {
+  enqueueForeignReply,
+  noReturnRoute,
+  healthForNoReturnRoute
+} from './orchestration-reply-foreign'
+import {
+  getRoutableLinkBinding,
+  localEvidenceUnavailable
+} from '../../orchestration/link-binding-routable'
+import {
   assertPeerMailDestinationAllowed,
   assertRemoteRunMailboxCaller,
   isRemoteRunMailboxRequest,
@@ -235,7 +244,9 @@ const ReplyParams = z.object({
   from: OptionalString,
   run: OptionalString,
   remoteRunMailbox: OptionalBoolean,
-  acknowledgeGate: OptionalBoolean
+  acknowledgeGate: OptionalBoolean,
+  // S10-16 R16.2: additive, optional — asserts the proven destination's own name; narrows only.
+  expectHost: OptionalString
 })
 
 const InboxParams = z.object({
@@ -2080,6 +2091,61 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             'A reply to a foreign-origin message must be issued locally.'
           )
         }
+        // R16 (v6, lifecycle M6): commit against the last proven binding row, never dial —
+        // enqueueForeignReply is a durable intent, gated by the live routability predicate on
+        // every pump attempt, never on this refusal path.
+        const foreignReplyAttestedCaller =
+          orchestrationCompatibilityCallerAuthority?.terminalHandle === original.to_handle
+            ? orchestrationCompatibilityCallerAuthority
+            : undefined
+        const foreignReplySenderPaneKey = foreignReplyAttestedCaller
+          ? foreignReplyAttestedCaller.paneKey
+          : orchestrationCompatibilityCallerAuthority
+            ? undefined
+            : (runtime.getTerminalPaneKey(original.to_handle) ?? undefined)
+        if (db.isPeerLinkQuarantined(original.peer_link_device_id)) {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: original.peer_link_device_id,
+            verb: 'reply',
+            outcome: 'no_return_route',
+            reasonCode: 'quarantined'
+          })
+          throw noReturnRoute(original, 'quarantined')
+        }
+        if (original.peer_agent_id == null) {
+          throw noReturnRoute(original, 'sender_unverified')
+        }
+        const binding = getRoutableLinkBinding(db, runtime, original.peer_link_device_id)
+        if (binding) {
+          return enqueueForeignReply({
+            db,
+            runtime,
+            original,
+            binding,
+            params,
+            replySenderPaneKey: foreignReplySenderPaneKey,
+            replySenderHostId: replyHostId
+          })
+        }
+        // v6 (lifecycle M6): L4's guarantee applies to a NEW reply too — a local file fault on
+        // THIS host must never refuse a reply the DB-resident route triple could still commit.
+        if (localEvidenceUnavailable(runtime)) {
+          const last = db.getPeerLinkBinding(original.peer_link_device_id)
+          if (last && last.state === 'confirmed' && last.revokedAt == null) {
+            return enqueueForeignReply({
+              db,
+              runtime,
+              original,
+              binding: last,
+              params,
+              replySenderPaneKey: foreignReplySenderPaneKey,
+              replySenderHostId: replyHostId,
+              heldCause: 'local_evidence_unavailable'
+            })
+          }
+        }
         db.writeAgentAudit({
           agentId: null,
           actorPaneKey: null,
@@ -2088,16 +2154,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           outcome: 'no_return_route',
           reasonCode: null
         })
-        throw new OrchestrationError(
-          'no_return_route',
-          `Message ${original.id} arrived from another host; this host has no automatic route back to its sender.`,
-          {
-            nextSteps: [
-              'orca agents ask <name>@<host> "…" — start a fresh cross-host thread with the sender instead',
-              'orca environment list'
-            ]
-          }
-        )
+        throw noReturnRoute(original, healthForNoReturnRoute(db, original.peer_link_device_id))
       }
 
       db.markAsRead([original.id])

@@ -147,6 +147,46 @@ export function holdReplyOutboxItem(
   ).run(now, nextAttemptAfter, lastErrorCode, id)
 }
 
+// R18.5: a transport-shaped outcome (an RPC was actually attempted and failed) retries — back to
+// 'queued' with the backoff curve advanced and `consecutive_failures` bumped. Distinct from
+// holdReplyOutboxItem (a PRE-DIAL check that never touches consecutive_failures) and from
+// settleReplyOutboxItem (a terminal state). Guarded `state='sending' -> 'queued'` (P18/R14.3).
+export function retryReplyOutboxItem(
+  db: Database.Database,
+  id: string,
+  nextAttemptAfter: number,
+  consecutiveFailures: number,
+  lastErrorCode: string | null,
+  lastError: string | null
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE peer_reply_outbox
+          SET state = 'queued', lease_expires_at = NULL, consecutive_failures = ?,
+              next_attempt_after = ?, last_error_code = ?, last_error = ?
+        WHERE id = ? AND state = 'sending'`
+    )
+    .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, id)
+  return result.changes === 1
+}
+
+// R18.4(a)/L4: the local-evidence hold — deliberately NOT holdReplyOutboxItem. `first_held_at`
+// is left exactly as it was (never COALESCEd to `now`), so REPLY_OUTBOX_HOLD_MAX_MS's clock
+// never starts while this host cannot read its own registry/environment store (test 73). Guarded
+// `state='sending' -> 'queued'` for the same P18/R14.3 reason as holdReplyOutboxItem.
+export function holdReplyOutboxItemLocalEvidence(
+  db: Database.Database,
+  id: string,
+  nextAttemptAfter: number
+): void {
+  db.prepare(
+    `UPDATE peer_reply_outbox
+        SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
+            next_attempt_after = ?, last_error_code = 'local_evidence_unavailable'
+      WHERE id = ? AND state = 'sending'`
+  ).run(nextAttemptAfter, id)
+}
+
 // R18.4(b): rewrite the route onto a freshly re-bound link, keyed by the retarget peer key.
 export function retargetReplyOutboxItem(
   db: Database.Database,

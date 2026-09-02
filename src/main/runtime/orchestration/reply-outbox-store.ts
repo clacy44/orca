@@ -189,6 +189,18 @@ export function getReplyOutboxItem(db: Database.Database, id: string): ReplyOutb
   return row ? fromSqlRow(row) : null
 }
 
+// R19.2/PART 0.7: `sent --id` keys its relay-branch lookup on the SENDER's own local reply row —
+// `local_message_id` is UNIQUE (R14 DDL) so this is a lookup, not a second branch.
+export function getReplyOutboxItemByLocalMessageId(
+  db: Database.Database,
+  localMessageId: string
+): ReplyOutboxRow | null {
+  const row = db
+    .prepare('SELECT * FROM peer_reply_outbox WHERE local_message_id = ?')
+    .get(localMessageId) as ReplyOutboxSqlRow | undefined
+  return row ? fromSqlRow(row) : null
+}
+
 export function listReplyOutbox(db: Database.Database, linkDeviceId?: string): ReplyOutboxRow[] {
   const rows = (
     linkDeviceId === undefined
@@ -221,6 +233,26 @@ export function cancelQueuedReplyOutbox(db: Database.Database, now: number): num
     )
     .run(CANCELLED_LOCAL_RESET_CODE, now)
   return Number(result.changes)
+}
+
+// R19.3/P2: the per-item half of the authorship-unconfirmed notice's edge trigger — set once,
+// never cleared (an item settles once; a fresh advisory needs a fresh item).
+export function markReplyOutboxNotified(db: Database.Database, id: string, now: number): void {
+  db.prepare('UPDATE peer_reply_outbox SET notified_at = ? WHERE id = ?').run(now, id)
+}
+
+// R18.7/pump idle scheduling: the earliest a queued item becomes claimable — a NULL
+// `next_attempt_after` is immediately claimable (claimNextReplyOutboxItem's own WHERE clause
+// treats NULL that way), so it wins the MIN unconditionally; null return means nothing is queued
+// at all (an empty outbox, or one whose every row is held with a future clock, is instead caught
+// by that row's own next_attempt_after value, never by this returning null).
+export function nextReplyOutboxWakeAt(db: Database.Database): number | null {
+  const row = db
+    .prepare(
+      `SELECT MIN(COALESCE(next_attempt_after, 0)) AS t FROM peer_reply_outbox WHERE state = 'queued'`
+    )
+    .get() as { t: number | null }
+  return row.t
 }
 
 // A-arith(8): the outbox backoff curve, deterministic core (jitter is applied by the pump/C5 at
