@@ -157,6 +157,7 @@ import {
 } from './orchestration/worker-terminal-process-liveness'
 import { rollbackWorkspaceSessionAfterFailedAsyncWrite } from './workspace-session-failed-write-rollback'
 import { OrchestrationError } from './orchestration/orchestration-error'
+import { HostIdGrammarError } from './orchestration/orchestration-id-grammar'
 import {
   planLegacyWorkerTerminalRecovery,
   type LegacyWorkerTerminalRecoveryPlan
@@ -5139,14 +5140,14 @@ export class OrcaRuntimeService {
           // orca-runtime.ts is the file exempted from the max-lines ratchet
           // (config/max-lines-baseline.txt:141), unlike federation-sync.ts. Effect-free: the
           // throw already unwound before importFederatedRelayItem ran for the offending item.
-          // S10-20 review F4: gate on the throw site's own marker (orchestration-id-grammar.ts),
-          // not on the bare error code -- a peer's own invalid_argument rethrown verbatim by
-          // throwOrchestrationWorkerServerError, and this file's own JSON/shape/incomplete
-          // throws (federation-sync.ts), share the same code but are not id refusals.
-          const isIdGrammarRefusal =
-            error instanceof OrchestrationError &&
-            error.code === 'invalid_argument' &&
-            (error.data as { reasonCode?: string } | undefined)?.reasonCode === 'malformed_relay_id'
+          // S10-20 review F11: gate on the throw site's own error CLASS
+          // (HostIdGrammarError, orchestration-id-grammar.ts), not on `data.reasonCode` -- that
+          // field is peer-forgeable (runtime-rpc-envelope.ts's failure envelope types `data` as
+          // `z.unknown()` and throwOrchestrationWorkerServerError:5103 rethrows it verbatim into
+          // a plain OrchestrationError), so a peer naming `reasonCode: 'malformed_relay_id'` in
+          // its own failure response could satisfy a data-keyed gate. A plain OrchestrationError
+          // can never be an instanceof this subclass, so identity is unforgeable by construction.
+          const isIdGrammarRefusal = error instanceof HostIdGrammarError
           if (isIdGrammarRefusal) {
             db.writeAgentAudit({
               agentId: null,
@@ -34244,6 +34245,11 @@ export class OrcaRuntimeService {
       // (the probe itself) before routing here — re-running the probe would risk re-arming
       // another deferred continuation instead of delivering.
       skipAbsenceProbe?: boolean
+      // S10-20 review F12: set ONLY by the mid-turn re-entry continuation below (this method's
+      // own async foreground-confirm branch, deliverPendingMessages), after a fresh
+      // confirmForegroundProcess read already ran for this push — tells the deliverPendingMessages
+      // call at the bottom of this method not to re-arm that same async scan, which would loop.
+      foregroundConfirmed?: boolean
     }
   ): void {
     const waitText = buildTerminalWaitText(
@@ -35903,6 +35909,28 @@ export class OrcaRuntimeService {
           ) {
             this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
             return
+          }
+          // S10-20 review F12: !authorizedIdle means this push runs on
+          // attemptMidTurnClaudeDelivery's busy-Claude-pane authorization (S10-15 F9), not the
+          // idle edge — and that path carries its OWN hard pre-write gate (the modal/trust-prompt
+          // check at attemptMidTurnClaudeDelivery), which the confirmForegroundProcess scan above
+          // ran concurrently with, not before. A modal that opened inside that async window would
+          // otherwise reach the write below unchecked and get auto-answered. Route back through
+          // the gate so it re-runs the modal check immediately before the write, exactly like the
+          // absence-probe continuation does above. foregroundConfirmed: true (added to
+          // attemptMidTurnClaudeDelivery's options below) tells the re-entrant
+          // deliverPendingMessages call that the foreground scan already ran, so it does not loop
+          // back into this branch.
+          if (!authorizedIdle) {
+            const pty = this.ptysById.get(guardedPtyId)
+            if (pty && this.isClaudeCodePane(pty)) {
+              this.attemptMidTurnClaudeDelivery(current.target, pty, mailboxHandle, {
+                ...options,
+                skipAbsenceProbe: true,
+                foregroundConfirmed: true
+              })
+              return
+            }
           }
           this.deliverPendingMessages(current.target, {
             ...options,

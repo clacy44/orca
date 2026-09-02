@@ -10,7 +10,10 @@ import {
 } from '../../orchestration/federation-lifecycle-settlement'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, requiredString } from '../schemas'
-import { requireHostMessageId } from '../../orchestration/orchestration-id-grammar'
+import {
+  HostIdGrammarError,
+  requireHostMessageId
+} from '../../orchestration/orchestration-id-grammar'
 
 const FederationPullParams = z.object({
   dispatchId: requiredString('Missing Dispatch ID'),
@@ -217,16 +220,17 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
               payload: item.payload
             })
           } catch (error) {
-            // S10-20 review F5: only the id-grammar refusal (marked at the throw site, F4) writes
-            // this row — request_mismatch and body_gate_refused already have their own audit, and
-            // a plain JSON/shape/incomplete parse failure is not an id refusal at all. The only
+            // S10-20 review F11: only the id-grammar refusal (HostIdGrammarError, thrown at
+            // orchestration-id-grammar.ts) writes this row — request_mismatch and
+            // body_gate_refused already have their own audit, and a plain JSON/shape/incomplete
+            // parse failure is not an id refusal at all. Keying on the error class rather than
+            // `data.reasonCode` matters here too: this catch is currently reachable only by
+            // errors that originate locally inside importFederatedControlMessage, but that is an
+            // unstated invariant a future refactor could break silently, so it takes the same
+            // unforgeable-by-construction key as the F11 gate in orca-runtime.ts. The only
             // requireHost* check reachable inside importFederatedControlMessage is the thread id
             // (via requireOptionalThreadId), so a marked error here is always malformed_thread_id.
-            const isIdGrammarRefusal =
-              error instanceof OrchestrationError &&
-              error.code === 'invalid_argument' &&
-              (error.data as { reasonCode?: string } | undefined)?.reasonCode ===
-                'malformed_relay_id'
+            const isIdGrammarRefusal = error instanceof HostIdGrammarError
             if (isIdGrammarRefusal) {
               db.writeAgentAudit({
                 agentId: null,

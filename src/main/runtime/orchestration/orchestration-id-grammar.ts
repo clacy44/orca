@@ -25,6 +25,14 @@
 // construction as the MESSAGE_ID case, same unreachable-by-peer-input guarantee (fact (b) above).
 import { OrchestrationError } from './orchestration-error'
 
+// S10-20 review F11: a distinct subclass so the audit gate can key on identity (unforgeable —
+// `throwOrchestrationWorkerServerError` at orca-runtime.ts:5103 constructs a plain
+// `OrchestrationError`, never this subclass) instead of on `data.reasonCode`, which a peer's own
+// failure envelope can carry verbatim across the wire (runtime-rpc-envelope.ts:35-41's `data` is
+// `z.unknown()`). `data.reasonCode` is kept for CLI display/logging only — it must never be the
+// thing a gate decides on.
+export class HostIdGrammarError extends OrchestrationError {}
+
 export const HOST_MESSAGE_ID_RE = /^(?:msg|relay)_[0-9a-f]{12}$/
 export const HOST_THREAD_ID_RE = /^(?:thr|msg|relay)_[0-9a-f]{12}$/
 
@@ -48,7 +56,7 @@ export function isHostThreadId(value: unknown): value is string {
 /** Typed, effect-free refusal. Callers write the audit row (they own the actor identity). */
 export function requireHostMessageId(value: unknown, field: string): string {
   if (!isHostMessageId(value)) {
-    throw new OrchestrationError(
+    throw new HostIdGrammarError(
       'invalid_argument',
       `The relayed ${field} is not a valid message id.`,
       {
@@ -67,7 +75,7 @@ export function requireHostMessageId(value: unknown, field: string): string {
 
 export function requireHostThreadId(value: unknown, field: string): string {
   if (!isHostThreadId(value)) {
-    throw new OrchestrationError(
+    throw new HostIdGrammarError(
       'invalid_argument',
       `The relayed ${field} is not a valid thread id.`,
       {

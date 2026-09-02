@@ -136,7 +136,12 @@ function setupGuardHarness(confirmForegroundProcess?: (ptyId: string) => Promise
   const handle = internals(runtime).issuePtyHandle(pty)
   const stub = makeOrchestrationDbStub(() => handle)
   runtime.setOrchestrationDb(stub.db as never)
-  return { runtime, write, ptyId, handle, stub }
+  return { runtime, write, ptyId, handle, stub, pty }
+}
+
+/** A busy (never-idle) title — mirrors s10-15-midturn-delivery.test.ts's driveWorkingTitle. */
+function driveWorkingTitle(runtime: OrcaRuntimeService, ptyId: string): void {
+  runtime.onPtyData(ptyId, '\x1b]0;Claude working\x07', 100)
 }
 
 describe('S10-20 §3: delivery foreground guard', () => {
@@ -408,5 +413,63 @@ describe('S10-20 §3: delivery foreground guard', () => {
 
     // The originating handle's confirm resolves and delivers.
     expect(pointerCalls(write, ptyId).length).toBeGreaterThan(0)
+  })
+
+  // S10-20 review F12: the mid-turn (busy Claude pane) continuation must re-run
+  // attemptMidTurnClaudeDelivery's own modal check immediately before the write, not rely on
+  // the modal state observed before the async confirmForegroundProcess scan started — a modal
+  // that opens inside that window must not be auto-answered.
+  it('T-S20-39 (review F12): a modal that opens during the mid-turn foreground scan is not answered', async () => {
+    let resolveConfirm!: (value: string | null) => void
+    const { runtime, write, ptyId, handle, stub, pty } = setupGuardHarness(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveConfirm = resolve
+        })
+    )
+    pty.launchAgent = 'claude'
+    driveWorkingTitle(runtime, ptyId)
+    stub.insert('mid-turn foreground-scan modal race')
+
+    // Busy Claude pane, no modal yet: routes through attemptMidTurnClaudeDelivery, which finds
+    // no modal and hands off to deliverPendingMessages — arming the async foreground confirm
+    // with authorizedIdle === false (F12's !authorizedIdle branch).
+    runtime.deliverPendingMessagesForHandle(handle)
+    await flush()
+    expect(write).not.toHaveBeenCalled()
+
+    // A permission/trust prompt opens inside the confirm window.
+    runtime.onPtyData(ptyId, 'Do you trust the files in this folder?\r\n', 200)
+    resolveConfirm('claude')
+    await flush()
+
+    expect(write).not.toHaveBeenCalled()
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(
+      'blocked_modal'
+    )
+  })
+
+  it('T-S20-40 (review F12): the normal mid-turn path still delivers exactly once, no double-write', async () => {
+    let resolveConfirm!: (value: string | null) => void
+    const { runtime, write, ptyId, handle, stub, pty } = setupGuardHarness(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveConfirm = resolve
+        })
+    )
+    pty.launchAgent = 'claude'
+    driveWorkingTitle(runtime, ptyId)
+    stub.insert('mid-turn foreground-scan clean path')
+
+    runtime.deliverPendingMessagesForHandle(handle)
+    await flush()
+    expect(write).not.toHaveBeenCalled()
+
+    // No modal appears; the confirm resolves normally.
+    resolveConfirm('claude')
+    await flush()
+
+    expect(pointerCalls(write, ptyId)).toHaveLength(1)
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)).toBeUndefined()
   })
 })

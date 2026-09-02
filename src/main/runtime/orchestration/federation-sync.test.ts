@@ -490,6 +490,61 @@ describe('federation relay acknowledgments', () => {
     expect(audits).toHaveLength(0)
   })
 
+  // S10-20 review F11: a peer that forges the id-grammar throw site's OWN marker in its failure
+  // envelope (`data.reasonCode: 'malformed_relay_id'`) must not make this host write an audit row
+  // accusing that peer of an id-grammar refusal it did not commit. The gate must key on the
+  // HostIdGrammarError class (unforgeable — throwOrchestrationWorkerServerError constructs a
+  // plain OrchestrationError from wire data, never the subclass), never on `data.reasonCode`.
+  it('T-S20-38 (review F11): a peer-forged malformed_relay_id marker writes no audit row', async () => {
+    const federated = {
+      environment_id: 'environment_windows',
+      environment_name: 'windows',
+      peer_fingerprint: 'windows_peer_fingerprint',
+      remote_runtime_epoch: 'remote_epoch_1',
+      protocol_version: 3,
+      to_home_imported_sequence: 0,
+      to_home_acknowledged_sequence: 0
+    }
+    const audits: unknown[] = []
+    const runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb({
+      getFederatedDispatch: () => federated,
+      getDispatchContextById: () => ({ run_id: 'run_home', task_id: 'task_home' }),
+      importFederatedRelayItem: () => {
+        throw new Error('must not be reached')
+      },
+      writeAgentAudit: (params: unknown) => {
+        audits.push(params)
+      },
+      getWorkerDispatch: () => ({ state: 'ready' }),
+      listPendingFederationRelay: () => [],
+      getFederatedDispatchSyncHealth: () => null,
+      recordFederatedDispatchSyncHealth: () => {},
+      isFederatedDispatchRelayEligible: () => true
+    } as never)
+    vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockReturnValue({
+      peerFingerprint: federated.peer_fingerprint
+    } as never)
+    vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+    vi.spyOn(runtime, 'callOrchestrationWorkerServer').mockImplementation(
+      async (_environmentId, method) => {
+        if (method === 'orchestration.federationPull') {
+          // Simulates throwOrchestrationWorkerServerError rethrowing a peer's own failure
+          // envelope verbatim — data is peer-supplied and peer-controlled end to end.
+          throw new OrchestrationError('invalid_argument', 'anything', {
+            reasonCode: 'malformed_relay_id'
+          })
+        }
+        throw new Error(`Unexpected method ${method}`)
+      }
+    )
+
+    await expect(
+      runtime.syncOrchestrationFederatedDispatch('dispatch_remote')
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(audits).toHaveLength(0)
+  })
+
   it('acknowledges only new progress until remote runtime identity changes', async () => {
     const { runtime, remoteCall, advanceCursor, restartRemote } = createIdleSyncHarness()
     const ackCalls = () =>
