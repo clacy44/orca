@@ -217,17 +217,26 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
               payload: item.payload
             })
           } catch (error) {
-            db.writeAgentAudit({
-              agentId: null,
-              actorPaneKey: null,
-              actorHostId: authenticatedCallerFingerprint ?? null,
-              verb: 'federationImport',
-              outcome: 'invalid_argument',
-              reasonCode:
-                error instanceof OrchestrationError && error.code === 'invalid_argument'
-                  ? 'malformed_thread_id'
-                  : 'malformed_message_id'
-            })
+            // S10-20 review F5: only the id-grammar refusal (marked at the throw site, F4) writes
+            // this row — request_mismatch and body_gate_refused already have their own audit, and
+            // a plain JSON/shape/incomplete parse failure is not an id refusal at all. The only
+            // requireHost* check reachable inside importFederatedControlMessage is the thread id
+            // (via requireOptionalThreadId), so a marked error here is always malformed_thread_id.
+            const isIdGrammarRefusal =
+              error instanceof OrchestrationError &&
+              error.code === 'invalid_argument' &&
+              (error.data as { reasonCode?: string } | undefined)?.reasonCode ===
+                'malformed_relay_id'
+            if (isIdGrammarRefusal) {
+              db.writeAgentAudit({
+                agentId: null,
+                actorPaneKey: null,
+                actorHostId: authenticatedCallerFingerprint ?? null,
+                verb: 'federationImport',
+                outcome: 'invalid_argument',
+                reasonCode: 'malformed_thread_id'
+              })
+            }
             throw error
           }
           imported += controlMessage.imported ? 1 : 0

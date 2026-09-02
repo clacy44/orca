@@ -2,6 +2,7 @@ import type { MessageRow } from './types'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { sanitizeDirectoryText } from './agent-name-sanitizer'
 import { sanitizeMessageText } from '../../../shared/message-text'
+import { HOST_ID_MAX_LENGTH } from './orchestration-id-grammar'
 
 // Why generous, not the write-side MESSAGE_BODY_MAX_LENGTH/SUBJECT_MAX_LENGTH
 // (message-gate-writer.ts): these render-side sanitizer calls exist for defense-in-depth against
@@ -175,8 +176,10 @@ const POINTER_ROLE_MAX_LENGTH = 40
 const POINTER_NAME_MAX_LENGTH = 32
 
 // S10-20 (Ruling 22 scope 2): ids render at the host grammar's own length; a longer value is not a
-// host id at all, so truncating it is the correct render.
-const POINTER_ID_MAX_LENGTH = 16
+// host id at all, so truncating it is the correct render. S10-20 review F3: bound is the grammar's
+// own HOST_ID_MAX_LENGTH (18, the `relay_` construction) — the prior literal 16 truncated a valid
+// relay_ id mid-string.
+const POINTER_ID_MAX_LENGTH = HOST_ID_MAX_LENGTH
 // Ruling 22 fixes 64, NOT the 32 of POINTER_NAME_MAX_LENGTH: a federation from_handle is
 // `remote:<link>:<agt_xxxxxxxxxxxx>` (federated-sender-identity.ts:236) or `dispatch:<id>`, which 32
 // would cut mid-identifier and make the sender unidentifiable to the reader.

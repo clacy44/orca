@@ -5139,7 +5139,15 @@ export class OrcaRuntimeService {
           // orca-runtime.ts is the file exempted from the max-lines ratchet
           // (config/max-lines-baseline.txt:141), unlike federation-sync.ts. Effect-free: the
           // throw already unwound before importFederatedRelayItem ran for the offending item.
-          if (error instanceof OrchestrationError && error.code === 'invalid_argument') {
+          // S10-20 review F4: gate on the throw site's own marker (orchestration-id-grammar.ts),
+          // not on the bare error code -- a peer's own invalid_argument rethrown verbatim by
+          // throwOrchestrationWorkerServerError, and this file's own JSON/shape/incomplete
+          // throws (federation-sync.ts), share the same code but are not id refusals.
+          const isIdGrammarRefusal =
+            error instanceof OrchestrationError &&
+            error.code === 'invalid_argument' &&
+            (error.data as { reasonCode?: string } | undefined)?.reasonCode === 'malformed_relay_id'
+          if (isIdGrammarRefusal) {
             db.writeAgentAudit({
               agentId: null,
               actorPaneKey: null,
@@ -35857,7 +35865,15 @@ export class OrcaRuntimeService {
     // fresh read goes through the async confirm-and-continue below.
     if (!options.foregroundConfirmed && this.ptyController?.confirmForegroundProcess) {
       const guardedPtyId = ptyId
+      // S10-20 review F1: capture the gate that authorized THIS push before arming the async
+      // confirm; the continuation below must re-verify it still holds, not just ptyId/writable.
+      const authorizedIdle =
+        resolved.lastAgentStatus === 'idle' && resolved.lastAgentStatusObservedLive
       if (this.foregroundGuardPendingPtyIds.has(guardedPtyId)) {
+        // S10-20 review F2: parity with the flight-park mechanism this guard bypasses (no
+        // flight is registered here) — a second/third mailbox on the same pty must park as a
+        // withheld attempt, never drop silently. scheduleSlowMailboxRetry re-enters this handle.
+        this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
         return
       }
       this.foregroundGuardPendingPtyIds.add(guardedPtyId)
@@ -35875,6 +35891,17 @@ export class OrcaRuntimeService {
           const current = this.resolveLiveDeliveryTarget(target)
           if (!current || current.ptyId !== guardedPtyId || !current.writable) {
             this.recordWithheldDelivery(mailboxHandle, 'no_live_pane')
+            return
+          }
+          // S10-20 review F1: the caller's idle authorization must still hold. Do not require
+          // idle unconditionally here — attemptMidTurnClaudeDelivery's busy-Claude-pane path
+          // (S10-15 F9) is legitimate and must keep working; only re-check when THIS push was
+          // originally authorized on the idle edge.
+          if (
+            authorizedIdle &&
+            !(current.lastAgentStatus === 'idle' && current.lastAgentStatusObservedLive)
+          ) {
+            this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
             return
           }
           this.deliverPendingMessages(current.target, {

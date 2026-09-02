@@ -663,9 +663,15 @@ describe('orchestration federation control mail', () => {
         .prepare(
           "SELECT * FROM agent_audit WHERE verb = 'federationImport' AND outcome = 'invalid_argument'"
         )
-        .get()
+        .get() as { reason_code: string } | undefined
       expect(audit).toBeTruthy()
+      // S10-20 review F5: tightened — assert the actual reason_code value, not just row existence.
+      expect(audit?.reason_code).toBe('malformed_message_id')
     })
+
+    // S10-20 review F5/F6/F8 tests (T-S20-36/37/38) live in
+    // orchestration-federation-relay-audit-marker.test.ts — kept out of this file to stay under
+    // the 800-line test-file budget (Gate-1: no baseline/budget change).
 
     // Chair ruling (S10-20 escalation finding 1): MESSAGE_ID role widened to accept relay_ ids
     // (db.ts:6705 generateId('relay')) since item.message_id on the wire is, in production, the

@@ -205,6 +205,20 @@ describe('formatMessagePointer', () => {
     )
   })
 
+  // S10-20 review F8: the `Number(sequence) || 0` coercion (formatter.ts) exists for exactly a
+  // non-numeric sequence value — no prior test injected one.
+  it('T-S20-32 (review F8): a non-numeric sequence coerces to 0 in the footer, not NaN', () => {
+    const msg = makeMessage({
+      from_handle: 'term_backend',
+      subject: 'schema freeze',
+      thread_id: 'th_123',
+      sequence: 'not-a-number' as unknown as number
+    })
+    const result = formatMessagePointer([msg])
+    expect(result).toContain('Read: orca agents thread --id th_123 --since 0')
+    expect(result).not.toContain('NaN')
+  })
+
   it('renders "thread:none" when the message has no thread', () => {
     const msg = makeMessage({ thread_id: null })
     expect(formatMessagePointer([msg])).toContain('thread:none')
@@ -473,6 +487,20 @@ describe('formatMessagePointer', () => {
     expect(formatMessagePointer([askWithMsgThread])).toContain(
       'Answer: orca agents reply --thread msg_0123456789ab --body "..."'
     )
+  })
+
+  // S10-20 review F3: an 18-char relay_ id (the host grammar's own longer construction,
+  // orchestration-id-grammar.ts) must render whole, not truncated to the old 16-char clamp.
+  it('T-S20-14 (review F3): a well-formed 18-char relay_ thread id renders whole, not truncated', () => {
+    const relayThreaded = makeMessage({
+      from_handle: 'term_backend',
+      subject: 'ok',
+      thread_id: 'relay_0123456789ab'
+    })
+    expect(relayThreaded.thread_id).toHaveLength(18)
+    const result = formatMessagePointer([relayThreaded])
+    expect(result).toContain('thread:relay_0123456789ab')
+    expect(result).toContain('Read: orca agents thread --id relay_0123456789ab --since')
   })
 
   it('T-S20-15: a sensitive-thread pointer with a hostile thread id renders inert (R2)', () => {

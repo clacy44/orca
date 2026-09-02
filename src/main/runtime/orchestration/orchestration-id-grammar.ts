@@ -28,6 +28,10 @@ import { OrchestrationError } from './orchestration-error'
 export const HOST_MESSAGE_ID_RE = /^(?:msg|relay)_[0-9a-f]{12}$/
 export const HOST_THREAD_ID_RE = /^(?:thr|msg|relay)_[0-9a-f]{12}$/
 
+// S10-20 review F3: the longer of the two constructions this grammar accepts (`relay_` + 12 hex
+// = 18 chars) — the single render-clamp bound so a legitimate id is never truncated in a pointer.
+export const HOST_ID_MAX_LENGTH = 18
+
 export function isHostMessageId(value: unknown): value is string {
   return typeof value === 'string' && HOST_MESSAGE_ID_RE.test(value)
 }
@@ -48,6 +52,10 @@ export function requireHostMessageId(value: unknown, field: string): string {
       'invalid_argument',
       `The relayed ${field} is not a valid message id.`,
       {
+        // S10-20 review F4/F5: marks the refusal as an id-grammar refusal at the throw site, so
+        // callers can write an id-refusal audit row only when THIS marker is present, never by
+        // sniffing the error code (which a peer's own invalid_argument rethrow would also match).
+        reasonCode: 'malformed_relay_id',
         nextSteps: [
           'this indicates a version-mismatched or malformed peer relay — update Orca on the sending host'
         ]
@@ -63,6 +71,7 @@ export function requireHostThreadId(value: unknown, field: string): string {
       'invalid_argument',
       `The relayed ${field} is not a valid thread id.`,
       {
+        reasonCode: 'malformed_relay_id',
         nextSteps: [
           'this indicates a version-mismatched or malformed peer relay — update Orca on the sending host'
         ]

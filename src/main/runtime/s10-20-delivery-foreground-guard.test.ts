@@ -24,6 +24,10 @@ type RuntimeInternals = {
   ) => { launchAgent: string | null; connected: boolean }
   issuePtyHandle: (pty: unknown) => string
   withheldDeliveryAttemptsByHandle: Map<string, { at: number; reason: string }>
+  deliverPendingMessages: (
+    target: { deliveryKind: 'pty'; ptyId: string },
+    options?: { mailboxHandle?: string }
+  ) => void
 }
 
 function internals(runtime: OrcaRuntimeService): RuntimeInternals {
@@ -296,5 +300,113 @@ describe('S10-20 §3: delivery foreground guard', () => {
     const payload = pointerWrite![1] as string
     expect(payload).not.toContain('\r')
     expect(payload.split('\n').filter((l) => l.length > 0)).toHaveLength(2)
+  })
+
+  // S10-20 review F1: the caller's live-idle authorization must still hold at continuation
+  // time, not just ptyId/writable — an agent that becomes busy inside the confirm window is
+  // not typed into.
+  it('T-S20-30 (review F1): a pane that goes busy inside the confirm window is not typed into', async () => {
+    let resolveConfirm!: (value: string | null) => void
+    const { runtime, write, ptyId, handle, stub } = setupGuardHarness(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveConfirm = resolve
+        })
+    )
+    driveIdleTitle(runtime, ptyId)
+    stub.insert('pointer hygiene busy-during-confirm')
+    runtime.deliverPendingMessagesForHandle(handle)
+    await flush()
+
+    // The agent starts a turn while the fresh foreground confirm is still in flight.
+    runtime.onPtyData(ptyId, '\x1b]0;Codex working\x07', 200)
+    resolveConfirm('claude')
+    await flush()
+
+    expect(write).not.toHaveBeenCalled()
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(
+      'pane_busy'
+    )
+  })
+
+  // S10-20 review F2: the re-entrancy dedupe must park every other mailbox on the same pty as
+  // a withheld attempt, never drop it silently — parity with the flight-park mechanism this
+  // guard bypasses (no flight is registered while the confirm is in flight).
+  it('T-S20-31 (review F2): three mailboxes on one pty during a confirm in flight all end delivered or withheld, none dropped', async () => {
+    let resolveConfirm!: (value: string | null) => void
+    const { runtime, write, ptyId, handle, stub } = setupGuardHarness(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveConfirm = resolve
+        })
+    )
+    driveIdleTitle(runtime, ptyId)
+    const runHandle = 'run:run_test'
+    const dispatchHandle = 'dispatch:dispatch_test'
+    stub.insert('pointer hygiene mailbox 1')
+    stub.rows.push(
+      {
+        id: 'msg_run_00000001',
+        run_id: 'run_test',
+        from_handle: 'term_sender',
+        to_handle: runHandle,
+        subject: 'run mailbox',
+        body: '',
+        type: 'status',
+        priority: 'normal',
+        thread_id: null,
+        payload: null,
+        read: 0,
+        sequence: 2,
+        created_at: 'now',
+        delivered_at: null,
+        sender_pane_key: null
+      },
+      {
+        id: 'msg_dispatch_0001',
+        run_id: 'run_test',
+        from_handle: 'term_sender',
+        to_handle: dispatchHandle,
+        subject: 'dispatch mailbox',
+        body: '',
+        type: 'status',
+        priority: 'normal',
+        thread_id: null,
+        payload: null,
+        read: 0,
+        sequence: 3,
+        created_at: 'now',
+        delivered_at: null,
+        sender_pane_key: null
+      }
+    )
+
+    // Mirrors deliverPendingMessagesForLeaf/ForPty: three synchronous deliverPendingMessages
+    // calls on one pty with three different mailbox handles. The first arms the guard; the
+    // other two must reach the dedupe branch.
+    runtime.deliverPendingMessagesForHandle(handle)
+    internals(runtime).deliverPendingMessages(
+      { deliveryKind: 'pty', ptyId },
+      { mailboxHandle: runHandle }
+    )
+    internals(runtime).deliverPendingMessages(
+      { deliveryKind: 'pty', ptyId },
+      { mailboxHandle: dispatchHandle }
+    )
+    await flush()
+
+    // The two mailboxes that hit the dedupe must be parked as withheld attempts, not dropped.
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(runHandle)?.reason).toBe(
+      'pane_busy'
+    )
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(dispatchHandle)?.reason).toBe(
+      'pane_busy'
+    )
+
+    resolveConfirm('claude')
+    await flush()
+
+    // The originating handle's confirm resolves and delivers.
+    expect(pointerCalls(write, ptyId).length).toBeGreaterThan(0)
   })
 })
