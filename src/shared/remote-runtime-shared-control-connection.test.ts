@@ -78,7 +78,7 @@ describe('RemoteRuntimeSharedControlConnection', () => {
     connection.close()
   })
 
-  it('preserves orchestration authority fields on shared-control requests', async () => {
+  it('strips the launch token and host stamp from shared-control requests and preserves the handle and pane key', async () => {
     const server = await createServer()
     const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
     const envelope = {
@@ -89,7 +89,8 @@ describe('RemoteRuntimeSharedControlConnection', () => {
       orchestrationCompatibilityEvidence: {
         terminalHandle: 'term-1',
         paneKey: 'pane-1',
-        launchToken: 'launch-1'
+        launchToken: 'launch-1',
+        host: 'forged-host'
       },
       id: 'forged-id',
       deviceToken: 'forged-token',
@@ -101,11 +102,15 @@ describe('RemoteRuntimeSharedControlConnection', () => {
 
     expect(server.requests).toContainEqual({
       ...envelope,
+      orchestrationCompatibilityEvidence: { terminalHandle: 'term-1', paneKey: 'pane-1' },
       id: expect.any(String),
       deviceToken: 'device-token',
       method: 'orchestration.federationPull',
       params: {}
     })
+    const sent = JSON.stringify(server.requests[0])
+    expect(sent).not.toContain('launch-1')
+    expect(sent).not.toContain('"host"')
     connection.close()
   })
 
