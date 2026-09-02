@@ -1,7 +1,11 @@
 import type { TuiAgent } from '../../../../shared/tui-agent'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
-import { assertPeerDispatchIds, clampPeerAttachTimeoutMs } from '../../runtime-peer-rpc-allowlist'
+import {
+  assertPeerDispatchIds,
+  assertPeerWorktreeMetadataBounded,
+  clampPeerAttachTimeoutMs
+} from '../../runtime-peer-rpc-allowlist'
 import { assertOrchestrationWorktreeCreationSupported } from './orchestration-folder-worktree-placement'
 import {
   appendFederationSetupEffect,
@@ -46,6 +50,17 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
         })
         if (idsAdmission.refused) {
           throw new OrchestrationError(idsAdmission.wireCode, idsAdmission.message)
+        }
+        // Ruling 24 addendum (h): enforce-before-mint — checked before any effect runs, same as
+        // the id grammar above.
+        const metadataAdmission = assertPeerWorktreeMetadataBounded({
+          name: params.name,
+          repo: params.repo,
+          displayName: params.displayName,
+          comment: params.comment
+        })
+        if (metadataAdmission.refused) {
+          throw new OrchestrationError(metadataAdmission.wireCode, metadataAdmission.message)
         }
       }
       if (params.worktree === 'current' || params.worktree === 'new-child') {
@@ -165,13 +180,13 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
             launch,
             terminalHandle,
             taskId: params.taskId,
-            effects
+            effects,
+            setFailedStage: (stage) => {
+              failedStage = stage
+            }
           })
           worktree = resolved.worktree
           terminalHandle = resolved.terminalHandle
-          if (resolved.failedStageOverride) {
-            failedStage = resolved.failedStageOverride
-          }
         }
         if (!worktree || !terminalHandle) {
           throw new Error('Federated worker topology did not resolve.')

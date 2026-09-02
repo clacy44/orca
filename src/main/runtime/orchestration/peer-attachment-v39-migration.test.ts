@@ -97,6 +97,118 @@ describe('v38 -> v39 peer attachment migration (C-7)', () => {
     raw.close()
   })
 
+  it('review finding 10: the CHECK-rebuild INSERT...SELECT column list actually runs against real v38 data — every column survives on multiple rows', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'orca-v39-rebuild-data-'))
+    dbPath = join(tempDir, 'orca.db')
+    db = new OrchestrationDb(dbPath)
+    db.close()
+    db = undefined
+
+    const raw = new Database(dbPath)
+    // The genuine PRE-v39 shape (old CHECK, no new columns) — mirrors the rollback test's DDL,
+    // but here the rebuild is left to actually SUCCEED so the data-copy path runs for real.
+    raw.exec(`
+      DROP INDEX IF EXISTS idx_rda_terminal_handle;
+      ALTER TABLE remote_dispatch_attachments RENAME TO remote_dispatch_attachments_v38shape;
+      CREATE TABLE remote_dispatch_attachments (
+        dispatch_id             TEXT PRIMARY KEY,
+        task_id                 TEXT NOT NULL,
+        home_peer_fingerprint   TEXT NOT NULL,
+        protocol_version        INTEGER NOT NULL DEFAULT 1,
+        runtime_epoch           TEXT NOT NULL,
+        capability_hash         TEXT,
+        pane_key                TEXT,
+        process_incarnation     TEXT,
+        state                   TEXT NOT NULL DEFAULT 'starting'
+          CHECK(state IN (
+            'starting', 'ready', 'start_unknown', 'failed', 'succeeded',
+            'stopping', 'stop_unknown', 'stopped', 'abandoned'
+          )),
+        stage                   TEXT NOT NULL DEFAULT 'accepted',
+        worktree_id             TEXT,
+        terminal_handle         TEXT,
+        setup_state             TEXT NOT NULL DEFAULT 'not_applicable',
+        effects                 TEXT NOT NULL DEFAULT '[]',
+        residual_resources      TEXT NOT NULL DEFAULT '[]',
+        to_worker_imported_sequence INTEGER NOT NULL DEFAULT 0,
+        last_error              TEXT,
+        created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      DROP TABLE remote_dispatch_attachments_v38shape;
+      DROP TABLE IF EXISTS peer_run_grants;
+    `)
+    raw.pragma('user_version = 38')
+    raw
+      .prepare(
+        `INSERT INTO remote_dispatch_attachments
+           (dispatch_id, task_id, home_peer_fingerprint, protocol_version, runtime_epoch,
+            capability_hash, pane_key, process_incarnation, state, stage, worktree_id,
+            terminal_handle, setup_state, effects, residual_resources,
+            to_worker_imported_sequence, last_error, created_at, updated_at)
+         VALUES
+           ('disp_data_1', 'task_1', 'fp_peer_1', 2, 'epoch_1', 'cap_hash_1', 'tab_1:leaf_1',
+            'pty_1:inc_1', 'ready', 'input_accepted', 'wt_1', 'term_1', 'ran', '[{"kind":"a"}]',
+            '[{"kind":"b"}]', 3, 'err_1', '2024-01-01 00:00:00', '2024-01-02 00:00:00'),
+           ('disp_data_2', 'task_2', 'fp_peer_2', 1, 'epoch_2', NULL, NULL, NULL, 'stopped',
+            'agent_exited', NULL, NULL, 'not_applicable', '[]', '[]', 0, NULL,
+            '2024-02-01 00:00:00', '2024-02-02 00:00:00')
+      `
+      )
+      .run()
+    raw.close()
+
+    db = new OrchestrationDb(dbPath)
+    const raw2 = new Database(dbPath)
+    expect(raw2.pragma('user_version', { simple: true })).toBe(39)
+
+    const row1 = db.getRemoteDispatchAttachment('disp_data_1')
+    expect(row1).toMatchObject({
+      task_id: 'task_1',
+      home_peer_fingerprint: 'fp_peer_1',
+      protocol_version: 2,
+      runtime_epoch: 'epoch_1',
+      capability_hash: 'cap_hash_1',
+      pane_key: 'tab_1:leaf_1',
+      process_incarnation: 'pty_1:inc_1',
+      state: 'ready',
+      stage: 'input_accepted',
+      worktree_id: 'wt_1',
+      terminal_handle: 'term_1',
+      setup_state: 'ran',
+      to_worker_imported_sequence: 3,
+      last_error: 'err_1',
+      created_at: '2024-01-01 00:00:00',
+      updated_at: '2024-01-02 00:00:00',
+      // New v39 columns default to NULL for a pre-existing row — never fabricated.
+      blocked_reason: null,
+      blocked_at: null,
+      blocked_consumed_at: null,
+      handle_bound_at: null,
+      agent_exited_at: null
+    })
+    expect(JSON.parse(row1?.effects ?? '[]')).toEqual([{ kind: 'a' }])
+    expect(JSON.parse(row1?.residual_resources ?? '[]')).toEqual([{ kind: 'b' }])
+
+    const row2 = db.getRemoteDispatchAttachment('disp_data_2')
+    expect(row2).toMatchObject({
+      task_id: 'task_2',
+      home_peer_fingerprint: 'fp_peer_2',
+      protocol_version: 1,
+      capability_hash: null,
+      pane_key: null,
+      process_incarnation: null,
+      state: 'stopped',
+      stage: 'agent_exited',
+      worktree_id: null,
+      terminal_handle: null,
+      to_worker_imported_sequence: 0,
+      last_error: null
+    })
+
+    raw2.close()
+  })
+
   it('a mid-rebuild failure leaves user_version at 38 — the CHECK rebuild is inside the atomic migration transaction', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'orca-v39-rollback-'))
     dbPath = join(tempDir, 'orca.db')

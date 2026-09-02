@@ -1179,30 +1179,21 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   },
 
   // S10-19 W-4 (C-8): the choke's only CLI entry — prints the server's nextSteps unchanged, no
-  // client-side fallback, no retry through another verb (C-9, W-5).
+  // client-side fallback, no retry through another verb (C-9, W-5). Review finding 9: a refusal
+  // now arrives as a THROWN error carrying §D's frozen wire code (not an {available:false}
+  // response) — left to propagate to the CLI's own top-level reportCliError/formatCliError
+  // (src/cli/format.ts), which already formats a RuntimeClientError/RuntimeRpcFailureError's
+  // code/message/nextSteps and sets the process exit code. No local try/catch needed or wanted.
   'orchestration worker-answer-prompt': async ({ flags, client, json }) => {
     const choice = getRequiredStringFlag(flags, 'choice')
     if (choice !== 'accept_trust' && choice !== 'decline') {
       throw new RuntimeClientError('invalid_argument', '--choice must be accept_trust or decline')
     }
-    const result = await client.call<{
-      available: boolean
-      dispatchId?: string
-      choice?: string
-      reason?: string
-      guidance?: string
-    }>('orchestration.federationAnswerPrompt', {
-      dispatchId: getRequiredStringFlag(flags, 'dispatch'),
-      choice
-    })
-    if (!result.result.available) {
-      process.exitCode = 1
-    }
-    printResult(result, json, (value) =>
-      value.available
-        ? `Answered ${value.dispatchId} with ${value.choice}`
-        : `Refused: ${value.reason}\n${value.guidance ?? ''}`
+    const result = await client.call<{ available: true; dispatchId: string; choice: string }>(
+      'orchestration.federationAnswerPrompt',
+      { dispatchId: getRequiredStringFlag(flags, 'dispatch'), choice }
     )
+    printResult(result, json, (value) => `Answered ${value.dispatchId} with ${value.choice}`)
   },
 
   'orchestration worker-release': async ({ flags, client, json }) => {

@@ -1,0 +1,31 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`S10-19 W-4: T-8, T-D1 > T-D1: the shared blocked-reason detector functions are untouched — pins their source text, not just that the symbols still resolve > detectTerminalWaitBlockedReason 1`] = `
+"function detectTerminalWaitBlockedReason(preview: string): RuntimeTerminalWaitBlockedReason | null {
+  const normalized = preview.toLowerCase()
+  return findActionableTerminalWaitBlockedSignal(normalized)?.reason ?? null
+}"
+`;
+
+exports[`S10-19 W-4: T-8, T-D1 > T-D1: the shared blocked-reason detector functions are untouched — pins their source text, not just that the symbols still resolve > findActionableTerminalWaitBlockedSignal 1`] = `
+"function findActionableTerminalWaitBlockedSignal(
+  normalized: string
+): { reason: RuntimeTerminalWaitBlockedReason; index: number }"
+`;
+
+exports[`S10-19 W-4: T-8, T-D1 > T-D1: the shared blocked-reason detector functions are untouched — pins their source text, not just that the symbols still resolve > findDismissedStartupModalIndex 1`] = `
+"function findDismissedStartupModalIndex(normalized: string): number | null {
+  const indexes = [
+    findCodexReadyPromptIndex(normalized),
+    findAntigravityReadyPromptIndex(normalized),
+    findCursorActivePromptIndex(normalized)
+  ].filter((index): index is number => index !== null)
+  return indexes.length > 0 ? Math.max(...indexes) : null
+}"
+`;
+
+exports[`S10-19 W-4: T-8, T-D1 > T-D1: the shared blocked-reason detector functions are untouched — pins their source text, not just that the symbols still resolve > findTerminalWaitBlockedSignal 1`] = `
+"function findTerminalWaitBlockedSignal(
+  normalized: string
+): { reason: RuntimeTerminalWaitBlockedReason; index: number }"
+`;

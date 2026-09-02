@@ -7,14 +7,29 @@ import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 
 export type PeerGrantProfileLookup = (fingerprint: string) => 'full' | 'peer' | null
 
+// S10-19 W-2 review B3: peer-owned panes are always local, so this is the one host scope the
+// boot sweep and the runtime prune ever probe — matches worker-terminal-process-liveness.ts's
+// WorkerTerminalHostScope 'local' shape.
+export const PEER_OWNED_PANE_LOCAL_HOST_SCOPE = JSON.stringify({ kind: 'local', hostId: 'local' })
+
 // Why narrow: closePeerOwnedPaneOnAgentExit/runPeerAttachmentRuntimePrune need exactly these
-// four PTY-table reads/actions — the same four public accessors ops BL-2 (W-4) found are the
-// only ones OrcaRuntimeService exposes over a handle.
+// reads/actions — the same accessors ops BL-2 (W-4) found are the only ones OrcaRuntimeService
+// exposes over a handle. getTerminalPaneKey is gone (review B3): a term_<uuid> handle is
+// re-minted every process start, so a row's stored terminal_handle NEVER resolves through it
+// again after a restart — inspectTerminalProcessIncarnationLiveness (queries the daemon/OS
+// process table directly, keyed on the persisted process_incarnation column) is the liveness
+// oracle that survives a restart; resolveLivePeerPaneHandle re-derives the CURRENT handle for
+// that same underlying pty once this process's pty graph has it (post-reconnect), so the prune
+// can still close it.
 export type PeerOwnedPaneRuntime = {
-  getTerminalPaneKey(handle: string): string | null
   closeTerminal(handle: string): Promise<unknown>
   isTerminalRunningAgent(handle: string): Promise<boolean>
   getRuntimeId(): string
+  inspectTerminalProcessIncarnationLiveness(
+    processIncarnation: string,
+    serializedHostScope: string | null
+  ): Promise<'live' | 'dead' | 'unknown'>
+  resolveLivePeerPaneHandle(processIncarnation: string): string | null
 }
 
 // S10-19 (§7.3-adjacent): the ONE place a peer-owned ATTACHMENT's grant profile is resolved —
@@ -38,10 +53,10 @@ export async function closePeerOwnedPaneOnAgentExit(args: {
   db: OrchestrationDb
   runtime: Pick<PeerOwnedPaneRuntime, 'closeTerminal'>
   lookup: PeerGrantProfileLookup | null
-  ptyId: string
+  handle: string
   cause: string
 }): Promise<void> {
-  const row = args.db.findPeerOwnedAttachmentForHandle(args.ptyId)
+  const row = args.db.findPeerOwnedAttachmentForHandle(args.handle)
   if (!row) {
     return
   }
@@ -51,7 +66,7 @@ export async function closePeerOwnedPaneOnAgentExit(args: {
   }
   if (profile === 'peer') {
     try {
-      await args.runtime.closeTerminal(args.ptyId)
+      await args.runtime.closeTerminal(args.handle)
     } catch (error) {
       console.warn('[orchestration] peer-owned pane close failed', error)
     }
@@ -70,20 +85,35 @@ export async function closePeerOwnedPaneOnAgentExit(args: {
 }
 
 // W-2 rule 1 (Ruling 24 addendum 2(o)): runs at BOOT, before the profile lookup exists (index.ts,
-// beside resumeOrchestrationFederationRelayAfterRestart, after prepareLegacyWorkerTerminalRecovery
-// has had a chance to reconnect daemon-backed sessions into this process's pty table). Stamps
-// agent_exited_at ONLY on rows whose PTY is PROVABLY GONE (no terminal_handle, or the handle
-// resolves to nothing in this process's pty table) — closes nothing, ever, and never reads the
-// profile lookup (it does not exist yet). A row whose PTY still lives is left untouched; it is
-// picked up later by runPeerAttachmentRuntimePrune once the lookup is installed.
-export function runPeerAttachmentBootSweep(args: {
+// beside resumeOrchestrationFederationRelayAfterRestart) and before this process's pty graph has
+// reconnected anything — so liveness is asked of the daemon/OS process table directly
+// (inspectTerminalProcessIncarnationLiveness), never of the in-memory, per-process handle map
+// (review B3: that map is always empty for a prior process's handle, making the old gate always
+// true). Stamps agent_exited_at ONLY on rows whose PTY is PROVABLY GONE — no terminal_handle, or
+// the daemon table proves the persisted process_incarnation dead. Closes nothing, ever, and
+// never reads the profile lookup (it does not exist yet). A row whose PTY is still live, or whose
+// liveness cannot be proven either way, is left untouched — picked up later by
+// runPeerAttachmentRuntimePrune once the lookup is installed.
+export async function runPeerAttachmentBootSweep(args: {
   db: OrchestrationDb
-  runtime: Pick<PeerOwnedPaneRuntime, 'getTerminalPaneKey' | 'getRuntimeId'>
-}): void {
+  runtime: Pick<PeerOwnedPaneRuntime, 'inspectTerminalProcessIncarnationLiveness' | 'getRuntimeId'>
+}): Promise<void> {
   const currentEpoch = args.runtime.getRuntimeId()
   for (const row of args.db.findStaleEpochAttachments(currentEpoch)) {
-    const ptyProvablyGone =
-      !row.terminal_handle || args.runtime.getTerminalPaneKey(row.terminal_handle) === null
+    let ptyProvablyGone: boolean
+    if (!row.terminal_handle) {
+      ptyProvablyGone = true
+    } else if (!row.process_incarnation) {
+      // Why not gone: a handle without a recorded process_incarnation cannot be proven dead —
+      // the non-destructive branch is "leave it for the runtime prune", never "assume gone".
+      ptyProvablyGone = false
+    } else {
+      ptyProvablyGone =
+        (await args.runtime.inspectTerminalProcessIncarnationLiveness(
+          row.process_incarnation,
+          PEER_OWNED_PANE_LOCAL_HOST_SCOPE
+        )) === 'dead'
+    }
     if (!ptyProvablyGone) {
       continue
     }
@@ -94,25 +124,32 @@ export function runPeerAttachmentBootSweep(args: {
 // W-2 (Ruling 24 addendum 2(p)/(q)): runs at RUNTIME TIME, once the profile lookup is installed
 // (runtime-rpc.ts, beside attachPrincipalLaneHost) — catches a peer-owned pane whose PTY
 // survived the restart (so the boot sweep left it alone) but whose agent had already finished.
-// close, then stamp, then delete, in that order (W2-T1) — restricted to profile==='peer' rows
-// whose agent has actually exited; a full-profile row is never even inspected for closing.
+// resolveLivePeerPaneHandle re-derives the CURRENT handle for the row's persisted
+// process_incarnation (review B3 — the row's stored terminal_handle from the prior process never
+// resolves again); close, then stamp, then delete, in that order (W2-T1) — restricted to
+// profile==='peer' rows whose agent has actually exited; a full-profile row is never even
+// inspected for closing.
 export async function runPeerAttachmentRuntimePrune(args: {
   db: OrchestrationDb
   runtime: PeerOwnedPaneRuntime
   lookup: PeerGrantProfileLookup
 }): Promise<void> {
   for (const row of args.db.findLivePeerCandidateAttachments()) {
-    if (!row.terminal_handle || args.runtime.getTerminalPaneKey(row.terminal_handle) === null) {
+    if (!row.terminal_handle || !row.process_incarnation) {
+      continue
+    }
+    const liveHandle = args.runtime.resolveLivePeerPaneHandle(row.process_incarnation)
+    if (!liveHandle) {
       continue
     }
     if (accessProfileOfAttachment(row, args.lookup) !== 'peer') {
       continue
     }
-    if (await args.runtime.isTerminalRunningAgent(row.terminal_handle)) {
+    if (await args.runtime.isTerminalRunningAgent(liveHandle)) {
       continue
     }
     try {
-      await args.runtime.closeTerminal(row.terminal_handle)
+      await args.runtime.closeTerminal(liveHandle)
     } catch (error) {
       console.warn('[orchestration] peer attachment runtime prune close failed', error)
     }

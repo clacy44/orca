@@ -1,5 +1,9 @@
 // S10-19 W-2 (INV-P-013, chair rulings 20/22/24 + Ruling 24 addendum 2): T-4, T-4b, T-4c, T-4d,
 // T-M1, NEG-19, NEG-19b, NEG-19c, W2-T1.
+// Review B1/B3 (2026-09-02): closePeerOwnedPaneOnAgentExit now takes the terminal HANDLE (never
+// a ptyId — that resolution is orca-runtime.ts's job, covered by its own integration test); the
+// boot sweep and the runtime prune key liveness off the persisted process_incarnation column
+// (inspectTerminalProcessIncarnationLiveness / resolveLivePeerPaneHandle), never a stale handle.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationDb } from './orchestration/db'
 import {
@@ -28,6 +32,7 @@ function insertAttachment(
     runtimeEpoch: string
     state: string
     terminalHandle: string | null
+    processIncarnation: string | null
     agentExitedAt: string | null
   }> = {}
 ): string {
@@ -35,8 +40,8 @@ function insertAttachment(
   rawDb(db)
     .prepare(
       `INSERT INTO remote_dispatch_attachments
-         (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, terminal_handle, agent_exited_at)
-       VALUES (?, 'task_x', ?, ?, ?, 'stage', ?, ?)`
+         (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, terminal_handle, process_incarnation, agent_exited_at)
+       VALUES (?, 'task_x', ?, ?, ?, 'stage', ?, ?, ?)`
     )
     .run(
       dispatchId,
@@ -44,6 +49,7 @@ function insertAttachment(
       overrides.runtimeEpoch ?? 'epoch-current',
       overrides.state ?? 'ready',
       overrides.terminalHandle === undefined ? 'term_x' : overrides.terminalHandle,
+      overrides.processIncarnation === undefined ? 'pty_x:inc_x' : overrides.processIncarnation,
       overrides.agentExitedAt ?? null
     )
   return dispatchId
@@ -88,7 +94,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
         db,
         runtime: runtime(closeTerminal),
         lookup: () => 'peer',
-        ptyId: 'term_peer',
+        handle: 'term_peer',
         cause: 'command_finished'
       })
       expect(closeTerminal).toHaveBeenCalledWith('term_peer')
@@ -106,7 +112,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
       db,
       runtime: runtime(),
       lookup: () => 'peer',
-      ptyId: 'term_peer',
+      handle: 'term_peer',
       cause: 'command_finished'
     })
     const first = db.getRemoteDispatchAttachment(dispatchId)?.agent_exited_at
@@ -114,7 +120,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
       db,
       runtime: runtime(),
       lookup: () => 'peer',
-      ptyId: 'term_peer',
+      handle: 'term_peer',
       cause: 'pty_exit'
     })
     // findPeerOwnedAttachmentForHandle excludes agent_exited_at IS NOT NULL rows, so the second
@@ -130,7 +136,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
       db,
       runtime: runtime(),
       lookup: () => 'peer',
-      ptyId: 'term_peer',
+      handle: 'term_peer',
       cause: 'command_finished'
     })
     const row = db.getRemoteDispatchAttachment(dispatchId)
@@ -146,7 +152,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
       db,
       runtime: runtime(),
       lookup: () => 'peer',
-      ptyId: 'term_peer',
+      handle: 'term_peer',
       cause: 'pty_exit'
     })
     const row = db.getRemoteDispatchAttachment(dispatchId)
@@ -162,7 +168,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
       db,
       runtime: runtime(closeTerminal),
       lookup: () => 'full',
-      ptyId: 'term_full',
+      handle: 'term_full',
       cause: 'command_finished'
     })
     expect(closeTerminal).not.toHaveBeenCalled()
@@ -177,7 +183,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
       db,
       runtime: runtime(closeTerminal),
       lookup: () => null,
-      ptyId: 'term_peer',
+      handle: 'term_peer',
       cause: 'command_finished'
     })
     expect(closeTerminal).not.toHaveBeenCalled()
@@ -197,7 +203,7 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
         db,
         runtime: runtime(closeTerminal),
         lookup: () => 'peer',
-        ptyId: 'term_unknown',
+        handle: 'term_unknown',
         cause: 'pty_exit'
       })
     ).resolves.toBeUndefined()
@@ -205,105 +211,174 @@ describe('S10-19 W-2: closePeerOwnedPaneOnAgentExit (T-4 family)', () => {
   })
 })
 
-describe('S10-19 W-2: runPeerAttachmentBootSweep (Ruling 24 addendum 2(o); attacker 2/3, ops BL-1/MO-2)', () => {
+describe('S10-19 W-2: runPeerAttachmentBootSweep (Ruling 24 addendum 2(o); review B3; attacker 2/3, ops BL-1/MO-2)', () => {
   let db: OrchestrationDb
   afterEach(() => db?.close())
 
-  it('NEG-19: stamps a stale-epoch row whose PTY is provably gone (no registered pty), for BOTH profiles equally — the sweep is profile-blind', () => {
+  it('NEG-19: stamps a stale-epoch row whose PTY is provably gone (daemon table classifies it dead), for BOTH profiles equally — the sweep is profile-blind', async () => {
     db = new OrchestrationDb(':memory:')
     const peerRow = insertAttachment(db, {
       homeFingerprint: 'fp_peer',
       runtimeEpoch: 'epoch-old',
-      terminalHandle: 'term_gone_peer'
+      terminalHandle: 'term_gone_peer',
+      processIncarnation: 'pty_gone_peer:inc_1'
     })
     const fullRow = insertAttachment(db, {
       homeFingerprint: 'fp_full',
       runtimeEpoch: 'epoch-old',
-      terminalHandle: 'term_gone_full'
+      terminalHandle: 'term_gone_full',
+      processIncarnation: 'pty_gone_full:inc_1'
     })
-    runPeerAttachmentBootSweep({
+    await runPeerAttachmentBootSweep({
       db,
-      runtime: { getTerminalPaneKey: () => null, getRuntimeId: () => 'epoch-current' }
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: async () => 'dead',
+        getRuntimeId: () => 'epoch-current'
+      }
     })
     expect(db.getRemoteDispatchAttachment(peerRow)?.agent_exited_at).not.toBeNull()
     expect(db.getRemoteDispatchAttachment(fullRow)?.agent_exited_at).not.toBeNull()
   })
 
-  it('NEG-19c / (o): a row whose PTY still resolves is LEFT ALONE — no stamp, no close attempted (there is nothing to close here by construction: this function never calls closeTerminal)', () => {
+  it('NEG-19c / (o): a row the daemon table classifies live is LEFT ALONE — no stamp, no close attempted (there is nothing to close here by construction: this function never calls closeTerminal)', async () => {
     db = new OrchestrationDb(':memory:')
     const liveRow = insertAttachment(db, {
       runtimeEpoch: 'epoch-old',
-      terminalHandle: 'term_still_live'
+      terminalHandle: 'term_still_live',
+      processIncarnation: 'pty_still_live:inc_1'
     })
-    runPeerAttachmentBootSweep({
+    const inspect = vi.fn(
+      async (processIncarnation: string) =>
+        (processIncarnation === 'pty_still_live:inc_1' ? 'live' : 'dead') as 'live' | 'dead'
+    )
+    await runPeerAttachmentBootSweep({
       db,
       runtime: {
-        getTerminalPaneKey: (h) => (h === 'term_still_live' ? 'tab_x:leaf' : null),
+        inspectTerminalProcessIncarnationLiveness: inspect,
         getRuntimeId: () => 'epoch-current'
       }
     })
     expect(db.getRemoteDispatchAttachment(liveRow)?.agent_exited_at).toBeNull()
   })
 
-  it('NEG-19c (Ruling 24 addendum 2(q)): with setPeerGrantProfileLookup NEVER installed, the boot sweep still stamps every provably-gone stale-epoch row — it never reads a lookup at all', () => {
+  it('review B3: a row whose liveness the daemon table cannot determine (unknown) is left alone too — never stamped without proof', async () => {
     db = new OrchestrationDb(':memory:')
-    const row = insertAttachment(db, { runtimeEpoch: 'epoch-old', terminalHandle: null })
+    const row = insertAttachment(db, {
+      runtimeEpoch: 'epoch-old',
+      terminalHandle: 'term_unknown_liveness',
+      processIncarnation: 'pty_unknown:inc_1'
+    })
+    await runPeerAttachmentBootSweep({
+      db,
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: async () => 'unknown',
+        getRuntimeId: () => 'epoch-current'
+      }
+    })
+    expect(db.getRemoteDispatchAttachment(row)?.agent_exited_at).toBeNull()
+  })
+
+  it('review B3: a row with a handle but no persisted process_incarnation cannot be proven gone and is left alone', async () => {
+    db = new OrchestrationDb(':memory:')
+    const row = insertAttachment(db, {
+      runtimeEpoch: 'epoch-old',
+      terminalHandle: 'term_no_incarnation',
+      processIncarnation: null
+    })
+    const inspect = vi.fn().mockResolvedValue('dead')
+    await runPeerAttachmentBootSweep({
+      db,
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: inspect,
+        getRuntimeId: () => 'epoch-current'
+      }
+    })
+    expect(inspect).not.toHaveBeenCalled()
+    expect(db.getRemoteDispatchAttachment(row)?.agent_exited_at).toBeNull()
+  })
+
+  it('NEG-19c (Ruling 24 addendum 2(q)): with setPeerGrantProfileLookup NEVER installed, the boot sweep still stamps every provably-gone stale-epoch row — it never reads a lookup at all', async () => {
+    db = new OrchestrationDb(':memory:')
+    const row = insertAttachment(db, {
+      runtimeEpoch: 'epoch-old',
+      terminalHandle: null,
+      processIncarnation: null
+    })
     // runPeerAttachmentBootSweepImpl's signature carries no lookup parameter whatsoever — this
     // test's own type-checking is the structural proof; the assertion below is the behavioral one.
-    runPeerAttachmentBootSweep({
+    await runPeerAttachmentBootSweep({
       db,
-      runtime: { getTerminalPaneKey: () => null, getRuntimeId: () => 'epoch-current' }
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: async () => 'dead',
+        getRuntimeId: () => 'epoch-current'
+      }
     })
     expect(db.getRemoteDispatchAttachment(row)?.agent_exited_at).not.toBeNull()
   })
 
-  it('a row with no terminal_handle at all is provably gone and is stamped', () => {
+  it('a row with no terminal_handle at all is provably gone and is stamped, without consulting the daemon table', async () => {
     db = new OrchestrationDb(':memory:')
-    const row = insertAttachment(db, { runtimeEpoch: 'epoch-old', terminalHandle: null })
-    runPeerAttachmentBootSweep({
-      db,
-      runtime: { getTerminalPaneKey: () => 'unused', getRuntimeId: () => 'epoch-current' }
+    const row = insertAttachment(db, {
+      runtimeEpoch: 'epoch-old',
+      terminalHandle: null,
+      processIncarnation: null
     })
+    const inspect = vi.fn().mockResolvedValue('live')
+    await runPeerAttachmentBootSweep({
+      db,
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: inspect,
+        getRuntimeId: () => 'epoch-current'
+      }
+    })
+    expect(inspect).not.toHaveBeenCalled()
     expect(db.getRemoteDispatchAttachment(row)?.agent_exited_at).not.toBeNull()
   })
 
-  it('a row already stamped (agent_exited_at set) is not a stale-epoch candidate at all', () => {
+  it('a row already stamped (agent_exited_at set) is not a stale-epoch candidate at all', async () => {
     db = new OrchestrationDb(':memory:')
     const row = insertAttachment(db, {
       runtimeEpoch: 'epoch-old',
       terminalHandle: 'term_x',
       agentExitedAt: '2020-01-01 00:00:00'
     })
-    runPeerAttachmentBootSweep({
+    await runPeerAttachmentBootSweep({
       db,
-      runtime: { getTerminalPaneKey: () => null, getRuntimeId: () => 'epoch-current' }
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: async () => 'dead',
+        getRuntimeId: () => 'epoch-current'
+      }
     })
     expect(db.getRemoteDispatchAttachment(row)?.agent_exited_at).toBe('2020-01-01 00:00:00')
   })
 
-  it('a row whose epoch matches the current one is not stale and is left untouched', () => {
+  it('a row whose epoch matches the current one is not stale and is left untouched', async () => {
     db = new OrchestrationDb(':memory:')
     const row = insertAttachment(db, {
       runtimeEpoch: 'epoch-current',
       terminalHandle: 'term_gone'
     })
-    runPeerAttachmentBootSweep({
+    await runPeerAttachmentBootSweep({
       db,
-      runtime: { getTerminalPaneKey: () => null, getRuntimeId: () => 'epoch-current' }
+      runtime: {
+        inspectTerminalProcessIncarnationLiveness: async () => 'dead',
+        getRuntimeId: () => 'epoch-current'
+      }
     })
     expect(db.getRemoteDispatchAttachment(row)?.agent_exited_at).toBeNull()
   })
 })
 
-describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q)): runPeerAttachmentRuntimePrune', () => {
+describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachmentRuntimePrune', () => {
   let db: OrchestrationDb
   afterEach(() => db?.close())
 
-  it('a daemon-backed peer row whose handle resolves and whose agent has exited is closed, THEN stamped, THEN deleted, in that order', async () => {
+  it('a daemon-backed peer row whose process_incarnation still resolves to a live handle, and whose agent has exited, is closed, THEN stamped, THEN deleted, in that order', async () => {
     db = new OrchestrationDb(':memory:')
     const dispatchId = insertAttachment(db, {
       homeFingerprint: 'fp_peer',
-      terminalHandle: 'term_daemon_peer',
+      terminalHandle: 'term_daemon_peer_stale',
+      processIncarnation: 'pty_daemon:inc_1',
       state: 'ready'
     })
     const order: string[] = []
@@ -311,7 +386,8 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q)): runPeerAttachmentRuntimePr
       order.push('close')
     })
     const runtime: PeerOwnedPaneRuntime = {
-      getTerminalPaneKey: () => 'tab_x:leaf',
+      resolveLivePeerPaneHandle: () => 'term_daemon_peer_reconnected',
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
       closeTerminal,
       isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
       getRuntimeId: () => 'epoch-current'
@@ -330,8 +406,31 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q)): runPeerAttachmentRuntimePr
     await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
 
     expect(order).toEqual(['close', 'stamp', 'delete'])
-    expect(closeTerminal).toHaveBeenCalledWith('term_daemon_peer')
+    // Why the RECONNECTED handle, not the row's stale one: a term_<uuid> handle is re-minted
+    // every process start (review B3) — closeTerminal must target whatever names the pty NOW.
+    expect(closeTerminal).toHaveBeenCalledWith('term_daemon_peer_reconnected')
     expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+  })
+
+  it('review B3: a row whose process_incarnation does not (yet) resolve to a live handle in this process is left alone', async () => {
+    db = new OrchestrationDb(':memory:')
+    const dispatchId = insertAttachment(db, {
+      homeFingerprint: 'fp_peer',
+      terminalHandle: 'term_not_reconnected',
+      processIncarnation: 'pty_not_reconnected:inc_1',
+      state: 'ready'
+    })
+    const closeTerminal = vi.fn().mockResolvedValue({})
+    const runtime: PeerOwnedPaneRuntime = {
+      resolveLivePeerPaneHandle: () => null,
+      inspectTerminalProcessIncarnationLiveness: async () => 'unknown',
+      closeTerminal,
+      isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
+      getRuntimeId: () => 'epoch-current'
+    }
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
+    expect(closeTerminal).not.toHaveBeenCalled()
+    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
   })
 
   it('a full-profile row whose agent has exited is never inspected for closing or deletion', async () => {
@@ -339,11 +438,13 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q)): runPeerAttachmentRuntimePr
     const dispatchId = insertAttachment(db, {
       homeFingerprint: 'fp_full',
       terminalHandle: 'term_full',
+      processIncarnation: 'pty_full:inc_1',
       state: 'ready'
     })
     const closeTerminal = vi.fn().mockResolvedValue({})
     const runtime: PeerOwnedPaneRuntime = {
-      getTerminalPaneKey: () => 'tab_x:leaf',
+      resolveLivePeerPaneHandle: () => 'term_full_reconnected',
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
       closeTerminal,
       isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
       getRuntimeId: () => 'epoch-current'
@@ -358,11 +459,13 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q)): runPeerAttachmentRuntimePr
     const dispatchId = insertAttachment(db, {
       homeFingerprint: 'fp_peer',
       terminalHandle: 'term_peer_live',
+      processIncarnation: 'pty_peer_live:inc_1',
       state: 'ready'
     })
     const closeTerminal = vi.fn().mockResolvedValue({})
     const runtime: PeerOwnedPaneRuntime = {
-      getTerminalPaneKey: () => 'tab_x:leaf',
+      resolveLivePeerPaneHandle: () => 'term_peer_live_reconnected',
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
       closeTerminal,
       isTerminalRunningAgent: vi.fn().mockResolvedValue(true),
       getRuntimeId: () => 'epoch-current'

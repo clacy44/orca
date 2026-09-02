@@ -4327,11 +4327,17 @@ export class OrcaRuntimeService {
     if (!db || typeof db.findPeerOwnedAttachmentForHandle !== 'function') {
       return
     }
+    // S10-19 W-2 review B1: the row is keyed on the terminal HANDLE, not the ptyId every call
+    // site here owns — resolve it before delegating, or there is nothing to close.
+    const handle = this.handleByPtyId.get(ptyId)
+    if (!handle) {
+      return
+    }
     closePeerOwnedPaneOnAgentExitImpl({
       db,
       runtime: this,
       lookup: this.peerGrantProfileLookup,
-      ptyId,
+      handle,
       cause
     }).catch((error) => {
       console.warn('[orchestration] peer-owned pane exit hook failed', error)
@@ -4346,11 +4352,9 @@ export class OrcaRuntimeService {
     if (!db) {
       return
     }
-    try {
-      runPeerAttachmentBootSweepImpl({ db, runtime: this })
-    } catch (error) {
+    runPeerAttachmentBootSweepImpl({ db, runtime: this }).catch((error) => {
       console.warn('[orchestration] peer attachment boot sweep failed', error)
-    }
+    })
   }
 
   // S10-19 W-2 (Ruling 24 addendum 2(p)/(q)): called once from runtime-rpc.ts right after the
@@ -16961,6 +16965,25 @@ export class OrcaRuntimeService {
       return 'unknown'
     }
     return classifyWorkerTerminalProcessIncarnation(processIncarnation, listed.value)
+  }
+
+  // S10-19 W-2 review B3: a peer-owned attachment row's terminal_handle is minted by a prior
+  // process and never resolves again after a restart — process_incarnation (`${ptyId}:${incarnationId}`)
+  // encodes the stable identity instead (ptyId is persisted per pane in the workspace session
+  // store, pty.ts's resolvePersistedStablePaneOwner). Once this process's pty graph has
+  // reconnected that same ptyId, re-derive whatever handle currently names it.
+  resolveLivePeerPaneHandle(processIncarnation: string): string | null {
+    const colonIndex = processIncarnation.indexOf(':')
+    if (colonIndex <= 0) {
+      return null
+    }
+    const ptyId = processIncarnation.slice(0, colonIndex)
+    const pty = this.ptysById.get(ptyId)
+    if (!pty) {
+      return null
+    }
+    const handle = this.handleByPtyId.get(ptyId) ?? this.issuePtyHandle(pty)
+    return this.getTerminalProcessIncarnation(handle) === processIncarnation ? handle : null
   }
 
   private getTerminalTopologyRevision(worktreeId: string): number {
@@ -33688,21 +33711,35 @@ export class OrcaRuntimeService {
   // the post-ready observer needs the tail that verdict came from, and neither may touch the PTY —
   // both run off the buffer already in memory. Every failure reads as unknown (null), never as a
   // verdict, so a stale or exited handle can never be reported as evidence about the worker.
-  getTerminalWaitEvidence(
-    handle: string
-  ): { tailText: string; blockedReason: RuntimeTerminalWaitBlockedReason | null } | null {
+  getTerminalWaitEvidence(handle: string): {
+    tailText: string
+    blockedReason: RuntimeTerminalWaitBlockedReason | null
+    // Optional (not absent) — review M5's addition, additive so pre-existing mocks that predate
+    // it still typecheck; the real implementation always sets it.
+    title?: string | null
+  } | null {
     try {
       const ptyId = this.getTerminalAgentStatusPtyId(handle)
-      const tailText = this.getTerminalAgentStatusSnapshot(handle, ptyId).waitText
-      return { tailText, blockedReason: detectTerminalWaitBlockedReason(tailText) }
+      const snapshot = this.getTerminalAgentStatusSnapshot(handle, ptyId)
+      return {
+        tailText: snapshot.waitText,
+        blockedReason: detectTerminalWaitBlockedReason(snapshot.waitText),
+        title: snapshot.title
+      }
     } catch {
       return null
     }
   }
 
-  // S10-19 W-4 (Ruling 24(d) / ops BL-2): the choke's only source of (blockedReason, launchAgent).
-  // `agent: null` (unauthored TuiAgent kind, or the pty record has none) ⇒ the caller refuses
-  // prompt_state_unknown — never a private field access from outside this class, no new accessor.
+  // S10-19 W-4 (Ruling 24(d) / ops BL-2; review M5): the choke's only source of (blockedReason,
+  // launchAgent). `agent: null` (unauthored TuiAgent kind, or the pty record has none) ⇒ the
+  // caller refuses prompt_state_unknown — never a private field access from outside this class,
+  // no new accessor. Wires findPeerDismissedStartupModalIndex (Ruling 20(b)'s peer-specific
+  // hardening) beside the shared detector's own index-ordered suppression: the shared scan
+  // already suppresses a blocked signal it finds a LATER dismissal for in the tail, but that
+  // tail is exactly what a peer's own task text can make the agent print. The pane's OSC TITLE
+  // is not something task text can set, so a title that no longer looks like a live prompt is
+  // treated as anchoring past the startup phase — the blocked reason is stale, never typed into.
   getPeerPromptState(
     handle: string
   ):
@@ -33714,6 +33751,19 @@ export class OrcaRuntimeService {
       return { state: 'unknown' }
     }
     if (!evidence.blockedReason) {
+      return { state: 'clear' }
+    }
+    const normalized = evidence.tailText.toLowerCase()
+    const blockedSignal = findTerminalWaitBlockedSignal(normalized)
+    const peerDismissedIndex = this.findPeerDismissedStartupModalIndex(
+      normalized,
+      evidence.title ?? ''
+    )
+    if (
+      blockedSignal !== null &&
+      peerDismissedIndex !== null &&
+      peerDismissedIndex > blockedSignal.index
+    ) {
       return { state: 'clear' }
     }
     const live = this.getLivePtyForHandle(handle)

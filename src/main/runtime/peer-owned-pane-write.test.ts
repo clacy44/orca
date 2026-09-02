@@ -84,7 +84,14 @@ describe('S10-19 W-4: writeToPeerOwnedPane happy paths (T-1)', () => {
       choice: 'accept_trust'
     })
     expect(result).toEqual({ refused: false })
-    expect(sendTerminal).toHaveBeenCalledWith('term_peer', { text: '1', enter: true })
+    expect(sendTerminal).toHaveBeenCalledWith(
+      'term_peer',
+      { text: '1', enter: true },
+      expect.objectContaining({
+        beforeWrite: expect.any(Function),
+        afterWrite: expect.any(Function)
+      })
+    )
     const row = db.getRemoteDispatchAttachment('disp_codex1')
     expect(row?.blocked_consumed_at).not.toBeNull()
   })
@@ -108,7 +115,14 @@ describe('S10-19 W-4: writeToPeerOwnedPane happy paths (T-1)', () => {
       dispatchId: 'disp_codex2',
       choice: 'decline'
     })
-    expect(sendTerminal).toHaveBeenCalledWith('term_peer', { text: '2', enter: true })
+    expect(sendTerminal).toHaveBeenCalledWith(
+      'term_peer',
+      { text: '2', enter: true },
+      expect.objectContaining({
+        beforeWrite: expect.any(Function),
+        afterWrite: expect.any(Function)
+      })
+    )
   })
 
   it('claude accept_trust writes {text:"y",enter:true}', async () => {
@@ -131,7 +145,14 @@ describe('S10-19 W-4: writeToPeerOwnedPane happy paths (T-1)', () => {
       choice: 'accept_trust'
     })
     expect(result).toEqual({ refused: false })
-    expect(sendTerminal).toHaveBeenCalledWith('term_peer', { text: 'y', enter: true })
+    expect(sendTerminal).toHaveBeenCalledWith(
+      'term_peer',
+      { text: 'y', enter: true },
+      expect.objectContaining({
+        beforeWrite: expect.any(Function),
+        afterWrite: expect.any(Function)
+      })
+    )
   })
 })
 
@@ -317,6 +338,41 @@ describe('S10-19 W-4: single-shot reservation (T-5, T-5d, T-5r)', () => {
     expect(second).toEqual({ refused: false })
     expect(sendTerminal).toHaveBeenCalledTimes(3)
   })
+
+  it('review B2(d) / Ruling 20(b): a PARTIAL write (afterWrite fires for the text, then the suffix re-check throws) consumes the shot — a retry is refused prompt_already_answered, never re-writes', async () => {
+    const s = setup()
+    db = s.db
+    insertPeerAttachment(db, 'disp_partial')
+    vi.spyOn(s.runtime, 'getPeerPromptState').mockReturnValue({
+      state: 'blocked',
+      reason: 'codex-trust-workspace',
+      agent: 'codex'
+    })
+    // Simulates writeTerminalAction's real contract: afterWrite fires once the text bytes are
+    // on the wire, then a later beforeWrite re-check (the suffix's, across the 500ms gap) throws.
+    const sendTerminal = vi
+      .spyOn(s.runtime, 'sendTerminal')
+      .mockImplementationOnce(async (_handle, _action, options) => {
+        await options?.afterWrite?.('pty-x')
+        throw new Error('agent no longer live for the suffix')
+      })
+      .mockResolvedValue({ handle: 'term_peer', accepted: true, bytesWritten: 1 })
+    const first = await writeToPeerOwnedPane({
+      ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
+      dispatchId: 'disp_partial',
+      choice: 'accept_trust'
+    })
+    expect(first).toMatchObject({ refused: true })
+    expect(db.getRemoteDispatchAttachment('disp_partial')?.blocked_consumed_at).not.toBeNull()
+    const second = await writeToPeerOwnedPane({
+      ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
+      dispatchId: 'disp_partial',
+      choice: 'accept_trust'
+    })
+    expect(second).toMatchObject({ refused: true, code: 'prompt_already_answered' })
+    // Only the failed keystroke write + the guarded recovery interrupt attempt — never a retry.
+    expect(sendTerminal).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('S10-19 W-4: T-6/T-6b/T-6c — the keystroke table is the only authority', () => {
@@ -406,16 +462,150 @@ describe('S10-19 W-4: rebind guard (T-7, T-11)', () => {
       .run('term_rebound', 'disp_rebind')
     expect(() => assertPeerPaneStillBound(s.runtime, 'disp_rebind', 'term_original')).toThrow()
   })
+
+  it('T-10: assertRecordedPromptStillPresent (the beforeWrite re-check half) refuses when the prompt changed between the ownership read and the write', async () => {
+    const s = setup()
+    db = s.db
+    insertPeerAttachment(db, 'disp_prompt_moved')
+    const promptStates: ReturnType<typeof s.runtime.getPeerPromptState>[] = [
+      { state: 'blocked', reason: 'codex-trust-workspace', agent: 'codex' },
+      { state: 'clear' }
+    ]
+    vi.spyOn(s.runtime, 'getPeerPromptState').mockImplementation(() => promptStates.shift()!)
+    const sendTerminal = vi
+      .spyOn(s.runtime, 'sendTerminal')
+      .mockImplementation(async (_handle, _action, options) => {
+        await options?.beforeWrite?.('pty-x')
+        return { handle: 'term_peer', accepted: true, bytesWritten: 1 }
+      })
+    const result = await writeToPeerOwnedPane({
+      ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
+      dispatchId: 'disp_prompt_moved',
+      choice: 'accept_trust'
+    })
+    // The initial read saw 'blocked' (so a keystroke was chosen); the beforeWrite re-check ran
+    // sendTerminal's real getPeerPromptState a second time and saw 'clear' — refused, not typed.
+    expect(result).toMatchObject({ refused: true, code: 'pane_not_peer_owned' })
+    expect(sendTerminal).toHaveBeenCalledTimes(2) // the failed write + the guarded recovery interrupt
+    expect(db.getRemoteDispatchAttachment('disp_prompt_moved')?.blocked_consumed_at).toBeNull()
+  })
+
+  it('T-12: assertPeerPaneStillBound (the beforeWrite re-check half) refuses when the row rebinds to a different handle between the read and the write', async () => {
+    const s = setup()
+    db = s.db
+    insertPeerAttachment(db, 'disp_rebind_write', { terminalHandle: 'term_peer' })
+    vi.spyOn(s.runtime, 'getPeerPromptState').mockReturnValue({
+      state: 'blocked',
+      reason: 'codex-trust-workspace',
+      agent: 'codex'
+    })
+    const sendTerminal = vi
+      .spyOn(s.runtime, 'sendTerminal')
+      .mockImplementation(async (_handle, _action, options) => {
+        rawDb(db!)
+          .prepare(
+            `UPDATE remote_dispatch_attachments SET terminal_handle = ? WHERE dispatch_id = ?`
+          )
+          .run('term_rebound', 'disp_rebind_write')
+        await options?.beforeWrite?.('pty-x')
+        return { handle: 'term_peer', accepted: true, bytesWritten: 1 }
+      })
+    const result = await writeToPeerOwnedPane({
+      ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
+      dispatchId: 'disp_rebind_write',
+      choice: 'accept_trust'
+    })
+    expect(result).toMatchObject({ refused: true, code: 'pane_not_peer_owned' })
+    expect(sendTerminal).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('S10-19 W-4: T-9 — the blast-radius set, parameterised over every authored (text+suffix) cell', () => {
+  let db: OrchestrationDb | undefined
+  afterEach(() => {
+    db?.close()
+    vi.restoreAllMocks()
+  })
+
+  it.each([
+    { agent: 'codex' as const, choice: 'accept_trust' as PeerPromptChoice, text: '1' },
+    { agent: 'codex' as const, choice: 'decline' as PeerPromptChoice, text: '2' },
+    { agent: 'claude' as const, choice: 'accept_trust' as PeerPromptChoice, text: 'y' }
+  ])(
+    '$agent/$choice writes exactly {text:"$text",enter:true} through the real table',
+    async ({ agent, choice, text }) => {
+      const s = setup()
+      db = s.db
+      const dispatchId = `disp_t9_${agent}_${choice}`
+      insertPeerAttachment(db, dispatchId)
+      vi.spyOn(s.runtime, 'getPeerPromptState').mockReturnValue({
+        state: 'blocked',
+        reason: 'codex-trust-workspace',
+        agent
+      })
+      const sendTerminal = vi.spyOn(s.runtime, 'sendTerminal').mockResolvedValue({
+        handle: 'term_peer',
+        accepted: true,
+        bytesWritten: 1
+      })
+      const result = await writeToPeerOwnedPane({
+        ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
+        dispatchId,
+        choice
+      })
+      expect(result).toEqual({ refused: false })
+      expect(sendTerminal).toHaveBeenCalledWith(
+        'term_peer',
+        { text, enter: true },
+        expect.objectContaining({
+          beforeWrite: expect.any(Function),
+          afterWrite: expect.any(Function)
+        })
+      )
+    }
+  )
 })
 
 describe('S10-19 W-4: T-8, T-D1', () => {
-  it('T-D1: the shared blocked-reason detector functions are untouched (structural — imported symbols still resolve)', async () => {
+  it('T-D1: the shared blocked-reason detector functions are untouched — pins their source text, not just that the symbols still resolve', async () => {
     const module = await import('./orca-runtime')
     expect(typeof module.OrcaRuntimeService.prototype.getTerminalWaitEvidence).toBe('function')
     expect(typeof module.OrcaRuntimeService.prototype.getPeerPromptState).toBe('function')
     expect(typeof module.OrcaRuntimeService.prototype.findPeerDismissedStartupModalIndex).toBe(
       'function'
     )
+    // Why a source snapshot and not just typeof: the plan's T-D1 is "byte-identical afterwards"
+    // — a typeof check passes even if the body is rewritten wholesale. These four are
+    // module-private (not exported) inside orca-runtime.ts, so the only way to pin their exact
+    // text from a test is to extract it from the file source itself.
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(new URL('./orca-runtime.ts', import.meta.url), 'utf8')
+    for (const name of [
+      'detectTerminalWaitBlockedReason',
+      'findActionableTerminalWaitBlockedSignal',
+      'findDismissedStartupModalIndex',
+      'findTerminalWaitBlockedSignal'
+    ]) {
+      const start = source.indexOf(`function ${name}(`)
+      expect(start, `${name} must still exist as a module-level function`).toBeGreaterThan(-1)
+      let depth = 0
+      let bodyStarted = false
+      let end = start
+      for (let i = start; i < source.length; i++) {
+        const ch = source[i]
+        if (ch === '{') {
+          depth++
+          bodyStarted = true
+        } else if (ch === '}') {
+          depth--
+          if (bodyStarted && depth === 0) {
+            end = i + 1
+            break
+          }
+        }
+      }
+      expect(source.slice(start, end)).toMatchSnapshot(name)
+    }
   })
 
   it('T-8: an attachment with no bound terminal_handle refuses pane_not_peer_owned rather than throwing', async () => {

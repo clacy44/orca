@@ -32,3 +32,7 @@ export const PEER_MAILBOX_PER_MINUTE = 60
 // never refused (G-5) — it can only be SHORTENED from a peer-chosen value.
 export const PEER_ATTACH_TIMEOUT_MIN_MS = 10_000
 export const PEER_ATTACH_TIMEOUT_MAX_MS = 180_000
+// Review finding 8: an ABSENT timeoutMs is not "the peer wants the ceiling" — it is "the peer
+// said nothing", which must fall back to the same 60s default the pre-existing FULL-caller path
+// uses (orchestration-federation.ts's `params.timeoutMs ?? 60_000`), not the 180s max.
+export const PEER_ATTACH_TIMEOUT_DEFAULT_MS = 60_000

@@ -13,8 +13,13 @@ type DispatchInputSendResult = {
   inputEvidence: ReturnType<typeof captureDispatchInputEvidence>
 }
 
-// Ruling 24(a) PEER profile: taskSpec is NEVER typed. Order matters — ready first, so the
-// mailbox row this points at is a Dispatch the mail path already treats as live.
+// Ruling 24(a) PEER profile (review M4/M6): taskSpec is NEVER typed. Order matches the FULL
+// path — write first, `ready` LAST — so a refused mail body or a failed pane write leaves the
+// row in 'starting' and the caller's catch can still route it through failRemoteAttachment to a
+// receipt (dispatch_inactive is only reachable once the row IS ready, review finding 4). The
+// preamble write also carries the same fresh-foreground conjunct the FULL paste does (review
+// finding 6) — the least-trusted caller's write must not be the one write path with no
+// liveness gate.
 export async function sendPeerDispatchMailPointer(args: {
   db: OrchestrationDb
   runtime: OrcaRuntimeService
@@ -26,7 +31,6 @@ export async function sendPeerDispatchMailPointer(args: {
   cliCommand?: 'orca' | 'orca-ide'
   effects: FederationEffect[]
 }): Promise<DispatchInputSendResult> {
-  const attachment = args.db.markRemoteAttachmentReady(args.dispatchId, args.effects)
   const mailInsert = args.db.insertGatedMessage({
     from: 'Run home (relayed by Orca)',
     to: `dispatch:${args.dispatchId}`,
@@ -47,12 +51,24 @@ export async function sendPeerDispatchMailPointer(args: {
       workerHandle: args.terminalHandle,
       dispatchCapability: args.capability,
       cliCommand: args.cliCommand
-    })
+    }),
+    {
+      beforeWrite: async () => {
+        if (!(await args.runtime.isPeerPaneForegroundAgentLive(args.terminalHandle))) {
+          throw new Error('agent_not_live')
+        }
+      }
+    }
   )
-  return {
-    attachment,
-    inputEvidence: captureDispatchInputEvidence(args.runtime, args.terminalHandle)
-  }
+  const inputEvidence = captureDispatchInputEvidence(args.runtime, args.terminalHandle)
+  args.effects.push({
+    kind: 'dispatch_input',
+    role: 'agent',
+    id: args.terminalHandle,
+    state: 'accepted'
+  })
+  const attachment = args.db.markRemoteAttachmentReady(args.dispatchId, args.effects)
+  return { attachment, inputEvidence }
 }
 
 // Ruling 24(a) FULL profile: the paste stays, with two changes — every submit byte stripped from

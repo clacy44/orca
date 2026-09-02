@@ -19,10 +19,14 @@ export async function resolveExistingFederatedWorktree(args: {
   terminalHandle: string | undefined
   taskId: string
   effects: FederationEffect[]
+  // Review finding 7: the base behavior set failedStage BEFORE calling createTerminal, so a
+  // throw from the create call itself reported 'terminal_create'. This module returns its
+  // result only on success, so the caller's local failedStage must be updated synchronously,
+  // right before the call that can throw — not after it returns.
+  setFailedStage: (stage: 'terminal_create') => void
 }): Promise<{
   worktree: Awaited<ReturnType<OrcaRuntimeService['showManagedTerminalWorkspace']>>
   terminalHandle: string
-  failedStageOverride?: 'terminal_create'
 }> {
   const worktree = await args.runtime
     .showManagedTerminalWorkspace(args.worktreeSelector)
@@ -69,6 +73,7 @@ export async function resolveExistingFederatedWorktree(args: {
     })
     return { worktree, terminalHandle: args.terminalHandle }
   }
+  args.setFailedStage('terminal_create')
   const terminal = await args.runtime.createTerminal(`id:${worktree.id}`, {
     credentialLane: args.credentialLane,
     // Why: agent ids are not shell commands (`cursor` is the desktop app, its CLI is
@@ -79,5 +84,5 @@ export async function resolveExistingFederatedWorktree(args: {
     presentation: 'background'
   })
   args.effects.push({ kind: 'terminal', role: 'agent', action: 'created', id: terminal.handle })
-  return { worktree, terminalHandle: terminal.handle, failedStageOverride: 'terminal_create' }
+  return { worktree, terminalHandle: terminal.handle }
 }

@@ -7,6 +7,8 @@ import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationDb } from './orchestration/db'
 import {
   admitRuntimePeerMethod,
+  assertPeerWorktreeMetadataBounded,
+  clampPeerAttachTimeoutMs,
   peerRefusal,
   RESERVED_PENDING_S10_16,
   RUNTIME_PEER_RPC_METHOD_ALLOWLIST,
@@ -238,6 +240,58 @@ describe('S10-19 W-5: federationAnswerPrompt admission (§6.4)', () => {
       params: { dispatchId: 'disp_nonexistent' }
     })
     expect(result).toEqual({ refused: false })
+  })
+})
+
+describe('S10-19 W-3 review finding 8: clampPeerAttachTimeoutMs', () => {
+  it('an absent or non-finite timeoutMs falls back to the plain 60s default, not the 180s ceiling', () => {
+    expect(clampPeerAttachTimeoutMs(undefined)).toBe(60_000)
+    expect(clampPeerAttachTimeoutMs(Number.NaN)).toBe(60_000)
+    expect(clampPeerAttachTimeoutMs(Number.POSITIVE_INFINITY)).toBe(60_000)
+  })
+
+  it('a supplied value is clamped into [10s, 180s]', () => {
+    expect(clampPeerAttachTimeoutMs(1)).toBe(10_000)
+    expect(clampPeerAttachTimeoutMs(999_999)).toBe(180_000)
+    expect(clampPeerAttachTimeoutMs(45_000)).toBe(45_000)
+  })
+})
+
+describe('Ruling 24 addendum (h): assertPeerWorktreeMetadataBounded', () => {
+  it('admits absent fields and short, clean text', () => {
+    expect(assertPeerWorktreeMetadataBounded({})).toEqual({ refused: false })
+    expect(
+      assertPeerWorktreeMetadataBounded({
+        name: 'feature-x',
+        repo: 'org/repo',
+        displayName: 'Feature X',
+        comment: 'a short comment'
+      })
+    ).toEqual({ refused: false })
+  })
+
+  it.each(['name', 'repo', 'displayName'] as const)(
+    'refuses %s past its 200-character bound',
+    (field) => {
+      const result = assertPeerWorktreeMetadataBounded({ [field]: 'x'.repeat(201) })
+      expect(result).toMatchObject({ refused: true, code: 'invalid_argument' })
+    }
+  )
+
+  it('refuses comment past its 2000-character bound', () => {
+    const result = assertPeerWorktreeMetadataBounded({ comment: 'x'.repeat(2001) })
+    expect(result).toMatchObject({ refused: true, code: 'invalid_argument' })
+  })
+
+  it('refuses a control character (e.g. embedded newline) in any bounded field', () => {
+    expect(assertPeerWorktreeMetadataBounded({ name: 'a\nb' })).toMatchObject({
+      refused: true,
+      code: 'invalid_argument'
+    })
+    expect(assertPeerWorktreeMetadataBounded({ comment: 'a\x01b' })).toMatchObject({
+      refused: true,
+      code: 'invalid_argument'
+    })
   })
 })
 

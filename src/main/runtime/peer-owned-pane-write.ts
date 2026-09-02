@@ -50,6 +50,11 @@ export const PEER_PROMPT_KEYSTROKES: Partial<
 // itself classifies as pane_not_peer_owned, never as pane_write_unavailable.
 export class PeerPaneReboundError extends Error {}
 
+// §D / review B2(c): internal throw only, classifies as agent_not_live — either
+// isTerminalRunningAgent or isPeerPaneForegroundAgentLive failed the re-check run inside the
+// write flight, immediately before a byte lands.
+export class PeerPaneAgentNotLiveError extends Error {}
+
 export type PeerPaneWriteRefusal = ReturnType<typeof peerRefusal>
 export type PeerPaneWrite = { readonly refused: false }
 
@@ -98,16 +103,45 @@ export function classifyPeerPaneWriteFailure(error: unknown): PeerPaneWriteRefus
   if (error instanceof PeerPaneReboundError) {
     return peerRefusal('pane_not_peer_owned', error.message)
   }
+  if (error instanceof PeerPaneAgentNotLiveError) {
+    return peerRefusal('agent_not_live', error.message)
+  }
   return peerRefusal(
     'pane_write_unavailable',
     error instanceof Error ? error.message : 'The prompt write failed.'
   )
 }
 
+// §6.3 step 3 (Ruling 24(a)/(c), frozen): the ONE re-check closure, run by writeTerminalAction's
+// own beforeWrite — inside the write flight, and re-run before EVERY byte (each text chunk, and
+// again before the suffix across the 500ms text→suffix gap, per writeTerminalAction's own
+// contract). Both liveness conjuncts: isTerminalRunningAgent (design conjunct b) and
+// isPeerPaneForegroundAgentLive (conjunct c) — either failing means "not live", never "assume
+// live".
+function buildPeerPaneWriteGuard(
+  runtime: OrcaRuntimeService,
+  dispatchId: string,
+  handle: string,
+  reason: RuntimeTerminalWaitBlockedReason
+): () => Promise<void> {
+  return async () => {
+    assertPeerPaneStillBound(runtime, dispatchId, handle)
+    assertRecordedPromptStillPresent(runtime, handle, reason)
+    const [runningAgent, foregroundLive] = await Promise.all([
+      runtime.isTerminalRunningAgent(handle),
+      runtime.isPeerPaneForegroundAgentLive(handle)
+    ])
+    if (!runningAgent || !foregroundLive) {
+      throw new PeerPaneAgentNotLiveError(`Agent on ${handle} is not live.`)
+    }
+  }
+}
+
 // Why guarded, and why best-effort: only ever sent to a pane this call already proved is
 // peer-owned and still showing the SAME blocked prompt — a defensive Ctrl-C so a write that
 // failed mid-flight never leaves a half-typed keystroke sitting in the shell. Never throws; a
 // failure here must not shadow the original write failure the caller is already returning.
+// Carries the same beforeWrite re-check as the keystroke write itself (review B2 smallest fix).
 export async function sendGuardedRecoveryInterrupt(
   runtime: OrcaRuntimeService,
   dispatchId: string,
@@ -115,18 +149,23 @@ export async function sendGuardedRecoveryInterrupt(
   reason: RuntimeTerminalWaitBlockedReason
 ): Promise<void> {
   try {
-    assertPeerPaneStillBound(runtime, dispatchId, handle)
-    assertRecordedPromptStillPresent(runtime, handle, reason)
-    await runtime.sendTerminal(handle, { interrupt: true })
+    await runtime.sendTerminal(
+      handle,
+      { interrupt: true },
+      { beforeWrite: buildPeerPaneWriteGuard(runtime, dispatchId, handle, reason) }
+    )
   } catch {
     // Best-effort — see doc comment above.
   }
 }
 
 // §6.3 steps 1-3: ownership + metering (W-3's peerOwnedAttachmentOrRefusal) -> resolve the
-// keystroke from the ONE table above -> reserve the single shot -> re-verify nothing rebound ->
-// write -> on any failure, release the shot (Ruling 20(b): a failed answer never burns it) and
-// attempt the guarded recovery interrupt.
+// keystroke from the ONE table above -> reserve the single shot -> write INSIDE the same PTY
+// write flight (writeTerminalAction's claimStructuredPtyWrite), re-checking rebind/prompt/
+// liveness via beforeWrite immediately before each byte (Ruling 20(i) — FROZEN) -> on any
+// failure, release the shot ONLY if no byte was written (Ruling 20(b): a failed answer never
+// burns the shot UNLESS the host actually typed something) and attempt the guarded recovery
+// interrupt.
 export async function writeToPeerOwnedPane(args: {
   ctx: PeerAdmissionContext
   dispatchId: string
@@ -165,13 +204,25 @@ export async function writeToPeerOwnedPane(args: {
       `Dispatch ${dispatchId}'s prompt was already answered.`
     )
   }
+  let sawWrite = false
   try {
-    assertPeerPaneStillBound(ctx.runtime, dispatchId, handle)
-    assertRecordedPromptStillPresent(ctx.runtime, handle, state.reason)
-    await ctx.runtime.sendTerminal(handle, { text: keystroke.text, enter: keystroke.enter })
+    await ctx.runtime.sendTerminal(
+      handle,
+      { text: keystroke.text, enter: keystroke.enter },
+      {
+        beforeWrite: buildPeerPaneWriteGuard(ctx.runtime, dispatchId, handle, state.reason),
+        afterWrite: () => {
+          sawWrite = true
+        }
+      }
+    )
     return { refused: false }
   } catch (error) {
-    ctx.runtime.getOrchestrationDb().releasePeerPromptAnswer(dispatchId)
+    // Ruling 20(b): a partial write (text landed, the suffix's re-check refused) still consumed
+    // the shot — afterWrite already fired for the text before the suffix's beforeWrite threw.
+    if (!sawWrite) {
+      ctx.runtime.getOrchestrationDb().releasePeerPromptAnswer(dispatchId)
+    }
     await sendGuardedRecoveryInterrupt(ctx.runtime, dispatchId, handle, state.reason)
     return classifyPeerPaneWriteFailure(error)
   }

@@ -7,6 +7,7 @@ import type { OrcaRuntimeService } from './orca-runtime'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 import {
   PEER_ATTACH_PER_MINUTE,
+  PEER_ATTACH_TIMEOUT_DEFAULT_MS,
   PEER_ATTACH_TIMEOUT_MAX_MS,
   PEER_ATTACH_TIMEOUT_MIN_MS,
   PEER_LIVE_ATTACHMENTS_PER_LINK,
@@ -137,12 +138,58 @@ export function assertPeerDispatchIds(params: {
   return PEER_ADMITTED
 }
 
+// Ruling 24 addendum (h): name/repo/displayName/comment length-capped and charset-bounded at
+// ingress, same enforce-before-mint ordering as assertPeerDispatchIds — none of these reaches
+// createManagedWorktree (git branch/repo selection, stored display metadata) unchecked.
+const PEER_WORKTREE_METADATA_MAX_LENGTH: Record<
+  'name' | 'repo' | 'displayName' | 'comment',
+  number
+> = {
+  name: 200,
+  repo: 200,
+  displayName: 200,
+  comment: 2000
+}
+
+// Every C0 control (0x00-0x1F, includes tab/LF/CR) plus DEL — never a legitimate byte in a
+// name/repo/displayName/comment string; a newline in particular is how free text turns into a
+// second shell/log line.
+// eslint-disable-next-line no-control-regex -- matching control bytes IS the point: refusing them at ingress.
+const PEER_WORKTREE_METADATA_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/
+
+export function assertPeerWorktreeMetadataBounded(params: {
+  name?: string
+  repo?: string
+  displayName?: string
+  comment?: string
+}): PeerRefusal | PeerAdmission {
+  for (const field of ['name', 'repo', 'displayName', 'comment'] as const) {
+    const value = params[field]
+    if (value === undefined) {
+      continue
+    }
+    const max = PEER_WORKTREE_METADATA_MAX_LENGTH[field]
+    if (value.length > max) {
+      return peerRefusal(
+        'invalid_argument',
+        `${field} exceeds the ${max}-character bound for a federation peer.`
+      )
+    }
+    if (PEER_WORKTREE_METADATA_CONTROL_CHAR_RE.test(value)) {
+      return peerRefusal('invalid_argument', `${field} contains a disallowed control character.`)
+    }
+  }
+  return PEER_ADMITTED
+}
+
 // §14B: an operator-supplied timeoutMs can only be SHORTENED from a peer-chosen value, never
 // extended past the host's own ceiling — clamped, never refused (G-5: a validation threshold,
 // not a refusal boundary).
 export function clampPeerAttachTimeoutMs(timeoutMs: number | undefined): number {
+  // Review finding 8: absent/non-finite is "the peer said nothing" — the plain 60s default, not
+  // the 180s ceiling. Only a SUPPLIED value is clamped into [MIN, MAX].
   if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) {
-    return PEER_ATTACH_TIMEOUT_MAX_MS
+    return PEER_ATTACH_TIMEOUT_DEFAULT_MS
   }
   return Math.min(Math.max(timeoutMs, PEER_ATTACH_TIMEOUT_MIN_MS), PEER_ATTACH_TIMEOUT_MAX_MS)
 }
