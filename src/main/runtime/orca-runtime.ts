@@ -10267,11 +10267,24 @@ export class OrcaRuntimeService {
     logContext: string
   ): void {
     const key = `${makePaneKey(args.tabId, args.leafId)}::${hostId ?? ''}`
+    // F7 residual: an absent store/method is not a successful persist — warn loudly instead
+    // of silently no-opping (mirrors the drain's identical check, :10218-10221), so this path
+    // reads consistently with the drain rather than treating "nothing to write to" as success.
+    if (!this.store?.persistTerminalLaunchTokenHash) {
+      this.handleFailedLaunchTokenHashAnchor(
+        key,
+        args,
+        hostId,
+        logContext,
+        new Error('launch-token-hash anchor store unavailable')
+      )
+      return
+    }
     try {
-      this.store?.persistTerminalLaunchTokenHash?.(args, hostId)
+      this.store.persistTerminalLaunchTokenHash(args, hostId)
       // F3: a frozen store flushes nothing and throws nothing — detect it explicitly and
       // treat it as a failed persist, same as the thrown path.
-      if (this.store?.isWritesFrozen?.()) {
+      if (this.store.isWritesFrozen?.()) {
         throw new Error('writes frozen')
       }
       this.launchTokenAnchorRetryQueue.delete(key)
@@ -27535,11 +27548,16 @@ export class OrcaRuntimeService {
               : null
             // S10-17/F5: agentSessionEnsure resume-adopt (claimed-agent-pty-owner.ts
             // ensure()) returns 'adopted' without spawning, so `!adoptedStablePane` is also
-            // true here for a LIVE agent this call never launched. Guard like registerPty's
-            // sibling site (:10298, pty.launchToken === null): a genuine launch/plain-shell
-            // relaunch (resumedLiveAgentSession false) always writes as before; a resumed
-            // live agent that already holds a token keeps it instead of being clobbered.
-            if (!resumedLiveAgentSession || pty.launchToken === null) {
+            // true here for a LIVE agent this call never launched. Guard on
+            // resumedLiveAgentSession alone (no `pty.launchToken === null` disjunct): unlike
+            // registerPty's sibling site (:10335), where pty.ts:479-502 has already proven a
+            // null launchToken means the token was delivered via the freshly spawned env, a
+            // resume-adopt spawns nothing, so a null pty.launchToken here does NOT mean "the
+            // token is in the env" — it can equally mean a daemon-survived pane resumed as
+            // 'adopted' after a runtime restart (providerResult null, pty.ts:5054-5060) and
+            // still holding its genuine persisted anchor. Skip the write unconditionally for
+            // any resume-adopt so that anchor is never overwritten with an undeliverable token.
+            if (!resumedLiveAgentSession) {
               pty.launchToken = launchToken ?? null
               pty.launchIncarnationId = launchToken ? pty.incarnationId : null
               pty.launchAgent = launchOpts.launchAgent ?? null
@@ -27610,7 +27628,13 @@ export class OrcaRuntimeService {
               ...(effectiveLaunchConfig ? { launchConfig: effectiveLaunchConfig } : {}),
               // S10-17: never publish a launch token for an adopted pane — it was never
               // minted (E1) and would be undeliverable to the already-running process.
-              ...(launchToken && !adoptedStablePane ? { launchToken } : {}),
+              // S10-17/F5 caveat: also never publish one for a resume-adopted live agent
+              // session — the write-block guard above never mints a fresh token for that
+              // case, but a stale local `launchToken` from an earlier branch must still be
+              // withheld from the renderer here.
+              ...(launchToken && !adoptedStablePane && !resumedLiveAgentSession
+                ? { launchToken }
+                : {}),
               ...(launchOpts.launchAgent ? { launchAgent: launchOpts.launchAgent } : {}),
               ...(launchOpts.viewMode ? { viewMode: launchOpts.viewMode } : {}),
               activate: presentation === 'focused',

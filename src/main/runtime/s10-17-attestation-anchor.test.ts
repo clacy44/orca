@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
 import { makePaneKey } from '../../shared/stable-pane-id'
 import { getDefaultWorkspaceSession } from '../../shared/constants'
+import { HEADLESS_RUNTIME_WINDOW_ID } from '../../shared/runtime-types'
 import type { WorkspaceSessionState } from '../../shared/workspace-session-state-types'
 import type { WorktreeMeta } from '../../shared/worktree/meta-types'
 
@@ -162,6 +163,34 @@ function fakePtyController(onSpawn: (env: Record<string, string> | undefined) =>
     write: () => true,
     kill: () => true,
     getForegroundProcess: async () => null
+  }
+}
+
+/** A notifier whose revealTerminalSession captures every reveal payload for inspection. */
+function fakeRevealCapturingNotifier(): {
+  notifier: unknown
+  revealCalls: Record<string, unknown>[]
+} {
+  const revealCalls: Record<string, unknown>[] = []
+  return {
+    revealCalls,
+    notifier: {
+      worktreesChanged: vi.fn(),
+      reposChanged: vi.fn(),
+      activateWorktree: vi.fn(),
+      createTerminal: vi.fn(),
+      revealTerminalSession: async (_worktreeId: string, payload: Record<string, unknown>) => {
+        revealCalls.push(payload)
+        return { tabId: payload.tabId as string }
+      },
+      splitTerminal: vi.fn(),
+      renameTerminal: vi.fn(),
+      focusTerminal: vi.fn(),
+      closeTerminal: vi.fn(),
+      sleepWorktree: vi.fn(),
+      terminalFitOverrideChanged: vi.fn(),
+      terminalDriverChanged: vi.fn()
+    }
   }
 }
 
@@ -432,24 +461,8 @@ describe('S10-17: launch-token anchor correctness', () => {
     const runtime = new OrcaRuntimeService(store)
     const controller = fakeAdoptingPtyController(() => {})
     runtime.setPtyController(controller)
-    const revealCalls: Record<string, unknown>[] = []
-    runtime.setNotifier({
-      worktreesChanged: vi.fn(),
-      reposChanged: vi.fn(),
-      activateWorktree: vi.fn(),
-      createTerminal: vi.fn(),
-      revealTerminalSession: async (_worktreeId: string, payload: Record<string, unknown>) => {
-        revealCalls.push(payload)
-        return { tabId: payload.tabId as string }
-      },
-      splitTerminal: vi.fn(),
-      renameTerminal: vi.fn(),
-      focusTerminal: vi.fn(),
-      closeTerminal: vi.fn(),
-      sleepWorktree: vi.fn(),
-      terminalFitOverrideChanged: vi.fn(),
-      terminalDriverChanged: vi.fn()
-    } as Parameters<typeof runtime.setNotifier>[0])
+    const { notifier, revealCalls } = fakeRevealCapturingNotifier()
+    runtime.setNotifier(notifier as Parameters<typeof runtime.setNotifier>[0])
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
@@ -483,24 +496,8 @@ describe('S10-17: launch-token anchor correctness', () => {
     const spawnCalls: { env?: Record<string, string> }[] = []
     const controller = fakeInSpawnAdoptingPtyController((args) => spawnCalls.push(args))
     runtime.setPtyController(controller)
-    const revealCalls: Record<string, unknown>[] = []
-    runtime.setNotifier({
-      worktreesChanged: vi.fn(),
-      reposChanged: vi.fn(),
-      activateWorktree: vi.fn(),
-      createTerminal: vi.fn(),
-      revealTerminalSession: async (_worktreeId: string, payload: Record<string, unknown>) => {
-        revealCalls.push(payload)
-        return { tabId: payload.tabId as string }
-      },
-      splitTerminal: vi.fn(),
-      renameTerminal: vi.fn(),
-      focusTerminal: vi.fn(),
-      closeTerminal: vi.fn(),
-      sleepWorktree: vi.fn(),
-      terminalFitOverrideChanged: vi.fn(),
-      terminalDriverChanged: vi.fn()
-    } as Parameters<typeof runtime.setNotifier>[0])
+    const { notifier, revealCalls } = fakeRevealCapturingNotifier()
+    runtime.setNotifier(notifier as Parameters<typeof runtime.setNotifier>[0])
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
@@ -835,5 +832,103 @@ describe('S10-17: launch-token anchor correctness', () => {
     // F5: the live agent's token and anchor must be unchanged — no clobber, no new
     // mint delivered.
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
+  })
+
+  it('F5 caveat: a daemon-survived pane resume-adopted after a restart (launchToken null, providerResult null) keeps its persisted anchor and reveals nothing', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+
+    // Generation 1: a genuine spawn mints and anchors a live token for pane P.
+    const runtime1 = new OrcaRuntimeService(store)
+    let capturedEnv: Record<string, string> | undefined
+    runtime1.setPtyController({
+      spawn: async (args) => {
+        capturedEnv = args.env
+        return { id: PTY_ID }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime1.attachWindow(1)
+    runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
+    await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1'
+    })
+    const token1 = capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(token1).toBeTruthy()
+    const hash1 = createHash('sha256').update(token1!).digest('hex')
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
+
+    // Restart: fresh runtime, registerPty (real path, no agentLaunchAuthority) leaves
+    // pty.launchToken null — the daemon-survived shape — while the shared store still
+    // carries generation 1's persisted anchor (mirrors s10-10's restart step).
+    const runtime2 = new OrcaRuntimeService(store)
+    runtime2.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    runtime2.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: 's10-17-f5-caveat-gen2',
+      isReattach: true
+    })
+
+    // Resume: agentSessionEnsure adopts the restored pty WITHOUT spawning
+    // (providerResult null, pty.ts:5054-5060) — a daemon-survived owner found by ensure().
+    const { notifier, revealCalls } = fakeRevealCapturingNotifier()
+    runtime2.setNotifier(notifier as Parameters<typeof runtime2.setNotifier>[0])
+    runtime2.setPtyController({
+      spawn: async (args) => ({
+        id: PTY_ID,
+        agentSessionEnsure: {
+          disposition: 'adopted' as const,
+          owner: {
+            claim: args.agentSessionEnsure!.claim,
+            generation: 'live-gen-2',
+            phase: 'live' as const,
+            ptyId: PTY_ID,
+            surface: {
+              worktreeId: WORKTREE_ID,
+              tabId: args.tabId!,
+              leafId: args.leafId!,
+              terminalHandle: args.preAllocatedHandle!
+            }
+          }
+        }
+      }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    await runtime2.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'agent-t1-restart-resume',
+      presentation: 'focused',
+      agentSessionClaim: {
+        digestVersion: 1,
+        keyId: 'k1',
+        identityDigest: 'd1',
+        worktreeScopeDigest: 'w1',
+        agent: 'claude'
+      }
+    })
+
+    // F5 caveat: the genuine pre-restart anchor must survive — no mint delivered into the
+    // record, no overwrite of the persisted hash.
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
+    // The reveal fires (as any focused create does) but must never carry a token — the
+    // reveal-gate half of this fix (`!resumedLiveAgentSession` on the launchToken spread).
+    expect(revealCalls).toHaveLength(1)
+    expect(revealCalls[0]).not.toHaveProperty('launchToken')
+    // The genuine token still corroborates against the untouched persisted anchor.
+    expect(runtime2.verifyLivePaneLaunchTokenHash(PANE_KEY, hash1)).toBe(true)
   })
 })
