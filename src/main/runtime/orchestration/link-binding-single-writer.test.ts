@@ -64,7 +64,10 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
   })
 
   it('the SQL INSERT/UPDATE into peer_link_bindings lives in exactly two places: the store (the proof writer) and the R14.4 fail-closed repair (revoke-only, schema-completeness only)', () => {
-    const files = allProductionTsFiles('src/main/runtime')
+    // Ruling 23 Addendum 4(hh)/review C4b finding 12: rooted at `src/main` (was `src/main/
+    // runtime`), matching the two call-site scans above — a new `src/main/ipc` writer must not
+    // evade this assertion the way it could evade the narrower root.
+    const files = allProductionTsFiles('src/main')
     const writers: string[] = []
     for (const file of files) {
       if (file.endsWith('.test.ts')) {
@@ -88,6 +91,26 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
     const dbSource = readFileSync(join(REPO_ROOT, 'src/main/runtime/orchestration/db.ts'), 'utf8')
     expect(dbSource).toContain('link_binding_unshipped_v40_repair')
     expect(dbSource).not.toMatch(/UPDATE peer_link_bindings SET[^;]*environment_id\s*=/)
+  })
+
+  // Ruling 23 Addendum 4(hh)/review C4b finding 12: the qualified-call and bare-word regexes
+  // above both require the literal identifier `putPeerLinkBinding` at the call site — an aliased
+  // import (`import { putPeerLinkBinding as writeBinding }` then `writeBinding(...)`) or a
+  // dynamic `import('.../link-binding-store').then(m => m.putPeerLinkBinding(...))` evades both.
+  // This catches the import itself: ANY production file (other than the definition site) that
+  // mentions both the symbol name and the module is flagged, regardless of call syntax.
+  it('putPeerLinkBinding is imported (any alias, any import form) only by its definition site (db.ts)', () => {
+    const files = allProductionTsFiles('src/main').filter(
+      (f) => f !== 'src/main/runtime/orchestration/link-binding-store.ts'
+    )
+    const importers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (/\bputPeerLinkBinding\b/.test(source) && /link-binding-store/.test(source)) {
+        importers.push(file)
+      }
+    }
+    expect(importers).toEqual(['src/main/runtime/orchestration/db.ts'])
   })
 
   it('no RPC handler (probe/confirm) ever calls putPeerLinkBinding — confirm writes advisory only (R7.5)', () => {

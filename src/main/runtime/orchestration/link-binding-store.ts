@@ -90,6 +90,15 @@ export function listPeerLinkBindings(db: Database.Database): PeerLinkBindingRow[
 // clears any contest/revoke bookkeeping — safe because a revoked link is excluded from the
 // candidate set (R10-A, revoke is sticky) and a contested link's re-proof resolving to one
 // winner is exactly how a contest is meant to clear.
+//
+// Ruling 23 Addendum 4(aa)/review C4b finding 1(b): the caller (link-binding-prover-settle.ts)
+// already never reaches this function for a contested link's mismatched winner — but the ON
+// CONFLICT below preserves an existing contest STRUCTURALLY too, at the SQL level, so "the
+// settle never overwrites a contest with confirmed" (Ruling 23(r)) is a property of the writer,
+// not only of its one caller. The only path that clears `state='contested'` is the host-side
+// contest-resolution verb (`proveNow`, which calls `contestPeerLinkBinding`'s sibling reset —
+// out of this commit's scope) or a fresh proof that genuinely re-resolves to a single winner
+// while the row is NOT currently contested.
 export function putPeerLinkBinding(
   db: Database.Database,
   row: Omit<
@@ -120,9 +129,17 @@ export function putPeerLinkBinding(
        grant_class = excluded.grant_class,
        scan_completeness = excluded.scan_completeness,
        proof_protocol = excluded.proof_protocol,
-       state = 'confirmed', detail = NULL, contest_incident_id = NULL,
+       -- structural contest guard (see the doc comment above): an existing contest survives
+       -- this write regardless of caller discipline. 'confirmed' only when the row was not
+       -- already 'contested'.
+       state = CASE WHEN peer_link_bindings.state = 'contested' THEN 'contested' ELSE 'confirmed' END,
+       detail = CASE WHEN peer_link_bindings.state = 'contested' THEN peer_link_bindings.detail ELSE NULL END,
+       contest_incident_id = CASE WHEN peer_link_bindings.state = 'contested'
+         THEN peer_link_bindings.contest_incident_id ELSE NULL END,
        proved_at = excluded.proved_at, last_verified_at = excluded.last_verified_at,
-       contested_at = NULL, revoked_at = NULL`
+       contested_at = CASE WHEN peer_link_bindings.state = 'contested'
+         THEN peer_link_bindings.contested_at ELSE NULL END,
+       revoked_at = NULL`
   ).run(
     row.linkDeviceId,
     row.environmentId,

@@ -156,6 +156,12 @@ export function settleProbeFailure(args: {
   // runtime_rpc_queue_overloaded all map to `unavailable` — none of them are `unreachable`
   // (R10.3's table: a local resource fault or a truthful "broken"/"empty" self-report is never
   // reported as a remote outage).
+  // Ruling 23 Addendum 4(ee): TWO REGISTERS, no contradiction. THIS mapping is R10.3's own
+  // SCAN-FACT OUTCOME table — `capability_unsupported` here settles `unavailable` (persisted,
+  // reported to the operator). It is independent of `resolveCapability`'s CAPABILITY CACHE in
+  // link-binding-prover-probe.ts, which governs Ruling 23(u) ("caches ONLY a genuine
+  // capability_unsupported") and only skips a redundant `status.get` call — it never decides
+  // this outcome.
   const isUnavailable =
     code === 'capability_unsupported' ||
     code === 'link_store_unreadable' ||
@@ -195,6 +201,10 @@ export function settleProbeResults(args: {
   db: OrchestrationDb
   selfView: LinkBindingSelfView
   page: PageCandidateLink[]
+  // F13/R10.4: the per-probe shuffled slot->link map (link-binding-prover-probe.ts) — the ONLY
+  // correct way to attribute a `slotIndex` back to a link once slot order no longer equals page
+  // order. `page` is still needed for `attemptedLinkIds` and the no-match set.
+  slotLinks: (PageCandidateLink | null)[]
   environmentId: string
   environment: KnownRuntimeEnvironment
   endpoint: { id: string; deviceToken: string; publicKeyB64: string }
@@ -212,6 +222,7 @@ export function settleProbeResults(args: {
     db,
     selfView,
     page,
+    slotLinks,
     environmentId,
     environment,
     endpoint,
@@ -227,12 +238,13 @@ export function settleProbeResults(args: {
   } = args
   const winners: { linkDeviceId: string; winner: LinkRoundWinner }[] = []
   const duplicateLinkIds: string[] = []
-  const matchedSlots = new Set(parsed.map((r) => r.slotIndex))
+  const matchedLinkIds = new Set<string>()
   for (const result of parsed) {
-    const link = page[result.slotIndex]
+    const link = slotLinks[result.slotIndex]
     if (!link) {
       continue
     }
+    matchedLinkIds.add(link.linkDeviceId)
     if (!result.matched) {
       duplicateLinkIds.push(link.linkDeviceId)
       writeScanFact(
@@ -287,7 +299,7 @@ export function settleProbeResults(args: {
       )
     }
   }
-  const noMatch = page.filter((_, idx) => !matchedSlots.has(idx)).map((l) => l.linkDeviceId)
+  const noMatch = page.filter((l) => !matchedLinkIds.has(l.linkDeviceId)).map((l) => l.linkDeviceId)
   for (const linkId of noMatch) {
     writeScanFact(db, linkId, environmentId, 'no_match', expectedRevision, selfView, now)
   }

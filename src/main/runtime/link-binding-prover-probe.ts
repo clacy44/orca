@@ -20,7 +20,6 @@ import {
   LINK_STORE_EMPTY_CODE
 } from './orchestration/link-binding-constants'
 import { ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
-import type { LinkRoundWinner } from './orchestration/link-binding-classify'
 import type { PageCandidateLink, RoundMode } from './orchestration/link-binding-schedule'
 import {
   parseProbeResults,
@@ -89,9 +88,11 @@ export async function probeOneEnvironment(args: {
   // v6 protocol M6: a candidate skipped for a live cached fact is `attempted`, CARRYING THAT
   // FACT'S OUTCOME — never a bare no-op. Without this, a link this host already proved (or that
   // already reported peer_duplicate) would read as a fresh `unpaired` on every cache-hit round,
-  // which can eventually park an already-bound link. The winner/duplicate shape is reconstructed
-  // from purely LOCAL data (this candidate's own endpoint, pinned and unchanged — that is exactly
-  // what "live" means here), never from the wire.
+  // which can eventually park an already-bound link. Under F2/Ruling 23(z)'s outcome-keyed skip
+  // below, `allLive` can only be true when every cached fact is `no_match`,
+  // `unavailable`(`link_store_empty`) or `unsupported` — none of which is `proven` or
+  // `peer_duplicate` — so a live-fact-skipped round never contributes a winner or a duplicate
+  // claim (review C4b finding 10; the prior winner/duplicate reconstruction here was dead code).
   if (mode === 'sweep' && page.length > 0) {
     const cached = page.map((link) => ({
       link,
@@ -127,28 +128,10 @@ export async function probeOneEnvironment(args: {
       return false
     })
     if (allLive) {
-      const winners: { linkDeviceId: string; winner: LinkRoundWinner }[] = []
-      const duplicateLinkIds: string[] = []
-      for (const { link, fact } of cached) {
-        if (fact?.outcome === 'proven') {
-          winners.push({
-            linkDeviceId: link.linkDeviceId,
-            winner: {
-              environmentId,
-              createdAt: environment.createdAt,
-              boundEndpointId: endpoint.id,
-              boundPairingRevision: expectedRevision,
-              peerCredentialFp: observedChannelFp,
-              peerKeyFingerprint: dstKeyFp
-            }
-          })
-        } else if (fact?.outcome === 'peer_duplicate') {
-          duplicateLinkIds.push(link.linkDeviceId)
-        }
-      }
+      // No `winners`/`duplicateLinkIds` to reconstruct — see the comment above `allLive`.
       return {
-        winners,
-        duplicateLinkIds,
+        winners: [],
+        duplicateLinkIds: [],
         attemptedLinkIds: page.map((l) => l.linkDeviceId),
         fullyAttempted: true,
         advisory: null
@@ -194,19 +177,38 @@ export async function probeOneEnvironment(args: {
 
   const probeId = randomHex(LINK_BINDING_HEX32_LENGTH / 2)
   const nonceH = randomHex(LINK_BINDING_NONCE_BYTES)
-  const selectors: string[] = page.map(
-    (link, idx) =>
+  // F13/R10.4: slot order within the probe is shuffled per probe (Fisher-Yates over the `k` real
+  // slots plus the padding) — without this, a page whose order is stable across rounds (the
+  // common case under LINK_BINDING_PROBE_SLOTS) hands a responder a STABLE per-link slot index,
+  // review C4b finding 13. `slotOrder[i]` is the wire slot this page's i-th link is assigned;
+  // `slotLinks` is its inverse, threaded through to `settleProbeResults` so slot->link
+  // attribution survives the shuffle.
+  const slotOrder = fisherYatesSlotOrder(LINK_BINDING_PROBE_SLOTS)
+  const slotLinks: (PageCandidateLink | null)[] = Array.from(
+    { length: LINK_BINDING_PROBE_SLOTS },
+    () => null
+  )
+  const selectors: string[] = Array.from({ length: LINK_BINDING_PROBE_SLOTS })
+  page.forEach((link, i) => {
+    const slot = slotOrder[i]
+    if (slot === undefined) {
+      return
+    }
+    slotLinks[slot] = link
+    selectors[slot] =
       selfView.macWithRegistryToken(link.linkDeviceId, SELECTOR_LABEL, [
         probeId,
         nonceH,
-        String(idx),
+        String(slot),
         String(roundEpoch),
         observedChannelFp,
         dstKeyFp
       ]) ?? randomHex(LINK_BINDING_NONCE_BYTES)
-  )
-  while (selectors.length < LINK_BINDING_PROBE_SLOTS) {
-    selectors.push(randomHex(LINK_BINDING_NONCE_BYTES))
+  })
+  for (let s = 0; s < LINK_BINDING_PROBE_SLOTS; s += 1) {
+    if (selectors[s] === undefined) {
+      selectors[s] = randomHex(LINK_BINDING_NONCE_BYTES)
+    }
   }
 
   let guarded: unknown
@@ -261,6 +263,7 @@ export async function probeOneEnvironment(args: {
     db,
     selfView,
     page,
+    slotLinks,
     environmentId,
     environment,
     endpoint,
@@ -274,6 +277,20 @@ export async function probeOneEnvironment(args: {
     advisory: parseProbeAdvisory(guarded),
     now
   })
+}
+
+// R10.4: Fisher-Yates over `n` positions — the shuffled permutation of slot indices this probe
+// assigns, in page order (`result[i]` is the wire slot the i-th real link/padding entry lands
+// on).
+function fisherYatesSlotOrder(n: number): number[] {
+  const order = Array.from({ length: n }, (_, i) => i)
+  for (let i = n - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = order[i]
+    order[i] = order[j] as number
+    order[j] = tmp as number
+  }
+  return order
 }
 
 async function resolveCapability(args: {
@@ -308,6 +325,13 @@ async function resolveCapability(args: {
     // recognise the method) is cached. Every other error (transport, rate limit, local queue
     // saturation) is peer/network-attributable, is never a capability answer, and must never be
     // cached — it is rethrown so the caller routes it through settleProbeFailure's full mapping.
+    // Ruling 23 Addendum 4(ee): TWO REGISTERS, no contradiction. THIS branch governs the
+    // CAPABILITY CACHE (clause (u): "caches ONLY a genuine capability_unsupported") — caching
+    // `method_not_found`/`capability_unsupported` here only skips a redundant `status.get` call
+    // next round. It does NOT decide the persisted SCAN-FACT outcome; that is R10.3's own table,
+    // implemented independently in `settleProbeFailure` (link-binding-prover-outcome.ts), which
+    // maps the identical `capability_unsupported` code to `unavailable` (the host is broken, not
+    // offline) — see the comment there. Both registers stand; this is not a code change.
     const code = error instanceof Error && 'code' in error ? (error as { code: string }).code : null
     if (code === 'method_not_found' || code === 'capability_unsupported') {
       capabilityCache.set(capKey, {

@@ -9,7 +9,9 @@ import type { LinkBindingSelfView } from './device-registry-link-credential'
 import { LINK_BINDING_PROTOCOL } from './orchestration/link-binding-proof'
 import {
   LINK_BINDING_HEX32_LENGTH,
-  LINK_BINDING_UNPAIRED_PARK_ROUNDS
+  LINK_BINDING_UNPAIRED_PARK_ROUNDS,
+  LINK_BINDING_RATE_WINDOW_MS,
+  LOCAL_EVIDENCE_UNAVAILABLE_CODE
 } from './orchestration/link-binding-constants'
 import { classifyLinkRound, type LinkRoundWinner } from './orchestration/link-binding-classify'
 import { linkBindingIntervalMs } from './orchestration/link-binding-schedule'
@@ -38,9 +40,12 @@ function worstEnvironmentOutcome(
     const fact = db.getScanFact(linkDeviceId, environmentId)
     // v6 protocol M6: a candidate SKIPPED this round for a live cached fact is still "attempted,
     // carrying that fact's outcome" — so a cache-hit round's stored fact is exactly as valid
-    // evidence as one freshly written this round. `environmentIds` is already scoped to the
-    // environments THIS round actually considered (collapsed.kept), so there is no stale-fact
-    // leakage from an environment this round never looked at.
+    // evidence as one freshly written this round. Ruling 23 Addendum 4(hh)/review C4b finding
+    // 11: the CALLER (link-binding-prover-round.ts) scopes `environmentIds` to
+    // `attemptedEnvironmentIds` — environments this round actually produced a fresh outcome for
+    // — never the full collapsed candidate set, so a `busy`/`runtime_environment_changed`/
+    // round-budget-cutoff environment (no scan fact written this round) can never leak a stale
+    // fact in here.
     if (!fact) {
       continue
     }
@@ -77,6 +82,11 @@ export function settleOneLink(args: {
   // write (as a fallback, when the branch below has no more specific detail of its own) instead
   // of a separate pre-write that settleBindingAttempt's later call unconditionally destroyed.
   collapseDetail: string | null
+  // Ruling 23 Addendum 4(dd): this round never reached the wire — the LOCAL environment-store
+  // read itself failed (link-binding-prover-round.ts's `readFailed` branch). Settles
+  // `unavailable`/LOCAL_EVIDENCE_UNAVAILABLE_CODE unconditionally and returns before any other
+  // branch runs; both park counters are left untouched (review C4b finding 5).
+  localEvidenceUnavailable?: boolean
 }): void {
   const {
     db,
@@ -89,10 +99,23 @@ export function settleOneLink(args: {
     reconfirmed,
     now,
     environmentIds,
-    collapseDetail
+    collapseDetail,
+    localEvidenceUnavailable
   } = args
-  const classification = classifyLinkRound(winners, peerDuplicateCount)
   const priorAttempt = db.getBindingAttempt(linkDeviceId)
+  if (localEvidenceUnavailable) {
+    db.settleBindingAttempt(linkDeviceId, {
+      lastAttemptAt: now,
+      lastRoundAt: now,
+      lastOutcome: 'unavailable',
+      lastDetail: LOCAL_EVIDENCE_UNAVAILABLE_CODE,
+      consecutiveFailures: priorAttempt?.consecutiveFailures ?? 0,
+      consecutiveNoWinner: priorAttempt?.consecutiveNoWinner ?? 0,
+      nextAttemptAfter: now + linkBindingIntervalMs(priorAttempt?.consecutiveFailures ?? 0)
+    })
+    return
+  }
+  const classification = classifyLinkRound(winners, peerDuplicateCount)
   const priorBinding = db.getPeerLinkBinding(linkDeviceId)
   let lastOutcome: LinkBindingLastOutcome = priorAttempt?.lastOutcome ?? 'pending'
   let consecutiveNoWinner = priorAttempt?.consecutiveNoWinner ?? 0
@@ -102,19 +125,38 @@ export function settleOneLink(args: {
   // `proveNow` re-arms it (R11.3 step 3). Every other branch keeps the ordinary backoff curve.
   let isContested = false
 
+  // Ruling 23 Addendum 4(ff): every audit writer C4/C4a/C4b added goes through the D3 pattern
+  // (orchestration-link-binding-pending.ts's `refuseIfQuarantined`/`refuseIfRateLimited`) —
+  // `limit: 1` per LINK_BINDING_RATE_WINDOW_MS per verb per link, so a peer alternating between
+  // two live grants (finding 7's `multi_grant` shape) cannot mint an unbounded `agent_audit`
+  // stream by flipping the round's winner every kick.
+  function meteredAudit(verb: string, write: () => void): void {
+    const gate = db.checkAndBumpRate({
+      subjectKey: `linkbind:${linkDeviceId}`,
+      verb,
+      windowMs: LINK_BINDING_RATE_WINDOW_MS,
+      limit: 1
+    })
+    if (gate.allowed) {
+      write()
+    }
+  }
+
   function writeContest(detail: string, incumbentEnvironmentId: string | null): void {
     lastOutcome = 'contested'
     lastDetail = detail
     isContested = true
     const incidentId = randomBytes(LINK_BINDING_HEX32_LENGTH / 2).toString('hex')
     db.contestPeerLinkBinding(linkDeviceId, now, incidentId, detail)
-    db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: null,
-      actorHostId: linkDeviceId,
-      verb: 'linkBinding',
-      outcome: 'contested',
-      reasonCode: JSON.stringify({ incidentId, incumbentEnvironmentId })
+    meteredAudit('linkBindingContestAudit', () => {
+      db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: null,
+        actorHostId: linkDeviceId,
+        verb: 'linkBinding',
+        outcome: 'contested',
+        reasonCode: JSON.stringify({ incidentId, incumbentEnvironmentId })
+      })
     })
   }
 
@@ -165,16 +207,20 @@ export function settleOneLink(args: {
       consecutiveNoWinner = 0
       consecutiveFailures = 0
       // F8/R11.3: a rebind that replaces a binding naming a DIFFERENT environment is audited.
+      // Finding 7: metered (see `meteredAudit`) — a peer holding two live grants to the same key
+      // can otherwise flip `winner.environmentId` every round and mint one rebound row per kick.
       if (priorBinding && priorBinding.environmentId !== classification.winner.environmentId) {
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: linkDeviceId,
-          verb: 'linkBinding',
-          outcome: 'link_binding_rebound',
-          reasonCode: JSON.stringify({
-            fromEnvironmentId: priorBinding.environmentId,
-            toEnvironmentId: classification.winner.environmentId
+        meteredAudit('linkBindingReboundAudit', () => {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: linkDeviceId,
+            verb: 'linkBinding',
+            outcome: 'link_binding_rebound',
+            reasonCode: JSON.stringify({
+              fromEnvironmentId: priorBinding.environmentId,
+              toEnvironmentId: classification.winner.environmentId
+            })
           })
         })
       }

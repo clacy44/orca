@@ -9,7 +9,8 @@ import {
   LINK_BINDING_STARTUP_DELAY_MS,
   LINK_BINDING_KICK_DEBOUNCE_MS,
   LINK_BINDING_PARTIAL_RETRY_MS,
-  LINK_BINDING_PARK_REARM_MS
+  LINK_BINDING_PEER_TEXT_CLAMP,
+  LINK_BINDING_RATE_WINDOW_MS
 } from './orchestration/link-binding-constants'
 import {
   RoundTokenBucket,
@@ -20,6 +21,7 @@ import {
   type RoundMode
 } from './orchestration/link-binding-schedule'
 import { runOneRound, type CapabilityCache, type GuardedProbe } from './link-binding-prover-round'
+import { createMaintenanceTick } from './link-binding-prover-maintenance'
 
 export type LinkBindingProver = {
   /** R13.1: an inbound-contact/peer-confirmed/sweep scheduling request for one link. Ruling
@@ -55,6 +57,10 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   // very first armed startup round of any runtime that hasn't wired R9 yet (most tests).
   let partialRetryTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
+  // R13 trigger table/R13.4/Ruling 23 Addendum 4(hh): the environment-set digest re-arm and the
+  // sweep-owned deletion — split into link-binding-prover-maintenance.ts (Ruling 23(m): a split
+  // is the only remedy for the 300-line gate).
+  const runMaintenanceTick = createMaintenanceTick(runtime, capabilityCache)
 
   // R10.2: keyed per purpose (`prover:<envId>`) — the pump (C5) keys its own guard
   // `pump:<envId>`, so the two never collide even against the same environment.
@@ -103,14 +109,31 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
         // mid-shutdown) and the round is treated as `partial` (never a completeness signal it
         // did not earn) so the caller's own book-keeping still proceeds.
         try {
-          runtime.getOrchestrationDb().writeAgentAudit({
-            agentId: null,
-            actorPaneKey: null,
-            actorHostId: null,
-            verb: 'linkBinding',
-            outcome: 'round_error',
-            reasonCode: error instanceof Error ? error.message : String(error)
+          const db = runtime.getOrchestrationDb()
+          // Ruling 23 Addendum 4(ff)/finding 9: a host-constant code plus a length-bounded
+          // sanitised message — never an unbounded raw `error.message` (a persistent
+          // `LinkBindingCapError` from `putScanFact` would otherwise produce one full-size row
+          // per failed round indefinitely) — and metered like every other C4/C4a/C4b audit row.
+          const rawMessage = error instanceof Error ? error.message : String(error)
+          const gate = db.checkAndBumpRate({
+            subjectKey: 'linkbind:round',
+            verb: 'linkBindingRoundErrorAudit',
+            windowMs: LINK_BINDING_RATE_WINDOW_MS,
+            limit: 1
           })
+          if (gate.allowed) {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: null,
+              actorHostId: null,
+              verb: 'linkBinding',
+              outcome: 'round_error',
+              reasonCode: JSON.stringify({
+                code: 'round_error',
+                detail: rawMessage.slice(0, LINK_BINDING_PEER_TEXT_CLAMP)
+              })
+            })
+          }
         } catch {
           // best-effort only — the round already failed; do not let the audit write mask it
           // with a SECOND unhandled failure.
@@ -139,20 +162,29 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   return {
     scheduleBinding(linkDeviceId: string, reason: ScheduleBindingReason): void {
       const db = runtime.getOrchestrationDb()
+      // Ruling 23 Addendum 4(aa)/review C4b finding 2: a contested link is excluded from ALL
+      // scheduling — inbound contact included. No schedule write, no `wanted.add`, no kick. Keyed
+      // on the BINDING row's own `state` (never `peer_link_attempts`, a table the unshipped-v40
+      // repair may drop and recreate), matching the round exclusion (link-binding-prover-round.ts).
+      const binding = db.getPeerLinkBinding(linkDeviceId)
+      if (binding?.state === 'contested') {
+        return
+      }
       const now = Date.now()
       const attempt = db.getBindingAttempt(linkDeviceId)
       const patch = scheduleBindingPatch(reason, attempt?.nextAttemptAfter ?? null, now)
       db.putBindingAttempt(linkDeviceId)
       const current = db.getBindingAttempt(linkDeviceId)
-      // F7/Ruling 23(w): parking re-arms on the FIRST inbound contact after the park, debounced
-      // to at most one re-arm per LINK_BINDING_PARK_REARM_MS (a lastAttemptAt comparison — the
-      // round settle stamps lastAttemptAt on every write, including the park write itself).
+      // Ruling 23 Addendum 4(cc)/review C4b finding 4: the FIRST inbound contact after a park
+      // re-arms IMMEDIATELY — no elapsed-time gate (the prior `>= LINK_BINDING_PARK_REARM_MS`
+      // gate delayed the first re-arm by up to 6h). The register timer is the FALLBACK for a
+      // park that never receives contact — that path lives in link-binding-prover-round.ts's
+      // candidate-selection loop, gated on the same constant.
       let rearmedOutcome: 'pending' | undefined
       let rearmedNoWinner: number | undefined
       if (
         (reason === 'inbound_contact' || reason === 'peer_confirmed') &&
-        current?.lastOutcome === 'unpaired_parked' &&
-        now - (current.lastAttemptAt ?? 0) >= LINK_BINDING_PARK_REARM_MS
+        current?.lastOutcome === 'unpaired_parked'
       ) {
         rearmedOutcome = 'pending'
         rearmedNoWinner = 0
@@ -178,8 +210,13 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       // sweep) and then ignore further kicks for LINK_BINDING_KICK_DEBOUNCE_MS. The prior
       // trailing-edge debounce reset on every call, so steady traffic faster than the debounce
       // window prevented the kick from ever firing at all (bounded only by the 60s sweep).
+      // Ruling 23 Addendum 4(bb)/review C4b finding 3: the leading-edge semantics are kept
+      // (the timer starts now, synchronously) but the round itself is deferred with
+      // `setTimeout(…, 0)` — R8.6 says a kick never runs a round's synchronous prefix (a disk
+      // read, up to 8 attempt-row writes) on the caller's own stack, and `scheduleBinding` is
+      // called at the tail of five peer-facing RPC handlers.
       if (patch.kicks && !stopped && !kickTimer) {
-        attemptRound('sweep')
+        setTimeout(() => attemptRound('sweep'), 0)
         kickTimer = setTimeout(() => {
           kickTimer = null
         }, LINK_BINDING_KICK_DEBOUNCE_MS)
@@ -192,6 +229,8 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       }
       startupTimer = setTimeout(() => {
         startupTimer = null
+        const now = Date.now()
+        runMaintenanceTick(now)
         attemptRound('sweep')
       }, LINK_BINDING_STARTUP_DELAY_MS)
       startupTimer.unref?.()
@@ -199,6 +238,8 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
         if (stopped) {
           return
         }
+        const now = Date.now()
+        runMaintenanceTick(now)
         attemptRound('sweep')
         sweepTimer = setTimeout(tick, LINK_BINDING_SWEEP_MS)
         sweepTimer.unref?.()

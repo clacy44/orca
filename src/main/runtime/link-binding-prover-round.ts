@@ -12,6 +12,7 @@ import {
 } from '../../shared/runtime-environments'
 import { hashCallerCredential } from './principal-link-fingerprint-binding'
 import { fingerprintOrchestrationPeer } from './orchestration/environment-transport'
+import { LINK_BINDING_PARK_REARM_MS } from './orchestration/link-binding-constants'
 import { resolveUserDataPath } from './rpc/methods/orchestration-link-binding-pending'
 import { CONFIRM_LABEL } from './orchestration/link-binding-proof'
 import {
@@ -22,6 +23,7 @@ import {
   selectRoundPage,
   deriveRoundEpoch,
   linkBindingIntervalMs,
+  roundBudgetMs,
   type PageCandidateLink,
   type RoundMode
 } from './orchestration/link-binding-schedule'
@@ -68,14 +70,35 @@ export async function runOneRound(args: {
     if (binding?.revokedAt != null) {
       continue
     }
-    const attempt = db.getBindingAttempt(link.deviceId)
+    let attempt = db.getBindingAttempt(link.deviceId)
     if (attempt?.lastOutcome === 'unpaired_parked') {
-      continue
+      // Ruling 23 Addendum 4(cc)/R13.3: the FIRST inbound contact after a park re-arms
+      // immediately (link-binding-prover.ts's `scheduleBinding`, ungated); this is the REGISTER-
+      // TIMER FALLBACK for a park that never receives contact — the sweep round itself re-arms
+      // once LINK_BINDING_PARK_REARM_MS has elapsed since the park write (review C4b finding 4).
+      const rearmDue = now - (attempt.lastAttemptAt ?? 0) >= LINK_BINDING_PARK_REARM_MS
+      if (!rearmDue) {
+        continue
+      }
+      db.settleBindingAttempt(link.deviceId, {
+        lastAttemptAt: attempt.lastAttemptAt ?? now,
+        lastRoundAt: attempt.lastRoundAt ?? now,
+        lastOutcome: 'pending',
+        lastDetail: attempt.lastDetail ?? null,
+        consecutiveFailures: attempt.consecutiveFailures ?? 0,
+        consecutiveNoWinner: 0,
+        nextAttemptAfter: attempt.nextAttemptAfter ?? null
+      })
+      attempt = db.getBindingAttempt(link.deviceId)
     }
-    // F1(b)/Ruling 23(r): a contested link never re-enters an automatic round — only `proveNow`
-    // (which clears the contest) can. Its next_attempt_after is null (settle.ts), so without this
-    // exclusion it would sit forever eligible on the backoff check below.
-    if (attempt?.lastOutcome === 'contested') {
+    // F1(b)/Ruling 23 Addendum 4(aa): a contested link never re-enters an automatic round — only
+    // `proveNow` (which clears the contest) can. Keyed on the BINDING row's own `state`, never on
+    // `peer_link_attempts` (a table the unshipped-v40 repair is licensed to drop and recreate,
+    // review C4b finding 1) — the binding row is `A2_NEVER_DROPPED_TABLES`, so this exclusion
+    // survives that repair even when the attempts row does not. Its next_attempt_after is null
+    // (settle.ts), so without this exclusion a re-created attempts row would sit forever eligible
+    // on the backoff check below.
+    if (binding?.state === 'contested') {
       continue
     }
     if (attempt?.nextAttemptAfter != null && attempt.nextAttemptAfter > now) {
@@ -117,6 +140,9 @@ export async function runOneRound(args: {
   // `readFailed`.
   const { candidates: envCandidates, readFailed } = buildEnvironmentCandidates(db, ownKeyFp)
   if (readFailed) {
+    // Ruling 23 Addendum 4(dd): a local store read failure is a FAULT ON THIS HOST, never
+    // evidence about the peer — settle it as `unavailable`/LOCAL_EVIDENCE_UNAVAILABLE_CODE, never
+    // the wrong-machine `unpaired` diagnosis (review C4b finding 5).
     for (const link of page) {
       const meta = linkMeta.get(link.linkDeviceId)
       settleOneLink({
@@ -130,7 +156,8 @@ export async function runOneRound(args: {
         reconfirmed: false,
         now,
         environmentIds: [],
-        collapseDetail: null
+        collapseDetail: null,
+        localEvidenceUnavailable: true
       })
     }
     return { completeness: 'partial', evaluatedLinkIds: page.map((p) => p.linkDeviceId) }
@@ -149,12 +176,15 @@ export async function runOneRound(args: {
           .map((d) => `${d.environmentId}->${d.survivorEnvironmentId}`)
           .join(',')}`
       : null
-  const environmentIds = collapsed.kept.map((c) => c.environmentId)
+  // R10.1/Ruling 23 Addendum 4(hh): the round's own budget, wired — a round that exceeds it ends
+  // `partial` rather than running unbounded (review C4b finding 14).
+  const roundDeadline = now + roundBudgetMs(collapsed.kept.length)
 
   const {
     winnersByLink,
     peerDuplicateCountByLink,
     attemptedEnvironmentCount,
+    attemptedEnvironmentIds,
     anyPartial,
     advisoryByEnvironment
   } = await probePage({
@@ -167,12 +197,17 @@ export async function runOneRound(args: {
     roundEpoch,
     guardedProbe,
     capabilityCache,
-    environments: collapsed.kept
+    environments: collapsed.kept,
+    deadline: roundDeadline
   })
+  // Review C4b finding 11: `worstEnvironmentOutcome` (settle.ts) must read only facts this round
+  // actually attempted — an environment skipped this round (busy, runtime_environment_changed,
+  // or cut off by the round budget) contributes no fresh fact and must not leak a stale one in.
+  const environmentIds = [...attemptedEnvironmentIds]
 
-  // R10-E: re-probe + batched confirm every bind-family winner BEFORE any peer_link_bindings
-  // write — gathered across the whole page so links that won the SAME environment share one
-  // re-probe + one confirm call (link-binding-prover-reconfirm.ts).
+  // Ruling 23 Addendum 4(gg): the incumbent-vs-winner comparison happens BEFORE the R10-E winner
+  // re-probe — a challenger contested against the incumbent is never sent a confirm; the round
+  // records the contest and moves on (review C4b finding 17).
   const reconfirmCandidates: ReconfirmCandidate[] = []
   for (const link of page) {
     const winners = winnersByLink.get(link.linkDeviceId) ?? []
@@ -185,10 +220,17 @@ export async function runOneRound(args: {
       classification.outcome === 'duplicate_environment' ||
       classification.outcome === 'multi_grant'
     ) {
-      reconfirmCandidates.push({
-        linkDeviceId: link.linkDeviceId,
-        winner: classification.winner
-      })
+      const priorBinding = db.getPeerLinkBinding(link.linkDeviceId)
+      const contestedByIncumbent =
+        priorBinding !== null &&
+        priorBinding.state !== 'revoked' &&
+        priorBinding.peerKeyFingerprint !== classification.winner.peerKeyFingerprint
+      if (!contestedByIncumbent) {
+        reconfirmCandidates.push({
+          linkDeviceId: link.linkDeviceId,
+          winner: classification.winner
+        })
+      }
     }
   }
   const reconfirmed = await reconfirmWinners({

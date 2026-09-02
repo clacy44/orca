@@ -21,6 +21,11 @@ export type ProbePageResult = {
   winnersByLink: Map<string, LinkRoundWinner[]>
   peerDuplicateCountByLink: Map<string, number>
   attemptedEnvironmentCount: Map<string, number>
+  // Review C4b finding 11: the set of environments this round actually produced a fresh outcome
+  // for — excludes anything skipped by the in-flight guard, a `runtime_environment_changed`
+  // retry signal, or (R10.1) the round budget below. `worstEnvironmentOutcome` (settle.ts) must
+  // scope to exactly this set, never to every collapsed candidate.
+  attemptedEnvironmentIds: Set<string>
   anyPartial: boolean
   advisoryByEnvironment: Map<string, ProbeAdvisory>
 }
@@ -36,6 +41,11 @@ export async function probePage(args: {
   guardedProbe: GuardedProbe
   capabilityCache: CapabilityCache
   environments: EnvCandidate[]
+  // R10.1/Ruling 23 Addendum 4(hh): a wall-clock cutoff (now + roundBudgetMs) — a worker that
+  // would start a new environment probe past this point stops instead, and the round ends
+  // `partial`. An in-flight probe already dispatched is never aborted (cancellation is
+  // R4.6/R10.2's own client-level `maxDurationMs`, not this budget).
+  deadline: number
 }): Promise<ProbePageResult> {
   const {
     runtime,
@@ -47,11 +57,13 @@ export async function probePage(args: {
     roundEpoch,
     guardedProbe,
     capabilityCache,
-    environments
+    environments,
+    deadline
   } = args
   const winnersByLink = new Map<string, LinkRoundWinner[]>()
   const peerDuplicateCountByLink = new Map<string, number>()
   const attemptedEnvironmentCount = new Map<string, number>()
+  const attemptedEnvironmentIds = new Set<string>()
   const advisoryByEnvironment = new Map<string, ProbeAdvisory>()
   let anyPartial = false
 
@@ -63,6 +75,10 @@ export async function probePage(args: {
   let nextIndex = 0
   async function worker(): Promise<void> {
     while (nextIndex < environments.length) {
+      if (Date.now() > deadline) {
+        anyPartial = true
+        return
+      }
       const candidate = environments[nextIndex]
       nextIndex += 1
       if (!candidate) {
@@ -91,6 +107,9 @@ export async function probePage(args: {
       for (const linkId of result.attemptedLinkIds) {
         attemptedEnvironmentCount.set(linkId, (attemptedEnvironmentCount.get(linkId) ?? 0) + 1)
       }
+      if (result.attemptedLinkIds.length > 0) {
+        attemptedEnvironmentIds.add(candidate.environmentId)
+      }
       if (!result.fullyAttempted) {
         anyPartial = true
       }
@@ -106,6 +125,7 @@ export async function probePage(args: {
     winnersByLink,
     peerDuplicateCountByLink,
     attemptedEnvironmentCount,
+    attemptedEnvironmentIds,
     anyPartial,
     advisoryByEnvironment
   }

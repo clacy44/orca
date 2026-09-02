@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import type Database from '../sqlite/sync-database'
 import { DeviceRegistry } from './device-registry'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from './e2ee-keypair'
 import { createLinkBindingSelfView } from './device-registry-link-credential'
@@ -48,6 +49,12 @@ vi.mock('../../shared/runtime-environment-store', async (importOriginal) => {
     }
   }
 })
+
+// S10-16 C4c: raw sqlite access for asserting agent_audit rows directly — matches the pattern in
+// agent-thread-succession.test.ts.
+function rawDb(db: OrchestrationDb): Database.Database {
+  return (db as unknown as { db: Database.Database }).db
+}
 
 describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
   let root: string
@@ -168,6 +175,11 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
           selectors: string[]
         }
         if (overrides.peerDuplicateSlots) {
+          // F13/R10.4: slot order is shuffled per probe (Fisher-Yates, `Math.random`-driven) — a
+          // fixture that fabricates a duplicate claim independent of any real MAC match (the
+          // responder's `peer_duplicate` answer is trusted without verification on this host, by
+          // design — F12) still needs to name a REAL slot index. Callers pin `Math.random` (see
+          // the test below) so the shuffle is the identity permutation and slot i === page[i].
           return {
             protocol: 'orca.link-binding.v1',
             results: overrides.peerDuplicateSlots.map((slotIndex) => ({
@@ -296,12 +308,16 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
       fakeResponder({ peerDuplicateSlots: [0] })
     )
+    // F13/R10.4: pin the per-probe Fisher-Yates shuffle to the identity permutation so the
+    // fixture's hardcoded slot 0 names the one real candidate (page[0]).
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.999999)
     let now = Date.now()
     for (let i = 0; i < LINK_BINDING_UNPAIRED_PARK_ROUNDS + 2; i += 1) {
       await runOneRound(freshRoundArgs(undefined, undefined, now))
       expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('peer_duplicate')
       now += 120_000
     }
+    randomSpy.mockRestore()
     expect(db.getBindingAttempt(linkId)?.consecutiveNoWinner).toBe(0)
     expect(db.getBindingAttempt(linkId)?.lastOutcome).not.toBe('unpaired_parked')
   })
@@ -409,6 +425,9 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     // (Ruling 23(e)) — this round bound to the survivor, so consecutiveNoWinner stays 0.
     const attempt = db.getBindingAttempt(linkId)
     expect(attempt?.consecutiveNoWinner).toBe(0)
+    // F10/review C4b finding 18: the 'bind' classification leaves classification.detail === null,
+    // so the collapse note IS written as this round's lastDetail (settle.ts's fallback).
+    expect(attempt?.lastDetail).toMatch(/^duplicate_environment:/)
     expect(db.getPeerLinkBinding(linkId)?.environmentId).toBe(
       facts[0] === firstFact ? first : second
     )
@@ -439,7 +458,10 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
       expiresAt: null
     })
     saveMatchingEnvironmentWithKey(keyB)
-    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(fakeResponder({ key: keyB }))
+    const confirmCounter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ key: keyB, confirmCallCounter: confirmCounter })
+    )
     now += 120_000
     await runOneRound(freshRoundArgs(undefined, undefined, now))
 
@@ -452,6 +474,21 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     expect(attempt?.lastOutcome).toBe('contested')
     // R11.3 step 3: no backoff schedule — only proveNow re-arms a contested link.
     expect(attempt?.nextAttemptAfter).toBeNull()
+    // Ruling 23 Addendum 4(gg)/review C4b finding 17: the incumbent comparison runs BEFORE the
+    // R10-E winner re-probe — the challenger (B) is NEVER sent a federatedLinkConfirm.
+    expect(confirmCounter.count).toBe(0)
+    // Review C4b finding 18/Q5: the contest is audited, metered (Ruling 23 Addendum 4(ff)) —
+    // exactly one `agent_audit` row for this contest.
+    const auditRows = rawDb(db)
+      .prepare(
+        "SELECT outcome, reason_code FROM agent_audit WHERE verb = 'linkBinding' AND outcome = 'contested'"
+      )
+      .all() as { outcome: string; reason_code: string }[]
+    expect(auditRows).toHaveLength(1)
+    const reason = JSON.parse(auditRows[0]?.reason_code ?? '{}') as {
+      incumbentEnvironmentId?: string
+    }
+    expect(reason.incumbentEnvironmentId).toBe(envA)
   })
 
   it('F1(b): a contested link is excluded from the next automatic round', async () => {
@@ -538,6 +575,10 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     }
     expect(db.getBindingAttempt(linkId)?.consecutiveNoWinner).toBe(0)
     expect(db.getBindingAttempt(linkId)?.lastOutcome).not.toBe('unpaired_parked')
+    // Ruling 23 Addendum 4(dd)/review C4b finding 5: settles `unavailable`/
+    // LOCAL_EVIDENCE_UNAVAILABLE_CODE — a fault ON THIS HOST, never the wrong-machine `unpaired`.
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('unavailable')
+    expect(db.getBindingAttempt(linkId)?.lastDetail).toBe('local_evidence_unavailable')
   })
 
   it('R10-E: a winning slot that survives the re-probe + confirm gets its binding written', async () => {
@@ -568,6 +609,12 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     const attempt = db.getBindingAttempt(linkId)
     expect(attempt?.lastOutcome).toBe('unreachable')
     expect(attempt?.lastDetail).toMatch(/^reconfirm_failed:/)
+    // F3/Ruling 23(s)/review C4b finding 18: a peer that proves T_in then declines to
+    // acknowledge the confirm must never drive this host's OWN park counter.
+    expect(attempt?.consecutiveNoWinner).toBe(0)
+    // F4/Ruling 23(t)/review C4b finding 18: this IS this host's own dial failing after a
+    // matching proof — it backs off like `unreachable` and bumps consecutive_failures.
+    expect(attempt?.consecutiveFailures).toBe(1)
   })
 
   it('R10-E: a re-probe that throws (peer unreachable on the second dial) also writes NO binding', async () => {
