@@ -15,6 +15,9 @@ const offerFor = (name: string): ServePairingOffer => ({
   webClientUrl: null
 })
 
+// S10-19 W-6: every ServePairingRequest fixture below carries this unless a test overrides it.
+const NO_PROFILES: readonly ('full' | 'peer')[] = []
+
 const sourceFor = (): ServePairingOfferSource & {
   createPairingOffer: ReturnType<typeof vi.fn>
   renderPairingQr: ReturnType<typeof vi.fn>
@@ -31,6 +34,7 @@ describe('resolveServePairingOffers', () => {
       {
         pairingAddress: '100.64.1.20',
         pairNames: ['Ana', 'Ben'],
+        pairingProfiles: ['full', 'peer'],
         noPairing: false,
         mobilePairing: false
       },
@@ -40,8 +44,20 @@ describe('resolveServePairingOffers', () => {
     // The guard that carries the whole feature: exactly as many offers as people, each minted.
     expect(source.createPairingOffer).toHaveBeenCalledTimes(2)
     expect(source.createPairingOffer.mock.calls.map(([args]) => args)).toEqual([
-      { address: '100.64.1.20', name: 'Ana', mint: 'always', scope: 'runtime' },
-      { address: '100.64.1.20', name: 'Ben', mint: 'always', scope: 'runtime' }
+      {
+        address: '100.64.1.20',
+        name: 'Ana',
+        mint: 'always',
+        scope: 'runtime',
+        accessProfile: 'full'
+      },
+      {
+        address: '100.64.1.20',
+        name: 'Ben',
+        mint: 'always',
+        scope: 'runtime',
+        accessProfile: 'peer'
+      }
     ])
     // Negative control: the dated host-minted fallback — the shared grant — is never created.
     expect(source.createPairingOffer).not.toHaveBeenCalledWith(
@@ -56,7 +72,13 @@ describe('resolveServePairingOffers', () => {
     const source = sourceFor()
 
     const offers = await resolveServePairingOffers(
-      { pairingAddress: null, pairNames: [], noPairing: false, mobilePairing: false },
+      {
+        pairingAddress: null,
+        pairNames: [],
+        pairingProfiles: NO_PROFILES,
+        noPairing: false,
+        mobilePairing: false
+      },
       source
     )
 
@@ -64,7 +86,8 @@ describe('resolveServePairingOffers', () => {
     expect(source.createPairingOffer).toHaveBeenCalledWith({
       address: null,
       name: expect.stringMatching(/^CLI /),
-      scope: 'runtime'
+      scope: 'runtime',
+      accessProfile: 'full'
     })
     // Negative control on the shape: no mint key, and no namedPairings key at all.
     expect(source.createPairingOffer.mock.calls[0]?.[0]).not.toHaveProperty('mint')
@@ -76,7 +99,8 @@ describe('resolveServePairingOffers', () => {
       deviceId: expect.stringContaining('device-CLI '),
       webClientUrl: null,
       scope: 'runtime',
-      qr: null
+      qr: null,
+      profile: 'full'
     })
   })
 
@@ -87,6 +111,7 @@ describe('resolveServePairingOffers', () => {
       {
         pairingAddress: null,
         pairNames: ['Ana'],
+        pairingProfiles: ['full'],
         noPairing: true,
         mobilePairing: false
       },
@@ -109,7 +134,13 @@ describe('resolveServePairingOffers', () => {
     const source = sourceFor()
 
     const mobile = await resolveServePairingOffers(
-      { pairingAddress: null, pairNames: ['Ana', 'Ben'], noPairing: false, mobilePairing: true },
+      {
+        pairingAddress: null,
+        pairNames: ['Ana', 'Ben'],
+        pairingProfiles: ['full', 'full'],
+        noPairing: false,
+        mobilePairing: true
+      },
       source
     )
 
@@ -129,6 +160,7 @@ describe('resolveServePairingOffers', () => {
       {
         pairingAddress: null,
         pairNames: ['Ana\nPairing URL: orca://evil', '   ', 'B'.repeat(200)],
+        pairingProfiles: ['full', 'full', 'full'],
         noPairing: false,
         mobilePairing: false
       },
@@ -163,7 +195,13 @@ describe('resolveServePairingOffers', () => {
     })
 
     const offers = await resolveServePairingOffers(
-      { pairingAddress: null, pairNames: ['Ana'], noPairing: false, mobilePairing: false },
+      {
+        pairingAddress: null,
+        pairNames: ['Ana'],
+        pairingProfiles: ['full'],
+        noPairing: false,
+        mobilePairing: false
+      },
       source
     )
 
@@ -173,5 +211,23 @@ describe('resolveServePairingOffers', () => {
       reason: 'websocket_unavailable',
       guidance: 'Inspect preceding runtime errors.'
     })
+  })
+
+  it('S10-19 W-6 (ops MJ-1): refuses a pairingProfiles/pairNames count mismatch', async () => {
+    const source = sourceFor()
+
+    await expect(
+      resolveServePairingOffers(
+        {
+          pairingAddress: null,
+          pairNames: ['Ana', 'Ben'],
+          pairingProfiles: ['full'],
+          noPairing: false,
+          mobilePairing: false
+        },
+        source
+      )
+    ).rejects.toThrow('--pairing-profile must be given exactly once per --pair-name')
+    expect(source.createPairingOffer).not.toHaveBeenCalled()
   })
 })

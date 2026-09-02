@@ -54,10 +54,13 @@ export type MobileApi = {
     rotate?: boolean
     reach?: RuntimePairingReach
     name?: string
+    // S10-19 W-6: required whenever `name` is present — see mobile:getRuntimePairingUrl's own
+    // profile_required refusal.
+    accessProfile?: 'full' | 'peer'
   }) => Promise<
     | {
         available: false
-        reason?: 'network_exposure_failed'
+        reason?: 'network_exposure_failed' | 'profile_required'
         guidance?: string
       }
     | {

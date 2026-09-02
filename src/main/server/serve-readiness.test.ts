@@ -14,7 +14,8 @@ const availablePairing: Extract<ServePairingReadiness, { available: true }> = {
   deviceId: 'device-1',
   webClientUrl: 'https://orca.example.test/runtime/web-index.html#pairing=secret',
   scope: 'runtime',
-  qr: null
+  qr: null,
+  profile: 'full'
 }
 
 const ready: ServeReadiness = {
@@ -41,6 +42,8 @@ describe('ServeReadinessPublisher', () => {
     expect(write).toHaveBeenCalledWith(
       expect.stringContaining('Pairing URL: orca://pair?code=secret\n')
     )
+    // S10-19 W-6 (§7.5): the profile is printed so an operator sees what was minted.
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('Access profile: full'))
   })
 
   it('publishes a versioned JSON contract with explicit endpoints and pairing availability', () => {

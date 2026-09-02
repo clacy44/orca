@@ -13,12 +13,14 @@ function renderForm(
     address: string
     runtimePairingUrl: string
     webClientUrl: string
-  }
+  },
+  profile: 'full' | 'peer' | null = 'full'
 ): string {
   return renderToStaticMarkup(
     <TooltipProvider>
       <RuntimePairingGeneratorForm
         deviceName="Ana"
+        profile={profile}
         intent={intent}
         loopbackAddress="127.0.0.1"
         networkInterfaces={[{ name: 'tailscale0', address: '100.76.32.125' }]}
@@ -30,6 +32,7 @@ function renderForm(
         copiedTarget={null}
         generatedAddress={generated?.address ?? null}
         onDeviceNameChange={vi.fn()}
+        onProfileChange={vi.fn()}
         onIntentChange={vi.fn()}
         onSelectedAddressChange={vi.fn()}
         onRefreshNetworkInterfaces={vi.fn()}
@@ -72,5 +75,20 @@ describe('RuntimePairingGeneratorForm', () => {
 
     expect(markup).toContain('The connection address changed.')
     expect(markup).not.toContain('stale-secret')
+  })
+
+  // S10-19 W-6: a named link requires an explicit profile choice — no preselection, and
+  // Generate stays disabled until one is picked.
+  it('shows the profile choice for a named link with no preselection, and disables Generate', () => {
+    const markup = renderForm('another', '100.76.32.125', undefined, null)
+    expect(markup).toContain('runtime-pairing-profile')
+    expect(markup).not.toMatch(/name="runtime-pairing-profile"[^>]*checked=""/)
+    expect(markup).toContain('disabled=""')
+  })
+
+  it('enables Generate once a profile is chosen', () => {
+    const markup = renderForm('another', '100.76.32.125', undefined, 'peer')
+    expect(markup).not.toContain('disabled=""')
+    expect(markup).toContain('no browser URL')
   })
 })

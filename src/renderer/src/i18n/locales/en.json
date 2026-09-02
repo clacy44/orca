@@ -7151,7 +7151,8 @@
           "27cf8507ad": "Refresh shared access",
           "f031182867": "Shared Server Access",
           "df142657a5": "Not used yet",
-          "b18d1764ef": "Last used {{value0}}"
+          "b18d1764ef": "Last used {{value0}}",
+          "profileLine": "{{value0}} profile · enforced by this runtime: {{value1}}"
         },
         "RuntimeEnvironmentsPane": {
           "aeb26635d2": "Remove {{value0}}",
@@ -7301,7 +7302,13 @@
           "customInvalid": "Enter a valid host, host:port, IPv6 address, or ws(s):// URL.",
           "deviceNameLabel": "Who is this link for?",
           "deviceNamePlaceholder": "A person or device name",
-          "deviceNameHelp": "Each named link gets its own revocable grant, so two people never share one identity. Leave blank for an unnamed link."
+          "deviceNameHelp": "Each named link gets its own revocable grant, so two people never share one identity. Leave blank for an unnamed link.",
+          "profileQuestion": "What can this link do?",
+          "profileFull": "Full runtime access",
+          "profileFullHelp": "Ordinary runtime access — panes, files, everything this device already grants.",
+          "profilePeer": "Federation peer",
+          "profilePeerHelp": "Least-privilege: can only dispatch and answer a startup prompt — no pane, no file access.",
+          "profilePeerNoWebClient": "A federation-peer link has no browser URL — it is Orca-to-Orca only."
         },
         "Settings": {
           "3bf149e873": "Project Settings > {{value0}}",

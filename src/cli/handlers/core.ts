@@ -133,6 +133,33 @@ export const CORE_HANDLERS: Record<string, CommandHandler> = {
         'Named pairing links require pairing; remove --no-pairing.'
       )
     }
+    // S10-19 W-6 (Ruling 20(d), ops MJ-1): --pairing-profile is REQUIRED, matched positionally,
+    // one per --pair-name — an operator must choose explicitly, every time. Refused beside
+    // --mobile-pairing: a federation-peer grant is runtime-scoped only, so the whole concept is
+    // inapplicable to a mobile-scoped link.
+    const pairingProfiles = getRepeatedStringFlag(flags, 'pairing-profile')
+    if (flags.has('pairing-profile') && flags.get('mobile-pairing') === true) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        '--pairing-profile is not valid with --mobile-pairing; a federation-peer grant is runtime-scoped only.'
+      )
+    }
+    if (pairNames.length > 0) {
+      if (pairingProfiles.length !== pairNames.length) {
+        throw new RuntimeClientError(
+          'invalid_argument',
+          '--pairing-profile is required exactly once per --pair-name, in the same order.'
+        )
+      }
+      for (const profile of pairingProfiles) {
+        if (profile !== 'peer' && profile !== 'full') {
+          throw new RuntimeClientError(
+            'invalid_argument',
+            `--pairing-profile must be "peer" or "full", not "${profile}".`
+          )
+        }
+      }
+    }
     const port = getOptionalServePort(flags)
     const exitCode = await serveOrcaApp({
       json,
@@ -142,7 +169,7 @@ export const CORE_HANDLERS: Record<string, CommandHandler> = {
           ? (flags.get('pairing-address') as string)
           : null,
       // Why: omitted entirely when unused so a plain `orca serve` spawns the exact argv it always has.
-      ...(pairNames.length > 0 ? { pairNames } : {}),
+      ...(pairNames.length > 0 ? { pairNames, pairingProfiles } : {}),
       noPairing: flags.get('no-pairing') === true,
       mobilePairing: flags.get('mobile-pairing') === true,
       recipeJson: flags.get('recipe-json') === true,

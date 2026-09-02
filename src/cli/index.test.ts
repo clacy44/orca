@@ -2162,8 +2162,22 @@ describe('orca cli worktree awareness', () => {
   it('forwards each --pair-name occurrence to the headless server', async () => {
     serveOrcaAppMock.mockResolvedValue(0)
 
+    // S10-19 W-6 (Ruling 20(d), ops MJ-1): --pairing-profile is required, matched positionally,
+    // once per --pair-name.
     await main(
-      ['serve', '--pairing-address', '100.64.1.20', '--pair-name', 'Ana', '--pair-name', 'Ben'],
+      [
+        'serve',
+        '--pairing-address',
+        '100.64.1.20',
+        '--pair-name',
+        'Ana',
+        '--pairing-profile',
+        'full',
+        '--pair-name',
+        'Ben',
+        '--pairing-profile',
+        'peer'
+      ],
       '/tmp/repo'
     )
 
@@ -2172,11 +2186,26 @@ describe('orca cli worktree awareness', () => {
       port: null,
       pairingAddress: '100.64.1.20',
       pairNames: ['Ana', 'Ben'],
+      pairingProfiles: ['full', 'peer'],
       noPairing: false,
       mobilePairing: false,
       recipeJson: false,
       projectRoot: null
     })
+  })
+
+  it('S10-19 W-6 (ops MJ-1): refuses --pair-name without a matching --pairing-profile', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await main(['serve', '--pair-name', 'Ana'], '/tmp/repo')
+
+    expect(serveOrcaAppMock).not.toHaveBeenCalled()
+    expect([...logSpy.mock.calls, ...errSpy.mock.calls].flat().join('\n')).toContain(
+      '--pairing-profile is required exactly once per --pair-name'
+    )
+    logSpy.mockRestore()
+    errSpy.mockRestore()
   })
 
   it('refuses a --pair-name that carries no name', async () => {

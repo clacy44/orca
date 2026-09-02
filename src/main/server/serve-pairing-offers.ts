@@ -20,6 +20,10 @@ export type ServePairingOffer =
 export type ServePairingRequest = {
   pairingAddress: string | null
   pairNames: readonly string[]
+  // S10-19 W-6: matched positionally with pairNames — pairingProfiles[i] is the profile for
+  // pairNames[i]. Required whenever pairNames is non-empty (enforced at the CLI, cli/handlers/
+  // core.ts, and re-checked here as defense-in-depth since this process reads its own argv).
+  pairingProfiles: readonly ('full' | 'peer')[]
   noPairing: boolean
   mobilePairing: boolean
 }
@@ -30,6 +34,7 @@ export type ServePairingOfferSource = {
     name: string
     mint?: 'always' | 'reuse'
     scope: ServePairingScope
+    accessProfile: 'full' | 'peer'
   }) => ServePairingOffer
   renderPairingQr: (pairingUrl: string) => Promise<string | null>
 }
@@ -42,7 +47,8 @@ export type ServePairingOffers = {
 async function toPairingReadiness(
   offer: ServePairingOffer,
   scope: ServePairingScope,
-  source: ServePairingOfferSource
+  source: ServePairingOfferSource,
+  profile: 'full' | 'peer'
 ): Promise<ServePairingReadiness> {
   if (!offer.available) {
     return offer
@@ -55,7 +61,8 @@ async function toPairingReadiness(
     webClientUrl: offer.webClientUrl,
     scope,
     // Why: a QR per named link is the point — each person scans their own, not a shared one.
-    qr: scope === 'mobile' ? await source.renderPairingQr(offer.pairingUrl) : null
+    qr: scope === 'mobile' ? await source.renderPairingQr(offer.pairingUrl) : null,
+    profile
   }
 }
 
@@ -81,21 +88,34 @@ export async function resolveServePairingOffers(
   const pairNames = request.pairNames
     .map((name) => normalizePairingDeviceName(name))
     .filter((name) => name.length > 0)
+  // S10-19 W-6 (ops MJ-1): required, matched positionally with --pair-name. This process reads
+  // its own argv independently of the CLI parent, so the count is re-checked here rather than
+  // trusted from the spawn — the CLI's own check is the primary UX, this is the closed default.
+  if (pairNames.length > 0 && request.pairingProfiles.length !== request.pairNames.length) {
+    throw new Error(
+      '--pairing-profile must be given exactly once per --pair-name, in the same order.'
+    )
+  }
   const namedPairings = await Promise.all(
-    pairNames.map(async (name) => ({
-      name,
-      pairing: await toPairingReadiness(
-        // Why: one grant per person — a shared link makes two humans one indistinguishable device.
-        source.createPairingOffer({
-          address: request.pairingAddress,
-          name,
-          mint: 'always',
-          scope
-        }),
-        scope,
-        source
-      )
-    }))
+    pairNames.map(async (name, index) => {
+      const accessProfile = request.pairingProfiles[index] ?? 'full'
+      return {
+        name,
+        pairing: await toPairingReadiness(
+          // Why: one grant per person — a shared link makes two humans one indistinguishable device.
+          source.createPairingOffer({
+            address: request.pairingAddress,
+            name,
+            mint: 'always',
+            scope,
+            accessProfile
+          }),
+          scope,
+          source,
+          accessProfile
+        )
+      }
+    })
   )
   const first = namedPairings[0]?.pairing
   const pairing =
@@ -106,10 +126,14 @@ export async function resolveServePairingOffers(
       source.createPairingOffer({
         address: request.pairingAddress,
         name: `${request.mobilePairing ? 'Mobile' : 'CLI'} ${new Date().toLocaleDateString()}`,
-        scope
+        scope,
+        // S10-19 §10.4/Ruling 18(g): the unnamed host-minted offer is exempt from the
+        // required-choice rule — it always mints 'full', unchanged from before this slice.
+        accessProfile: 'full'
       }),
       scope,
-      source
+      source,
+      'full'
     ))
   // Why: key omitted when unused so an unnamed serve publishes exactly today's payload.
   return { pairing, ...(namedPairings.length > 0 ? { namedPairings } : {}) }

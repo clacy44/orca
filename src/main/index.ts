@@ -1828,6 +1828,8 @@ type ServeOptions = {
   // Why: one entry per `--pair-name`, in flag order — each becomes its own revocable grant so two people
   // handed two links are two distinct pairedDeviceIds on this runtime.
   pairNames: string[]
+  // S10-19 W-6: matched positionally with pairNames — pairingProfiles[i] is pairNames[i]'s profile.
+  pairingProfiles: string[]
   noPairing: boolean
   mobilePairing: boolean
   recipeJson: boolean
@@ -1851,6 +1853,12 @@ function getServeOptions(argv = process.argv): ServeOptions {
       `[serve] Ignored ${pairNames.dropped} --serve-pair-name occurrence(s) with no name.`
     )
   }
+  const pairingProfiles = readServeFlagValues(argv, '--serve-pairing-profile')
+  if (pairingProfiles.dropped > 0) {
+    console.warn(
+      `[serve] Ignored ${pairingProfiles.dropped} --serve-pairing-profile occurrence(s) with no value.`
+    )
+  }
   const rawPort = valueAfter('--serve-port')
   let wsPort: number | undefined
   if (rawPort) {
@@ -1865,6 +1873,7 @@ function getServeOptions(argv = process.argv): ServeOptions {
     ...(wsPort !== undefined ? { wsPort } : {}),
     pairingAddress: valueAfter('--serve-pairing-address'),
     pairNames: pairNames.values,
+    pairingProfiles: pairingProfiles.values,
     noPairing: argv.includes('--serve-no-pairing'),
     mobilePairing: argv.includes('--serve-mobile-pairing'),
     recipeJson: argv.includes('--serve-recipe-json'),
@@ -1925,6 +1934,7 @@ async function printServeReady(options: ServeOptions): Promise<void> {
     {
       pairingAddress: options.pairingAddress,
       pairNames: options.pairNames,
+      pairingProfiles: options.pairingProfiles as ('full' | 'peer')[],
       noPairing: options.noPairing,
       mobilePairing: options.mobilePairing
     },
