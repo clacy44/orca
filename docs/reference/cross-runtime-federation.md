@@ -50,6 +50,26 @@ prints (the `orca://pair?code=...` line — not the mobile QR from
 orca serve --pairing-address <peer-reachable-address>
 ```
 
+### Least-privilege: pairing a peer that may only dispatch (S10-19)
+
+The pairing link from step 1 mints a **full** grant — the peer can drive any pane, read any
+file, and do everything a local operator can. For a machine you do not fully trust — a
+teammate's box, a shared CI runner, anything outside your own admin boundary — mint a
+**federation-peer** grant instead. It can create a fresh top-level worktree and dispatch to
+it, answer that dispatch's startup prompt from a two-value vocabulary the host types, and
+send the dispatched agent further mail. It cannot open `terminal.send`, read or write files,
+list repos, or touch any pane it did not create for that dispatch.
+
+```bash
+orca lane create-person --name <peer>
+orca lane invite --person <peer> --scope runtime --profile peer
+```
+
+This is the recommended way to mint a federation link when the peer host is not fully
+trusted — not `orca serve --pair-name`, because a host with a running `serve` cannot start a
+second one to mint a named invite that way; `lane invite` mints against the already-running
+server.
+
 ## 2. Register the peer on the coordinator
 
 `--on` resolves a **saved environment**, not a live socket. A runtime that is
@@ -145,21 +165,62 @@ the remote run mailbox is a direct, synchronous call against the owning runtime.
 Do not reach for the remote mailbox to talk to a federated worker you started —
 `dispatch:<id>` addressing already handles that and enforces the settlement fences.
 
+### Sending a running worker more instructions
+
+`orca terminal send` is **refused** against a peer-owned pane (and against a federation-peer
+grant generally — `terminal.send` is not on that grant's allowlist at all). The supported
+verb for handing a dispatched worker more instructions after it has started is mail, not
+keystrokes:
+
+```bash
+orca orchestration send --to dispatch:<dispatch_id> \
+  --subject "..." --body "<attempt-specific guidance>" --environment <peer> --json
+```
+
+This is the same verb §3 already shows for a coordinator on the home runtime; it works the
+same way here. Say plainly what changes when the recipient is a federation-peer worker: the
+worker sees a pointer to the mail when the host judges its agent **ready** to read it, not
+the instant you send it — this is durable and ordered delivery, not a synchronous keystroke.
+The reason `terminal send` stays refused rather than merely discouraged: a peer that could
+type into a pane could type into a shell, and the whole point of the peer profile is that it
+cannot.
+
 ### Why this is not a privilege escalation
 
-Ordinary Run scope asks "is the caller's *pane* the Run's current consumer".
-A paired peer owns no pane on the Run's runtime, so that question is
-unanswerable rather than merely unanswered. The remote mailbox path answers a
-different question — "is this an authenticated runtime-scope paired device" —
-checked against the authenticated socket identity, never against a
-caller-supplied handle. That credential already grants terminal-drive rights on
-the host (`terminal.send`, `worker-start`), so the peer could always read and
-post Run mail by driving a local pane; calling the mailbox directly is strictly
-less capable. Mobile-scope pairings are refused. The read joins the Run's
-**current consumer generation** rather than rebinding it, so a locally bound
-coordinator is never fenced, and acks land in the owning runtime's database
-(`--retry-request <id>` gives the same `request_mismatch` idempotency there as
-it does locally).
+Ordinary Run scope asks "is the caller's *pane* the Run's current consumer". A paired peer
+owns no pane on the Run's runtime, so that question is unanswerable rather than merely
+unanswered. The remote mailbox path answers a different question instead — "is this an
+authenticated runtime-scope paired device" (`pairedDeviceId` + `clientKind === 'runtime'`),
+asserted up front and never from a caller-supplied handle. The read joins the Run's
+**current consumer generation** rather than rebinding it, so a locally bound coordinator is
+never fenced and acks land in the owning runtime's database (`--retry-request <id>` gives
+the same `request_mismatch` idempotency there as it does locally).
+
+Under a **federation-peer** grant (the least-privilege profile above) this is a first-class
+capability, not a shortcut around one the peer already had: `terminal.create` and
+`terminal.send` are both refused, and the peer has no pane input at all beyond a two-value
+startup-prompt answer the host types (`worker-answer-prompt`, below). What bounds the
+mailbox is that it is addressed **by Run id only** — a body handle, pane key, or `from` is
+refused for a peer caller — and that a peer may not take the exclusive waiter on a Run a
+local pane is bound to. **A Run id is a bearer capability**: any peer holding one can read
+and consume that Run's mail. Scoping a peer to only the Runs it was explicitly told about is
+a link-binding feature that has not landed yet; until it does, treat a Run id you share with
+a peer as shared with that whole host.
+
+Under a **full** grant the peer already holds terminal-drive rights on the host
+(`terminal.send`, `worker-start`), so it could always read and post Run mail by driving a
+local pane; calling the mailbox directly is strictly less capable there too. Mobile-scope
+pairings are refused regardless of profile.
+
+**The residual worth naming plainly (RCE-by-proxy).** A federation-peer grant cannot type
+into a pane, but it can still cause the host to run arbitrary code: it chooses the repo (from
+the host's own `federationDispatchRepos` allowlist, or any registered repo when that list is
+empty and the dispatch targets `new-top-level`), which means it chooses that repo's setup
+script, which the host runs. It also authors the task text an agent executes with real tool
+access in that worktree. Neither is a bug — this is the documented product feature, dispatch
+plus supervision — but it means a peer grant is not "read-only" or "sandboxed" in any strong
+sense: bound the trust you place in a peer host to the repos you list in
+`federationDispatchRepos` and the agent you let it drive, not to the profile name alone.
 
 ### Version skew
 
@@ -181,10 +242,17 @@ is unchanged — new methods and new optional params are additive.
 - **A remote worktree the peer's agent has not trusted will deadlock on its folder-trust
   prompt.** The worker stalls on "Is this a project you trust?" *before the agent takes a
   turn*, while `worker-show` still reports `ready`/`input_accepted` — it looks green but
-  hangs until answered. Whether it fires depends on the peer host's agent
-  trust store, not on the worktree being new. Unblock it from the coordinator with a single
-  send, then wait:
-  `orca terminal send --terminal <peer_terminal_handle> --environment <peer> --text "1" --enter`.
+  hangs until answered. Whether it fires depends on the peer host's agent trust store, not
+  on the worktree being new. **`orca terminal send --text "1" --enter` does not work over a
+  federation-peer grant** — `terminal.send` is refused there. Unblock it from the
+  coordinator with:
+  `orca orchestration worker-answer-prompt --dispatch <dispatch_id> --choice accept_trust --environment <peer>`.
+  Four things to know about this verb: it works only while the host's own detector still
+  sees the prompt (it does not fabricate a wait); it works **once** — the shot is consumed
+  on success and released, not burned, on any failure; the host types the keystrokes, never
+  the caller's bytes; and `--choice decline` dismisses without submitting anything. It works
+  identically for a `full` grant too — prefer it over a raw `terminal send` regardless of
+  profile, since it does not race the host's own liveness check.
 - **`orca serve` binds every interface.** `--pairing-address` sets only the advertised
   address; the listener opens on `0.0.0.0` and there is no bind/host flag. Block direct
   ingress to the port with a host or network firewall (a private tunnel is an additional
@@ -221,6 +289,12 @@ is unchanged — new methods and new optional params are additive.
 - **Version skew.** Any change to federation RPC params or frames must stay
   capability-negotiated for mixed-version peers — see
   [Remote wire compatibility](./remote-wire-compatibility.md).
+- **Once a host holds a federation-peer grant, run exactly one Orca runtime against its
+  data directory, and never roll back to an older image without first revoking the peer
+  grants.** The peer-profile enforcement is entirely in the runtime process — an older
+  build has no `accessProfile` concept and treats every grant as full. Rolling back, or
+  running a second older process against the same data directory, silently turns a
+  least-privilege grant back into a full one with no error and no log line naming it.
 
 ## Verifying the pairing transport
 

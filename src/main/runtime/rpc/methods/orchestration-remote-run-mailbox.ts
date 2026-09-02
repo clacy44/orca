@@ -8,18 +8,24 @@ import { resolveRunScope, type RunScopeParams } from './orchestration-run-scope'
 // mail for you in run_X" on another runtime has no local row to read. This path lets a
 // paired runtime read/write that mailbox on the runtime that owns it.
 //
-// TRUST ARGUMENT — why dropping requireCurrentConsumer here is not an escalation:
-// requireCurrentConsumer answers "is the caller's PANE the Run's current consumer", which
-// is a *binding* question about panes in this runtime's own DB. A paired peer has no pane
-// here, so the question is unanswerable, not merely unanswered. What authorizes the call
-// instead is the runtime-scope pairing the peer already holds: that credential lets it
-// create terminals and drive agents on this host (`terminal.send`, `worker-start`), so it
-// could always post and read Run mail by driving a local pane. Reading the same mailbox
-// directly is strictly less capable than the terminal-drive rights pairing already grants.
-// The claim is checked against the authenticated socket identity (`pairedDeviceId` +
-// runtime scope), never against a caller-supplied handle, and it never rebinds the Run:
-// the read joins the Run's CURRENT consumer generation, so acks land in this (the
-// authoritative) DB and the locally bound coordinator is not fenced.
+// TRUST ARGUMENT — why dropping requireCurrentConsumer here is not an escalation (S10-19
+// §13.1, R18 — rewritten, not annotated: the pre-S10-19 text claimed a peer "could always
+// post and read Run mail by driving a local pane", which is false under a peer-profile
+// grant — terminal.create is refused and terminal.send does not exist for a peer at all):
+// The caller is an authenticated runtime-scope paired device (`pairedDeviceId` +
+// `clientKind === 'runtime'`), asserted up front and never from a caller-supplied handle;
+// the read joins the Run's CURRENT consumer generation rather than rebinding it, so a
+// locally bound coordinator is never fenced and acks land in the authoritative DB. Under a
+// federation-peer grant this is a first-class capability, not a shortcut around one the
+// peer already had: `terminal.create` and `terminal.send` are both refused and the peer
+// has no pane input at all beyond a two-value startup-prompt answer the host types
+// (`orchestration.federationAnswerPrompt`). What bounds it is that the mailbox is
+// addressed by Run id only — body handles, pane keys and `from` are refused for a peer
+// caller (§8.1/§8.2) — and that a peer may not take the exclusive waiter on a Run a local
+// pane is bound to (R24, `run_wait_local_only`). A Run id is a bearer capability: any peer
+// holding one can read and consume that Run's mail. Scoping a peer to Runs it was
+// explicitly told about requires the link binding S10-16 lands; until then, treat a Run id
+// shared with a peer as shared with that whole host.
 export type RemoteRunMailboxCaller = Pick<RpcContext, 'pairedDeviceId' | 'clientKind'> & {
   remoteRunMailbox?: boolean
 }
