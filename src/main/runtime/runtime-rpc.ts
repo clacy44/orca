@@ -26,6 +26,11 @@ import {
   type DeviceEntry,
   type DeviceScope
 } from './device-registry'
+import {
+  admitRuntimePeerMethod,
+  RUNTIME_PEER_RPC_METHOD_ALLOWLIST
+} from './runtime-peer-rpc-allowlist'
+import { ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
 import {
   createPrincipalLaneConnectionJoin,
@@ -493,13 +498,28 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
 }
 
 // Why: status.get has no per-connection context in the dispatcher, so stamp the scope here at the transport boundary.
-function injectDeviceScope(response: string, scope: DeviceScope): string {
+// S10-19 §9.2: for an authenticated peer-profile caller only, also stamp a `peerAccess` block —
+// the caller already holds a valid credential and could enumerate the allowlist by trying every
+// method, so this is not an oracle; it lets a coordinator distinguish this filter's `forbidden`
+// from any other and know `federationAnswerPrompt` exists before offering it.
+function injectDeviceScope(
+  response: string,
+  scope: DeviceScope,
+  accessProfile?: 'full' | 'peer'
+): string {
   try {
     const parsed = JSON.parse(response) as RpcResponse
     if (parsed.ok !== true || typeof parsed.result !== 'object' || parsed.result === null) {
       return response
     }
     ;(parsed.result as Record<string, unknown>).deviceScope = scope
+    if (accessProfile === 'peer') {
+      ;(parsed.result as Record<string, unknown>).peerAccess = {
+        profile: 'peer',
+        version: ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY,
+        methods: [...RUNTIME_PEER_RPC_METHOD_ALLOWLIST.keys()]
+      }
+    }
     return JSON.stringify(parsed)
   } catch {
     return response
@@ -612,6 +632,12 @@ export class OrcaRuntimeRpcServer {
 
   getDeviceRegistry(): DeviceRegistry | null {
     return this.deviceRegistry
+  }
+
+  // S10-19 W-6: the grant list (ipc/mobile.ts) needs this to resolve each row's effective
+  // profile the same way the ingress does — public, read-only, never itself a config surface.
+  getLegacyGrantProfile(): 'full' | 'peer' {
+    return this.legacyGrantProfile
   }
 
   getTlsFingerprint(): string | null {
@@ -1876,6 +1902,13 @@ export class OrcaRuntimeRpcServer {
     // the authenticated device, never from anything the request itself carries. Undefined means
     // "not a paired peer" everywhere downstream (RpcContext.accessProfile's own contract).
     const accessProfile = effectiveAccessProfile(device, this.legacyGrantProfile)
+    // S10-19 R6 (FROZEN): a peer-profile caller's orchestrationCompatibilityEvidence is deleted
+    // at ingress, same statement block as the strip-and-stamp above — the dispatcher otherwise
+    // passes it straight off the request body, and it is a local-attestation channel a paired
+    // peer never holds.
+    if (accessProfile === 'peer' && request.orchestrationCompatibilityEvidence !== undefined) {
+      delete (request as Record<string, unknown>).orchestrationCompatibilityEvidence
+    }
     if (device.scope === 'mobile' && !MOBILE_RPC_METHOD_ALLOWLIST.has(request.method)) {
       reply(
         JSON.stringify(
@@ -1894,6 +1927,37 @@ export class OrcaRuntimeRpcServer {
       wsTransport.setClientId(ws, token)
     }
 
+    // S10-19 W-5: the peer ingress filter — one boundary, and it is the only thing that decides.
+    // Inserted after setClientId and before longPollClassOf (NEG-13b) so a refused frame consumes
+    // no long-poll slot but the socket is still accounted for on close.
+    if (accessProfile === 'peer') {
+      const admission = await admitRuntimePeerMethod({
+        runtime: this.runtime,
+        // Why sha256(token), not device.deviceId: this MUST match
+        // authenticatedCallerFingerprint (orchestration-mutation-executor.ts), which is what
+        // remote_dispatch_attachments.home_peer_fingerprint is stamped with on attach — a
+        // different fingerprint here would make every ownership check refuse its own caller.
+        callerFingerprint: createHash('sha256').update(token).digest('hex'),
+        params: request.params,
+        method: request.method
+      })
+      if (admission.refused) {
+        reply(
+          JSON.stringify(
+            this.buildError(
+              request.id,
+              admission.wireCode,
+              admission.message,
+              admission.retryAfterMs !== undefined
+                ? { retryAfterMs: admission.retryAfterMs }
+                : undefined
+            )
+          )
+        )
+        return
+      }
+    }
+
     const longPoll = longPollClassOf(request)
     const rejection = this.admitLongPoll(longPoll)
     if (rejection) {
@@ -1906,7 +1970,8 @@ export class OrcaRuntimeRpcServer {
     // Why: older pairings may lack scope metadata, so stamp the authenticated scope onto status.get.
     const replyForRequest =
       request.method === 'status.get'
-        ? (response: string): void => reply(injectDeviceScope(response, device.scope))
+        ? (response: string): void =>
+            reply(injectDeviceScope(response, device.scope, accessProfile))
         : reply
 
     const connectionId = ws ? this.mobileSocketWiring?.getConnectionId(ws) : undefined
@@ -1961,8 +2026,8 @@ export class OrcaRuntimeRpcServer {
     }
   }
 
-  private buildError(id: string, code: string, message: string): RpcResponse {
-    return errorResponse(id, { runtimeId: this.runtime.getRuntimeId() }, code, message)
+  private buildError(id: string, code: string, message: string, data?: unknown): RpcResponse {
+    return errorResponse(id, { runtimeId: this.runtime.getRuntimeId() }, code, message, data)
   }
 
   private writeMetadata(): void {

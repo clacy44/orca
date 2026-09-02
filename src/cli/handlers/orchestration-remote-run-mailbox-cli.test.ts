@@ -26,6 +26,20 @@ function supportedStatus(): { result: { capabilities: string[] } } {
   ])
 }
 
+// S10-19 §9.2: a federation-peer grant stamps a peerAccess block on status.get; a full pairing
+// never does. C-1/C-2/C-3 key the client-side identity suppression off this, not off `.remote`.
+function peerStatus(): { result: { capabilities: string[]; peerAccess: Record<string, unknown> } } {
+  return {
+    result: {
+      capabilities: [
+        'runtime.status.compat.v1',
+        ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY
+      ],
+      peerAccess: { profile: 'peer', version: 'orchestration.peer-allowlist.v1', methods: [] }
+    }
+  }
+}
+
 function invoke(command: string, flags: Map<string, string | boolean>, isRemote: boolean) {
   return ORCHESTRATION_HANDLERS[command]({
     flags,
@@ -205,5 +219,89 @@ describe('orchestration reply --environment', () => {
 
     expect(methodsCalled()).toEqual(['orchestration.reply'])
     expect(paramsOf(0).remoteRunMailbox).toBeUndefined()
+  })
+})
+
+// S10-19 C-1/C-2/C-3/C-4: once negotiateRemoteRunMailbox learns the callee is a federation-peer
+// grant (peerAccess present on status.get), the CLI stops offering local pane identity — the
+// peer server refuses it outright (§8.1/§8.2).
+describe('S10-19 W-5: client-side peer-identity suppression', () => {
+  it('C-1: check omits terminal (not just terminalPaneKey) against a peer grant', async () => {
+    callMock
+      .mockResolvedValueOnce(peerStatus())
+      .mockResolvedValueOnce({ result: { messages: [], count: 0, runId: 'run_1' } })
+
+    await invoke('orchestration check', new Map([['run', 'run_1']]), true)
+
+    expect(paramsOf(1).terminal).toBeUndefined()
+    expect(paramsOf(1).terminalPaneKey).toBeUndefined()
+  })
+
+  it('a full-profile remote check still offers terminal (no peerAccess block)', async () => {
+    callMock
+      .mockResolvedValueOnce(supportedStatus())
+      .mockResolvedValueOnce({ result: { messages: [], count: 0, runId: 'run_1' } })
+    getTerminalHandleMock.mockResolvedValue('term_caller')
+
+    await invoke('orchestration check', new Map([['run', 'run_1']]), true)
+
+    expect(paramsOf(1).terminal).toBe('term_caller')
+  })
+
+  it('C-2: send omits from and senderPaneKey against a peer grant', async () => {
+    callMock
+      .mockResolvedValueOnce(peerStatus())
+      .mockResolvedValueOnce({ result: { message: { id: 'msg_1' } } })
+    getTerminalHandleMock.mockResolvedValue('term_caller')
+
+    await invoke(
+      'orchestration send',
+      new Map([
+        ['to', 'run:run_1'],
+        ['subject', 'Cross-runtime instruction']
+      ]),
+      true
+    )
+
+    expect(paramsOf(1).from).toBeUndefined()
+    expect(paramsOf(1).senderPaneKey).toBeUndefined()
+  })
+
+  it('C-3: reply omits from against a peer grant', async () => {
+    callMock
+      .mockResolvedValueOnce(peerStatus())
+      .mockResolvedValueOnce({ result: { message: { id: 'msg_2' } } })
+    getTerminalHandleMock.mockResolvedValue('term_caller')
+
+    await invoke(
+      'orchestration reply',
+      new Map([
+        ['id', 'msg_1'],
+        ['body', 'Use the release branch.']
+      ]),
+      true
+    )
+
+    expect(paramsOf(1).from).toBeUndefined()
+  })
+
+  it('C-4: the compatibilityAck follow-up carries remoteRunMailbox and omits terminal against a peer grant', async () => {
+    callMock
+      .mockResolvedValueOnce(peerStatus())
+      .mockResolvedValueOnce({
+        result: {
+          messages: [],
+          count: 0,
+          runId: 'run_1',
+          legacyCompatibility: { ackMessageIds: ['msg_1'] }
+        }
+      })
+      .mockResolvedValueOnce({ result: {} })
+
+    await invoke('orchestration check', new Map([['run', 'run_1']]), true)
+
+    expect(methodsCalled()).toEqual(['status.get', 'orchestration.check', 'orchestration.check'])
+    expect(paramsOf(2)).toMatchObject({ remoteRunMailbox: true })
+    expect(paramsOf(2).terminal).toBeUndefined()
   })
 })

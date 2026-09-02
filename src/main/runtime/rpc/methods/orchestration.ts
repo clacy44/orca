@@ -36,6 +36,25 @@ import {
   isRemoteRunMailboxRequest,
   resolveRemoteRunMailboxScope
 } from './orchestration-remote-run-mailbox'
+import { meterPeerLink } from '../../runtime-peer-rpc-allowlist'
+
+// S10-19 §8.6/§8.7: the mail trio (check/send/reply) share one meter, PEER_MAILBOX_PER_MINUTE,
+// keyed on the caller's own fingerprint — a no-op for a non-peer caller.
+function assertPeerMailboxMeter(
+  runtime: Parameters<typeof meterPeerLink>[0]['runtime'],
+  accessProfile: 'full' | 'peer' | undefined,
+  callerFingerprint: string | undefined
+): void {
+  if (accessProfile !== 'peer') {
+    return
+  }
+  const metered = meterPeerLink({ runtime, callerFingerprint: callerFingerprint ?? '' }, 'mailbox')
+  if (metered.refused) {
+    throw new OrchestrationError('rate_limited', metered.message, {
+      retryAfterMs: metered.retryAfterMs
+    })
+  }
+}
 import { ORCHESTRATION_RUN_METHODS } from './orchestration-runs'
 import { ORCHESTRATION_AGENT_METHODS } from './orchestration-agents'
 import { ORCHESTRATION_WORKER_METHODS } from './orchestration-worker-methods'
@@ -586,9 +605,24 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         orchestrationMutation,
         pairedDeviceId,
         clientKind,
+        accessProfile,
+        authenticatedCallerFingerprint,
         signal
       }
     ) => {
+      // S10-19 §8.1/§8.2 (R7 extended to mail): a federation-peer grant may not name a local
+      // pane on this host — `from`/`senderPaneKey` name nothing here. Refused up front, before
+      // any branch below reads them.
+      if (
+        accessProfile === 'peer' &&
+        (params.from !== undefined || params.senderPaneKey !== undefined)
+      ) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer may not name a sender pane on this host; omit --from and rely on the mailbox identity.'
+        )
+      }
+      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       // Why first (K25, blocker fix): every branch below (point-to-point, group fan-out, and
       // both federation relay directions) forwards params.payload verbatim — one guard at the
@@ -1151,9 +1185,28 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         revalidateLegacyCoordinator,
         recordMutationReceipt,
         pairedDeviceId,
-        clientKind
+        clientKind,
+        accessProfile,
+        authenticatedCallerFingerprint
       }
     ) => {
+      // S10-19 §8.1: a federation peer must use the remote-run-mailbox mode and may not name a
+      // local pane — `terminal`/`terminalPaneKey` name nothing here.
+      if (accessProfile === 'peer') {
+        if (params.terminal !== undefined || params.terminalPaneKey !== undefined) {
+          throw new OrchestrationError(
+            'forbidden',
+            'A federation peer may not name a pane on this host; omit --terminal and use --run with remoteRunMailbox.'
+          )
+        }
+        if (params.remoteRunMailbox !== true) {
+          throw new OrchestrationError(
+            'forbidden',
+            'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.'
+          )
+        }
+      }
+      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       const handle = params.terminal ?? 'unknown'
       const typeFilter = parseMessageTypes(params.types)
@@ -1248,6 +1301,15 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
         }
 
+        // S10-19 R24 (§8.7): a peer never fences a locally-bound Run — two exclusive waiters were
+        // never going to coexist (waiter_exists), so a typed refusal beats a race the peer can
+        // win. A peer may still read/consume its own mail on this Run without --wait.
+        if (accessProfile === 'peer' && run.coordinator_pane_key !== null) {
+          throw new OrchestrationError(
+            'run_wait_local_only',
+            'This Run has a locally-bound coordinator; a federation peer may read mail here but may not --wait, which would fence the local coordinator.'
+          )
+        }
         const waitResult = await runtime.waitForMessage(address, {
           typeFilter: typeFilter as string[] | undefined,
           timeoutMs: params.timeoutMs ?? undefined,
@@ -1681,9 +1743,19 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         runtime,
         legacyCoordinatorRunId,
         pairedDeviceId,
-        clientKind
+        clientKind,
+        accessProfile,
+        authenticatedCallerFingerprint
       }
     ) => {
+      // S10-19 §8.2: a federation peer may not name a local sender pane via `from`.
+      if (accessProfile === 'peer' && params.from !== undefined) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer may not name a sender pane on this host; omit --from.'
+        )
+      }
+      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       if (isRemoteRunMailboxRequest({ remoteRunMailbox: params.remoteRunMailbox })) {
         assertRemoteRunMailboxCaller({ pairedDeviceId, clientKind })

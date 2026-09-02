@@ -26,7 +26,7 @@ export const ORCHESTRATION_AGENTS_DIRECTORY_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.agents.list',
     params: ListParams,
-    handler: async (params, { runtime, orchestrationCompatibilityEvidence }) => {
+    handler: async (params, { runtime, orchestrationCompatibilityEvidence, pairedDeviceId }) => {
       const db = runtime.getOrchestrationDb()
       const hostId = params.host ?? hostIdFor(runtime)
 
@@ -34,8 +34,14 @@ export const ORCHESTRATION_AGENTS_DIRECTORY_METHODS: RpcMethod[] = [
         orchestrationCompatibilityEvidence,
         { currentRuntimeLaunchSufficient: true }
       )
+      // S10-19 ops m13: an unattested LOCAL caller could otherwise choose its own rate bucket by
+      // passing --host; never key on params.host. A paired caller keys on its own link identity
+      // (never the host it claims to be), and an unattested local caller keys on this runtime's
+      // own id, not the caller-supplied one.
       const rate = db.checkAndBumpRate({
-        subjectKey: authority?.paneKey ?? hostId,
+        subjectKey:
+          authority?.paneKey ??
+          (pairedDeviceId ? `link:${pairedDeviceId}` : `host:${hostIdFor(runtime)}`),
         verb: 'list',
         windowMs: MINUTE_MS,
         limit: 60

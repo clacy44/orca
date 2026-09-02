@@ -6,8 +6,10 @@ import { isHostScopedId } from './orchestration/orchestration-id-grammar'
 import type { OrcaRuntimeService } from './orca-runtime'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 import {
+  PEER_ATTACH_PER_MINUTE,
   PEER_ATTACH_TIMEOUT_MAX_MS,
   PEER_ATTACH_TIMEOUT_MIN_MS,
+  PEER_LIVE_ATTACHMENTS_PER_LINK,
   PEER_MAILBOX_PER_MINUTE
 } from './peer-profile-constants'
 
@@ -61,6 +63,11 @@ export const PEER_ADMITTED: PeerAdmission = { refused: false }
 export type PeerAdmissionContext = {
   runtime: OrcaRuntimeService
   callerFingerprint: string
+  // W-5: the raw request params, needed by the ingress-level admission predicates
+  // (federationAttachStart's params.terminal refusal, federationAnswerPrompt's dispatchId
+  // extraction). Optional so W-3/W-4's narrower call sites (which never construct it) keep
+  // compiling unchanged.
+  params?: unknown
 }
 
 // S10-19 (ops MO-1 / attacker 6): db.checkAndBumpRate over one shared meter for every peer-link
@@ -167,4 +174,164 @@ export function peerOwnedAttachmentOrRefusal(
     return metered
   }
   return { refused: false, row }
+}
+
+// ── W-5: the ingress filter, the allowlist literal, per-verb hardening, metering ──────────────
+
+const p = (params: unknown): Record<string, unknown> =>
+  params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
+
+// §D: an unreadable store, a resolver fault, or any other throw from an admission predicate
+// refuses this ONE call with a typed, effect-free reply and an audit row — it never drops the
+// frame (an unhandled rejection reads as no response at all) and it never admits (§3 prereq 5).
+export const REFUSE_ADMISSION_UNAVAILABLE: PeerRefusal = peerRefusal(
+  'admission_unavailable',
+  'The peer admission check is temporarily unavailable; retry shortly.'
+)
+
+export function recordPeerAdmissionFault(
+  ctx: PeerAdmissionContext & { method: string },
+  error: unknown
+): void {
+  try {
+    ctx.runtime.getOrchestrationDb().writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: ctx.callerFingerprint,
+      verb: `peer_link:${ctx.method}`,
+      outcome: 'admission_unavailable',
+      reasonCode: error instanceof Error ? error.message.slice(0, 200) : 'unknown_fault'
+    })
+  } catch {
+    // Why: the audit write itself must never be the reason a refusal fails to reach the wire.
+  }
+}
+
+// §5 (Ruling 20 CORE RULING, R13/R30.3): S10-16 registers `federatedLinkProbe`/`federatedLinkConfirm`
+// as peer-by-design verbs. They do not exist at this branch's HEAD (git grep -> 0 hits), so S-1
+// exempts them from the "every allowlist entry resolves to a registered method" check and S-5
+// asserts this set is empty once ALL_RPC_METHODS actually contains them (i.e. once S10-16 lands
+// — whichever slice merges second carries the other's entries in the same commit, §11).
+export const RESERVED_PENDING_S10_16: ReadonlySet<string> = new Set([
+  'orchestration.federatedLinkProbe',
+  'orchestration.federatedLinkConfirm'
+])
+
+// §8.6: one flat meter per verb "subject" for every peer-link verb OTHER than attach, which gets
+// its own PEER_ATTACH_PER_MINUTE budget below so a metered read (status/roster) can't starve a
+// dispatch attempt, and vice versa.
+function meteredOnly(subject: string): (ctx: PeerAdmissionContext) => PeerRefusal | PeerAdmission {
+  return (ctx) => meterPeerLink(ctx, subject)
+}
+
+// §4.1/§4.1a/R7/R15: the ingress-level bound on `orchestration.federationAttachStart` for a peer
+// caller. The worktree-target and dispatch-id-grammar predicates are already enforced INSIDE the
+// handler (orchestration-federation.ts, W-3) because they need the resolved managed-worktree
+// record; this predicate covers what the handler does not: no caller-named pane (R7 — refused
+// here, effect-free, before any row exists), the per-link live-attachment cap
+// (PEER_LIVE_ATTACHMENTS_PER_LINK), and the attach verb's own rate budget
+// (PEER_ATTACH_PER_MINUTE, distinct from the general PEER_MAILBOX_PER_MINUTE meter).
+function federatedAttachAdmission(ctx: PeerAdmissionContext): PeerRefusal | PeerAdmission {
+  if (p(ctx.params).terminal !== undefined) {
+    return peerRefusal(
+      'worktree_not_federated',
+      'A federation peer may not name a pane to attach to; omit --terminal.'
+    )
+  }
+  const live = ctx.runtime.getOrchestrationDb().countLivePeerAttachments(ctx.callerFingerprint)
+  if (live >= PEER_LIVE_ATTACHMENTS_PER_LINK) {
+    return peerRefusal(
+      'attachment_cap_reached',
+      `This link already holds ${live} live peer attachments (cap ${PEER_LIVE_ATTACHMENTS_PER_LINK}).`
+    )
+  }
+  const result = ctx.runtime.getOrchestrationDb().checkAndBumpRate({
+    subjectKey: ctx.callerFingerprint,
+    verb: 'peer_link:attach',
+    windowMs: 60_000,
+    limit: PEER_ATTACH_PER_MINUTE
+  })
+  return result.allowed
+    ? PEER_ADMITTED
+    : peerRefusal('rate_limited', 'Peer link attach rate limit exceeded.', result.retryAfterMs)
+}
+
+// §6.4: admitted here only on shape (a well-formed dispatchId). Ownership, prompt liveness and
+// the single-shot reservation are decided inside writeToPeerOwnedPane (W-4) under the PTY
+// write's own serialization — that function already calls peerOwnedAttachmentOrRefusal itself
+// (which ends in meterPeerLink), so re-running it here would meter the same call twice.
+function peerPromptAnswerAdmission(ctx: PeerAdmissionContext): PeerRefusal | PeerAdmission {
+  return typeof p(ctx.params).dispatchId === 'string'
+    ? PEER_ADMITTED
+    : peerRefusal('pane_not_peer_owned', 'Missing dispatchId.')
+}
+
+export type PeerRpcAdmissionRule =
+  | true
+  | ((ctx: PeerAdmissionContext) => PeerRefusal | PeerAdmission)
+
+// The 20-entry literal (§5/§D, FROZEN): 11 admitted on the name alone, 7 conditional
+// (status.get, federationAttachStart, check, send, reply, terminal.list,
+// federationAnswerPrompt), 2 reserved for S10-16 (peer-by-design; not registered on this
+// branch). An absent key is a refusal — default-deny. `orchestration.federationWorkerInput`
+// does not exist and appears nowhere here (S-8).
+export const RUNTIME_PEER_RPC_METHOD_ALLOWLIST = new Map<string, PeerRpcAdmissionRule>([
+  // ── 1. capability negotiation ─────────────────────────────────────────────
+  ['status.get', meteredOnly('status')],
+
+  // ── 2. federated worker lifecycle (this host is the WORKER SERVER) ────────
+  ['orchestration.federationAttachStart', federatedAttachAdmission],
+  ['orchestration.federationPull', true],
+  ['orchestration.federationAck', true],
+  ['orchestration.federationImport', true],
+  ['orchestration.federationShow', true],
+  ['orchestration.federationRead', true],
+  ['orchestration.federationReadOutput', true],
+  ['orchestration.federationStop', true],
+
+  // ── 3. chair-to-chair mail ────────────────────────────────────────────────
+  ['orchestration.federatedAsk', true],
+  ['orchestration.federatedSend', true],
+
+  // ── 4. remote run mailbox — the mode assertion + body-identity refusal live in the handler
+  // (orchestration.ts, W-5) because they need the parsed, typed params; admitted here on name.
+  ['orchestration.check', true],
+  ['orchestration.send', true],
+  ['orchestration.reply', true],
+
+  // ── 5. roster and directory (read-only, projected / metered) ──────────────
+  ['terminal.list', meteredOnly('roster')],
+  ['orchestration.agents.list', true],
+  ['orchestration.agents.get', true],
+
+  // ── 6. the only peer input into a pane (Ruling 20 CORE RULING) ────────────
+  ['orchestration.federationAnswerPrompt', peerPromptAnswerAdmission],
+
+  // ── 7. S10-16 link binding — peer-by-design (R13, Ruling 14f) ─────────────
+  ['orchestration.federatedLinkProbe', true],
+  ['orchestration.federatedLinkConfirm', true]
+])
+
+// §3, the ingress boundary. `runtime-rpc.ts` awaits this for every peer-profile WS request
+// before dispatch. Cannot throw (MJ-5/R3): a throw here would be an unhandled rejection with no
+// frame written, which is the unknown-outcome R17/M10 exist to prevent.
+export async function admitRuntimePeerMethod(
+  ctx: PeerAdmissionContext & { method: string }
+): Promise<PeerAdmission | PeerRefusal> {
+  try {
+    const rule = RUNTIME_PEER_RPC_METHOD_ALLOWLIST.get(ctx.method)
+    if (rule === undefined) {
+      return peerRefusal(
+        'method_not_available',
+        `Method '${ctx.method}' is not available to a federation-peer grant.`
+      )
+    }
+    if (rule === true) {
+      return PEER_ADMITTED
+    }
+    return rule(ctx)
+  } catch (error) {
+    recordPeerAdmissionFault(ctx, error)
+    return REFUSE_ADMISSION_UNAVAILABLE
+  }
 }

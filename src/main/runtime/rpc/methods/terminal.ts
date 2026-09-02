@@ -92,6 +92,16 @@ import {
 import type { TerminalSnapshotUnavailableReason } from '../../../../shared/terminal-snapshot-unavailability'
 import type { RemoteTerminalSourceRangeReplacementReservation } from '../../remote-terminal-source-range-consumer'
 import { withTerminalCloseAttribution } from '../terminal-close-attribution'
+import type { RuntimeTerminalSummary } from '../../../../shared/runtime-types'
+
+// S10-19 §5 (F6): the peer-visible terminal.list projection — everything else on
+// RuntimeTerminalSummary is omitted, not nulled, so the response shape itself carries no signal
+// about it.
+function projectPeerTerminalSummary(
+  terminal: RuntimeTerminalSummary
+): Pick<RuntimeTerminalSummary, 'handle' | 'worktreeId' | 'title'> {
+  return { handle: terminal.handle, worktreeId: terminal.worktreeId, title: terminal.title }
+}
 
 const REQUESTED_SNAPSHOT_BYTE_BUDGET = 2 * 1024 * 1024
 const TERMINAL_OUTPUT_FLUSH_MS = 5
@@ -1226,7 +1236,10 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.list',
     params: TerminalListParams,
-    handler: async (params, { runtime, connectionId, pairedDeviceId, clientKind }) => {
+    handler: async (
+      params,
+      { runtime, connectionId, pairedDeviceId, clientKind, accessProfile }
+    ) => {
       const presence =
         params.includePresence === true
           ? resolveTerminalListPresenceScope(terminalPresenceRegistry, {
@@ -1235,7 +1248,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
               ...(clientKind ? { clientKind } : {})
             })
           : null
-      return await runtime.listTerminals(params.worktree, params.limit, {
+      const result = await runtime.listTerminals(params.worktree, params.limit, {
         handles: params.handles,
         requireFreshPtyLiveness: params.requireFreshPtyLiveness,
         includeVisualLayouts: params.includeVisualLayouts,
@@ -1244,6 +1257,12 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         ...(pairedDeviceId ? { pairedDeviceId } : {}),
         ...(presence ? { presence } : {})
       })
+      // S10-19 §5 (F6): a federation-peer grant sees only handle/worktreeId/title per terminal —
+      // keys OMITTED, not nulled, so a peer never learns a row's shape it cannot see. Applied at
+      // the RPC boundary rather than inside listTerminals so every other caller is untouched.
+      return accessProfile === 'peer'
+        ? { ...result, terminals: result.terminals.map(projectPeerTerminalSummary) }
+        : result
     }
   }),
   defineMethod({

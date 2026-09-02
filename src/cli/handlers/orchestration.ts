@@ -654,7 +654,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       run !== undefined || to?.startsWith('run:') === true
     )
     const sendParams = {
-      from,
+      from: remoteRunMailbox.peerAccess ? undefined : from,
       to,
       host: resolvedTarget?.host,
       run,
@@ -666,7 +666,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       threadId: getOptionalStringFlag(flags, 'thread-id'),
       payload: getOptionalStructuredMessagePayload(flags),
       // Why: pane key is the remint-stable sender identity the runtime verifies lifecycle ownership against; older runtimes strip it.
-      senderPaneKey: process.env.ORCA_PANE_KEY || undefined,
+      // S10-19 C-2: never offered to a federation-peer grant — it names nothing there.
+      senderPaneKey: remoteRunMailbox.peerAccess
+        ? undefined
+        : process.env.ORCA_PANE_KEY || undefined,
       waitForLifecycleSettlement: type === 'worker_done' ? true : undefined,
       devMode: isDevCliInvocation()
     }
@@ -793,7 +796,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     try {
       result = await withRemoteRunMailboxDegradation(remoteRunMailbox, () =>
         callMutation<CheckResult>(client, flags, 'orchestration.check', {
-          terminal,
+          // S10-19 C-1: a federation-peer grant refuses `terminal` outright (§8.1); it names a
+          // pane on THIS host, which means nothing on that server.
+          terminal: remoteRunMailbox.peerAccess ? undefined : terminal,
           // Why: a local pane key names nothing on the peer, so never offer it as identity there.
           terminalPaneKey:
             explicitTerminal || remoteRunMailbox.remote
@@ -859,8 +864,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const compatibilityAck = result.result.legacyCompatibility?.ackMessageIds
     if (compatibilityAck && compatibilityAck.length > 0) {
       await flushStdout()
+      // S10-19 C-4: this is a second call on the same possibly-remote client with no mode param
+      // of its own — pass remoteRunMailbox.param here too, or R4 refuses it.
       await client.call('orchestration.check', {
-        terminal,
+        terminal: remoteRunMailbox.peerAccess ? undefined : terminal,
+        remoteRunMailbox: remoteRunMailbox.param,
         compatibilityAck: JSON.stringify({
           messageIds: compatibilityAck,
           types: getOptionalStringFlag(flags, 'types')
@@ -882,7 +890,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         body: getRequiredStringFlag(flags, 'body'),
         run: getOptionalStringFlag(flags, 'run'),
         remoteRunMailbox: remoteRunMailbox.param,
-        from
+        // S10-19 C-3: a federation-peer grant refuses `from` (§8.2) — it names a pane on this
+        // host, which means nothing on that server.
+        from: remoteRunMailbox.peerAccess ? undefined : from
       })
     )
     printResult(result, json, (r) =>
