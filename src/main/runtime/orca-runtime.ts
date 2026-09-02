@@ -157,6 +157,7 @@ import {
 } from './orchestration/worker-terminal-process-liveness'
 import { rollbackWorkspaceSessionAfterFailedAsyncWrite } from './workspace-session-failed-write-rollback'
 import { OrchestrationError } from './orchestration/orchestration-error'
+import { HostIdGrammarError } from './orchestration/orchestration-id-grammar'
 import {
   planLegacyWorkerTerminalRecovery,
   type LegacyWorkerTerminalRecoveryPlan
@@ -5132,6 +5133,31 @@ export class OrcaRuntimeService {
       .catch((error: unknown) => {
         if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
           this.settleOrchestrationFederationSyncHealth(dispatchId, { kind: 'failure', error })
+          // S10-20 (ratchet relief for federation-sync.ts, chair-directed): the audit row Ruling
+          // 22 (1) requires for an I-5/I-6 id-grammar refusal is written HERE, not at the
+          // parseRelayedMessage call site — this is the one place both the throw and the
+          // federated dispatch's environment_id (for actorHostId) are already in scope, and
+          // orca-runtime.ts is the file exempted from the max-lines ratchet
+          // (config/max-lines-baseline.txt:141), unlike federation-sync.ts. Effect-free: the
+          // throw already unwound before importFederatedRelayItem ran for the offending item.
+          // S10-20 review F11: gate on the throw site's own error CLASS
+          // (HostIdGrammarError, orchestration-id-grammar.ts), not on `data.reasonCode` -- that
+          // field is peer-forgeable (runtime-rpc-envelope.ts's failure envelope types `data` as
+          // `z.unknown()` and throwOrchestrationWorkerServerError:5103 rethrows it verbatim into
+          // a plain OrchestrationError), so a peer naming `reasonCode: 'malformed_relay_id'` in
+          // its own failure response could satisfy a data-keyed gate. A plain OrchestrationError
+          // can never be an instanceof this subclass, so identity is unforgeable by construction.
+          const isIdGrammarRefusal = error instanceof HostIdGrammarError
+          if (isIdGrammarRefusal) {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: null,
+              actorHostId: db.getFederatedDispatch(dispatchId)?.environment_id ?? null,
+              verb: 'federationSync',
+              outcome: 'invalid_argument',
+              reasonCode: 'malformed_relay_id'
+            })
+          }
           if (!this.orchestrationFederationWarnings.has(dispatchId)) {
             console.warn(`[orchestration] Federation sync failed for ${dispatchId}:`, error)
             this.orchestrationFederationWarnings.add(dispatchId)
@@ -17901,6 +17927,8 @@ export class OrcaRuntimeService {
   // Why: probe dedupe shares one promise across callers, but each caller's
   // continuation would re-deliver the same unread rows; arm one per pty.
   private readonly probeDeferredDeliveryPtyIds = new Set<string>()
+  // S10-20: re-entrancy guard for the delivery foreground guard's own confirm-and-continue.
+  private readonly foregroundGuardPendingPtyIds = new Set<string>()
 
   private controllerKnowsPtyIsLive(ptyId: string): boolean {
     try {
@@ -34010,6 +34038,41 @@ export class OrcaRuntimeService {
     })
   }
 
+  // S10-20: three-valued on purpose. 'not_agent' is a PROOF and is the only verdict that holds.
+  // 'unknown' delivers — the same rule the absence probe states two hundred lines below
+  // ("Proven absence keeps them queued for a future surface; unknown liveness still delivers",
+  // :35562-35564) — because a controller with no confirmForegroundProcess (remote/ssh/degraded
+  // providers, pty.ts:5739-5743, degraded-daemon-pty-provider.ts:187-188 both return null when
+  // unsupported) must not have its mail stopped. What makes 'unknown' acceptable is S10-20 (1)+(2):
+  // after those, every byte in the pointer is host-constant or grammar/length-bounded.
+  private async confirmDeliveryForegroundIsAgent(
+    ptyId: string
+  ): Promise<'agent' | 'not_agent' | 'unknown'> {
+    const controller = this.ptyController
+    if (!controller?.confirmForegroundProcess) {
+      return 'unknown'
+    }
+    let confirmed: string | null
+    try {
+      confirmed = await controller.confirmForegroundProcess(ptyId)
+    } catch {
+      return 'unknown'
+    }
+    if (!confirmed) {
+      return 'unknown'
+    }
+    if (recognizeAgentProcess(confirmed) !== null) {
+      return 'agent'
+    }
+    // A wrapper (node/npx) reported before the cmdline cache resolves is not proof of absence —
+    // isRecognizedForegroundAgentProcess (:33889) treats it the same way, with a retry this guard
+    // deliberately does not run: it sits in front of EVERY delivery and must stay cheap.
+    if (isAgentForegroundWrapperProcess(confirmed)) {
+      return 'unknown'
+    }
+    return 'not_agent'
+  }
+
   private async isRecognizedForegroundAgentProcess(
     ptyId: string,
     foregroundProcess: string,
@@ -34182,6 +34245,11 @@ export class OrcaRuntimeService {
       // (the probe itself) before routing here — re-running the probe would risk re-arming
       // another deferred continuation instead of delivering.
       skipAbsenceProbe?: boolean
+      // S10-20 review F12: set ONLY by the mid-turn re-entry continuation below (this method's
+      // own async foreground-confirm branch, deliverPendingMessages), after a fresh
+      // confirmForegroundProcess read already ran for this push — tells the deliverPendingMessages
+      // call at the bottom of this method not to re-arm that same async scan, which would loop.
+      foregroundConfirmed?: boolean
     }
   ): void {
     const waitText = buildTerminalWaitText(
@@ -35597,6 +35665,9 @@ export class OrcaRuntimeService {
       // threadId arg was omitted — several dispatch: pokes carry no specific row — so the
       // still-live waiter check below cannot assume this row is what that waiter is about.
       notifiedThreadIdKnown?: boolean
+      // S10-20 (Ruling 22 scope 3): set ONLY by the guard's own continuation below, after a fresh
+      // confirmForegroundProcess read proved an agent owns this pty. Never set by an external caller.
+      foregroundConfirmed?: boolean
     } = {}
   ): void {
     if (!this._orchestrationDb) {
@@ -35776,6 +35847,100 @@ export class OrcaRuntimeService {
           // S10-15 review m-8: a throwing probe silently dropped here too — treat it the same
           // as any other withheld attempt (matches attemptHydratedProbedDelivery's own
           // catch -> recordWithheldDelivery('probe_failed') precedent for a throwing probe).
+          this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
+        })
+      return
+    }
+
+    // S10-20 (Ruling 22 scope 3; INV-P-012 clause 5, INV-P-013 corollary): a stale 'idle' status
+    // alone never authorises a write. lastAgentStatus is written ONLY by the OSC-title handler
+    // (:11314-11315 / :11389-11390) and cleared ONLY by a provider-generation reset (:11437-11450),
+    // so a login shell that emits no title after its agent exits leaves 'idle' + observedLive
+    // standing indefinitely (S10-19 T-10). Take a FRESH, cache-bypassing, non-sticky read here —
+    // confirmForegroundProcess (fresh:true, local-pty-provider.ts:1419-1438 /
+    // pty-subprocess.ts:1118-1140), never getForegroundProcess (1000ms cache at pty-subprocess.ts:87;
+    // sticky lastRecognizedAgent via stable-foreground-process.ts:36-39) and never isPtyRunningAgent
+    // (:33847-33854 returns true on exactly the stale-status state this guard exists to catch).
+    // Deferral shape copies the absence probe directly above.
+    // Chair ruling (S10-20 escalation finding 2): a controller with no confirmForegroundProcess
+    // at all can only ever resolve 'unknown' (confirmDeliveryForegroundIsAgent's own first
+    // branch), which already delivers per §3.4 — so this case takes a SYNCHRONOUS fast path,
+    // preserving every pre-S10-20 caller's exact timing (remote/ssh/degraded providers, and every
+    // test controller built without the capability). Security semantics are unchanged: the
+    // verdict here is deterministically 'unknown' either way. Only a controller that CAN take a
+    // fresh read goes through the async confirm-and-continue below.
+    if (!options.foregroundConfirmed && this.ptyController?.confirmForegroundProcess) {
+      const guardedPtyId = ptyId
+      // S10-20 review F1: capture the gate that authorized THIS push before arming the async
+      // confirm; the continuation below must re-verify it still holds, not just ptyId/writable.
+      const authorizedIdle =
+        resolved.lastAgentStatus === 'idle' && resolved.lastAgentStatusObservedLive
+      if (this.foregroundGuardPendingPtyIds.has(guardedPtyId)) {
+        // S10-20 review F2: parity with the flight-park mechanism this guard bypasses (no
+        // flight is registered here) — a second/third mailbox on the same pty must park as a
+        // withheld attempt, never drop silently. scheduleSlowMailboxRetry re-enters this handle.
+        this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
+        return
+      }
+      this.foregroundGuardPendingPtyIds.add(guardedPtyId)
+      void this.confirmDeliveryForegroundIsAgent(guardedPtyId)
+        .then((verdict) => {
+          this.foregroundGuardPendingPtyIds.delete(guardedPtyId)
+          if (verdict === 'not_agent') {
+            // Proven: the pane's foreground is not its agent. HELD, never typed.
+            this.recordWithheldDelivery(mailboxHandle, 'not_agent_pane')
+            this.mailPointerRepointScheduler.schedule(mailboxHandle)
+            return
+          }
+          // Why re-resolve (same reason the absence continuation does above): an
+          // exit/respawn/regraph inside the read window must not be typed into on a stale closure.
+          const current = this.resolveLiveDeliveryTarget(target)
+          if (!current || current.ptyId !== guardedPtyId || !current.writable) {
+            this.recordWithheldDelivery(mailboxHandle, 'no_live_pane')
+            return
+          }
+          // S10-20 review F1: the caller's idle authorization must still hold. Do not require
+          // idle unconditionally here — attemptMidTurnClaudeDelivery's busy-Claude-pane path
+          // (S10-15 F9) is legitimate and must keep working; only re-check when THIS push was
+          // originally authorized on the idle edge.
+          if (
+            authorizedIdle &&
+            !(current.lastAgentStatus === 'idle' && current.lastAgentStatusObservedLive)
+          ) {
+            this.recordWithheldDelivery(mailboxHandle, 'pane_busy')
+            return
+          }
+          // S10-20 review F12: !authorizedIdle means this push runs on
+          // attemptMidTurnClaudeDelivery's busy-Claude-pane authorization (S10-15 F9), not the
+          // idle edge — and that path carries its OWN hard pre-write gate (the modal/trust-prompt
+          // check at attemptMidTurnClaudeDelivery), which the confirmForegroundProcess scan above
+          // ran concurrently with, not before. A modal that opened inside that async window would
+          // otherwise reach the write below unchecked and get auto-answered. Route back through
+          // the gate so it re-runs the modal check immediately before the write, exactly like the
+          // absence-probe continuation does above. foregroundConfirmed: true (added to
+          // attemptMidTurnClaudeDelivery's options below) tells the re-entrant
+          // deliverPendingMessages call that the foreground scan already ran, so it does not loop
+          // back into this branch.
+          if (!authorizedIdle) {
+            const pty = this.ptysById.get(guardedPtyId)
+            if (pty && this.isClaudeCodePane(pty)) {
+              this.attemptMidTurnClaudeDelivery(current.target, pty, mailboxHandle, {
+                ...options,
+                skipAbsenceProbe: true,
+                foregroundConfirmed: true
+              })
+              return
+            }
+          }
+          this.deliverPendingMessages(current.target, {
+            ...options,
+            mailboxHandle,
+            skipAbsenceProbe: true,
+            foregroundConfirmed: true
+          })
+        })
+        .catch(() => {
+          this.foregroundGuardPendingPtyIds.delete(guardedPtyId)
           this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
         })
       return

@@ -15,6 +15,10 @@ import {
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { payloadValueForGate } from '../../orchestration/message-gate-writer'
 import { buildFederatedSenderIdentity } from '../../orchestration/federated-sender-identity'
+import {
+  isHostMessageId,
+  requireOptionalThreadId
+} from '../../orchestration/orchestration-id-grammar'
 import { resolveCallerAgent } from './orchestration-caller-identity'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationCompatibilityEvidence } from '../../../../shared/orchestration-compatibility-evidence'
@@ -161,7 +165,34 @@ export async function relayPeerSendToHost(args: {
     }
   }
   const result = relayResult as { messageId: string; threadId: string | null }
-  db.markPeerRelayAccepted(message.id, result.threadId ?? null)
+  // S10-20 review F6 (Ruling 22 (1)): the peer's RPC response ids are peer-chosen wire data,
+  // same as any other ingress — validate before they reach messages.peer_thread_id / are
+  // returned as relay.peerMessageId. Refused, not thrown: the local row already exists (this
+  // relay attempt failed on the wire like any other peer-side refusal).
+  let validatedThreadId: string | null
+  try {
+    validatedThreadId = requireOptionalThreadId(result.threadId, 'thread id')
+    if (!isHostMessageId(result.messageId)) {
+      throw new OrchestrationError(
+        'invalid_argument',
+        'The peer relay response message id is not a valid message id.'
+      )
+    }
+  } catch (error) {
+    const code = error instanceof OrchestrationError ? error.code : 'invalid_argument'
+    const reason = error instanceof Error ? error.message : String(error)
+    return {
+      message,
+      relay: {
+        destination: 'peer_agent',
+        environment: server.name,
+        accepted: false,
+        code,
+        reason
+      }
+    }
+  }
+  db.markPeerRelayAccepted(message.id, validatedThreadId)
   return {
     message: db.getMessageById(message.id) ?? message,
     relay: {

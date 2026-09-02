@@ -575,7 +575,7 @@ describe('per-dispatch liveness window', () => {
                     dispatch_id: started.dispatch.id,
                     direction: 'to_home',
                     sequence: 1,
-                    message_id: 'msg_peer_heartbeat',
+                    message_id: 'msg_deadbeef0123',
                     kind: 'message',
                     created_at: peerNow,
                     payload: JSON.stringify({

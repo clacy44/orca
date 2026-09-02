@@ -2,6 +2,7 @@ import { MESSAGE_TYPES, type MessagePriority, type MessageType } from './types'
 import type { OrchestrationDb } from './db'
 import { OrchestrationError } from './orchestration-error'
 import { gateVerdictRefusalError } from './gate-refusal-error'
+import { requireOptionalThreadId } from './orchestration-id-grammar'
 
 const MESSAGE_TYPE_SET = new Set<MessageType>(MESSAGE_TYPES)
 
@@ -46,7 +47,7 @@ export function parseFederatedControlMessage(payload: string): FederatedControlM
     type: message.type as MessageType,
     priority:
       message.priority === 'high' || message.priority === 'urgent' ? message.priority : 'normal',
-    threadId: typeof message.threadId === 'string' ? message.threadId : null,
+    threadId: requireOptionalThreadId(message.threadId, 'thread id'),
     payload: typeof message.payload === 'string' ? message.payload : null
   }
 }

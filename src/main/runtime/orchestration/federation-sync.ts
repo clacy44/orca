@@ -15,6 +15,7 @@ import {
 } from './federation-ack-checkpoints'
 import { parseFederatedWorkerReportPayload } from './federation-worker-report-payload'
 import { extractPayloadKind } from './message-waiter-thread-keying'
+import { requireHostMessageId, requireOptionalThreadId } from './orchestration-id-grammar'
 
 const MESSAGE_TYPE_SET = new Set<MessageType>(MESSAGE_TYPES)
 const FEDERATION_PULL_PAGE_SIZE = 50
@@ -99,7 +100,7 @@ async function syncFederatedDispatchPages(
         `Federated relay for ${dispatchId} is not contiguous after sequence ${cursor}.`
       )
     }
-    const message = parseRelayedMessage(item.payload)
+    const message = parseRelayedMessage(item.payload, item.message_id)
     const stored = db.importFederatedRelayItem({
       dispatchId,
       sequence: item.sequence,
@@ -218,7 +219,7 @@ async function syncFederatedDispatchPages(
   return { imported, acknowledgedThrough: cursor }
 }
 
-export function parseRelayedMessage(payload: string): RelayedMessage {
+export function parseRelayedMessage(payload: string, messageId: string): RelayedMessage {
   let parsed: unknown
   try {
     parsed = JSON.parse(payload)
@@ -229,6 +230,7 @@ export function parseRelayedMessage(payload: string): RelayedMessage {
     throw new OrchestrationError('invalid_argument', 'Federated relay payload is not a message.')
   }
   const message = parsed as Partial<RelayedMessage>
+  requireHostMessageId(messageId, 'message id')
   if (typeof message.subject !== 'string' || typeof message.body !== 'string') {
     throw new OrchestrationError('invalid_argument', 'Federated relay message is incomplete.')
   }
@@ -245,7 +247,7 @@ export function parseRelayedMessage(payload: string): RelayedMessage {
     type: message.type,
     priority:
       message.priority === 'high' || message.priority === 'urgent' ? message.priority : 'normal',
-    threadId: typeof message.threadId === 'string' ? message.threadId : null,
+    threadId: requireOptionalThreadId(message.threadId, 'thread id'),
     payload: typeof message.payload === 'string' ? message.payload : null
   }
 }

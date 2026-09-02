@@ -17,11 +17,13 @@ import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { payloadValueForGate } from '../../orchestration/message-gate-writer'
 import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 import {
+  isHostMessageId,
+  requireOptionalThreadId
+} from '../../orchestration/orchestration-id-grammar'
+import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
-
-const RELAYED_MESSAGE_ID_RE = /^msg_[0-9a-f]{12}$/
 
 const FederatedSendParams = z.object({
   // Optional (D3): an old sender, or one whose pane has no registered `agents` row, omits it.
@@ -106,7 +108,7 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           peerAgentId = null
         }
 
-        if (!RELAYED_MESSAGE_ID_RE.test(params.messageId)) {
+        if (!isHostMessageId(params.messageId)) {
           throw new OrchestrationError(
             'invalid_argument',
             'The relayed message id is not a valid message id.',
@@ -117,6 +119,7 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
             }
           )
         }
+        requireOptionalThreadId(params.threadId, 'thread id')
         // Idempotent replay vs conflict (mirrors importFederatedRelayItem's conflict rule,
         // db.ts): a peer-chosen id that already exists on this host either matches (a retry —
         // return the stored receipt) or conflicts (refuse). Finding 21: this distinction is a

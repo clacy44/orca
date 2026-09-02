@@ -10,6 +10,10 @@ import {
 } from '../../orchestration/federation-lifecycle-settlement'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, requiredString } from '../schemas'
+import {
+  HostIdGrammarError,
+  requireHostMessageId
+} from '../../orchestration/orchestration-id-grammar'
 
 const FederationPullParams = z.object({
   dispatchId: requiredString('Missing Dispatch ID'),
@@ -164,6 +168,19 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
         if (item.sequence <= cursor) {
           continue
         }
+        try {
+          requireHostMessageId(item.message_id, 'message id')
+        } catch (error) {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: authenticatedCallerFingerprint ?? null,
+            verb: 'federationImport',
+            outcome: 'invalid_argument',
+            reasonCode: 'malformed_message_id'
+          })
+          throw error
+        }
         const currentAttachment = requireHomeAttachment(
           runtime,
           params.dispatchId,
@@ -195,11 +212,37 @@ export const ORCHESTRATION_FEDERATION_RELAY_METHODS: RpcMethod[] = [
               `Remote Dispatch ${params.dispatchId} does not support coordinator control mail.`
             )
           }
-          const controlMessage = importFederatedControlMessage(db, {
-            dispatchId: params.dispatchId,
-            messageId: item.message_id,
-            payload: item.payload
-          })
+          let controlMessage: ReturnType<typeof importFederatedControlMessage>
+          try {
+            controlMessage = importFederatedControlMessage(db, {
+              dispatchId: params.dispatchId,
+              messageId: item.message_id,
+              payload: item.payload
+            })
+          } catch (error) {
+            // S10-20 review F11: only the id-grammar refusal (HostIdGrammarError, thrown at
+            // orchestration-id-grammar.ts) writes this row — request_mismatch and
+            // body_gate_refused already have their own audit, and a plain JSON/shape/incomplete
+            // parse failure is not an id refusal at all. Keying on the error class rather than
+            // `data.reasonCode` matters here too: this catch is currently reachable only by
+            // errors that originate locally inside importFederatedControlMessage, but that is an
+            // unstated invariant a future refactor could break silently, so it takes the same
+            // unforgeable-by-construction key as the F11 gate in orca-runtime.ts. The only
+            // requireHost* check reachable inside importFederatedControlMessage is the thread id
+            // (via requireOptionalThreadId), so a marked error here is always malformed_thread_id.
+            const isIdGrammarRefusal = error instanceof HostIdGrammarError
+            if (isIdGrammarRefusal) {
+              db.writeAgentAudit({
+                agentId: null,
+                actorPaneKey: null,
+                actorHostId: authenticatedCallerFingerprint ?? null,
+                verb: 'federationImport',
+                outcome: 'invalid_argument',
+                reasonCode: 'malformed_thread_id'
+              })
+            }
+            throw error
+          }
           imported += controlMessage.imported ? 1 : 0
           if (controlMessage.imported) {
             runtime.notifyMessageArrived(`dispatch:${params.dispatchId}`, controlMessage.type)
@@ -260,7 +303,7 @@ function parseFederatedReply(payload: string): {
   }
   return {
     questionId: reply.questionId,
-    answerMessageId: reply.answerMessageId,
+    answerMessageId: requireHostMessageId(reply.answerMessageId, 'answer message id'),
     body: reply.body
   }
 }
