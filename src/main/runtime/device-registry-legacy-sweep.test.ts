@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeviceRegistry, type DeviceEntry } from './device-registry'
 import { PENDING_GRANT_TTL_MS } from './device-registry-pending-grants'
 import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
@@ -59,6 +59,64 @@ describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
         legacyExpiresAt: pairedAt + PENDING_GRANT_TTL_MS
       }
     ])
+  })
+
+  // S10-16 C1 review round 2 D2: a headless `orca serve` that never touches an orchestration verb
+  // never constructs the DB (flushLegacySweepAudit is lazy), so queued audit rows would otherwise
+  // sit silent until process exit and vanish. Load-time loud degradation: warn with the count.
+  it('D2: warns once, naming the row count, when the sweep queues audit rows at load', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-runtime',
+        name: 'Legacy runtime link',
+        token: 'legacy-runtime-token',
+        scope: 'runtime',
+        pairedAt: Date.now(),
+        lastSeenAt: 0
+      },
+      {
+        deviceId: 'legacy-runtime-2',
+        name: 'Legacy runtime link 2',
+        token: 'legacy-runtime-token-2',
+        scope: 'runtime',
+        pairedAt: Date.now(),
+        lastSeenAt: 0
+      }
+    ])
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const registry = new DeviceRegistry(userDataPath)
+      // The flush mechanism is unchanged — this is an additional loud signal, not a replacement.
+      expect(registry.getPendingLegacySweepAudit()).toHaveLength(2)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('2')
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('orchestration DB attaches')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('D2: does not warn when the sweep queues nothing', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'mobile-1',
+        name: 'Phone',
+        token: 'mobile-token',
+        scope: 'mobile',
+        pairedAt: Date.now(),
+        lastSeenAt: Date.now()
+      }
+    ])
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const registry = new DeviceRegistry(userDataPath)
+      expect(registry.getPendingLegacySweepAudit()).toEqual([])
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('F4: keeps an ALREADY-EXPIRED legacy row at load (never deleted by the sweep) but refuses it at validateToken, and it stays listable', () => {

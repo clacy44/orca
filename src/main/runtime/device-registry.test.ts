@@ -206,6 +206,42 @@ describe('DeviceRegistry pending grants', () => {
     expect(persisted.map((device) => device.deviceId)).toEqual(['legacy', expect.any(String)])
   })
 
+  // S10-16 C1 review round 2 D1: an expired swept row must never be re-advertised as the answer
+  // to an unnamed `orca serve` start (runtime-rpc.ts:804 -> getOrCreatePendingDevice, no mint/
+  // rotate). Before this fix the swept row satisfied findCoalescedPendingDevice's predicate
+  // (lastSeenAt === 0, scope matches, isMintedPendingDevice() === false post-F1) and was returned
+  // — but validateToken refuses its token (device-registry.ts's isExpiredLegacyCoalescedGrant OR
+  // clause), so the pairing URL/banner would authenticate never. The regression assertion is the
+  // one the review named: the returned entry's OWN token must authenticate.
+  it('D1: getOrCreatePendingDevice never coalesces onto an expired swept grant — the returned token always authenticates', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'swept-expired',
+        name: 'Old shared link',
+        token: 'swept-expired-token',
+        scope: 'runtime',
+        // Far enough in the past that the sweep's derived deadline (pairedAt + PENDING_GRANT_TTL_MS)
+        // has already elapsed.
+        pairedAt: 0,
+        lastSeenAt: 0
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+    // Confirm the fixture really is a swept, expired, unauthenticatable row before exercising the
+    // coalescing path — otherwise this test would pass for the wrong reason.
+    expect(registry.getDevice('swept-expired')?.grantClass).toBe('legacy_coalesced')
+    expect(registry.validateToken('swept-expired-token')).toBeNull()
+
+    // Same call runtime-rpc.ts:804 makes for an unnamed `orca serve` start: no mint, no rotate.
+    const returned = registry.getOrCreatePendingDevice('CLI 2026-09-02', 'runtime', 'network')
+
+    expect(returned.deviceId).not.toBe('swept-expired')
+    expect(registry.validateToken(returned.token)?.deviceId).toBe(returned.deviceId)
+    // The dead row is untouched: still listed, still revocable (F4), just never re-offered (D1).
+    expect(registry.getDevice('swept-expired')).not.toBeNull()
+  })
+
   it('F2: rotatePendingDevice still removes a legacy_coalesced row the sweep stamped (one-click revocation restored)', () => {
     writeRegistryFile([
       {

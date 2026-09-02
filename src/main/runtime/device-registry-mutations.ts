@@ -8,6 +8,7 @@ import type { RelayDeviceBinding } from './relay/relay-revoke-outbox'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
 import {
   PENDING_GRANT_TTL_MS,
+  isExpiredLegacyCoalescedGrant,
   isMintedPendingDevice,
   type BudgetClass
 } from './device-registry-pending-grants'
@@ -48,11 +49,23 @@ export function buildDeviceEntry(
 // Why: a minted row carries a deadline and belongs to one named human, so reusing it here would
 // hand that person's link out again as the shared unnamed one. The two lanes stay disjoint by
 // construction.
+// S10-16 C1 review round 2 D1: an expired legacy-coalesced (swept) row is excluded too — its
+// validateToken has already been refused (device-registry.ts's isExpiredLegacyCoalescedGrant OR
+// clause), so coalescing onto it would hand out a pairing link that can never authenticate. A
+// fresh row is minted instead; the dead one stays listed and revocable (F4) and rotate still
+// drops it (F2) — this clause only stops it being re-advertised as the answer here.
 export function findCoalescedPendingDevice(
   devices: DeviceEntry[],
-  scope: DeviceEntry['scope']
+  scope: DeviceEntry['scope'],
+  now: number
 ): DeviceEntry | undefined {
-  return devices.find((d) => d.lastSeenAt === 0 && d.scope === scope && !isMintedPendingDevice(d))
+  return devices.find(
+    (d) =>
+      d.lastSeenAt === 0 &&
+      d.scope === scope &&
+      !isMintedPendingDevice(d) &&
+      !isExpiredLegacyCoalescedGrant(d, now)
+  )
 }
 
 /** Null when `deviceId` is not found — the caller then skips persistence entirely. */

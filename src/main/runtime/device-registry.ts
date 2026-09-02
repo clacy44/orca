@@ -92,7 +92,7 @@ export class DeviceRegistry {
     scope: DeviceScope = 'mobile',
     pairingReach: RuntimePairingReach = 'network'
   ): DeviceEntry {
-    const existing = findCoalescedPendingDevice(this.devices, scope)
+    const existing = findCoalescedPendingDevice(this.devices, scope, Date.now())
     if (existing) {
       // Why: the same pending token can be re-advertised at a broader reach; widen it but never narrow it,
       // or a link already handed out for off-host use would stop being served after the next launch.
@@ -304,6 +304,16 @@ export class DeviceRegistry {
     this.devices = devices
     this.registryLoadSucceeded = loadSucceeded
     this.pendingLegacySweepAudit.push(...legacySweepAudit)
+    // S10-16 C1 review round 2 D2: a headless `orca serve` that never touches an orchestration verb
+    // never constructs the DB, so these rows could otherwise sit here until process exit and vanish
+    // with no trace (getPendingLegacySweepAudit/flushLegacySweepAudit still drain them the moment a
+    // DB does attach — this is loud degradation, not a behavior change).
+    if (legacySweepAudit.length > 0) {
+      console.warn(
+        `[mobile] Legacy-sweep audit: ${legacySweepAudit.length} row(s) queued at registry load; ` +
+          'will flush once the orchestration DB attaches.'
+      )
+    }
   }
 
   /** Drains and returns the legacy-sweep audit rows this load produced, if any (S10-16 R1.4). */
