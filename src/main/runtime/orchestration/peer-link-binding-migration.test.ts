@@ -488,7 +488,7 @@ describe('S10-16 C2: schema v40 migration and repair', () => {
     expect(db.listContainment()).toHaveLength(1)
   })
 
-  it('a containment lift followed by a re-assertion produces one row with lifted_at IS NULL and two audit rows', () => {
+  it('a containment lift followed by a re-assertion produces one row with lifted_at IS NULL and the latest reason', () => {
     const path = freshPath()
     db = new OrchestrationDb(path)
     db.putContainment({

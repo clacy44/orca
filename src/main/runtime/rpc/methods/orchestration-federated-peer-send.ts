@@ -24,7 +24,7 @@ import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
-import { refuseIfQuarantined } from './orchestration-link-binding-pending'
+import { refuseIfQuarantined, LinkContainmentRefusal } from './orchestration-link-binding-pending'
 
 const FederatedSendParams = z.object({
   // Optional (D3): an old sender, or one whose pane has no registered `agents` row, omits it.
@@ -193,15 +193,13 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           threadId: message.thread_id
         } satisfies FederatedSendResult
       } catch (error) {
-        // Review F1 (forced deviation, noted in the C3 fixup's return) — see the identical
-        // exclusion in orchestration-federated-peer-ask.ts's own catch for the full rationale:
-        // without it, this choke point's unconditional per-refusal audit write would reopen the
-        // undeletable-`agent_audit` DoS the containment gate's own meter is supposed to close.
-        if (
-          error instanceof OrchestrationError &&
-          error.code !== 'agent_quarantined' &&
-          error.code !== 'rate_limited'
-        ) {
+        // C3a delta D2 — see the identical exclusion in orchestration-federated-peer-ask.ts's own
+        // catch for the full rationale: exclude by ORIGIN (the marked `LinkContainmentRefusal`
+        // from `refuseIfQuarantined`, which already wrote its own metered audit row per D3), never
+        // by code alone — a quarantined-SENDER refusal from federated-sender-identity.ts is a
+        // plain `OrchestrationError` with the same `agent_quarantined` code and must still reach
+        // this audit write every time.
+        if (error instanceof OrchestrationError && !(error instanceof LinkContainmentRefusal)) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

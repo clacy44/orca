@@ -8,6 +8,13 @@ import type { DeviceRegistry } from './device-registry'
 import { hashCallerCredential } from './principal-link-fingerprint-binding'
 import { fingerprintOrchestrationPeer } from './orchestration/environment-transport'
 import { linkBindingMac } from './orchestration/link-binding-proof'
+import { deriveGrantClassAtBind } from './orchestration/link-binding-classify'
+
+export type LinkBindingCandidateLink = {
+  deviceId: string
+  pairedAt: number
+  grantClass: 'minted' | 'legacy_coalesced'
+}
 
 export type LinkBindingSelfView = {
   /** `hashCallerCredential` of the registry token for this deviceId, or null if unknown. NEVER
@@ -17,6 +24,10 @@ export type LinkBindingSelfView = {
   ownKeyFingerprint(): string | null
   /** The MAC a selector scan needs, computed beside the secret. NEVER returns a token. */
   macWithRegistryToken(deviceId: string, label: string, fields: readonly string[]): string | null
+  /** S10-16 C4, R10-A: every runtime-scope link that has actually authenticated
+   *  (`scope==='runtime' && lastSeenAt !== 0`), with the grant-class fact R15.1's `routingClass`
+   *  needs at bind time. Never a token. */
+  listRuntimeLinkCandidates(): readonly LinkBindingCandidateLink[]
 }
 
 export function createLinkBindingSelfView(
@@ -39,6 +50,16 @@ export function createLinkBindingSelfView(
     ): string | null {
       const device = deviceRegistry.getDevice(deviceId)
       return device ? linkBindingMac(device.token, label, fields) : null
+    },
+    listRuntimeLinkCandidates(): readonly LinkBindingCandidateLink[] {
+      return deviceRegistry
+        .listDevices()
+        .filter((d) => d.scope === 'runtime' && d.lastSeenAt !== 0)
+        .map((d) => ({
+          deviceId: d.deviceId,
+          pairedAt: d.pairedAt,
+          grantClass: deriveGrantClassAtBind(d)
+        }))
     }
   }
 }

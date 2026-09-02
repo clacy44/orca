@@ -122,9 +122,7 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
         acknowledged.push(entry.slotIndex)
         try {
           // R7.5: a confirm writes NO binding and NO scan fact — one confirm-observations row,
-          // advisory only, single-writer (this responder). C4's link-binding-prover.ts (not yet
-          // landed in this commit) is what schedules this host's own proof round on the back of
-          // a confirm; that wiring is deferred to C4 (see this commit's return notes).
+          // advisory only, single-writer (this responder).
           runtime.getOrchestrationDb().putConfirmObservation({
             linkDeviceId: pairedDeviceId,
             environmentId: slot.environmentId,
@@ -154,6 +152,10 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
       )
     }
     byProbeId?.delete(params.probeId)
+
+    // R7.5/R13.1: schedule THIS host's own proof round against the peer that just confirmed —
+    // after the confirm is fully dispositioned, once per call (not per acknowledged slot).
+    runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'peer_confirmed')
 
     const result: FederatedLinkConfirmResult = { protocol: LINK_BINDING_PROTOCOL, acknowledged }
     return result

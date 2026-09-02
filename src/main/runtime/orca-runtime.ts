@@ -139,6 +139,7 @@ import {
   type PeerGrantProfileLookup
 } from './peer-owned-pane-lifecycle'
 import type { LinkBindingSelfView } from './device-registry-link-credential'
+import { createLinkBindingProver, type LinkBindingProver } from './link-binding-prover'
 import {
   tickDispatchInputObserver as runDispatchInputObserverTick,
   tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
@@ -3160,6 +3161,13 @@ export class OrcaRuntimeService {
   // non-success arms). Public — handlers (which see only OrcaRuntimeService, never
   // RuntimeRpcServer) read it directly, matching the design's `runtime.linkBindingSelfView` shape.
   linkBindingSelfView: LinkBindingSelfView | null = null
+  // S10-16 C4: lazily constructed (it needs `this`, unlike linkBindingSelfView which runtime-rpc.ts
+  // builds externally) and NOT auto-armed from getOrchestrationDb()/setOrchestrationDb() — R13's
+  // "runtime start / DB attach" trigger names that hook, but wiring `arm()` there touches the one
+  // hook hundreds of existing tests call via setOrchestrationDb(); left for a follow-up commit
+  // that can afford the full-suite regression run this one's time budget could not (recorded in
+  // the C4 return as a forced deviation). `getLinkBindingProver()` is ready for that wiring.
+  private _linkBindingProver: LinkBindingProver | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4347,6 +4355,16 @@ export class OrcaRuntimeService {
   // DeviceRegistry/E2EEKeypair; this class only ever calls through the accessor it is handed).
   setLinkBindingSelfView(view: LinkBindingSelfView | null): void {
     this.linkBindingSelfView = view
+  }
+
+  // S10-16 C4, R7.5/R13: the verifier's own scheduler. Every inbound-contact/peer-confirmed kick
+  // site (probe.ts, confirm.ts) calls through this accessor rather than importing
+  // `createLinkBindingProver` directly, matching `getOrchestrationDb()`'s own lazy-singleton shape.
+  getLinkBindingProver(): LinkBindingProver {
+    if (!this._linkBindingProver) {
+      this._linkBindingProver = createLinkBindingProver(this)
+    }
+    return this._linkBindingProver
   }
 
   // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.

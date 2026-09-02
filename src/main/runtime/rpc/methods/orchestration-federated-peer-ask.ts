@@ -23,7 +23,7 @@ import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
-import { refuseIfQuarantined } from './orchestration-link-binding-pending'
+import { refuseIfQuarantined, LinkContainmentRefusal } from './orchestration-link-binding-pending'
 
 // S10-15 F5 (chair ruling 5): the per-link cap on PENDING relayed questions.
 const PEER_ASK_PENDING_CAP = 32
@@ -224,19 +224,14 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
           extractPayloadKind(created.message.payload_kind)
         )
       } catch (error) {
-        // Review F1 (forced deviation, noted in the C3 fixup's return): `agent_quarantined` and
-        // `rate_limited` from the containment gate (refuseIfQuarantined) are excluded from this
-        // choke point's own unconditional per-refusal audit write. Without this exclusion, this
-        // catch would write ONE row per call regardless of the gate's own meter — the same
-        // undeletable-`agent_audit` DoS F1 closes in the gate itself, reopened one frame up, for
-        // every call the meter is supposed to be bounding. `rate_limited` cannot originate
-        // anywhere else in this handler today (no other rate limiter here), so excluding it here
-        // never hides a different refusal's audit row.
-        if (
-          error instanceof OrchestrationError &&
-          error.code !== 'agent_quarantined' &&
-          error.code !== 'rate_limited'
-        ) {
+        // C3a delta D2: exclude by ORIGIN, not by code. `refuseIfQuarantined` throws the marked
+        // `LinkContainmentRefusal` subclass and already handles its own audit write under its own
+        // per-window meter (D3) — this choke point must not duplicate it. But an `agent_quarantined`
+        // thrown from INSIDE this handler for a different reason — a quarantined RECIPIENT
+        // (addressable-agent-recipient.ts) — is a plain `OrchestrationError`, not the marker, and
+        // must still reach this audit write every time (it was silently dropped by the old
+        // code-based exclusion, which could not tell the two apart).
+        if (error instanceof OrchestrationError && !(error instanceof LinkContainmentRefusal)) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

@@ -189,6 +189,9 @@ export function findBindingsByEnvironment(
 }
 
 // R18.4(b): the retarget lookup — the only routable binding, if any, matching a peer key.
+// Review F16: INV-P-008 makes >=2 confirmed rows under one key a contest, not a route choice —
+// ORDER BY makes the (should-be-impossible) pick deterministic rather than SQLite's unspecified
+// `LIMIT 1` row order.
 export function findRoutableBindingByKeyFingerprint(
   db: Database.Database,
   peerKeyFingerprint: string
@@ -197,6 +200,7 @@ export function findRoutableBindingByKeyFingerprint(
     .prepare(
       `SELECT * FROM peer_link_bindings
         WHERE peer_key_fingerprint = ? AND state = 'confirmed' AND revoked_at IS NULL
+        ORDER BY last_verified_at DESC
         LIMIT 1`
     )
     .get(peerKeyFingerprint) as PeerLinkBindingSqlRow | undefined

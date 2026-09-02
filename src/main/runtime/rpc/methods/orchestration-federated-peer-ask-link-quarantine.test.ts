@@ -194,6 +194,79 @@ describe('S10-16 C2a F2/R3: link containment before identity on federatedAsk', (
     expect(audit).toBeTruthy()
   })
 
+  // C3a delta D2: an `agent_quarantined` thrown from INSIDE the handler for a QUARANTINED
+  // RECIPIENT (not the link) must still reach federatedAsk's own choke-point audit write — the
+  // prior code-only exclusion (`error.code !== 'agent_quarantined'`) could not tell this apart
+  // from the link-containment gate's own refusal and silently dropped it.
+  it('D2: a quarantined recipient (link unquarantined) still writes its own federatedAsk audit row', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    await call(
+      'orchestration.agents.quarantine',
+      { id: agentB },
+      { runtime: workerRuntime, orchestrationCompatibilityEvidence: evidenceB }
+    )
+
+    await expect(
+      call(
+        'orchestration.federatedAsk',
+        {
+          fromAgent: { id: 'agt_00000000ac97', displayName: 'asker-of-quarantined-agent' },
+          toAgentId: agentB,
+          question: 'should be refused by the recipient guard, not the link gate',
+          timeoutMs: 10
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    const audit = rawDb(workerDb)
+      .prepare(
+        "SELECT * FROM agent_audit WHERE verb = 'federatedAsk' AND outcome = 'agent_quarantined'"
+      )
+      .get()
+    expect(audit).toBeTruthy()
+  })
+
+  // C3a delta D3 (chair-adopted): the refusal fires on EVERY call from a quarantined link, but
+  // the gate's own audit write is metered to at most one row per window per verb per link.
+  it('D3: a quarantined link refuses every call but writes at most one audit row per window', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    workerDb.putContainment({
+      subjectKind: 'link',
+      subjectId: HOME_LINK_DEVICE_ID,
+      action: 'quarantine',
+      reasonCode: 'smoke_test',
+      reasonText: null,
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+
+    for (let i = 0; i < 3; i += 1) {
+      await expect(
+        call(
+          'orchestration.federatedAsk',
+          {
+            fromAgent: { id: 'agt_00000000ac96', displayName: 'repeat-asker' },
+            toAgentId: agentB,
+            question: `attempt ${i}`,
+            timeoutMs: 10
+          },
+          workerLinkCtx()
+        )
+      ).rejects.toMatchObject({ code: 'agent_quarantined' })
+    }
+
+    const auditCount = rawDb(workerDb)
+      .prepare(
+        "SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'federatedLink' AND outcome = 'link_quarantined'"
+      )
+      .get() as { n: number }
+    expect(auditCount.n).toBe(1)
+  })
+
   it('R3: an unquarantined link sees unchanged federatedAsk behaviour', async () => {
     setup()
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)

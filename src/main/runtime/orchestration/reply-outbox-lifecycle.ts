@@ -29,6 +29,14 @@ export function reclaimExpiredReplyOutboxLeases(db: Database.Database, now: numb
 // another claimant (or a reset) won the race, so the caller tries the next candidate. Signature
 // is unchanged (db, now) — no route parameter — so C5 needs no signature change: the "per route"
 // guarantee is enforced by the NOT EXISTS clause, not by the caller choosing a route.
+//
+// C4 carry-forward D2: the SELECT's NOT EXISTS is a read-time check only — between the SELECT and
+// this row's own UPDATE, a second process (a separate OS process holding the same DB file, SQLite
+// serialises but does not order across connections) can claim a sibling row on the same route,
+// which would let two processes each believe they alone are 'sending' for that route. The same
+// NOT EXISTS clause is therefore repeated in the UPDATE's own WHERE, correlated on the row being
+// updated, so the claim itself is atomic: it can succeed only if no sibling is 'sending' AT UPDATE
+// TIME, not merely at SELECT time.
 export function claimNextReplyOutboxItem(
   db: Database.Database,
   now: number
@@ -58,10 +66,17 @@ export function claimNextReplyOutboxItem(
     const preDialBackoff = now + replyOutboxIntervalMs(candidate.consecutiveFailures)
     const result = db
       .prepare(
-        `UPDATE peer_reply_outbox
+        `UPDATE peer_reply_outbox AS a
             SET state = 'sending', lease_expires_at = ?, attempts = attempts + 1,
                 last_attempt_at = ?, next_attempt_after = ?
-          WHERE id = ? AND state = 'queued'`
+          WHERE id = ? AND state = 'queued'
+            AND NOT EXISTS (
+              SELECT 1 FROM peer_reply_outbox b
+               WHERE b.link_device_id = a.link_device_id
+                 AND b.environment_id = a.environment_id
+                 AND b.bound_pairing_revision = a.bound_pairing_revision
+                 AND b.state = 'sending'
+            )`
       )
       .run(leaseExpiresAt, now, preDialBackoff, candidate.id)
     if (result.changes === 1) {

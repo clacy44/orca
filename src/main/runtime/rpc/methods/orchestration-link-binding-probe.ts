@@ -269,6 +269,11 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
     })
     evictOldestIfOverCap(byProbeId)
 
+    // R13.1: an authenticated inbound call is proof of liveness — tail of the handler, after the
+    // probe has been fully dispositioned. Ruling 23(j)/FC-1: this NEVER resets the prover's own
+    // `consecutive_failures` — it only clamps `next_attempt_after` to the per-link floor.
+    runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
+
     return responseResult
   }
 })

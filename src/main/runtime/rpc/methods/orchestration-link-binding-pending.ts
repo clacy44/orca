@@ -8,7 +8,6 @@ import {
   LINK_BINDING_PROBE_TTL_MS,
   LINK_BINDING_PENDING_PER_LINK,
   LINK_BINDING_RATE_WINDOW_MS,
-  LINK_BINDING_RATE_LIMIT,
   deriveLinkQuarantineIncidentId
 } from '../../orchestration/link-binding-constants'
 import type { PendingAnswer } from './orchestration-link-binding-wire'
@@ -71,18 +70,24 @@ export function releaseSuperseded(byProbeId: Map<string, PendingAnswer>, epoch: 
   }
 }
 
+// C3a delta D2: a marker subclass so a caller's outer catch can exclude an `agent_quarantined`
+// refusal ORIGINATING AT THIS GATE from its own per-refusal audit write (this gate already wrote
+// — or, per D3, deliberately withheld under its own meter — the audit row for it) without also
+// excluding an `agent_quarantined` a handler throws for an unrelated reason (a quarantined
+// RECIPIENT — addressable-agent-recipient.ts — or a quarantined SENDER —
+// federated-sender-identity.ts), which must still reach the caller's own audit write every time.
+// `instanceof` on this class is the discriminator, never `.code` alone.
+export class LinkContainmentRefusal extends OrchestrationError {}
+
 // R3: link containment gate — first statement after the lane gate, before anything else. Review
-// F1: the refusal itself must still be the FIRST read/write of this call (R3's ordering), but the
-// `agent_audit` write it used to perform unconditionally is an undeletable-table DoS for a
-// quarantined-but-still-authenticated peer with no meter in front of it. Split accordingly: (1) a
-// pure read of `peer_link_containment` decides the verdict, with no write of any kind; (2) only
-// when quarantined, `checkAndBumpRate` is consulted — this consumes this link's own quarantine-
-// gate budget and, once exhausted, refuses `rate_limited` with NO audit write, bounding the audit
-// table to at most `LINK_BINDING_RATE_LIMIT` rows per `LINK_BINDING_RATE_WINDOW_MS` per link; (3)
-// only a call that is both quarantined and within budget writes the audit row and throws
-// `agent_quarantined`. The quarantine REFUSAL (this function returning early is the only non-
-// refusing path) still precedes every other read/write in every caller — only the audit write
-// moved behind the meter.
+// F1's original problem stands: the `agent_audit` write this gate performs is an undeletable-
+// table DoS for a quarantined-but-still-authenticated peer with no meter in front of it.
+// C3a delta D3 (chair-adopted): the refusal fires on EVERY call from a quarantined link — never
+// downgrades to `rate_limited` — while the audit WRITE is metered separately, `limit: 1` per
+// `LINK_BINDING_RATE_WINDOW_MS` per verb per link (`linkQuarantineAudit:<verb>`), so a quarantined
+// peer can produce at most one `agent_audit` row per window per verb regardless of call volume —
+// closing the same undeletable-table DoS the prior scheme closed, without ever substituting a
+// wrong disposition (`rate_limited`) for the true one (`agent_quarantined`) on the wire.
 export function refuseIfQuarantined(
   runtime: OrcaRuntimeService,
   pairedDeviceId: string,
@@ -91,19 +96,6 @@ export function refuseIfQuarantined(
   const db = runtime.getOrchestrationDb()
   if (!db.isPeerLinkQuarantined(pairedDeviceId)) {
     return
-  }
-  const rate = db.checkAndBumpRate({
-    subjectKey: `linkbind:${pairedDeviceId}`,
-    verb: `linkQuarantineGate:${verb}`,
-    windowMs: LINK_BINDING_RATE_WINDOW_MS,
-    limit: LINK_BINDING_RATE_LIMIT
-  })
-  if (!rate.allowed) {
-    throw new OrchestrationError(
-      'rate_limited',
-      'Too many link-binding calls from this quarantined link; try again shortly.',
-      { retryAfterMs: rate.retryAfterMs }
-    )
   }
   // Lifecycle m4: the incident id has no dedicated column on `peer_link_containment` (R14 DDL) —
   // derived deterministically from the containment row's own identity so it is stable for the
@@ -115,7 +107,7 @@ export function refuseIfQuarantined(
   // path, never an opaque-but-wrong id — no silent `?? 0` fallback.
   const containment = db.getContainment('link', pairedDeviceId, 'quarantine')
   if (!containment) {
-    throw new OrchestrationError(
+    throw new LinkContainmentRefusal(
       'agent_quarantined',
       `This paired link is quarantined on this host and cannot ${verb}.`,
       {
@@ -126,15 +118,23 @@ export function refuseIfQuarantined(
     )
   }
   const incidentId = deriveLinkQuarantineIncidentId(pairedDeviceId, containment.createdAt)
-  db.writeAgentAudit({
-    agentId: null,
-    actorPaneKey: null,
-    actorHostId: pairedDeviceId,
-    verb: 'federatedLink',
-    outcome: 'link_quarantined',
-    reasonCode: verb
+  const auditGate = db.checkAndBumpRate({
+    subjectKey: `linkbind:${pairedDeviceId}`,
+    verb: `linkQuarantineAudit:${verb}`,
+    windowMs: LINK_BINDING_RATE_WINDOW_MS,
+    limit: 1
   })
-  throw new OrchestrationError(
+  if (auditGate.allowed) {
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: pairedDeviceId,
+      verb: 'federatedLink',
+      outcome: 'link_quarantined',
+      reasonCode: verb
+    })
+  }
+  throw new LinkContainmentRefusal(
     'agent_quarantined',
     `This paired link is quarantined on this host and cannot ${verb}.`,
     {

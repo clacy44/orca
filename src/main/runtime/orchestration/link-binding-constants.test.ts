@@ -45,22 +45,17 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
 }
 
-// F12: a regex quantifier ({32}, {64}, {1,3}, …) is not the L-2 class this test guards — it is a
-// character-count constraint inside a pattern, built (per link-binding-proof.ts) from THE
-// REGISTER's own length constants via `new RegExp`. Strip both regex-literal bodies (`/…/flags`)
-// and `new RegExp(...)` call arguments before scanning for numeric literals, so a future frozen
-// regex that DOES spell a quantifier literally (rather than interpolating a register constant)
-// does not force a choice between moving the regex and weakening this test.
+// C2 delta D1: the prior strip removed whole regex-literal bodies and whole `new RegExp(...)`
+// argument lists, which is unforced — C3's patterns are all built by interpolating THE REGISTER's
+// own constants (`link-binding-proof.ts:20-21,27-29`: `new RegExp(\`^[0-9a-f]{${LINK_BINDING_HEX32_LENGTH}}$\`)`),
+// and simulating the whole surface with and without the wide strip found zero hits either way — so
+// the wide strip protected nothing that exists while disarming the guard against exactly the
+// literal-quantifier shape (`{32}`, `{1,3}`) the rule exists to catch. F12's recommendation, taken
+// literally: strip ONLY `{n}`/`{n,m}` quantifiers, everywhere in the source, not whole regex
+// bodies — so a literal `{32}` restating LINK_BINDING_HEX32_LENGTH still can never hide inside a
+// regex, in or out of a pattern.
 function stripRegexContexts(source: string): string {
-  let out = source.replace(/new RegExp\(([\s\S]*?)\)/g, 'new RegExp(/* stripped */)')
-  // Heuristic regex-literal detector: a `/` preceded by an operator/punctuation/start-of-line
-  // context (never an identifier, `)`, `]` or digit — those precede division, not a regex) up to
-  // its closing `/` and flag letters.
-  out = out.replace(
-    /(^|[[(:,;={!&|?]\s*)\/(?:[^/\\\n]|\\.)+\/[a-z]*/g,
-    '$1/* regex-literal-stripped */'
-  )
-  return out
+  return source.replace(/\{\d+(,\d*)?\}/g, '{}')
 }
 
 // Numeric literals this rule is about: multi-digit integers (tuning values, TTLs, caps) and

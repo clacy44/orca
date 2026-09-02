@@ -352,6 +352,46 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(audit).toBeTruthy()
   })
 
+  // C3a delta D2: an `agent_quarantined` thrown from INSIDE the handler for a QUARANTINED SENDER
+  // (federated-sender-identity.ts's `isRemoteAgentLocallyQuarantined` check — the link itself is
+  // NOT quarantined) must still reach federatedSend's own choke-point audit write. The prior
+  // code-only exclusion (`error.code !== 'agent_quarantined'`) could not tell this apart from the
+  // link-containment gate's own refusal and silently dropped it.
+  it('D2: a locally-quarantined remote sender (link unquarantined) still writes its own federatedSend audit row', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    const senderId = 'agt_00000000ab98'
+    raw(workerDb)
+      .prepare(
+        `INSERT INTO remote_agents (
+           environment_id, environment_name, link_kind, remote_agent_id, display_name,
+           local_quarantined
+         ) VALUES (?, ?, 'paired_device', ?, ?, 1)`
+      )
+      .run(LINK_DEVICE_ID, LINK_DEVICE_ID, senderId, 'already-quarantined-sender')
+
+    await expect(
+      call(
+        'orchestration.federatedSend',
+        {
+          fromAgent: { id: senderId, displayName: 'already-quarantined-sender' },
+          toAgentId: agentB,
+          messageId: 'msg_0000000ab198',
+          subject: 'hi',
+          body: 'should be refused by the sender guard, not the link gate'
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    const audit = raw(workerDb)
+      .prepare(
+        "SELECT * FROM agent_audit WHERE verb = 'federatedSend' AND outcome = 'agent_quarantined'"
+      )
+      .get()
+    expect(audit).toBeTruthy()
+  })
+
   it('R3: an unquarantined link sees unchanged federatedSend behaviour', async () => {
     setup()
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)

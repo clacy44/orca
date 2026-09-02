@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type * as NodeCryptoModule from 'node:crypto'
 
 // Review F4: `vi.spyOn(require('node:crypto'), 'timingSafeEqual')` never intercepts this
 // module's own `import { timingSafeEqual } from 'node:crypto'` under this Vitest config's SSR
@@ -94,22 +95,38 @@ async function call(name: string, params: Record<string, unknown>, context: RpcC
 // `errors.ts`'s three new registrations (link_binding_conflict/link_store_unreadable/
 // link_store_empty) had no test at all. This mirrors runtime-rpc.ts's own two-step dispatch
 // (admission, then handler) without pulling in the full WS server.
-async function dispatchPeer(name: string, params: Record<string, unknown>, context: RpcContext) {
+// C3a delta Q5: mirrors runtime-rpc.ts's own condition (`:2001`) for WHEN the gate runs at all —
+// `device.scope === 'runtime' && accessProfile === 'peer'`. A mobile-scope or full-profile caller
+// never reaches `admitRuntimePeerMethod` in production; it goes straight to the handler, gated
+// only by the handler's own lane check (`clientKind !== 'runtime'`). Defaults match every
+// pre-existing call site in this file (a genuine peer probe/confirm caller) so none of them
+// change behaviour.
+async function dispatchPeer(
+  name: string,
+  params: Record<string, unknown>,
+  context: RpcContext,
+  admission: { scope: 'runtime' | 'mobile'; accessProfile: 'peer' | 'full' } = {
+    scope: 'runtime',
+    accessProfile: 'peer'
+  }
+) {
   const meta: RpcEnvelopeMeta = { runtimeId: 'test-runtime' }
-  const admission = await admitRuntimePeerMethod({
-    runtime: context.runtime,
-    callerFingerprint:
-      typeof context.authenticatedCallerFingerprint === 'string'
-        ? context.authenticatedCallerFingerprint
-        : '',
-    params,
-    method: name
-  })
-  if (admission.refused) {
-    throw {
-      code: admission.wireCode,
-      message: admission.message,
-      ...(admission.retryAfterMs !== undefined ? { retryAfterMs: admission.retryAfterMs } : {})
+  if (admission.scope === 'runtime' && admission.accessProfile === 'peer') {
+    const admitted = await admitRuntimePeerMethod({
+      runtime: context.runtime,
+      callerFingerprint:
+        typeof context.authenticatedCallerFingerprint === 'string'
+          ? context.authenticatedCallerFingerprint
+          : '',
+      params,
+      method: name
+    })
+    if (admitted.refused) {
+      throw {
+        code: admitted.wireCode,
+        message: admitted.message,
+        ...(admitted.retryAfterMs !== undefined ? { retryAfterMs: admitted.retryAfterMs } : {})
+      }
     }
   }
   const m = method(name)
@@ -837,6 +854,9 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
     const failure = mapRuntimeError('id', meta, capError)
     expect(failure.error.code).toBe('link_binding_conflict')
   })
+
+  // C3a delta Q5 and C4/R7.5 are in the sibling file link-binding-handshake-c4-delta.test.ts
+  // (max-lines split — this file was at its 800-line cap).
 
   // ---- review F1: quarantine-gate audit write is bounded by the rate meter (probe/confirm) --
 
