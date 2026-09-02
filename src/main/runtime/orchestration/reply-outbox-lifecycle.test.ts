@@ -93,14 +93,26 @@ describe('reply-outbox-lifecycle: smoke (every exported statement runs against a
     expect(getReplyOutboxItem(sqlite, id2)?.state).toBe('queued')
     expect(getReplyOutboxItem(sqlite, id2)?.holdCount).toBe(1)
 
-    retargetReplyOutboxItem(sqlite, id2, {
+    // Ruling 26(a)/(b): a held row is claimable once its clock passes (B1) — retarget itself is
+    // guarded state='sending' -> 'queued', same P18/R14.3 shape as holdReplyOutboxItem, so it
+    // runs against a freshly re-claimed row, exactly as holdOrRetargetReplyOutboxItem calls it.
+    const reclaimed2 = claimNextReplyOutboxItem(sqlite, now + 1000)
+    expect(reclaimed2?.id).toBe(id2)
+    const retargeted = retargetReplyOutboxItem(sqlite, id2, {
       linkDeviceId: 'link_smoke_5_retargeted',
       environmentId: 'env_smoke_5_retargeted',
       boundPairingRevision: 2,
       peerCredentialFp: 'peer_fp_5_retargeted',
       peerKeyFingerprint: 'peer_key_fp_5_retargeted'
     })
+    expect(retargeted).toBe(true)
     expect(getReplyOutboxItem(sqlite, id2)?.linkDeviceId).toBe('link_smoke_5_retargeted')
+    // Ruling 26(b): the release resets hold_count/first_held_at/next_attempt_after and the row
+    // lands back in 'queued' — a retarget never re-holds.
+    expect(getReplyOutboxItem(sqlite, id2)?.state).toBe('queued')
+    expect(getReplyOutboxItem(sqlite, id2)?.holdCount).toBe(0)
+    expect(getReplyOutboxItem(sqlite, id2)?.firstHeldAt).toBeNull()
+    expect(getReplyOutboxItem(sqlite, id2)?.nextAttemptAfter).toBeNull()
 
     // M1 regression check for the guard formula itself: claim -> resetMessages (cancel) -> hold
     // does NOT resurrect the cancelled row.

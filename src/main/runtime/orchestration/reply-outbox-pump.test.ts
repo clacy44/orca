@@ -19,10 +19,16 @@ import { OrchestrationError } from './orchestration-error'
 import {
   REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD,
   REPLY_OUTBOX_MAX_MS,
-  REPLY_OUTBOX_MAX_AGE_MS
+  REPLY_OUTBOX_MAX_AGE_MS,
+  REPLY_OUTBOX_HOLD_MAX_MS
 } from './link-binding-constants'
 import { replyOutboxIntervalMs } from './reply-outbox-store'
 import { PEER_REFUSAL_DISPOSITIONS, classifyPeerRefusalCode } from './reply-outbox-health'
+import {
+  recordReplyOutboxFailureAndMaybeNotify,
+  onReplyOutboxDelivered
+} from './reply-outbox-pump-notify'
+import { holdOrRetargetReplyOutboxItem } from './reply-outbox-pump-hold'
 import type { RpcContext } from '../rpc/core'
 
 const appState = { userData: '' }
@@ -279,7 +285,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(items[0].firstHeldAt).toBeNull()
   })
 
-  it('test 35/78: unreachable fires once at the threshold, and recovery fires once', async () => {
+  it('test 35/78: an outage that exceeds the threshold still delivers, resetting consecutive_failures to 0', async () => {
     let call_ = 0
     vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async () => {
       call_ += 1
@@ -315,9 +321,194 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     const settled = db.getReplyOutboxItem(outboxId)
     expect(settled?.state).toBe('delivered')
     expect(settled?.consecutiveFailures).toBe(0)
-    // R18.5's own reset site: consecutive_failures returns to 0 only on a clean delivery. The
-    // unreachable/recovered EDGE NOTICES themselves (classifyFederationRelayHealthTransition
-    // reuse) are exercised directly at the unit level below rather than through this end-to-end
-    // timing-sensitive harness.
+    // The EXACT-once notice-count guarantee (H5/Ruling 26(f)) is proven deterministically,
+    // without this harness's real timers/backoff, in the dedicated test below — this end-to-end
+    // timer-driven harness stays a liveness/eventual-delivery check (design v6 §6's own residual-
+    // uncertainty note 2 on this file: the multi-item/restart/hold cases are what actually
+    // distinguish the fix, not the single-item timing here).
   }, 45000)
+
+  // H5/Ruling 26(f): the notice-count assertion the C5 review found removed. Restored here as a
+  // DIRECT, deterministic exercise of recordReplyOutboxFailureAndMaybeNotify/onReplyOutboxDelivered
+  // against real rows through the real DB/notice-write path — no pump, no timers, no backoff —
+  // which is what proves the edge is driven ONLY from the row passed in (never an in-memory Map):
+  // two independent calls with the same row shape behave identically regardless of call order or
+  // process history, which is exactly what "survives a restart" means for a function with no
+  // memory of its own.
+  it('Ruling 26(f): reply_relay_unreachable fires exactly once at the crossing and never again while still unreachable; reply_relay_recovered fires exactly once and never for a healthy delivery', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const baseItem = db.getReplyOutboxItem(outboxId)
+    if (!baseItem) {
+      throw new Error('test setup: outbox item missing')
+    }
+    const countBySubject = (needle: string): number =>
+      (
+        raw(db)
+          .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE ?`)
+          .get(originalRunId, `%${needle}%`) as { n: number }
+      ).n
+
+    // previous = THRESHOLD - 1, next = THRESHOLD: the crossing. Fires once.
+    recordReplyOutboxFailureAndMaybeNotify(
+      runtime,
+      { ...baseItem, consecutiveFailures: REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD - 1 },
+      REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
+    )
+    expect(countBySubject('unreachable')).toBe(1)
+
+    // previous = THRESHOLD, next = THRESHOLD + 1: still unreachable, already past the crossing —
+    // must NOT re-fire (this is exactly the per-item overwrite the old Map-keyed version got
+    // wrong when two items shared one link).
+    recordReplyOutboxFailureAndMaybeNotify(
+      runtime,
+      { ...baseItem, consecutiveFailures: REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD },
+      REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD + 1
+    )
+    expect(countBySubject('unreachable')).toBe(1)
+
+    // A delivery whose PRE-SETTLE row was at/above the threshold: recovered fires once.
+    onReplyOutboxDelivered(runtime, {
+      ...baseItem,
+      consecutiveFailures: REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD + 1
+    })
+    expect(countBySubject('recovered')).toBe(1)
+
+    // A delivery whose pre-settle row was never unreachable: no recovered notice (never a
+    // healthy link discovering an outage it never had).
+    onReplyOutboxDelivered(runtime, { ...baseItem, consecutiveFailures: 2 })
+    expect(countBySubject('recovered')).toBe(1)
+
+    // Ruling 26(f)'s restart claim, made concrete: these two calls carry NO state of their own
+    // (no Map argument exists any more) — a brand-new closure (as a restart would produce) calling
+    // them with the SAME row values produces the SAME result, which is what "the edge survives a
+    // restart" means for a stateless function.
+    recordReplyOutboxFailureAndMaybeNotify(
+      runtime,
+      { ...baseItem, consecutiveFailures: REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD - 1 },
+      REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
+    )
+    expect(countBySubject('unreachable')).toBe(2)
+  })
+
+  it('Ruling 26(j)/M10: holdReplyOutboxItemCollision never advances first_held_at and writes the register code, never `""` (direct, no timers)', async () => {
+    // Direct exercise of holdReplyOutboxItemCollision (reply-outbox-lifecycle.ts) — the pump's
+    // 'busy' branch calls exactly this, and only this, on an in-flight-guard collision. A real
+    // end-to-end collision additionally requires two DIFFERENT routes sharing one in-flight-guard
+    // key (M10's own fix: keyed per link+environment, not per environment alone) to race inside
+    // one tick — a timing shape this harness cannot force deterministically; the state transition
+    // this hold performs is exactly what's under test here.
+    const { outboxId } = await enqueueOneReply()
+    // Put the row into 'sending' the way the pump would (a real claim), then apply the collision
+    // hold directly — same call the pump's 'busy' branch makes.
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+    const now = Date.now()
+    db.holdReplyOutboxItemCollision(outboxId, now + 30_000)
+    const held = db.getReplyOutboxItem(outboxId)
+    expect(held?.state).toBe('queued')
+    expect(held?.lastErrorCode).toBe('relay_dial_collision')
+    expect(held?.firstHeldAt).toBeNull()
+    expect(held?.consecutiveFailures).toBe(0)
+    expect(held?.holdCount).toBe(1)
+    expect(held?.nextAttemptAfter).toBe(now + 30_000)
+
+    // A SECOND collision hold still must not start the clock.
+    const reclaimed = db.claimNextReplyOutboxItem(now + 30_001)
+    expect(reclaimed?.id).toBe(outboxId)
+    db.holdReplyOutboxItemCollision(outboxId, now + 60_000)
+    const heldAgain = db.getReplyOutboxItem(outboxId)
+    expect(heldAgain?.firstHeldAt).toBeNull()
+    expect(heldAgain?.holdCount).toBe(2)
+  })
+
+  it('Ruling 26(h)/M7: a reply refused at the outbox capacity leaves NO row — never relay_pending forever', async () => {
+    for (let i = 0; i < 256; i++) {
+      db.enqueueReplyOutbox({
+        localMessageId: `msg_cap_fill_${i.toString().padStart(6, '0')}`,
+        linkDeviceId,
+        environmentId,
+        boundPairingRevision: 1,
+        peerCredentialFp: 'fp',
+        peerKeyFingerprint: 'kfp',
+        inReplyToMessageId: outboundId,
+        peerAgentId: 'peer_answerer_agt',
+        peerThreadId: null,
+        localThreadId: null,
+        noticeRunId: null,
+        noticePaneKey: null,
+        payload: '{}',
+        byteCount: 2,
+        createdAt: Date.now()
+      })
+    }
+    await expect(enqueueOneReply()).rejects.toMatchObject({ code: 'link_binding_conflict' })
+    // No orphaned local message row for the refused reply.
+    const rows = raw(db)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM messages WHERE peer_link_device_id IS NULL AND to_handle LIKE ?`
+      )
+      .get(`remote:${environmentId}:%`) as { n: number }
+    expect(rows.n).toBe(0)
+  })
+
+  it('Ruling 26(b)/R18.4(b): a successful retarget re-points and releases in ONE statement — never re-held', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+    expect(claimed?.state).toBe('sending')
+
+    // A second, routable binding sharing the SAME peer key fingerprint — the re-pair shape
+    // findRoutableBindingByKeyFingerprint matches on.
+    const retargetedLinkId = 'retargeted-link-device'
+    db.putPeerLinkBinding({
+      linkDeviceId: retargetedLinkId,
+      environmentId,
+      boundEndpointId: 'retargeted-endpoint',
+      boundPairingRevision: 999,
+      linkCredentialFp: 'retargeted-link-credential-fp',
+      peerCredentialFp: 'retargeted-peer-credential-fp',
+      peerKeyFingerprint: fingerprintOrchestrationPeer('peer_own_pubkey_b64'),
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+
+    holdOrRetargetReplyOutboxItem(runtime, claimed!, Date.now())
+
+    const after = db.getReplyOutboxItem(outboxId)
+    expect(after?.linkDeviceId).toBe(retargetedLinkId)
+    expect(after?.boundPairingRevision).toBe(999)
+    expect(after?.state).toBe('queued')
+    // Ruling 26(b): released, never re-held — the hold fields all reset, not advanced.
+    expect(after?.holdCount).toBe(0)
+    expect(after?.firstHeldAt).toBeNull()
+    expect(after?.nextAttemptAfter).toBeNull()
+  })
+
+  it('Ruling 26(c)/B2: route_moved settles from `sending`, its deadline read from firstHeldAt BEFORE any hold write, and the notice fires only when the settle wrote a row', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+
+    // No routable binding at all for this peer key — findRoutableBindingByKeyFingerprint finds
+    // nothing, and localEvidenceUnavailable is false (the registry/environment store both read
+    // fine), so the deadline check is reached.
+    db.revokePeerLinkBinding(linkDeviceId, Date.now())
+
+    const now = Date.now()
+    const pastDeadline = now - REPLY_OUTBOX_HOLD_MAX_MS - 1000
+    // B2's own bug reproduced-and-fixed: firstHeldAt is read from the ITEM PASSED IN (as it was
+    // at claim time), not re-read after a hold write that would have just reset it to `now`.
+    holdOrRetargetReplyOutboxItem(runtime, { ...claimed!, firstHeldAt: pastDeadline }, now)
+
+    const after = db.getReplyOutboxItem(outboxId)
+    expect(after?.state).toBe('refused')
+    expect(after?.lastErrorCode).toBe('route_moved')
+    const notice = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%route%'`)
+      .get(originalRunId) as { n: number }
+    expect(notice.n).toBe(1)
+  })
 })

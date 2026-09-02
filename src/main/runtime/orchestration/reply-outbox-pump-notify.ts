@@ -60,17 +60,20 @@ export function fireReplyRelayNotice(
   })
 }
 
-// R19.3's health-transition edge, per link. `lastKnownFailures` is owned by the caller (the
-// pump) and passed in — this stays a pure-ish function over that Map, in-memory only (a restart
-// re-derives from consecutive_failures on the next crossing).
+// H5/Ruling 26(f): the R19.3 health-transition edge, driven ONLY from the row's own persisted
+// `consecutive_failures` — never an in-memory Map. That fixes all four defects the C5 review
+// found in the Map-keyed version: (a) two queued items on one link overwriting each other's
+// edge, (b) a hold's non-failure claim inflating the counter that fires this notice (holds never
+// call this function — only a transport-shaped retry does), (c) the edge going silent across a
+// restart (a Map has no persistence; a SQLite column does), and (d) one route's delivery
+// resetting another route's outage on the same link (this is now per-ITEM, matching the
+// per-route claim unit, not per-link).
 export function recordReplyOutboxFailureAndMaybeNotify(
   runtime: OrcaRuntimeService,
-  lastKnownFailures: Map<string, number>,
   item: ReplyOutboxRow,
   nextFailures: number
 ): void {
-  const previous = lastKnownFailures.get(item.linkDeviceId) ?? 0
-  lastKnownFailures.set(item.linkDeviceId, nextFailures)
+  const previous = item.consecutiveFailures
   const transition = classifyFederationRelayHealthTransition(
     { lastSyncAt: null, lastError: null, consecutiveFailures: previous },
     { lastSyncAt: null, lastError: null, consecutiveFailures: nextFailures },
@@ -81,14 +84,11 @@ export function recordReplyOutboxFailureAndMaybeNotify(
   }
 }
 
-export function onReplyOutboxDelivered(
-  runtime: OrcaRuntimeService,
-  lastKnownFailures: Map<string, number>,
-  item: ReplyOutboxRow
-): void {
-  const wasUnreachable =
-    (lastKnownFailures.get(item.linkDeviceId) ?? 0) >= REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
-  lastKnownFailures.set(item.linkDeviceId, 0)
+// Ruling 26(f): `item` here is the PRE-SETTLE row (its `consecutiveFailures` is whatever the
+// failing streak reached before this delivery), which is exactly what "was this link/route
+// unreachable" needs to test against.
+export function onReplyOutboxDelivered(runtime: OrcaRuntimeService, item: ReplyOutboxRow): void {
+  const wasUnreachable = item.consecutiveFailures >= REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
   if (wasUnreachable) {
     fireReplyRelayNotice(runtime, item, REPLY_RELAY_RECOVERED_NOTICE, null)
   }

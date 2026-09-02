@@ -141,6 +141,7 @@ import {
   settleReplyOutboxItem as settleReplyOutboxItemImpl,
   holdReplyOutboxItem as holdReplyOutboxItemImpl,
   holdReplyOutboxItemLocalEvidence as holdReplyOutboxItemLocalEvidenceImpl,
+  holdReplyOutboxItemCollision as holdReplyOutboxItemCollisionImpl,
   retryReplyOutboxItem as retryReplyOutboxItemImpl,
   retargetReplyOutboxItem as retargetReplyOutboxItemImpl,
   type ReplyOutboxSettle
@@ -4823,6 +4824,12 @@ export class OrchestrationDb {
     holdReplyOutboxItemLocalEvidenceImpl(this.db, id, nextAttemptAfter)
   }
 
+  // M10 (C5 review)/Ruling 26(j): the in-flight-registry collision hold — never starts the
+  // R18.3 abandon clock (first_held_at left untouched, same shape as the local-evidence hold).
+  holdReplyOutboxItemCollision(id: string, nextAttemptAfter: number): void {
+    holdReplyOutboxItemCollisionImpl(this.db, id, nextAttemptAfter)
+  }
+
   retryReplyOutboxItem(
     id: string,
     _now: number,
@@ -4850,8 +4857,8 @@ export class OrchestrationDb {
       peerCredentialFp: string
       peerKeyFingerprint: string
     }
-  ): void {
-    retargetReplyOutboxItemImpl(this.db, id, route)
+  ): boolean {
+    return retargetReplyOutboxItemImpl(this.db, id, route)
   }
 
   getOrCreateMailboxDelivery(

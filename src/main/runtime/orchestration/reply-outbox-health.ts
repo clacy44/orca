@@ -10,6 +10,8 @@ import {
   REPLY_RELAY_PEER_RECEIPT_POISONED_NOTICE,
   REPLY_RELAY_ID_CONFLICT_NOTICE,
   REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE,
+  REPLY_RELAY_STALE_PAIRING_NOTICE,
+  REPLY_RELAY_UNSUPPORTED_NOTICE,
   UNKNOWN_PEER_REFUSAL_CODE,
   LINK_BINDING_REVERIFY_MS
 } from './link-binding-constants'
@@ -23,6 +25,8 @@ export type ReplyRelayNoticeCode =
   | typeof REPLY_RELAY_PEER_RECEIPT_POISONED_NOTICE
   | typeof REPLY_RELAY_ID_CONFLICT_NOTICE
   | typeof REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE
+  | typeof REPLY_RELAY_STALE_PAIRING_NOTICE
+  | typeof REPLY_RELAY_UNSUPPORTED_NOTICE
 
 // R18.5's disposition column, keyed on the wire code — the ONE closed vocabulary (P17). A key
 // outside this map renders/settles as `unknown_peer_refusal` (transport-shaped: retry).
@@ -122,6 +126,22 @@ export function describeReplyRelayNotice(
           `Message ${ctx.localMessageId} to ${who} was delivered, but the peer could not confirm ` +
           `it was answering its own message (incident ${ctx.incidentId ?? 'unknown'}). This is an ` +
           `advisory only; no link state changed.`
+      }
+    case REPLY_RELAY_STALE_PAIRING_NOTICE:
+      return {
+        subject: `A reply to ${ctx.environmentName} needs a fresh pairing`,
+        body:
+          `Message ${ctx.localMessageId} to ${who} is held: the pairing is stale ` +
+          `(${ctx.peerRefusalCode ?? 'stale_environment_pairing'}). Run ` +
+          `\`orca environment pair\` for ${ctx.environmentName} to re-pair.`
+      }
+    case REPLY_RELAY_UNSUPPORTED_NOTICE:
+      return {
+        subject: `A reply to ${ctx.environmentName} is waiting on a peer upgrade`,
+        body:
+          `Message ${ctx.localMessageId} to ${who} is held: the peer does not support this ` +
+          `operation yet (${ctx.peerRefusalCode ?? 'capability_unsupported'}). Update Orca on ` +
+          `that host.`
       }
   }
 }

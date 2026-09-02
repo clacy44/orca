@@ -11,7 +11,11 @@ import {
 } from '../../orchestration/link-binding-store'
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
 import { assertThreadNotSensitiveForFederation } from './orchestration-sensitive-thread-guard'
-import { REPLY_OUTBOX_MAX_BYTES } from '../../orchestration/link-binding-constants'
+import { isHostMessageId } from '../../orchestration/orchestration-id-grammar'
+import {
+  REPLY_OUTBOX_MAX_BYTES,
+  REPLY_OUTBOX_PER_LINK_CAP
+} from '../../orchestration/link-binding-constants'
 import type { MessageRow } from '../../orchestration/types'
 
 export type ReplyParamsShape = {
@@ -88,7 +92,13 @@ export function enqueueForeignReply(args: EnqueueForeignReplyArgs): EnqueueForei
   // so the wire payload's `messageId` (the id THIS row will carry on the peer) can be fixed
   // before `insertGatedMessage` runs, rather than colliding with `original.id` (the message
   // being answered, which the peer already holds under that id — R17.1's idempotency key).
+  // L15 (C5 review): minted inline (matching message-gate-writer.ts's own construction) rather
+  // than through the grammar module's minter — asserted against the grammar's own shape here so
+  // the two constructions cannot silently diverge (L-2).
   const replyMessageId = `msg_${randomBytes(6).toString('hex')}`
+  if (!isHostMessageId(replyMessageId)) {
+    throw new Error('internal error: minted reply message id failed the host id grammar')
+  }
 
   // R16.3: capacity refusal, never eviction.
   const canonicalPayload = {
@@ -109,6 +119,20 @@ export function enqueueForeignReply(args: EnqueueForeignReplyArgs): EnqueueForei
       'link_binding_conflict',
       `This reply exceeds the ${REPLY_OUTBOX_MAX_BYTES}-byte reply-outbox limit.`,
       { nextSteps: ['shorten the reply body'] }
+    )
+  }
+
+  // R16.3/Ruling 26(h): the capacity check runs BEFORE insertGatedMessage, alongside the byte
+  // check — enqueueReplyOutbox's own cap check (inside enqueueForeignReplyIntent's transaction)
+  // runs too late: insertGatedMessage has already committed a local reply row outside any
+  // transaction, so a refusal there orphans that row with no outbox item — the shape `sent --id`
+  // (getMessageDeliverySnapshot) would otherwise report `relay_pending` for ever. Checking here
+  // leaves no row at all on refusal.
+  if (db.countPendingReplyOutbox(binding.linkDeviceId) >= REPLY_OUTBOX_PER_LINK_CAP) {
+    throw new OrchestrationError(
+      'link_binding_conflict',
+      `This link's reply outbox is at capacity.`,
+      { nextSteps: ['orca environment link-status --outbox'] }
     )
   }
 

@@ -563,6 +563,63 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(farRow?.peer_thread_id).toBe('thr_aaaaaaaaaaaa')
   })
 
+  // M14 (C5 review)/Ruling 26(m): R28.1(1a) clause (i) — P-7's regression. A peer must not
+  // attach its reply to another local agent's thread by naming an `inReplyToMessageId` that was
+  // really addressed to a DIFFERENT local agent over the same link.
+  it('R28.1(1a) clause (i): a same-link, cross-agent inReplyToMessageId must NOT attach to another agent local thread', async () => {
+    setup()
+    const agentA = await registerAgent(workerRuntime, 'agent-a', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'agent-b', evidenceB)
+
+    // An outbound relay mirror row on the RECEIVING host: agent A previously sent this out to a
+    // remote peer over the same link. clause (i) exists to stop a peer claiming this row as the
+    // one being answered while addressing the reply to a DIFFERENT local agent (B).
+    const mirrorThread = workerDb.createThread({
+      subject: 'A to peer',
+      createdByAgentId: agentA,
+      origin: 'fanout',
+      participants: [
+        { participantKey: agentA, agentId: agentA, handle: `agent:${agentA}`, role: 'owner' }
+      ]
+    })
+    const mirrorId = 'msg_aaaaaaaaaa01'
+    workerDb.insertGatedMessage({
+      id: mirrorId,
+      from: `agent:${agentA}`,
+      to: `remote:${WORKER_SERVER.environmentId}:peer_far_agt`,
+      subject: 'A to peer',
+      body: 'hi peer',
+      threadId: mirrorThread.thread.id,
+      verb: 'send'
+    })
+
+    const envelope = {
+      fromAgent: { id: 'agt_00000000cd01', displayName: 'peer-sender' },
+      toAgentId: agentB,
+      messageId: 'msg_0000000bcd11',
+      subject: 'reply',
+      body: 'poisoned reply attempt',
+      inReplyToMessageId: mirrorId
+    }
+    const result = (await call('orchestration.federatedSend', envelope, workerLinkCtx())) as {
+      accepted: true
+      messageId: string
+      threadId: string | null
+      authorshipUnconfirmed?: true
+    }
+
+    // Clause (i) fails (the row's from_handle names agent A, not the addressee B), so this gets
+    // its OWN fresh thread rather than attaching to — or back-filling — A's thread, and is never
+    // flagged authorshipUnconfirmed (that flag is for a FAILED authorship lookup, not this case).
+    expect(result.threadId).not.toBe(mirrorThread.thread.id)
+    expect(result.authorshipUnconfirmed).toBeUndefined()
+    const farRow = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(envelope.messageId) as { thread_id: string | null }
+    expect(farRow.thread_id).not.toBe(mirrorThread.thread.id)
+    expect(farRow.thread_id).toBe(result.threadId)
+  })
+
   // S10-20 review F6 (Ruling 22 (1)): the peer's RPC RESPONSE ids are wire data too — a
   // misbehaving/version-mismatched peer answering with a malformed threadId must not have it
   // stored into peer_thread_id, and the relay must report a refusal rather than accepted:true.

@@ -2,11 +2,16 @@
 // claim, settle, hold, retarget. Split from reply-outbox-store.ts (types/enqueue/reads) to stay
 // under max-lines (plan §7.6).
 import type Database from '../../sqlite/sync-database'
-import { REPLY_OUTBOX_RPC_BUDGET_MS, REPLY_OUTBOX_LEASE_GRACE_MS } from './link-binding-constants'
+import {
+  REPLY_OUTBOX_RPC_BUDGET_MS,
+  REPLY_OUTBOX_LEASE_GRACE_MS,
+  REPLY_RELAY_COLLISION_CODE
+} from './link-binding-constants'
 import {
   type ReplyOutboxRow,
   getReplyOutboxItem,
-  replyOutboxIntervalMs
+  replyOutboxIntervalMs,
+  applyReplyOutboxJitter
 } from './reply-outbox-store'
 
 // R18.7, and (v6, protocol M4) the first statement of every pump tick: a 'sending' row whose
@@ -41,10 +46,17 @@ export function claimNextReplyOutboxItem(
   db: Database.Database,
   now: number
 ): ReplyOutboxRow | null {
+  // Ruling 26(a)/B1: a hold is expressed by next_attempt_after (+ first_held_at for the
+  // abandonment clock) and by NOTHING else. hold_count is a reporting counter only — it never
+  // gates the claim (dropped `AND hold_count = 0`, which made every hold terminal: nothing ever
+  // resets that column, so the row became permanently unclaimable the first time it was held).
+  // A held row whose next_attempt_after has passed is claimed like any other row, and R18.3's
+  // abandon deadline (checked at the head of processItem, on every claim) then delivers,
+  // refuses, or abandons it — never strands it.
   const candidates = db
     .prepare(
       `SELECT id, consecutive_failures AS consecutiveFailures FROM peer_reply_outbox a
-        WHERE state = 'queued' AND hold_count = 0
+        WHERE state = 'queued'
           AND (next_attempt_after IS NULL OR next_attempt_after <= ?)
           AND NOT EXISTS (
             SELECT 1 FROM peer_reply_outbox b
@@ -63,7 +75,8 @@ export function claimNextReplyOutboxItem(
     // 'queued' with this backoff already in place rather than immediately due again. Computed
     // from the item's own current consecutive_failures (unchanged by this claim — that column's
     // single writer is still the settle) via the same deterministic curve the kick uses.
-    const preDialBackoff = now + replyOutboxIntervalMs(candidate.consecutiveFailures)
+    const preDialBackoff =
+      now + applyReplyOutboxJitter(replyOutboxIntervalMs(candidate.consecutiveFailures))
     const result = db
       .prepare(
         `UPDATE peer_reply_outbox AS a
@@ -187,7 +200,11 @@ export function holdReplyOutboxItemLocalEvidence(
   ).run(nextAttemptAfter, id)
 }
 
-// R18.4(b): rewrite the route onto a freshly re-bound link, keyed by the retarget peer key.
+// R18.4(b)/Ruling 26(b): rewrite the route onto a freshly re-bound link AND release the row in
+// ONE statement — hold_count, first_held_at and next_attempt_after reset, guarded
+// `state='sending' -> 'queued'` (same P18/R14.3 cancellation-race reason as holdReplyOutboxItem).
+// A retarget never re-holds: this is the row's ONLY write for a successful retarget (B1/B2 —
+// the caller must not follow this with a hold call).
 export function retargetReplyOutboxItem(
   db: Database.Database,
   id: string,
@@ -198,18 +215,42 @@ export function retargetReplyOutboxItem(
     peerCredentialFp: string
     peerKeyFingerprint: string
   }
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE peer_reply_outbox
+          SET link_device_id = ?, environment_id = ?, bound_pairing_revision = ?,
+              peer_credential_fp = ?, peer_key_fingerprint = ?,
+              state = 'queued', lease_expires_at = NULL,
+              hold_count = 0, first_held_at = NULL, next_attempt_after = NULL,
+              last_error_code = NULL
+        WHERE id = ? AND state = 'sending'`
+    )
+    .run(
+      route.linkDeviceId,
+      route.environmentId,
+      route.boundPairingRevision,
+      route.peerCredentialFp,
+      route.peerKeyFingerprint,
+      id
+    )
+  return result.changes === 1
+}
+
+// M10 (C5 review)/Ruling 26(j): the in-flight-registry collision hold — deliberately NOT
+// holdReplyOutboxItem. Mirrors holdReplyOutboxItemLocalEvidence's shape (first_held_at left
+// exactly as it was, never COALESCEd — this is this host's own scheduling, not a remote outage,
+// and must never start the R18.3 abandon clock) but carries the collision's own register code
+// rather than local_evidence_unavailable's.
+export function holdReplyOutboxItemCollision(
+  db: Database.Database,
+  id: string,
+  nextAttemptAfter: number
 ): void {
   db.prepare(
     `UPDATE peer_reply_outbox
-        SET link_device_id = ?, environment_id = ?, bound_pairing_revision = ?,
-            peer_credential_fp = ?, peer_key_fingerprint = ?
-      WHERE id = ?`
-  ).run(
-    route.linkDeviceId,
-    route.environmentId,
-    route.boundPairingRevision,
-    route.peerCredentialFp,
-    route.peerKeyFingerprint,
-    id
-  )
+        SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
+            next_attempt_after = ?, last_error_code = ?
+      WHERE id = ? AND state = 'sending'`
+  ).run(nextAttemptAfter, REPLY_RELAY_COLLISION_CODE, id)
 }

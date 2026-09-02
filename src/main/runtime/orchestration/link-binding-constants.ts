@@ -94,6 +94,9 @@ export const REPLY_OUTBOX_LINK_CONCURRENCY = 4
 // A-arith(10): matches the existing relay timeout; passed as both timeoutMs and maxDurationMs.
 export const REPLY_OUTBOX_RPC_BUDGET_MS = 30_000
 export const REPLY_OUTBOX_KICK_DEBOUNCE_MS = 1_000
+// M11 (C5 review)/Ruling 26(k)/INV-P-006 clause (a): the write-time cap on a stored
+// `peer_reply_outbox.last_error` detail — raw peer text is never stored beyond this bound.
+export const REPLY_OUTBOX_LAST_ERROR_DETAIL_CLAMP = 512
 // Existing constants, owned by device-registry-pending-grants.ts (the base tree, pre-S10-16) —
 // re-exported here, never redeclared, so this slice's consumers still get them from THE REGISTER
 // without creating a second definition site (F4/L-2). MAX_LIVE_MINTED_GRANTS is newly partitioned
@@ -138,6 +141,15 @@ export const CANCELLED_LOCAL_RESET_CODE = 'cancelled_local_reset'
 export const BINDING_CHANGED_CODE = 'binding_changed'
 export const ROUTE_MOVED_CODE = 'route_moved'
 export const UNKNOWN_PEER_REFUSAL_CODE = 'unknown_peer_refusal'
+// Ruling 26(j): the in-flight-registry collision hold's own code — distinct from
+// LOCAL_EVIDENCE_UNAVAILABLE_CODE (a different local-scheduling cause) and never ''.
+export const REPLY_RELAY_COLLISION_CODE = 'relay_dial_collision'
+// Ruling 26(e): a peer's federatedSend receipt failed the host id grammar — settled `delivered`
+// (the peer accepted the reply; retrying would double-deliver) with the peer ids NULL.
+export const PEER_RESULT_MALFORMED_CODE = 'peer_result_malformed'
+// Ruling 26(g): a throw from post-delivery bookkeeping (after a successful settle) — never a
+// transport failure, never a retry of a delivered row.
+export const REPLY_RELAY_BOOKKEEPING_FAILED_CODE = 'reply_relay_bookkeeping_failed'
 
 export const REPLY_RELAY_UNREACHABLE_NOTICE = 'reply_relay_unreachable'
 export const REPLY_RELAY_RECOVERED_NOTICE = 'reply_relay_recovered'
@@ -147,6 +159,9 @@ export const REPLY_RELAY_ROUTE_MOVED_NOTICE = 'reply_relay_route_moved'
 export const REPLY_RELAY_PEER_RECEIPT_POISONED_NOTICE = 'reply_relay_peer_receipt_poisoned'
 export const REPLY_RELAY_ID_CONFLICT_NOTICE = 'reply_relay_id_conflict'
 export const REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE = 'reply_relay_authorship_unconfirmed'
+// M9 (C5 review)/Ruling 26(i): the two R18.5 notices the review found unimplemented.
+export const REPLY_RELAY_STALE_PAIRING_NOTICE = 'reply_relay_stale_pairing'
+export const REPLY_RELAY_UNSUPPORTED_NOTICE = 'reply_relay_unsupported'
 export const LINK_BINDING_CONTESTED_NOTICE = 'link_binding_contested'
 export const LINK_BINDING_UNAVAILABLE_NOTICE = 'link_binding_unavailable'
 export const LINK_BINDING_PEER_REPORTS_CONTEST_NOTICE = 'link_binding_peer_reports_contest'

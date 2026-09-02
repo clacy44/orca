@@ -7,6 +7,7 @@ import {
   REPLY_OUTBOX_BASE_MS,
   REPLY_OUTBOX_MAX_MS,
   REPLY_OUTBOX_PER_LINK_CAP,
+  REPLY_OUTBOX_JITTER_RATIO,
   CANCELLED_LOCAL_RESET_CODE
 } from './link-binding-constants'
 import { LinkBindingCapError } from './link-binding-store'
@@ -263,6 +264,16 @@ export function replyOutboxIntervalMs(consecutiveFailures: number): number {
     return REPLY_OUTBOX_BASE_MS
   }
   return Math.min(REPLY_OUTBOX_BASE_MS * 2 ** consecutiveFailures, REPLY_OUTBOX_MAX_MS)
+}
+
+// M8 (C5 review)/R18.2/Ruling 26(i): ±REPLY_OUTBOX_JITTER_RATIO jitter, applied at the two
+// scheduling sites that compute a backoff FOR THE NEXT ATTEMPT (the claim's pre-dial backoff and
+// the disposition table's retry schedule) — never at the kick clamp, which test 63/78 requires to
+// land EXACTLY on `replyOutboxIntervalMs(n)` ("no nearer than the item's own current interval").
+export function applyReplyOutboxJitter(intervalMs: number): number {
+  const span = intervalMs * REPLY_OUTBOX_JITTER_RATIO
+  const jitter = (Math.random() * 2 - 1) * span
+  return Math.max(0, Math.round(intervalMs + jitter))
 }
 
 // Chair briefing §0 decision 2 (Ruling 23(b)): the ITEM's own current interval — never the global

@@ -7,22 +7,23 @@ import type { OrcaRuntimeService } from '../orca-runtime'
 import { createInFlightGuard } from './link-binding-schedule'
 import { getRoutableLinkBinding } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
-import { shouldFireReplyRelayNotice } from './reply-outbox-health'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
 import {
   fireReplyRelayNotice,
-  recordReplyOutboxFailureAndMaybeNotify,
-  onReplyOutboxDelivered
+  recordReplyOutboxFailureAndMaybeNotify
 } from './reply-outbox-pump-notify'
 import { holdOrRetargetReplyOutboxItem } from './reply-outbox-pump-hold'
+import {
+  settleReplyOutboxDelivery,
+  type FederatedSendResultShape
+} from './reply-outbox-pump-deliver'
 import {
   REPLY_OUTBOX_RPC_BUDGET_MS,
   REPLY_OUTBOX_MAX_AGE_MS,
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_LINK_CONCURRENCY,
   REPLY_OUTBOX_KICK_DEBOUNCE_MS,
-  REPLY_RELAY_ABANDONED_NOTICE,
-  REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE
+  REPLY_RELAY_ABANDONED_NOTICE
 } from './link-binding-constants'
 
 export type ReplyOutboxPump = {
@@ -33,23 +34,16 @@ export type ReplyOutboxPump = {
   stop(): void
 }
 
-type FederatedSendResultShape = {
-  accepted: true
-  messageId: string
-  threadId: string | null
-  authorshipUnconfirmed?: boolean
-}
-
 export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxPump {
   const inFlightGuard = createInFlightGuard()
-  // R19.3's health-transition edge, per link — in-memory only (a restart re-derives from
-  // consecutive_failures on the next crossing; an already-unreachable link that stays
-  // unreachable across a restart simply does not re-fire until it recovers or fails again from 0).
-  const lastKnownFailures = new Map<string, number>()
   const lastAdvisoryNotifiedAt = new Map<string, number>()
   let stopped = false
   let wakeTimer: ReturnType<typeof setTimeout> | null = null
   let loopRunning = false
+  // M13 (C5 review)/Ruling 26(l): a kick landing while a tick is already running must not be
+  // dropped — its own debounce-fired call into runTickLoop sees `loopRunning` and would
+  // otherwise just no-op. This flag is consumed at the running tick's own tail.
+  let rerunRequested = false
 
   const fireNotice = (
     item: ReplyOutboxRow,
@@ -104,13 +98,18 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       return
     }
 
-    // ONE try/catch spans the guarded dial AND its disposition (P18-adjacent: a thrown RPC
-    // error, wherever it originates in this async chain, must reach the SAME classification
-    // below — an error escaping this function unclassified strands the row 'sending' forever,
-    // since only claim/settle/hold/retry ever move it out of that state).
+    // ONE try/catch spans ONLY the guarded dial (H6/Ruling 26(g) — post-delivery bookkeeping,
+    // below, is deliberately OUTSIDE it: a thrown RPC error, wherever it originates in this
+    // async chain, must reach the SAME classification below, since only claim/settle/hold/retry
+    // ever move the row out of 'sending'; but a throw AFTER a successful settle is a local
+    // bookkeeping fault, never a transport failure and never a retry of a delivered row).
+    let guardResult: 'busy' | FederatedSendResultShape
     try {
-      const guardResult = await inFlightGuard.guarded(
-        `pump:${item.environmentId}`,
+      guardResult = (await inFlightGuard.guarded(
+        // M10 (C5 review)/Ruling 26(j): keyed per ROUTE (link + environment), not per
+        // environment alone — two routes to one environment (old/new bound_pairing_revision,
+        // i.e. exactly the re-pair case) must not collide with each other.
+        `pump:${item.linkDeviceId}:${item.environmentId}`,
         REPLY_OUTBOX_RPC_BUDGET_MS,
         async () => {
           return runtime.callPinnedEnvironment({
@@ -124,61 +123,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
             envelope: { orchestrationRequestId: `reply_relay_${item.id}` }
           })
         }
-      )
-      if (guardResult === 'busy') {
-        // R18.5: a local scheduling collision — never a remote-outage signal.
-        db.holdReplyOutboxItem(
-          item.id,
-          now,
-          now + REPLY_OUTBOX_HOLD_INTERVAL_MS,
-          item.lastErrorCode ?? ''
-        )
-        return
-      }
-      const result = guardResult as FederatedSendResultShape
-      db.markPeerRelayAccepted(item.localMessageId, result.threadId)
-      db.settleReplyOutboxItem(item.id, {
-        state: 'delivered',
-        settledAt: Date.now(),
-        consecutiveFailures: 0,
-        nextAttemptAfter: null,
-        lastErrorCode: null,
-        lastError: null,
-        peerMessageId: result.messageId,
-        peerReplyThreadId: result.threadId
-      })
-      onReplyOutboxDelivered(runtime, lastKnownFailures, item)
-      if (result.authorshipUnconfirmed !== true) {
-        // R20.2 (v6, protocol M2/lifecycle M1): a clean delivery clears the advisory state.
-        db.clearLinkAdvisory(item.linkDeviceId)
-      }
-      if (result.authorshipUnconfirmed === true) {
-        db.bumpMisrouteAdvisories(item.linkDeviceId)
-        db.putLinkAdvisory(
-          item.linkDeviceId,
-          { kind: 'authorship_unconfirmed', outboxId: item.id, environmentId: item.environmentId },
-          Date.now()
-        )
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: item.linkDeviceId,
-          verb: 'replyRelay',
-          outcome: 'authorship_unconfirmed',
-          reasonCode: null
-        })
-        if (
-          shouldFireReplyRelayNotice(
-            item,
-            lastAdvisoryNotifiedAt.get(item.linkDeviceId) ?? null,
-            Date.now()
-          )
-        ) {
-          lastAdvisoryNotifiedAt.set(item.linkDeviceId, Date.now())
-          db.markReplyOutboxNotified(item.id, Date.now())
-          fireNotice(item, REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE, item.inReplyToMessageId)
-        }
-      }
+      )) as 'busy' | FederatedSendResultShape
     } catch (error) {
       const at = Date.now()
       // attempts already bumped at claim time (R18.2) — the item's OWN current attempt count.
@@ -195,20 +140,51 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         fireNotice(item, disposition.noticeCode, null)
         return
       }
+      if (disposition.kind === 'recheck') {
+        // M9/R18.5's `runtime_environment_changed` row: no failure bump, immediate re-check
+        // through the SAME routable-binding path the top of this function already runs.
+        holdOrRetargetReplyOutboxItem(runtime, item, at)
+        return
+      }
+      // H5/Ruling 26(f): consecutive_failures is driven from the row's OWN persisted counter,
+      // never `item.attempts` (which bumps on every claim, including ones that end in a hold).
+      const nextFailures = disposition.bumpFailure
+        ? item.consecutiveFailures + 1
+        : item.consecutiveFailures
       db.retryReplyOutboxItem(
         item.id,
         at,
         disposition.nextAttemptAfter,
-        item.attempts,
+        nextFailures,
         disposition.disposition,
         disposition.errorMessage
       )
-      recordReplyOutboxFailureAndMaybeNotify(runtime, lastKnownFailures, item, item.attempts)
+      if (disposition.bumpFailure) {
+        recordReplyOutboxFailureAndMaybeNotify(runtime, item, nextFailures)
+      }
+      if (disposition.noticeCode) {
+        fireNotice(item, disposition.noticeCode, null)
+      }
+      return
     }
+
+    if (guardResult === 'busy') {
+      // R18.5/Ruling 26(j): a local scheduling collision — never a remote-outage signal, and
+      // (unlike holdReplyOutboxItem) never starts the R18.3 abandon clock.
+      db.holdReplyOutboxItemCollision(item.id, now + REPLY_OUTBOX_HOLD_INTERVAL_MS)
+      return
+    }
+
+    settleReplyOutboxDelivery(runtime, item, guardResult, lastAdvisoryNotifiedAt)
   }
 
   async function runTickLoop(): Promise<void> {
     if (loopRunning || stopped) {
+      // M13/Ruling 26(l): a kick's debounced call landing while the loop is already running
+      // must not be silently dropped — flag it for the running tick's own tail to consume.
+      if (loopRunning && !stopped) {
+        rerunRequested = true
+      }
       return
     }
     loopRunning = true
@@ -238,6 +214,10 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       }
     } finally {
       loopRunning = false
+      if (rerunRequested) {
+        rerunRequested = false
+        scheduleWake(0)
+      }
     }
   }
 

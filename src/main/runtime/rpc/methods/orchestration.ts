@@ -2132,8 +2132,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // v6 (lifecycle M6): L4's guarantee applies to a NEW reply too — a local file fault on
         // THIS host must never refuse a reply the DB-resident route triple could still commit.
         if (localEvidenceUnavailable(runtime)) {
-          const last = db.getPeerLinkBinding(original.peer_link_device_id)
-          if (last && last.state === 'confirmed' && last.revokedAt == null) {
+          const last = getRoutableLinkBinding(db, runtime, original.peer_link_device_id, {
+            sqliteOnly: true
+          })
+          if (last) {
             return enqueueForeignReply({
               db,
               runtime,

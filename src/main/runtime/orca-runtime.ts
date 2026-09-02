@@ -35062,7 +35062,14 @@ export class OrcaRuntimeService {
       // entry, keyed on `local_message_id` — UNIQUE) reports the OUTBOX row's own state, a
       // lookup on this same branch rather than a second one. Every other relay row (the plain
       // federation-relay mirror, which has none) keeps the two-state shape above unchanged.
-      const outboxItem = this.getOrchestrationDb().getReplyOutboxItemByLocalMessageId(message.id)
+      // M12 (C5 review)/Ruling 26: same partial-`OrchestrationDb`-stub guard `resumeAfterRestart`
+      // uses (reply-outbox-pump.ts) — many pre-existing tests install one via
+      // `setOrchestrationDb({...} as never)` that predates this accessor.
+      const orchestrationDbForSnapshot = this.getOrchestrationDb()
+      const outboxItem =
+        typeof orchestrationDbForSnapshot.getReplyOutboxItemByLocalMessageId === 'function'
+          ? orchestrationDbForSnapshot.getReplyOutboxItemByLocalMessageId(message.id)
+          : null
       if (outboxItem) {
         const delivery: MessageDeliveryState =
           outboxItem.state === 'queued'
