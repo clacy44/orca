@@ -3,6 +3,7 @@
 // RUNTIME_PEER_RPC_METHOD_ALLOWLIST Map itself and the ingress block land in W-5 (§B ordering —
 // no commit on this branch may mint a 'peer' grant that it does not already enforce).
 import { isHostScopedId } from './orchestration/orchestration-id-grammar'
+import { nextStepsForRefusedMethod } from './peer-refusal-next-steps'
 import type { OrcaRuntimeService } from './orca-runtime'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 import {
@@ -39,6 +40,7 @@ export type PeerRefusal = {
   readonly wireCode: 'forbidden' | 'rate_limited' | 'invalid_argument'
   readonly message: string
   readonly retryAfterMs?: number
+  readonly nextSteps: readonly string[]
 }
 
 export type PeerAdmission = { readonly refused: false }
@@ -48,16 +50,21 @@ export type PeerAdmission = { readonly refused: false }
 export function peerRefusal(
   code: PeerRefusalCode,
   message: string,
-  retryAfterMs?: number
+  retryAfterMs?: number,
+  nextSteps: readonly string[] = []
 ): PeerRefusal {
   return {
     refused: true,
     code,
     wireCode: code === 'rate_limited' || code === 'invalid_argument' ? code : 'forbidden',
     message,
+    nextSteps,
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {})
   }
 }
+
+// §9.1/R11 (FROZEN): per-method next steps for a `method_not_available` refusal — split into
+// peer-refusal-next-steps.ts to stay under the max-lines ratchet.
 
 export const PEER_ADMITTED: PeerAdmission = { refused: false }
 
@@ -113,13 +120,23 @@ export function assertPeerDispatchTarget(
       'A federation peer may only dispatch to a new-top-level worktree or an allowlisted existing one.'
     )
   }
+  // W-5..W-7 review · worktree oracle (Ruling 24(z)) / NEG-14: byte-identical whether the
+  // selector resolved to a non-federated repo or did not resolve at all — a message that
+  // embeds `target.repoId` would let a peer distinguish "exists, not federated" from "does not
+  // exist" (a worktree-existence oracle). Fixed text, never interpolated.
   return federationDispatchRepos.includes(target.repoId)
     ? PEER_ADMITTED
-    : peerRefusal(
-        'worktree_not_federated',
-        `Repo ${target.repoId} is not on this host's federationDispatchRepos allowlist.`
-      )
+    : WORKTREE_NOT_FEDERATED_REFUSAL
 }
+
+export const WORKTREE_NOT_FEDERATED_REFUSAL: PeerRefusal = peerRefusal(
+  'worktree_not_federated',
+  "This pairing may dispatch into new-top-level only; ask that host's operator to add the repo to federationDispatchRepos.",
+  undefined,
+  [
+    'ask the operator of that host to add the repo to federationDispatchRepos in settings; this pairing may dispatch into new-top-level only'
+  ]
+)
 
 // RISK 1 (§0.2 / E.2): the peer-profile preamble is host-constant only once dispatchId/taskId are
 // validated against the host's OWN id grammar — a preamble with taskSpec removed but a
@@ -370,7 +387,9 @@ export async function admitRuntimePeerMethod(
     if (rule === undefined) {
       return peerRefusal(
         'method_not_available',
-        `Method '${ctx.method}' is not available to a federation-peer grant.`
+        `Method '${ctx.method}' is not available to a federation-peer grant.`,
+        undefined,
+        nextStepsForRefusedMethod(ctx.method)
       )
     }
     if (rule === true) {

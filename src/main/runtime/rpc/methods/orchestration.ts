@@ -622,6 +622,22 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           'A federation peer may not name a sender pane on this host; omit --from and rely on the mailbox identity.'
         )
       }
+      // S10-19 §8.1/§8.2, W-5..W-7 review F2 / Ruling 24(t): a peer must use the remote-run-mailbox
+      // mode on ALL THREE mail verbs, not just `check` — otherwise a peer with no remoteRunMailbox
+      // falls into the ordinary local send path (agent:/dispatch:/bare handles/group fan-out,
+      // thread minting, cross-host relay).
+      if (accessProfile === 'peer' && params.remoteRunMailbox !== true) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+          {
+            effectsApplied: false,
+            nextSteps: [
+              'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+            ]
+          }
+        )
+      }
       assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       // Why first (K25, blocker fix): every branch below (point-to-point, group fan-out, and
@@ -1202,7 +1218,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         if (params.remoteRunMailbox !== true) {
           throw new OrchestrationError(
             'forbidden',
-            'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.'
+            'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+            {
+              effectsApplied: false,
+              nextSteps: [
+                'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+              ]
+            }
           )
         }
       }
@@ -1753,6 +1775,21 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         throw new OrchestrationError(
           'forbidden',
           'A federation peer may not name a sender pane on this host; omit --from.'
+        )
+      }
+      // W-5..W-7 review F2 / Ruling 24(t): all three mail verbs require remoteRunMailbox mode for
+      // peer callers — without this, `reply` could reach db.getMessageById for any non-legacy
+      // message row on the host instead of only its own mailbox rows.
+      if (accessProfile === 'peer' && params.remoteRunMailbox !== true) {
+        throw new OrchestrationError(
+          'forbidden',
+          'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+          {
+            effectsApplied: false,
+            nextSteps: [
+              'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+            ]
+          }
         )
       }
       assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)

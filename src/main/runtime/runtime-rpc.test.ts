@@ -6741,3 +6741,204 @@ describe('S10-19 W-1: access-profile plumbing', () => {
     }
   })
 })
+
+// W-5..W-7 review F10 (S-3): "the single test the whole slice exists to keep green" — a real WS
+// frame driven through handleWebSocketMessage, never the allowlist unit-tested in isolation.
+describe('W-5..W-7 review F10 (S-3): end-to-end peer ingress', () => {
+  async function startServerWithGrants(): Promise<{
+    server: OrcaRuntimeRpcServer
+    peerToken: string
+    fullToken: string
+    stop: () => Promise<void>
+  }> {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const db = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(db)
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    await server.start()
+    const peerOffer = server.createPairingOffer({
+      address: '127.0.0.1',
+      name: 'Peer',
+      scope: 'runtime',
+      mint: 'always',
+      accessProfile: 'peer'
+    })
+    const fullOffer = server.createPairingOffer({
+      address: '127.0.0.1',
+      name: 'Full',
+      scope: 'runtime',
+      mint: 'always',
+      accessProfile: 'full'
+    })
+    if (!peerOffer.available || !fullOffer.available) {
+      throw new Error('offer unavailable')
+    }
+    const peerToken = parsePairingCode(peerOffer.pairingUrl)!.deviceToken
+    const fullToken = parsePairingCode(fullOffer.pairingUrl)!.deviceToken
+    return {
+      server,
+      peerToken,
+      fullToken,
+      stop: async () => {
+        db.close()
+        await server.stop()
+      }
+    }
+  }
+
+  async function sendFrame(
+    server: OrcaRuntimeRpcServer,
+    deviceToken: string,
+    method: string,
+    params: Record<string, unknown> = {}
+  ): Promise<Record<string, unknown>> {
+    const replies: Record<string, unknown>[] = []
+    await server['handleWebSocketMessage'](
+      JSON.stringify(
+        withCurrentOrchestrationContract({
+          id: `req_${method}`,
+          method,
+          deviceToken,
+          params
+        })
+      ),
+      (response) => replies.push(JSON.parse(response) as Record<string, unknown>),
+      () => {}
+    )
+    const reply = replies.find((r) => r.id === `req_${method}`)
+    if (!reply) {
+      throw new Error(`no reply for ${method}`)
+    }
+    return reply
+  }
+
+  it('admits an allowlisted verb (status.get) for a peer-profile device', async () => {
+    const { server, peerToken, stop } = await startServerWithGrants()
+    try {
+      const reply = await sendFrame(server, peerToken, 'status.get')
+      expect(reply.ok).toBe(true)
+    } finally {
+      await stop()
+    }
+  })
+
+  it('refuses terminal.send for a peer-profile device with the frozen method_not_available/forbidden shape, carrying effectsApplied:false and nextSteps', async () => {
+    const { server, peerToken, stop } = await startServerWithGrants()
+    try {
+      const reply = await sendFrame(server, peerToken, 'terminal.send', {
+        terminal: 't1',
+        data: 'x'
+      })
+      expect(reply.ok).toBe(false)
+      expect(reply.error).toMatchObject({
+        code: 'forbidden',
+        data: expect.objectContaining({
+          effectsApplied: false,
+          nextSteps: expect.arrayContaining([expect.stringContaining('worker-answer-prompt')])
+        })
+      })
+    } finally {
+      await stop()
+    }
+  })
+
+  it('refuses a retired verb (orchestration.federationWorkerInput) for a peer-profile device', async () => {
+    const { server, peerToken, stop } = await startServerWithGrants()
+    try {
+      const reply = await sendFrame(server, peerToken, 'orchestration.federationWorkerInput', {
+        dispatchId: 'disp_x'
+      })
+      expect(reply.ok).toBe(false)
+      expect(reply.error).toMatchObject({ code: 'forbidden' })
+    } finally {
+      await stop()
+    }
+  })
+
+  it('refuses a verb with different case (Status.get) for a peer-profile device — no case-normalization on either side', async () => {
+    const { server, peerToken, stop } = await startServerWithGrants()
+    try {
+      const reply = await sendFrame(server, peerToken, 'Status.get')
+      expect(reply.ok).toBe(false)
+      expect(reply.error).toMatchObject({ code: expect.any(String) })
+    } finally {
+      await stop()
+    }
+  })
+
+  it('admits all four frames for a full-profile device (unchanged from today)', async () => {
+    const { server, fullToken, stop } = await startServerWithGrants()
+    try {
+      const status = await sendFrame(server, fullToken, 'status.get')
+      expect(status.ok).toBe(true)
+
+      // A full grant is refused for an unregistered/case-mismatched method the same as any
+      // caller would be — it never reaches the peer allowlist filter in the first place.
+      const wrongCase = await sendFrame(server, fullToken, 'Status.get')
+      expect(wrongCase.ok).toBe(false)
+
+      const retired = await sendFrame(server, fullToken, 'orchestration.federationWorkerInput', {
+        dispatchId: 'disp_x'
+      })
+      expect(retired.ok).toBe(false)
+    } finally {
+      await stop()
+    }
+  })
+})
+
+// W-5..W-7 review F6 / Ruling 24(s): the ingress peer branch is entered only when
+// device.scope === 'runtime' AND the effective profile is 'peer' — a mobile-scope device must
+// never take it, even under a legacyGrantProfile:'peer' flip.
+describe('W-5..W-7 review F6 / Ruling 24(s): mobile-scope devices never take the peer branch', () => {
+  it('a mobile-scope device with no accessProfile, under legacyGrantProfile:"peer", still gets the mobile allowlist treatment — not the peer refusal', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    // Test-only: legacyGrantProfile has no production setter (the flip is a future operator
+    // action, §10.4/G-3) — cast past readonly to simulate the ruled future state.
+    ;(server as unknown as { legacyGrantProfile: 'full' | 'peer' }).legacyGrantProfile = 'peer'
+    await server.start()
+    try {
+      const offer = server.createPairingOffer({ address: '127.0.0.1', scope: 'mobile' })
+      expect(offer.available).toBe(true)
+      if (!offer.available) {
+        throw new Error('offer unavailable')
+      }
+      const deviceToken = parsePairingCode(offer.pairingUrl)!.deviceToken
+      // accounts.list is on the MOBILE allowlist but NOT on the peer allowlist — if the ingress
+      // dropped the device.scope==='runtime' conjunct (F6), effectiveAccessProfile would resolve
+      // this unlabelled mobile device to 'peer' and the peer filter would refuse it with
+      // method_not_available. With the conjunct restored, it must never reach that filter.
+      const replies: Record<string, unknown>[] = []
+      await server['handleWebSocketMessage'](
+        JSON.stringify({
+          id: 'req_accounts',
+          method: 'accounts.list',
+          deviceToken,
+          params: {}
+        }),
+        (response) => replies.push(JSON.parse(response) as Record<string, unknown>),
+        () => {}
+      )
+      const reply = replies.find((r) => r.id === 'req_accounts')
+      expect(reply?.error).not.toMatchObject({
+        code: 'forbidden',
+        message: expect.stringContaining('federation-peer grant')
+      })
+    } finally {
+      await server.stop()
+    }
+  })
+})

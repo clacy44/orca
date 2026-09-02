@@ -3757,6 +3757,102 @@ describe('orchestration RPC methods', () => {
       ).rejects.toMatchObject({ code: 'forbidden' })
     })
 
+    // W-5..W-7 review F2 / Ruling 24(t): ALL THREE mail verbs require remoteRunMailbox mode for
+    // a peer caller, not just check — send/reply must refuse the same way, through the same
+    // real caller (call() -> the RPC method registry, orchestration.ts's handler).
+    it('send refuses a peer caller that omits remoteRunMailbox', async () => {
+      setup()
+      ctx = { runtime, accessProfile: 'peer', authenticatedCallerFingerprint: 'fp_peer' }
+
+      await expect(
+        call('orchestration.send', { to: `run:${activeRunId}`, subject: 'hi', body: 'body' })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
+    it('reply refuses a peer caller that omits remoteRunMailbox', async () => {
+      setup()
+      const msg = db.insertMessage({
+        to: 'term_coord',
+        from: 'term_x',
+        subject: 'hi',
+        body: 'body',
+        type: 'status',
+        runId: activeRunId
+      })
+      ctx = { runtime, accessProfile: 'peer', authenticatedCallerFingerprint: 'fp_peer' }
+
+      await expect(
+        call('orchestration.reply', { id: msg.id, body: 'reply body' })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
+    it('a peer send WITH remoteRunMailbox:true reaches the mailbox path (not refused for lacking mode)', async () => {
+      setup()
+      ctx = {
+        runtime,
+        accessProfile: 'peer',
+        authenticatedCallerFingerprint: 'fp_peer',
+        pairedDeviceId: 'dev_peer',
+        clientKind: 'runtime'
+      }
+
+      await expect(
+        call('orchestration.send', {
+          to: `run:${activeRunId}`,
+          run: activeRunId,
+          subject: 'hi',
+          body: 'body',
+          remoteRunMailbox: true
+        })
+      ).resolves.not.toMatchObject({ code: 'forbidden' })
+    })
+
+    it('a peer reply WITH remoteRunMailbox:true reaches past the mode refusal', async () => {
+      setup()
+      const msg = db.insertMessage({
+        to: 'term_coord',
+        from: 'term_x',
+        subject: 'hi',
+        body: 'body',
+        type: 'status',
+        runId: activeRunId
+      })
+      ctx = {
+        runtime,
+        accessProfile: 'peer',
+        authenticatedCallerFingerprint: 'fp_peer',
+        pairedDeviceId: 'dev_peer',
+        clientKind: 'runtime'
+      }
+
+      // Not asserting success outright (the message may not be a bound-Run/question row for this
+      // peer) — only that it is never refused for the reason F2 exists to fix.
+      await expect(
+        call('orchestration.reply', {
+          id: msg.id,
+          run: activeRunId,
+          body: 'reply body',
+          remoteRunMailbox: true
+        }).catch((error: { code?: string; message?: string }) => {
+          if (error.code === 'forbidden' && error.message?.includes('must set remoteRunMailbox')) {
+            throw error
+          }
+          return { ok: true }
+        })
+      ).resolves.toBeDefined()
+    })
+
+    // W-5..W-7 review F2: a peer send with no remoteRunMailbox must never reach the LOCAL send
+    // surface (agent:/dispatch:/bare handle/group fan-out) — it must refuse before any of that.
+    it('send refuses a peer caller targeting a local agent: handle before reaching the relay/local-send path', async () => {
+      setup()
+      ctx = { runtime, accessProfile: 'peer', authenticatedCallerFingerprint: 'fp_peer' }
+
+      await expect(
+        call('orchestration.send', { to: 'agent:some_agent', subject: 'hi', body: 'body' })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
     it('NEG-16 (R24): a peer check --wait against a locally-bound Run refuses run_wait_local_only', async () => {
       setup()
       ctx = {

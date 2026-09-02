@@ -47,7 +47,8 @@ describe('S10-19 W-4 review finding 9: orchestration.federationAnswerPrompt refu
       code: 'rate_limited',
       wireCode: 'rate_limited',
       message: 'Too many prompt answers.',
-      retryAfterMs: 5000
+      retryAfterMs: 5000,
+      nextSteps: []
     })
     try {
       const runtime = new OrcaRuntimeService()

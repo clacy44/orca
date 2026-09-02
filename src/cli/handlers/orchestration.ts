@@ -649,10 +649,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     // Why: lifecycle senders preserve ORCA_TERMINAL_HANDLE across restarts for older runtimes.
     const from = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from')
     const run = getOptionalStringFlag(flags, 'run')
-    const remoteRunMailbox = await negotiateRemoteRunMailbox(
-      client,
-      run !== undefined || to?.startsWith('run:') === true
-    )
+    // W-5..W-7 review F5 / Ruling 24(w): probe peerAccess for EVERY remote send, not only
+    // --run/--to run: — `--to dispatch:<id> --environment <peer>` must also negotiate and
+    // suppress `from`, or a peer send is refused by the server (negotiateRemoteRunMailbox is a
+    // no-op unless client.isRemote is true, so this never adds a round trip for a local call).
+    const remoteRunMailbox = await negotiateRemoteRunMailbox(client, true)
     const sendParams = {
       from: remoteRunMailbox.peerAccess ? undefined : from,
       to,

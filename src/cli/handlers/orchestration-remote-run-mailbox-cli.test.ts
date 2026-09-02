@@ -151,8 +151,18 @@ describe('orchestration send --to run: --environment', () => {
     expect(paramsOf(1)).toMatchObject({ to: 'run:run_1', remoteRunMailbox: true })
   })
 
-  it('does not probe when sending to a Dispatch on the peer', async () => {
-    callMock.mockResolvedValueOnce({ result: { message: { id: 'msg_1' } } })
+  // W-5..W-7 review F5 / Ruling 24(w): `orca orchestration send --to dispatch:<id>
+  // --environment <peer>` is the documented follow-up flow and must WORK — the CLI now probes
+  // peerAccess for every remote send, not only --run/--to run:, so a peer grant's `from`
+  // suppression fires here too instead of the server refusing the call outright.
+  // Prior expectation ("does not probe when sending to a Dispatch on the peer") described the
+  // defect this fix removes: a `--to dispatch:` send skipped the probe, so `from` was always
+  // sent and a peer grant refused `forbidden` (F5 in the W-5..W-7 review).
+  it('F5: probes peerAccess and omits from when sending to a Dispatch on a peer grant', async () => {
+    callMock
+      .mockResolvedValueOnce(peerStatus())
+      .mockResolvedValueOnce({ result: { message: { id: 'msg_1' } } })
+    getTerminalHandleMock.mockResolvedValue('term_caller')
 
     await invoke(
       'orchestration send',
@@ -161,6 +171,43 @@ describe('orchestration send --to run: --environment', () => {
         ['subject', 'Follow-up']
       ]),
       true
+    )
+
+    expect(methodsCalled()).toEqual(['status.get', 'orchestration.send'])
+    expect(paramsOf(1)).toMatchObject({ to: 'dispatch:dispatch_1', remoteRunMailbox: true })
+    expect(paramsOf(1).from).toBeUndefined()
+  })
+
+  it('a full-profile remote send to a Dispatch still probes but keeps offering from (no peerAccess block)', async () => {
+    callMock
+      .mockResolvedValueOnce(supportedStatus())
+      .mockResolvedValueOnce({ result: { message: { id: 'msg_1' } } })
+    getTerminalHandleMock.mockResolvedValue('term_caller')
+
+    await invoke(
+      'orchestration send',
+      new Map([
+        ['to', 'dispatch:dispatch_1'],
+        ['subject', 'Follow-up']
+      ]),
+      true
+    )
+
+    expect(methodsCalled()).toEqual(['status.get', 'orchestration.send'])
+    expect(paramsOf(1).from).toBe('term_caller')
+  })
+
+  it('a local (non-remote) send to a Dispatch never probes', async () => {
+    callMock.mockResolvedValueOnce({ result: { message: { id: 'msg_1' } } })
+    getTerminalHandleMock.mockResolvedValue('term_caller')
+
+    await invoke(
+      'orchestration send',
+      new Map([
+        ['to', 'dispatch:dispatch_1'],
+        ['subject', 'Follow-up']
+      ]),
+      false
     )
 
     expect(methodsCalled()).toEqual(['orchestration.send'])

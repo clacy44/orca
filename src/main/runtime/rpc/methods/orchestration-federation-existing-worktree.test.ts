@@ -63,3 +63,46 @@ describe('S10-19 W-3 review finding 7: resolveExistingFederatedWorktree failedSt
     expect(createTerminal).not.toHaveBeenCalled()
   })
 })
+
+describe('W-5..W-7 review · worktree oracle (Ruling 24(z)) / NEG-14', () => {
+  async function refusalFor(exists: boolean) {
+    const runtime = new OrcaRuntimeService()
+    if (exists) {
+      vi.spyOn(runtime, 'showManagedTerminalWorkspace').mockResolvedValue({
+        id: 'wt-1',
+        repoId: 'repo-not-federated'
+      } as never)
+    } else {
+      vi.spyOn(runtime, 'showManagedTerminalWorkspace').mockRejectedValue(new Error('not found'))
+    }
+    vi.spyOn(runtime, 'getFederationDispatchRepos').mockReturnValue([])
+    try {
+      await resolveExistingFederatedWorktree({
+        runtime,
+        worktreeSelector: 'id:wt-1',
+        isPeerCaller: true,
+        credentialLane: { kind: 'none' } as never,
+        agent: undefined,
+        launch: { receipt: {}, preferences: undefined } as never,
+        terminalHandle: undefined,
+        taskId: 'task_x',
+        effects: [],
+        setFailedStage: () => {}
+      })
+      throw new Error('expected a refusal')
+    } catch (error) {
+      return error as { code: string; message: string; data?: unknown }
+    }
+  }
+
+  it('a peer caller gets the byte-identical refusal whether the worktree exists (unfederated) or does not exist', async () => {
+    const resolvedButUnfederated = await refusalFor(true)
+    const didNotResolve = await refusalFor(false)
+
+    expect(resolvedButUnfederated.code).toBe('forbidden')
+    expect(didNotResolve.code).toBe('forbidden')
+    expect(resolvedButUnfederated.message).toBe(didNotResolve.message)
+    expect(resolvedButUnfederated.data).toEqual(didNotResolve.data)
+    expect(resolvedButUnfederated.message).not.toContain('repo-not-federated')
+  })
+})

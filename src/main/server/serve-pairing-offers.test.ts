@@ -133,11 +133,18 @@ describe('resolveServePairingOffers', () => {
   it('renders a QR per named mobile link and none on the runtime scope', async () => {
     const source = sourceFor()
 
+    // W-5..W-7 review F8 / Ruling 24(s): restored to the shape the CLI can actually produce —
+    // named MOBILE pairing carries no --pairing-profile at all (the CLI refuses it beside
+    // --mobile-pairing), so pairingProfiles is empty here, not a fabricated ['full','full'].
+    // Prior expectation (commit 6d8b316598): resolveServePairingOffers({ pairingAddress: null,
+    // pairNames: ['Ana', 'Ben'], noPairing: false, mobilePairing: true }, source) — the field was
+    // optional then; 35ebd68bb4 (W-6) made pairingProfiles required and the test was changed to
+    // pass ['full','full'] to satisfy the type, which the CLI can never generate for --mobile-pairing.
     const mobile = await resolveServePairingOffers(
       {
         pairingAddress: null,
         pairNames: ['Ana', 'Ben'],
-        pairingProfiles: ['full', 'full'],
+        pairingProfiles: [],
         noPairing: false,
         mobilePairing: true
       },
@@ -229,5 +236,34 @@ describe('resolveServePairingOffers', () => {
       )
     ).rejects.toThrow('--pairing-profile must be given exactly once per --pair-name')
     expect(source.createPairingOffer).not.toHaveBeenCalled()
+  })
+
+  it('W-5..W-7 review F7 / Ruling 24(y): refuses instead of silently minting full when a name normalizes away', async () => {
+    const source = sourceFor()
+
+    // '   ' normalizes to '' and is filtered. Filtering names FIRST and then indexing profiles
+    // positionally against the filtered array would pair Ben's name with the FIRST remaining
+    // profile ('full', minted for the blank slot) instead of his own ('peer') — a link the
+    // operator marked least-privilege becomes 'full'. Zipping name+profile BEFORE filtering (the
+    // fix) keeps Ben bound to his own 'peer' profile.
+    await expect(
+      resolveServePairingOffers(
+        {
+          pairingAddress: null,
+          pairNames: ['   ', 'Ben'],
+          pairingProfiles: ['full', 'peer'],
+          noPairing: false,
+          mobilePairing: false
+        },
+        source
+      )
+    ).resolves.toMatchObject({
+      namedPairings: [{ name: 'Ben', pairing: { available: true } }]
+    })
+    expect(source.createPairingOffer).toHaveBeenCalledTimes(1)
+    expect(source.createPairingOffer.mock.calls[0]?.[0]).toMatchObject({
+      name: 'Ben',
+      accessProfile: 'peer'
+    })
   })
 })

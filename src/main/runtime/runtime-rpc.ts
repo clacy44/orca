@@ -31,6 +31,7 @@ import {
   RUNTIME_PEER_RPC_METHOD_ALLOWLIST
 } from './runtime-peer-rpc-allowlist'
 import { ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
+import { PEER_LONG_POLL_PER_DEVICE_CAP } from './peer-profile-constants'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
 import {
   createPrincipalLaneConnectionJoin,
@@ -597,6 +598,10 @@ export class OrcaRuntimeRpcServer {
   private activeLongPolls = 0
   // Why: subset of activeLongPolls held by orchestration.ask, fenced by askLongPollCap.
   private activeAskLongPolls = 0
+  // Ruling 24 addendum (u) / W-5..W-7 review F3: per-pairedDeviceId sub-cap on peer-held
+  // long-polls, inside the global longPollCap fence — a single peer device may not consume every
+  // slot and starve the host's own agents.
+  private readonly activePeerLongPollsByDevice = new Map<string, number>()
 
   constructor({
     runtime,
@@ -1779,7 +1784,10 @@ export class OrcaRuntimeRpcServer {
   // Why: one fence for both transports — the total cap protects short RPCs, the ask
   // sub-cap protects terminal.wait / check --wait from slow reply-blocked asks.
   // Returns the rejection message, or null once the slot is reserved.
-  private admitLongPoll(longPoll: LongPollClass | null): string | null {
+  private admitLongPoll(
+    longPoll: LongPollClass | null,
+    peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined }
+  ): string | null {
     if (!longPoll) {
       return null
     }
@@ -1789,20 +1797,41 @@ export class OrcaRuntimeRpcServer {
     if (longPoll === 'ask' && this.activeAskLongPolls >= this.askLongPollCap) {
       return 'orchestration.ask capacity reached; retry with backoff'
     }
+    if (peerKey?.accessProfile === 'peer') {
+      const held = this.activePeerLongPollsByDevice.get(peerKey.pairedDeviceId) ?? 0
+      if (held >= PEER_LONG_POLL_PER_DEVICE_CAP) {
+        return 'long-poll capacity reached for this device; retry with backoff'
+      }
+    }
     this.activeLongPolls += 1
     if (longPoll === 'ask') {
       this.activeAskLongPolls += 1
     }
+    if (peerKey?.accessProfile === 'peer') {
+      const held = this.activePeerLongPollsByDevice.get(peerKey.pairedDeviceId) ?? 0
+      this.activePeerLongPollsByDevice.set(peerKey.pairedDeviceId, held + 1)
+    }
     return null
   }
 
-  private releaseLongPoll(longPoll: LongPollClass | null): void {
+  private releaseLongPoll(
+    longPoll: LongPollClass | null,
+    peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined }
+  ): void {
     if (!longPoll) {
       return
     }
     this.activeLongPolls = Math.max(0, this.activeLongPolls - 1)
     if (longPoll === 'ask') {
       this.activeAskLongPolls = Math.max(0, this.activeAskLongPolls - 1)
+    }
+    if (peerKey?.accessProfile === 'peer') {
+      const held = this.activePeerLongPollsByDevice.get(peerKey.pairedDeviceId) ?? 0
+      if (held <= 1) {
+        this.activePeerLongPollsByDevice.delete(peerKey.pairedDeviceId)
+      } else {
+        this.activePeerLongPollsByDevice.set(peerKey.pairedDeviceId, held - 1)
+      }
     }
   }
 
@@ -1906,7 +1935,11 @@ export class OrcaRuntimeRpcServer {
     // at ingress, same statement block as the strip-and-stamp above — the dispatcher otherwise
     // passes it straight off the request body, and it is a local-attestation channel a paired
     // peer never holds.
-    if (accessProfile === 'peer' && request.orchestrationCompatibilityEvidence !== undefined) {
+    if (
+      device.scope === 'runtime' &&
+      accessProfile === 'peer' &&
+      request.orchestrationCompatibilityEvidence !== undefined
+    ) {
       delete (request as Record<string, unknown>).orchestrationCompatibilityEvidence
     }
     if (device.scope === 'mobile' && !MOBILE_RPC_METHOD_ALLOWLIST.has(request.method)) {
@@ -1930,7 +1963,9 @@ export class OrcaRuntimeRpcServer {
     // S10-19 W-5: the peer ingress filter — one boundary, and it is the only thing that decides.
     // Inserted after setClientId and before longPollClassOf (NEG-13b) so a refused frame consumes
     // no long-poll slot but the socket is still accounted for on close.
-    if (accessProfile === 'peer') {
+    // W-5..W-7 review F6 / Ruling 24(s): accessProfile applies to RUNTIME-scope grants only — a
+    // mobile-scope device must never take this branch even under legacyGrantProfile 'peer'.
+    if (device.scope === 'runtime' && accessProfile === 'peer') {
       const admission = await admitRuntimePeerMethod({
         runtime: this.runtime,
         // Why sha256(token), not device.deviceId: this MUST match
@@ -1942,16 +1977,17 @@ export class OrcaRuntimeRpcServer {
         method: request.method
       })
       if (admission.refused) {
+        // W-5..W-7 review F4 / Ruling 24(v): every peer refusal carries effectsApplied:false and
+        // the frozen §9.1/R11 nextSteps families.
         reply(
           JSON.stringify(
-            this.buildError(
-              request.id,
-              admission.wireCode,
-              admission.message,
-              admission.retryAfterMs !== undefined
+            this.buildError(request.id, admission.wireCode, admission.message, {
+              effectsApplied: false,
+              nextSteps: admission.nextSteps,
+              ...(admission.retryAfterMs !== undefined
                 ? { retryAfterMs: admission.retryAfterMs }
-                : undefined
-            )
+                : {})
+            })
           )
         )
         return
@@ -1959,7 +1995,8 @@ export class OrcaRuntimeRpcServer {
     }
 
     const longPoll = longPollClassOf(request)
-    const rejection = this.admitLongPoll(longPoll)
+    const peerLongPollKey = { pairedDeviceId: device.deviceId, accessProfile }
+    const rejection = this.admitLongPoll(longPoll, peerLongPollKey)
     if (rejection) {
       reply(JSON.stringify(this.buildError(request.id, 'runtime_busy', rejection)))
       return
@@ -2022,7 +2059,7 @@ export class OrcaRuntimeRpcServer {
       })
     } finally {
       abortRegistration?.dispose()
-      this.releaseLongPoll(longPoll)
+      this.releaseLongPoll(longPoll, peerLongPollKey)
     }
   }
 

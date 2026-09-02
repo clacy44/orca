@@ -2269,6 +2269,36 @@ describe('orca cli worktree awareness', () => {
     })
   })
 
+  it('W-5..W-7 review F8 / Ruling 24(s): named MOBILE pairing needs no --pairing-profile', async () => {
+    serveOrcaAppMock.mockResolvedValue(0)
+
+    await main(
+      [
+        'serve',
+        '--pairing-address',
+        '100.64.1.20',
+        '--mobile-pairing',
+        '--pair-name',
+        'Ana',
+        '--pair-name',
+        'Ben'
+      ],
+      '/tmp/repo'
+    )
+
+    expect(serveOrcaAppMock).toHaveBeenCalledWith({
+      json: false,
+      port: null,
+      pairingAddress: '100.64.1.20',
+      pairNames: ['Ana', 'Ben'],
+      pairingProfiles: [],
+      noPairing: false,
+      mobilePairing: true,
+      recipeJson: false,
+      projectRoot: null
+    })
+  })
+
   it('starts a recipe JSON headless server for VM recipes', async () => {
     serveOrcaAppMock.mockResolvedValue(0)
 

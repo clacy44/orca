@@ -83,22 +83,38 @@ export async function resolveServePairingOffers(
     }
   }
   const scope: ServePairingScope = request.mobilePairing ? 'mobile' : 'runtime'
-  // Why: the readiness banner interpolates this name into its own lines, so a name carrying a newline
-  // would forge readiness output. One that normalizes away is unnamed, as a blank desktop field is.
-  const pairNames = request.pairNames
-    .map((name) => normalizePairingDeviceName(name))
-    .filter((name) => name.length > 0)
-  // S10-19 W-6 (ops MJ-1): required, matched positionally with --pair-name. This process reads
-  // its own argv independently of the CLI parent, so the count is re-checked here rather than
-  // trusted from the spawn — the CLI's own check is the primary UX, this is the closed default.
-  if (pairNames.length > 0 && request.pairingProfiles.length !== request.pairNames.length) {
-    throw new Error(
-      '--pairing-profile must be given exactly once per --pair-name, in the same order.'
-    )
+  // W-5..W-7 review F7 / Ruling 24(y): zip raw name + raw profile BEFORE normalizing/filtering
+  // names, so a name that normalizes away (blank/whitespace) cannot shift a later name onto an
+  // earlier profile. Why: the readiness banner interpolates the name into its own lines, so a
+  // name carrying a newline would forge readiness output. One that normalizes away is unnamed,
+  // as a blank desktop field is.
+  const rawPairings = request.pairNames.map((rawName, index) => ({
+    name: normalizePairingDeviceName(rawName),
+    profile: request.pairingProfiles[index]
+  }))
+  const namedPairs = rawPairings.filter((pair) => pair.name.length > 0)
+  // S10-19 W-6 (ops MJ-1) / F8: required, matched positionally with --pair-name — but ONLY for
+  // runtime-scope grants; a mobile grant is never 'peer', so named mobile pairing carries no
+  // profile at all (the CLI refuses --pairing-profile beside --mobile-pairing). This process
+  // reads its own argv independently of the CLI parent, so both checks are re-verified here
+  // rather than trusted from the spawn — the CLI's own check is the primary UX, this is the
+  // closed default.
+  if (scope === 'runtime' && namedPairs.length > 0) {
+    if (request.pairingProfiles.length !== request.pairNames.length) {
+      throw new Error(
+        '--pairing-profile must be given exactly once per --pair-name, in the same order.'
+      )
+    }
+    if (namedPairs.some((pair) => pair.profile === undefined)) {
+      // Never a silent full mint (F7): a misaligned name/profile pair is a refusal.
+      throw new Error(
+        '--pairing-profile must be given exactly once per --pair-name, in the same order.'
+      )
+    }
   }
   const namedPairings = await Promise.all(
-    pairNames.map(async (name, index) => {
-      const accessProfile = request.pairingProfiles[index] ?? 'full'
+    namedPairs.map(async ({ name, profile }) => {
+      const accessProfile = scope === 'mobile' ? 'full' : (profile ?? 'full')
       return {
         name,
         pairing: await toPairingReadiness(

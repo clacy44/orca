@@ -5,7 +5,10 @@ import type { TuiAgent } from '../../../../shared/tui-agent'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { PaneCredentialLane } from '../../pane-credential-lane-registry'
-import { assertPeerDispatchTarget } from '../../runtime-peer-rpc-allowlist'
+import {
+  assertPeerDispatchTarget,
+  WORKTREE_NOT_FEDERATED_REFUSAL
+} from '../../runtime-peer-rpc-allowlist'
 import type { FederationEffect } from './orchestration-federation-effects'
 import type { prepareFederationAttachmentWorkerStart } from './orchestration-worker-start-validation'
 
@@ -28,9 +31,22 @@ export async function resolveExistingFederatedWorktree(args: {
   worktree: Awaited<ReturnType<OrcaRuntimeService['showManagedTerminalWorkspace']>>
   terminalHandle: string
 }> {
+  // W-5..W-7 review · worktree oracle (Ruling 24(z)) / NEG-14: a peer refusal must be
+  // byte-identical whether the selector resolved to a non-federated repo or did not resolve at
+  // all — otherwise `worktree_not_found_on_server` vs `worktree_not_federated` is a
+  // worktree-existence oracle. For a peer caller, a resolution failure throws the SAME
+  // `worktree_not_federated` refusal assertPeerDispatchTarget would throw for an existing,
+  // non-federated repo (never a repoId-bearing message).
   const worktree = await args.runtime
     .showManagedTerminalWorkspace(args.worktreeSelector)
     .catch(() => {
+      if (args.isPeerCaller) {
+        throw new OrchestrationError(
+          WORKTREE_NOT_FEDERATED_REFUSAL.wireCode,
+          WORKTREE_NOT_FEDERATED_REFUSAL.message,
+          { effectsApplied: false, nextSteps: WORKTREE_NOT_FEDERATED_REFUSAL.nextSteps }
+        )
+      }
       throw new OrchestrationError(
         'worktree_not_found_on_server',
         `Worktree ${args.worktreeSelector} was not found on the selected worker server.`
@@ -44,7 +60,10 @@ export async function resolveExistingFederatedWorktree(args: {
       args.runtime.getFederationDispatchRepos()
     )
     if (targetAdmission.refused) {
-      throw new OrchestrationError(targetAdmission.wireCode, targetAdmission.message)
+      throw new OrchestrationError(targetAdmission.wireCode, targetAdmission.message, {
+        effectsApplied: false,
+        nextSteps: targetAdmission.nextSteps
+      })
     }
   }
   args.effects.push(

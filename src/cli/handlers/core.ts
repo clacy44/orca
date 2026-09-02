@@ -144,7 +144,10 @@ export const CORE_HANDLERS: Record<string, CommandHandler> = {
         '--pairing-profile is not valid with --mobile-pairing; a federation-peer grant is runtime-scoped only.'
       )
     }
-    if (pairNames.length > 0) {
+    // W-5..W-7 review F8 / Ruling 24(s): named MOBILE pairing requires no profile at all — a
+    // mobile grant is never 'peer' (--pairing-profile is already refused beside --mobile-pairing
+    // above), so the per-name requirement below applies to runtime-scope pairing only.
+    if (pairNames.length > 0 && flags.get('mobile-pairing') !== true) {
       if (pairingProfiles.length !== pairNames.length) {
         throw new RuntimeClientError(
           'invalid_argument',

@@ -1260,8 +1260,15 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
       // S10-19 §5 (F6): a federation-peer grant sees only handle/worktreeId/title per terminal —
       // keys OMITTED, not nulled, so a peer never learns a row's shape it cannot see. Applied at
       // the RPC boundary rather than inside listTerminals so every other caller is untouched.
+      // W-5..W-7 review F1 / Ruling 24(x): construct the peer response explicitly — never spread
+      // `result` — so `visualLayouts` and `topologyRevisions` (which carry per-pane ids and
+      // worktree paths) never survive the projection regardless of `includeVisualLayouts`.
       return accessProfile === 'peer'
-        ? { ...result, terminals: result.terminals.map(projectPeerTerminalSummary) }
+        ? {
+            terminals: result.terminals.map(projectPeerTerminalSummary),
+            totalCount: result.totalCount,
+            truncated: result.truncated
+          }
         : result
     }
   }),
