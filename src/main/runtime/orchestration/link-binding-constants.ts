@@ -10,14 +10,20 @@ import { createHash } from 'node:crypto'
 // --- A1: constants this slice owns -----------------------------------------------------------
 
 export const LINK_BINDING_PROBE_SLOTS = 8
-// C3: byte/char lengths for the proof module's hex/base64url shape guards and nonce sizes — THE
-// REGISTER owns these too (link-binding-proof.ts builds its regexes from these via `new RegExp`,
-// never an inline quantifier, so test 77's scan has nothing to catch there).
+// C3 (review F11): byte/char lengths for the proof module's hex/base64url shape guards and nonce
+// sizes — THE REGISTER owns these too (link-binding-proof.ts builds its regexes from these via
+// `new RegExp`, never an inline quantifier, so test 77's scan has nothing to catch there). No
+// APPENDIX A row of their own; C3 is their one definition site.
+// A1-45: hex-string length of a 16-byte (128-bit) value — the quarantine incident id
+// (deriveLinkQuarantineIncidentId, below) truncates its sha256 digest to this many hex chars.
 export const LINK_BINDING_HEX32_LENGTH = 32
+// A1-46: hex-string length of a 32-byte (256-bit) value — every proof/confirm/selector MAC.
 export const LINK_BINDING_HEX64_LENGTH = 64
-// sha256 digest as unpadded base64url.
+// A1-47: sha256 digest as unpadded base64url.
 export const LINK_BINDING_B64URL_SHA256_LENGTH = 43
-// R7.3 step 9: nonceP's byte width, and the incident-id hex length (lifecycle m4).
+// A1-48: nonceP's byte width (R7.3 step 9) — a DIFFERENT 32 from LINK_BINDING_HEX32_LENGTH above
+// (bytes vs. hex chars; conflating the two was review F11's finding). The incident id's hex
+// length is LINK_BINDING_HEX32_LENGTH, never this constant.
 export const LINK_BINDING_NONCE_BYTES = 32
 export const LINK_BINDING_MAX_PAGES_PER_ROUND = 1
 export const LINK_BINDING_SCAN_CONCURRENCY = 4

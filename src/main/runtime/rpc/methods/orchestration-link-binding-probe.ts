@@ -13,10 +13,11 @@ import {
 } from '../../orchestration/link-binding-constants'
 import {
   scanEnvironmentsForSelectors,
-  computeCandidateMac,
+  computeCandidateMacFromEnvironments,
   type LinkBindingCandidate
 } from '../../../ipc/runtime-environment-link-binding'
 import { hashCallerCredential } from '../../principal-link-fingerprint-binding'
+import { LinkBindingCapError } from '../../orchestration/link-binding-store'
 import {
   resolveUserDataPath,
   pendingForRuntime,
@@ -125,9 +126,6 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
       )
     }
 
-    // R8.3: supersession by epoch, applied before this probe's own record is inserted.
-    releaseSuperseded(byProbeId, params.epoch)
-
     const userDataPath = resolveUserDataPath()
     const buildFields = (slotIndex: number): string[] => [
       params.probeId,
@@ -145,13 +143,23 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
     if (scan.status === 'unreadable') {
       throw new OrchestrationError(
         'link_store_unreadable',
-        'This host could not read its saved-environment store to answer a link-binding probe.'
+        'This host could not read its saved-environment store to answer a link-binding probe.',
+        {
+          nextSteps: [
+            'this host cannot read its own saved-environment store right now; check its filesystem permissions and retry'
+          ]
+        }
       )
     }
     if (scan.status === 'empty') {
       throw new OrchestrationError(
         'link_store_empty',
-        'This host has no saved environments to answer a link-binding probe against.'
+        'This host has no saved environments to answer a link-binding probe against.',
+        {
+          nextSteps: [
+            'this host has no saved environments to bind against; save at least one environment here first'
+          ]
+        }
       )
     }
 
@@ -173,7 +181,12 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
       }
       const nonceP = randomBytes(LINK_BINDING_NONCE_BYTES).toString('hex')
       const fields = [...buildFields(slotIndex), nonceP]
-      const proof = computeCandidateMac(userDataPath, match.environmentId, PROOF_LABEL, fields)
+      const proof = computeCandidateMacFromEnvironments(
+        scan.environments,
+        match.environmentId,
+        PROOF_LABEL,
+        fields
+      )
       if (proof === null) {
         // The environment vanished between the scan and now (a benign race) — omit the slot
         // rather than answering with a lie.
@@ -208,18 +221,25 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
             detail,
             observedAt: now
           })
-        } catch {
+        } catch (e) {
           // R14.5: at cap ⇒ link_binding_conflict is the write-side story; the probe answer
           // itself must still reach the peer, so a capped observation write is swallowed here.
+          // Review F7: narrowed to the cap's own typed error; any other fault must propagate.
+          if (!(e instanceof LinkBindingCapError)) {
+            throw e
+          }
         }
       }
+      // Review F11 hygiene: `reason_code` holds short codes everywhere else in this table — the
+      // full duplicate-environment-id JSON is already recorded per environment above, in each
+      // `peer_link_confirm_observations.detail` row, so it is not repeated here.
       runtime.getOrchestrationDb().writeAgentAudit({
         agentId: null,
         actorPaneKey: null,
         actorHostId: pairedDeviceId,
         verb: 'federatedLink',
         outcome: 'peer_duplicate',
-        reasonCode: detail
+        reasonCode: null
       })
     }
 
@@ -235,6 +255,10 @@ export const FEDERATED_LINK_PROBE_METHOD: RpcMethod = defineMethod({
         : {})
     }
 
+    // Review F5 / R8.3: supersession is a consequence of a probe being SERVED, not attempted — a
+    // probe that ends in `link_store_empty`/`link_store_unreadable` (thrown above) must mutate
+    // nothing, so this runs immediately before the successful answer is recorded, not at entry.
+    releaseSuperseded(byProbeId, params.epoch)
     byProbeId.set(params.probeId, {
       createdAt: now,
       nonceH: params.nonceH,

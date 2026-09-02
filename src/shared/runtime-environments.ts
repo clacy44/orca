@@ -16,6 +16,7 @@ export const PublicRuntimeAccessEndpointSchema = RuntimeAccessEndpointSchema.omi
 })
 
 export type PublicRuntimeAccessEndpoint = z.infer<typeof PublicRuntimeAccessEndpointSchema>
+export type RuntimeAccessEndpoint = z.infer<typeof RuntimeAccessEndpointSchema>
 
 export const RuntimeEnvironmentSourceSchema = z.enum(['manual', 'ephemeral-vm'])
 export type RuntimeEnvironmentSource = z.infer<typeof RuntimeEnvironmentSourceSchema>
@@ -111,10 +112,22 @@ export function isUserManagedRuntimeEnvironment(
   return !isEphemeralVmRuntimeEnvironment(environment)
 }
 
-export function getPreferredPairingOffer(environment: KnownRuntimeEnvironment): PairingOffer {
-  const endpoint =
+// The one definition site for "which endpoint does this environment currently bind to" — the
+// preferred one by id, falling back to the first (`endpoints` is schema-enforced non-empty, so
+// this returns null only when the array is empty at the type level, i.e. never through the
+// schema; callers that must not throw on that impossible case still check for null).
+export function resolvePreferredEndpoint(
+  environment: KnownRuntimeEnvironment
+): RuntimeAccessEndpoint | null {
+  return (
     environment.endpoints.find((entry) => entry.id === environment.preferredEndpointId) ??
-    environment.endpoints[0]
+    environment.endpoints[0] ??
+    null
+  )
+}
+
+export function getPreferredPairingOffer(environment: KnownRuntimeEnvironment): PairingOffer {
+  const endpoint = resolvePreferredEndpoint(environment)
   if (!endpoint) {
     throw new Error(`Environment ${environment.name} has no access endpoints`)
   }

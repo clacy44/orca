@@ -20,8 +20,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
-import type * as NodeCrypto from 'node:crypto'
+
+// Review F4: `vi.spyOn(require('node:crypto'), 'timingSafeEqual')` never intercepts this
+// module's own `import { timingSafeEqual } from 'node:crypto'` under this Vitest config's SSR
+// transform (confirmed empirically in link-binding-proof.test.ts's own F4(c) fix — the spy
+// never fires, for a valid compare either) and `vi.spyOn(<namespace import>, …)` throws (ESM
+// namespaces are non-configurable). `vi.mock` rewrites the module graph itself, so every
+// importer in this file's dependency tree — this test file AND the handler under test —
+// resolves the SAME wrapped export.
+const { timingSafeEqualSpy } = vi.hoisted(() => ({ timingSafeEqualSpy: vi.fn() }))
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeCryptoModule>()
+  return {
+    ...actual,
+    timingSafeEqual: (...args: Parameters<typeof actual.timingSafeEqual>) => {
+      timingSafeEqualSpy(...args)
+      return actual.timingSafeEqual(...args)
+    }
+  }
+})
+
+import { randomBytes } from 'node:crypto'
 import { DeviceRegistry } from '../../device-registry'
 import { loadOrCreateE2EEKeypair, type E2EEKeypair } from '../../e2ee-keypair'
 import { createLinkBindingSelfView } from '../../device-registry-link-credential'
@@ -30,15 +49,24 @@ import { fingerprintOrchestrationPeer } from '../../orchestration/environment-tr
 import {
   LINK_BINDING_PROTOCOL,
   SELECTOR_LABEL,
-  linkBindingMac
+  linkBindingMac,
+  linkBindingMacEquals
 } from '../../orchestration/link-binding-proof'
-import { LINK_BINDING_PENDING_PER_LINK } from '../../orchestration/link-binding-constants'
+import {
+  LINK_BINDING_PENDING_PER_LINK,
+  LINK_BINDING_RATE_LIMIT
+} from '../../orchestration/link-binding-constants'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
 import { addEnvironmentFromPairingCode } from '../../../../shared/runtime-environment-store'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../../../shared/pairing'
-import type { RpcContext } from '../core'
+import { admitRuntimePeerMethod } from '../../runtime-peer-rpc-allowlist'
+import { mapRuntimeError } from '../errors'
+import { LinkBindingCapError } from '../../orchestration/link-binding-store'
+import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-federated-peer-send'
+import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federated-peer-ask'
+import type { RpcContext, RpcEnvelopeMeta } from '../core'
 
 const appState = { userData: '' }
 
@@ -58,6 +86,45 @@ async function call(name: string, params: Record<string, unknown>, context: RpcC
   const m = method(name)
   const parsed = m.params ? m.params.parse(params) : undefined
   return m.handler(parsed, context)
+}
+
+// Review F11: "at least the probe/confirm positive and negative cases" must go through the REAL
+// dispatcher (admitRuntimePeerMethod, THEN the handler, THEN mapRuntimeError) rather than
+// `m.handler` directly — `call()` above skips both the allowlist and the error-mapping layer, so
+// `errors.ts`'s three new registrations (link_binding_conflict/link_store_unreadable/
+// link_store_empty) had no test at all. This mirrors runtime-rpc.ts's own two-step dispatch
+// (admission, then handler) without pulling in the full WS server.
+async function dispatchPeer(name: string, params: Record<string, unknown>, context: RpcContext) {
+  const meta: RpcEnvelopeMeta = { runtimeId: 'test-runtime' }
+  const admission = await admitRuntimePeerMethod({
+    runtime: context.runtime,
+    callerFingerprint:
+      typeof context.authenticatedCallerFingerprint === 'string'
+        ? context.authenticatedCallerFingerprint
+        : '',
+    params,
+    method: name
+  })
+  if (admission.refused) {
+    throw {
+      code: admission.wireCode,
+      message: admission.message,
+      ...(admission.retryAfterMs !== undefined ? { retryAfterMs: admission.retryAfterMs } : {})
+    }
+  }
+  const m = method(name)
+  const parsed = m.params ? m.params.parse(params) : undefined
+  try {
+    return await m.handler(parsed, context)
+  } catch (e) {
+    const failure = mapRuntimeError('dispatch-test-id', meta, e)
+    // eslint-disable-next-line @typescript-eslint/only-throw-error -- mirrors RpcFailure.error
+    throw {
+      code: failure.error.code,
+      message: failure.error.message,
+      ...(failure.error.data !== undefined ? { data: failure.error.data } : {})
+    }
+  }
 }
 
 const HOME_LINK_FINGERPRINT = 'fp_home_link'
@@ -261,11 +328,15 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
 
   // ---- positive round-trip: probe -> confirm ----------------------------------------------
 
-  it('positive proof round-trip: probe matches, confirm verifies and acknowledges', async () => {
+  it('positive proof round-trip: probe matches, confirm verifies and acknowledges (real dispatcher)', async () => {
     const tIn = 'matching-secret'
     const environmentId = saveCandidateEnvironment(tIn)
     const params = buildProbe(2, tIn)
-    const probeResult = (await call('orchestration.federatedLinkProbe', params, pairedCtx())) as {
+    const probeResult = (await dispatchPeer(
+      'orchestration.federatedLinkProbe',
+      params,
+      pairedCtx()
+    )) as {
       protocol: string
       results: (
         | {
@@ -310,7 +381,7 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
       dstKeyFp(),
       matched.nonceP
     ])
-    const confirmResult = (await call(
+    const confirmResult = (await dispatchPeer(
       'orchestration.federatedLinkConfirm',
       {
         protocol: LINK_BINDING_PROTOCOL,
@@ -329,16 +400,20 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
     expect(observations[0]).toMatchObject({ kind: 'peer_confirmed', environmentId })
   })
 
-  it('wrong MAC is refused: a confirm with an incorrect value is not acknowledged', async () => {
+  it('wrong MAC is refused: a confirm with an incorrect value is not acknowledged (real dispatcher)', async () => {
     const tIn = 'matching-secret-2'
     saveCandidateEnvironment(tIn)
     const params = buildProbe(0, tIn)
-    const probeResult = (await call('orchestration.federatedLinkProbe', params, pairedCtx())) as {
+    const probeResult = (await dispatchPeer(
+      'orchestration.federatedLinkProbe',
+      params,
+      pairedCtx()
+    )) as {
       results: { slotIndex: number; matched: true; nonceP: string }[]
     }
     expect(probeResult.results).toHaveLength(1)
     await expect(
-      call(
+      dispatchPeer(
         'orchestration.federatedLinkConfirm',
         {
           protocol: LINK_BINDING_PROTOCOL,
@@ -348,6 +423,27 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
         pairedCtx()
       )
     ).rejects.toMatchObject({ code: 'not_the_addressee' })
+    // Review F3: a total miss must NOT consume the pending record — still there for a genuine
+    // confirm on the same probeId.
+    const confirmMac = linkBindingMac(tIn, 'orca.link-binding.v1/confirm', [
+      params.probeId,
+      params.nonceH,
+      '0',
+      '0',
+      observedChannelFp(),
+      dstKeyFp(),
+      probeResult.results[0]!.nonceP
+    ])
+    const retry = (await dispatchPeer(
+      'orchestration.federatedLinkConfirm',
+      {
+        protocol: LINK_BINDING_PROTOCOL,
+        probeId: params.probeId,
+        confirms: [{ slotIndex: 0, confirm: confirmMac }]
+      },
+      pairedCtx()
+    )) as { acknowledged: number[] }
+    expect(retry.acknowledged).toEqual([0])
   })
 
   // ---- malformed hex refused BEFORE decode, never reaches timingSafeEqual ----------------
@@ -360,28 +456,26 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
       results: { slotIndex: number; matched: true }[]
     }
     expect(probeResult.results).toHaveLength(1)
-    // CJS require (not the ES `import` binding, which vitest cannot make configurable for spying).
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- see comment above
-    const crypto = require('node:crypto') as typeof NodeCrypto
-    const spy = vi.spyOn(crypto, 'timingSafeEqual')
-    try {
-      await expect(
-        call(
-          'orchestration.federatedLinkConfirm',
-          {
-            protocol: LINK_BINDING_PROTOCOL,
-            probeId: params.probeId,
-            confirms: [{ slotIndex: 0, confirm: 'zz'.padEnd(64, 'z') }]
-          },
-          pairedCtx()
-        )
-      ).rejects.toBeTruthy()
-      // Malformed hex is refused by the zod schema (LINK_BINDING_HEX64_RE) before the handler
-      // ever runs — the strongest form of "before any decode": timingSafeEqual is never reached.
-      expect(spy).not.toHaveBeenCalled()
-    } finally {
-      spy.mockRestore()
-    }
+    timingSafeEqualSpy.mockClear()
+    // Review F4(b): the previous version went through `call()`, whose own `m.params.parse`
+    // (LINK_BINDING_HEX64_RE, identical to the handler's own guard) rejects malformed hex
+    // before the handler ever runs — `.rejects.toBeTruthy()` was matching the ZodError, not
+    // exercising the handler's own guard, and passed even with the handler deleted. Calling
+    // `m.handler` DIRECTLY bypasses that zod layer so the malformed value genuinely reaches
+    // `linkBindingMacEquals` inside the handler — the guard this test is actually about.
+    await expect(
+      method('orchestration.federatedLinkConfirm').handler(
+        {
+          protocol: LINK_BINDING_PROTOCOL,
+          probeId: params.probeId,
+          confirms: [{ slotIndex: 0, confirm: 'zz'.padEnd(64, 'z') }]
+        },
+        pairedCtx()
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+    // The handler's own hex64 shape guard (linkBindingMacEquals) refuses before any decode:
+    // timingSafeEqual is never reached.
+    expect(timingSafeEqualSpy).not.toHaveBeenCalled()
   })
 
   // ---- design test 7: peer claims a duplicate --------------------------------------------
@@ -566,7 +660,8 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
 
   it('rate-limits federatedLinkProbe per link, per verb', async () => {
     saveCandidateEnvironment('rate-secret')
-    const budget = 60
+    // Review F11: was a hardcoded `const budget = 60` — THE REGISTER owns this value.
+    const budget = LINK_BINDING_RATE_LIMIT
     for (let i = 0; i < budget; i += 1) {
       await call('orchestration.federatedLinkProbe', buildProbe(0, 'rate-secret', i), pairedCtx())
     }
@@ -575,8 +670,272 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
     ).rejects.toMatchObject({ code: 'rate_limited' })
   })
 
+  // ---- review F2: containment expiry -----------------------------------------------------
+
+  it('F2: an expired quarantine no longer refuses (expires_at in the past)', async () => {
+    db.putContainment({
+      subjectKind: 'link',
+      subjectId: homeLinkDeviceId,
+      action: 'quarantine',
+      reasonCode: 'test',
+      reasonText: 'test quarantine',
+      detail: null,
+      createdAt: Date.now() - 10_000,
+      expiresAt: Date.now() - 1_000
+    })
+    saveCandidateEnvironment('post-expiry-secret')
+    const params = buildProbe(0, 'post-expiry-secret')
+    const result = (await call('orchestration.federatedLinkProbe', params, pairedCtx())) as {
+      results: unknown[]
+    }
+    expect(result.results).toHaveLength(1)
+  })
+
+  // ---- review F11 coverage gaps -----------------------------------------------------------
+
+  it('a confirm arriving on a DIFFERENT link than its own probe is refused, no state change', async () => {
+    const tIn = 'cross-link-secret'
+    saveCandidateEnvironment(tIn)
+    const params = buildProbe(0, tIn)
+    const probeResult = (await call('orchestration.federatedLinkProbe', params, pairedCtx())) as {
+      results: { slotIndex: number; matched: true; nonceP: string }[]
+    }
+    const matched = probeResult.results[0]!
+    const confirmMac = linkBindingMac(tIn, 'orca.link-binding.v1/confirm', [
+      params.probeId,
+      params.nonceH,
+      '0',
+      '0',
+      observedChannelFp(),
+      dstKeyFp(),
+      matched.nonceP
+    ])
+    // A second, genuinely-registered link — this probeId was never served on it.
+    const other = deviceRegistry.mintPendingDevice('other', 'runtime')
+    await expect(
+      call(
+        'orchestration.federatedLinkConfirm',
+        {
+          protocol: LINK_BINDING_PROTOCOL,
+          probeId: params.probeId,
+          confirms: [{ slotIndex: 0, confirm: confirmMac }]
+        },
+        pairedCtx({ pairedDeviceId: other.deviceId, authenticatedCallerFingerprint: 'fp_other' })
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+    // No state change on the home link's own pending record — the genuine confirm still works.
+    const genuine = (await call(
+      'orchestration.federatedLinkConfirm',
+      {
+        protocol: LINK_BINDING_PROTOCOL,
+        probeId: params.probeId,
+        confirms: [{ slotIndex: 0, confirm: confirmMac }]
+      },
+      pairedCtx()
+    )) as { acknowledged: number[] }
+    expect(genuine.acknowledged).toEqual([0])
+  })
+
+  it('duplicate slotIndex in one federatedLinkConfirm call is invalid_argument', async () => {
+    const tIn = 'dup-slot-secret'
+    saveCandidateEnvironment(tIn)
+    const params = buildProbe(0, tIn)
+    await call('orchestration.federatedLinkProbe', params, pairedCtx())
+    await expect(
+      call(
+        'orchestration.federatedLinkConfirm',
+        {
+          protocol: LINK_BINDING_PROTOCOL,
+          probeId: params.probeId,
+          confirms: [
+            { slotIndex: 0, confirm: 'a'.repeat(64) },
+            { slotIndex: 0, confirm: 'b'.repeat(64) }
+          ]
+        },
+        pairedCtx()
+      )
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+  })
+
+  it('link_contested advisory: a contested binding surfaces a well-shaped 32-hex incidentId', async () => {
+    saveCandidateEnvironment('contested-secret')
+    db.putPeerLinkBinding({
+      linkDeviceId: homeLinkDeviceId,
+      environmentId: 'env-does-not-need-to-exist',
+      boundEndpointId: 'ep-1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: LINK_BINDING_PROTOCOL,
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const incidentId = 'c'.repeat(32)
+    db.contestPeerLinkBinding(homeLinkDeviceId, Date.now(), incidentId, 'test contest')
+    const params = buildProbe(0, 'contested-secret')
+    const result = (await call('orchestration.federatedLinkProbe', params, pairedCtx())) as {
+      advisory?: { kind: string; incidentId: string }
+    }
+    expect(result.advisory).toEqual({ kind: 'link_contested', incidentId })
+    expect(result.advisory?.incidentId).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('epoch supersession (R8.3): a higher-epoch probe releases the same link’s lower-epoch pending records', async () => {
+    const tIn = 'epoch-secret'
+    saveCandidateEnvironment(tIn)
+    const low = buildProbe(0, tIn, 0)
+    await call('orchestration.federatedLinkProbe', low, pairedCtx())
+    const high = buildProbe(0, tIn, 1)
+    await call('orchestration.federatedLinkProbe', high, pairedCtx())
+    // The lower-epoch probeId's pending record was released by the higher-epoch probe — a
+    // confirm against it now finds nothing, the same shape as an expired/consumed record.
+    await expect(
+      call(
+        'orchestration.federatedLinkConfirm',
+        {
+          protocol: LINK_BINDING_PROTOCOL,
+          probeId: low.probeId,
+          confirms: [{ slotIndex: 0, confirm: 'a'.repeat(64) }]
+        },
+        pairedCtx()
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+  })
+
+  it('the clientId belt check refuses a mismatched credential (probe.ts ~97-102)', async () => {
+    const params = buildProbe(0, 'secret')
+    await expect(
+      call(
+        'orchestration.federatedLinkProbe',
+        params,
+        pairedCtx({ clientId: 'a-token-that-does-not-hash-to-observedChannelFp' })
+      )
+    ).rejects.toMatchObject({ code: 'unauthenticated_lane' })
+  })
+
+  it('the three new passthrough codes cross mapRuntimeError as themselves, through the real dispatcher', async () => {
+    // link_store_empty
+    await expect(
+      dispatchPeer('orchestration.federatedLinkProbe', buildProbe(0, 'secret'), pairedCtx())
+    ).rejects.toMatchObject({ code: 'link_store_empty' })
+
+    // link_store_unreadable
+    mkdirSync(join(userDataPath, 'orca-environments.json'))
+    await expect(
+      dispatchPeer('orchestration.federatedLinkProbe', buildProbe(0, 'secret'), pairedCtx())
+    ).rejects.toMatchObject({ code: 'link_store_unreadable' })
+    rmSync(join(userDataPath, 'orca-environments.json'), { recursive: true, force: true })
+
+    // link_binding_conflict — LinkBindingCapError's own `.code`, exercised directly (review F6:
+    // the one live throw site, reply-outbox-store.ts, is a different C-phase's call path; this
+    // proves the wire-code wiring itself through the same mapRuntimeError the dispatcher uses).
+    const meta: RpcEnvelopeMeta = { runtimeId: 'test-runtime' }
+    const capError = new LinkBindingCapError('peer_reply_outbox')
+    const failure = mapRuntimeError('id', meta, capError)
+    expect(failure.error.code).toBe('link_binding_conflict')
+  })
+
+  // ---- review F1: quarantine-gate audit write is bounded by the rate meter (probe/confirm) --
+
+  describe('review F1: quarantine-gate audit rows are bounded by the meter', () => {
+    function rawDb(): { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } {
+      return (db as unknown as { db: ReturnType<typeof rawDb> }).db
+    }
+
+    function auditCount(): number {
+      return (rawDb().prepare('SELECT COUNT(*) AS n FROM agent_audit').get() as { n: number }).n
+    }
+
+    beforeEach(() => {
+      db.putContainment({
+        subjectKind: 'link',
+        subjectId: homeLinkDeviceId,
+        action: 'quarantine',
+        reasonCode: 'test',
+        reasonText: 'test quarantine',
+        detail: null,
+        createdAt: Date.now(),
+        expiresAt: null
+      })
+    })
+
+    it('federatedLinkProbe: at most LINK_BINDING_RATE_LIMIT audit rows across a burst', async () => {
+      const before = auditCount()
+      for (let i = 0; i < LINK_BINDING_RATE_LIMIT + 5; i += 1) {
+        await expect(
+          call('orchestration.federatedLinkProbe', buildProbe(0, 'secret', i), pairedCtx())
+        ).rejects.toBeTruthy()
+      }
+      expect(auditCount() - before).toBeLessThanOrEqual(LINK_BINDING_RATE_LIMIT)
+    })
+
+    it('federatedLinkConfirm: at most LINK_BINDING_RATE_LIMIT audit rows across a burst', async () => {
+      const before = auditCount()
+      for (let i = 0; i < LINK_BINDING_RATE_LIMIT + 5; i += 1) {
+        await expect(
+          call(
+            'orchestration.federatedLinkConfirm',
+            {
+              protocol: LINK_BINDING_PROTOCOL,
+              probeId: probeId(),
+              confirms: [{ slotIndex: 0, confirm: 'a'.repeat(64) }]
+            },
+            pairedCtx()
+          )
+        ).rejects.toBeTruthy()
+      }
+      expect(auditCount() - before).toBeLessThanOrEqual(LINK_BINDING_RATE_LIMIT)
+    })
+
+    it('federatedSend: at most LINK_BINDING_RATE_LIMIT audit rows across a burst', async () => {
+      const m = ORCHESTRATION_FEDERATED_PEER_SEND_METHODS.find(
+        (x) => x.name === 'orchestration.federatedSend'
+      )!
+      const before = auditCount()
+      for (let i = 0; i < LINK_BINDING_RATE_LIMIT + 5; i += 1) {
+        const parsed = m.params!.parse({
+          toAgentId: 'agt_deadbeef0000',
+          messageId: `msg-${i}`,
+          subject: 'x'
+        })
+        // federatedSend's handler is synchronous and throws directly (unlike Ask's `async`) —
+        // normalize through a resolved-promise `.then` so a sync throw and an async rejection
+        // are asserted the same way.
+        await expect(
+          Promise.resolve().then(() => m.handler(parsed, pairedCtx()))
+        ).rejects.toBeTruthy()
+      }
+      expect(auditCount() - before).toBeLessThanOrEqual(LINK_BINDING_RATE_LIMIT)
+    })
+
+    it('federatedAsk: at most LINK_BINDING_RATE_LIMIT audit rows across a burst', async () => {
+      const m = ORCHESTRATION_FEDERATED_PEER_ASK_METHODS.find(
+        (x) => x.name === 'orchestration.federatedAsk'
+      )!
+      const before = auditCount()
+      for (let i = 0; i < LINK_BINDING_RATE_LIMIT + 5; i += 1) {
+        const parsed = m.params!.parse({
+          fromAgent: { id: 'agt_deadbeef0000', displayName: 'Peer' },
+          toAgentId: 'agt_deadbeef0001',
+          question: `q-${i}`
+        })
+        await expect(m.handler(parsed, pairedCtx())).rejects.toBeTruthy()
+      }
+      expect(auditCount() - before).toBeLessThanOrEqual(LINK_BINDING_RATE_LIMIT)
+    })
+  })
+
   it('sanity: linkBindingMacEquals backs the handler (a direct positive control)', () => {
+    // Review F4(a): the previous version of this test never called `linkBindingMacEquals` —
+    // it asserted `timingSafeEqual(x, x) === true`, which tests Node, not this module. Assert
+    // the module-graph-level spy WAS called, proving `linkBindingMacEquals` really does back
+    // onto `timingSafeEqual` (see the file-header comment for why this is `vi.mock`-based).
+    timingSafeEqualSpy.mockClear()
     const a = 'a'.repeat(64)
-    expect(timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(a, 'hex'))).toBe(true)
+    expect(linkBindingMacEquals(a, a)).toBe(true)
+    expect(timingSafeEqualSpy).toHaveBeenCalled()
   })
 })

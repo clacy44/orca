@@ -3,8 +3,12 @@
 // confirm MAC computation. Deliberately NEVER returns a `deviceToken` to its caller: every
 // function that needs a saved environment's credential computes the MAC internally and returns
 // only the result, matching device-registry-link-credential.ts's own discipline.
-import { listEnvironments } from '../../shared/runtime-environment-store'
-import type { KnownRuntimeEnvironment } from '../../shared/runtime-environments'
+import { statSync } from 'node:fs'
+import { listEnvironments, getEnvironmentStorePath } from '../../shared/runtime-environment-store'
+import {
+  resolvePreferredEndpoint,
+  type KnownRuntimeEnvironment
+} from '../../shared/runtime-environments'
 import { hashCallerCredential } from '../runtime/principal-link-fingerprint-binding'
 import { fingerprintOrchestrationPeer } from '../runtime/orchestration/environment-transport'
 import {
@@ -24,17 +28,20 @@ export type LinkBindingCandidate = {
 export type SelectorScanResult =
   | { status: 'unreadable' }
   | { status: 'empty' }
-  | { status: 'ok'; matchesBySlot: ReadonlyMap<number, readonly LinkBindingCandidate[]> }
+  | {
+      status: 'ok'
+      // Review F9: the scan's own already-loaded list, reused by the caller for every matched
+      // slot's proof MAC instead of each one re-reading and re-zod-parsing the whole store.
+      environments: readonly KnownRuntimeEnvironment[]
+      matchesBySlot: ReadonlyMap<number, readonly LinkBindingCandidate[]>
+    }
 
+// Review F11: was a reimplementation of shared/runtime-environments.ts's preferred-endpoint
+// resolution (the schema's `endpoints.min(1)` makes the two's null-vs-throw difference moot).
 function resolveBoundEndpoint(
   environment: KnownRuntimeEnvironment
 ): { id: string; deviceToken: string; publicKeyB64: string } | null {
-  const endpoint =
-    environment.endpoints.find((entry) => entry.id === environment.preferredEndpointId) ??
-    environment.endpoints[0]
-  return endpoint
-    ? { id: endpoint.id, deviceToken: endpoint.deviceToken, publicKeyB64: endpoint.publicKeyB64 }
-    : null
+  return resolvePreferredEndpoint(environment)
 }
 
 function toCandidate(
@@ -72,7 +79,19 @@ export function scanEnvironmentsForSelectors(
     return { status: 'unreadable' }
   }
   if (environments.length === 0) {
-    return { status: 'empty' }
+    // Review F8: `readEnvironmentStore` early-returns "empty" for ANY `existsSync` failure,
+    // including EACCES on the file or a parent dir — the exact misreport P6 exists to prevent,
+    // masking an operator-visible fault as a truthful "no environments" state. `statSync`
+    // (unlike `existsSync`) propagates that failure rather than swallowing it to `false`.
+    try {
+      statSync(getEnvironmentStorePath(userDataPath))
+      return { status: 'empty' }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { status: 'empty' }
+      }
+      return { status: 'unreadable' }
+    }
   }
   const matchesBySlot = new Map<number, LinkBindingCandidate[]>()
   for (let slotIndex = 0; slotIndex < selectors.length; slotIndex += 1) {
@@ -96,26 +115,35 @@ export function scanEnvironmentsForSelectors(
       matchesBySlot.set(slotIndex, matches)
     }
   }
-  return { status: 'ok', matchesBySlot }
+  return { status: 'ok', environments, matchesBySlot }
+}
+
+// Review F9: a probe/confirm call must read and zod-parse the store AT MOST ONCE, not once per
+// slot — a peer-chosen selector/confirm count up to 8 previously multiplied the read. Callers
+// load once (via this function, or reuse `scanEnvironmentsForSelectors`'s own `environments`)
+// and pass the same list into every `computeCandidateMacFromEnvironments` call for that request.
+export function loadEnvironmentsForLinkBinding(
+  userDataPath: string
+): readonly KnownRuntimeEnvironment[] | null {
+  try {
+    return listEnvironments(userDataPath)
+  } catch {
+    return null
+  }
 }
 
 /**
  * Computes a proof/confirm MAC over a specific, already-matched environment's bound-endpoint
- * device token. Returns null if the environment has vanished since the scan (a benign race —
- * the caller refuses the slot rather than throwing). NEVER returns the token itself.
+ * device token, against an ALREADY-LOADED environment list (F9 — never re-reads the store).
+ * Returns null if the environment has vanished since the scan (a benign race — the caller
+ * refuses the slot rather than throwing). NEVER returns the token itself.
  */
-export function computeCandidateMac(
-  userDataPath: string,
+export function computeCandidateMacFromEnvironments(
+  environments: readonly KnownRuntimeEnvironment[],
   environmentId: string,
   label: string,
   fields: readonly string[]
 ): string | null {
-  let environments: KnownRuntimeEnvironment[]
-  try {
-    environments = listEnvironments(userDataPath)
-  } catch {
-    return null
-  }
   const environment = environments.find((entry) => entry.id === environmentId)
   if (!environment) {
     return null

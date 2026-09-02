@@ -23,7 +23,10 @@ export const LINK_BINDING_HEX64_RE = new RegExp(`^[0-9a-f]{${LINK_BINDING_HEX64_
 // validated by this module (dstKeyFp/observedChannelFp are transcript fields, not hex-guarded
 // wire inputs), kept here beside its siblings per R7's declaration block. Underscore placed first
 // in the character class so no digit is textually adjacent to it (cosmetic — regex semantics are
-// unaffected either way).
+// unaffected either way). Review F11: declared but unused by any C3 file — part of this module's
+// frozen export surface (plan §4 FROZEN-INTERFACE LIST, design v6:1189), reserved for a future
+// initiator/verifier consumer (C4) that shape-checks a peer-supplied `dstKeyFp`/`observedChannelFp`
+// rather than a defect to delete; left in place rather than removed from a frozen interface.
 export const LINK_BINDING_B64URL32_RE = new RegExp(
   `^[_A-Za-z0-9-]{${LINK_BINDING_B64URL_SHA256_LENGTH}}$`
 )

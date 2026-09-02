@@ -224,7 +224,19 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
           extractPayloadKind(created.message.payload_kind)
         )
       } catch (error) {
-        if (error instanceof OrchestrationError) {
+        // Review F1 (forced deviation, noted in the C3 fixup's return): `agent_quarantined` and
+        // `rate_limited` from the containment gate (refuseIfQuarantined) are excluded from this
+        // choke point's own unconditional per-refusal audit write. Without this exclusion, this
+        // catch would write ONE row per call regardless of the gate's own meter — the same
+        // undeletable-`agent_audit` DoS F1 closes in the gate itself, reopened one frame up, for
+        // every call the meter is supposed to be bounding. `rate_limited` cannot originate
+        // anywhere else in this handler today (no other rate limiter here), so excluding it here
+        // never hides a different refusal's audit row.
+        if (
+          error instanceof OrchestrationError &&
+          error.code !== 'agent_quarantined' &&
+          error.code !== 'rate_limited'
+        ) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

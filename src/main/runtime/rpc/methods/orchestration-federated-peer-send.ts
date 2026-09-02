@@ -193,7 +193,15 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           threadId: message.thread_id
         } satisfies FederatedSendResult
       } catch (error) {
-        if (error instanceof OrchestrationError) {
+        // Review F1 (forced deviation, noted in the C3 fixup's return) — see the identical
+        // exclusion in orchestration-federated-peer-ask.ts's own catch for the full rationale:
+        // without it, this choke point's unconditional per-refusal audit write would reopen the
+        // undeletable-`agent_audit` DoS the containment gate's own meter is supposed to close.
+        if (
+          error instanceof OrchestrationError &&
+          error.code !== 'agent_quarantined' &&
+          error.code !== 'rate_limited'
+        ) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

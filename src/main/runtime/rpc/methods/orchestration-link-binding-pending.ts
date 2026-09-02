@@ -7,6 +7,8 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   LINK_BINDING_PROBE_TTL_MS,
   LINK_BINDING_PENDING_PER_LINK,
+  LINK_BINDING_RATE_WINDOW_MS,
+  LINK_BINDING_RATE_LIMIT,
   deriveLinkQuarantineIncidentId
 } from '../../orchestration/link-binding-constants'
 import type { PendingAnswer } from './orchestration-link-binding-wire'
@@ -69,7 +71,18 @@ export function releaseSuperseded(byProbeId: Map<string, PendingAnswer>, epoch: 
   }
 }
 
-// R3: link containment gate — first statement after the lane gate, before anything else.
+// R3: link containment gate — first statement after the lane gate, before anything else. Review
+// F1: the refusal itself must still be the FIRST read/write of this call (R3's ordering), but the
+// `agent_audit` write it used to perform unconditionally is an undeletable-table DoS for a
+// quarantined-but-still-authenticated peer with no meter in front of it. Split accordingly: (1) a
+// pure read of `peer_link_containment` decides the verdict, with no write of any kind; (2) only
+// when quarantined, `checkAndBumpRate` is consulted — this consumes this link's own quarantine-
+// gate budget and, once exhausted, refuses `rate_limited` with NO audit write, bounding the audit
+// table to at most `LINK_BINDING_RATE_LIMIT` rows per `LINK_BINDING_RATE_WINDOW_MS` per link; (3)
+// only a call that is both quarantined and within budget writes the audit row and throws
+// `agent_quarantined`. The quarantine REFUSAL (this function returning early is the only non-
+// refusing path) still precedes every other read/write in every caller — only the audit write
+// moved behind the meter.
 export function refuseIfQuarantined(
   runtime: OrcaRuntimeService,
   pairedDeviceId: string,
@@ -79,12 +92,40 @@ export function refuseIfQuarantined(
   if (!db.isPeerLinkQuarantined(pairedDeviceId)) {
     return
   }
+  const rate = db.checkAndBumpRate({
+    subjectKey: `linkbind:${pairedDeviceId}`,
+    verb: `linkQuarantineGate:${verb}`,
+    windowMs: LINK_BINDING_RATE_WINDOW_MS,
+    limit: LINK_BINDING_RATE_LIMIT
+  })
+  if (!rate.allowed) {
+    throw new OrchestrationError(
+      'rate_limited',
+      'Too many link-binding calls from this quarantined link; try again shortly.',
+      { retryAfterMs: rate.retryAfterMs }
+    )
+  }
   // Lifecycle m4: the incident id has no dedicated column on `peer_link_containment` (R14 DDL) —
   // derived deterministically from the containment row's own identity so it is stable for the
   // life of one quarantine (a lift + re-assert is a new row-content generation and yields a new
-  // id, which is correct: it is a new incident from the peer's point of view).
+  // id, which is correct: it is a new incident from the peer's point of view). The id is
+  // deterministic, not opaque (F10): a recipient who knows its own device id can brute-force
+  // `createdAt` over a plausible window; the value is a stable label, not a secret. A missing
+  // containment row here (the read above found one, so `getContainment` should too) is a refusal
+  // path, never an opaque-but-wrong id — no silent `?? 0` fallback.
   const containment = db.getContainment('link', pairedDeviceId, 'quarantine')
-  const incidentId = deriveLinkQuarantineIncidentId(pairedDeviceId, containment?.createdAt ?? 0)
+  if (!containment) {
+    throw new OrchestrationError(
+      'agent_quarantined',
+      `This paired link is quarantined on this host and cannot ${verb}.`,
+      {
+        nextSteps: [
+          'this link is quarantined on this host; ask the operator to lift it with `orca environment link-quarantine --lift`'
+        ]
+      }
+    )
+  }
+  const incidentId = deriveLinkQuarantineIncidentId(pairedDeviceId, containment.createdAt)
   db.writeAgentAudit({
     agentId: null,
     actorPaneKey: null,

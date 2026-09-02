@@ -139,7 +139,15 @@ export function putPeerLinkBinding(
   )
 }
 
+// Review F6: the ONE truth for the `link_binding_conflict` wire code (rpc/errors.ts's
+// STRUCTURED_RUNTIME_PASSTHROUGH_CODES matches on `.code`, never on `.message`) — every capped
+// table throws this and its `.code` is what makes it a passthrough rather than a collapsed
+// `runtime_error` wherever it is allowed to propagate unswallowed (R16/R14.5:
+// reply-outbox-store.ts's REPLY_OUTBOX_PER_LINK_CAP is the live site in this tree; C3's own two
+// call sites deliberately swallow it as a soft degrade, per R14.5's "acknowledgement still
+// stands" rule).
 export class LinkBindingCapError extends Error {
+  readonly code = 'link_binding_conflict'
   constructor(readonly table: string) {
     super(`link_binding_conflict: ${table} at capacity`)
   }

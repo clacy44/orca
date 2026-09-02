@@ -13,7 +13,11 @@ import {
   LINK_BINDING_RATE_WINDOW_MS,
   LINK_BINDING_RATE_LIMIT
 } from '../../orchestration/link-binding-constants'
-import { computeCandidateMac } from '../../../ipc/runtime-environment-link-binding'
+import {
+  loadEnvironmentsForLinkBinding,
+  computeCandidateMacFromEnvironments
+} from '../../../ipc/runtime-environment-link-binding'
+import { LinkBindingCapError } from '../../orchestration/link-binding-store'
 import {
   resolveUserDataPath,
   pendingForRuntime,
@@ -91,6 +95,8 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
     }
 
     const userDataPath = resolveUserDataPath()
+    // Review F9: read/parse the store ONCE per call, not once per confirm entry (up to 8).
+    const environments = loadEnvironmentsForLinkBinding(userDataPath) ?? []
     const acknowledged: number[] = []
     for (const entry of params.confirms) {
       const slot = pending.bySlot.get(entry.slotIndex)
@@ -106,7 +112,12 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
         slot.dstKeyFp,
         slot.nonceP
       ]
-      const expected = computeCandidateMac(userDataPath, slot.environmentId, CONFIRM_LABEL, fields)
+      const expected = computeCandidateMacFromEnvironments(
+        environments,
+        slot.environmentId,
+        CONFIRM_LABEL,
+        fields
+      )
       if (expected !== null && linkBindingMacEquals(expected, entry.confirm)) {
         acknowledged.push(entry.slotIndex)
         try {
@@ -121,21 +132,28 @@ export const FEDERATED_LINK_CONFIRM_METHOD: RpcMethod = defineMethod({
             detail: null,
             observedAt: now
           })
-        } catch {
+        } catch (e) {
           // R14.5: capped — the acknowledgement still stands even if the observation row does not.
+          // Review F7: narrowed to the cap's own typed error; any other fault (schema, CHECK, IO)
+          // must propagate rather than yield a successful acknowledgement with no signal.
+          if (!(e instanceof LinkBindingCapError)) {
+            throw e
+          }
         }
       }
     }
 
-    // Consume the pending record on first use, regardless of outcome (R8.5).
-    byProbeId?.delete(params.probeId)
-
+    // Review F3 / R7.4 (design v6:1360): "if none verify => not_the_addressee, no state change."
+    // Consume the pending record ONLY when at least one slot verified — a total miss (any party
+    // authenticated on the link, including a duplicated-credential holder) must not be able to
+    // burn a legitimate in-flight handshake with one well-formed but wrong confirm.
     if (acknowledged.length === 0) {
       throw new OrchestrationError(
         'not_the_addressee',
         'No confirmed slot verified against this link’s pending probe.'
       )
     }
+    byProbeId?.delete(params.probeId)
 
     const result: FederatedLinkConfirmResult = { protocol: LINK_BINDING_PROTOCOL, acknowledged }
     return result

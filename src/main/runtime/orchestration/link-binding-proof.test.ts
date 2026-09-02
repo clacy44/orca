@@ -1,8 +1,27 @@
 // S10-16 C3, R7.9's list: the frozen crypto primitives, tested for the exact adversarial shapes
 // the plan's §6 risk table names as the commit's failure mode.
 import { describe, expect, it, vi } from 'vitest'
+import type * as NodeCryptoModule from 'node:crypto'
+
+// Review F4(c): NEITHER `vi.spyOn(require('node:crypto'), …)` NOR `vi.spyOn(<namespace import>,
+// …)` actually intercepts `linkBindingMacEquals`'s own `import { timingSafeEqual } from
+// 'node:crypto'` under this Vitest config — the former resolves a different object (confirmed:
+// a positive control never triggered it), the latter throws (`Module namespace is not
+// configurable in ESM`). `vi.mock` is the one mechanism that rewrites the module graph itself, so
+// every importer — this file AND link-binding-proof.ts — resolves the SAME wrapped export.
+const { timingSafeEqualSpy } = vi.hoisted(() => ({ timingSafeEqualSpy: vi.fn() }))
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeCryptoModule>()
+  return {
+    ...actual,
+    timingSafeEqual: (...args: Parameters<typeof actual.timingSafeEqual>) => {
+      timingSafeEqualSpy(...args)
+      return actual.timingSafeEqual(...args)
+    }
+  }
+})
+
 import { createHmac, timingSafeEqual } from 'node:crypto'
-import type * as NodeCrypto from 'node:crypto'
 import {
   LINK_BINDING_PROTOCOL,
   SELECTOR_LABEL,
@@ -96,20 +115,19 @@ describe('linkBindingMacEquals — hex64-guarded before any decode, never throws
     // Spy on the node:crypto module object itself (not the source file's already-bound import
     // reference) so the assertion is about call COUNT, not merely the return value — a compare
     // that decoded first and got lucky by chance would also return `false` here.
-    // CJS require (not the ES `import` binding, which vitest cannot make configurable for spying)
-    // — the same object `linkBindingMacEquals`'s own module-level import resolves to at runtime.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- see comment above
-    const crypto = require('node:crypto') as typeof NodeCrypto
-    const spy = vi.spyOn(crypto, 'timingSafeEqual')
-    try {
-      expect(linkBindingMacEquals('zz', 'qqqq')).toBe(false)
-      expect(linkBindingMacEquals('abcz', 'ab')).toBe(false)
-      expect(linkBindingMacEquals('', '')).toBe(false)
-      expect(linkBindingMacEquals('a'.repeat(64).toUpperCase(), 'a'.repeat(64))).toBe(false)
-      expect(spy).not.toHaveBeenCalled()
-    } finally {
-      spy.mockRestore()
-    }
+    timingSafeEqualSpy.mockClear()
+    expect(linkBindingMacEquals('zz', 'qqqq')).toBe(false)
+    expect(linkBindingMacEquals('abcz', 'ab')).toBe(false)
+    expect(linkBindingMacEquals('', '')).toBe(false)
+    expect(linkBindingMacEquals('a'.repeat(64).toUpperCase(), 'a'.repeat(64))).toBe(false)
+    expect(timingSafeEqualSpy).not.toHaveBeenCalled()
+    // Review F4(c): a positive control, spy still installed — proves the spy really does sit on
+    // the binding `linkBindingMacEquals` resolves at runtime. Without this, the earlier
+    // `require('node:crypto')`-based spy silently intercepted NOTHING (confirmed empirically:
+    // it failed to fire even here), which made every negative assertion above vacuous — it
+    // passed even with the handler deleted.
+    expect(linkBindingMacEquals(valid, valid)).toBe(true)
+    expect(timingSafeEqualSpy).toHaveBeenCalled()
   })
 
   it('accepts two equal, well-formed 64-hex values', () => {

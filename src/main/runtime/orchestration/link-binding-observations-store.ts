@@ -226,14 +226,18 @@ export function listContainment(db: Database.Database): ContainmentRow[] {
   return rows.map(fromSqlContainmentRow)
 }
 
-// R10-A / R15: is this link currently quarantined (a live, unlifted quarantine row)?
+// R10-A / R15: is this link currently quarantined (a live, unlifted, unexpired quarantine row)?
+// Review F2 / design R3 (s10-16-design-link-binding-v6.md:880-883): a time-boxed quarantine must
+// stop refusing once past its own `expires_at` — omitting this clause left an operator's expiry
+// silently inert (fail-closed, not a security hole, but a live row that never actually lifts).
 export function isPeerLinkQuarantined(db: Database.Database, linkDeviceId: string): boolean {
   const row = db
     .prepare(
       `SELECT 1 FROM peer_link_containment
-        WHERE subject_kind = 'link' AND subject_id = ? AND action = 'quarantine' AND lifted_at IS NULL`
+        WHERE subject_kind = 'link' AND subject_id = ? AND action = 'quarantine' AND lifted_at IS NULL
+          AND (expires_at IS NULL OR expires_at > ?)`
     )
-    .get(linkDeviceId)
+    .get(linkDeviceId, Date.now())
   return row !== undefined
 }
 
