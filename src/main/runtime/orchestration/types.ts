@@ -224,27 +224,7 @@ export type FederatedDispatchRow = {
   updated_at: string
 }
 
-export type RemoteDispatchAttachmentRow = {
-  dispatch_id: string
-  task_id: string
-  home_peer_fingerprint: string
-  protocol_version: number
-  runtime_epoch: string
-  capability_hash: string | null
-  pane_key: string | null
-  process_incarnation: string | null
-  state: WorkerDispatchState
-  stage: string
-  worktree_id: string | null
-  terminal_handle: string | null
-  setup_state: string
-  effects: string
-  residual_resources: string
-  to_worker_imported_sequence: number
-  last_error: string | null
-  created_at: string
-  updated_at: string
-}
+export type { RemoteDispatchAttachmentRow } from './remote-dispatch-attachment-row'
 
 export type FederationRelayDirection = 'to_home' | 'to_worker'
 

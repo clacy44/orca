@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ORCHESTRATION_WORKER_READ_SOURCES } from '../../../../shared/orchestration-worker-output'
 import type { OrcaRuntimeService } from '../../orca-runtime'
+import { PEER_ATTACHMENT_SETTLED_STATES } from '../../orchestration/db'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { RemoteDispatchAttachmentRow } from '../../orchestration/types'
 import { defineMethod, type RpcMethod } from '../core'
@@ -119,7 +120,7 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
       requireHomeAttachment(runtime, params.dispatchId, authenticatedCallerFingerprint)
       const db = runtime.getOrchestrationDb()
       const begun = db.beginRemoteAttachmentStop(params.dispatchId)
-      if (['succeeded', 'failed', 'stopped', 'abandoned'].includes(begun.state)) {
+      if ((PEER_ATTACHMENT_SETTLED_STATES as readonly string[]).includes(begun.state)) {
         return {
           dispatchId: params.dispatchId,
           state: begun.state,

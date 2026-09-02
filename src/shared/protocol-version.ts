@@ -119,6 +119,13 @@ export const AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY = 'agent.identity-lanes.
 // (environment-terminal-roster.ts) rather than a hard error.
 export const ORCHESTRATION_AGENT_DIRECTORY_RUNTIME_CAPABILITY =
   'orchestration.agent-directory.v1' as const
+// S10-19: the peer RPC ingress allowlist exists and is enforced (never
+// 'orchestration.peer-pane-input.v1' — renamed before anything published, per §D).
+export const ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY =
+  'orchestration.peer-allowlist.v1' as const
+// S10-19: orchestration.federationAnswerPrompt (the prompt-answer choke) exists.
+export const ORCHESTRATION_PEER_PROMPT_ANSWER_RUNTIME_CAPABILITY =
+  'orchestration.peer-prompt-answer.v1' as const
 
 export const RUNTIME_CAPABILITIES = [
   'runtime.status.compat.v1',
@@ -160,7 +167,9 @@ export const RUNTIME_CAPABILITIES = [
   ORCHESTRATION_REMOTE_RUN_MAILBOX_RUNTIME_CAPABILITY,
   AGENT_IDENTITY_LANES_RUNTIME_CAPABILITY,
   AGENT_IDENTITY_LANES_V2_RUNTIME_CAPABILITY,
-  ORCHESTRATION_AGENT_DIRECTORY_RUNTIME_CAPABILITY
+  ORCHESTRATION_AGENT_DIRECTORY_RUNTIME_CAPABILITY,
+  ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY,
+  ORCHESTRATION_PEER_PROMPT_ANSWER_RUNTIME_CAPABILITY
 ] as const
 
 export type RuntimeCapability = (typeof RUNTIME_CAPABILITIES)[number] | (string & {})

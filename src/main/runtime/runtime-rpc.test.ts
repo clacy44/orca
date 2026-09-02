@@ -2227,7 +2227,9 @@ describe('OrcaRuntimeRpcServer', () => {
       ) as Record<string, unknown>[]
       expect(persisted).toHaveLength(1)
       // ...and writes exactly the pre-change row shape, with no pendingExpiresAt deadline.
+      // S10-19 (R10): accessProfile is now always written.
       expect(Object.keys(persisted[0]!).sort()).toEqual([
+        'accessProfile',
         'deviceId',
         'lastSeenAt',
         'name',
@@ -6618,5 +6620,124 @@ describe('OrcaRuntimeRpcServer WebSocket bind host (STA-2370)', () => {
     // widenWebSocketBind and re-open a 0.0.0.0 listener on a server that is supposed to be down.
     await server.ensureNetworkExposure()
     expect(widenSpy).not.toHaveBeenCalled()
+  })
+})
+
+// S10-19 (chair rulings 20/22/24): the least-privilege peer access profile — W-1 plumbing only
+// (schema/field/context threading). The ingress filter itself lands in W-5.
+describe('S10-19 W-1: access-profile plumbing', () => {
+  it('C-3: the mobile-scope refusal message is byte-identical to before this slice', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const server = new OrcaRuntimeRpcServer({
+      runtime: new OrcaRuntimeService(),
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    await server.start()
+    try {
+      const offer = server.createPairingOffer({ address: '127.0.0.1', scope: 'mobile' })
+      expect(offer.available).toBe(true)
+      if (!offer.available) {
+        throw new Error('WebSocket pairing unavailable')
+      }
+      const replies: Record<string, unknown>[] = []
+      const parsed = parsePairingCode(offer.pairingUrl)!
+      await server['handleWebSocketMessage'](
+        JSON.stringify({
+          id: 'req_forbidden',
+          method: 'orchestration.federationStop',
+          deviceToken: parsed.deviceToken,
+          params: { dispatchId: 'disp_x' }
+        }),
+        (response) => replies.push(JSON.parse(response) as Record<string, unknown>),
+        () => {}
+      )
+      expect(replies).toContainEqual(
+        expect.objectContaining({
+          id: 'req_forbidden',
+          ok: false,
+          error: expect.objectContaining({
+            code: 'forbidden',
+            message: "Method 'orchestration.federationStop' is not available to mobile clients"
+          })
+        })
+      )
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('C-4: accessProfile round-trips through the registry load()/save() cycle behind createPairingOffer', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const server = new OrcaRuntimeRpcServer({
+      runtime: new OrcaRuntimeService(),
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    await server.start()
+    let deviceId: string
+    try {
+      const offer = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Peer Worker',
+        scope: 'runtime',
+        mint: 'always',
+        accessProfile: 'peer'
+      })
+      expect(offer.available).toBe(true)
+      if (!offer.available) {
+        throw new Error('offer unavailable')
+      }
+      deviceId = offer.deviceId
+      expect(server.getDeviceRegistry()?.getDevice(deviceId)?.accessProfile).toBe('peer')
+    } finally {
+      await server.stop()
+    }
+    // Fresh DeviceRegistry over the same userDataPath — a real load() from disk, not the in-memory copy.
+    const reloaded = new DeviceRegistry(userDataPath)
+    expect(reloaded.getDevice(deviceId)?.accessProfile).toBe('peer')
+  })
+
+  it('S-4 install-day no-op: a pre-slice-shaped registry entry (no accessProfile key) keeps full behavior', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const server = new OrcaRuntimeRpcServer({
+      runtime: new OrcaRuntimeService(),
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    await server.start()
+    try {
+      const offer = server.createPairingOffer({ address: '127.0.0.1', scope: 'runtime' })
+      expect(offer.available).toBe(true)
+      if (!offer.available) {
+        throw new Error('offer unavailable')
+      }
+      // Simulate a grant minted before this slice: strip accessProfile straight off disk.
+      const registryPath = join(userDataPath, DEVICE_REGISTRY_FILENAME)
+      const devices = JSON.parse(readFileSync(registryPath, 'utf-8')) as Record<string, unknown>[]
+      for (const device of devices) {
+        delete device.accessProfile
+      }
+      await writeFile(registryPath, JSON.stringify(devices), 'utf-8')
+
+      const replies: Record<string, unknown>[] = []
+      const parsed = parsePairingCode(offer.pairingUrl)!
+      await server['handleWebSocketMessage'](
+        JSON.stringify({
+          id: 'req_status',
+          method: 'status.get',
+          deviceToken: parsed.deviceToken,
+          params: {}
+        }),
+        (response) => replies.push(JSON.parse(response) as Record<string, unknown>),
+        () => {}
+      )
+      expect(replies).toContainEqual(expect.objectContaining({ id: 'req_status', ok: true }))
+    } finally {
+      await server.stop()
+    }
   })
 })

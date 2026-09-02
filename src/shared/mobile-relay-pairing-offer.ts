@@ -77,6 +77,9 @@ export function createPairingOfferSchema(now: () => number = () => Date.now()) {
       publicKeyB64: z.string().min(1).max(PAIRING_PUBLIC_KEY_MAX_CHARACTERS),
       pairedDeviceId: z.string().min(1).max(128).optional(),
       scope: PairingScopeSchema.optional(),
+      // S10-19 (R5): advisory display only — the actual enforcement boundary is server-derived
+      // per-request (RpcContext.accessProfile), never trusted from an offer a peer decoded.
+      profile: z.enum(['full', 'peer']).optional(),
       relay: relaySchema.optional()
     })
     .superRefine((offer, ctx) => {

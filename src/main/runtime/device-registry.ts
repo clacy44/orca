@@ -19,6 +19,12 @@ import {
 import type { RelayDeviceBinding } from './relay/relay-revoke-outbox'
 import type { MobilePairingConnectionMode } from '../../shared/mobile-pairing-connection-mode'
 import type { RuntimePairingReach } from '../../shared/runtime-pairing-reach'
+import {
+  effectiveAccessProfile,
+  normalizeLoadedDeviceEntryFields
+} from './device-registry-field-normalizers'
+
+export { effectiveAccessProfile }
 
 export type { DeviceScope }
 
@@ -38,25 +44,10 @@ export type DeviceEntry = {
   // deadline; absent (legacy rows, and every coalesced row) means "never expires", so an upgrade cannot
   // invalidate a link already handed out.
   pendingExpiresAt?: number
-}
-
-function validRelayBinding(value: unknown, deviceId: string): RelayDeviceBinding | undefined {
-  if (!value || typeof value !== 'object') {
-    return undefined
-  }
-  const binding = value as Partial<RelayDeviceBinding>
-  return binding.relayDeviceId === deviceId &&
-    typeof binding.relayHostId === 'string' &&
-    typeof binding.ownerIdentityKey === 'string'
-    ? {
-        relayHostId: binding.relayHostId,
-        relayDeviceId: binding.relayDeviceId,
-        ownerIdentityKey: binding.ownerIdentityKey,
-        ...(typeof binding.inviteExpiresAt === 'number' && Number.isFinite(binding.inviteExpiresAt)
-          ? { inviteExpiresAt: binding.inviteExpiresAt }
-          : {})
-      }
-    : undefined
+  // S10-19: the least-privilege peer access profile this grant was minted under. Absent means
+  // "minted before this slice existed" — effectiveAccessProfile() resolves that case against the
+  // host's legacyGrantProfile config (ships 'full'), which is the install-day no-op property.
+  accessProfile?: 'full' | 'peer'
 }
 
 // Why: a lastSeen refresh is pure bookkeeping, so coalesce reconnect bursts into one write instead of
@@ -79,9 +70,10 @@ export class DeviceRegistry {
   addDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    accessProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
-    return this.createAndPersistDevice(this.devices, name, scope, pairingReach)
+    return this.createAndPersistDevice(this.devices, name, scope, pairingReach, accessProfile)
   }
 
   private createAndPersistDevice(
@@ -89,6 +81,9 @@ export class DeviceRegistry {
     name: string,
     scope: DeviceScope,
     pairingReach: RuntimePairingReach,
+    // R10: always written, never omitted — unlike pendingExpiresAt, a missing accessProfile on a
+    // freshly-minted row would be indistinguishable from a pre-S10-19 legacy grant.
+    accessProfile: 'full' | 'peer' = 'full',
     pendingExpiresAt?: number
   ): DeviceEntry {
     const entry: DeviceEntry = {
@@ -99,6 +94,7 @@ export class DeviceRegistry {
       pairedAt: Date.now(),
       lastSeenAt: 0,
       pairingReach,
+      accessProfile,
       // Why: omit the key entirely when absent so a coalesced grant's persisted shape is unchanged.
       ...(pendingExpiresAt === undefined ? {} : { pendingExpiresAt })
     }
@@ -118,12 +114,22 @@ export class DeviceRegistry {
   getOrCreatePendingDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    accessProfile: 'full' | 'peer' = 'full',
+    // Why: resolves a legacy (pre-S10-19) pending row's effective profile for the coalescing
+    // comparison below; the host's legacyGrantProfile config, ships 'full'.
+    legacyGrantProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
     // Why: a minted row carries a deadline and belongs to one named human, so reusing it here would hand
     // that person's link out again as the shared unnamed one. The two lanes stay disjoint by construction.
+    // S10-19: a pending row coalesces only within its own access profile — a peer-scoped pending
+    // link must never silently widen into (or be silently narrowed from) a full-access one.
     const existing = this.devices.find(
-      (d) => d.lastSeenAt === 0 && d.scope === scope && !isMintedPendingDevice(d)
+      (d) =>
+        d.lastSeenAt === 0 &&
+        d.scope === scope &&
+        !isMintedPendingDevice(d) &&
+        effectiveAccessProfile(d, legacyGrantProfile) === accessProfile
     )
     if (existing) {
       // Why: the same pending token can be re-advertised at a broader reach; widen it but never narrow it,
@@ -132,7 +138,7 @@ export class DeviceRegistry {
         ? this.setPairingReach(existing, 'network')
         : existing
     }
-    return this.addDevice(name, scope, pairingReach)
+    return this.addDevice(name, scope, pairingReach, accessProfile)
   }
 
   // Why: two humans handed one coalesced link land on one deviceId and one token, so nothing downstream
@@ -145,7 +151,8 @@ export class DeviceRegistry {
     pairingReach: RuntimePairingReach = 'network',
     // Why clamped to (0, PENDING_GRANT_TTL_MS] rather than accepted verbatim: an invite can only be
     // SHORTENED, never extended past the design's leak control (S9 §2a's 24h ceiling).
-    ttlMs?: number
+    ttlMs?: number,
+    accessProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
     const now = Date.now()
     const clampedTtlMs =
@@ -162,6 +169,7 @@ export class DeviceRegistry {
       name,
       scope,
       pairingReach,
+      accessProfile,
       now + clampedTtlMs
     )
   }
@@ -187,15 +195,23 @@ export class DeviceRegistry {
   rotatePendingDevice(
     name: string,
     scope: DeviceScope = 'mobile',
-    pairingReach: RuntimePairingReach = 'network'
+    pairingReach: RuntimePairingReach = 'network',
+    accessProfile: 'full' | 'peer' = 'full',
+    legacyGrantProfile: 'full' | 'peer' = 'full'
   ): DeviceEntry {
     // Why: rotation revokes the ONE shared token that may have been screenshotted; a minted invite is
     // named, individually revocable (mobile:revokeRuntimeAccess), and must survive an unrelated
     // "Regenerate" click — the desktop generator sends rotate on every unnamed link.
+    // S10-19: never drop a sibling pending row minted under a DIFFERENT access profile — rotation
+    // is scoped to the profile being regenerated, same discipline as the coalescing predicate.
     const retainedDevices = this.devices.filter(
-      (d) => d.lastSeenAt !== 0 || d.scope !== scope || isMintedPendingDevice(d)
+      (d) =>
+        d.lastSeenAt !== 0 ||
+        d.scope !== scope ||
+        isMintedPendingDevice(d) ||
+        effectiveAccessProfile(d, legacyGrantProfile) !== accessProfile
     )
-    return this.createAndPersistDevice(retainedDevices, name, scope, pairingReach)
+    return this.createAndPersistDevice(retainedDevices, name, scope, pairingReach, accessProfile)
   }
 
   removeDevice(deviceId: string): boolean {
@@ -214,12 +230,24 @@ export class DeviceRegistry {
     return this.devices.find((d) => d.deviceId === deviceId) ?? null
   }
 
-  /** The shared, regenerable pending row of a scope — never a minted named invite. */
-  getPendingDevice(scope: DeviceScope = 'mobile'): DeviceEntry | null {
+  /**
+   * The shared, regenerable pending row of a scope — never a minted named invite.
+   * accessProfile, when given, narrows to a row of exactly that effective profile (S10-19); omitted
+   * preserves every pre-existing caller's untargeted lookup.
+   */
+  getPendingDevice(
+    scope: DeviceScope = 'mobile',
+    accessProfile?: 'full' | 'peer',
+    legacyGrantProfile: 'full' | 'peer' = 'full'
+  ): DeviceEntry | null {
     return (
       this.devices.find(
         (device) =>
-          device.lastSeenAt === 0 && device.scope === scope && !isMintedPendingDevice(device)
+          device.lastSeenAt === 0 &&
+          device.scope === scope &&
+          !isMintedPendingDevice(device) &&
+          (accessProfile === undefined ||
+            effectiveAccessProfile(device, legacyGrantProfile) === accessProfile)
       ) ?? null
     )
   }
@@ -366,21 +394,7 @@ export class DeviceRegistry {
       const parsed = JSON.parse(readFileSync(this.registryPath, 'utf-8')) as DeviceEntry[]
       const loaded: DeviceEntry[] = parsed.map((device) => ({
         ...device,
-        // Why: older registries only existed for phone pairing. Treat missing
-        // scope as mobile so legacy device tokens do not gain new CLI powers.
-        scope: device.scope === 'runtime' ? 'runtime' : 'mobile',
-        relayBinding: validRelayBinding(device.relayBinding, device.deviceId),
-        mobilePairingConnectionMode:
-          device.mobilePairingConnectionMode === 'local-only' ? 'local-only' : 'automatic',
-        // Why: registries written before this field existed only ever held network-reach grants (phones and
-        // LAN links), so a missing value must keep binding every interface on reconnect.
-        pairingReach: device.pairingReach === 'this-computer' ? 'this-computer' : 'network',
-        // Why: a non-finite value on disk would make every comparison false and pin the row forever, so
-        // normalize anything unusable back to the legacy "never expires" shape.
-        pendingExpiresAt:
-          typeof device.pendingExpiresAt === 'number' && Number.isFinite(device.pendingExpiresAt)
-            ? device.pendingExpiresAt
-            : undefined
+        ...normalizeLoadedDeviceEntryFields(device)
       }))
       // Why: sweep in memory only — the next mutation persists the pruned array, and rewriting here would
       // pay a secure-file write (two synchronous PowerShell ACL spawns on Windows) on every construction.

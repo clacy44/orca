@@ -20,7 +20,12 @@ import { UnixSocketTransport } from './rpc/unix-socket-transport'
 import { WebSocketTransport } from './rpc/ws-transport'
 import { readWsFallbackPort, writeWsFallbackPort } from './rpc/ws-fallback-port-store'
 import type { WebSocket } from 'ws'
-import { DeviceRegistry, type DeviceEntry, type DeviceScope } from './device-registry'
+import {
+  DeviceRegistry,
+  effectiveAccessProfile,
+  type DeviceEntry,
+  type DeviceScope
+} from './device-registry'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
 import {
   createPrincipalLaneConnectionJoin,
@@ -95,6 +100,9 @@ export type PairingOfferUnavailableReason =
   | 'invalid_advertised_endpoint'
   | 'relay_mint_failed'
   | 'network_exposure_failed'
+  // S10-19: a peer-profile offer was requested outside runtime scope — peer access is
+  // federation-dispatch-only, never a mobile grant.
+  | 'profile_scope_mismatch'
 
 export type PairingOfferUnavailable = {
   available: false
@@ -530,6 +538,11 @@ export class OrcaRuntimeRpcServer {
   // reuse and falls back to the 127.0.0.1 default in `resolveAdvertisedPairingEndpoint`, emitting a
   // loopback link the desktop dialog refuses as `host-unreachable`.
   private advertisedPairingAddress: string | null = null
+  // S10-19 (Ruling 24 addendum (j) / Ruling 22 escalation (5)): every grant minted before this
+  // slice existed has no accessProfile on disk; this is what effectiveAccessProfile() resolves
+  // that absence against. Ships 'full' (§10.4 — the install-day no-op, S-4/T-4d). Recorded for
+  // owner ratification; not yet a config surface.
+  private readonly legacyGrantProfile: 'full' | 'peer' = 'full'
   private tlsFingerprint: string | null = null
   private activeTransports: RpcTransport[] = []
   private transports: RuntimeTransportMetadata[] = []
@@ -739,6 +752,10 @@ export class OrcaRuntimeRpcServer {
     // person and may need a shorter leash than the 24h default; every other caller (coalesced QR,
     // rotate) leaves this undefined and is byte-identical to before.
     ttlMs?: number
+    // S10-19: required-choice at the mint surfaces (W-6); this method's own default keeps every
+    // pre-existing caller (coalesced QR, rotate, every runtime-time mint before this slice) minting
+    // 'full' exactly as before — the install-day no-op property (S-4).
+    accessProfile?: 'full' | 'peer'
   }):
     | PairingOfferUnavailable
     | {
@@ -750,6 +767,17 @@ export class OrcaRuntimeRpcServer {
       } {
     if (this.pairingInitializationFailure) {
       return this.pairingInitializationFailure
+    }
+    const accessProfile = args.accessProfile ?? 'full'
+    const scope = args.scope ?? 'runtime'
+    // S10-19 R2: a peer grant is federation-dispatch-only — it is never reachable over a mobile
+    // scope, so refuse before any registry write rather than mint an unenforceable row.
+    if (accessProfile === 'peer' && scope !== 'runtime') {
+      return {
+        available: false,
+        reason: 'profile_scope_mismatch',
+        guidance: 'A federation peer grant is runtime-scoped only; choose the runtime scope.'
+      }
     }
     const rawEndpoint = this.getWebSocketEndpoint()
     if (!rawEndpoint) {
@@ -779,7 +807,6 @@ export class OrcaRuntimeRpcServer {
     // every later presence label. A name that normalizes away is treated as unnamed.
     const deviceName =
       normalizePairingDeviceName(args.name) || `CLI ${new Date().toLocaleDateString()}`
-    const scope = args.scope ?? 'runtime'
     let device: DeviceEntry
     try {
       const reach = args.reach ?? 'network'
@@ -787,10 +814,28 @@ export class OrcaRuntimeRpcServer {
       // co-worker's un-scanned invite the moment a second named one is created.
       device =
         args.mint === 'always'
-          ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach, args.ttlMs)
+          ? this.deviceRegistry.mintPendingDevice(
+              deviceName,
+              scope,
+              reach,
+              args.ttlMs,
+              accessProfile
+            )
           : args.rotate
-            ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
-            : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)
+            ? this.deviceRegistry.rotatePendingDevice(
+                deviceName,
+                scope,
+                reach,
+                accessProfile,
+                this.legacyGrantProfile
+              )
+            : this.deviceRegistry.getOrCreatePendingDevice(
+                deviceName,
+                scope,
+                reach,
+                accessProfile,
+                this.legacyGrantProfile
+              )
     } catch (error) {
       console.error('[runtime] Failed to persist pairing credential:', error)
       return pairingUnavailable('device_registry_unavailable', DEVICE_REGISTRY_UNAVAILABLE_GUIDANCE)
@@ -808,8 +853,12 @@ export class OrcaRuntimeRpcServer {
       pairingUrl,
       endpoint,
       deviceId: device.deviceId,
+      // S10-19: a peer offer is never advertised as a browser client — the web client speaks the
+      // full runtime UI surface, which a peer grant does not have.
       webClientUrl:
-        this.webClientRoot && scope === 'runtime' ? createWebClientUrl(endpoint, pairingUrl) : null
+        this.webClientRoot && scope === 'runtime' && accessProfile !== 'peer'
+          ? createWebClientUrl(endpoint, pairingUrl)
+          : null
     }
   }
 
@@ -1809,6 +1858,10 @@ export class OrcaRuntimeRpcServer {
     if (request.orchestrationCompatibilityEvidence?.host !== undefined) {
       delete (request.orchestrationCompatibilityEvidence as Record<string, unknown>).host
     }
+    // S10-19: the server-derived access profile for this frame — derived exactly once, here, from
+    // the authenticated device, never from anything the request itself carries. Undefined means
+    // "not a paired peer" everywhere downstream (RpcContext.accessProfile's own contract).
+    const accessProfile = effectiveAccessProfile(device, this.legacyGrantProfile)
     if (device.scope === 'mobile' && !MOBILE_RPC_METHOD_ALLOWLIST.has(request.method)) {
       reply(
         JSON.stringify(
@@ -1875,11 +1928,18 @@ export class OrcaRuntimeRpcServer {
         // Why: gates the mobile-only payload diet so full-screen web/desktop clients aren't truncated.
         clientKind: device.scope,
         clientCapabilities: authenticatedSocket?.clientCapabilities,
+        accessProfile,
         pairing: pairingContext,
         signal: abortRegistration?.signal,
         sendBinary,
-        registerBinaryStreamHandler: (streamId, handler) =>
-          this.registerBinaryStreamHandler(connectionId, streamId, handler)
+        // S10-19 binary-registrar gate: a peer grant has no terminal.subscribe/binary-stream
+        // surface on the allowlist, so the handler is never even offered to a peer caller.
+        ...(accessProfile === 'peer'
+          ? {}
+          : {
+              registerBinaryStreamHandler: (streamId, handler) =>
+                this.registerBinaryStreamHandler(connectionId, streamId, handler)
+            })
       })
     } finally {
       abortRegistration?.dispose()
