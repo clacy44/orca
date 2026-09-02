@@ -5,6 +5,8 @@
 // may write a numeric literal or duplicate one of these unions — every consumer imports the symbol
 // (test: link-binding-constants.test.ts, the rewritten test 77).
 
+import { createHash } from 'node:crypto'
+
 // --- A1: constants this slice owns -----------------------------------------------------------
 
 export const LINK_BINDING_PROBE_SLOTS = 8
@@ -86,10 +88,11 @@ export const REPLY_OUTBOX_LINK_CONCURRENCY = 4
 // A-arith(10): matches the existing relay timeout; passed as both timeoutMs and maxDurationMs.
 export const REPLY_OUTBOX_RPC_BUDGET_MS = 30_000
 export const REPLY_OUTBOX_KICK_DEBOUNCE_MS = 1_000
-// Existing constant, newly partitioned by (scope, budgetClass) — R1.1.
-export const MAX_LIVE_MINTED_GRANTS = 16
-// Existing constant, unchanged.
-export const PENDING_GRANT_TTL_MS = 24 * 60 * 60 * 1000
+// Existing constants, owned by device-registry-pending-grants.ts (the base tree, pre-S10-16) —
+// re-exported here, never redeclared, so this slice's consumers still get them from THE REGISTER
+// without creating a second definition site (F4/L-2). MAX_LIVE_MINTED_GRANTS is newly partitioned
+// by (scope, budgetClass) per R1.1; PENDING_GRANT_TTL_MS is unchanged.
+export { MAX_LIVE_MINTED_GRANTS, PENDING_GRANT_TTL_MS } from '../device-registry-pending-grants'
 
 // --- A2: counts and structural numbers --------------------------------------------------------
 
@@ -202,3 +205,20 @@ export const REPLY_OUTBOX_STATES = [
   'abandoned',
   'cancelled'
 ] as const
+
+// --- A5: derived-id formulas — single definition site, formula frozen by C3 --------------------
+
+// Lifecycle m4: the incident id for a link-quarantine refusal (R3). Deterministic per quarantine
+// "generation" — a lift + re-assert is a new row-content generation and yields a new id, which is
+// correct: it is a new incident from the peer's point of view. Every refusal path (probe/confirm
+// in C3, federatedSend/federatedAsk in C2a) derives through this one function rather than
+// re-implementing the formula; do not change it without re-deriving every caller's fixtures.
+export function deriveLinkQuarantineIncidentId(
+  linkDeviceId: string,
+  quarantinedAt: number
+): string {
+  return createHash('sha256')
+    .update(`${linkDeviceId}:${quarantinedAt}`)
+    .digest('hex')
+    .slice(0, LINK_BINDING_HEX32_LENGTH)
+}

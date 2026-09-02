@@ -45,6 +45,24 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
 }
 
+// F12: a regex quantifier ({32}, {64}, {1,3}, …) is not the L-2 class this test guards — it is a
+// character-count constraint inside a pattern, built (per link-binding-proof.ts) from THE
+// REGISTER's own length constants via `new RegExp`. Strip both regex-literal bodies (`/…/flags`)
+// and `new RegExp(...)` call arguments before scanning for numeric literals, so a future frozen
+// regex that DOES spell a quantifier literally (rather than interpolating a register constant)
+// does not force a choice between moving the regex and weakening this test.
+function stripRegexContexts(source: string): string {
+  let out = source.replace(/new RegExp\(([\s\S]*?)\)/g, 'new RegExp(/* stripped */)')
+  // Heuristic regex-literal detector: a `/` preceded by an operator/punctuation/start-of-line
+  // context (never an identifier, `)`, `]` or digit — those precede division, not a regex) up to
+  // its closing `/` and flag letters.
+  out = out.replace(
+    /(^|[[(:,;={!&|?]\s*)\/(?:[^/\\\n]|\\.)+\/[a-z]*/g,
+    '$1/* regex-literal-stripped */'
+  )
+  return out
+}
+
 // Numeric literals this rule is about: multi-digit integers (tuning values, TTLs, caps) and
 // underscore-grouped numeric literals (1_000 style). Single digits (0, 1, 2 as loop/array
 // indices, exponents, etc.) are not the L-2 class this test guards and would false-positive on
@@ -63,11 +81,32 @@ describe('link-binding-constants.ts is THE REGISTER (test 77, rewritten)', () =>
   it.each(files.map((f) => [f.slice(REPO_ROOT.length + 1), f]))(
     '%s writes no numeric literal outside link-binding-constants.ts',
     (_label, file) => {
-      const code = stripComments(readFileSync(file, 'utf8'))
+      const code = stripRegexContexts(stripComments(readFileSync(file, 'utf8')))
       const hits = code.match(NUMERIC_LITERAL_RE) ?? []
       expect(hits).toEqual([])
     }
   )
+
+  it('the register re-exports base-tree constants rather than redeclaring them (F4 class)', () => {
+    // MAX_LIVE_MINTED_GRANTS / PENDING_GRANT_TTL_MS are owned by device-registry-pending-grants.ts
+    // (base tree, pre-S10-16) — the register must `export { NAME } from '...'`, never restate
+    // `export const NAME = ...`, or the two definition sites can drift silently (F4).
+    const baseTreeFile = join(REPO_ROOT, 'src/main/runtime/device-registry-pending-grants.ts')
+    const baseSource = stripComments(readFileSync(baseTreeFile, 'utf8'))
+    const baseNames = [...baseSource.matchAll(/^export const (\w+)/gm)].map((m) => m[1])
+    expect(baseNames.length).toBeGreaterThan(0)
+
+    const registerFile = join(REPO_ROOT, 'src/main/runtime/orchestration/link-binding-constants.ts')
+    const registerSource = stripComments(readFileSync(registerFile, 'utf8'))
+    for (const name of baseNames) {
+      const redeclared = new RegExp(`export const ${name}\\b`).test(registerSource)
+      expect(redeclared).toBe(false)
+    }
+    // And the register must actually still expose them (as a re-export), so nothing silently
+    // dropped the import while satisfying the redeclaration check above.
+    expect(constants).toHaveProperty('MAX_LIVE_MINTED_GRANTS')
+    expect(constants).toHaveProperty('PENDING_GRANT_TTL_MS')
+  })
 
   it('LinkBindingHealth precedence is total over the twenty-member union (no drift between the two lists)', async () => {
     const health = await import('../../../shared/link-binding-health')
@@ -76,11 +115,29 @@ describe('link-binding-constants.ts is THE REGISTER (test 77, rewritten)', () =>
   })
 
   it('the A2 reset-exempt / never-dropped / drop-and-recreate lists are disjoint and complete', () => {
-    expect(constants.A2_RESET_EXEMPT_TABLES).toHaveLength(4)
-    expect(constants.A2_NEVER_DROPPED_TABLES).toHaveLength(3)
-    expect(constants.A2_DROP_AND_RECREATE_TABLES).toHaveLength(3)
+    // Membership, not length (F9/MOD2) — a length assertion cannot see a table swapped for a
+    // wrong one of the same count.
+    expect(new Set(constants.A2_RESET_EXEMPT_TABLES)).toEqual(
+      new Set([
+        'peer_link_bindings',
+        'peer_link_attempts',
+        'peer_link_scan_facts',
+        'peer_link_containment'
+      ])
+    )
+    expect(new Set(constants.A2_NEVER_DROPPED_TABLES)).toEqual(
+      new Set(['peer_link_bindings', 'peer_link_containment', 'peer_reply_outbox'])
+    )
+    expect(new Set(constants.A2_DROP_AND_RECREATE_TABLES)).toEqual(
+      new Set(['peer_link_attempts', 'peer_link_scan_facts', 'peer_link_confirm_observations'])
+    )
     const all = [...constants.A2_NEVER_DROPPED_TABLES, ...constants.A2_DROP_AND_RECREATE_TABLES]
     expect(new Set(all).size).toBe(6)
+    // Disjoint: no table is both never-dropped and drop-and-recreate.
+    const neverDropped = new Set<string>(constants.A2_NEVER_DROPPED_TABLES)
+    for (const table of constants.A2_DROP_AND_RECREATE_TABLES) {
+      expect(neverDropped.has(table)).toBe(false)
+    }
   })
 
   it('FEDERATED_ASK_RATE_LIMIT is the Ruling 23(f) derived value, 64', () => {

@@ -24,6 +24,7 @@ import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
+import { refuseIfQuarantined } from './orchestration-link-binding-pending'
 
 const FederatedSendParams = z.object({
   // Optional (D3): an old sender, or one whose pane has no registered `agents` row, omits it.
@@ -70,6 +71,11 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
             }
           )
         }
+        // R3 (Ruling 23 Addendum 2(n)): link containment before identity — a quarantined link
+        // refuses BEFORE the identity importer runs, effect-free, on peer_link_containment alone
+        // (no peer-supplied value in the read). Same gate, same order as the probe/confirm RPCs.
+        refuseIfQuarantined(runtime, pairedDeviceId, 'send')
+
         const toAgent = requireAddressableAgentRecipient(db, params.toAgentId)
         toAgentIdForAudit = toAgent.id
 

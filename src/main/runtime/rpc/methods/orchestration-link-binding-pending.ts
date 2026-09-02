@@ -1,14 +1,13 @@
 // S10-16 C3, R3/R8/R9 (design v6, frozen): responder-side pending state (in-memory only, never
 // SQLite), the containment gate, and the userDataPath accessor — split out of
 // orchestration-link-binding-peer.ts to stay under the max-lines ratchet.
-import { createHash } from 'node:crypto'
 import { app } from 'electron'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   LINK_BINDING_PROBE_TTL_MS,
   LINK_BINDING_PENDING_PER_LINK,
-  LINK_BINDING_HEX32_LENGTH
+  deriveLinkQuarantineIncidentId
 } from '../../orchestration/link-binding-constants'
 import type { PendingAnswer } from './orchestration-link-binding-wire'
 
@@ -85,10 +84,7 @@ export function refuseIfQuarantined(
   // life of one quarantine (a lift + re-assert is a new row-content generation and yields a new
   // id, which is correct: it is a new incident from the peer's point of view).
   const containment = db.getContainment('link', pairedDeviceId, 'quarantine')
-  const incidentId = createHash('sha256')
-    .update(`${pairedDeviceId}:${containment?.createdAt ?? 0}`)
-    .digest('hex')
-    .slice(0, LINK_BINDING_HEX32_LENGTH)
+  const incidentId = deriveLinkQuarantineIncidentId(pairedDeviceId, containment?.createdAt ?? 0)
   db.writeAgentAudit({
     agentId: null,
     actorPaneKey: null,

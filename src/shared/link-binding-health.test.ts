@@ -20,8 +20,40 @@ describe('LinkBindingHealth: TOTALITY (test 75, C2 slice)', () => {
     expect(new Set(LINK_BINDING_HEALTH_PRECEDENCE).size).toBe(20)
   })
 
+  // F11: a compile-time exhaustive map over the UNION (not the precedence array) — a 21st union
+  // member added without a precedence entry fails TYPE CHECKING here (missing key), which the
+  // array-only version of this test could not catch (its length/contains assertions stay green).
+  const EVERY_LINK_BINDING_HEALTH_WORD: Record<LinkBindingHealth, true> = {
+    quarantined: true,
+    revoked: true,
+    excluded: true,
+    parked: true,
+    contested: true,
+    misroute_suspected: true,
+    peer_reports_contest: true,
+    peer_duplicate: true,
+    peer_no_environments: true,
+    duplicate_environment: true,
+    multi_grant: true,
+    unavailable: true,
+    unreachable: true,
+    unsupported: true,
+    stale: true,
+    legacy_unattested: true,
+    proven: true,
+    pending: true,
+    unpaired: true,
+    sender_unverified: true
+  }
+
+  it('the precedence list has no drift from the union — same members, either direction', () => {
+    expect(Object.keys(EVERY_LINK_BINDING_HEALTH_WORD).sort()).toEqual(
+      [...LINK_BINDING_HEALTH_PRECEDENCE].sort()
+    )
+  })
+
   it('every member of the union yields a defined word that is itself a member of the precedence list', () => {
-    for (const word of LINK_BINDING_HEALTH_PRECEDENCE) {
+    for (const word of Object.keys(EVERY_LINK_BINDING_HEALTH_WORD) as LinkBindingHealth[]) {
       const result = worstLinkBindingHealth([word])
       expect(result).toBe(word)
       expect(LINK_BINDING_HEALTH_PRECEDENCE).toContain(result)

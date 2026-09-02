@@ -3,7 +3,11 @@
 // under max-lines (plan §7.6).
 import type Database from '../../sqlite/sync-database'
 import { REPLY_OUTBOX_RPC_BUDGET_MS, REPLY_OUTBOX_LEASE_GRACE_MS } from './link-binding-constants'
-import { type ReplyOutboxRow, getReplyOutboxItem } from './reply-outbox-store'
+import {
+  type ReplyOutboxRow,
+  getReplyOutboxItem,
+  replyOutboxIntervalMs
+} from './reply-outbox-store'
 
 // R18.7, and (v6, protocol M4) the first statement of every pump tick: a 'sending' row whose
 // lease expired (a crash mid-RPC) reverts to 'queued' so it is claimable again.
@@ -18,30 +22,48 @@ export function reclaimExpiredReplyOutboxLeases(db: Database.Database, now: numb
   return Number(result.changes)
 }
 
-// R18.1/P18: the durable claim. Selects the oldest eligible item across every route (seq order,
-// hold_count = 0, due), then claims it with a guarded state transition — zero rows updated means
-// another claimant (or a reset) won the race, so the caller should try the next candidate.
+// R18.1/P18: the durable claim. Selects the oldest eligible item, PER ROUTE — the
+// (link_device_id, environment_id, bound_pairing_revision) triple design v6:3196-3212 names —
+// skipping any candidate whose route already has a row `sending` (R18.1: "holds no more than one
+// in flight per route"), then claims it with a guarded state transition; zero rows updated means
+// another claimant (or a reset) won the race, so the caller tries the next candidate. Signature
+// is unchanged (db, now) — no route parameter — so C5 needs no signature change: the "per route"
+// guarantee is enforced by the NOT EXISTS clause, not by the caller choosing a route.
 export function claimNextReplyOutboxItem(
   db: Database.Database,
   now: number
 ): ReplyOutboxRow | null {
   const candidates = db
     .prepare(
-      `SELECT id FROM peer_reply_outbox
+      `SELECT id, consecutive_failures AS consecutiveFailures FROM peer_reply_outbox a
         WHERE state = 'queued' AND hold_count = 0
           AND (next_attempt_after IS NULL OR next_attempt_after <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM peer_reply_outbox b
+             WHERE b.link_device_id = a.link_device_id
+               AND b.environment_id = a.environment_id
+               AND b.bound_pairing_revision = a.bound_pairing_revision
+               AND b.state = 'sending'
+          )
         ORDER BY seq ASC`
     )
-    .all(now) as { id: string }[]
+    .all(now) as { id: string; consecutiveFailures: number }[]
   const leaseExpiresAt = now + REPLY_OUTBOX_RPC_BUDGET_MS * 2 + REPLY_OUTBOX_LEASE_GRACE_MS
   for (const candidate of candidates) {
+    // R18.2: next_attempt_after is advanced BEFORE the socket opens (same UPDATE as the claim),
+    // so a crash-loop mid-attempt cannot hot-loop on restart — the reclaimed row (R18.7) lands
+    // 'queued' with this backoff already in place rather than immediately due again. Computed
+    // from the item's own current consecutive_failures (unchanged by this claim — that column's
+    // single writer is still the settle) via the same deterministic curve the kick uses.
+    const preDialBackoff = now + replyOutboxIntervalMs(candidate.consecutiveFailures)
     const result = db
       .prepare(
         `UPDATE peer_reply_outbox
-            SET state = 'sending', lease_expires_at = ?, attempts = attempts + 1, last_attempt_at = ?
+            SET state = 'sending', lease_expires_at = ?, attempts = attempts + 1,
+                last_attempt_at = ?, next_attempt_after = ?
           WHERE id = ? AND state = 'queued'`
       )
-      .run(leaseExpiresAt, now, candidate.id)
+      .run(leaseExpiresAt, now, preDialBackoff, candidate.id)
     if (result.changes === 1) {
       return getReplyOutboxItem(db, candidate.id)
     }
@@ -92,6 +114,9 @@ export function settleReplyOutboxItem(
 }
 
 // R18.4(a): a bounded, scheduled hold — back to 'queued' with the hold clock and next re-attempt.
+// Guarded `state='sending' -> 'queued'`, same as settleReplyOutboxItem (P18/R14.3): a cancellation
+// that landed in between (resetMessages) wins — zero rows updated means the item is no longer
+// 'sending' and the hold must not resurrect it.
 export function holdReplyOutboxItem(
   db: Database.Database,
   id: string,
@@ -103,7 +128,7 @@ export function holdReplyOutboxItem(
     `UPDATE peer_reply_outbox
         SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
             first_held_at = COALESCE(first_held_at, ?), next_attempt_after = ?, last_error_code = ?
-      WHERE id = ?`
+      WHERE id = ? AND state = 'sending'`
   ).run(now, nextAttemptAfter, lastErrorCode, id)
 }
 

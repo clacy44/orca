@@ -93,13 +93,13 @@ import {
   findRoutableBindingByKeyFingerprint as findRoutableBindingByKeyFingerprintImpl,
   type PeerLinkBindingRow
 } from './link-binding-store'
+import { A2_DROP_AND_RECREATE_TABLES } from './link-binding-constants'
 import {
   getBindingAttempt as getBindingAttemptImpl,
   listBindingAttempts as listBindingAttemptsImpl,
   putBindingAttempt as putBindingAttemptImpl,
   settleBindingAttempt as settleBindingAttemptImpl,
   putLinkAdvisory as putLinkAdvisoryImpl,
-  markAdvisoryNotified as markAdvisoryNotifiedImpl,
   clearLinkAdvisory as clearLinkAdvisoryImpl,
   bumpMisrouteAdvisories as bumpMisrouteAdvisoriesImpl,
   type BindingAttemptRow,
@@ -1352,7 +1352,11 @@ export class OrchestrationDb {
         ['grant_class', 'TEXT'],
         ['scan_completeness', 'TEXT'],
         ['proof_protocol', 'TEXT'],
-        ['state', "TEXT NOT NULL DEFAULT 'confirmed'"],
+        // Ruling 19 P3 / R14.4: NOT a `DEFAULT 'confirmed'` — a back-filled column must never
+        // supply the routable value. Plain nullable TEXT, like every other column in this list;
+        // the incomplete-row probe below fails closed on a NULL state exactly like any other
+        // missing NOT NULL column.
+        ['state', 'TEXT'],
         ['detail', 'TEXT'],
         ['contest_incident_id', 'TEXT'],
         ['proved_at', 'INTEGER'],
@@ -1368,13 +1372,20 @@ export class OrchestrationDb {
         }
       }
       if (addedColumn) {
+        // F6/R14.4: every NOT NULL column of peer_link_bindings the fresh v40 DDL requires, not
+        // just the eight that predate the ALTER loop above. `state` is checked against the valid
+        // word set (not merely NULL) so an unrecognized back-filled value fails closed the same
+        // as a missing one.
         const incomplete = this.db
           .prepare(
             `SELECT link_device_id FROM peer_link_bindings
               WHERE environment_id IS NULL OR bound_endpoint_id IS NULL
                  OR link_credential_fp IS NULL OR peer_credential_fp IS NULL
                  OR peer_key_fingerprint IS NULL OR proof_protocol IS NULL
-                 OR proved_at IS NULL OR last_verified_at IS NULL`
+                 OR proved_at IS NULL OR last_verified_at IS NULL
+                 OR state IS NULL OR state NOT IN ('confirmed', 'contested', 'revoked')
+                 OR bound_pairing_revision IS NULL OR grant_class IS NULL
+                 OR scan_completeness IS NULL`
           )
           .all() as { link_device_id: string }[]
         for (const row of incomplete) {
@@ -1394,7 +1405,8 @@ export class OrchestrationDb {
           this.writeAgentAudit({
             agentId: null,
             actorPaneKey: null,
-            actorHostId: 'local',
+            // F8: name the link the repair acted on — 'local' left every row indistinguishable.
+            actorHostId: row.link_device_id,
             verb: 'link_binding_unshipped_v40_repair',
             outcome: 'revoked',
             reasonCode: 'incomplete_row_fail_closed'
@@ -1467,6 +1479,10 @@ export class OrchestrationDb {
                  OR payload IS NULL OR local_message_id IS NULL`
           )
           .all() as { id: string }[]
+        // F7 fallback target: no CHECK constrains next_attempt_after, so a value far enough in
+        // the future that the claim's own `(next_attempt_after IS NULL OR next_attempt_after
+        // <= ?)` predicate never admits the row again.
+        const farFutureNextAttemptAfter = now + 100 * 365 * 24 * 60 * 60 * 1000
         for (const row of incomplete) {
           try {
             this.db
@@ -1477,13 +1493,24 @@ export class OrchestrationDb {
               )
               .run(now, row.id)
           } catch {
-            // ignore — the row's own CHECK cannot be satisfied by an unshipped-repair build; the
-            // audit row below is still the record of the fail-closed decision.
+            // F7: mirror the binding branch's fallback — a pre-review build's `state` CHECK may
+            // reject 'abandoned'; fall back to the columns no CHECK constrains
+            // (next_attempt_after / settled_at / last_error_code) so the row still stops being
+            // claimable. Without this, an un-reconstructable row stayed 'queued' and dialable —
+            // "an outbox row that cannot be reconstructed cannot be sent."
+            this.db
+              .prepare(
+                `UPDATE peer_reply_outbox
+                    SET next_attempt_after = ?, settled_at = ?, last_error_code = 'incomplete_row_fail_closed'
+                  WHERE id = ?`
+              )
+              .run(farFutureNextAttemptAfter, now, row.id)
           }
           this.writeAgentAudit({
             agentId: null,
             actorPaneKey: null,
-            actorHostId: 'local',
+            // F8: name the outbox row the repair acted on — 'local' left every row indistinguishable.
+            actorHostId: row.id,
             verb: 'link_binding_unshipped_v40_repair',
             outcome: 'abandoned',
             reasonCode: 'incomplete_row_fail_closed'
@@ -1492,33 +1519,30 @@ export class OrchestrationDb {
       }
     }
 
-    for (const [table, columns] of [
-      [
-        'peer_link_attempts',
-        [
-          'link_device_id',
-          'last_outcome',
-          'consecutive_failures',
-          'consecutive_no_winner',
-          'misroute_advisories'
-        ]
+    // F9/MOD2/L-9/X3: the drop-and-recreate table SET is driven from THE REGISTER
+    // (A2_DROP_AND_RECREATE_TABLES) — this loop's `table` values are no longer a second
+    // hard-coded copy of that list. The column maps stay local (they are per-table probe detail,
+    // not one of the register's own owned facts) but are keyed by the same names.
+    const dropAndRecreateColumns: Record<(typeof A2_DROP_AND_RECREATE_TABLES)[number], string[]> = {
+      peer_link_attempts: [
+        'link_device_id',
+        'last_outcome',
+        'consecutive_failures',
+        'consecutive_no_winner',
+        'misroute_advisories'
       ],
-      [
-        'peer_link_scan_facts',
-        [
-          'link_device_id',
-          'environment_id',
-          'outcome',
-          'environment_pairing_revision',
-          'link_credential_fp',
-          'observed_at'
-        ]
+      peer_link_scan_facts: [
+        'link_device_id',
+        'environment_id',
+        'outcome',
+        'environment_pairing_revision',
+        'link_credential_fp',
+        'observed_at'
       ],
-      [
-        'peer_link_confirm_observations',
-        ['link_device_id', 'environment_id', 'kind', 'observed_at']
-      ]
-    ] as [string, string[]][]) {
+      peer_link_confirm_observations: ['link_device_id', 'environment_id', 'kind', 'observed_at']
+    }
+    for (const table of A2_DROP_AND_RECREATE_TABLES) {
+      const columns = dropAndRecreateColumns[table]
       if (!hasTable(table)) {
         continue
       }
@@ -4647,10 +4671,6 @@ export class OrchestrationDb {
 
   putLinkAdvisory(linkDeviceId: string, advisory: LinkAdvisory, now: number): void {
     putLinkAdvisoryImpl(this.db, linkDeviceId, advisory, now)
-  }
-
-  markAdvisoryNotified(linkDeviceId: string, now: number | null): void {
-    markAdvisoryNotifiedImpl(this.db, linkDeviceId, now)
   }
 
   clearLinkAdvisory(linkDeviceId: string): void {
@@ -10267,21 +10287,29 @@ export class OrchestrationDb {
 
   resetMessages(): void {
     // Why: relay rows carry contiguous cross-server cursors, not just inbox history.
-    // S10-16 R14.3 (v5, P18): cancel every queued AND 'sending' outbox row BEFORE deleting
+    // S10-16 R14.3 (v5, P18) / F10: cancel every queued AND 'sending' outbox row BEFORE deleting
     // messages — without this the outbox's self-contained payload would still ship a
     // conversation the operator just purged. 'sending' too: without the durable in-flight state
     // a claimed item stays 'queued' while its RPC runs, so this cancel would hit it and the
     // item's own settle would then write 'delivered' straight over the cancellation.
-    this.runResetTransaction(`
-      UPDATE peer_reply_outbox
-         SET state = 'cancelled', last_error_code = 'cancelled_local_reset',
-             settled_at = ${Date.now()}, next_attempt_after = NULL, lease_expires_at = NULL
-       WHERE state IN ('queued', 'sending');
-      DELETE FROM legacy_mail_receipts;
-      DELETE FROM question_threads;
-      DELETE FROM deliveries;
-      DELETE FROM messages;
-    `)
+    // The cancel itself is `cancelQueuedReplyOutbox` (reply-outbox-store.ts) — the ONE
+    // definition of "cancel queued/sending outbox rows", not restated here — called inside this
+    // same BEGIN IMMEDIATE/COMMIT so it stays atomic with the message deletes below.
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      cancelQueuedReplyOutboxImpl(this.db, now)
+      this.db.exec(`
+        DELETE FROM legacy_mail_receipts;
+        DELETE FROM question_threads;
+        DELETE FROM deliveries;
+        DELETE FROM messages;
+      `)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   close(): void {

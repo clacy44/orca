@@ -156,25 +156,16 @@ export function putLinkAdvisory(
   ).run(JSON.stringify(advisory), now, linkDeviceId)
 }
 
-// v5 P2: fires-once bookkeeping for the peer-reports-contest notice; proveNow clears it to NULL.
-export function markAdvisoryNotified(
-  db: Database.Database,
-  linkDeviceId: string,
-  now: number | null
-): void {
-  db.prepare(
-    `UPDATE peer_link_attempts SET last_advisory_notified_at = ? WHERE link_device_id = ?`
-  ).run(now, linkDeviceId)
-}
-
-// v6 protocol M2 / lifecycle M1: the clearing writer both the pump (clean delivery) and proveNow
-// use — misroute_advisories, last_advisory, last_advisory_at, last_advisory_notified_at all clear
-// together.
+// v6 protocol M2 / lifecycle M1 / Ruling 23(a): the clearing writer both the pump (clean
+// delivery) and proveNow use — misroute_advisories, last_advisory, last_advisory_at all clear
+// together. `last_advisory_notified_at` does not exist in the v40 DDL (C2 amendment (i)); the
+// authorship-family dedupe this column used to back now lives in `shouldFireReplyRelayNotice`
+// (per-(link, incidentId, code), against `peer_reply_outbox.notified_at` — plan §3.1 P-4), not
+// in this table.
 export function clearLinkAdvisory(db: Database.Database, linkDeviceId: string): void {
   db.prepare(
     `UPDATE peer_link_attempts
-        SET misroute_advisories = 0, last_advisory = NULL, last_advisory_at = NULL,
-            last_advisory_notified_at = NULL
+        SET misroute_advisories = 0, last_advisory = NULL, last_advisory_at = NULL
       WHERE link_device_id = ?`
   ).run(linkDeviceId)
 }

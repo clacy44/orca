@@ -303,6 +303,78 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(audit).toBeTruthy()
   })
 
+  // F2/R3 (Ruling 23 Addendum 2(n)): link containment before identity. A quarantined LINK (not
+  // agent) must refuse federatedSend before the identity importer runs — effect-free, no
+  // messages row, no remote_agents mirror — reading peer_link_containment only.
+  it('R3: a quarantined link refuses federatedSend before the identity importer runs, effect-free, with an agent_audit row', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    workerDb.putContainment({
+      subjectKind: 'link',
+      subjectId: LINK_DEVICE_ID,
+      action: 'quarantine',
+      reasonCode: 'smoke_test',
+      reasonText: null,
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+
+    await expect(
+      call(
+        'orchestration.federatedSend',
+        {
+          fromAgent: { id: 'agt_00000000ab99', displayName: 'quarantined-link-sender' },
+          toAgentId: agentB,
+          messageId: 'msg_0000000ab199',
+          subject: 'hi',
+          body: 'should be refused before identity import'
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    // Effect-free: no message row, no remote_agents mirror for the sender.
+    const messageRow = raw(workerDb)
+      .prepare('SELECT 1 FROM messages WHERE id = ?')
+      .get('msg_0000000ab199')
+    expect(messageRow).toBeUndefined()
+    const remoteAgentRow = raw(workerDb)
+      .prepare('SELECT 1 FROM remote_agents WHERE remote_agent_id = ?')
+      .get('agt_00000000ab99')
+    expect(remoteAgentRow).toBeUndefined()
+
+    const audit = raw(workerDb)
+      .prepare(
+        "SELECT * FROM agent_audit WHERE verb = 'federatedLink' AND outcome = 'link_quarantined'"
+      )
+      .get()
+    expect(audit).toBeTruthy()
+  })
+
+  it('R3: an unquarantined link sees unchanged federatedSend behaviour', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    const result = (await call(
+      'orchestration.federatedSend',
+      {
+        fromAgent: { id: 'agt_00000000ab98', displayName: 'ordinary-sender' },
+        toAgentId: agentB,
+        messageId: 'msg_0000000ab198',
+        subject: 'hi',
+        body: 'should go through normally'
+      },
+      workerLinkCtx()
+    )) as { accepted: boolean }
+    expect(result.accepted).toBe(true)
+
+    const messageRow = raw(workerDb)
+      .prepare('SELECT 1 FROM messages WHERE id = ?')
+      .get('msg_0000000ab198')
+    expect(messageRow).toBeTruthy()
+  })
+
   it('--to agent:<id> --host x --type worker_done -> invalid_argument', async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)

@@ -23,6 +23,7 @@ import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
+import { refuseIfQuarantined } from './orchestration-link-binding-pending'
 
 // S10-15 F5 (chair ruling 5): the per-link cap on PENDING relayed questions.
 const PEER_ASK_PENDING_CAP = 32
@@ -95,6 +96,11 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
             }
           )
         }
+        // R3 (Ruling 23 Addendum 2(n)): link containment before identity — a quarantined link
+        // refuses BEFORE the identity importer runs, effect-free, on peer_link_containment alone
+        // (no peer-supplied value in the read). Same gate, same order as the probe/confirm RPCs.
+        refuseIfQuarantined(runtime, pairedDeviceId, 'ask')
+
         // R3: recipient resolution honors every existing guard (unknown/quarantined/derived) —
         // never a second, looser copy of the local rule for a foreign asker.
         const toAgent = requireAddressableAgentRecipient(db, params.toAgentId)
