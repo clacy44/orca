@@ -82,12 +82,13 @@ describe('RemoteRuntimeSharedControlConnection', () => {
     const server = await createServer()
     const connection = new RemoteRuntimeSharedControlConnection(server.pairing)
     const evidence = { terminalHandle: 'term-1', paneKey: 'pane-1' }
+    const wslHost = { kind: 'wsl', hostId: 'h1', distro: 'd1' } as const
     const envelope = {
       orchestrationCapability: 'capability',
       orchestrationContractVersion: 1,
       orchestrationRequestId: 'request-1',
       compatibilityInvocationId: 'compatibility-1',
-      orchestrationCompatibilityEvidence: { ...evidence, launchToken: 'launch-1', host: 'h' },
+      orchestrationCompatibilityEvidence: { ...evidence, launchToken: 'launch-1', host: wslHost },
       id: 'forged-id',
       deviceToken: 'forged-token',
       method: 'orchestration.federationAck',
