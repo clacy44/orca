@@ -7996,6 +7996,12 @@ export class Store {
     }
   }
 
+  // S10-17/F3: writeToDiskSync returns silently when frozen, so flushOrThrow throws nothing —
+  // callers that must detect a non-durable write (e.g. the launch-token anchor retry) poll this.
+  isWritesFrozen(): boolean {
+    return this.writesFrozen
+  }
+
   // Why best-effort: the sidecar is a refetchable cache; a failed write only costs a cold badge paint next launch, never data.
   private writeGithubCacheSnapshotSync(): void {
     if (!this.githubCacheDirty) {
