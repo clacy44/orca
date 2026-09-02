@@ -3,11 +3,12 @@
 import type { OrcaRuntimeService } from '../orca-runtime'
 import { localEvidenceUnavailable } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
-import { fireReplyRelayNotice } from './reply-outbox-pump-notify'
+import { fireReplyRelayNotice, auditReplyRelaySettleRaced } from './reply-outbox-pump-notify'
 import {
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_HOLD_MAX_MS,
   REPLY_RELAY_ROUTE_MOVED_NOTICE,
+  REPLY_RELAY_REFUSED_NOTICE,
   ROUTE_MOVED_CODE,
   BINDING_CHANGED_CODE
 } from './link-binding-constants'
@@ -25,7 +26,14 @@ export function holdOrRetargetReplyOutboxItem(
 ): void {
   const db = runtime.getOrchestrationDb()
   if (localEvidenceUnavailable(runtime)) {
-    db.holdReplyOutboxItemLocalEvidence(item.id, now, now + REPLY_OUTBOX_HOLD_INTERVAL_MS)
+    const heldLocalEvidence = db.holdReplyOutboxItemLocalEvidence(
+      item.id,
+      now,
+      now + REPLY_OUTBOX_HOLD_INTERVAL_MS
+    )
+    if (!heldLocalEvidence) {
+      auditReplyRelaySettleRaced(db, item, 'hold_local_evidence')
+    }
     return
   }
   const retargeted = db.findRoutableBindingByKeyFingerprint(item.peerKeyFingerprint)
@@ -35,11 +43,14 @@ export function holdOrRetargetReplyOutboxItem(
   // route still matches, so this always fired). Retarget only when the resolved route actually
   // differs; otherwise fall through to the bounded hold below, which starts first_held_at and
   // therefore the REPLY_OUTBOX_HOLD_MAX_MS/route_moved bound.
+  // Ruling 26 Addendum 3(ee)/F5: peerCredentialFp is compared too — a credential-only rotation
+  // (no pairing-revision bump) must not read as "same route" and keep a stale peer_credential_fp.
   const isSameRoute =
     retargeted !== null &&
     retargeted.linkDeviceId === item.linkDeviceId &&
     retargeted.environmentId === item.environmentId &&
-    retargeted.boundPairingRevision === item.boundPairingRevision
+    retargeted.boundPairingRevision === item.boundPairingRevision &&
+    retargeted.peerCredentialFp === item.peerCredentialFp
   if (retargeted && !isSameRoute) {
     const retargetedRow = db.retargetReplyOutboxItem(item.id, {
       linkDeviceId: retargeted.linkDeviceId,
@@ -75,27 +86,39 @@ export function holdOrRetargetReplyOutboxItem(
   // hold write below (which is the only statement in this function that could advance it).
   const firstHeldAt = item.firstHeldAt ?? now
   if (now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
+    // Ruling 26 Addendum 3(ee)/F6: a same-route hold (isSameRoute true — this tick's own
+    // re-check resolved to the row's CURRENT route) never settles route_moved; the route did not
+    // move. Only the genuine "no routable binding found at all" case (retargeted === null) uses
+    // ROUTE_MOVED_CODE/the route-moved notice. Both existing constants — no new one added.
     const settled = db.settleReplyOutboxItem(item.id, {
       state: 'refused',
       settledAt: now,
       consecutiveFailures: item.consecutiveFailures,
       nextAttemptAfter: null,
-      lastErrorCode: ROUTE_MOVED_CODE,
+      lastErrorCode: isSameRoute ? BINDING_CHANGED_CODE : ROUTE_MOVED_CODE,
       lastError: null
     })
     if (settled) {
-      fireReplyRelayNotice(runtime, item, REPLY_RELAY_ROUTE_MOVED_NOTICE, null)
+      fireReplyRelayNotice(
+        runtime,
+        item,
+        isSameRoute ? REPLY_RELAY_REFUSED_NOTICE : REPLY_RELAY_ROUTE_MOVED_NOTICE,
+        null
+      )
     } else {
-      db.writeAgentAudit({
-        agentId: null,
-        actorPaneKey: null,
-        actorHostId: item.linkDeviceId,
-        verb: 'replyRelay',
-        outcome: 'settle_raced',
-        reasonCode: JSON.stringify({ outboxId: item.id, cause: 'route_moved' })
-      })
+      auditReplyRelaySettleRaced(db, item, isSameRoute ? 'same_route_hold_deadline' : 'route_moved')
     }
     return
   }
-  db.holdReplyOutboxItem(item.id, now, now + REPLY_OUTBOX_HOLD_INTERVAL_MS, BINDING_CHANGED_CODE)
+  // Ruling 26 Addendum 3(dd)/F4: the boolean is checked — a lost hold (row cancelled underneath
+  // this call) is audited, never silently dropped.
+  const heldBindingChanged = db.holdReplyOutboxItem(
+    item.id,
+    now,
+    now + REPLY_OUTBOX_HOLD_INTERVAL_MS,
+    BINDING_CHANGED_CODE
+  )
+  if (!heldBindingChanged) {
+    auditReplyRelaySettleRaced(db, item, 'hold')
+  }
 }

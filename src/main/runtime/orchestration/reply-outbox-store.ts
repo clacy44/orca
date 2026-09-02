@@ -52,6 +52,7 @@ export type ReplyOutboxRow = {
   createdAt: number
   settledAt: number | null
   notifiedAt: number | null
+  lastNotifiedCondition: string | null
 }
 
 type ReplyOutboxSqlRow = {
@@ -86,6 +87,7 @@ type ReplyOutboxSqlRow = {
   created_at: number
   settled_at: number | null
   notified_at: number | null
+  last_notified_condition: string | null
 }
 
 function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
@@ -120,7 +122,8 @@ function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
     peerReplyThreadId: row.peer_reply_thread_id,
     createdAt: row.created_at,
     settledAt: row.settled_at,
-    notifiedAt: row.notified_at
+    notifiedAt: row.notified_at,
+    lastNotifiedCondition: row.last_notified_condition
   }
 }
 
@@ -240,6 +243,20 @@ export function cancelQueuedReplyOutbox(db: Database.Database, now: number): num
 // never cleared (an item settles once; a fresh advisory needs a fresh item).
 export function markReplyOutboxNotified(db: Database.Database, id: string, now: number): void {
   db.prepare('UPDATE peer_reply_outbox SET notified_at = ? WHERE id = ?').run(now, id)
+}
+
+// Ruling 26 Addendum 3(aa): the notice choke's own edge column — the last NOTIFIED condition,
+// distinct from last_error_code (which every hold path also writes). This is the ONLY writer;
+// no hold statement ever touches this column.
+export function markReplyOutboxNoticeCondition(
+  db: Database.Database,
+  id: string,
+  condition: string
+): void {
+  db.prepare('UPDATE peer_reply_outbox SET last_notified_condition = ? WHERE id = ?').run(
+    condition,
+    id
+  )
 }
 
 // R18.7/pump idle scheduling: the earliest a queued item becomes claimable — a NULL

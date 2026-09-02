@@ -132,6 +132,7 @@ import {
   kickReplyOutboxForLink as kickReplyOutboxForLinkImpl,
   getReplyOutboxItemByLocalMessageId as getReplyOutboxItemByLocalMessageIdImpl,
   markReplyOutboxNotified as markReplyOutboxNotifiedImpl,
+  markReplyOutboxNoticeCondition as markReplyOutboxNoticeConditionImpl,
   nextReplyOutboxWakeAt as nextReplyOutboxWakeAtImpl,
   type EnqueueReplyOutboxParams,
   type ReplyOutboxRow
@@ -1019,7 +1020,11 @@ const S10_16_LINK_BINDING_SCHEMA_SQL = `
         peer_reply_thread_id     TEXT,
         created_at               INTEGER NOT NULL,
         settled_at               INTEGER,
-        notified_at              INTEGER
+        notified_at              INTEGER,
+        -- Ruling 26 Addendum 3(aa): the disposition-notice edge keys on the last NOTIFIED
+        -- condition, not on last_error_code (which holds also write). Written ONLY by the notice
+        -- choke (fireReplyRelayNotice); holds never touch it.
+        last_notified_condition  TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_peer_reply_outbox_pending
         ON peer_reply_outbox(link_device_id, environment_id, bound_pairing_revision, state,
@@ -1469,7 +1474,10 @@ export class OrchestrationDb {
         ['peer_reply_thread_id', 'TEXT'],
         ['created_at', 'INTEGER'],
         ['settled_at', 'INTEGER'],
-        ['notified_at', 'INTEGER']
+        ['notified_at', 'INTEGER'],
+        // Ruling 26 Addendum 3(aa): unshipped-repair path for the new notice-edge column (S10-16
+        // C5d) — never a schema-version bump.
+        ['last_notified_condition', 'TEXT']
       ]
       let addedColumn = false
       for (const [column, type] of columns) {
@@ -4795,6 +4803,12 @@ export class OrchestrationDb {
     markReplyOutboxNotifiedImpl(this.db, id, now)
   }
 
+  // Ruling 26 Addendum 3(aa): the ONLY writer of last_notified_condition — called exclusively
+  // from the notice choke (fireReplyRelayNotice), never from a hold path.
+  markReplyOutboxNoticeCondition(id: string, condition: string): void {
+    markReplyOutboxNoticeConditionImpl(this.db, id, condition)
+  }
+
   nextReplyOutboxWakeAt(): number | null {
     return nextReplyOutboxWakeAtImpl(this.db)
   }
@@ -4811,25 +4825,27 @@ export class OrchestrationDb {
     return settleReplyOutboxItemImpl(this.db, id, settle)
   }
 
+  // Ruling 26 Addendum 3(dd)/F4: the guarded state='sending' -> 'queued' write's boolean is
+  // returned so the caller can check it (a lost write must never be treated as a completed hold).
   holdReplyOutboxItem(
     id: string,
     now: number,
     nextAttemptAfter: number,
     lastErrorCode: string
-  ): void {
-    holdReplyOutboxItemImpl(this.db, id, now, nextAttemptAfter, lastErrorCode)
+  ): boolean {
+    return holdReplyOutboxItemImpl(this.db, id, now, nextAttemptAfter, lastErrorCode)
   }
 
   // `now` kept in the public signature for call-site symmetry with the other lifecycle methods;
   // the impl no longer writes it (first_held_at is deliberately never advanced — R18.4(a)/L4).
-  holdReplyOutboxItemLocalEvidence(id: string, _now: number, nextAttemptAfter: number): void {
-    holdReplyOutboxItemLocalEvidenceImpl(this.db, id, nextAttemptAfter)
+  holdReplyOutboxItemLocalEvidence(id: string, _now: number, nextAttemptAfter: number): boolean {
+    return holdReplyOutboxItemLocalEvidenceImpl(this.db, id, nextAttemptAfter)
   }
 
   // M10 (C5 review)/Ruling 26(j): the in-flight-registry collision hold — never starts the
   // R18.3 abandon clock (first_held_at left untouched, same shape as the local-evidence hold).
-  holdReplyOutboxItemCollision(id: string, nextAttemptAfter: number): void {
-    holdReplyOutboxItemCollisionImpl(this.db, id, nextAttemptAfter)
+  holdReplyOutboxItemCollision(id: string, nextAttemptAfter: number): boolean {
+    return holdReplyOutboxItemCollisionImpl(this.db, id, nextAttemptAfter)
   }
 
   retryReplyOutboxItem(

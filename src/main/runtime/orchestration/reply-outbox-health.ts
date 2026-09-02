@@ -149,6 +149,16 @@ export function describeReplyRelayNotice(
   }
 }
 
+// Ruling 26 Addendum 3(aa): the per-link minimum-interval half, factored out so every
+// disposition notice on the reply-relay path can be bounded to R19.3's rate, not only the one
+// peer-triggered advisory this file originally gated.
+export function replyRelayNoticeRateLimitOk(
+  lastLinkNotifiedAt: number | null,
+  now: number
+): boolean {
+  return now - (lastLinkNotifiedAt ?? 0) >= LINK_BINDING_REVERIFY_MS
+}
+
 // R19.3/P2: the ONE peer-triggered reply-relay notice (`reply_relay_authorship_unconfirmed`).
 // Fires iff this item has never fired one before (per-incident half, `notifiedAt`) AND the link
 // has not fired one within LINK_BINDING_REVERIFY_MS (the interval half, `lastAdvisoryNotifiedAt`).
@@ -160,5 +170,5 @@ export function shouldFireReplyRelayNotice(
   if (item.notifiedAt !== null) {
     return false
   }
-  return now - (lastAdvisoryNotifiedAt ?? 0) >= LINK_BINDING_REVERIFY_MS
+  return replyRelayNoticeRateLimitOk(lastAdvisoryNotifiedAt, now)
 }

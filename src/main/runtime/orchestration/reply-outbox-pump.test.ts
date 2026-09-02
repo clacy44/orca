@@ -104,6 +104,14 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     db = new OrchestrationDb(':memory:')
     runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
+    // Ruling 26 Addendum 3(bb)/F1: setOrchestrationDb arms linkBindingProver (S10-16 C4a, R13 —
+    // "arm() runs at every DB attach"), which shares this test's mocked `callPinnedEnvironment`
+    // with the reply-outbox pump. Left armed, its LINK_BINDING_STARTUP_DELAY_MS-delayed first
+    // round fires mid-test-35/78 (a ~45s-budgeted run) and steals one of the scripted mock
+    // responses meant for the pump's own retry sequence — the harness defect the exact-once
+    // assertion this ruling adds would otherwise intermittently trip on, unrelated to the pump's
+    // own correctness. Disarmed here, matching orca-runtime.test.ts's own established pattern.
+    runtime.getLinkBindingProver().disarm()
     vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockReturnValue('proc-1')
     const verifyCaller = vi
       .spyOn(runtime, 'verifyOrchestrationCompatibilityCaller')
@@ -331,11 +339,25 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(settled?.state).toBe('delivered')
     expect(settled?.consecutiveFailures).toBe(0)
     expect(call_).toBeGreaterThan(REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD)
-    // The EXACT-once notice-count guarantee (H5/Ruling 26(f)) is proven deterministically,
-    // without this harness's real timers/backoff, in the dedicated test below — this end-to-end
-    // timer-driven harness stays a liveness/eventual-delivery check (design v6 §6's own residual-
-    // uncertainty note 2 on this file: the multi-item/restart/hold cases are what actually
-    // distinguish the fix, not the single-item timing here).
+    // Ruling 26 Addendum 3(bb): the end-to-end exact-once assertion is mandatory here, not only
+    // in the direct-call unit test below — count the unreachable/recovered mailbox rows this
+    // exact timer-driven run produced and assert exactly one of each.
+    const unreachableCount = (
+      raw(db)
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%unreachable%'`
+        )
+        .get(originalRunId) as { n: number }
+    ).n
+    const recoveredCount = (
+      raw(db)
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%recovered%'`
+        )
+        .get(originalRunId) as { n: number }
+    ).n
+    expect(unreachableCount).toBe(1)
+    expect(recoveredCount).toBe(1)
   }, 45000)
 
   it('Ruling 26 Addendum 1(n)/F1: a same-route runtime_environment_changed re-check is not a retarget — bounded hold, never released with a NULL schedule', async () => {
@@ -375,7 +397,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(afterSecond?.state).toBe('queued')
   })
 
-  it('Ruling 26 Addendum 1(o)/F2/F8: reply_relay_stale_pairing is edge-triggered on last_error_code — fires once across repeated retries, and consecutive_failures still bumps each time', async () => {
+  it('Ruling 26 Addendum 3(aa)/F2/F8: reply_relay_stale_pairing is edge-triggered on last_notified_condition (never last_error_code) — fires once across repeated retries AND across an intervening hold, and consecutive_failures still bumps each time', async () => {
     vi.spyOn(runtime, 'callPinnedEnvironment').mockRejectedValue(
       new OrchestrationError('stale_environment_pairing', 'pairing stale')
     )
@@ -389,9 +411,9 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
           .get(originalRunId) as { n: number }
       ).n
 
-    // First attempt: crosses INTO stale_environment_pairing from a NULL last_error_code — fires
-    // once, and (Ruling 26 Addendum 1(u)/F8) bumps consecutive_failures — R18.5 exempts only
-    // runtime_environment_changed and the two local-scheduling rows, not this one.
+    // First attempt: crosses INTO stale_environment_pairing from a NULL last_notified_condition
+    // — fires once, and (Ruling 26 Addendum 1(u)/F8) bumps consecutive_failures — R18.5 exempts
+    // only runtime_environment_changed and the two local-scheduling rows, not this one.
     runtime.replyOutbox?.kick(linkDeviceId)
     let item = db.getReplyOutboxItem(outboxId)
     for (let i = 0; i < 80 && (item?.consecutiveFailures ?? 0) < 1; i++) {
@@ -399,6 +421,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       item = db.getReplyOutboxItem(outboxId)
     }
     expect(item?.lastErrorCode).toBe('stale_environment_pairing')
+    expect(item?.lastNotifiedCondition).toBe('reply_relay_stale_pairing')
     expect(item?.consecutiveFailures).toBe(1)
     expect(countNotices()).toBe(1)
 
@@ -420,10 +443,46 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(item?.lastErrorCode).toBe('stale_environment_pairing')
     expect(countNotices()).toBe(1)
 
+    // F2's actual defect: an INTERVENING hold rewrites last_error_code (to binding_changed) but
+    // must NEVER touch last_notified_condition — the notice choke is its only writer. Simulate
+    // the hold directly (same statement holdOrRetargetReplyOutboxItem's fall-through calls), then
+    // let one more stale-pairing retry land: the edge must still not re-fire, because
+    // last_notified_condition is untouched by the hold.
+    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare(`UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?`)
+      .run(Date.now() - 1, outboxId)
+    const claimedForHold = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimedForHold?.id).toBe(outboxId)
+    const heldOk = db.holdReplyOutboxItem(
+      outboxId,
+      Date.now(),
+      Date.now() + 1000,
+      'binding_changed'
+    )
+    expect(heldOk).toBe(true)
+    const afterHold = db.getReplyOutboxItem(outboxId)
+    expect(afterHold?.lastErrorCode).toBe('binding_changed')
+    expect(afterHold?.lastNotifiedCondition).toBe('reply_relay_stale_pairing')
+    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare(`UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?`)
+      .run(Date.now() - 1, outboxId)
+    runtime.replyOutbox?.kick(linkDeviceId)
+    for (
+      let i = 0;
+      i < 80 && (db.getReplyOutboxItem(outboxId)?.consecutiveFailures ?? 0) < 3;
+      i++
+    ) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    item = db.getReplyOutboxItem(outboxId)
+    expect(item?.consecutiveFailures).toBe(3)
+    expect(item?.lastErrorCode).toBe('stale_environment_pairing')
+    expect(countNotices()).toBe(1)
+
     // Restart-shaped: the edge decision is a pure function of the row's PERSISTED
-    // last_error_code — no in-memory Map exists to have survived or lost a restart. A fresh
-    // classification call, given the item's own current lastErrorCode, reproduces the same
-    // non-firing decision deterministically.
+    // last_notified_condition — no in-memory Map exists that must survive a restart to skip a
+    // re-fire. A fresh classification call, given the item's own current
+    // lastNotifiedCondition, reproduces the same non-firing decision deterministically.
     const disposition = classifyReplyRelayError(
       new OrchestrationError('stale_environment_pairing', 'still stale'),
       item!.consecutiveFailures,
@@ -431,7 +490,9 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     )
     expect(disposition.kind).toBe('retry')
     expect(
-      disposition.kind === 'retry' ? item!.lastErrorCode !== disposition.disposition : true
+      disposition.kind === 'retry' && disposition.noticeCode
+        ? item!.lastNotifiedCondition !== disposition.noticeCode
+        : true
     ).toBe(false)
   })
 
@@ -546,7 +607,8 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     const claimed = db.claimNextReplyOutboxItem(Date.now())
     expect(claimed?.id).toBe(outboxId)
     const now = Date.now()
-    db.holdReplyOutboxItemCollision(outboxId, now + 30_000)
+    // Ruling 26 Addendum 3(dd)/F4: the write's boolean is returned and checked.
+    expect(db.holdReplyOutboxItemCollision(outboxId, now + 30_000)).toBe(true)
     const held = db.getReplyOutboxItem(outboxId)
     expect(held?.state).toBe('queued')
     expect(held?.lastErrorCode).toBe('relay_dial_collision')
@@ -653,5 +715,32 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%route%'`)
       .get(originalRunId) as { n: number }
     expect(notice.n).toBe(1)
+  })
+
+  it('Ruling 26 Addendum 3(ee)/F6: a same-route hold past the deadline never settles route_moved — the route did not move', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+
+    // The ONLY routable binding for this peer key fingerprint IS the row's own current route
+    // (beforeEach's single peer_link_bindings row is untouched) — isSameRoute resolves true,
+    // exactly the F1/(n) fall-through shape, not the (c)/B2 "no binding at all" shape above.
+    const now = Date.now()
+    const pastDeadline = now - REPLY_OUTBOX_HOLD_MAX_MS - 1000
+    holdOrRetargetReplyOutboxItem(runtime, { ...claimed!, firstHeldAt: pastDeadline }, now)
+
+    const after = db.getReplyOutboxItem(outboxId)
+    expect(after?.state).toBe('refused')
+    // NOT route_moved — the same-route case settles with the binding-changed code instead.
+    expect(after?.lastErrorCode).toBe('binding_changed')
+    expect(after?.lastErrorCode).not.toBe('route_moved')
+    const routeMovedNotice = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%route%'`)
+      .get(originalRunId) as { n: number }
+    expect(routeMovedNotice.n).toBe(0)
+    const refusedNotice = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%refused%'`)
+      .get(originalRunId) as { n: number }
+    expect(refusedNotice.n).toBe(1)
   })
 })

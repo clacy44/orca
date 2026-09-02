@@ -85,11 +85,19 @@ describe('reply-outbox-lifecycle: smoke (every exported statement runs against a
     expect(claimed2?.id).toBe(id2)
 
     // M1: holdReplyOutboxItem is guarded on state='sending' — a settled/cancelled row must not
-    // be resurrected.
-    holdReplyOutboxItem(sqlite, id, now, now + 1000, 'held_after_delivered')
+    // be resurrected. Ruling 26 Addendum 3(dd)/F4: the write's boolean is returned.
+    const heldAfterDelivered = holdReplyOutboxItem(
+      sqlite,
+      id,
+      now,
+      now + 1000,
+      'held_after_delivered'
+    )
+    expect(heldAfterDelivered).toBe(false)
     expect(getReplyOutboxItem(sqlite, id)?.state).toBe('delivered')
 
-    holdReplyOutboxItem(sqlite, id2, now, now + 1000, 'held_smoke')
+    const heldSmoke = holdReplyOutboxItem(sqlite, id2, now, now + 1000, 'held_smoke')
+    expect(heldSmoke).toBe(true)
     expect(getReplyOutboxItem(sqlite, id2)?.state).toBe('queued')
     expect(getReplyOutboxItem(sqlite, id2)?.holdCount).toBe(1)
 
@@ -120,7 +128,8 @@ describe('reply-outbox-lifecycle: smoke (every exported statement runs against a
     claimNextReplyOutboxItem(sqlite, now)
     cancelQueuedReplyOutbox(sqlite, now)
     expect(getReplyOutboxItem(sqlite, id3)?.state).toBe('cancelled')
-    holdReplyOutboxItem(sqlite, id3, now, now + 1000, 'held_after_cancel')
+    const heldAfterCancel = holdReplyOutboxItem(sqlite, id3, now, now + 1000, 'held_after_cancel')
+    expect(heldAfterCancel).toBe(false)
     expect(getReplyOutboxItem(sqlite, id3)?.state).toBe('cancelled')
   })
 })

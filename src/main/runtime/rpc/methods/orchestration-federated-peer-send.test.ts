@@ -142,9 +142,18 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     )
   }
 
-  afterEach(() => {
+  afterEach(async () => {
     homeDb?.close()
     workerDb?.close()
+    // Ruling 26 Addendum 3(ff)/F9: scope the vi.mock wrapper to the tests that need it — reset
+    // back to a genuine pass-through after every test, so a future `mockReturnValue` (not
+    // `Once`) in any one test cannot silently leak the routability check off for every test that
+    // runs after it.
+    const actual = await vi.importActual<typeof LinkBindingRoutable>(
+      '../../orchestration/link-binding-routable'
+    )
+    vi.mocked(getRoutableLinkBinding).mockReset()
+    vi.mocked(getRoutableLinkBinding).mockImplementation(actual.getRoutableLinkBinding)
   })
 
   async function registerAgent(
@@ -605,6 +614,30 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       threadId: mirrorThread.thread.id,
       verb: 'send'
     })
+
+    // Ruling 26 Addendum 3(cc)/F3: stub the routable-binding lookup so clause (ii) is TRUE —
+    // otherwise this suite's real getRoutableLinkBinding finds nothing (no device registry /
+    // environment store wired here), clause (ii) is false regardless of clause (i), rule 1 never
+    // applies, and the assertions below would pass identically with clause (i) deleted.
+    vi.mocked(getRoutableLinkBinding).mockReturnValueOnce({
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: WORKER_SERVER.environmentId,
+      boundEndpointId: 'ep_worker_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_cred_fp',
+      peerCredentialFp: 'peer_cred_fp',
+      peerKeyFingerprint: 'peer_key_fp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      state: 'confirmed',
+      detail: null,
+      contestIncidentId: null,
+      contestedAt: null,
+      revokedAt: null,
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    } satisfies PeerLinkBindingRow)
 
     const envelope = {
       fromAgent: { id: 'agt_00000000cd01', displayName: 'peer-sender' },

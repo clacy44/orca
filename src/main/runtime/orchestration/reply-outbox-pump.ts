@@ -10,13 +10,15 @@ import type { ReplyOutboxRow } from './reply-outbox-store'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
 import {
   fireReplyRelayNotice,
-  recordReplyOutboxFailureAndMaybeNotify
+  recordReplyOutboxFailureAndMaybeNotify,
+  auditReplyRelaySettleRaced as auditSettleRaced
 } from './reply-outbox-pump-notify'
 import { holdOrRetargetReplyOutboxItem } from './reply-outbox-pump-hold'
 import {
   settleReplyOutboxDelivery,
   type FederatedSendResultShape
 } from './reply-outbox-pump-deliver'
+import { replyRelayNoticeRateLimitOk } from './reply-outbox-health'
 import {
   REPLY_OUTBOX_RPC_BUDGET_MS,
   REPLY_OUTBOX_MAX_AGE_MS,
@@ -87,14 +89,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       if (settled) {
         fireNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
       } else {
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: item.linkDeviceId,
-          verb: 'replyRelay',
-          outcome: 'settle_raced',
-          reasonCode: JSON.stringify({ outboxId: item.id, cause: 'abandoned' })
-        })
+        auditSettleRaced(db, item, 'abandoned')
       }
       return
     }
@@ -157,14 +152,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         if (settled) {
           fireNotice(item, disposition.noticeCode, null)
         } else {
-          db.writeAgentAudit({
-            agentId: null,
-            actorPaneKey: null,
-            actorHostId: item.linkDeviceId,
-            verb: 'replyRelay',
-            outcome: 'settle_raced',
-            reasonCode: JSON.stringify({ outboxId: item.id, cause: 'refused' })
-          })
+          auditSettleRaced(db, item, 'refused')
         }
         return
       }
@@ -191,25 +179,23 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         disposition.errorMessage
       )
       if (!wrote) {
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: item.linkDeviceId,
-          verb: 'replyRelay',
-          outcome: 'settle_raced',
-          reasonCode: JSON.stringify({ outboxId: item.id, cause: 'retry' })
-        })
+        auditSettleRaced(db, item, 'retry')
         return
       }
       if (disposition.bumpFailure) {
         recordReplyOutboxFailureAndMaybeNotify(runtime, item, nextFailures)
       }
-      // Ruling 26 Addendum 1(o)/F2: edge-triggered on persisted state — a disposition notice
-      // fires only on the transition INTO this disposition (item.lastErrorCode is the
-      // pre-write value read at claim time), never on every retry. `last_error_code` was just
-      // written by the retryReplyOutboxItem call above, so the edge is durable and survives a
-      // restart for free — the same discipline Ruling 26(f) applies to the unreachable edge.
-      if (disposition.noticeCode && item.lastErrorCode !== disposition.disposition) {
+      // Ruling 26 Addendum 3(aa): edge-triggered on the notice choke's OWN persisted column
+      // (last_notified_condition), never on last_error_code — a hold's write to last_error_code
+      // (binding_changed etc.) must not re-arm this edge (F2). Also bounded by the same per-link
+      // minimum interval shouldFireReplyRelayNotice already applies to the peer-triggered
+      // advisory, so an alternating peer cannot exceed R19.3's rate either.
+      if (
+        disposition.noticeCode &&
+        item.lastNotifiedCondition !== disposition.noticeCode &&
+        replyRelayNoticeRateLimitOk(lastAdvisoryNotifiedAt.get(item.linkDeviceId) ?? null, at)
+      ) {
+        lastAdvisoryNotifiedAt.set(item.linkDeviceId, at)
         fireNotice(item, disposition.noticeCode, null)
       }
       return
@@ -218,7 +204,12 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
     if (guardResult === 'busy') {
       // R18.5/Ruling 26(j): a local scheduling collision — never a remote-outage signal, and
       // (unlike holdReplyOutboxItem) never starts the R18.3 abandon clock.
-      db.holdReplyOutboxItemCollision(item.id, now + REPLY_OUTBOX_HOLD_INTERVAL_MS)
+      // Ruling 26 Addendum 3(dd)/F4: the boolean is checked — a lost collision hold (the row was
+      // cancelled underneath this call) is audited, never silently dropped.
+      const held = db.holdReplyOutboxItemCollision(item.id, now + REPLY_OUTBOX_HOLD_INTERVAL_MS)
+      if (!held) {
+        auditSettleRaced(db, item, 'hold_collision')
+      }
       return
     }
 

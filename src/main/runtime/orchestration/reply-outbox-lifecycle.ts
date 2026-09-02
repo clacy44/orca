@@ -145,19 +145,24 @@ export function settleReplyOutboxItem(
 // Guarded `state='sending' -> 'queued'`, same as settleReplyOutboxItem (P18/R14.3): a cancellation
 // that landed in between (resetMessages) wins — zero rows updated means the item is no longer
 // 'sending' and the hold must not resurrect it.
+// Ruling 26 Addendum 3(dd)/F4: the guarded write's boolean is returned — a lost hold (the row
+// was cancelled underneath this call) must be visible to the caller, never silently swallowed.
 export function holdReplyOutboxItem(
   db: Database.Database,
   id: string,
   now: number,
   nextAttemptAfter: number,
   lastErrorCode: string
-): void {
-  db.prepare(
-    `UPDATE peer_reply_outbox
-        SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
-            first_held_at = COALESCE(first_held_at, ?), next_attempt_after = ?, last_error_code = ?
-      WHERE id = ? AND state = 'sending'`
-  ).run(now, nextAttemptAfter, lastErrorCode, id)
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE peer_reply_outbox
+          SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
+              first_held_at = COALESCE(first_held_at, ?), next_attempt_after = ?, last_error_code = ?
+        WHERE id = ? AND state = 'sending'`
+    )
+    .run(now, nextAttemptAfter, lastErrorCode, id)
+  return result.changes === 1
 }
 
 // R18.5: a transport-shaped outcome (an RPC was actually attempted and failed) retries — back to
@@ -187,17 +192,21 @@ export function retryReplyOutboxItem(
 // is left exactly as it was (never COALESCEd to `now`), so REPLY_OUTBOX_HOLD_MAX_MS's clock
 // never starts while this host cannot read its own registry/environment store (test 73). Guarded
 // `state='sending' -> 'queued'` for the same P18/R14.3 reason as holdReplyOutboxItem.
+// Ruling 26 Addendum 3(dd)/F4: boolean returned, same reasoning as holdReplyOutboxItem.
 export function holdReplyOutboxItemLocalEvidence(
   db: Database.Database,
   id: string,
   nextAttemptAfter: number
-): void {
-  db.prepare(
-    `UPDATE peer_reply_outbox
-        SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
-            next_attempt_after = ?, last_error_code = 'local_evidence_unavailable'
-      WHERE id = ? AND state = 'sending'`
-  ).run(nextAttemptAfter, id)
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE peer_reply_outbox
+          SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
+              next_attempt_after = ?, last_error_code = 'local_evidence_unavailable'
+        WHERE id = ? AND state = 'sending'`
+    )
+    .run(nextAttemptAfter, id)
+  return result.changes === 1
 }
 
 // R18.4(b)/Ruling 26(b): rewrite the route onto a freshly re-bound link AND release the row in
@@ -242,15 +251,19 @@ export function retargetReplyOutboxItem(
 // exactly as it was, never COALESCEd — this is this host's own scheduling, not a remote outage,
 // and must never start the R18.3 abandon clock) but carries the collision's own register code
 // rather than local_evidence_unavailable's.
+// Ruling 26 Addendum 3(dd)/F4: boolean returned, same reasoning as holdReplyOutboxItem.
 export function holdReplyOutboxItemCollision(
   db: Database.Database,
   id: string,
   nextAttemptAfter: number
-): void {
-  db.prepare(
-    `UPDATE peer_reply_outbox
-        SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
-            next_attempt_after = ?, last_error_code = ?
-      WHERE id = ? AND state = 'sending'`
-  ).run(nextAttemptAfter, REPLY_RELAY_COLLISION_CODE, id)
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE peer_reply_outbox
+          SET state = 'queued', lease_expires_at = NULL, hold_count = hold_count + 1,
+              next_attempt_after = ?, last_error_code = ?
+        WHERE id = ? AND state = 'sending'`
+    )
+    .run(nextAttemptAfter, REPLY_RELAY_COLLISION_CODE, id)
+  return result.changes === 1
 }

@@ -8,8 +8,36 @@ import type { ReplyOutboxRow } from './reply-outbox-store'
 import {
   REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD,
   REPLY_RELAY_UNREACHABLE_NOTICE,
-  REPLY_RELAY_RECOVERED_NOTICE
+  REPLY_RELAY_RECOVERED_NOTICE,
+  LINK_BINDING_RATE_WINDOW_MS
 } from './link-binding-constants'
+
+// Ruling 26 Addendum 3(ff)/F7: every settle_raced audit writer on the reply-relay path goes
+// through the C3/C4 house `limit:1`-per-window meter (Ruling 23 Addendum 3/5(mm)). These losers
+// are local-only (resetMessages/lease reclaim), not peer-drivable, but the house standard
+// applies uniformly — one shared writer so pump.ts and pump-hold.ts cannot drift apart.
+export function auditReplyRelaySettleRaced(
+  db: ReturnType<OrcaRuntimeService['getOrchestrationDb']>,
+  item: ReplyOutboxRow,
+  cause: string
+): void {
+  const gate = db.checkAndBumpRate({
+    subjectKey: `replyRelay:${item.linkDeviceId}`,
+    verb: 'replyRelaySettleRaced',
+    windowMs: LINK_BINDING_RATE_WINDOW_MS,
+    limit: 1
+  })
+  if (gate.allowed) {
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: item.linkDeviceId,
+      verb: 'replyRelay',
+      outcome: 'settle_raced',
+      reasonCode: JSON.stringify({ outboxId: item.id, cause })
+    })
+  }
+}
 
 // R19.1/P12: assembled entirely from local values; dropped-with-an-audit-row when the item's own
 // enqueue-time pane had no current run, never addressed to the synthetic PEER_RUN_ID mailbox.
@@ -20,6 +48,10 @@ export function fireReplyRelayNotice(
   incidentId: string | null
 ): void {
   const db = runtime.getOrchestrationDb()
+  // Ruling 26 Addendum 3(aa): the notice choke is the ONLY writer of last_notified_condition —
+  // every fire (mailbox-addressed or surfaced-via-check) records the condition it just fired,
+  // regardless of the run/no-run branch below.
+  db.markReplyOutboxNoticeCondition(item.id, code)
   if (item.noticeRunId === null) {
     // Ruling 26 Addendum 2(y): renamed from `notice_dropped_no_run` — Ruling 21 Protocol B2
     // RULED that a notice with no addressable run is NOT a mailbox write; it surfaces as
