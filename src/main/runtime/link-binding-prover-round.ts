@@ -72,6 +72,12 @@ export async function runOneRound(args: {
     if (attempt?.lastOutcome === 'unpaired_parked') {
       continue
     }
+    // F1(b)/Ruling 23(r): a contested link never re-enters an automatic round — only `proveNow`
+    // (which clears the contest) can. Its next_attempt_after is null (settle.ts), so without this
+    // exclusion it would sit forever eligible on the backoff check below.
+    if (attempt?.lastOutcome === 'contested') {
+      continue
+    }
     if (attempt?.nextAttemptAfter != null && attempt.nextAttemptAfter > now) {
       continue
     }
@@ -105,14 +111,45 @@ export async function runOneRound(args: {
     })
   }
 
-  const envCandidates = buildEnvironmentCandidates(db, ownKeyFp)
+  // F6/Ruling 23(v): a local environment-store read failure is never an attempted round — R13.4's
+  // "a failed read is never evidence of absence" applied one layer up. Distinguished from a
+  // legitimately empty store (which DOES probe normally and finds zero candidates) by
+  // `readFailed`.
+  const { candidates: envCandidates, readFailed } = buildEnvironmentCandidates(db, ownKeyFp)
+  if (readFailed) {
+    for (const link of page) {
+      const meta = linkMeta.get(link.linkDeviceId)
+      settleOneLink({
+        db,
+        selfView,
+        linkDeviceId: link.linkDeviceId,
+        grantClass: meta?.grantClass ?? 'legacy_coalesced',
+        winners: [],
+        peerDuplicateCount: 0,
+        attempted: false,
+        reconfirmed: false,
+        now,
+        environmentIds: [],
+        collapseDetail: null
+      })
+    }
+    return { completeness: 'partial', evaluatedLinkIds: page.map((p) => p.linkDeviceId) }
+  }
+
   // R10-B (v6/M2): collapse credential-identical candidates to the newest, for the probe pass.
   // Ruling 23(d): the dropped record writes NO scan fact — only `last_detail`, and it does NOT
   // advance the park counter (Ruling 23(e) — it carries no outcome for R13.3's predicate).
   const collapsed = collapseCredentialIdenticalCandidates(envCandidates)
-  if (collapsed.dropped.length > 0) {
-    recordCollapsedDuplicates(db, page, collapsed.dropped, now)
-  }
+  // F10: composed into the settle's own single lastDetail write (below) rather than a separate
+  // pre-write settleBindingAttempt call — the prior code's separate write was unconditionally
+  // overwritten by settleOneLink's own write later in the SAME round (review F10).
+  const collapseDetail =
+    collapsed.dropped.length > 0
+      ? `duplicate_environment:${collapsed.dropped
+          .map((d) => `${d.environmentId}->${d.survivorEnvironmentId}`)
+          .join(',')}`
+      : null
+  const environmentIds = collapsed.kept.map((c) => c.environmentId)
 
   const {
     winnersByLink,
@@ -172,8 +209,13 @@ export async function runOneRound(args: {
       winners: winnersByLink.get(link.linkDeviceId) ?? [],
       peerDuplicateCount: peerDuplicateCountByLink.get(link.linkDeviceId) ?? 0,
       attempted: (attemptedEnvironmentCount.get(link.linkDeviceId) ?? 0) >= collapsed.kept.length,
-      reconfirmed: reconfirmed.get(link.linkDeviceId) ?? null,
-      now
+      // F12/Ruling 23(y): fail-CLOSED default — a bind-family classification with no entry in the
+      // reconfirm map (today the map is total over the candidates; a future caller change must
+      // not silently skip R10-E's re-probe).
+      reconfirmed: reconfirmed.get(link.linkDeviceId) ?? false,
+      now,
+      environmentIds,
+      collapseDetail
     })
   }
 
@@ -190,13 +232,19 @@ export async function runOneRound(args: {
   }
 }
 
-function buildEnvironmentCandidates(db: OrchestrationDb, ownKeyFp: string): EnvCandidate[] {
+function buildEnvironmentCandidates(
+  db: OrchestrationDb,
+  ownKeyFp: string
+): { candidates: EnvCandidate[]; readFailed: boolean } {
   const userDataPath = resolveUserDataPath()
   let allEnvironments: KnownRuntimeEnvironment[]
+  // F6/Ruling 23(v): a THROW (a store file present but unreadable/corrupt) is a FAULT, never
+  // evidence of an empty candidate set — distinguished from `listEnvironments`' own legitimate
+  // `{environments:[]}` empty-store return, which is NOT a read failure.
   try {
     allEnvironments = listEnvironments(userDataPath)
   } catch {
-    allEnvironments = []
+    return { candidates: [], readFailed: true }
   }
   const envCandidates: EnvCandidate[] = []
   for (const environment of allEnvironments) {
@@ -219,26 +267,5 @@ function buildEnvironmentCandidates(db: OrchestrationDb, ownKeyFp: string): EnvC
       peerCredentialFp: hashCallerCredential(endpoint.deviceToken)
     })
   }
-  return envCandidates
-}
-
-function recordCollapsedDuplicates(
-  db: OrchestrationDb,
-  page: PageCandidateLink[],
-  dropped: { environmentId: string; survivorEnvironmentId: string }[],
-  now: number
-): void {
-  const byDetail = dropped.map((d) => `${d.environmentId}->${d.survivorEnvironmentId}`).join(',')
-  for (const link of page) {
-    const attempt = db.getBindingAttempt(link.linkDeviceId)
-    db.settleBindingAttempt(link.linkDeviceId, {
-      lastAttemptAt: now,
-      lastRoundAt: now,
-      lastOutcome: attempt?.lastOutcome ?? 'pending',
-      lastDetail: `duplicate_environment:${byDetail}`,
-      consecutiveFailures: attempt?.consecutiveFailures ?? 0,
-      consecutiveNoWinner: attempt?.consecutiveNoWinner ?? 0,
-      nextAttemptAfter: attempt?.nextAttemptAfter ?? null
-    })
-  }
+  return { candidates: envCandidates, readFailed: false }
 }

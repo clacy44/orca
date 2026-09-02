@@ -103,16 +103,26 @@ export function writeScanFact(
   outcome: LinkScanFactOutcome,
   environmentPairingRevision: number,
   selfView: LinkBindingSelfView,
-  now: number
+  now: number,
+  // F9: the machinery-gap vocabulary (Ruling 23(x)) — the raw local/peer-self-report code behind
+  // an `unavailable` outcome (`link_store_empty` / `link_store_unreadable` / `rate_limited` /
+  // `runtime_rpc_queue_overloaded`), so C6 can render R21's distinct health words from stored
+  // state instead of a collapsed `unavailable`. `null` for every other outcome.
+  detail: string | null = null
 ): void {
-  const linkCredentialFp = selfView.registryCredentialFingerprint(linkDeviceId) ?? ''
+  const linkCredentialFp = selfView.registryCredentialFingerprint(linkDeviceId)
+  // F18: the device row vanished mid-round — refuse the write rather than pinning a scan fact to
+  // an empty fingerprint (which would match any other failed read).
+  if (linkCredentialFp === null) {
+    return
+  }
   const row: ScanFactRow = {
     linkDeviceId,
     environmentId,
     outcome,
     environmentPairingRevision,
     linkCredentialFp,
-    detail: null,
+    detail,
     observedAt: now
   }
   db.putScanFact(row)
@@ -146,18 +156,31 @@ export function settleProbeFailure(args: {
   // runtime_rpc_queue_overloaded all map to `unavailable` — none of them are `unreachable`
   // (R10.3's table: a local resource fault or a truthful "broken"/"empty" self-report is never
   // reported as a remote outage).
-  const outcome: LinkScanFactOutcome =
+  const isUnavailable =
     code === 'capability_unsupported' ||
     code === 'link_store_unreadable' ||
     code === 'link_store_empty' ||
     code === 'rate_limited' ||
     code === 'runtime_rpc_queue_overloaded'
-      ? 'unavailable'
-      : code === 'method_not_found'
-        ? 'unsupported'
-        : 'unreachable'
+  const outcome: LinkScanFactOutcome = isUnavailable
+    ? 'unavailable'
+    : code === 'method_not_found'
+      ? 'unsupported'
+      : 'unreachable'
+  // F9/Ruling 23(x): carry the code itself into `detail` for `unavailable` so the machinery-gap
+  // reason (empty store vs. unreadable store vs. transport/rate fault) survives to C6.
+  const detail = isUnavailable ? code : null
   for (const link of page) {
-    writeScanFact(db, link.linkDeviceId, environmentId, outcome, expectedRevision, selfView, now)
+    writeScanFact(
+      db,
+      link.linkDeviceId,
+      environmentId,
+      outcome,
+      expectedRevision,
+      selfView,
+      now,
+      detail
+    )
   }
   return {
     winners: [],
@@ -250,11 +273,14 @@ export function settleProbeResults(args: {
       })
       writeScanFact(db, link.linkDeviceId, environmentId, 'proven', expectedRevision, selfView, now)
     } else {
+      // F15: a shape-valid `matched: true` response whose MAC fails is a PROTOCOL violation, not
+      // a transport failure — `unreachable` would let a peer choose to have itself diagnosed as a
+      // network fault instead of a bogus proof.
       writeScanFact(
         db,
         link.linkDeviceId,
         environmentId,
-        'unreachable',
+        'protocol_violation',
         expectedRevision,
         selfView,
         now

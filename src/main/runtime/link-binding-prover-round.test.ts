@@ -28,9 +28,26 @@ import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationError } from './orchestration/orchestration-error'
 import { runOneRound, type CapabilityCache, type GuardedProbe } from './link-binding-prover-round'
 import { createLinkBindingProver } from './link-binding-prover'
+import type * as RuntimeEnvironmentStoreModule from '../../shared/runtime-environment-store'
 
 const appState = { userData: '' }
 vi.mock('electron', () => ({ app: { getPath: () => appState.userData } }))
+
+// F6: a controllable fault injection for `listEnvironments` — a real throw (store file present
+// but corrupt/unreadable), distinct from the module's own legitimate empty-store return.
+const environmentStoreFault = { throwing: false }
+vi.mock('../../shared/runtime-environment-store', async (importOriginal) => {
+  const actual = await importOriginal<typeof RuntimeEnvironmentStoreModule>()
+  return {
+    ...actual,
+    listEnvironments: (userDataPath: string) => {
+      if (environmentStoreFault.throwing) {
+        throw new Error('store unreadable')
+      }
+      return actual.listEnvironments(userDataPath)
+    }
+  }
+})
 
 describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
   let root: string
@@ -54,6 +71,23 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
       endpoint: 'ws://peer.example:16768',
       deviceToken: linkToken,
       publicKeyB64: peerE2ee.publicKeyB64
+    })
+    const env = addEnvironmentFromPairingCode(userDataPath, {
+      name: `env-${randomBytes(4).toString('hex')}`,
+      pairingCode: code
+    })
+    return env.id
+  }
+
+  // F1: a coalesced fixture with a DIFFERENT peer key than the describe-level `peerE2ee` — used
+  // to simulate a second holder of the same link credential (T_in) answering from an environment
+  // this host has never bound before.
+  function saveMatchingEnvironmentWithKey(key: E2EEKeypair): string {
+    const code = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: 'ws://peer-b.example:16768',
+      deviceToken: linkToken,
+      publicKeyB64: key.publicKeyB64
     })
     const env = addEnvironmentFromPairingCode(userDataPath, {
       name: `env-${randomBytes(4).toString('hex')}`,
@@ -96,6 +130,9 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     confirmThrowWith?: OrchestrationError
     // C-9/R11.5: attaches this advisory to every `orchestration.federatedLinkProbe` answer.
     advisory?: { kind: 'link_contested' | 'link_quarantined'; incidentId: string }
+    // F1: the E2EE key this fake responder answers as — defaults to the describe-level `peerE2ee`.
+    // Lets a test simulate a SECOND distinct peer key answering the same link credential.
+    key?: E2EEKeypair
   }) {
     return vi.fn(async (args: { method: string; params: unknown }) => {
       if (args.method === 'status.get') {
@@ -141,7 +178,7 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
           }
         }
         const observedChannelFp = hashCallerCredential(linkToken)
-        const dstKeyFp = fingerprintOrchestrationPeer(peerE2ee.publicKeyB64)
+        const dstKeyFp = fingerprintOrchestrationPeer((overrides.key ?? peerE2ee).publicKeyB64)
         const results: unknown[] = []
         for (let s = 0; s < p.selectors.length; s += 1) {
           const expected = linkBindingMac(linkToken, SELECTOR_LABEL, [
@@ -303,6 +340,33 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
   })
 
   it('a cached fact never satisfies a contest_search round — the cache is bypassed entirely (R12.1(2))', async () => {
+    // F2/Ruling 23(z): the fact cache is now GATED ON OUTCOME — only `no_match` (and
+    // `unavailable`/`link_store_empty`, and `unsupported`) are TTL-cacheable; `proven` is
+    // re-probed every round (R12.2's table: "every round — it is the winner"), so a `no_match`
+    // fixture is what actually exercises R12.1(2)'s sweep-vs-contest_search cache distinction.
+    saveNonMatchingEnvironment()
+    const counter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ probeCallCounter: counter })
+    )
+    let now = Date.now()
+    // Round 1 (sweep): no live fact yet -> one fresh scan-pass probe. No winner, so no R10-E
+    // re-probe.
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBe(1)
+    now += 120_000 // past R10-A's own backoff exclusion, still well inside the 24h fact TTL.
+    // Round 2 (sweep): the fresh 'no_match' fact is live -> the scan pass is cache-skipped
+    // entirely (F2: `no_match` is one of the three outcomes the TTL actually covers).
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBe(1)
+    now += 120_000
+    // Round 3 (contest_search): bypasses the cache entirely regardless of outcome -> one more
+    // fresh scan-pass probe.
+    await runOneRound(freshRoundArgs(undefined, undefined, now, 'contest_search'))
+    expect(counter.count).toBe(2)
+  })
+
+  it('F2/Ruling 23(z): a PROVEN fact is re-probed every sweep round, never cache-skipped', async () => {
     saveMatchingEnvironment()
     const counter = { count: 0 }
     vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
@@ -310,19 +374,14 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     )
     let now = Date.now()
     // Every round that selects a winner issues its own scan-pass probe PLUS R10-E's winner
-    // re-probe — two `federatedLinkProbe` calls per winning round, whether or not the scan
-    // pass itself hit the fact cache.
+    // re-probe — two `federatedLinkProbe` calls per winning round.
     await runOneRound(freshRoundArgs(undefined, undefined, now))
     expect(counter.count).toBe(2)
     now += 120_000 // past R10-A's own backoff exclusion, still well inside the 24h fact TTL.
-    // Sweep mode: the fresh 'proven' fact is live -> the SCAN pass is skipped, but R10-E still
-    // re-probes before re-writing the (already-existing) binding — one more call.
+    // R12.2: `proven` is "re-probed: every round (it is the winner)" — the fact cache NEVER
+    // skips it, regardless of the TTL. Two MORE calls (fresh scan pass + R10-E re-probe).
     await runOneRound(freshRoundArgs(undefined, undefined, now))
-    expect(counter.count).toBe(3)
-    now += 120_000
-    // contest_search mode: bypasses the cache entirely -> a fresh scan pass PLUS its own re-probe.
-    await runOneRound(freshRoundArgs(undefined, undefined, now, 'contest_search'))
-    expect(counter.count).toBe(5)
+    expect(counter.count).toBe(4)
   })
 
   it('credential-identical candidate environments collapse to the newest; the dropped one gets NO scan fact (Ruling 23(d)/23(e))', async () => {
@@ -353,6 +412,132 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     expect(db.getPeerLinkBinding(linkId)?.environmentId).toBe(
       facts[0] === firstFact ? first : second
     )
+  })
+
+  it('F1/R11.4/Ruling 23(r): a valid proof for a link already bound elsewhere CONTESTS — the incumbent is never overwritten', async () => {
+    const keyB = loadOrCreateE2EEKeypair(join(root, 'peer-userdata-b'))
+    const envA = saveMatchingEnvironment()
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(fakeResponder({}))
+    let now = Date.now()
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    const incumbent = db.getPeerLinkBinding(linkId)
+    expect(incumbent?.environmentId).toBe(envA)
+    expect(incumbent?.state).toBe('confirmed')
+
+    // Exclude A so B is the round's sole (and thus |W|=1) winner — isolating R11.4's ACROSS-ROUND
+    // incumbent check from R11.3's SAME-round >=2-winner contest (already unit-tested by
+    // classifyLinkRound). B answers with a genuinely valid proof (it also knows T_in) but a
+    // DIFFERENT peer key.
+    db.putContainment({
+      subjectKind: 'environment',
+      subjectId: envA,
+      action: 'scan_exclude',
+      reasonCode: 'test',
+      reasonText: null,
+      detail: null,
+      createdAt: now,
+      expiresAt: null
+    })
+    saveMatchingEnvironmentWithKey(keyB)
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(fakeResponder({ key: keyB }))
+    now += 120_000
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+
+    const binding = db.getPeerLinkBinding(linkId)
+    // The incumbent (A) is NEVER overwritten by B's valid-but-different-key proof.
+    expect(binding?.environmentId).toBe(envA)
+    expect(binding?.state).toBe('contested')
+    expect(binding?.contestIncidentId).not.toBeNull()
+    const attempt = db.getBindingAttempt(linkId)
+    expect(attempt?.lastOutcome).toBe('contested')
+    // R11.3 step 3: no backoff schedule — only proveNow re-arms a contested link.
+    expect(attempt?.nextAttemptAfter).toBeNull()
+  })
+
+  it('F1(b): a contested link is excluded from the next automatic round', async () => {
+    const keyB = loadOrCreateE2EEKeypair(join(root, 'peer-userdata-b'))
+    const envA = saveMatchingEnvironment()
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(fakeResponder({}))
+    let now = Date.now()
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    db.putContainment({
+      subjectKind: 'environment',
+      subjectId: envA,
+      action: 'scan_exclude',
+      reasonCode: 'test',
+      reasonText: null,
+      detail: null,
+      createdAt: now,
+      expiresAt: null
+    })
+    saveMatchingEnvironmentWithKey(keyB)
+    const counter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ key: keyB, probeCallCounter: counter })
+    )
+    now += 120_000
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('contested')
+    const callsAfterContest = counter.count
+
+    // A further round (well past any ordinary backoff) must not re-select this contested link.
+    now += 3_600_000
+    const outcome = await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(outcome.evaluatedLinkIds).not.toContain(linkId)
+    expect(counter.count).toBe(callsAfterContest)
+  })
+
+  it('F2 negative: link_store_unreadable (a FAULT) is re-probed every round, never cache-skipped', async () => {
+    saveMatchingEnvironment()
+    const counter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({
+        throwWith: new OrchestrationError('link_store_unreadable', 'broken'),
+        probeCallCounter: counter
+      })
+    )
+    let now = Date.now()
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBe(1)
+    now += 120_000
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    // Unlike link_store_empty, an unreadable store is a FAULT — it must be re-probed every round.
+    expect(counter.count).toBe(2)
+  })
+
+  it('F21/F2 negative: an unreachable scan fact is re-probed every round, never cache-skipped', async () => {
+    saveMatchingEnvironment()
+    const counter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({
+        throwWith: new OrchestrationError('unreachable', 'peer down'),
+        probeCallCounter: counter
+      })
+    )
+    let now = Date.now()
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBe(1)
+    now += 120_000
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBe(2)
+  })
+
+  it('F6/Ruling 23(v): a local environment-store read failure is never an attempted round — the park counter never advances', async () => {
+    saveNonMatchingEnvironment()
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(fakeResponder({}))
+    environmentStoreFault.throwing = true
+    let now = Date.now()
+    try {
+      for (let i = 0; i < LINK_BINDING_UNPAIRED_PARK_ROUNDS + 2; i += 1) {
+        const outcome = await runOneRound(freshRoundArgs(undefined, undefined, now))
+        expect(outcome.completeness).toBe('partial')
+        now += 120_000
+      }
+    } finally {
+      environmentStoreFault.throwing = false
+    }
+    expect(db.getBindingAttempt(linkId)?.consecutiveNoWinner).toBe(0)
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).not.toBe('unpaired_parked')
   })
 
   it('R10-E: a winning slot that survives the re-probe + confirm gets its binding written', async () => {

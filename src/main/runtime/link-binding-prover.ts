@@ -8,7 +8,8 @@ import {
   LINK_BINDING_SWEEP_MS,
   LINK_BINDING_STARTUP_DELAY_MS,
   LINK_BINDING_KICK_DEBOUNCE_MS,
-  LINK_BINDING_PARTIAL_RETRY_MS
+  LINK_BINDING_PARTIAL_RETRY_MS,
+  LINK_BINDING_PARK_REARM_MS
 } from './orchestration/link-binding-constants'
 import {
   RoundTokenBucket,
@@ -95,7 +96,27 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
     const roundWanted = new Set(wanted)
     wanted.clear()
     void runOneRound({ runtime, mode, now, wanted: roundWanted, guardedProbe, capabilityCache })
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        // F17: prefer loud degradation — a round exception (e.g. a mid-round row-cap error) no
+        // longer vanishes silently; it gets one audit row (best-effort: the audit write itself
+        // must never throw an unhandled rejection out of this handler — e.g. a DB closed
+        // mid-shutdown) and the round is treated as `partial` (never a completeness signal it
+        // did not earn) so the caller's own book-keeping still proceeds.
+        try {
+          runtime.getOrchestrationDb().writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: null,
+            verb: 'linkBinding',
+            outcome: 'round_error',
+            reasonCode: error instanceof Error ? error.message : String(error)
+          })
+        } catch {
+          // best-effort only — the round already failed; do not let the audit write mask it
+          // with a SECOND unhandled failure.
+        }
+        return { completeness: 'partial', evaluatedLinkIds: [] } as const
+      })
       .then((outcome) => {
         roundInFlight = false
         if (outcome && outcome.completeness === 'partial' && !stopped) {
@@ -118,29 +139,50 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   return {
     scheduleBinding(linkDeviceId: string, reason: ScheduleBindingReason): void {
       const db = runtime.getOrchestrationDb()
+      const now = Date.now()
       const attempt = db.getBindingAttempt(linkDeviceId)
-      const patch = scheduleBindingPatch(reason, attempt?.nextAttemptAfter ?? null, Date.now())
+      const patch = scheduleBindingPatch(reason, attempt?.nextAttemptAfter ?? null, now)
       db.putBindingAttempt(linkDeviceId)
-      if (patch.nextAttemptAfter !== undefined) {
-        const current = db.getBindingAttempt(linkDeviceId)
+      const current = db.getBindingAttempt(linkDeviceId)
+      // F7/Ruling 23(w): parking re-arms on the FIRST inbound contact after the park, debounced
+      // to at most one re-arm per LINK_BINDING_PARK_REARM_MS (a lastAttemptAt comparison — the
+      // round settle stamps lastAttemptAt on every write, including the park write itself).
+      let rearmedOutcome: 'pending' | undefined
+      let rearmedNoWinner: number | undefined
+      if (
+        (reason === 'inbound_contact' || reason === 'peer_confirmed') &&
+        current?.lastOutcome === 'unpaired_parked' &&
+        now - (current.lastAttemptAt ?? 0) >= LINK_BINDING_PARK_REARM_MS
+      ) {
+        rearmedOutcome = 'pending'
+        rearmedNoWinner = 0
+      }
+      if (patch.nextAttemptAfter !== undefined || rearmedOutcome !== undefined) {
         db.settleBindingAttempt(linkDeviceId, {
-          lastAttemptAt: current?.lastAttemptAt ?? Date.now(),
-          lastRoundAt: current?.lastRoundAt ?? Date.now(),
-          lastOutcome: current?.lastOutcome ?? 'pending',
+          lastAttemptAt: current?.lastAttemptAt ?? now,
+          lastRoundAt: current?.lastRoundAt ?? now,
+          lastOutcome: rearmedOutcome ?? current?.lastOutcome ?? 'pending',
           lastDetail: current?.lastDetail ?? null,
           consecutiveFailures: current?.consecutiveFailures ?? 0,
-          consecutiveNoWinner: current?.consecutiveNoWinner ?? 0,
-          nextAttemptAfter: patch.nextAttemptAfter
+          consecutiveNoWinner: rearmedNoWinner ?? current?.consecutiveNoWinner ?? 0,
+          nextAttemptAfter:
+            patch.nextAttemptAfter !== undefined
+              ? patch.nextAttemptAfter
+              : (current?.nextAttemptAfter ?? null)
         })
       }
       if (patch.addToWanted) {
         wanted.add(linkDeviceId)
       }
-      if (patch.kicks && !stopped) {
-        if (kickTimer) {
-          clearTimeout(kickTimer)
-        }
-        kickTimer = setTimeout(() => attemptRound('sweep'), LINK_BINDING_KICK_DEBOUNCE_MS)
+      // F19: LEADING-edge debounce — fire the kick now (R13.1's whole point is faster than the
+      // sweep) and then ignore further kicks for LINK_BINDING_KICK_DEBOUNCE_MS. The prior
+      // trailing-edge debounce reset on every call, so steady traffic faster than the debounce
+      // window prevented the kick from ever firing at all (bounded only by the 60s sweep).
+      if (patch.kicks && !stopped && !kickTimer) {
+        attemptRound('sweep')
+        kickTimer = setTimeout(() => {
+          kickTimer = null
+        }, LINK_BINDING_KICK_DEBOUNCE_MS)
         kickTimer.unref?.()
       }
     },

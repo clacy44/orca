@@ -24,7 +24,7 @@ function allProductionTsFiles(dir: string): string[] {
 
 describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () => {
   it('db.putPeerLinkBinding is called from exactly one production call site: the round settle', () => {
-    const files = allProductionTsFiles('src/main/runtime')
+    const files = allProductionTsFiles('src/main')
     const callers: string[] = []
     for (const file of files) {
       const source = readFileSync(join(REPO_ROOT, file), 'utf8')
@@ -39,6 +39,28 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
       }
     }
     expect(callers).toEqual(['src/main/runtime/link-binding-prover-settle.ts'])
+  })
+
+  // F11: the qualified-call regex above requires a preceding `.` or `)` — a module that imports
+  // `putPeerLinkBinding` directly and calls it BARE-WORD (`putPeerLinkBinding(row)`, no receiver)
+  // matches neither assertion above nor the SQL-text scan below. Excludes the two definition
+  // sites (the raw function declaration and the DB wrapper's own method declaration), which are
+  // themselves bare-word by construction and are not calls.
+  it('no bare-word (unqualified) call site bypasses the qualified-call scan', () => {
+    const definitionFiles = new Set([
+      'src/main/runtime/orchestration/link-binding-store.ts',
+      'src/main/runtime/orchestration/db.ts'
+    ])
+    const files = allProductionTsFiles('src/main').filter((f) => !definitionFiles.has(f))
+    const bareWordRe = /(?<![\w.$])putPeerLinkBinding\s*\(/
+    const bareCallers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (bareWordRe.test(source)) {
+        bareCallers.push(file)
+      }
+    }
+    expect(bareCallers).toEqual([])
   })
 
   it('the SQL INSERT/UPDATE into peer_link_bindings lives in exactly two places: the store (the proof writer) and the R14.4 fail-closed repair (revoke-only, schema-completeness only)', () => {

@@ -16,7 +16,8 @@ import {
   LINK_BINDING_HEX32_LENGTH,
   LINK_BINDING_RPC_BUDGET_MS,
   LINK_BINDING_CAPABILITY_TTL_MS,
-  LINK_BINDING_REVERIFY_MS
+  LINK_BINDING_REVERIFY_MS,
+  LINK_STORE_EMPTY_CODE
 } from './orchestration/link-binding-constants'
 import { ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import type { LinkRoundWinner } from './orchestration/link-binding-classify'
@@ -96,14 +97,35 @@ export async function probeOneEnvironment(args: {
       link,
       fact: db.getScanFact(link.linkDeviceId, environmentId)
     }))
-    const allLive = cached.every(
-      ({ link, fact }) =>
-        fact !== null &&
-        fact.environmentPairingRevision === expectedRevision &&
-        fact.linkCredentialFp ===
-          (selfView.registryCredentialFingerprint(link.linkDeviceId) ?? '') &&
-        now - fact.observedAt < LINK_BINDING_REVERIFY_MS
-    )
+    // F2/Ruling 23(z): the skip is keyed on the fact's OUTCOME (R12.2's per-outcome re-probe
+    // column) — never a blanket "any live fact skips". Only `no_match` and `unavailable` with the
+    // `link_store_empty` reason are TTL'd on LINK_BINDING_REVERIFY_MS; `unsupported` is TTL'd on
+    // the shorter LINK_BINDING_CAPABILITY_TTL_MS. Every other outcome (`proven`, `peer_duplicate`,
+    // `protocol_violation`, `unavailable` for any other reason, `unreachable`) re-probes every
+    // round — a single transient fault must never freeze the environment out of the scan.
+    const allLive = cached.every(({ link, fact }) => {
+      if (fact === null) {
+        return false
+      }
+      if (fact.environmentPairingRevision !== expectedRevision) {
+        return false
+      }
+      if (
+        fact.linkCredentialFp !== (selfView.registryCredentialFingerprint(link.linkDeviceId) ?? '')
+      ) {
+        return false
+      }
+      if (fact.outcome === 'no_match') {
+        return now - fact.observedAt < LINK_BINDING_REVERIFY_MS
+      }
+      if (fact.outcome === 'unavailable' && fact.detail === LINK_STORE_EMPTY_CODE) {
+        return now - fact.observedAt < LINK_BINDING_REVERIFY_MS
+      }
+      if (fact.outcome === 'unsupported') {
+        return now - fact.observedAt < LINK_BINDING_CAPABILITY_TTL_MS
+      }
+      return false
+    })
     if (allLive) {
       const winners: { linkDeviceId: string; winner: LinkRoundWinner }[] = []
       const duplicateLinkIds: string[] = []
@@ -134,13 +156,21 @@ export async function probeOneEnvironment(args: {
     }
   }
 
-  const supported = await resolveCapability({
-    runtime,
-    environmentId,
-    expectedRevision,
-    now,
-    capabilityCache
-  })
+  let supported: boolean
+  try {
+    supported = await resolveCapability({
+      runtime,
+      environmentId,
+      expectedRevision,
+      now,
+      capabilityCache
+    })
+  } catch (error) {
+    // F5/Ruling 23(u): a transport/rate/queue failure during the capability check is NOT a
+    // capability answer — route it through the same local-failure mapping the probe RPC uses
+    // (unavailable(transport) etc.), and never cache it as `unsupported`.
+    return settleProbeFailure({ db, selfView, page, environmentId, expectedRevision, error, now })
+  }
   if (!supported) {
     for (const link of page) {
       writeScanFact(
@@ -273,11 +303,20 @@ async function resolveCapability(args: {
     const supported = capabilities.includes(ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY)
     capabilityCache.set(capKey, { supported, expiresAt: now + LINK_BINDING_CAPABILITY_TTL_MS })
     return supported
-  } catch {
-    capabilityCache.set(capKey, {
-      supported: false,
-      expiresAt: now + LINK_BINDING_CAPABILITY_TTL_MS
-    })
-    return false
+  } catch (error) {
+    // F5/Ruling 23(u): only a GENUINE capability-unsupported answer (an old peer that does not
+    // recognise the method) is cached. Every other error (transport, rate limit, local queue
+    // saturation) is peer/network-attributable, is never a capability answer, and must never be
+    // cached — it is rethrown so the caller routes it through settleProbeFailure's full mapping.
+    const code = error instanceof Error && 'code' in error ? (error as { code: string }).code : null
+    if (code === 'method_not_found' || code === 'capability_unsupported') {
+      capabilityCache.set(capKey, {
+        supported: false,
+        expiresAt: now + LINK_BINDING_CAPABILITY_TTL_MS
+      })
+      return false
+    }
+    capabilityCache.delete(capKey)
+    throw error
   }
 }
