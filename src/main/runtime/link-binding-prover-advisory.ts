@@ -10,6 +10,7 @@
 // `last_outcome` — that column's single writer stays the round settle.
 import type { OrchestrationDb } from './orchestration/db'
 import type { ProbeAdvisory } from './link-binding-prover-outcome'
+import { LINK_BINDING_RATE_WINDOW_MS } from './orchestration/link-binding-constants'
 
 export function recordContestAdvisoryReceipt(
   db: OrchestrationDb,
@@ -26,14 +27,27 @@ export function recordContestAdvisoryReceipt(
     // never the wire's `link_contested`/`link_quarantined`, which is what the PEER found on ITS
     // side) may always refresh itself.
     if (existing && existing.kind !== 'peer_reports_contest') {
-      db.writeAgentAudit({
-        agentId: null,
-        actorPaneKey: null,
-        actorHostId: environmentId,
-        verb: 'linkBindingAdvisory',
-        outcome: 'advisory_kind_conflict',
-        reasonCode: JSON.stringify({ existing: existing.kind, incoming: 'peer_reports_contest' })
+      // Ruling 23 Addendum 5(mm)/review C4c finding 4: peer-triggerable (the advisory's `kind`
+      // is a peer-chosen field, and `authorship_unconfirmed` — written by C5's pump — is a
+      // normal-operation value that trips this branch every round) — metered like every other
+      // C4/C4a/C4b/C4c audit writer, `linkbind:<id>` subject key, `limit: 1` per
+      // LINK_BINDING_RATE_WINDOW_MS.
+      const gate = db.checkAndBumpRate({
+        subjectKey: `linkbind:${binding.linkDeviceId}`,
+        verb: 'linkBindingAdvisoryConflictAudit',
+        windowMs: LINK_BINDING_RATE_WINDOW_MS,
+        limit: 1
       })
+      if (gate.allowed) {
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: environmentId,
+          verb: 'linkBindingAdvisory',
+          outcome: 'advisory_kind_conflict',
+          reasonCode: JSON.stringify({ existing: existing.kind, incoming: 'peer_reports_contest' })
+        })
+      }
       continue
     }
     db.putLinkAdvisory(

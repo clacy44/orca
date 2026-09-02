@@ -171,18 +171,66 @@ export class LinkBindingCapError extends Error {
 }
 
 // R11.3: the ONE writer of state='contested'. No wire code from any peer can reach this (INV-P-012).
+//
+// Ruling 23 Addendum 5(jj)/review C4c finding 1: a contest MUST produce a binding row even when
+// no incumbent exists — R11.3's own canonical case (two winners, different key fingerprints, a
+// link this host has never bound). `firstWinner` supplies the host-derived fields (from the
+// round's first winner — never anything peer-supplied beyond what a normal `bind` write would
+// already accept) an INSERT needs to satisfy the table's NOT NULL columns; they are used ONLY on
+// the insert branch. The `WHERE state <> 'contested'` guard makes the whole write a no-op once
+// the row is already contested — the proof-bearing columns (and the contest markers themselves)
+// stay immutable to every writer except the host-side contest-resolution verb, matching
+// `putPeerLinkBinding`'s own structural guard above.
+export type ContestFirstWinner = {
+  environmentId: string
+  boundEndpointId: string
+  boundPairingRevision: number
+  linkCredentialFp: string
+  peerCredentialFp: string
+  peerKeyFingerprint: string
+  grantClass: 'minted' | 'legacy_coalesced'
+  scanCompleteness: 'complete' | 'partial'
+  proofProtocol: string
+}
+
 export function contestPeerLinkBinding(
   db: Database.Database,
   linkDeviceId: string,
   now: number,
   incidentId: string,
-  detail: string | null
+  detail: string | null,
+  firstWinner: ContestFirstWinner
 ): void {
   db.prepare(
-    `UPDATE peer_link_bindings
-        SET state = 'contested', contested_at = ?, contest_incident_id = ?, detail = ?
-      WHERE link_device_id = ?`
-  ).run(now, incidentId, detail, linkDeviceId)
+    `INSERT INTO peer_link_bindings (
+       link_device_id, environment_id, bound_endpoint_id, bound_pairing_revision,
+       link_credential_fp, peer_credential_fp, peer_key_fingerprint, grant_class,
+       scan_completeness, proof_protocol, state, detail, contest_incident_id,
+       proved_at, last_verified_at, contested_at, revoked_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'contested', ?, ?, ?, ?, ?, NULL)
+     ON CONFLICT(link_device_id) DO UPDATE SET
+       state = 'contested',
+       detail = excluded.detail,
+       contest_incident_id = excluded.contest_incident_id,
+       contested_at = excluded.contested_at
+     WHERE peer_link_bindings.state <> 'contested'`
+  ).run(
+    linkDeviceId,
+    firstWinner.environmentId,
+    firstWinner.boundEndpointId,
+    firstWinner.boundPairingRevision,
+    firstWinner.linkCredentialFp,
+    firstWinner.peerCredentialFp,
+    firstWinner.peerKeyFingerprint,
+    firstWinner.grantClass,
+    firstWinner.scanCompleteness,
+    firstWinner.proofProtocol,
+    detail,
+    incidentId,
+    now,
+    now,
+    now
+  )
 }
 
 export function revokePeerLinkBinding(

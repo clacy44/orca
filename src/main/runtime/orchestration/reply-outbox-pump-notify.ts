@@ -21,12 +21,16 @@ export function fireReplyRelayNotice(
 ): void {
   const db = runtime.getOrchestrationDb()
   if (item.noticeRunId === null) {
+    // Ruling 26 Addendum 2(y): renamed from `notice_dropped_no_run` — Ruling 21 Protocol B2
+    // RULED that a notice with no addressable run is NOT a mailbox write; it surfaces as
+    // link-status health, this audit row, and `orca orchestration check`'s attention line. The
+    // row IS the durable record, so "dropped" was the defect, not the behaviour.
     db.writeAgentAudit({
       agentId: null,
       actorPaneKey: item.noticePaneKey,
       actorHostId: item.linkDeviceId,
       verb: 'replyRelay',
-      outcome: 'notice_dropped_no_run',
+      outcome: 'notice_surfaced_via_check',
       reasonCode: JSON.stringify({ outboxId: item.id, localMessageId: item.localMessageId, code })
     })
     return

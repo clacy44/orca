@@ -229,7 +229,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     }
     expect(settled?.state).toBe('abandoned')
     const dropped = raw(db)
-      .prepare(`SELECT * FROM agent_audit WHERE outcome = 'notice_dropped_no_run'`)
+      .prepare(`SELECT * FROM agent_audit WHERE outcome = 'notice_surfaced_via_check'`)
       .get()
     const currentRun = db.getCurrentRunForPane(PANE_A)
     const notice = raw(db)
@@ -275,6 +275,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       ownKeyFingerprint: () => null,
       macWithRegistryToken: () => null,
       listRuntimeLinkCandidates: () => [],
+      listRuntimeScopeDeviceIds: () => [],
       registryLoadSucceeded: () => false
     })
     runtime.replyOutbox?.kick(linkDeviceId)

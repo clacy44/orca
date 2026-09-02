@@ -46,6 +46,12 @@ export async function probePage(args: {
   // `partial`. An in-flight probe already dispatched is never aborted (cancellation is
   // R4.6/R10.2's own client-level `maxDurationMs`, not this budget).
   deadline: number
+  // Ruling 23 Addendum 5(oo)/review C4c finding 7: the SAME clock `deadline` was computed from —
+  // defaults to `Date.now` (production, where it agrees with the round's own `now` by
+  // construction) but is injectable so a test can drive genuine elapsed time against a
+  // synthetic `now` without the two clocks disagreeing (a caller passing a `now` far from real
+  // time previously made the cutoff trip on origin skew rather than on a slow responder).
+  clock?: () => number
 }): Promise<ProbePageResult> {
   const {
     runtime,
@@ -58,7 +64,8 @@ export async function probePage(args: {
     guardedProbe,
     capabilityCache,
     environments,
-    deadline
+    deadline,
+    clock = Date.now
   } = args
   const winnersByLink = new Map<string, LinkRoundWinner[]>()
   const peerDuplicateCountByLink = new Map<string, number>()
@@ -75,7 +82,7 @@ export async function probePage(args: {
   let nextIndex = 0
   async function worker(): Promise<void> {
     while (nextIndex < environments.length) {
-      if (Date.now() > deadline) {
+      if (clock() > deadline) {
         anyPartial = true
         return
       }

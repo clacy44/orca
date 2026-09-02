@@ -791,7 +791,17 @@ describe('S10-16 C3: link-binding responder (federatedLinkProbe/federatedLinkCon
       lastVerifiedAt: Date.now()
     })
     const incidentId = 'c'.repeat(32)
-    db.contestPeerLinkBinding(homeLinkDeviceId, Date.now(), incidentId, 'test contest')
+    db.contestPeerLinkBinding(homeLinkDeviceId, Date.now(), incidentId, 'test contest', {
+      environmentId: 'env-does-not-need-to-exist',
+      boundEndpointId: 'ep-1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: LINK_BINDING_PROTOCOL
+    })
     const params = buildProbe(0, 'contested-secret')
     const result = (await call('orchestration.federatedLinkProbe', params, pairedCtx())) as {
       advisory?: { kind: string; incidentId: string }

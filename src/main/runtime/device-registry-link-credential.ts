@@ -28,6 +28,13 @@ export type LinkBindingSelfView = {
    *  (`scope==='runtime' && lastSeenAt !== 0`), with the grant-class fact R15.1's `routingClass`
    *  needs at bind time. Never a token. */
   listRuntimeLinkCandidates(): readonly LinkBindingCandidateLink[]
+  /** Ruling 23 Addendum 5(pp)/review C4c finding 13: R13.4's own retained set for the sweep-owned
+   *  purge — every `scope==='runtime'` device id, WITHOUT the `lastSeenAt !== 0` filter
+   *  `listRuntimeLinkCandidates` applies for probing. R13.4 says "live runtime-scope device ids",
+   *  not "authenticated" ones — a minted-but-never-authenticated runtime grant must stay retained
+   *  (it has no binding/attempt row to lose today, but the purge's guard should say what R13.4
+   *  says, not a narrower thing that happens to be harmless). */
+  listRuntimeScopeDeviceIds(): readonly string[]
   /** S10-16 C5, R15.3/R18.4(a): `deviceRegistry.loadSucceeded` — false only on a genuine parse/
    *  read failure of `orca-devices.json`, never on an empty/missing file. */
   registryLoadSucceeded(): boolean
@@ -63,6 +70,12 @@ export function createLinkBindingSelfView(
           pairedAt: d.pairedAt,
           grantClass: deriveGrantClassAtBind(d)
         }))
+    },
+    listRuntimeScopeDeviceIds(): readonly string[] {
+      return deviceRegistry
+        .listDevices()
+        .filter((d) => d.scope === 'runtime')
+        .map((d) => d.deviceId)
     },
     registryLoadSucceeded(): boolean {
       return deviceRegistry.loadSucceeded

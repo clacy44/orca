@@ -91,7 +91,8 @@ import {
   revokePeerLinkBinding as revokePeerLinkBindingImpl,
   findBindingsByEnvironment as findBindingsByEnvironmentImpl,
   findRoutableBindingByKeyFingerprint as findRoutableBindingByKeyFingerprintImpl,
-  type PeerLinkBindingRow
+  type PeerLinkBindingRow,
+  type ContestFirstWinner
 } from './link-binding-store'
 import { A2_DROP_AND_RECREATE_TABLES } from './link-binding-constants'
 import {
@@ -4642,9 +4643,10 @@ export class OrchestrationDb {
     linkDeviceId: string,
     now: number,
     incidentId: string,
-    detail: string | null
+    detail: string | null,
+    firstWinner: ContestFirstWinner
   ): void {
-    contestPeerLinkBindingImpl(this.db, linkDeviceId, now, incidentId, detail)
+    contestPeerLinkBindingImpl(this.db, linkDeviceId, now, incidentId, detail, firstWinner)
   }
 
   revokePeerLinkBinding(linkDeviceId: string, now: number): void {

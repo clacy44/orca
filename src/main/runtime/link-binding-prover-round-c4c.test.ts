@@ -20,8 +20,10 @@ import {
   LINK_BINDING_UNPAIRED_PARK_ROUNDS,
   LINK_BINDING_PARK_REARM_MS,
   LINK_BINDING_STARTUP_DELAY_MS,
-  LINK_BINDING_SWEEP_MS
+  LINK_BINDING_SWEEP_MS,
+  LINK_BINDING_SCAN_CONCURRENCY
 } from './orchestration/link-binding-constants'
+import { roundBudgetMs } from './orchestration/link-binding-schedule'
 import { ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
 import { addEnvironmentFromPairingCode } from '../../shared/runtime-environment-store'
@@ -68,6 +70,84 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
       pairingCode: code
     })
     return env.id
+  }
+
+  // Ruling 23 Addendum 5(jj)/review C4c finding 1: a genuine two-winner-same-round contest needs
+  // TWO environments that both independently prove the SAME link credential (`linkToken`) from
+  // DIFFERENT peer keys — but R10-B's credential collapse groups candidates by
+  // `hashCallerCredential(deviceToken)`, so they must carry DIFFERENT `deviceToken`s to survive
+  // as two separate probe targets. `fakeResponder` (below) hardcodes ONE `observedChannelFp`
+  // (`hash(linkToken)`), which only matches a candidate whose OWN `deviceToken` is `linkToken` —
+  // so this fixture needs its own responder, parameterised by the environment's real
+  // `deviceToken`, computing exactly what `probeOneEnvironment` computes (F1: genuine crypto, no
+  // stub return value).
+  function saveEnvironmentKnowingCredential(deviceToken: string, key: E2EEKeypair): string {
+    const code = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: `ws://peer-${randomBytes(4).toString('hex')}.example:16768`,
+      deviceToken,
+      publicKeyB64: key.publicKeyB64
+    })
+    const env = addEnvironmentFromPairingCode(userDataPath, {
+      name: `env-${randomBytes(4).toString('hex')}`,
+      pairingCode: code
+    })
+    return env.id
+  }
+
+  // Mirrors `fakeResponder`'s `orchestration.federatedLinkProbe`/`status.get` branches exactly,
+  // but derives `observedChannelFp` from THIS environment's own `deviceToken` (never a hardcoded
+  // `linkToken`) — so it verifies correctly against `probeOneEnvironment`'s real computation for
+  // an UNCOLLAPSED candidate whose stored `deviceToken` differs from every other candidate's.
+  function credentialResponder(deviceToken: string, key: E2EEKeypair) {
+    return vi.fn(async (args: { method: string; params: unknown }) => {
+      if (args.method === 'status.get') {
+        return { capabilities: [ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY] }
+      }
+      if (args.method === 'orchestration.federatedLinkConfirm') {
+        const p = args.params as { confirms: { slotIndex: number; confirm: string }[] }
+        return {
+          protocol: 'orca.link-binding.v1',
+          acknowledged: p.confirms.map((c) => c.slotIndex)
+        }
+      }
+      if (args.method === 'orchestration.federatedLinkProbe') {
+        const p = args.params as {
+          probeId: string
+          nonceH: string
+          epoch: number
+          selectors: string[]
+        }
+        const observedChannelFp = hashCallerCredential(deviceToken)
+        const dstKeyFp = fingerprintOrchestrationPeer(key.publicKeyB64)
+        const results: unknown[] = []
+        for (let s = 0; s < p.selectors.length; s += 1) {
+          const expected = linkBindingMac(linkToken, SELECTOR_LABEL, [
+            p.probeId,
+            p.nonceH,
+            String(s),
+            String(p.epoch),
+            observedChannelFp,
+            dstKeyFp
+          ])
+          if (expected === p.selectors[s]) {
+            const nonceP = randomBytes(32).toString('hex')
+            const proof = linkBindingMac(linkToken, PROOF_LABEL, [
+              p.probeId,
+              p.nonceH,
+              String(s),
+              String(p.epoch),
+              observedChannelFp,
+              dstKeyFp,
+              nonceP
+            ])
+            results.push({ slotIndex: s, matched: true, nonceP, proof })
+          }
+        }
+        return { protocol: 'orca.link-binding.v1', results }
+      }
+      throw new Error(`unexpected method ${args.method}`)
+    })
   }
 
   function saveNonMatchingEnvironment(): string {
@@ -486,6 +566,39 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
     expect(db.getScanFact(linkId, envId)).toBeNull()
   })
 
+  it('Ruling 23 Addendum 5(oo)/review C4c finding 7: a GENUINELY slow first wave trips the round budget on a later candidate — one clock, not a pre-expired `now`', async () => {
+    vi.useFakeTimers()
+    try {
+      // More candidates than the pool width — the (SCAN_CONCURRENCY + 1)-th only starts once one
+      // of the first SCAN_CONCURRENCY workers frees up, which is exactly where genuinely elapsed
+      // time (not a stale `now`) must be observed for the cutoff to fire correctly.
+      const envIds = Array.from({ length: LINK_BINDING_SCAN_CONCURRENCY + 1 }, () =>
+        saveNonMatchingEnvironment()
+      )
+      const dialled: string[] = []
+      const budgetMs = roundBudgetMs(envIds.length)
+      vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async (args) => {
+        const a = args as { method: string; selector?: string }
+        dialled.push(String(a.selector))
+        // Every dial genuinely takes real (simulated) time on the SAME clock (`Date.now`,
+        // fake-timer-driven) the round's deadline was computed from — past the budget itself, so
+        // by the time any of the first-wave workers frees up, the deadline has GENUINELY elapsed.
+        await new Promise((resolve) => setTimeout(resolve, budgetMs + 5_000))
+        throw new OrchestrationError('unreachable', 'down')
+      })
+      const now = Date.now()
+      const roundPromise = runOneRound(freshRoundArgs(undefined, undefined, now))
+      await vi.advanceTimersByTimeAsync(budgetMs + 10_000)
+      const outcome = await roundPromise
+      expect(outcome.completeness).toBe('partial')
+      // Exactly the pool width was dialled — the (SCAN_CONCURRENCY + 1)-th candidate's turn only
+      // came after the budget had genuinely elapsed, so the cutoff correctly stopped it.
+      expect(dialled).toHaveLength(LINK_BINDING_SCAN_CONCURRENCY)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('finding 4/Ruling 23 Addendum 4(cc): the register-timer fallback re-arms a park that never receives inbound contact, after LINK_BINDING_PARK_REARM_MS', async () => {
     saveNonMatchingEnvironment()
     vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(fakeResponder({}))
@@ -510,6 +623,64 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
     now = parkedAt + LINK_BINDING_PARK_REARM_MS + 1_000
     outcome = await runOneRound(freshRoundArgs(undefined, undefined, now))
     expect(outcome.evaluatedLinkIds).toContain(linkId)
+  })
+
+  it('Ruling 23 Addendum 5(jj)/review C4c finding 1: two winners with different key fingerprints and NO incumbent still write a contested row, excluded from the next round', async () => {
+    const keyA = loadOrCreateE2EEKeypair(join(root, 'peer-userdata-a'))
+    const keyB = loadOrCreateE2EEKeypair(join(root, 'peer-userdata-b'))
+    const tokenA = 'shared-credential-token-a'
+    const tokenB = 'shared-credential-token-b'
+    const envA = saveEnvironmentKnowingCredential(tokenA, keyA)
+    const envB = saveEnvironmentKnowingCredential(tokenB, keyB)
+    const respA = credentialResponder(tokenA, keyA)
+    const respB = credentialResponder(tokenB, keyB)
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async (args) => {
+      const a = args as { method: string; params: unknown; selector?: string }
+      if (a.selector === envA) {
+        return respA(a)
+      }
+      if (a.selector === envB) {
+        return respB(a)
+      }
+      throw new Error(`unexpected selector ${String(a.selector)}`)
+    })
+
+    // No incumbent — this link has never had a `peer_link_bindings` row.
+    expect(db.getPeerLinkBinding(linkId)).toBeNull()
+
+    const now = Date.now()
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+
+    const binding = db.getPeerLinkBinding(linkId)
+    expect(binding?.state).toBe('contested')
+    expect(binding?.contestIncidentId).not.toBeNull()
+    const incidentId = binding?.contestIncidentId
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('contested')
+    // Exactly one contested audit row — one incident id.
+    const auditRows = rawDb(db)
+      .prepare(
+        "SELECT reason_code FROM agent_audit WHERE verb = 'linkBinding' AND outcome = 'contested'"
+      )
+      .all() as { reason_code: string }[]
+    expect(auditRows).toHaveLength(1)
+    const reason = JSON.parse(auditRows[0]?.reason_code ?? '{}') as { incidentId?: string }
+    expect(reason.incidentId).toBe(incidentId)
+
+    // Excluded from the next round — `binding.state === 'contested'` now has a row to key on.
+    const outcome = await runOneRound(freshRoundArgs(undefined, undefined, now + 3_600_000))
+    expect(outcome.evaluatedLinkIds).not.toContain(linkId)
+    // Unchanged by the exclusion — the row (and its incident id) is durable.
+    expect(db.getPeerLinkBinding(linkId)?.contestIncidentId).toBe(incidentId)
+
+    // Excluded from every kick too — `scheduleBinding` reads the same binding row.
+    vi.useFakeTimers()
+    const prover = createLinkBindingProver(runtime)
+    const before = db.getBindingAttempt(linkId)
+    prover.scheduleBinding(linkId, 'inbound_contact')
+    expect(db.getBindingAttempt(linkId)).toEqual(before)
+    await vi.advanceTimersByTimeAsync(20_000)
+    prover.stop()
+    vi.useRealTimers()
   })
 })
 
@@ -564,7 +735,17 @@ describe('S10-16 C4c: review C4b closure — prover-level (Ruling 23 Addendum 4)
       provedAt: 0,
       lastVerifiedAt: 0
     })
-    db.contestPeerLinkBinding(linkId, 0, 'incident-1', 'contest detail')
+    db.contestPeerLinkBinding(linkId, 0, 'incident-1', 'contest detail', {
+      environmentId: 'env-x',
+      boundEndpointId: 'ep-x',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1'
+    })
     const before = db.getBindingAttempt(linkId)
     const prover = createLinkBindingProver(runtime)
     prover.scheduleBinding(linkId, 'inbound_contact')
@@ -576,8 +757,30 @@ describe('S10-16 C4c: review C4b closure — prover-level (Ruling 23 Addendum 4)
     prover.stop()
   })
 
-  it("finding 3/Ruling 23 Addendum 4(bb): a kick never runs the round's synchronous prefix on the caller's own stack", () => {
+  it("finding 3/Ruling 23 Addendum 4(bb), made discriminating by Ruling 23 Addendum 5(pp)/review C4c finding 5: a kick never runs the round's synchronous prefix on the caller's own stack", () => {
+    // Review C4c finding 5: the ORIGINAL fixture saved no environment, so `callPinnedEnvironment`
+    // was unreachable whether or not the round was deferred — the assertion below could not fail
+    // on the pre-fix (synchronous-kick) code. A REACHABLE environment plus an overdue
+    // `nextAttemptAfter` (the F19 test's own setup) makes the round's synchronous prefix actually
+    // try to call it if `scheduleBinding` ever regresses to running the round on the caller's own
+    // stack.
+    const code = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: 'ws://peer.example:16768',
+      deviceToken: 'irrelevant-to-this-test',
+      publicKeyB64: peerE2ee.publicKeyB64
+    })
+    addEnvironmentFromPairingCode(userDataPath, { name: 'env-bb-test', pairingCode: code })
     db.putBindingAttempt(linkId)
+    db.settleBindingAttempt(linkId, {
+      lastAttemptAt: 0,
+      lastRoundAt: 0,
+      lastOutcome: 'pending',
+      lastDetail: null,
+      consecutiveFailures: 0,
+      consecutiveNoWinner: 0,
+      nextAttemptAfter: Date.now() - 1_000
+    })
     const prover = createLinkBindingProver(runtime)
     prover.scheduleBinding(linkId, 'inbound_contact')
     // Synchronously, immediately after scheduleBinding returns — R8.6: no round has started yet.

@@ -156,12 +156,16 @@ export function settleProbeFailure(args: {
   // runtime_rpc_queue_overloaded all map to `unavailable` — none of them are `unreachable`
   // (R10.3's table: a local resource fault or a truthful "broken"/"empty" self-report is never
   // reported as a remote outage).
-  // Ruling 23 Addendum 4(ee): TWO REGISTERS, no contradiction. THIS mapping is R10.3's own
-  // SCAN-FACT OUTCOME table — `capability_unsupported` here settles `unavailable` (persisted,
-  // reported to the operator). It is independent of `resolveCapability`'s CAPABILITY CACHE in
-  // link-binding-prover-probe.ts, which governs Ruling 23(u) ("caches ONLY a genuine
-  // capability_unsupported") and only skips a redundant `status.get` call — it never decides
-  // this outcome.
+  // Ruling 23 Addendum 5(ll) (settling C4c finding 3, ex-Ruling 23 Addendum 4(ee)): TWO
+  // REGISTERS, no contradiction. THIS mapping is R10.3's own SCAN-FACT OUTCOME table —
+  // `capability_unsupported` here settles `unavailable` (persisted, reported to the operator),
+  // reached when `federatedLinkProbe` itself throws the code. It is independent of
+  // `resolveCapability`'s CAPABILITY CACHE in link-binding-prover-probe.ts, which governs Ruling
+  // 23(u) ("caches ONLY a genuine capability_unsupported") and only skips a redundant
+  // `status.get` call — it never decides this outcome. `resolveCapability`'s OWN caller
+  // (`probeOneEnvironment`'s `!capability.supported` branch, reached when `status.get` itself
+  // throws or answers without the capability) now applies the SAME R10.3 mapping independently,
+  // keyed on the `reason` `resolveCapability` returns — see the comment there.
   const isUnavailable =
     code === 'capability_unsupported' ||
     code === 'link_store_unreadable' ||

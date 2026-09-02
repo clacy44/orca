@@ -29,7 +29,7 @@ import {
 } from './orchestration/link-binding-constants'
 import type { LinkRoundWinner } from './orchestration/link-binding-classify'
 import { parseProbeResults } from './link-binding-prover-outcome'
-import type { GuardedProbe } from './link-binding-prover-probe'
+import { fisherYatesSlotOrder, type GuardedProbe } from './link-binding-prover-probe'
 
 export type ReconfirmCandidate = { linkDeviceId: string; winner: LinkRoundWinner }
 
@@ -106,21 +106,40 @@ async function reconfirmOneEnvironment(args: {
   const dstKeyFp = first.winner.peerKeyFingerprint
   const expectedRevision = first.winner.boundPairingRevision
 
+  // Ruling 23 Addendum 5(pp)/review C4c findings 9-10: the re-probe is a probe (R10-E) and gets
+  // both of R10.4's per-probe properties the original scan pass gets — a FRESH epoch (never the
+  // round's own `roundEpoch`, which the original probe already consumed) and a shuffled slot
+  // order (never the identity `group[idx]` mapping, which handed a responder a stable per-link
+  // slot on every re-probe).
+  const reconfirmEpoch = roundEpoch + 1
   const probeId = randomHex(LINK_BINDING_HEX32_LENGTH / 2)
   const nonceH = randomHex(LINK_BINDING_NONCE_BYTES)
-  const selectors: string[] = group.map(
-    (candidate, idx) =>
+  const slotOrder = fisherYatesSlotOrder(LINK_BINDING_PROBE_SLOTS)
+  const slotCandidates: (ReconfirmCandidate | null)[] = Array.from(
+    { length: LINK_BINDING_PROBE_SLOTS },
+    () => null
+  )
+  const selectors: string[] = Array.from({ length: LINK_BINDING_PROBE_SLOTS })
+  group.forEach((candidate, i) => {
+    const slot = slotOrder[i]
+    if (slot === undefined) {
+      return
+    }
+    slotCandidates[slot] = candidate
+    selectors[slot] =
       selfView.macWithRegistryToken(candidate.linkDeviceId, SELECTOR_LABEL, [
         probeId,
         nonceH,
-        String(idx),
-        String(roundEpoch),
+        String(slot),
+        String(reconfirmEpoch),
         observedChannelFp,
         dstKeyFp
       ]) ?? randomHex(LINK_BINDING_NONCE_BYTES)
-  )
-  while (selectors.length < LINK_BINDING_PROBE_SLOTS) {
-    selectors.push(randomHex(LINK_BINDING_NONCE_BYTES))
+  })
+  for (let s = 0; s < LINK_BINDING_PROBE_SLOTS; s += 1) {
+    if (selectors[s] === undefined) {
+      selectors[s] = randomHex(LINK_BINDING_NONCE_BYTES)
+    }
   }
 
   let probed: unknown
@@ -129,7 +148,13 @@ async function reconfirmOneEnvironment(args: {
       runtime.callPinnedEnvironment({
         selector: environmentId,
         method: 'orchestration.federatedLinkProbe',
-        params: { protocol: LINK_BINDING_PROTOCOL, probeId, nonceH, epoch: roundEpoch, selectors },
+        params: {
+          protocol: LINK_BINDING_PROTOCOL,
+          probeId,
+          nonceH,
+          epoch: reconfirmEpoch,
+          selectors
+        },
         timeoutMs: LINK_BINDING_RPC_BUDGET_MS,
         maxDurationMs: LINK_BINDING_RPC_BUDGET_MS,
         expectedEnvironmentPairingRevision: expectedRevision,
@@ -152,7 +177,7 @@ async function reconfirmOneEnvironment(args: {
     if (!result.matched) {
       continue
     }
-    const candidate = group[result.slotIndex]
+    const candidate = slotCandidates[result.slotIndex]
     if (!candidate) {
       continue
     }
@@ -160,7 +185,7 @@ async function reconfirmOneEnvironment(args: {
       probeId,
       nonceH,
       String(result.slotIndex),
-      String(roundEpoch),
+      String(reconfirmEpoch),
       observedChannelFp,
       dstKeyFp,
       result.nonceP

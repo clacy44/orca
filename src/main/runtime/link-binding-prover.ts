@@ -10,7 +10,8 @@ import {
   LINK_BINDING_KICK_DEBOUNCE_MS,
   LINK_BINDING_PARTIAL_RETRY_MS,
   LINK_BINDING_PEER_TEXT_CLAMP,
-  LINK_BINDING_RATE_WINDOW_MS
+  LINK_BINDING_RATE_WINDOW_MS,
+  LINK_BINDING_PARK_REARM_MS
 } from './orchestration/link-binding-constants'
 import {
   RoundTokenBucket,
@@ -56,7 +57,17 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   // no `linkBindingSelfView` installed yet returns `partial` immediately, so this fires on the
   // very first armed startup round of any runtime that hasn't wired R9 yet (most tests).
   let partialRetryTimer: ReturnType<typeof setTimeout> | null = null
+  // Ruling 23 Addendum 5(nn)/review C4c finding 6: the deferred kick's `setTimeout(…, 0)` (below)
+  // — untracked before this fix, so `disarm()` could not stop a pending round. Tracked and
+  // `unref`'d like every other prover timer; cleared in both `disarm()` and `stop()`.
+  let kickRunTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
+  // Ruling 23 Addendum 5(kk)/review C4c finding 2: R13.3's re-arm debounce, restored as an
+  // in-memory map (not relocated away) — the FIRST inbound contact after a park re-arms
+  // immediately, and every subsequent one is debounced to at most one re-arm per
+  // LINK_BINDING_PARK_REARM_MS. No new column: this state is scheduler-local and does not need
+  // to survive a restart (a restart's first contact is, correctly, a fresh "first" re-arm).
+  const lastRearmAt = new Map<string, number>()
   // R13 trigger table/R13.4/Ruling 23 Addendum 4(hh): the environment-set digest re-arm and the
   // sweep-owned deletion — split into link-binding-prover-maintenance.ts (Ruling 23(m): a split
   // is the only remedy for the 300-line gate).
@@ -66,14 +77,27 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   // `pump:<envId>`, so the two never collide even against the same environment.
   const guardedProbe: GuardedProbe = (environmentId, maxDurationMs, run) =>
     inFlightGuard.guarded(`prover:${environmentId}`, maxDurationMs, run, () => {
-      runtime.getOrchestrationDb().writeAgentAudit({
-        agentId: null,
-        actorPaneKey: null,
-        actorHostId: environmentId,
-        verb: 'linkBinding',
-        outcome: 'inflight_stale_evicted',
-        reasonCode: null
+      const db = runtime.getOrchestrationDb()
+      // Ruling 23 Addendum 5(mm)/review C4c finding 4: "every audit writer in the C4 family is
+      // metered" — this one included, even though it is host-driven (a peer cannot trigger a
+      // stale in-flight eviction directly). `environmentId`-keyed subject, same pattern as every
+      // other C4/C4a/C4b/C4c writer.
+      const gate = db.checkAndBumpRate({
+        subjectKey: `linkbind:${environmentId}`,
+        verb: 'linkBindingInflightStaleEvictedAudit',
+        windowMs: LINK_BINDING_RATE_WINDOW_MS,
+        limit: 1
       })
+      if (gate.allowed) {
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: environmentId,
+          verb: 'linkBinding',
+          outcome: 'inflight_stale_evicted',
+          reasonCode: null
+        })
+      }
     })
 
   function ensureBucket(now: number): RoundTokenBucket {
@@ -186,8 +210,16 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
         (reason === 'inbound_contact' || reason === 'peer_confirmed') &&
         current?.lastOutcome === 'unpaired_parked'
       ) {
-        rearmedOutcome = 'pending'
-        rearmedNoWinner = 0
+        // Ruling 23 Addendum 5(kk): the first re-arm for a link fires immediately (no entry in
+        // the map yet); every subsequent one within LINK_BINDING_PARK_REARM_MS of the last is
+        // debounced away — a peer's own message cadence must never keep this host probing at the
+        // 30s floor forever (review C4c finding 2).
+        const last = lastRearmAt.get(linkDeviceId)
+        if (last === undefined || now - last >= LINK_BINDING_PARK_REARM_MS) {
+          rearmedOutcome = 'pending'
+          rearmedNoWinner = 0
+          lastRearmAt.set(linkDeviceId, now)
+        }
       }
       if (patch.nextAttemptAfter !== undefined || rearmedOutcome !== undefined) {
         db.settleBindingAttempt(linkDeviceId, {
@@ -216,7 +248,11 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       // read, up to 8 attempt-row writes) on the caller's own stack, and `scheduleBinding` is
       // called at the tail of five peer-facing RPC handlers.
       if (patch.kicks && !stopped && !kickTimer) {
-        setTimeout(() => attemptRound('sweep'), 0)
+        kickRunTimer = setTimeout(() => {
+          kickRunTimer = null
+          attemptRound('sweep')
+        }, 0)
+        kickRunTimer.unref?.()
         kickTimer = setTimeout(() => {
           kickTimer = null
         }, LINK_BINDING_KICK_DEBOUNCE_MS)
@@ -248,6 +284,11 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       sweepTimer.unref?.()
     },
     disarm(): void {
+      // Ruling 23 Addendum 5(nn)/review C4c finding 6: `disarm()` now sets `stopped` — a pending
+      // deferred kick (or any timer callback that fires after this call) checks it and starts no
+      // round, matching `stop()`'s own contract. `arm()`'s own `stopped` guard means a disarmed
+      // prover needs no re-arm path here; `arm()` is the caller's own re-entry point.
+      stopped = true
       if (startupTimer) {
         clearTimeout(startupTimer)
         startupTimer = null
@@ -259,6 +300,10 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       if (kickTimer) {
         clearTimeout(kickTimer)
         kickTimer = null
+      }
+      if (kickRunTimer) {
+        clearTimeout(kickRunTimer)
+        kickRunTimer = null
       }
       if (partialRetryTimer) {
         clearTimeout(partialRetryTimer)

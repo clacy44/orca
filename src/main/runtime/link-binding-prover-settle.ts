@@ -147,7 +147,24 @@ export function settleOneLink(args: {
     lastDetail = detail
     isContested = true
     const incidentId = randomBytes(LINK_BINDING_HEX32_LENGTH / 2).toString('hex')
-    db.contestPeerLinkBinding(linkDeviceId, now, incidentId, detail)
+    // Ruling 23 Addendum 5(jj)/review C4c finding 1: `writeContest` is only ever called from a
+    // branch classifyLinkRound reached with `winners.length >= 1` (bind-family or `contested`),
+    // so `winners[0]` — the round's first winner — always exists here. Its host-derived fields
+    // seed the row when the write's UPSERT finds none (R11.3's canonical no-incumbent case); when
+    // a row already exists (the bind-family incumbent-mismatch branch), the UPDATE half of the
+    // upsert never touches these columns.
+    const firstWinner = winners[0]
+    db.contestPeerLinkBinding(linkDeviceId, now, incidentId, detail, {
+      environmentId: firstWinner?.environmentId ?? '',
+      boundEndpointId: firstWinner?.boundEndpointId ?? '',
+      boundPairingRevision: firstWinner?.boundPairingRevision ?? 0,
+      linkCredentialFp: selfView.registryCredentialFingerprint(linkDeviceId) ?? '',
+      peerCredentialFp: firstWinner?.peerCredentialFp ?? '',
+      peerKeyFingerprint: firstWinner?.peerKeyFingerprint ?? '',
+      grantClass,
+      scanCompleteness: attempted ? 'complete' : 'partial',
+      proofProtocol: LINK_BINDING_PROTOCOL
+    })
     meteredAudit('linkBindingContestAudit', () => {
       db.writeAgentAudit({
         agentId: null,

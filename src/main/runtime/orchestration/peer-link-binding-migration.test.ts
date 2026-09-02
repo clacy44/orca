@@ -117,7 +117,17 @@ describe('S10-16 C2: schema v40 migration and repair', () => {
       provedAt: 1000,
       lastVerifiedAt: 1000
     })
-    db.contestPeerLinkBinding('link1', 2000, 'incident1', 'detail')
+    db.contestPeerLinkBinding('link1', 2000, 'incident1', 'detail', {
+      environmentId: 'env1',
+      boundEndpointId: 'ep1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lfp',
+      peerCredentialFp: 'pfp',
+      peerKeyFingerprint: 'pkf',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1'
+    })
     db.close()
     db = undefined
 

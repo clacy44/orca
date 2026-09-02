@@ -74,7 +74,11 @@ export function createMaintenanceTick(
     if (!selfView || !selfView.registryLoadSucceeded()) {
       return
     }
-    const retainedLinkDeviceIds = selfView.listRuntimeLinkCandidates().map((l) => l.deviceId)
+    // Ruling 23 Addendum 5(pp)/review C4c finding 13: R13.4's own wording — "live runtime-scope
+    // device ids" — not `listRuntimeLinkCandidates()`'s narrower "authenticated" set (which
+    // additionally requires `lastSeenAt !== 0`, R10-A's own probing filter, not R13.4's retention
+    // one).
+    const retainedLinkDeviceIds = selfView.listRuntimeScopeDeviceIds()
     if (retainedLinkDeviceIds.length === 0) {
       return
     }
