@@ -74,7 +74,9 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
 
     // R18.3: the delivery deadline, checked before any RPC.
     if (now - item.createdAt > REPLY_OUTBOX_MAX_AGE_MS) {
-      db.settleReplyOutboxItem(item.id, {
+      // Ruling 26 Addendum 1(q)/F4: the settle's boolean is checked — a lost write (the row was
+      // cancelled underneath this call) must never fire the notice.
+      const settled = db.settleReplyOutboxItem(item.id, {
         state: 'abandoned',
         settledAt: now,
         consecutiveFailures: item.consecutiveFailures,
@@ -82,7 +84,18 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         lastErrorCode: item.lastErrorCode,
         lastError: item.lastError
       })
-      fireNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
+      if (settled) {
+        fireNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
+      } else {
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: item.linkDeviceId,
+          verb: 'replyRelay',
+          outcome: 'settle_raced',
+          reasonCode: JSON.stringify({ outboxId: item.id, cause: 'abandoned' })
+        })
+      }
       return
     }
 
@@ -126,10 +139,14 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       )) as 'busy' | FederatedSendResultShape
     } catch (error) {
       const at = Date.now()
-      // attempts already bumped at claim time (R18.2) — the item's OWN current attempt count.
-      const disposition = classifyReplyRelayError(error, item.attempts, at)
+      // Ruling 26 Addendum 1(r)/F5: the backoff curve is keyed on the row's own persisted
+      // consecutive_failures — the SAME counter the claim (reply-outbox-lifecycle.ts) and the
+      // unreachable/recovered edge use — never on `item.attempts` (which bumps on every claim,
+      // including ones that end in a hold, and diverges from consecutive_failures under B1).
+      const disposition = classifyReplyRelayError(error, item.consecutiveFailures, at)
       if (disposition.kind === 'refused') {
-        db.settleReplyOutboxItem(item.id, {
+        // Ruling 26 Addendum 1(q)/F4: check the settle's boolean before firing.
+        const settled = db.settleReplyOutboxItem(item.id, {
           state: 'refused',
           settledAt: at,
           consecutiveFailures: item.consecutiveFailures,
@@ -137,7 +154,18 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
           lastErrorCode: disposition.code,
           lastError: disposition.errorMessage
         })
-        fireNotice(item, disposition.noticeCode, null)
+        if (settled) {
+          fireNotice(item, disposition.noticeCode, null)
+        } else {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: item.linkDeviceId,
+            verb: 'replyRelay',
+            outcome: 'settle_raced',
+            reasonCode: JSON.stringify({ outboxId: item.id, cause: 'refused' })
+          })
+        }
         return
       }
       if (disposition.kind === 'recheck') {
@@ -151,7 +179,10 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       const nextFailures = disposition.bumpFailure
         ? item.consecutiveFailures + 1
         : item.consecutiveFailures
-      db.retryReplyOutboxItem(
+      // Ruling 26 Addendum 1(q)/F4: the retry's boolean is checked — a lost write (a concurrent
+      // resetMessages/reclaim mid-flight) must persist nothing, fire nothing, and never let the
+      // next claim re-cross a threshold on a counter that was never written.
+      const wrote = db.retryReplyOutboxItem(
         item.id,
         at,
         disposition.nextAttemptAfter,
@@ -159,10 +190,26 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         disposition.disposition,
         disposition.errorMessage
       )
+      if (!wrote) {
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: item.linkDeviceId,
+          verb: 'replyRelay',
+          outcome: 'settle_raced',
+          reasonCode: JSON.stringify({ outboxId: item.id, cause: 'retry' })
+        })
+        return
+      }
       if (disposition.bumpFailure) {
         recordReplyOutboxFailureAndMaybeNotify(runtime, item, nextFailures)
       }
-      if (disposition.noticeCode) {
+      // Ruling 26 Addendum 1(o)/F2: edge-triggered on persisted state — a disposition notice
+      // fires only on the transition INTO this disposition (item.lastErrorCode is the
+      // pre-write value read at claim time), never on every retry. `last_error_code` was just
+      // written by the retryReplyOutboxItem call above, so the edge is durable and survives a
+      // restart for free — the same discipline Ruling 26(f) applies to the unreachable edge.
+      if (disposition.noticeCode && item.lastErrorCode !== disposition.disposition) {
         fireNotice(item, disposition.noticeCode, null)
       }
       return

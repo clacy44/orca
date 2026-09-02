@@ -24,6 +24,7 @@ import {
 } from './link-binding-constants'
 import { replyOutboxIntervalMs } from './reply-outbox-store'
 import { PEER_REFUSAL_DISPOSITIONS, classifyPeerRefusalCode } from './reply-outbox-health'
+import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
 import {
   recordReplyOutboxFailureAndMaybeNotify,
   onReplyOutboxDelivered
@@ -295,38 +296,179 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       return { accepted: true, messageId: 'msg_peerreceipt01', threadId: null }
     })
     const { outboxId } = await enqueueOneReply()
-    // Force each attempt to be immediately claimable rather than waiting the real backoff curve,
-    // and wait for `call_` itself to advance (never a fixed sleep — the kick debounces 1000ms).
+    // Ruling 26 Addendum 1(w): re-aimed at the ROW's own consecutive_failures, never the mock's
+    // call count (a count of mock ENTRIES, not of persisted attempts — the C5b review's answer
+    // (i) traced the harness's flakiness to exactly this). The force-write is guarded
+    // `AND state = 'queued'` and only issued once the row has actually settled back to 'queued'
+    // — never concurrently with an in-flight 'sending' row, which is the race the review found
+    // (a force-write landing between the pump's own retryReplyOutboxItem and the next claim).
     for (let i = 0; i < REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD + 3; i++) {
       if (db.getReplyOutboxItem(outboxId)?.state === 'delivered') {
         break
       }
-      const callsBefore = call_
+      for (let w = 0; w < 100 && db.getReplyOutboxItem(outboxId)?.state !== 'queued'; w++) {
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      const failuresBefore = db.getReplyOutboxItem(outboxId)?.consecutiveFailures ?? 0
       ;(
         db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }
       ).db
-        .prepare(`UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?`)
+        .prepare(
+          `UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ? AND state = 'queued'`
+        )
         .run(Date.now() - 1, outboxId)
       runtime.replyOutbox?.kick(linkDeviceId)
-      for (let w = 0; w < 80; w++) {
+      for (let w = 0; w < 100; w++) {
         await new Promise((r) => setTimeout(r, 50))
-        if (call_ > callsBefore) {
+        const row = db.getReplyOutboxItem(outboxId)
+        if (row?.state === 'delivered' || (row?.consecutiveFailures ?? 0) > failuresBefore) {
           break
         }
       }
-      expect(call_).toBeGreaterThan(callsBefore)
-      // Let the settle/retry write land before forcing the next attempt.
-      await new Promise((r) => setTimeout(r, 20))
     }
     const settled = db.getReplyOutboxItem(outboxId)
     expect(settled?.state).toBe('delivered')
     expect(settled?.consecutiveFailures).toBe(0)
+    expect(call_).toBeGreaterThan(REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD)
     // The EXACT-once notice-count guarantee (H5/Ruling 26(f)) is proven deterministically,
     // without this harness's real timers/backoff, in the dedicated test below — this end-to-end
     // timer-driven harness stays a liveness/eventual-delivery check (design v6 §6's own residual-
     // uncertainty note 2 on this file: the multi-item/restart/hold cases are what actually
     // distinguish the fix, not the single-item timing here).
   }, 45000)
+
+  it('Ruling 26 Addendum 1(n)/F1: a same-route runtime_environment_changed re-check is not a retarget — bounded hold, never released with a NULL schedule', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+
+    const now = Date.now()
+    // The ONLY routable binding for this peer key fingerprint IS the row's own current route
+    // (beforeEach set up exactly one peer_link_bindings row) — findRoutableBindingByKeyFingerprint
+    // resolves to the SAME route, which used to be treated as a retarget onto itself.
+    holdOrRetargetReplyOutboxItem(runtime, claimed!, now)
+
+    const after = db.getReplyOutboxItem(outboxId)
+    // Route identity unchanged, and — the F1 defect — NOT released with next_attempt_after=NULL
+    // (which would make it immediately re-claimable, the unbounded dial loop). It is a bounded
+    // hold: queued, with a real schedule and firstHeldAt started.
+    expect(after?.linkDeviceId).toBe(linkDeviceId)
+    expect(after?.boundPairingRevision).toBe(claimed!.boundPairingRevision)
+    expect(after?.state).toBe('queued')
+    expect(after?.lastErrorCode).toBe('binding_changed')
+    expect(after?.nextAttemptAfter).not.toBeNull()
+    expect(after?.nextAttemptAfter as number).toBeGreaterThan(now)
+    expect(after?.firstHeldAt).not.toBeNull()
+    expect(after?.consecutiveFailures).toBe(0)
+
+    // A second same-route re-check (the row reclaimed once its hold expires) must stay bounded:
+    // it does not advance firstHeldAt (the route_moved clock keeps counting from the FIRST hold,
+    // per Ruling 26(c)) and it still schedules a real, non-null next attempt rather than looping.
+    const firstHeldAt = after!.firstHeldAt
+    const reclaimed = db.claimNextReplyOutboxItem(after!.nextAttemptAfter! + 1)
+    expect(reclaimed?.id).toBe(outboxId)
+    holdOrRetargetReplyOutboxItem(runtime, reclaimed!, after!.nextAttemptAfter! + 1)
+    const afterSecond = db.getReplyOutboxItem(outboxId)
+    expect(afterSecond?.firstHeldAt).toBe(firstHeldAt)
+    expect(afterSecond?.nextAttemptAfter).not.toBeNull()
+    expect(afterSecond?.state).toBe('queued')
+  })
+
+  it('Ruling 26 Addendum 1(o)/F2/F8: reply_relay_stale_pairing is edge-triggered on last_error_code — fires once across repeated retries, and consecutive_failures still bumps each time', async () => {
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockRejectedValue(
+      new OrchestrationError('stale_environment_pairing', 'pairing stale')
+    )
+    const { outboxId } = await enqueueOneReply()
+    const countNotices = (): number =>
+      (
+        raw(db)
+          .prepare(
+            `SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%fresh pairing%'`
+          )
+          .get(originalRunId) as { n: number }
+      ).n
+
+    // First attempt: crosses INTO stale_environment_pairing from a NULL last_error_code — fires
+    // once, and (Ruling 26 Addendum 1(u)/F8) bumps consecutive_failures — R18.5 exempts only
+    // runtime_environment_changed and the two local-scheduling rows, not this one.
+    runtime.replyOutbox?.kick(linkDeviceId)
+    let item = db.getReplyOutboxItem(outboxId)
+    for (let i = 0; i < 80 && (item?.consecutiveFailures ?? 0) < 1; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      item = db.getReplyOutboxItem(outboxId)
+    }
+    expect(item?.lastErrorCode).toBe('stale_environment_pairing')
+    expect(item?.consecutiveFailures).toBe(1)
+    expect(countNotices()).toBe(1)
+
+    // Retry with the SAME disposition: the counter still bumps, but the notice must NOT re-fire
+    // — it is edge-triggered on the transition, not level-triggered on every attempt.
+    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare(`UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?`)
+      .run(Date.now() - 1, outboxId)
+    runtime.replyOutbox?.kick(linkDeviceId)
+    for (
+      let i = 0;
+      i < 80 && (db.getReplyOutboxItem(outboxId)?.consecutiveFailures ?? 0) < 2;
+      i++
+    ) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    item = db.getReplyOutboxItem(outboxId)
+    expect(item?.consecutiveFailures).toBe(2)
+    expect(item?.lastErrorCode).toBe('stale_environment_pairing')
+    expect(countNotices()).toBe(1)
+
+    // Restart-shaped: the edge decision is a pure function of the row's PERSISTED
+    // last_error_code — no in-memory Map exists to have survived or lost a restart. A fresh
+    // classification call, given the item's own current lastErrorCode, reproduces the same
+    // non-firing decision deterministically.
+    const disposition = classifyReplyRelayError(
+      new OrchestrationError('stale_environment_pairing', 'still stale'),
+      item!.consecutiveFailures,
+      Date.now()
+    )
+    expect(disposition.kind).toBe('retry')
+    expect(
+      disposition.kind === 'retry' ? item!.lastErrorCode !== disposition.disposition : true
+    ).toBe(false)
+  })
+
+  it('M13/Ruling 26(l): a kick landing while a tick is already running is not dropped — the item still reaches delivered', async () => {
+    const gate: { resolve: (() => void) | undefined } = { resolve: undefined }
+    let calls = 0
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async () => {
+      calls += 1
+      if (calls === 1) {
+        // Hold the FIRST dial open so the tick is still `loopRunning` when the second kick's
+        // debounced call lands — the exact window M13's rerun flag exists for.
+        await new Promise<void>((resolve) => {
+          gate.resolve = resolve
+        })
+      }
+      return { accepted: true, messageId: 'msg_peerreceipt02', threadId: null }
+    })
+    const { outboxId } = await enqueueOneReply()
+    runtime.replyOutbox?.kick(linkDeviceId)
+    // Wait for the pump to actually enter the held-open first dial.
+    for (let i = 0; i < 80 && calls < 1; i++) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    expect(calls).toBe(1)
+    // A second kick while the tick is running: without M13's rerun flag this call is either a
+    // silent no-op (the guard at the top of runTickLoop returns early) or — if the debounce
+    // timer is still armed — later gets cleared by a subsequent kick with no memory that this
+    // one ever arrived.
+    runtime.replyOutbox?.kick(linkDeviceId)
+    await new Promise((r) => setTimeout(r, 50))
+    gate.resolve?.()
+    let settled = db.getReplyOutboxItem(outboxId)
+    for (let i = 0; i < 80 && settled?.state !== 'delivered'; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      settled = db.getReplyOutboxItem(outboxId)
+    }
+    expect(settled?.state).toBe('delivered')
+  })
 
   // H5/Ruling 26(f): the notice-count assertion the C5 review found removed. Restored here as a
   // DIRECT, deterministic exercise of recordReplyOutboxFailureAndMaybeNotify/onReplyOutboxDelivered

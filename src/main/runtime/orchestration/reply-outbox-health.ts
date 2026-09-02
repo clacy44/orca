@@ -133,7 +133,10 @@ export function describeReplyRelayNotice(
         body:
           `Message ${ctx.localMessageId} to ${who} is held: the pairing is stale ` +
           `(${ctx.peerRefusalCode ?? 'stale_environment_pairing'}). Run ` +
-          `\`orca environment pair\` for ${ctx.environmentName} to re-pair.`
+          // Ruling 26 Addendum 1(s)/F6: only a verb that exists — plan §4.8's
+          // `orca environment update` (`orca environment pair` is not a real command).
+          `\`orca environment update --environment ${ctx.environmentName} --pairing-code '<url>'\` ` +
+          `to re-pair.`
       }
     case REPLY_RELAY_UNSUPPORTED_NOTICE:
       return {

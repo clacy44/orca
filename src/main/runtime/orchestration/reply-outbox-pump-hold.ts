@@ -29,7 +29,18 @@ export function holdOrRetargetReplyOutboxItem(
     return
   }
   const retargeted = db.findRoutableBindingByKeyFingerprint(item.peerKeyFingerprint)
-  if (retargeted) {
+  // Ruling 26 Addendum 1(n)/F1: a re-check that resolves to the row's CURRENT route is not a
+  // retarget — retargeting it onto itself and releasing with next_attempt_after = NULL turns
+  // every `runtime_environment_changed` re-check into an unbounded, unclamped dial loop (the
+  // route still matches, so this always fired). Retarget only when the resolved route actually
+  // differs; otherwise fall through to the bounded hold below, which starts first_held_at and
+  // therefore the REPLY_OUTBOX_HOLD_MAX_MS/route_moved bound.
+  const isSameRoute =
+    retargeted !== null &&
+    retargeted.linkDeviceId === item.linkDeviceId &&
+    retargeted.environmentId === item.environmentId &&
+    retargeted.boundPairingRevision === item.boundPairingRevision
+  if (retargeted && !isSameRoute) {
     const retargetedRow = db.retargetReplyOutboxItem(item.id, {
       linkDeviceId: retargeted.linkDeviceId,
       environmentId: retargeted.environmentId,

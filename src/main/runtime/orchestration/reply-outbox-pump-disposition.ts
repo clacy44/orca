@@ -45,8 +45,10 @@ function clampRetryAfterMs(v: unknown): number | null {
 // M11 (C5 review)/Ruling 26(k)/INV-P-006 clause (a): strip control characters and clamp length
 // at the write site — raw, unbounded peer text is never stored in `last_error`.
 function sanitizeErrorDetail(message: string): string {
+  // Ruling 26 Addendum 1(v)/F9: also strips U+2028/U+2029 — JS string line terminators that
+  // survive a JSON round-trip (R19.4's set).
   // eslint-disable-next-line no-control-regex -- Why: stripping raw peer-supplied control bytes is the point.
-  const stripped = message.replace(/[\x00-\x1F\x7F]/g, ' ').trim()
+  const stripped = message.replace(/[\x00-\x1F\x7F\u2028\u2029]/g, ' ').trim()
   return stripped.slice(0, REPLY_OUTBOX_LAST_ERROR_DETAIL_CLAMP)
 }
 
@@ -64,9 +66,12 @@ const KNOWN_REFUSAL_CODES = new Set([
 ])
 
 // R18.5's disposition table + R18.8's closed error read, as one pure function.
+// Ruling 26 Addendum 1(r)/F5: the backoff curve's input is the row's persisted
+// consecutive_failures — the same counter the claim (reply-outbox-lifecycle.ts) and the
+// unreachable/recovered edge use — never `attempts` (parameter renamed from `attemptsAfterClaim`).
 export function classifyReplyRelayError(
   error: unknown,
-  attemptsAfterClaim: number,
+  consecutiveFailures: number,
   now: number
 ): ReplyRelayErrorDisposition {
   const errorCode = (error as { code?: unknown } | null)?.code
@@ -95,14 +100,16 @@ export function classifyReplyRelayError(
 
   // Transport-shaped (or unknown/untyped): retry, with a bounded, jittered backoff
   // (R18.2/Ruling 26(i) — every backoff computed on this path is jittered).
-  let nextAttemptAfter = now + applyReplyOutboxJitter(replyOutboxIntervalMs(attemptsAfterClaim))
+  let nextAttemptAfter = now + applyReplyOutboxJitter(replyOutboxIntervalMs(consecutiveFailures))
   let bumpFailure = true
   let noticeCode: ReplyRelayNoticeCode | undefined
 
   if (code === 'stale_environment_pairing' || code === 'unauthorized') {
-    // markPairingStale has already run in the transport layer (orca-runtime.ts) by the time this
-    // error surfaces; this disposition only needs to avoid the failure bump and name the notice.
-    bumpFailure = false
+    // Ruling 26 Addendum 1(u)/F8: R18.5's table has NO exemption for this row — only
+    // runtime_environment_changed and the two local-scheduling rows skip the bump. markPairingStale
+    // has already run in the transport layer (orca-runtime.ts); that is orthogonal to whether this
+    // is evidence of a failed attempt. bumpFailure stays true so a permanently-unauthorized route
+    // reaches REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD and the `unreachable` health word.
     noticeCode = REPLY_RELAY_STALE_PAIRING_NOTICE
   } else if (code === 'orchestration_migration_required' || code === 'capability_unsupported') {
     bumpFailure = false
@@ -117,7 +124,10 @@ export function classifyReplyRelayError(
     )
     nextAttemptAfter =
       now +
-      Math.max(retryAfterMs ?? 0, applyReplyOutboxJitter(replyOutboxIntervalMs(attemptsAfterClaim)))
+      Math.max(
+        retryAfterMs ?? 0,
+        applyReplyOutboxJitter(replyOutboxIntervalMs(consecutiveFailures))
+      )
   }
   return {
     kind: 'retry',

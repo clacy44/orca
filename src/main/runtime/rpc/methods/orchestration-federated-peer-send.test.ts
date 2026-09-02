@@ -9,7 +9,20 @@ import {
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import type { PeerLinkBindingRow } from '../../orchestration/link-binding-store'
+import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
+import type * as LinkBindingRoutable from '../../orchestration/link-binding-routable'
 import type { RpcContext } from '../core'
+
+// Ruling 26 Addendum 1(w)/F10 (R28.1(1b) back-fill test, below): this suite never wires a real
+// device registry / environment store (unlike reply-outbox-pump.test.ts), so
+// getRoutableLinkBinding's clauseII check has nothing routable to find. Wrapped (default
+// pass-through to the real implementation for every other test) so exactly one test can force a
+// matching route without standing up that machinery.
+vi.mock('../../orchestration/link-binding-routable', async (importOriginal) => {
+  const actual = await importOriginal<typeof LinkBindingRoutable>()
+  return { ...actual, getRoutableLinkBinding: vi.fn(actual.getRoutableLinkBinding) }
+})
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -618,6 +631,85 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       .get(envelope.messageId) as { thread_id: string | null }
     expect(farRow.thread_id).not.toBe(mirrorThread.thread.id)
     expect(farRow.thread_id).toBe(result.threadId)
+  })
+
+  // Ruling 26 Addendum 1(w)/F10: R28.1(1b)'s BACK-FILL half — the case the design calls out as
+  // the actual harm (a durable write to another agent's own pre-existing row) — was untested;
+  // the clause-(i) test above uses a mirror row that ALREADY has a thread, which only exercises
+  // the "don't reuse" half. Here the mirror row has thread_id NULL, so a legitimate,
+  // authorship-passing reply must mint a fresh thread and back-fill the mirror row's own
+  // thread_id with it — the row is the SAME row that gets read back, never a duplicate.
+  it('R28.1(1b): a NULL-thread mirror row is back-filled with the freshly minted thread, in place', async () => {
+    setup()
+    const agentA = await registerAgent(workerRuntime, 'agent-a', evidenceA)
+
+    const mirrorId = 'msg_aaaaaaaaaa02'
+    workerDb.insertGatedMessage({
+      id: mirrorId,
+      from: `agent:${agentA}`,
+      to: `remote:${WORKER_SERVER.environmentId}:peer_far_agt`,
+      subject: 'A to peer, no thread yet',
+      body: 'hi peer',
+      threadId: null,
+      verb: 'send'
+    })
+    const before = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(mirrorId) as { thread_id: string | null }
+    expect(before.thread_id).toBeNull()
+
+    // Force clauseII's routable-binding check: the caller's link resolves to the SAME
+    // environment the mirror row was addressed to. (This suite runs `orchestration.federatedSend`
+    // without a real device registry / environment store, so the real getRoutableLinkBinding has
+    // nothing to find — this test is the one place that stubs it, per the file-level vi.mock
+    // above; every other test still exercises the real implementation.)
+    vi.mocked(getRoutableLinkBinding).mockReturnValueOnce({
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: WORKER_SERVER.environmentId,
+      boundEndpointId: 'ep_worker_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_cred_fp',
+      peerCredentialFp: 'peer_cred_fp',
+      peerKeyFingerprint: 'peer_key_fp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      state: 'confirmed',
+      detail: null,
+      contestIncidentId: null,
+      contestedAt: null,
+      revokedAt: null,
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    } satisfies PeerLinkBindingRow)
+
+    const envelope = {
+      fromAgent: { id: 'agt_00000000cd02', displayName: 'peer-sender' },
+      toAgentId: agentA,
+      messageId: 'msg_0000000bcd12',
+      subject: 'reply',
+      body: 'a real reply',
+      inReplyToMessageId: mirrorId
+    }
+    const result = (await call('orchestration.federatedSend', envelope, workerLinkCtx())) as {
+      accepted: true
+      messageId: string
+      threadId: string | null
+      authorshipUnconfirmed?: true
+    }
+
+    expect(result.threadId).toBeTruthy()
+    expect(result.authorshipUnconfirmed).toBeUndefined()
+    const mirrorAfter = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(mirrorId) as { thread_id: string | null }
+    // The mirror row is back-filled IN PLACE with the same thread the reply lands in — not a
+    // second, orphaned thread.
+    expect(mirrorAfter.thread_id).toBe(result.threadId)
+    const replyRow = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(envelope.messageId) as { thread_id: string | null }
+    expect(replyRow.thread_id).toBe(result.threadId)
   })
 
   // S10-20 review F6 (Ruling 22 (1)): the peer's RPC RESPONSE ids are wire data too — a
