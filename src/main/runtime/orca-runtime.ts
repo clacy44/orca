@@ -124,11 +124,19 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import { OrchestrationDb } from './orchestration/db'
+import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 import {
   DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
   sweepDispatchLivenessBreaches
 } from './orchestration/dispatch-liveness-monitor'
 import { DISPATCH_INPUT_OBSERVER_INTERVAL_MS } from './orchestration/dispatch-input-observation'
+import {
+  accessProfileOfAttachment as accessProfileOfAttachmentImpl,
+  closePeerOwnedPaneOnAgentExit as closePeerOwnedPaneOnAgentExitImpl,
+  runPeerAttachmentBootSweep as runPeerAttachmentBootSweepImpl,
+  runPeerAttachmentRuntimePrune as runPeerAttachmentRuntimePruneImpl,
+  type PeerGrantProfileLookup
+} from './peer-owned-pane-lifecycle'
 import {
   tickDispatchInputObserver as runDispatchInputObserverTick,
   tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
@@ -3135,6 +3143,10 @@ export class OrcaRuntimeService {
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  // S10-19 W-2: installed by runtime-rpc.ts beside attachPrincipalLaneHost (and cleared on
+  // both non-success arms, beside detachPrincipalLaneHost). null at boot, by construction —
+  // the boot sweep (below) never reads this and never should (Ruling 24 addendum 2(o)).
+  private peerGrantProfileLookup: PeerGrantProfileLookup | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4263,6 +4275,67 @@ export class OrcaRuntimeService {
     } catch (error) {
       console.warn('[orchestration] dispatch liveness sweep failed', error)
     }
+  }
+
+  // S10-19 W-2: install/clear the peer-grant-profile resolver (runtime-rpc.ts owns the actual
+  // DeviceRegistry lookup; this class only ever calls through the function it is handed).
+  setPeerGrantProfileLookup(lookup: PeerGrantProfileLookup | null): void {
+    this.peerGrantProfileLookup = lookup
+  }
+
+  // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.
+  accessProfileOfAttachment(row: RemoteDispatchAttachmentRow): 'full' | 'peer' | null {
+    return accessProfileOfAttachmentImpl(row, this.peerGrantProfileLookup)
+  }
+
+  // Why fire-and-forget at every call site (below): the four exit hooks are synchronous event
+  // handlers and must not block the scanner/relay/pty-exit path on a peer-pane close.
+  private closePeerOwnedPaneOnAgentExit(ptyId: string, cause: string): void {
+    const db = this._orchestrationDb
+    // Why the function-existence probe: many existing tests install a partial OrchestrationDb
+    // stub via setOrchestrationDb({...}) carrying only the methods that test needs — this hook
+    // fires on every pty exit unconditionally and must be a silent no-op against those, not an
+    // unhandled rejection.
+    if (!db || typeof db.findPeerOwnedAttachmentForHandle !== 'function') {
+      return
+    }
+    closePeerOwnedPaneOnAgentExitImpl({
+      db,
+      runtime: this,
+      lookup: this.peerGrantProfileLookup,
+      ptyId,
+      cause
+    }).catch((error) => {
+      console.warn('[orchestration] peer-owned pane exit hook failed', error)
+    })
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(o)): called once from main/index.ts beside
+  // resumeOrchestrationFederationRelayAfterRestart(), before the RPC server (and so the profile
+  // lookup) exists. Closes nothing — see peer-owned-pane-lifecycle.ts's own doc comment.
+  runPeerAttachmentBootSweep(): void {
+    const db = this._orchestrationDb
+    if (!db) {
+      return
+    }
+    try {
+      runPeerAttachmentBootSweepImpl({ db, runtime: this })
+    } catch (error) {
+      console.warn('[orchestration] peer attachment boot sweep failed', error)
+    }
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(p)/(q)): called once from runtime-rpc.ts right after the
+  // profile lookup is installed. Catches a peer-owned pane whose PTY survived the restart.
+  runPeerAttachmentRuntimePrune(): void {
+    const db = this._orchestrationDb
+    const lookup = this.peerGrantProfileLookup
+    if (!db || !lookup) {
+      return
+    }
+    void runPeerAttachmentRuntimePruneImpl({ db, runtime: this, lookup }).catch((error) => {
+      console.warn('[orchestration] peer attachment runtime prune failed', error)
+    })
   }
 
   private getLegacyWorkerTerminalRecoveryPlan(): LegacyWorkerTerminalRecoveryPlan {
@@ -11036,6 +11109,8 @@ export class OrcaRuntimeService {
         return
       case 'command-finished':
         this.retirePtyAgentLaunchAuthority(ptyId)
+        // S10-19 W-2: daemon relay exit hook (site 1/4).
+        this.closePeerOwnedPaneOnAgentExit(ptyId, 'command_finished')
         this.recordTerminalSideEffectFact(ptyId, {
           kind: 'command-finished',
           exitCode: fact.exitCode
@@ -11366,6 +11441,8 @@ export class OrcaRuntimeService {
         },
         onCommandFinished: (exitCode: number | null) => {
           this.retirePtyAgentLaunchAuthority(ptyId)
+          // S10-19 W-2: main scanner exit hook (site 2/4).
+          this.closePeerOwnedPaneOnAgentExit(ptyId, 'command_finished')
           this.recordTerminalSideEffectFact(ptyId, { kind: 'command-finished', exitCode })
         },
         onBell: () => {
@@ -14838,6 +14915,9 @@ export class OrcaRuntimeService {
       this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
     } else {
       this.retirePtyAgentLaunchAuthority(ptyId)
+      // S10-19 W-2: pty-exit hook (site 4/4) — excluded on the abnormal-SSH branch, which
+      // preserves the surface rather than tearing it down.
+      this.closePeerOwnedPaneOnAgentExit(ptyId, 'pty_exit')
     }
     const incarnationId =
       exitIncarnationId ??
@@ -18370,6 +18450,8 @@ export class OrcaRuntimeService {
     const titleObservedAt = pty?.lastOscTitleAt ?? null
     const foregroundRead = this.readPtyForegroundProcessFromController(ptyId, titleObservedAt ?? 0)
     if (!pty?.connected || !foregroundRead) {
+      // S10-19 W-2: confirmed-agent-exit hook (site 3/4).
+      this.closePeerOwnedPaneOnAgentExit(ptyId, 'agent_exited')
       this.recordTerminalSideEffectFact(ptyId, { kind: 'agent-exited' })
       return
     }
@@ -18404,6 +18486,8 @@ export class OrcaRuntimeService {
         }
         return
       }
+      // S10-19 W-2: confirmed-agent-exit hook, async continuation (still site 3/4).
+      this.closePeerOwnedPaneOnAgentExit(ptyId, 'agent_exited')
       this.recordTerminalSideEffectFact(ptyId, { kind: 'agent-exited' })
     })
   }

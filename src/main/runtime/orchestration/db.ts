@@ -217,6 +217,10 @@ import {
   ensureMutationReceiptCapacity,
   migrateMutationReceiptCapacity
 } from './mutation-receipt-capacity'
+import {
+  PEER_ATTACHMENT_RETENTION_MS,
+  PEER_ATTACHMENTS_RETAINED_PER_LINK
+} from '../peer-profile-constants'
 
 // Why: leaf UUID is the remint-stable pane identity (tab half changes on break-out); exact match covers legacy/unparseable keys.
 // S10-19 m11: exported so a peer-owned-pane lookup outside this module can use the same equivalence.
@@ -6553,6 +6557,125 @@ export class OrchestrationDb {
     return this.db
       .prepare('SELECT * FROM remote_dispatch_attachments WHERE dispatch_id = ?')
       .get(dispatchId) as RemoteDispatchAttachmentRow | undefined
+  }
+
+  // S10-19 W-2 (INV-P-013): the row a peer-owned-pane exit hook should act on — no state filter
+  // (attacker/Ruling 20(c): the close must fire regardless of succeeded/stopped/abandoned/
+  // failed/ready), scoped to the terminal and to a row that has not already been marked exited.
+  findPeerOwnedAttachmentForHandle(handle: string): RemoteDispatchAttachmentRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE terminal_handle = ? AND agent_exited_at IS NULL
+         ORDER BY COALESCE(handle_bound_at, created_at) DESC, rowid DESC LIMIT 1`
+      )
+      .get(handle) as RemoteDispatchAttachmentRow | undefined
+  }
+
+  // S10-19 W-2 (ops MJ-1 / §D): agent_exited_at is stamped in EVERY case — the only durable fact
+  // of the exit. `state`/`stage` move to 'agent_exited' ONLY from ready/start_unknown/failed
+  // (§D — never from 'starting', where recordRemoteAttachmentStage/failRemoteAttachment are the
+  // unguarded in-flight writers) — succeeded/stopping/stop_unknown/stopped/abandoned rows keep
+  // their own more specific terminal state, but still get the stamp.
+  markPeerOwnedAttachmentAgentExited(
+    dispatchId: string,
+    cause: string
+  ): RemoteDispatchAttachmentRow | undefined {
+    this.db
+      .prepare(
+        `UPDATE remote_dispatch_attachments
+         SET agent_exited_at = COALESCE(agent_exited_at, datetime('now')),
+             state = CASE WHEN state IN ('ready', 'start_unknown', 'failed') THEN 'agent_exited' ELSE state END,
+             stage = CASE WHEN state IN ('ready', 'start_unknown', 'failed') THEN 'agent_exited' ELSE stage END,
+             last_error = CASE WHEN state IN ('ready', 'start_unknown', 'failed') THEN ? ELSE last_error END,
+             updated_at = datetime('now')
+         WHERE dispatch_id = ? AND agent_exited_at IS NULL`
+      )
+      .run(`peer pane closed: ${cause}`, dispatchId)
+    return this.getRemoteDispatchAttachment(dispatchId)
+  }
+
+  // S10-19 W-2 (ops MN-7): the per-link live-attachment count the ingress cap
+  // (PEER_LIVE_ATTACHMENTS_PER_LINK, W-3) checks before admitting a new attach.
+  countLivePeerAttachments(fingerprint: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM remote_dispatch_attachments
+         WHERE home_peer_fingerprint = ? AND agent_exited_at IS NULL
+           AND state IN ('starting', 'ready', 'start_unknown', 'stopping', 'stop_unknown')`
+      )
+      .get(fingerprint) as { n: number }
+    return row.n
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(o)): every stale-epoch row not yet marked exited — the
+  // caller (runPeerAttachmentBootSweep) decides per row, from its OWN pty table, whether the
+  // PTY is provably gone; this query never filters on that (db.ts has no pty visibility).
+  findStaleEpochAttachments(currentEpoch: string): RemoteDispatchAttachmentRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE runtime_epoch != ? AND agent_exited_at IS NULL`
+      )
+      .all(currentEpoch) as RemoteDispatchAttachmentRow[]
+  }
+
+  // S10-19 W-2 (Ruling 24 addendum 2(p)/(q)): candidates for the runtime-time prune — a live,
+  // still-bound terminal handle whose attachment has not been marked exited. The caller filters
+  // to peer-profile rows and to ones whose agent has actually exited (isTerminalRunningAgent).
+  findLivePeerCandidateAttachments(): RemoteDispatchAttachmentRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE terminal_handle IS NOT NULL AND agent_exited_at IS NULL`
+      )
+      .all() as RemoteDispatchAttachmentRow[]
+  }
+
+  deleteRemoteDispatchAttachment(dispatchId: string): void {
+    this.db.prepare(`DELETE FROM remote_dispatch_attachments WHERE dispatch_id = ?`).run(dispatchId)
+  }
+
+  // S10-19 W-2 (§8.6, ops MO-2): garbage-collects rows that are ALREADY settled — every row this
+  // deletes either went through a close-then-stamp path already (agent_exited_at set) or reached
+  // a terminal dispatch state with no pane ever bound in that state, so this never needs to
+  // close anything itself. Retention window first, then the per-link cap on the remainder.
+  pruneSettledRemoteAttachments(): number {
+    const settledPredicate = `(
+      agent_exited_at IS NOT NULL
+      OR state IN (${PEER_ATTACHMENT_SETTLED_STATES.map(() => '?').join(', ')}, 'stop_unknown', 'start_unknown')
+    )`
+    const settledParams = [...PEER_ATTACHMENT_SETTLED_STATES]
+    const retentionDeleted = Number(
+      this.db
+        .prepare(
+          `DELETE FROM remote_dispatch_attachments
+           WHERE ${settledPredicate}
+             AND COALESCE(agent_exited_at, updated_at) < datetime('now', ?)`
+        )
+        .run(...settledParams, `-${Math.floor(PEER_ATTACHMENT_RETENTION_MS / 1000)} seconds`)
+        .changes
+    )
+    const capDeleted = Number(
+      this.db
+        .prepare(
+          `DELETE FROM remote_dispatch_attachments
+           WHERE dispatch_id IN (
+             SELECT dispatch_id FROM (
+               SELECT dispatch_id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY home_peer_fingerprint
+                        ORDER BY COALESCE(agent_exited_at, updated_at) DESC, rowid DESC
+                      ) AS rn
+               FROM remote_dispatch_attachments
+               WHERE ${settledPredicate}
+             )
+             WHERE rn > ?
+           )`
+        )
+        .run(...settledParams, PEER_ATTACHMENTS_RETAINED_PER_LINK).changes
+    )
+    return retentionDeleted + capDeleted
   }
 
   recordRemoteAttachmentStage(params: {

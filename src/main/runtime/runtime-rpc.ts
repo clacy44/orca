@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- Why: this file is the single security boundary for the bundled CLI — transport setup, auth-token enforcement, admission control, keepalive framing, and orphan-socket sweeping all co-locate deliberately so a reviewer can audit the boundary in one sitting. Splitting this across files would scatter the invariants without reducing complexity. */
 // Why: the single security boundary for the bundled CLI — auth-token enforcement, metadata publication, transport orchestration.
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { RuntimeMetadata, RuntimeTransportMetadata } from '../../shared/runtime-bootstrap'
@@ -1307,6 +1307,8 @@ export class OrcaRuntimeRpcServer {
       // host whose persisted binding rows name a principal (S9 §2a).
       this.principalGrantBindings = null
       detachPrincipalLaneHost(this.runtime)
+      // S10-19 W-2 (ops MN-4): no pairing transport means no grant rows to resolve a profile from.
+      this.runtime.setPeerGrantProfileLookup?.(null)
     }
     // Why: WebSocket uses per-device tokens + E2EE (tweetnacl) instead of TLS since React Native can't pin self-signed certs.
     if (this.enableWebSocket) {
@@ -1320,6 +1322,8 @@ export class OrcaRuntimeRpcServer {
         this.principalGrantBindings = null
         // Without grant rows nothing can resolve to a principal; fall back to pre-S9 behaviour.
         detachPrincipalLaneHost(this.runtime)
+        // S10-19 W-2 (ops MN-4): pairing init failed — no DeviceRegistry to resolve a profile from.
+        this.runtime.setPeerGrantProfileLookup?.(null)
       } else {
         this.deviceRegistry = pairingIdentity.deviceRegistry
         this.e2eeKeypair = pairingIdentity.e2eeKeypair
@@ -1341,6 +1345,16 @@ export class OrcaRuntimeRpcServer {
             advertisedAddress: () => this.advertisedPairingAddress
           }
         }).registry
+        // S10-19 W-2: install the peer-grant-profile resolver now that DeviceRegistry exists,
+        // then catch up any peer-owned pane whose PTY survived the restart (Ruling 24 addendum
+        // 2(p)/(q)) — the boot sweep (index.ts, before this point) deliberately left it alone.
+        this.runtime.setPeerGrantProfileLookup?.((fingerprint) => {
+          const device = this.deviceRegistry
+            ?.listDevices()
+            .find((d) => createHash('sha256').update(d.token).digest('hex') === fingerprint)
+          return device ? effectiveAccessProfile(device, this.legacyGrantProfile) : null
+        })
+        this.runtime.runPeerAttachmentRuntimePrune?.()
         try {
           const host = this.resolveInitialWebSocketBindHost()
           const { transport, endpoint } = await this.startWebSocketTransport({

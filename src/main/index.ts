@@ -2621,6 +2621,9 @@ void app.whenReady().then(async () => {
   // Why: federated mail queued before the restart resumes here instead of waiting for
   // an RPC to touch the Run.
   runtimeService.resumeOrchestrationFederationRelayAfterRestart()
+  // S10-19 W-2 (INV-P-013, Ruling 24 addendum 2(o)): before the profile lookup exists — stamps
+  // only rows whose PTY is provably gone; closes nothing.
+  runtimeService.runPeerAttachmentBootSweep()
   publishProviderSessionChanges(agentHookServer.getProviderSessionIdentities())
   browserManager.setBrowserGuestStateChangedListener((worktreeId) => {
     runtimeService.notifyMobileSessionTabsChanged(worktreeId)

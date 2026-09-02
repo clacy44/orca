@@ -223,6 +223,9 @@ function exposeRemoteAttachment(attachment: RemoteDispatchAttachmentRow) {
   return {
     ...attachment,
     effects: JSON.parse(attachment.effects) as unknown[],
-    residualResources: JSON.parse(attachment.residual_resources) as unknown[]
+    residualResources: JSON.parse(attachment.residual_resources) as unknown[],
+    // S10-19 W-2 (D-4): surfaced only when true — never a bare `false`, so an old client reading
+    // this projection sees an absent key rather than a stale negative.
+    ...(attachment.agent_exited_at !== null ? { agentExited: true as const } : {})
   }
 }
