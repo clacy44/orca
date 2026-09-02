@@ -40,6 +40,38 @@ describe('S10-19 W-4 review finding 9: orchestration.federationAnswerPrompt refu
     }
   })
 
+  // W-5..W-7 review finding 4 (Ruling 24 addendum 4(dd)): the choke previously discarded
+  // result.nextSteps entirely — this is the one caller that used to drop the field on the floor.
+  it('finding 4 / 24(dd): the handler forwards nextSteps and effectsApplied:false as error.data', async () => {
+    const peerWrite = await import('../../peer-owned-pane-write')
+    vi.spyOn(peerWrite, 'writeToPeerOwnedPane').mockResolvedValue({
+      refused: true,
+      code: 'prompt_already_answered',
+      wireCode: 'forbidden',
+      message: "Dispatch disp_answered's prompt was already answered.",
+      nextSteps: ["this dispatch's startup prompt has already been answered; start a new dispatch"]
+    })
+    try {
+      const runtime = new OrcaRuntimeService()
+      await expect(
+        method.handler({ dispatchId: 'disp_answered', choice: 'accept_trust' }, {
+          runtime,
+          authenticatedCallerFingerprint: 'fp_peer'
+        } as never)
+      ).rejects.toMatchObject({
+        code: 'forbidden',
+        data: {
+          effectsApplied: false,
+          nextSteps: [
+            "this dispatch's startup prompt has already been answered; start a new dispatch"
+          ]
+        }
+      })
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('the handler forwards retryAfterMs as error.data when the refusal carries one', async () => {
     const peerWrite = await import('../../peer-owned-pane-write')
     vi.spyOn(peerWrite, 'writeToPeerOwnedPane').mockResolvedValue({

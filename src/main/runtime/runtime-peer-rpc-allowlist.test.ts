@@ -7,6 +7,7 @@ import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationDb } from './orchestration/db'
 import {
   admitRuntimePeerMethod,
+  assertPeerDispatchIds,
   assertPeerWorktreeMetadataBounded,
   clampPeerAttachTimeoutMs,
   peerRefusal,
@@ -14,6 +15,7 @@ import {
   RUNTIME_PEER_RPC_METHOD_ALLOWLIST,
   type PeerAdmissionContext
 } from './runtime-peer-rpc-allowlist'
+import { isHostScopedId } from './orchestration/orchestration-id-grammar'
 import { PEER_ATTACH_PER_MINUTE, PEER_LIVE_ATTACHMENTS_PER_LINK } from './peer-profile-constants'
 
 function setup(): { db: OrchestrationDb; runtime: OrcaRuntimeService } {
@@ -37,16 +39,52 @@ describe('S10-19 W-5: the allowlist literal (S-1, S-8)', () => {
     expect(missing).toEqual([])
   })
 
-  it('S-5 companion: RESERVED_PENDING_S10_16 stays non-empty until S10-16 registers its verbs', () => {
-    const registered = new Set(ALL_RPC_METHODS.map((method) => method.name))
-    const stillReserved = [...RESERVED_PENDING_S10_16].filter((method) => !registered.has(method))
-    // Why not toEqual([]): this asserts the COMBINED artifact, not this branch (§E.1) — it goes
-    // live automatically once S10-16 lands (`registered.has` starts returning true for both).
-    expect(stillReserved).toEqual([...RESERVED_PENDING_S10_16])
-  })
+  // W-5..W-7 review finding 9 (Ruling 24 addendum 4(ee)): the un-conditioned version of this
+  // test breaks the instant S10-16 registers federatedLinkProbe/federatedLinkConfirm — it was a
+  // merge tripwire, not a companion that "goes live automatically" as the plan asked. Split into
+  // two mutually-exclusive halves so exactly one runs, keyed on whether ALL_RPC_METHODS already
+  // contains the S10-16 symbols at THIS branch's HEAD.
+  const s10_16Registered = new Set(ALL_RPC_METHODS.map((method) => method.name))
+  const s10_16Landed = [...RESERVED_PENDING_S10_16].every((method) => s10_16Registered.has(method))
+
+  it.skipIf(s10_16Landed)(
+    'S-5 companion (pre-S10-16): RESERVED_PENDING_S10_16 stays non-empty until S10-16 registers its verbs',
+    () => {
+      const registered = new Set(ALL_RPC_METHODS.map((method) => method.name))
+      const stillReserved = [...RESERVED_PENDING_S10_16].filter((method) => !registered.has(method))
+      expect(stillReserved).toEqual([...RESERVED_PENDING_S10_16])
+    }
+  )
+
+  it.skipIf(!s10_16Landed)(
+    'S-5 companion (post-S10-16): once federatedLinkProbe/federatedLinkConfirm are registered, RESERVED_PENDING_S10_16 is fully covered',
+    () => {
+      const registered = new Set(ALL_RPC_METHODS.map((method) => method.name))
+      const stillReserved = [...RESERVED_PENDING_S10_16].filter((method) => !registered.has(method))
+      expect(stillReserved).toEqual([])
+    }
+  )
 
   it('S-8: orchestration.federationWorkerInput does not exist anywhere in the allowlist', () => {
     expect(RUNTIME_PEER_RPC_METHOD_ALLOWLIST.has('orchestration.federationWorkerInput')).toBe(false)
+  })
+
+  // W-5..W-7 review finding 10 (Ruling 24 addendum 4(ee)): S-9 was named in the plan but never
+  // written — a structural regression guard against a later refactor silently dropping this
+  // module's import of S10-20's id-grammar module. Proven by exercising assertPeerDispatchIds
+  // against the REAL isHostScopedId (never a local stand-in) — a regression that swapped in a
+  // permissive local check would still pass a hand-rolled test but fail this one.
+  it('S-9: assertPeerDispatchIds is wired to the real S10-20 isHostScopedId grammar, not a local stand-in', () => {
+    // ctx_/task_ + 12 lowercase-hex is the S10-20 grammar's own shape (orchestration-id-grammar.ts).
+    expect(isHostScopedId('ctx_0123456789ab', ['ctx'])).toBe(true)
+    expect(
+      assertPeerDispatchIds({ dispatchId: 'ctx_0123456789ab', taskId: 'task_0123456789ab' })
+    ).toEqual({ refused: false })
+    // A peer-chosen id outside the grammar (wrong prefix, wrong length, uppercase) refuses —
+    // this is the ingress-level bound the module import exists to enforce.
+    expect(assertPeerDispatchIds({ dispatchId: 'evil_id', taskId: 'task_0123456789ab' })).toEqual(
+      expect.objectContaining({ refused: true, code: 'invalid_argument' })
+    )
   })
 
   it('NEG-1..NEG-7: default-denies terminal.send, terminal.create, and other unlisted verbs', () => {

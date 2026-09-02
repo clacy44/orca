@@ -52,3 +52,60 @@ describe('S10-19 W-5: orchestration.agents.list rate subject', () => {
     expect(subjectKey).toMatch(/^host:/)
   })
 })
+
+// W-5..W-7 review finding 8 (Ruling 24 addendum 4(ee)): agents.get was admitted on the
+// allowlist name alone and metered nowhere, unlike agents.list — a peer could probe arbitrary
+// agent ids/names at line rate. Metered symmetrically, same subject-key rule as list's m13 fix.
+describe('W-5..W-7 review finding 8: orchestration.agents.get is now metered', () => {
+  let db: OrchestrationDb
+  let runtime: OrcaRuntimeService
+
+  function setup(): void {
+    db = new OrchestrationDb(':memory:')
+    runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb(db)
+  }
+
+  afterEach(() => {
+    db.close()
+    vi.restoreAllMocks()
+  })
+
+  it('calls checkAndBumpRate for verb "get"', async () => {
+    setup()
+    const method = findMethod('orchestration.agents.get')
+    const rateSpy = vi.spyOn(db, 'checkAndBumpRate')
+    const ctx: RpcContext = { runtime }
+    try {
+      await method.handler(method.params!.parse({ id: 'agent_nonexistent' }), ctx)
+    } catch {
+      // not_found is expected past the meter — only the meter call matters here.
+    }
+    expect(rateSpy).toHaveBeenCalledWith(expect.objectContaining({ verb: 'get' }))
+  })
+
+  it('a peer that exceeds the rate limit is refused rate_limited before any lookup', () => {
+    setup()
+    const method = findMethod('orchestration.agents.get')
+    vi.spyOn(db, 'checkAndBumpRate').mockReturnValue({ allowed: false, retryAfterMs: 5000 })
+    const ctx: RpcContext = { runtime, pairedDeviceId: 'dev_peer_1', clientKind: 'runtime' }
+    // Why not `.rejects`: agents.get's handler is synchronous — it throws directly rather than
+    // returning a rejected promise.
+    expect(() => method.handler(method.params!.parse({ id: 'agent_x' }), ctx)).toThrowError(
+      expect.objectContaining({ code: 'rate_limited' })
+    )
+  })
+
+  it('a paired caller is metered on link:<pairedDeviceId>, never a caller-supplied value', async () => {
+    setup()
+    const method = findMethod('orchestration.agents.get')
+    const rateSpy = vi.spyOn(db, 'checkAndBumpRate')
+    const ctx: RpcContext = { runtime, pairedDeviceId: 'dev_peer_1', clientKind: 'runtime' }
+    try {
+      await method.handler(method.params!.parse({ id: 'agent_x' }), ctx)
+    } catch {
+      // not_found is expected — only the subject key matters here.
+    }
+    expect(rateSpy).toHaveBeenCalledWith(expect.objectContaining({ subjectKey: 'link:dev_peer_1' }))
+  })
+})

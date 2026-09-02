@@ -121,6 +121,7 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
       const db = runtime.getOrchestrationDb()
       const begun = db.beginRemoteAttachmentStop(params.dispatchId)
       if ((PEER_ATTACHMENT_SETTLED_STATES as readonly string[]).includes(begun.state)) {
+        runtime.runPeerAttachmentRuntimePrune()
         return {
           dispatchId: params.dispatchId,
           state: begun.state,
@@ -134,6 +135,9 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
           params.dispatchId,
           `The recorded worker process is ${observation.status}; no terminal was closed.`
         )
+        // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): this is an attachment SETTLE
+        // path — re-run the runtime prune here too, not only on the periodic tick.
+        runtime.runPeerAttachmentRuntimePrune()
         return {
           dispatchId: params.dispatchId,
           state: attachment.state,
@@ -145,6 +149,7 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
       try {
         const close = await runtime.closeTerminal(observation.terminal.handle)
         const attachment = db.settleRemoteAttachmentStop(params.dispatchId)
+        runtime.runPeerAttachmentRuntimePrune()
         return {
           dispatchId: params.dispatchId,
           state: attachment.state,
@@ -155,6 +160,7 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         const attachment = db.markRemoteAttachmentStopUnknown(params.dispatchId, reason)
+        runtime.runPeerAttachmentRuntimePrune()
         return {
           dispatchId: params.dispatchId,
           state: attachment.state,

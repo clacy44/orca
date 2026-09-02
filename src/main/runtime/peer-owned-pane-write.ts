@@ -192,16 +192,25 @@ export async function writeToPeerOwnedPane(args: {
   }
   const keystroke = lookUpKeystroke(state.agent, state.reason, choice)
   if (!keystroke) {
+    // W-5..W-7 review finding 4 (Ruling 24 addendum 4(dd)): this is the plan's own W-4
+    // requirement — Claude's `decline` (no authored keystroke) must refuse
+    // prompt_state_unknown WITH nextSteps naming the operator remedy, not silently.
     return peerRefusal(
       'prompt_state_unknown',
-      `No authored keystroke exists for this agent/prompt/choice combination.`
+      `No authored keystroke exists for this agent/prompt/choice combination.`,
+      undefined,
+      [`orca orchestration worker-stop --dispatch ${dispatchId}`]
     )
   }
   const reserved = ctx.runtime.getOrchestrationDb().reservePeerPromptAnswer(dispatchId)
   if (!reserved) {
     return peerRefusal(
       'prompt_already_answered',
-      `Dispatch ${dispatchId}'s prompt was already answered.`
+      `Dispatch ${dispatchId}'s prompt was already answered.`,
+      undefined,
+      [
+        "this dispatch's startup prompt has already been answered; start a new dispatch with 'orca orchestration worker-start --task <id> --on <environment>'"
+      ]
     )
   }
   let sawWrite = false

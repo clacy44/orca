@@ -1934,7 +1934,10 @@ async function printServeReady(options: ServeOptions): Promise<void> {
     {
       pairingAddress: options.pairingAddress,
       pairNames: options.pairNames,
-      pairingProfiles: options.pairingProfiles as ('full' | 'peer')[],
+      // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): no `as ('full'|'peer')[]` cast —
+      // argv is untyped text; resolveServePairingOffers enum-validates it and refuses anything
+      // else, never reading an unrecognized value as 'full'.
+      pairingProfiles: options.pairingProfiles,
       noPairing: options.noPairing,
       mobilePairing: options.mobilePairing
     },

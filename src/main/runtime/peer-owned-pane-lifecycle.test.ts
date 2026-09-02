@@ -433,6 +433,60 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
   })
 
+  // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): a REVOKED/rotated grant (the lookup
+  // finds no matching device, resolving null — not 'full') is treated as peer-owned, not
+  // skipped: close, stamp, delete, same as a genuine 'peer' row.
+  it('finding 2 / 24(bb): a row whose grant is REVOKED (lookup resolves null) is treated as peer-owned — closed, stamped, then deleted', async () => {
+    db = new OrchestrationDb(':memory:')
+    const dispatchId = insertAttachment(db, {
+      homeFingerprint: 'fp_revoked',
+      terminalHandle: 'term_revoked',
+      processIncarnation: 'pty_revoked:inc_1',
+      state: 'ready'
+    })
+    const closeTerminal = vi.fn().mockResolvedValue({})
+    const runtime: PeerOwnedPaneRuntime = {
+      resolveLivePeerPaneHandle: () => 'term_revoked_reconnected',
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
+      closeTerminal,
+      isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
+      getRuntimeId: () => 'epoch-current'
+    }
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => null })
+    expect(closeTerminal).toHaveBeenCalledWith('term_revoked_reconnected')
+    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+  })
+
+  // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): the RE-RUN property — a row
+  // unresolvable on one pass (the pty graph had not yet re-adopted it) is handled on a LATER
+  // pass, not left alone forever.
+  it('finding 2 / 24(bb): a row unresolvable on the first call is closed on a later call once the handle resolves', async () => {
+    db = new OrchestrationDb(':memory:')
+    const dispatchId = insertAttachment(db, {
+      homeFingerprint: 'fp_peer',
+      terminalHandle: 'term_later',
+      processIncarnation: 'pty_later:inc_1',
+      state: 'ready'
+    })
+    const closeTerminal = vi.fn().mockResolvedValue({})
+    let resolved = false
+    const runtime: PeerOwnedPaneRuntime = {
+      resolveLivePeerPaneHandle: () => (resolved ? 'term_later_reconnected' : null),
+      inspectTerminalProcessIncarnationLiveness: async () => 'live',
+      closeTerminal,
+      isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
+      getRuntimeId: () => 'epoch-current'
+    }
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
+    expect(closeTerminal).not.toHaveBeenCalled()
+    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
+
+    resolved = true
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
+    expect(closeTerminal).toHaveBeenCalledWith('term_later_reconnected')
+    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+  })
+
   it('a full-profile row whose agent has exited is never inspected for closing or deletion', async () => {
     db = new OrchestrationDb(':memory:')
     const dispatchId = insertAttachment(db, {

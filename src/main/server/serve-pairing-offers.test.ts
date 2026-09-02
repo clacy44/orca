@@ -266,4 +266,25 @@ describe('resolveServePairingOffers', () => {
       accessProfile: 'peer'
     })
   })
+
+  // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): a junk --serve-pairing-profile string
+  // (argv is untyped text — nothing upstream of this function's own runtime enum guard proves
+  // it is 'full' or 'peer') must REFUSE, never mint 'full' via the ?? fallback.
+  it('finding 3 / 24(cc): refuses an unrecognized --serve-pairing-profile value instead of minting full', async () => {
+    const source = sourceFor()
+
+    await expect(
+      resolveServePairingOffers(
+        {
+          pairingAddress: null,
+          pairNames: ['Ana'],
+          pairingProfiles: ['peerx'],
+          noPairing: false,
+          mobilePairing: false
+        },
+        source
+      )
+    ).rejects.toThrow("--serve-pairing-profile must be 'full' or 'peer'")
+    expect(source.createPairingOffer).not.toHaveBeenCalled()
+  })
 })

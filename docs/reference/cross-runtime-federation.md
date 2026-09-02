@@ -200,12 +200,15 @@ Under a **federation-peer** grant (the least-privilege profile above) this is a 
 capability, not a shortcut around one the peer already had: `terminal.create` and
 `terminal.send` are both refused, and the peer has no pane input at all beyond a two-value
 startup-prompt answer the host types (`worker-answer-prompt`, below). What bounds the
-mailbox is that it is addressed **by Run id only** — a body handle, pane key, or `from` is
-refused for a peer caller — and that a peer may not take the exclusive waiter on a Run a
-local pane is bound to. **A Run id is a bearer capability**: any peer holding one can read
-and consume that Run's mail. Scoping a peer to only the Runs it was explicitly told about is
-a link-binding feature that has not landed yet; until it does, treat a Run id you share with
-a peer as shared with that whole host.
+mailbox is enforced **server-side**, never by a flag the peer itself sends: a peer's `send`
+or `reply` may address only an explicit `run:<id>` mailbox (a Run id it already knows) or a
+`dispatch:<id>` this same link's own attachment owns — naming any other local recipient
+(`agent:<id>`, a bare pane handle, a group address, or a Dispatch owned by a different link)
+is refused before anything is written or read, regardless of what the request claims. **A
+Run id is a bearer capability**: any peer holding one can read and consume that Run's mail.
+Scoping a peer to only the Runs it was explicitly told about is a link-binding feature that
+has not landed yet; until it does, treat a Run id you share with a peer as shared with that
+whole host.
 
 Under a **full** grant the peer already holds terminal-drive rights on the host
 (`terminal.send`, `worker-start`), so it could always read and post Run mail by driving a
@@ -232,6 +235,17 @@ on Run binding, the CLI reports `peer does not support remote run mailbox (needs
 matching build)` instead of a misleading "No Run is bound". `RUNTIME_PROTOCOL_VERSION`
 is unchanged — new methods and new optional params are additive.
 
+**Two behaviour changes worth flagging explicitly for an existing install:**
+- **The federation relay now bounds its own batch.** A single relay pull/push is capped at
+  `FEDERATION_RELAY_ITEMS_MAX` (200) items and `PAYLOAD_MAX_LENGTH` (8000) bytes per item —
+  previously unbounded. An existing home that has been sending a larger batch than that will
+  start seeing the excess refused rather than accepted; this is a new refusal on an
+  already-federated home, not just a boundary on new pairings.
+- **`accounts.lane.mintInvite` is now a breaking wire change.** `accessProfile` is required
+  with no default (least-privilege by design, Ruling 20(d)) — an OLDER CLI calling this verb
+  without `accessProfile` is refused where it previously succeeded. Update both ends together
+  when minting a named invite.
+
 ## Operational notes
 
 - **Give a new worker ~60s before judging it stuck.** For roughly the first 20s after
@@ -249,10 +263,13 @@ is unchanged — new methods and new optional params are additive.
   `orca orchestration worker-answer-prompt --dispatch <dispatch_id> --choice accept_trust --environment <peer>`.
   Four things to know about this verb: it works only while the host's own detector still
   sees the prompt (it does not fabricate a wait); it works **once** — the shot is consumed
-  on success and released, not burned, on any failure; the host types the keystrokes, never
-  the caller's bytes; and `--choice decline` dismisses without submitting anything. It works
-  identically for a `full` grant too — prefer it over a raw `terminal send` regardless of
-  profile, since it does not race the host's own liveness check.
+  the moment any byte actually lands on the pane, even a partial write that then fails its
+  re-check (it is released only when nothing was written at all); the host types the
+  keystrokes, never the caller's bytes; and for codex, `--choice decline` submits `2` with
+  Enter — a real keystroke that dismisses the prompt, not a no-op (Claude has no authored
+  decline keystroke and refuses `prompt_state_unknown` instead). It works identically for a
+  `full` grant too — prefer it over a raw `terminal send` regardless of profile, since it
+  does not race the host's own liveness check.
 - **`orca serve` binds every interface.** `--pairing-address` sets only the advertised
   address; the listener opens on `0.0.0.0` and there is no bind/host flag. Block direct
   ingress to the port with a host or network firewall (a private tunnel is an additional

@@ -1,4 +1,5 @@
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import type { OrchestrationDb } from '../../orchestration/db'
 import type { RunRow } from '../../orchestration/types'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { RpcContext } from '../core'
@@ -9,9 +10,10 @@ import { resolveRunScope, type RunScopeParams } from './orchestration-run-scope'
 // paired runtime read/write that mailbox on the runtime that owns it.
 //
 // TRUST ARGUMENT — why dropping requireCurrentConsumer here is not an escalation (S10-19
-// §13.1, R18 — rewritten, not annotated: the pre-S10-19 text claimed a peer "could always
-// post and read Run mail by driving a local pane", which is false under a peer-profile
-// grant — terminal.create is refused and terminal.send does not exist for a peer at all):
+// §13.1, R18 — rewritten again by W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): the
+// pre-S10-19 text claimed a peer "could always post and read Run mail by driving a local
+// pane", which is false under a peer-profile grant — terminal.create is refused and
+// terminal.send does not exist for a peer at all):
 // The caller is an authenticated runtime-scope paired device (`pairedDeviceId` +
 // `clientKind === 'runtime'`), asserted up front and never from a caller-supplied handle;
 // the read joins the Run's CURRENT consumer generation rather than rebinding it, so a
@@ -19,13 +21,20 @@ import { resolveRunScope, type RunScopeParams } from './orchestration-run-scope'
 // federation-peer grant this is a first-class capability, not a shortcut around one the
 // peer already had: `terminal.create` and `terminal.send` are both refused and the peer
 // has no pane input at all beyond a two-value startup-prompt answer the host types
-// (`orchestration.federationAnswerPrompt`). What bounds it is that the mailbox is
-// addressed by Run id only — body handles, pane keys and `from` are refused for a peer
-// caller (§8.1/§8.2) — and that a peer may not take the exclusive waiter on a Run a local
-// pane is bound to (R24, `run_wait_local_only`). A Run id is a bearer capability: any peer
-// holding one can read and consume that Run's mail. Scoping a peer to Runs it was
-// explicitly told about requires the link binding S10-16 lands; until then, treat a Run id
-// shared with a peer as shared with that whole host.
+// (`orchestration.federationAnswerPrompt`). What bounds it is `assertPeerMailDestinationAllowed`
+// below, enforced SERVER-SIDE on all three mail verbs, never `params.remoteRunMailbox` (a
+// client hint only): a peer send/check may address an explicit `run:<id>` mailbox (a Run id
+// is a bearer capability — any peer holding one can read and consume that Run's mail; body
+// handles, pane keys and `from` are refused, §8.1/§8.2) or a `dispatch:<id>` whose
+// `remote_dispatch_attachments` row carries THIS link's `home_peer_fingerprint`; a peer
+// reply is scoped the same way from the row it is replying to, plus a peer may not take the
+// exclusive waiter on a Run a local pane is bound to (R24, `run_wait_local_only`). Scoping a
+// peer to Runs it was explicitly told about requires the link binding S10-16 lands; until
+// then, treat a Run id shared with a peer as shared with that whole host — that is the
+// accepted "mail as data" residual (INV-P-012's amendment), not a hole this fix closes. What
+// this fix DOES close: a peer reaching `agent:<id>`, a bare terminal handle, a group
+// address, or a Dispatch mailbox owned by a DIFFERENT link — none of which is "a mailbox
+// this peer was told about".
 export type RemoteRunMailboxCaller = Pick<RpcContext, 'pairedDeviceId' | 'clientKind'> & {
   remoteRunMailbox?: boolean
 }
@@ -77,4 +86,51 @@ export function resolveRemoteRunMailboxScope(
 
 function isRunBindingRefusal(error: unknown): boolean {
   return error instanceof OrchestrationError && RUN_BINDING_REFUSAL_CODES.has(error.code)
+}
+
+// W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): the SERVER-SIDE destination
+// constraint for a peer-profile mail caller — `params.remoteRunMailbox` is a client hint
+// only, this is the actual authority. A peer may address:
+//  - `run`: an explicit Run mailbox (the accepted "Run id is a bearer capability" residual,
+//    unchanged — a peer must already know the Run id to name it here); or
+//  - `dispatch`: a Dispatch whose `remote_dispatch_attachments` row was attached by THIS
+//    same link (`home_peer_fingerprint === callerFingerprint`) — the documented peer
+//    follow-up route (`send --to dispatch:<id>`).
+// Everything else — `agent:<id>`, a bare terminal handle, a group address, or a Dispatch
+// owned by a DIFFERENT link — refuses. A non-peer caller (accessProfile !== 'peer') is
+// always a no-op: this constraint exists only at the peer boundary.
+export type PeerMailDestination =
+  | { readonly kind: 'run'; readonly runId: string }
+  | { readonly kind: 'dispatch'; readonly dispatchId: string }
+  | { readonly kind: 'other' }
+
+export function assertPeerMailDestinationAllowed(
+  db: OrchestrationDb,
+  accessProfile: 'full' | 'peer' | undefined,
+  callerFingerprint: string | undefined,
+  destination: PeerMailDestination
+): void {
+  if (accessProfile !== 'peer') {
+    return
+  }
+  if (destination.kind === 'run') {
+    return
+  }
+  if (destination.kind === 'dispatch') {
+    const attachment = db.getRemoteDispatchAttachment(destination.dispatchId)
+    if (attachment && attachment.home_peer_fingerprint === callerFingerprint) {
+      return
+    }
+  }
+  throw new OrchestrationError(
+    'forbidden',
+    'A federation peer may only address its own Run mailbox (an explicit run:<id> it already ' +
+      'knows) or a Dispatch this link owns.',
+    {
+      effectsApplied: false,
+      nextSteps: [
+        'address --run <run_id> (the run mailbox this link already knows) or --to dispatch:<id> for a Dispatch this link owns'
+      ]
+    }
+  )
 }

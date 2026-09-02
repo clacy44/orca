@@ -39,7 +39,10 @@ describe('S10-19 W-4 review M5: getPeerPromptState wires the peer-specific dismi
     expect(state).toMatchObject({ state: 'blocked', reason: 'codex-trust-workspace' })
   })
 
-  it('no title evidence at all does not spuriously suppress a blocked reason', () => {
+  // W-5..W-7 review finding 7 (Ruling 24 addendum 4(ee)): this test previously asserted the
+  // GAP as intended behaviour — with no title evidence, a blocked reason came only from the
+  // peer-forgeable tail. The fix REFUSES prompt_state_unknown instead of trusting the tail.
+  it('finding 7 / 24(ee): no title evidence at all refuses prompt_state_unknown — the tail alone is peer-forgeable', () => {
     const runtime = new OrcaRuntimeService()
     vi.spyOn(runtime, 'getTerminalWaitEvidence').mockReturnValue({
       tailText: TRUST_GATE_SENTINEL_TAIL,
@@ -47,7 +50,18 @@ describe('S10-19 W-4 review M5: getPeerPromptState wires the peer-specific dismi
       title: null
     })
     const state = runtime.getPeerPromptState('term_peer')
-    expect(state).toMatchObject({ state: 'blocked', reason: 'codex-trust-workspace' })
+    expect(state).toEqual({ state: 'unknown' })
+  })
+
+  it('finding 7 / 24(ee): empty-string title evidence also refuses prompt_state_unknown', () => {
+    const runtime = new OrcaRuntimeService()
+    vi.spyOn(runtime, 'getTerminalWaitEvidence').mockReturnValue({
+      tailText: TRUST_GATE_SENTINEL_TAIL,
+      blockedReason: 'codex-trust-workspace',
+      title: ''
+    })
+    const state = runtime.getPeerPromptState('term_peer')
+    expect(state).toEqual({ state: 'unknown' })
   })
 
   it('clear evidence (no blocked reason at all) stays clear regardless of title', () => {

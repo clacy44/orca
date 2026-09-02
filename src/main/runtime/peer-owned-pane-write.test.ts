@@ -304,6 +304,35 @@ describe('S10-19 W-4: single-shot reservation (T-5, T-5d, T-5r)', () => {
     })
     expect(second).toMatchObject({ refused: true, code: 'prompt_already_answered' })
     expect(sendTerminal).toHaveBeenCalledTimes(1)
+    // W-5..W-7 review finding 4 (Ruling 24 addendum 4(dd)): prompt_already_answered now names
+    // the operator remedy — a new dispatch — instead of an empty nextSteps.
+    expect(second).toMatchObject({
+      nextSteps: [expect.stringContaining('worker-start --task')]
+    })
+  })
+
+  // W-5..W-7 review finding 4 (Ruling 24 addendum 4(dd)): Claude's decline has no authored
+  // keystroke and refuses prompt_state_unknown — but must now name worker-stop as the remedy,
+  // the plan's own W-4 requirement.
+  it("finding 4 / 24(dd): Claude's decline (no authored keystroke) names worker-stop in nextSteps", async () => {
+    const s = setup()
+    db = s.db
+    insertPeerAttachment(db, 'disp_claude_decline')
+    vi.spyOn(s.runtime, 'getPeerPromptState').mockReturnValue({
+      state: 'blocked',
+      reason: 'codex-trust-workspace',
+      agent: 'claude'
+    })
+    const result = await writeToPeerOwnedPane({
+      ctx: { runtime: s.runtime, callerFingerprint: 'fp_peer' },
+      dispatchId: 'disp_claude_decline',
+      choice: 'decline'
+    })
+    expect(result).toMatchObject({
+      refused: true,
+      code: 'prompt_state_unknown',
+      nextSteps: ['orca orchestration worker-stop --dispatch disp_claude_decline']
+    })
   })
 
   it('T-5d/T-5r: a write failure releases the shot — a retried call can still succeed', async () => {

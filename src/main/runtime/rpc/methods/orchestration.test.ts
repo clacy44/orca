@@ -3724,7 +3724,12 @@ describe('orchestration RPC methods', () => {
 
       await expect(
         call('orchestration.send', { to: 'term_coord', subject: 'hi', from: 'term_x' })
-      ).rejects.toMatchObject({ code: 'forbidden' })
+      ).rejects.toMatchObject({
+        code: 'forbidden',
+        // W-5..W-7 review finding 4 (Ruling 24 addendum 4(dd)): the body-identity refusal now
+        // carries effectsApplied:false + nextSteps — it used to carry neither.
+        data: { effectsApplied: false, nextSteps: expect.arrayContaining([expect.any(String)]) }
+      })
     })
 
     it('send refuses a peer-supplied senderPaneKey', async () => {
@@ -3850,6 +3855,31 @@ describe('orchestration RPC methods', () => {
 
       await expect(
         call('orchestration.send', { to: 'agent:some_agent', subject: 'hi', body: 'body' })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    })
+
+    // Review finding 1 / Ruling 24 addendum 4(aa): the F2 regression above passed for the wrong
+    // reason — it never set remoteRunMailbox, so it only ever exercised the MODE refusal, not the
+    // destination one. WITH the flag set, `to: 'agent:<id>'` must still refuse — now on the
+    // server-side destination constraint, since accessProfile === 'peer' bounds the destination
+    // regardless of what the peer claims via remoteRunMailbox.
+    it('W-5..W-7 review finding 1: send with remoteRunMailbox:true STILL refuses agent:<id> — the destination constraint is server-derived, not the peer flag', async () => {
+      setup()
+      ctx = {
+        runtime,
+        accessProfile: 'peer',
+        authenticatedCallerFingerprint: 'fp_peer',
+        pairedDeviceId: 'dev_peer',
+        clientKind: 'runtime'
+      }
+
+      await expect(
+        call('orchestration.send', {
+          to: 'agent:some_agent',
+          subject: 'hi',
+          body: 'body',
+          remoteRunMailbox: true
+        })
       ).rejects.toMatchObject({ code: 'forbidden' })
     })
 

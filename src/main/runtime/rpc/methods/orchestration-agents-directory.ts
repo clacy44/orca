@@ -77,12 +77,33 @@ export const ORCHESTRATION_AGENTS_DIRECTORY_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.agents.get',
     params: GetParams,
-    handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+    handler: (params, { runtime, orchestrationCompatibilityEvidence, pairedDeviceId }) => {
       if (!params.id && !params.name) {
         throw new OrchestrationError('invalid_argument', 'Pass --id or --name.')
       }
       const db = runtime.getOrchestrationDb()
       const hostId = hostIdFor(runtime)
+      // W-5..W-7 review finding 8 (Ruling 24 addendum 4(ee)): agents.get was admitted on the
+      // allowlist name alone and metered nowhere — a peer could probe arbitrary agent ids/names
+      // at line rate. Metered the same way agents.list is (m13): never keyed on caller-supplied
+      // input, an unattested local caller keys on this runtime's own id.
+      const preAuthority = runtime.verifyOrchestrationCompatibilityCaller(
+        orchestrationCompatibilityEvidence,
+        { currentRuntimeLaunchSufficient: true }
+      )
+      const rate = db.checkAndBumpRate({
+        subjectKey:
+          preAuthority?.paneKey ??
+          (pairedDeviceId ? `link:${pairedDeviceId}` : `host:${hostIdFor(runtime)}`),
+        verb: 'get',
+        windowMs: MINUTE_MS,
+        limit: 60
+      })
+      if (!rate.allowed) {
+        throw new OrchestrationError('rate_limited', 'Too many requests; try again shortly.', {
+          retryAfterMs: rate.retryAfterMs
+        })
+      }
       const row = params.id ? db.getAgentById(params.id) : db.getAgentByName(hostId, params.name!)
       if (!row) {
         throw new OrchestrationError(
@@ -91,10 +112,7 @@ export const ORCHESTRATION_AGENTS_DIRECTORY_METHODS: RpcMethod[] = [
           { nextSteps: ['orca agents find "<plain English description>"', 'orca agents list'] }
         )
       }
-      const authority = runtime.verifyOrchestrationCompatibilityCaller(
-        orchestrationCompatibilityEvidence,
-        { currentRuntimeLaunchSufficient: true }
-      )
+      const authority = preAuthority
       const callerRow = authority ? db.getAgentByPaneKey(hostId, authority.paneKey) : undefined
       const { row: refreshed, pushable } = refreshLiveness(runtime, db, row)
       const full = callerRow?.id === refreshed.id

@@ -169,3 +169,48 @@ describe('S10-19 W-2 review B1: closePeerOwnedPaneOnAgentExit resolves the termi
     }
   })
 })
+
+// W-5..W-7 review findings 2/5 (Ruling 24 addendum 4(bb)/(ee)): the periodic dispatch-liveness
+// tick is the production caller for BOTH runPeerAttachmentRuntimePrune's re-run and
+// pruneSettledRemoteAttachments — driven through the real public method, not the impl functions.
+describe('W-5..W-7 review findings 2/5: tickDispatchLivenessMonitor re-runs the peer attachment prune and calls pruneSettledRemoteAttachments', () => {
+  it('a live daemon-backed peer row whose agent has exited is closed and deleted by tickDispatchLivenessMonitor, and pruneSettledRemoteAttachments is invoked', async () => {
+    const runtime = new OrcaRuntimeService()
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      runtime.setPeerGrantProfileLookup(() => 'peer')
+
+      const dispatchId = 'disp_tick_prune'
+      rawDb(db)
+        .prepare(
+          `INSERT INTO remote_dispatch_attachments
+             (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, terminal_handle, process_incarnation, agent_exited_at)
+           VALUES (?, 'task_x', 'fp_peer', ?, 'ready', 'input_accepted', 'term_tick_stale', 'pty_tick:inc_1', NULL)`
+        )
+        .run(dispatchId, runtime.getRuntimeId())
+
+      vi.spyOn(runtime, 'resolveLivePeerPaneHandle').mockReturnValue('term_tick_reconnected')
+      vi.spyOn(runtime, 'isTerminalRunningAgent').mockResolvedValue(false)
+      const closeTerminal = vi
+        .spyOn(runtime, 'closeTerminal')
+        .mockResolvedValue({
+          handle: 'term_tick_reconnected',
+          accepted: true,
+          exited: true
+        } as never)
+      const pruneSettled = vi.spyOn(db, 'pruneSettledRemoteAttachments')
+
+      runtime.tickDispatchLivenessMonitor()
+
+      // Both prune calls are fire-and-forget from the tick; give the async close a turn.
+      await vi.waitFor(() => {
+        expect(closeTerminal).toHaveBeenCalledWith('term_tick_reconnected')
+      })
+      expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+      expect(pruneSettled).toHaveBeenCalled()
+    } finally {
+      db.close()
+    }
+  })
+})

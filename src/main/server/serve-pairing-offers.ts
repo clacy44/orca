@@ -23,7 +23,10 @@ export type ServePairingRequest = {
   // S10-19 W-6: matched positionally with pairNames — pairingProfiles[i] is the profile for
   // pairNames[i]. Required whenever pairNames is non-empty (enforced at the CLI, cli/handlers/
   // core.ts, and re-checked here as defense-in-depth since this process reads its own argv).
-  pairingProfiles: readonly ('full' | 'peer')[]
+  // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): typed `readonly string[]`, not
+  // `('full'|'peer')[]` — argv is untyped text, and index.ts no longer lies about that with an
+  // `as` cast. The enum is validated below, at the one place this process reads its own argv.
+  pairingProfiles: readonly string[]
   noPairing: boolean
   mobilePairing: boolean
 }
@@ -111,10 +114,19 @@ export async function resolveServePairingOffers(
         '--pairing-profile must be given exactly once per --pair-name, in the same order.'
       )
     }
+    // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): the VALUE, not just its presence —
+    // an unrecognized --serve-pairing-profile string must REFUSE (fail closed), never mint
+    // 'full' via the `?? 'full'` fallback below (that fallback exists for the ABSENT-profile
+    // case, mobile scope, which never reaches this branch).
+    const invalid = namedPairs.find((pair) => pair.profile !== 'full' && pair.profile !== 'peer')
+    if (invalid) {
+      throw new Error(`--serve-pairing-profile must be 'full' or 'peer', got '${invalid.profile}'.`)
+    }
   }
   const namedPairings = await Promise.all(
     namedPairs.map(async ({ name, profile }) => {
-      const accessProfile = scope === 'mobile' ? 'full' : (profile ?? 'full')
+      const accessProfile: 'full' | 'peer' =
+        scope === 'mobile' ? 'full' : profile === 'peer' ? 'peer' : 'full'
       return {
         name,
         pairing: await toPairingReadiness(

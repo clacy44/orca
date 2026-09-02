@@ -4276,6 +4276,16 @@ export class OrcaRuntimeService {
     } catch (error) {
       console.warn('[orchestration] dispatch liveness sweep failed', error)
     }
+    // W-5..W-7 review findings 2/5 (Ruling 24 addendum 4(bb)/(ee)): the existing periodic tick
+    // is where the peer-attachment runtime prune RE-RUNS (a row unresolvable on one pass is
+    // retried here) and where pruneSettledRemoteAttachments gets its first production caller —
+    // no new timer.
+    this.runPeerAttachmentRuntimePrune()
+    try {
+      db.pruneSettledRemoteAttachments()
+    } catch (error) {
+      console.warn('[orchestration] settled remote attachment prune failed', error)
+    }
   }
 
   // S10-19 W-2: install/clear the peer-grant-profile resolver (runtime-rpc.ts owns the actual
@@ -4342,6 +4352,10 @@ export class OrcaRuntimeService {
     }).catch((error) => {
       console.warn('[orchestration] peer-owned pane exit hook failed', error)
     })
+    // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): re-run the runtime prune from every
+    // exit hook too — a restart-orphaned row whose pty graph only just re-adopted the handle at
+    // THIS exit becomes resolvable here, not only on the periodic tick.
+    this.runPeerAttachmentRuntimePrune()
   }
 
   // S10-19 W-2 (Ruling 24 addendum 2(o)): called once from main/index.ts beside
@@ -33752,6 +33766,13 @@ export class OrcaRuntimeService {
     }
     if (!evidence.blockedReason) {
       return { state: 'clear' }
+    }
+    // W-5..W-7 review finding 7 (Ruling 24 addendum 4(ee)): with no OSC title evidence, the ONLY
+    // signal left is the output tail — which is exactly what a peer's own task text can make the
+    // agent print. Refuse prompt_state_unknown rather than trust the tail alone; the OSC title is
+    // the one signal task text cannot set.
+    if (!evidence.title) {
+      return { state: 'unknown' }
     }
     const normalized = evidence.tailText.toLowerCase()
     const blockedSignal = findTerminalWaitBlockedSignal(normalized)

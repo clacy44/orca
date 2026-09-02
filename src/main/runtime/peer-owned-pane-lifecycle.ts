@@ -121,14 +121,26 @@ export async function runPeerAttachmentBootSweep(args: {
   }
 }
 
-// W-2 (Ruling 24 addendum 2(p)/(q)): runs at RUNTIME TIME, once the profile lookup is installed
-// (runtime-rpc.ts, beside attachPrincipalLaneHost) — catches a peer-owned pane whose PTY
-// survived the restart (so the boot sweep left it alone) but whose agent had already finished.
-// resolveLivePeerPaneHandle re-derives the CURRENT handle for the row's persisted
-// process_incarnation (review B3 — the row's stored terminal_handle from the prior process never
-// resolves again); close, then stamp, then delete, in that order (W2-T1) — restricted to
-// profile==='peer' rows whose agent has actually exited; a full-profile row is never even
-// inspected for closing.
+// W-2 (Ruling 24 addendum 2(p)/(q), W-5..W-7 review finding 2 / Ruling 24 addendum 4(bb)): runs
+// at RUNTIME TIME, once the profile lookup is installed (runtime-rpc.ts, beside
+// attachPrincipalLaneHost) — catches a peer-owned pane whose PTY survived the restart (so the
+// boot sweep left it alone) but whose agent had already finished. resolveLivePeerPaneHandle
+// re-derives the CURRENT handle for the row's persisted process_incarnation (review B3 — the
+// row's stored terminal_handle from the prior process never resolves again); close, then stamp,
+// then delete, in that order (W2-T1).
+//
+// RE-RUN, not once (finding 2): this function is now called from every attachment settle path,
+// every runtime-time agent-exit hook, and the existing dispatch-liveness periodic tick
+// (orca-runtime.ts's tickDispatchLivenessMonitor) — a row that could not be resolved on one pass
+// (the pty graph had not yet re-adopted it) is retried on the next, rather than left alone
+// forever.
+//
+// A row whose grant profile does NOT resolve to 'full' is treated as peer-owned: this covers a
+// genuine 'peer' grant AND a REVOKED/rotated one (accessProfileOfAttachment returns null when
+// the lookup finds no matching device) — the pane was created for that peer, so a revoked grant
+// does not turn it into a full-profile pane that must never be force-closed; it removes the only
+// party who could ever have reached it. Only a row that resolves to an ACTUAL 'full' grant is
+// skipped, unclosed.
 export async function runPeerAttachmentRuntimePrune(args: {
   db: OrchestrationDb
   runtime: PeerOwnedPaneRuntime
@@ -142,7 +154,7 @@ export async function runPeerAttachmentRuntimePrune(args: {
     if (!liveHandle) {
       continue
     }
-    if (accessProfileOfAttachment(row, args.lookup) !== 'peer') {
+    if (accessProfileOfAttachment(row, args.lookup) === 'full') {
       continue
     }
     if (await args.runtime.isTerminalRunningAgent(liveHandle)) {

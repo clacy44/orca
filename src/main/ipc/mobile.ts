@@ -177,6 +177,17 @@ export function registerMobileHandlers(
           guidance: 'Choose Full runtime access or Federation peer before generating a named link.'
         }
       }
+      // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): the IPC arg's TS type
+      // (`accessProfile?: 'full' | 'peer'`) is a compile-time annotation only — an IPC caller
+      // is not bound by it at runtime. An unrecognized value must REFUSE, never fall through to
+      // the `as 'full' | 'peer'` cast below (which would read a junk string as a real profile).
+      if (deviceNameArg && args?.accessProfile !== 'full' && args?.accessProfile !== 'peer') {
+        return {
+          available: false as const,
+          reason: 'profile_required' as const,
+          guidance: 'Choose Full runtime access or Federation peer before generating a named link.'
+        }
+      }
       const ip = args?.address ?? (await getDefaultPairingAddress(getDefaultRouteInterfaceNames))
       if (!ip) {
         return { available: false as const }

@@ -416,8 +416,9 @@ export type GlobalSettings = {
   /** GitHub Project mode state (pinned/recent/active project, last view per project).
    *  Optional for pre-feature profiles; the persistence merge hydrates the default. */
   githubProjects?: GitHubProjectSettings
-  /** S10-19: repos a federation peer may target with a new-child/current-worktree dispatch
-   *  (assertPeerDispatchTarget). Empty/absent is default-deny for existing worktrees; a
+  /** S10-19: repos a federation peer may target with a dispatch into an EXACT EXISTING
+   *  worktree (assertPeerDispatchTarget) — new-child and current are refused outright for a
+   *  peer regardless of this list. Empty/absent is default-deny for existing worktrees; a
    *  new-top-level dispatch is admitted unconditionally regardless of this list. */
   federationDispatchRepos?: string[]
   /** AI commit-message config (agent, model, per-model thinking, prompt suffix). Optional to avoid migrating existing profiles. */

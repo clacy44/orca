@@ -6668,6 +6668,33 @@ describe('S10-19 W-1: access-profile plumbing', () => {
     }
   })
 
+  // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): createPairingOffer is the LAST mint
+  // surface every caller funnels through — a junk accessProfile string must refuse here too,
+  // never mint (fail closed), even if an upstream caller's own check were somehow bypassed.
+  it('finding 3 / 24(cc): createPairingOffer refuses an accessProfile that is neither full nor peer', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const server = new OrcaRuntimeRpcServer({
+      runtime: new OrcaRuntimeService(),
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    await server.start()
+    try {
+      const offer = server.createPairingOffer({
+        address: '127.0.0.1',
+        name: 'Junk Profile',
+        scope: 'runtime',
+        mint: 'always',
+        // @ts-expect-error — exercising a caller that ignores the TS type, same as argv/IPC do.
+        accessProfile: 'peerx'
+      })
+      expect(offer).toMatchObject({ available: false, reason: 'invalid_access_profile' })
+    } finally {
+      await server.stop()
+    }
+  })
+
   it('C-4: accessProfile round-trips through the registry load()/save() cycle behind createPairingOffer', async () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
     const server = new OrcaRuntimeRpcServer({
@@ -6887,6 +6914,214 @@ describe('W-5..W-7 review F10 (S-3): end-to-end peer ingress', () => {
         dispatchId: 'disp_x'
       })
       expect(retired.ok).toBe(false)
+    } finally {
+      await stop()
+    }
+  })
+
+  // W-5..W-7 review finding 10 / NEG-13b (Ruling 24 addendum 4(ee)): the peer allowlist filter
+  // runs BEFORE longPollClassOf/admitLongPoll — a refused frame must consume no long-poll slot.
+  // Driven through the real WS ingress and the server's own (private, but real) accounting map.
+  it('NEG-13b: a refused peer frame consumes no long-poll slot', async () => {
+    const { server, peerToken, stop } = await startServerWithGrants()
+    try {
+      // terminal.send is refused by the allowlist itself, well before longPollClassOf ever runs.
+      const reply = await sendFrame(server, peerToken, 'terminal.send', {
+        terminal: 't1',
+        data: 'x'
+      })
+      expect(reply.ok).toBe(false)
+
+      const internals = server as unknown as {
+        activePeerLongPollsByDevice: Map<string, number>
+        activeLongPolls: number
+      }
+      expect(internals.activePeerLongPollsByDevice.size).toBe(0)
+      expect(internals.activeLongPolls).toBe(0)
+    } finally {
+      await stop()
+    }
+  })
+})
+
+// W-5..W-7 review finding 1 / Ruling 24 addendum 4(aa): peer mail destinations are
+// constrained SERVER-SIDE — params.remoteRunMailbox is a client hint only. Driven through the
+// real WS ingress (handleWebSocketMessage), never the allowlist/handler unit-tested alone.
+describe('W-5..W-7 review finding 1 (Ruling 24 addendum 4(aa)): peer mail destination is server-constrained', () => {
+  const coordinatorPaneKey = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+  async function startServerWithGrants(): Promise<{
+    server: OrcaRuntimeRpcServer
+    runtime: OrcaRuntimeService
+    db: OrchestrationDb
+    peerToken: string
+    peerFingerprint: string
+    stop: () => Promise<void>
+  }> {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+    const runtime = new OrcaRuntimeService()
+    const db = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(db)
+    const server = new OrcaRuntimeRpcServer({
+      runtime,
+      userDataPath,
+      enableWebSocket: true,
+      wsPort: 0
+    })
+    await server.start()
+    const peerOffer = server.createPairingOffer({
+      address: '127.0.0.1',
+      name: 'Peer',
+      scope: 'runtime',
+      mint: 'always',
+      accessProfile: 'peer'
+    })
+    if (!peerOffer.available) {
+      throw new Error('offer unavailable')
+    }
+    const peerToken = parsePairingCode(peerOffer.pairingUrl)!.deviceToken
+    return {
+      server,
+      runtime,
+      db,
+      peerToken,
+      peerFingerprint: createHash('sha256').update(peerToken).digest('hex'),
+      stop: async () => {
+        db.close()
+        await server.stop()
+      }
+    }
+  }
+
+  async function sendFrame(
+    server: OrcaRuntimeRpcServer,
+    deviceToken: string,
+    method: string,
+    params: Record<string, unknown> = {}
+  ): Promise<Record<string, unknown>> {
+    const replies: Record<string, unknown>[] = []
+    await server['handleWebSocketMessage'](
+      JSON.stringify(
+        withCurrentOrchestrationContract({
+          id: `req_${method}`,
+          method,
+          deviceToken,
+          params
+        })
+      ),
+      (response) => replies.push(JSON.parse(response) as Record<string, unknown>),
+      () => {}
+    )
+    const reply = replies.find((r) => r.id === `req_${method}`)
+    if (!reply) {
+      throw new Error(`no reply for ${method}`)
+    }
+    return reply
+  }
+
+  // Creates a dispatch (status 'pending', which requireActiveDispatchForWorkerMail admits) and
+  // attaches it to `homePeerFingerprint` — the same field admitRuntimePeerMethod/
+  // assertPeerMailDestinationAllowed compares the caller's fingerprint against.
+  function createAttachedDispatch(
+    db: OrchestrationDb,
+    runtime: OrcaRuntimeService,
+    homePeerFingerprint: string
+  ): string {
+    const run = db.createRun({
+      objective: 'F1 destination guard fixture',
+      coordinatorHandle: 'term_coord',
+      coordinatorPaneKey
+    })
+    const task = db.createTask({ spec: 'Do the thing', runId: run.id })
+    const started = db.createStartingWorkerDispatch({
+      taskId: task.id,
+      startOptions: {}
+    })
+    const dispatchId = started.dispatch.id
+    db.createRemoteDispatchAttachment({
+      dispatchId,
+      taskId: task.id,
+      homePeerFingerprint,
+      protocolVersion: 2,
+      runtimeEpoch: runtime.getRuntimeId(),
+      mutationReceipt: {
+        callerFingerprint: homePeerFingerprint,
+        requestId: `attach-${dispatchId}`,
+        method: 'orchestration.federationAttachStart',
+        payloadHash: 'fixture-payload'
+      }
+    })
+    return dispatchId
+  }
+
+  it('peer send with remoteRunMailbox:true to agent:<id> refuses', async () => {
+    const { server, peerToken, stop } = await startServerWithGrants()
+    try {
+      const reply = await sendFrame(server, peerToken, 'orchestration.send', {
+        to: 'agent:some_agent',
+        subject: 'hi',
+        body: 'body',
+        remoteRunMailbox: true
+      })
+      expect(reply.ok).toBe(false)
+      expect(reply.error).toMatchObject({ code: 'forbidden' })
+    } finally {
+      await stop()
+    }
+  })
+
+  it('peer send with remoteRunMailbox:true to a Dispatch owned by ANOTHER link refuses', async () => {
+    const { server, runtime, db, peerToken, stop } = await startServerWithGrants()
+    try {
+      const dispatchId = createAttachedDispatch(db, runtime, 'fp_a_different_link')
+      const reply = await sendFrame(server, peerToken, 'orchestration.send', {
+        to: `dispatch:${dispatchId}`,
+        subject: 'hi',
+        body: 'body',
+        remoteRunMailbox: true
+      })
+      expect(reply.ok).toBe(false)
+      expect(reply.error).toMatchObject({ code: 'forbidden' })
+    } finally {
+      await stop()
+    }
+  })
+
+  it('peer send with remoteRunMailbox:true to its OWN Dispatch is admitted', async () => {
+    const { server, runtime, db, peerToken, peerFingerprint, stop } = await startServerWithGrants()
+    try {
+      const dispatchId = createAttachedDispatch(db, runtime, peerFingerprint)
+      const reply = await sendFrame(server, peerToken, 'orchestration.send', {
+        to: `dispatch:${dispatchId}`,
+        subject: 'hi',
+        body: 'body',
+        remoteRunMailbox: true
+      })
+      expect(reply.ok).toBe(true)
+    } finally {
+      await stop()
+    }
+  })
+
+  it('peer reply to a message row addressed from a Dispatch owned by ANOTHER link refuses', async () => {
+    const { server, runtime, db, peerToken, stop } = await startServerWithGrants()
+    try {
+      const foreignDispatchId = createAttachedDispatch(db, runtime, 'fp_a_different_link')
+      const msg = db.insertMessage({
+        to: 'term_coord',
+        from: `dispatch:${foreignDispatchId}`,
+        subject: 'status',
+        body: 'body',
+        type: 'status',
+        runId: db.getDispatchContextById(foreignDispatchId)!.run_id
+      })
+      const reply = await sendFrame(server, peerToken, 'orchestration.reply', {
+        id: msg.id,
+        body: 'reply body',
+        remoteRunMailbox: true
+      })
+      expect(reply.ok).toBe(false)
+      expect(reply.error).toMatchObject({ code: 'forbidden' })
     } finally {
       await stop()
     }

@@ -109,6 +109,9 @@ export type PairingOfferUnavailableReason =
   // S10-19: a peer-profile offer was requested outside runtime scope — peer access is
   // federation-dispatch-only, never a mobile grant.
   | 'profile_scope_mismatch'
+  // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): accessProfile is neither 'full' nor
+  // 'peer' — refused here, fail closed, never read as 'full'.
+  | 'invalid_access_profile'
 
 export type PairingOfferUnavailable = {
   available: false
@@ -800,6 +803,18 @@ export class OrcaRuntimeRpcServer {
       return this.pairingInitializationFailure
     }
     const accessProfile = args.accessProfile ?? 'full'
+    // W-5..W-7 review finding 3 / Ruling 24 addendum 4(cc): the LAST mint surface — every
+    // caller (argv, mobile IPC, pairing offers) funnels through here. An accessProfile that is
+    // neither 'full' nor 'peer' (a junk string past a caller's own TS-only annotation) must
+    // REFUSE, never fall through to `effectiveAccessProfile` returning it verbatim as if it
+    // were a real enum member.
+    if (accessProfile !== 'full' && accessProfile !== 'peer') {
+      return {
+        available: false,
+        reason: 'invalid_access_profile',
+        guidance: "accessProfile must be 'full' or 'peer'."
+      }
+    }
     const scope = args.scope ?? 'runtime'
     // S10-19 R2: a peer grant is federation-dispatch-only — it is never reachable over a mobile
     // scope, so refuse before any registry write rather than mint an unenforceable row.

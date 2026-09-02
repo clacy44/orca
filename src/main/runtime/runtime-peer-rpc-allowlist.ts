@@ -299,14 +299,20 @@ function federatedAttachAdmission(ctx: PeerAdmissionContext): PeerRefusal | Peer
   if (p(ctx.params).terminal !== undefined) {
     return peerRefusal(
       'worktree_not_federated',
-      'A federation peer may not name a pane to attach to; omit --terminal.'
+      'A federation peer may not name a pane to attach to; omit --terminal.',
+      undefined,
+      ['omit --terminal: a federation pairing cannot name a pane on this host']
     )
   }
   const live = ctx.runtime.getOrchestrationDb().countLivePeerAttachments(ctx.callerFingerprint)
   if (live >= PEER_LIVE_ATTACHMENTS_PER_LINK) {
     return peerRefusal(
       'attachment_cap_reached',
-      `This link already holds ${live} live peer attachments (cap ${PEER_LIVE_ATTACHMENTS_PER_LINK}).`
+      `This link already holds ${live} live peer attachments (cap ${PEER_LIVE_ATTACHMENTS_PER_LINK}).`,
+      undefined,
+      [
+        'wait for a live peer-owned Dispatch to settle (worker_done, or federationStop from the coordinator), or ask the operator to raise the per-link attachment cap'
+      ]
     )
   }
   const result = ctx.runtime.getOrchestrationDb().checkAndBumpRate({
