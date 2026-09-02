@@ -118,10 +118,13 @@ describe('orchestration RPC methods', () => {
     // (orchestration-agents-retire.ts). S10-8 adds orchestration.federatedAsk
     // (orchestration-federated-peer-ask.ts, R2/R3: the receiving half of cross-host ask relay).
     // S10-15 adds orchestration.federatedSend (orchestration-federated-peer-send.ts, chair
-    // ruling 7: the receiving half of a cross-host relayed send).
-    expect(registry.size).toBe(61)
+    // ruling 7: the receiving half of a cross-host relayed send). S10-19 W-4 adds
+    // orchestration.federationAnswerPrompt (orchestration-federation-answer-prompt.ts — the
+    // peer-owned-pane-write choke's only caller).
+    expect(registry.size).toBe(62)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.federatedSend')).toBe(true)
+    expect(registry.has('orchestration.federationAnswerPrompt')).toBe(true)
     expect(registry.has('orchestration.agents.relink')).toBe(true)
     expect(registry.has('orchestration.agents.retire')).toBe(true)
     expect(registry.has('orchestration.threads.invite')).toBe(true)

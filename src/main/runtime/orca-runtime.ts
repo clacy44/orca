@@ -33700,6 +33700,44 @@ export class OrcaRuntimeService {
     }
   }
 
+  // S10-19 W-4 (Ruling 24(d) / ops BL-2): the choke's only source of (blockedReason, launchAgent).
+  // `agent: null` (unauthored TuiAgent kind, or the pty record has none) ⇒ the caller refuses
+  // prompt_state_unknown — never a private field access from outside this class, no new accessor.
+  getPeerPromptState(
+    handle: string
+  ):
+    | { state: 'blocked'; reason: RuntimeTerminalWaitBlockedReason; agent: TuiAgent | null }
+    | { state: 'clear' }
+    | { state: 'unknown' } {
+    const evidence = this.getTerminalWaitEvidence(handle)
+    if (!evidence) {
+      return { state: 'unknown' }
+    }
+    if (!evidence.blockedReason) {
+      return { state: 'clear' }
+    }
+    const live = this.getLivePtyForHandle(handle)
+    return {
+      state: 'blocked',
+      reason: evidence.blockedReason,
+      agent: live?.pty.launchAgent ?? null
+    }
+  }
+
+  // S10-19 W-4 (Ruling 20(b)): a peer-only, ADDITIVE dismissal check beside the shared one — a
+  // peer-owned pane can run any of the 36 TuiAgent kinds, not only the codex/antigravity/cursor
+  // families findDismissedStartupModalIndex targets. Never narrows what the shared detector
+  // already found (T-D1: that function is untouched); this can only WIDEN "dismissed", which is
+  // the safe direction here — it can only make the choke refuse a write, never authorize one.
+  findPeerDismissedStartupModalIndex(normalized: string, title: string): number | null {
+    const shared = findDismissedStartupModalIndex(normalized)
+    const titleLooksLikeLivePrompt = /trust|prompt|confirm|yes\s*\/\s*no|proceed\?/i.test(title)
+    if (title.trim().length > 0 && !titleLooksLikeLivePrompt) {
+      return normalized.length
+    }
+    return shared
+  }
+
   // Why: the gate's first-sighting stamp lives on the PTY snapshot; observation callers need it as
   // evidence of dwell, and must never fail because a handle went stale — return null on any error.
   getTerminalWaitBlockedAt(handle: string): number | null {

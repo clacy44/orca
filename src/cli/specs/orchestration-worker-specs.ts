@@ -82,6 +82,18 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
     notes: ['Retains all possibly-live resources and performs no process or filesystem action.']
   },
   {
+    path: ['orchestration', 'worker-answer-prompt'],
+    summary: 'Answer a blocked trust/confirmation prompt in a federation peer-owned pane',
+    usage:
+      'orca orchestration worker-answer-prompt --dispatch <dispatch_id> --choice <accept_trust|decline> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'dispatch', 'choice'],
+    notes: [
+      'The choke: the pane receives exactly one of a small, host-authored set of keystrokes, never caller-chosen text.',
+      'A single-shot answer per blocked-prompt occurrence — repeating the call after it lands refuses prompt_already_answered.',
+      "Refuses (never guesses) when the pane's agent or prompt kind has no authored keystroke for the given choice."
+    ]
+  },
+  {
     path: ['orchestration', 'worker-release'],
     summary: 'Release the terminal of one settled supervised worker',
     usage:

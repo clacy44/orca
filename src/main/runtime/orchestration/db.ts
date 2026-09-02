@@ -6632,6 +6632,32 @@ export class OrchestrationDb {
       .all() as RemoteDispatchAttachmentRow[]
   }
 
+  // S10-19 W-4 (the choke's single-shot claim): the ONE conditional UPDATE that lets exactly one
+  // federationAnswerPrompt call proceed to write a keystroke for a given blocked-prompt
+  // occurrence. Returns whether THIS call won the claim.
+  reservePeerPromptAnswer(dispatchId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE remote_dispatch_attachments
+         SET blocked_consumed_at = datetime('now')
+         WHERE dispatch_id = ? AND agent_exited_at IS NULL AND blocked_consumed_at IS NULL`
+      )
+      .run(dispatchId)
+    return Number(result.changes) === 1
+  }
+
+  // S10-19 W-4 (Ruling 20(b)): un-burns the single shot — called only when the reserved write
+  // itself failed, so a failed answer never costs the caller their one opportunity.
+  releasePeerPromptAnswer(dispatchId: string): void {
+    this.db
+      .prepare(
+        `UPDATE remote_dispatch_attachments
+         SET blocked_consumed_at = NULL
+         WHERE dispatch_id = ? AND blocked_consumed_at IS NOT NULL`
+      )
+      .run(dispatchId)
+  }
+
   deleteRemoteDispatchAttachment(dispatchId: string): void {
     this.db.prepare(`DELETE FROM remote_dispatch_attachments WHERE dispatch_id = ?`).run(dispatchId)
   }

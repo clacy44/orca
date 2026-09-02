@@ -1168,6 +1168,33 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     )
   },
 
+  // S10-19 W-4 (C-8): the choke's only CLI entry — prints the server's nextSteps unchanged, no
+  // client-side fallback, no retry through another verb (C-9, W-5).
+  'orchestration worker-answer-prompt': async ({ flags, client, json }) => {
+    const choice = getRequiredStringFlag(flags, 'choice')
+    if (choice !== 'accept_trust' && choice !== 'decline') {
+      throw new RuntimeClientError('invalid_argument', '--choice must be accept_trust or decline')
+    }
+    const result = await client.call<{
+      available: boolean
+      dispatchId?: string
+      choice?: string
+      reason?: string
+      guidance?: string
+    }>('orchestration.federationAnswerPrompt', {
+      dispatchId: getRequiredStringFlag(flags, 'dispatch'),
+      choice
+    })
+    if (!result.result.available) {
+      process.exitCode = 1
+    }
+    printResult(result, json, (value) =>
+      value.available
+        ? `Answered ${value.dispatchId} with ${value.choice}`
+        : `Refused: ${value.reason}\n${value.guidance ?? ''}`
+    )
+  },
+
   'orchestration worker-release': async ({ flags, client, json }) => {
     const result = await callMutation<WorkerReleaseReceipt>(
       client,
