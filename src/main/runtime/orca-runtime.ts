@@ -1336,6 +1336,7 @@ type RuntimeStore = {
     terminalMainSideEffectAuthority?: GlobalSettings['terminalMainSideEffectAuthority']
     terminalHiddenDeliveryGate?: GlobalSettings['terminalHiddenDeliveryGate']
     terminalModelQueryAuthority?: GlobalSettings['terminalModelQueryAuthority']
+    federationDispatchRepos?: GlobalSettings['federationDispatchRepos']
   }
   // Why: narrow to `unknown` return so test mocks can return void without
   // a cast. The runtime never reads the return value — the persisted value
@@ -4286,6 +4287,33 @@ export class OrcaRuntimeService {
   // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.
   accessProfileOfAttachment(row: RemoteDispatchAttachmentRow): 'full' | 'peer' | null {
     return accessProfileOfAttachmentImpl(row, this.peerGrantProfileLookup)
+  }
+
+  // S10-19 W-3: never throws (§4.1's target predicate reads this before any settings write
+  // exists — an absent/malformed store must read as "nothing allowlisted", not crash the check).
+  getFederationDispatchRepos(): readonly string[] {
+    return this.store?.getSettings()?.federationDispatchRepos ?? []
+  }
+
+  // S10-19 W-3 (Ruling 24(a) FULL profile, D-2): the ONLY liveness read the full-profile paste's
+  // beforeWrite trusts. Prefers the OS-backed confirmForegroundProcess (daemon-pty-adapter.ts,
+  // the local provider's fresh:true path) — unlike terminalHasShellForegroundProcess (which
+  // assumes still-agent when the optional method is absent, erring toward "not yet stale"), this
+  // FAILS CLOSED on an absent confirmForegroundProcess: about to type peer-chosen bytes, "cannot
+  // prove it" must read as "not live", never as "assume live".
+  async isPeerPaneForegroundAgentLive(handle: string): Promise<boolean> {
+    const pty = this.getLivePtyForHandle(handle)
+    const ptyId = pty?.pty.ptyId
+    if (!ptyId || !this.ptyController?.confirmForegroundProcess) {
+      return false
+    }
+    let confirmedProcess: string | null
+    try {
+      confirmedProcess = await this.ptyController.confirmForegroundProcess(ptyId)
+    } catch {
+      return false
+    }
+    return confirmedProcess !== null && recognizeAgentProcess(confirmedProcess) !== null
   }
 
   // Why fire-and-forget at every call site (below): the four exit hooks are synchronous event
