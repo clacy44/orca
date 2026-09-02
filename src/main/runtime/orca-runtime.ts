@@ -5132,6 +5132,23 @@ export class OrcaRuntimeService {
       .catch((error: unknown) => {
         if (this.orchestrationFederationSyncs.get(dispatchId)?.promise === sync) {
           this.settleOrchestrationFederationSyncHealth(dispatchId, { kind: 'failure', error })
+          // S10-20 (ratchet relief for federation-sync.ts, chair-directed): the audit row Ruling
+          // 22 (1) requires for an I-5/I-6 id-grammar refusal is written HERE, not at the
+          // parseRelayedMessage call site — this is the one place both the throw and the
+          // federated dispatch's environment_id (for actorHostId) are already in scope, and
+          // orca-runtime.ts is the file exempted from the max-lines ratchet
+          // (config/max-lines-baseline.txt:141), unlike federation-sync.ts. Effect-free: the
+          // throw already unwound before importFederatedRelayItem ran for the offending item.
+          if (error instanceof OrchestrationError && error.code === 'invalid_argument') {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: null,
+              actorHostId: db.getFederatedDispatch(dispatchId)?.environment_id ?? null,
+              verb: 'federationSync',
+              outcome: 'invalid_argument',
+              reasonCode: 'malformed_relay_id'
+            })
+          }
           if (!this.orchestrationFederationWarnings.has(dispatchId)) {
             console.warn(`[orchestration] Federation sync failed for ${dispatchId}:`, error)
             this.orchestrationFederationWarnings.add(dispatchId)

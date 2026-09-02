@@ -15,11 +15,7 @@ import {
 } from './federation-ack-checkpoints'
 import { parseFederatedWorkerReportPayload } from './federation-worker-report-payload'
 import { extractPayloadKind } from './message-waiter-thread-keying'
-import {
-  requireHostMessageId,
-  requireOptionalHostThreadId,
-  withHostIdValidationAudit
-} from './orchestration-id-grammar'
+import { requireHostMessageId, requireOptionalThreadId } from './orchestration-id-grammar'
 
 const MESSAGE_TYPE_SET = new Set<MessageType>(MESSAGE_TYPES)
 const FEDERATION_PULL_PAGE_SIZE = 50
@@ -104,14 +100,7 @@ async function syncFederatedDispatchPages(
         `Federated relay for ${dispatchId} is not contiguous after sequence ${cursor}.`
       )
     }
-    const relayAudit = {
-      actorHostId: federated.environment_id,
-      verb: 'federationSync',
-      reasonCode: 'malformed_relay_id'
-    }
-    const message = withHostIdValidationAudit(db, relayAudit, () =>
-      parseRelayedMessage(item.payload, item.message_id)
-    )
+    const message = parseRelayedMessage(item.payload, item.message_id)
     const stored = db.importFederatedRelayItem({
       dispatchId,
       sequence: item.sequence,
@@ -258,7 +247,7 @@ export function parseRelayedMessage(payload: string, messageId: string): Relayed
     type: message.type,
     priority:
       message.priority === 'high' || message.priority === 'urgent' ? message.priority : 'normal',
-    threadId: requireOptionalHostThreadId(message.threadId, 'thread id'),
+    threadId: requireOptionalThreadId(message.threadId, 'thread id'),
     payload: typeof message.payload === 'string' ? message.payload : null
   }
 }

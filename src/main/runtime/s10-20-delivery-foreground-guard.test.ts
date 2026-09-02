@@ -124,7 +124,7 @@ async function flush(): Promise<void> {
 
 function setupGuardHarness(confirmForegroundProcess?: (ptyId: string) => Promise<string | null>) {
   const runtime = new OrcaRuntimeService()
-  const write = vi.fn(() => true)
+  const write = vi.fn((_ptyId: string, _data: string) => true)
   runtime.setPtyController(makeController(write, confirmForegroundProcess) as never)
   runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
   const ptyId = 'pty-s20-guard'

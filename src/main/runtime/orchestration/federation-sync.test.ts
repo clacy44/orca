@@ -282,7 +282,13 @@ describe('federation relay acknowledgments', () => {
         audits.push(params)
       },
       getWorkerDispatch: () => ({ state: 'ready' }),
-      listPendingFederationRelay: () => []
+      listPendingFederationRelay: () => [],
+      // Needed by syncOrchestrationFederatedDispatch's own health-tracking wrapper (the audit
+      // write now lives in its .catch(), see orca-runtime.ts) — best-effort/read paths, not
+      // under test here.
+      getFederatedDispatchSyncHealth: () => null,
+      recordFederatedDispatchSyncHealth: () => {},
+      isFederatedDispatchRelayEligible: () => true
     } as never)
     vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockReturnValue({
       peerFingerprint: federated.peer_fingerprint
@@ -308,9 +314,9 @@ describe('federation relay acknowledgments', () => {
       payload: JSON.stringify({ subject: 'x', body: 'y', type: 'status' })
     })
 
-    await expect(syncFederatedDispatch(runtime, 'dispatch_remote')).rejects.toMatchObject({
-      code: 'invalid_argument'
-    })
+    await expect(
+      runtime.syncOrchestrationFederatedDispatch('dispatch_remote')
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
     expect(federated.to_home_imported_sequence).toBe(0)
     expect(audits).toHaveLength(1)
     expect(audits[0]).toMatchObject({ verb: 'federationSync', outcome: 'invalid_argument' })
@@ -330,9 +336,9 @@ describe('federation relay acknowledgments', () => {
       })
     })
 
-    await expect(syncFederatedDispatch(runtime, 'dispatch_remote')).rejects.toMatchObject({
-      code: 'invalid_argument'
-    })
+    await expect(
+      runtime.syncOrchestrationFederatedDispatch('dispatch_remote')
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
     expect(federated.to_home_imported_sequence).toBe(0)
     expect(audits).toHaveLength(1)
   })
@@ -408,9 +414,9 @@ describe('federation relay acknowledgments', () => {
       payload: JSON.stringify({ subject: 'x', body: 'y', type: 'status' })
     })
 
-    await expect(syncFederatedDispatch(runtime, 'dispatch_remote')).rejects.toMatchObject({
-      code: 'invalid_argument'
-    })
+    await expect(
+      runtime.syncOrchestrationFederatedDispatch('dispatch_remote')
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
     expect(federated.to_home_imported_sequence).toBe(0)
     expect(audits).toHaveLength(1)
   })

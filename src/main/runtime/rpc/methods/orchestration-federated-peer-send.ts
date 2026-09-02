@@ -18,7 +18,7 @@ import { payloadValueForGate } from '../../orchestration/message-gate-writer'
 import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 import {
   isHostMessageId,
-  requireOptionalHostThreadId
+  requireOptionalThreadId
 } from '../../orchestration/orchestration-id-grammar'
 import {
   FederatedSenderIdentitySchema,
@@ -119,7 +119,7 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
             }
           )
         }
-        requireOptionalHostThreadId(params.threadId, 'thread id')
+        requireOptionalThreadId(params.threadId, 'thread id')
         // Idempotent replay vs conflict (mirrors importFederatedRelayItem's conflict rule,
         // db.ts): a peer-chosen id that already exists on this host either matches (a retry —
         // return the stored receipt) or conflicts (refuse). Finding 21: this distinction is a

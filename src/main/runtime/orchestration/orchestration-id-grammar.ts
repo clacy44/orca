@@ -24,7 +24,6 @@
 // in the threadId fallback slot is routinely `relay_`-shaped, not `msg_`-shaped. Same host-minted
 // construction as the MESSAGE_ID case, same unreachable-by-peer-input guarantee (fact (b) above).
 import { OrchestrationError } from './orchestration-error'
-import type { WriteAgentAuditParams } from './agent-audit-log'
 
 export const HOST_MESSAGE_ID_RE = /^(?:msg|relay)_[0-9a-f]{12}$/
 export const HOST_THREAD_ID_RE = /^(?:thr|msg|relay)_[0-9a-f]{12}$/
@@ -74,34 +73,9 @@ export function requireHostThreadId(value: unknown, field: string): string {
 }
 
 /** Optional thread id: absent stays absent; PRESENT-AND-MALFORMED REFUSES (never silently null). */
-export function requireOptionalHostThreadId(value: unknown, field: string): string | null {
+export function requireOptionalThreadId(value: unknown, field: string): string | null {
   if (value === undefined || value === null) {
     return null
   }
   return requireHostThreadId(value, field)
-}
-
-// S10-20 (ratchet relief for federation-sync.ts, chair-directed): the shared shape every ingress
-// call site needs — run a grammar check, and on refusal write the SAME audit row shape used at
-// every other S10-20 ingress (agentId null, actorPaneKey null, actorHostId from the caller,
-// outcome 'invalid_argument') — factored out here so a call site is one expression, not a
-// six-line try/catch repeated per file.
-export function withHostIdValidationAudit<T>(
-  db: { writeAgentAudit(params: WriteAgentAuditParams): void },
-  audit: { actorHostId: string | null; verb: string; reasonCode: string },
-  fn: () => T
-): T {
-  try {
-    return fn()
-  } catch (error) {
-    db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: null,
-      actorHostId: audit.actorHostId,
-      verb: audit.verb,
-      outcome: 'invalid_argument',
-      reasonCode: audit.reasonCode
-    })
-    throw error
-  }
 }
