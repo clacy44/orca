@@ -38,6 +38,10 @@ export function setEnvironmentEndpoint(
   const next: KnownRuntimeEnvironment = {
     ...existing,
     updatedAt: now,
+    // S10-16 R4.4: re-pointing a URL moves the destination without changing a credential, so a
+    // binding must re-prove rather than stay "live" against a new address — bump exactly as
+    // updateEnvironmentFromPairingCode does.
+    pairingRevision: Math.max(now, (existing.pairingRevision ?? existing.createdAt) + 1),
     endpoints: existing.endpoints.map((endpoint) =>
       endpoint.id === existing.preferredEndpointId ? { ...endpoint, endpoint: args.url } : endpoint
     )

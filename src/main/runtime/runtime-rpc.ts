@@ -21,6 +21,7 @@ import { WebSocketTransport } from './rpc/ws-transport'
 import { readWsFallbackPort, writeWsFallbackPort } from './rpc/ws-fallback-port-store'
 import type { WebSocket } from 'ws'
 import { DeviceRegistry, type DeviceEntry, type DeviceScope } from './device-registry'
+import type { BudgetClass } from './device-registry-pending-grants'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
 import {
   createPrincipalLaneConnectionJoin,
@@ -739,6 +740,10 @@ export class OrcaRuntimeRpcServer {
     // person and may need a shorter leash than the 24h default; every other caller (coalesced QR,
     // rotate) leaves this undefined and is byte-identical to before.
     ttlMs?: number
+    // S10-16 R1.1: which minted-grant eviction budget this invite counts against, keyed by the
+    // issuing lane — consumed only on the `mint === 'always'` arm (mintPendingDevice). Every other
+    // caller leaves this undefined and is byte-identical to before.
+    budgetClass?: BudgetClass
   }):
     | PairingOfferUnavailable
     | {
@@ -787,7 +792,13 @@ export class OrcaRuntimeRpcServer {
       // co-worker's un-scanned invite the moment a second named one is created.
       device =
         args.mint === 'always'
-          ? this.deviceRegistry.mintPendingDevice(deviceName, scope, reach, args.ttlMs)
+          ? this.deviceRegistry.mintPendingDevice(
+              deviceName,
+              scope,
+              reach,
+              args.ttlMs,
+              args.budgetClass
+            )
           : args.rotate
             ? this.deviceRegistry.rotatePendingDevice(deviceName, scope, reach)
             : this.deviceRegistry.getOrCreatePendingDevice(deviceName, scope, reach)

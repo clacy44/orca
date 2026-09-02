@@ -40,8 +40,20 @@ describe('resolveServePairingOffers', () => {
     // The guard that carries the whole feature: exactly as many offers as people, each minted.
     expect(source.createPairingOffer).toHaveBeenCalledTimes(2)
     expect(source.createPairingOffer.mock.calls.map(([args]) => args)).toEqual([
-      { address: '100.64.1.20', name: 'Ana', mint: 'always', scope: 'runtime' },
-      { address: '100.64.1.20', name: 'Ben', mint: 'always', scope: 'runtime' }
+      {
+        address: '100.64.1.20',
+        name: 'Ana',
+        mint: 'always',
+        scope: 'runtime',
+        budgetClass: 'serve_named'
+      },
+      {
+        address: '100.64.1.20',
+        name: 'Ben',
+        mint: 'always',
+        scope: 'runtime',
+        budgetClass: 'serve_named'
+      }
     ])
     // Negative control: the dated host-minted fallback — the shared grant — is never created.
     expect(source.createPairingOffer).not.toHaveBeenCalledWith(
@@ -64,7 +76,8 @@ describe('resolveServePairingOffers', () => {
     expect(source.createPairingOffer).toHaveBeenCalledWith({
       address: null,
       name: expect.stringMatching(/^CLI /),
-      scope: 'runtime'
+      scope: 'runtime',
+      budgetClass: 'host_auto'
     })
     // Negative control on the shape: no mint key, and no namedPairings key at all.
     expect(source.createPairingOffer.mock.calls[0]?.[0]).not.toHaveProperty('mint')

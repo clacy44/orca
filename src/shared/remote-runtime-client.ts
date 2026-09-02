@@ -88,9 +88,21 @@ export function sendRemoteRuntimeRequest<TResult>(
   method: string,
   params: unknown,
   timeoutMs: number,
-  envelope?: RuntimeOrchestrationEnvelope
+  envelope?: RuntimeOrchestrationEnvelope,
+  // Why trailing and optional: an ABSOLUTE deadline on top of the idle `timeoutMs`, enforced inside
+  // this client so a keepalive-emitting peer cannot hold the socket (and its pool slot) open forever.
+  // Absent at every pre-S10-16 call site ⇒ byte-identical behaviour (S10-16 R4.6).
+  maxDurationMs?: number
 ): Promise<RuntimeRpcResponse<TResult>> {
-  return sendRemoteRuntimeRequestOnSocket(pairing, method, params, timeoutMs, envelope)
+  return sendRemoteRuntimeRequestOnSocket(
+    pairing,
+    method,
+    params,
+    timeoutMs,
+    envelope,
+    undefined,
+    maxDurationMs
+  )
 }
 
 export function sendRemoteRuntimeRequestWithStatusPreflight<TResult>(
@@ -117,7 +129,9 @@ async function sendRemoteRuntimeRequestOnSocket<TResult>(
   params: unknown,
   timeoutMs: number,
   envelope?: RuntimeOrchestrationEnvelope,
-  validateStatus?: (response: RuntimeRpcResponse<RuntimeStatus>) => void
+  validateStatus?: (response: RuntimeRpcResponse<RuntimeStatus>) => void,
+  // S10-16 R4.6: absolute deadline, independent of the idle `timeoutMs` and any keepalive refresh.
+  maxDurationMs?: number
 ): Promise<RuntimeRpcResponse<TResult>> {
   if (!isSafeTimerDelayMs(timeoutMs)) {
     throw new RemoteRuntimeClientError(
@@ -186,7 +200,13 @@ async function sendRemoteRuntimeRequestOnSocket<TResult>(
       }
     }
 
-    let timeout = setTimeout(onTimeout, timeoutMs)
+    // Why performance.now(): a MONOTONIC clock, so an NTP step-back cannot extend the absolute
+    // deadline below (S10-16 R4.6, P14 — the same reasoning as R10.5's `+1`).
+    const startedAtMono = performance.now()
+    // Why clamp the first arm too: a maxDurationMs shorter than timeoutMs must still fire at
+    // maxDurationMs, not wait for the idle timeout to elapse first.
+    const firstDelay = maxDurationMs === undefined ? timeoutMs : Math.min(timeoutMs, maxDurationMs)
+    let timeout = setTimeout(onTimeout, firstDelay)
 
     function onTimeout(): void {
       finish({
@@ -200,14 +220,38 @@ async function sendRemoteRuntimeRequestOnSocket<TResult>(
     }
 
     function refreshTimeout(): void {
-      const refreshableTimeout = timeout as { refresh?: () => void }
-      if (typeof refreshableTimeout.refresh === 'function') {
-        refreshableTimeout.refresh()
+      if (maxDurationMs === undefined) {
+        const refreshableTimeout = timeout as { refresh?: () => void }
+        if (typeof refreshableTimeout.refresh === 'function') {
+          refreshableTimeout.refresh()
+          return
+        }
+        // Mobile's DOM timer type has no refresh().
+        clearTimeout(timeout)
+        timeout = setTimeout(onTimeout, timeoutMs)
         return
       }
-      // Mobile's DOM timer type has no refresh().
+      // S10-16 R4.6: never extend past the absolute deadline captured at startedAtMono.
+      const remaining = startedAtMono + maxDurationMs - performance.now()
+      if (remaining <= 0) {
+        onTimeout()
+        return
+      }
+      if (remaining >= timeoutMs) {
+        // Why the fast path still applies here: the full idle window still fits inside the
+        // absolute deadline, so re-arming for timeoutMs cannot outrun it — same churn profile as
+        // the maxDurationMs === undefined branch above.
+        const refreshableTimeout = timeout as { refresh?: () => void }
+        if (typeof refreshableTimeout.refresh === 'function') {
+          refreshableTimeout.refresh()
+          return
+        }
+        clearTimeout(timeout)
+        timeout = setTimeout(onTimeout, timeoutMs)
+        return
+      }
       clearTimeout(timeout)
-      timeout = setTimeout(onTimeout, timeoutMs)
+      timeout = setTimeout(onTimeout, remaining)
     }
 
     const finish = (

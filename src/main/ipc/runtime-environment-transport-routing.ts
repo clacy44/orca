@@ -91,7 +91,13 @@ export async function callRuntimeEnvironment(
   params: unknown,
   timeoutMs?: number,
   expectedEnvironmentPairingRevision?: number,
-  envelope?: RuntimeOrchestrationEnvelope
+  envelope?: RuntimeOrchestrationEnvelope,
+  // S10-16 R4.6: an ABSOLUTE deadline on top of `timeoutMs`, forwarded only to the two branches
+  // below that call sendRemoteRuntimeRequest. shouldUseCachedRequestConnection (terminal.send /
+  // terminal.updateViewport) and the shared-control branch are NOT plumbed — no method this slice
+  // calls reaches them (R4.3's branch analysis) — so a later author adding a method to either of
+  // those branches must plumb maxDurationMs there too.
+  maxDurationMs?: number
 ): Promise<RuntimeRpcResponse<unknown>> {
   const environment = resolveEnvironment(userDataPath, selector)
   // Why: connection failures reject (they don't resolve as ok:false), so the
@@ -121,7 +127,8 @@ export async function callRuntimeEnvironment(
           method,
           params,
           effectiveTimeoutMs,
-          envelope
+          envelope,
+          maxDurationMs
         )
         markEnvironmentUsedFromResponse(userDataPath, currentEnvironment.id, response)
         return response
@@ -163,15 +170,28 @@ export async function callRuntimeEnvironment(
       }
       // Why: startup/control-plane RPCs use the proven one-shot path so repo
       // hydration cannot be coupled to a stale terminal-control connection.
+      // Why the nested ternary instead of always passing 6 args: an omitted trailing
+      // `maxDurationMs` must produce the exact same call shape as before S10-16 (zero blast
+      // radius at HEAD, proven — not merely functionally equivalent).
       const response = sharedControlEnvelope
         ? await sendRemoteRuntimeRequest(
             pairing,
             method,
             params,
             effectiveTimeoutMs,
-            sharedControlEnvelope
+            sharedControlEnvelope,
+            maxDurationMs
           )
-        : await sendRemoteRuntimeRequest(pairing, method, params, effectiveTimeoutMs)
+        : maxDurationMs === undefined
+          ? await sendRemoteRuntimeRequest(pairing, method, params, effectiveTimeoutMs)
+          : await sendRemoteRuntimeRequest(
+              pairing,
+              method,
+              params,
+              effectiveTimeoutMs,
+              undefined,
+              maxDurationMs
+            )
       markEnvironmentUsedFromResponse(userDataPath, currentEnvironment.id, response)
       return response
     })
@@ -289,7 +309,14 @@ function shouldUseSharedControlEnvelope(
 
 function shouldUseOneShotRequest(method: string): boolean {
   // Why: snapshot recovery must remain available while a retained shared-control stream is reconnecting after a HUB restart.
-  return method === 'session.tabs.list' || method === 'session.tabs.listAll'
+  // S10-16 R4.3: link-binding control-plane RPCs must not be coupled to a retained shared-control
+  // stream that may be reconnecting, for the same reason.
+  return (
+    method === 'session.tabs.list' ||
+    method === 'session.tabs.listAll' ||
+    method === 'orchestration.federatedLinkProbe' ||
+    method === 'orchestration.federatedLinkConfirm'
+  )
 }
 
 function shouldKeepDedicatedSubscriptionSocket(method: string): boolean {

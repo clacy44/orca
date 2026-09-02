@@ -191,8 +191,11 @@ export function registerMobileHandlers(
         // coalescing onto the shared pending row — two named links are two distinct devices. Both keys
         // are omitted when blank so an unnamed link makes exactly today's call.
         ...(deviceName
-          ? { name: deviceName, mint: 'always' as const }
-          : { name: `Runtime ${new Date().toLocaleDateString()}` }),
+          ? { name: deviceName, mint: 'always' as const, budgetClass: 'ui_named' as const }
+          : {
+              name: `Runtime ${new Date().toLocaleDateString()}`,
+              budgetClass: 'host_auto' as const
+            }),
         scope: 'runtime',
         // Why: a grant that only ever pointed at loopback must not make the next launch bind every
         // interface when its local client reconnects (that would restore the exposure one restart later).

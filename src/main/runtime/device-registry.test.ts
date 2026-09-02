@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeviceRegistry, type DeviceEntry } from './device-registry'
-import { MAX_LIVE_MINTED_GRANTS } from './device-registry-pending-grants'
+import { MAX_LIVE_MINTED_GRANTS, PENDING_GRANT_TTL_MS } from './device-registry-pending-grants'
 import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -160,7 +160,12 @@ describe('DeviceRegistry pending grants', () => {
     expect(readRegistryFile().some((device) => device.deviceId === 'scanned')).toBe(true)
   })
 
-  it('never sweeps legacy rows written before pendingExpiresAt existed', () => {
+  // S10-16 R1.4: superseded. Before R1.4 this exact row (a pre-existing un-consumed COALESCED
+  // runtime grant) was stranded forever with no revocation path — R1.4 exists precisely to close
+  // that gap by giving it the PENDING_GRANT_TTL_MS deadline it should always have had, derived from
+  // its own pairedAt (never `now`, protocol M7). Coverage for the "stamp survives an upgrade and is
+  // byte-identical across constructions" property moved to device-registry-legacy-sweep.test.ts.
+  it('stamps a legacy row written before pendingExpiresAt existed with a deadline derived from its own pairedAt (R1.4)', () => {
     writeRegistryFile([
       {
         deviceId: 'legacy',
@@ -174,14 +179,24 @@ describe('DeviceRegistry pending grants', () => {
 
     const registry = new DeviceRegistry(userDataPath)
 
-    expect(registry.getDevice('legacy')).not.toBeNull()
-    expect(registry.validateToken('legacy-token')?.deviceId).toBe('legacy')
+    // pairedAt: 0 is far older than PENDING_GRANT_TTL_MS before "now" — the stamped deadline is
+    // already in the past, so the sweep's own in-memory prune (the same one that already dropped
+    // any other expired minted row) removes it at load. Loud, not silent: the sweep recorded it
+    // (getPendingLegacySweepAudit) before pruning, it did not just vanish unaccounted-for.
+    expect(registry.getDevice('legacy')).toBeNull()
+    expect(registry.validateToken('legacy-token')).toBeNull()
+    expect(registry.getPendingLegacySweepAudit()).toEqual([
+      {
+        deviceId: 'legacy',
+        name: 'Legacy link',
+        pairedAt: 0,
+        pendingExpiresAt: PENDING_GRANT_TTL_MS
+      }
+    ])
 
     registry.mintPendingDevice('Ana', 'runtime')
     const persisted = readRegistryFile()
-    expect(persisted.map((device) => device.deviceId)).toEqual(['legacy', expect.any(String)])
-    // An upgrade must not add a deadline to a link already handed out.
-    expect(persisted[0]).not.toHaveProperty('pendingExpiresAt')
+    expect(persisted.map((device) => device.deviceId)).toEqual([expect.any(String)])
   })
 
   it('rotatePendingDevice drops the shared pending row but spares named invites', () => {
@@ -260,14 +275,23 @@ describe('DeviceRegistry pending grants', () => {
     expect(registry.validateToken('relay-bound-token')).toBeNull()
   })
 
-  it('caps how many live minted grants can accumulate, ignoring scanned rows', () => {
+  it('caps how many live minted grants can accumulate per (scope, budgetClass) partition, ignoring scanned rows', () => {
     const registry = new DeviceRegistry(userDataPath)
-    const scanned = registry.mintPendingDevice('Scanned', 'runtime')
+    const scanned = registry.mintPendingDevice(
+      'Scanned',
+      'runtime',
+      'network',
+      undefined,
+      'ui_named'
+    )
     registry.updateLastSeen(scanned.deviceId)
     const shared = registry.getOrCreatePendingDevice('Shared', 'runtime')
 
+    // S10-16 R1.1: the cap partitions by issuing lane — every real call site always names one, so
+    // the capping test must too (an omitted budgetClass now means the un-evictable 'legacy' lane,
+    // covered by the negative control below).
     const minted = Array.from({ length: MAX_LIVE_MINTED_GRANTS + 4 }, (_, index) =>
-      registry.mintPendingDevice(`Person ${index}`, 'runtime')
+      registry.mintPendingDevice(`Person ${index}`, 'runtime', 'network', undefined, 'ui_named')
     )
 
     const live = registry
@@ -282,14 +306,15 @@ describe('DeviceRegistry pending grants', () => {
     expect(registry.getDevice(shared.deviceId)).not.toBeNull()
   })
 
-  it('treats an unusable pendingExpiresAt on disk as a never-expiring legacy row', () => {
+  it('normalizes an unusable pendingExpiresAt on disk, then (S10-16 R1.4) the legacy sweep stamps a fresh deadline from pairedAt', () => {
+    const pairedAt = Date.now()
     writeRegistryFile([
       {
         deviceId: 'text-deadline',
         name: 'Ana',
         token: 'text-deadline-token',
         scope: 'runtime',
-        pairedAt: 0,
+        pairedAt,
         lastSeenAt: 0,
         pendingExpiresAt: 'soon' as unknown as number
       },
@@ -298,7 +323,7 @@ describe('DeviceRegistry pending grants', () => {
         name: 'Ben',
         token: 'nan-deadline-token',
         scope: 'runtime',
-        pairedAt: 0,
+        pairedAt,
         lastSeenAt: 0,
         pendingExpiresAt: Number.NaN
       }
@@ -306,17 +331,25 @@ describe('DeviceRegistry pending grants', () => {
 
     const registry = new DeviceRegistry(userDataPath)
 
-    // Negative control on the normalization: a value no comparison can order must not silently become an
-    // instantly-expired grant, nor an immortal one that pins the row forever.
+    // Negative control on the normalization: a value no comparison can order must not crash and must
+    // not silently become an instantly-expired grant. Before R1.4 it would then be immortal; R1.4
+    // instead gives it the same PENDING_GRANT_TTL_MS-from-pairedAt deadline as any other legacy row —
+    // still valid now (pairedAt is fresh), no longer eternal.
     expect(registry.validateToken('text-deadline-token')?.deviceId).toBe('text-deadline')
     expect(registry.validateToken('nan-deadline-token')?.deviceId).toBe('nan-deadline')
+    expect(registry.getDevice('text-deadline')?.pendingExpiresAt).toBe(
+      pairedAt + PENDING_GRANT_TTL_MS
+    )
+    expect(registry.getDevice('nan-deadline')?.pendingExpiresAt).toBe(
+      pairedAt + PENDING_GRANT_TTL_MS
+    )
     registry.mintPendingDevice('Cara', 'runtime')
     expect(readRegistryFile().map((device) => device.deviceId)).toEqual([
       'text-deadline',
       'nan-deadline',
       expect.any(String)
     ])
-    expect(readRegistryFile()[0]).not.toHaveProperty('pendingExpiresAt')
+    expect(readRegistryFile()[0]?.pendingExpiresAt).toBe(pairedAt + PENDING_GRANT_TTL_MS)
   })
 
   it('mints with a caller-given ttlMs, clamped to at most the 24h default', () => {

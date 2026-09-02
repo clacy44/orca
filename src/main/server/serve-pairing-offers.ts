@@ -30,6 +30,8 @@ export type ServePairingOfferSource = {
     name: string
     mint?: 'always' | 'reuse'
     scope: ServePairingScope
+    // S10-16 R1.1: which minted-grant eviction budget this invite counts against.
+    budgetClass?: 'host_auto' | 'serve_named'
   }) => ServePairingOffer
   renderPairingQr: (pairingUrl: string) => Promise<string | null>
 }
@@ -90,7 +92,8 @@ export async function resolveServePairingOffers(
           address: request.pairingAddress,
           name,
           mint: 'always',
-          scope
+          scope,
+          budgetClass: 'serve_named'
         }),
         scope,
         source
@@ -106,7 +109,8 @@ export async function resolveServePairingOffers(
       source.createPairingOffer({
         address: request.pairingAddress,
         name: `${request.mobilePairing ? 'Mobile' : 'CLI'} ${new Date().toLocaleDateString()}`,
-        scope
+        scope,
+        budgetClass: 'host_auto'
       }),
       scope,
       source

@@ -62,6 +62,7 @@ describe('naming a runtime pairing link', () => {
         rotate: undefined,
         name: 'Ana',
         mint: 'always',
+        budgetClass: 'ui_named',
         scope: 'runtime',
         reach: 'network'
       },
@@ -70,6 +71,7 @@ describe('naming a runtime pairing link', () => {
         rotate: undefined,
         name: 'Ben',
         mint: 'always',
+        budgetClass: 'ui_named',
         scope: 'runtime',
         reach: 'network'
       }
@@ -85,6 +87,7 @@ describe('naming a runtime pairing link', () => {
       address: '100.64.1.20',
       rotate: undefined,
       name: expect.stringMatching(/^Runtime /),
+      budgetClass: 'host_auto',
       scope: 'runtime',
       reach: 'network'
     })

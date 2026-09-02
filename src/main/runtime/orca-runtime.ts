@@ -5078,6 +5078,71 @@ export class OrcaRuntimeService {
     return response.result
   }
 
+  /**
+   * S10-16 R4.2/R4.5: the ONE call path link binding and the pinned reply relay use — pinned to
+   * the endpoint/pairing revision the caller resolved, and bounded by an ABSOLUTE duration
+   * (`maxDurationMs`) rather than the idle `timeoutMs`. `server_required` before any I/O when the
+   * transport or its optional `callPinned` member is absent (S10-16 is then simply unavailable on
+   * this runtime, never silently unpinned). `requireOrchestrationContract` runs the same fresh
+   * `status.get` capability precheck `callOrchestrationWorkerServer` runs for mutations, on the
+   * pinned path — the reply relay (R18.4) passes `true`; the prover's probes pass `false` and rely
+   * on R10.3's own cache instead. There is no `Promise.race` anywhere on this path.
+   */
+  async callPinnedEnvironment(args: {
+    selector: string
+    method: string
+    params: unknown
+    timeoutMs: number
+    maxDurationMs: number
+    expectedEnvironmentPairingRevision: number
+    envelope?: RuntimeOrchestrationEnvelope
+    requireOrchestrationContract: boolean
+  }): Promise<unknown> {
+    const transport = this.orchestrationEnvironmentTransport
+    if (!transport?.callPinned) {
+      throw new OrchestrationError(
+        'server_required',
+        'Connected-server orchestration is unavailable in this runtime.'
+      )
+    }
+    if (args.requireOrchestrationContract) {
+      const statusResponse = await transport.callPinned({
+        selector: args.selector,
+        method: 'status.get',
+        params: undefined,
+        timeoutMs: args.timeoutMs,
+        maxDurationMs: args.maxDurationMs,
+        expectedEnvironmentPairingRevision: args.expectedEnvironmentPairingRevision
+      })
+      if (statusResponse.ok === false) {
+        this.throwOrchestrationWorkerServerError(args.selector, statusResponse.error)
+      }
+      const status = statusResponse.result as RuntimeStatus
+      if (!status.capabilities?.includes(ORCHESTRATION_CONTRACT_RUNTIME_CAPABILITY)) {
+        throw new OrchestrationError(
+          'orchestration_migration_required',
+          'The connected worker server does not support the current orchestration contract. No effects were applied.',
+          orchestrationMigrationData('runtime_capability_missing')
+        )
+      }
+    }
+    const response = await transport.callPinned({
+      selector: args.selector,
+      method: args.method,
+      params: args.params,
+      timeoutMs: args.timeoutMs,
+      maxDurationMs: args.maxDurationMs,
+      expectedEnvironmentPairingRevision: args.expectedEnvironmentPairingRevision,
+      envelope: args.method.startsWith('orchestration.')
+        ? { ...args.envelope, orchestrationContractVersion: ORCHESTRATION_CONTRACT_VERSION }
+        : args.envelope
+    })
+    if (response.ok === false) {
+      this.throwOrchestrationWorkerServerError(args.selector, response.error)
+    }
+    return response.result
+  }
+
   // S10-4 ruling 7: an `unauthorized` from a saved environment's RPC means the peer rejected our
   // pairing token — surface a typed error naming the environment and the fix, never a generic
   // `unauthorized` buried in the federation relay loop, and mark the link so `orca environment

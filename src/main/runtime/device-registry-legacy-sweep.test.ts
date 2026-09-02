@@ -1,0 +1,211 @@
+// S10-16 R1.4: the one-time legacy sweep that gives a pre-existing un-consumed coalesced runtime
+// grant the deadline it should always have had — before R1, such a row (lastSeenAt===0, no
+// pendingExpiresAt) is unreachable by rotatePendingDevice/retainNewestMintedGrants/
+// retainUnexpiredPendingDevices and accepted forever by validateToken, a stranded bearer credential.
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { DeviceRegistry, type DeviceEntry } from './device-registry'
+import { PENDING_GRANT_TTL_MS } from './device-registry-pending-grants'
+import { DEVICE_REGISTRY_FILENAME } from './mobile-pairing-files'
+
+describe('DeviceRegistry legacy coalesced-grant sweep (R1.4)', () => {
+  let userDataPath: string
+
+  beforeEach(() => {
+    userDataPath = mkdtempSync(join(tmpdir(), 'orca-device-registry-legacy-sweep-'))
+  })
+
+  afterEach(() => {
+    rmSync(userDataPath, { recursive: true, force: true })
+  })
+
+  const registryFilePath = (): string => join(userDataPath, DEVICE_REGISTRY_FILENAME)
+
+  const writeRegistryFile = (devices: DeviceEntry[]): void => {
+    writeFileSync(registryFilePath(), JSON.stringify(devices), 'utf-8')
+  }
+
+  it('stamps a legacy coalesced runtime row on construction, with no mint ever called', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-runtime',
+        name: 'Legacy runtime link',
+        token: 'legacy-runtime-token',
+        scope: 'runtime',
+        pairedAt: Date.now(),
+        lastSeenAt: 0
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+    const pairedAt = registry.getDevice('legacy-runtime')!.pairedAt
+
+    expect(registry.getDevice('legacy-runtime')?.pendingExpiresAt).toBe(
+      pairedAt + PENDING_GRANT_TTL_MS
+    )
+    expect(registry.getPendingLegacySweepAudit()).toEqual([
+      {
+        deviceId: 'legacy-runtime',
+        name: 'Legacy runtime link',
+        pairedAt,
+        pendingExpiresAt: pairedAt + PENDING_GRANT_TTL_MS
+      }
+    ])
+  })
+
+  it('removes an ALREADY-EXPIRED legacy row at load (same in-memory prune every minted row goes through), with the audit row still recorded', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'stale-legacy-runtime',
+        name: 'Stale legacy runtime link',
+        token: 'stale-legacy-runtime-token',
+        scope: 'runtime',
+        // Far enough in the past that pairedAt + PENDING_GRANT_TTL_MS is already behind "now".
+        pairedAt: 1_000,
+        lastSeenAt: 0
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.getDevice('stale-legacy-runtime')).toBeNull()
+    expect(registry.getPendingLegacySweepAudit()).toEqual([
+      {
+        deviceId: 'stale-legacy-runtime',
+        name: 'Stale legacy runtime link',
+        pairedAt: 1_000,
+        pendingExpiresAt: 1_000 + PENDING_GRANT_TTL_MS
+      }
+    ])
+  })
+
+  it('leaves a mobile row of the same shape untouched', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-mobile',
+        name: 'Legacy phone',
+        token: 'legacy-mobile-token',
+        scope: 'mobile',
+        pairedAt: 1_000,
+        lastSeenAt: 0
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.getDevice('legacy-mobile')?.pendingExpiresAt).toBeUndefined()
+    expect(registry.getPendingLegacySweepAudit()).toEqual([])
+  })
+
+  it('leaves a relayBinding-holding row untouched', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-relay',
+        name: 'Legacy relay row',
+        token: 'legacy-relay-token',
+        scope: 'runtime',
+        pairedAt: 1_000,
+        lastSeenAt: 0,
+        relayBinding: {
+          relayHostId: 'host-1',
+          relayDeviceId: 'legacy-relay',
+          ownerIdentityKey: 'owner-key'
+        }
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.getDevice('legacy-relay')?.pendingExpiresAt).toBeUndefined()
+    expect(registry.getPendingLegacySweepAudit()).toEqual([])
+  })
+
+  it('leaves an already-connected row (lastSeenAt !== 0) untouched', () => {
+    writeRegistryFile([
+      {
+        deviceId: 'scanned-runtime',
+        name: 'Scanned runtime link',
+        token: 'scanned-runtime-token',
+        scope: 'runtime',
+        pairedAt: 1_000,
+        lastSeenAt: 5_000
+      }
+    ])
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.getDevice('scanned-runtime')?.pendingExpiresAt).toBeUndefined()
+    expect(registry.getPendingLegacySweepAudit()).toEqual([])
+  })
+
+  it('stamps nothing new on a second construction from the same on-disk file', () => {
+    const pairedAt = Date.now()
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-runtime',
+        name: 'Legacy runtime link',
+        token: 'legacy-runtime-token',
+        scope: 'runtime',
+        pairedAt,
+        lastSeenAt: 0
+      }
+    ])
+
+    new DeviceRegistry(userDataPath).getPendingLegacySweepAudit()
+    // No save() happened, so the file on disk is still the un-stamped legacy shape — the sweep
+    // re-derives the SAME stamp from `pairedAt` every load, it does not skip an already-stamped row.
+    const second = new DeviceRegistry(userDataPath)
+    expect(second.getPendingLegacySweepAudit()).toHaveLength(1)
+    expect(second.getDevice('legacy-runtime')?.pendingExpiresAt).toBe(
+      pairedAt + PENDING_GRANT_TTL_MS
+    )
+  })
+
+  it('★ the stamp is byte-identical across constructions with no intervening save() (v6, protocol M7)', () => {
+    const pairedAt = Date.now()
+    writeRegistryFile([
+      {
+        deviceId: 'legacy-runtime',
+        name: 'Legacy runtime link',
+        token: 'legacy-runtime-token',
+        scope: 'runtime',
+        pairedAt,
+        lastSeenAt: 0
+      }
+    ])
+
+    const first = new DeviceRegistry(userDataPath)
+    const firstStamp = first.getDevice('legacy-runtime')?.pendingExpiresAt
+
+    // No save() in between: the file on disk is still the un-stamped legacy shape. A stamp
+    // derived from `now` would slide forward here; one derived from `pairedAt` cannot.
+    const second = new DeviceRegistry(userDataPath)
+    const secondStamp = second.getDevice('legacy-runtime')?.pendingExpiresAt
+
+    expect(firstStamp).toBe(pairedAt + PENDING_GRANT_TTL_MS)
+    expect(secondStamp).toBe(firstStamp)
+  })
+
+  it('sweep safety: stamps nothing when the registry load failed (loadSucceeded === false)', () => {
+    // A directory at the registry path makes readFileSync throw ENOTDIR/EISDIR, i.e. a failed load.
+    writeFileSync(registryFilePath(), '{not json', 'utf-8')
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.loadSucceeded).toBe(false)
+    expect(registry.listDevices()).toEqual([])
+    expect(registry.getPendingLegacySweepAudit()).toEqual([])
+  })
+
+  it('sweep safety: stamps nothing on an empty device list', () => {
+    writeRegistryFile([])
+
+    const registry = new DeviceRegistry(userDataPath)
+
+    expect(registry.loadSucceeded).toBe(true)
+    expect(registry.listDevices()).toEqual([])
+    expect(registry.getPendingLegacySweepAudit()).toEqual([])
+  })
+})

@@ -506,6 +506,7 @@ describe('registerMobileHandlers', () => {
       address: '100.64.1.20',
       rotate: true,
       name: expect.stringMatching(/^Runtime /),
+      budgetClass: 'host_auto',
       scope: 'runtime',
       reach: 'network'
     })

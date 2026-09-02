@@ -37,6 +37,8 @@ export type PairingInviteOfferArgs = {
   scope: DeviceScope
   reach: 'network'
   ttlMs?: number
+  // S10-16 R1.1: this lane's minted-grant eviction budget — always 'lane_invite'.
+  budgetClass: 'lane_invite'
 }
 
 export type PairingInviteOfferResult =
@@ -205,6 +207,7 @@ export class PrincipalLaneConsentService {
       mint: 'always',
       scope: params.scope,
       reach: 'network',
+      budgetClass: 'lane_invite',
       ...(params.ttlHours !== undefined ? { ttlMs: params.ttlHours * 3_600_000 } : {})
     })
     if (!offer.available) {
