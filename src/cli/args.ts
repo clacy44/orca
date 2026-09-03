@@ -13,64 +13,13 @@ export type ParsedArgs = {
 
 export const GLOBAL_FLAGS = ['help', 'json', 'pairing-code', 'environment']
 const GLOBAL_VALUE_FLAGS = new Set(['pairing-code', 'environment'])
-export const BOOLEAN_FLAGS = new Set([
-  'accept-legacy',
-  'accept-unverified-platform',
-  'acknowledge-gate',
-  'all',
-  'all-hosts',
-  'attachments',
-  'cancel',
-  'children',
-  'clear',
-  'comments',
-  'connect',
-  'current',
-  'deep',
-  'drain',
-  'dry-run',
-  'enter',
-  'focus',
-  'force',
-  'full',
-  'help',
-  'inject',
-  'include-archived',
-  'include-quarantined',
-  'include-visual-layouts',
-  'interrupt',
-  'json',
-  'leave',
-  'lift',
-  'local',
-  'messages',
-  'me',
-  'mobile',
-  'mobile-pairing',
-  'new',
-  'no-derived',
-  'no-pairing',
-  'outbox',
-  'parent-current',
-  'provision',
-  'ready',
-  'recipe-json',
-  'relations',
-  'reinstall',
-  'restore-window',
-  'return-preamble',
-  'run-hooks',
-  'sensitive',
-  'show-profile',
-  'staged',
-  'tab',
-  'tasks',
-  'text-stdin',
-  'unread',
-  'value-stdin',
-  'wait',
-  'yes'
-])
+// Ruling 28 (C8a housekeeping): one string, split at parse time, rather than one array literal
+// entry per line — the array-literal form put this file at 301 counted lines (over the 300
+// max-lines cap) at the C8a base commit; a formatter re-wrapping the array back to one-per-line
+// would reintroduce that overflow on every future edit, so the flag list is kept as data instead.
+const BOOLEAN_FLAG_NAMES =
+  'accept-legacy accept-unverified-platform acknowledge-gate all all-hosts attachments cancel children clear comments connect current deep drain dry-run enter focus force full help inject include-archived include-quarantined include-visual-layouts interrupt json leave lift local messages me mobile mobile-pairing new no-derived no-pairing outbox parent-current provision ready recipe-json relations reinstall restore-window return-preamble run-hooks sensitive show-profile staged tab tasks text-stdin unread value-stdin wait yes'
+export const BOOLEAN_FLAGS = new Set(BOOLEAN_FLAG_NAMES.split(' '))
 
 export const REPEATED_FLAG_SEPARATOR = '\u0000'
 const REPEATABLE_STRING_FLAGS = new Set(['label', 'pair-name', 'pairing-profile', 'skill'])

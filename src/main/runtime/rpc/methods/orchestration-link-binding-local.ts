@@ -1,8 +1,8 @@
 // S10-16 C7/C8a, R22 (design v6): the local-operator link-binding surface — `linkBindings`,
-// `linkBind`, `linkRevoke`, `linkForget`. `linkContainment` and `replyOutbox` live in their own
-// files (orchestration-link-binding-containment.ts / -outbox.ts, C8a max-lines split). Every verb
-// opens with the shared local-caller gate (R22, Ruling 28(h): the positive form, R23.4/R30.3:
-// never registered on the peer allowlist — test 53).
+// `linkRevoke`, `linkForget`. `linkBind`, `linkContainment` and `replyOutbox` live in their own
+// files (orchestration-link-binding-bind/-containment/-outbox.ts, C8a max-lines split). Every
+// verb opens with the shared local-caller gate (R22, Ruling 28(h): the positive form, R23.4/
+// R30.3: never registered on the peer allowlist — test 53).
 import { z } from 'zod'
 import { defineMethod, type RpcMethod, type RpcContext } from '../core'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
@@ -16,39 +16,11 @@ import {
 } from '../../orchestration/link-binding-routable'
 import { renderLinkBindingHealth } from '../../../../shared/link-binding-health'
 import { requireLocalCaller } from './orchestration-link-binding-caller-gate'
+import { collectLinkIds } from './orchestration-link-binding-ids'
+import { ORCHESTRATION_LINK_BINDING_BIND_METHODS } from './orchestration-link-binding-bind'
 import { ORCHESTRATION_LINK_BINDING_CONTAINMENT_METHODS } from './orchestration-link-binding-containment'
 import { ORCHESTRATION_LINK_BINDING_OUTBOX_METHODS } from './orchestration-link-binding-outbox'
-import {
-  LINK_BINDING_LEGACY_ATTEST_TTL_MS,
-  LINK_BINDING_STATUS_WAIT_CAP_MS
-} from '../../orchestration/link-binding-constants'
-
-function collectLinkIds(runtime: RpcContext['runtime']): string[] {
-  const db = runtime.getOrchestrationDb()
-  const ids = new Set<string>()
-  for (const row of db.listPeerLinkBindings()) {
-    ids.add(row.linkDeviceId)
-  }
-  for (const row of db.listBindingAttempts()) {
-    ids.add(row.linkDeviceId)
-  }
-  for (const row of db.listContainment()) {
-    if (row.subjectKind === 'link') {
-      ids.add(row.subjectId)
-    }
-  }
-  // Ruling 28(h)/protocol F9: the two tables `collectLinkIds` previously never enumerated — a
-  // `--link Y` on an unrelated link could silently delete Y's own scan-fact/confirm-observation
-  // rows (they were excluded from `retained`) or, for a link living ONLY in one of these two
-  // tables, could never be named by `--all` at all.
-  for (const id of db.listScanFactLinkIds()) {
-    ids.add(id)
-  }
-  for (const id of db.listConfirmObservationLinkIds()) {
-    ids.add(id)
-  }
-  return [...ids]
-}
+import { LINK_BINDING_STATUS_WAIT_CAP_MS } from '../../orchestration/link-binding-constants'
 
 function clampWaitMs(timeoutMs: number | undefined): number {
   return Math.min(timeoutMs ?? LINK_BINDING_STATUS_WAIT_CAP_MS, LINK_BINDING_STATUS_WAIT_CAP_MS)
@@ -135,151 +107,6 @@ const LINK_BINDINGS_METHOD: RpcMethod = defineMethod({
   }
 })
 
-const LinkBindParams = z
-  .object({
-    link: z.string().optional(),
-    all: z.boolean().optional(),
-    deep: z.boolean().optional(),
-    acceptLegacy: z.boolean().optional(),
-    lift: z.boolean().optional(),
-    reason: z.string().optional()
-  })
-  .strict()
-
-const LINK_BIND_METHOD: RpcMethod = defineMethod({
-  name: 'orchestration.linkBind',
-  params: LinkBindParams,
-  handler: async (params, ctx) => {
-    requireLocalCaller(ctx)
-    const { runtime } = ctx
-    if (!params.link && !params.all) {
-      throw new OrchestrationError('invalid_argument', 'Pass --link <deviceId> or --all.')
-    }
-    const db = runtime.getOrchestrationDb()
-    if (params.link) {
-      const known = collectLinkIds(runtime).includes(params.link)
-      if (!known) {
-        throw new OrchestrationError('invalid_argument', `No link known for ${params.link}.`)
-      }
-    }
-    if (params.acceptLegacy) {
-      if (!params.link) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          '--accept-legacy requires exactly one --link.'
-        )
-      }
-      if (params.lift) {
-        // Ruling 28(e)/protocol F3: --lift on link-bind WITHDRAWS the attestation instead of
-        // renewing it — the exact inverse of the un-lifted flag, which C7 shipped as dead grammar.
-        const prior = db.getContainment('link', params.link, 'accept_legacy')
-        db.liftContainment('link', params.link, 'accept_legacy', Date.now())
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: 'local',
-          verb: 'linkBinding',
-          outcome: 'accept_legacy_lifted',
-          reasonCode: JSON.stringify({
-            link: params.link,
-            priorReasonText: prior?.reasonText ?? null,
-            priorExpiresAt: prior?.expiresAt ?? null
-          })
-        })
-      } else {
-        if (!params.reason) {
-          throw new OrchestrationError(
-            'invalid_argument',
-            '--accept-legacy requires a --reason (pass --lift to withdraw instead).'
-          )
-        }
-        const binding = db.getPeerLinkBinding(params.link)
-        if (!binding) {
-          throw new OrchestrationError(
-            'invalid_argument',
-            `No binding known for link ${params.link}.`
-          )
-        }
-        const now = Date.now()
-        const prior = db.getContainment('link', params.link, 'accept_legacy')
-        db.putContainment({
-          subjectKind: 'link',
-          subjectId: params.link,
-          action: 'accept_legacy',
-          reasonCode: 'operator_attestation',
-          reasonText: params.reason,
-          detail: JSON.stringify({
-            environmentId: binding.environmentId,
-            peerKeyFingerprint: binding.peerKeyFingerprint
-          }),
-          createdAt: now,
-          expiresAt: now + LINK_BINDING_LEGACY_ATTEST_TTL_MS
-        })
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: 'local',
-          verb: 'linkBinding',
-          outcome: prior && prior.liftedAt === null ? 'accept_legacy_reasserted' : 'accept_legacy',
-          reasonCode: JSON.stringify({
-            link: params.link,
-            reasonText: params.reason,
-            priorReasonText: prior?.reasonText ?? null,
-            priorExpiresAt: prior?.expiresAt ?? null
-          })
-        })
-      }
-    }
-    const prover = runtime.getLinkBindingProver()
-    if (params.link) {
-      // Ruling 28(a): the operator's single-link kick is 'operator_bind' (proveNow) — never
-      // 'inbound_contact' (C7's declared deviation 3), so it is exempt from the peer-traffic kick
-      // debounce and the park re-arm debounce, and bypasses the contested/revoked exclusions.
-      const wasRevoked = db.getPeerLinkBinding(params.link)?.revokedAt != null
-      if (wasRevoked) {
-        // Ruling 28(a): clears a sticky revoke through its OWN guarded statement, audited, BEFORE
-        // the round runs — `link-bind` is the only path licensed to lift a revoke.
-        const now = Date.now()
-        const cleared = db.unrevokePeerLinkBinding(params.link, now)
-        if (cleared) {
-          db.writeAgentAudit({
-            agentId: null,
-            actorPaneKey: null,
-            actorHostId: params.link,
-            verb: 'linkBinding',
-            outcome: 'link_revoke_lifted',
-            reasonCode: null
-          })
-        }
-      }
-      prover.scheduleBinding(params.link, 'operator_bind')
-      if (params.deep) {
-        prover.requestRerun('contest_search')
-      }
-      // Ruling 28(a)/(c): wait for THIS round's settle so the verb reports what actually
-      // happened rather than a fire-and-forget 'running' for work it may not have done (a
-      // contested/revoked link previously reported 'running' while doing nothing at all).
-      const settled = await prover.waitForSettle(params.link, LINK_BINDING_STATUS_WAIT_CAP_MS)
-      if (settled === 'timeout') {
-        return { state: 'timeout', link: params.link }
-      }
-      const binding = db.getPeerLinkBinding(params.link)
-      const attempt = db.getBindingAttempt(params.link)
-      const state =
-        binding?.state === 'contested' ? 'contested' : (attempt?.lastOutcome ?? 'unavailable')
-      return { state, link: params.link, attemptId: `${params.link}:${Date.now()}` }
-    }
-    const ids = collectLinkIds(runtime)
-    for (const linkDeviceId of ids) {
-      prover.scheduleBinding(linkDeviceId, 'operator_bind')
-    }
-    if (params.deep) {
-      prover.requestRerun('contest_search')
-    }
-    return { state: 'running', kicked: ids }
-  }
-})
-
 const LinkFlagParams = z.object({ link: z.string() }).strict()
 
 const LINK_REVOKE_METHOD: RpcMethod = defineMethod({
@@ -347,9 +174,9 @@ const LINK_FORGET_METHOD: RpcMethod = defineMethod({
 
 export const ORCHESTRATION_LINK_BINDING_LOCAL_METHODS: RpcMethod[] = [
   LINK_BINDINGS_METHOD,
-  LINK_BIND_METHOD,
   LINK_REVOKE_METHOD,
   LINK_FORGET_METHOD,
+  ...ORCHESTRATION_LINK_BINDING_BIND_METHODS,
   ...ORCHESTRATION_LINK_BINDING_CONTAINMENT_METHODS,
   ...ORCHESTRATION_LINK_BINDING_OUTBOX_METHODS
 ]

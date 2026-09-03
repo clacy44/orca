@@ -196,13 +196,19 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
   // Ruling 28(h): pins C7's two mutators (`revokePeerLinkBinding`, `deleteBindingsAndAttemptsIn`
   // — the renamed inclusion-based purge) plus C8a's own `unrevokePeerLinkBinding`, all reachable
   // from exactly one production module: the local RPC surface.
-  it('revokePeerLinkBinding, unrevokePeerLinkBinding and deleteBindingsAndAttemptsIn are called from exactly one production call site: the local RPC surface', () => {
+  it('revokePeerLinkBinding, unrevokePeerLinkBinding and deleteBindingsAndAttemptsIn are called from exactly one production call site each, all within the local RPC surface', () => {
     const files = allProductionTsFiles('src/main')
-    for (const symbol of [
-      'revokePeerLinkBinding',
-      'unrevokePeerLinkBinding',
-      'deleteBindingsAndAttemptsIn'
-    ]) {
+    // Ruling 28(h): all three live under rpc/methods/orchestration-link-binding-*.ts (the local
+    // RPC surface's own C8a max-lines split) — `unrevokePeerLinkBinding` lives in
+    // orchestration-link-binding-bind.ts (linkBind's revoke-lift step); the other two stay in
+    // orchestration-link-binding-local.ts (linkRevoke / linkForget).
+    const expectedCallerBySymbol: Record<string, string> = {
+      revokePeerLinkBinding: 'src/main/runtime/rpc/methods/orchestration-link-binding-local.ts',
+      unrevokePeerLinkBinding: 'src/main/runtime/rpc/methods/orchestration-link-binding-bind.ts',
+      deleteBindingsAndAttemptsIn:
+        'src/main/runtime/rpc/methods/orchestration-link-binding-local.ts'
+    }
+    for (const [symbol, expectedCaller] of Object.entries(expectedCallerBySymbol)) {
       const callers: string[] = []
       const callRe = new RegExp(`[.)]\\s*${symbol}\\s*\\(|\\bdb\\.${symbol}\\s*\\(`)
       for (const file of files) {
@@ -214,7 +220,7 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
           callers.push(file)
         }
       }
-      expect(callers).toEqual(['src/main/runtime/rpc/methods/orchestration-link-binding-local.ts'])
+      expect(callers).toEqual([expectedCaller])
     }
   })
 
