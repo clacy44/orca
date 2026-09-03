@@ -35,14 +35,7 @@ const principals: PrincipalLookup = {
 
 function createRuntime(): { runtime: OrcaRuntimeService; spawn: ReturnType<typeof vi.fn> } {
   const store = {
-    getSettings: () => PEER_SETTINGS,
-    // H2a (F-6d, Ruling 32 Addendum 4): createTerminal now persists the launch-token anchor
-    // BEFORE spawn and aborts the launch if that persist has nowhere to land — stateless
-    // no-ops, since this suite asserts launch-config closure, not anchor persistence.
-    getWorkspaceSession: () => ({ terminalLaunchTokenHashesByPaneKey: {} }),
-    persistTerminalLaunchTokenHash: () => {},
-    forgetTerminalLaunchTokenHash: () => {},
-    isWritesFrozen: () => false
+    getSettings: () => PEER_SETTINGS
   } as unknown as ConstructorParameters<typeof OrcaRuntimeService>[0]
   const runtime = new OrcaRuntimeService(store)
   const internals = runtime as unknown as {

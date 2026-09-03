@@ -312,4 +312,118 @@ describe('ClaimedAgentPtyOwnerRegistry', () => {
     await expect(second).resolves.toMatchObject({ disposition: 'adopted' })
     expect(spawn).toHaveBeenCalledOnce()
   })
+
+  // H2c (F-6d, Ruling 32 Addendum 7) T6: the owner record carries the caller's spawn-env
+  // token hash — set once, at creation, by the registry that spawned the process; an adopt
+  // or a reservation join return the CREATOR's stored hash, never their own caller's.
+  describe('launchTokenHash (Ruling 32 Addendum 7)', () => {
+    const HASH_A = 'a'.repeat(64)
+    const HASH_B = 'b'.repeat(64)
+
+    it('stores the caller-computed hash on the fresh created-path owner', async () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+
+      const result = await registry.ensure({
+        claim: claim(),
+        surface,
+        launchTokenHash: HASH_A,
+        spawn: async () => ({ ptyId: 'pty-1' })
+      })
+
+      expect(result.disposition).toBe('created')
+      expect(result.owner.launchTokenHash).toBe(HASH_A)
+      expect(registry.find(claim())?.launchTokenHash).toBe(HASH_A)
+    })
+
+    it('leaves launchTokenHash unset when the caller passes none', async () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+
+      const result = await registry.ensure({
+        claim: claim(),
+        surface,
+        spawn: async () => ({ ptyId: 'pty-1' })
+      })
+
+      expect(result.owner.launchTokenHash).toBeUndefined()
+    })
+
+    it("a fresh owner built from the spawn callback's own owner keeps ITS hash, not the caller's", async () => {
+      // Why: the else-branch (spawned.owner present) already carries an owner object built by
+      // a lower layer (e.g. an adopted early return whose owner was constructed elsewhere) —
+      // args.launchTokenHash only backfills the registry's OWN fresh-owner construction.
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+
+      const result = await registry.ensure({
+        claim: claim(),
+        surface,
+        launchTokenHash: HASH_B,
+        spawn: async () => ({
+          ptyId: 'pty-1',
+          owner: { claim: claim(), generation: 'gen-1', phase: 'live', ptyId: 'pty-1', surface }
+        })
+      })
+
+      expect(result.owner.launchTokenHash).toBeUndefined()
+    })
+
+    it("a live-owner adopt returns the CREATOR's stored hash via cloneOwner, not the caller's", async () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+      await registry.ensure({
+        claim: claim(),
+        surface,
+        launchTokenHash: HASH_A,
+        spawn: async () => ({ ptyId: 'pty-1' })
+      })
+
+      // A second, unrelated caller ensures the SAME identity with a DIFFERENT hash — this call
+      // never spawns (the owner is already live) and must not overwrite the stored hash.
+      const adopted = await registry.ensure({
+        claim: claim(),
+        surface,
+        launchTokenHash: HASH_B,
+        spawn: async () => ({ ptyId: 'unexpected' })
+      })
+
+      expect(adopted.disposition).toBe('adopted')
+      expect(adopted.owner.launchTokenHash).toBe(HASH_A)
+      expect(registry.find(claim())?.launchTokenHash).toBe(HASH_A)
+    })
+
+    it("a reservation join returns the CREATOR's stored hash via cloneOwner, not the joiner's", async () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+      let finish!: (result: { ptyId: string }) => void
+      const spawn = vi.fn(
+        () =>
+          new Promise<{ ptyId: string }>((resolve) => {
+            finish = resolve
+          })
+      )
+
+      const first = registry.ensure({ claim: claim(), surface, launchTokenHash: HASH_A, spawn })
+      const second = registry.ensure({ claim: claim(), surface, launchTokenHash: HASH_B, spawn })
+      finish({ ptyId: 'pty-1' })
+
+      const firstResult = await first
+      const secondResult = await second
+      expect(firstResult.owner.launchTokenHash).toBe(HASH_A)
+      expect(secondResult.disposition).toBe('adopted')
+      expect(secondResult.owner.launchTokenHash).toBe(HASH_A)
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+    it("cloneOwner copies launchTokenHash into register()'s reconciled snapshot", () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+
+      registry.register({
+        claim: claim(),
+        generation: 'gen-external',
+        phase: 'live',
+        ptyId: 'pty-external',
+        surface,
+        launchTokenHash: HASH_A
+      })
+
+      expect(registry.find(claim())?.launchTokenHash).toBe(HASH_A)
+    })
+  })
 })

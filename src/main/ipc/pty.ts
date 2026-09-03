@@ -164,6 +164,7 @@ import {
 import { isWslUncPath, toWindowsWslPath } from '../../shared/wsl-paths'
 import { splitWorktreeIdForFilesystem } from '../../shared/worktree/id'
 import type { AgentSessionOwnerBinding } from '../../shared/agent-session-host-authority'
+import { launchTokenHash } from '../../shared/launch-token-hash'
 import {
   agentSessionOwnerBindingsEqual,
   ClaimedAgentPtyOwnerRegistry
@@ -5024,9 +5025,13 @@ export function registerPtyHandlers(
               pendingRegistrationPtyId = recoveredOwner.ptyId
             }
             let providerResult: PtySpawnResult | null = null
+            const spawnEnvLaunchToken = spawnOptions.env?.ORCA_AGENT_LAUNCH_TOKEN
             const ensured = await agentSessionOwners.ensure({
               claim: args.agentSessionEnsure.claim,
               surface: args.agentSessionEnsure.surface,
+              ...(spawnEnvLaunchToken
+                ? { launchTokenHash: launchTokenHash(spawnEnvLaunchToken) }
+                : {}),
               spawn: async () => {
                 assertClientStillConnected()
                 providerResult = await spawnWithLane(provider, spawnOptions, paneLane)
@@ -5240,11 +5245,25 @@ export function registerPtyHandlers(
               ...(env ? { launchEnv: env } : {})
             })
           }
-          return {
+          const adoptedResponse = {
             id: result.id,
             ...(result.incarnationId ? { incarnationId: result.incarnationId } : {}),
             agentSessionEnsure: result.agentSessionEnsure
           }
+          // H2c (F-6d, Ruling 32 Addendum 7, item 4): this early return skipped settling the
+          // reservation created above — every future spawn for this pane then awaited a promise
+          // that never resolves (this file's own comment at the catch block below). Settle it
+          // here exactly as the normal path below does.
+          resolvePaneSpawnReservation(paneSpawnReservationKey, paneSpawnReservation, {
+            ...result,
+            ...(typeof result.snapshotKittyKeyboardFlags === 'number' &&
+            reconciledSnapshotSeq !== null &&
+            snapshotKittyFlagsCoverReconciledSeq
+              ? { snapshotSeq: reconciledSnapshotSeq }
+              : { snapshotKittyKeyboardFlags: undefined }),
+            isReattach: true
+          })
+          return adoptedResponse
         }
         ptyOwnership.set(result.id, args.connectionId ?? null)
         if (result.incarnationId) {

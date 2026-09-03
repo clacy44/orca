@@ -100,18 +100,7 @@ describe('remote agent-session host authority integration', () => {
         getRepo: () => undefined,
         getAllWorktreeMeta: () => ({}),
         getWorktreeMeta: () => undefined,
-        getProjects: () => [],
-        // H2a (F-6d, Ruling 32 Addendum 4): createTerminal now persists the launch-token anchor
-        // BEFORE spawn and aborts the launch if that persist has nowhere to land —
-        // ensureAgentSession always passes a launchConfig. This suite makes no assertion about
-        // anchor contents, only about the racing-resume dedup/adopt/retire mechanics, so a
-        // stateless no-op is deliberately used (not a real getWorkspaceSession-backed store):
-        // several unrelated code paths key behavior off getWorkspaceSession's mere presence,
-        // and adding it here reproducibly broke this suite's post-exit tab retirement — see
-        // orca-runtime.test.ts's identical finding for its own shared store fixture.
-        persistTerminalLaunchTokenHash: () => {},
-        forgetTerminalLaunchTokenHash: () => {},
-        isWritesFrozen: () => false
+        getProjects: () => []
       }
       const runtime = new OrcaRuntimeService(store as never)
       let nextRequestedSession = 0

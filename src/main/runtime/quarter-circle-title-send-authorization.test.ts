@@ -5,9 +5,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
 import { assertTerminalAgentSendable } from './rpc/terminal-agent-send-guard'
 import { detectAgentStatusFromTitle } from '../../shared/agent-detection'
-import { getDefaultWorkspaceSession } from '../../shared/constants'
-import { makePaneKey } from '../../shared/stable-pane-id'
-import type { WorkspaceSessionState } from '../../shared/workspace-session-state-types'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -26,35 +23,6 @@ const SPINNER_ONLY_TITLE = '◑ Check package version in package.json'
 const SPINNER_WITH_IDENTITY_TITLE = '◐ Claude Code'
 const BRAILLE_SPINNER_ONLY_TITLE = '⠂ Deploying release 4.2'
 
-// H2a (F-6d, Ruling 32 Addendum 4): createTerminal now persists the launch-token anchor
-// BEFORE spawn and aborts the launch if that persist has nowhere to land — a `null` store
-// (this file's prior fixture) is no longer a viable stand-in for any launchAgent-launching
-// test, so this is a minimal but real in-memory store, mirroring the pattern in
-// s10-10-restored-launch-token-anchor.test.ts / s10-17-attestation-anchor.test.ts.
-function createInMemoryStore(): ConstructorParameters<typeof OrcaRuntimeService>[0] {
-  const session: WorkspaceSessionState = {
-    ...getDefaultWorkspaceSession(),
-    terminalLaunchTokenHashesByPaneKey: {}
-  }
-  return {
-    getWorkspaceSession: () => session,
-    persistTerminalLaunchTokenHash: (args: {
-      tabId: string
-      leafId: string
-      launchTokenHash: string
-    }) => {
-      session.terminalLaunchTokenHashesByPaneKey = {
-        ...session.terminalLaunchTokenHashesByPaneKey,
-        [makePaneKey(args.tabId, args.leafId)]: args.launchTokenHash
-      }
-    },
-    forgetTerminalLaunchTokenHash: (paneKey: string) => {
-      const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
-      session.terminalLaunchTokenHashesByPaneKey = rest
-    }
-  } as ConstructorParameters<typeof OrcaRuntimeService>[0]
-}
-
 async function createRuntimeWithTitle(
   paneTitle: string,
   foregroundProcess: string | null,
@@ -65,7 +33,7 @@ async function createRuntimeWithTitle(
   handle: string
   getForegroundProcess: ReturnType<typeof vi.fn>
 }> {
-  const runtime = new OrcaRuntimeService(createInMemoryStore())
+  const runtime = new OrcaRuntimeService(null)
   const internals = runtime as unknown as {
     resolveTerminalWorkspaceLaunchScope: (selector: string) => Promise<unknown>
   }

@@ -56,6 +56,7 @@ import {
 } from '../shared/pty-startup-ingress'
 import { extractOnlyCookedEchoSafeQueryReplies } from '../shared/terminal-query-reply'
 import { resolvePtyOwnerBackend, type PtyOwnerBackend } from '../shared/pty-owner-backend'
+import { launchTokenHash } from '../shared/launch-token-hash'
 import { RecentPtyOutputBuffer } from '../main/runtime/recent-pty-output-buffer'
 import { expandWindowsPathEnvironmentVariables } from '../shared/windows-environment-expansion'
 import {
@@ -1408,9 +1409,11 @@ export class PtyHandler {
       }
       const claim = ensure.claim
       const surface = ensure.surface
+      const envLaunchToken = env?.ORCA_AGENT_LAUNCH_TOKEN
       const result = await this.agentSessionOwners.ensure({
         claim,
         surface,
+        ...(envLaunchToken ? { launchTokenHash: launchTokenHash(envLaunchToken) } : {}),
         spawn: async ({ generation }) => {
           const created = await this.spawnAfterAdmission(
             params,

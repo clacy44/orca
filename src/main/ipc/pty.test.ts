@@ -14,6 +14,7 @@ import { FLOATING_TERMINAL_WORKTREE_ID, getDefaultWorkspaceSession } from '../..
 import type { TuiAgent } from '../../shared/tui-agent'
 import type { AgentSessionOwnerBinding } from '../../shared/agent-session-host-authority'
 import { AGENT_SESSION_CLAIM_DIGEST_VERSION } from '../../shared/agent-session-host-authority'
+import { ClaimedAgentPtyOwnerRegistry } from '../../shared/claimed-agent-pty-owner'
 import { PtyWriteUnavailableError } from '../providers/pty-write-unavailable-error'
 import { TerminalSessionOwnerUnverifiedError } from '../daemon/daemon-errors'
 import type * as Wsl from '../wsl'
@@ -1751,6 +1752,104 @@ describe('registerPtyHandlers', () => {
     expect(reconnected.spawn).not.toHaveBeenCalled()
 
     unregisterSshPtyProvider(connectionId)
+    clearProviderPtyState(owner.ptyId)
+  })
+
+  // H2c (F-6d, Ruling 32 Addendum 7) T7: pty.ts passes the registry a hash of the SAME env it
+  // hands to spawnWithLane — not a hash of anything else, not omitted when a token is present.
+  it('passes ensure() a hash of the launch token in the spawned env', async () => {
+    const claim = {
+      ...recoveredAgentClaim,
+      identityDigest: 'ccccccccccccccccccccccccccccccccccccccccccc'
+    }
+    const token = 'pty-ts-launch-token'
+    const expectedHash = createHash('sha256').update(token).digest('hex')
+    const ensureSpy = vi.spyOn(ClaimedAgentPtyOwnerRegistry.prototype, 'ensure')
+    const spawn = vi.fn(async () => ({
+      id: 'pty-t7-created',
+      incarnationId: 'incarnation-t7'
+    }))
+    const sessions = [
+      {
+        id: 'pty-t7-created',
+        incarnationId: 'incarnation-t7',
+        cwd: '/tmp/recovered-worktree',
+        title: 'Codex'
+      }
+    ]
+    const provider = createAgentClaimProvider({
+      spawn,
+      sessions,
+      authoritativeOwnerListings: false
+    })
+    setLocalPtyProvider(provider as never)
+    const controller = registerAgentClaimController()
+
+    await controller.spawn({
+      cols: 80,
+      rows: 24,
+      cwd: '/tmp/recovered-worktree',
+      env: { ORCA_AGENT_LAUNCH_TOKEN: token },
+      agentSessionEnsure: { claim, surface: recoveredAgentSurface }
+    })
+
+    expect(ensureSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ launchTokenHash: expectedHash })
+    )
+
+    ensureSpy.mockRestore()
+    clearProviderPtyState('pty-t7-created')
+  })
+
+  // H2c (F-6d, Ruling 32 Addendum 7) item 4: the adopted early return used to skip settling the
+  // pane spawn reservation created earlier in this same call — every later spawn for that pane
+  // then awaited a promise that never resolves. Two sequential calls on one pane key, first
+  // adopted: the second must complete, not hang.
+  it('T8: settles the pane spawn reservation on an adopted early return', async () => {
+    const claim = {
+      ...recoveredAgentClaim,
+      identityDigest: 'ddddddddddddddddddddddddddddddddddddddddddd'
+    }
+    const owner: AgentSessionOwnerBinding = {
+      claim,
+      generation: 'generation-t8',
+      phase: 'live',
+      ptyId: 'pty-t8-preexisting',
+      surface: recoveredAgentSurface
+    }
+    const sessions = [
+      {
+        id: owner.ptyId,
+        incarnationId: 'incarnation-t8',
+        cwd: '/tmp/recovered-worktree',
+        title: 'Codex',
+        agentSessionOwners: [owner]
+      }
+    ]
+    const provider = createAgentClaimProvider({ sessions })
+    setLocalPtyProvider(provider as never)
+    const controller = registerAgentClaimController()
+    const request = {
+      cols: 80,
+      rows: 24,
+      cwd: '/tmp/recovered-worktree',
+      tabId: recoveredAgentSurface.tabId,
+      leafId: recoveredAgentSurface.leafId,
+      agentSessionEnsure: { claim, surface: recoveredAgentSurface }
+    }
+
+    await expect(controller.spawn(request)).resolves.toMatchObject({
+      id: owner.ptyId,
+      agentSessionEnsure: { disposition: 'adopted', owner }
+    })
+
+    // Before the fix, this second call finds the first call's never-settled reservation and
+    // hangs forever awaiting it.
+    await expect(controller.spawn(request)).resolves.toMatchObject({
+      id: owner.ptyId,
+      agentSessionEnsure: { disposition: 'adopted', owner }
+    })
+
     clearProviderPtyState(owner.ptyId)
   })
 

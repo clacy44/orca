@@ -54,6 +54,13 @@ export class ClaimedAgentPtyOwnerRegistry {
   async ensure(args: {
     claim: AgentSessionExecutionClaim
     surface: AgentSessionSurfaceBinding
+    /**
+     * sha256 hex of the `ORCA_AGENT_LAUNCH_TOKEN` in the env THIS call is about to spawn with,
+     * computed by the caller (Ruling 32 Addendum 7). Stored on the owner only on the fresh
+     * 'created' path below — an adopt or a reservation join returns the creator's stored hash
+     * instead, via cloneOwner.
+     */
+    launchTokenHash?: string
     spawn: (reservation: { generation: string }) => Promise<{
       ptyId: string
       owner?: AgentSessionOwnerBinding
@@ -131,7 +138,8 @@ export class ClaimedAgentPtyOwnerRegistry {
             generation,
             phase: 'live',
             ptyId: spawned.ptyId,
-            surface: requestedSurface
+            surface: requestedSurface,
+            ...(args.launchTokenHash !== undefined ? { launchTokenHash: args.launchTokenHash } : {})
           }
       if (
         owner.ptyId !== spawned.ptyId ||

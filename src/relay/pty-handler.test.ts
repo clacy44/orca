@@ -1,9 +1,11 @@
 /* oxlint-disable max-lines */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_BOUNDED_SSH_RELAY_GRACE_PERIOD_SECONDS } from '../shared/ssh-types'
+import { ClaimedAgentPtyOwnerRegistry } from '../shared/claimed-agent-pty-owner'
 import * as gitBash from '../main/git-bash'
 import * as ptyShellUtils from './pty-shell-utils'
 import {
@@ -503,6 +505,41 @@ describe('PtyHandler', () => {
       owner: (first.agentSessionEnsure as { owner: unknown }).owner
     })
     expect(mockPtySpawn).toHaveBeenCalledOnce()
+  })
+
+  // H2c (F-6d, Ruling 32 Addendum 7) T7: the relay's own registry call gets a hash of the
+  // launch token in the SAME env this spawn carries, from the caller — not omitted.
+  it('T7: passes ensure() a hash of the launch token in the spawn env', async () => {
+    const token = 'relay-launch-token'
+    const expectedHash = createHash('sha256').update(token).digest('hex')
+    const ensureSpy = vi.spyOn(ClaimedAgentPtyOwnerRegistry.prototype, 'ensure')
+    const agentSessionEnsure = {
+      claim: {
+        digestVersion: 1,
+        keyId: 'claim-key-t7',
+        identityDigest: 'e'.repeat(43),
+        worktreeScopeDigest: 'f'.repeat(43),
+        agent: 'codex'
+      },
+      surface: {
+        worktreeId: 'repo::/tmp/worktree-t7',
+        tabId: '33333333-3333-4333-8333-333333333333',
+        leafId: '44444444-4444-4444-8444-444444444444',
+        terminalHandle: 'term_t7'
+      }
+    }
+
+    await dispatcher.callRequest('pty.spawn', {
+      cols: 80,
+      rows: 24,
+      env: { ORCA_AGENT_LAUNCH_TOKEN: token },
+      agentSessionEnsure
+    })
+
+    expect(ensureSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ launchTokenHash: expectedHash })
+    )
+    ensureSpy.mockRestore()
   })
 
   it('hedges both causes on Linux and offers the build-tools remedy nowhere else', () => {

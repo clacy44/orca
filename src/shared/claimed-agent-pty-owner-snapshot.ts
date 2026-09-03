@@ -37,7 +37,8 @@ export function cloneAgentSessionOwnerBinding(
     generation: owner.generation,
     phase: owner.phase,
     ptyId: owner.ptyId,
-    surface: cloneAgentSessionSurface(owner.surface)
+    surface: cloneAgentSessionSurface(owner.surface),
+    ...(owner.launchTokenHash !== undefined ? { launchTokenHash: owner.launchTokenHash } : {})
   }
 }
 

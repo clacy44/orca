@@ -80,6 +80,13 @@ export type AgentSessionOwnerBinding = {
   phase: 'reserved' | 'live'
   ptyId: string
   surface: AgentSessionSurfaceBinding
+  /**
+   * sha256 hex of the `ORCA_AGENT_LAUNCH_TOKEN` the CREATING caller's spawn env carried
+   * (Ruling 32 Addendum 7). Set once, at creation, by the registry that spawned the process;
+   * never the raw token. Absent for an owner that predates this field or whose creator spawned
+   * with no token.
+   */
+  launchTokenHash?: string
 }
 
 export type AgentSessionClaimedSpawnResult = {
@@ -194,7 +201,9 @@ export function isAgentSessionOwnerBinding(value: unknown): value is AgentSessio
     isBoundedWireString(owner.generation, 128) &&
     (owner.phase === 'reserved' || owner.phase === 'live') &&
     isBoundedWireString(owner.ptyId, 4096) &&
-    isAgentSessionSurfaceBinding(owner.surface)
+    isAgentSessionSurfaceBinding(owner.surface) &&
+    (owner.launchTokenHash === undefined ||
+      (typeof owner.launchTokenHash === 'string' && /^[0-9a-f]{64}$/.test(owner.launchTokenHash)))
   )
 }
 
