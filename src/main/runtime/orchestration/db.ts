@@ -6237,14 +6237,23 @@ export class OrchestrationDb {
   // to); `peer_link_device_id` marks an INBOUND-imported row only (db.ts's own messages column
   // comment), so excluding it here means these are never peer-supplied values — the host wrote
   // every one itself. Distinct, so the caller can tell "exactly one" from "more than one".
-  getOwnOutboundPeerAgentIdsForThread(threadId: string): string[] {
+  // F-9 item (b) (delta review, Ruling 32 Addendum 9): scoped to `environmentId` — the LINK the
+  // reply is actually being routed over (the INBOUND row's binding, per the caller in
+  // orchestration.ts) — not every outbound row on the thread regardless of link. An outbound
+  // row's `to_handle` is always `remote:<environmentId>:<peerAgentId>`
+  // (orchestration-peer-send-relay.ts), so this is the same address shape that row was written
+  // with. Without this scope, an unattributed inbound row from peer Y on a thread that also
+  // carries this host's own outbound rows to a DIFFERENT peer X recovered X's id as the
+  // addressee for a reply meant for Y.
+  getOwnOutboundPeerAgentIdsForThread(threadId: string, environmentId: string): string[] {
     const rows = this.db
       .prepare(
         `SELECT DISTINCT peer_agent_id FROM messages
          WHERE thread_id = ? AND peer_link_device_id IS NULL AND peer_agent_id IS NOT NULL
+         AND to_handle LIKE 'remote:' || ? || ':%'
          AND ${liveMessageSqlClause()}`
       )
-      .all(threadId) as { peer_agent_id: string }[]
+      .all(threadId, environmentId) as { peer_agent_id: string }[]
     return rows.map((row) => row.peer_agent_id)
   }
 

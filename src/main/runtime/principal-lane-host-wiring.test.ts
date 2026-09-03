@@ -126,6 +126,37 @@ describe('attachPrincipalLaneHost', () => {
     expect(labelResolvers.at(-1)?.laneAccountLabelOf?.('not-a-principal')).toBeNull()
   })
 
+  // F-9 item (d) (delta review, Ruling 32 Addendum 9): before this fix, PrincipalRegistry was
+  // constructed with no legacyGrantProfile here, so a pre-S10-19 device row (no explicit
+  // accessProfile of its own — FakeGrants' 'home-peer' fixture) always resolved 'full'
+  // regardless of what the RPC server's own legacyGrantProfile actually was. This is the read
+  // `lane status`/`orca agents lane status` surfaces via registry.listGrants().accessProfile.
+  it("threads the caller-supplied legacyGrantProfile through to a legacy grant's reported accessProfile", () => {
+    const { registry } = attachPrincipalLaneHost({
+      userDataPath,
+      grants: new FakeGrants(),
+      runtimeAuthToken: RUNTIME_AUTH_TOKEN,
+      runtime,
+      legacyGrantProfile: 'peer'
+    })
+
+    const grants = registry.listGrants()
+    expect(grants).toHaveLength(1)
+    expect(grants[0].accessProfile).toBe('peer')
+  })
+
+  it("defaults to 'full' when no legacyGrantProfile is supplied (unchanged prior behavior)", () => {
+    const { registry } = attachPrincipalLaneHost({
+      userDataPath,
+      grants: new FakeGrants(),
+      runtimeAuthToken: RUNTIME_AUTH_TOKEN,
+      runtime
+    })
+
+    const grants = registry.listGrants()
+    expect(grants[0].accessProfile).toBe('full')
+  })
+
   it('arms the federated refusal: an unticked link fails closed for every caller', () => {
     const { lookup } = attachPrincipalLaneHost({
       userDataPath,

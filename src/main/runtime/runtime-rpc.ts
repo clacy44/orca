@@ -1414,6 +1414,10 @@ export class OrcaRuntimeRpcServer {
           grants: pairingIdentity.deviceRegistry,
           runtimeAuthToken: this.authToken,
           runtime: this.runtime,
+          // F-9 item (d) (delta review, Ruling 32 Addendum 9): without this, PrincipalRegistry
+          // always resolved 'full' regardless of this server's actual legacyGrantProfile —
+          // correct only by coincidence, because runtime-rpc.ts's ship default is also 'full'.
+          legacyGrantProfile: this.getLegacyGrantProfile(),
           // Why here and not a standalone closure: `this.createPairingOffer` is already in scope
           // inside RuntimeRpcServer, so a runtime-time mint (`accounts.lane.mintInvite`) reuses the
           // exact same offer-construction path every other pairing entry point does.

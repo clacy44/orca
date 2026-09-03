@@ -511,10 +511,18 @@ function resolveMessageRun(
     payload?: string
     // Why: a paired caller's handle names a pane on ITS runtime, so guessing a local Run from it would misdeliver.
     allowPaneFallback?: boolean
+    // F-9 item (c) (delta review, Ruling 32 Addendum 9): only a peer caller needs its
+    // payload-borne dispatchId grammar-gated below — a non-peer caller's own typed id is
+    // unaffected (assertPeerMailPointerGrammar itself no-ops for accessProfile !== 'peer').
+    peerCaller?: {
+      accessProfile: 'full' | 'peer' | undefined
+      callerFingerprint: string | undefined
+    }
   }
 ): { run: RunRow | undefined; dispatchId: string | undefined } {
   const db = runtime.getOrchestrationDb()
   let dispatchId: string | undefined
+  let dispatchIdFromPayload = false
   if (params.payload) {
     try {
       const payload: unknown = JSON.parse(params.payload)
@@ -525,10 +533,27 @@ function resolveMessageRun(
         typeof (payload as { dispatchId?: unknown }).dispatchId === 'string'
       ) {
         dispatchId = (payload as { dispatchId: string }).dispatchId
+        dispatchIdFromPayload = true
       }
     } catch {
       // Lifecycle validation owns malformed payload errors; routing simply cannot derive a Dispatch.
     }
+  }
+  // F-9 item (c) (delta review, Ruling 32 Addendum 9): deliberately OUTSIDE the try/catch above
+  // — that catch exists only for a malformed JSON.parse and must never swallow this refusal.
+  // classifyRawPeerMailDestination (the caller's own destination guard, called ahead of this
+  // function) reads only to/run — it never sees this payload-borne dispatchId, so a peer caller
+  // could otherwise walk an unvalidated wire string straight into db.getDispatchContextById
+  // below and have dispatch_run_mismatch echo a foreign dispatch's run id back on a correct
+  // guess. Gate it BEFORE that lookup, same shape (and same sibling) as the to:/run: pointer
+  // gate above.
+  if (dispatchIdFromPayload && dispatchId && params.peerCaller) {
+    assertPeerMailPointerGrammar(
+      db,
+      params.peerCaller.accessProfile,
+      params.peerCaller.callerFingerprint,
+      { kind: 'dispatch', dispatchId }
+    )
   }
   if (!dispatchId && params.to?.startsWith('dispatch:')) {
     dispatchId = params.to.slice('dispatch:'.length)
@@ -907,7 +932,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         to: params.to,
         runId: params.run,
         payload: params.payload,
-        allowPaneFallback: !isRemoteRunMailboxRequest(remoteRunMailbox)
+        allowPaneFallback: !isRemoteRunMailboxRequest(remoteRunMailbox),
+        // F-9 item (c): gates a payload-borne dispatchId the same way rawPeerMailDestination
+        // above gates a to:/run: one — assertPeerMailPointerGrammar no-ops for a non-peer caller.
+        peerCaller: { accessProfile, callerFingerprint: authenticatedCallerFingerprint }
       })
       if (
         params.type === 'worker_done' &&
@@ -2233,11 +2261,19 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // F-11 pt.2 (Ruling 32(b)): before refusing "no addressee", recover it from THIS host's
         // own outbound rows on the same thread — never from anything the peer supplied. Exactly
         // one distinct addressee among them is used; zero or more than one still refuses as today.
+        // F-9 item (b) (delta review, Ruling 32 Addendum 9): scoped to the transport binding this
+        // reply is actually routed over — the INBOUND row's own link's environmentId — never the
+        // whole thread regardless of link, which could recover a DIFFERENT peer's addressee.
         let replyOriginal = original
         if (original.peer_agent_id == null) {
-          const recoveredAddressees = original.thread_id
-            ? db.getOwnOutboundPeerAgentIdsForThread(original.thread_id)
-            : []
+          const inboundBinding = db.getPeerLinkBinding(original.peer_link_device_id)
+          const recoveredAddressees =
+            original.thread_id && inboundBinding
+              ? db.getOwnOutboundPeerAgentIdsForThread(
+                  original.thread_id,
+                  inboundBinding.environmentId
+                )
+              : []
           if (recoveredAddressees.length !== 1) {
             throw noReturnRoute(original, 'sender_unverified')
           }

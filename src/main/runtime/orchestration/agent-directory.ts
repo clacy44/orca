@@ -6,7 +6,10 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
-import { adoptPredecessorThreadMembership } from './agent-thread-succession'
+import {
+  adoptPredecessorThreadMembership,
+  countUninheritedPredecessorMail
+} from './agent-thread-succession'
 import type { AgentRow, AgentState } from './types'
 
 // Why a local generator, not db.ts's generateId: importing it back from db.ts (which will
@@ -44,6 +47,10 @@ export type UpsertAgentByPaneSuffixResult =
       agent: AgentRow
       adoptedThreads: number
       blockedByQuarantinedPredecessor: boolean
+      // F-9 (Ruling 32 Addendum 9): what a tombstoned predecessor's peer-facing authority and
+      // bare-handle mailbox left behind -- never repointed, so register owes an honest count.
+      pendingPeerQuestions: number
+      unreadMailOnRetiredId: number
     }
   | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
   | {
@@ -211,8 +218,21 @@ export function upsertAgentByPaneSuffix(
       params.displayName,
       id
     )
+    const { pendingPeerQuestions, unreadMailOnRetiredId } = countUninheritedPredecessorMail(
+      db,
+      params.hostId,
+      params.displayName,
+      id
+    )
     db.exec('COMMIT')
-    return { outcome: 'created', agent: created, adoptedThreads, blockedByQuarantinedPredecessor }
+    return {
+      outcome: 'created',
+      agent: created,
+      adoptedThreads,
+      blockedByQuarantinedPredecessor,
+      pendingPeerQuestions,
+      unreadMailOnRetiredId
+    }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error

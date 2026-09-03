@@ -194,7 +194,13 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // adoption outright (by design). Lets the CLI say WHICH threads were not inherited and
         // why, instead of a bare 0 reading the same as "nothing to inherit".
         blockedByQuarantinedPredecessor:
-          result.outcome === 'created' ? result.blockedByQuarantinedPredecessor : false
+          result.outcome === 'created' ? result.blockedByQuarantinedPredecessor : false,
+        // F-9 (Ruling 32 Addendum 9): what a tombstoned predecessor's pending peer questions and
+        // unread bare-handle mail left behind on register -- neither is repointed onto the fresh
+        // successor id (deferred by ruling), so this counts what the CLI must say was NOT
+        // inherited. Always 0 on a 'reminted' row (its id was never orphaned).
+        pendingPeerQuestions: result.outcome === 'created' ? result.pendingPeerQuestions : 0,
+        unreadMailOnRetiredId: result.outcome === 'created' ? result.unreadMailOnRetiredId : 0
       }
     }
   })

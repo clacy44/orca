@@ -372,7 +372,7 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
       code: 'no_pane_identity',
       data: {
         nextSteps: [
-          'this pane holds a launch token but the runtime has no anchor for it; relaunch from an Orca agent pane'
+          "this pane holds a launch token but the runtime has no anchor for it; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
         ]
       }
     })

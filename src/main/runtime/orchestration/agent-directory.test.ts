@@ -352,6 +352,40 @@ describe('agent-directory', () => {
       }
     })
 
+    // F-9 item (a) (delta review, Ruling 32 Addendum 9): register must surface what a
+    // tombstoned predecessor's peer-facing authority and unread mail left behind — neither is
+    // repointed onto the fresh successor id.
+    it('surfaces pending peer questions and unread mail left behind on the tombstoned predecessor', () => {
+      const db = rawDb()
+      const first = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
+      const predecessorId = first.outcome === 'created' ? first.agent.id : ''
+
+      db.prepare(
+        `INSERT INTO question_threads (message_id, run_id, dispatch_id, asker_handle, status, to_agent_id)
+         VALUES ('q1', 'peer_questions', 'peer:t1', 'remote:env:asker', 'pending', ?)`
+      ).run(predecessorId)
+      orchestrationDb!.insertGatedMessage({
+        from: 'agent:other',
+        to: `agent:${predecessorId}`,
+        subject: 'still pending'
+      })
+
+      db.prepare(
+        `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL WHERE id = ?`
+      ).run(predecessorId)
+
+      const successor = upsertAgentByPaneSuffix(
+        db,
+        baseParams({ paneKey: 'tab9:leaf-newcomer', terminalHandle: 'term_newcomer' })
+      )
+      expect(successor.outcome).toBe('created')
+      if (successor.outcome !== 'created') {
+        return
+      }
+      expect(successor.pendingPeerQuestions).toBe(1)
+      expect(successor.unreadMailOnRetiredId).toBe(1)
+    })
+
     it('reclaims a name held by a gone+derived row (tombstones it, then inserts fresh)', () => {
       const db = rawDb()
       const derivedHolder = upsertAgentByPaneSuffix(

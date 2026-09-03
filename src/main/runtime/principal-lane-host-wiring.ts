@@ -58,9 +58,15 @@ export function attachPrincipalLaneHost(input: {
   // Why optional: a REMOTE-host runtime proxy passes none, and `mintInvite` refuses
   // `accounts.lane.invite_unavailable` rather than throwing at attach time.
   pairing?: PairingInviteSource
+  // F-9 item (d) (delta review, Ruling 32 Addendum 9): the RPC server's own legacy grant
+  // profile (OrcaRuntimeRpcServer.getLegacyGrantProfile) — omitted defaults to 'full' inside
+  // PrincipalRegistry itself, same as before this fix (a REMOTE-host proxy has no server here
+  // to source it from).
+  legacyGrantProfile?: 'full' | 'peer'
 }): PrincipalLaneHostAttachment {
   const registry = new PrincipalRegistry(input.userDataPath, input.grants, {
-    runtimeAuthToken: input.runtimeAuthToken
+    runtimeAuthToken: input.runtimeAuthToken,
+    legacyGrantProfile: input.legacyGrantProfile
   })
   const lookup: PrincipalLookup = {
     // Why a delegating object and not the registry itself: the funnel must see exactly these two

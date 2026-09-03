@@ -7,6 +7,7 @@ import { resolveEnvironment } from '../runtime/environments'
 import type { RuntimeRpcSuccess } from '../runtime-client'
 import { nameOrId, resolveAgentAcrossHost } from './agents-shared'
 import { addressOf, findAgentsAcrossHosts, LOCAL_FIND_HOST } from './agents-cross-host'
+import { formatAgentRegister, type RegisterResult } from './agents-register-format'
 
 export type AgentView = {
   id: string
@@ -22,15 +23,6 @@ export type AgentView = {
   terminalHandle?: string | null
 }
 
-type RegisterResult = {
-  agent: AgentView
-  created: boolean
-  reMinted: boolean
-  repointedMessages: number
-  pendingOnOldHandle: number
-  adoptedThreads: number
-  blockedByQuarantinedPredecessor: boolean
-}
 type ListResult = {
   agents: AgentView[]
   liveCount: number
@@ -106,33 +98,6 @@ function agentLine(agent: AgentView): string {
   const tags = [agent.quarantined ? '[quarantined]' : null].filter(Boolean).join(' ')
   const role = agent.derived ? '' : agent.role ? ` — ${agent.role}` : ''
   return `${namePrefix}${agent.displayName}  [${agent.state}]${role} ${tags}`.trimEnd()
-}
-
-function formatAgentRegister(result: RegisterResult): string {
-  const verb = result.reMinted ? 'Re-registered' : 'Registered'
-  const role = result.agent.role ? ` — role: ${result.agent.role}` : ''
-  const repointed =
-    result.repointedMessages > 0
-      ? `\n${result.repointedMessages} unread message(s) from your previous terminal handle moved into this mailbox.`
-      : ''
-  const pending =
-    result.pendingOnOldHandle > 0
-      ? `\n${result.pendingOnOldHandle} more unread message(s) on your previous terminal handle were NOT moved (backlog too large for one re-mint) and are no longer reachable from this agent.`
-      : ''
-  // R2 (S10-11): only on a fresh id (never reMinted — a rebind's threads were never orphaned).
-  const adopted =
-    result.adoptedThreads > 0
-      ? `\nInherited ${result.adoptedThreads} thread(s) (including pact state) from a previous registration under this name.`
-      : ''
-  // F-9 (Ruling 32(b)): a bare 0 above reads the same whether there was nothing to inherit or
-  // something was blocked — say which when it is the latter.
-  const blocked = result.blockedByQuarantinedPredecessor
-    ? '\nA quarantined previous registration under this name exists; its thread participation was NOT inherited (quarantine survives retire, by design).'
-    : ''
-  return (
-    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}${adopted}${blocked}\n` +
-    `Next: orca orchestration send --to agent:${result.agent.id} --subject "..."`
-  )
 }
 
 function formatAgentsList(result: ListResult): string {

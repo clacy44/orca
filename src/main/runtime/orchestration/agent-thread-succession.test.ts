@@ -2,7 +2,10 @@
 import { describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
-import { adoptPredecessorThreadMembership } from './agent-thread-succession'
+import {
+  adoptPredecessorThreadMembership,
+  countUninheritedPredecessorMail
+} from './agent-thread-succession'
 
 function freshDb(): OrchestrationDb {
   return new OrchestrationDb(':memory:')
@@ -254,6 +257,99 @@ describe('adoptPredecessorThreadMembership', () => {
       .get(thread.id) as { pact_proposer_agent_id: string; pact_turn_agent_id: string }
     expect(row.pact_proposer_agent_id).toBe('agt_pred')
     expect(row.pact_turn_agent_id).toBe('agt_pred')
+    db.close()
+  })
+})
+
+function insertPendingQuestion(raw: Database.Database, messageId: string, toAgentId: string): void {
+  raw
+    .prepare(
+      `INSERT INTO question_threads (message_id, run_id, dispatch_id, asker_handle, status, to_agent_id)
+       VALUES (?, 'peer_questions', 'peer:t1', 'remote:env:asker', 'pending', ?)`
+    )
+    .run(messageId, toAgentId)
+}
+
+// F-9 honesty (Ruling 32 Addendum 9): question_threads.to_agent_id and unread bare-handle mail
+// are deliberately never repointed onto a successor — this counts what was left behind so
+// register can say so, instead of a bare "Inherited N thread(s)" reading as complete.
+describe('countUninheritedPredecessorMail', () => {
+  it('counts pending peer questions still addressed to the tombstoned predecessor', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+    insertPendingQuestion(raw, 'q1', 'agt_pred')
+    insertPendingQuestion(raw, 'q2', 'agt_pred')
+
+    const outcome = countUninheritedPredecessorMail(raw, 'local', 'merge-backend', 'agt_succ')
+    expect(outcome.pendingPeerQuestions).toBe(2)
+    expect(outcome.unreadMailOnRetiredId).toBe(0)
+    db.close()
+  })
+
+  it('does not count an already-answered or closed question', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+    insertPendingQuestion(raw, 'q1', 'agt_pred')
+    raw.prepare(`UPDATE question_threads SET status = 'answered' WHERE message_id = 'q1'`).run()
+
+    const outcome = countUninheritedPredecessorMail(raw, 'local', 'merge-backend', 'agt_succ')
+    expect(outcome.pendingPeerQuestions).toBe(0)
+    db.close()
+  })
+
+  it('counts unread mail still addressed to the retired agent:<id> handle', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+    db.insertGatedMessage({ from: 'agent:other', to: 'agent:agt_pred', subject: 'hi' })
+    db.insertGatedMessage({ from: 'agent:other', to: 'agent:agt_pred', subject: 'hi again' })
+
+    const outcome = countUninheritedPredecessorMail(raw, 'local', 'merge-backend', 'agt_succ')
+    expect(outcome.unreadMailOnRetiredId).toBe(2)
+    db.close()
+  })
+
+  it('does not count mail already read, or addressed to a different id', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+    const inserted = db.insertGatedMessage({
+      from: 'agent:other',
+      to: 'agent:agt_pred',
+      subject: 'hi'
+    })
+    if (inserted.outcome === 'stored') {
+      raw.prepare('UPDATE messages SET read = 1 WHERE id = ?').run(inserted.message.id)
+    }
+    db.insertGatedMessage({ from: 'agent:other', to: 'agent:someone_else', subject: 'hi' })
+
+    const outcome = countUninheritedPredecessorMail(raw, 'local', 'merge-backend', 'agt_succ')
+    expect(outcome.unreadMailOnRetiredId).toBe(0)
+    db.close()
+  })
+
+  it('sums across every tombstoned predecessor sharing this host+name, quarantined or not', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred_clean', 'local', 'agent-a', 0)
+    tombstone(raw, 'agt_pred_quarantined', 'local', 'agent-a', 1)
+    insertPendingQuestion(raw, 'q1', 'agt_pred_clean')
+    insertPendingQuestion(raw, 'q2', 'agt_pred_quarantined')
+    db.insertGatedMessage({ from: 'agent:other', to: 'agent:agt_pred_quarantined', subject: 'hi' })
+
+    const outcome = countUninheritedPredecessorMail(raw, 'local', 'agent-a', 'agt_succ')
+    expect(outcome.pendingPeerQuestions).toBe(2)
+    expect(outcome.unreadMailOnRetiredId).toBe(1)
+    db.close()
+  })
+
+  it('reports zero for a clean register with no tombstoned predecessor at all', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const outcome = countUninheritedPredecessorMail(raw, 'local', 'never-registered', 'agt_succ')
+    expect(outcome).toEqual({ pendingPeerQuestions: 0, unreadMailOnRetiredId: 0 })
     db.close()
   })
 })

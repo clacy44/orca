@@ -60,6 +60,12 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
   let runtime: OrcaRuntimeService
   let linkDeviceId: string
   let environmentId: string
+  // F-9 item (b): hoisted so a test needing a SECOND link can mint it off the same in-memory
+  // registry the self-view above already closes over — a fresh `new DeviceRegistry(dataPath)`
+  // would reload the file but leave THIS registry's in-memory device list (and so
+  // registryCredentialFingerprint) unaware of it, which would make a second link refuse for an
+  // unrelated reason (unknown credential) rather than the one this file tests.
+  let registry: DeviceRegistry
 
   beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), 'orca-reply-addressee-recovery-'))
@@ -70,7 +76,7 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
     runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
 
-    const registry = new DeviceRegistry(dataPath)
+    registry = new DeviceRegistry(dataPath)
     const link = registry.mintPendingDevice('p-host', 'runtime')
     registry.updateLastSeen(link.deviceId)
     linkDeviceId = link.deviceId
@@ -205,6 +211,71 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
       call(
         'orchestration.reply',
         { id: foreign.id, body: 'reply body' },
+        { runtime, orchestrationCompatibilityEvidence: replierEvidence() }
+      )
+    ).rejects.toMatchObject({ code: 'no_return_route' } satisfies Partial<OrchestrationError>)
+  })
+
+  // F-9 item (b) (delta review, Ruling 32 Addendum 9): recovery must scope to the INBOUND row's
+  // OWN link, not the whole thread regardless of link — else this host's own outbound rows to
+  // peer X (over link1) wrongly recover as the addressee for a reply meant for peer Y (over a
+  // DIFFERENT link2) sharing the same local thread_id.
+  it('refuses "no addressee" — not peer X\'s id — when the thread also carries own outbound rows to a DIFFERENT peer link', async () => {
+    // Same in-memory `registry` as link1 above — see the hoisting note by its declaration.
+    const link2 = registry.mintPendingDevice('p-host-2', 'runtime')
+    registry.updateLastSeen(link2.deviceId)
+    const linkDeviceId2 = link2.deviceId
+
+    const p2EndpointOffer = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: 'ws://p2.example:16768',
+      deviceToken: 'p2_endpoint_token',
+      publicKeyB64: 'p2_own_pubkey_b64'
+    })
+    const p2Env = addEnvironmentFromPairingCode(dataPath, {
+      name: 'p2-environment',
+      pairingCode: p2EndpointOffer
+    })
+    db.putPeerLinkBinding({
+      linkDeviceId: linkDeviceId2,
+      environmentId: p2Env.id,
+      boundEndpointId: p2Env.preferredEndpointId,
+      boundPairingRevision: p2Env.pairingRevision ?? p2Env.createdAt,
+      linkCredentialFp: hashCallerCredential(link2.token),
+      peerCredentialFp: hashCallerCredential('p2_endpoint_token'),
+      peerKeyFingerprint: fingerprintOrchestrationPeer('p2_own_pubkey_b64'),
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+
+    const threadId = 'thr_recovery_scoped_to_link'
+    // This host's own outbound row to peer X, over link1/environmentId — NOT link2.
+    insertOwnOutboundRow(threadId, 'agt_peer_addressee_x')
+    // An unattributed inbound row from peer Y, imported over link2 — a different link, same
+    // local thread_id.
+    const inserted = db.insertGatedMessage({
+      from: `remote:${linkDeviceId2}:unverified`,
+      to: `agent:${LOCAL_ADDRESSEE_AGENT_ID}`,
+      subject: 'hello from Y',
+      body: 'hello from peer Y',
+      threadId,
+      runId: 'peer_run',
+      verb: 'federation_import',
+      peerLinkDeviceId: linkDeviceId2,
+      peerAgentId: null,
+      peerThreadId: 'peer_thread_y'
+    })
+    if (inserted.outcome === 'refused') {
+      throw new Error('setup: unverified foreign row from peer Y was refused')
+    }
+
+    await expect(
+      call(
+        'orchestration.reply',
+        { id: inserted.message.id, body: 'reply body' },
         { runtime, orchestrationCompatibilityEvidence: replierEvidence() }
       )
     ).rejects.toMatchObject({ code: 'no_return_route' } satisfies Partial<OrchestrationError>)

@@ -123,7 +123,7 @@ const CAUSE_NEUTRAL_NEXT_STEP =
 // a launch token, the runtime accepted re-attestation, and identity is still absent, the only
 // cause left reachable is that the runtime never recorded an anchor for that token — name it.
 const TOKEN_PRESENT_NO_ANCHOR_NEXT_STEP =
-  'this pane holds a launch token but the runtime has no anchor for it; relaunch from an Orca agent pane'
+  "this pane holds a launch token but the runtime has no anchor for it; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
 
 /** S10-6 (R4): swap in the accurate first nextStep — the server's canned
  *  `NO_PANE_IDENTITY_NEXT_STEPS[0]` ("re-run the command — the CLI re-attests this pane

@@ -46,6 +46,58 @@ describe('agents CLI', () => {
     expect(printed).toContain('Next: orca orchestration send --to agent:agt_abc123')
   })
 
+  // F-9 (Ruling 32 Addendum 9): "Inherited N thread(s)" must not read as complete when a
+  // predecessor's pending peer questions or unread bare-handle mail were left behind.
+  it('register names uninherited pending peer questions and unread mail when re-registering after a retire', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        agent: agent(),
+        created: true,
+        reMinted: false,
+        adoptedThreads: 1,
+        pendingPeerQuestions: 2,
+        unreadMailOnRetiredId: 3
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_HANDLERS['agents register']({
+      flags: new Map([['name', 'merge-restructure-backend']]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain('Inherited 1 thread(s)')
+    expect(printed).toContain(
+      "2 pending peer question(s) addressed to your previous registration were NOT inherited; the asker must re-ask this agent's new id."
+    )
+    expect(printed).toContain(
+      '3 unread message(s) on your previous registration were NOT inherited; read them with `orca orchestration inbox --thread-id` on the old threads -- they remain addressed to the old id.'
+    )
+  })
+
+  it('register prints neither uninherited sentence when both counts are zero', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        agent: agent(),
+        created: true,
+        reMinted: false,
+        adoptedThreads: 0,
+        pendingPeerQuestions: 0,
+        unreadMailOnRetiredId: 0
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_HANDLERS['agents register']({
+      flags: new Map([['name', 'merge-restructure-backend']]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).not.toContain('NOT inherited')
+  })
+
   it('find prints exact text for resolved, with the populated next command', async () => {
     const call = vi.fn().mockResolvedValue({
       result: {

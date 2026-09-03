@@ -112,3 +112,45 @@ export function adoptPredecessorThreadMembership(
   }
   return { adoptedThreads: adopted, blockedByQuarantinedPredecessor: false }
 }
+
+export type UninheritedPredecessorMailOutcome = {
+  pendingPeerQuestions: number
+  unreadMailOnRetiredId: number
+}
+
+// F-9 honesty (Ruling 32 Addendum 9): peer-facing authority (question_threads.to_agent_id) and
+// unread mail addressed to the bare `agent:<id>` handle are DELIBERATELY not repointed onto a
+// successor (deferred by ruling; see this file's header) -- so a re-register still owes an
+// honest count of what did NOT come with it. Summed across every tombstoned predecessor sharing
+// this host+name, quarantined or not: quarantine (above) only blocks THREAD adoption, it never
+// made this backlog reachable by any other means either way.
+export function countUninheritedPredecessorMail(
+  db: Database.Database,
+  hostId: string,
+  displayName: string,
+  successorId: string
+): UninheritedPredecessorMailOutcome {
+  const predecessors = db
+    .prepare(
+      `SELECT id FROM agents WHERE host_id = ? AND display_name = ? AND tombstoned_at IS NOT NULL AND id != ?`
+    )
+    .all(hostId, displayName, successorId) as { id: string }[]
+  let pendingPeerQuestions = 0
+  let unreadMailOnRetiredId = 0
+  for (const predecessor of predecessors) {
+    const questionRow = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM question_threads WHERE to_agent_id = ? AND status = 'pending'`
+      )
+      .get(predecessor.id) as { n: number }
+    pendingPeerQuestions += questionRow.n
+    const mailRow = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM messages
+         WHERE to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery' AND purged_at IS NULL`
+      )
+      .get(`agent:${predecessor.id}`) as { n: number }
+    unreadMailOnRetiredId += mailRow.n
+  }
+  return { pendingPeerQuestions, unreadMailOnRetiredId }
+}
