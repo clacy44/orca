@@ -4392,6 +4392,18 @@ export class OrcaRuntimeService {
     return this._linkBindingProver
   }
 
+  // S10-16 C7, Ruling 27 Addendum 1(m): side-effect-free — unlike `getLinkBindingProver()`, never
+  // arms the lazy singleton. `describeLinkBindingHealth`'s `unavailable(prover)` reason reads this
+  // instead of constructing a prover just to answer "is one armed".
+  hasLinkBindingProver(): boolean {
+    return this._linkBindingProver !== null
+  }
+
+  // S10-16 C7, Ruling 27 Addendum 1(m): companion accessor for `unavailable(transport)`.
+  hasOrchestrationEnvironmentTransport(): boolean {
+    return this.orchestrationEnvironmentTransport !== null
+  }
+
   // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.
   accessProfileOfAttachment(row: RemoteDispatchAttachmentRow): 'full' | 'peer' | null {
     return accessProfileOfAttachmentImpl(row, this.peerGrantProfileLookup)

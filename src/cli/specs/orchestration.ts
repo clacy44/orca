@@ -118,8 +118,9 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'reply'],
     summary: 'Reply to a message',
     usage:
-      'orca orchestration reply --id <msg_id> --body <text> [--run <run_id>] [--from <handle>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'id', 'body', 'run', 'from', 'retry-request']
+      'orca orchestration reply --id <msg_id> --body <text> [--run <run_id>] [--from <handle>] ' +
+      '[--expect-host <name>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id', 'body', 'run', 'from', 'retry-request', 'expect-host']
   },
   {
     path: ['orchestration', 'inbox'],

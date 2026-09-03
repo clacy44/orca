@@ -237,9 +237,23 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
       'environment show',
       'environment roster',
       'environment set-endpoint',
-      'environment rm'
+      'environment rm',
+      'environment update'
     ],
     load: async () => (await import('./handlers/environment.js')).ENVIRONMENT_HANDLERS
+  },
+  {
+    name: 'environment-link-binding',
+    keys: [
+      'environment link-status',
+      'environment link-bind',
+      'environment link-revoke',
+      'environment link-forget',
+      'environment link-quarantine',
+      'environment link-exclude'
+    ],
+    load: async () =>
+      (await import('./handlers/environment-link-binding.js')).ENVIRONMENT_LINK_BINDING_HANDLERS
   },
   {
     name: 'linear',

@@ -137,8 +137,9 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     path: ['agents', 'reply'],
     summary: 'Reply to the latest message on a thread, or to one message by id',
     usage:
-      'orca agents reply --thread <t> | --id <msg> --body "<text>" [--acknowledge-gate] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'thread', 'id', 'body', 'acknowledge-gate']
+      'orca agents reply --thread <t> | --id <msg> --body "<text>" [--expect-host <name>] ' +
+      '[--acknowledge-gate] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'thread', 'id', 'body', 'acknowledge-gate', 'expect-host']
   },
   {
     path: ['agents', 'wait'],

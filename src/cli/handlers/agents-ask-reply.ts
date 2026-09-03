@@ -150,7 +150,8 @@ export const AGENT_ASK_REPLY_HANDLERS: Record<string, CommandHandler> = {
     const result = await client.call<ReplyResult>('orchestration.reply', {
       id,
       body,
-      acknowledgeGate: flags.has('acknowledge-gate') ? true : undefined
+      acknowledgeGate: flags.has('acknowledge-gate') ? true : undefined,
+      expectHost: getOptionalStringFlag(flags, 'expect-host')
     })
     printResult(result, json, formatReply)
   }

@@ -6,6 +6,7 @@ import {
   removeEnvironment as removeEnvironmentFromStore,
   resolveEnvironment as resolveEnvironmentFromStore,
   resolveEnvironmentPairingOffer as resolveEnvironmentPairingOfferFromStore,
+  updateEnvironmentFromPairingCode as updateEnvironmentFromPairingCodeInStore,
   RuntimeEnvironmentStoreError,
   type RuntimeEnvironmentStoreErrorCode
 } from '../../shared/runtime-environment-store'
@@ -41,6 +42,18 @@ export function addEnvironmentFromPairingCode(
   args: { name: string; pairingCode: string; now?: number }
 ): KnownRuntimeEnvironment {
   return translateStoreError(() => addEnvironmentFromPairingCodeInStore(userDataPath, args))
+}
+
+// R22.2: re-pairs an EXISTING record in place (preserves createdAt, bumps pairingRevision, R15's
+// old-binding kill), rather than `add`'s new-record path.
+export function updateEnvironmentFromPairingCode(
+  userDataPath: string,
+  selector: string,
+  args: { pairingCode: string; now?: number }
+): KnownRuntimeEnvironment {
+  return translateStoreError(() =>
+    updateEnvironmentFromPairingCodeInStore(userDataPath, selector, args)
+  )
 }
 
 export function removeEnvironment(userDataPath: string, selector: string): KnownRuntimeEnvironment {

@@ -95,6 +95,7 @@ import { validateDisplayNameCandidate } from '../../orchestration/agent-name-san
 import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federated-peer-ask'
 import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-federated-peer-send'
 import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
+import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
 import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
@@ -628,6 +629,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_FEDERATED_PEER_ASK_METHODS,
   ...ORCHESTRATION_FEDERATED_PEER_SEND_METHODS,
   ...ORCHESTRATION_LINK_BINDING_PEER_METHODS,
+  ...ORCHESTRATION_LINK_BINDING_LOCAL_METHODS,
   defineMethod({
     name: 'orchestration.send',
     params: SendParams,

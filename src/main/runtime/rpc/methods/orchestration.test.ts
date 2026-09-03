@@ -122,13 +122,21 @@ describe('orchestration RPC methods', () => {
     // orchestration.federationAnswerPrompt (orchestration-federation-answer-prompt.ts — the
     // peer-owned-pane-write choke's only caller). S10-16 C3 adds orchestration.federatedLinkProbe
     // / orchestration.federatedLinkConfirm (orchestration-link-binding-peer.ts, R7: the two
-    // peer-facing link-binding proof RPCs).
-    expect(registry.size).toBe(64)
+    // peer-facing link-binding proof RPCs). S10-16 C7 adds the six local link-binding verbs
+    // (orchestration-link-binding-local.ts, R22): orchestration.linkBindings/linkBind/linkRevoke/
+    // linkForget/linkContainment/replyOutbox.
+    expect(registry.size).toBe(70)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.federatedSend')).toBe(true)
     expect(registry.has('orchestration.federationAnswerPrompt')).toBe(true)
     expect(registry.has('orchestration.federatedLinkProbe')).toBe(true)
     expect(registry.has('orchestration.federatedLinkConfirm')).toBe(true)
+    expect(registry.has('orchestration.linkBindings')).toBe(true)
+    expect(registry.has('orchestration.linkBind')).toBe(true)
+    expect(registry.has('orchestration.linkRevoke')).toBe(true)
+    expect(registry.has('orchestration.linkForget')).toBe(true)
+    expect(registry.has('orchestration.linkContainment')).toBe(true)
+    expect(registry.has('orchestration.replyOutbox')).toBe(true)
     expect(registry.has('orchestration.agents.relink')).toBe(true)
     expect(registry.has('orchestration.agents.retire')).toBe(true)
     expect(registry.has('orchestration.threads.invite')).toBe(true)

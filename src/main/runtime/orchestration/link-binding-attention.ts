@@ -139,6 +139,16 @@ export function describeLinkBindingHealth(
     candidates.push('unavailable')
     unavailableReason = 'local_evidence'
   }
+  // C7, Ruling 27 Addendum 1(m): `runtime.hasOrchestrationEnvironmentTransport()` /
+  // `hasLinkBindingProver()` now exist as the side-effect-free accessors the ruling asks for, but
+  // wiring them into this function as an unconditional `unavailable(transport)`/`unavailable(prover)`
+  // branch regressed 8 existing tests here (every fixture that does not explicitly construct a
+  // transport/prover reads `unavailable` even when the fixture's actual condition is something
+  // else entirely) — the correct trigger condition needs the exact same design-level judgment call
+  // Ruling 27's own comment above deferred ("not a worker call to resolve outright"). DEVIATION,
+  // stated for Gate 1: the two accessors are added and exported; wiring them into the health
+  // precedence is left as an open question for the chair rather than guessed at under test
+  // pressure.
 
   switch (attempt?.lastOutcome) {
     case 'peer_duplicate':

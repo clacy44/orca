@@ -14,6 +14,7 @@ export type ParsedArgs = {
 export const GLOBAL_FLAGS = ['help', 'json', 'pairing-code', 'environment']
 const GLOBAL_VALUE_FLAGS = new Set(['pairing-code', 'environment'])
 export const BOOLEAN_FLAGS = new Set([
+  'accept-legacy',
   'accept-unverified-platform',
   'acknowledge-gate',
   'all',
@@ -21,9 +22,12 @@ export const BOOLEAN_FLAGS = new Set([
   'attachments',
   'cancel',
   'children',
+  'clear',
   'comments',
   'connect',
   'current',
+  'deep',
+  'drain',
   'dry-run',
   'enter',
   'focus',
@@ -46,6 +50,7 @@ export const BOOLEAN_FLAGS = new Set([
   'new',
   'no-derived',
   'no-pairing',
+  'outbox',
   'parent-current',
   'provision',
   'ready',
@@ -63,7 +68,8 @@ export const BOOLEAN_FLAGS = new Set([
   'text-stdin',
   'unread',
   'value-stdin',
-  'wait'
+  'wait',
+  'yes'
 ])
 
 export const REPEATED_FLAG_SEPARATOR = '\u0000'

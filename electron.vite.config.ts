@@ -262,6 +262,11 @@ export const electronViteConfig: UserConfig = {
           // (review fix) through this module before scoring/rendering it.
           'runtime/orchestration/agent-name-sanitizer': resolve(
             'src/main/runtime/orchestration/agent-name-sanitizer.ts'
+          ),
+          // Why: S10-16 C7 — `environment-link-binding.ts`'s relative-time rendering imports its
+          // numeric constants from THE REGISTER (test 77) rather than writing a literal.
+          'runtime/orchestration/link-binding-constants': resolve(
+            'src/main/runtime/orchestration/link-binding-constants.ts'
           )
         },
         // Why: Rolldown's SSR default is ESM, but Electron and sidecar launchers

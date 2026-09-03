@@ -22,6 +22,7 @@ import {
   removeEnvironment,
   resolveEnvironment,
   setEnvironmentEndpoint,
+  updateEnvironmentFromPairingCode,
   type EnvironmentAddResult,
   type EnvironmentRemoveResult,
   type EnvironmentSetEndpointResult
@@ -42,6 +43,20 @@ export const ENVIRONMENT_HANDLERS: Record<string, CommandHandler> = {
       json,
       (result: EnvironmentAddResult) =>
         `Saved environment ${result.environment.name} (${result.environment.id}).`
+    )
+  },
+  // R22.2: mirrors `environment add`, but re-pairs the EXISTING record named by --environment.
+  'environment update': async ({ flags, json }) => {
+    const selector = getRequiredStringFlag(flags, 'environment')
+    const pairingCode = getRequiredStringFlag(flags, 'pairing-code')
+    const environment = redactRuntimeEnvironment(
+      updateEnvironmentFromPairingCode(getDefaultUserDataPath(), selector, { pairingCode })
+    )
+    printResult(
+      localSuccess({ environment }),
+      json,
+      (result: EnvironmentAddResult) =>
+        `Re-paired ${result.environment.name} (${result.environment.id}); pairingRevision now ${result.environment.pairingRevision}.`
     )
   },
   'environment list': async ({ json }) => {
