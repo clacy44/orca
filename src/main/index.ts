@@ -2556,7 +2556,20 @@ void app.whenReady().then(async () => {
       ),
     markPairingStale: (selector) => {
       markEnvironmentPairingStale(app.getPath('userData'), selector)
-    }
+    },
+    // S10-16 R4.1: the pinned, absolutely-bounded path — the 6th positional the existing `call`
+    // above hard-codes to `undefined`, plus R4.6's `maxDurationMs` as the 8th.
+    callPinned: (args) =>
+      callRuntimeEnvironment(
+        app.getPath('userData'),
+        args.selector,
+        args.method,
+        args.params,
+        args.timeoutMs,
+        args.expectedEnvironmentPairingRevision,
+        args.envelope,
+        args.maxDurationMs
+      )
   }
   const runtimeService = new OrcaRuntimeService(store, stats, {
     agentSessionClaimSigner: loadAgentSessionClaimSigner(

@@ -73,6 +73,28 @@ describe('runtime environment endpoint override (S10-4 rulings 6/7)', () => {
     expect(listEnvironments(userDataPath)).toEqual([updated])
   })
 
+  // S10-16 R4.4 / C1 review finding 5+6 (scenario 10): re-pointing the endpoint must bump
+  // pairingRevision exactly as updateEnvironmentFromPairingCode does — a stale binding must
+  // re-prove rather than read as still-live against the new address.
+  it('setEnvironmentEndpoint bumps pairingRevision (R4.4)', () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
+    tempDirs.push(userDataPath)
+    const saved = addEnvironmentFromPairingCode(userDataPath, {
+      name: 'dev box',
+      pairingCode: pairingCode('ws://127.0.0.1:6768')
+    })
+    const savedRevision = saved.pairingRevision ?? saved.createdAt
+
+    const updated = setEnvironmentEndpoint(userDataPath, 'dev box', {
+      url: 'wss://tunnel.example:8443',
+      now: saved.updatedAt + 1000
+    })
+
+    expect(updated.pairingRevision).toBeDefined()
+    expect(updated.pairingRevision!).toBeGreaterThan(savedRevision)
+    expect(updated.pairingRevision!).toBe(Math.max(saved.updatedAt + 1000, savedRevision + 1))
+  })
+
   it('setEnvironmentEndpoint refuses a bad scheme without touching the saved environment', () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-env-store-'))
     tempDirs.push(userDataPath)

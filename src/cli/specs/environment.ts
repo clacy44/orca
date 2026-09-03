@@ -53,5 +53,86 @@ export const ENVIRONMENT_COMMAND_SPECS: CommandSpec[] = [
     summary: 'Remove one saved Orca runtime environment',
     usage: 'orca environment rm --environment <selector> [--json]',
     allowedFlags: [...GLOBAL_FLAGS]
+  },
+  {
+    path: ['environment', 'update'],
+    summary: 'Re-pair an existing saved environment in place from a new pairing code',
+    usage: 'orca environment update --environment <selector> --pairing-code <code> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS],
+    notes: [
+      'Preserves createdAt, bumps pairingRevision (which kills the old link binding, R15) and rewrites the endpoint from the offer.',
+      'Produces no duplicate environment record, unlike `add --name <new>`.'
+    ],
+    examples: ['orca environment update --environment vps --pairing-code orca://pair?code=...']
+  },
+  {
+    path: ['environment', 'link-status'],
+    summary: 'Show link-binding health for one or every proven/attempted link',
+    usage:
+      'orca environment link-status [--link <deviceId>] [--environment <selector>] [--outbox] ' +
+      '[--drain] [--wait] [--timeout-ms <ms>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'link', 'environment', 'outbox', 'drain', 'wait', 'timeout-ms'],
+    notes: [
+      '--wait waits on the prover round-settled event, capped at LINK_BINDING_STATUS_WAIT_CAP_MS; a wait that expires is a report, never an error.',
+      '--outbox shows the reply-relay queue for the link; --drain kicks every route with pending work and returns the pending count per route.',
+      '--environment <selector> filters the table to links bound to that environment (server-side, by resolved environment id); ignored by --outbox/--drain, which already take --link.'
+    ],
+    examples: [
+      'orca environment link-status --json',
+      'orca environment link-status --link 9c1e… --outbox'
+    ]
+  },
+  {
+    path: ['environment', 'link-bind'],
+    summary: 'Kick a link-binding round for one link or every link',
+    usage:
+      'orca environment link-bind (--link <deviceId> | --all) [--deep] ' +
+      '[--accept-legacy --reason <text> [--lift]] [--yes] [--timeout-ms <ms>] [--json]',
+    allowedFlags: [
+      ...GLOBAL_FLAGS,
+      'link',
+      'all',
+      'deep',
+      'accept-legacy',
+      'reason',
+      'lift',
+      'yes',
+      'timeout-ms'
+    ],
+    notes: [
+      'Kicks and returns immediately with {state:"running", link, attemptId} or {state:"noop", reason}; --deep requests a contest_search round.',
+      '--accept-legacy is an audited, last-resort operator attestation; it requires --reason, expires after LINK_BINDING_LEGACY_ATTEST_TTL_MS, and silently lapses if the binding is later re-bound elsewhere.'
+    ],
+    examples: ['orca environment link-bind --all', 'orca environment link-bind --link 9c1e… --deep']
+  },
+  {
+    path: ['environment', 'link-revoke'],
+    summary: 'Revoke a link binding so no inbound message can silently re-bind it',
+    usage: 'orca environment link-revoke --link <deviceId> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'link'],
+    notes: ['Sticky: `link-bind` on the same link is required to undo it.']
+  },
+  {
+    path: ['environment', 'link-forget'],
+    summary: "Drop a retired link's binding rows",
+    usage: 'orca environment link-forget (--link <deviceId> | --all) [--yes] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'link', 'all', 'yes']
+  },
+  {
+    path: ['environment', 'link-quarantine'],
+    summary: 'Quarantine or lift quarantine on one link (routing and inbound mail both stop)',
+    usage: 'orca environment link-quarantine --link <deviceId> [--lift] [--reason <text>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'link', 'lift', 'reason'],
+    notes: ['The wire refusal carries the advisory so the peer operator learns it.']
+  },
+  {
+    path: ['environment', 'link-exclude'],
+    summary: 'Take a saved environment out of link-binding scans, or clear the exclusion',
+    usage:
+      'orca environment link-exclude --environment <selector> [--clear] [--reason <text>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'clear', 'reason'],
+    notes: [
+      'Use before re-pointing an environment mid re-pair to bracket the window (v6, lifecycle M9), then `--clear` to restore scanning.'
+    ]
   }
 ]

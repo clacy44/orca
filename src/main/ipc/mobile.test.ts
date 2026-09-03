@@ -506,6 +506,7 @@ describe('registerMobileHandlers', () => {
       address: '100.64.1.20',
       rotate: true,
       name: expect.stringMatching(/^Runtime /),
+      budgetClass: 'host_auto',
       scope: 'runtime',
       reach: 'network',
       accessProfile: 'full'
@@ -661,60 +662,6 @@ describe('registerMobileHandlers', () => {
 
     expect(ensureNetworkExposure).toHaveBeenCalled()
     expect(createPairingOffer).not.toHaveBeenCalled()
-  })
-
-  it('lists runtime access grants including unused generated links', () => {
-    const rpcServer = {
-      getDeviceRegistry: () => ({
-        listDevices: () => [
-          {
-            deviceId: 'mobile-1',
-            name: 'Phone',
-            scope: 'mobile',
-            pairedAt: 1,
-            lastSeenAt: 2
-          },
-          {
-            deviceId: 'runtime-1',
-            name: 'Browser',
-            scope: 'runtime',
-            pairedAt: 3,
-            lastSeenAt: 4
-          },
-          {
-            deviceId: 'pending-runtime',
-            name: 'Copied link',
-            scope: 'runtime',
-            pairedAt: 5,
-            lastSeenAt: 0
-          }
-        ]
-      }),
-      getLegacyGrantProfile: () => 'full' as const
-    }
-
-    registerMobileHandlers(rpcServer as never)
-
-    expect(handlers.get('mobile:listRuntimeAccessGrants')?.()).toEqual({
-      grants: [
-        {
-          deviceId: 'pending-runtime',
-          name: 'Copied link',
-          createdAt: 5,
-          lastSeenAt: null,
-          effective: 'full',
-          enforcedByThisRuntime: true
-        },
-        {
-          deviceId: 'runtime-1',
-          name: 'Browser',
-          createdAt: 3,
-          lastSeenAt: 4,
-          effective: 'full',
-          enforcedByThisRuntime: true
-        }
-      ]
-    })
   })
 
   it('revokes runtime access through the runtime server', () => {

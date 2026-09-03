@@ -56,6 +56,45 @@ describe('runtime RPC call queue', () => {
     await expect(second).resolves.toBe('second')
   })
 
+  // S10-16 R4.6, test 19c's queue half: a run() that rejects (mirroring the client's
+  // `runtime_timeout` rejection through `finish()` once R4.6's absolute deadline fires) must
+  // return the per-selector `active` count to its pre-call value, not leak the slot.
+  it('returns the selector active count to 0 after a rejection, and a ninth call runs immediately', async () => {
+    const queue = new RuntimeRpcCallQueuePool(8, 8)
+    const releasers: (() => void)[] = []
+    const eight = Array.from({ length: 8 }, (_, index) =>
+      queue.enqueue('desk', 'status.get', async () => {
+        if (index === 0) {
+          return await new Promise<string>((_resolve, reject) => {
+            releasers.push(() => reject(new Error('runtime_timeout')))
+          })
+        }
+        return await new Promise<string>((resolve) => {
+          releasers.push(() => resolve('held'))
+        })
+      })
+    )
+    await vi.waitFor(() => expect(releasers).toHaveLength(8))
+
+    const ninthStarted = vi.fn()
+    const ninth = queue.enqueue('desk', 'status.get', async () => {
+      ninthStarted()
+      return 'ninth'
+    })
+    // The 9th call must not start while all 8 slots are held.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(ninthStarted).not.toHaveBeenCalled()
+
+    releasers[0]!() // the timed-out call rejects
+    await expect(eight[0]).rejects.toThrow('runtime_timeout')
+
+    await expect(ninth).resolves.toBe('ninth')
+    expect(ninthStarted).toHaveBeenCalledTimes(1)
+
+    releasers.slice(1).forEach((release) => release())
+    await Promise.all(eight.slice(1))
+  })
+
   it('preserves queued background ordering across large bursts', async () => {
     const queue = new RuntimeRpcCallQueuePool(1, 1)
     const started: number[] = []

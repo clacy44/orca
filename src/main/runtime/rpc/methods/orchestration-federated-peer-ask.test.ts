@@ -223,6 +223,44 @@ describe('S10-8 cross-host ask/reply relay (R1-R7)', () => {
     })
   })
 
+  it('R13.1: an ask from a paired peer clamps the link-binding schedule, never resets the failure counter', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    workerDb.putBindingAttempt(HOME_LINK_DEVICE_ID)
+    const farFuture = Date.now() + 10_000_000
+    workerDb.settleBindingAttempt(HOME_LINK_DEVICE_ID, {
+      lastAttemptAt: 0,
+      lastRoundAt: 0,
+      lastOutcome: 'unreachable',
+      lastDetail: null,
+      consecutiveFailures: 5,
+      consecutiveNoWinner: 0,
+      nextAttemptAfter: farFuture
+    })
+
+    const askPromise = call(
+      'orchestration.ask',
+      { to: `agent:${agentB}`, host: 'windows', question: 'still there?', timeoutMs: 5_000 },
+      homeCtx(evidenceA)
+    ) as Promise<{ answer: string | null; timedOut: boolean }>
+
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    const attempt = workerDb.getBindingAttempt(HOME_LINK_DEVICE_ID)
+    expect(attempt?.nextAttemptAfter).toBeLessThan(farFuture)
+    expect(attempt?.consecutiveFailures).toBe(5)
+
+    const workerQuestionRow = findPendingPeerQuestion(workerDb)
+    await call(
+      'orchestration.reply',
+      { id: workerQuestionRow.message_id, body: 'yes' },
+      workerLocalCtx(evidenceB)
+    )
+    await askPromise
+    workerRuntime.getLinkBindingProver().stop()
+  })
+
   it('R7 F-hard: a HARD-gated question body is refused on the target host with a durable audit row, and the link is not wedged', async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)

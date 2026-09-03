@@ -18,7 +18,11 @@
 import { z } from 'zod'
 import { requiredString } from '../rpc/schemas'
 import { OrchestrationError } from './orchestration-error'
-import { REMOTE_AGENTS_PER_LINK_CAP, type OrchestrationDb } from './db'
+import {
+  REMOTE_AGENTS_PER_LINK_CAP,
+  isUnauthenticatedLaneCallerFingerprint,
+  type OrchestrationDb
+} from './db'
 import type { RemoteAgentRow } from './remote-agent-directory-types'
 import {
   sanitizeDirectoryText,
@@ -78,7 +82,7 @@ export type RemoteIdentityImport =
   | { outcome: 'absent' }
   | {
       outcome: 'invalid'
-      reason: 'id_shape' | 'local_collision' | 'display_name'
+      reason: 'id_shape' | 'local_collision' | 'display_name' | 'unbindable_fingerprint'
       error: OrchestrationError
     }
   | { outcome: 'quarantined'; scope: 'local' | 'remote'; error: OrchestrationError }
@@ -135,6 +139,25 @@ export function importFederatedSenderIdentity(
   const { identity, linkKey, peerFingerprint, verb = 'ask' } = args
   if (!identity) {
     return { outcome: 'absent' }
+  }
+
+  // S10-16 R25 (Ruling 7(vi)): exclude the `authenticated_transport` fallback by name, everywhere
+  // its value is read — an identity carried over a lane that never proved a real caller credential
+  // must never be bound to a link. One guard inside the importer, not two outside it.
+  if (isUnauthenticatedLaneCallerFingerprint(peerFingerprint)) {
+    return {
+      outcome: 'invalid',
+      reason: 'unbindable_fingerprint',
+      error: new OrchestrationError(
+        'unauthenticated_lane',
+        'Cross-host send requires an authenticated paired-runtime link, not a local caller.',
+        {
+          nextSteps: [
+            'this call must arrive over a paired runtime link, never a local pane or an old CLI — re-pair the two hosts if this persists'
+          ]
+        }
+      )
+    }
   }
 
   if (!FOREIGN_AGENT_ID_RE.test(identity.id)) {

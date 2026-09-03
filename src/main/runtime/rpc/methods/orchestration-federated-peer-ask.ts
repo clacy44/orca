@@ -23,6 +23,13 @@ import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
+import {
+  refuseIfQuarantined,
+  refuseIfRateLimited,
+  LinkContainmentRefusal,
+  LinkRateRefusal
+} from './orchestration-link-binding-pending'
+import { FEDERATED_ASK_RATE_LIMIT } from '../../orchestration/link-binding-constants'
 
 // S10-15 F5 (chair ruling 5): the per-link cap on PENDING relayed questions.
 const PEER_ASK_PENDING_CAP = 32
@@ -95,6 +102,13 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
             }
           )
         }
+        // R27.1/R27.2 (Ruling 23 Addendum 3): rate -> containment -> identity shape -> recipient.
+        refuseIfRateLimited(runtime, pairedDeviceId, 'federatedAsk', FEDERATED_ASK_RATE_LIMIT)
+        // R3 (Ruling 23 Addendum 2(n)): link containment before identity — a quarantined link
+        // refuses BEFORE the identity importer runs, effect-free, on peer_link_containment alone
+        // (no peer-supplied value in the read). Same gate, same order as the probe/confirm RPCs.
+        refuseIfQuarantined(runtime, pairedDeviceId, 'ask')
+
         // R3: recipient resolution honors every existing guard (unknown/quarantined/derived) —
         // never a second, looser copy of the local rule for a foreign asker.
         const toAgent = requireAddressableAgentRecipient(db, params.toAgentId)
@@ -217,8 +231,23 @@ export const ORCHESTRATION_FEDERATED_PEER_ASK_METHODS: RpcMethod[] = [
           created.message.thread_id,
           extractPayloadKind(created.message.payload_kind)
         )
+        // R13.1: an authenticated inbound call is proof of liveness — after the ask has been
+        // fully admitted (never before), and before the blocking wait below. Ruling 23(j)/FC-1:
+        // clamps next_attempt_after only, never resets consecutive_failures.
+        runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
       } catch (error) {
-        if (error instanceof OrchestrationError) {
+        // C3a delta D2: exclude by ORIGIN, not by code. `refuseIfQuarantined` throws the marked
+        // `LinkContainmentRefusal` subclass and already handles its own audit write under its own
+        // per-window meter (D3) — this choke point must not duplicate it. But an `agent_quarantined`
+        // thrown from INSIDE this handler for a different reason — a quarantined RECIPIENT
+        // (addressable-agent-recipient.ts) — is a plain `OrchestrationError`, not the marker, and
+        // must still reach this audit write every time (it was silently dropped by the old
+        // code-based exclusion, which could not tell the two apart).
+        if (
+          error instanceof OrchestrationError &&
+          !(error instanceof LinkContainmentRefusal) &&
+          !(error instanceof LinkRateRefusal)
+        ) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

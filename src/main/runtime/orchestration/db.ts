@@ -84,6 +84,85 @@ import {
   type RateLimitResult
 } from './agent-rate-limit'
 import {
+  getPeerLinkBinding as getPeerLinkBindingImpl,
+  listPeerLinkBindings as listPeerLinkBindingsImpl,
+  putPeerLinkBinding as putPeerLinkBindingImpl,
+  contestPeerLinkBinding as contestPeerLinkBindingImpl,
+  revokePeerLinkBinding as revokePeerLinkBindingImpl,
+  unrevokePeerLinkBinding as unrevokePeerLinkBindingImpl,
+  resolvePeerLinkBindingContest as resolvePeerLinkBindingContestImpl,
+  findBindingsByEnvironment as findBindingsByEnvironmentImpl,
+  findBindingCandidateByKeyFingerprint as findBindingCandidateByKeyFingerprintImpl,
+  type PeerLinkBindingRow,
+  type ContestFirstWinner
+} from './link-binding-store'
+import {
+  A2_DROP_AND_RECREATE_TABLES,
+  REPLY_OUTBOX_REPAIR_REJECTED_CODE
+} from './link-binding-constants'
+import {
+  getBindingAttempt as getBindingAttemptImpl,
+  listBindingAttempts as listBindingAttemptsImpl,
+  putBindingAttempt as putBindingAttemptImpl,
+  settleBindingAttempt as settleBindingAttemptImpl,
+  putLinkAdvisory as putLinkAdvisoryImpl,
+  clearLinkAdvisory as clearLinkAdvisoryImpl,
+  bumpMisrouteAdvisories as bumpMisrouteAdvisoriesImpl,
+  type BindingAttemptRow,
+  type BindingAttemptSettle,
+  type LinkAdvisory
+} from './link-binding-attempts-store'
+import {
+  getScanFact as getScanFactImpl,
+  listScanFacts as listScanFactsImpl,
+  listScanFactLinkIds as listScanFactLinkIdsImpl,
+  putScanFact as putScanFactImpl,
+  listConfirmObservations as listConfirmObservationsImpl,
+  listConfirmObservationLinkIds as listConfirmObservationLinkIdsImpl,
+  putConfirmObservation as putConfirmObservationImpl,
+  isPeerLinkQuarantined as isPeerLinkQuarantinedImpl,
+  getContainment as getContainmentImpl,
+  listContainment as listContainmentImpl,
+  putContainment as putContainmentImpl,
+  liftContainment as liftContainmentImpl,
+  deleteBindingsAndAttemptsNotIn as deleteBindingsAndAttemptsNotInImpl,
+  deleteBindingsAndAttemptsIn as deleteBindingsAndAttemptsInImpl,
+  type ScanFactRow,
+  type ConfirmObservationRow,
+  type ContainmentRow
+} from './link-binding-observations-store'
+import {
+  enqueueReplyOutbox as enqueueReplyOutboxImpl,
+  getReplyOutboxItem as getReplyOutboxItemImpl,
+  listReplyOutbox as listReplyOutboxImpl,
+  countPendingReplyOutbox as countPendingReplyOutboxImpl,
+  cancelQueuedReplyOutbox as cancelQueuedReplyOutboxImpl,
+  kickReplyOutboxForLink as kickReplyOutboxForLinkImpl,
+  getReplyOutboxItemByLocalMessageId as getReplyOutboxItemByLocalMessageIdImpl,
+  markReplyOutboxNotified as markReplyOutboxNotifiedImpl,
+  markReplyOutboxDispositionNotice as markReplyOutboxDispositionNoticeImpl,
+  replyOutboxLinkLastDispositionNotifiedAt as replyOutboxLinkLastDispositionNotifiedAtImpl,
+  nextReplyOutboxWakeAt as nextReplyOutboxWakeAtImpl,
+  type EnqueueReplyOutboxParams,
+  type ReplyOutboxRow
+} from './reply-outbox-store'
+import {
+  listReplyOutboxHealthRows as listReplyOutboxHealthRowsImpl,
+  type ReplyOutboxHealthRow
+} from './reply-outbox-health-rows'
+import {
+  reclaimExpiredReplyOutboxLeases as reclaimExpiredReplyOutboxLeasesImpl,
+  claimNextReplyOutboxItem as claimNextReplyOutboxItemImpl,
+  settleReplyOutboxItem as settleReplyOutboxItemImpl,
+  holdReplyOutboxItem as holdReplyOutboxItemImpl,
+  holdReplyOutboxItemLocalEvidence as holdReplyOutboxItemLocalEvidenceImpl,
+  holdReplyOutboxItemCollision as holdReplyOutboxItemCollisionImpl,
+  retryReplyOutboxItem as retryReplyOutboxItemImpl,
+  retargetReplyOutboxItem as retargetReplyOutboxItemImpl,
+  replyOutboxLinkLastAdvisoryNotifiedAt as replyOutboxLinkLastAdvisoryNotifiedAtImpl,
+  type ReplyOutboxSettle
+} from './reply-outbox-lifecycle'
+import {
   getOrCreateMailboxDelivery as getOrCreateMailboxDeliveryImpl,
   acknowledgeMailboxDelivery as acknowledgeMailboxDeliveryImpl,
   type GetOrCreateMailboxDeliveryParams,
@@ -812,6 +891,165 @@ const PACT_PAIR_LIVE_SQL = `
 // collide (INSERT OR IGNORE) with whatever sequence 1 recorded before the relink, refusals
 // included. relay_seen's key grows a `generation` column, matching federated_dispatches's new
 // relink_generation counter above — see recordRelaySeen/importFederatedRelayItem.
+// S10-16 (rulings 8/10/11/14/17): the PROVEN correspondence between an inbound paired link and one
+// saved outbound environment. A row exists only after a completed possession + channel-membership
+// + peer-key proof (link-binding-proof.ts) performed BY THIS HOST. Nothing here is ever written
+// from a peer-asserted body field, and nothing here is written by the confirm handler (R7.5) —
+// one writer per row, always this host's own verifier. `state='contested'` has exactly ONE writer,
+// R11.3, and no wire code from any peer can reach it (INV-P-012). Keyed by a device id only THIS
+// host mints, so the table is not peer-growable. Timestamps are epoch ms (R14.1), deliberately
+// unlike the older tables' datetime('now') — the sweeper orders on them.
+//
+// C2 amendment (i), Ruling 23(a): `peer_link_attempts.last_advisory_notified_at` is NOT created —
+// the design v6 DDL's column is dropped; see the chair briefing §0 decision 3 and Ruling 23(a).
+// C2 amendment (ii), Ruling 23(d): `peer_link_scan_facts.outcome`'s CHECK is UNCHANGED (seven
+// members, no `duplicate_environment`) — the credential collapse writes no scan fact (§3 P-3).
+const S10_16_LINK_BINDING_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS peer_link_bindings (
+        link_device_id         TEXT PRIMARY KEY,
+        environment_id         TEXT NOT NULL,
+        bound_endpoint_id      TEXT NOT NULL,
+        bound_pairing_revision INTEGER NOT NULL,
+        link_credential_fp     TEXT NOT NULL,
+        peer_credential_fp     TEXT NOT NULL,
+        peer_key_fingerprint   TEXT NOT NULL,
+        grant_class            TEXT NOT NULL DEFAULT 'legacy_coalesced'
+                                 CHECK(grant_class IN ('minted', 'legacy_coalesced')),
+        scan_completeness      TEXT NOT NULL DEFAULT 'partial'
+                                 CHECK(scan_completeness IN ('complete', 'partial')),
+        proof_protocol         TEXT NOT NULL,
+        state                  TEXT NOT NULL DEFAULT 'confirmed'
+                                 CHECK(state IN ('confirmed', 'contested', 'revoked')),
+        detail                 TEXT,
+        contest_incident_id    TEXT,
+        proved_at              INTEGER NOT NULL,
+        last_verified_at       INTEGER NOT NULL,
+        contested_at           INTEGER,
+        revoked_at             INTEGER
+      );
+      -- DELIBERATELY NOT UNIQUE on environment_id — a re-pair leaves the OLD link row live
+      -- (device-registry.ts's rotatePendingDevice keeps every row with lastSeenAt !== 0), so many
+      -- links may legitimately name one environment; the LINK side is 1:1 (the PRIMARY KEY above),
+      -- and inbound ambiguity is handled by R11's contest, not by a constraint.
+      CREATE INDEX IF NOT EXISTS idx_peer_link_bindings_env ON peer_link_bindings(environment_id);
+
+      -- Durable schedule/backoff/health per link. Peer-ungrowable for the same reason.
+      -- last_outcome has exactly ONE writer — this host's own prover round settle (R14.2) — so
+      -- peer-triggered signals live in last_advisory instead, never overwriting the operator's
+      -- own last classification.
+      CREATE TABLE IF NOT EXISTS peer_link_attempts (
+        link_device_id        TEXT PRIMARY KEY,
+        last_attempt_at       INTEGER,
+        last_round_at         INTEGER,
+        last_full_round_at    INTEGER,
+        last_outcome          TEXT NOT NULL DEFAULT 'pending'
+          CHECK(last_outcome IN ('pending','proven','unpaired','unpaired_parked','peer_duplicate',
+                                 'duplicate_environment','multi_grant','contested','unreachable',
+                                 'unsupported','unavailable','protocol_violation','quarantined',
+                                 'revoked','excluded')),
+        last_detail           TEXT,
+        last_advisory              TEXT,
+        last_advisory_at           INTEGER,
+        consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+        consecutive_no_winner INTEGER NOT NULL DEFAULT 0,
+        misroute_advisories   INTEGER NOT NULL DEFAULT 0,
+        next_attempt_after    INTEGER
+      );
+
+      -- R12: the per-(link, environment) fact, with the two pins AND the TTL that bound it. SINGLE
+      -- WRITER: this host's own verifier round. 'peer_confirmed' is NOT an outcome here.
+      CREATE TABLE IF NOT EXISTS peer_link_scan_facts (
+        link_device_id               TEXT NOT NULL,
+        environment_id               TEXT NOT NULL,
+        outcome                      TEXT NOT NULL
+          CHECK(outcome IN ('no_match','proven','peer_duplicate','protocol_violation',
+                            'unsupported','unavailable','unreachable')),
+        environment_pairing_revision INTEGER NOT NULL,
+        link_credential_fp           TEXT NOT NULL,
+        detail                       TEXT,
+        observed_at                  INTEGER NOT NULL,
+        PRIMARY KEY (link_device_id, environment_id)
+      );
+
+      -- Ruling 17(g): confirm-triggered observations, ADVISORY ONLY. Separate table so a
+      -- peer-triggered write can never overwrite the verifier's definitive facts. The ONLY table
+      -- in this slice a peer's call causes a row in — bounded per link, included in link-forget.
+      CREATE TABLE IF NOT EXISTS peer_link_confirm_observations (
+        link_device_id TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        kind           TEXT NOT NULL CHECK(kind IN ('peer_confirmed','local_duplicate')),
+        detail         TEXT,
+        observed_at    INTEGER NOT NULL,
+        PRIMARY KEY (link_device_id, environment_id, kind)
+      );
+
+      -- Ruling 10 + Ruling 14(c) + R12.3: durable LOCAL OPERATOR INTENT about a subject. One table
+      -- for three actions because all three are the same thing — a local, audited, liftable
+      -- decision that must survive resetAll and that no peer may ever write.
+      CREATE TABLE IF NOT EXISTS peer_link_containment (
+        subject_kind TEXT NOT NULL CHECK(subject_kind IN ('link','environment')),
+        subject_id   TEXT NOT NULL,
+        action       TEXT NOT NULL CHECK(action IN ('quarantine','scan_exclude','accept_legacy')),
+        reason_code  TEXT,
+        reason_text  TEXT,
+        detail       TEXT,
+        created_at   INTEGER NOT NULL,
+        expires_at   INTEGER,
+        lifted_at    INTEGER,
+        PRIMARY KEY (subject_kind, subject_id, action)
+      );
+
+      -- Ruling 14(e): the DURABLE reply relay. A reply to a foreign-origin message is committed
+      -- here in the same transaction as the audit row and markAsRead. Ordering is per ROUTE —
+      -- (link_device_id, environment_id, bound_pairing_revision) — not per link alone.
+      CREATE TABLE IF NOT EXISTS peer_reply_outbox (
+        id                       TEXT PRIMARY KEY,
+        seq                      INTEGER NOT NULL,
+        local_message_id         TEXT NOT NULL UNIQUE,
+        link_device_id           TEXT NOT NULL,
+        environment_id           TEXT NOT NULL,
+        bound_pairing_revision   INTEGER NOT NULL,
+        peer_credential_fp       TEXT NOT NULL,
+        peer_key_fingerprint     TEXT NOT NULL,
+        in_reply_to_message_id   TEXT NOT NULL,
+        peer_agent_id            TEXT NOT NULL,
+        peer_thread_id           TEXT,
+        local_thread_id          TEXT,
+        notice_run_id            TEXT,
+        notice_pane_key          TEXT,
+        payload                  TEXT NOT NULL,
+        byte_count               INTEGER NOT NULL,
+        state                    TEXT NOT NULL DEFAULT 'queued'
+          CHECK(state IN ('queued','sending','delivered','refused','abandoned','cancelled')),
+        lease_expires_at         INTEGER,
+        attempts                 INTEGER NOT NULL DEFAULT 0,
+        consecutive_failures     INTEGER NOT NULL DEFAULT 0,
+        hold_count               INTEGER NOT NULL DEFAULT 0,
+        first_held_at            INTEGER,
+        last_attempt_at          INTEGER,
+        next_attempt_after       INTEGER,
+        last_error_code          TEXT,
+        last_error               TEXT,
+        peer_message_id          TEXT,
+        peer_reply_thread_id     TEXT,
+        created_at               INTEGER NOT NULL,
+        settled_at               INTEGER,
+        notified_at              INTEGER,
+        -- Ruling 26 Addendum 3(aa): the disposition-notice edge keys on the last NOTIFIED
+        -- condition, not on last_error_code (which holds also write). Written ONLY by the notice
+        -- choke (fireReplyRelayNotice); holds never touch it.
+        last_notified_condition  TEXT,
+        -- Ruling 26 Addendum 4(ii): stamped in the SAME write as last_notified_condition — the
+        -- persisted half of the disposition family's per-link R19.3 interval (MAX(last_notified_at)
+        -- WHERE link_device_id = ?), replacing the in-memory Map C5d shared with the R20.2
+        -- advisory. Guarded to queued/sending rows (jj) — a settled row is never mutated.
+        last_notified_at         INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_peer_reply_outbox_pending
+        ON peer_reply_outbox(link_device_id, environment_id, bound_pairing_revision, state,
+                             next_attempt_after, seq);
+`
+
 const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS remote_agents (
         environment_id          TEXT NOT NULL,   -- local link key (D5: paired_device = pairedDeviceId, environment = KnownRuntimeEnvironment.id)
@@ -915,8 +1153,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24).
-const SCHEMA_VERSION = 39
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23).
+const SCHEMA_VERSION = 40
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
 // NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
@@ -1108,6 +1346,259 @@ export class OrchestrationDb {
     this.repointStrandedDisplayNameAddressedMessages()
   }
 
+  // R14.4: unshipped-v40 repair, called first in createTables() after repairUnshippedV38PeerRouting
+  // (S10-19 needs none of its own — its v39 columns are simple nullable TEXT, added inline). Guard
+  // on user_version >= 40 AND a hasTable probe — a pure new-table migration needs no repair against
+  // a SHIPPED older build; this exists because v40 is unshipped, so an in-review shape change to a
+  // table an earlier copy of this migration already created would otherwise never be applied.
+  //
+  // NEVER DROPPED (peer_link_bindings, peer_link_containment, peer_reply_outbox): missing columns
+  // added nullable; a row whose NOT NULL invariant cannot be back-filled is marked fail-closed
+  // (revoked / abandoned) with an audit row — never deleted. `revoked_at` is the load-bearing half
+  // of the binding mark (R10-A's candidate filter and R15's routing predicate both key on the
+  // COLUMN, not `state`) — if the `state` CHECK a pre-review build wrote rejects 'revoked', the
+  // UPDATE is caught and `revoked_at` alone is stamped (no CHECK constrains it).
+  //
+  // DROP-AND-RECREATE (peer_link_attempts, peer_link_scan_facts, peer_link_confirm_observations):
+  // genuinely re-derivable state — probe every expected column, DROP + re-create from the same
+  // const if any is missing.
+  private repairUnshippedV40LinkBinding(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 40) {
+      return
+    }
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+    const now = Date.now()
+
+    if (hasTable('peer_link_bindings')) {
+      const columns: [string, string][] = [
+        ['environment_id', 'TEXT'],
+        ['bound_endpoint_id', 'TEXT'],
+        ['bound_pairing_revision', 'INTEGER'],
+        ['link_credential_fp', 'TEXT'],
+        ['peer_credential_fp', 'TEXT'],
+        ['peer_key_fingerprint', 'TEXT'],
+        ['grant_class', 'TEXT'],
+        ['scan_completeness', 'TEXT'],
+        ['proof_protocol', 'TEXT'],
+        // Ruling 19 P3 / R14.4: NOT a `DEFAULT 'confirmed'` — a back-filled column must never
+        // supply the routable value. Plain nullable TEXT, like every other column in this list;
+        // the incomplete-row probe below fails closed on a NULL state exactly like any other
+        // missing NOT NULL column.
+        ['state', 'TEXT'],
+        ['detail', 'TEXT'],
+        ['contest_incident_id', 'TEXT'],
+        ['proved_at', 'INTEGER'],
+        ['last_verified_at', 'INTEGER'],
+        ['contested_at', 'INTEGER'],
+        ['revoked_at', 'INTEGER']
+      ]
+      let addedColumn = false
+      for (const [column, type] of columns) {
+        if (!this.hasColumn('peer_link_bindings', column)) {
+          this.db.exec(`ALTER TABLE peer_link_bindings ADD COLUMN ${column} ${type}`)
+          addedColumn = true
+        }
+      }
+      if (addedColumn) {
+        // F6/R14.4: every NOT NULL column of peer_link_bindings the fresh v40 DDL requires, not
+        // just the eight that predate the ALTER loop above. `state` is checked against the valid
+        // word set (not merely NULL) so an unrecognized back-filled value fails closed the same
+        // as a missing one.
+        const incomplete = this.db
+          .prepare(
+            `SELECT link_device_id FROM peer_link_bindings
+              WHERE environment_id IS NULL OR bound_endpoint_id IS NULL
+                 OR link_credential_fp IS NULL OR peer_credential_fp IS NULL
+                 OR peer_key_fingerprint IS NULL OR proof_protocol IS NULL
+                 OR proved_at IS NULL OR last_verified_at IS NULL
+                 OR state IS NULL OR state NOT IN ('confirmed', 'contested', 'revoked')
+                 OR bound_pairing_revision IS NULL OR grant_class IS NULL
+                 OR scan_completeness IS NULL`
+          )
+          .all() as { link_device_id: string }[]
+        for (const row of incomplete) {
+          try {
+            this.db
+              .prepare(
+                `UPDATE peer_link_bindings SET state = 'revoked', revoked_at = ? WHERE link_device_id = ?`
+              )
+              .run(now, row.link_device_id)
+          } catch {
+            // A pre-review build's `state` CHECK may reject 'revoked' — fail closed on the column
+            // R10-A/R15 actually read, which no CHECK constrains.
+            this.db
+              .prepare(`UPDATE peer_link_bindings SET revoked_at = ? WHERE link_device_id = ?`)
+              .run(now, row.link_device_id)
+          }
+          this.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            // F8: name the link the repair acted on — 'local' left every row indistinguishable.
+            actorHostId: row.link_device_id,
+            verb: 'link_binding_unshipped_v40_repair',
+            outcome: 'revoked',
+            reasonCode: 'incomplete_row_fail_closed'
+          })
+        }
+      }
+    }
+
+    if (hasTable('peer_link_containment')) {
+      const columns: [string, string][] = [
+        ['reason_code', 'TEXT'],
+        ['reason_text', 'TEXT'],
+        ['detail', 'TEXT'],
+        ['created_at', 'INTEGER'],
+        ['expires_at', 'INTEGER'],
+        ['lifted_at', 'INTEGER']
+      ]
+      for (const [column, type] of columns) {
+        if (!this.hasColumn('peer_link_containment', column)) {
+          this.db.exec(`ALTER TABLE peer_link_containment ADD COLUMN ${column} ${type}`)
+        }
+      }
+    }
+
+    if (hasTable('peer_reply_outbox')) {
+      const columns: [string, string][] = [
+        ['seq', 'INTEGER'],
+        ['local_message_id', 'TEXT'],
+        ['link_device_id', 'TEXT'],
+        ['environment_id', 'TEXT'],
+        ['bound_pairing_revision', 'INTEGER'],
+        ['peer_credential_fp', 'TEXT'],
+        ['peer_key_fingerprint', 'TEXT'],
+        ['in_reply_to_message_id', 'TEXT'],
+        ['peer_agent_id', 'TEXT'],
+        ['peer_thread_id', 'TEXT'],
+        ['local_thread_id', 'TEXT'],
+        ['notice_run_id', 'TEXT'],
+        ['notice_pane_key', 'TEXT'],
+        ['payload', 'TEXT'],
+        ['byte_count', 'INTEGER'],
+        ['state', "TEXT NOT NULL DEFAULT 'queued'"],
+        ['lease_expires_at', 'INTEGER'],
+        ['attempts', 'INTEGER NOT NULL DEFAULT 0'],
+        ['consecutive_failures', 'INTEGER NOT NULL DEFAULT 0'],
+        ['hold_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['first_held_at', 'INTEGER'],
+        ['last_attempt_at', 'INTEGER'],
+        ['next_attempt_after', 'INTEGER'],
+        ['last_error_code', 'TEXT'],
+        ['last_error', 'TEXT'],
+        ['peer_message_id', 'TEXT'],
+        ['peer_reply_thread_id', 'TEXT'],
+        ['created_at', 'INTEGER'],
+        ['settled_at', 'INTEGER'],
+        ['notified_at', 'INTEGER'],
+        // Ruling 26 Addendum 3(aa): unshipped-repair path for the new notice-edge column (S10-16
+        // C5d) — never a schema-version bump.
+        ['last_notified_condition', 'TEXT'],
+        // Ruling 26 Addendum 4(ii): same unshipped-repair pattern, one commit later (S10-16 C5e)
+        // — never a schema-version bump. Re-triggers the fail-closed repair sweep below once on
+        // every existing v40 database (harmless, one-time — (ll)).
+        ['last_notified_at', 'INTEGER']
+      ]
+      let addedColumn = false
+      for (const [column, type] of columns) {
+        if (!this.hasColumn('peer_reply_outbox', column)) {
+          this.db.exec(`ALTER TABLE peer_reply_outbox ADD COLUMN ${column} ${type}`)
+          addedColumn = true
+        }
+      }
+      if (addedColumn) {
+        const incomplete = this.db
+          .prepare(
+            `SELECT id FROM peer_reply_outbox
+              WHERE link_device_id IS NULL OR environment_id IS NULL OR peer_agent_id IS NULL
+                 OR payload IS NULL OR local_message_id IS NULL`
+          )
+          .all() as { id: string }[]
+        for (const row of incomplete) {
+          // Ruling 28(j)/ML-5: `settled_at != NULL` is now terminal for the claim, the kick, the
+          // per-link cap and health (reply-outbox-store.ts) — the far-future
+          // `next_attempt_after` hack this fallback used before that was true is no longer
+          // needed, and is dropped so a repaired row's `next_attempt_after` cannot outlive the
+          // predicate it once had to defeat.
+          let usedFallback = false
+          try {
+            this.db
+              .prepare(
+                `UPDATE peer_reply_outbox
+                    SET state = 'abandoned', settled_at = ?, last_error_code = 'incomplete_row_fail_closed'
+                  WHERE id = ?`
+              )
+              .run(now, row.id)
+          } catch {
+            // F7/Ruling 28(j): mirror the binding branch's fallback — a pre-review build's
+            // `state` CHECK may reject 'abandoned'; fall back to the columns no CHECK constrains
+            // (settled_at / last_error_code) so the row still stops being claimable via
+            // settled_at alone. The code is REPLY_OUTBOX_REPAIR_REJECTED_CODE, distinct from the
+            // primary path's 'incomplete_row_fail_closed' — a row here was rejected AT the
+            // repair, not merely found incomplete by it.
+            usedFallback = true
+            this.db
+              .prepare(
+                `UPDATE peer_reply_outbox
+                    SET settled_at = ?, last_error_code = ?
+                  WHERE id = ?`
+              )
+              .run(now, REPLY_OUTBOX_REPAIR_REJECTED_CODE, row.id)
+          }
+          this.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            // F8: name the outbox row the repair acted on — 'local' left every row indistinguishable.
+            actorHostId: row.id,
+            verb: 'link_binding_unshipped_v40_repair',
+            outcome: 'abandoned',
+            reasonCode: usedFallback
+              ? REPLY_OUTBOX_REPAIR_REJECTED_CODE
+              : 'incomplete_row_fail_closed'
+          })
+        }
+      }
+    }
+
+    // F9/MOD2/L-9/X3: the drop-and-recreate table SET is driven from THE REGISTER
+    // (A2_DROP_AND_RECREATE_TABLES) — this loop's `table` values are no longer a second
+    // hard-coded copy of that list. The column maps stay local (they are per-table probe detail,
+    // not one of the register's own owned facts) but are keyed by the same names.
+    const dropAndRecreateColumns: Record<(typeof A2_DROP_AND_RECREATE_TABLES)[number], string[]> = {
+      peer_link_attempts: [
+        'link_device_id',
+        'last_outcome',
+        'consecutive_failures',
+        'consecutive_no_winner',
+        'misroute_advisories'
+      ],
+      peer_link_scan_facts: [
+        'link_device_id',
+        'environment_id',
+        'outcome',
+        'environment_pairing_revision',
+        'link_credential_fp',
+        'observed_at'
+      ],
+      peer_link_confirm_observations: ['link_device_id', 'environment_id', 'kind', 'observed_at']
+    }
+    for (const table of A2_DROP_AND_RECREATE_TABLES) {
+      const columns = dropAndRecreateColumns[table]
+      if (!hasTable(table)) {
+        continue
+      }
+      const missing = columns.some((column) => !this.hasColumn(table, column))
+      if (missing) {
+        this.db.exec(`DROP TABLE ${table}`)
+      }
+    }
+    // Re-creates any dropped table above from the single source of truth.
+    this.db.exec(S10_16_LINK_BINDING_SCHEMA_SQL)
+  }
+
   // S10-15 review m-2: scoped to host_id and capped at one match — deterministic today only
   // because host_id is the constant 'local' for every row this DB ever writes; defense in depth
   // against a future multi-host-per-db writer, and keeps the scalar subquery from ever throwing
@@ -1135,6 +1626,7 @@ export class OrchestrationDb {
     this.repairUnshippedV36RelinkGeneration()
     this.repairUnshippedV37RemoteAgentIdentity()
     this.repairUnshippedV38PeerRouting()
+    this.repairUnshippedV40LinkBinding()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,
@@ -1483,6 +1975,7 @@ export class OrchestrationDb {
       ${AGENT_DIRECTORY_SCHEMA_SQL}
       ${THREAD_DIRECTORY_SCHEMA_SQL}
       ${S10_4_FEDERATION_SCHEMA_SQL}
+      ${S10_16_LINK_BINDING_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
     this.createThreadDirectoryIndexesIfPossible()
@@ -2186,6 +2679,15 @@ export class OrchestrationDb {
               ON remote_dispatch_attachments(terminal_handle);
           `)
         }
+      }
+      // v39 -> v40 (S10-16 rulings 8/10/11/14/17/18g): peer_link_bindings + peer_link_attempts +
+      // peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment +
+      // peer_reply_outbox. Tables only, no ALTER — createTables() already ran this exact
+      // CREATE TABLE IF NOT EXISTS text, so this is a no-op on a fresh DB and creates the tables
+      // on an upgraded one. Same "version bump and schema land in one atomic migration"
+      // discipline as v37/v38/v39.
+      if (current < 40) {
+        this.db.exec(S10_16_LINK_BINDING_SCHEMA_SQL)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -4152,6 +4654,309 @@ export class OrchestrationDb {
 
   checkAndBumpRate(params: CheckAndBumpRateParams): RateLimitResult {
     return checkAndBumpRateImpl(this.db, params)
+  }
+
+  // S10-16 R14.6: link-binding-store.ts / link-binding-attempts-store.ts /
+  // link-binding-observations-store.ts / reply-outbox-store.ts / reply-outbox-lifecycle.ts
+  // delegations — two/three-line wrappers only, matching agent-audit-log.ts's split.
+  getPeerLinkBinding(linkDeviceId: string): PeerLinkBindingRow | null {
+    return getPeerLinkBindingImpl(this.db, linkDeviceId)
+  }
+
+  listPeerLinkBindings(): PeerLinkBindingRow[] {
+    return listPeerLinkBindingsImpl(this.db)
+  }
+
+  putPeerLinkBinding(
+    row: Omit<
+      PeerLinkBindingRow,
+      'state' | 'detail' | 'contestIncidentId' | 'contestedAt' | 'revokedAt'
+    >
+  ): void {
+    putPeerLinkBindingImpl(this.db, row)
+  }
+
+  contestPeerLinkBinding(
+    linkDeviceId: string,
+    now: number,
+    incidentId: string,
+    detail: string | null,
+    firstWinner: ContestFirstWinner
+  ): void {
+    contestPeerLinkBindingImpl(this.db, linkDeviceId, now, incidentId, detail, firstWinner)
+  }
+
+  revokePeerLinkBinding(linkDeviceId: string, now: number): void {
+    revokePeerLinkBindingImpl(this.db, linkDeviceId, now)
+  }
+
+  // Ruling 28(a): lifts a sticky revoke — called only from the `linkBind` RPC handler.
+  unrevokePeerLinkBinding(linkDeviceId: string, now: number): boolean {
+    return unrevokePeerLinkBindingImpl(this.db, linkDeviceId, now)
+  }
+
+  // Ruling 28(a): clears an existing contest on a forced proveNow round's clean single winner —
+  // called only from link-binding-prover-settle.ts, the round settle
+  resolvePeerLinkBindingContest(
+    row: Omit<
+      PeerLinkBindingRow,
+      'state' | 'detail' | 'contestIncidentId' | 'contestedAt' | 'revokedAt'
+    >
+  ): void {
+    resolvePeerLinkBindingContestImpl(this.db, row)
+  }
+
+  findBindingsByEnvironment(environmentId: string): PeerLinkBindingRow[] {
+    return findBindingsByEnvironmentImpl(this.db, environmentId)
+  }
+
+  // Ruling 26 Addendum 5(nn): a CANDIDATE, not a routable destination — callers must filter
+  // through `getRoutableLinkBinding` before retargeting onto it.
+  findBindingCandidateByKeyFingerprint(peerKeyFingerprint: string): PeerLinkBindingRow | null {
+    return findBindingCandidateByKeyFingerprintImpl(this.db, peerKeyFingerprint)
+  }
+
+  getBindingAttempt(linkDeviceId: string): BindingAttemptRow | null {
+    return getBindingAttemptImpl(this.db, linkDeviceId)
+  }
+
+  listBindingAttempts(): BindingAttemptRow[] {
+    return listBindingAttemptsImpl(this.db)
+  }
+
+  putBindingAttempt(linkDeviceId: string): void {
+    putBindingAttemptImpl(this.db, linkDeviceId)
+  }
+
+  settleBindingAttempt(linkDeviceId: string, settle: BindingAttemptSettle): void {
+    settleBindingAttemptImpl(this.db, linkDeviceId, settle)
+  }
+
+  putLinkAdvisory(linkDeviceId: string, advisory: LinkAdvisory, now: number): void {
+    putLinkAdvisoryImpl(this.db, linkDeviceId, advisory, now)
+  }
+
+  clearLinkAdvisory(linkDeviceId: string): void {
+    clearLinkAdvisoryImpl(this.db, linkDeviceId)
+  }
+
+  bumpMisrouteAdvisories(linkDeviceId: string): void {
+    bumpMisrouteAdvisoriesImpl(this.db, linkDeviceId)
+  }
+
+  getScanFact(linkDeviceId: string, environmentId: string): ScanFactRow | null {
+    return getScanFactImpl(this.db, linkDeviceId, environmentId)
+  }
+
+  listScanFacts(linkDeviceId: string): ScanFactRow[] {
+    return listScanFactsImpl(this.db, linkDeviceId)
+  }
+
+  // Ruling 28(h): the distinct link ids `linkForget` must include so it never deletes a link's
+  // scan-fact rows while omitting it from the retained/forgotten id set.
+  listScanFactLinkIds(): string[] {
+    return listScanFactLinkIdsImpl(this.db)
+  }
+
+  putScanFact(row: ScanFactRow): void {
+    putScanFactImpl(this.db, row)
+  }
+
+  listConfirmObservations(linkDeviceId: string): ConfirmObservationRow[] {
+    return listConfirmObservationsImpl(this.db, linkDeviceId)
+  }
+
+  // Ruling 28(h): same coverage requirement as `listScanFactLinkIds`, for the confirm-observation
+  // table — the one table a peer's own call creates rows in.
+  listConfirmObservationLinkIds(): string[] {
+    return listConfirmObservationLinkIdsImpl(this.db)
+  }
+
+  putConfirmObservation(row: ConfirmObservationRow): void {
+    putConfirmObservationImpl(this.db, row)
+  }
+
+  isPeerLinkQuarantined(linkDeviceId: string): boolean {
+    return isPeerLinkQuarantinedImpl(this.db, linkDeviceId)
+  }
+
+  getContainment(
+    subjectKind: ContainmentRow['subjectKind'],
+    subjectId: string,
+    action: ContainmentRow['action']
+  ): ContainmentRow | null {
+    return getContainmentImpl(this.db, subjectKind, subjectId, action)
+  }
+
+  listContainment(): ContainmentRow[] {
+    return listContainmentImpl(this.db)
+  }
+
+  putContainment(row: Omit<ContainmentRow, 'liftedAt'>): void {
+    putContainmentImpl(this.db, row)
+  }
+
+  liftContainment(
+    subjectKind: ContainmentRow['subjectKind'],
+    subjectId: string,
+    action: ContainmentRow['action'],
+    now: number
+  ): void {
+    liftContainmentImpl(this.db, subjectKind, subjectId, action, now)
+  }
+
+  deleteBindingsAndAttemptsNotIn(retainedLinkDeviceIds: readonly string[]): void {
+    deleteBindingsAndAttemptsNotInImpl(this.db, retainedLinkDeviceIds)
+  }
+
+  deleteBindingsAndAttemptsIn(forgottenLinkDeviceIds: readonly string[]): void {
+    deleteBindingsAndAttemptsInImpl(this.db, forgottenLinkDeviceIds)
+  }
+
+  enqueueReplyOutbox(params: EnqueueReplyOutboxParams): string {
+    return enqueueReplyOutboxImpl(this.db, params)
+  }
+
+  // R16.2(2): audit + enqueue + markAsRead, ONE `BEGIN IMMEDIATE` — plain statements only, no
+  // network. `insertGatedMessage` (R16.2(1)) already ran OUTSIDE this transaction, in the
+  // caller, so its own `gate_refusals` audit row survives a refusal here undisturbed.
+  enqueueForeignReplyIntent(params: {
+    audit: WriteAgentAuditParams
+    outbox: EnqueueReplyOutboxParams
+    markAsReadIds: string[]
+  }): string {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.writeAgentAudit(params.audit)
+      const outboxId = enqueueReplyOutboxImpl(this.db, params.outbox)
+      this.markAsRead(params.markAsReadIds)
+      this.db.exec('COMMIT')
+      return outboxId
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getReplyOutboxItem(id: string): ReplyOutboxRow | null {
+    return getReplyOutboxItemImpl(this.db, id)
+  }
+
+  listReplyOutbox(linkDeviceId?: string): ReplyOutboxRow[] {
+    return listReplyOutboxImpl(this.db, linkDeviceId)
+  }
+
+  // S10-16 C6a, Ruling 27(b): the bounded, column-limited accessor the check-path health mapper
+  // uses instead of `listReplyOutbox`'s unfiltered `SELECT *`.
+  listReplyOutboxHealthRows(linkDeviceId: string, now: number): ReplyOutboxHealthRow[] {
+    return listReplyOutboxHealthRowsImpl(this.db, linkDeviceId, now)
+  }
+
+  countPendingReplyOutbox(linkDeviceId: string): number {
+    return countPendingReplyOutboxImpl(this.db, linkDeviceId)
+  }
+
+  cancelQueuedReplyOutbox(now: number): number {
+    return cancelQueuedReplyOutboxImpl(this.db, now)
+  }
+
+  kickReplyOutboxForLink(linkDeviceId: string, now: number): void {
+    kickReplyOutboxForLinkImpl(this.db, linkDeviceId, now)
+  }
+
+  getReplyOutboxItemByLocalMessageId(localMessageId: string): ReplyOutboxRow | null {
+    return getReplyOutboxItemByLocalMessageIdImpl(this.db, localMessageId)
+  }
+
+  markReplyOutboxNotified(id: string, now: number): void {
+    markReplyOutboxNotifiedImpl(this.db, id, now)
+  }
+
+  // Ruling 26 Addendum 4(hh)/(ii)/(jj): the ONLY writer of last_notified_condition/
+  // last_notified_at — the DISPOSITION family's own edge + persisted per-link interval; called
+  // exclusively from the notice choke's disposition path, never from a hold path and never for
+  // the R20.2 advisory or the unreachable/recovered family.
+  markReplyOutboxDispositionNotice(id: string, condition: string, now: number): void {
+    markReplyOutboxDispositionNoticeImpl(this.db, id, condition, now)
+  }
+
+  replyOutboxLinkLastDispositionNotifiedAt(linkDeviceId: string): number | null {
+    return replyOutboxLinkLastDispositionNotifiedAtImpl(this.db, linkDeviceId)
+  }
+
+  // Ruling 26 Addendum 5(oo): the R20.2 advisory's own persisted per-link interval, restart-safe.
+  replyOutboxLinkLastAdvisoryNotifiedAt(linkDeviceId: string): number | null {
+    return replyOutboxLinkLastAdvisoryNotifiedAtImpl(this.db, linkDeviceId)
+  }
+
+  nextReplyOutboxWakeAt(): number | null {
+    return nextReplyOutboxWakeAtImpl(this.db)
+  }
+
+  reclaimExpiredReplyOutboxLeases(now: number): number {
+    return reclaimExpiredReplyOutboxLeasesImpl(this.db, now)
+  }
+
+  claimNextReplyOutboxItem(now: number): ReplyOutboxRow | null {
+    return claimNextReplyOutboxItemImpl(this.db, now)
+  }
+
+  settleReplyOutboxItem(id: string, settle: ReplyOutboxSettle): boolean {
+    return settleReplyOutboxItemImpl(this.db, id, settle)
+  }
+
+  // Ruling 26 Addendum 3(dd)/F4: the guarded state='sending' -> 'queued' write's boolean is
+  // returned so the caller can check it (a lost write must never be treated as a completed hold).
+  holdReplyOutboxItem(
+    id: string,
+    now: number,
+    nextAttemptAfter: number,
+    lastErrorCode: string
+  ): boolean {
+    return holdReplyOutboxItemImpl(this.db, id, now, nextAttemptAfter, lastErrorCode)
+  }
+
+  // `now` kept in the public signature for call-site symmetry with the other lifecycle methods;
+  // the impl no longer writes it (first_held_at is deliberately never advanced — R18.4(a)/L4).
+  holdReplyOutboxItemLocalEvidence(id: string, _now: number, nextAttemptAfter: number): boolean {
+    return holdReplyOutboxItemLocalEvidenceImpl(this.db, id, nextAttemptAfter)
+  }
+
+  // M10 (C5 review)/Ruling 26(j): the in-flight-registry collision hold — never starts the
+  // R18.3 abandon clock (first_held_at left untouched, same shape as the local-evidence hold).
+  holdReplyOutboxItemCollision(id: string, nextAttemptAfter: number): boolean {
+    return holdReplyOutboxItemCollisionImpl(this.db, id, nextAttemptAfter)
+  }
+
+  retryReplyOutboxItem(
+    id: string,
+    _now: number,
+    nextAttemptAfter: number,
+    consecutiveFailures: number,
+    lastErrorCode: string | null,
+    lastError: string | null
+  ): boolean {
+    return retryReplyOutboxItemImpl(
+      this.db,
+      id,
+      nextAttemptAfter,
+      consecutiveFailures,
+      lastErrorCode,
+      lastError
+    )
+  }
+
+  retargetReplyOutboxItem(
+    id: string,
+    route: {
+      linkDeviceId: string
+      environmentId: string
+      boundPairingRevision: number
+      peerCredentialFp: string
+      peerKeyFingerprint: string
+    }
+  ): boolean {
+    return retargetReplyOutboxItemImpl(this.db, id, route)
   }
 
   getOrCreateMailboxDelivery(
@@ -7480,6 +8285,42 @@ export class OrchestrationDb {
       .run(peerThreadId, messageId)
   }
 
+  // S10-16 C5, R28.1 rule 2: the continuation path for a multi-message exchange — a prior
+  // INBOUND-imported row (peer_link_device_id set) on the same link naming the same peer thread
+  // id, already carrying a local thread. `peer_thread_id IS NOT NULL` is load-bearing (L2): SQL
+  // equality on NULL matches nothing on its own, but this clause makes that explicit rather than
+  // relying on the implicit behaviour.
+  findForeignRowByLinkAndPeerThread(
+    linkDeviceId: string,
+    peerThreadId: string
+  ): MessageRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+          WHERE peer_link_device_id = ? AND peer_thread_id = ? AND peer_thread_id IS NOT NULL
+            AND thread_id IS NOT NULL
+          ORDER BY sequence DESC LIMIT 1`
+      )
+      .get(linkDeviceId, peerThreadId) as MessageRow | undefined
+  }
+
+  // S10-16 C5, R28.1(1b): mint a local thread, then back-fill a NULL-thread row's `thread_id`.
+  // `createThread` already owns its own `BEGIN IMMEDIATE`/COMMIT (thread-directory.ts), so the
+  // mint and the back-fill are two statements, not one nested transaction — SQLite has none. The
+  // `AND thread_id IS NULL` guard on the UPDATE is what stays load-bearing: it protects the ROW
+  // (a concurrent mint loses the backfill race and its thread becomes an unreferenced orphan,
+  // never a correctness fault) even though the two writes are not atomic with each other.
+  mintThreadAndBackfillMessage(
+    backfillMessageId: string,
+    threadParams: CreateThreadParams
+  ): { threadId: string; backfilled: boolean } {
+    const { thread } = this.createThread(threadParams)
+    const result = this.db
+      .prepare('UPDATE messages SET thread_id = ? WHERE id = ? AND thread_id IS NULL')
+      .run(thread.id, backfillMessageId)
+    return { threadId: thread.id, backfilled: result.changes === 1 }
+  }
+
   // S10-15 ruling 2: the link's own currently-bound fingerprint, or null if this link has never
   // asserted one (first contact — binds on the next upsertRemoteAgent call).
   getBoundPeerFingerprintForLink(environmentId: string): string | null {
@@ -9603,6 +10444,13 @@ export class OrchestrationDb {
       -- S10-15 (INV-P-006): agent_rate is peer-writable (checkAndBumpRate, agent-rate-limit.ts)
       -- and must be purgeable like every other coordination-bus table.
       DELETE FROM agent_rate;
+      -- S10-16 R14.3 (v5, P10): peer_reply_outbox and peer_link_confirm_observations are the two
+      -- link-binding tables NOT exempt from resetAll — the outbox is coordination-bus state and
+      -- confirm observations are the only table a peer's own call causes a row in (INV-P-006(b)).
+      -- The other four — bindings, attempts, scan facts, containment — stay out (this host's own
+      -- proofs and its operator's own decisions); see A2_RESET_EXEMPT_TABLES for the ONE list.
+      DELETE FROM peer_reply_outbox;
+      DELETE FROM peer_link_confirm_observations;
       DELETE FROM worker_terminal_archives;
       DELETE FROM worker_terminal_resources;
       DELETE FROM worker_dispatches;
@@ -9642,12 +10490,29 @@ export class OrchestrationDb {
 
   resetMessages(): void {
     // Why: relay rows carry contiguous cross-server cursors, not just inbox history.
-    this.runResetTransaction(`
-      DELETE FROM legacy_mail_receipts;
-      DELETE FROM question_threads;
-      DELETE FROM deliveries;
-      DELETE FROM messages;
-    `)
+    // S10-16 R14.3 (v5, P18) / F10: cancel every queued AND 'sending' outbox row BEFORE deleting
+    // messages — without this the outbox's self-contained payload would still ship a
+    // conversation the operator just purged. 'sending' too: without the durable in-flight state
+    // a claimed item stays 'queued' while its RPC runs, so this cancel would hit it and the
+    // item's own settle would then write 'delivered' straight over the cancellation.
+    // The cancel itself is `cancelQueuedReplyOutbox` (reply-outbox-store.ts) — the ONE
+    // definition of "cancel queued/sending outbox rows", not restated here — called inside this
+    // same BEGIN IMMEDIATE/COMMIT so it stays atomic with the message deletes below.
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      cancelQueuedReplyOutboxImpl(this.db, now)
+      this.db.exec(`
+        DELETE FROM legacy_mail_receipts;
+        DELETE FROM question_threads;
+        DELETE FROM deliveries;
+        DELETE FROM messages;
+      `)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   close(): void {

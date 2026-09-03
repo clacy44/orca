@@ -37,6 +37,8 @@ export type PairingInviteOfferArgs = {
   scope: DeviceScope
   reach: 'network'
   ttlMs?: number
+  // S10-16 R1.1: this lane's minted-grant eviction budget — always 'lane_invite'.
+  budgetClass: 'lane_invite'
   // S10-19 W-6: threaded straight to RuntimeRpcServer.createPairingOffer, which already
   // defaults 'full' and refuses peer+non-runtime scope (W-1). Required here — mintInvite has no
   // default of its own; the CLI/desktop callers are the ones that must choose.
@@ -216,6 +218,7 @@ export class PrincipalLaneConsentService {
       mint: 'always',
       scope: params.scope,
       reach: 'network',
+      budgetClass: 'lane_invite',
       accessProfile: params.accessProfile,
       ...(params.ttlHours !== undefined ? { ttlMs: params.ttlHours * 3_600_000 } : {})
     })

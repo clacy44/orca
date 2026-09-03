@@ -140,6 +140,7 @@ describe('accounts.lane.mintInvite', () => {
         mint: 'always',
         scope: 'runtime',
         reach: 'network',
+        budgetClass: 'lane_invite',
         accessProfile: 'full',
         ttlMs: 7_200_000
       }

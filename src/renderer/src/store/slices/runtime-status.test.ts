@@ -515,6 +515,28 @@ describe('runtime-status slice', () => {
     }
   )
 
+  // S10-16 R4.4 / C1 review finding 5+6 (scenario 10): setEnvironmentEndpoint bumps
+  // pairingRevision by the same formula as a re-pair, so editing an endpoint's address must drive
+  // this slice exactly as a re-pair does — drop the cached status and advance the connection
+  // generation — never read as "still connected to the old address".
+  it('editing an endpoint (a pairingRevision bump, R4.4) drops cached status and advances the connection generation', () => {
+    const store = createSliceStore()
+    store.getState().setRuntimeEnvironments([makeEnvironment({ pairingRevision: 1 })])
+    store.getState().setRuntimeEnvironmentStatus('env-a', {
+      status: makeStatus({ runtimeId: 'runtime-a' }),
+      checkedAt: 1
+    })
+    const generationBeforeEdit = getRuntimeEnvironmentConnectionGeneration('env-a')
+
+    // setEnvironmentEndpoint's own bump formula (Math.max(now, (pairingRevision ?? createdAt) + 1))
+    // always produces a strictly greater revision — reproduced here rather than importing the
+    // main-process fs-backed function into a renderer test.
+    store.getState().setRuntimeEnvironments([makeEnvironment({ pairingRevision: 2 })])
+
+    expect(store.getState().runtimeStatusByEnvironmentId.has('env-a')).toBe(false)
+    expect(getRuntimeEnvironmentConnectionGeneration('env-a')).toBeGreaterThan(generationBeforeEdit)
+  })
+
   it('advances connection generation after recovery without churning stable status polls', () => {
     const store = createSliceStore()
     store.getState().setRuntimeEnvironmentStatus('env-a', {

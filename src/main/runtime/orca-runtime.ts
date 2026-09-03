@@ -124,6 +124,7 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import { OrchestrationDb } from './orchestration/db'
+import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
 import {
   DISPATCH_LIVENESS_SWEEP_INTERVAL_MS,
@@ -137,6 +138,9 @@ import {
   runPeerAttachmentRuntimePrune as runPeerAttachmentRuntimePruneImpl,
   type PeerGrantProfileLookup
 } from './peer-owned-pane-lifecycle'
+import type { LinkBindingSelfView } from './device-registry-link-credential'
+import { createLinkBindingProver, type LinkBindingProver } from './link-binding-prover'
+import { createReplyOutboxPump, type ReplyOutboxPump } from './orchestration/reply-outbox-pump'
 import {
   tickDispatchInputObserver as runDispatchInputObserverTick,
   tickFederatedDispatchInputObserver as runFederatedDispatchInputObserverTick,
@@ -3144,10 +3148,34 @@ export class OrcaRuntimeService {
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
+  // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
+  // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
+  // per queued batch at both attach sites below (Ruling 23 addendum (p)).
+  private legacySweepAuditSource: { getPendingLegacySweepAudit(): LegacySweepAuditRow[] } | null =
+    null
   // S10-19 W-2: installed by runtime-rpc.ts beside attachPrincipalLaneHost (and cleared on
   // both non-success arms, beside detachPrincipalLaneHost). null at boot, by construction —
   // the boot sweep (below) never reads this and never should (Ruling 24 addendum 2(o)).
   private peerGrantProfileLookup: PeerGrantProfileLookup | null = null
+  // S10-16 R9: installed by runtime-rpc.ts beside attachPrincipalLaneHost (and cleared on both
+  // non-success arms). Public — handlers (which see only OrcaRuntimeService, never
+  // RuntimeRpcServer) read it directly, matching the design's `runtime.linkBindingSelfView` shape.
+  linkBindingSelfView: LinkBindingSelfView | null = null
+  // S10-16 C4a, R13: lazily constructed (it needs `this`, unlike linkBindingSelfView which
+  // runtime-rpc.ts builds externally). Auto-armed from BOTH getOrchestrationDb() and
+  // setOrchestrationDb() below (R13's "runtime start / DB attach" trigger) — `arm()` itself only
+  // schedules timers (LINK_BINDING_STARTUP_DELAY_MS then the sweep interval), never runs a round
+  // synchronously inside attach, and is idempotent (a second `arm()` while already armed is a
+  // no-op), so calling it from both attach sites is safe. A runtime with no `linkBindingSelfView`
+  // installed yet, or no runtime-scope link candidates, stays inert — `runOneRound` returns
+  // `{completeness:'complete', evaluatedLinkIds:[]}` before any network call the moment its
+  // candidate page is empty (link-binding-prover-round.ts).
+  private _linkBindingProver: LinkBindingProver | null = null
+  // S10-16 C5, R18.7: same lazy-singleton/auto-arm pattern as `_linkBindingProver` — armed from
+  // BOTH getOrchestrationDb() and setOrchestrationDb(). Public so RPC handlers (which see only
+  // OrcaRuntimeService) can reach `runtime.replyOutbox?.kick(...)` directly (design's own shape).
+  replyOutbox: ReplyOutboxPump | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   // Why: mobile clients subscribe to terminal output via terminal.subscribe.
   // These listeners fire on every onPtyData call, enabling real-time streaming
@@ -4140,8 +4168,53 @@ export class OrcaRuntimeService {
       this.ensureDispatchLivenessMonitor()
       this.resumeDispatchInputObservers()
       this.scheduleRestoredMessageRepoints()
+      this.flushLegacySweepAudit()
+      // S10-16 C4a, R13: arm the verifier's own schedule at the DB attach site — idempotent,
+      // never runs a round synchronously (see the field doc comment above).
+      this.getLinkBindingProver().arm()
+      // S10-16 C5, R18.7: the resume SCAN's own site — NOT nested inside
+      // resumeOrchestrationFederationRelayAfterRestart (that returns early with no transport).
+      if (!this.replyOutbox) {
+        this.replyOutbox = createReplyOutboxPump(this)
+      }
+      this.replyOutbox.resumeAfterRestart()
     }
     return this._orchestrationDb
+  }
+
+  // S10-16 C1 review F3: registered by RuntimeRpcServer once its DeviceRegistry is live, so
+  // whichever of getOrchestrationDb()/setOrchestrationDb() attaches first can drain it.
+  setLegacySweepAuditSource(
+    source: { getPendingLegacySweepAudit(): LegacySweepAuditRow[] } | null
+  ): void {
+    this.legacySweepAuditSource = source
+    this.flushLegacySweepAudit()
+  }
+
+  // Drains the registered source (a no-op with none registered, or nothing queued) into
+  // agent_audit. The drain in DeviceRegistry.getPendingLegacySweepAudit() is itself exactly-once
+  // (it swaps the buffer for an empty one), so calling this from either attach site is safe.
+  private flushLegacySweepAudit(): void {
+    const source = this.legacySweepAuditSource
+    const db = this._orchestrationDb
+    if (!source || !db) {
+      return
+    }
+    for (const row of source.getPendingLegacySweepAudit()) {
+      db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: null,
+        actorHostId: null,
+        verb: 'deviceRegistryLegacySweep',
+        outcome: 'legacy_coalesced_stamped',
+        reasonCode: JSON.stringify({
+          deviceId: row.deviceId,
+          name: row.name,
+          pairedAt: row.pairedAt,
+          legacyExpiresAt: row.legacyExpiresAt
+        })
+      })
+    }
   }
 
   setOrchestrationDb(db: OrchestrationDb): void {
@@ -4161,6 +4234,15 @@ export class OrcaRuntimeService {
     this.ensureDispatchLivenessMonitor()
     this.resumeDispatchInputObservers()
     this.scheduleRestoredMessageRepoints()
+    this.flushLegacySweepAudit()
+    // S10-16 C4a, R13: same auto-arm as getOrchestrationDb() — idempotent, timers only.
+    this.getLinkBindingProver().arm()
+    // S10-16 C5, R18.7: same two call sites as the prover's own arm — a swapped DB (a fresh
+    // in-memory harness, a test fixture) still gets its own reclaim + resume scan.
+    if (!this.replyOutbox) {
+      this.replyOutbox = createReplyOutboxPump(this)
+    }
+    this.replyOutbox.resumeAfterRestart()
   }
 
   // Why armed with the database rather than with each worker-start: the breach fence lives in a
@@ -4292,6 +4374,34 @@ export class OrcaRuntimeService {
   // DeviceRegistry lookup; this class only ever calls through the function it is handed).
   setPeerGrantProfileLookup(lookup: PeerGrantProfileLookup | null): void {
     this.peerGrantProfileLookup = lookup
+  }
+
+  // S10-16 R9: install/clear the link-binding self-view (runtime-rpc.ts owns the actual
+  // DeviceRegistry/E2EEKeypair; this class only ever calls through the accessor it is handed).
+  setLinkBindingSelfView(view: LinkBindingSelfView | null): void {
+    this.linkBindingSelfView = view
+  }
+
+  // S10-16 C4, R7.5/R13: the verifier's own scheduler. Every inbound-contact/peer-confirmed kick
+  // site (probe.ts, confirm.ts) calls through this accessor rather than importing
+  // `createLinkBindingProver` directly, matching `getOrchestrationDb()`'s own lazy-singleton shape.
+  getLinkBindingProver(): LinkBindingProver {
+    if (!this._linkBindingProver) {
+      this._linkBindingProver = createLinkBindingProver(this)
+    }
+    return this._linkBindingProver
+  }
+
+  // S10-16 C7, Ruling 27 Addendum 1(m): side-effect-free — unlike `getLinkBindingProver()`, never
+  // arms the lazy singleton. `describeLinkBindingHealth`'s `unavailable(prover)` reason reads this
+  // instead of constructing a prover just to answer "is one armed".
+  hasLinkBindingProver(): boolean {
+    return this._linkBindingProver !== null
+  }
+
+  // S10-16 C7, Ruling 27 Addendum 1(m): companion accessor for `unavailable(transport)`.
+  hasOrchestrationEnvironmentTransport(): boolean {
+    return this.orchestrationEnvironmentTransport !== null
   }
 
   // S10-19: public — W-3's peerOwnedAttachmentOrRefusal reads a live attachment's profile through this.
@@ -5193,6 +5303,71 @@ export class OrcaRuntimeService {
     )
     if (response.ok === false) {
       this.throwOrchestrationWorkerServerError(selector, response.error)
+    }
+    return response.result
+  }
+
+  /**
+   * S10-16 R4.2/R4.5: the ONE call path link binding and the pinned reply relay use — pinned to
+   * the endpoint/pairing revision the caller resolved, and bounded by an ABSOLUTE duration
+   * (`maxDurationMs`) rather than the idle `timeoutMs`. `server_required` before any I/O when the
+   * transport or its optional `callPinned` member is absent (S10-16 is then simply unavailable on
+   * this runtime, never silently unpinned). `requireOrchestrationContract` runs the same fresh
+   * `status.get` capability precheck `callOrchestrationWorkerServer` runs for mutations, on the
+   * pinned path — the reply relay (R18.4) passes `true`; the prover's probes pass `false` and rely
+   * on R10.3's own cache instead. There is no `Promise.race` anywhere on this path.
+   */
+  async callPinnedEnvironment(args: {
+    selector: string
+    method: string
+    params: unknown
+    timeoutMs: number
+    maxDurationMs: number
+    expectedEnvironmentPairingRevision: number
+    envelope?: RuntimeOrchestrationEnvelope
+    requireOrchestrationContract: boolean
+  }): Promise<unknown> {
+    const transport = this.orchestrationEnvironmentTransport
+    if (!transport?.callPinned) {
+      throw new OrchestrationError(
+        'server_required',
+        'Connected-server orchestration is unavailable in this runtime.'
+      )
+    }
+    if (args.requireOrchestrationContract) {
+      const statusResponse = await transport.callPinned({
+        selector: args.selector,
+        method: 'status.get',
+        params: undefined,
+        timeoutMs: args.timeoutMs,
+        maxDurationMs: args.maxDurationMs,
+        expectedEnvironmentPairingRevision: args.expectedEnvironmentPairingRevision
+      })
+      if (statusResponse.ok === false) {
+        this.throwOrchestrationWorkerServerError(args.selector, statusResponse.error)
+      }
+      const status = statusResponse.result as RuntimeStatus
+      if (!status.capabilities?.includes(ORCHESTRATION_CONTRACT_RUNTIME_CAPABILITY)) {
+        throw new OrchestrationError(
+          'orchestration_migration_required',
+          'The connected worker server does not support the current orchestration contract. No effects were applied.',
+          orchestrationMigrationData('runtime_capability_missing')
+        )
+      }
+    }
+    const response = await transport.callPinned({
+      selector: args.selector,
+      method: args.method,
+      params: args.params,
+      timeoutMs: args.timeoutMs,
+      maxDurationMs: args.maxDurationMs,
+      expectedEnvironmentPairingRevision: args.expectedEnvironmentPairingRevision,
+      envelope: args.method.startsWith('orchestration.')
+        ? { ...args.envelope, orchestrationContractVersion: ORCHESTRATION_CONTRACT_VERSION }
+        : args.envelope
+    })
+    if (response.ok === false) {
+      this.throwOrchestrationWorkerServerError(args.selector, response.error)
     }
     return response.result
   }
@@ -34895,6 +35070,37 @@ export class OrcaRuntimeService {
     // NULL isolates the outbound mirror without disturbing that row's relay reporting.
     if (message.peer_agent_id != null && message.peer_link_device_id == null) {
       const environment = message.to_handle.split(':')[1]
+      // S10-16 C5, R19.2/PART 0.7: a reply-relay row (this message has a `peer_reply_outbox`
+      // entry, keyed on `local_message_id` — UNIQUE) reports the OUTBOX row's own state, a
+      // lookup on this same branch rather than a second one. Every other relay row (the plain
+      // federation-relay mirror, which has none) keeps the two-state shape above unchanged.
+      // M12 (C5 review)/Ruling 26: same partial-`OrchestrationDb`-stub guard `resumeAfterRestart`
+      // uses (reply-outbox-pump.ts) — many pre-existing tests install one via
+      // `setOrchestrationDb({...} as never)` that predates this accessor.
+      const orchestrationDbForSnapshot = this.getOrchestrationDb()
+      const outboxItem =
+        typeof orchestrationDbForSnapshot.getReplyOutboxItemByLocalMessageId === 'function'
+          ? orchestrationDbForSnapshot.getReplyOutboxItemByLocalMessageId(message.id)
+          : null
+      if (outboxItem) {
+        const delivery: MessageDeliveryState =
+          outboxItem.state === 'queued'
+            ? 'queued'
+            : outboxItem.state === 'sending'
+              ? 'sending'
+              : outboxItem.state === 'delivered'
+                ? 'relayed'
+                : outboxItem.state === 'refused'
+                  ? 'refused'
+                  : outboxItem.state === 'abandoned'
+                    ? 'abandoned'
+                    : 'cancelled'
+        return {
+          delivery,
+          recipient: { state: 'unresolved', lastSeenAt: null },
+          ...(environment ? { environment } : {})
+        }
+      }
       return {
         delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',
         recipient: { state: 'unresolved', lastSeenAt: null },

@@ -160,6 +160,9 @@ environment:
   foreign agent id still has no reader on this host, so `agent:<id>` sends and `dispatch
   --inject` to it refuse — `ask`/`show` work by routing to the peer directly instead.
 
+A reply to a foreign sender rides the proven link automatically and is queued durably if the
+peer is down; `orca environment link-status` shows why not, `--outbox` shows what is waiting.
+
 A peer that does not advertise the agent directory at all (an older runtime) degrades the same
 way the roster does: it is skipped and named in `unreached`, never a hard error for the whole
 query. A same-name hit that used to resolve locally may be a stale pairing once a second host
@@ -511,6 +514,10 @@ orca serve --pairing-address <peer-reachable-address>
 orca environment add --name <peer> --pairing-code "orca://pair?code=..." --json
 orca environment list --json
 ```
+
+Runtime pairing URLs are per-peer and expire after `PENDING_GRANT_TTL_MS`, and reply routing
+requires a per-peer (minted) grant — re-pair any link that predates it (`orca environment
+link-bind`, or `orca environment update` to re-pair an existing saved environment in place).
 
 Federation is directional per Dispatch: the coordinator dials the worker server, never the reverse. For either runtime to coordinate the other, register the peer on **both** — each saves the other as an environment. Both runtimes must run matching builds so the peer advertises the federation capability; a peer that does not is refused before any worktree or terminal is created on it.
 

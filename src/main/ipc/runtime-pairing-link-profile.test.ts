@@ -80,6 +80,9 @@ describe('S10-19 W-6: naming a runtime pairing link requires an access profile',
       rotate: undefined,
       name: 'Ana',
       mint: 'always',
+      // S10-16 C1 R1.1 (merge of the S10-16 link-binding branch): the named desktop link mints
+      // into its own eviction budget. Still an exact-shape assertion, one key wider.
+      budgetClass: 'ui_named',
       scope: 'runtime',
       reach: 'network',
       accessProfile: 'peer'

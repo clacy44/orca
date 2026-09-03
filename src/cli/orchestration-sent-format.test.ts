@@ -62,4 +62,20 @@ describe('formatOrchestrationSent', () => {
         'Next step: orca orchestration sent --id msg_4 --json — check again for a state change.'
     )
   })
+
+  // S10-16 C6, plan §C6 file table: "the formatter falls back to printing the raw string rather
+  // than throwing on an unknown state." Already true by construction — the ternary at
+  // orchestration-sent-format.ts:13-16 has no exhaustive switch to fall through, so any state
+  // this union doesn't yet name (a future outbox state on an old CLI) prints verbatim instead of
+  // throwing. This test pins that property rather than asserting a code change.
+  it('prints an unrecognized delivery state verbatim instead of throwing', () => {
+    const result = {
+      delivery: {
+        state: 'some_future_state',
+        recipient: { state: 'unresolved', lastSeenAt: null }
+      }
+    } as unknown as OrchestrationSentResult
+    expect(() => formatOrchestrationSent(result, 'msg_5', 'orca')).not.toThrow()
+    expect(formatOrchestrationSent(result, 'msg_5', 'orca')).toContain('some_future_state')
+  })
 })

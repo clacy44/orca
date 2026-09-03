@@ -9,7 +9,20 @@ import {
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import type { PeerLinkBindingRow } from '../../orchestration/link-binding-store'
+import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
+import type * as LinkBindingRoutable from '../../orchestration/link-binding-routable'
 import type { RpcContext } from '../core'
+
+// Ruling 26 Addendum 1(w)/F10 (R28.1(1b) back-fill test, below): this suite never wires a real
+// device registry / environment store (unlike reply-outbox-pump.test.ts), so
+// getRoutableLinkBinding's clauseII check has nothing routable to find. Wrapped (default
+// pass-through to the real implementation for every other test) so exactly one test can force a
+// matching route without standing up that machinery.
+vi.mock('../../orchestration/link-binding-routable', async (importOriginal) => {
+  const actual = await importOriginal<typeof LinkBindingRoutable>()
+  return { ...actual, getRoutableLinkBinding: vi.fn(actual.getRoutableLinkBinding) }
+})
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -129,9 +142,18 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     )
   }
 
-  afterEach(() => {
+  afterEach(async () => {
     homeDb?.close()
     workerDb?.close()
+    // Ruling 26 Addendum 3(ff)/F9: scope the vi.mock wrapper to the tests that need it — reset
+    // back to a genuine pass-through after every test, so a future `mockReturnValue` (not
+    // `Once`) in any one test cannot silently leak the routability check off for every test that
+    // runs after it.
+    const actual = await vi.importActual<typeof LinkBindingRoutable>(
+      '../../orchestration/link-binding-routable'
+    )
+    vi.mocked(getRoutableLinkBinding).mockReset()
+    vi.mocked(getRoutableLinkBinding).mockImplementation(actual.getRoutableLinkBinding)
   })
 
   async function registerAgent(
@@ -166,6 +188,38 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       .get(`agent:${agentB}`) as { body: string; peer_link_device_id: string } | undefined
     expect(farRow?.body).toBe('hello from home')
     expect(farRow?.peer_link_device_id).toBe(LINK_DEVICE_ID)
+  })
+
+  it('R13.1: a send from a paired peer clamps the link-binding schedule, never resets the failure counter', async () => {
+    setup()
+    await registerAgent(homeRuntime, 'asker', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    // Pre-seed the WORKER's own binding-attempt row for the caller's link (LINK_DEVICE_ID) with
+    // a far-future backoff and a non-zero failure counter — exactly the state R13.1's inbound-
+    // contact kick must clamp, and exactly the state it must NEVER touch (Ruling 23(j)/FC-1).
+    workerDb.putBindingAttempt(LINK_DEVICE_ID)
+    const farFuture = Date.now() + 10_000_000
+    workerDb.settleBindingAttempt(LINK_DEVICE_ID, {
+      lastAttemptAt: 0,
+      lastRoundAt: 0,
+      lastOutcome: 'unreachable',
+      lastDetail: null,
+      consecutiveFailures: 5,
+      consecutiveNoWinner: 0,
+      nextAttemptAfter: farFuture
+    })
+
+    await call(
+      'orchestration.send',
+      { to: `agent:${agentB}`, host: 'windows', subject: 'hi', body: 'hello from home' },
+      homeCtx(evidenceA)
+    )
+
+    const attempt = workerDb.getBindingAttempt(LINK_DEVICE_ID)
+    expect(attempt?.nextAttemptAfter).toBeLessThan(farFuture)
+    expect(attempt?.consecutiveFailures).toBe(5)
+    workerRuntime.getLinkBindingProver().stop()
   })
 
   it('a same-id retry with matching type is an idempotent replay; a same-id collision with a DIFFERENT type refuses request_mismatch (m-1)', async () => {
@@ -303,6 +357,118 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(audit).toBeTruthy()
   })
 
+  // F2/R3 (Ruling 23 Addendum 2(n)): link containment before identity. A quarantined LINK (not
+  // agent) must refuse federatedSend before the identity importer runs — effect-free, no
+  // messages row, no remote_agents mirror — reading peer_link_containment only.
+  it('R3: a quarantined link refuses federatedSend before the identity importer runs, effect-free, with an agent_audit row', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    workerDb.putContainment({
+      subjectKind: 'link',
+      subjectId: LINK_DEVICE_ID,
+      action: 'quarantine',
+      reasonCode: 'smoke_test',
+      reasonText: null,
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+
+    await expect(
+      call(
+        'orchestration.federatedSend',
+        {
+          fromAgent: { id: 'agt_00000000ab99', displayName: 'quarantined-link-sender' },
+          toAgentId: agentB,
+          messageId: 'msg_0000000ab199',
+          subject: 'hi',
+          body: 'should be refused before identity import'
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    // Effect-free: no message row, no remote_agents mirror for the sender.
+    const messageRow = raw(workerDb)
+      .prepare('SELECT 1 FROM messages WHERE id = ?')
+      .get('msg_0000000ab199')
+    expect(messageRow).toBeUndefined()
+    const remoteAgentRow = raw(workerDb)
+      .prepare('SELECT 1 FROM remote_agents WHERE remote_agent_id = ?')
+      .get('agt_00000000ab99')
+    expect(remoteAgentRow).toBeUndefined()
+
+    const audit = raw(workerDb)
+      .prepare(
+        "SELECT * FROM agent_audit WHERE verb = 'federatedLink' AND outcome = 'link_quarantined'"
+      )
+      .get()
+    expect(audit).toBeTruthy()
+  })
+
+  // C3a delta D2: an `agent_quarantined` thrown from INSIDE the handler for a QUARANTINED SENDER
+  // (federated-sender-identity.ts's `isRemoteAgentLocallyQuarantined` check — the link itself is
+  // NOT quarantined) must still reach federatedSend's own choke-point audit write. The prior
+  // code-only exclusion (`error.code !== 'agent_quarantined'`) could not tell this apart from the
+  // link-containment gate's own refusal and silently dropped it.
+  it('D2: a locally-quarantined remote sender (link unquarantined) still writes its own federatedSend audit row', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    const senderId = 'agt_00000000ab98'
+    raw(workerDb)
+      .prepare(
+        `INSERT INTO remote_agents (
+           environment_id, environment_name, link_kind, remote_agent_id, display_name,
+           local_quarantined
+         ) VALUES (?, ?, 'paired_device', ?, ?, 1)`
+      )
+      .run(LINK_DEVICE_ID, LINK_DEVICE_ID, senderId, 'already-quarantined-sender')
+
+    await expect(
+      call(
+        'orchestration.federatedSend',
+        {
+          fromAgent: { id: senderId, displayName: 'already-quarantined-sender' },
+          toAgentId: agentB,
+          messageId: 'msg_0000000ab198',
+          subject: 'hi',
+          body: 'should be refused by the sender guard, not the link gate'
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    const audit = raw(workerDb)
+      .prepare(
+        "SELECT * FROM agent_audit WHERE verb = 'federatedSend' AND outcome = 'agent_quarantined'"
+      )
+      .get()
+    expect(audit).toBeTruthy()
+  })
+
+  it('R3: an unquarantined link sees unchanged federatedSend behaviour', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+
+    const result = (await call(
+      'orchestration.federatedSend',
+      {
+        fromAgent: { id: 'agt_00000000ab98', displayName: 'ordinary-sender' },
+        toAgentId: agentB,
+        messageId: 'msg_0000000ab198',
+        subject: 'hi',
+        body: 'should go through normally'
+      },
+      workerLinkCtx()
+    )) as { accepted: boolean }
+    expect(result.accepted).toBe(true)
+
+    const messageRow = raw(workerDb)
+      .prepare('SELECT 1 FROM messages WHERE id = ?')
+      .get('msg_0000000ab198')
+    expect(messageRow).toBeTruthy()
+  })
+
   it('--to agent:<id> --host x --type worker_done -> invalid_argument', async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)
@@ -386,9 +552,13 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     expect(relayCalls).toHaveLength(0)
   })
 
-  // S10-15 verifier F2: the receiver has no local thread for the sender's own threadId — storing
-  // it verbatim would point messages.thread_id at a thread row that is never minted on this host.
-  it("F2: the imported row on the far host has thread_id NULL; peer_thread_id carries the sender's threadId", async () => {
+  // S10-15 verifier F2 (SUPERSEDED by S10-16 R28.1 rule 3 / design v6 PART 10 test 48 — Ruling
+  // 13 F2 explicitly deferred this mint "to S10-16 with the reply/thread model"; v4 replaces the
+  // NULL with a host-minted local thread id and keeps peer_thread_id unchanged for exactly this
+  // reason). The receiver now mints its OWN local thread for a foreign-origin row with no
+  // resolvable `inReplyToMessageId`/`(link,peerThreadId)` match — asserted NOT equal to the
+  // peer's own id (never writing a peer-chosen id into `messages.thread_id`, Class rule C-11).
+  it("F2/test 48: the imported row on the far host mints its OWN local thread_id; peer_thread_id carries the sender's threadId", async () => {
     setup()
     await registerAgent(homeRuntime, 'asker', evidenceA)
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
@@ -410,8 +580,169 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       .get(`agent:${agentB}`) as
       | { thread_id: string | null; peer_thread_id: string | null }
       | undefined
-    expect(farRow?.thread_id).toBeNull()
+    expect(farRow?.thread_id).toBeTruthy()
+    expect(farRow?.thread_id).not.toBe('thr_aaaaaaaaaaaa')
     expect(farRow?.peer_thread_id).toBe('thr_aaaaaaaaaaaa')
+  })
+
+  // M14 (C5 review)/Ruling 26(m): R28.1(1a) clause (i) — P-7's regression. A peer must not
+  // attach its reply to another local agent's thread by naming an `inReplyToMessageId` that was
+  // really addressed to a DIFFERENT local agent over the same link.
+  it('R28.1(1a) clause (i): a same-link, cross-agent inReplyToMessageId must NOT attach to another agent local thread', async () => {
+    setup()
+    const agentA = await registerAgent(workerRuntime, 'agent-a', evidenceA)
+    const agentB = await registerAgent(workerRuntime, 'agent-b', evidenceB)
+
+    // An outbound relay mirror row on the RECEIVING host: agent A previously sent this out to a
+    // remote peer over the same link. clause (i) exists to stop a peer claiming this row as the
+    // one being answered while addressing the reply to a DIFFERENT local agent (B).
+    const mirrorThread = workerDb.createThread({
+      subject: 'A to peer',
+      createdByAgentId: agentA,
+      origin: 'fanout',
+      participants: [
+        { participantKey: agentA, agentId: agentA, handle: `agent:${agentA}`, role: 'owner' }
+      ]
+    })
+    const mirrorId = 'msg_aaaaaaaaaa01'
+    workerDb.insertGatedMessage({
+      id: mirrorId,
+      from: `agent:${agentA}`,
+      to: `remote:${WORKER_SERVER.environmentId}:peer_far_agt`,
+      subject: 'A to peer',
+      body: 'hi peer',
+      threadId: mirrorThread.thread.id,
+      verb: 'send'
+    })
+
+    // Ruling 26 Addendum 3(cc)/F3: stub the routable-binding lookup so clause (ii) is TRUE —
+    // otherwise this suite's real getRoutableLinkBinding finds nothing (no device registry /
+    // environment store wired here), clause (ii) is false regardless of clause (i), rule 1 never
+    // applies, and the assertions below would pass identically with clause (i) deleted.
+    vi.mocked(getRoutableLinkBinding).mockReturnValueOnce({
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: WORKER_SERVER.environmentId,
+      boundEndpointId: 'ep_worker_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_cred_fp',
+      peerCredentialFp: 'peer_cred_fp',
+      peerKeyFingerprint: 'peer_key_fp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      state: 'confirmed',
+      detail: null,
+      contestIncidentId: null,
+      contestedAt: null,
+      revokedAt: null,
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    } satisfies PeerLinkBindingRow)
+
+    const envelope = {
+      fromAgent: { id: 'agt_00000000cd01', displayName: 'peer-sender' },
+      toAgentId: agentB,
+      messageId: 'msg_0000000bcd11',
+      subject: 'reply',
+      body: 'poisoned reply attempt',
+      inReplyToMessageId: mirrorId
+    }
+    const result = (await call('orchestration.federatedSend', envelope, workerLinkCtx())) as {
+      accepted: true
+      messageId: string
+      threadId: string | null
+      authorshipUnconfirmed?: true
+    }
+
+    // Clause (i) fails (the row's from_handle names agent A, not the addressee B), so this gets
+    // its OWN fresh thread rather than attaching to — or back-filling — A's thread, and is never
+    // flagged authorshipUnconfirmed (that flag is for a FAILED authorship lookup, not this case).
+    expect(result.threadId).not.toBe(mirrorThread.thread.id)
+    expect(result.authorshipUnconfirmed).toBeUndefined()
+    const farRow = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(envelope.messageId) as { thread_id: string | null }
+    expect(farRow.thread_id).not.toBe(mirrorThread.thread.id)
+    expect(farRow.thread_id).toBe(result.threadId)
+  })
+
+  // Ruling 26 Addendum 1(w)/F10: R28.1(1b)'s BACK-FILL half — the case the design calls out as
+  // the actual harm (a durable write to another agent's own pre-existing row) — was untested;
+  // the clause-(i) test above uses a mirror row that ALREADY has a thread, which only exercises
+  // the "don't reuse" half. Here the mirror row has thread_id NULL, so a legitimate,
+  // authorship-passing reply must mint a fresh thread and back-fill the mirror row's own
+  // thread_id with it — the row is the SAME row that gets read back, never a duplicate.
+  it('R28.1(1b): a NULL-thread mirror row is back-filled with the freshly minted thread, in place', async () => {
+    setup()
+    const agentA = await registerAgent(workerRuntime, 'agent-a', evidenceA)
+
+    const mirrorId = 'msg_aaaaaaaaaa02'
+    workerDb.insertGatedMessage({
+      id: mirrorId,
+      from: `agent:${agentA}`,
+      to: `remote:${WORKER_SERVER.environmentId}:peer_far_agt`,
+      subject: 'A to peer, no thread yet',
+      body: 'hi peer',
+      threadId: null,
+      verb: 'send'
+    })
+    const before = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(mirrorId) as { thread_id: string | null }
+    expect(before.thread_id).toBeNull()
+
+    // Force clauseII's routable-binding check: the caller's link resolves to the SAME
+    // environment the mirror row was addressed to. (This suite runs `orchestration.federatedSend`
+    // without a real device registry / environment store, so the real getRoutableLinkBinding has
+    // nothing to find — this test is the one place that stubs it, per the file-level vi.mock
+    // above; every other test still exercises the real implementation.)
+    vi.mocked(getRoutableLinkBinding).mockReturnValueOnce({
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: WORKER_SERVER.environmentId,
+      boundEndpointId: 'ep_worker_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_cred_fp',
+      peerCredentialFp: 'peer_cred_fp',
+      peerKeyFingerprint: 'peer_key_fp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      state: 'confirmed',
+      detail: null,
+      contestIncidentId: null,
+      contestedAt: null,
+      revokedAt: null,
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    } satisfies PeerLinkBindingRow)
+
+    const envelope = {
+      fromAgent: { id: 'agt_00000000cd02', displayName: 'peer-sender' },
+      toAgentId: agentA,
+      messageId: 'msg_0000000bcd12',
+      subject: 'reply',
+      body: 'a real reply',
+      inReplyToMessageId: mirrorId
+    }
+    const result = (await call('orchestration.federatedSend', envelope, workerLinkCtx())) as {
+      accepted: true
+      messageId: string
+      threadId: string | null
+      authorshipUnconfirmed?: true
+    }
+
+    expect(result.threadId).toBeTruthy()
+    expect(result.authorshipUnconfirmed).toBeUndefined()
+    const mirrorAfter = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(mirrorId) as { thread_id: string | null }
+    // The mirror row is back-filled IN PLACE with the same thread the reply lands in — not a
+    // second, orphaned thread.
+    expect(mirrorAfter.thread_id).toBe(result.threadId)
+    const replyRow = raw(workerDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(envelope.messageId) as { thread_id: string | null }
+    expect(replyRow.thread_id).toBe(result.threadId)
   })
 
   // S10-20 review F6 (Ruling 22 (1)): the peer's RPC RESPONSE ids are wire data too — a
@@ -484,5 +815,65 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'reply' AND outcome = 'no_return_route'`)
       .get()
     expect(audit).toBeTruthy()
+  })
+
+  it('test 81 (protocol m3): a quarantined link past the send rate limit gets rate_limited, not agent_quarantined — and the audit write is metered', async () => {
+    setup()
+    const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)
+    workerDb.putContainment({
+      subjectKind: 'link',
+      subjectId: LINK_DEVICE_ID,
+      action: 'quarantine',
+      reasonCode: 'test',
+      reasonText: null,
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+
+    // Below the limit: still refused agent_quarantined (Ruling 10's ordering is untouched).
+    await expect(
+      call(
+        'orchestration.federatedSend',
+        {
+          fromAgent: { id: 'agt_aaaaaaaaaaaa', displayName: 'asker' },
+          toAgentId: agentB,
+          messageId: 'msg_bbbbbbbbbbb1',
+          subject: 'hi',
+          body: 'hi'
+        },
+        workerLinkCtx()
+      )
+    ).rejects.toMatchObject({ code: 'agent_quarantined' })
+
+    // Drive the link past FEDERATED_SEND_RATE_LIMIT (256) inbound sends in this window.
+    let lastError: unknown
+    for (let i = 0; i < 260; i++) {
+      try {
+        await call(
+          'orchestration.federatedSend',
+          {
+            fromAgent: { id: 'agt_aaaaaaaaaaaa', displayName: 'asker' },
+            toAgentId: agentB,
+            messageId: `msg_ccccccccc${String(i).padStart(3, '0')}`,
+            subject: 'hi',
+            body: 'hi'
+          },
+          workerLinkCtx()
+        )
+      } catch (error) {
+        lastError = error
+      }
+    }
+    expect(lastError).toMatchObject({ code: 'rate_limited' })
+
+    // The audit write is metered to at most a handful of rows regardless of call volume — the
+    // C3 F1 undeletable-table DoS this pattern exists to close.
+    const auditCount = (
+      raw(workerDb).prepare(
+        `SELECT COUNT(*) AS n FROM agent_audit WHERE actor_host_id = ?`
+      ) as unknown as { get: (...a: unknown[]) => { n: number } }
+    ).get(LINK_DEVICE_ID)
+    expect(auditCount.n).toBeLessThan(10)
   })
 })

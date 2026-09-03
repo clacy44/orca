@@ -893,7 +893,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         remoteRunMailbox: remoteRunMailbox.param,
         // S10-19 C-3: a federation-peer grant refuses `from` (§8.2) — it names a pane on this
         // host, which means nothing on that server.
-        from: remoteRunMailbox.peerAccess ? undefined : from
+        from: remoteRunMailbox.peerAccess ? undefined : from,
+        // S10-16 R16.2: an assertion that can only narrow the destination the reply's own proof
+        // already fixed — orchestration-reply-foreign.ts:66-71 refuses if it does not match.
+        expectHost: getOptionalStringFlag(flags, 'expect-host')
       })
     )
     printResult(result, json, (r) =>

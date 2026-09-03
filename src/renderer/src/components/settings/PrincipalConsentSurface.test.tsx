@@ -23,8 +23,22 @@ type ConsentApi = {
 }
 
 const GRANTS: RuntimeAccessGrant[] = [
-  { deviceId: 'dev-ana', name: 'Ana laptop', createdAt: 1, lastSeenAt: 100 },
-  { deviceId: 'dev-new', name: 'New tablet', createdAt: 2, lastSeenAt: null }
+  {
+    deviceId: 'dev-ana',
+    name: 'Ana laptop',
+    createdAt: 1,
+    lastSeenAt: 100,
+    grantClass: 'minted',
+    expiresAt: null
+  },
+  {
+    deviceId: 'dev-new',
+    name: 'New tablet',
+    createdAt: 2,
+    lastSeenAt: null,
+    grantClass: 'minted',
+    expiresAt: null
+  }
 ]
 
 const SNAPSHOT: PrincipalConsentSnapshot = {

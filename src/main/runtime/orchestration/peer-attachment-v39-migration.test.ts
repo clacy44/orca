@@ -38,7 +38,7 @@ describe('v38 -> v39 peer attachment migration (C-7)', () => {
 
     db = new OrchestrationDb(dbPath)
     const raw2 = new Database(dbPath)
-    expect(raw2.pragma('user_version', { simple: true })).toBe(39)
+    expect(raw2.pragma('user_version', { simple: true })).toBe(40)
 
     for (const column of [
       'blocked_reason',
@@ -89,7 +89,7 @@ describe('v38 -> v39 peer attachment migration (C-7)', () => {
     dbPath = join(tempDir, 'orca.db')
     db = new OrchestrationDb(dbPath)
     const raw = new Database(dbPath)
-    expect(raw.pragma('user_version', { simple: true })).toBe(39)
+    expect(raw.pragma('user_version', { simple: true })).toBe(40)
     const hasIndex = (
       raw.prepare(`PRAGMA index_list(remote_dispatch_attachments)`).all() as { name: string }[]
     ).some((i) => i.name === 'idx_rda_terminal_handle')
@@ -160,7 +160,7 @@ describe('v38 -> v39 peer attachment migration (C-7)', () => {
 
     db = new OrchestrationDb(dbPath)
     const raw2 = new Database(dbPath)
-    expect(raw2.pragma('user_version', { simple: true })).toBe(39)
+    expect(raw2.pragma('user_version', { simple: true })).toBe(40)
 
     const row1 = db.getRemoteDispatchAttachment('disp_data_1')
     expect(row1).toMatchObject({

@@ -713,7 +713,9 @@ describe('registerRuntimeEnvironmentHandlers', () => {
       expect.objectContaining({ endpoint: 'ws://127.0.0.1:6768' }),
       'repo.list',
       undefined,
-      75
+      75,
+      undefined,
+      undefined
     )
     expect(sendRemoteRuntimeConnectionRequestMock).not.toHaveBeenCalled()
   })

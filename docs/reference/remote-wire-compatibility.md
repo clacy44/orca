@@ -124,3 +124,23 @@ The harness covers the terminal stream only. It does **not** cover the session-t
 sync channel, agent-session publications, file or Git RPCs, mobile/E2EE framing, or
 the relay transport. A change on those paths still needs its own reasoning against
 the three rules above.
+
+## S10-16 link binding — five classifications, verified at merge tip (R23.5)
+
+- `orchestration.federatedLinkProbe` / `federatedLinkConfirm` are two brand-new
+  methods — Case 4: gated client-side on `orchestration.link-binding.v1`
+  (`protocol-version.ts`); an old peer never calls them, and health reads
+  `unsupported` rather than failing loud.
+- `federatedSend` gains one optional parameter, `inReplyToMessageId` — Rule 1, sent
+  only behind the same capability gate.
+- `FederatedLinkProbeResult` gains one optional result field, `advisory` — Rule 1; an
+  old verifier's zod parse ignores it.
+- `FederatedSendResult` gains one optional result field, `authorshipUnconfirmed` — Rule
+  1; an old sender ignores it, and an old receiver never sets it (it refuses
+  `not_the_addressee` instead, which the sender already handles).
+- `OrchestrationDeliveryState` gains `sending | refused | abandoned | cancelled`
+  (`shared/orchestration-delivery-state.ts`) — the CLI formatter falls back to the raw
+  string on an unknown value rather than throwing, and the new states are only ever
+  produced for rows an old runtime cannot create; and `OrchestrationCheckOutput` gains
+  one optional string field, `linkBindingAttention` — Rule 1 in both directions, and
+  it is produced only for a local caller, so it never crosses a link at all.

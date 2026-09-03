@@ -49,6 +49,7 @@ describe('resolveServePairingOffers', () => {
         name: 'Ana',
         mint: 'always',
         scope: 'runtime',
+        budgetClass: 'serve_named',
         accessProfile: 'full'
       },
       {
@@ -56,6 +57,7 @@ describe('resolveServePairingOffers', () => {
         name: 'Ben',
         mint: 'always',
         scope: 'runtime',
+        budgetClass: 'serve_named',
         accessProfile: 'peer'
       }
     ])
@@ -87,6 +89,7 @@ describe('resolveServePairingOffers', () => {
       address: null,
       name: expect.stringMatching(/^CLI /),
       scope: 'runtime',
+      budgetClass: 'host_auto',
       accessProfile: 'full'
     })
     // Negative control on the shape: no mint key, and no namedPairings key at all.

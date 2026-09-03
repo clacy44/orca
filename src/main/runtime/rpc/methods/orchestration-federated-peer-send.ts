@@ -18,12 +18,22 @@ import { payloadValueForGate } from '../../orchestration/message-gate-writer'
 import { extractPayloadKind } from '../../orchestration/message-waiter-thread-keying'
 import {
   isHostMessageId,
+  requireHostMessageId,
   requireOptionalThreadId
 } from '../../orchestration/orchestration-id-grammar'
 import {
   FederatedSenderIdentitySchema,
   importFederatedSenderIdentity
 } from '../../orchestration/federated-sender-identity'
+import {
+  refuseIfQuarantined,
+  refuseIfRateLimited,
+  LinkContainmentRefusal,
+  LinkRateRefusal
+} from './orchestration-link-binding-pending'
+import { FEDERATED_SEND_RATE_LIMIT } from '../../orchestration/link-binding-constants'
+import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
+import { resolveForeignThread } from './orchestration-federated-peer-send-inbound'
 
 const FederatedSendParams = z.object({
   // Optional (D3): an old sender, or one whose pane has no registered `agents` row, omits it.
@@ -31,6 +41,9 @@ const FederatedSendParams = z.object({
   toAgentId: requiredString('Missing target agent id'),
   messageId: requiredString('Missing relayed message id'),
   threadId: OptionalString,
+  // S10-16 R20.1: optional, sent only behind ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY on
+  // the SENDER's side — this receiver runs the detector whenever the field is present.
+  inReplyToMessageId: OptionalString,
   subject: requiredString('Missing subject'),
   body: OptionalString,
   type: z.string().optional(),
@@ -42,6 +55,7 @@ type FederatedSendResult = {
   accepted: true
   messageId: string
   threadId: string | null
+  authorshipUnconfirmed?: true
 }
 
 export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
@@ -70,6 +84,14 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
             }
           )
         }
+        // R27.2 (Ruling 23 Addendum 3): rate -> containment -> identity shape -> recipient. The
+        // one caller class already decided hostile must not have an unbounded call rate either.
+        refuseIfRateLimited(runtime, pairedDeviceId, 'federatedSend', FEDERATED_SEND_RATE_LIMIT)
+        // R3 (Ruling 23 Addendum 2(n)): link containment before identity — a quarantined link
+        // refuses BEFORE the identity importer runs, effect-free, on peer_link_containment alone
+        // (no peer-supplied value in the read). Same gate, same order as the probe/confirm RPCs.
+        refuseIfQuarantined(runtime, pairedDeviceId, 'send')
+
         const toAgent = requireAddressableAgentRecipient(db, params.toAgentId)
         toAgentIdForAudit = toAgent.id
 
@@ -120,6 +142,10 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           )
         }
         requireOptionalThreadId(params.threadId, 'thread id')
+        const inReplyToMessageId =
+          params.inReplyToMessageId === undefined
+            ? undefined
+            : requireHostMessageId(params.inReplyToMessageId, 'in-reply-to message id')
         // Idempotent replay vs conflict (mirrors importFederatedRelayItem's conflict rule,
         // db.ts): a peer-chosen id that already exists on this host either matches (a retry —
         // return the stored receipt) or conflicts (refuse). Finding 21: this distinction is a
@@ -127,15 +153,35 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         // enumeration impractical) and stated here per the Gate-1 justification.
         const existing = db.getMessageById(params.messageId)
         if (existing) {
+          // S10-16 R17.2 (v5, P8): the replay predicate is LINK-scoped, and a re-pair on the
+          // RECEIVING side must not turn an already-delivered reply into `request_mismatch`.
+          // `getRoutableLinkBinding` — ROUTABLE rows only (P8) — on both links; matching key
+          // fingerprints under a live, unrevoked, unquarantined binding of THIS host's own
+          // proving means "the same runtime, by INV-P-008", purely local.
+          const sameOriginHost = (storedLink: string | null, callerLink: string): boolean => {
+            if (storedLink === null) {
+              return false
+            }
+            if (storedLink === callerLink) {
+              return true
+            }
+            const a = getRoutableLinkBinding(db, runtime, storedLink)
+            const b = getRoutableLinkBinding(db, runtime, callerLink)
+            return a !== null && b !== null && a.peerKeyFingerprint === b.peerKeyFingerprint
+          }
           // S10-15 review m-1: R7 step 2 also required matching `type` — without it, a real id
           // collision with a DIFFERENT type (e.g. a genuine msg_* clash presenting a different
           // message shape under the same id) was silently swallowed as an idempotent "accepted"
           // replay instead of refusing request_mismatch.
           if (
             existing.to_handle === `agent:${toAgent.id}` &&
-            existing.peer_link_device_id === pairedDeviceId &&
+            sameOriginHost(existing.peer_link_device_id ?? null, pairedDeviceId) &&
             existing.type === (params.type ?? 'status')
           ) {
+            // R13.1: an authenticated inbound call is proof of liveness — after admission
+            // (a replay is still an admitted call), never before. Ruling 23(j)/FC-1: clamps
+            // next_attempt_after only, never resets consecutive_failures.
+            runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
             return {
               accepted: true,
               messageId: existing.id,
@@ -148,6 +194,22 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           )
         }
 
+        // S10-16 R28.1/R20.1: resolved BEFORE insertGatedMessage — a local thread for every
+        // foreign-origin row, and the authorship predicate (L5: a failed lookup still stores).
+        const { threadId: resolvedThreadId, authorshipUnconfirmed } = resolveForeignThread(
+          db,
+          runtime,
+          {
+            toAgent,
+            askerHandle,
+            pairedDeviceId,
+            inReplyToMessageId,
+            peerThreadId: params.threadId ?? null,
+            subject: params.subject,
+            body: params.body
+          }
+        )
+
         const inserted = db.insertGatedMessage({
           id: params.messageId,
           from: askerHandle,
@@ -156,10 +218,9 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           body: params.body,
           type: (params.type ?? 'status') as MessageType,
           priority: params.priority,
-          // S10-15 verifier F2: no local thread exists on the receiver for the sender's own
-          // threadId — storing it verbatim would point messages.thread_id at a thread row that
-          // is never minted here. peer_thread_id (below) is the correct home for the peer's id.
-          threadId: null,
+          // R28: the LOCAL thread this host minted or resolved above — the peer's own id is
+          // never written to `messages.thread_id`; it lives in peer_thread_id below.
+          threadId: resolvedThreadId,
           payload: payloadValueForGate(
             params.payload === undefined ? undefined : JSON.stringify(params.payload)
           ),
@@ -175,19 +236,35 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
           throw gateVerdictRefusalError(inserted.verdict, inserted.refusalId)
         }
         const message = inserted.message
+        db.bumpThreadOnMessage(resolvedThreadId, message)
         runtime.notifyMessageArrived(
           message.to_handle,
           message.type,
           message.thread_id,
           extractPayloadKind(message.payload_kind)
         )
+        // R13.1: an authenticated inbound call is proof of liveness — tail of the handler,
+        // after the mail has been fully admitted. Ruling 23(j)/FC-1: clamps next_attempt_after
+        // only, never resets consecutive_failures.
+        runtime.getLinkBindingProver().scheduleBinding(pairedDeviceId, 'inbound_contact')
         return {
           accepted: true,
           messageId: message.id,
-          threadId: message.thread_id
+          threadId: message.thread_id,
+          ...(authorshipUnconfirmed ? { authorshipUnconfirmed: true as const } : {})
         } satisfies FederatedSendResult
       } catch (error) {
-        if (error instanceof OrchestrationError) {
+        // C3a delta D2 — see the identical exclusion in orchestration-federated-peer-ask.ts's own
+        // catch for the full rationale: exclude by ORIGIN (the marked `LinkContainmentRefusal`
+        // from `refuseIfQuarantined`, which already wrote its own metered audit row per D3), never
+        // by code alone — a quarantined-SENDER refusal from federated-sender-identity.ts is a
+        // plain `OrchestrationError` with the same `agent_quarantined` code and must still reach
+        // this audit write every time.
+        if (
+          error instanceof OrchestrationError &&
+          !(error instanceof LinkContainmentRefusal) &&
+          !(error instanceof LinkRateRefusal)
+        ) {
           db.writeAgentAudit({
             agentId: toAgentIdForAudit,
             actorPaneKey: null,

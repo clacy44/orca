@@ -83,6 +83,16 @@
     // Why: agents-cross-host.ts also sanitizes/validates every foreign row through this module
     // before scoring/rendering it (review fix); no imports, so listing it pulls in nothing else.
     "../src/main/runtime/orchestration/agent-name-sanitizer.ts",
+    // Why: environment-link-binding.ts's relative-time rendering imports its three tiny numeric
+    // constants from THE REGISTER (S10-16 test 77) rather than writing a literal; that file's own
+    // `export { MAX_LIVE_MINTED_GRANTS, PENDING_GRANT_TTL_MS } from '../device-registry-pending-
+    // grants'` re-export is a type-only chain (device-registry-pending-grants.ts ->
+    // device-registry-types.ts -> relay/relay-revoke-outbox.ts), so listing all four pulls in no
+    // runtime logic beyond what `type` imports already erase.
+    "../src/main/runtime/orchestration/link-binding-constants.ts",
+    "../src/main/runtime/device-registry-pending-grants.ts",
+    "../src/main/runtime/device-registry-types.ts",
+    "../src/main/runtime/relay/relay-revoke-outbox.ts",
     "../src/main/startup/hydrate-shell-path.ts",
     "../src/main/startup/windows-shell-path-ownership.ts",
     // Why: serve-electron-flag-parity.test.ts checks the Electron-side serve argv rewrite against this

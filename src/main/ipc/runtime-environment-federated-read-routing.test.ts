@@ -126,7 +126,8 @@ describe('federated read RPC transport routing', () => {
       'orchestration.federationAck',
       { dispatchId: 'dispatch-1', throughSequence: 4 },
       15_000,
-      envelope
+      envelope,
+      undefined
     )
     expect(sendRemoteRuntimeSharedControlRequestMock).not.toHaveBeenCalled()
   })
@@ -168,7 +169,8 @@ describe('federated read RPC transport routing', () => {
       'orchestration.federationPull',
       { dispatchId: 'dispatch-1', afterSequence: 0, limit: 50 },
       15_000,
-      envelope
+      envelope,
+      undefined
     )
     expect(sendRemoteRuntimeSharedControlRequestMock).not.toHaveBeenCalled()
   })

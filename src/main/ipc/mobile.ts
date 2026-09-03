@@ -48,6 +48,13 @@ function toRuntimeAccessGrant(
     name: device.name,
     createdAt: device.pairedAt,
     lastSeenAt: device.lastSeenAt > 0 ? device.lastSeenAt : null,
+    // S10-16 C2 carry-forward (a): absent grantClass means a row minted before this field
+    // existed — that predates the sweep/mint split, so it derives from pendingExpiresAt's
+    // presence (the same fact buildDeviceEntry used to decide whether to stamp 'minted' at all)
+    // rather than collapsing every non-'minted' value to 'legacy_coalesced'.
+    grantClass:
+      device.grantClass ?? (device.pendingExpiresAt !== undefined ? 'minted' : 'legacy_coalesced'),
+    expiresAt: device.pendingExpiresAt ?? null,
     ...(device.accessProfile !== undefined ? { profile: device.accessProfile } : {}),
     effective: effectiveAccessProfile(device, legacyGrantProfile),
     enforcedByThisRuntime: true
@@ -226,8 +233,11 @@ export function registerMobileHandlers(
         // coalescing onto the shared pending row — two named links are two distinct devices. Both keys
         // are omitted when blank so an unnamed link makes exactly today's call.
         ...(deviceNameArg
-          ? { name: deviceNameArg, mint: 'always' as const }
-          : { name: `Runtime ${new Date().toLocaleDateString()}` }),
+          ? { name: deviceNameArg, mint: 'always' as const, budgetClass: 'ui_named' as const }
+          : {
+              name: `Runtime ${new Date().toLocaleDateString()}`,
+              budgetClass: 'host_auto' as const
+            }),
         scope: 'runtime',
         // Why: a grant that only ever pointed at loopback must not make the next launch bind every
         // interface when its local client reconnects (that would restore the exposure one restart later).

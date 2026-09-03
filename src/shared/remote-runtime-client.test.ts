@@ -324,6 +324,111 @@ describe('sendRemoteRuntimeRequest', () => {
   })
 })
 
+// S10-16 R4.6: an absolute deadline enforced INSIDE the client, independent of keepalives — so a
+// raced-out round against a keepalive-emitting peer cannot leak a socket or a pool slot forever.
+describe('sendRemoteRuntimeRequest maxDurationMs (S10-16 R4.6)', () => {
+  it('rejects runtime_timeout at maxDurationMs, well below timeoutMs, against a peer that never answers', async () => {
+    const server = await createNeverAnsweringServer()
+
+    const start = Date.now()
+    await expect(
+      sendRemoteRuntimeRequest(server.pairing, 'status.get', {}, 10_000, undefined, 200)
+    ).rejects.toMatchObject({ code: 'runtime_timeout' })
+    // The absolute deadline fired, not the 10s idle timeout.
+    expect(Date.now() - start).toBeLessThan(5_000)
+
+    // The server, not just the caller's promise, observes the close.
+    await server.closed
+  })
+
+  it('holds the call open past timeoutMs when maxDurationMs is omitted — zero blast radius at HEAD', async () => {
+    const server = await createOneShotServer()
+
+    const response = await sendRemoteRuntimeRequest<{ satisfied: boolean }>(
+      server.pairing,
+      'terminal.wait',
+      { terminal: 't1', for: 'tui-idle', timeoutMs: 550 },
+      300
+    )
+
+    expect(response).toMatchObject({ ok: true, result: { satisfied: true } })
+  })
+})
+
+async function createNeverAnsweringServer(): Promise<{
+  pairing: PairingOffer
+  closed: Promise<void>
+}> {
+  const serverKeyPair = generateKeyPair()
+  const wss = new WebSocketServer({ port: 0 })
+  servers.push(wss)
+  let resolveClosed: () => void = () => {}
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve
+  })
+
+  wss.on('connection', (ws) => {
+    let sharedKey: Uint8Array | null = null
+    let authenticated = false
+    let keepalive: NodeJS.Timeout | null = null
+
+    ws.on('close', () => {
+      if (keepalive) {
+        clearInterval(keepalive)
+      }
+      resolveClosed()
+    })
+
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        return
+      }
+      const frame = data.toString()
+      if (!sharedKey) {
+        const hello = JSON.parse(frame) as { publicKeyB64: string }
+        sharedKey = deriveSharedKey(
+          serverKeyPair.secretKey,
+          publicKeyFromBase64(hello.publicKeyB64)
+        )
+        ws.send(JSON.stringify({ type: 'e2ee_ready' }))
+        return
+      }
+
+      const plaintext = decrypt(frame, sharedKey)
+      if (!plaintext) {
+        return
+      }
+      if (!authenticated) {
+        authenticated = true
+        sendEncrypted(ws, sharedKey, { type: 'e2ee_authenticated' })
+        return
+      }
+
+      // Keepalives forever, no response ever — the case that leaked a socket and a pool slot
+      // before R4.6 (the caller's Promise.race bounded only the caller's wait).
+      const key = sharedKey
+      keepalive = setInterval(() => {
+        sendEncrypted(ws, key, { _keepalive: true })
+      }, 50)
+    })
+  })
+
+  await new Promise<void>((resolve) => wss.once('listening', resolve))
+  const address = wss.address() as AddressInfo
+  const pairing = parsePairingCode(
+    encodePairingOffer({
+      v: 2,
+      endpoint: `ws://127.0.0.1:${address.port}`,
+      deviceToken: 'device-token',
+      publicKeyB64: publicKeyToBase64(serverKeyPair.publicKey)
+    })
+  )
+  if (!pairing) {
+    throw new Error('Failed to create test pairing')
+  }
+  return { pairing, closed }
+}
+
 async function createSubscriptionServer(
   options: {
     sendMismatchedResponseAfterSubscribe?: boolean

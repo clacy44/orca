@@ -26,6 +26,7 @@ import {
   type DeviceEntry,
   type DeviceScope
 } from './device-registry'
+import type { BudgetClass } from './device-registry-pending-grants'
 import {
   admitRuntimePeerMethod,
   RUNTIME_PEER_RPC_METHOD_ALLOWLIST
@@ -33,6 +34,7 @@ import {
 import { ORCHESTRATION_PEER_ALLOWLIST_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { PEER_LONG_POLL_PER_DEVICE_CAP } from './peer-profile-constants'
 import { attachPrincipalLaneHost, detachPrincipalLaneHost } from './principal-lane-host-wiring'
+import { createLinkBindingSelfView } from './device-registry-link-credential'
 import {
   createPrincipalLaneConnectionJoin,
   removeLaneOnGrantRevoked,
@@ -786,6 +788,10 @@ export class OrcaRuntimeRpcServer {
     // person and may need a shorter leash than the 24h default; every other caller (coalesced QR,
     // rotate) leaves this undefined and is byte-identical to before.
     ttlMs?: number
+    // S10-16 R1.1: which minted-grant eviction budget this invite counts against, keyed by the
+    // issuing lane — consumed only on the `mint === 'always'` arm (mintPendingDevice). Every other
+    // caller leaves this undefined and is byte-identical to before.
+    budgetClass?: BudgetClass
     // S10-19: required-choice at the mint surfaces (W-6); this method's own default keeps every
     // pre-existing caller (coalesced QR, rotate, every runtime-time mint before this slice) minting
     // 'full' exactly as before — the install-day no-op property (S-4).
@@ -865,7 +871,8 @@ export class OrcaRuntimeRpcServer {
               scope,
               reach,
               args.ttlMs,
-              accessProfile
+              accessProfile,
+              args.budgetClass
             )
           : args.rotate
             ? this.deviceRegistry.rotatePendingDevice(
@@ -1355,6 +1362,8 @@ export class OrcaRuntimeRpcServer {
       detachPrincipalLaneHost(this.runtime)
       // S10-19 W-2 (ops MN-4): no pairing transport means no grant rows to resolve a profile from.
       this.runtime.setPeerGrantProfileLookup?.(null)
+      // S10-16 R9: no DeviceRegistry/E2EEKeypair to compute a self-view from.
+      this.runtime.setLinkBindingSelfView?.(null)
     }
     // Why: WebSocket uses per-device tokens + E2EE (tweetnacl) instead of TLS since React Native can't pin self-signed certs.
     if (this.enableWebSocket) {
@@ -1368,12 +1377,20 @@ export class OrcaRuntimeRpcServer {
         this.principalGrantBindings = null
         // Without grant rows nothing can resolve to a principal; fall back to pre-S9 behaviour.
         detachPrincipalLaneHost(this.runtime)
+        // S10-16 C1 review F3: no registry, nothing to flush.
+        this.runtime.setLegacySweepAuditSource?.(null)
         // S10-19 W-2 (ops MN-4): pairing init failed — no DeviceRegistry to resolve a profile from.
         this.runtime.setPeerGrantProfileLookup?.(null)
+        // S10-16 R9: no DeviceRegistry/E2EEKeypair — self-view refuses `capability_unsupported`.
+        this.runtime.setLinkBindingSelfView?.(null)
       } else {
         this.deviceRegistry = pairingIdentity.deviceRegistry
         this.e2eeKeypair = pairingIdentity.e2eeKeypair
         this.pairingInitializationFailure = null
+        // S10-16 C1 review F3: the R1.4 legacy-sweep audit rows this registry's load() queued have
+        // no sink until the orchestration DB attaches — hand the registry to the runtime so
+        // whichever of getOrchestrationDb()/setOrchestrationDb() runs first can drain it.
+        this.runtime.setLegacySweepAuditSource?.(this.deviceRegistry)
         // Why here and not at construction: the registry's grant rows ARE the pairing registry,
         // and attaching it is what arms `terminal.lane_link_unbound` (S9 §2a, §6).
         // Held: S9c's close and revoke wipes need `principalOf` and the survivor query, and both
@@ -1400,6 +1417,11 @@ export class OrcaRuntimeRpcServer {
             .find((d) => createHash('sha256').update(d.token).digest('hex') === fingerprint)
           return device ? effectiveAccessProfile(device, this.legacyGrantProfile) : null
         })
+        // S10-16 R9: armed in the same block as attachPrincipalLaneHost, beside the peer-grant
+        // profile resolver — a DeviceRegistry and an E2EEKeypair both exist here by construction.
+        this.runtime.setLinkBindingSelfView?.(
+          createLinkBindingSelfView(this.deviceRegistry, () => this.getE2EEPublicKey())
+        )
         this.runtime.runPeerAttachmentRuntimePrune?.()
         try {
           const host = this.resolveInitialWebSocketBindHost()

@@ -1,6 +1,7 @@
 import { RuntimeClientError } from './runtime/types'
 import { unknownCommandData, unknownFlagData } from './command-suggestion'
 import { specPaths, type CommandSpec } from './command-spec'
+import { BOOLEAN_FLAG_NAMES } from './args-flags'
 
 export { specPaths }
 export type { CommandSpec }
@@ -13,58 +14,11 @@ export type ParsedArgs = {
 
 export const GLOBAL_FLAGS = ['help', 'json', 'pairing-code', 'environment']
 const GLOBAL_VALUE_FLAGS = new Set(['pairing-code', 'environment'])
-export const BOOLEAN_FLAGS = new Set([
-  'accept-unverified-platform',
-  'acknowledge-gate',
-  'all',
-  'all-hosts',
-  'attachments',
-  'cancel',
-  'children',
-  'comments',
-  'connect',
-  'current',
-  'dry-run',
-  'enter',
-  'focus',
-  'force',
-  'full',
-  'help',
-  'inject',
-  'include-archived',
-  'include-quarantined',
-  'include-visual-layouts',
-  'interrupt',
-  'json',
-  'leave',
-  'lift',
-  'local',
-  'messages',
-  'me',
-  'mobile',
-  'mobile-pairing',
-  'new',
-  'no-derived',
-  'no-pairing',
-  'parent-current',
-  'provision',
-  'ready',
-  'recipe-json',
-  'relations',
-  'reinstall',
-  'restore-window',
-  'return-preamble',
-  'run-hooks',
-  'sensitive',
-  'show-profile',
-  'staged',
-  'tab',
-  'tasks',
-  'text-stdin',
-  'unread',
-  'value-stdin',
-  'wait'
-])
+// Ruling 28 Addendum 1(t): the array itself lives in the sibling module `args-flags.ts` — one
+// name per line — so the max-lines cap here is met by the split, not by re-encoding the flag
+// grammar as a string (Gate 1/D-5: C8a's string form was semantically identical but made a
+// single-token change invisible to review and unreachable by any formatter or sort rule).
+export const BOOLEAN_FLAGS = new Set(BOOLEAN_FLAG_NAMES)
 
 export const REPEATED_FLAG_SEPARATOR = '\u0000'
 const REPEATABLE_STRING_FLAGS = new Set(['label', 'pair-name', 'pairing-profile', 'skill'])

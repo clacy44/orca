@@ -353,9 +353,10 @@ export type PeerRpcAdmissionRule =
 
 // The 20-entry literal (§5/§D, FROZEN): 11 admitted on the name alone, 7 conditional
 // (status.get, federationAttachStart, check, send, reply, terminal.list,
-// federationAnswerPrompt), 2 reserved for S10-16 (peer-by-design; not registered on this
-// branch). An absent key is a refusal — default-deny. `orchestration.federationWorkerInput`
-// does not exist and appears nowhere here (S-8).
+// federationAnswerPrompt), 2 registered by S10-16 C3 (peer-by-design, admitted true — see
+// §7 below; review F11: this comment previously said "not registered on this branch", stale
+// since C3 landed them). An absent key is a refusal — default-deny.
+// `orchestration.federationWorkerInput` does not exist and appears nowhere here (S-8).
 export const RUNTIME_PEER_RPC_METHOD_ALLOWLIST = new Map<string, PeerRpcAdmissionRule>([
   // ── 1. capability negotiation ─────────────────────────────────────────────
   ['status.get', meteredOnly('status')],

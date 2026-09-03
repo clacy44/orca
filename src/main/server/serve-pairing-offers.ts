@@ -37,6 +37,8 @@ export type ServePairingOfferSource = {
     name: string
     mint?: 'always' | 'reuse'
     scope: ServePairingScope
+    // S10-16 R1.1: which minted-grant eviction budget this invite counts against.
+    budgetClass?: 'host_auto' | 'serve_named'
     accessProfile: 'full' | 'peer'
   }) => ServePairingOffer
   renderPairingQr: (pairingUrl: string) => Promise<string | null>
@@ -136,6 +138,8 @@ export async function resolveServePairingOffers(
             name,
             mint: 'always',
             scope,
+            // S10-16 R1.1: the named `orca serve` mint lane's own eviction budget.
+            budgetClass: 'serve_named',
             accessProfile
           }),
           scope,
@@ -155,6 +159,7 @@ export async function resolveServePairingOffers(
         address: request.pairingAddress,
         name: `${request.mobilePairing ? 'Mobile' : 'CLI'} ${new Date().toLocaleDateString()}`,
         scope,
+        budgetClass: 'host_auto',
         // S10-19 §10.4/Ruling 18(g): the unnamed host-minted offer is exempt from the
         // required-choice rule — it always mints 'full', unchanged from before this slice.
         accessProfile: 'full'
