@@ -1,11 +1,25 @@
 // S10-16 C7, test 53: every local link-binding verb refuses a paired/mobile caller `forbidden`,
 // gate-first (bogus ids never reach a read/write), and is absent from the peer allowlist.
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
 import { RUNTIME_PEER_RPC_METHOD_ALLOWLIST } from '../../runtime-peer-rpc-allowlist'
 import type { RpcContext } from '../core'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
+import type Database from '../../../sqlite/sync-database'
+import { LINK_BINDING_STATUS_WAIT_CAP_MS } from '../../orchestration/link-binding-constants'
+
+function rawDb(db: OrchestrationDb): Database.Database {
+  return (db as unknown as { db: Database.Database }).db
+}
+
+type AuditRow = { verb: string; outcome: string; reason_code: string | null }
+
+function listAudit(db: OrchestrationDb): AuditRow[] {
+  return rawDb(db)
+    .prepare('SELECT verb, outcome, reason_code FROM agent_audit ORDER BY seq ASC')
+    .all() as AuditRow[]
+}
 
 function findMethod(name: string) {
   const method = ORCHESTRATION_LINK_BINDING_LOCAL_METHODS.find((m) => m.name === name)
@@ -82,7 +96,178 @@ describe('orchestration-link-binding-local RPC methods', () => {
     expect(result.links).toEqual([])
   })
 
-  it('R30.3: none of the six local verbs are on the peer allowlist', () => {
+  // Ruling 28(h)/protocol F10: the positive-form gate must ALSO admit the in-process
+  // `clientKind: 'runtime'` shape with no `pairedDeviceId` — the exact case the old denylist
+  // form (`pairedDeviceId != null || clientKind === 'mobile'`) silently admitted by accident,
+  // never asserted by C7's own test.
+  it('a local caller carrying {clientKind: "runtime"} and no pairedDeviceId is admitted', async () => {
+    setup()
+    const ctx: RpcContext = { runtime, clientKind: 'runtime' }
+    const result = (await call('orchestration.linkBindings', {}, ctx)) as { links: unknown[] }
+    expect(result.links).toEqual([])
+  })
+
+  // Ruling 28(c)/design test 61: the server-side wait is bounded by the SINGLE cap
+  // (LINK_BINDING_STATUS_WAIT_CAP_MS) regardless of a larger --timeout-ms — replaces C7's test
+  // that pinned `--wait` as a documented no-op.
+  describe('Ruling 28(c)/test 61: linkBindings --wait is clamped to the single 45s cap', () => {
+    it('--timeout-ms 200000 is clamped to LINK_BINDING_STATUS_WAIT_CAP_MS, and a timed-out wait is a report, not an error', async () => {
+      setup()
+      vi.useFakeTimers()
+      try {
+        const promise = call(
+          'orchestration.linkBindings',
+          { link: 'lnk_never_settles', wait: true, timeoutMs: 200_000 },
+          { runtime }
+        )
+        await vi.advanceTimersByTimeAsync(LINK_BINDING_STATUS_WAIT_CAP_MS - 1)
+        // Not yet resolved — the wait has not hit its cap.
+        let settled = false
+        void promise.then(() => {
+          settled = true
+        })
+        await Promise.resolve()
+        expect(settled).toBe(false)
+        await vi.advanceTimersByTimeAsync(2)
+        const result = (await promise) as { links: unknown[]; state?: string }
+        expect(result.state).toBe('timeout')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  describe('Ruling 28(n): behavioural tests for the write verbs — the row changed, and its audit row', () => {
+    function localCtx(): RpcContext {
+      return { runtime }
+    }
+
+    it('linkRevoke revokes the row and writes an audit row', async () => {
+      setup()
+      db.putPeerLinkBinding({
+        linkDeviceId: 'link_revoke_behav',
+        environmentId: 'env_revoke_behav',
+        boundEndpointId: 'endpoint_1',
+        boundPairingRevision: 1,
+        linkCredentialFp: 'fp_1',
+        peerCredentialFp: 'peer_fp_1',
+        peerKeyFingerprint: 'peer_key_fp_1',
+        grantClass: 'minted',
+        scanCompleteness: 'complete',
+        proofProtocol: 'v1',
+        provedAt: 0,
+        lastVerifiedAt: 0
+      })
+      const before = listAudit(db).length
+      const result = (await call(
+        'orchestration.linkRevoke',
+        { link: 'link_revoke_behav' },
+        localCtx()
+      )) as { linkDeviceId: string; revokedAt: number }
+      expect(result.revokedAt).toBeGreaterThan(0)
+      expect(db.getPeerLinkBinding('link_revoke_behav')?.state).toBe('revoked')
+      const audit = listAudit(db)
+      expect(audit.length).toBe(before + 1)
+      expect(audit.at(-1)?.outcome).toBe('revoked')
+    })
+
+    it('linkForget deletes the row from all four tables and writes an audit row, and refuses an unknown link', async () => {
+      setup()
+      db.putPeerLinkBinding({
+        linkDeviceId: 'link_forget_behav',
+        environmentId: 'env_forget_behav',
+        boundEndpointId: 'endpoint_1',
+        boundPairingRevision: 1,
+        linkCredentialFp: 'fp_1',
+        peerCredentialFp: 'peer_fp_1',
+        peerKeyFingerprint: 'peer_key_fp_1',
+        grantClass: 'minted',
+        scanCompleteness: 'complete',
+        proofProtocol: 'v1',
+        provedAt: 0,
+        lastVerifiedAt: 0
+      })
+      db.putScanFact({
+        linkDeviceId: 'link_forget_behav',
+        environmentId: 'env_forget_behav',
+        outcome: 'proven',
+        environmentPairingRevision: 1,
+        linkCredentialFp: 'fp_1',
+        detail: null,
+        observedAt: 0
+      })
+      db.putConfirmObservation({
+        linkDeviceId: 'link_forget_behav',
+        environmentId: 'env_forget_behav',
+        kind: 'peer_confirmed',
+        detail: null,
+        observedAt: 0
+      })
+      const before = listAudit(db).length
+      const result = (await call(
+        'orchestration.linkForget',
+        { link: 'link_forget_behav' },
+        localCtx()
+      )) as { forgotten: string[] }
+      expect(result.forgotten).toEqual(['link_forget_behav'])
+      expect(db.getPeerLinkBinding('link_forget_behav')).toBeNull()
+      expect(db.listScanFacts('link_forget_behav')).toEqual([])
+      expect(db.listConfirmObservations('link_forget_behav')).toEqual([])
+      const audit = listAudit(db)
+      expect(audit.length).toBe(before + 1)
+      expect(audit.at(-1)?.outcome).toBe('forgotten')
+
+      await expect(
+        call('orchestration.linkForget', { link: 'link_unknown_behav' }, localCtx())
+      ).rejects.toMatchObject({ code: 'invalid_argument' })
+    })
+
+    it('linkContainment writes a containment row and an audit row, then lift writes another audit row carrying the prior reason', async () => {
+      setup()
+      const write = (await call(
+        'orchestration.linkContainment',
+        {
+          subjectKind: 'link',
+          subjectId: 'link_containment_behav',
+          action: 'quarantine',
+          reason: 'r1'
+        },
+        localCtx()
+      )) as { subjectId: string; liftedAt: number | null }
+      expect(write.subjectId).toBe('link_containment_behav')
+      expect(db.isPeerLinkQuarantined('link_containment_behav')).toBe(true)
+      const afterWriteAudit = listAudit(db)
+      expect(afterWriteAudit.at(-1)?.outcome).toBe('quarantine')
+
+      const lift = (await call(
+        'orchestration.linkContainment',
+        {
+          subjectKind: 'link',
+          subjectId: 'link_containment_behav',
+          action: 'quarantine',
+          lift: true
+        },
+        localCtx()
+      )) as { liftedAt: number }
+      expect(lift.liftedAt).toBeGreaterThan(0)
+      expect(db.isPeerLinkQuarantined('link_containment_behav')).toBe(false)
+      const afterLiftAudit = listAudit(db)
+      expect(afterLiftAudit.at(-1)?.outcome).toBe('quarantine_lifted')
+      expect(afterLiftAudit.at(-1)?.reason_code).toContain('"priorReasonText":"r1"')
+    })
+
+    it('replyOutbox --drain reports the pre-kick queued count labelled "kicked", never claiming a completed drain', async () => {
+      setup()
+      const result = (await call(
+        'orchestration.replyOutbox',
+        { link: 'link_drain_behav', drain: true },
+        localCtx()
+      )) as { kicked: Record<string, number> }
+      expect(result.kicked).toEqual({ link_drain_behav: 0 })
+    })
+  })
+
+  it('R30.3: none of the local verbs are on the peer allowlist', () => {
     for (const method of ORCHESTRATION_LINK_BINDING_LOCAL_METHODS) {
       expect(RUNTIME_PEER_RPC_METHOD_ALLOWLIST.has(method.name)).toBe(false)
     }

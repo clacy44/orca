@@ -25,6 +25,7 @@ import {
 } from './orchestration/link-binding-schedule'
 import { runOneRound, type CapabilityCache, type GuardedProbe } from './link-binding-prover-round'
 import { createMaintenanceTick } from './link-binding-prover-maintenance'
+import { createSettleWaitRegistry } from './link-binding-prover-wait'
 
 export type LinkBindingProver = {
   /** R13.1: an inbound-contact/peer-confirmed/sweep scheduling request for one link. Ruling
@@ -38,6 +39,11 @@ export type LinkBindingProver = {
   /** Never blocks the caller (R8.6): fires a round attempt off the microtask queue. */
   requestRerun(mode: RoundMode): void
   health(): { inFlightCount: number; bucketWanted: boolean }
+  // Ruling 28(c) (C8a): a one-shot promise for the NEXT round that evaluates `linkDeviceId` —
+  // resolved 'settled' when a round's outcome names it in `evaluatedLinkIds`, or 'timeout' after
+  // `timeoutMs`. Never throws. Used by `linkBind`/`linkBindings --wait` to report the round's
+  // actual outcome instead of a fire-and-forget 'running'.
+  waitForSettle(linkDeviceId: string, timeoutMs: number): Promise<'settled' | 'timeout'>
   stop(): void
 }
 
@@ -79,6 +85,12 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   // Ruling 23 Addendum 6(ww)/review C4d finding 11: strictly monotonic across rounds even at
   // sub-millisecond cadence — see RoundEpochCounter's own doc comment.
   const epochCounter = new RoundEpochCounter()
+  // Ruling 28(c): the one-shot settle-wait registry (split out — link-binding-prover-wait.ts).
+  const settleWait = createSettleWaitRegistry()
+  // Ruling 28(a): the set of links this round must probe REGARDLESS of the contested/revoked
+  // exclusions (link-binding-prover-round.ts) — populated only by `scheduleBinding('operator_bind', …)`
+  // below, consumed (and cleared) the moment a round actually starts.
+  const forcedLinkIds = new Set<string>()
   // R13 trigger table/R13.4/Ruling 23 Addendum 4(hh): the environment-set digest re-arm and the
   // sweep-owned deletion — split into link-binding-prover-maintenance.ts (Ruling 23(m): a split
   // is the only remedy for the 300-line gate).
@@ -136,6 +148,8 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
     roundInFlight = true
     const roundWanted = new Set(wanted)
     wanted.clear()
+    const roundForced = new Set(forcedLinkIds)
+    forcedLinkIds.clear()
     void runOneRound({
       runtime,
       mode,
@@ -144,7 +158,8 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       guardedProbe,
       capabilityCache,
       rearmDebounce,
-      epochCounter
+      epochCounter,
+      forcedLinkIds: roundForced
     })
       .catch((error: unknown) => {
         // F17: prefer loud degradation — a round exception (e.g. a mid-round row-cap error) no
@@ -186,6 +201,11 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       })
       .then((outcome) => {
         roundInFlight = false
+        // Ruling 28(c): notify every one-shot waiter for a link this round actually evaluated —
+        // before the partial-retry/rerun bookkeeping below so a waiter never blocks on those.
+        for (const linkDeviceId of outcome?.evaluatedLinkIds ?? []) {
+          settleWait.notifySettled(linkDeviceId)
+        }
         if (outcome && outcome.completeness === 'partial' && !stopped) {
           if (partialRetryTimer) {
             clearTimeout(partialRetryTimer)
@@ -211,7 +231,10 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       // on the BINDING row's own `state` (never `peer_link_attempts`, a table the unshipped-v40
       // repair may drop and recreate), matching the round exclusion (link-binding-prover-round.ts).
       const binding = db.getPeerLinkBinding(linkDeviceId)
-      if (binding?.state === 'contested') {
+      // Ruling 28(a): 'operator_bind' is exempt from this exclusion — it is the verb that clears
+      // a contest (`proveNow`), so it must be able to schedule a round on the very link this
+      // guard would otherwise drop.
+      if (binding?.state === 'contested' && reason !== 'operator_bind') {
         return
       }
       const now = Date.now()
@@ -227,7 +250,9 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       let rearmedOutcome: 'pending' | undefined
       let rearmedNoWinner: number | undefined
       if (
-        (reason === 'inbound_contact' || reason === 'peer_confirmed') &&
+        (reason === 'inbound_contact' ||
+          reason === 'peer_confirmed' ||
+          reason === 'operator_bind') &&
         current?.lastOutcome === 'unpaired_parked'
       ) {
         // Ruling 23 Addendum 5(kk): the first re-arm for a link fires immediately (no entry in
@@ -235,9 +260,15 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
         // last re-arm — by ANY of the three paths (ww) — is debounced away — a peer's own
         // message cadence must never keep this host probing at the 30s floor forever (review C4c
         // finding 2).
-        if (rearmDebounce.shouldRearm(linkDeviceId, now, LINK_BINDING_PARK_REARM_MS)) {
+        // Ruling 28(a): 'operator_bind' is EXEMPT from this debounce — an operator's own kick
+        // must always re-arm a parked link, regardless of how recently any path last re-armed it.
+        if (
+          reason === 'operator_bind' ||
+          rearmDebounce.shouldRearm(linkDeviceId, now, LINK_BINDING_PARK_REARM_MS)
+        ) {
           rearmedOutcome = 'pending'
           rearmedNoWinner = 0
+          rearmDebounce.record(linkDeviceId, now)
         }
       }
       if (patch.nextAttemptAfter !== undefined || rearmedOutcome !== undefined) {
@@ -257,6 +288,11 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       if (patch.addToWanted) {
         wanted.add(linkDeviceId)
       }
+      if (reason === 'operator_bind') {
+        // Ruling 28(a): forces the NEXT round to bypass the contested/revoked exclusions for
+        // this one link (link-binding-prover-round.ts) — cleared when that round actually starts.
+        forcedLinkIds.add(linkDeviceId)
+      }
       // F19: LEADING-edge debounce — fire the kick now (R13.1's whole point is faster than the
       // sweep) and then ignore further kicks for LINK_BINDING_KICK_DEBOUNCE_MS. The prior
       // trailing-edge debounce reset on every call, so steady traffic faster than the debounce
@@ -266,16 +302,22 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       // `setTimeout(…, 0)` — R8.6 says a kick never runs a round's synchronous prefix (a disk
       // read, up to 8 attempt-row writes) on the caller's own stack, and `scheduleBinding` is
       // called at the tail of five peer-facing RPC handlers.
-      if (patch.kicks && !stopped && !kickTimer) {
+      // Ruling 28(a): `patch.bypassDebounce` (true only for 'operator_bind') fires the kick
+      // immediately regardless of `kickTimer`'s state, and deliberately does NOT set/extend
+      // `kickTimer` itself — an operator kick must never be silently absorbed by, nor extend,
+      // the ordinary 2s peer-traffic debounce.
+      if (patch.kicks && !stopped && (patch.bypassDebounce || !kickTimer)) {
         kickRunTimer = setTimeout(() => {
           kickRunTimer = null
           attemptRound('sweep')
         }, 0)
         kickRunTimer.unref?.()
-        kickTimer = setTimeout(() => {
-          kickTimer = null
-        }, LINK_BINDING_KICK_DEBOUNCE_MS)
-        kickTimer.unref?.()
+        if (!patch.bypassDebounce) {
+          kickTimer = setTimeout(() => {
+            kickTimer = null
+          }, LINK_BINDING_KICK_DEBOUNCE_MS)
+          kickTimer.unref?.()
+        }
       }
     },
     arm(): void {
@@ -337,6 +379,9 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
     },
     health(): { inFlightCount: number; bucketWanted: boolean } {
       return { inFlightCount: inFlightGuard.size(), bucketWanted: rerun.wanted }
+    },
+    waitForSettle(linkDeviceId: string, timeoutMs: number): Promise<'settled' | 'timeout'> {
+      return settleWait.waitForSettle(linkDeviceId, timeoutMs)
     },
     stop(): void {
       stopped = true

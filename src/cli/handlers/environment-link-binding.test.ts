@@ -75,11 +75,14 @@ describe('environment link-binding CLI handlers', () => {
     )
   })
 
-  it('link-status --drain kicks every route with pending work and reports the pending count', async () => {
+  // Ruling 28(g): --drain wakes the pump (runtime.replyOutbox.kick) and reports the PRE-drain
+  // queued count labelled `kicked` — never a number implying the drain already completed. The
+  // C7 shape (`{drained: {...}}`, printed as "pending") is replaced.
+  it('link-status --drain kicks every route with pending work and reports it honestly as "kicked"', async () => {
     const call = vi.fn().mockResolvedValue({
       id: 'local',
       ok: true,
-      result: { drained: { lnk_1: 0 } },
+      result: { kicked: { lnk_1: 0 } },
       _meta: { runtimeId: 'local' }
     })
     await ENVIRONMENT_LINK_BINDING_HANDLERS['environment link-status'](

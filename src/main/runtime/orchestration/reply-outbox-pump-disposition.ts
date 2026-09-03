@@ -44,7 +44,10 @@ function clampRetryAfterMs(v: unknown): number | null {
 
 // M11 (C5 review)/Ruling 26(k)/INV-P-006 clause (a): strip control characters and clamp length
 // at the write site — raw, unbounded peer text is never stored in `last_error`.
-function sanitizeErrorDetail(message: string): string {
+// Ruling 28(f) (C8a): exported — the ONE permitted edit to a pump file this clause makes —
+// so `link-status --outbox` (orchestration-link-binding-local.ts) can render the same
+// write-time-sanitized text under the R19.4 label, rather than dumping raw peer-supplied bytes.
+export function sanitizeErrorDetail(message: string): string {
   // Ruling 26 Addendum 1(v)/F9: also strips U+2028/U+2029 — JS string line terminators that
   // survive a JSON round-trip (R19.4's set).
   // eslint-disable-next-line no-control-regex -- Why: stripping raw peer-supplied control bytes is the point.

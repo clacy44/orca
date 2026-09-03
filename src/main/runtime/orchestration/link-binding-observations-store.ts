@@ -58,6 +58,17 @@ export function getScanFact(
     : null
 }
 
+// Ruling 28(h)/protocol F9 (C8a): distinct link ids holding a scan-fact row — `linkForget`'s id
+// set must cover this table too, not only bindings/attempts/containment.
+export function listScanFactLinkIds(db: Database.Database): string[] {
+  const rows = db
+    .prepare('SELECT DISTINCT link_device_id AS id FROM peer_link_scan_facts')
+    .all() as {
+    id: string
+  }[]
+  return rows.map((row) => row.id)
+}
+
 export function listScanFacts(db: Database.Database, linkDeviceId: string): ScanFactRow[] {
   const rows = db
     .prepare('SELECT * FROM peer_link_scan_facts WHERE link_device_id = ?')
@@ -145,6 +156,15 @@ export function listConfirmObservations(
     detail: row.detail,
     observedAt: row.observed_at
   }))
+}
+
+// Ruling 28(h)/protocol F9 (C8a): distinct link ids holding a confirm-observation row — the one
+// table a peer's own call can create rows in, so `linkForget`'s id set must cover it too.
+export function listConfirmObservationLinkIds(db: Database.Database): string[] {
+  const rows = db
+    .prepare('SELECT DISTINCT link_device_id AS id FROM peer_link_confirm_observations')
+    .all() as { id: string }[]
+  return rows.map((row) => row.id)
 }
 
 // Ruling 17(g): the ONLY table a peer's own RPC call causes a row in — per-link capped (INV-P-006).
@@ -278,9 +298,12 @@ export function liftContainment(
   ).run(now, subjectKind, subjectId, action)
 }
 
-// R5.1: per-row purge surface for `orca environment link-forget` — bindings, attempts, facts and
-// confirm observations for links NOT IN the retained set (containment is deliberately excluded —
-// operator intent must survive a link-forget the same way it survives resetAll, R14.3).
+// R13.4: the sweep's own retention purge — bindings, attempts, facts and confirm observations
+// for links NOT IN the currently-live runtime-scope device id set (containment is deliberately
+// excluded — operator intent must survive a sweep the same way it survives resetAll, R14.3).
+// Distinct from `deleteBindingsAndAttemptsIn` below (link-forget's OPERATOR-NAMED purge) — this
+// one's caller (link-binding-prover-maintenance.ts) genuinely needs exclusion-from-a-retained-set
+// semantics: "delete everything the registry no longer knows about."
 export function deleteBindingsAndAttemptsNotIn(
   db: Database.Database,
   retainedLinkDeviceIds: readonly string[]
@@ -294,5 +317,30 @@ export function deleteBindingsAndAttemptsNotIn(
     'peer_link_confirm_observations'
   ]) {
     db.prepare(`DELETE FROM ${table} WHERE link_device_id NOT IN (${placeholders})`).run(...args)
+  }
+}
+
+// R5.1/Ruling 28(h)/protocol F9: per-row purge surface for `orca environment link-forget` —
+// bindings, attempts, facts and confirm observations for links IN the forgotten set. Deletes by
+// INCLUSION over the caller's own `forgotten` id list — never by exclusion from a possibly-
+// incomplete `retained` set — so a link the caller's own enumeration missed (or a row inserted
+// between that read and this write) can never be swept up by accident (protocol F9).
+export function deleteBindingsAndAttemptsIn(
+  db: Database.Database,
+  forgottenLinkDeviceIds: readonly string[]
+): void {
+  if (forgottenLinkDeviceIds.length === 0) {
+    return
+  }
+  const placeholders = forgottenLinkDeviceIds.map(() => '?').join(',')
+  for (const table of [
+    'peer_link_bindings',
+    'peer_link_attempts',
+    'peer_link_scan_facts',
+    'peer_link_confirm_observations'
+  ]) {
+    db.prepare(`DELETE FROM ${table} WHERE link_device_id IN (${placeholders})`).run(
+      ...forgottenLinkDeviceIds
+    )
   }
 }

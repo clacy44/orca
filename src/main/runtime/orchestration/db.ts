@@ -89,6 +89,8 @@ import {
   putPeerLinkBinding as putPeerLinkBindingImpl,
   contestPeerLinkBinding as contestPeerLinkBindingImpl,
   revokePeerLinkBinding as revokePeerLinkBindingImpl,
+  unrevokePeerLinkBinding as unrevokePeerLinkBindingImpl,
+  resolvePeerLinkBindingContest as resolvePeerLinkBindingContestImpl,
   findBindingsByEnvironment as findBindingsByEnvironmentImpl,
   findBindingCandidateByKeyFingerprint as findBindingCandidateByKeyFingerprintImpl,
   type PeerLinkBindingRow,
@@ -110,8 +112,10 @@ import {
 import {
   getScanFact as getScanFactImpl,
   listScanFacts as listScanFactsImpl,
+  listScanFactLinkIds as listScanFactLinkIdsImpl,
   putScanFact as putScanFactImpl,
   listConfirmObservations as listConfirmObservationsImpl,
+  listConfirmObservationLinkIds as listConfirmObservationLinkIdsImpl,
   putConfirmObservation as putConfirmObservationImpl,
   isPeerLinkQuarantined as isPeerLinkQuarantinedImpl,
   getContainment as getContainmentImpl,
@@ -119,6 +123,7 @@ import {
   putContainment as putContainmentImpl,
   liftContainment as liftContainmentImpl,
   deleteBindingsAndAttemptsNotIn as deleteBindingsAndAttemptsNotInImpl,
+  deleteBindingsAndAttemptsIn as deleteBindingsAndAttemptsInImpl,
   type ScanFactRow,
   type ConfirmObservationRow,
   type ContainmentRow
@@ -4676,6 +4681,22 @@ export class OrchestrationDb {
     revokePeerLinkBindingImpl(this.db, linkDeviceId, now)
   }
 
+  // Ruling 28(a): lifts a sticky revoke — called only from the `linkBind` RPC handler.
+  unrevokePeerLinkBinding(linkDeviceId: string, now: number): boolean {
+    return unrevokePeerLinkBindingImpl(this.db, linkDeviceId, now)
+  }
+
+  // Ruling 28(a): clears an existing contest on a forced proveNow round's clean single winner —
+  // called only from link-binding-prover-settle.ts, the round settle
+  resolvePeerLinkBindingContest(
+    row: Omit<
+      PeerLinkBindingRow,
+      'state' | 'detail' | 'contestIncidentId' | 'contestedAt' | 'revokedAt'
+    >
+  ): void {
+    resolvePeerLinkBindingContestImpl(this.db, row)
+  }
+
   findBindingsByEnvironment(environmentId: string): PeerLinkBindingRow[] {
     return findBindingsByEnvironmentImpl(this.db, environmentId)
   }
@@ -4722,12 +4743,24 @@ export class OrchestrationDb {
     return listScanFactsImpl(this.db, linkDeviceId)
   }
 
+  // Ruling 28(h): the distinct link ids `linkForget` must include so it never deletes a link's
+  // scan-fact rows while omitting it from the retained/forgotten id set.
+  listScanFactLinkIds(): string[] {
+    return listScanFactLinkIdsImpl(this.db)
+  }
+
   putScanFact(row: ScanFactRow): void {
     putScanFactImpl(this.db, row)
   }
 
   listConfirmObservations(linkDeviceId: string): ConfirmObservationRow[] {
     return listConfirmObservationsImpl(this.db, linkDeviceId)
+  }
+
+  // Ruling 28(h): same coverage requirement as `listScanFactLinkIds`, for the confirm-observation
+  // table — the one table a peer's own call creates rows in.
+  listConfirmObservationLinkIds(): string[] {
+    return listConfirmObservationLinkIdsImpl(this.db)
   }
 
   putConfirmObservation(row: ConfirmObservationRow): void {
@@ -4765,6 +4798,10 @@ export class OrchestrationDb {
 
   deleteBindingsAndAttemptsNotIn(retainedLinkDeviceIds: readonly string[]): void {
     deleteBindingsAndAttemptsNotInImpl(this.db, retainedLinkDeviceIds)
+  }
+
+  deleteBindingsAndAttemptsIn(forgottenLinkDeviceIds: readonly string[]): void {
+    deleteBindingsAndAttemptsInImpl(this.db, forgottenLinkDeviceIds)
   }
 
   enqueueReplyOutbox(params: EnqueueReplyOutboxParams): string {

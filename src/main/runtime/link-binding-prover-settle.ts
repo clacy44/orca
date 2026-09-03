@@ -87,6 +87,11 @@ export function settleOneLink(args: {
   // `unavailable`/LOCAL_EVIDENCE_UNAVAILABLE_CODE unconditionally and returns before any other
   // branch runs; both park counters are left untouched (review C4b finding 5).
   localEvidenceUnavailable?: boolean
+  // Ruling 28(a) (C8a): true only for the operator's forced link in a `proveNow` round — licenses
+  // clearing an existing contest on a clean single-winner outcome (`resolvePeerLinkBindingContest`,
+  // the ONE additional guarded write this clause adds, called only from this file). Defaults to
+  // false for every caller predating C8a.
+  forcedResolve?: boolean
 }): void {
   const {
     db,
@@ -100,7 +105,8 @@ export function settleOneLink(args: {
     now,
     environmentIds,
     collapseDetail,
-    localEvidenceUnavailable
+    localEvidenceUnavailable,
+    forcedResolve = false
   } = args
   const priorAttempt = db.getBindingAttempt(linkDeviceId)
   if (localEvidenceUnavailable) {
@@ -215,6 +221,7 @@ export function settleOneLink(args: {
     // of the link credential — contest, never overwrite. The single writer's ONE contest path
     // (this function) is also the only place that reads the incumbent for this purpose.
     if (
+      !forcedResolve &&
       priorBinding &&
       priorBinding.state !== 'revoked' &&
       priorBinding.peerKeyFingerprint !== classification.winner.peerKeyFingerprint
@@ -251,25 +258,7 @@ export function settleOneLink(args: {
       lastDetail = classification.detail
       consecutiveNoWinner = 0
       consecutiveFailures = 0
-      // F8/R11.3: a rebind that replaces a binding naming a DIFFERENT environment is audited.
-      // Finding 7: metered (see `meteredAudit`) — a peer holding two live grants to the same key
-      // can otherwise flip `winner.environmentId` every round and mint one rebound row per kick.
-      if (priorBinding && priorBinding.environmentId !== classification.winner.environmentId) {
-        meteredAudit('linkBindingReboundAudit', () => {
-          db.writeAgentAudit({
-            agentId: null,
-            actorPaneKey: null,
-            actorHostId: linkDeviceId,
-            verb: 'linkBinding',
-            outcome: 'link_binding_rebound',
-            reasonCode: JSON.stringify({
-              fromEnvironmentId: priorBinding.environmentId,
-              toEnvironmentId: classification.winner.environmentId
-            })
-          })
-        })
-      }
-      db.putPeerLinkBinding({
+      const freshRow: Parameters<OrchestrationDb['putPeerLinkBinding']>[0] = {
         linkDeviceId,
         environmentId: classification.winner.environmentId,
         boundEndpointId: classification.winner.boundEndpointId,
@@ -282,7 +271,48 @@ export function settleOneLink(args: {
         proofProtocol: LINK_BINDING_PROTOCOL,
         provedAt: now,
         lastVerifiedAt: now
-      })
+      }
+      // Ruling 28(a): a forced (proveNow) round with a currently-contested incumbent and exactly
+      // one clean winner CLEARS the contest — the ONE path licensed to do so
+      // (`putPeerLinkBinding`'s own upsert structurally refuses to, by design, for every other
+      // caller). Recorded with its own audit outcome, directly (a security-relevant state
+      // transition, like the contest write itself — never through `meteredAudit`).
+      if (forcedResolve && priorBinding?.state === 'contested') {
+        const resolvedIncidentId = priorBinding.contestIncidentId
+        db.resolvePeerLinkBindingContest(freshRow)
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: linkDeviceId,
+          verb: 'linkBinding',
+          outcome: 'link_contest_resolved',
+          reasonCode: JSON.stringify({
+            incidentId: resolvedIncidentId,
+            environmentId: classification.winner.environmentId
+          })
+        })
+      } else {
+        // F8/R11.3: a rebind that replaces a binding naming a DIFFERENT environment is audited.
+        // Finding 7: metered (see `meteredAudit`) — a peer holding two live grants to the same
+        // key can otherwise flip `winner.environmentId` every round and mint one rebound row per
+        // kick.
+        if (priorBinding && priorBinding.environmentId !== classification.winner.environmentId) {
+          meteredAudit('linkBindingReboundAudit', () => {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: null,
+              actorHostId: linkDeviceId,
+              verb: 'linkBinding',
+              outcome: 'link_binding_rebound',
+              reasonCode: JSON.stringify({
+                fromEnvironmentId: priorBinding.environmentId,
+                toEnvironmentId: classification.winner.environmentId
+              })
+            })
+          })
+        }
+        db.putPeerLinkBinding(freshRow)
+      }
     }
   } else if (classification.outcome === 'contested') {
     // R11.3: two-or-more winners THIS round with different key fingerprints — refuse both.

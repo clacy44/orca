@@ -7,6 +7,8 @@ import {
   putPeerLinkBinding,
   contestPeerLinkBinding,
   revokePeerLinkBinding,
+  unrevokePeerLinkBinding,
+  resolvePeerLinkBindingContest,
   findBindingsByEnvironment,
   findBindingCandidateByKeyFingerprint,
   LinkBindingCapError,
@@ -294,5 +296,157 @@ describe('C4e: contestPeerLinkBinding under Ruling 23 Addendum 6 (tt)/(vv)', () 
     expect(row?.state).toBe('revoked')
     expect(row?.environmentId).toBe('env_revoked_original')
     expect(row?.contestIncidentId).toBeNull()
+  })
+})
+
+// Ruling 28(b) (C8a)/protocol F2: `putPeerLinkBinding`'s upsert must never resurrect a revoked
+// row — the sticky-revoke invariant applies to EVERY automatic writer, not only the round's own
+// candidate-exclusion check.
+describe('Ruling 28(b): putPeerLinkBinding never rebinds a revoked row', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('a fresh proof landing mid-round on a revoked link is a no-op', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const linkDeviceId = 'link_revoke_race'
+    putPeerLinkBinding(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_revoke_race_original',
+      boundEndpointId: 'endpoint_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_1',
+      peerCredentialFp: 'peer_fp_1',
+      peerKeyFingerprint: 'peer_key_fp_1',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 0,
+      lastVerifiedAt: 0
+    })
+    revokePeerLinkBinding(sqlite, linkDeviceId, 500)
+    expect(getPeerLinkBinding(sqlite, linkDeviceId)?.revokedAt).toBe(500)
+
+    // A round that started before the revoke landed reaches its own write AFTER it — the exact
+    // race protocol review F2 named live once C7 shipped `linkRevoke`.
+    putPeerLinkBinding(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_revoke_race_challenger',
+      boundEndpointId: 'endpoint_2',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_1',
+      peerCredentialFp: 'peer_fp_2',
+      peerKeyFingerprint: 'peer_key_fp_2',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 1000,
+      lastVerifiedAt: 1000
+    })
+
+    const row = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(row?.state).toBe('revoked')
+    expect(row?.revokedAt).toBe(500)
+    expect(row?.environmentId).toBe('env_revoke_race_original')
+    expect(row?.peerKeyFingerprint).toBe('peer_key_fp_1')
+  })
+})
+
+// Ruling 28(a) (C8a): the two new guarded writes — `unrevokePeerLinkBinding` (lifts a sticky
+// revoke) and `resolvePeerLinkBindingContest` (clears an existing contest).
+describe('Ruling 28(a): unrevokePeerLinkBinding and resolvePeerLinkBindingContest', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('unrevokePeerLinkBinding clears revoked_at and reports true only when the row was revoked', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const linkDeviceId = 'link_unrevoke'
+    putPeerLinkBinding(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_unrevoke',
+      boundEndpointId: 'endpoint_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_1',
+      peerCredentialFp: 'peer_fp_1',
+      peerKeyFingerprint: 'peer_key_fp_1',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 0,
+      lastVerifiedAt: 0
+    })
+    expect(unrevokePeerLinkBinding(sqlite, linkDeviceId, 100)).toBe(false)
+    revokePeerLinkBinding(sqlite, linkDeviceId, 200)
+    expect(getPeerLinkBinding(sqlite, linkDeviceId)?.state).toBe('revoked')
+    expect(unrevokePeerLinkBinding(sqlite, linkDeviceId, 300)).toBe(true)
+    const row = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(row?.state).toBe('confirmed')
+    expect(row?.revokedAt).toBeNull()
+  })
+
+  it('resolvePeerLinkBindingContest clears an existing contest on a clean single winner, and is a no-op on a confirmed row', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const linkDeviceId = 'link_resolve_contest'
+    contestPeerLinkBinding(sqlite, linkDeviceId, 100, 'incident_resolve', 'two winners', {
+      environmentId: 'env_a',
+      boundEndpointId: 'endpoint_a',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_a',
+      peerCredentialFp: 'peer_fp_a',
+      peerKeyFingerprint: 'peer_key_fp_a',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1'
+    })
+    expect(getPeerLinkBinding(sqlite, linkDeviceId)?.state).toBe('contested')
+
+    resolvePeerLinkBindingContest(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_b',
+      boundEndpointId: 'endpoint_b',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_b',
+      peerCredentialFp: 'peer_fp_b',
+      peerKeyFingerprint: 'peer_key_fp_b',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 500,
+      lastVerifiedAt: 500
+    })
+    const resolved = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(resolved?.state).toBe('confirmed')
+    expect(resolved?.contestIncidentId).toBeNull()
+    expect(resolved?.contestedAt).toBeNull()
+    expect(resolved?.environmentId).toBe('env_b')
+    expect(resolved?.peerKeyFingerprint).toBe('peer_key_fp_b')
+
+    // Ruling 28(a): a merely-confirmed row is untouched by this statement — the ordinary path
+    // stays `putPeerLinkBinding`.
+    resolvePeerLinkBindingContest(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_c',
+      boundEndpointId: 'endpoint_c',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_c',
+      peerCredentialFp: 'peer_fp_c',
+      peerKeyFingerprint: 'peer_key_fp_c',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 900,
+      lastVerifiedAt: 900
+    })
+    expect(getPeerLinkBinding(sqlite, linkDeviceId)?.environmentId).toBe('env_b')
   })
 })

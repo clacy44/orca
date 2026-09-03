@@ -139,7 +139,8 @@ export function putPeerLinkBinding(
        proved_at = excluded.proved_at, last_verified_at = excluded.last_verified_at,
        contested_at = CASE WHEN peer_link_bindings.state = 'contested'
          THEN peer_link_bindings.contested_at ELSE NULL END,
-       revoked_at = NULL`
+       revoked_at = NULL
+     WHERE peer_link_bindings.revoked_at IS NULL`
   ).run(
     row.linkDeviceId,
     row.environmentId,
@@ -245,6 +246,43 @@ export function contestPeerLinkBinding(
   )
 }
 
+// Ruling 28(a) (C8a): the ONE write licensed to clear an existing contest — called only from
+// `link-binding-prover-settle.ts`'s forced (proveNow) resolve path (pinned by
+// `link-binding-single-writer.test.ts`). Structurally guarded by `WHERE state = 'contested'`: a
+// merely 'confirmed' row is untouched by this statement (the ordinary path stays
+// `putPeerLinkBinding`), and a 'revoked' row is also untouched (revoke stays sticky — this
+// function never clears `revoked_at`, which is already NULL on every reachable contested row).
+export function resolvePeerLinkBindingContest(
+  db: Database.Database,
+  row: Omit<
+    PeerLinkBindingRow,
+    'state' | 'detail' | 'contestIncidentId' | 'contestedAt' | 'revokedAt'
+  >
+): void {
+  db.prepare(
+    `UPDATE peer_link_bindings SET
+       environment_id = ?, bound_endpoint_id = ?, bound_pairing_revision = ?,
+       link_credential_fp = ?, peer_credential_fp = ?, peer_key_fingerprint = ?,
+       grant_class = ?, scan_completeness = ?, proof_protocol = ?,
+       state = 'confirmed', detail = NULL, contest_incident_id = NULL,
+       proved_at = ?, last_verified_at = ?, contested_at = NULL, revoked_at = NULL
+     WHERE link_device_id = ? AND state = 'contested'`
+  ).run(
+    row.environmentId,
+    row.boundEndpointId,
+    row.boundPairingRevision,
+    row.linkCredentialFp,
+    row.peerCredentialFp,
+    row.peerKeyFingerprint,
+    row.grantClass,
+    row.scanCompleteness,
+    row.proofProtocol,
+    row.provedAt,
+    row.lastVerifiedAt,
+    row.linkDeviceId
+  )
+}
+
 export function revokePeerLinkBinding(
   db: Database.Database,
   linkDeviceId: string,
@@ -253,6 +291,24 @@ export function revokePeerLinkBinding(
   db.prepare(
     `UPDATE peer_link_bindings SET state = 'revoked', revoked_at = ? WHERE link_device_id = ?`
   ).run(now, linkDeviceId)
+}
+
+// Ruling 28(a) (C8a): the ONE write licensed to lift a sticky revoke — called only from the
+// `linkBind` RPC handler (`orchestration-link-binding-local.ts`), audited `link_revoke_lifted`,
+// BEFORE the operator round it then requests. Guarded by `WHERE revoked_at IS NOT NULL`: a no-op
+// (returns false) on a link that was never revoked. Returns whether a row was actually changed.
+export function unrevokePeerLinkBinding(
+  db: Database.Database,
+  linkDeviceId: string,
+  now: number
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE peer_link_bindings SET state = 'confirmed', revoked_at = NULL, last_verified_at = ?
+        WHERE link_device_id = ? AND revoked_at IS NOT NULL`
+    )
+    .run(now, linkDeviceId)
+  return Number(result.changes) > 0
 }
 
 export function findBindingsByEnvironment(

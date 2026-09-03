@@ -237,6 +237,7 @@ describe('S10-16 C3a delta Q5 / C4 R7.5 (split from link-binding-handshake.test.
       disarm: vi.fn(),
       requestRerun: vi.fn(),
       health: vi.fn(),
+      waitForSettle: vi.fn().mockResolvedValue('timeout'),
       stop: vi.fn()
     })
     await call(

@@ -231,7 +231,10 @@ export function describeLinkBindingHealth(
 // (runtime-environment-name.ts) permits an embedded \r or \n, which would otherwise break the
 // one-line-per-signal discipline agents parse the check line with. Strip \r/\n BEFORE the clamp,
 // same line, same function — closing F13 by construction rather than by grammar.
-function resolveEnvironmentName(
+// Ruling 28(f) (C8a): exported so `link-status` (orchestration-link-binding-local.ts) resolves
+// the environment name the same way the check-line attention does, rather than a second copy of
+// this try/catch (F-12's own suggested reuse).
+export function resolveEnvironmentName(
   runtime: OrcaRuntimeService,
   environmentId: string | null,
   linkDeviceId: string

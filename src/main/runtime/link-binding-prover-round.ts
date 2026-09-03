@@ -57,9 +57,22 @@ export async function runOneRound(args: {
   // Ruling 23 Addendum 6(ww)/review C4d finding 10: the debounce map shared with `scheduleBinding`
   // and the maintenance digest re-arm — the register-timer fallback re-arm below records into it.
   rearmDebounce: RearmDebounce
+  // Ruling 28(a) (C8a): links this round must probe REGARDLESS of the contested/revoked
+  // candidate exclusions below — populated only by an 'operator_bind' schedule (proveNow).
+  // Empty (the default) for every other caller.
+  forcedLinkIds?: ReadonlySet<string>
 }): Promise<RoundOutcome> {
-  const { runtime, mode, now, wanted, guardedProbe, capabilityCache, epochCounter, rearmDebounce } =
-    args
+  const {
+    runtime,
+    mode,
+    now,
+    wanted,
+    guardedProbe,
+    capabilityCache,
+    epochCounter,
+    rearmDebounce,
+    forcedLinkIds = new Set<string>()
+  } = args
   // Ruling 23 Addendum 6(ww)/review C4d finding 6: ONE clock for this round's deadline AND its
   // cutoff check — `roundDeadline` below is `now + roundBudgetMs(...)` and `clock` (passed to
   // `probePage`) reports the same origin's elapsed real time, so the two never disagree even when
@@ -81,7 +94,13 @@ export async function runOneRound(args: {
       continue
     }
     const binding = db.getPeerLinkBinding(link.deviceId)
-    if (binding?.revokedAt != null) {
+    const forced = forcedLinkIds.has(link.deviceId)
+    // Ruling 28(a): the operator's `proveNow` round bypasses the revoked exclusion for its own
+    // named link — in practice `linkBind` already clears `revoked_at` before requesting this
+    // round (its own guarded statement, audited `link_revoke_lifted`), so this is normally a
+    // no-op; kept as a real bypass, not just dead code, so the property holds even if that
+    // ordering ever changes.
+    if (binding?.revokedAt != null && !forced) {
       continue
     }
     let attempt = db.getBindingAttempt(link.deviceId)
@@ -115,7 +134,9 @@ export async function runOneRound(args: {
     // survives that repair even when the attempts row does not. Its next_attempt_after is null
     // (settle.ts), so without this exclusion a re-created attempts row would sit forever eligible
     // on the backoff check below.
-    if (binding?.state === 'contested') {
+    // Ruling 28(a): 'operator_bind' (proveNow) is the ONE path licensed to bypass this exclusion
+    // — it is the verb that resolves a contest.
+    if (binding?.state === 'contested' && !forced) {
       continue
     }
     if (attempt?.nextAttemptAfter != null && attempt.nextAttemptAfter > now) {
@@ -174,7 +195,8 @@ export async function runOneRound(args: {
         now,
         environmentIds: [],
         collapseDetail: null,
-        localEvidenceUnavailable: true
+        localEvidenceUnavailable: true,
+        forcedResolve: false
       })
     }
     return { completeness: 'partial', evaluatedLinkIds: page.map((p) => p.linkDeviceId) }
@@ -239,7 +261,11 @@ export async function runOneRound(args: {
       classification.outcome === 'multi_grant'
     ) {
       const priorBinding = db.getPeerLinkBinding(link.linkDeviceId)
+      // Ruling 28(a): the operator's forced link never re-contests against the (arbitrary) key
+      // fingerprint a prior automatic contest happened to record — proveNow's whole purpose is
+      // to let a fresh round determine the winner, including when it differs from that value.
       const contestedByIncumbent =
+        !forcedLinkIds.has(link.linkDeviceId) &&
         priorBinding !== null &&
         priorBinding.state !== 'revoked' &&
         priorBinding.peerKeyFingerprint !== classification.winner.peerKeyFingerprint
@@ -275,7 +301,9 @@ export async function runOneRound(args: {
       reconfirmed: reconfirmed.get(link.linkDeviceId) ?? false,
       now,
       environmentIds,
-      collapseDetail
+      collapseDetail,
+      // Ruling 28(a): tells the settle it may clear an existing contest on this link.
+      forcedResolve: forcedLinkIds.has(link.linkDeviceId)
     })
   }
 

@@ -17,8 +17,14 @@ import {
 type LinkRow = {
   linkDeviceId: string
   environmentId: string | null
+  environmentName: string | null
   state: string | null
   grantClass: string | null
+  routes: boolean
+  routingClass: string | null
+  peerKeyFingerprint: string | null
+  attestationExpiresAt: number | null
+  advisories: unknown[]
   health: string
   healthLabel: string
   unavailableReason: string | null
@@ -46,15 +52,21 @@ function formatWhen(ms: number | null): string {
   return `${Math.round(deltaS / LINK_BINDING_STATUS_SECONDS_PER_HOUR)}h ago`
 }
 
-function formatLinkStatus(result: { links: LinkRow[] }): string {
+// Ruling 28(f): the design's link-status row (design v6:4808-4820,:5049-5056) — ROUTES and
+// ROUTING CLASS as independent columns, ENVIRONMENT host-resolved by name (never a bare UUID).
+function formatLinkStatus(result: { links: LinkRow[]; state?: string }): string {
   if (result.links.length === 0) {
-    return 'No links known.'
+    return result.state ? `No links known. (${result.state})` : 'No links known.'
   }
   const lines = result.links.map((l) => {
     const health = l.unavailableReason ? `${l.healthLabel}(${l.unavailableReason})` : l.healthLabel
-    return `${l.linkDeviceId}  ${health}  grant=${l.grantClass ?? '—'}  environment=${l.environmentId ?? '—'}  last round ${formatWhen(l.lastRoundAt)}  outbox ${l.outboxPending}`
+    return (
+      `${l.linkDeviceId}  ${health}  grant=${l.grantClass ?? '—'}  routes=${l.routes ? 'yes' : 'no'}  ` +
+      `routingClass=${l.routingClass ?? '—'}  environment=${l.environmentName ?? '—'}  ` +
+      `last round ${formatWhen(l.lastRoundAt)}  outbox ${l.outboxPending}`
+    )
   })
-  return lines.join('\n')
+  return result.state ? `${lines.join('\n')}\n(${result.state})` : lines.join('\n')
 }
 
 export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> = {
@@ -62,13 +74,15 @@ export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> =
     const link = getOptionalStringFlag(flags, 'link')
     const drain = flags.has('drain')
     if (drain) {
-      const result = await client.call<{ drained: Record<string, number> }>(
+      // Ruling 28(g): the server reports the PRE-drain queued count, labelled `kicked` — never a
+      // number implying the drain already finished (the pump's own kick is fire-and-forget).
+      const result = await client.call<{ kicked: Record<string, number> }>(
         'orchestration.replyOutbox',
         { link, drain: true }
       )
       printResult(result, json, (r) =>
-        Object.entries(r.drained)
-          .map(([id, pending]) => `${id}: ${pending} pending`)
+        Object.entries(r.kicked)
+          .map(([id, pending]) => `${id}: kicked (${pending} pending)`)
           .join('\n')
       )
       return
@@ -80,13 +94,15 @@ export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> =
     }
     // --wait: the server-side wait is bounded by LINK_BINDING_STATUS_WAIT_CAP_MS regardless of the
     // client's own --timeout-ms (R22.1's one cap); the CLI's own socket timeout is raised to give
-    // that wait room to answer rather than time out the transport underneath it.
-    const timeoutMs = flags.has('wait')
+    // that wait room to answer rather than time out the transport underneath it. A wait that
+    // expires is a report (`state: 'timeout'`), never an error (Ruling 28(c)).
+    const wait = flags.has('wait')
+    const timeoutMs = wait
       ? (getOptionalPositiveIntegerFlag(flags, 'timeout-ms') ?? undefined)
       : undefined
-    const result = await client.call<{ links: LinkRow[] }>(
+    const result = await client.call<{ links: LinkRow[]; state?: string }>(
       'orchestration.linkBindings',
-      { link },
+      { link, wait, timeoutMs },
       timeoutMs !== undefined ? { timeoutMs } : undefined
     )
     printResult(result, json, formatLinkStatus)
@@ -115,6 +131,7 @@ export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> =
       all,
       deep: flags.has('deep'),
       acceptLegacy,
+      lift: flags.has('lift'),
       reason: getOptionalStringFlag(flags, 'reason')
     })
     printResult(result, json, (r) =>

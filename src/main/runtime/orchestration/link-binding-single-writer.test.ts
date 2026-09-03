@@ -162,6 +162,62 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
     expect(importers).toEqual(['src/main/runtime/orchestration/db.ts'])
   })
 
+  // Ruling 28(a)/(h) (C8a): a THIRD, differently-shaped writer — `resolvePeerLinkBindingContest`,
+  // the one write licensed to clear an existing contest (the operator's forced `proveNow` round).
+  it('db.resolvePeerLinkBindingContest is called from exactly one production call site: the round settle', () => {
+    const files = allProductionTsFiles('src/main')
+    const callers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (
+        /[.)]\s*resolvePeerLinkBindingContest\s*\(/.test(source) ||
+        /\bdb\.resolvePeerLinkBindingContest\s*\(/.test(source)
+      ) {
+        callers.push(file)
+      }
+    }
+    expect(callers).toEqual(['src/main/runtime/link-binding-prover-settle.ts'])
+  })
+
+  it('resolvePeerLinkBindingContest is imported (any alias, any import form) only by its definition site (db.ts)', () => {
+    const files = allProductionTsFiles('src/main').filter(
+      (f) => f !== 'src/main/runtime/orchestration/link-binding-store.ts'
+    )
+    const importers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (/\bresolvePeerLinkBindingContest\b/.test(source) && /link-binding-store/.test(source)) {
+        importers.push(file)
+      }
+    }
+    expect(importers).toEqual(['src/main/runtime/orchestration/db.ts'])
+  })
+
+  // Ruling 28(h): pins C7's two mutators (`revokePeerLinkBinding`, `deleteBindingsAndAttemptsIn`
+  // — the renamed inclusion-based purge) plus C8a's own `unrevokePeerLinkBinding`, all reachable
+  // from exactly one production module: the local RPC surface.
+  it('revokePeerLinkBinding, unrevokePeerLinkBinding and deleteBindingsAndAttemptsIn are called from exactly one production call site: the local RPC surface', () => {
+    const files = allProductionTsFiles('src/main')
+    for (const symbol of [
+      'revokePeerLinkBinding',
+      'unrevokePeerLinkBinding',
+      'deleteBindingsAndAttemptsIn'
+    ]) {
+      const callers: string[] = []
+      const callRe = new RegExp(`[.)]\\s*${symbol}\\s*\\(|\\bdb\\.${symbol}\\s*\\(`)
+      for (const file of files) {
+        if (file.endsWith('link-binding-store.ts') || file.endsWith('/db.ts')) {
+          continue
+        }
+        const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+        if (callRe.test(source)) {
+          callers.push(file)
+        }
+      }
+      expect(callers).toEqual(['src/main/runtime/rpc/methods/orchestration-link-binding-local.ts'])
+    }
+  })
+
   it('no RPC handler (probe/confirm) ever calls putPeerLinkBinding — confirm writes advisory only (R7.5)', () => {
     const probe = readFileSync(
       join(REPO_ROOT, 'src/main/runtime/rpc/methods/orchestration-link-binding-probe.ts'),

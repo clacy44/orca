@@ -96,6 +96,7 @@ import { ORCHESTRATION_FEDERATED_PEER_ASK_METHODS } from './orchestration-federa
 import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-federated-peer-send'
 import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
 import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
+import { isLocalOnlyCaller } from './orchestration-link-binding-caller-gate'
 import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
@@ -1846,9 +1847,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
         return readAndReturn()
       })()
-      // R19.5's local-caller gate — the same one every other link-binding local verb uses
-      // (R22): a paired peer or a mobile client never learns this host's link health.
-      if (pairedDeviceId != null || clientKind === 'mobile') {
+      // R19.5's local-caller gate — the same shared positive-form gate every other link-binding
+      // local verb uses (R22, Ruling 28(h)): a paired peer or a mobile client never learns this
+      // host's link health.
+      if (!isLocalOnlyCaller({ pairedDeviceId, clientKind })) {
         return result
       }
       // F3/Ruling 27(c): the attention read must never fail `check` — this is the fleet's

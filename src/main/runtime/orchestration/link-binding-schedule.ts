@@ -204,7 +204,16 @@ export class RearmDebounce {
   }
 }
 
-export type ScheduleBindingReason = 'inbound_contact' | 'peer_confirmed' | 'sweep_candidate'
+// Ruling 28(a) (C8a): 'operator_bind' is the design's `proveNow` scheduling reason — never
+// peer-callable (only `orchestration-link-binding-local.ts`'s `linkBind` RPC schedules it),
+// audited with caller identity by the RPC layer, and EXEMPT from both the peer-traffic kick
+// debounce (link-binding-prover.ts) and the park re-arm debounce (RearmDebounce) — see
+// `ScheduleBindingPatch.bypassDebounce` below.
+export type ScheduleBindingReason =
+  | 'inbound_contact'
+  | 'peer_confirmed'
+  | 'sweep_candidate'
+  | 'operator_bind'
 
 export type ScheduleBindingPatch = {
   // R13.1, Ruling 23(j)/FC-1: inbound contact is scheduling LIVENESS ONLY. It NEVER resets
@@ -215,6 +224,9 @@ export type ScheduleBindingPatch = {
   nextAttemptAfter: number | undefined
   addToWanted: boolean
   kicks: boolean
+  // Ruling 28(a): true only for 'operator_bind' — the caller (link-binding-prover.ts) skips the
+  // kick debounce timer and the park re-arm debounce for this one request.
+  bypassDebounce: boolean
 }
 
 // R13.1's `scheduleBinding`, minus the DB write and the actual kick() call (the caller performs
@@ -224,12 +236,17 @@ export function scheduleBindingPatch(
   currentNextAttemptAfter: number | null,
   now: number
 ): ScheduleBindingPatch {
-  if (reason === 'inbound_contact' || reason === 'peer_confirmed') {
+  if (reason === 'inbound_contact' || reason === 'peer_confirmed' || reason === 'operator_bind') {
     const floor = now + LINK_BINDING_MIN_KICK_INTERVAL_MS
     const next = currentNextAttemptAfter === null ? floor : Math.min(currentNextAttemptAfter, floor)
-    return { nextAttemptAfter: next, addToWanted: true, kicks: true }
+    return {
+      nextAttemptAfter: next,
+      addToWanted: true,
+      kicks: true,
+      bypassDebounce: reason === 'operator_bind'
+    }
   }
-  return { nextAttemptAfter: undefined, addToWanted: true, kicks: false }
+  return { nextAttemptAfter: undefined, addToWanted: true, kicks: false, bypassDebounce: false }
 }
 
 // R10.2: the in-flight registry — keyed per purpose (`prover:<envId>` / `pump:<envId>`), removed
