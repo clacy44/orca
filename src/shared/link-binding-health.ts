@@ -71,17 +71,27 @@ export const LINK_BINDING_UNAVAILABLE_REASONS: readonly LinkBindingUnavailableRe
   'local_evidence'
 ]
 
-// A4-06, AS AMENDED BY RULING 23(c): the check-line attention set gains `unavailable` and
-// `revoked` beyond R19.5's original four. `misroute_suspected` is deliberately NOT a member —
-// its push surface is the (un-mutable, per Ruling 23(a)) authorship notice, a chair decision
-// recorded in the C6 dispatch, not reopened here.
+// A4-06, AS AMENDED BY RULING 23(c) AND RULING 27(a) (C6 fix-up). Ruling 23(c) added
+// `unavailable`/`revoked` to R19.5's original four; Ruling 27(a) AFFIRMS `misroute_suspected`
+// (Ruling 23 ADDENDUM (k) — a dispatch never outranks a ruling, so the C6-dispatch exclusion
+// this Set previously carried is withdrawn) and adds the reply-relay words `unreachable`,
+// `unsupported`, `stale` (Ruling 26 Addendum 2(z)/3(gg)). Ruling 27(a)'s own enumeration reads as
+// a strict eight-word replacement, but that contradicts Ruling 27(e)/(f) (both presuppose
+// `revoked`/`unavailable` still gate the line) and Ruling 23(c)'s standing, never-withdrawn grant
+// of `peer_reports_contest`/`unavailable`/`revoked` — so this Set is the UNION of the
+// still-standing 23(c) membership and 27(a)'s additions, not 27(a) read as exhaustive. Declared
+// in the C6a commit body; not a worker call to resolve outright, escalated for confirmation.
 export const LINK_BINDING_ATTENTION_HEALTH: ReadonlySet<LinkBindingHealth> = new Set([
   'contested',
   'quarantined',
   'parked',
   'peer_reports_contest',
   'unavailable',
-  'revoked'
+  'revoked',
+  'misroute_suspected',
+  'unreachable',
+  'unsupported',
+  'stale'
 ])
 
 // R21.6 clause 2: "the FIRST word in this list that applies" — the pure combine step, DB-free.

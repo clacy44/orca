@@ -10,7 +10,10 @@ import {
   listEnvironments,
   RuntimeEnvironmentStoreError
 } from '../../../shared/runtime-environment-store'
-import { resolvePreferredEndpoint } from '../../../shared/runtime-environments'
+import {
+  resolvePreferredEndpoint,
+  type KnownRuntimeEnvironment
+} from '../../../shared/runtime-environments'
 import { resolveUserDataPath } from '../rpc/methods/orchestration-link-binding-pending'
 import {
   isRoutableBindingRow,
@@ -21,24 +24,40 @@ import {
 import type { PeerLinkBindingRow } from './link-binding-store'
 import type { OrchestrationDb } from './db'
 
+// S10-16 C6a, Ruling 27(b): a snapshot of one `listEnvironments` read, taken once by a caller
+// (`readEnvironmentSnapshot`) and threaded through every per-link routability/local-evidence
+// check for that call — the read this fleet's hottest verb (`orchestration.check`) was doing
+// once PER LINK before this (s10-16-review-C6.md F2).
+export type EnvironmentSnapshot =
+  | { ok: true; environments: KnownRuntimeEnvironment[] }
+  | { ok: false; error: unknown }
+
+// R15's own floor: never throws. A corrupt store reads as "not ok", and the caller's own
+// local_evidence_unavailable branch is what distinguishes that from a genuinely gone environment
+// (localEvidenceUnavailable, below).
+export function readEnvironmentSnapshot(): EnvironmentSnapshot {
+  try {
+    return { ok: true, environments: listEnvironments(resolveUserDataPath()) }
+  } catch (error) {
+    return { ok: false, error }
+  }
+}
+
 // R15.5: fingerprint sources are INJECTED — no token ever crosses into the liveness layer.
-function buildLivenessSources(runtime: OrcaRuntimeService): LinkBindingLivenessSources {
+function buildLivenessSources(
+  runtime: OrcaRuntimeService,
+  snapshot: EnvironmentSnapshot
+): LinkBindingLivenessSources {
   const db = runtime.getOrchestrationDb()
   return {
     isPeerLinkQuarantined: (linkDeviceId: string) => db.isPeerLinkQuarantined(linkDeviceId),
     registryLinkCredentialFingerprint: (linkDeviceId: string) =>
       runtime.linkBindingSelfView?.registryCredentialFingerprint(linkDeviceId) ?? null,
     resolveEnvironmentEndpoint: (environmentId: string): ResolvedEnvironmentEndpoint | null => {
-      // R15's own floor: never throws. A corrupt store here reads as "no endpoint", and the
-      // caller's own local_evidence_unavailable branch is what distinguishes that from a
-      // genuinely gone environment (localEvidenceUnavailable, below).
-      let environments: ReturnType<typeof listEnvironments>
-      try {
-        environments = listEnvironments(resolveUserDataPath())
-      } catch {
+      if (!snapshot.ok) {
         return null
       }
-      const environment = environments.find((e) => e.id === environmentId)
+      const environment = snapshot.environments.find((e) => e.id === environmentId)
       if (!environment) {
         return null
       }
@@ -118,27 +137,32 @@ export function getRoutableLinkBinding(
   db: OrchestrationDb,
   runtime: OrcaRuntimeService,
   linkDeviceId: string,
-  options: IsRoutableOptions = {}
+  options: IsRoutableOptions = {},
+  // S10-16 C6a, Ruling 27(b): defaults to a fresh read so the prover/pump callers (unedited by
+  // this slice) keep their existing per-call read; `describeLinkBindingAttention` passes ONE
+  // snapshot it already took, hoisted out of its per-link loop.
+  snapshot: EnvironmentSnapshot = readEnvironmentSnapshot()
 ): PeerLinkBindingRow | null {
   const row = db.getPeerLinkBinding(linkDeviceId)
   if (!row) {
     return null
   }
-  const sources = buildLivenessSources(runtime)
+  const sources = buildLivenessSources(runtime, snapshot)
   return isRoutableBindingRow(toLivenessRow(row), sources, Date.now(), options) ? row : null
 }
 
 // R16/L4: this host's OWN evidence, not the peer's — a throw (never an empty store) on either
 // local file. Never used to judge a PEER's absence (R12.1(1)'s separate rule).
-export function localEvidenceUnavailable(runtime: OrcaRuntimeService): boolean {
+export function localEvidenceUnavailable(
+  runtime: OrcaRuntimeService,
+  snapshot: EnvironmentSnapshot = readEnvironmentSnapshot()
+): boolean {
   const selfView = runtime.linkBindingSelfView
   if (!selfView || !selfView.registryLoadSucceeded()) {
     return true
   }
-  try {
-    listEnvironments(resolveUserDataPath())
+  if (snapshot.ok) {
     return false
-  } catch (error) {
-    return error instanceof RuntimeEnvironmentStoreError
   }
+  return snapshot.error instanceof RuntimeEnvironmentStoreError
 }

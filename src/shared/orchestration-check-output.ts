@@ -103,7 +103,13 @@ export function formatOrchestrationCheckText(
   // interpolation of every return below — additive (byte-identical output when null) and
   // present on all eight paths, so the compensating control this line is accepted on can never
   // be silent on the one path that happens to fire.
-  const attentionSuffix = prepared.linkBindingAttention ? `\n${prepared.linkBindingAttention}` : ''
+  // F13/Ruling 27 (C6a): passed through the same control-character escaper message fields use —
+  // its interpolated environment name is operator-chosen, not peer-chosen, but unescaped and
+  // unclamped it is one newline away from breaking the one-line-per-signal discipline agents
+  // parse (the length clamp itself lives where the name is composed, link-binding-attention.ts).
+  const attentionSuffix = prepared.linkBindingAttention
+    ? `\n${escapeTerminalControlCharacters(prepared.linkBindingAttention)}`
+    : ''
   if (prepared.formatted) {
     // Why prepended here too: --format and --inject return before the Delivery line is built, so
     // without this the injected banner is byte-identical on every replay and the starvation stays

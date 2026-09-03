@@ -1,14 +1,35 @@
-// S10-16 C6, R21.1/R21.6/R19.5 (Ruling 21 Protocol B2; Ruling 26 Addendum 2(z)/3(gg)), test 79's
-// C6 slice: `describeLinkBindingHealth`/`describeLinkBindingAttention` against a real
-// OrchestrationDb fixture. `runtime.linkBindingSelfView` is left null (its default), so
-// `getRoutableLinkBinding` refuses `registryLinkCredentialFingerprint` before it ever touches a
-// real registry/environment-store file — `routes` is deterministically false without any disk
-// I/O or electron mock, which is exactly what distinguishes `stale` from `legacy_unattested`.
+// S10-16 C6/C6a, R21.1/R21.6/R19.5 (Ruling 21 Protocol B2; Ruling 26 Addendum 2(z)/3(gg);
+// Ruling 27 — C6 fix-up), test 79's C6 slice: `describeLinkBindingHealth`/
+// `describeLinkBindingAttention` against a real OrchestrationDb fixture.
+//
+// `runtime.linkBindingSelfView` is set to a WORKING stub (`registryLoadSucceeded: () => true`,
+// `registryCredentialFingerprint: () => null`) rather than left null: Ruling 27(f)/F6 makes
+// `describeLinkBindingHealth` raise `unavailable(local_evidence)` whenever local evidence is
+// unavailable, and a null `linkBindingSelfView` IS local evidence being unavailable — leaving it
+// null (as C6 did) would make every fixture in this file read `unavailable`, since that word
+// outranks `stale`/`legacy_unattested`/`proven`/`pending` in A4-02. The stub still returns null
+// from `registryCredentialFingerprint`, so `getRoutableLinkBinding` still refuses on credential
+// mismatch before it ever touches a real registry/environment-store file — `routes` is still
+// deterministically false without any disk I/O or electron mock, which is exactly what
+// distinguishes `stale` from `legacy_unattested`. The dedicated `unavailable(local_evidence)`
+// test below is the one place `linkBindingSelfView` is left null on purpose.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
 import { describeLinkBindingHealth, describeLinkBindingAttention } from './link-binding-attention'
 import { LINK_BINDING_REVERIFY_MS, LINK_BINDING_ATTEST_WARN_MS } from './link-binding-constants'
+import type { LinkBindingSelfView } from '../device-registry-link-credential'
+
+function workingSelfView(): LinkBindingSelfView {
+  return {
+    registryCredentialFingerprint: () => null,
+    ownKeyFingerprint: () => null,
+    macWithRegistryToken: () => null,
+    listRuntimeLinkCandidates: () => [],
+    listRuntimeScopeDeviceIds: () => [],
+    registryLoadSucceeded: () => true
+  }
+}
 
 describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
   let db: OrchestrationDb
@@ -18,6 +39,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
     db = new OrchestrationDb(':memory:')
     runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
+    runtime.linkBindingSelfView = workingSelfView()
     vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockImplementation(
       (selector: string) => ({ name: `env:${selector}`, id: selector }) as never
     )
@@ -43,7 +65,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
   })
 
   it('an unknown link (no rows anywhere) reads pending', () => {
-    expect(describeLinkBindingHealth(db, runtime, 'link_ghost')).toBe('pending')
+    expect(describeLinkBindingHealth(db, runtime, 'link_ghost').word).toBe('pending')
   })
 
   it('a live quarantine outranks every other signal', () => {
@@ -67,13 +89,28 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       createdAt: Date.now(),
       expiresAt: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_a')).toBe('quarantined')
+    expect(describeLinkBindingHealth(db, runtime, 'link_a').word).toBe('quarantined')
   })
 
-  it('a revoked binding reads revoked', () => {
+  it('a revoked binding (state) reads revoked', () => {
     db.putPeerLinkBinding(boundRow('link_b', 'env_1'))
     db.revokePeerLinkBinding('link_b', Date.now())
-    expect(describeLinkBindingHealth(db, runtime, 'link_b')).toBe('revoked')
+    expect(describeLinkBindingHealth(db, runtime, 'link_b').word).toBe('revoked')
+  })
+
+  // F7/Ruling 27(e): `revoked_at` is the load-bearing half of the mark — a row revoked through
+  // the CHECK-rejection catch branch stamps `revoked_at` alone. Simulate that directly.
+  it('a binding with revoked_at stamped but state NOT revoked (the fail-closed repair fallback) still reads revoked', () => {
+    db.putPeerLinkBinding(boundRow('link_b2', 'env_1'))
+    const raw = (
+      db as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }
+    ).db
+    raw
+      .prepare(
+        `UPDATE peer_link_bindings SET revoked_at = ? WHERE link_device_id = ? AND state != 'revoked'`
+      )
+      .run(Date.now(), 'link_b2')
+    expect(describeLinkBindingHealth(db, runtime, 'link_b2').word).toBe('revoked')
   })
 
   it('a contested binding reads contested', () => {
@@ -88,7 +125,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       scanCompleteness: 'complete',
       proofProtocol: 'p1'
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_c')).toBe('contested')
+    expect(describeLinkBindingHealth(db, runtime, 'link_c').word).toBe('contested')
   })
 
   it('unpaired_parked reads parked', () => {
@@ -102,7 +139,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       consecutiveNoWinner: 3,
       nextAttemptAfter: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_d')).toBe('parked')
+    expect(describeLinkBindingHealth(db, runtime, 'link_d').word).toBe('parked')
   })
 
   it('a fresh authorship_unconfirmed advisory reads misroute_suspected, and clears past REVERIFY_MS', () => {
@@ -117,7 +154,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       nextAttemptAfter: null
     })
     db.putLinkAdvisory('link_e', { kind: 'authorship_unconfirmed' }, Date.now())
-    expect(describeLinkBindingHealth(db, runtime, 'link_e')).toBe('misroute_suspected')
+    expect(describeLinkBindingHealth(db, runtime, 'link_e').word).toBe('misroute_suspected')
 
     // Same row, but the advisory is now older than LINK_BINDING_REVERIFY_MS — no system-time
     // mutation needed, since describeLinkBindingHealth reads Date.now() itself.
@@ -126,7 +163,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       { kind: 'authorship_unconfirmed' },
       Date.now() - LINK_BINDING_REVERIFY_MS - 1000
     )
-    expect(describeLinkBindingHealth(db, runtime, 'link_e')).not.toBe('misroute_suspected')
+    expect(describeLinkBindingHealth(db, runtime, 'link_e').word).not.toBe('misroute_suspected')
   })
 
   it('a fresh peer_reports_contest advisory reads peer_reports_contest', () => {
@@ -141,7 +178,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       nextAttemptAfter: null
     })
     db.putLinkAdvisory('link_f', { kind: 'peer_reports_contest' }, Date.now())
-    expect(describeLinkBindingHealth(db, runtime, 'link_f')).toBe('peer_reports_contest')
+    expect(describeLinkBindingHealth(db, runtime, 'link_f').word).toBe('peer_reports_contest')
   })
 
   it.each([
@@ -162,7 +199,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       consecutiveNoWinner: 0,
       nextAttemptAfter: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_g')).toBe(outcome)
+    expect(describeLinkBindingHealth(db, runtime, 'link_g').word).toBe(outcome)
   })
 
   it('unavailable with local_evidence_unavailable detail reads unavailable', () => {
@@ -176,7 +213,16 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       consecutiveNoWinner: 0,
       nextAttemptAfter: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_h')).toBe('unavailable')
+    expect(describeLinkBindingHealth(db, runtime, 'link_h').word).toBe('unavailable')
+  })
+
+  // F6/Ruling 27(f): a LIVE wiring fact — no self-view armed — reads `unavailable` with reason
+  // `local_evidence`, independent of any stored attempt outcome.
+  it('a null linkBindingSelfView reads unavailable with reason local_evidence, even for an otherwise-pending link', () => {
+    runtime.linkBindingSelfView = null
+    const result = describeLinkBindingHealth(db, runtime, 'link_h2')
+    expect(result.word).toBe('unavailable')
+    expect(result.reason).toBe('local_evidence')
   })
 
   it('unavailable with a link_store_empty detail reads peer_no_environments (A4-01 promotes it above unavailable)', () => {
@@ -190,7 +236,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       consecutiveNoWinner: 0,
       nextAttemptAfter: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_i')).toBe('peer_no_environments')
+    expect(describeLinkBindingHealth(db, runtime, 'link_i').word).toBe('peer_no_environments')
   })
 
   it('proven with a legacy_coalesced grant and no attestation reads legacy_unattested', () => {
@@ -205,7 +251,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       consecutiveNoWinner: 0,
       nextAttemptAfter: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_j')).toBe('legacy_unattested')
+    expect(describeLinkBindingHealth(db, runtime, 'link_j').word).toBe('legacy_unattested')
   })
 
   it('proven with a minted grant that fails the live route check reads stale', () => {
@@ -220,7 +266,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       consecutiveNoWinner: 0,
       nextAttemptAfter: null
     })
-    expect(describeLinkBindingHealth(db, runtime, 'link_k')).toBe('stale')
+    expect(describeLinkBindingHealth(db, runtime, 'link_k').word).toBe('stale')
   })
 
   it('a reply-relay row past the unreachable failure threshold contributes unreachable', () => {
@@ -248,7 +294,7 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
     raw
       .prepare(`UPDATE peer_reply_outbox SET consecutive_failures = 7 WHERE link_device_id = ?`)
       .run('link_l')
-    expect(describeLinkBindingHealth(db, runtime, 'link_l')).toBe('unreachable')
+    expect(describeLinkBindingHealth(db, runtime, 'link_l').word).toBe('unreachable')
   })
 })
 
@@ -260,6 +306,7 @@ describe('describeLinkBindingAttention', () => {
     db = new OrchestrationDb(':memory:')
     runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
+    runtime.linkBindingSelfView = workingSelfView()
     vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockImplementation(
       (selector: string) => ({ name: `desktop`, id: selector }) as never
     )
@@ -283,7 +330,10 @@ describe('describeLinkBindingAttention', () => {
     expect(describeLinkBindingAttention(db, runtime)).toBeNull()
   })
 
-  it('P-11(a): with link A misroute_suspected and link B peer_reports_contest, names peer_reports_contest and counts one', () => {
+  // F5/Ruling 27(a): misroute_suspected IS in the attention set (Ruling 23 ADDENDUM (k)
+  // AFFIRMED) and outranks peer_reports_contest in A4-02, so it is now the winning word — the
+  // opposite of what this test asserted pre-C6a.
+  it('with link A misroute_suspected and link B peer_reports_contest, per-word counts both and names misroute_suspected as the worst', () => {
     db.putBindingAttempt('link_a')
     db.settleBindingAttempt('link_a', {
       lastAttemptAt: Date.now(),
@@ -309,13 +359,15 @@ describe('describeLinkBindingAttention', () => {
     db.putLinkAdvisory('link_b', { kind: 'peer_reports_contest' }, Date.now())
 
     const line = describeLinkBindingAttention(db, runtime)
-    expect(line).toContain('peer reports contest')
-    expect(line).toContain('1 ')
+    expect(line).toContain('1 misroute suspected')
+    expect(line).toContain('1 peer reports contest')
     // P-11(b): a peer-sourced word renders through R21.4's claim shape.
     expect(line).toContain('claim supplied by the remote host')
   })
 
-  it('quarantined outranks everything else and names the count of attention links', () => {
+  // F9/Ruling 27(g): the count is PER WORD, never merged under the worst word alone — two links
+  // needing attention, one quarantined and one contested, must never render as "2 quarantined".
+  it('quarantined and contested links render distinct per-word counts, never a merged count', () => {
     db.putContainment({
       subjectKind: 'link',
       subjectId: 'link_q',
@@ -338,7 +390,9 @@ describe('describeLinkBindingAttention', () => {
       proofProtocol: 'p1'
     })
     const line = describeLinkBindingAttention(db, runtime)
-    expect(line).toContain('2 quarantined')
+    expect(line).not.toContain('2 quarantined')
+    expect(line).toContain('1 quarantined')
+    expect(line).toContain('1 contested')
   })
 
   it('a live accept_legacy attestation inside the warn window triggers attention even with no attention-set health word', () => {
@@ -357,16 +411,12 @@ describe('describeLinkBindingAttention', () => {
       lastVerifiedAt: Date.now()
     }
     db.putPeerLinkBinding(boundRow)
-    db.putBindingAttempt('link_leg')
-    db.settleBindingAttempt('link_leg', {
-      lastAttemptAt: Date.now(),
-      lastRoundAt: Date.now(),
-      lastOutcome: 'proven',
-      lastDetail: null,
-      consecutiveFailures: 0,
-      consecutiveNoWinner: 0,
-      nextAttemptAfter: null
-    })
+    // F1/Ruling 27(a): `stale` is now an attention-set word (the reply-relay half of this fix),
+    // so a `proven`-outcome attempt whose live legacy attestation moves routingClassOf off
+    // `legacy_unattested` would ALSO trigger attention via the health word `stale`, defeating
+    // this test's own premise ("even with no attention-set health word"). Deliberately no
+    // binding attempt is settled here — no attempt row means the health word is `pending`,
+    // which is NOT in the attention set, isolating the attestation trigger.
     const now = Date.now()
     db.putContainment({
       subjectKind: 'link',
@@ -378,10 +428,306 @@ describe('describeLinkBindingAttention', () => {
       createdAt: now,
       expiresAt: now + LINK_BINDING_ATTEST_WARN_MS - 1000
     })
-    // Health alone reads legacy_unattested (unattested — the containment above is what makes it
-    // legacy_attested, but the underlying health word this test cares about not being in the
-    // attention set is unaffected either way): confirm attention still fires.
     const line = describeLinkBindingAttention(db, runtime)
     expect(line).toContain('attestation expiring')
+  })
+
+  it('an accept_legacy attestation already past expiry reads attestation expired', () => {
+    const boundRow = {
+      linkDeviceId: 'link_leg2',
+      environmentId: 'env_1',
+      boundEndpointId: 'ep_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp_link',
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      grantClass: 'legacy_coalesced' as const,
+      scanCompleteness: 'complete' as const,
+      proofProtocol: 'p1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    }
+    db.putPeerLinkBinding(boundRow)
+    const now = Date.now()
+    db.putContainment({
+      subjectKind: 'link',
+      subjectId: 'link_leg2',
+      action: 'accept_legacy',
+      reasonCode: null,
+      reasonText: 'test',
+      detail: JSON.stringify({ environmentId: 'env_1', peerKeyFingerprint: 'fp_key' }),
+      createdAt: now - 1000,
+      expiresAt: now - 1
+    })
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).toContain('attestation expired')
+  })
+
+  // Ruling 27(a): "one test per word proves the line appears" — the F1 half (the reply-relay
+  // words unreachable/unsupported/stale, Ruling 26 Addendum 2(z)/3(gg)) plus revoked/unavailable
+  // (standing Ruling 23(c) membership) at the ATTENTION LINE level, not just the health level.
+  it('a reply-relay row past the unreachable failure threshold reaches the attention line (F1)', () => {
+    db.putPeerLinkBinding({
+      linkDeviceId: 'link_relay_unreachable',
+      environmentId: 'env_1',
+      boundEndpointId: 'ep_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp_link',
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'p1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    db.enqueueReplyOutbox({
+      localMessageId: 'msg_relay_1',
+      linkDeviceId: 'link_relay_unreachable',
+      environmentId: 'env_1',
+      boundPairingRevision: 1,
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      inReplyToMessageId: 'msg_0',
+      peerAgentId: 'agt_peer',
+      peerThreadId: null,
+      localThreadId: null,
+      noticeRunId: null,
+      noticePaneKey: null,
+      payload: '{}',
+      byteCount: 2,
+      createdAt: Date.now()
+    })
+    const raw = (
+      db as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }
+    ).db
+    raw
+      .prepare(`UPDATE peer_reply_outbox SET consecutive_failures = 7 WHERE link_device_id = ?`)
+      .run('link_relay_unreachable')
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+    expect(line).toContain('unreachable')
+  })
+
+  it('a reply-relay row abandoned with stale_environment_pairing reaches the attention line as stale (F1/F4)', () => {
+    db.putPeerLinkBinding({
+      linkDeviceId: 'link_relay_stale',
+      environmentId: 'env_1',
+      boundEndpointId: 'ep_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp_link',
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'p1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    db.enqueueReplyOutbox({
+      localMessageId: 'msg_relay_2',
+      linkDeviceId: 'link_relay_stale',
+      environmentId: 'env_1',
+      boundPairingRevision: 1,
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      inReplyToMessageId: 'msg_0',
+      peerAgentId: 'agt_peer',
+      peerThreadId: null,
+      localThreadId: null,
+      noticeRunId: null,
+      noticePaneKey: null,
+      payload: '{}',
+      byteCount: 2,
+      createdAt: Date.now()
+    })
+    const raw = (
+      db as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }
+    ).db
+    raw
+      .prepare(
+        `UPDATE peer_reply_outbox SET state = 'abandoned', last_error_code = 'stale_environment_pairing' WHERE link_device_id = ?`
+      )
+      .run('link_relay_stale')
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+    expect(line).toContain('1 stale')
+  })
+
+  it('a reply-relay row abandoned with capability_unsupported reaches the attention line as unsupported (F1)', () => {
+    db.putPeerLinkBinding({
+      linkDeviceId: 'link_relay_unsupported',
+      environmentId: 'env_1',
+      boundEndpointId: 'ep_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp_link',
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'p1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    db.enqueueReplyOutbox({
+      localMessageId: 'msg_relay_3',
+      linkDeviceId: 'link_relay_unsupported',
+      environmentId: 'env_1',
+      boundPairingRevision: 1,
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      inReplyToMessageId: 'msg_0',
+      peerAgentId: 'agt_peer',
+      peerThreadId: null,
+      localThreadId: null,
+      noticeRunId: null,
+      noticePaneKey: null,
+      payload: '{}',
+      byteCount: 2,
+      createdAt: Date.now()
+    })
+    const raw = (
+      db as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }
+    ).db
+    raw
+      .prepare(
+        `UPDATE peer_reply_outbox SET state = 'abandoned', last_error_code = 'capability_unsupported' WHERE link_device_id = ?`
+      )
+      .run('link_relay_unsupported')
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+    expect(line).toContain('1 unsupported')
+  })
+
+  it('a revoked binding reaches the attention line (standing Ruling 23(c) membership)', () => {
+    db.putPeerLinkBinding({
+      linkDeviceId: 'link_revoked_att',
+      environmentId: 'env_1',
+      boundEndpointId: 'ep_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp_link',
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'p1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    db.revokePeerLinkBinding('link_revoked_att', Date.now())
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+    expect(line).toContain('1 revoked')
+  })
+
+  it('a null linkBindingSelfView reaches the attention line as unavailable(local_evidence) (F6)', () => {
+    runtime.linkBindingSelfView = null
+    db.putBindingAttempt('link_unavail_att')
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+    expect(line).toContain('unavailable(local_evidence)')
+  })
+
+  // F3's throw-safety is exercised at the RPC layer (orchestration-check-link-attention.test.ts);
+  // this file only proves the pure read side stays well-formed on a healthy host.
+
+  // F8/Ruling 27(g)/test 79: for each of Protocol B2's five binding-side codes (contest,
+  // unavailable, peer_reports_contest, attestation-expired, attestation-expiring), the DB state
+  // that raises it reaches the check attention line WITHOUT any mailbox write —
+  // `describeLinkBindingHealth`/`describeLinkBindingAttention` are read-only over `db` (verified
+  // by construction: neither function is ever passed anything that could write, and `messages`
+  // count is asserted unchanged here). DECLARED RESIDUAL: this does not drive the codes through
+  // their real PRODUCING path (createTables()'s v40 repair for `unavailable`, contestPeerLinkBinding
+  // for `contest`, the attestation clock for the two expiry codes) — those live outside C6a's file
+  // scope (link-binding-attention.ts/link-binding-health.ts/reply-outbox-health.ts/
+  // peer-supplied-text.ts/orchestration-check-output.ts/the RPC wrap site/reply-outbox store
+  // accessors). Whether those producing paths themselves write an `agent_audit` row is unverified
+  // here and carried forward for the whole-slice review, per the C6a commit body.
+  it.each([
+    'contest',
+    'unavailable',
+    'peer_reports_contest',
+    'attestation_expired',
+    'attestation_expiring'
+  ] as const)('%s reaches the attention line with zero new messages rows', (code) => {
+    const raw = (
+      db as unknown as {
+        db: {
+          prepare: (sql: string) => { get: () => { n: number }; run: (...a: unknown[]) => unknown }
+        }
+      }
+    ).db
+    const messagesBefore = raw.prepare('SELECT COUNT(*) AS n FROM messages').get().n
+
+    if (code === 'contest') {
+      db.contestPeerLinkBinding('link_code_contest', Date.now(), 'incident_1', 'detail', {
+        environmentId: 'env_1',
+        boundEndpointId: 'ep_1',
+        boundPairingRevision: 1,
+        linkCredentialFp: 'fp_link',
+        peerCredentialFp: 'fp_peer',
+        peerKeyFingerprint: 'fp_key',
+        grantClass: 'minted',
+        scanCompleteness: 'complete',
+        proofProtocol: 'p1'
+      })
+    } else if (code === 'unavailable') {
+      db.putBindingAttempt('link_code_unavailable')
+      db.settleBindingAttempt('link_code_unavailable', {
+        lastAttemptAt: Date.now(),
+        lastRoundAt: Date.now(),
+        lastOutcome: 'unavailable',
+        lastDetail: 'local_evidence_unavailable',
+        consecutiveFailures: 0,
+        consecutiveNoWinner: 0,
+        nextAttemptAfter: null
+      })
+    } else if (code === 'peer_reports_contest') {
+      db.putBindingAttempt('link_code_prc')
+      db.settleBindingAttempt('link_code_prc', {
+        lastAttemptAt: Date.now(),
+        lastRoundAt: Date.now(),
+        lastOutcome: 'proven',
+        lastDetail: null,
+        consecutiveFailures: 0,
+        consecutiveNoWinner: 0,
+        nextAttemptAfter: null
+      })
+      db.putLinkAdvisory('link_code_prc', { kind: 'peer_reports_contest' }, Date.now())
+    } else {
+      const linkId = code === 'attestation_expired' ? 'link_code_att_exp' : 'link_code_att_soon'
+      db.putPeerLinkBinding({
+        linkDeviceId: linkId,
+        environmentId: 'env_1',
+        boundEndpointId: 'ep_1',
+        boundPairingRevision: 1,
+        linkCredentialFp: 'fp_link',
+        peerCredentialFp: 'fp_peer',
+        peerKeyFingerprint: 'fp_key',
+        grantClass: 'legacy_coalesced',
+        scanCompleteness: 'complete',
+        proofProtocol: 'p1',
+        provedAt: Date.now(),
+        lastVerifiedAt: Date.now()
+      })
+      const now = Date.now()
+      db.putContainment({
+        subjectKind: 'link',
+        subjectId: linkId,
+        action: 'accept_legacy',
+        reasonCode: null,
+        reasonText: 'test',
+        detail: JSON.stringify({ environmentId: 'env_1', peerKeyFingerprint: 'fp_key' }),
+        createdAt: now - 1000,
+        expiresAt:
+          code === 'attestation_expired' ? now - 1 : now + LINK_BINDING_ATTEST_WARN_MS - 1000
+      })
+    }
+
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+
+    const messagesAfter = raw.prepare('SELECT COUNT(*) AS n FROM messages').get().n
+    expect(messagesAfter).toBe(messagesBefore)
   })
 })

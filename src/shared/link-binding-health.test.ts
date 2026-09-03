@@ -90,18 +90,45 @@ describe('LinkBindingHealth: TOTALITY (test 75, C2 slice)', () => {
     expect(new Set(LINK_BINDING_UNAVAILABLE_REASONS).size).toBe(7)
   })
 
-  it('the attention set (Ruling 23(c) amended) contains unavailable and revoked plus the original four', () => {
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('unavailable')).toBe(true)
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('revoked')).toBe(true)
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('contested')).toBe(true)
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('quarantined')).toBe(true)
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('parked')).toBe(true)
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('peer_reports_contest')).toBe(true)
-    expect(LINK_BINDING_ATTENTION_HEALTH.size).toBe(6)
+  // Ruling 27(a) (C6a, C6 fix-up): affirms Ruling 23 ADDENDUM (k) — misroute_suspected IS in the
+  // set (a dispatch never outranks a ruling) — and adds the reply-relay words unreachable/
+  // unsupported/stale (Ruling 26 Addendum 2(z)/3(gg)), on top of the standing Ruling 23(c)
+  // membership (unavailable/revoked/peer_reports_contest/contested/quarantined/parked) that no
+  // ruling has withdrawn. One test per word, per Ruling 27(a)'s own text.
+  it.each([
+    'contested',
+    'quarantined',
+    'parked',
+    'peer_reports_contest',
+    'unavailable',
+    'revoked',
+    'misroute_suspected',
+    'unreachable',
+    'unsupported',
+    'stale'
+  ] as const)('the attention set (Ruling 27(a)) contains %s', (word) => {
+    expect(LINK_BINDING_ATTENTION_HEALTH.has(word)).toBe(true)
   })
 
-  it('misroute_suspected is deliberately NOT in the attention set (its push surface is the notice)', () => {
-    expect(LINK_BINDING_ATTENTION_HEALTH.has('misroute_suspected')).toBe(false)
+  it('the attention set has exactly ten members (Ruling 27(a) additions over standing Ruling 23(c))', () => {
+    expect(LINK_BINDING_ATTENTION_HEALTH.size).toBe(10)
+  })
+
+  it('excluded/legacy_unattested/proven/pending/unpaired/sender_unverified/peer_duplicate/peer_no_environments/duplicate_environment/multi_grant are NOT in the attention set', () => {
+    for (const word of [
+      'excluded',
+      'legacy_unattested',
+      'proven',
+      'pending',
+      'unpaired',
+      'sender_unverified',
+      'peer_duplicate',
+      'peer_no_environments',
+      'duplicate_environment',
+      'multi_grant'
+    ] as const) {
+      expect(LINK_BINDING_ATTENTION_HEALTH.has(word)).toBe(false)
+    }
   })
 
   it('HEALTH is independent of ROUTES: this module computes no routability at all', () => {

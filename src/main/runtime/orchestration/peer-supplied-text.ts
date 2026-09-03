@@ -1,18 +1,18 @@
 // S10-16 C6, R19.4/R21.4, INV-P-012 clause (2)/(5): the ONLY renderer of peer-supplied text. A
 // peer-chosen byte reaches the operator only as a labelled, control-stripped, length-clamped
 // claim — never as free prose, never unlabelled.
-import { LINK_BINDING_PEER_TEXT_CLAMP } from './link-binding-constants'
+//
+// F10/Ruling 27(h) (C6a): C6 landed a `sanitizePeerSuppliedText` here that was exported and
+// called NOWHERE — byte-for-byte `reply-outbox-pump-disposition.ts`'s write-time
+// `sanitizeErrorDetail` (same control-char strip, same clamp shape, a different constant) but
+// missing R19.4's whitespace-collapse and truncation-marker contract, and untested. Ruling
+// 27(h)'s two options: complete it to R19.4 and make `sanitizeErrorDetail` delegate to it (one
+// definition site, Ruling 23(i)), or delete it and point C7 at `sanitizeErrorDetail`.
+// `sanitizeErrorDetail` lives in `reply-outbox-pump-disposition.ts`, which this slice's
+// `reply-outbox-pump*.ts` no-edit constraint puts out of reach — delegating would require editing
+// it — so this is the DELETE branch: C7's `link-status --outbox` should import
+// `sanitizeErrorDetail` from `reply-outbox-pump-disposition.ts`, not a dead duplicate here.
 import type { LinkBindingHealth } from '../../../shared/link-binding-health'
-
-// R19.4: strip control characters (Ruling 26 Addendum 1(v)'s set) and clamp
-// to the write-time bound this text was already capped at, so a render-side bug can never emit
-// more than the store itself would ever hold. Mirrors reply-outbox-pump-disposition.ts's
-// write-time `sanitizeErrorDetail` — the render-side counterpart of the same rule.
-export function sanitizePeerSuppliedText(raw: string): string {
-  // eslint-disable-next-line no-control-regex -- Why: stripping raw peer-supplied control bytes is the point.
-  const stripped = raw.replace(/[\x00-\x1F\x7F\u2028\u2029]/g, ' ').trim()
-  return stripped.slice(0, LINK_BINDING_PEER_TEXT_CLAMP)
-}
 
 // A4-03: health words sourced from a peer's own answer — rendered through R21.4's claim shape.
 export const PEER_SOURCED_HEALTH_WORDS: ReadonlySet<LinkBindingHealth> = new Set([

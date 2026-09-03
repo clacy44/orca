@@ -75,6 +75,11 @@ export const LINK_BINDING_SCAN_FACTS_CAP = 4_096
 export const LINK_BINDING_CONFIRM_OBS_PER_LINK_CAP = 64
 export const LINK_BINDING_MISROUTE_ADVISORY_ALARM = 3
 export const LINK_BINDING_PEER_TEXT_CLAMP = 512
+// F13/Ruling 27 (C6a): the check attention line's interpolated environment name is
+// operator-chosen, not peer-chosen, but unclamped it is one long name away from an unwieldy
+// line. FORCED registration here (not a ruling-named constant) — test 77/THE REGISTER bans any
+// numeric literal in link-binding-attention.ts outside this file; declared in the C6a commit body.
+export const LINK_BINDING_ATTENTION_ENVIRONMENT_NAME_CLAMP = 200
 // A-arith(9): the band equals the outbox backoff's own floor and cap.
 export const LINK_BINDING_RETRY_MIN_MS = 5_000
 export const LINK_BINDING_RETRY_MAX_MS = 300_000

@@ -3,7 +3,7 @@
 // against a real OrchestrationDb fixture — not a unit test of the formatter alone. Local caller
 // carries `linkBindingAttention`; the same call with `pairedDeviceId` set, or a mobile client,
 // carries no such field (R19.5's local-caller gate); a healthy host carries no field either.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
@@ -73,5 +73,43 @@ describe('orchestration.check: linkBindingAttention (S10-16 C6)', () => {
     contestLinkC()
     const result = await check({ clientKind: 'mobile' })
     expect(result.linkBindingAttention).toBeUndefined()
+  })
+
+  // F3/Ruling 27(c): the attention read must never fail `check` — a throw degrades LOUDLY to a
+  // host-constant literal and an audit row, never silently to "no attention" and never by
+  // failing the whole verb (the fleet's hottest read).
+  it('a throwing attention read still returns the check result, carrying the host-constant degradation literal', async () => {
+    vi.spyOn(db, 'listPeerLinkBindings').mockImplementation(() => {
+      throw new Error('v40 table missing')
+    })
+    const auditCountBefore = (
+      db as unknown as { db: { prepare: (sql: string) => { get: () => { n: number } } } }
+    ).db
+      .prepare('SELECT COUNT(*) AS n FROM agent_audit')
+      .get().n
+
+    const result = await check()
+
+    expect(typeof result.linkBindingAttention).toBe('string')
+    expect(result.linkBindingAttention).toBe(
+      'Link binding health could not be read on this host — orca environment link-status'
+    )
+    expect(result.messages).toBeDefined()
+
+    const auditCountAfter = (
+      db as unknown as { db: { prepare: (sql: string) => { get: () => { n: number } } } }
+    ).db
+      .prepare('SELECT COUNT(*) AS n FROM agent_audit')
+      .get().n
+    expect(auditCountAfter).toBe(auditCountBefore + 1)
+    const row = (
+      db as unknown as {
+        db: { prepare: (sql: string) => { get: () => { verb: string; outcome: string } } }
+      }
+    ).db
+      .prepare('SELECT verb, outcome FROM agent_audit ORDER BY rowid DESC LIMIT 1')
+      .get()
+    expect(row.verb).toBe('check')
+    expect(row.outcome).toBe('link_attention_unavailable')
   })
 })

@@ -1849,7 +1849,27 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (pairedDeviceId != null || clientKind === 'mobile') {
         return result
       }
-      const attention = describeLinkBindingAttention(runtime.getOrchestrationDb(), runtime)
+      // F3/Ruling 27(c): the attention read must never fail `check` — this is the fleet's
+      // hottest verb (every agent reads its mail every turn) and the specific fault this read
+      // can hit (a missing/malformed v40 table) is R14.4's own fail-closed repair scenario, i.e.
+      // exactly the condition this line exists to report. Degrade LOUDLY: a host-constant literal
+      // instead of the computed line, plus an audit row — never a silent `catch {}` back to "no
+      // attention".
+      let attention: string | null = null
+      try {
+        attention = describeLinkBindingAttention(runtime.getOrchestrationDb(), runtime)
+      } catch (error) {
+        runtime.getOrchestrationDb().writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: 'local',
+          verb: 'check',
+          outcome: 'link_attention_unavailable',
+          reasonCode: error instanceof Error ? error.name : 'unknown'
+        })
+        attention =
+          'Link binding health could not be read on this host — orca environment link-status'
+      }
       return attention
         ? { ...(result as Record<string, unknown>), linkBindingAttention: attention }
         : result

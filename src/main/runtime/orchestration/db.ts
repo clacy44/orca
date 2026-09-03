@@ -139,6 +139,10 @@ import {
   type ReplyOutboxRow
 } from './reply-outbox-store'
 import {
+  listReplyOutboxHealthRows as listReplyOutboxHealthRowsImpl,
+  type ReplyOutboxHealthRow
+} from './reply-outbox-health-rows'
+import {
   reclaimExpiredReplyOutboxLeases as reclaimExpiredReplyOutboxLeasesImpl,
   claimNextReplyOutboxItem as claimNextReplyOutboxItemImpl,
   settleReplyOutboxItem as settleReplyOutboxItemImpl,
@@ -4794,6 +4798,12 @@ export class OrchestrationDb {
 
   listReplyOutbox(linkDeviceId?: string): ReplyOutboxRow[] {
     return listReplyOutboxImpl(this.db, linkDeviceId)
+  }
+
+  // S10-16 C6a, Ruling 27(b): the bounded, column-limited accessor the check-path health mapper
+  // uses instead of `listReplyOutbox`'s unfiltered `SELECT *`.
+  listReplyOutboxHealthRows(linkDeviceId: string, now: number): ReplyOutboxHealthRow[] {
+    return listReplyOutboxHealthRowsImpl(this.db, linkDeviceId, now)
   }
 
   countPendingReplyOutbox(linkDeviceId: string): number {

@@ -196,11 +196,12 @@ describe('formatOrchestrationCheckText delivery replay', () => {
 })
 
 // S10-16 C6, plan §C6 P-2/Gate-1 checklist item 1: a table-driven test that drives ALL EIGHT
-// return paths of `formatOrchestrationCheckText` (orchestration-check-output.ts:107, :112, :118,
-// :123, :126, :132, :135, :149 at this revision) with a non-null `linkBindingAttention` and
-// asserts the line appears in every one, additively (byte-identical prefix) — and is absent when
-// the field is unset. Missing even one path would leave Ruling 21 B2's compensating control
-// silent on exactly the path a contested/quarantined/parked link happens to take.
+// return paths of `formatOrchestrationCheckText` (F16/C6a: line numbers are not cited here —
+// they drift with every edit to the file; `bases` below enumerates the eight paths by shape
+// instead) with a non-null `linkBindingAttention` and asserts the line appears in every one,
+// additively (byte-identical prefix) — and is absent when the field is unset. Missing even one
+// path would leave Ruling 21 B2's compensating control silent on exactly the path a
+// contested/quarantined/parked link happens to take.
 describe('formatOrchestrationCheckText: linkBindingAttention on all eight return paths', () => {
   const attentionLine =
     'Link binding needs attention: 1 contested (desktop, incident 3f2a) — orca environment link-status'
@@ -255,4 +256,20 @@ describe('formatOrchestrationCheckText: linkBindingAttention on all eight return
       expect(withAttention).toBe(`${withoutAttention}\n${attentionLine}`)
     })
   }
+
+  // F13: the composed line goes through the same control-character escaper message fields use —
+  // a stray 0x01 in an operator-chosen environment name must not reach the terminal raw.
+  it('F13: a control character in the attention line is escaped, not passed through raw', () => {
+    const rendered = formatOrchestrationCheckText(
+      {
+        messages: [],
+        count: 0,
+        linkBindingAttention:
+          'Link binding needs attention: 1 stale (env\x01) — orca environment link-status'
+      },
+      'term_coord'
+    )
+    expect(rendered).not.toContain('\x01')
+    expect(rendered).toContain('\\x01')
+  })
 })

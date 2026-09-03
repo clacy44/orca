@@ -161,13 +161,19 @@ export function replyRelayNoticeRateLimitOk(
   return now - (lastLinkNotifiedAt ?? 0) >= LINK_BINDING_REVERIFY_MS
 }
 
-// S10-16 C6, Ruling 26 Addendum 2(z)/3(gg): the outbox-row-to-health-word mapper. Health and the
-// check attention line cover the reply-relay conditions (unreachable, stale pairing, unsupported,
-// abandoned) derived DIRECTLY from `peer_reply_outbox` rows (state, consecutive_failures,
-// last_error_code), never from the no-run notice's audit row. A4-01 is a closed twenty-member
-// union with no `abandoned` member, so a terminal `abandoned` row is classified by the condition
-// that caused the abandonment (its own `last_error_code`), defaulting to `unreachable` — declared
-// deviation, C6 commit body.
+// S10-16 C6/C6a, Ruling 26 Addendum 2(z)/3(gg), Ruling 27(d): the outbox-row-to-health-word
+// mapper. Health and the check attention line cover the reply-relay conditions (unreachable,
+// stale pairing, unsupported, abandoned) derived DIRECTLY from `peer_reply_outbox` rows (state,
+// consecutive_failures, last_error_code, created_at), never from the no-run notice's audit row.
+// A4-01 is a closed twenty-member union with no `abandoned` member, so a terminal `abandoned` row
+// is classified by the condition that caused the abandonment: `runtime_environment_changed` and
+// `stale_environment_pairing` both read `stale` (Ruling 26 Addendum 5(mm) — the peer answered,
+// its runtime environment moved, that is not a transport verdict); `capability_unsupported`
+// reads `unsupported`; anything else reads `unreachable` ONLY when the row also carries a
+// failure streak past the threshold — an abandonment with no informative code and no failure
+// streak is not evidence of unreachability, so it contributes nothing (Ruling 27(d)). A terminal
+// row older than LINK_BINDING_REVERIFY_MS (from its OWN `created_at`) is ignored entirely, so one
+// stale abandonment can never pin a link's health above `proven` for ever (Ruling 27(d)).
 export type ReplyRelayLinkHealthWord = 'unreachable' | 'unsupported' | 'stale'
 
 const REPLY_RELAY_LINK_HEALTH_RANK: Record<ReplyRelayLinkHealthWord, number> = {
@@ -177,7 +183,11 @@ const REPLY_RELAY_LINK_HEALTH_RANK: Record<ReplyRelayLinkHealthWord, number> = {
 }
 
 export function describeReplyRelayLinkHealth(
-  rows: readonly Pick<ReplyOutboxRow, 'state' | 'consecutiveFailures' | 'lastErrorCode'>[]
+  rows: readonly Pick<
+    ReplyOutboxRow,
+    'state' | 'consecutiveFailures' | 'lastErrorCode' | 'createdAt'
+  >[],
+  now: number
 ): ReplyRelayLinkHealthWord | null {
   let worst: ReplyRelayLinkHealthWord | null = null
   const consider = (word: ReplyRelayLinkHealthWord): void => {
@@ -194,13 +204,19 @@ export function describeReplyRelayLinkHealth(
     if (!live && !terminal) {
       continue
     }
+    if (terminal && now - row.createdAt >= LINK_BINDING_REVERIFY_MS) {
+      continue
+    }
     if (live && row.consecutiveFailures >= REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD) {
       consider('unreachable')
-    } else if (row.lastErrorCode === 'stale_environment_pairing') {
+    } else if (
+      row.lastErrorCode === 'stale_environment_pairing' ||
+      row.lastErrorCode === 'runtime_environment_changed'
+    ) {
       consider('stale')
     } else if (row.lastErrorCode === 'capability_unsupported') {
       consider('unsupported')
-    } else if (terminal) {
+    } else if (terminal && row.consecutiveFailures >= REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD) {
       consider('unreachable')
     }
   }
