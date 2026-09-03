@@ -12,7 +12,7 @@ import {
   LINK_BINDING_STATUS_MS_PER_SECOND,
   LINK_BINDING_STATUS_SECONDS_PER_MINUTE,
   LINK_BINDING_STATUS_SECONDS_PER_HOUR
-} from '../../main/runtime/orchestration/link-binding-constants'
+} from '../../shared/link-binding-register'
 
 type LinkRow = {
   linkDeviceId: string
