@@ -1299,9 +1299,19 @@ export class OrchestrationDb {
       return
     }
     if (!this.hasColumn('remote_agents', 'link_kind')) {
+      // Ruling 31(c): same silent-backfill log as the migrate() v37 step above, for a store an
+      // earlier unshipped copy of this migration stamped v37 without ever running that step.
+      const remoteAgentCount = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM remote_agents').get() as { n: number }
+      ).n
       this.db.exec(
         `ALTER TABLE remote_agents ADD COLUMN link_kind TEXT NOT NULL DEFAULT 'paired_device'`
       )
+      if (remoteAgentCount > 0) {
+        console.warn('[orchestration] remote_agents link_kind back-filled', {
+          count: remoteAgentCount
+        })
+      }
     }
     if (!this.hasColumn('remote_agents', 'peer_fingerprint')) {
       this.db.exec(`ALTER TABLE remote_agents ADD COLUMN peer_fingerprint TEXT`)
@@ -1344,6 +1354,35 @@ export class OrchestrationDb {
     // either — the F7a data repair that block performs must also run here, or a DB stamped v38
     // by an earlier build of this branch keeps its stranded rows forever.
     this.repointStrandedDisplayNameAddressedMessages()
+  }
+
+  // Ruling 31(b) unshipped-v39 repair (same shape as v35/v36/v37/v38 above): a DB already stamped
+  // v39/v40 by a pre-fix copy of this branch never re-enters migrate()'s `current < 39` block, so
+  // it would never get the install-day retention floor and every pre-existing settled row would
+  // be evaluated against the unmodified 7-day predicate on the very next prune tick. Guarded on
+  // user_version >= 39 (INV-P-016: no v39/v40 artifact is installed anywhere, so this table may
+  // still ride the v39 step) plus a hasTable probe, same discipline as every repair above.
+  private repairUnshippedV39AttachmentRetentionFloor(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 39) {
+      return
+    }
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+    if (!hasTable('peer_attachment_retention_floor')) {
+      this.db.exec(`
+        CREATE TABLE peer_attachment_retention_floor (
+          id       INTEGER PRIMARY KEY CHECK(id = 1),
+          floor_at TEXT NOT NULL
+        );
+      `)
+    }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO peer_attachment_retention_floor (id, floor_at) VALUES (1, datetime('now'))`
+      )
+      .run()
   }
 
   // R14.4: unshipped-v40 repair, called first in createTables() after repairUnshippedV38PeerRouting
@@ -1605,20 +1644,30 @@ export class OrchestrationDb {
   // "more than one row returned" if that invariant is ever loosened. Idempotent: re-running finds
   // nothing left to repoint once every stranded row has been.
   private repointStrandedDisplayNameAddressedMessages(): void {
-    this.db.exec(`
-      UPDATE messages
-      SET to_handle = 'agent:' || (
-        SELECT a.id FROM agents a
-        WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL AND a.host_id = 'local'
-        LIMIT 1
+    const result = this.db
+      .prepare(
+        `UPDATE messages
+         SET to_handle = 'agent:' || (
+           SELECT a.id FROM agents a
+           WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL AND a.host_id = 'local'
+           LIMIT 1
+         )
+         WHERE recipient_pane_key IS NULL
+           AND read = 0
+           AND EXISTS (
+             SELECT 1 FROM agents a
+             WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL AND a.host_id = 'local'
+           )`
       )
-      WHERE recipient_pane_key IS NULL
-        AND read = 0
-        AND EXISTS (
-          SELECT 1 FROM agents a
-          WHERE a.display_name = messages.to_handle AND a.tombstoned_at IS NULL AND a.host_id = 'local'
-        )
-    `)
+      .run()
+    // Ruling 31(c): this rewrite (F7a) was previously silent — log the row count once, no
+    // message content, whenever it actually repoints something. Idempotent: a later call finds
+    // nothing left to repoint and logs nothing.
+    if (result.changes > 0) {
+      console.warn('[orchestration] stranded display-name-addressed messages repointed', {
+        count: result.changes
+      })
+    }
   }
 
   private createTables(): void {
@@ -1626,6 +1675,7 @@ export class OrchestrationDb {
     this.repairUnshippedV36RelinkGeneration()
     this.repairUnshippedV37RemoteAgentIdentity()
     this.repairUnshippedV38PeerRouting()
+    this.repairUnshippedV39AttachmentRetentionFloor()
     this.repairUnshippedV40LinkBinding()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
@@ -1846,6 +1896,15 @@ export class OrchestrationDb {
       );
       CREATE INDEX IF NOT EXISTS idx_rda_terminal_handle
         ON remote_dispatch_attachments(terminal_handle);
+
+      -- Ruling 31(b): install-day retention floor for pruneSettledRemoteAttachments. A fresh
+      -- store stamps it here, at creation, so no pre-existing row is ever evaluated — there are
+      -- none. An upgraded store stamps it in the v39 migration step / the unshipped-v39 repair.
+      CREATE TABLE IF NOT EXISTS peer_attachment_retention_floor (
+        id       INTEGER PRIMARY KEY CHECK(id = 1),
+        floor_at TEXT NOT NULL
+      );
+      INSERT OR IGNORE INTO peer_attachment_retention_floor (id, floor_at) VALUES (1, datetime('now'));
 
       -- v39 (S10-19): peer run-mailbox sharing grants. Created empty; the reader is behind
       -- peerRunMailboxScoped:false, and the operator writer is not built by this slice
@@ -2558,9 +2617,19 @@ export class OrchestrationDb {
       // as the v36 block just above.
       if (current < 37) {
         if (!this.hasColumn('remote_agents', 'link_kind')) {
+          // Ruling 31(c): the ALTER's DEFAULT back-fills every existing row silently — log the
+          // count once, at migration time, before the column exists to filter by.
+          const remoteAgentCount = (
+            this.db.prepare('SELECT COUNT(*) AS n FROM remote_agents').get() as { n: number }
+          ).n
           this.db.exec(
             `ALTER TABLE remote_agents ADD COLUMN link_kind TEXT NOT NULL DEFAULT 'paired_device'`
           )
+          if (remoteAgentCount > 0) {
+            console.warn('[orchestration] remote_agents link_kind back-filled', {
+              count: remoteAgentCount
+            })
+          }
         }
         if (!this.hasColumn('remote_agents', 'peer_fingerprint')) {
           this.db.exec(`ALTER TABLE remote_agents ADD COLUMN peer_fingerprint TEXT`)
@@ -2625,6 +2694,14 @@ export class OrchestrationDb {
             granted_at              TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (run_id, peer_link_device_id)
           );
+          -- Ruling 31(b): stamp the retention floor exactly once, atomically with the v39 bump,
+          -- so every pre-existing settled row gets a full retention window counted from THIS
+          -- upgrade rather than from its own (long-past) updated_at.
+          CREATE TABLE IF NOT EXISTS peer_attachment_retention_floor (
+            id       INTEGER PRIMARY KEY CHECK(id = 1),
+            floor_at TEXT NOT NULL
+          );
+          INSERT OR IGNORE INTO peer_attachment_retention_floor (id, floor_at) VALUES (1, datetime('now'));
         `)
         if (!this.remoteDispatchAttachmentsCheckAllowsAgentExited()) {
           this.db.exec(`
@@ -7467,22 +7544,31 @@ export class OrchestrationDb {
     this.db.prepare(`DELETE FROM remote_dispatch_attachments WHERE dispatch_id = ?`).run(dispatchId)
   }
 
-  // S10-19 W-2 (§8.6, ops MO-2): garbage-collects rows that are ALREADY settled — every row this
-  // deletes either went through a close-then-stamp path already (agent_exited_at set) or reached
-  // a terminal dispatch state with no pane ever bound in that state, so this never needs to
-  // close anything itself. Retention window first, then the per-link cap on the remainder.
+  // S10-19 W-2 (§8.6, ops MO-2), Ruling 31(d): garbage-collects rows that are ALREADY settled AND
+  // already closed-or-stamped by the pane-lifecycle pass — either agent_exited_at is set (a
+  // close-then-stamp or markOwnerUnresolved already ran) or the row reached a terminal dispatch
+  // state with NO pane ever bound (terminal_handle IS NULL, so there is nothing to leak). A
+  // settled row that still carries a live terminal_handle and has not yet been stamped is left
+  // for the next pane-lifecycle pass — never deleted unclosed. Retention window first (Ruling
+  // 31(b): floored at the install-day stamp so a pre-existing backlog gets a full window counted
+  // from upgrade, not from its own long-past updated_at), then the per-link cap on the remainder.
   pruneSettledRemoteAttachments(): number {
     const settledPredicate = `(
       agent_exited_at IS NOT NULL
-      OR state IN (${PEER_ATTACHMENT_SETTLED_STATES.map(() => '?').join(', ')}, 'stop_unknown', 'start_unknown')
+      OR (
+        state IN (${PEER_ATTACHMENT_SETTLED_STATES.map(() => '?').join(', ')}, 'stop_unknown', 'start_unknown')
+        AND terminal_handle IS NULL
+      )
     )`
     const settledParams = [...PEER_ATTACHMENT_SETTLED_STATES]
+    const floorFloored = `max(COALESCE(agent_exited_at, updated_at),
+        COALESCE((SELECT floor_at FROM peer_attachment_retention_floor WHERE id = 1), '0000'))`
     const retentionDeleted = Number(
       this.db
         .prepare(
           `DELETE FROM remote_dispatch_attachments
            WHERE ${settledPredicate}
-             AND COALESCE(agent_exited_at, updated_at) < datetime('now', ?)`
+             AND ${floorFloored} < datetime('now', ?)`
         )
         .run(...settledParams, `-${Math.floor(PEER_ATTACHMENT_RETENTION_MS / 1000)} seconds`)
         .changes
@@ -7496,7 +7582,7 @@ export class OrchestrationDb {
                SELECT dispatch_id,
                       ROW_NUMBER() OVER (
                         PARTITION BY home_peer_fingerprint
-                        ORDER BY COALESCE(agent_exited_at, updated_at) DESC, rowid DESC
+                        ORDER BY ${floorFloored} DESC, rowid DESC
                       ) AS rn
                FROM remote_dispatch_attachments
                WHERE ${settledPredicate}

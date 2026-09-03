@@ -190,6 +190,10 @@ export async function runPeerAttachmentRuntimePrune(args: {
     }
     const liveHandle = args.runtime.resolveLivePeerPaneHandle(row.process_incarnation)
     if (!liveHandle) {
+      // Ruling 31(d): an incarnation this pass cannot resolve is stamped and audited HERE, never
+      // silently skipped — otherwise the row stays unstamped forever with a live-but-unresolvable
+      // pane, which is exactly the delete-without-close orphan the retention prune must never do.
+      markOwnerUnresolved(args.db, row.dispatch_id, 'incarnation_unresolvable')
       continue
     }
     const disposition = peerOwnedPaneDisposition(row, args.lookup)

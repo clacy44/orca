@@ -554,10 +554,16 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     expect(pruneAudit).toEqual(exitAudit)
   })
 
-  // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)): the RE-RUN property — a row
-  // unresolvable on one pass (the pty graph had not yet re-adopted it) is handled on a LATER
-  // pass, not left alone forever.
-  it('finding 2 / 24(bb): a row unresolvable on the first call is closed on a later call once the handle resolves', async () => {
+  // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)) SUPERSEDED by Ruling 31(d): the prior
+  // "retry a later pass" design left an unresolvable incarnation unstamped in between passes,
+  // which is exactly the delete-without-close gap the migration-rehearsal root cause (D-R59)
+  // found — pruneSettledRemoteAttachments has no visibility into "still being retried" and could
+  // delete a settled row whose pane was never closed. Ruling 31(d) requires the FIRST
+  // unresolvable pass to stamp+audit immediately (never skip), so the row is (a) never deleted
+  // unclosed and (b) no longer a re-run candidate once resolvable — an unresolved disposition is
+  // not proof of peer ownership (D1), so it must never be force-closed even if the handle later
+  // resolves.
+  it('Ruling 31(d): a row unresolvable on the first call is stamped + audited immediately, and is not closed even once the handle later resolves', async () => {
     db = new OrchestrationDb(':memory:')
     const dispatchId = insertAttachment(db, {
       homeFingerprint: 'fp_peer',
@@ -576,12 +582,22 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     }
     await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
     expect(closeTerminal).not.toHaveBeenCalled()
-    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
+    const stampedRow = db.getRemoteDispatchAttachment(dispatchId)
+    expect(stampedRow).toBeDefined()
+    expect(stampedRow?.agent_exited_at).not.toBeNull()
+    const audit = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'peerPaneClose'`)
+      .all() as { outcome: string; reason_code: string }[]
+    expect(audit).toHaveLength(1)
+    expect(audit[0]?.outcome).toBe('owner_unresolved')
+    expect(audit[0]?.reason_code).toBe('incarnation_unresolvable')
 
+    // The row is now stamped (agent_exited_at set), so it is no longer a
+    // findLivePeerCandidateAttachments candidate at all — the later resolve is a no-op.
     resolved = true
     await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
-    expect(closeTerminal).toHaveBeenCalledWith('term_later_reconnected')
-    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+    expect(closeTerminal).not.toHaveBeenCalled()
+    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
   })
 
   it('a full-profile row whose agent has exited is never inspected for closing or deletion', async () => {

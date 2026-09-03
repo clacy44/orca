@@ -4364,7 +4364,22 @@ export class OrcaRuntimeService {
     // no new timer.
     this.runPeerAttachmentRuntimePrune()
     try {
-      db.pruneSettledRemoteAttachments()
+      const pruned = db.pruneSettledRemoteAttachments()
+      // Ruling 31(c): a non-zero prune is loud — one log line and one audit row per tick, count
+      // only, no row content (no fingerprints/handles/ids).
+      if (pruned > 0) {
+        console.warn('[orchestration] settled remote attachment prune deleted rows', {
+          count: pruned
+        })
+        db.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: 'local',
+          verb: 'attachmentRetentionPrune',
+          outcome: 'pruned',
+          reasonCode: `count=${pruned}`
+        })
+      }
     } catch (error) {
       console.warn('[orchestration] settled remote attachment prune failed', error)
     }
