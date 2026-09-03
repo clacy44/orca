@@ -71,10 +71,15 @@ export const LINK_BINDING_STATUS_POLL_MS = 500
 export const LINK_BINDING_STATUS_WAIT_CAP_MS = 45_000
 export const LINK_BINDING_STATUS_CLIENT_MARGIN_MS = 10_000
 // C7: `environment-link-binding.ts`'s relative-time rendering ("just now" / "Ns ago" / …) — THE
-// REGISTER owns these too, per test 77's scan of that file.
-export const LINK_BINDING_STATUS_MS_PER_SECOND = 1_000
-export const LINK_BINDING_STATUS_SECONDS_PER_MINUTE = 60
-export const LINK_BINDING_STATUS_SECONDS_PER_HOUR = 3_600
+// REGISTER owns these too, per test 77's scan of that file. Ruling 29 (C8e, D-B13 packaging
+// failure): the CLI cannot import anything under src/main, so these three moved to
+// src/shared/link-binding-register.ts (the CLI's and main's shared packaged closure) and are
+// re-exported here, never redeclared — the register stays single-source, no value duplicated.
+export {
+  LINK_BINDING_STATUS_MS_PER_SECOND,
+  LINK_BINDING_STATUS_SECONDS_PER_MINUTE,
+  LINK_BINDING_STATUS_SECONDS_PER_HOUR
+} from '../../../shared/link-binding-register'
 export const LINK_BINDING_ROWS_CAP = 512
 export const LINK_BINDING_SCAN_FACTS_CAP = 4_096
 export const LINK_BINDING_CONFIRM_OBS_PER_LINK_CAP = 64
