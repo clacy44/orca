@@ -21,11 +21,12 @@ import {
 } from './orchestration/link-binding-classify'
 import {
   selectRoundPage,
-  deriveRoundEpoch,
   linkBindingIntervalMs,
   roundBudgetMs,
   type PageCandidateLink,
-  type RoundMode
+  type RoundMode,
+  type RoundEpochCounter,
+  type RearmDebounce
 } from './orchestration/link-binding-schedule'
 import type { EnvCandidate, GuardedProbe, CapabilityCache } from './link-binding-prover-probe'
 import { settleOneLink } from './link-binding-prover-settle'
@@ -50,8 +51,21 @@ export async function runOneRound(args: {
   wanted: ReadonlySet<string>
   guardedProbe: GuardedProbe
   capabilityCache: CapabilityCache
+  // Ruling 23 Addendum 6(ww)/review C4d finding 11: strictly monotonic across rounds, shared with
+  // the prover's other callers of `runOneRound` (one instance per runtime, in link-binding-prover.ts).
+  epochCounter: RoundEpochCounter
+  // Ruling 23 Addendum 6(ww)/review C4d finding 10: the debounce map shared with `scheduleBinding`
+  // and the maintenance digest re-arm — the register-timer fallback re-arm below records into it.
+  rearmDebounce: RearmDebounce
 }): Promise<RoundOutcome> {
-  const { runtime, mode, now, wanted, guardedProbe, capabilityCache } = args
+  const { runtime, mode, now, wanted, guardedProbe, capabilityCache, epochCounter, rearmDebounce } =
+    args
+  // Ruling 23 Addendum 6(ww)/review C4d finding 6: ONE clock for this round's deadline AND its
+  // cutoff check — `roundDeadline` below is `now + roundBudgetMs(...)` and `clock` (passed to
+  // `probePage`) reports the same origin's elapsed real time, so the two never disagree even when
+  // `now` is a synthetic (test) timestamp far from `Date.now()`.
+  const wallAtRoundStart = Date.now()
+  const clock = (): number => now + (Date.now() - wallAtRoundStart)
   const db = runtime.getOrchestrationDb()
   const selfView = runtime.linkBindingSelfView
   const ownKeyFp = selfView?.ownKeyFingerprint() ?? null
@@ -89,6 +103,9 @@ export async function runOneRound(args: {
         consecutiveNoWinner: 0,
         nextAttemptAfter: attempt.nextAttemptAfter ?? null
       })
+      // Ruling 23 Addendum 6(ww)/review C4d finding 10: this path's own re-arm shares the same
+      // debounce map `scheduleBinding` reads/writes.
+      rearmDebounce.record(link.deviceId, now)
       attempt = db.getBindingAttempt(link.deviceId)
     }
     // F1(b)/Ruling 23 Addendum 4(aa): a contested link never re-enters an automatic round — only
@@ -117,7 +134,7 @@ export async function runOneRound(args: {
   }
 
   const maxLastRoundAt = linkCandidates.reduce((m, c) => Math.max(m, c.lastRoundAt ?? 0), 0)
-  const roundEpoch = deriveRoundEpoch(maxLastRoundAt, now)
+  const roundEpoch = epochCounter.next(now, maxLastRoundAt)
 
   // R13.2: backoff/last_attempt_at/last_round_at written BEFORE the first socket opens.
   for (const link of page) {
@@ -198,7 +215,8 @@ export async function runOneRound(args: {
     guardedProbe,
     capabilityCache,
     environments: collapsed.kept,
-    deadline: roundDeadline
+    deadline: roundDeadline,
+    clock
   })
   // Review C4b finding 11: `worstEnvironmentOutcome` (settle.ts) must read only facts this round
   // actually attempted — an environment skipped this round (busy, runtime_environment_changed,

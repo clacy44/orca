@@ -16,12 +16,17 @@ import { listEnvironments } from '../../shared/runtime-environment-store'
 import { LINK_BINDING_REVERIFY_MS } from './orchestration/link-binding-constants'
 import { resolveUserDataPath } from './rpc/methods/orchestration-link-binding-pending'
 import type { CapabilityCache } from './link-binding-prover-round'
+import type { RearmDebounce } from './orchestration/link-binding-schedule'
 
 export type MaintenanceTick = (now: number) => void
 
 export function createMaintenanceTick(
   runtime: OrcaRuntimeService,
-  capabilityCache: CapabilityCache
+  capabilityCache: CapabilityCache,
+  // Ruling 23 Addendum 6(ww)/review C4d finding 10: the SAME debounce map `scheduleBinding` and
+  // the round.ts register-timer fallback use — this digest re-arm records into it too, so a
+  // subsequent inbound-contact re-arm sees this one happened.
+  rearmDebounce: RearmDebounce
 ): MaintenanceTick {
   // `null` until the first observation — no baseline to compare against yet, so the first tick
   // never fires a spurious re-arm.
@@ -50,6 +55,7 @@ export function createMaintenanceTick(
         consecutiveNoWinner: 0,
         nextAttemptAfter: attempt.nextAttemptAfter ?? null
       })
+      rearmDebounce.record(link.deviceId, now)
     }
   }
 

@@ -201,6 +201,18 @@ export function contestPeerLinkBinding(
   detail: string | null,
   firstWinner: ContestFirstWinner
 ): void {
+  // Ruling 23 Addendum 6(tt)/review C4d finding 3: the same pre-check `putPeerLinkBinding` runs —
+  // only when this INSERT would create a NEW row (an existing row is an UPDATE, no growth) — and
+  // the same refusal code (LinkBindingCapError -> 'link_binding_conflict').
+  if (getPeerLinkBinding(db, linkDeviceId) === null) {
+    const count = db.prepare('SELECT COUNT(*) AS n FROM peer_link_bindings').get() as { n: number }
+    if (count.n >= LINK_BINDING_ROWS_CAP) {
+      throw new LinkBindingCapError('peer_link_bindings')
+    }
+  }
+  // Ruling 23 Addendum 6(vv)/review C4d finding 8: the upsert guard below admits ONLY a
+  // currently-confirmed row -- narrower than the prior "not already contested" predicate (which
+  // also admitted a revoked row). A revoked row is never flipped back to contested in place.
   db.prepare(
     `INSERT INTO peer_link_bindings (
        link_device_id, environment_id, bound_endpoint_id, bound_pairing_revision,
@@ -213,7 +225,7 @@ export function contestPeerLinkBinding(
        detail = excluded.detail,
        contest_incident_id = excluded.contest_incident_id,
        contested_at = excluded.contested_at
-     WHERE peer_link_bindings.state <> 'contested'`
+     WHERE peer_link_bindings.state = 'confirmed'`
   ).run(
     linkDeviceId,
     firstWinner.environmentId,

@@ -38,6 +38,23 @@ export function deriveRoundEpoch(maxLastRoundAt: number | null, now: number): nu
   return Math.max(now, maxLastRoundAt ?? 0) + 1
 }
 
+// Ruling 23 Addendum 6(ww)/review C4d finding 11: `deriveRoundEpoch` alone is only strictly
+// increasing while two rounds' own `now`/`MAX(last_round_at)` differ — two rounds started in the
+// same millisecond derive the SAME epoch from the DB alone. This counter additionally remembers
+// the last epoch it actually HANDED OUT (in-memory, per prover instance — never persisted; a
+// restart falls back to the DB-derived value, same as before) so every subsequent call is
+// strictly greater than every previous one it returned, matching `max(previous + 1, now)`.
+export class RoundEpochCounter {
+  private last: number | null = null
+
+  next(now: number, maxLastRoundAt: number | null): number {
+    const seed = this.last === null ? maxLastRoundAt : Math.max(this.last, maxLastRoundAt ?? 0)
+    const epoch = deriveRoundEpoch(seed, now)
+    this.last = epoch
+    return epoch
+  }
+}
+
 // R10.1/A-arith(2): computed at round start from the candidate ENVIRONMENT count, capped.
 export function roundBudgetMs(candidateEnvironmentCount: number): number {
   const perEnvironmentPhases = Math.ceil(candidateEnvironmentCount / LINK_BINDING_SCAN_CONCURRENCY)
@@ -157,6 +174,33 @@ export class LinkBindingRerunFlag {
     this._wanted = false
     this._mode = 'sweep'
     return mode
+  }
+}
+
+// Ruling 23 Addendum 6(ww)/review C4d finding 10: ONE debounce map shared by all three R13
+// re-arm paths — `scheduleBinding`'s own inbound-contact re-arm, the register-timer sweep
+// fallback (link-binding-prover-round.ts), and the environment-set digest re-arm
+// (link-binding-prover-maintenance.ts). Before this, only `scheduleBinding` recorded a re-arm,
+// so a link re-armed by either of the other two paths still got an immediate FIRST
+// `scheduleBinding` re-arm right afterwards — that path's own record was invisible to the other.
+export class RearmDebounce {
+  private lastRearmAt = new Map<string, number>()
+
+  // Returns true (and records `now`) iff this link may re-arm now under the window; false and
+  // no write if the last re-arm — by ANY path — was within `windowMs`.
+  shouldRearm(linkDeviceId: string, now: number, windowMs: number): boolean {
+    const last = this.lastRearmAt.get(linkDeviceId)
+    if (last !== undefined && now - last < windowMs) {
+      return false
+    }
+    this.lastRearmAt.set(linkDeviceId, now)
+    return true
+  }
+
+  // For a re-arm path that decides to fire on its OWN gating condition (not this window) — still
+  // stamps the shared map so the other two paths see it happened.
+  record(linkDeviceId: string, now: number): void {
+    this.lastRearmAt.set(linkDeviceId, now)
   }
 }
 

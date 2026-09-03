@@ -28,6 +28,7 @@ import { OrchestrationDb } from './orchestration/db'
 import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationError } from './orchestration/orchestration-error'
 import { runOneRound, type CapabilityCache, type GuardedProbe } from './link-binding-prover-round'
+import { RoundEpochCounter, RearmDebounce } from './orchestration/link-binding-schedule'
 import { createLinkBindingProver } from './link-binding-prover'
 import type * as RuntimeEnvironmentStoreModule from '../../shared/runtime-environment-store'
 
@@ -246,7 +247,9 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
       now: now ?? Date.now(),
       wanted: new Set<string>(),
       guardedProbe: guardedProbe ?? passthroughGuardedProbe,
-      capabilityCache: capabilityCache ?? new Map()
+      capabilityCache: capabilityCache ?? new Map(),
+      epochCounter: new RoundEpochCounter(),
+      rearmDebounce: new RearmDebounce()
     }
   }
 

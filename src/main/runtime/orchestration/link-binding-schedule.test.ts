@@ -6,6 +6,8 @@ import {
   selectRoundPage,
   RoundTokenBucket,
   LinkBindingRerunFlag,
+  RoundEpochCounter,
+  RearmDebounce,
   scheduleBindingPatch,
   createInFlightGuard,
   type PageCandidateLink
@@ -53,6 +55,66 @@ describe('deriveRoundEpoch (R10.5)', () => {
     const first = deriveRoundEpoch(null, 5000)
     const steppedBack = deriveRoundEpoch(first, 1000)
     expect(steppedBack).toBeGreaterThan(first)
+  })
+})
+
+describe('RoundEpochCounter (Ruling 23 Addendum 6(ww)/review C4d finding 11)', () => {
+  it('is strictly increasing across two calls at the SAME millisecond, unlike deriveRoundEpoch alone', () => {
+    // The exact bug: two rounds started at the same `now`, both deriving from the same
+    // MAX(last_round_at), give the SAME epoch via deriveRoundEpoch alone.
+    expect(deriveRoundEpoch(1000, 1000)).toBe(deriveRoundEpoch(1000, 1000))
+
+    const counter = new RoundEpochCounter()
+    const first = counter.next(1000, 1000)
+    const second = counter.next(1000, 1000)
+    expect(second).toBeGreaterThan(first)
+  })
+
+  it('is strictly increasing across many same-millisecond calls', () => {
+    const counter = new RoundEpochCounter()
+    let last = counter.next(2000, null)
+    for (let i = 0; i < 50; i += 1) {
+      const next = counter.next(2000, null)
+      expect(next).toBeGreaterThan(last)
+      last = next
+    }
+  })
+
+  it('survives a clock step-back and still increases past its own prior return', () => {
+    const counter = new RoundEpochCounter()
+    const first = counter.next(5000, null)
+    const steppedBack = counter.next(1000, null)
+    expect(steppedBack).toBeGreaterThan(first)
+  })
+
+  it('a fresh counter after a restart falls back to the DB-derived value (never below it)', () => {
+    const counter = new RoundEpochCounter()
+    const epoch = counter.next(1000, 5000)
+    expect(epoch).toBe(deriveRoundEpoch(5000, 1000))
+  })
+})
+
+describe('RearmDebounce (Ruling 23 Addendum 6(ww)/review C4d finding 10)', () => {
+  it('allows the first re-arm for a link immediately, debounces a repeat within the window', () => {
+    const debounce = new RearmDebounce()
+    expect(debounce.shouldRearm('link-1', 1000, 30_000)).toBe(true)
+    expect(debounce.shouldRearm('link-1', 1500, 30_000)).toBe(false)
+    expect(debounce.shouldRearm('link-1', 40_000, 30_000)).toBe(true)
+  })
+
+  it('record() (a re-arm path with its own gating) makes the OTHER paths see it happened', () => {
+    const debounce = new RearmDebounce()
+    // The register-timer fallback or the digest re-arm fires on its own condition and records.
+    debounce.record('link-2', 10_000)
+    // scheduleBinding's own debounce check, moments later, must see it and refuse.
+    expect(debounce.shouldRearm('link-2', 10_500, 30_000)).toBe(false)
+    expect(debounce.shouldRearm('link-2', 41_000, 30_000)).toBe(true)
+  })
+
+  it('tracks each link independently', () => {
+    const debounce = new RearmDebounce()
+    expect(debounce.shouldRearm('link-a', 1000, 30_000)).toBe(true)
+    expect(debounce.shouldRearm('link-b', 1000, 30_000)).toBe(true)
   })
 })
 

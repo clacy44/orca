@@ -16,6 +16,8 @@ import {
 import {
   RoundTokenBucket,
   LinkBindingRerunFlag,
+  RoundEpochCounter,
+  RearmDebounce,
   scheduleBindingPatch,
   createInFlightGuard,
   type ScheduleBindingReason,
@@ -62,16 +64,25 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   // `unref`'d like every other prover timer; cleared in both `disarm()` and `stop()`.
   let kickRunTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
-  // Ruling 23 Addendum 5(kk)/review C4c finding 2: R13.3's re-arm debounce, restored as an
-  // in-memory map (not relocated away) — the FIRST inbound contact after a park re-arms
-  // immediately, and every subsequent one is debounced to at most one re-arm per
+  // Ruling 23 Addendum 6(ss)/review C4d finding 2: `disarm()` is NOT terminal — a separate flag
+  // from `stopped` (stop()'s own terminal state). `arm()` clears it, so disarm() -> arm() is a
+  // real re-entry path, not a permanent no-op.
+  let disarmed = false
+  // Ruling 23 Addendum 5(kk)/review C4c finding 2, extended by Addendum 6(ww)/review C4d finding
+  // 10: R13.3's re-arm debounce, shared by all three re-arm paths (this one, the register-timer
+  // fallback in link-binding-prover-round.ts, and the digest re-arm in
+  // link-binding-prover-maintenance.ts) — the FIRST inbound contact after a park re-arms
+  // immediately, and every subsequent one across ANY path is debounced to at most one re-arm per
   // LINK_BINDING_PARK_REARM_MS. No new column: this state is scheduler-local and does not need
   // to survive a restart (a restart's first contact is, correctly, a fresh "first" re-arm).
-  const lastRearmAt = new Map<string, number>()
+  const rearmDebounce = new RearmDebounce()
+  // Ruling 23 Addendum 6(ww)/review C4d finding 11: strictly monotonic across rounds even at
+  // sub-millisecond cadence — see RoundEpochCounter's own doc comment.
+  const epochCounter = new RoundEpochCounter()
   // R13 trigger table/R13.4/Ruling 23 Addendum 4(hh): the environment-set digest re-arm and the
   // sweep-owned deletion — split into link-binding-prover-maintenance.ts (Ruling 23(m): a split
   // is the only remedy for the 300-line gate).
-  const runMaintenanceTick = createMaintenanceTick(runtime, capabilityCache)
+  const runMaintenanceTick = createMaintenanceTick(runtime, capabilityCache, rearmDebounce)
 
   // R10.2: keyed per purpose (`prover:<envId>`) — the pump (C5) keys its own guard
   // `pump:<envId>`, so the two never collide even against the same environment.
@@ -110,7 +121,7 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
   // R10.6: one round in flight per host; a kick/sweep/startup while one runs — or while the
   // bucket is empty — sets the re-run flag and starts nothing.
   function attemptRound(mode: RoundMode): void {
-    if (stopped) {
+    if (stopped || disarmed) {
       return
     }
     const now = Date.now()
@@ -125,7 +136,16 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
     roundInFlight = true
     const roundWanted = new Set(wanted)
     wanted.clear()
-    void runOneRound({ runtime, mode, now, wanted: roundWanted, guardedProbe, capabilityCache })
+    void runOneRound({
+      runtime,
+      mode,
+      now,
+      wanted: roundWanted,
+      guardedProbe,
+      capabilityCache,
+      rearmDebounce,
+      epochCounter
+    })
       .catch((error: unknown) => {
         // F17: prefer loud degradation — a round exception (e.g. a mid-round row-cap error) no
         // longer vanishes silently; it gets one audit row (best-effort: the audit write itself
@@ -211,14 +231,13 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
         current?.lastOutcome === 'unpaired_parked'
       ) {
         // Ruling 23 Addendum 5(kk): the first re-arm for a link fires immediately (no entry in
-        // the map yet); every subsequent one within LINK_BINDING_PARK_REARM_MS of the last is
-        // debounced away — a peer's own message cadence must never keep this host probing at the
-        // 30s floor forever (review C4c finding 2).
-        const last = lastRearmAt.get(linkDeviceId)
-        if (last === undefined || now - last >= LINK_BINDING_PARK_REARM_MS) {
+        // the shared map yet); every subsequent one within LINK_BINDING_PARK_REARM_MS of the
+        // last re-arm — by ANY of the three paths (ww) — is debounced away — a peer's own
+        // message cadence must never keep this host probing at the 30s floor forever (review C4c
+        // finding 2).
+        if (rearmDebounce.shouldRearm(linkDeviceId, now, LINK_BINDING_PARK_REARM_MS)) {
           rearmedOutcome = 'pending'
           rearmedNoWinner = 0
-          lastRearmAt.set(linkDeviceId, now)
         }
       }
       if (patch.nextAttemptAfter !== undefined || rearmedOutcome !== undefined) {
@@ -263,6 +282,9 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       if (sweepTimer || stopped) {
         return
       }
+      // (ss): arm() is the re-entry point after disarm() — clear the flag disarm() set so
+      // attemptRound() runs again.
+      disarmed = false
       startupTimer = setTimeout(() => {
         startupTimer = null
         const now = Date.now()
@@ -284,11 +306,11 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       sweepTimer.unref?.()
     },
     disarm(): void {
-      // Ruling 23 Addendum 5(nn)/review C4c finding 6: `disarm()` now sets `stopped` — a pending
-      // deferred kick (or any timer callback that fires after this call) checks it and starts no
-      // round, matching `stop()`'s own contract. `arm()`'s own `stopped` guard means a disarmed
-      // prover needs no re-arm path here; `arm()` is the caller's own re-entry point.
-      stopped = true
+      // Ruling 23 Addendum 6(ss)/review C4d finding 2: `disarm()` sets `disarmed`, NOT `stopped`
+      // — it cancels every pending timer (so no round starts while disarmed) but is NOT
+      // terminal: `arm()` clears `disarmed` and re-establishes the sweep/startup timers. `stop()`
+      // remains the only terminal transition.
+      disarmed = true
       if (startupTimer) {
         clearTimeout(startupTimer)
         startupTimer = null
@@ -327,12 +349,18 @@ export function createLinkBindingProver(runtime: OrcaRuntimeService): LinkBindin
       if (kickTimer) {
         clearTimeout(kickTimer)
       }
+      // (ss)/review C4d finding 5: stop() must cancel EVERY prover timer, including the kick
+      // timer — disarm() already did; stop() had not.
+      if (kickRunTimer) {
+        clearTimeout(kickRunTimer)
+      }
       if (partialRetryTimer) {
         clearTimeout(partialRetryTimer)
       }
       startupTimer = null
       sweepTimer = null
       kickTimer = null
+      kickRunTimer = null
       partialRetryTimer = null
     }
   }

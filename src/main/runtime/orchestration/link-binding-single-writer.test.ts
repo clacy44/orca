@@ -113,6 +113,55 @@ describe('peer_link_bindings has exactly one writer (R14.2/Ruling 17(a))', () =>
     expect(importers).toEqual(['src/main/runtime/orchestration/db.ts'])
   })
 
+  // Ruling 23 Addendum 6(uu)/review C4d finding 4: `peer_link_bindings` now has TWO writers —
+  // `putPeerLinkBinding` (pinned above) and `contestPeerLinkBinding` (new in C4d). Mirrors the
+  // three assertions above for the second writer, pinned to the same sole caller.
+  it('db.contestPeerLinkBinding is called from exactly one production call site: the round settle', () => {
+    const files = allProductionTsFiles('src/main')
+    const callers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (
+        /[.)]\s*contestPeerLinkBinding\s*\(/.test(source) ||
+        /\bdb\.contestPeerLinkBinding\s*\(/.test(source)
+      ) {
+        callers.push(file)
+      }
+    }
+    expect(callers).toEqual(['src/main/runtime/link-binding-prover-settle.ts'])
+  })
+
+  it('no bare-word (unqualified) call site bypasses the qualified-call scan for contestPeerLinkBinding', () => {
+    const definitionFiles = new Set([
+      'src/main/runtime/orchestration/link-binding-store.ts',
+      'src/main/runtime/orchestration/db.ts'
+    ])
+    const files = allProductionTsFiles('src/main').filter((f) => !definitionFiles.has(f))
+    const bareWordRe = /(?<![\w.$])contestPeerLinkBinding\s*\(/
+    const bareCallers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (bareWordRe.test(source)) {
+        bareCallers.push(file)
+      }
+    }
+    expect(bareCallers).toEqual([])
+  })
+
+  it('contestPeerLinkBinding is imported (any alias, any import form) only by its definition site (db.ts)', () => {
+    const files = allProductionTsFiles('src/main').filter(
+      (f) => f !== 'src/main/runtime/orchestration/link-binding-store.ts'
+    )
+    const importers: string[] = []
+    for (const file of files) {
+      const source = readFileSync(join(REPO_ROOT, file), 'utf8')
+      if (/\bcontestPeerLinkBinding\b/.test(source) && /link-binding-store/.test(source)) {
+        importers.push(file)
+      }
+    }
+    expect(importers).toEqual(['src/main/runtime/orchestration/db.ts'])
+  })
+
   it('no RPC handler (probe/confirm) ever calls putPeerLinkBinding — confirm writes advisory only (R7.5)', () => {
     const probe = readFileSync(
       join(REPO_ROOT, 'src/main/runtime/rpc/methods/orchestration-link-binding-probe.ts'),

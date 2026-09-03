@@ -143,37 +143,65 @@ export function settleOneLink(args: {
   }
 
   function writeContest(detail: string, incumbentEnvironmentId: string | null): void {
+    // Ruling 23 Addendum 5(jj)/review C4c finding 1: `writeContest` is only ever called from a
+    // branch classifyLinkRound reached with `winners.length >= 1` (bind-family or `contested`),
+    // so a first winner always exists here. Ruling 23 Addendum 6(vv)/review C4d findings 7/8:
+    // the row's identity columns must be DETERMINISTIC, never "whichever finished first" —
+    // winners are ordered by (peerCredentialFp, peerKeyFingerprint) ascending before the first is
+    // taken. Its host-derived fields seed the row when the write's UPSERT finds none (R11.3's
+    // canonical no-incumbent case); when a row already exists (the bind-family incumbent-mismatch
+    // branch), the UPDATE half of the upsert never touches these columns.
+    const orderedWinners = [...winners].sort((a, b) => {
+      if (a.peerCredentialFp !== b.peerCredentialFp) {
+        return a.peerCredentialFp < b.peerCredentialFp ? -1 : 1
+      }
+      return a.peerKeyFingerprint < b.peerKeyFingerprint ? -1 : 1
+    })
+    const firstWinner = orderedWinners[0]
+    const linkCredentialFp = selfView.registryCredentialFingerprint(linkDeviceId)
+    // (vv): a winner missing any host-derived identity field is a protocol_violation outcome —
+    // no `?? ''` fallback ever writes a junk contested row (the same shape F18 removed from
+    // `writeScanFact`).
+    if (
+      !firstWinner ||
+      !firstWinner.environmentId ||
+      !firstWinner.boundEndpointId ||
+      !firstWinner.peerCredentialFp ||
+      !firstWinner.peerKeyFingerprint ||
+      !linkCredentialFp
+    ) {
+      lastOutcome = 'protocol_violation'
+      lastDetail = detail
+      return
+    }
     lastOutcome = 'contested'
     lastDetail = detail
     isContested = true
     const incidentId = randomBytes(LINK_BINDING_HEX32_LENGTH / 2).toString('hex')
-    // Ruling 23 Addendum 5(jj)/review C4c finding 1: `writeContest` is only ever called from a
-    // branch classifyLinkRound reached with `winners.length >= 1` (bind-family or `contested`),
-    // so `winners[0]` — the round's first winner — always exists here. Its host-derived fields
-    // seed the row when the write's UPSERT finds none (R11.3's canonical no-incumbent case); when
-    // a row already exists (the bind-family incumbent-mismatch branch), the UPDATE half of the
-    // upsert never touches these columns.
-    const firstWinner = winners[0]
+    // (vv): the contest-resolution verb re-proves; it never trusts a contested row's
+    // environment_id (C7 carries the verb — this row's identity is the round's first winner by
+    // construction, not necessarily the true claimant).
     db.contestPeerLinkBinding(linkDeviceId, now, incidentId, detail, {
-      environmentId: firstWinner?.environmentId ?? '',
-      boundEndpointId: firstWinner?.boundEndpointId ?? '',
-      boundPairingRevision: firstWinner?.boundPairingRevision ?? 0,
-      linkCredentialFp: selfView.registryCredentialFingerprint(linkDeviceId) ?? '',
-      peerCredentialFp: firstWinner?.peerCredentialFp ?? '',
-      peerKeyFingerprint: firstWinner?.peerKeyFingerprint ?? '',
+      environmentId: firstWinner.environmentId,
+      boundEndpointId: firstWinner.boundEndpointId,
+      boundPairingRevision: firstWinner.boundPairingRevision,
+      linkCredentialFp,
+      peerCredentialFp: firstWinner.peerCredentialFp,
+      peerKeyFingerprint: firstWinner.peerKeyFingerprint,
       grantClass,
       scanCompleteness: attempted ? 'complete' : 'partial',
       proofProtocol: LINK_BINDING_PROTOCOL
     })
-    meteredAudit('linkBindingContestAudit', () => {
-      db.writeAgentAudit({
-        agentId: null,
-        actorPaneKey: null,
-        actorHostId: linkDeviceId,
-        verb: 'linkBinding',
-        outcome: 'contested',
-        reasonCode: JSON.stringify({ incidentId, incumbentEnvironmentId })
-      })
+    // Ruling 23 Addendum 6(rr)/review C4d finding 1: the contest audit is a SECURITY EVENT — one
+    // row per (link, contest incident id) — written DIRECTLY, never through the window meter
+    // (`meteredAudit` stays for the rebound writer only, below).
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: linkDeviceId,
+      verb: 'linkBinding',
+      outcome: 'contested',
+      reasonCode: JSON.stringify({ incidentId, incumbentEnvironmentId })
     })
   }
 

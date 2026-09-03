@@ -8,8 +8,11 @@ import {
   contestPeerLinkBinding,
   revokePeerLinkBinding,
   findBindingsByEnvironment,
-  findRoutableBindingByKeyFingerprint
+  findRoutableBindingByKeyFingerprint,
+  LinkBindingCapError,
+  type ContestFirstWinner
 } from './link-binding-store'
+import { LINK_BINDING_ROWS_CAP } from './link-binding-constants'
 
 // F15/SMOKE: one test per store module that calls EVERY exported statement once against a fresh
 // v40 DB — this is the test that would have caught F1 (a prepared statement whose column names
@@ -116,9 +119,9 @@ describe('contestPeerLinkBinding: Ruling 23 Addendum 5(jj) — a contest creates
     expect(row?.detail).toBe('contest detail')
     expect(row?.environmentId).toBe('env_challenger_1')
 
-    // The guard (`WHERE state <> 'contested'`) makes a second contest write on the SAME row a
-    // no-op — the proof-bearing columns and the original incident id stay immutable to every
-    // writer except the host-side contest-resolution verb.
+    // The guard (Ruling 23 Addendum 6(vv): `WHERE state = 'confirmed'`) makes a second contest
+    // write on the SAME row a no-op — the proof-bearing columns and the original incident id stay
+    // immutable to every writer except the host-side contest-resolution verb.
     contestPeerLinkBinding(
       sqlite,
       linkDeviceId,
@@ -141,5 +144,155 @@ describe('contestPeerLinkBinding: Ruling 23 Addendum 5(jj) — a contest creates
     expect(unchanged?.contestIncidentId).toBe('incident_no_incumbent')
     expect(unchanged?.environmentId).toBe('env_challenger_1')
     expect(unchanged?.contestedAt).toBe(1000)
+  })
+})
+
+describe('C4e: contestPeerLinkBinding under Ruling 23 Addendum 6 (tt)/(vv)', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function firstWinner(overrides: Partial<ContestFirstWinner> = {}): ContestFirstWinner {
+    return {
+      environmentId: 'env_cap_x',
+      boundEndpointId: 'endpoint_cap_x',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_cap',
+      peerCredentialFp: 'peer_fp_cap',
+      peerKeyFingerprint: 'peer_key_fp_cap',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      ...overrides
+    }
+  }
+
+  // Finding 3/(tt): the contested INSERT respects LINK_BINDING_ROWS_CAP exactly as
+  // putPeerLinkBinding's own pre-check does — same refusal code.
+  it('refuses a NEW contested row past LINK_BINDING_ROWS_CAP with the same LinkBindingCapError as putPeerLinkBinding', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    for (let i = 0; i < LINK_BINDING_ROWS_CAP; i += 1) {
+      putPeerLinkBinding(sqlite, {
+        linkDeviceId: `link_cap_fill_${i}`,
+        environmentId: `env_cap_fill_${i}`,
+        boundEndpointId: `endpoint_cap_fill_${i}`,
+        boundPairingRevision: 1,
+        linkCredentialFp: `link_fp_cap_${i}`,
+        peerCredentialFp: `peer_fp_cap_${i}`,
+        peerKeyFingerprint: `peer_key_fp_cap_${i}`,
+        grantClass: 'minted',
+        scanCompleteness: 'complete',
+        proofProtocol: 'v1',
+        provedAt: 0,
+        lastVerifiedAt: 0
+      })
+    }
+    expect(listPeerLinkBindings(sqlite)).toHaveLength(LINK_BINDING_ROWS_CAP)
+    let thrown: unknown
+    try {
+      contestPeerLinkBinding(
+        sqlite,
+        'link_cap_overflow',
+        1000,
+        'incident_cap_overflow',
+        'contest at cap',
+        firstWinner()
+      )
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(LinkBindingCapError)
+    expect((thrown as LinkBindingCapError).code).toBe('link_binding_conflict')
+    expect(getPeerLinkBinding(sqlite, 'link_cap_overflow')).toBeNull()
+  })
+
+  // Contesting an EXISTING row (an UPDATE, not a growth of the table) must never be refused by
+  // the cap, exactly like putPeerLinkBinding's own re-bind path.
+  it('never refuses a contest that upserts an EXISTING row, even at the cap', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    putPeerLinkBinding(sqlite, {
+      linkDeviceId: 'link_cap_existing',
+      environmentId: 'env_cap_existing',
+      boundEndpointId: 'endpoint_cap_existing',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_existing',
+      peerCredentialFp: 'peer_fp_existing',
+      peerKeyFingerprint: 'peer_key_fp_existing',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 0,
+      lastVerifiedAt: 0
+    })
+    for (let i = 0; i < LINK_BINDING_ROWS_CAP - 1; i += 1) {
+      putPeerLinkBinding(sqlite, {
+        linkDeviceId: `link_cap_fill2_${i}`,
+        environmentId: `env_cap_fill2_${i}`,
+        boundEndpointId: `endpoint_cap_fill2_${i}`,
+        boundPairingRevision: 1,
+        linkCredentialFp: `link_fp_cap2_${i}`,
+        peerCredentialFp: `peer_fp_cap2_${i}`,
+        peerKeyFingerprint: `peer_key_fp_cap2_${i}`,
+        grantClass: 'minted',
+        scanCompleteness: 'complete',
+        proofProtocol: 'v1',
+        provedAt: 0,
+        lastVerifiedAt: 0
+      })
+    }
+    expect(listPeerLinkBindings(sqlite)).toHaveLength(LINK_BINDING_ROWS_CAP)
+    expect(() =>
+      contestPeerLinkBinding(
+        sqlite,
+        'link_cap_existing',
+        1000,
+        'incident_cap_existing',
+        'contest existing at cap',
+        firstWinner()
+      )
+    ).not.toThrow()
+    expect(getPeerLinkBinding(sqlite, 'link_cap_existing')?.state).toBe('contested')
+  })
+
+  // Finding 8/(vv): the upsert guard admits ONLY `state = 'confirmed'` — a revoked row is never
+  // flipped to contested in place (the prior `<> 'contested'` guard would have admitted it).
+  it('never overwrites a REVOKED row in place — the guard admits only state = confirmed', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const linkDeviceId = 'link_revoked_guard'
+    putPeerLinkBinding(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_revoked_original',
+      boundEndpointId: 'endpoint_revoked_original',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_revoked',
+      peerCredentialFp: 'peer_fp_revoked',
+      peerKeyFingerprint: 'peer_key_fp_revoked',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 0,
+      lastVerifiedAt: 0
+    })
+    revokePeerLinkBinding(sqlite, linkDeviceId, 500)
+    expect(getPeerLinkBinding(sqlite, linkDeviceId)?.state).toBe('revoked')
+
+    contestPeerLinkBinding(
+      sqlite,
+      linkDeviceId,
+      1000,
+      'incident_should_not_land_on_revoked',
+      'contest a revoked row',
+      firstWinner({ environmentId: 'env_challenger_revoked' })
+    )
+    const row = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(row?.state).toBe('revoked')
+    expect(row?.environmentId).toBe('env_revoked_original')
+    expect(row?.contestIncidentId).toBeNull()
   })
 })

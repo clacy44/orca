@@ -4,6 +4,11 @@
 // the exact same fixtures/harness (real DeviceRegistry/E2EE/environment-store, a FAKE responder
 // using the SAME production MAC functions) as its sibling file — see that file's own header for
 // the harness rationale.
+//
+// Ruling 23 Addendum 6(ww)/review C4d finding 12: this file's own PROVER-level describe block
+// (createLinkBindingProver's scheduleBinding/arm/disarm/stop) was moved out to
+// link-binding-prover-c4c.test.ts — a pure move, nothing dropped — to stay under the 800-line
+// gate again; this file keeps only the ROUND-level describe block (runOneRound).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -19,11 +24,8 @@ import { SELECTOR_LABEL, PROOF_LABEL, linkBindingMac } from './orchestration/lin
 import {
   LINK_BINDING_UNPAIRED_PARK_ROUNDS,
   LINK_BINDING_PARK_REARM_MS,
-  LINK_BINDING_STARTUP_DELAY_MS,
-  LINK_BINDING_SWEEP_MS,
   LINK_BINDING_SCAN_CONCURRENCY
 } from './orchestration/link-binding-constants'
-import { roundBudgetMs } from './orchestration/link-binding-schedule'
 import { ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
 import { addEnvironmentFromPairingCode } from '../../shared/runtime-environment-store'
@@ -31,6 +33,11 @@ import { OrchestrationDb } from './orchestration/db'
 import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationError } from './orchestration/orchestration-error'
 import { runOneRound, type CapabilityCache, type GuardedProbe } from './link-binding-prover-round'
+import {
+  roundBudgetMs,
+  RoundEpochCounter,
+  RearmDebounce
+} from './orchestration/link-binding-schedule'
 import { createLinkBindingProver } from './link-binding-prover'
 
 const appState = { userData: '' }
@@ -293,7 +300,9 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
       now: now ?? Date.now(),
       wanted: new Set<string>(),
       guardedProbe: guardedProbe ?? passthroughGuardedProbe,
-      capabilityCache: capabilityCache ?? new Map()
+      capabilityCache: capabilityCache ?? new Map(),
+      epochCounter: new RoundEpochCounter(),
+      rearmDebounce: new RearmDebounce()
     }
   }
 
@@ -547,11 +556,16 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
     expect(auditRows.n).toBe(1)
   })
 
-  it('R10.1/Ruling 23 Addendum 4(hh)/review C4b finding 14: a round that exceeds its budget ends partial', async () => {
-    // roundBudgetMs(1) = ceil(1/SCAN_CONCURRENCY) * CANDIDATE_BUDGET_MS, always > 0 — the test
-    // forces the deadline into the PAST by starting the round with `now` already stale relative
-    // to the real wall clock, so the worker pool's very first deadline check trips before any
-    // candidate is dialled.
+  it("Ruling 23 Addendum 6(ww)/review C4d finding 6: the round's own clock is anchored to `now`, not real wall-clock skew — a stale `now` alone no longer trips the budget cutoff", async () => {
+    // R10.1/Ruling 23 Addendum 4(hh)/review C4b finding 14's ORIGINAL test forced the deadline
+    // into the past by starting the round with `now` already stale relative to the real wall
+    // clock, asserting an IMMEDIATE cutoff with zero real elapsed time — exactly the (oo)/finding
+    // 6 bug (origin skew, not a genuine slow responder) that Ruling 23 Addendum 6(ww) closes.
+    // Replaced (declared in the C4e commit body): `probePage`'s `clock` is now wired from
+    // `runOneRound` as `now + (Date.now() - wallAtRoundStart)`, so `deadline` (`now +
+    // roundBudgetMs`) and the cutoff check share ONE origin — a stale `now` no longer trips it on
+    // its own; the sibling test below ("a GENUINELY slow first wave…") proves genuine elapsed
+    // time still does.
     const envId = saveNonMatchingEnvironment()
     const calls = { count: 0 }
     vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(async (args) => {
@@ -560,10 +574,12 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
     })
     const past = Date.now() - 10_000_000
     const outcome = await runOneRound(freshRoundArgs(undefined, undefined, past))
-    expect(outcome.completeness).toBe('partial')
-    // No environment was actually dialled — the round-budget cutoff fired before the first probe.
-    expect(calls.count).toBe(0)
-    expect(db.getScanFact(linkId, envId)).toBeNull()
+    // The candidate WAS dialled — no origin-skew cutoff — and the round completed normally. Two
+    // calls (status.get's capability probe, then federatedLinkProbe itself) for the one
+    // environment, an empty capability cache being the first-round default.
+    expect(calls.count).toBe(2)
+    expect(outcome.completeness).toBe('complete')
+    expect(db.getScanFact(linkId, envId)).not.toBeNull()
   })
 
   it('Ruling 23 Addendum 5(oo)/review C4c finding 7: a GENUINELY slow first wave trips the round budget on a later candidate — one clock, not a pre-expired `now`', async () => {
@@ -681,229 +697,5 @@ describe('S10-16 C4c: review C4b closure — round-level (Ruling 23 Addendum 4)'
     await vi.advanceTimersByTimeAsync(20_000)
     prover.stop()
     vi.useRealTimers()
-  })
-})
-
-describe('S10-16 C4c: review C4b closure — prover-level (Ruling 23 Addendum 4)', () => {
-  let root: string
-  let userDataPath: string
-  let deviceRegistry: DeviceRegistry
-  let e2ee: E2EEKeypair
-  let peerE2ee: E2EEKeypair
-  let db: OrchestrationDb
-  let runtime: OrcaRuntimeService
-  let linkId: string
-
-  beforeEach(() => {
-    vi.useFakeTimers()
-    root = mkdtempSync(join(tmpdir(), 'orca-link-binding-prover-'))
-    userDataPath = join(root, 'userdata')
-    appState.userData = userDataPath
-    deviceRegistry = new DeviceRegistry(userDataPath)
-    const link = deviceRegistry.mintPendingDevice('home', 'runtime')
-    linkId = link.deviceId
-    deviceRegistry.updateLastSeen(linkId)
-    e2ee = loadOrCreateE2EEKeypair(userDataPath)
-    peerE2ee = loadOrCreateE2EEKeypair(join(root, 'peer-userdata'))
-    db = new OrchestrationDb(':memory:')
-    runtime = new OrcaRuntimeService()
-    runtime.setOrchestrationDb(db)
-    runtime.setLinkBindingSelfView(
-      createLinkBindingSelfView(deviceRegistry, () => e2ee.publicKeyB64)
-    )
-    vi.spyOn(runtime, 'callPinnedEnvironment').mockResolvedValue({ capabilities: [] })
-  })
-
-  afterEach(() => {
-    db.close()
-    rmSync(root, { recursive: true, force: true })
-    vi.useRealTimers()
-  })
-
-  it('finding 2/Ruling 23 Addendum 4(aa): scheduleBinding is a total no-op for a contested link — no schedule write, no wanted, no kick', async () => {
-    db.putPeerLinkBinding({
-      linkDeviceId: linkId,
-      environmentId: 'env-x',
-      boundEndpointId: 'ep-x',
-      boundPairingRevision: 1,
-      linkCredentialFp: 'fp',
-      peerCredentialFp: 'pcfp',
-      peerKeyFingerprint: 'pkfp',
-      grantClass: 'minted',
-      scanCompleteness: 'complete',
-      proofProtocol: 'orca.link-binding.v1',
-      provedAt: 0,
-      lastVerifiedAt: 0
-    })
-    db.contestPeerLinkBinding(linkId, 0, 'incident-1', 'contest detail', {
-      environmentId: 'env-x',
-      boundEndpointId: 'ep-x',
-      boundPairingRevision: 1,
-      linkCredentialFp: 'fp',
-      peerCredentialFp: 'pcfp',
-      peerKeyFingerprint: 'pkfp',
-      grantClass: 'minted',
-      scanCompleteness: 'complete',
-      proofProtocol: 'orca.link-binding.v1'
-    })
-    const before = db.getBindingAttempt(linkId)
-    const prover = createLinkBindingProver(runtime)
-    prover.scheduleBinding(linkId, 'inbound_contact')
-    // No schedule write — putBindingAttempt/settleBindingAttempt were never reached.
-    expect(db.getBindingAttempt(linkId)).toEqual(before)
-    // No kick — even well past the debounce window, no round ever started.
-    await vi.advanceTimersByTimeAsync(20_000)
-    expect(runtime.callPinnedEnvironment).not.toHaveBeenCalled()
-    prover.stop()
-  })
-
-  it("finding 3/Ruling 23 Addendum 4(bb), made discriminating by Ruling 23 Addendum 5(pp)/review C4c finding 5: a kick never runs the round's synchronous prefix on the caller's own stack", () => {
-    // Review C4c finding 5: the ORIGINAL fixture saved no environment, so `callPinnedEnvironment`
-    // was unreachable whether or not the round was deferred — the assertion below could not fail
-    // on the pre-fix (synchronous-kick) code. A REACHABLE environment plus an overdue
-    // `nextAttemptAfter` (the F19 test's own setup) makes the round's synchronous prefix actually
-    // try to call it if `scheduleBinding` ever regresses to running the round on the caller's own
-    // stack.
-    const code = encodePairingOffer({
-      v: PAIRING_OFFER_VERSION,
-      endpoint: 'ws://peer.example:16768',
-      deviceToken: 'irrelevant-to-this-test',
-      publicKeyB64: peerE2ee.publicKeyB64
-    })
-    addEnvironmentFromPairingCode(userDataPath, { name: 'env-bb-test', pairingCode: code })
-    db.putBindingAttempt(linkId)
-    db.settleBindingAttempt(linkId, {
-      lastAttemptAt: 0,
-      lastRoundAt: 0,
-      lastOutcome: 'pending',
-      lastDetail: null,
-      consecutiveFailures: 0,
-      consecutiveNoWinner: 0,
-      nextAttemptAfter: Date.now() - 1_000
-    })
-    const prover = createLinkBindingProver(runtime)
-    prover.scheduleBinding(linkId, 'inbound_contact')
-    // Synchronously, immediately after scheduleBinding returns — R8.6: no round has started yet.
-    expect(runtime.callPinnedEnvironment).not.toHaveBeenCalled()
-    prover.stop()
-  })
-
-  it('F19: the leading-edge kick debounce suppresses a second round start within LINK_BINDING_KICK_DEBOUNCE_MS', async () => {
-    const code = encodePairingOffer({
-      v: PAIRING_OFFER_VERSION,
-      endpoint: 'ws://peer.example:16768',
-      deviceToken: 'irrelevant-to-this-test',
-      publicKeyB64: peerE2ee.publicKeyB64
-    })
-    addEnvironmentFromPairingCode(userDataPath, { name: 'env-debounce-test', pairingCode: code })
-    db.putBindingAttempt(linkId)
-    // Already overdue — scheduleBindingPatch's floor-clamp takes min(current, floor), so this
-    // stays in the past and the link is not excluded from its own kicked round's candidate list.
-    db.settleBindingAttempt(linkId, {
-      lastAttemptAt: 0,
-      lastRoundAt: 0,
-      lastOutcome: 'pending',
-      lastDetail: null,
-      consecutiveFailures: 0,
-      consecutiveNoWinner: 0,
-      nextAttemptAfter: Date.now() - 1_000
-    })
-    const prover = createLinkBindingProver(runtime)
-    const mock = runtime.callPinnedEnvironment as unknown as { mock: { calls: unknown[][] } }
-    prover.scheduleBinding(linkId, 'inbound_contact')
-    await vi.advanceTimersByTimeAsync(50) // let the deferred (setTimeout 0) round fire and settle
-    const firstCount = mock.mock.calls.length
-    expect(firstCount).toBeGreaterThan(0)
-    prover.scheduleBinding(linkId, 'inbound_contact') // still inside the debounce window
-    await vi.advanceTimersByTimeAsync(50)
-    expect(mock.mock.calls.length).toBe(firstCount)
-    prover.stop()
-  })
-
-  it('finding 4/Ruling 23 Addendum 4(cc): the FIRST inbound contact after a park re-arms IMMEDIATELY — no elapsed-time gate', () => {
-    db.putBindingAttempt(linkId)
-    db.settleBindingAttempt(linkId, {
-      lastAttemptAt: Date.now(),
-      lastRoundAt: Date.now(),
-      lastOutcome: 'unpaired_parked',
-      lastDetail: null,
-      consecutiveFailures: 0,
-      consecutiveNoWinner: LINK_BINDING_UNPAIRED_PARK_ROUNDS,
-      nextAttemptAfter: null
-    })
-    const prover = createLinkBindingProver(runtime)
-    // No time advance at all — the prior `>= LINK_BINDING_PARK_REARM_MS` gate would have refused
-    // this (finding 4's original bug); the fix re-arms on the very next inbound contact.
-    prover.scheduleBinding(linkId, 'inbound_contact')
-    const attempt = db.getBindingAttempt(linkId)
-    expect(attempt?.lastOutcome).toBe('pending')
-    expect(attempt?.consecutiveNoWinner).toBe(0)
-    prover.stop()
-  })
-
-  it('finding 16/R13 trigger table: an environment-set change re-arms parked links', async () => {
-    const code1 = encodePairingOffer({
-      v: PAIRING_OFFER_VERSION,
-      endpoint: 'ws://peer1.example:16768',
-      deviceToken: 'irrelevant-1',
-      publicKeyB64: peerE2ee.publicKeyB64
-    })
-    addEnvironmentFromPairingCode(userDataPath, { name: 'env-digest-1', pairingCode: code1 })
-    db.putBindingAttempt(linkId)
-    db.settleBindingAttempt(linkId, {
-      lastAttemptAt: Date.now(),
-      lastRoundAt: Date.now(),
-      lastOutcome: 'unpaired_parked',
-      lastDetail: null,
-      consecutiveFailures: 0,
-      consecutiveNoWinner: LINK_BINDING_UNPAIRED_PARK_ROUNDS,
-      nextAttemptAfter: null
-    })
-    const prover = createLinkBindingProver(runtime)
-    prover.arm()
-    // First tick (the startup timer): no baseline digest exists yet, so this ONLY establishes
-    // one — it must never fire a spurious re-arm on its own.
-    await vi.advanceTimersByTimeAsync(LINK_BINDING_STARTUP_DELAY_MS)
-    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('unpaired_parked')
-
-    const code2 = encodePairingOffer({
-      v: PAIRING_OFFER_VERSION,
-      endpoint: 'ws://peer2.example:16768',
-      deviceToken: 'irrelevant-2',
-      publicKeyB64: peerE2ee.publicKeyB64
-    })
-    addEnvironmentFromPairingCode(userDataPath, { name: 'env-digest-2', pairingCode: code2 })
-    // Next sweep tick: the digest changed — the park is re-armed BEFORE this tick's own round
-    // runs, so it is no longer `unpaired_parked` by the time this settles.
-    await vi.advanceTimersByTimeAsync(LINK_BINDING_SWEEP_MS)
-    expect(db.getBindingAttempt(linkId)?.lastOutcome).not.toBe('unpaired_parked')
-    prover.stop()
-  })
-
-  it('finding 14/R13.4: sweep-owned deletion purges bindings/attempts for a link no longer in the device registry', async () => {
-    const orphanId = 'orphan-device-id'
-    db.putPeerLinkBinding({
-      linkDeviceId: orphanId,
-      environmentId: 'env-orphan',
-      boundEndpointId: 'ep-orphan',
-      boundPairingRevision: 1,
-      linkCredentialFp: 'fp',
-      peerCredentialFp: 'pcfp',
-      peerKeyFingerprint: 'pkfp',
-      grantClass: 'minted',
-      scanCompleteness: 'complete',
-      proofProtocol: 'orca.link-binding.v1',
-      provedAt: 0,
-      lastVerifiedAt: 0
-    })
-    db.putBindingAttempt(orphanId)
-    expect(db.getPeerLinkBinding(orphanId)).not.toBeNull()
-
-    const prover = createLinkBindingProver(runtime)
-    prover.arm()
-    await vi.advanceTimersByTimeAsync(LINK_BINDING_STARTUP_DELAY_MS)
-    expect(db.getPeerLinkBinding(orphanId)).toBeNull()
-    expect(db.getBindingAttempt(orphanId)).toBeNull()
-    prover.stop()
   })
 })
