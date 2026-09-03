@@ -9,7 +9,9 @@ import { chmodSync, existsSync, rmSync } from 'node:fs'
 import type { RpcMessageContext, RpcTransport } from './transport'
 
 const MAX_RUNTIME_RPC_MESSAGE_BYTES = 1024 * 1024
-const RUNTIME_RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000
+// H3c (Ruling 32 Addendum 6(a)): exported so a test can assert the production value is
+// untouched by making the bound itself injectable below.
+export const RUNTIME_RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000
 const MAX_RUNTIME_RPC_CONNECTIONS = 32
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 10_000
 
@@ -21,6 +23,10 @@ export type UnixSocketTransportOptions = {
   // the client honours them, the client-side idle timer. Tests override this
   // to avoid waiting 10 s for a frame.
   keepaliveIntervalMs?: number
+  // H3c (Ruling 32 Addendum 6(a)): per-connection socket idle bound. Defaults to the
+  // production value; tests override it to prove the keepalive/idle interaction without
+  // waiting out the real 30s bound.
+  idleTimeoutMs?: number
 }
 
 type MessageHandler = (
@@ -33,14 +39,16 @@ export class UnixSocketTransport implements RpcTransport {
   private readonly endpoint: string
   private readonly kind: 'unix' | 'named-pipe'
   private readonly keepaliveIntervalMs: number
+  private readonly idleTimeoutMs: number
   private server: Server | null = null
   private messageHandler: MessageHandler | null = null
   private readonly activeSockets = new Set<Socket>()
 
-  constructor({ endpoint, kind, keepaliveIntervalMs }: UnixSocketTransportOptions) {
+  constructor({ endpoint, kind, keepaliveIntervalMs, idleTimeoutMs }: UnixSocketTransportOptions) {
     this.endpoint = endpoint
     this.kind = kind
     this.keepaliveIntervalMs = keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS
+    this.idleTimeoutMs = idleTimeoutMs ?? RUNTIME_RPC_SOCKET_IDLE_TIMEOUT_MS
   }
 
   onMessage(handler: MessageHandler): void {
@@ -116,7 +124,7 @@ export class UnixSocketTransport implements RpcTransport {
 
     socket.setEncoding('utf8')
     socket.setNoDelay(true)
-    socket.setTimeout(RUNTIME_RPC_SOCKET_IDLE_TIMEOUT_MS, () => {
+    socket.setTimeout(this.idleTimeoutMs, () => {
       socket.destroy()
     })
     socket.on('error', () => {
