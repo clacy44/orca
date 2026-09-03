@@ -1394,7 +1394,65 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // Why: a live runtime handle is authoritative; pane metadata is only the restart fallback.
         const paneKey = runtime.getTerminalPaneKey(handle) ?? params.terminalPaneKey
         const boundRun = paneKey ? db.getCurrentRunForPane(paneKey) : undefined
-        if (params.run || boundRun) {
+        // Ruling 32 Addendum 11 (F1/F-17): hoisted from just above the agent: branch below (was
+        // ~:1680-1713) so `callerAgentMailbox` is available to gate the run-mailbox branch too —
+        // a pane bound as coordinator of ANY non-legacy run used to route through `run:<id>`
+        // unconditionally and return long before the agent: branch was ever reached, so a
+        // registered chair whose pane is run-bound never saw directory-addressed mail (local or
+        // federated) through `check`. Identity here is ONLY
+        // runtime.verifyOrchestrationCompatibilityCaller — never a caller-supplied
+        // `--terminal`/`terminalPaneKey`. `orchestrationCompatibilityCallerAuthority` (the
+        // legacy-adoption preflight) is undefined for an ordinary peer, so it cannot be a
+        // fallback source of identity here; this branch verifies directly instead (ARBITRATION
+        // A1, CONTAINMENT #1 — mirrors agents.register/find/quarantine's own direct verify call).
+        const agentHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        const attestedForAgentCheck = runtime.verifyOrchestrationCompatibilityCaller(
+          orchestrationCompatibilityEvidence,
+          { currentRuntimeLaunchSufficient: true }
+        )
+        const callerAgentRow =
+          attestedForAgentCheck && attestedForAgentCheck.terminalHandle === handle
+            ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
+            : undefined
+        // Why derived !== 1: a derived row is minted by ANY caller's `agents list`/`find` for
+        // every live pane (agent-directory-rpc-liveness.ts) — the pane's own owner never opted
+        // in. Routing a never-registered pane through the durable agent: branch would silently
+        // flip its pre-existing bare-handle mailbox from destructive to replay-until-ack a
+        // release early (owner decision 3) merely because a third party listed the directory.
+        const callerAgentMailbox =
+          callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1
+            ? `agent:${callerAgentRow.id}`
+            : undefined
+        // B3 (Ruling 32 Addendum 10/F-17): an attestation/pane-key mismatch (the caller's live
+        // pane resolves to a DIFFERENT terminal handle than the one this `check` names, e.g. a
+        // stale `--terminal`) used to fall silently into the bare-handle branch below and read
+        // `handle`'s mailbox instead of the caller's own `agent:<id>` — with nothing in the
+        // response saying so. Looked up regardless of the handle match above so a mismatch can
+        // be reported even though `callerAgentRow` itself stays undefined for routing purposes.
+        const attestedAgentRowOnMismatch =
+          attestedForAgentCheck && attestedForAgentCheck.terminalHandle !== handle
+            ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
+            : undefined
+        const skippedAgentMailboxNotice =
+          attestedAgentRowOnMismatch &&
+          !attestedAgentRowOnMismatch.tombstoned_at &&
+          attestedAgentRowOnMismatch.derived !== 1
+            ? `Read mailbox "${handle}"; your registered mailbox agent:${attestedAgentRowOnMismatch.id} was not read (this pane resolves to terminal "${attestedForAgentCheck?.terminalHandle}", check requested "${handle}").`
+            : undefined
+        // F1 (Ruling 32 Addendum 11): an IMPLICIT run binding (boundRun, no explicit --run) no
+        // longer shadows the caller's own agent mailbox when that mailbox actually has
+        // non-legacy mail waiting — an explicit `--run <id>` still always selects the run
+        // mailbox (peers never set boundRun's precondition — `paneKey` — anyway, so every
+        // S10-19 refusal above still stands unchanged). `.some(...)` over `getUnreadMessages`
+        // reuses the exact same live-row filtering (liveMessageSqlClause) every other read path
+        // already applies — never a second, drifting definition of "mail waiting".
+        const ownAgentMailWaiting =
+          callerAgentMailbox !== undefined &&
+          !params.run &&
+          db
+            .getUnreadMessages(callerAgentMailbox, typeFilter)
+            .some((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+        if ((params.run || boundRun) && !ownAgentMailWaiting) {
           const run = resolveRemoteRunMailboxScope(
             runtime,
             {
@@ -1709,45 +1767,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // an `agent:<id>` mailbox — durable via mailbox_deliveries (BUG 5), taken
         // before the bare-handle branch below so a registered agent's mail never
         // falls through to the legacy-fenced path.
-        // Identity here is ONLY runtime.verifyOrchestrationCompatibilityCaller — never a
-        // caller-supplied `--terminal`/`terminalPaneKey`. `orchestrationCompatibilityCallerAuthority`
-        // (the legacy-adoption preflight) is undefined for an ordinary peer, so it cannot be a
-        // fallback source of identity here; this branch verifies directly instead (ARBITRATION A1,
-        // CONTAINMENT #1 — mirrors agents.register/find/quarantine's own direct verify call).
-        const agentHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
-        const attestedForAgentCheck = runtime.verifyOrchestrationCompatibilityCaller(
-          orchestrationCompatibilityEvidence,
-          { currentRuntimeLaunchSufficient: true }
-        )
-        const callerAgentRow =
-          attestedForAgentCheck && attestedForAgentCheck.terminalHandle === handle
-            ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
-            : undefined
-        // B3 (Ruling 32 Addendum 10/F-17): an attestation/pane-key mismatch (the caller's live
-        // pane resolves to a DIFFERENT terminal handle than the one this `check` names, e.g. a
-        // stale `--terminal`) used to fall silently into the bare-handle branch below and read
-        // `handle`'s mailbox instead of the caller's own `agent:<id>` — with nothing in the
-        // response saying so. Looked up regardless of the handle match above so a mismatch can
-        // be reported even though `callerAgentRow` itself stays undefined for routing purposes.
-        const attestedAgentRowOnMismatch =
-          attestedForAgentCheck && attestedForAgentCheck.terminalHandle !== handle
-            ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
-            : undefined
-        const skippedAgentMailboxNotice =
-          attestedAgentRowOnMismatch &&
-          !attestedAgentRowOnMismatch.tombstoned_at &&
-          attestedAgentRowOnMismatch.derived !== 1
-            ? `Read mailbox "${handle}"; your registered mailbox agent:${attestedAgentRowOnMismatch.id} was not read (this pane resolves to terminal "${attestedForAgentCheck?.terminalHandle}", check requested "${handle}").`
-            : undefined
-        // Why derived !== 1: a derived row is minted by ANY caller's `agents list`/`find` for
-        // every live pane (agent-directory-rpc-liveness.ts) — the pane's own owner never opted
-        // in. Routing a never-registered pane through the durable agent: branch would silently
-        // flip its pre-existing bare-handle mailbox from destructive to replay-until-ack a
-        // release early (owner decision 3) merely because a third party listed the directory.
         if (callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1) {
           // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
           const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
-          const address = `agent:${callerAgentRow.id}`
+          const address = callerAgentMailbox as string
           // F-6c: exactly one host-constant line, present only when this row has a parked
           // (withheld-and-not-since-retried) ambient delivery — never per-count/per-pane text.
           const parkedDeliveryNotice = runtime.hasParkedDelivery(address)
@@ -1760,6 +1783,16 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             processIncarnation:
               attestedProcessIncarnation ?? runtime.getTerminalProcessIncarnation(handle)
           })
+          // F1 (Ruling 32 Addendum 11): this pane is ALSO a run's coordinator (boundRun) — this
+          // branch just read its own agent mailbox instead (ownAgentMailWaiting stepped past the
+          // run branch above), so say what was stepped past rather than leaving the run mailbox
+          // invisible to a caller that only reads its own agent: mailbox from here on.
+          const runMailboxFields = boundRun
+            ? {
+                runMailbox: `run:${boundRun.id}`,
+                runPending: db.countUnreadMessages(`run:${boundRun.id}`)
+              }
+            : {}
 
           if (params.peek || params.all) {
             const addressRows = params.all
@@ -1785,6 +1818,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               messages: visible,
               count: visible.length,
               legacyPending,
+              ...runMailboxFields,
               ...(parkedDeliveryNotice ? { parkedDeliveryNotice } : {}),
               ...(params.format || params.inject
                 ? { formatted: visible.map(formatMessageBanner).join('\n\n') }
@@ -1819,6 +1853,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             legacyPending: durable.legacyPending,
             acknowledged: durable.acknowledged,
             ...(durable.omitted ? { omitted: durable.omitted } : {}),
+            ...runMailboxFields,
             ...(parkedDeliveryNotice ? { parkedDeliveryNotice } : {}),
             ...(params.format || params.inject
               ? {

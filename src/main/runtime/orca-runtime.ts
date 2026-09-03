@@ -34656,6 +34656,30 @@ export class OrcaRuntimeService {
     return dispatchId ? `dispatch:${dispatchId}` : null
   }
 
+  // F2 (Ruling 32 Addendum 11): neither idle-edge push resolved `agent:<id>` at all — a pane
+  // whose owner registered gets no wake header for agent mail on the busy->idle edge, pull-only
+  // until its next `check`. Guard mirrors resolveMailboxTerminalHandle's own agent: branch
+  // (!quarantined && !tombstoned_at) plus `derived !== 1` — a derived row is minted by ANY
+  // caller's `agents list`/`find` for every live pane, never something the pane's own owner
+  // opted into (same guard `check`'s durable branch uses, orchestration.ts).
+  private resolveAgentMailboxForPaneKey(paneKey: string): string | null {
+    const db = this._orchestrationDb
+    // Why typeof-guarded, not just `!db`: this fires on the hottest idle-edge path (every
+    // title-driven busy->idle transition), which a great many existing tests reach through a
+    // hand-rolled orchestration-db double that implements only the handful of methods its own
+    // scenario needs — never the full OrchestrationDb surface. A newly added call here must
+    // degrade to "no agent mailbox" against such a double rather than throwing, exactly as
+    // `!db` already does for a runtime with no orchestration db attached at all.
+    if (!db || typeof db.getAgentByPaneKey !== 'function') {
+      return null
+    }
+    const hostId = this.getOrchestrationCompatibilityHostId()
+    const row = db.getAgentByPaneKey(hostId, paneKey)
+    return row && !row.tombstoned_at && row.derived !== 1 && !row.quarantined
+      ? `agent:${row.id}`
+      : null
+  }
+
   // Why notifiedThreadIdKnown (message-loss blocker fix, S10-3a): defaults true so every
   // caller but notifyMessageArrived's no-consumer branch keeps today's exact filtering.
   // Why a read-only pre-check, not just calling getLivePtyForHandle directly (S10-15 F8 fix
@@ -35074,6 +35098,12 @@ export class OrcaRuntimeService {
     if (dispatchMailbox) {
       this.deliverPendingMessages(leaf, { mailboxHandle: dispatchMailbox })
     }
+    // F2 (Ruling 32 Addendum 11): a busy pane that owns a registered agent:<id> mailbox got no
+    // wake header for agent-addressed mail on this edge at all.
+    const agentMailbox = this.resolveAgentMailboxForPaneKey(`${leaf.tabId}:${leaf.leafId}`)
+    if (agentMailbox) {
+      this.deliverPendingMessages(leaf, { mailboxHandle: agentMailbox })
+    }
   }
 
   // Why (S10-15 F8 fix A): the pty-only mirror of deliverPendingMessagesForLeaf, for a pty
@@ -35091,6 +35121,11 @@ export class OrcaRuntimeService {
     const dispatchMailbox = this.resolveDispatchMailboxForPty(pty)
     if (dispatchMailbox) {
       this.deliverPendingMessages(target, { mailboxHandle: dispatchMailbox })
+    }
+    // F2 (Ruling 32 Addendum 11): the pty-only mirror of the leaf-side agent: wake above.
+    const agentMailbox = pty.paneKey ? this.resolveAgentMailboxForPaneKey(pty.paneKey) : null
+    if (agentMailbox) {
+      this.deliverPendingMessages(target, { mailboxHandle: agentMailbox })
     }
   }
 

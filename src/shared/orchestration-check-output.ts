@@ -73,6 +73,14 @@ export type OrchestrationCheckOutput = {
   // readMailboxDelivery/getOrCreateMailboxDelivery compute — carried through so a blocked
   // mailbox's zero-count text can say why, not just that a Delivery id exists.
   omitted?: { purged: number; withheld: number }
+  // F1 (Ruling 32 Addendum 11): present only when this pane is ALSO a run's coordinator and
+  // this check just read its own agent:<id> mailbox instead (F-17's "run-bound pane never sees
+  // its directory mail" symptom) — names the run mailbox it stepped past and how much is
+  // waiting there. Data-only, same treatment as `legacyPending` (no dedicated line in
+  // formatOrchestrationCheckText — neither field renders into the plain-text check output;
+  // both are additive JSON carried straight through by `--json`/programmatic callers).
+  runMailbox?: string
+  runPending?: number
 }
 
 export function formatMessageReadOnlyTag(

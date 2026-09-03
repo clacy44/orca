@@ -575,4 +575,106 @@ describe('agent: routing + durability', () => {
     expect(first.parkedDeliveryNotice).toBe(second.parkedDeliveryNotice)
     expect(first.parkedDeliveryNotice).not.toContain(agentBId)
   })
+
+  // Ruling 32 Addendum 11 (F1/F-17): a pane that is BOTH a registered agent AND a run's
+  // coordinator used to route `check` through the run mailbox unconditionally and return long
+  // before the agent: branch was ever reached — a registered chair whose pane is run-bound
+  // never saw directory-addressed mail (local or federated) through check.
+  describe('a run-bound pane also reads its own agent: mailbox (Ruling 32 Addendum 11 F1)', () => {
+    it('T1b: agent-addressed mail on a run-bound pane is read through the agent: branch, not silently dropped', async () => {
+      setup()
+      db.createRun({ objective: 'x', coordinatorHandle: 'term_b', coordinatorPaneKey: PANE_B })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'directory mail to the chair'
+      })
+
+      const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
+        mailbox?: string
+        count: number
+        messages: { subject: string }[]
+      }
+      expect(checked.mailbox).toBe(`agent:${agentBId}`)
+      expect(checked.count).toBe(1)
+      expect(checked.messages.map((m) => m.subject)).toEqual(['directory mail to the chair'])
+    })
+
+    it('T1c: an explicit --run always still selects the run mailbox, never the agent: one', async () => {
+      setup()
+      const run = db.createRun({
+        objective: 'x',
+        coordinatorHandle: 'term_b',
+        coordinatorPaneKey: PANE_B
+      })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'directory mail to the chair'
+      })
+
+      const checked = (await call('orchestration.check', {
+        terminal: 'term_b',
+        run: run.id
+      })) as { runId?: string; mailbox?: string }
+      expect(checked.runId).toBe(run.id)
+      expect(checked.mailbox).toBeUndefined()
+    })
+
+    it('T1d: a --types filter that only the run mailbox would satisfy still reaches the run branch', async () => {
+      setup()
+      const run = db.createRun({
+        objective: 'x',
+        coordinatorHandle: 'term_b',
+        coordinatorPaneKey: PANE_B
+      })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'ordinary status mail'
+      })
+
+      const checked = (await call('orchestration.check', {
+        terminal: 'term_b',
+        types: 'worker_done'
+      })) as { runId?: string; mailbox?: string }
+      // The agent: mailbox has nothing of type worker_done, so ownAgentMailWaiting is false —
+      // this falls through to the run branch exactly as before F1.
+      expect(checked.runId).toBe(run.id)
+      expect(checked.mailbox).toBeUndefined()
+    })
+
+    it('T1e: after acking the agent: delivery, the next plain check falls back to the run branch', async () => {
+      setup()
+      const run = db.createRun({
+        objective: 'x',
+        coordinatorHandle: 'term_b',
+        coordinatorPaneKey: PANE_B
+      })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'directory mail to the chair'
+      })
+
+      const first = (await call('orchestration.check', { terminal: 'term_b' })) as {
+        mailbox?: string
+        deliveryId?: string | null
+      }
+      expect(first.mailbox).toBe(`agent:${agentBId}`)
+      expect(first.deliveryId).toBeTruthy()
+
+      await call('orchestration.check', {
+        terminal: 'term_b',
+        ack: first.deliveryId as string
+      })
+
+      const after = (await call('orchestration.check', { terminal: 'term_b' })) as {
+        runId?: string
+        mailbox?: string
+      }
+      expect(after.runId).toBe(run.id)
+      expect(after.mailbox).toBeUndefined()
+    })
+  })
 })
