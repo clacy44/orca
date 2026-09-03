@@ -6,11 +6,6 @@ import type { PtySourceReceivingActivation } from '../../shared/pty-source-recei
 
 export type PtySpawnResult = {
   agentSessionEnsure?: AgentSessionClaimedSpawnResult
-  /** F-6d (H2, Ruling 32a): true only when a real spawn happened (providerResult
-   *  non-null) AND the spawn env actually carried ORCA_AGENT_LAUNCH_TOKEN — i.e. a
-   *  launch token was genuinely delivered to this process, distinct from the
-   *  agentSessionEnsure disposition, which can say 'adopted' with no spawn at all. */
-  launchTokenDelivered?: boolean
   /** App-facing PTY id. Remote providers must return globally routable ids,
    *  not relay-local handles, because renderer/runtime IPC routes by this key. */
   id: string

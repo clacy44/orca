@@ -5072,14 +5072,6 @@ export function registerPtyHandlers(
               incarnationId: ptyIncarnationById.get(ensured.owner.ptyId)
             }
             result.agentSessionEnsure = ensured
-            // F-6d (H2, Ruling 32a): a resume-adopt (agentSessionEnsure.disposition ===
-            // 'adopted') spawns nothing — providerResult stays null and no token ever reached
-            // a process. Record delivery only when a real spawn ran AND its env actually
-            // carried the token, so the caller (orca-runtime.ts) can tell "adopted, nothing
-            // to record" apart from "adopted, but a token WAS minted and delivered".
-            result.launchTokenDelivered =
-              providerResult !== null &&
-              typeof spawnOptions.env?.ORCA_AGENT_LAUNCH_TOKEN === 'string'
           } else {
             assertClientStillConnected()
             const stablePaneSpawn = preAdoptedStablePane
@@ -5448,10 +5440,7 @@ export function registerPtyHandlers(
                 }
               }
             : {}),
-          ...(result.agentSessionEnsure ? { agentSessionEnsure: result.agentSessionEnsure } : {}),
-          ...(typeof result.launchTokenDelivered === 'boolean'
-            ? { launchTokenDelivered: result.launchTokenDelivered }
-            : {})
+          ...(result.agentSessionEnsure ? { agentSessionEnsure: result.agentSessionEnsure } : {})
         }
         resolvePaneSpawnReservation(paneSpawnReservationKey, paneSpawnReservation, {
           ...result,

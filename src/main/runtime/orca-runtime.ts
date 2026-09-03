@@ -1868,9 +1868,6 @@ type RuntimePtyController = {
     wslDistro?: string
     stablePaneOwner?: { handle: string; tabId: string; leafId: string }
     agentSessionEnsure?: AgentSessionClaimedSpawnResult
-    /** F-6d (H2, Ruling 32a): true only when a real spawn happened and its env
-     *  carried ORCA_AGENT_LAUNCH_TOKEN — see pty-spawn-result.ts. */
-    launchTokenDelivered?: boolean
   }>
   write(ptyId: string, data: string): boolean
   /** Attach-only adoption of a live local daemon session so its output streams
@@ -10666,6 +10663,40 @@ export class OrcaRuntimeService {
       this.drainLaunchTokenAnchorRetryQueue()
     } catch (error) {
       this.handleFailedLaunchTokenHashAnchor(key, args, hostId, logContext, error)
+    }
+  }
+
+  // H2a (F-6d, Ruling 32 Addendum 4): compare-and-restore. Acts ONLY when the anchor still
+  // equals the hash THIS call minted — a live pane's genuine anchor (written by anyone else
+  // since our persist) can never be deleted or overwritten by our rollback.
+  private restoreMintedLaunchTokenAnchor(
+    paneKey: string,
+    tabId: string,
+    leafId: string,
+    ourHash: string,
+    prior: string | null | undefined,
+    hostId: string | null | undefined
+  ): void {
+    const current =
+      this.store?.getWorkspaceSession?.(hostId)?.terminalLaunchTokenHashesByPaneKey?.[paneKey]
+    if (current !== ourHash) {
+      return
+    }
+    try {
+      if (prior) {
+        this.store?.persistTerminalLaunchTokenHash?.(
+          { tabId, leafId, launchTokenHash: prior },
+          hostId
+        )
+      } else {
+        this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
+      }
+    } catch (error) {
+      console.warn(
+        '[runtime] createTerminal: failed to restore launch-token-hash anchor',
+        paneKey,
+        error
+      )
     }
   }
 
@@ -27892,6 +27923,45 @@ export class OrcaRuntimeService {
           launchOpts.persistHostSessionBinding ||
           launchOpts.surfaceOwner === false ||
           this.getAvailableAuthoritativeWindow() === null
+        // H2a (F-6d, Ruling 32 Addendum 4): anchor the launch token BEFORE the env carrying it
+        // reaches any process. flushOrThrow (persistence.ts:7045) proves the anchor is durable
+        // on disk before spawn — the resume-adopt corner where nothing was ever attempted
+        // (createTerminal previously anchored only after spawn, gated on disposition flags
+        // the provider can set after the fact) can no longer occur, because the write already
+        // happened by the time any process could observe the token.
+        const mintedPaneKey = paneKey
+        const mintedTabId = tabId
+        const mintedLeafId = leafId
+        const launchTokenHostId = workspace.connectionId
+          ? toSshExecutionHostId(workspace.connectionId)
+          : undefined
+        const mintedLaunchTokenHash = launchToken
+          ? createHash('sha256').update(launchToken).digest('hex')
+          : undefined
+        const priorMintedAnchor = launchToken
+          ? this.store?.getWorkspaceSession?.(launchTokenHostId)
+              ?.terminalLaunchTokenHashesByPaneKey?.[mintedPaneKey]
+          : undefined
+        if (launchToken && mintedLaunchTokenHash) {
+          try {
+            if (!this.store?.persistTerminalLaunchTokenHash) {
+              throw new Error('launch-token-hash anchor store unavailable')
+            }
+            this.store.persistTerminalLaunchTokenHash(
+              { tabId, leafId, launchTokenHash: mintedLaunchTokenHash },
+              launchTokenHostId
+            )
+            // F3 (S10-17): a frozen store's flush returns silently and throws nothing —
+            // detect it explicitly, or a frozen store would spawn a token-bearing process
+            // with no durable anchor, recreating F-6d under a different trigger.
+            if (this.store.isWritesFrozen?.()) {
+              throw new Error('launch-token-hash anchor store writes frozen')
+            }
+          } catch {
+            releaseStablePaneCreate?.()
+            throw new Error('launch_token_anchor_unavailable')
+          }
+        }
         let result: Awaited<ReturnType<NonNullable<RuntimePtyController['spawn']>>>
         try {
           result = await this.ptyController.spawn({
@@ -27950,6 +28020,20 @@ export class OrcaRuntimeService {
             // awaits above if the authoritative window is destroyed mid-spawn.
             ...(persistHostSessionBinding ? { persistHostSessionBinding: true } : {})
           })
+        } catch (error) {
+          // H2a step 2: a spawn failure never delivered the minted token — roll back to
+          // whatever the pane held before this call, never touching a value we did not write.
+          if (launchToken && mintedLaunchTokenHash) {
+            this.restoreMintedLaunchTokenAnchor(
+              mintedPaneKey,
+              mintedTabId,
+              mintedLeafId,
+              mintedLaunchTokenHash,
+              priorMintedAnchor,
+              launchTokenHostId
+            )
+          }
+          throw error
         } finally {
           releaseStablePaneCreate?.()
         }
@@ -27959,9 +28043,14 @@ export class OrcaRuntimeService {
         const adoptedStablePane = Boolean(result.stablePaneOwner)
         // S10-17/F5: agentSessionEnsure adoption resumes an already-LIVE agent without
         // spawning (claimed-agent-pty-owner.ts ensure()) — distinct from a genuine
-        // fresh/plain-shell launch, which also runs with adoptedStablePane===false.
+        // fresh/plain-shell launch, which also runs with adoptedStablePane===false. Still
+        // used below (renderer reveal) to withhold a stale local launchToken.
         const resumedLiveAgentSession = result.agentSessionEnsure?.disposition === 'adopted'
-        const mintedPaneKey = paneKey
+        // H2a (F-6d, Ruling 32 Addendum 4): the runtime-local fact the record-write gate below
+        // relies on instead of any provider-reported disposition — was this pty ALREADY
+        // published by an earlier registerPty call (i.e. not new to this create)? Captured
+        // before registerPty (below) adds result.id to the set.
+        const ptyPreexisted = this.spawnPublishedPtys.has(result.id)
         if (result.agentSessionEnsure) {
           const canonicalSurface = result.agentSessionEnsure.owner.surface
           preAllocatedHandle = canonicalSurface.terminalHandle
@@ -27973,6 +28062,41 @@ export class OrcaRuntimeService {
           tabId = result.stablePaneOwner.tabId
           leafId = result.stablePaneOwner.leafId
           paneKey = makePaneKey(tabId, leafId)
+        }
+        const redirected = paneKey !== mintedPaneKey
+        // H2a (F-6d, Ruling 32 Addendum 4): the single runtime-local fact that decides whether
+        // step 1's speculative pre-spawn anchor turned out to be genuine. Mirrors the
+        // write-mirror gate below exactly (paneKey === mintedPaneKey && (!resumedLiveAgentSession
+        // || !ptyPreexisted)), negated — covers all three ways delivery can turn out not to have
+        // happened: (a) redirected to a different pane (step 3: the process at the destination
+        // did not receive this env), (b) discovered mid-spawn to be a stable-pane owner
+        // attach (S10-17/F4: "dead on arrival", same as the pre-flight-adopt case E1 guards),
+        // (c) a resume-adopt that reused an already-published (live) pty with no genuine new
+        // spawn (S10-17/F5 and F5 caveat: nothing to anchor, the existing anchor must survive).
+        const tokenGenuinelyDelivered =
+          !redirected && !adoptedStablePane && (!resumedLiveAgentSession || !ptyPreexisted)
+        if (launchToken && mintedLaunchTokenHash && !tokenGenuinelyDelivered) {
+          this.restoreMintedLaunchTokenAnchor(
+            mintedPaneKey,
+            mintedTabId,
+            mintedLeafId,
+            mintedLaunchTokenHash,
+            priorMintedAnchor,
+            launchTokenHostId
+          )
+          if (redirected) {
+            // H2a step 3: never write under the destination pane either — a redirect means the
+            // process actually living there did NOT receive the minted env.
+            const destinationAnchor =
+              this.store?.getWorkspaceSession?.(launchTokenHostId)
+                ?.terminalLaunchTokenHashesByPaneKey?.[paneKey]
+            if (!destinationAnchor) {
+              console.warn(
+                '[runtime] createTerminal: launch token redirected to a pane with no anchor',
+                { paneKey }
+              )
+            }
+          }
         }
         // Why: the spawn can land on a canonical/stable owner pane rather than the minted one, so
         // the gate that ran at the mint has not seen this pane — re-run it against the pane the
@@ -27994,6 +28118,17 @@ export class OrcaRuntimeService {
         } catch (error) {
           if (error instanceof Error && error.message === 'agent_session_exited_during_start') {
             this.releaseRejectedPtyRegistrationFence(result.id, result.incarnationId)
+          }
+          // H2a step 2: registration was rejected after all — roll back the same way.
+          if (launchToken && mintedLaunchTokenHash) {
+            this.restoreMintedLaunchTokenAnchor(
+              mintedPaneKey,
+              mintedTabId,
+              mintedLeafId,
+              mintedLaunchTokenHash,
+              priorMintedAnchor,
+              launchTokenHostId
+            )
           }
           throw error
         }
@@ -28030,42 +28165,22 @@ export class OrcaRuntimeService {
             pty.launchConfig = effectiveLaunchConfig
               ? copySleepingAgentLaunchConfig(effectiveLaunchConfig)
               : null
-            // S10-17/F5: agentSessionEnsure resume-adopt (claimed-agent-pty-owner.ts
-            // ensure()) returns 'adopted' without spawning, so `!adoptedStablePane` is also
-            // true here for a LIVE agent this call never launched. Guard on
-            // resumedLiveAgentSession alone (no `pty.launchToken === null` disjunct): unlike
-            // registerPty's sibling site (:10335), where pty.ts:479-502 has already proven a
-            // null launchToken means the token was delivered via the freshly spawned env, a
-            // resume-adopt spawns nothing, so a null pty.launchToken here does NOT mean "the
-            // token is in the env" — it can equally mean a daemon-survived pane resumed as
-            // 'adopted' after a runtime restart (providerResult null, pty.ts:5054-5060) and
-            // still holding its genuine persisted anchor. Skip the write unconditionally for
-            // any resume-adopt so that anchor is never overwritten with an undeliverable token —
-            // UNLESS pty.ts proves (result.launchTokenDelivered) that a real spawn ran and the
-            // token genuinely reached the process env: that pane can never attest otherwise
-            // (F-6d, H2, Ruling 32a — the residual corner Ruling 11(d)/S10-17 left open).
-            if (!resumedLiveAgentSession || result.launchTokenDelivered === true) {
+            // H2a (F-6d, Ruling 32 Addendum 4): mirror step 1's own tokenGenuinelyDelivered
+            // fact — this branch is inside `if (!adoptedStablePane)` already, so the two
+            // conditions are equivalent here. `ptyPreexisted` only disqualifies a resume-adopt
+            // (resumedLiveAgentSession): a plain relaunch that happens to reuse the same ptyId
+            // (no agentSessionEnsure at all — F4, and the vast majority of createTerminal
+            // callers) must still write/forget as before — it was never gated on ptyPreexisted
+            // pre-H2a, only on disposition. For a genuine resume-adopt, `ptyPreexisted` is what
+            // tells a real fresh delivery (T2: a NEW pty id never published before) apart from a
+            // true no-spawn attach to an already-live owner (F5/F5-caveat: the SAME
+            // already-published pty id, no new process, nothing to mirror or anchor).
+            if (tokenGenuinelyDelivered) {
               pty.launchToken = launchToken ?? null
               pty.launchIncarnationId = launchToken ? pty.incarnationId : null
               pty.launchAgent = launchOpts.launchAgent ?? null
-              // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
-              // restart — which has no live launchToken, only its own process env — can still
-              // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
-              // F8: a spawned pty must not abort its launch over a persistence flush failure;
-              // S10-17: failure is queued for retry instead of being silently lost.
-              const launchTokenHostId = workspace.connectionId
-                ? toSshExecutionHostId(workspace.connectionId)
-                : undefined
-              if (launchToken) {
-                this.persistLaunchTokenHashAnchorWithRetry(
-                  {
-                    tabId,
-                    leafId,
-                    launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
-                  },
-                  launchTokenHostId,
-                  'createTerminal'
-                )
+              if (launchToken !== undefined) {
+                // Step 1 already anchored the hash before spawn — nothing more to do here.
               } else {
                 // S10-17/F1: drop any queued retry for this pane too, or a later successful
                 // drain could resurrect the anchor this forget is about to delete.
@@ -28081,14 +28196,6 @@ export class OrcaRuntimeService {
                   )
                 }
               }
-            } else if (launchToken) {
-              // F-6d (H2, Ruling 32a): a resume-adopt that did NOT prove delivery still had a
-              // token minted for it above — loud degradation instead of a silent, permanently
-              // unattestable pane (doctrine: "prefer loud degradation").
-              console.warn(
-                '[runtime] createTerminal: launch token minted but not recorded for resume-adopted pane',
-                { paneKey }
-              )
             }
           }
           pty.tabId = tabId

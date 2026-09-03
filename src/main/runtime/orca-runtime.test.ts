@@ -1566,7 +1566,19 @@ const store = {
     branchPrefix: 'none',
     branchPrefixCustom: ''
   }),
-  getProjects: () => []
+  getProjects: () => [],
+  // H2a (F-6d, Ruling 32 Addendum 4): createTerminal now persists the launch-token anchor
+  // BEFORE spawn and aborts the launch if that persist fails or has nowhere to land. The vast
+  // majority of tests sharing this fixture launch an agent incidentally (to exercise unrelated
+  // behavior) and never assert anything about the anchor itself, so these are intentionally
+  // stateless no-ops — real enough to satisfy the new precondition without introducing any
+  // cross-test pollution from a shared mutable session. Deliberately NOT adding
+  // `getWorkspaceSession` here — several tests key their own behavior off its absence/presence
+  // (see makeRuntimeStoreWithWorkspaceSession and any test overriding it directly); step 1's own
+  // `priorMintedAnchor` read is optional-chained and tolerates it being undefined.
+  persistTerminalLaunchTokenHash: () => {},
+  forgetTerminalLaunchTokenHash: () => {},
+  isWritesFrozen: () => false
 }
 
 function createRuntimeWithSshLease(
