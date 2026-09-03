@@ -368,3 +368,38 @@ describe('formatOrchestrationCheckText: mailboxMismatchNotice (Ruling 32 Addendu
     )
   })
 })
+
+describe('formatOrchestrationCheckText: runMailbox/runPending (H4c, Ruling 32 Addendum 11)', () => {
+  it('renders one host-constant line after "No messages." when runPending > 0', () => {
+    const rendered = formatOrchestrationCheckText(
+      { messages: [], count: 0, runMailbox: 'run:run_1', runPending: 3 },
+      'term_coord'
+    )
+    expect(rendered).toBe(
+      'No messages.\n3 message(s) waiting on run:run_1; read them with --run run_1'
+    )
+  })
+
+  it('renders nothing when runPending is 0', () => {
+    const rendered = formatOrchestrationCheckText(
+      { messages: [], count: 0, runMailbox: 'run:run_1', runPending: 0 },
+      'term_coord'
+    )
+    expect(rendered).toBe('No messages.')
+  })
+
+  it('renders nothing when runPending is undefined', () => {
+    const rendered = formatOrchestrationCheckText(
+      { messages: [], count: 0, runMailbox: 'run:run_1' },
+      'term_coord'
+    )
+    expect(rendered).toBe('No messages.')
+  })
+
+  it('leaves the JSON result object untouched (fields carried straight through)', () => {
+    const result = { messages: [], count: 0, runMailbox: 'run:run_1', runPending: 3 }
+    const prepared = prepareOrchestrationCheckOutput(result, 'term_coord', false)
+    expect(prepared.runMailbox).toBe('run:run_1')
+    expect(prepared.runPending).toBe(3)
+  })
+})
