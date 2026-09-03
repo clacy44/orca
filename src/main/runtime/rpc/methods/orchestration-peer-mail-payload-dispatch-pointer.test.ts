@@ -4,7 +4,6 @@
 // db.getDispatchContextById on it unvalidated — a hostile payload dispatchId could reach that
 // lookup, or have dispatch_run_mismatch echo a foreign dispatch's run id back on a correct
 // guess. Split into its own file (not appended to orchestration.test.ts, which already carries
-// an `/* eslint-disable max-lines */` — see that file's header — and must not grow further)
 // per this repo's own split-file precedent for RPC method test coverage (e.g.
 // orchestration-peer-mailbox-check.test.ts).
 import { afterEach, describe, expect, it, vi } from 'vitest'
