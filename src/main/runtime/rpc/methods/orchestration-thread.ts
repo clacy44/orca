@@ -102,11 +102,16 @@ function resolveThreadReplay(
     return { messages: [], count: 0, degraded: true }
   }
   const afterSequence = cursor?.kind === 'sequence' ? cursor.value : undefined
-  const messages = db.getThreadMessagesFor(threadId, callerHandle, afterSequence)
+  // F-1 (Ruling 32(b)): a foreign-origin (peer-relayed) row is always addressed as
+  // `agent:<id>`, never as the caller's bare terminal handle — matching on the handle alone
+  // silently excluded every one of them from a degraded (non-participant) read even when the
+  // caller genuinely was that agent. Match both forms when the caller resolves to one.
+  const degradeAddresses = callerAgentId ? [callerHandle, `agent:${callerAgentId}`] : [callerHandle]
+  const messages = db.getThreadMessagesFor(threadId, degradeAddresses, afterSequence)
   const omitted = db.getThreadMessagesOmitted(
     threadId,
     afterSequence !== undefined ? { kind: 'sequence', value: afterSequence } : undefined,
-    callerHandle
+    degradeAddresses
   )
   return {
     messages: annotateSenderDeliveryHonesty(runtime, messages, callerHandle),

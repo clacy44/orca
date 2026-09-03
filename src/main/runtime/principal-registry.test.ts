@@ -363,6 +363,23 @@ describe('PrincipalRegistry', () => {
     })
   })
 
+  describe('F-11: accessProfile visibility (Ruling 32(b))', () => {
+    it('listGrants() reports the persisted accessProfile, not the mint request', () => {
+      const store = registry()
+      grants.add({ deviceId: 'peer-device', accessProfile: 'peer' })
+      grants.add({ deviceId: 'full-device', accessProfile: 'full' })
+      // Absent on disk (pre-S10-19 row) resolves via the legacyGrantProfile default ('full').
+      grants.add({ deviceId: 'legacy-device', accessProfile: undefined })
+
+      const byId = (id: string): string | undefined =>
+        store.listGrants().find((row) => row.deviceId === id)?.accessProfile
+
+      expect(byId('peer-device')).toBe('peer')
+      expect(byId('full-device')).toBe('full')
+      expect(byId('legacy-device')).toBe('full')
+    })
+  })
+
   describe('provisioning refusals', () => {
     it('refuses a principal with no bound grant', () => {
       const store = registry()

@@ -39,7 +39,12 @@ export type UpsertAgentByPaneSuffixParams = {
 }
 
 export type UpsertAgentByPaneSuffixResult =
-  | { outcome: 'created'; agent: AgentRow; adoptedThreads: number }
+  | {
+      outcome: 'created'
+      agent: AgentRow
+      adoptedThreads: number
+      blockedByQuarantinedPredecessor: boolean
+    }
   | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
   | {
       outcome: 'name_taken'
@@ -200,14 +205,14 @@ export function upsertAgentByPaneSuffix(
     const created = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as AgentRow
     // R2: a tombstoned predecessor under this same host+name (retired, or just tombstoned
     // above by the reclaim branch) leaves its thread membership behind unless adopted here.
-    const { adoptedThreads } = adoptPredecessorThreadMembership(
+    const { adoptedThreads, blockedByQuarantinedPredecessor } = adoptPredecessorThreadMembership(
       db,
       params.hostId,
       params.displayName,
       id
     )
     db.exec('COMMIT')
-    return { outcome: 'created', agent: created, adoptedThreads }
+    return { outcome: 'created', agent: created, adoptedThreads, blockedByQuarantinedPredecessor }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error

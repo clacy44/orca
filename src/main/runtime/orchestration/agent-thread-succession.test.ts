@@ -174,6 +174,86 @@ describe('adoptPredecessorThreadMembership', () => {
     const outcome = adoptPredecessorThreadMembership(raw, 'local', 'agent-a', 'agt_succ')
     expect(outcome.adoptedThreads).toBe(0)
     expect(db.isThreadParticipant(thread.id, 'agt_succ')).toBe(false)
+    expect(outcome.blockedByQuarantinedPredecessor).toBe(true)
+    db.close()
+  })
+
+  it('a clean retire+register (nothing to inherit) is NOT reported as quarantine-blocked', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'never-registered', 'agt_succ')
+    expect(outcome.adoptedThreads).toBe(0)
+    expect(outcome.blockedByQuarantinedPredecessor).toBe(false)
+    db.close()
+  })
+
+  // F-9 (Ruling 32(b)): requirePactParticipant (pact-shared.ts) reads ONLY
+  // threads.pact_proposer_agent_id/pact_with_agent_id/pact_turn_agent_id — never
+  // thread_participants. Membership transfer alone left a pact predecessor was a party to
+  // unreachable by the successor (still `not_a_participant` on every pact verb) even though
+  // `orca agents threads` already listed the successor as a member — this is the "peers must
+  // open fresh threads" field symptom. The pact columns must transfer too.
+  it("transfers a pact predecessor's proposer/with/turn agent-id columns to the successor", () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 'a pact thread',
+      createdByAgentId: 'agt_pred',
+      participants: [
+        { participantKey: 'agt_pred', agentId: 'agt_pred', role: 'owner' },
+        { participantKey: 'agt_peer', agentId: 'agt_peer', role: 'member' }
+      ]
+    })
+    raw
+      .prepare(
+        `UPDATE threads SET pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_state = 'engaged' WHERE id = ?`
+      )
+      .run('agt_pred', 'agt_peer', 'agt_pred', thread.id)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'merge-backend', 'agt_succ')
+    expect(outcome.adoptedThreads).toBe(1)
+
+    const row = raw
+      .prepare(
+        'SELECT pact_proposer_agent_id, pact_with_agent_id, pact_turn_agent_id FROM threads WHERE id = ?'
+      )
+      .get(thread.id) as {
+      pact_proposer_agent_id: string
+      pact_with_agent_id: string
+      pact_turn_agent_id: string
+    }
+    expect(row.pact_proposer_agent_id).toBe('agt_succ')
+    expect(row.pact_with_agent_id).toBe('agt_peer') // untouched: never the predecessor's column
+    expect(row.pact_turn_agent_id).toBe('agt_succ')
+    db.close()
+  })
+
+  it("a quarantined predecessor's pact columns never transfer either", () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 'a pact thread',
+      sensitive: true,
+      createdByAgentId: 'agt_pred',
+      participants: [{ participantKey: 'agt_pred', agentId: 'agt_pred', role: 'owner' }]
+    })
+    raw
+      .prepare(
+        `UPDATE threads SET pact_proposer_agent_id = ?, pact_turn_agent_id = ?,
+           pact_state = 'engaged' WHERE id = ?`
+      )
+      .run('agt_pred', 'agt_pred', thread.id)
+    tombstone(raw, 'agt_pred', 'local', 'agent-a', 1)
+
+    adoptPredecessorThreadMembership(raw, 'local', 'agent-a', 'agt_succ')
+
+    const row = raw
+      .prepare('SELECT pact_proposer_agent_id, pact_turn_agent_id FROM threads WHERE id = ?')
+      .get(thread.id) as { pact_proposer_agent_id: string; pact_turn_agent_id: string }
+    expect(row.pact_proposer_agent_id).toBe('agt_pred')
+    expect(row.pact_turn_agent_id).toBe('agt_pred')
     db.close()
   })
 })

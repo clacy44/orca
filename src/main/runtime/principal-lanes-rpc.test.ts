@@ -169,6 +169,7 @@ describe('principal lane consent RPC', () => {
         boundPrincipalId: string | null
         designated: boolean
         redeemed: boolean
+        accessProfile: string
       }[]
       principals: {
         principalId: string
@@ -177,6 +178,8 @@ describe('principal lane consent RPC', () => {
         boundDeviceIds: string[]
       }[]
     }
+    // F-11 (Ruling 32(b)): `accessProfile` joins LaneGrantSummary — this device predates the
+    // slice (no explicit profile minted), which resolves to the legacyGrantProfile default 'full'.
     expect(status.grants).toEqual([
       {
         deviceId: 'desktop',
@@ -184,7 +187,8 @@ describe('principal lane consent RPC', () => {
         perPerson: true,
         boundPrincipalId: principalId,
         designated: true,
-        redeemed: true
+        redeemed: true,
+        accessProfile: 'full'
       }
     ])
     expect(status.principals[0]).toMatchObject({

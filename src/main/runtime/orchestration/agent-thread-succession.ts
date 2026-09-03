@@ -5,7 +5,13 @@
 // mechanism that reattaches that successor to every thread its predecessor(s) belonged to.
 import type Database from '../../sqlite/sync-database'
 
-export type ThreadSuccessionOutcome = { adoptedThreads: number }
+export type ThreadSuccessionOutcome = {
+  adoptedThreads: number
+  // F-9 (Ruling 32(b)): true when a quarantined predecessor under this name blocked adoption
+  // outright (by design — quarantine survives retire, agent-directory.ts's own precedent). The
+  // caller renders this so a bare 0 never reads the same as "there was nothing to inherit".
+  blockedByQuarantinedPredecessor: boolean
+}
 
 /** Idempotent: a thread the successor already participates in is left alone (never
  * double-claimed, never overwritten). Transfers regardless of left_at — leaving a thread is
@@ -32,7 +38,7 @@ export function adoptPredecessorThreadMembership(
     )
     .get(hostId, displayName, successorId)
   if (anyQuarantinedPredecessor) {
-    return { adoptedThreads: 0 }
+    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: true }
   }
 
   const predecessors = db
@@ -43,7 +49,7 @@ export function adoptPredecessorThreadMembership(
     )
     .all(hostId, displayName, successorId) as { id: string }[]
   if (predecessors.length === 0) {
-    return { adoptedThreads: 0 }
+    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false }
   }
 
   let adopted = 0
@@ -64,6 +70,34 @@ export function adoptPredecessorThreadMembership(
       ).run(successorId, successorId, row.thread_id, row.participant_key)
       adopted += 1
     }
+    // F-9 (Ruling 32(b)): thread_participants above is membership; a PACT thread's live state
+    // rides on three DIRECT agent-id columns on `threads` (pact_proposer_agent_id/
+    // pact_with_agent_id/pact_turn_agent_id — pact-shared.ts's requirePactParticipant reads
+    // ONLY these, never thread_participants). Adopting membership alone left every pact this
+    // predecessor was a party to unreachable — requirePactParticipant kept refusing the
+    // successor `not_a_participant` even though `orca agents threads` already listed it as a
+    // member, which is exactly the "peers had to open fresh threads" symptom. One UPDATE per
+    // predecessor, scoped per-column so a column the predecessor never held is left untouched.
+    db.prepare(
+      `UPDATE threads SET
+         pact_proposer_agent_id =
+           CASE WHEN pact_proposer_agent_id = ? THEN ? ELSE pact_proposer_agent_id END,
+         pact_with_agent_id =
+           CASE WHEN pact_with_agent_id = ? THEN ? ELSE pact_with_agent_id END,
+         pact_turn_agent_id =
+           CASE WHEN pact_turn_agent_id = ? THEN ? ELSE pact_turn_agent_id END
+       WHERE pact_proposer_agent_id = ? OR pact_with_agent_id = ? OR pact_turn_agent_id = ?`
+    ).run(
+      predecessor.id,
+      successorId,
+      predecessor.id,
+      successorId,
+      predecessor.id,
+      successorId,
+      predecessor.id,
+      predecessor.id,
+      predecessor.id
+    )
   }
 
   if (adopted > 0) {
@@ -76,5 +110,5 @@ export function adoptPredecessorThreadMembership(
       `${adopted} thread(s) adopted from ${predecessors.length} predecessor(s)`
     )
   }
-  return { adoptedThreads: adopted }
+  return { adoptedThreads: adopted, blockedByQuarantinedPredecessor: false }
 }

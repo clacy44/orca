@@ -2,7 +2,10 @@
 // waiting on the server round; link-status --wait/--timeout-ms thread through as a call option;
 // --drain is in the grammar (L11.1); every flag PART 7's runbook quotes is in `allowedFlags`.
 import { describe, expect, it, vi } from 'vitest'
-import { ENVIRONMENT_LINK_BINDING_HANDLERS } from './environment-link-binding'
+import {
+  ENVIRONMENT_LINK_BINDING_HANDLERS,
+  formatReplyOutboxList
+} from './environment-link-binding'
 import { ENVIRONMENT_COMMAND_SPECS } from '../specs/environment'
 import { BOOLEAN_FLAGS } from '../args'
 import type { HandlerContext } from '../dispatch'
@@ -89,6 +92,40 @@ describe('environment link-binding CLI handlers', () => {
       ctxWith({ drain: true }, call)
     )
     expect(call).toHaveBeenCalledWith('orchestration.replyOutbox', { link: undefined, drain: true })
+  })
+
+  // F-3 (Ruling 32(b)): the old text formatter was `${items.length} queued` — labelling every
+  // row "queued" regardless of its real state. projectOutboxRow (orchestration-link-binding-
+  // outbox.ts) already reports the honest `state` per row; the JSON branch was always correct
+  // (it is the raw RPC result) — only the text branch lied.
+  describe('formatReplyOutboxList (F-3)', () => {
+    it('never reports a DELIVERED row as queued', () => {
+      expect(formatReplyOutboxList({ items: [{ state: 'delivered' }] })).toBe('1 delivered')
+    })
+
+    it('tallies per state, matching what the JSON branch already showed', () => {
+      const text = formatReplyOutboxList({
+        items: [{ state: 'queued' }, { state: 'delivered' }, { state: 'delivered' }]
+      })
+      expect(text).toBe('1 queued, 2 delivered')
+    })
+
+    it('reports 0 queued for an empty outbox', () => {
+      expect(formatReplyOutboxList({ items: [] })).toBe('0 queued')
+    })
+  })
+
+  it('environment link-status --outbox passes the link through unchanged', async () => {
+    const call = vi.fn().mockResolvedValue({
+      id: 'local',
+      ok: true,
+      result: { items: [{ state: 'delivered' }] },
+      _meta: { runtimeId: 'local' }
+    })
+    await ENVIRONMENT_LINK_BINDING_HANDLERS['environment link-status'](
+      ctxWith({ outbox: true, link: 'lnk_1' }, call)
+    )
+    expect(call).toHaveBeenCalledWith('orchestration.replyOutbox', { link: 'lnk_1' })
   })
 
   it('--drain is in the BOOLEAN_FLAGS grammar (L11.1)', () => {

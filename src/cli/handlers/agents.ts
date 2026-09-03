@@ -29,6 +29,7 @@ type RegisterResult = {
   repointedMessages: number
   pendingOnOldHandle: number
   adoptedThreads: number
+  blockedByQuarantinedPredecessor: boolean
 }
 type ListResult = {
   agents: AgentView[]
@@ -121,10 +122,15 @@ function formatAgentRegister(result: RegisterResult): string {
   // R2 (S10-11): only on a fresh id (never reMinted — a rebind's threads were never orphaned).
   const adopted =
     result.adoptedThreads > 0
-      ? `\nInherited ${result.adoptedThreads} thread(s) from a previous registration under this name.`
+      ? `\nInherited ${result.adoptedThreads} thread(s) (including pact state) from a previous registration under this name.`
       : ''
+  // F-9 (Ruling 32(b)): a bare 0 above reads the same whether there was nothing to inherit or
+  // something was blocked — say which when it is the latter.
+  const blocked = result.blockedByQuarantinedPredecessor
+    ? '\nA quarantined previous registration under this name exists; its thread participation was NOT inherited (quarantine survives retire, by design).'
+    : ''
   return (
-    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}${adopted}\n` +
+    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}${adopted}${blocked}\n` +
     `Next: orca orchestration send --to agent:${result.agent.id} --subject "..."`
   )
 }

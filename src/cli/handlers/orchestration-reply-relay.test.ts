@@ -60,6 +60,25 @@ describe('orchestration reply receipt rendering', () => {
     ).resolves.toBe('Queued relay_1 for worker Dispatch ctx_remote')
   })
 
+  // F-2 (Ruling 32(b)): before the fix, `'relay' in r` alone routed this shape into the worker-
+  // Dispatch branch too, rendering "Queued undefined for worker Dispatch undefined" — the
+  // peer_link relay (enqueueForeignReply, orchestration-reply-foreign.ts) has neither field.
+  it('renders the actual peer-link relay receipt for a foreign-origin reply, never the dispatch fields', async () => {
+    await expect(
+      renderReply({
+        message: { id: 'msg_reply_1' },
+        relay: {
+          destination: 'peer_link',
+          environment: 'p-environment',
+          accepted: true,
+          state: 'queued',
+          outboxId: 'obx_1',
+          link: 'link_device_1'
+        }
+      })
+    ).resolves.toBe('Queued msg_reply_1 for relay to p-environment (reply outbox obx_1).')
+  })
+
   it('keeps the local receipt byte-identical', async () => {
     // Negative control: a local reply still renders exactly as before.
     await expect(renderReply({ message: { id: 'msg_reply' } })).resolves.toBe('Replied msg_reply')

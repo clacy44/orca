@@ -2211,15 +2211,25 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           })
           throw noReturnRoute(original, 'quarantined')
         }
+        // F-11 pt.2 (Ruling 32(b)): before refusing "no addressee", recover it from THIS host's
+        // own outbound rows on the same thread — never from anything the peer supplied. Exactly
+        // one distinct addressee among them is used; zero or more than one still refuses as today.
+        let replyOriginal = original
         if (original.peer_agent_id == null) {
-          throw noReturnRoute(original, 'sender_unverified')
+          const recoveredAddressees = original.thread_id
+            ? db.getOwnOutboundPeerAgentIdsForThread(original.thread_id)
+            : []
+          if (recoveredAddressees.length !== 1) {
+            throw noReturnRoute(original, 'sender_unverified')
+          }
+          replyOriginal = { ...original, peer_agent_id: recoveredAddressees[0] }
         }
         const binding = getRoutableLinkBinding(db, runtime, original.peer_link_device_id)
         if (binding) {
           return enqueueForeignReply({
             db,
             runtime,
-            original,
+            original: replyOriginal,
             binding,
             params,
             replySenderPaneKey: foreignReplySenderPaneKey,
@@ -2236,7 +2246,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             return enqueueForeignReply({
               db,
               runtime,
-              original,
+              original: replyOriginal,
               binding: last,
               params,
               replySenderPaneKey: foreignReplySenderPaneKey,

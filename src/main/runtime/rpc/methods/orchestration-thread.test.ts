@@ -276,6 +276,58 @@ describe('orchestration.thread (BUG 4, hardened per S10-2 ruling 1)', () => {
     expect(result.messages.map((m) => m.subject)).toEqual(['one'])
   })
 
+  // F-1 (Ruling 32(b)): every peer-relayed (foreign-origin) row is addressed as `agent:<id>`,
+  // never a bare terminal handle (message-gate-writer.ts's federation_import verb always writes
+  // `to: agent:${toAgent.id}`) — so the degrade path's OLD bare-handle-only filter silently
+  // excluded every one of them even for the genuine addressee, which is exactly the field
+  // symptom: `orca orchestration check`/`inbox` (handle- and id-agnostic reads) showed the
+  // message; `orca agents thread --id` showed none.
+  it('T1 (F-1): a registered agent still sees a foreign-origin row addressed to their durable agent:<id>, not just their bare handle', async () => {
+    db = new OrchestrationDb(':memory:')
+    const { dispatcher } = dispatcherFor(db)
+
+    const registerResponse = await dispatcher.dispatch(
+      request(
+        'register-recipient',
+        'orchestration.agents.register',
+        { name: 'agent-recipient', role: 'test agent' },
+        evidenceFor('term_recipient')
+      )
+    )
+    expect(registerResponse.ok).toBe(true)
+    const agentId = (registerResponse as { result: { agent: { id: string } } }).result.agent.id
+
+    // No db.createThread / thread_participants row — mirrors a raw federation_import insert
+    // (resolveForeignThread mints its OWN participant rows via createThread; this reproduces the
+    // shape where the reader falls through to the degrade path regardless of why).
+    db.insertMessage({
+      from: 'remote:link_p:peer_agent_1',
+      to: `agent:${agentId}`,
+      subject: 'hello from the peer',
+      threadId: 'foreign_t1'
+    })
+
+    const response = await dispatcher.dispatch(
+      request(
+        'thread-foreign-recipient',
+        'orchestration.thread',
+        { id: 'foreign_t1' },
+        evidenceFor('term_recipient')
+      )
+    )
+    expect(response.ok).toBe(true)
+    const result = (
+      response as {
+        result: { messages: { subject: string; from_handle: string }[]; degraded: boolean }
+      }
+    ).result
+    expect(result.degraded).toBe(true)
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0].subject).toBe('hello from the peer')
+    // Rendered with the remote sender handle, never rewritten or hidden.
+    expect(result.messages[0].from_handle).toBe('remote:link_p:peer_agent_1')
+  })
+
   it('an unattested caller (no evidence at all) gets nothing, never the unfiltered dump', async () => {
     db = new OrchestrationDb(':memory:')
     const threadId = seedParticipantThread(db, ['term_a', 'term_b'], ['one', 'two'])

@@ -21,6 +21,7 @@ import {
   type PrincipalRegistryState
 } from './principal-registry-store'
 import { isMintedPendingDevice } from './device-registry-pending-grants'
+import { buildLaneGrantSummary } from './principal-registry-grant-summary'
 
 import type {
   LaneGrantSummary,
@@ -115,17 +116,13 @@ export class PrincipalRegistry {
   listGrants(): LaneGrantSummary[] {
     return this.grants.listDevices().map((device) => {
       const boundPrincipalId = this.principalOf(device.deviceId)
-      return {
-        deviceId: device.deviceId,
-        label: device.name,
-        perPerson: device.pendingExpiresAt !== undefined,
+      return buildLaneGrantSummary(device, {
         boundPrincipalId,
         designated:
           boundPrincipalId !== null &&
           this.delegatedGrantIdOf(boundPrincipalId) === device.deviceId,
-        // M1: an un-redeemed per-person invite (§9 step 0.2's checkable precondition).
-        redeemed: device.lastSeenAt > 0
-      }
+        legacyGrantProfile: this.options.legacyGrantProfile ?? 'full'
+      })
     })
   }
 

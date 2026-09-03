@@ -128,6 +128,21 @@ type OrchestrationReplyResult =
       // Why also `message`: CLIs that predate this branch render `Replied ${r.message.id}`.
       message: { id: string }
     }
+  // F-2 (Ruling 32(b)): a reply to a foreign-origin message durably enqueues onto the peer
+  // reply outbox (orchestration-reply-foreign.ts's `enqueueForeignReply`) — a THIRD relay
+  // shape, never a worker Dispatch. Missing from this union, `'relay' in r` still matched it
+  // and the render below read the (absent) dispatch fields as `undefined`.
+  | {
+      relay: {
+        destination: 'peer_link'
+        environment: string
+        accepted: true
+        state: 'queued'
+        outboxId: string
+        link: string
+      }
+      message: { id: string }
+    }
 
 type OrchestrationSendResult = (
   | { message: { id: string; run_id?: string }; lifecycle?: LifecycleSendResult }
@@ -901,11 +916,19 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         expectHost: getOptionalStringFlag(flags, 'expect-host')
       })
     )
-    printResult(result, json, (r) =>
-      'relay' in r
-        ? `Queued ${r.relay.messageId} for worker Dispatch ${r.relay.dispatchId}`
-        : `Replied ${r.message.id}`
-    )
+    printResult(result, json, (r) => {
+      if (!('relay' in r)) {
+        return `Replied ${r.message.id}`
+      }
+      // F-2: the peer_link relay (a foreign-origin reply) is a distinct shape from the worker
+      // Dispatch relay above — render its actual result, never the dispatch fields it has none
+      // of. `outboxId` (never present on the Dispatch relay) is the narrowing discriminant since
+      // only the peer_link variant carries a literal `destination` tag.
+      if ('outboxId' in r.relay) {
+        return `Queued ${r.message.id} for relay to ${r.relay.environment} (reply outbox ${r.relay.outboxId}).`
+      }
+      return `Queued ${r.relay.messageId} for worker Dispatch ${r.relay.dispatchId}`
+    })
   },
 
   'orchestration inbox': async ({ flags, client, json }) => {

@@ -6162,24 +6162,35 @@ export class OrchestrationDb {
   }
 
   // Why: ask wait-loop read — to_handle filter shows only replies to the worker; afterSequence resumes past its own outbound ask.
-  getThreadMessagesFor(threadId: string, toHandle: string, afterSequence?: number): MessageRow[] {
+  // F-1 (Ruling 32(b)): `toHandle` accepts one or more addresses — a degraded (non-participant)
+  // reader must match BOTH the caller's bare terminal handle and its durable `agent:<id>` form,
+  // because every peer-relayed (foreign-origin) row is addressed ONLY as `agent:<id>` (never a
+  // bare terminal handle) — filtering by the bare handle alone silently excluded every one of
+  // them (orchestration-thread.ts's degrade path was the only caller).
+  getThreadMessagesFor(
+    threadId: string,
+    toHandle: string | readonly string[],
+    afterSequence?: number
+  ): MessageRow[] {
+    const toHandles = Array.isArray(toHandle) ? toHandle : [toHandle as string]
+    const placeholders = toHandles.map(() => '?').join(',')
     if (afterSequence !== undefined) {
       return exposeMessageListTimestamps(
         this.db
           .prepare(
-            `SELECT * FROM messages WHERE thread_id = ? AND to_handle = ? AND sequence > ?
+            `SELECT * FROM messages WHERE thread_id = ? AND to_handle IN (${placeholders}) AND sequence > ?
              AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
           )
-          .all(threadId, toHandle, afterSequence) as MessageRow[]
+          .all(threadId, ...toHandles, afterSequence) as MessageRow[]
       )
     }
     return exposeMessageListTimestamps(
       this.db
         .prepare(
-          `SELECT * FROM messages WHERE thread_id = ? AND to_handle = ?
+          `SELECT * FROM messages WHERE thread_id = ? AND to_handle IN (${placeholders})
            AND ${liveMessageSqlClause()} ORDER BY sequence ASC`
         )
-        .all(threadId, toHandle) as MessageRow[]
+        .all(threadId, ...toHandles) as MessageRow[]
     )
   }
 
@@ -6221,6 +6232,22 @@ export class OrchestrationDb {
     )
   }
 
+  // F-11 pt.2 (Ruling 32(b)): the "no addressee" reply refusal's local-evidence recovery. Every
+  // row THIS host sent outbound over a peer link carries `peer_agent_id` (the addressee it went
+  // to); `peer_link_device_id` marks an INBOUND-imported row only (db.ts's own messages column
+  // comment), so excluding it here means these are never peer-supplied values — the host wrote
+  // every one itself. Distinct, so the caller can tell "exactly one" from "more than one".
+  getOwnOutboundPeerAgentIdsForThread(threadId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT peer_agent_id FROM messages
+         WHERE thread_id = ? AND peer_link_device_id IS NULL AND peer_agent_id IS NOT NULL
+         AND ${liveMessageSqlClause()}`
+      )
+      .all(threadId) as { peer_agent_id: string }[]
+    return rows.map((row) => row.peer_agent_id)
+  }
+
   // Adversarial review S10-2b major #5 fix: getThreadMessages/getThreadMessagesFor above filter
   // purged/quarantine-withheld rows straight in SQL (liveMessageSqlClause) but never counted
   // what they excluded — resolveThreadReplay (orchestration-thread.ts) declares an `omitted`
@@ -6229,10 +6256,13 @@ export class OrchestrationDb {
   // query excluded. Two separate COUNT queries (not a single CASE-summed one) so a row that is
   // both purged AND from a quarantined sender is never double-counted: the withheld count
   // explicitly excludes purged rows, same split as getThreadMessagesSince (thread-directory.ts).
+  // F-1: `toHandle` accepts one or more addresses — see getThreadMessagesFor's own note; the
+  // omitted count must be taken over the same address set the degraded read actually queried,
+  // or "N withheld" could report a number the caller's own read never corroborates.
   getThreadMessagesOmitted(
     threadId: string,
     since?: ThreadSinceCursor,
-    toHandle?: string
+    toHandle?: string | readonly string[]
   ): { purged: number; withheld: number } {
     const cursorClause =
       since?.kind === 'sequence'
@@ -6241,8 +6271,10 @@ export class OrchestrationDb {
           ? 'AND created_at > ?'
           : ''
     const cursorArgs = since ? [since.value] : []
-    const toHandleClause = toHandle !== undefined ? 'AND to_handle = ?' : ''
-    const toHandleArgs = toHandle !== undefined ? [toHandle] : []
+    const toHandles = toHandle === undefined ? [] : Array.isArray(toHandle) ? toHandle : [toHandle]
+    const toHandleClause =
+      toHandles.length > 0 ? `AND to_handle IN (${toHandles.map(() => '?').join(',')})` : ''
+    const toHandleArgs = toHandles
     const purged = (
       this.db
         .prepare(

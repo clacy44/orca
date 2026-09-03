@@ -189,7 +189,12 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // R2: a tombstoned predecessor under this same host+name whose thread membership this
         // fresh id just inherited. Always 0 on a 'reminted' row (its id, and so its membership,
         // was never orphaned in the first place).
-        adoptedThreads: result.outcome === 'created' ? result.adoptedThreads : 0
+        adoptedThreads: result.outcome === 'created' ? result.adoptedThreads : 0,
+        // F-9 (Ruling 32(b)): true when a quarantined predecessor under this name blocked
+        // adoption outright (by design). Lets the CLI say WHICH threads were not inherited and
+        // why, instead of a bare 0 reading the same as "nothing to inherit".
+        blockedByQuarantinedPredecessor:
+          result.outcome === 'created' ? result.blockedByQuarantinedPredecessor : false
       }
     }
   })

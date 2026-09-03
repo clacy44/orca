@@ -16,6 +16,8 @@ export type PrincipalGrantRow = {
   pairedAt: number
   lastSeenAt: number
   pendingExpiresAt?: number
+  // S10-19: absent means "minted before this slice existed" — resolved via effectiveAccessProfile().
+  accessProfile?: 'full' | 'peer'
 }
 
 /** One pairing grant as the host-only read surface sees it: label, lane binding and designation. */
@@ -29,10 +31,14 @@ export type LaneGrantSummary = {
   designated: boolean
   /** False for a per-person invite nobody has opened yet (M1) — `orca lane status`'s precondition. */
   redeemed: boolean
+  /** F-11 (Ruling 32(b)): the effective least-privilege peer access profile this grant holds. */
+  accessProfile: 'full' | 'peer'
 }
 
 export type PrincipalRegistryOptions = {
   /** The runtime's shared auth token, refused by name as a federated link key (§2a rev 16). */
   runtimeAuthToken?: string | null
   now?: () => number
+  // F-11: resolves a pre-S10-19 row's absent accessProfile (device-registry.ts's own default: 'full').
+  legacyGrantProfile?: 'full' | 'peer'
 }

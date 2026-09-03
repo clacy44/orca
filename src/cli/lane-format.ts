@@ -17,6 +17,8 @@ export type LaneGrant = {
   boundPrincipalId: string | null
   designated: boolean
   redeemed: boolean
+  // F-11 (Ruling 32(b)): the persisted row's effective peer access profile.
+  accessProfile: 'full' | 'peer'
 }
 
 export type LaneStatusPrincipal = LanePrincipal & {
@@ -212,6 +214,7 @@ export function formatStatus(snapshot: LaneStatusSnapshot): string {
       : 'unbound'
     const marks = [
       grant.perPerson ? 'per-person' : 'shared',
+      `profile:${grant.accessProfile}`,
       ...(grant.designated ? ['pusher'] : []),
       ...(grant.redeemed ? [] : ['invite outstanding'])
     ]

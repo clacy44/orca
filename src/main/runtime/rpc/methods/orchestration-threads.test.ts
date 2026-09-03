@@ -291,6 +291,49 @@ describe('orchestration.threads.* / orchestration.wait', () => {
       expect(replay.degraded).toBe(false)
     })
 
+    // F-9 (Ruling 32(b)): thread_participants transferring is not enough for a PACT thread —
+    // requirePactParticipant (pact-shared.ts) reads threads.pact_proposer_agent_id/
+    // pact_with_agent_id/pact_turn_agent_id directly. Before the fix this test's final `pause`
+    // call refused `not_a_participant` even though `successor.adoptedThreads` was already 1.
+    it('T3-pact: a re-registered successor can still act on a pact its predecessor was engaged in', async () => {
+      setup()
+      const predecessor = await registerAgent('agent-a', evidenceA)
+      const agentB = await registerAgent('agent-b', evidenceB)
+      const created = (await call(
+        'orchestration.threads.create',
+        { with: `agent:${agentB}` },
+        ctx(evidenceA)
+      )) as { thread: { id: string } }
+
+      await call(
+        'orchestration.threads.pact',
+        { id: created.thread.id, with: `agent:${agentB}`, steps: 3 },
+        ctx(evidenceA)
+      )
+      await call(
+        'orchestration.threads.pact',
+        { id: created.thread.id, accept: true },
+        ctx(evidenceB)
+      )
+
+      await call('orchestration.agents.retire', { id: predecessor }, ctx(evidenceB))
+      const successor = (await call(
+        'orchestration.agents.register',
+        { name: 'agent-a', role: 'take two' },
+        ctx(evidenceARelaunch)
+      )) as { agent: { id: string }; adoptedThreads: number }
+      expect(successor.adoptedThreads).toBe(1)
+
+      // Turn moved to the proposer (agent-a) on accept — the successor now holds that id.
+      const paused = (await call(
+        'orchestration.threads.pact',
+        { id: created.thread.id, pause: true, reasonCode: 'operator' },
+        ctx(evidenceARelaunch)
+      )) as { thread: { pact_state: string; pact_proposer_agent_id: string } }
+      expect(paused.thread.pact_state).toBe('engaged')
+      expect(paused.thread.pact_proposer_agent_id).toBe(successor.agent.id)
+    })
+
     it('R2 fix: quarantine then retire never hands a sensitive thread to the next registrant of the freed name', async () => {
       setup()
       const predecessor = await registerAgent('agent-a', evidenceA)
@@ -312,10 +355,18 @@ describe('orchestration.threads.* / orchestration.wait', () => {
         'orchestration.agents.register',
         { name: 'agent-a', role: 'take two' },
         ctx(evidenceARelaunch)
-      )) as { agent: { id: string }; created: boolean; adoptedThreads: number }
+      )) as {
+        agent: { id: string }
+        created: boolean
+        adoptedThreads: number
+        blockedByQuarantinedPredecessor: boolean
+      }
       expect(successor.created).toBe(true)
       expect(successor.agent.id).not.toBe(predecessor)
       expect(successor.adoptedThreads).toBe(0)
+      // F-9 (Ruling 32(b)): a bare 0 must not read the same as "nothing to inherit" — the CLI
+      // needs this to say WHICH threads were withheld and why.
+      expect(successor.blockedByQuarantinedPredecessor).toBe(true)
 
       // Still refused, exactly like any other outsider — no widening from the quarantined
       // predecessor's own membership.

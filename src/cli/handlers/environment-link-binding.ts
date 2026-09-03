@@ -69,6 +69,26 @@ function formatLinkStatus(result: { links: LinkRow[]; state?: string }): string 
   return result.state ? `${lines.join('\n')}\n(${result.state})` : lines.join('\n')
 }
 
+// F-3 (Ruling 32(b)): projectOutboxRow (orchestration-link-binding-outbox.ts) reports every
+// outbox row's real state — 'queued' | 'sending' | 'delivered' | 'refused' | 'abandoned' |
+// 'cancelled' — never only queued rows. The JSON branch already renders this honestly (it is
+// the raw RPC result); this type keeps the text branch reading the same field, not a bare count.
+type ReplyOutboxItem = { state: string }
+
+// The text branch's count MUST come from the same per-state tally the item list itself carries
+// — never a single bare `items.length` labelled "queued", which reads a DELIVERED (or refused/
+// abandoned/cancelled) row as still pending.
+export function formatReplyOutboxList(result: { items: ReplyOutboxItem[] }): string {
+  if (result.items.length === 0) {
+    return '0 queued'
+  }
+  const counts = new Map<string, number>()
+  for (const item of result.items) {
+    counts.set(item.state, (counts.get(item.state) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([state, count]) => `${count} ${state}`).join(', ')
+}
+
 export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> = {
   'environment link-status': async ({ flags, client, json }) => {
     const link = getOptionalStringFlag(flags, 'link')
@@ -89,8 +109,10 @@ export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> =
       return
     }
     if (flags.has('outbox')) {
-      const result = await client.call<{ items: unknown[] }>('orchestration.replyOutbox', { link })
-      printResult(result, json, (r) => `${r.items.length} queued`)
+      const result = await client.call<{ items: ReplyOutboxItem[] }>('orchestration.replyOutbox', {
+        link
+      })
+      printResult(result, json, formatReplyOutboxList)
       return
     }
     // --wait: the server-side wait is bounded by LINK_BINDING_STATUS_WAIT_CAP_MS regardless of the
