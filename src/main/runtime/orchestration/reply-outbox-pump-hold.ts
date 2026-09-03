@@ -3,12 +3,14 @@
 import type { OrcaRuntimeService } from '../orca-runtime'
 import { localEvidenceUnavailable } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
-import { fireReplyRelayNotice, auditReplyRelaySettleRaced } from './reply-outbox-pump-notify'
+import {
+  fireReplyRelayDispositionNotice,
+  auditReplyRelaySettleRaced
+} from './reply-outbox-pump-notify'
 import {
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_HOLD_MAX_MS,
   REPLY_RELAY_ROUTE_MOVED_NOTICE,
-  REPLY_RELAY_REFUSED_NOTICE,
   ROUTE_MOVED_CODE,
   BINDING_CHANGED_CODE
 } from './link-binding-constants'
@@ -85,28 +87,29 @@ export function holdOrRetargetReplyOutboxItem(
   // Ruling 26(c): evaluated from item.firstHeldAt as already read at claim time — BEFORE the
   // hold write below (which is the only statement in this function that could advance it).
   const firstHeldAt = item.firstHeldAt ?? now
-  if (now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
-    // Ruling 26 Addendum 3(ee)/F6: a same-route hold (isSameRoute true — this tick's own
-    // re-check resolved to the row's CURRENT route) never settles route_moved; the route did not
-    // move. Only the genuine "no routable binding found at all" case (retargeted === null) uses
-    // ROUTE_MOVED_CODE/the route-moved notice. Both existing constants — no new one added.
+  // Ruling 26 Addendum 4(kk): a same-route hold (isSameRoute true — this tick's own re-check
+  // resolved to the row's CURRENT route) NEVER settles at this deadline — not route_moved (the
+  // route did not move) and not the binding_changed/reply_relay_refused pairing the C5d review
+  // found dishonest (a peer refusal that never happened). Only the genuine "no routable binding
+  // found at all" case (retargeted === null, !isSameRoute) settles here, with route_moved. A
+  // same-route item falls through to the bounded hold below and keeps being re-checked;
+  // R18.3's REPLY_OUTBOX_MAX_AGE_MS deadline (processItem, evaluated on every claim) is the ONLY
+  // thing that can eventually settle it — abandoned, with reply_relay_abandoned — exactly the
+  // shape R18.4(a) already prescribes for the local-evidence hold.
+  if (!isSameRoute && now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
     const settled = db.settleReplyOutboxItem(item.id, {
       state: 'refused',
       settledAt: now,
       consecutiveFailures: item.consecutiveFailures,
       nextAttemptAfter: null,
-      lastErrorCode: isSameRoute ? BINDING_CHANGED_CODE : ROUTE_MOVED_CODE,
+      lastErrorCode: ROUTE_MOVED_CODE,
       lastError: null
     })
     if (settled) {
-      fireReplyRelayNotice(
-        runtime,
-        item,
-        isSameRoute ? REPLY_RELAY_REFUSED_NOTICE : REPLY_RELAY_ROUTE_MOVED_NOTICE,
-        null
-      )
+      // Ruling 26 Addendum 4(hh): route_moved is a disposition-family notice.
+      fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ROUTE_MOVED_NOTICE, null)
     } else {
-      auditReplyRelaySettleRaced(db, item, isSameRoute ? 'same_route_hold_deadline' : 'route_moved')
+      auditReplyRelaySettleRaced(db, item, 'route_moved')
     }
     return
   }

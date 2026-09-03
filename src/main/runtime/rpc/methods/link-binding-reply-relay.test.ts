@@ -20,6 +20,7 @@ import {
   OrcaRuntimeService,
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
+import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import type { RpcContext } from '../core'
 
@@ -570,4 +571,131 @@ describe('S10-16 C5: durable reply relay (two-runtime harness)', () => {
     }
     expect(stillUnread.read).toBe(0)
   })
+
+  it('Ruling 26 Addendum 4(ll): the prover ARMED and the pump delivering, against the two-runtime harness with per-method scripted responses (no shared queue), proves R13.1 normal shape', async () => {
+    // Unlike reply-outbox-pump.test.ts's own harness, THIS file's beforeEach never disarms
+    // linkBindingProver — both hRuntime and pRuntime keep it armed (createReplyOutboxPump's
+    // sibling install, same setOrchestrationDb() call), exactly R13.1's normal production shape:
+    // "one inbound message kicks a prover round AND an outbox drain".
+    appState.userData = hDataPath
+    const askerId = await registerAgent(hRuntime, 'asker', {
+      terminalHandle: 'term_a',
+      paneKey: PANE_A
+    })
+    appState.userData = pDataPath
+    const answererId = await registerAgent(pRuntime, 'answerer', {
+      terminalHandle: 'term_b',
+      paneKey: PANE_B
+    })
+
+    appState.userData = hDataPath
+    const outboundId = 'msg_ffffffffff01'
+    hDb.insertGatedMessage({
+      id: outboundId,
+      from: `agent:${askerId}`,
+      to: `remote:${hEnvironmentIdForP}:${answererId}`,
+      subject: 'hello',
+      body: 'hello P',
+      runId: 'run_local_test',
+      verb: 'send',
+      peerAgentId: answererId,
+      threadId: null
+    })
+
+    appState.userData = pDataPath
+    await call(
+      'orchestration.federatedSend',
+      {
+        fromAgent: { id: askerId, displayName: 'home-asker' },
+        toAgentId: answererId,
+        messageId: outboundId,
+        subject: 'hello',
+        body: 'hello P'
+      },
+      pLinkCtx()
+    )
+
+    // Per-method scripted responses on BOTH runtimes — `orchestration.federatedSend` routes to
+    // the peer's REAL handler (the pump's own leg); `status.get` (the prover's capability check,
+    // R10.3) answers `method_not_found` — a genuine, cheap capability decline that short-circuits
+    // the round before any probe/confirm call. Each method has its OWN branch and its OWN
+    // counter — never one shared mock queue a caller could steal an entry from (the exact
+    // harness defect Ruling 26 Addendum 3(bb)/F1 named for the disarmed version of this test).
+    const statusGetCalls = { h: 0, p: 0 }
+    vi.spyOn(pRuntime, 'callPinnedEnvironment').mockImplementation(async (args) => {
+      if (args.method === 'status.get') {
+        statusGetCalls.p += 1
+        throw new OrchestrationError('method_not_found', 'no orchestration support')
+      }
+      appState.userData = hDataPath
+      if (args.method !== 'orchestration.federatedSend') {
+        throw new Error(`unexpected method ${args.method}`)
+      }
+      const result = await call(
+        'orchestration.federatedSend',
+        args.params as Record<string, unknown>,
+        {
+          runtime: hRuntime,
+          pairedDeviceId: hLinkDeviceId,
+          clientKind: 'runtime',
+          authenticatedCallerFingerprint: 'fp_h_as_seen_by_itself'
+        }
+      )
+      appState.userData = pDataPath
+      return result
+    })
+    vi.spyOn(hRuntime, 'callPinnedEnvironment').mockImplementation(async (args) => {
+      if (args.method === 'status.get') {
+        statusGetCalls.h += 1
+        throw new OrchestrationError('method_not_found', 'no orchestration support')
+      }
+      appState.userData = pDataPath
+      if (args.method !== 'orchestration.federatedSend') {
+        throw new Error(`unexpected method ${args.method}`)
+      }
+      const result = await call(
+        'orchestration.federatedSend',
+        args.params as Record<string, unknown>,
+        pLinkCtx()
+      )
+      appState.userData = hDataPath
+      return result
+    })
+
+    appState.userData = pDataPath
+    const reply = (await call(
+      'orchestration.reply',
+      { id: outboundId, body: 'thanks A' },
+      {
+        runtime: pRuntime,
+        orchestrationCompatibilityEvidence: { terminalHandle: 'term_b', paneKey: PANE_B }
+      }
+    )) as { relay: { outboxId: string } }
+
+    appState.userData = pDataPath
+    pRuntime.replyOutbox?.kick(pLinkDeviceId)
+    let lastSettled: ReturnType<typeof pDb.getReplyOutboxItem> = null
+    for (let i = 0; i < 100; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      lastSettled = pDb.getReplyOutboxItem(reply.relay.outboxId)
+      if (lastSettled?.state === 'delivered') {
+        break
+      }
+    }
+    expect(lastSettled?.state).toBe('delivered')
+
+    // R13.1: a round's FIRST write (link-binding-prover-round.ts, "backoff/last_attempt_at/
+    // last_round_at written BEFORE the first socket opens") lands on peer_link_attempts before
+    // any RPC — proof the inbound-contact kick actually ran a round for this link, independent of
+    // which scripted RPC branch it happened to reach (this harness's shared `appState.userData`
+    // switch, used only for the FILE-BACKED environment store, races the round's deferred
+    // `setTimeout(0)` in a way neither this test nor production code needs to resolve — the
+    // pump's OWN delivery leg, asserted above, never touches that global).
+    let hAttempt = hDb.getBindingAttempt(hLinkDeviceId)
+    for (let i = 0; i < 60 && hAttempt?.lastAttemptAt == null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      hAttempt = hDb.getBindingAttempt(hLinkDeviceId)
+    }
+    expect(hAttempt?.lastAttemptAt).not.toBeNull()
+  }, 20000)
 })

@@ -9,7 +9,7 @@ import { getRoutableLinkBinding } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
 import {
-  fireReplyRelayNotice,
+  fireReplyRelayDispositionNotice,
   recordReplyOutboxFailureAndMaybeNotify,
   auditReplyRelaySettleRaced as auditSettleRaced
 } from './reply-outbox-pump-notify'
@@ -47,11 +47,15 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
   // otherwise just no-op. This flag is consumed at the running tick's own tail.
   let rerunRequested = false
 
-  const fireNotice = (
+  // Ruling 26 Addendum 4(hh)/(jj): the DISPOSITION family's own sender — stamps
+  // last_notified_condition + last_notified_at (guarded to queued/sending) before firing. Never
+  // shares a budget with lastAdvisoryNotifiedAt (the R20.2 advisory's own map) or with the
+  // unreachable/recovered edge (the consecutive_failures counter).
+  const fireDispositionNotice = (
     item: ReplyOutboxRow,
-    code: Parameters<typeof fireReplyRelayNotice>[2],
+    code: Parameters<typeof fireReplyRelayDispositionNotice>[2],
     incidentId: string | null
-  ): void => fireReplyRelayNotice(runtime, item, code, incidentId)
+  ): void => fireReplyRelayDispositionNotice(runtime, item, code, incidentId)
 
   function scheduleWake(delayMs: number): void {
     if (stopped) {
@@ -87,7 +91,9 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         lastError: item.lastError
       })
       if (settled) {
-        fireNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
+        // Ruling 26 Addendum 4(hh): abandoned is a disposition-family notice — its own budget,
+        // never the R20.2 advisory's.
+        fireDispositionNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
       } else {
         auditSettleRaced(db, item, 'abandoned')
       }
@@ -150,7 +156,9 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
           lastError: disposition.errorMessage
         })
         if (settled) {
-          fireNotice(item, disposition.noticeCode, null)
+          // Ruling 26 Addendum 4(hh): refused/peer_receipt_poisoned/id_conflict are disposition-
+          // family notices — their own budget, never the R20.2 advisory's.
+          fireDispositionNotice(item, disposition.noticeCode, null)
         } else {
           auditSettleRaced(db, item, 'refused')
         }
@@ -185,18 +193,22 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       if (disposition.bumpFailure) {
         recordReplyOutboxFailureAndMaybeNotify(runtime, item, nextFailures)
       }
-      // Ruling 26 Addendum 3(aa): edge-triggered on the notice choke's OWN persisted column
-      // (last_notified_condition), never on last_error_code — a hold's write to last_error_code
-      // (binding_changed etc.) must not re-arm this edge (F2). Also bounded by the same per-link
-      // minimum interval shouldFireReplyRelayNotice already applies to the peer-triggered
-      // advisory, so an alternating peer cannot exceed R19.3's rate either.
+      // Ruling 26 Addendum 3(aa)/4(hh)/(ii): edge-triggered on the notice choke's OWN persisted
+      // column (last_notified_condition), never on last_error_code — a hold's write to
+      // last_error_code (binding_changed etc.) must not re-arm this edge (F2). Bounded by the
+      // DISPOSITION family's OWN persisted per-link interval — MAX(last_notified_at) over this
+      // link's rows — never the R20.2 advisory's lastAdvisoryNotifiedAt map (F1): a peer cannot
+      // buy silence on one family by tripping the other, and the interval survives a restart
+      // (F2) because it is read from the database, not from a Map.
       if (
         disposition.noticeCode &&
         item.lastNotifiedCondition !== disposition.noticeCode &&
-        replyRelayNoticeRateLimitOk(lastAdvisoryNotifiedAt.get(item.linkDeviceId) ?? null, at)
+        replyRelayNoticeRateLimitOk(
+          db.replyOutboxLinkLastDispositionNotifiedAt(item.linkDeviceId),
+          at
+        )
       ) {
-        lastAdvisoryNotifiedAt.set(item.linkDeviceId, at)
-        fireNotice(item, disposition.noticeCode, null)
+        fireDispositionNotice(item, disposition.noticeCode, null)
       }
       return
     }

@@ -132,7 +132,8 @@ import {
   kickReplyOutboxForLink as kickReplyOutboxForLinkImpl,
   getReplyOutboxItemByLocalMessageId as getReplyOutboxItemByLocalMessageIdImpl,
   markReplyOutboxNotified as markReplyOutboxNotifiedImpl,
-  markReplyOutboxNoticeCondition as markReplyOutboxNoticeConditionImpl,
+  markReplyOutboxDispositionNotice as markReplyOutboxDispositionNoticeImpl,
+  replyOutboxLinkLastDispositionNotifiedAt as replyOutboxLinkLastDispositionNotifiedAtImpl,
   nextReplyOutboxWakeAt as nextReplyOutboxWakeAtImpl,
   type EnqueueReplyOutboxParams,
   type ReplyOutboxRow
@@ -1024,7 +1025,12 @@ const S10_16_LINK_BINDING_SCHEMA_SQL = `
         -- Ruling 26 Addendum 3(aa): the disposition-notice edge keys on the last NOTIFIED
         -- condition, not on last_error_code (which holds also write). Written ONLY by the notice
         -- choke (fireReplyRelayNotice); holds never touch it.
-        last_notified_condition  TEXT
+        last_notified_condition  TEXT,
+        -- Ruling 26 Addendum 4(ii): stamped in the SAME write as last_notified_condition — the
+        -- persisted half of the disposition family's per-link R19.3 interval (MAX(last_notified_at)
+        -- WHERE link_device_id = ?), replacing the in-memory Map C5d shared with the R20.2
+        -- advisory. Guarded to queued/sending rows (jj) — a settled row is never mutated.
+        last_notified_at         INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_peer_reply_outbox_pending
         ON peer_reply_outbox(link_device_id, environment_id, bound_pairing_revision, state,
@@ -1477,7 +1483,11 @@ export class OrchestrationDb {
         ['notified_at', 'INTEGER'],
         // Ruling 26 Addendum 3(aa): unshipped-repair path for the new notice-edge column (S10-16
         // C5d) — never a schema-version bump.
-        ['last_notified_condition', 'TEXT']
+        ['last_notified_condition', 'TEXT'],
+        // Ruling 26 Addendum 4(ii): same unshipped-repair pattern, one commit later (S10-16 C5e)
+        // — never a schema-version bump. Re-triggers the fail-closed repair sweep below once on
+        // every existing v40 database (harmless, one-time — (ll)).
+        ['last_notified_at', 'INTEGER']
       ]
       let addedColumn = false
       for (const [column, type] of columns) {
@@ -4803,10 +4813,16 @@ export class OrchestrationDb {
     markReplyOutboxNotifiedImpl(this.db, id, now)
   }
 
-  // Ruling 26 Addendum 3(aa): the ONLY writer of last_notified_condition — called exclusively
-  // from the notice choke (fireReplyRelayNotice), never from a hold path.
-  markReplyOutboxNoticeCondition(id: string, condition: string): void {
-    markReplyOutboxNoticeConditionImpl(this.db, id, condition)
+  // Ruling 26 Addendum 4(hh)/(ii)/(jj): the ONLY writer of last_notified_condition/
+  // last_notified_at — the DISPOSITION family's own edge + persisted per-link interval; called
+  // exclusively from the notice choke's disposition path, never from a hold path and never for
+  // the R20.2 advisory or the unreachable/recovered family.
+  markReplyOutboxDispositionNotice(id: string, condition: string, now: number): void {
+    markReplyOutboxDispositionNoticeImpl(this.db, id, condition, now)
+  }
+
+  replyOutboxLinkLastDispositionNotifiedAt(linkDeviceId: string): number | null {
+    return replyOutboxLinkLastDispositionNotifiedAtImpl(this.db, linkDeviceId)
   }
 
   nextReplyOutboxWakeAt(): number | null {

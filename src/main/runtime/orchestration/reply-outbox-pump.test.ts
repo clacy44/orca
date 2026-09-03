@@ -717,7 +717,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(notice.n).toBe(1)
   })
 
-  it('Ruling 26 Addendum 3(ee)/F6: a same-route hold past the deadline never settles route_moved — the route did not move', async () => {
+  it('Ruling 26 Addendum 4(kk): a same-route hold past the deadline never settles at all — it keeps holding, and only R18.3 eventually abandons it, with the rendered body naming no peer refusal', async () => {
     const { outboxId } = await enqueueOneReply()
     const claimed = db.claimNextReplyOutboxItem(Date.now())
     expect(claimed?.id).toBe(outboxId)
@@ -726,14 +726,15 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     // (beforeEach's single peer_link_bindings row is untouched) — isSameRoute resolves true,
     // exactly the F1/(n) fall-through shape, not the (c)/B2 "no binding at all" shape above.
     const now = Date.now()
-    const pastDeadline = now - REPLY_OUTBOX_HOLD_MAX_MS - 1000
-    holdOrRetargetReplyOutboxItem(runtime, { ...claimed!, firstHeldAt: pastDeadline }, now)
+    const pastHoldDeadline = now - REPLY_OUTBOX_HOLD_MAX_MS - 1000
+    holdOrRetargetReplyOutboxItem(runtime, { ...claimed!, firstHeldAt: pastHoldDeadline }, now)
 
+    // Not settled at all — (kk): no binding_changed, no route_moved, no reply_relay_refused.
+    // The item is held again (bounded, re-checked), exactly like every other same-route
+    // re-check (test at Ruling 26 Addendum 1(n)/F1 above).
     const after = db.getReplyOutboxItem(outboxId)
-    expect(after?.state).toBe('refused')
-    // NOT route_moved — the same-route case settles with the binding-changed code instead.
+    expect(after?.state).toBe('queued')
     expect(after?.lastErrorCode).toBe('binding_changed')
-    expect(after?.lastErrorCode).not.toBe('route_moved')
     const routeMovedNotice = raw(db)
       .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%route%'`)
       .get(originalRunId) as { n: number }
@@ -741,6 +742,149 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     const refusedNotice = raw(db)
       .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%refused%'`)
       .get(originalRunId) as { n: number }
-    expect(refusedNotice.n).toBe(1)
+    expect(refusedNotice.n).toBe(0)
+
+    // R18.3's REPLY_OUTBOX_MAX_AGE_MS deadline — evaluated at the head of processItem on every
+    // claim, before holdOrRetarget ever runs — is the ONLY thing that eventually settles a
+    // same-route hold: abandoned, with reply_relay_abandoned. The rendered body is asserted, not
+    // only the count (the C5d review's own gap): it names the deadline and the attempt count,
+    // never a peer refusal code.
+    // A held row's next_attempt_after is untouched by kick() (P-6's own guard: `hold_count = 0`)
+    // — force it into the past directly, same as every other test here that needs a held/backed-
+    // off row reclaimed sooner than its real schedule.
+    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare('UPDATE peer_reply_outbox SET created_at = ?, next_attempt_after = ? WHERE id = ?')
+      .run(now - REPLY_OUTBOX_MAX_AGE_MS - 1000, Date.now() - 1, outboxId)
+    runtime.replyOutbox?.kick(linkDeviceId)
+    let settled = db.getReplyOutboxItem(outboxId)
+    for (let i = 0; i < 80 && settled?.state !== 'abandoned'; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      settled = db.getReplyOutboxItem(outboxId)
+    }
+    expect(settled?.state).toBe('abandoned')
+    const abandonedNotice = raw(db)
+      .prepare(`SELECT body FROM messages WHERE run_id = ? AND subject LIKE '%abandoned%'`)
+      .get(originalRunId) as { body: string } | undefined
+    expect(abandonedNotice?.body).toContain('could not be delivered within the retry deadline')
+    expect(abandonedNotice?.body).not.toContain('refused')
+    expect(abandonedNotice?.body).not.toContain('route moved')
+  })
+
+  it('Ruling 26 Addendum 4(hh)/(ii)/(jj): the disposition family persists its own per-link interval, never shares it with the R20.2 advisory, and only stamps queued/sending rows', async () => {
+    const { outboxId } = await enqueueOneReply()
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockRejectedValue(
+      new OrchestrationError('stale_environment_pairing', 'pairing stale')
+    )
+    runtime.replyOutbox?.kick(linkDeviceId)
+    let item = db.getReplyOutboxItem(outboxId)
+    for (let i = 0; i < 80 && item?.lastNotifiedCondition !== 'reply_relay_stale_pairing'; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      item = db.getReplyOutboxItem(outboxId)
+    }
+    // (ii): the persisted interval, not a Map — both notice columns stamped in the SAME write,
+    // and only because the row was still 'queued' when the notice fired (jj).
+    expect(item?.lastNotifiedCondition).toBe('reply_relay_stale_pairing')
+    expect(item?.lastNotifiedAt).not.toBeNull()
+    expect(db.replyOutboxLinkLastDispositionNotifiedAt(linkDeviceId)).toBe(item?.lastNotifiedAt)
+
+    // (hh): a SECOND, DIFFERENT item on the SAME link, delivered cleanly with an
+    // authorship-unconfirmed result, still fires the R20.2 advisory notice — the disposition
+    // family's just-stamped interval must not silence it. A shared budget (the C5d defect)
+    // would suppress this notice for LINK_BINDING_REVERIFY_MS after the stale-pairing fire above.
+    db.insertGatedMessage({
+      id: 'msg_eeeeeeeeee02',
+      from: `remote:${environmentId}:peer_answerer_agt`,
+      to: `agent:${askerId}`,
+      subject: 'hello 2',
+      body: 'hello P 2',
+      runId: 'run_peer_local',
+      verb: 'federation_import',
+      peerLinkDeviceId: linkDeviceId,
+      peerAgentId: 'peer_answerer_agt',
+      threadId: null
+    })
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockResolvedValue({
+      accepted: true,
+      messageId: 'msg_peerreceipt03',
+      threadId: null,
+      authorshipUnconfirmed: true
+    })
+    const second = (await call(
+      'orchestration.reply',
+      { id: 'msg_eeeeeeeeee02', body: 'reply body 2' },
+      {
+        runtime,
+        orchestrationCompatibilityEvidence: { terminalHandle: `agent:${askerId}`, paneKey: PANE_A },
+        orchestrationCompatibilityCallerAuthority: makeAuthority(`agent:${askerId}`)
+      }
+    )) as { relay: { outboxId: string } }
+    runtime.replyOutbox?.kick(linkDeviceId)
+    let secondItem = db.getReplyOutboxItem(second.relay.outboxId)
+    for (let i = 0; i < 80 && secondItem?.state !== 'delivered'; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      secondItem = db.getReplyOutboxItem(second.relay.outboxId)
+    }
+    expect(secondItem?.state).toBe('delivered')
+    const advisoryNotice = raw(db)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%could not confirm its addressee%'`
+      )
+      .get(originalRunId) as { n: number }
+    expect(advisoryNotice.n).toBe(1)
+    // The disposition family's own column is untouched by the advisory delivery — proving the
+    // two families really are on separate columns/budgets, not just separately timed.
+    expect(secondItem?.lastNotifiedCondition).toBeNull()
+
+    // (jj): the unreachable/recovered family never touches last_notified_condition either —
+    // driven only from the row's own consecutive_failures.
+    const baseItem = db.getReplyOutboxItem(outboxId)!
+    recordReplyOutboxFailureAndMaybeNotify(
+      runtime,
+      { ...baseItem, consecutiveFailures: REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD - 1 },
+      REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
+    )
+    expect(db.getReplyOutboxItem(outboxId)?.lastNotifiedCondition).toBe('reply_relay_stale_pairing')
+  })
+
+  it('Ruling 26 Addendum 4(jj)/F5: a retarget clears BOTH notice columns — a new route starts a new notice history', async () => {
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockRejectedValue(
+      new OrchestrationError('stale_environment_pairing', 'pairing stale')
+    )
+    const { outboxId } = await enqueueOneReply()
+    runtime.replyOutbox?.kick(linkDeviceId)
+    let item = db.getReplyOutboxItem(outboxId)
+    for (let i = 0; i < 80 && item?.lastNotifiedCondition !== 'reply_relay_stale_pairing'; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      item = db.getReplyOutboxItem(outboxId)
+    }
+    expect(item?.lastNotifiedCondition).toBe('reply_relay_stale_pairing')
+    expect(item?.lastNotifiedAt).not.toBeNull()
+
+    // The stale-pairing retry left a real backoff on next_attempt_after — force it claimable now.
+    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare('UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?')
+      .run(Date.now() - 1, outboxId)
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+    const retargetedLinkId = 'retargeted-link-device-2'
+    db.putPeerLinkBinding({
+      linkDeviceId: retargetedLinkId,
+      environmentId,
+      boundEndpointId: 'retargeted-endpoint-2',
+      boundPairingRevision: 998,
+      linkCredentialFp: 'retargeted-link-credential-fp-2',
+      peerCredentialFp: 'retargeted-peer-credential-fp-2',
+      peerKeyFingerprint: fingerprintOrchestrationPeer('peer_own_pubkey_b64'),
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    holdOrRetargetReplyOutboxItem(runtime, claimed!, Date.now())
+    const after = db.getReplyOutboxItem(outboxId)
+    expect(after?.linkDeviceId).toBe(retargetedLinkId)
+    expect(after?.lastNotifiedCondition).toBeNull()
+    expect(after?.lastNotifiedAt).toBeNull()
   })
 })

@@ -41,6 +41,12 @@ export function auditReplyRelaySettleRaced(
 
 // R19.1/P12: assembled entirely from local values; dropped-with-an-audit-row when the item's own
 // enqueue-time pane had no current run, never addressed to the synthetic PEER_RUN_ID mailbox.
+// Ruling 26 Addendum 4(hh)/(jj): this function no longer stamps last_notified_condition for
+// every code — only the DISPOSITION family does, and only through
+// fireReplyRelayDispositionNotice below, which stamps BEFORE calling this. Firing the
+// unreachable/recovered edge or the R20.2 advisory through this function touches neither notice
+// column — those families keep their own separate budgets (unreachable/recovered: the
+// consecutive_failures counter; advisory: notified_at + the caller's own per-link map).
 export function fireReplyRelayNotice(
   runtime: OrcaRuntimeService,
   item: ReplyOutboxRow,
@@ -48,10 +54,6 @@ export function fireReplyRelayNotice(
   incidentId: string | null
 ): void {
   const db = runtime.getOrchestrationDb()
-  // Ruling 26 Addendum 3(aa): the notice choke is the ONLY writer of last_notified_condition —
-  // every fire (mailbox-addressed or surfaced-via-check) records the condition it just fired,
-  // regardless of the run/no-run branch below.
-  db.markReplyOutboxNoticeCondition(item.id, code)
   if (item.noticeRunId === null) {
     // Ruling 26 Addendum 2(y): renamed from `notice_dropped_no_run` — Ruling 21 Protocol B2
     // RULED that a notice with no addressable run is NOT a mailbox write; it surfaces as
@@ -94,6 +96,24 @@ export function fireReplyRelayNotice(
     body,
     payload: { kind: code }
   })
+}
+
+// Ruling 26 Addendum 4(hh)/(ii)/(jj): the DISPOSITION family's own notice sender — stale,
+// unsupported, unauthorized, abandoned, refused, route_moved, peer_receipt_poisoned,
+// id_conflict — every code the disposition table (reply-outbox-pump-disposition.ts) and the
+// same-route/no-route hold deadline (reply-outbox-pump-hold.ts) can fire. Stamps
+// last_notified_condition + last_notified_at BEFORE sending (guarded to queued/sending rows —
+// a no-op for the terminal codes, which settle to a non-queued/sending state before their
+// notice fires, exactly as intended: a terminal item never re-fires for itself, so nothing needs
+// persisting for it, and the guard is what keeps a settled row's columns untouched).
+export function fireReplyRelayDispositionNotice(
+  runtime: OrcaRuntimeService,
+  item: ReplyOutboxRow,
+  code: ReplyRelayNoticeCode,
+  incidentId: string | null
+): void {
+  runtime.getOrchestrationDb().markReplyOutboxDispositionNotice(item.id, code, Date.now())
+  fireReplyRelayNotice(runtime, item, code, incidentId)
 }
 
 // H5/Ruling 26(f): the R19.3 health-transition edge, driven ONLY from the row's own persisted

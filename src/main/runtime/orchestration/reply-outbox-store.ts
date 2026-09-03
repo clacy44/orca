@@ -53,6 +53,7 @@ export type ReplyOutboxRow = {
   settledAt: number | null
   notifiedAt: number | null
   lastNotifiedCondition: string | null
+  lastNotifiedAt: number | null
 }
 
 type ReplyOutboxSqlRow = {
@@ -88,6 +89,7 @@ type ReplyOutboxSqlRow = {
   settled_at: number | null
   notified_at: number | null
   last_notified_condition: string | null
+  last_notified_at: number | null
 }
 
 function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
@@ -123,7 +125,8 @@ function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
     createdAt: row.created_at,
     settledAt: row.settled_at,
     notifiedAt: row.notified_at,
-    lastNotifiedCondition: row.last_notified_condition
+    lastNotifiedCondition: row.last_notified_condition,
+    lastNotifiedAt: row.last_notified_at
   }
 }
 
@@ -245,18 +248,42 @@ export function markReplyOutboxNotified(db: Database.Database, id: string, now: 
   db.prepare('UPDATE peer_reply_outbox SET notified_at = ? WHERE id = ?').run(now, id)
 }
 
-// Ruling 26 Addendum 3(aa): the notice choke's own edge column — the last NOTIFIED condition,
-// distinct from last_error_code (which every hold path also writes). This is the ONLY writer;
-// no hold statement ever touches this column.
-export function markReplyOutboxNoticeCondition(
+// Ruling 26 Addendum 4(hh)/(ii)/(jj): the DISPOSITION family's own edge + persisted per-link
+// interval, in ONE write — last_notified_condition (the edge, distinct from last_error_code,
+// which every hold path also writes) beside last_notified_at (the R19.3 interval's persisted
+// derivation, replacing the in-memory Map C5d shared with the R20.2 advisory). This is the
+// ONLY writer of either column; no hold statement and no other notice family touches them.
+// Guarded to queued/sending (jj) — a settled row is never mutated by a notice fired after its
+// own terminal settle (abandoned/refused/route_moved/peer_receipt_poisoned/id_conflict all
+// settle BEFORE their notice fires, so the guard is a no-op for those, by construction — only
+// the retry-path disposition codes (stale_pairing, unsupported), fired while the row is still
+// 'queued', ever actually persist here).
+export function markReplyOutboxDispositionNotice(
   db: Database.Database,
   id: string,
-  condition: string
+  condition: string,
+  now: number
 ): void {
-  db.prepare('UPDATE peer_reply_outbox SET last_notified_condition = ? WHERE id = ?').run(
-    condition,
-    id
-  )
+  db.prepare(
+    `UPDATE peer_reply_outbox
+        SET last_notified_condition = ?, last_notified_at = ?
+      WHERE id = ? AND state IN ('queued', 'sending')`
+  ).run(condition, now, id)
+}
+
+// Ruling 26 Addendum 4(ii): the R19.3 per-link interval for the DISPOSITION family, derived from
+// the column markReplyOutboxDispositionNotice stamps — never the R20.2 advisory's own budget.
+export function replyOutboxLinkLastDispositionNotifiedAt(
+  db: Database.Database,
+  linkDeviceId: string
+): number | null {
+  const row = db
+    .prepare(
+      `SELECT MAX(last_notified_at) AS t FROM peer_reply_outbox
+        WHERE link_device_id = ? AND last_notified_at IS NOT NULL`
+    )
+    .get(linkDeviceId) as { t: number | null }
+  return row.t
 }
 
 // R18.7/pump idle scheduling: the earliest a queued item becomes claimable — a NULL

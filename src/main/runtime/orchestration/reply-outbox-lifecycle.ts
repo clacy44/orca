@@ -232,7 +232,11 @@ export function retargetReplyOutboxItem(
               peer_credential_fp = ?, peer_key_fingerprint = ?,
               state = 'queued', lease_expires_at = NULL,
               hold_count = 0, first_held_at = NULL, next_attempt_after = NULL,
-              last_error_code = NULL
+              last_error_code = NULL,
+              -- Ruling 26 Addendum 4(jj): a retarget clears both notice columns — a new route
+              -- starts a new notice history; the old route's disposition edge must not suppress
+              -- the first notice on the new one.
+              last_notified_condition = NULL, last_notified_at = NULL
         WHERE id = ? AND state = 'sending'`
     )
     .run(
