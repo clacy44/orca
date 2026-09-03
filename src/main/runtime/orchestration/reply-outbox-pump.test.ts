@@ -10,7 +10,10 @@ import { DeviceRegistry } from '../device-registry'
 import { createLinkBindingSelfView } from '../device-registry-link-credential'
 import { hashCallerCredential } from '../principal-link-fingerprint-binding'
 import { fingerprintOrchestrationPeer } from './environment-transport'
-import { addEnvironmentFromPairingCode } from '../../../shared/runtime-environment-store'
+import {
+  addEnvironmentFromPairingCode,
+  updateEnvironmentFromPairingCode
+} from '../../../shared/runtime-environment-store'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../../shared/pairing'
 import { OrchestrationDb } from './db'
 import { OrcaRuntimeService, type OrchestrationCompatibilityCallerAuthority } from '../orca-runtime'
@@ -699,6 +702,45 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(after?.boundPairingRevision).toBe(claimed!.boundPairingRevision)
     expect(after?.state).toBe('queued')
     // Ruling 26(b): released, never re-held — the hold fields all reset, not advanced.
+    expect(after?.holdCount).toBe(0)
+    expect(after?.firstHeldAt).toBeNull()
+    expect(after?.nextAttemptAfter).toBeNull()
+  })
+
+  // Ruling 26 Addendum 6(tt)/R18.4(b)/PART 7 Step 2: pairing-revision-bump re-pair — SAME
+  // device, NEW pairing revision — retargets from the freshly-read routable row.
+  it('a pairing-revision-bump re-pair retargets onto the same device with the new pins', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+    expect(claimed?.state).toBe('sending')
+    // `orca environment update`: same env/endpoint id, bumped pairingRevision, rotated token —
+    // peerKeyFingerprint (the candidate match key) stays put; the rest genuinely differ, unlike
+    // the synthetic fixtures F4 flagged.
+    const rotatedOffer = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: 'ws://peer.example:16768',
+      deviceToken: 'peer_endpoint_token_v2',
+      publicKeyB64: 'peer_own_pubkey_b64'
+    })
+    const updatedEnv = updateEnvironmentFromPairingCode(root, 'peer-environment', {
+      pairingCode: rotatedOffer
+    })
+    const updatedPairingRevision = updatedEnv.pairingRevision ?? updatedEnv.createdAt
+    // Re-pair the SAME device (linkDeviceId unchanged) against the new pins.
+    db.putPeerLinkBinding({
+      ...db.getPeerLinkBinding(linkDeviceId)!,
+      boundEndpointId: updatedEnv.preferredEndpointId,
+      boundPairingRevision: updatedPairingRevision,
+      peerCredentialFp: hashCallerCredential('peer_endpoint_token_v2')
+    })
+    holdOrRetargetReplyOutboxItem(runtime, claimed!, Date.now())
+    const after = db.getReplyOutboxItem(outboxId)
+    // Same device — the retarget re-points onto the SAME linkDeviceId with the NEW pins.
+    expect(after?.linkDeviceId).toBe(linkDeviceId)
+    expect(after?.boundPairingRevision).toBe(updatedPairingRevision)
+    expect(after?.boundPairingRevision).not.toBe(claimed!.boundPairingRevision)
+    expect(after?.state).toBe('queued')
     expect(after?.holdCount).toBe(0)
     expect(after?.firstHeldAt).toBeNull()
     expect(after?.nextAttemptAfter).toBeNull()

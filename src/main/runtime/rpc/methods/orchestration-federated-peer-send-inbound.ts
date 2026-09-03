@@ -70,13 +70,15 @@ export function resolveForeignThread(
         if (toEnv === callerBinding.environmentId) {
           clauseII = true
         } else {
-          // Ruling 26 Addendum 5(nn): mechanical rename follow (findBindingCandidateByKeyFingerprint
-          // is not the routable predicate); this clause only reads the candidate's environmentId
-          // for an authorship comparison and never retargets — behaviour unchanged.
-          const retargeted = db.findBindingCandidateByKeyFingerprint(
-            callerBinding.peerKeyFingerprint
-          )
-          clauseII = retargeted?.environmentId === toEnv
+          // Ruling 26 Addendum 6(qq): findBindingCandidateByKeyFingerprint is not the routable
+          // predicate, so the sibling must additionally clear getRoutableLinkBinding before this
+          // clause treats it as a thread-selection aiming point — a quarantined or pin-mismatched
+          // sibling of the same host must never satisfy (ii) or back-fill a thread.
+          const sibling = db.findBindingCandidateByKeyFingerprint(callerBinding.peerKeyFingerprint)
+          clauseII =
+            sibling != null &&
+            sibling.environmentId === toEnv &&
+            getRoutableLinkBinding(db, runtime, sibling.linkDeviceId) != null
         }
       }
     }

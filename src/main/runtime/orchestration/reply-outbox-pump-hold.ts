@@ -40,13 +40,15 @@ export function holdOrRetargetReplyOutboxItem(
     }
     return
   }
-  // Ruling 26 Addendum 5(nn)/F2: the SQL candidate applies only two of R15's clauses (state,
-  // revoked_at) — filtered here through the full routable predicate so a retarget can never
-  // re-point onto a quarantined, pin-mismatched, or legacy_unattested link. A candidate that
-  // fails the predicate is treated exactly like "no candidate" (falls through to the hold below).
+  // Ruling 26 Addendum 5(nn)/F2, Addendum 6(ss): the SQL candidate applies only two of R15's
+  // clauses (state, revoked_at) — filtered here through the full routable predicate so a
+  // retarget can never re-point onto a quarantined, pin-mismatched, or legacy_unattested link.
+  // A candidate that fails the predicate is treated exactly like "no candidate" (falls through
+  // to the hold below). `retargeted` is the freshly-read ROUTABLE row itself, not the earlier
+  // candidate read — a binding rewritten between the two reads must not leave the retarget
+  // writing stale candidate values while the routability decision was made on the fresh ones.
   const candidate = db.findBindingCandidateByKeyFingerprint(item.peerKeyFingerprint)
-  const retargeted =
-    candidate && getRoutableLinkBinding(db, runtime, candidate.linkDeviceId) ? candidate : null
+  const retargeted = candidate ? getRoutableLinkBinding(db, runtime, candidate.linkDeviceId) : null
   // Ruling 26 Addendum 1(n)/F1: a re-check that resolves to the row's CURRENT route is not a
   // retarget — retargeting it onto itself and releasing with next_attempt_after = NULL turns
   // every `runtime_environment_changed` re-check into an unbounded, unclamped dial loop (the

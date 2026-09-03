@@ -94,13 +94,15 @@ export function settleReplyOutboxDelivery(
           Date.now()
         )
       ) {
-        db.markReplyOutboxNotified(item.id, Date.now())
+        // Ruling 26 Addendum 6(rr): stamp AFTER the send succeeds — same rule as (oo) — so a
+        // throw here leaves notified_at unstamped and the advisory re-fires next pass.
         fireReplyRelayNotice(
           runtime,
           item,
           REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE,
           item.inReplyToMessageId
         )
+        db.markReplyOutboxNotified(item.id, Date.now())
       }
     }
   } catch (error) {
