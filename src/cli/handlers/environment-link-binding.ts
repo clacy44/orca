@@ -72,6 +72,7 @@ function formatLinkStatus(result: { links: LinkRow[]; state?: string }): string 
 export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> = {
   'environment link-status': async ({ flags, client, json }) => {
     const link = getOptionalStringFlag(flags, 'link')
+    const environment = getOptionalStringFlag(flags, 'environment')
     const drain = flags.has('drain')
     if (drain) {
       // Ruling 28(g): the server reports the PRE-drain queued count, labelled `kicked` — never a
@@ -102,7 +103,7 @@ export const ENVIRONMENT_LINK_BINDING_HANDLERS: Record<string, CommandHandler> =
       : undefined
     const result = await client.call<{ links: LinkRow[]; state?: string }>(
       'orchestration.linkBindings',
-      { link, wait, timeoutMs },
+      { link, environment, wait, timeoutMs },
       timeoutMs !== undefined ? { timeoutMs } : undefined
     )
     printResult(result, json, formatLinkStatus)

@@ -77,6 +77,16 @@ export type LinkBindingHealthResult = {
   // construct it; `orchestrationEnvironmentTransport` is fully private) — declared residual,
   // out of this file's scope (orca-runtime.ts is not in the C6a file list).
   reason?: LinkBindingUnavailableReason
+  // Ruling 28(i): the WORST word among this link's candidates that is a member of
+  // LINK_BINDING_ATTENTION_HEALTH, independent of `word` above. `word` is the total-precedence
+  // worst over EVERY candidate (used everywhere else — link-status, tests already pinned on it)
+  // and can be a non-attention-set word (`excluded`, `peer_duplicate`, `peer_no_environments`,
+  // `duplicate_environment`, `multi_grant`) that outranks an in-set word also present on the same
+  // link (`parked`, `contested`, …) in the total order. `describeLinkBindingAttention` must never
+  // use `word` to decide set membership for exactly that reason — it would silently drop the link
+  // off the check line instead of surfacing the in-set condition. null when no candidate is in
+  // the attention set.
+  attentionWord: LinkBindingHealth | null
 }
 
 // R21.1: computed entirely from rows — never from a live prover object. R21.6: the word is the
@@ -139,16 +149,27 @@ export function describeLinkBindingHealth(
     candidates.push('unavailable')
     unavailableReason = 'local_evidence'
   }
-  // C7, Ruling 27 Addendum 1(m): `runtime.hasOrchestrationEnvironmentTransport()` /
-  // `hasLinkBindingProver()` now exist as the side-effect-free accessors the ruling asks for, but
-  // wiring them into this function as an unconditional `unavailable(transport)`/`unavailable(prover)`
-  // branch regressed 8 existing tests here (every fixture that does not explicitly construct a
-  // transport/prover reads `unavailable` even when the fixture's actual condition is something
-  // else entirely) — the correct trigger condition needs the exact same design-level judgment call
-  // Ruling 27's own comment above deferred ("not a worker call to resolve outright"). DEVIATION,
-  // stated for Gate 1: the two accessors are added and exported; wiring them into the health
-  // precedence is left as an open question for the chair rather than guessed at under test
-  // pressure.
+  // C7/C8b, Ruling 28(m) (resolving Ruling 27 Addendum 1(m)'s deferred open question):
+  // `unavailable(transport)`/`unavailable(prover)`, gated on evidence the wiring was EXPECTED —
+  // a binding row on this link, or a queued/sending reply in its outbox — never unconditional.
+  // An unconditional check regressed 8 existing tests here (every fixture that does not
+  // explicitly construct a transport/prover read `unavailable` even when the fixture's actual
+  // condition was something else entirely); gating on "this link has evidence it was ever wired
+  // up" is the shape that avoids that regression while still catching the real defect (a host
+  // where the transport/prover never armed reads `pending`, silently, forever, for a link that
+  // plainly has a binding or outbox traffic). Skipped entirely once `local_evidence` has already
+  // set `unavailableReason` above — that reason already wins the line (F6/Ruling 27(f) fires
+  // first, unconditionally, and is the more specific diagnosis).
+  if (unavailableReason === undefined) {
+    const wiringExpected = binding !== null || db.countPendingReplyOutbox(linkDeviceId) > 0
+    if (wiringExpected && !runtime.hasOrchestrationEnvironmentTransport()) {
+      candidates.push('unavailable')
+      unavailableReason = 'transport'
+    } else if (wiringExpected && !runtime.hasLinkBindingProver()) {
+      candidates.push('unavailable')
+      unavailableReason = 'prover'
+    }
+  }
 
   switch (attempt?.lastOutcome) {
     case 'peer_duplicate':
@@ -222,7 +243,17 @@ export function describeLinkBindingHealth(
   }
 
   const word = worstLinkBindingHealth(candidates) ?? 'pending'
-  return word === 'unavailable' ? { word, reason: unavailableReason } : { word }
+  // Ruling 28(i): computed over the SAME candidates list, filtered to the attention set first, so
+  // a non-attention-set candidate (e.g. `excluded`) can never mask an in-set one (e.g. `parked`)
+  // that is also present on this link.
+  const attentionWord = worstLinkBindingHealth(
+    candidates.filter((c) => LINK_BINDING_ATTENTION_HEALTH.has(c))
+  )
+  // `reason` is carried whenever the wiring-level check set it, regardless of whether the
+  // TOTAL-precedence `word` happens to be 'unavailable' — a non-attention-set word (peer_duplicate,
+  // peer_no_environments, duplicate_environment, multi_grant) can outrank 'unavailable' in `word`
+  // while 'unavailable' is still the (masked) attentionWord, and the reason belongs with it.
+  return { word, reason: unavailableReason, attentionWord }
 }
 
 // F16: label a link with no environment (a quarantine-only link, no binding row) as a link id,
@@ -249,7 +280,13 @@ export function resolveEnvironmentName(
             return environmentId
           }
         })()
-  return raw.replace(/[\r\n]+/g, ' ').slice(0, LINK_BINDING_ATTENTION_ENVIRONMENT_NAME_CLAMP)
+  // ML-4/F12: strip \r\n AND U+2028/U+2029 (line/paragraph separator — a line-terminator for
+  // `String.prototype.split`/many renderers but not matched by `\n`), then clamp over CODE
+  // POINTS, not UTF-16 code units — `.slice()` over units can split a surrogate pair and leave a
+  // lone surrogate on the line.
+  return [...raw.replace(/[\r\n\u2028\u2029]+/g, ' ')]
+    .slice(0, LINK_BINDING_ATTENTION_ENVIRONMENT_NAME_CLAMP)
+    .join('')
 }
 
 type AttentionCandidate = {
@@ -326,13 +363,17 @@ export function describeLinkBindingAttention(
         attestationExpiring = true
       }
     }
-    const inAttentionSet = LINK_BINDING_ATTENTION_HEALTH.has(health.word)
+    // Ruling 28(i): membership AND the rendered word both come from `attentionWord` — never from
+    // `health.word`, which can be a worse-ranked word OUTSIDE the attention set (F-2: `excluded`
+    // masking `parked`, etc.). `reason` only makes sense attached to `attentionWord === 'unavailable'`.
+    const inAttentionSet = health.attentionWord !== null
     if (inAttentionSet || attestationExpired || attestationExpiring) {
       candidates.push({
         linkDeviceId,
         environmentId: binding?.environmentId ?? null,
-        word: inAttentionSet ? health.word : null,
-        reason: inAttentionSet ? health.reason : undefined,
+        word: inAttentionSet ? health.attentionWord : null,
+        reason:
+          inAttentionSet && health.attentionWord === 'unavailable' ? health.reason : undefined,
         attestationExpired,
         attestationExpiring
       })

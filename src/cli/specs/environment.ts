@@ -71,10 +71,11 @@ export const ENVIRONMENT_COMMAND_SPECS: CommandSpec[] = [
     usage:
       'orca environment link-status [--link <deviceId>] [--environment <selector>] [--outbox] ' +
       '[--drain] [--wait] [--timeout-ms <ms>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'link', 'outbox', 'drain', 'wait', 'timeout-ms'],
+    allowedFlags: [...GLOBAL_FLAGS, 'link', 'environment', 'outbox', 'drain', 'wait', 'timeout-ms'],
     notes: [
       '--wait waits on the prover round-settled event, capped at LINK_BINDING_STATUS_WAIT_CAP_MS; a wait that expires is a report, never an error.',
-      '--outbox shows the reply-relay queue for the link; --drain kicks every route with pending work and returns the pending count per route.'
+      '--outbox shows the reply-relay queue for the link; --drain kicks every route with pending work and returns the pending count per route.',
+      '--environment <selector> filters the table to links bound to that environment (server-side, by resolved environment id); ignored by --outbox/--drain, which already take --link.'
     ],
     examples: [
       'orca environment link-status --json',

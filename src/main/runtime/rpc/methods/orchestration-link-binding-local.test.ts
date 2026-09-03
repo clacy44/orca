@@ -1,6 +1,12 @@
 // S10-16 C7, test 53: every local link-binding verb refuses a paired/mobile caller `forbidden`,
 // gate-first (bogus ids never reach a read/write), and is absent from the peer allowlist.
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// Ruling 28: the --environment filter's server-side resolution (orchestration-link-binding-
+// local.ts's resolveEnvironmentFilterId) reads userDataPath via electron's `app.getPath`
+// (orchestration-link-binding-pending.ts's resolveUserDataPath) — mocked so that read never
+// throws ahead of the `resolveEnvironment` spy the filter tests install per-test.
+vi.mock('electron', () => ({ app: { getPath: () => '/tmp/orca-link-binding-local-test' } }))
 import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
 import { RUNTIME_PEER_RPC_METHOD_ALLOWLIST } from '../../runtime-peer-rpc-allowlist'
 import type { RpcContext } from '../core'
@@ -8,6 +14,7 @@ import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import type Database from '../../../sqlite/sync-database'
 import { LINK_BINDING_STATUS_WAIT_CAP_MS } from '../../orchestration/link-binding-constants'
+import * as runtimeEnvironmentStore from '../../../../shared/runtime-environment-store'
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -264,6 +271,69 @@ describe('orchestration-link-binding-local RPC methods', () => {
         localCtx()
       )) as { kicked: Record<string, number> }
       expect(result.kicked).toEqual({ link_drain_behav: 0 })
+    })
+  })
+
+  // Lifecycle F-12/Ruling 28: `--environment` was advertised in the CLI spec but no code path
+  // ever read it — a documented flag that does nothing is a defect. Implemented server-side,
+  // resolving the selector to the environment id `buildLinkRow`'s own `environmentId` is keyed
+  // on (the same shape as (d)'s other selector-resolution sites), so it is asserted here rather
+  // than removed.
+  describe('Ruling 28: linkBindings --environment filters by the resolved environment id', () => {
+    function boundRow(linkDeviceId: string, environmentId: string) {
+      return {
+        linkDeviceId,
+        environmentId,
+        boundEndpointId: 'ep_1',
+        boundPairingRevision: 1,
+        linkCredentialFp: 'fp_link',
+        peerCredentialFp: 'fp_peer',
+        peerKeyFingerprint: 'fp_key',
+        grantClass: 'minted' as const,
+        scanCompleteness: 'complete' as const,
+        proofProtocol: 'p1',
+        provedAt: Date.now(),
+        lastVerifiedAt: Date.now()
+      }
+    }
+
+    it('a name selector resolves to the environment id and filters the table to that environment only', async () => {
+      setup()
+      db.putPeerLinkBinding(boundRow('link_env_a', 'env_uuid_a'))
+      db.putPeerLinkBinding(boundRow('link_env_b', 'env_uuid_b'))
+      const spy = vi
+        .spyOn(runtimeEnvironmentStore, 'resolveEnvironment')
+        .mockImplementation((_userDataPath: string, selector: string) => {
+          if (selector !== 'desktop') {
+            throw new Error('no match')
+          }
+          return { id: 'env_uuid_a' } as never
+        })
+      try {
+        const result = (await call(
+          'orchestration.linkBindings',
+          { environment: 'desktop' },
+          { runtime }
+        )) as { links: { linkDeviceId: string }[] }
+        expect(result.links.map((l) => l.linkDeviceId)).toEqual(['link_env_a'])
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('an unresolvable selector is a hard refusal, never a filter that silently matches nothing', async () => {
+      setup()
+      db.putPeerLinkBinding(boundRow('link_env_c', 'env_uuid_c'))
+      const spy = vi.spyOn(runtimeEnvironmentStore, 'resolveEnvironment').mockImplementation(() => {
+        throw new Error('no match')
+      })
+      try {
+        await expect(
+          call('orchestration.linkBindings', { environment: 'ghost' }, { runtime })
+        ).rejects.toMatchObject({ code: 'invalid_argument' })
+      } finally {
+        spy.mockRestore()
+      }
     })
   })
 

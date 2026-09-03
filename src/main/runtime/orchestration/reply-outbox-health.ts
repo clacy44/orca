@@ -199,7 +199,12 @@ export function describeReplyRelayLinkHealth(
     }
   }
   for (const row of rows) {
-    const live = row.state === 'queued' || row.state === 'sending'
+    // Ruling 28(j)/ML-5: `settledAt !== null` is terminal REGARDLESS of `state` — the v40 outbox
+    // repair's CHECK-rejection fallback (db.ts) can settle a row while `state` stays 'queued'
+    // (repair_rejected). Such a row is a repair artifact, not live transport evidence: it must
+    // not read as `live` (F4: it would otherwise be misread as an unreachable-streak signal), and
+    // it is not literally 'abandoned' either, so it contributes nothing at all.
+    const live = (row.state === 'queued' || row.state === 'sending') && row.settledAt === null
     const terminal = row.state === 'abandoned'
     if (!live && !terminal) {
       continue

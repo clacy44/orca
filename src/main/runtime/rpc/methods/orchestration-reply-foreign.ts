@@ -64,12 +64,37 @@ export function enqueueForeignReply(args: EnqueueForeignReplyArgs): EnqueueForei
   assertThreadNotSensitiveForFederation(db, original.thread_id)
 
   // --expect-host: an assertion that can only narrow a destination the proof already fixed.
-  const environmentName = runtime.resolveOrchestrationWorkerServer(binding.environmentId).name
-  if (params.expectHost !== undefined && params.expectHost !== environmentName) {
-    throw new OrchestrationError(
-      'not_the_addressee',
-      `--expect-host ${params.expectHost} does not match the proven destination ${environmentName}.`
-    )
+  // Ruling 28(l)/F5: R16 ("commit, never dial") means this enqueue must never throw on a
+  // transport-shaped fault BEFORE the durable write — including the `heldCause:
+  // 'local_evidence_unavailable'` branch, which exists specifically for a host whose own
+  // evidence is unreadable. `resolveOrchestrationWorkerServer` throws `server_required` when the
+  // transport is absent and throws on an unresolvable selector; every OTHER consumer of this
+  // name already guards it (reply-outbox-pump-notify.ts, link-binding-attention.ts) — this one
+  // did not. Falls back to the raw environment id (matching those guarded consumers) so the
+  // durable enqueue below still runs; when the operator supplied `--expect-host` and the name did
+  // not resolve, refuse `not_the_addressee` fail-closed rather than comparing the assertion
+  // against an id it was never phrased against.
+  let environmentName: string
+  let environmentNameResolved = true
+  try {
+    environmentName = runtime.resolveOrchestrationWorkerServer(binding.environmentId).name
+  } catch {
+    environmentNameResolved = false
+    environmentName = binding.environmentId
+  }
+  if (params.expectHost !== undefined) {
+    if (!environmentNameResolved) {
+      throw new OrchestrationError(
+        'not_the_addressee',
+        `--expect-host ${params.expectHost} could not be verified against the proven destination (its name did not resolve).`
+      )
+    }
+    if (params.expectHost !== environmentName) {
+      throw new OrchestrationError(
+        'not_the_addressee',
+        `--expect-host ${params.expectHost} does not match the proven destination ${environmentName}.`
+      )
+    }
   }
 
   // The replying caller's own agent identity, mirroring `relayPeerSendToHost`'s

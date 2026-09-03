@@ -3,7 +3,11 @@
 import type { OrcaRuntimeService } from '../orca-runtime'
 import { postRuntimeNotification } from './runtime-notification'
 import { classifyFederationRelayHealthTransition } from './federation-sync-health'
-import { describeReplyRelayNotice, type ReplyRelayNoticeCode } from './reply-outbox-health'
+import {
+  describeReplyRelayNotice,
+  replyRelayNoticeRateLimitOk,
+  type ReplyRelayNoticeCode
+} from './reply-outbox-health'
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import {
   REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD,
@@ -115,6 +119,27 @@ export function fireReplyRelayDispositionNotice(
 ): void {
   fireReplyRelayNotice(runtime, item, code, incidentId)
   runtime.getOrchestrationDb().markReplyOutboxDispositionNotice(item.id, code, Date.now())
+}
+
+// Ruling 28(k)/F7: the ONE gate every DISPOSITION-family call site (retry-path AND terminal
+// alike) must pass before calling fireReplyRelayDispositionNotice — edge-triggered on this
+// item's own last_notified_condition, bounded by the family's persisted per-link interval
+// (Ruling 28(k) drops markReplyOutboxDispositionNotice's queued/sending guard specifically so a
+// terminal row's stamp participates in this same interval). Previously only the retry path
+// (reply-outbox-pump.ts's post-catch tail) applied this; the four terminal call sites
+// (abandoned x2, refused, route_moved) fired unconditionally, up to REPLY_OUTBOX_PER_LINK_CAP
+// times per peer refusal streak.
+export function shouldFireDispositionNotice(
+  runtime: OrcaRuntimeService,
+  item: ReplyOutboxRow,
+  code: ReplyRelayNoticeCode,
+  now: number
+): boolean {
+  const db = runtime.getOrchestrationDb()
+  return (
+    item.lastNotifiedCondition !== code &&
+    replyRelayNoticeRateLimitOk(db.replyOutboxLinkLastDispositionNotifiedAt(item.linkDeviceId), now)
+  )
 }
 
 // H5/Ruling 26(f): the R19.3 health-transition edge, driven ONLY from the row's own persisted

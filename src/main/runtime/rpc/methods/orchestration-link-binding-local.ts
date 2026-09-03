@@ -17,6 +17,8 @@ import {
 import { renderLinkBindingHealth } from '../../../../shared/link-binding-health'
 import { requireLocalCaller } from './orchestration-link-binding-caller-gate'
 import { collectLinkIds } from './orchestration-link-binding-ids'
+import { resolveUserDataPath } from './orchestration-link-binding-pending'
+import { resolveEnvironment } from '../../../../shared/runtime-environment-store'
 import { ORCHESTRATION_LINK_BINDING_BIND_METHODS } from './orchestration-link-binding-bind'
 import { ORCHESTRATION_LINK_BINDING_CONTAINMENT_METHODS } from './orchestration-link-binding-containment'
 import { ORCHESTRATION_LINK_BINDING_OUTBOX_METHODS } from './orchestration-link-binding-outbox'
@@ -78,10 +80,29 @@ function buildLinkRow(
 const LinkBindingsParams = z
   .object({
     link: z.string().optional(),
+    // Lifecycle F-12/Ruling 28: the CLI spec advertises `--environment <selector>` on
+    // `link-status` but no code path ever read it — a documented flag that does nothing is a
+    // defect. Implemented server-side (matching the (d) selector-resolution precedent every
+    // other write verb already uses), never left as a silent no-op.
+    environment: z.string().optional(),
     wait: z.boolean().optional(),
     timeoutMs: z.number().optional()
   })
   .strict()
+
+// Ruling 28: reused (d)'s selector-resolution shape — a name or UUID resolves to the
+// environment's UUID (the shape `buildLinkRow`'s own `environmentId` is keyed on); an
+// unresolvable selector is a hard refusal, never a filter that silently matches nothing.
+function resolveEnvironmentFilterId(selector: string): string {
+  try {
+    return resolveEnvironment(resolveUserDataPath(), selector).id
+  } catch {
+    throw new OrchestrationError(
+      'invalid_argument',
+      `No saved environment matches selector ${selector}.`
+    )
+  }
+}
 
 const LINK_BINDINGS_METHOD: RpcMethod = defineMethod({
   name: 'orchestration.linkBindings',
@@ -100,8 +121,13 @@ const LINK_BINDINGS_METHOD: RpcMethod = defineMethod({
       timedOut = settled === 'timeout'
     }
     const ids = params.link ? [params.link] : collectLinkIds(runtime)
+    let links = ids.map((linkDeviceId) => buildLinkRow(runtime, linkDeviceId))
+    if (params.environment !== undefined) {
+      const resolvedEnvironmentId = resolveEnvironmentFilterId(params.environment)
+      links = links.filter((l) => l.environmentId === resolvedEnvironmentId)
+    }
     return {
-      links: ids.map((linkDeviceId) => buildLinkRow(runtime, linkDeviceId)),
+      links,
       ...(params.wait ? { state: timedOut ? 'timeout' : 'settled' } : {})
     }
   }

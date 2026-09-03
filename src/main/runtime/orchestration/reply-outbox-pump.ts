@@ -10,6 +10,7 @@ import type { ReplyOutboxRow } from './reply-outbox-store'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
 import {
   fireReplyRelayDispositionNotice,
+  shouldFireDispositionNotice,
   recordReplyOutboxFailureAndMaybeNotify,
   auditReplyRelaySettleRaced as auditSettleRaced
 } from './reply-outbox-pump-notify'
@@ -18,7 +19,6 @@ import {
   settleReplyOutboxDelivery,
   type FederatedSendResultShape
 } from './reply-outbox-pump-deliver'
-import { replyRelayNoticeRateLimitOk } from './reply-outbox-health'
 import {
   REPLY_OUTBOX_RPC_BUDGET_MS,
   REPLY_OUTBOX_MAX_AGE_MS,
@@ -27,6 +27,15 @@ import {
   REPLY_OUTBOX_KICK_DEBOUNCE_MS,
   REPLY_RELAY_ABANDONED_NOTICE
 } from './link-binding-constants'
+import { MAX_TIMER_DELAY_MS } from '../../../shared/timer-delay'
+
+// Ruling 28(j): every setTimeout delay on this path is clamped — a wake computed from a stored
+// timestamp (an item's next_attempt_after / lease_expires_at) can in principle exceed Node's
+// signed-32-bit setTimeout ceiling (~24.8 days) and fire IMMEDIATELY instead of at the intended
+// time; clamping to the ceiling means "wake no later than", never "wake late".
+function clampTimerDelayMs(delayMs: number): number {
+  return Math.min(Math.max(0, delayMs), MAX_TIMER_DELAY_MS)
+}
 
 export type ReplyOutboxPump = {
   kick(linkDeviceId: string): void
@@ -63,13 +72,10 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
     if (wakeTimer) {
       clearTimeout(wakeTimer)
     }
-    wakeTimer = setTimeout(
-      () => {
-        wakeTimer = null
-        void runTickLoop()
-      },
-      Math.max(0, delayMs)
-    )
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null
+      void runTickLoop()
+    }, clampTimerDelayMs(delayMs))
     wakeTimer.unref?.()
   }
 
@@ -91,8 +97,11 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       })
       if (settled) {
         // Ruling 26 Addendum 4(hh): abandoned is a disposition-family notice — its own budget,
-        // never the R20.2 advisory's.
-        fireDispositionNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
+        // never the R20.2 advisory's. Ruling 28(k): terminal notices are edge-triggered/
+        // interval-bounded like the rest of the family too.
+        if (shouldFireDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, now)) {
+          fireDispositionNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
+        }
       } else {
         auditSettleRaced(db, item, 'abandoned')
       }
@@ -156,8 +165,11 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         })
         if (settled) {
           // Ruling 26 Addendum 4(hh): refused/peer_receipt_poisoned/id_conflict are disposition-
-          // family notices — their own budget, never the R20.2 advisory's.
-          fireDispositionNotice(item, disposition.noticeCode, null)
+          // family notices — their own budget, never the R20.2 advisory's. Ruling 28(k): edge-
+          // triggered/interval-bounded like the rest of the family.
+          if (shouldFireDispositionNotice(runtime, item, disposition.noticeCode, at)) {
+            fireDispositionNotice(item, disposition.noticeCode, null)
+          }
         } else {
           auditSettleRaced(db, item, 'refused')
         }
@@ -201,11 +213,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       // restart because they are read from the database, not from a Map.
       if (
         disposition.noticeCode &&
-        item.lastNotifiedCondition !== disposition.noticeCode &&
-        replyRelayNoticeRateLimitOk(
-          db.replyOutboxLinkLastDispositionNotifiedAt(item.linkDeviceId),
-          at
-        )
+        shouldFireDispositionNotice(runtime, item, disposition.noticeCode, at)
       ) {
         fireDispositionNotice(item, disposition.noticeCode, null)
       }
@@ -280,7 +288,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       wakeTimer = setTimeout(() => {
         wakeTimer = null
         void runTickLoop()
-      }, REPLY_OUTBOX_KICK_DEBOUNCE_MS)
+      }, clampTimerDelayMs(REPLY_OUTBOX_KICK_DEBOUNCE_MS))
       wakeTimer.unref?.()
     },
     health(): { inFlightCount: number } {

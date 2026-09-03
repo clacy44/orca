@@ -163,6 +163,12 @@ export const PEER_RESULT_MALFORMED_CODE = 'peer_result_malformed'
 // Ruling 26(g): a throw from post-delivery bookkeeping (after a successful settle) — never a
 // transport failure, never a retry of a delivered row.
 export const REPLY_RELAY_BOOKKEEPING_FAILED_CODE = 'reply_relay_bookkeeping_failed'
+// Ruling 28(j): the v40 outbox repair's CHECK-rejection fallback (db.ts) — the row's `state`
+// write to 'abandoned' was itself rejected by a pre-review build's CHECK constraint, so the
+// fallback settles the row terminal (settled_at stamped) through the columns no CHECK
+// constrains, WITHOUT lying about the reason via the primary path's own
+// 'incomplete_row_fail_closed' code.
+export const REPLY_OUTBOX_REPAIR_REJECTED_CODE = 'repair_rejected'
 
 export const REPLY_RELAY_UNREACHABLE_NOTICE = 'reply_relay_unreachable'
 export const REPLY_RELAY_RECOVERED_NOTICE = 'reply_relay_recovered'

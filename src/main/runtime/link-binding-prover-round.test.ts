@@ -23,7 +23,12 @@ import {
 } from './orchestration/link-binding-constants'
 import { ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
-import { addEnvironmentFromPairingCode } from '../../shared/runtime-environment-store'
+import {
+  addEnvironmentFromPairingCode,
+  updateEnvironmentFromPairingCode
+} from '../../shared/runtime-environment-store'
+import { ORCHESTRATION_LINK_BINDING_CONTAINMENT_METHODS } from './rpc/methods/orchestration-link-binding-containment'
+import type { RpcContext } from './rpc/core'
 import { OrchestrationDb } from './orchestration/db'
 import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationError } from './orchestration/orchestration-error'
@@ -525,6 +530,103 @@ describe('S10-16 C4: link-binding-prover-round / link-binding-prover', () => {
     const outcome = await runOneRound(freshRoundArgs(undefined, undefined, now))
     expect(outcome.evaluatedLinkIds).not.toContain(linkId)
     expect(counter.count).toBe(callsAfterContest)
+  })
+
+  // Scenario 83/lifecycle M9/Ruling 28(d): THE RE-PAIR WINDOW NEVER DIALS THIS HOST. A
+  // sequencing test — no time simulation needed. `link-exclude` (resolved SERVER-SIDE from a
+  // NAME selector, F-1's fix — the CLI/RPC path, not a raw `db.putContainment`) brackets an
+  // environment through re-pair churn (an endpoint update while excluded, an intervening
+  // sweep-mode AND contest_search-mode round) and holds it out of every round for the whole
+  // bracket; lifting it is what makes it dialable again. Narrowed from the full design text: the
+  // self-dial/loopback-exclusion negative half (removing the bracket to show INV-P-... does NOT
+  // otherwise prevent a self-dial) needs real HTTP/self-listener plumbing this unit harness does
+  // not model — declared deviation; the bracket's OWN holding property (what the containment
+  // verb exists to guarantee) is what is asserted here.
+  it('scenario 83 (M9): the link-exclude bracket (NAME-resolved) holds an environment out of every round across re-pair churn — no probe reaches it until lifted', async () => {
+    const envName = `env-m9-83-${randomBytes(4).toString('hex')}`
+    const code = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: 'ws://peer.example:16768',
+      deviceToken: linkToken,
+      publicKeyB64: peerE2ee.publicKeyB64
+    })
+    addEnvironmentFromPairingCode(userDataPath, { name: envName, pairingCode: code })
+
+    async function linkContainment(params: {
+      subjectKind: 'environment'
+      subjectId: string
+      action: 'scan_exclude'
+      lift?: boolean
+      reason?: string
+    }): Promise<{ subjectId: string }> {
+      const method = ORCHESTRATION_LINK_BINDING_CONTAINMENT_METHODS[0]!
+      const parsed = method.params ? method.params.parse(params) : params
+      return method.handler(parsed, { runtime } as RpcContext) as Promise<{ subjectId: string }>
+    }
+
+    // `link-exclude --environment <name>`: the F-1 fix resolves the NAME to the environment's
+    // UUID server-side — the write the round's own `buildEnvironmentCandidates` reads is keyed
+    // on that UUID, so a name-selector write must actually take effect.
+    const excludeResult = await linkContainment({
+      subjectKind: 'environment',
+      subjectId: envName,
+      action: 'scan_exclude',
+      reason: 'm9-83'
+    })
+    expect(excludeResult.subjectId).not.toBe(envName) // resolved to the UUID, not left as the name
+
+    const counter = { count: 0 }
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      fakeResponder({ probeCallCounter: counter })
+    )
+    let now = Date.now()
+
+    // Round 1, excluded: no candidate at all (this fixture's only environment is excluded) — the
+    // link is still ATTEMPTED (evaluatedLinkIds includes every link a round tries, win or not;
+    // see the "no matching environment" test above), but with zero candidates it settles
+    // unpaired and NO probe call ever fires.
+    const round1 = await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(round1.evaluatedLinkIds).toContain(linkId)
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('unpaired')
+    expect(counter.count).toBe(0)
+
+    // "environment update" / "set-endpoint" while excluded — the endpoint is in flux, matching
+    // PART 7 Step 2c.
+    now += 60_000
+    const codeUpdated = encodePairingOffer({
+      v: PAIRING_OFFER_VERSION,
+      endpoint: 'ws://peer.example:26768',
+      deviceToken: linkToken,
+      publicKeyB64: peerE2ee.publicKeyB64
+    })
+    updateEnvironmentFromPairingCode(userDataPath, envName, { pairingCode: codeUpdated, now })
+
+    // An inbound-contact kick AND a contest_search ("environment-digest") sweep, both while the
+    // endpoint is still in flux and the exclude is still live. Exactly ONE more attempt here
+    // (not two): LINK_BINDING_UNPAIRED_PARK_ROUNDS is 3, and a third consecutive unpaired
+    // attempt would PARK the link before the lift below ever runs — parking is real, correct
+    // behaviour, but it would defeat this test's own premise ("lifting the exclude is what makes
+    // it dialable again"), so this bracket stays at 2 unpaired strikes.
+    now += 1_000
+    await runOneRound(freshRoundArgs(undefined, undefined, now, 'contest_search'))
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('unpaired')
+    expect(counter.count).toBe(0)
+
+    // `link-exclude --clear`: lift it.
+    await linkContainment({
+      subjectKind: 'environment',
+      subjectId: envName,
+      action: 'scan_exclude',
+      lift: true
+    })
+
+    // Now, and only now, a round reaches the environment and probes it. Advanced well past the
+    // backoff the last unpaired attempt wrote (R13.2) — same margin the other rounds in this
+    // file use between sweep-mode attempts.
+    now += 120_000
+    await runOneRound(freshRoundArgs(undefined, undefined, now))
+    expect(counter.count).toBeGreaterThan(0)
+    expect(db.getBindingAttempt(linkId)?.lastOutcome).toBe('proven')
   })
 
   it('F2 negative: link_store_unreadable (a FAULT) is re-probed every round, never cache-skipped', async () => {

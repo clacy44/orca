@@ -56,16 +56,17 @@ async function call(name: string, params: Record<string, unknown>, context: RpcC
 
 function raw(db: OrchestrationDb) {
   return (
-    db as unknown as {
-      db: { prepare: (sql: string) => { get: (...a: unknown[]) => unknown } }
-    }
+    db as unknown as { db: { prepare: (sql: string) => { get: (...a: unknown[]) => unknown } } }
   ).db
 }
 
-function makeAuthority(terminalHandle: string): OrchestrationCompatibilityCallerAuthority {
+function makeAuthority(
+  terminalHandle: string,
+  paneKey: string = PANE_A
+): OrchestrationCompatibilityCallerAuthority {
   return {
     hostScope: { kind: 'local', hostId: 'local' },
-    paneKey: PANE_A,
+    paneKey,
     terminalHandle,
     processIncarnation: 'proc-1',
     launchTokenHash: 'hash'
@@ -881,7 +882,12 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(abandonedNotice?.body).not.toContain('route moved')
   })
 
-  it('Ruling 26 Addendum 4(hh)/(ii)/(jj): the disposition family persists its own per-link interval, never shares it with the R20.2 advisory, and only stamps queued/sending rows', async () => {
+  // Ruling 28(k) AMENDS (jj): the stamp is no longer guarded to queued/sending rows (a terminal
+  // disposition now persists it too, so it can gate the SAME per-link interval) — this test's
+  // own assertions only ever exercise the retry-path code (fired while the row is still
+  // 'queued'), so they are unaffected; the dedicated terminal-notice tests below cover the
+  // amended (now-persists-on-terminal-rows) behaviour directly.
+  it('Ruling 26 Addendum 4(hh)/(ii)/(jj): the disposition family persists its own per-link interval, never shares it with the R20.2 advisory', async () => {
     const { outboxId } = await enqueueOneReply()
     vi.spyOn(runtime, 'callPinnedEnvironment').mockRejectedValue(
       new OrchestrationError('stale_environment_pairing', 'pairing stale')
@@ -1002,4 +1008,13 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(after?.lastNotifiedCondition).toBeNull()
     expect(after?.lastNotifiedAt).toBeNull()
   })
+
+  // Design v6 catalogue scenario 28/Ruling 28(j): "Reply, peer down: item queued; restart the
+  // process; the pump resumes at DB attach and delivers on the peer's return, with no operator
+  // action and no re-issued reply." The load-bearing half this ruling actually fixes is the
+  // CRASH-MID-SEND case: a 'sending' row whose lease has not yet expired at "restart" time is
+  // invisible to a wake computed from `queued.next_attempt_after` alone (state != 'queued'), so
+  // nothing would ever wake the pump when that lease finally expires — the row would sit
+  // 'sending' forever without an external kick. `nextReplyOutboxWakeAt` now also considers
+  // `sending.lease_expires_at`.
 })

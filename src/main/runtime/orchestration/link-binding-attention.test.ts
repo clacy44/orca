@@ -44,9 +44,21 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
 
   beforeEach(() => {
     db = new OrchestrationDb(':memory:')
-    runtime = new OrcaRuntimeService()
+    // Ruling 28(m): a WORKING transport, matching workingSelfView's role for local evidence —
+    // `hasOrchestrationEnvironmentTransport()`/`hasLinkBindingProver()` now gate a real
+    // `unavailable(transport)`/`unavailable(prover)` candidate on evidence the wiring was
+    // expected (a binding row or a queued reply on the link); every fixture below that puts a
+    // binding row down would otherwise trip that candidate purely because this constructed
+    // runtime never wires either, masking the word under test the same way the C7 attempt's
+    // unconditional check did (the 8-test regression Ruling 28(m)'s comment names). The dedicated
+    // `unavailable(transport)`/`unavailable(prover)` tests below construct a runtime WITHOUT one
+    // of these on purpose.
+    runtime = new OrcaRuntimeService(null, undefined, {
+      orchestrationEnvironmentTransport: {} as never
+    })
     runtime.setOrchestrationDb(db)
     runtime.linkBindingSelfView = workingSelfView()
+    runtime.getLinkBindingProver()
     vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockImplementation(
       (selector: string) => ({ name: `env:${selector}`, id: selector }) as never
     )
@@ -365,9 +377,16 @@ describe('describeLinkBindingAttention', () => {
 
   beforeEach(() => {
     db = new OrchestrationDb(':memory:')
-    runtime = new OrcaRuntimeService()
+    // Ruling 28(m): same working-transport/prover wiring as the other describe block's
+    // beforeEach — see its comment. Both accessors must read true here so a binding row (which
+    // most fixtures below construct) does not trip a spurious unavailable(transport)/(prover)
+    // candidate that masks the word actually under test.
+    runtime = new OrcaRuntimeService(null, undefined, {
+      orchestrationEnvironmentTransport: {} as never
+    })
     runtime.setOrchestrationDb(db)
     runtime.linkBindingSelfView = workingSelfView()
+    runtime.getLinkBindingProver()
     vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockImplementation(
       (selector: string) => ({ name: `desktop`, id: selector }) as never
     )
@@ -816,23 +835,28 @@ describe('describeLinkBindingAttention', () => {
   // link-binding-attention.ts:293) rather than the mechanism (default-parameter threading) — a
   // later call site that omits the fifth argument and reintroduces per-link reads fails THIS
   // test even though the threading itself still type-checks.
+  // ML-3/F14: settled `proven` (not quarantine-only) so `describeLinkBindingHealth`'s `case
+  // 'proven'` arm actually runs `getRoutableLinkBinding` (the only call site) — a quarantine-only
+  // fixture never reaches it (the `switch(undefined)` -> 'pending' arm short-circuits first). No
+  // binding row exists for these three links, so `routes` is false and the `else` (no binding)
+  // branch settles each to 'stale', which IS an attention-set word.
   it('reads the environment store exactly once per check call, regardless of link count', () => {
     const spy = vi.spyOn(linkBindingRoutable, 'readEnvironmentSnapshot')
     try {
       for (const linkDeviceId of ['link_ro_a', 'link_ro_b', 'link_ro_c']) {
-        db.putContainment({
-          subjectKind: 'link',
-          subjectId: linkDeviceId,
-          action: 'quarantine',
-          reasonCode: 'test',
-          reasonText: 'test',
-          detail: null,
-          createdAt: Date.now(),
-          expiresAt: null
+        db.putBindingAttempt(linkDeviceId)
+        db.settleBindingAttempt(linkDeviceId, {
+          lastAttemptAt: Date.now(),
+          lastRoundAt: Date.now(),
+          lastOutcome: 'proven',
+          lastDetail: null,
+          consecutiveFailures: 0,
+          consecutiveNoWinner: 0,
+          nextAttemptAfter: null
         })
       }
       const line = describeLinkBindingAttention(db, runtime)
-      expect(line).toContain('3 quarantined')
+      expect(line).toContain('3 stale')
       expect(spy).toHaveBeenCalledTimes(1)
     } finally {
       spy.mockRestore()

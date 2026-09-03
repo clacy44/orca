@@ -236,6 +236,95 @@ describe('S10-16 C2: schema v40 migration and repair', () => {
     expect(db.listReplyOutbox()[0]?.state).toBe('queued')
   })
 
+  // Ruling 28(j)/ML-5: the v40 outbox repair's CHECK-rejection fallback. A pre-review build's
+  // `state` CHECK (no 'abandoned' member) rejects the repair's primary UPDATE; the fallback
+  // settles the row terminal through settled_at/last_error_code alone, with the code
+  // repair_rejected — never the far-future next_attempt_after hack, and never the primary path's
+  // own 'incomplete_row_fail_closed' code (which would falsely claim the write succeeded as
+  // described).
+  it('the outbox repair CHECK-rejection fallback settles an incomplete row with repair_rejected, settled_at stamped, state left alone', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    db.close()
+    db = undefined
+
+    const oldDb = new Database(path)
+    oldDb.exec('DROP TABLE peer_reply_outbox')
+    // A pre-review build's shape: `payload` nullable (so an incomplete row is representable at
+    // all) and `state`'s CHECK missing 'abandoned' — the exact precondition the fallback exists
+    // for.
+    oldDb.exec(`
+      CREATE TABLE peer_reply_outbox (
+        id                       TEXT PRIMARY KEY,
+        seq                      INTEGER NOT NULL,
+        local_message_id         TEXT NOT NULL UNIQUE,
+        link_device_id           TEXT NOT NULL,
+        environment_id           TEXT NOT NULL,
+        bound_pairing_revision   INTEGER NOT NULL,
+        peer_credential_fp       TEXT NOT NULL,
+        peer_key_fingerprint     TEXT NOT NULL,
+        in_reply_to_message_id   TEXT NOT NULL,
+        peer_agent_id            TEXT NOT NULL,
+        peer_thread_id           TEXT,
+        local_thread_id          TEXT,
+        notice_run_id            TEXT,
+        notice_pane_key          TEXT,
+        payload                  TEXT,
+        byte_count               INTEGER NOT NULL,
+        state                    TEXT NOT NULL DEFAULT 'queued'
+          CHECK(state IN ('queued','sending','delivered','refused','cancelled')),
+        created_at               INTEGER NOT NULL
+      )
+    `)
+    oldDb
+      .prepare(
+        `INSERT INTO peer_reply_outbox (
+           id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
+           peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
+           payload, byte_count, state, created_at
+         ) VALUES (?, 1, 'msg_repair_rejected', 'link_rr', 'env_rr', 1, 'pfp', 'pkf', 'orig_rr',
+                   'agent_rr', NULL, 0, 'queued', 1000)`
+      )
+      .run('outbox_repair_rejected_1')
+    oldDb.close()
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    const row = sqlite
+      .prepare(
+        `SELECT state, settled_at, last_error_code, next_attempt_after
+           FROM peer_reply_outbox WHERE id = ?`
+      )
+      .get('outbox_repair_rejected_1') as {
+      state: string
+      settled_at: number | null
+      last_error_code: string | null
+      next_attempt_after: number | null
+    }
+    // state is untouched (the CHECK rejected the write that would have changed it) —
+    // settled_at/last_error_code are the columns no CHECK constrains, and are what carry the
+    // "this row is terminal" fact from here on.
+    expect(row.state).toBe('queued')
+    expect(row.settled_at).not.toBeNull()
+    expect(row.last_error_code).toBe('repair_rejected')
+    // No far-future next_attempt_after hack — settled_at alone is now what every ML-5 consumer
+    // (the claim, the kick, the cap, health) treats as terminal.
+    expect(row.next_attempt_after).toBeNull()
+
+    // ML-5: the zombie is invisible to the per-link cap and to the wake computation.
+    expect(db.countPendingReplyOutbox('link_rr')).toBe(0)
+    expect(db.nextReplyOutboxWakeAt()).toBeNull()
+
+    // The audit row names the fallback's own code, not the primary path's.
+    const audit = sqlite
+      .prepare(
+        `SELECT reason_code FROM agent_audit
+           WHERE verb = 'link_binding_unshipped_v40_repair' AND actor_host_id = ?`
+      )
+      .get('outbox_repair_rejected_1') as { reason_code: string } | undefined
+    expect(audit?.reason_code).toBe('repair_rejected')
+  })
+
   for (const table of [
     'peer_link_attempts',
     'peer_link_scan_facts',

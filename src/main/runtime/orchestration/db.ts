@@ -96,7 +96,10 @@ import {
   type PeerLinkBindingRow,
   type ContestFirstWinner
 } from './link-binding-store'
-import { A2_DROP_AND_RECREATE_TABLES } from './link-binding-constants'
+import {
+  A2_DROP_AND_RECREATE_TABLES,
+  REPLY_OUTBOX_REPAIR_REJECTED_CODE
+} from './link-binding-constants'
 import {
   getBindingAttempt as getBindingAttemptImpl,
   listBindingAttempts as listBindingAttemptsImpl,
@@ -1514,11 +1517,13 @@ export class OrchestrationDb {
                  OR payload IS NULL OR local_message_id IS NULL`
           )
           .all() as { id: string }[]
-        // F7 fallback target: no CHECK constrains next_attempt_after, so a value far enough in
-        // the future that the claim's own `(next_attempt_after IS NULL OR next_attempt_after
-        // <= ?)` predicate never admits the row again.
-        const farFutureNextAttemptAfter = now + 100 * 365 * 24 * 60 * 60 * 1000
         for (const row of incomplete) {
+          // Ruling 28(j)/ML-5: `settled_at != NULL` is now terminal for the claim, the kick, the
+          // per-link cap and health (reply-outbox-store.ts) — the far-future
+          // `next_attempt_after` hack this fallback used before that was true is no longer
+          // needed, and is dropped so a repaired row's `next_attempt_after` cannot outlive the
+          // predicate it once had to defeat.
+          let usedFallback = false
           try {
             this.db
               .prepare(
@@ -1528,18 +1533,20 @@ export class OrchestrationDb {
               )
               .run(now, row.id)
           } catch {
-            // F7: mirror the binding branch's fallback — a pre-review build's `state` CHECK may
-            // reject 'abandoned'; fall back to the columns no CHECK constrains
-            // (next_attempt_after / settled_at / last_error_code) so the row still stops being
-            // claimable. Without this, an un-reconstructable row stayed 'queued' and dialable —
-            // "an outbox row that cannot be reconstructed cannot be sent."
+            // F7/Ruling 28(j): mirror the binding branch's fallback — a pre-review build's
+            // `state` CHECK may reject 'abandoned'; fall back to the columns no CHECK constrains
+            // (settled_at / last_error_code) so the row still stops being claimable via
+            // settled_at alone. The code is REPLY_OUTBOX_REPAIR_REJECTED_CODE, distinct from the
+            // primary path's 'incomplete_row_fail_closed' — a row here was rejected AT the
+            // repair, not merely found incomplete by it.
+            usedFallback = true
             this.db
               .prepare(
                 `UPDATE peer_reply_outbox
-                    SET next_attempt_after = ?, settled_at = ?, last_error_code = 'incomplete_row_fail_closed'
+                    SET settled_at = ?, last_error_code = ?
                   WHERE id = ?`
               )
-              .run(farFutureNextAttemptAfter, now, row.id)
+              .run(now, REPLY_OUTBOX_REPAIR_REJECTED_CODE, row.id)
           }
           this.writeAgentAudit({
             agentId: null,
@@ -1548,7 +1555,9 @@ export class OrchestrationDb {
             actorHostId: row.id,
             verb: 'link_binding_unshipped_v40_repair',
             outcome: 'abandoned',
-            reasonCode: 'incomplete_row_fail_closed'
+            reasonCode: usedFallback
+              ? REPLY_OUTBOX_REPAIR_REJECTED_CODE
+              : 'incomplete_row_fail_closed'
           })
         }
       }

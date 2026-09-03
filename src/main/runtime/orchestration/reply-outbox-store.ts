@@ -219,11 +219,15 @@ export function listReplyOutbox(db: Database.Database, linkDeviceId?: string): R
   return rows.map(fromSqlRow)
 }
 
+// Ruling 28(j)/ML-5: `settled_at IS NOT NULL` is terminal REGARDLESS of `state` — the v40 outbox
+// repair's CHECK-rejection fallback (db.ts) can settle a row while leaving `state = 'queued'`
+// (a pre-review build's CHECK rejects the 'abandoned' write), and without this clause that zombie
+// counts against the per-link cap forever.
 export function countPendingReplyOutbox(db: Database.Database, linkDeviceId: string): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM peer_reply_outbox
-        WHERE link_device_id = ? AND state IN ('queued', 'sending')`
+        WHERE link_device_id = ? AND state IN ('queued', 'sending') AND settled_at IS NULL`
     )
     .get(linkDeviceId) as { n: number }
   return row.n
@@ -248,16 +252,22 @@ export function markReplyOutboxNotified(db: Database.Database, id: string, now: 
   db.prepare('UPDATE peer_reply_outbox SET notified_at = ? WHERE id = ?').run(now, id)
 }
 
-// Ruling 26 Addendum 4(hh)/(ii)/(jj): the DISPOSITION family's own edge + persisted per-link
-// interval, in ONE write — last_notified_condition (the edge, distinct from last_error_code,
-// which every hold path also writes) beside last_notified_at (the R19.3 interval's persisted
-// derivation, replacing the in-memory Map C5d shared with the R20.2 advisory). This is the
-// ONLY writer of either column; no hold statement and no other notice family touches them.
-// Guarded to queued/sending (jj) — a settled row is never mutated by a notice fired after its
-// own terminal settle (abandoned/refused/route_moved/peer_receipt_poisoned/id_conflict all
-// settle BEFORE their notice fires, so the guard is a no-op for those, by construction — only
-// the retry-path disposition codes (stale_pairing, unsupported), fired while the row is still
-// 'queued', ever actually persist here).
+// Ruling 26 Addendum 4(hh)/(ii)/(jj), AMENDED by Ruling 28(k): the DISPOSITION family's own edge
+// + persisted per-link interval, in ONE write — last_notified_condition (the edge, distinct from
+// last_error_code, which every hold path also writes) beside last_notified_at (the R19.3
+// interval's persisted derivation, replacing the in-memory Map C5d shared with the R20.2
+// advisory). This is the ONLY writer of either column; no hold statement and no other notice
+// family touches them.
+// Ruling 28(k)/F7: the previous `state IN ('queued', 'sending')` guard made this a NO-OP for
+// every terminal code (abandoned/refused/route_moved/peer_receipt_poisoned/id_conflict) — each
+// settles the row to a non-queued/sending state BEFORE its notice fires, so the stamp never
+// persisted and those codes were un-deduplicated: a peer refusing every relayed reply could mint
+// one turn-waking mailbox write per outbox item, up to REPLY_OUTBOX_PER_LINK_CAP. Terminal
+// notices are now edge-triggered "like the rest of the family" (once per (link, code) per
+// interval): the guard is dropped so the stamp persists on a terminal row too, and
+// `replyOutboxLinkLastDispositionNotifiedAt` below already reads MAX(last_notified_at) with NO
+// state filter, so a terminal row's stamp participates in the SAME per-link interval bound the
+// retry-path codes already use — no new column, no new query.
 export function markReplyOutboxDispositionNotice(
   db: Database.Database,
   id: string,
@@ -267,7 +277,7 @@ export function markReplyOutboxDispositionNotice(
   db.prepare(
     `UPDATE peer_reply_outbox
         SET last_notified_condition = ?, last_notified_at = ?
-      WHERE id = ? AND state IN ('queued', 'sending')`
+      WHERE id = ?`
   ).run(condition, now, id)
 }
 
@@ -286,16 +296,22 @@ export function replyOutboxLinkLastDispositionNotifiedAt(
   return row.t
 }
 
-// R18.7/pump idle scheduling: the earliest a queued item becomes claimable — a NULL
+// R18.7/pump idle scheduling, AMENDED by Ruling 28(j): the earliest moment the pump has
+// something to do — MIN(queued.next_attempt_after, sending.lease_expires_at). A NULL
 // `next_attempt_after` is immediately claimable (claimNextReplyOutboxItem's own WHERE clause
-// treats NULL that way), so it wins the MIN unconditionally; null return means nothing is queued
-// at all (an empty outbox, or one whose every row is held with a future clock, is instead caught
-// by that row's own next_attempt_after value, never by this returning null).
+// treats NULL that way), so it wins the MIN unconditionally. The `sending` half is what makes a
+// crash mid-send self-heal without an external kick: a lease that has NOT yet expired at wake-
+// computation time (the common restart case: `reclaimExpiredReplyOutboxLeases` already reverted
+// any already-expired lease before this is read) would otherwise be invisible to this query
+// (state != 'queued'), leaving nothing to wake the pump when that lease finally does expire — the
+// row would sit 'sending' forever, reclaimed only by a future kick or a new enqueue. Both halves
+// exclude `settled_at IS NOT NULL` rows (ML-5: a v40-repaired zombie can be settled while `state`
+// is still 'queued'). Null return means nothing pending at all.
 export function nextReplyOutboxWakeAt(db: Database.Database): number | null {
+  const queuedHalf = `SELECT COALESCE(next_attempt_after, 0) AS t FROM peer_reply_outbox WHERE state = 'queued' AND settled_at IS NULL`
+  const sendingHalf = `SELECT lease_expires_at AS t FROM peer_reply_outbox WHERE state = 'sending' AND settled_at IS NULL AND lease_expires_at IS NOT NULL`
   const row = db
-    .prepare(
-      `SELECT MIN(COALESCE(next_attempt_after, 0)) AS t FROM peer_reply_outbox WHERE state = 'queued'`
-    )
+    .prepare(`SELECT MIN(t) AS t FROM (${queuedHalf} UNION ALL ${sendingHalf})`)
     .get() as { t: number | null }
   return row.t
 }
@@ -336,11 +352,15 @@ export function kickReplyOutboxForLink(
   linkDeviceId: string,
   now: number
 ): void {
+  // Ruling 28(j)/ML-5: `settled_at IS NULL` — a v40-repaired zombie (settled while `state`
+  // stayed 'queued') must never be resurrected by a peer kick (F4: the resurrected row's NULL
+  // `payload` then throws inside the guarded dial, and the local repair artifact gets reported
+  // as the peer's transport being down).
   const rows = db
     .prepare(
       `SELECT id, consecutive_failures FROM peer_reply_outbox
         WHERE link_device_id = ? AND state = 'queued' AND hold_count = 0
-          AND next_attempt_after IS NOT NULL`
+          AND next_attempt_after IS NOT NULL AND settled_at IS NULL`
     )
     .all(linkDeviceId) as { id: string; consecutive_failures: number }[]
   const update = db.prepare(

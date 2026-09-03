@@ -5,6 +5,7 @@ import { localEvidenceUnavailable, getRoutableLinkBinding } from './link-binding
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import {
   fireReplyRelayDispositionNotice,
+  shouldFireDispositionNotice,
   auditReplyRelaySettleRaced
 } from './reply-outbox-pump-notify'
 import {
@@ -63,7 +64,19 @@ export function holdOrRetargetReplyOutboxItem(
     retargeted.environmentId === item.environmentId &&
     retargeted.boundPairingRevision === item.boundPairingRevision &&
     retargeted.peerCredentialFp === item.peerCredentialFp
-  if (retargeted && !isSameRoute) {
+  // ML-2/F11 (Ruling 28(j)): the RETARGET's own precondition, separate from isSameRoute — added
+  // to the WRITE gate, not folded into isSameRoute (which also governs the same-route hold
+  // branches below, where no fingerprint is written). `candidate` is looked up BY
+  // `item.peerKeyFingerprint`, but `retargeted` is a fresh re-read of that row BY `linkDeviceId`;
+  // both reads are synchronous within one process, but the reachable case is the
+  // two-runtimes-one-DB residual (a second process rewrote the key fingerprint between the
+  // lookup and this comparison). R18.4(b) retargets BY key fingerprint, so a silent key change on
+  // the very row about to be retargeted onto is exactly the property this precondition exists to
+  // preserve; a mismatch falls through to the bounded hold below rather than writing a
+  // fingerprint the caller's own lookup never actually confirmed.
+  const retargetKeyFingerprintMatches =
+    retargeted === null || retargeted.peerKeyFingerprint === item.peerKeyFingerprint
+  if (retargeted && !isSameRoute && retargetKeyFingerprintMatches) {
     const retargetedRow = db.retargetReplyOutboxItem(item.id, {
       linkDeviceId: retargeted.linkDeviceId,
       environmentId: retargeted.environmentId,
@@ -112,8 +125,11 @@ export function holdOrRetargetReplyOutboxItem(
       lastError: null
     })
     if (settled) {
-      // Ruling 26 Addendum 4(hh): route_moved is a disposition-family notice.
-      fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ROUTE_MOVED_NOTICE, null)
+      // Ruling 26 Addendum 4(hh): route_moved is a disposition-family notice. Ruling 28(k):
+      // edge-triggered/interval-bounded like the rest of the family.
+      if (shouldFireDispositionNotice(runtime, item, REPLY_RELAY_ROUTE_MOVED_NOTICE, now)) {
+        fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ROUTE_MOVED_NOTICE, null)
+      }
     } else {
       auditReplyRelaySettleRaced(db, item, 'route_moved')
     }
@@ -134,7 +150,10 @@ export function holdOrRetargetReplyOutboxItem(
       lastError: item.lastError
     })
     if (settled) {
-      fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, null)
+      // Ruling 28(k): edge-triggered/interval-bounded like the rest of the family.
+      if (shouldFireDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, now)) {
+        fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, null)
+      }
     } else {
       auditReplyRelaySettleRaced(db, item, 'abandoned')
     }
