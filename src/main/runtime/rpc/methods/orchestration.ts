@@ -40,6 +40,7 @@ import {
   getRoutableLinkBinding,
   localEvidenceUnavailable
 } from '../../orchestration/link-binding-routable'
+import { describeLinkBindingAttention } from '../../orchestration/link-binding-attention'
 import {
   assertPeerMailDestinationAllowed,
   assertRemoteRunMailboxCaller,
@@ -1261,6 +1262,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.check',
     params: CheckParams,
+    // S10-16 C6, R19.5/Ruling 21 Protocol B2 (design v6 `rpc/methods/orchestration.ts:1141-1156`
+    // at `7a4a6b6be0`): the ONE wrap site — the result is wrapped once with
+    // `linkBindingAttention` (local callers only) after the inner IIFE below, rather than edited
+    // at each of this handler's own internal returns. The IIFE's body is the pre-existing
+    // handler, unchanged.
     handler: async (
       params,
       {
@@ -1276,560 +1282,577 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         authenticatedCallerFingerprint
       }
     ) => {
-      // S10-19 §8.1: a federation peer must use the remote-run-mailbox mode and may not name a
-      // local pane — `terminal`/`terminalPaneKey` name nothing here. Ruling 24 addendum 4(aa):
-      // this refusal IS check's server-side destination constraint — with terminal/terminalPaneKey
-      // refused, the only destination `check` can ever resolve for a peer is an explicit
-      // `run:<id>` mailbox (params.run), the same bearer-capability route `send`/`reply` allow.
-      if (accessProfile === 'peer') {
-        if (params.terminal !== undefined || params.terminalPaneKey !== undefined) {
-          throw new OrchestrationError(
-            'forbidden',
-            'A federation peer may not name a pane on this host; omit --terminal and use --run with remoteRunMailbox.',
-            {
-              effectsApplied: false,
-              nextSteps: [
-                'a terminal handle or pane key from your runtime names nothing here; update Orca on the calling host'
-              ]
-            }
-          )
+      const result = await (async () => {
+        // S10-19 §8.1: a federation peer must use the remote-run-mailbox mode and may not name a
+        // local pane — `terminal`/`terminalPaneKey` name nothing here. Ruling 24 addendum 4(aa):
+        // this refusal IS check's server-side destination constraint — with terminal/terminalPaneKey
+        // refused, the only destination `check` can ever resolve for a peer is an explicit
+        // `run:<id>` mailbox (params.run), the same bearer-capability route `send`/`reply` allow.
+        if (accessProfile === 'peer') {
+          if (params.terminal !== undefined || params.terminalPaneKey !== undefined) {
+            throw new OrchestrationError(
+              'forbidden',
+              'A federation peer may not name a pane on this host; omit --terminal and use --run with remoteRunMailbox.',
+              {
+                effectsApplied: false,
+                nextSteps: [
+                  'a terminal handle or pane key from your runtime names nothing here; update Orca on the calling host'
+                ]
+              }
+            )
+          }
+          if (params.remoteRunMailbox !== true) {
+            throw new OrchestrationError(
+              'forbidden',
+              'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+              {
+                effectsApplied: false,
+                nextSteps: [
+                  'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
+                ]
+              }
+            )
+          }
         }
-        if (params.remoteRunMailbox !== true) {
-          throw new OrchestrationError(
-            'forbidden',
-            'A federation peer must set remoteRunMailbox; pass --run <run_id> so the CLI negotiates the remote run mailbox.',
+        assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
+        const db = runtime.getOrchestrationDb()
+        const handle = params.terminal ?? 'unknown'
+        const typeFilter = parseMessageTypes(params.types)
+
+        // Why: a live runtime handle is authoritative; pane metadata is only the restart fallback.
+        const paneKey = runtime.getTerminalPaneKey(handle) ?? params.terminalPaneKey
+        const boundRun = paneKey ? db.getCurrentRunForPane(paneKey) : undefined
+        if (params.run || boundRun) {
+          const run = resolveRemoteRunMailboxScope(
+            runtime,
             {
-              effectsApplied: false,
-              nextSteps: [
-                'pass --run <run_id> so the CLI negotiates the remote run mailbox, or update Orca on the calling host (needs orchestration.remote-run-mailbox.v1)'
-              ]
-            }
+              runId: params.run,
+              callerTerminalHandle: handle,
+              callerPaneKey: paneKey ?? undefined,
+              requireCurrentConsumer: true,
+              legacyCoordinatorRunId,
+              callerEvidence: orchestrationCompatibilityEvidence
+            },
+            { remoteRunMailbox: params.remoteRunMailbox, pairedDeviceId, clientKind }
           )
-        }
-      }
-      assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
-      const db = runtime.getOrchestrationDb()
-      const handle = params.terminal ?? 'unknown'
-      const typeFilter = parseMessageTypes(params.types)
+          const generation = run.consumer_generation
+          const address = `run:${run.id}`
+          runtime.ensureOrchestrationFederationRelay(run.id)
 
-      // Why: a live runtime handle is authoritative; pane metadata is only the restart fallback.
-      const paneKey = runtime.getTerminalPaneKey(handle) ?? params.terminalPaneKey
-      const boundRun = paneKey ? db.getCurrentRunForPane(paneKey) : undefined
-      if (params.run || boundRun) {
-        const run = resolveRemoteRunMailboxScope(
-          runtime,
-          {
-            runId: params.run,
-            callerTerminalHandle: handle,
-            callerPaneKey: paneKey ?? undefined,
-            requireCurrentConsumer: true,
-            legacyCoordinatorRunId,
-            callerEvidence: orchestrationCompatibilityEvidence
-          },
-          { remoteRunMailbox: params.remoteRunMailbox, pairedDeviceId, clientKind }
-        )
-        const generation = run.consumer_generation
-        const address = `run:${run.id}`
-        runtime.ensureOrchestrationFederationRelay(run.id)
+          const acknowledged = params.ack
+            ? db.acknowledgeRunDelivery({
+                runId: run.id,
+                consumerGeneration: generation,
+                deliveryId: params.ack
+              })
+            : undefined
+          if (acknowledged) {
+            recordMutationReceipt?.(
+              interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'outcome_unknown')
+            )
+          }
+          if (params.peek || params.all || params.unread === false) {
+            const history = db.getRunMailboxHistory(run.id, 100, typeFilter)
+            const messages =
+              params.all || (params.unread === false && !params.peek)
+                ? history
+                : history.filter((message) => message.read === 0)
+            const result = {
+              messages,
+              count: messages.length,
+              acknowledged: acknowledged?.delivery.id ?? null
+            }
+            if (params.format || params.inject) {
+              return {
+                ...result,
+                formatted: messages.map(formatMessageBanner).join('\n\n'),
+                runId: run.id
+              }
+            }
+            return { ...result, runId: run.id }
+          }
 
-        const acknowledged = params.ack
-          ? db.acknowledgeRunDelivery({
+          const readDelivery = (wakeTypes?: MessageType[]) =>
+            db.getOrCreateRunDelivery({
               runId: run.id,
               consumerGeneration: generation,
-              deliveryId: params.ack
+              wakeTypes
             })
-          : undefined
-        if (acknowledged) {
-          recordMutationReceipt?.(
-            interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'outcome_unknown')
-          )
-        }
-        if (params.peek || params.all || params.unread === false) {
-          const history = db.getRunMailboxHistory(run.id, 100, typeFilter)
-          const messages =
-            params.all || (params.unread === false && !params.peek)
-              ? history
-              : history.filter((message) => message.read === 0)
-          const result = {
-            messages,
-            count: messages.length,
-            acknowledged: acknowledged?.delivery.id ?? null
-          }
-          if (params.format || params.inject) {
+          let current = readDelivery(params.wait ? typeFilter : undefined)
+          if (current) {
             return {
-              ...result,
-              formatted: messages.map(formatMessageBanner).join('\n\n'),
-              runId: run.id
+              runId: run.id,
+              deliveryId: current.delivery.id,
+              messages: current.messages,
+              count: current.messages.length,
+              replayed: current.replayed,
+              pendingBehind: current.pendingBehind,
+              acknowledged: acknowledged?.delivery.id ?? null,
+              timedOut: false,
+              cancelled: false,
+              connectionLost: false,
+              ...(params.format || params.inject
+                ? { formatted: current.messages.map(formatMessageBanner).join('\n\n') }
+                : {})
             }
           }
-          return { ...result, runId: run.id }
-        }
+          if (!params.wait) {
+            return {
+              runId: run.id,
+              deliveryId: null,
+              messages: [],
+              count: 0,
+              acknowledged: acknowledged?.delivery.id ?? null,
+              timedOut: false,
+              cancelled: false,
+              connectionLost: false
+            }
+          }
 
-        const readDelivery = (wakeTypes?: MessageType[]) =>
-          db.getOrCreateRunDelivery({
-            runId: run.id,
-            consumerGeneration: generation,
-            wakeTypes
+          // S10-19 R24 (§8.7): a peer never fences a locally-bound Run — two exclusive waiters were
+          // never going to coexist (waiter_exists), so a typed refusal beats a race the peer can
+          // win. A peer may still read/consume its own mail on this Run without --wait.
+          if (accessProfile === 'peer' && run.coordinator_pane_key !== null) {
+            throw new OrchestrationError(
+              'run_wait_local_only',
+              'This Run has a locally-bound coordinator; a federation peer may read mail here but may not --wait, which would fence the local coordinator.'
+            )
+          }
+          const waitResult = await runtime.waitForMessage(address, {
+            typeFilter: typeFilter as string[] | undefined,
+            timeoutMs: params.timeoutMs ?? undefined,
+            signal,
+            exclusive: true
           })
-        let current = readDelivery(params.wait ? typeFilter : undefined)
-        if (current) {
+          try {
+            revalidateLegacyCoordinator?.()
+          } catch (error) {
+            if (!acknowledged) {
+              throw error
+            }
+            return interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'consumer_fenced')
+          }
+          const latestRun = db.getRun(run.id)
+          if (!latestRun || latestRun.consumer_generation !== generation) {
+            if (acknowledged) {
+              return interruptedAcknowledgedCheck(
+                run.id,
+                acknowledged.delivery.id,
+                'consumer_fenced'
+              )
+            }
+            throw new OrchestrationError(
+              'consumer_fenced',
+              'This mailbox consumer was replaced while waiting.'
+            )
+          }
+          if (waitResult === 'waiter_exists') {
+            if (acknowledged) {
+              return interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'waiter_exists')
+            }
+            throw new OrchestrationError(
+              'waiter_exists',
+              `Run ${run.id} already has an active actionable waiter.`
+            )
+          }
+          if (waitResult === 'timed_out') {
+            return {
+              runId: run.id,
+              deliveryId: null,
+              messages: [],
+              count: 0,
+              acknowledged: acknowledged?.delivery.id ?? null,
+              timedOut: true,
+              cancelled: false,
+              connectionLost: false
+            }
+          }
+          if (waitResult === 'cancelled') {
+            return {
+              runId: run.id,
+              deliveryId: null,
+              messages: [],
+              count: 0,
+              acknowledged: acknowledged?.delivery.id ?? null,
+              timedOut: false,
+              cancelled: true,
+              connectionLost: signal?.aborted === true
+            }
+          }
+
+          current = readDelivery(typeFilter)
           return {
             runId: run.id,
-            deliveryId: current.delivery.id,
-            messages: current.messages,
-            count: current.messages.length,
-            replayed: current.replayed,
-            pendingBehind: current.pendingBehind,
+            deliveryId: current?.delivery.id ?? null,
+            messages: current?.messages ?? [],
+            count: current?.messages.length ?? 0,
+            replayed: current?.replayed ?? false,
+            pendingBehind: current?.pendingBehind ?? 0,
             acknowledged: acknowledged?.delivery.id ?? null,
             timedOut: false,
             cancelled: false,
             connectionLost: false,
-            ...(params.format || params.inject
+            ...(params.format && current
               ? { formatted: current.messages.map(formatMessageBanner).join('\n\n') }
               : {})
           }
         }
-        if (!params.wait) {
-          return {
-            runId: run.id,
-            deliveryId: null,
-            messages: [],
-            count: 0,
-            acknowledged: acknowledged?.delivery.id ?? null,
-            timedOut: false,
-            cancelled: false,
-            connectionLost: false
-          }
-        }
 
-        // S10-19 R24 (§8.7): a peer never fences a locally-bound Run — two exclusive waiters were
-        // never going to coexist (waiter_exists), so a typed refusal beats a race the peer can
-        // win. A peer may still read/consume its own mail on this Run without --wait.
-        if (accessProfile === 'peer' && run.coordinator_pane_key !== null) {
-          throw new OrchestrationError(
-            'run_wait_local_only',
-            'This Run has a locally-bound coordinator; a federation peer may read mail here but may not --wait, which would fence the local coordinator.'
-          )
-        }
-        const waitResult = await runtime.waitForMessage(address, {
-          typeFilter: typeFilter as string[] | undefined,
-          timeoutMs: params.timeoutMs ?? undefined,
-          signal,
-          exclusive: true
-        })
-        try {
-          revalidateLegacyCoordinator?.()
-        } catch (error) {
-          if (!acknowledged) {
-            throw error
-          }
-          return interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'consumer_fenced')
-        }
-        const latestRun = db.getRun(run.id)
-        if (!latestRun || latestRun.consumer_generation !== generation) {
-          if (acknowledged) {
-            return interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'consumer_fenced')
-          }
-          throw new OrchestrationError(
-            'consumer_fenced',
-            'This mailbox consumer was replaced while waiting.'
-          )
-        }
-        if (waitResult === 'waiter_exists') {
-          if (acknowledged) {
-            return interruptedAcknowledgedCheck(run.id, acknowledged.delivery.id, 'waiter_exists')
-          }
-          throw new OrchestrationError(
-            'waiter_exists',
-            `Run ${run.id} already has an active actionable waiter.`
-          )
-        }
-        if (waitResult === 'timed_out') {
-          return {
-            runId: run.id,
-            deliveryId: null,
-            messages: [],
-            count: 0,
-            acknowledged: acknowledged?.delivery.id ?? null,
-            timedOut: true,
-            cancelled: false,
-            connectionLost: false
-          }
-        }
-        if (waitResult === 'cancelled') {
-          return {
-            runId: run.id,
-            deliveryId: null,
-            messages: [],
-            count: 0,
-            acknowledged: acknowledged?.delivery.id ?? null,
-            timedOut: false,
-            cancelled: true,
-            connectionLost: signal?.aborted === true
-          }
-        }
-
-        current = readDelivery(typeFilter)
-        return {
-          runId: run.id,
-          deliveryId: current?.delivery.id ?? null,
-          messages: current?.messages ?? [],
-          count: current?.messages.length ?? 0,
-          replayed: current?.replayed ?? false,
-          pendingBehind: current?.pendingBehind ?? 0,
-          acknowledged: acknowledged?.delivery.id ?? null,
-          timedOut: false,
-          cancelled: false,
-          connectionLost: false,
-          ...(params.format && current
-            ? { formatted: current.messages.map(formatMessageBanner).join('\n\n') }
-            : {})
-        }
-      }
-
-      const activeDispatch = db.getActiveDispatchForIdentity(handle, paneKey ?? undefined)
-      const remoteAttachment =
-        !activeDispatch && paneKey ? db.findActiveRemoteAttachmentForPane(paneKey) : undefined
-      if (
-        remoteAttachment &&
-        !db.isRemoteAttachmentProcessCurrent({
-          dispatchId: remoteAttachment.dispatch_id,
-          paneKey: paneKey ?? null,
-          processIncarnation: runtime.getTerminalProcessIncarnation(handle)
-        })
-      ) {
-        throw new OrchestrationError(
-          'dispatch_inactive',
-          `Dispatch ${remoteAttachment.dispatch_id} is no longer attached to this worker process.`
-        )
-      }
-      const workerMailbox = activeDispatch
-        ? { dispatchId: activeDispatch.id, runId: activeDispatch.run_id }
-        : remoteAttachment
-          ? { dispatchId: remoteAttachment.dispatch_id, runId: undefined }
-          : undefined
-      if (workerMailbox) {
-        const address = `dispatch:${workerMailbox.dispatchId}`
-        const showAll = params.all === true || (params.unread === false && params.peek !== true)
-        const consumeUnread = !showAll && params.peek !== true
-        // Why the dual path (owner decision 3): default stays today's destructive markAsRead —
-        // zero regression for in-flight callers. ackMode:'implicit' opts this dispatch: mailbox
-        // into the same replay-until-ack durability agent:<id> ships with (BUG 5). Why the
-        // candidate query is INSIDE the implicit branch and not hoisted above it: an ack must
-        // mark the prior delivery's ids read before this query runs, or it would still see
-        // them as unread and hand the just-acked batch straight back (readMailboxDelivery
-        // enforces this ordering internally via `fetchCandidates`).
-        let messages: MessageRow[]
-        let deliveryMeta: Record<string, unknown> = {}
-        let deliveryOmitted: { purged: number; withheld: number } | undefined
-        if (consumeUnread && params.ackMode === 'implicit') {
-          const durable = readMailboxDelivery(db, {
-            mailboxHandle: address,
-            fetchCandidates: () => db.getUnreadMessages(address, typeFilter),
-            ack: params.ack
+        const activeDispatch = db.getActiveDispatchForIdentity(handle, paneKey ?? undefined)
+        const remoteAttachment =
+          !activeDispatch && paneKey ? db.findActiveRemoteAttachmentForPane(paneKey) : undefined
+        if (
+          remoteAttachment &&
+          !db.isRemoteAttachmentProcessCurrent({
+            dispatchId: remoteAttachment.dispatch_id,
+            paneKey: paneKey ?? null,
+            processIncarnation: runtime.getTerminalProcessIncarnation(handle)
           })
-          messages = durable.messages
-          deliveryOmitted = durable.omitted
-          deliveryMeta = {
-            deliveryId: durable.deliveryId,
-            replayed: durable.replayed,
-            pendingBehind: durable.pendingBehind,
-            acknowledged: durable.acknowledged,
-            ...(durable.omitted ? { omitted: durable.omitted } : {})
-          }
-        } else {
-          messages = showAll
-            ? db.getAllMessagesForHandle(address, 100, typeFilter)
-            : db.getUnreadMessages(address, typeFilter)
-          if (consumeUnread && messages.length > 0) {
-            db.markAsRead(messages.map((message) => message.id))
-          }
+        ) {
+          throw new OrchestrationError(
+            'dispatch_inactive',
+            `Dispatch ${remoteAttachment.dispatch_id} is no longer attached to this worker process.`
+          )
         }
-        if (messages.length > 0 || !params.wait) {
+        const workerMailbox = activeDispatch
+          ? { dispatchId: activeDispatch.id, runId: activeDispatch.run_id }
+          : remoteAttachment
+            ? { dispatchId: remoteAttachment.dispatch_id, runId: undefined }
+            : undefined
+        if (workerMailbox) {
+          const address = `dispatch:${workerMailbox.dispatchId}`
+          const showAll = params.all === true || (params.unread === false && params.peek !== true)
+          const consumeUnread = !showAll && params.peek !== true
+          // Why the dual path (owner decision 3): default stays today's destructive markAsRead —
+          // zero regression for in-flight callers. ackMode:'implicit' opts this dispatch: mailbox
+          // into the same replay-until-ack durability agent:<id> ships with (BUG 5). Why the
+          // candidate query is INSIDE the implicit branch and not hoisted above it: an ack must
+          // mark the prior delivery's ids read before this query runs, or it would still see
+          // them as unread and hand the just-acked batch straight back (readMailboxDelivery
+          // enforces this ordering internally via `fetchCandidates`).
+          let messages: MessageRow[]
+          let deliveryMeta: Record<string, unknown> = {}
+          let deliveryOmitted: { purged: number; withheld: number } | undefined
+          if (consumeUnread && params.ackMode === 'implicit') {
+            const durable = readMailboxDelivery(db, {
+              mailboxHandle: address,
+              fetchCandidates: () => db.getUnreadMessages(address, typeFilter),
+              ack: params.ack
+            })
+            messages = durable.messages
+            deliveryOmitted = durable.omitted
+            deliveryMeta = {
+              deliveryId: durable.deliveryId,
+              replayed: durable.replayed,
+              pendingBehind: durable.pendingBehind,
+              acknowledged: durable.acknowledged,
+              ...(durable.omitted ? { omitted: durable.omitted } : {})
+            }
+          } else {
+            messages = showAll
+              ? db.getAllMessagesForHandle(address, 100, typeFilter)
+              : db.getUnreadMessages(address, typeFilter)
+            if (consumeUnread && messages.length > 0) {
+              db.markAsRead(messages.map((message) => message.id))
+            }
+          }
+          if (messages.length > 0 || !params.wait) {
+            return {
+              ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
+              dispatchId: workerMailbox.dispatchId,
+              messages,
+              count: messages.length,
+              ...deliveryMeta,
+              ...(params.format || params.inject
+                ? {
+                    formatted: appendOmittedMessagesLine(
+                      messages.map(formatMessageBanner).join('\n\n'),
+                      deliveryOmitted
+                    )
+                  }
+                : {})
+            }
+          }
+          // Why here and not at the top of the branch: everything above returns without parking —
+          // --peek, --all and a mailbox that already had mail are reads, and the preamble exempts
+          // only a worker actually blocked inside the call (A1 §14).
+          const waitResult = await whileDispatchBlocked(db, workerMailbox.dispatchId, () =>
+            runtime.waitForMessage(address, {
+              typeFilter: typeFilter as string[] | undefined,
+              timeoutMs: params.timeoutMs ?? undefined,
+              signal
+            })
+          )
+          if (waitResult === 'timed_out' || waitResult === 'cancelled') {
+            return {
+              ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
+              dispatchId: workerMailbox.dispatchId,
+              messages: [],
+              count: 0,
+              timedOut: waitResult === 'timed_out',
+              cancelled: waitResult === 'cancelled',
+              connectionLost: waitResult === 'cancelled' && signal?.aborted === true
+            }
+          }
+          let arrived: MessageRow[]
+          let arrivedDeliveryMeta: Record<string, unknown> = {}
+          let arrivedOmitted: { purged: number; withheld: number } | undefined
+          if (params.ackMode === 'implicit') {
+            const durable = readMailboxDelivery(db, {
+              mailboxHandle: address,
+              fetchCandidates: () => db.getUnreadMessages(address, typeFilter),
+              ack: params.ack
+            })
+            arrived = durable.messages
+            arrivedOmitted = durable.omitted
+            arrivedDeliveryMeta = {
+              deliveryId: durable.deliveryId,
+              replayed: durable.replayed,
+              pendingBehind: durable.pendingBehind,
+              acknowledged: durable.acknowledged,
+              ...(durable.omitted ? { omitted: durable.omitted } : {})
+            }
+          } else {
+            arrived = db.getUnreadMessages(address, typeFilter)
+            db.markAsRead(arrived.map((message) => message.id))
+          }
           return {
             ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
             dispatchId: workerMailbox.dispatchId,
-            messages,
-            count: messages.length,
-            ...deliveryMeta,
+            messages: arrived,
+            count: arrived.length,
+            ...arrivedDeliveryMeta,
             ...(params.format || params.inject
               ? {
                   formatted: appendOmittedMessagesLine(
-                    messages.map(formatMessageBanner).join('\n\n'),
-                    deliveryOmitted
+                    arrived.map(formatMessageBanner).join('\n\n'),
+                    arrivedOmitted
                   )
                 }
               : {})
           }
         }
-        // Why here and not at the top of the branch: everything above returns without parking —
-        // --peek, --all and a mailbox that already had mail are reads, and the preamble exempts
-        // only a worker actually blocked inside the call (A1 §14).
-        const waitResult = await whileDispatchBlocked(db, workerMailbox.dispatchId, () =>
-          runtime.waitForMessage(address, {
-            typeFilter: typeFilter as string[] | undefined,
-            timeoutMs: params.timeoutMs ?? undefined,
-            signal
-          })
+
+        // Why (S10-1 ROUTING "Check"): the caller's own directory row, if any, owns
+        // an `agent:<id>` mailbox — durable via mailbox_deliveries (BUG 5), taken
+        // before the bare-handle branch below so a registered agent's mail never
+        // falls through to the legacy-fenced path.
+        // Identity here is ONLY runtime.verifyOrchestrationCompatibilityCaller — never a
+        // caller-supplied `--terminal`/`terminalPaneKey`. `orchestrationCompatibilityCallerAuthority`
+        // (the legacy-adoption preflight) is undefined for an ordinary peer, so it cannot be a
+        // fallback source of identity here; this branch verifies directly instead (ARBITRATION A1,
+        // CONTAINMENT #1 — mirrors agents.register/find/quarantine's own direct verify call).
+        const agentHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        const attestedForAgentCheck = runtime.verifyOrchestrationCompatibilityCaller(
+          orchestrationCompatibilityEvidence,
+          { currentRuntimeLaunchSufficient: true }
         )
-        if (waitResult === 'timed_out' || waitResult === 'cancelled') {
-          return {
-            ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
-            dispatchId: workerMailbox.dispatchId,
-            messages: [],
-            count: 0,
-            timedOut: waitResult === 'timed_out',
-            cancelled: waitResult === 'cancelled',
-            connectionLost: waitResult === 'cancelled' && signal?.aborted === true
+        const callerAgentRow =
+          attestedForAgentCheck && attestedForAgentCheck.terminalHandle === handle
+            ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
+            : undefined
+        // Why derived !== 1: a derived row is minted by ANY caller's `agents list`/`find` for
+        // every live pane (agent-directory-rpc-liveness.ts) — the pane's own owner never opted
+        // in. Routing a never-registered pane through the durable agent: branch would silently
+        // flip its pre-existing bare-handle mailbox from destructive to replay-until-ack a
+        // release early (owner decision 3) merely because a third party listed the directory.
+        if (callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1) {
+          // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
+          const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
+          const address = `agent:${callerAgentRow.id}`
+          db.refreshAgentLiveness({
+            id: callerAgentRow.id,
+            state: 'idle',
+            terminalHandle: handle,
+            processIncarnation:
+              attestedProcessIncarnation ?? runtime.getTerminalProcessIncarnation(handle)
+          })
+
+          if (params.peek || params.all) {
+            const addressRows = params.all
+              ? db.getAllMessagesForHandle(address, 100, typeFilter)
+              : db.getUnreadMessages(address, typeFilter)
+            const handleRows = params.all
+              ? db.getAllMessagesForHandle(handle, 100, typeFilter)
+              : db.getUnreadMessages(handle, typeFilter)
+            const mergedById = new Map<string, (typeof addressRows)[number]>()
+            for (const row of [...addressRows, ...handleRows]) {
+              mergedById.set(row.id, row)
+            }
+            const merged = [...mergedById.values()].sort((a, b) => a.sequence - b.sequence)
+            const legacyPending = merged.filter(
+              (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
+            ).length
+            const visible = params.all
+              ? merged
+              : merged.filter((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+            return {
+              mailbox: address,
+              agentId: callerAgentRow.id,
+              messages: visible,
+              count: visible.length,
+              legacyPending,
+              ...(params.format || params.inject
+                ? { formatted: visible.map(formatMessageBanner).join('\n\n') }
+                : {})
+            }
           }
-        }
-        let arrived: MessageRow[]
-        let arrivedDeliveryMeta: Record<string, unknown> = {}
-        let arrivedOmitted: { purged: number; withheld: number } | undefined
-        if (params.ackMode === 'implicit') {
+
           const durable = readMailboxDelivery(db, {
             mailboxHandle: address,
-            fetchCandidates: () => db.getUnreadMessages(address, typeFilter),
+            // Why fetched here (inside the callback, run AFTER the ack): see readMailboxDelivery's
+            // own comment — a candidate query run before the ack would still see the prior
+            // delivery's ids as unread and hand them back into the new one.
+            fetchCandidates: () => {
+              const addressUnread = db.getUnreadMessages(address, typeFilter)
+              const handleUnread = db.getUnreadMessages(handle, typeFilter)
+              const unreadById = new Map<string, (typeof addressUnread)[number]>()
+              for (const row of [...addressUnread, ...handleUnread]) {
+                unreadById.set(row.id, row)
+              }
+              return [...unreadById.values()].sort((a, b) => a.sequence - b.sequence)
+            },
             ack: params.ack
           })
-          arrived = durable.messages
-          arrivedOmitted = durable.omitted
-          arrivedDeliveryMeta = {
-            deliveryId: durable.deliveryId,
-            replayed: durable.replayed,
-            pendingBehind: durable.pendingBehind,
-            acknowledged: durable.acknowledged,
-            ...(durable.omitted ? { omitted: durable.omitted } : {})
-          }
-        } else {
-          arrived = db.getUnreadMessages(address, typeFilter)
-          db.markAsRead(arrived.map((message) => message.id))
-        }
-        return {
-          ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
-          dispatchId: workerMailbox.dispatchId,
-          messages: arrived,
-          count: arrived.length,
-          ...arrivedDeliveryMeta,
-          ...(params.format || params.inject
-            ? {
-                formatted: appendOmittedMessagesLine(
-                  arrived.map(formatMessageBanner).join('\n\n'),
-                  arrivedOmitted
-                )
-              }
-            : {})
-        }
-      }
-
-      // Why (S10-1 ROUTING "Check"): the caller's own directory row, if any, owns
-      // an `agent:<id>` mailbox — durable via mailbox_deliveries (BUG 5), taken
-      // before the bare-handle branch below so a registered agent's mail never
-      // falls through to the legacy-fenced path.
-      // Identity here is ONLY runtime.verifyOrchestrationCompatibilityCaller — never a
-      // caller-supplied `--terminal`/`terminalPaneKey`. `orchestrationCompatibilityCallerAuthority`
-      // (the legacy-adoption preflight) is undefined for an ordinary peer, so it cannot be a
-      // fallback source of identity here; this branch verifies directly instead (ARBITRATION A1,
-      // CONTAINMENT #1 — mirrors agents.register/find/quarantine's own direct verify call).
-      const agentHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
-      const attestedForAgentCheck = runtime.verifyOrchestrationCompatibilityCaller(
-        orchestrationCompatibilityEvidence,
-        { currentRuntimeLaunchSufficient: true }
-      )
-      const callerAgentRow =
-        attestedForAgentCheck && attestedForAgentCheck.terminalHandle === handle
-          ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
-          : undefined
-      // Why derived !== 1: a derived row is minted by ANY caller's `agents list`/`find` for
-      // every live pane (agent-directory-rpc-liveness.ts) — the pane's own owner never opted
-      // in. Routing a never-registered pane through the durable agent: branch would silently
-      // flip its pre-existing bare-handle mailbox from destructive to replay-until-ack a
-      // release early (owner decision 3) merely because a third party listed the directory.
-      if (callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1) {
-        // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
-        const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
-        const address = `agent:${callerAgentRow.id}`
-        db.refreshAgentLiveness({
-          id: callerAgentRow.id,
-          state: 'idle',
-          terminalHandle: handle,
-          processIncarnation:
-            attestedProcessIncarnation ?? runtime.getTerminalProcessIncarnation(handle)
-        })
-
-        if (params.peek || params.all) {
-          const addressRows = params.all
-            ? db.getAllMessagesForHandle(address, 100, typeFilter)
-            : db.getUnreadMessages(address, typeFilter)
-          const handleRows = params.all
-            ? db.getAllMessagesForHandle(handle, 100, typeFilter)
-            : db.getUnreadMessages(handle, typeFilter)
-          const mergedById = new Map<string, (typeof addressRows)[number]>()
-          for (const row of [...addressRows, ...handleRows]) {
-            mergedById.set(row.id, row)
-          }
-          const merged = [...mergedById.values()].sort((a, b) => a.sequence - b.sequence)
-          const legacyPending = merged.filter(
-            (row) => row.run_id === ORCHESTRATION_LEGACY_RUN_ID
-          ).length
-          const visible = params.all
-            ? merged
-            : merged.filter((row) => row.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
           return {
             mailbox: address,
             agentId: callerAgentRow.id,
-            messages: visible,
-            count: visible.length,
-            legacyPending,
+            deliveryId: durable.deliveryId,
+            messages: durable.messages,
+            count: durable.messages.length,
+            replayed: durable.replayed,
+            pendingBehind: durable.pendingBehind,
+            legacyPending: durable.legacyPending,
+            acknowledged: durable.acknowledged,
+            ...(durable.omitted ? { omitted: durable.omitted } : {}),
             ...(params.format || params.inject
-              ? { formatted: visible.map(formatMessageBanner).join('\n\n') }
+              ? {
+                  formatted: appendOmittedMessagesLine(
+                    durable.messages.map(formatMessageBanner).join('\n\n'),
+                    durable.omitted
+                  )
+                }
               : {})
           }
         }
 
-        const durable = readMailboxDelivery(db, {
-          mailboxHandle: address,
-          // Why fetched here (inside the callback, run AFTER the ack): see readMailboxDelivery's
-          // own comment — a candidate query run before the ack would still see the prior
-          // delivery's ids as unread and hand them back into the new one.
-          fetchCandidates: () => {
-            const addressUnread = db.getUnreadMessages(address, typeFilter)
-            const handleUnread = db.getUnreadMessages(handle, typeFilter)
-            const unreadById = new Map<string, (typeof addressUnread)[number]>()
-            for (const row of [...addressUnread, ...handleUnread]) {
-              unreadById.set(row.id, row)
-            }
-            return [...unreadById.values()].sort((a, b) => a.sequence - b.sequence)
-          },
-          ack: params.ack
-        })
-        return {
-          mailbox: address,
-          agentId: callerAgentRow.id,
-          deliveryId: durable.deliveryId,
-          messages: durable.messages,
-          count: durable.messages.length,
-          replayed: durable.replayed,
-          pendingBehind: durable.pendingBehind,
-          legacyPending: durable.legacyPending,
-          acknowledged: durable.acknowledged,
-          ...(durable.omitted ? { omitted: durable.omitted } : {}),
-          ...(params.format || params.inject
-            ? {
-                formatted: appendOmittedMessagesLine(
-                  durable.messages.map(formatMessageBanner).join('\n\n'),
-                  durable.omitted
-                )
-              }
-            : {})
-        }
-      }
+        // Why: unread:false is honored for one release as a compat shim so in-flight callers don't break (design doc §5).
+        const showAll = params.all === true || (params.unread === false && params.peek !== true)
+        const consumeUnread = !showAll && params.peek !== true
 
-      // Why: unread:false is honored for one release as a compat shim so in-flight callers don't break (design doc §5).
-      const showAll = params.all === true || (params.unread === false && params.peek !== true)
-      const consumeUnread = !showAll && params.peek !== true
-
-      // Why "the peer check branch": a bare terminal handle is the address two hand-started
-      // agents actually use before either registers (A4/BUG 6). It shares this mailbox with any
-      // genuinely-legacy pre-migration row, so — mirroring the agent:<id> branch above — a
-      // legacy row is reported as `legacyPending` and left untouched, never thrown at the caller.
-      // MUTATION PROOF: reinstating the old `throw new OrchestrationError('legacy_read_only', …)`
-      // here fails T2-equivalent coverage for the bare-handle mailbox (peer mail must never throw
-      // even when genuine legacy debt shares the same address).
-      const readAndReturn = () => {
-        if (!consumeUnread) {
-          // --peek / --all: inspect everything (legacy rows included), no mutation, no throw.
-          const messages = showAll
-            ? db.getAllMessagesForHandle(handle, undefined, typeFilter)
-            : db.getUnreadMessages(handle, typeFilter)
-          return params.format || params.inject
-            ? {
-                messages,
-                formatted: messages.map(formatMessageBanner).join('\n\n'),
-                count: messages.length
-              }
-            : { messages, count: messages.length }
-        }
-
-        if (params.ackMode === 'implicit') {
-          // Why the candidate query is INSIDE the callback (run AFTER the ack): see
-          // readMailboxDelivery's own comment — a query run before the ack would still see the
-          // prior delivery's ids as unread and hand them back into the newly-minted one.
-          let legacyPending = 0
-          const durable = readMailboxDelivery(db, {
-            mailboxHandle: handle,
-            fetchCandidates: () => {
-              const rows = db.getUnreadMessages(handle, typeFilter)
-              legacyPending = rows.filter(
-                (message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID
-              ).length
-              return rows.filter((message) => message.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
-            },
-            ack: params.ack
-          })
-          const result = {
-            messages: durable.messages,
-            count: durable.messages.length,
-            deliveryId: durable.deliveryId,
-            replayed: durable.replayed,
-            pendingBehind: durable.pendingBehind,
-            legacyPending,
-            acknowledged: durable.acknowledged,
-            ...(durable.omitted ? { omitted: durable.omitted } : {})
+        // Why "the peer check branch": a bare terminal handle is the address two hand-started
+        // agents actually use before either registers (A4/BUG 6). It shares this mailbox with any
+        // genuinely-legacy pre-migration row, so — mirroring the agent:<id> branch above — a
+        // legacy row is reported as `legacyPending` and left untouched, never thrown at the caller.
+        // MUTATION PROOF: reinstating the old `throw new OrchestrationError('legacy_read_only', …)`
+        // here fails T2-equivalent coverage for the bare-handle mailbox (peer mail must never throw
+        // even when genuine legacy debt shares the same address).
+        const readAndReturn = () => {
+          if (!consumeUnread) {
+            // --peek / --all: inspect everything (legacy rows included), no mutation, no throw.
+            const messages = showAll
+              ? db.getAllMessagesForHandle(handle, undefined, typeFilter)
+              : db.getUnreadMessages(handle, typeFilter)
+            return params.format || params.inject
+              ? {
+                  messages,
+                  formatted: messages.map(formatMessageBanner).join('\n\n'),
+                  count: messages.length
+                }
+              : { messages, count: messages.length }
           }
+
+          if (params.ackMode === 'implicit') {
+            // Why the candidate query is INSIDE the callback (run AFTER the ack): see
+            // readMailboxDelivery's own comment — a query run before the ack would still see the
+            // prior delivery's ids as unread and hand them back into the newly-minted one.
+            let legacyPending = 0
+            const durable = readMailboxDelivery(db, {
+              mailboxHandle: handle,
+              fetchCandidates: () => {
+                const rows = db.getUnreadMessages(handle, typeFilter)
+                legacyPending = rows.filter(
+                  (message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID
+                ).length
+                return rows.filter((message) => message.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
+              },
+              ack: params.ack
+            })
+            const result = {
+              messages: durable.messages,
+              count: durable.messages.length,
+              deliveryId: durable.deliveryId,
+              replayed: durable.replayed,
+              pendingBehind: durable.pendingBehind,
+              legacyPending,
+              acknowledged: durable.acknowledged,
+              ...(durable.omitted ? { omitted: durable.omitted } : {})
+            }
+            return params.format || params.inject
+              ? {
+                  ...result,
+                  formatted: appendOmittedMessagesLine(
+                    durable.messages.map(formatMessageBanner).join('\n\n'),
+                    durable.omitted
+                  )
+                }
+              : result
+          }
+
+          // Destructive default (owner decision 3, dual behaviour): unchanged behavior for
+          // current rows — mark-read on read, zero regression for in-flight callers.
+          const messages = db.getUnreadMessages(handle, typeFilter)
+          const legacyPending = messages.filter(
+            (message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID
+          ).length
+          const current = messages.filter(
+            (message) => message.run_id !== ORCHESTRATION_LEGACY_RUN_ID
+          )
+          let visibleMessages = current
+          if (current.length > 0) {
+            // Why: unread check is an authoritative read path for worker_done/heartbeat, so reconcile lifecycle messages here too.
+            visibleMessages = current.map((message) => {
+              const reconciled = reconcileLifecycleMessage(db, message)
+              return reconciled.action === 'rejected'
+                ? (db.getMessageById(message.id) ?? message)
+                : message
+            })
+            db.markAsRead(current.map((m) => m.id))
+          }
+          const result = { messages: visibleMessages, count: visibleMessages.length, legacyPending }
           return params.format || params.inject
-            ? {
-                ...result,
-                formatted: appendOmittedMessagesLine(
-                  durable.messages.map(formatMessageBanner).join('\n\n'),
-                  durable.omitted
-                )
-              }
+            ? { ...result, formatted: visibleMessages.map(formatMessageBanner).join('\n\n') }
             : result
         }
 
-        // Destructive default (owner decision 3, dual behaviour): unchanged behavior for
-        // current rows — mark-read on read, zero regression for in-flight callers.
-        const messages = db.getUnreadMessages(handle, typeFilter)
-        const legacyPending = messages.filter(
-          (message) => message.run_id === ORCHESTRATION_LEGACY_RUN_ID
-        ).length
-        const current = messages.filter((message) => message.run_id !== ORCHESTRATION_LEGACY_RUN_ID)
-        let visibleMessages = current
-        if (current.length > 0) {
-          // Why: unread check is an authoritative read path for worker_done/heartbeat, so reconcile lifecycle messages here too.
-          visibleMessages = current.map((message) => {
-            const reconciled = reconcileLifecycleMessage(db, message)
-            return reconciled.action === 'rejected'
-              ? (db.getMessageById(message.id) ?? message)
-              : message
-          })
-          db.markAsRead(current.map((m) => m.id))
+        if (signal?.aborted) {
+          return { messages: [], count: 0 }
         }
-        const result = { messages: visibleMessages, count: visibleMessages.length, legacyPending }
-        return params.format || params.inject
-          ? { ...result, formatted: visibleMessages.map(formatMessageBanner).join('\n\n') }
-          : result
-      }
+        const result = readAndReturn()
+        if (result.count > 0 || !params.wait) {
+          return result
+        }
 
-      if (signal?.aborted) {
-        return { messages: [], count: 0 }
-      }
-      const result = readAndReturn()
-      if (result.count > 0 || !params.wait) {
+        // Why: signal aborts this waiter when the client socket closes, freeing the long-poll slot immediately rather than after timeoutMs (design doc §3.1).
+        await runtime.waitForMessage(handle, {
+          typeFilter: typeFilter as string[] | undefined,
+          timeoutMs: params.timeoutMs ?? undefined,
+          signal
+        })
+        if (signal?.aborted) {
+          return { messages: [], count: 0 }
+        }
+        return readAndReturn()
+      })()
+      // R19.5's local-caller gate — the same one every other link-binding local verb uses
+      // (R22): a paired peer or a mobile client never learns this host's link health.
+      if (pairedDeviceId != null || clientKind === 'mobile') {
         return result
       }
-
-      // Why: signal aborts this waiter when the client socket closes, freeing the long-poll slot immediately rather than after timeoutMs (design doc §3.1).
-      await runtime.waitForMessage(handle, {
-        typeFilter: typeFilter as string[] | undefined,
-        timeoutMs: params.timeoutMs ?? undefined,
-        signal
-      })
-      if (signal?.aborted) {
-        return { messages: [], count: 0 }
-      }
-      return readAndReturn()
+      const attention = describeLinkBindingAttention(runtime.getOrchestrationDb(), runtime)
+      return attention
+        ? { ...(result as Record<string, unknown>), linkBindingAttention: attention }
+        : result
     }
   }),
 

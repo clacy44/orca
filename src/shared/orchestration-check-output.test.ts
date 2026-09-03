@@ -194,3 +194,65 @@ describe('formatOrchestrationCheckText delivery replay', () => {
     ).toBe('[FROM term_worker] progress')
   })
 })
+
+// S10-16 C6, plan §C6 P-2/Gate-1 checklist item 1: a table-driven test that drives ALL EIGHT
+// return paths of `formatOrchestrationCheckText` (orchestration-check-output.ts:107, :112, :118,
+// :123, :126, :132, :135, :149 at this revision) with a non-null `linkBindingAttention` and
+// asserts the line appears in every one, additively (byte-identical prefix) — and is absent when
+// the field is unset. Missing even one path would leave Ruling 21 B2's compensating control
+// silent on exactly the path a contested/quarantined/parked link happens to take.
+describe('formatOrchestrationCheckText: linkBindingAttention on all eight return paths', () => {
+  const attentionLine =
+    'Link binding needs attention: 1 contested (desktop, incident 3f2a) — orca environment link-status'
+
+  const bases: Record<string, OrchestrationCheckOutput> = {
+    'formatted (--format/--inject)': {
+      messages: [],
+      count: 1,
+      formatted: '[FROM term_worker] progress'
+    },
+    'count 0, timedOut': { messages: [], count: 0, timedOut: true },
+    'count 0, cancelled': { messages: [], count: 0, cancelled: true },
+    'count 0, waitInterrupted consumer_fenced': {
+      messages: [],
+      count: 0,
+      waitInterrupted: 'consumer_fenced',
+      runId: 'run_1'
+    },
+    'count 0, waitInterrupted waiter_exists': {
+      messages: [],
+      count: 0,
+      waitInterrupted: 'waiter_exists'
+    },
+    'count 0, waitInterrupted outcome_unknown': {
+      messages: [],
+      count: 0,
+      waitInterrupted: 'outcome_unknown'
+    },
+    'count 0, plain No messages': { messages: [], count: 0 },
+    'count > 0, rendered message list': {
+      messages: [
+        {
+          id: 'msg_1',
+          from_handle: 'term_a',
+          subject: 'hi',
+          type: 'status'
+        }
+      ],
+      count: 1
+    }
+  }
+
+  for (const [name, base] of Object.entries(bases)) {
+    it(`${name}: additive when set, absent when unset`, () => {
+      const withoutAttention = formatOrchestrationCheckText(base, 'term_coord')
+      const withAttention = formatOrchestrationCheckText(
+        { ...base, linkBindingAttention: attentionLine },
+        'term_coord'
+      )
+
+      expect(withoutAttention).not.toContain('Link binding needs attention')
+      expect(withAttention).toBe(`${withoutAttention}\n${attentionLine}`)
+    })
+  }
+})

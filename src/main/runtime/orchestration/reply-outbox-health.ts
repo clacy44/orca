@@ -13,8 +13,10 @@ import {
   REPLY_RELAY_STALE_PAIRING_NOTICE,
   REPLY_RELAY_UNSUPPORTED_NOTICE,
   UNKNOWN_PEER_REFUSAL_CODE,
-  LINK_BINDING_REVERIFY_MS
+  LINK_BINDING_REVERIFY_MS,
+  REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
 } from './link-binding-constants'
+import type { ReplyOutboxRow } from './reply-outbox-store'
 
 export type ReplyRelayNoticeCode =
   | typeof REPLY_RELAY_UNREACHABLE_NOTICE
@@ -157,6 +159,52 @@ export function replyRelayNoticeRateLimitOk(
   now: number
 ): boolean {
   return now - (lastLinkNotifiedAt ?? 0) >= LINK_BINDING_REVERIFY_MS
+}
+
+// S10-16 C6, Ruling 26 Addendum 2(z)/3(gg): the outbox-row-to-health-word mapper. Health and the
+// check attention line cover the reply-relay conditions (unreachable, stale pairing, unsupported,
+// abandoned) derived DIRECTLY from `peer_reply_outbox` rows (state, consecutive_failures,
+// last_error_code), never from the no-run notice's audit row. A4-01 is a closed twenty-member
+// union with no `abandoned` member, so a terminal `abandoned` row is classified by the condition
+// that caused the abandonment (its own `last_error_code`), defaulting to `unreachable` — declared
+// deviation, C6 commit body.
+export type ReplyRelayLinkHealthWord = 'unreachable' | 'unsupported' | 'stale'
+
+const REPLY_RELAY_LINK_HEALTH_RANK: Record<ReplyRelayLinkHealthWord, number> = {
+  unreachable: 0,
+  unsupported: 1,
+  stale: 2
+}
+
+export function describeReplyRelayLinkHealth(
+  rows: readonly Pick<ReplyOutboxRow, 'state' | 'consecutiveFailures' | 'lastErrorCode'>[]
+): ReplyRelayLinkHealthWord | null {
+  let worst: ReplyRelayLinkHealthWord | null = null
+  const consider = (word: ReplyRelayLinkHealthWord): void => {
+    if (
+      worst === null ||
+      REPLY_RELAY_LINK_HEALTH_RANK[word] < REPLY_RELAY_LINK_HEALTH_RANK[worst]
+    ) {
+      worst = word
+    }
+  }
+  for (const row of rows) {
+    const live = row.state === 'queued' || row.state === 'sending'
+    const terminal = row.state === 'abandoned'
+    if (!live && !terminal) {
+      continue
+    }
+    if (live && row.consecutiveFailures >= REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD) {
+      consider('unreachable')
+    } else if (row.lastErrorCode === 'stale_environment_pairing') {
+      consider('stale')
+    } else if (row.lastErrorCode === 'capability_unsupported') {
+      consider('unsupported')
+    } else if (terminal) {
+      consider('unreachable')
+    }
+  }
+  return worst
 }
 
 // R19.3/P2: the ONE peer-triggered reply-relay notice (`reply_relay_authorship_unconfirmed`).
