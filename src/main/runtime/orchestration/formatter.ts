@@ -259,15 +259,25 @@ export function formatMessagePointer(
   resolveSenderAgent?: ResolveMessagePointerSenderAgent,
   resolveThreadSensitive?: ResolveThreadSensitive
 ): string {
-  if (messages.length === 0) {
+  // F-16 (Ruling 32 Addendum 5): filter to UNREAD rows defensively — this composer must never
+  // trust a caller-supplied array to already be exactly "what's unread" (that trust is exactly
+  // what let a stale/all-delivered array read as a growing, never-shrinking backlog). When
+  // nothing is unread the summary carries no headers at all, not an empty overflow line.
+  const unread = messages.filter((msg) => msg.read === 0)
+  if (unread.length === 0) {
     return ''
   }
-  const shown = messages.slice(0, POINTER_MAX_SHOWN)
-  const overflow = messages.length - shown.length
+  // F-16: favor the NEWEST unread rows when truncating, not the oldest — `messages` arrives in
+  // ascending sequence order (the DB's own `ORDER BY sequence`), so the tail is the newest.
+  // Always showing the two OLDEST pending rows pinned them in the summary forever and turned
+  // "N more" into a count of every message ever delivered, since the truly new mail never
+  // displaced them. "N more" below is the unread remainder beyond the cap, nothing else.
+  const shown = unread.slice(-POINTER_MAX_SHOWN)
+  const overflow = unread.length - shown.length
   const lines = shown.map((msg) => {
     const sensitive = threadIsSensitive(msg, resolveThreadSensitive)
     const sensitiveCount = sensitive
-      ? messages.filter((m) => m.thread_id === msg.thread_id).length
+      ? unread.filter((m) => m.thread_id === msg.thread_id).length
       : undefined
     return formatMessagePointerLine(msg, resolveSenderAgent, sensitiveCount)
   })

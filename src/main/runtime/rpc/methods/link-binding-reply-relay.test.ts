@@ -393,9 +393,15 @@ describe('S10-16 C5: durable reply relay (two-runtime harness)', () => {
     }).toEqual({ state: 'delivered', code: null, err: null })
 
     appState.userData = pDataPath
+    // Test 59 discriminates (Ruling 32 Addendum 3(c)): `to_handle = 'agent:'+answererId` alone
+    // matches BOTH the original imported row (outboundId, still addressed to the answerer) and
+    // the newly relayed reply-to-reply row — with no ORDER BY, `.get()` is free to return
+    // either. Excluding outboundId forces the relayed row, so the thread_id equality below
+    // proves the reply-to-reply actually landed on the original thread rather than comparing
+    // the original row to itself.
     const replyToReplyOnP = raw(pDb)
-      .prepare('SELECT thread_id FROM messages WHERE to_handle = ?')
-      .get(`agent:${answererId}`) as { thread_id: string | null } | undefined
+      .prepare('SELECT thread_id FROM messages WHERE to_handle = ? AND id <> ?')
+      .get(`agent:${answererId}`, outboundId) as { thread_id: string | null } | undefined
     const answererOriginalRow = raw(pDb)
       .prepare('SELECT thread_id FROM messages WHERE id = ?')
       .get(outboundId) as { thread_id: string | null }

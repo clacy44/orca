@@ -350,17 +350,19 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
     })
   })
 
-  it('reason: still-unattested-after-reattest — the retry after a "successful" 204 still refuses, with a cause-neutral message (S10-6 review correction)', async () => {
+  it('reason: still-unattested-after-reattest — the retry after a "successful" 204 still refuses, naming the missing launch-token anchor (Ruling 32 Addendum 3(c), item 3(b))', async () => {
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-client-reattest-r4-'))
     const rpc = await startAlwaysRefusingRpcServer(userDataPath)
+    // setEvidenceEnv() sets ORCA_AGENT_LAUNCH_TOKEN — attemptOrchestrationReattest requires
+    // evidence.launchToken to even reach the fetch that can return 204 (it early-returns
+    // 'no-launch-token' otherwise), so every real still-unattested-after-reattest disposition
+    // through this client path carries a launch token: the only reachable cause is a missing
+    // anchor for it, per item 3(b) — the message names that cause, not a cause-neutral one.
     setEvidenceEnv()
     // Why 204: handleReattestRequest returns this same status for a genuine success and for a
     // disposition-not-'accept' pane (server.ts:2826) — deliberately, so a caller can't use the
     // status to enumerate which paneKeys are open. This stub reproduces that exact status; the
-    // rpc stub above always refuses no_pane_identity on the retry too. That combination has
-    // several possible real causes (disposition-not-'accept', no hydrated commitment for the
-    // pane, a live-recheck conjunct failing, attestation ambiguity) — this test only asserts
-    // the client can't tell which, so its message must not name one.
+    // rpc stub above always refuses no_pane_identity on the retry too.
     await startStubReattestServer(userDataPath, 204)
 
     const client = new RuntimeClient(userDataPath, 2_000)
@@ -370,7 +372,7 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
       code: 'no_pane_identity',
       data: {
         nextSteps: [
-          "re-attestation was accepted but this pane still has no attested identity, and that cannot be fixed in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
+          'this pane holds a launch token but the runtime has no anchor for it; relaunch from an Orca agent pane'
         ]
       }
     })

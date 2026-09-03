@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
-import { attemptOrchestrationReattest } from './orchestration-compatibility-reattest'
+import {
+  attemptOrchestrationReattest,
+  withReattestFailureNextStep
+} from './orchestration-compatibility-reattest'
+import type { RuntimeRpcFailure } from '../../shared/runtime-rpc-envelope'
 
 const EVIDENCE = {
   terminalHandle: 'term-1',
@@ -283,5 +287,49 @@ describe('attemptOrchestrationReattest', () => {
       ok: false,
       reason: 'no-endpoint-file'
     })
+  })
+})
+
+// Item 3(b), F-6a/F-6d follow-up (Ruling 32 Addendum 3(c)): withReattestFailureNextStep's
+// 'still-unattested-after-reattest' branch names the missing-anchor cause specifically when the
+// caller's own evidence already carries a launch token — the only reachable cause in that shape.
+describe('withReattestFailureNextStep still-unattested-after-reattest', () => {
+  function failure(): RuntimeRpcFailure {
+    return {
+      id: '1',
+      ok: false,
+      error: {
+        code: 'no_pane_identity',
+        message: 'refused',
+        data: {
+          nextSteps: [
+            're-run the command — the CLI re-attests this pane automatically after a runtime restart',
+            'other step'
+          ]
+        }
+      }
+    }
+  }
+
+  it('names the missing launch-token anchor when evidence.launchToken is present', () => {
+    const patched = withReattestFailureNextStep(
+      failure(),
+      'still-unattested-after-reattest',
+      EVIDENCE
+    )
+    expect((patched.error.data as { nextSteps: string[] }).nextSteps).toEqual([
+      'this pane holds a launch token but the runtime has no anchor for it; relaunch from an Orca agent pane',
+      'other step'
+    ])
+  })
+
+  it('keeps the cause-neutral message when evidence carries no launch token', () => {
+    const patched = withReattestFailureNextStep(failure(), 'still-unattested-after-reattest', {
+      terminalHandle: 'term-1',
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111'
+    })
+    expect((patched.error.data as { nextSteps: string[] }).nextSteps[0]).toBe(
+      "re-attestation was accepted but this pane still has no attested identity; if re-running does not clear it, this pane cannot be repaired in place — close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
+    )
   })
 })

@@ -2186,19 +2186,38 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // can never equal it. Resolve the replying caller's directory identity the way the
         // sibling peer-ASK-reply branch does (~1993-2023: verifyOrchestrationCompatibilityCaller
         // -> getAgentByPaneKey) and compare against the addressee's directory id instead.
+        // F-8 strict caller refusal (Ruling 32 Addendum 3(c)): an unattested or unregistered
+        // caller does NOT fall through to an anonymous relay — that would let a pane with no
+        // provable identity at all mint traffic under a foreign thread. This mirrors the fresh
+        // cross-host send path exactly (resolveCallerAgent in orchestration-caller-identity.ts:
+        // 57-71, reached from orchestration-peer-send-relay.ts:64) and the sibling peer-ASK-reply
+        // branch above (~1995-2012): same codes, same next-step remedies. Only a REGISTERED
+        // caller that is not the addressee still relays, unattributed (R16.2(2)/Ruling 1 class B).
         const foreignReplyAttested = runtime.verifyOrchestrationCompatibilityCaller(
           orchestrationCompatibilityEvidence,
           { currentRuntimeLaunchSufficient: true }
         )
-        const foreignReplyCallerAgent = foreignReplyAttested
-          ? db.getAgentByPaneKey(replyHostId, foreignReplyAttested.paneKey)
-          : undefined
-        // R16.2(2)/Ruling 1 class B: the ADDRESSEE replies as itself; anyone else (or an
-        // unregistered pane) still replies, unattributed, exactly as a plain send with no
-        // registered caller does.
+        if (!foreignReplyAttested) {
+          throw new OrchestrationError(
+            'no_pane_identity',
+            'A reply to a foreign-origin message requires an attested, registered caller identity.',
+            { nextSteps: peerNoPaneIdentityNextSteps(pairedDeviceId, clientKind) }
+          )
+        }
+        const foreignReplyCallerAgent = db.getAgentByPaneKey(
+          replyHostId,
+          foreignReplyAttested.paneKey
+        )
+        if (!foreignReplyCallerAgent) {
+          throw new OrchestrationError(
+            'no_registered_identity',
+            'A reply to a foreign-origin message requires a registered caller identity.',
+            { nextSteps: peerNoRegisteredIdentityNextSteps(pairedDeviceId, clientKind) }
+          )
+        }
         const foreignReplySenderPaneKey =
-          foreignReplyCallerAgent && `agent:${foreignReplyCallerAgent.id}` === original.to_handle
-            ? foreignReplyAttested?.paneKey
+          `agent:${foreignReplyCallerAgent.id}` === original.to_handle
+            ? foreignReplyAttested.paneKey
             : undefined
         if (db.isPeerLinkQuarantined(original.peer_link_device_id)) {
           db.writeAgentAudit({

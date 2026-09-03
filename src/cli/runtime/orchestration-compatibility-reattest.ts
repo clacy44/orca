@@ -115,7 +115,15 @@ const AGENT_PANE_UNRECOVERABLE_NEXT_STEP =
   "this pane was not launched as an Orca agent pane (no launch token), so re-attesting cannot fix it and the state is not recoverable in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
 
 const CAUSE_NEUTRAL_NEXT_STEP =
-  "re-attestation was accepted but this pane still has no attested identity, and that cannot be fixed in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
+  "re-attestation was accepted but this pane still has no attested identity; if re-running does not clear it, this pane cannot be repaired in place — close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
+
+// Item 3(b) / F-6a/F-6d follow-up (Ruling 32 Addendum 3(c)): the cause-neutral message above
+// covers a `still-unattested-after-reattest` disposition in general (see the Why block above:
+// three of its four causes clear on retry), but when the caller's OWN evidence already carries
+// a launch token, the runtime accepted re-attestation, and identity is still absent, the only
+// cause left reachable is that the runtime never recorded an anchor for that token — name it.
+const TOKEN_PRESENT_NO_ANCHOR_NEXT_STEP =
+  'this pane holds a launch token but the runtime has no anchor for it; relaunch from an Orca agent pane'
 
 /** S10-6 (R4): swap in the accurate first nextStep — the server's canned
  *  `NO_PANE_IDENTITY_NEXT_STEPS[0]` ("re-run the command — the CLI re-attests this pane
@@ -126,7 +134,8 @@ const CAUSE_NEUTRAL_NEXT_STEP =
  *  sets one today via orchestration-caller-identity.ts). */
 export function withReattestFailureNextStep(
   response: RuntimeRpcFailure,
-  reason: OrchestrationReattestFailureReason
+  reason: OrchestrationReattestFailureReason,
+  evidence?: OrchestrationCompatibilityEvidence
 ): RuntimeRpcFailure {
   const data = response.error.data
   if (
@@ -144,7 +153,9 @@ export function withReattestFailureNextStep(
   // but 'no-launch-token' and the cause-neutral case share the same AGENT-pane remedy text.
   const nextStep =
     reason === 'still-unattested-after-reattest'
-      ? CAUSE_NEUTRAL_NEXT_STEP
+      ? evidence?.launchToken
+        ? TOKEN_PRESENT_NO_ANCHOR_NEXT_STEP
+        : CAUSE_NEUTRAL_NEXT_STEP
       : reason === 'no-launch-token'
         ? AGENT_PANE_UNRECOVERABLE_NEXT_STEP
         : `this pane cannot re-attest (reason: ${reason}); relaunch this agent in a fresh Orca pane (claude --resume keeps its context)`

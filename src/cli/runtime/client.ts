@@ -163,7 +163,11 @@ export class RuntimeClient {
             // "not admitted" as fact.
             throw new RuntimeRpcFailureError(
               retried.error.code === 'no_pane_identity'
-                ? withReattestFailureNextStep(retried, 'still-unattested-after-reattest')
+                ? withReattestFailureNextStep(
+                    retried,
+                    'still-unattested-after-reattest',
+                    this.orchestrationCompatibility.orchestrationCompatibilityEvidence
+                  )
                 : retried
             )
           }

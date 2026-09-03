@@ -233,14 +233,77 @@ describe('formatMessagePointer', () => {
     )
   })
 
-  it('shows only the first two messages plus an overflow count for five pending', () => {
+  // F-16 (Ruling 32 Addendum 5): shows the NEWEST two, not the oldest two — `messages` is
+  // ascending by sequence (msg_0 oldest .. msg_4 newest), so the always-pinned-oldest-two
+  // behaviour this replaces is exactly the bug item 4 fixes.
+  it('shows only the newest two messages plus an overflow count for five pending', () => {
     const messages = Array.from({ length: 5 }, (_, i) =>
       makeMessage({ id: `msg_${i}`, from_handle: `term_${i}`, subject: `subject-${i}` })
     )
     expect(formatMessagePointer(messages)).toBe(
-      '\n[from: term_0] "subject-0" thread:none\n[from: term_1] "subject-1" thread:none\n' +
+      '\n[from: term_3] "subject-3" thread:none\n[from: term_4] "subject-4" thread:none\n' +
         '— 3 more; run orca orchestration check\n'
     )
+  })
+
+  // F-16 (Ruling 32 Addendum 5): the composer must filter to unread rows itself, never trust
+  // the caller's array already excludes read mail — a stale/all-delivered array is exactly what
+  // produced the observed bug (the same two already-read headers forever, "N more" counting
+  // every message ever delivered instead of the genuine unread remainder).
+  it('names only the unread rows, newest first up to the cap, with the remainder as unread-only overflow', () => {
+    const readOld1 = makeMessage({
+      id: 'msg_r1',
+      from_handle: 'term_r1',
+      subject: 'stale-1',
+      read: 1
+    })
+    const readOld2 = makeMessage({
+      id: 'msg_r2',
+      from_handle: 'term_r2',
+      subject: 'stale-2',
+      read: 1
+    })
+    const unread1 = makeMessage({
+      id: 'msg_u1',
+      from_handle: 'term_u1',
+      subject: 'fresh-1',
+      read: 0
+    })
+    const unread2 = makeMessage({
+      id: 'msg_u2',
+      from_handle: 'term_u2',
+      subject: 'fresh-2',
+      read: 0
+    })
+    const unread3 = makeMessage({
+      id: 'msg_u3',
+      from_handle: 'term_u3',
+      subject: 'fresh-3',
+      read: 0
+    })
+    const result = formatMessagePointer([readOld1, readOld2, unread1, unread2, unread3])
+    expect(result).not.toContain('stale-1')
+    expect(result).not.toContain('stale-2')
+    expect(result).toBe(
+      '\n[from: term_u2] "fresh-2" thread:none\n[from: term_u3] "fresh-3" thread:none\n' +
+        '— 1 more; run orca orchestration check\n'
+    )
+  })
+
+  it('carries no headers at all when every row is already read', () => {
+    const readOld1 = makeMessage({
+      id: 'msg_r1',
+      from_handle: 'term_r1',
+      subject: 'read-1',
+      read: 1
+    })
+    const readOld2 = makeMessage({
+      id: 'msg_r2',
+      from_handle: 'term_r2',
+      subject: 'read-2',
+      read: 1
+    })
+    expect(formatMessagePointer([readOld1, readOld2])).toBe('')
   })
 
   it('never includes a 3 KB message body in the pointer text', () => {
@@ -360,17 +423,20 @@ describe('formatMessagePointer', () => {
     expect(result).toContain('Answer: orca agents reply --thread thr_ask1 --body "..."')
   })
 
+  // F-16 (Ruling 32 Addendum 5): `ask` is now the array's NEWEST (last) row so it survives
+  // the newest-two selection this item introduces — `overflow_oldest` (the row that must be
+  // pushed into the overflow count) is oldest, first in the array.
   it("a peer ask's answer trailer displaces the overflow line and never widens past 3 lines", () => {
-    const first = makeMessage({ id: 'msg_1', from_handle: 'term_a', subject: 'first' })
+    const overflowOldest = makeMessage({ id: 'msg_1', from_handle: 'term_c', subject: 'third' })
+    const first = makeMessage({ id: 'msg_2', from_handle: 'term_a', subject: 'first' })
     const ask = makeMessage({
-      id: 'msg_2',
+      id: 'msg_3',
       from_handle: 'agent:agt_asker',
       subject: 'blocked question',
       type: 'question',
       thread_id: 'thr_ask2'
     })
-    const overflow = makeMessage({ id: 'msg_3', from_handle: 'term_c', subject: 'third' })
-    const result = formatMessagePointer([first, ask, overflow])
+    const result = formatMessagePointer([overflowOldest, first, ask])
     const lines = result.split('\n').filter((l) => l.length > 0)
     expect(lines).toHaveLength(3)
     expect(lines.at(-1)).toBe('Answer: orca agents reply --thread thr_ask2 --body "..."')

@@ -15,13 +15,23 @@ import { fingerprintOrchestrationPeer } from '../../orchestration/environment-tr
 import { addEnvironmentFromPairingCode } from '../../../../shared/runtime-environment-store'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../../../shared/pairing'
 import { OrchestrationDb } from '../../orchestration/db'
-import { OrcaRuntimeService } from '../../orca-runtime'
+import {
+  OrcaRuntimeService,
+  type OrchestrationCompatibilityCallerAuthority
+} from '../../orca-runtime'
 import type { OrchestrationError } from '../../orchestration/orchestration-error'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import type { RpcContext } from '../core'
 
 const appState = { userData: '' }
 vi.mock('electron', () => ({ app: { getPath: () => appState.userData } }))
+
+// F-8 strict caller refusal (Ruling 32 Addendum 3(c), item 2): the reply path this file
+// exercises now refuses BEFORE reaching the addressee-recovery hunk (F-11 pt.2) unless the
+// caller is attested and registered — every call below must carry a real, registered caller
+// identity or it refuses no_pane_identity/no_registered_identity before recovery ever runs.
+const REPLIER_PANE = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const REPLIER_TERMINAL_HANDLE = 'term_replier'
 
 function method(name: string) {
   const found = ORCHESTRATION_METHODS.find((m) => m.name === name)
@@ -37,6 +47,10 @@ async function call(name: string, params: Record<string, unknown>, context: RpcC
   return m.handler(parsed, context)
 }
 
+function replierEvidence() {
+  return { terminalHandle: REPLIER_TERMINAL_HANDLE, paneKey: REPLIER_PANE }
+}
+
 const LOCAL_ADDRESSEE_AGENT_ID = 'agt_local_addressee'
 
 describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows', () => {
@@ -47,7 +61,7 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
   let linkDeviceId: string
   let environmentId: string
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), 'orca-reply-addressee-recovery-'))
     dataPath = join(root, 'h-userdata')
     appState.userData = dataPath
@@ -94,6 +108,32 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
       name: 'p-environment',
       peerFingerprint: 'p_fp'
     })
+
+    // F-8 (item 2): every reply call below now needs an attested, registered caller before it
+    // ever reaches the addressee-recovery hunk this file actually tests.
+    vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockReturnValue('proc-1')
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation(
+      (evidence): OrchestrationCompatibilityCallerAuthority | null => {
+        if (
+          (evidence as { terminalHandle?: string; paneKey?: string } | null)?.paneKey ===
+          REPLIER_PANE
+        ) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: REPLIER_PANE,
+            terminalHandle: REPLIER_TERMINAL_HANDLE,
+            processIncarnation: 'proc-1',
+            launchTokenHash: 'hash'
+          }
+        }
+        return null
+      }
+    )
+    await call(
+      'orchestration.agents.register',
+      { name: 'replier', role: 'test agent' },
+      { runtime, orchestrationCompatibilityEvidence: replierEvidence() }
+    )
   })
 
   afterEach(() => {
@@ -150,7 +190,7 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
     const result = (await call(
       'orchestration.reply',
       { id: foreign.id, body: 'reply body' },
-      { runtime }
+      { runtime, orchestrationCompatibilityEvidence: replierEvidence() }
     )) as { relay: { state: string; environment: string } }
 
     expect(result.relay.state).toBe('queued')
@@ -162,7 +202,11 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
     const foreign = insertUnverifiedForeignRow(threadId)
 
     await expect(
-      call('orchestration.reply', { id: foreign.id, body: 'reply body' }, { runtime })
+      call(
+        'orchestration.reply',
+        { id: foreign.id, body: 'reply body' },
+        { runtime, orchestrationCompatibilityEvidence: replierEvidence() }
+      )
     ).rejects.toMatchObject({ code: 'no_return_route' } satisfies Partial<OrchestrationError>)
   })
 
@@ -173,7 +217,11 @@ describe('F-11 pt.2: no-addressee reply refusal recovers from own outbound rows'
     const foreign = insertUnverifiedForeignRow(threadId)
 
     await expect(
-      call('orchestration.reply', { id: foreign.id, body: 'reply body' }, { runtime })
+      call(
+        'orchestration.reply',
+        { id: foreign.id, body: 'reply body' },
+        { runtime, orchestrationCompatibilityEvidence: replierEvidence() }
+      )
     ).rejects.toMatchObject({ code: 'no_return_route' } satisfies Partial<OrchestrationError>)
   })
 })
