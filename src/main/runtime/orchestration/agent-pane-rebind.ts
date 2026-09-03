@@ -4,7 +4,7 @@
 // import — agent-directory.ts imports remintRow from this file, so this file cannot import
 // back from it; every caller's params/result already satisfies these shapes structurally.
 import type Database from '../../sqlite/sync-database'
-import { repointMailboxOnReMint } from './agent-mailbox-repoint'
+import { repointMailboxOnNameBind, repointMailboxOnReMint } from './agent-mailbox-repoint'
 import type { AgentRow } from './types'
 
 // R1: ground truth for "is this row's own pane still alive" — a null pane_key (unresolvable by
@@ -80,7 +80,19 @@ export function remintRow(
   )
   const reminted = db.prepare('SELECT * FROM agents WHERE id = ?').get(existing.id) as AgentRow
   // S10-7 F-C: pending mail follows the agent across a re-mint, same as its identity does.
-  const { repointedMessages, pendingOnOldHandle } = repointMailboxOnReMint(db, existing, params)
+  const fromHandle = repointMailboxOnReMint(db, existing, params)
+  // Ruling 32 Addendum 10 (A3/F-5b): a bare NAME address is a separate stranding surface from
+  // the terminal-handle one above — re-resolve both on every re-mint (rename or dead-pane
+  // reclaim), since either can leave mail addressed to `params.displayName` unbound.
+  const fromName = repointMailboxOnNameBind(db, params.displayName, existing.id, {
+    paneKey: params.paneKey,
+    hostId: params.hostId
+  })
   db.exec('COMMIT')
-  return { outcome: 'reminted', agent: reminted, repointedMessages, pendingOnOldHandle }
+  return {
+    outcome: 'reminted',
+    agent: reminted,
+    repointedMessages: fromHandle.repointedMessages + fromName.repointedMessages,
+    pendingOnOldHandle: fromHandle.pendingOnOldHandle + fromName.pendingOnOldHandle
+  }
 }

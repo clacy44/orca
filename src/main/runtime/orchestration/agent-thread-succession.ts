@@ -4,6 +4,7 @@
 // legitimately claiming a tombstoned name still needs its own successor id. This is the one
 // mechanism that reattaches that successor to every thread its predecessor(s) belonged to.
 import type Database from '../../sqlite/sync-database'
+import { repointMailboxOnSuccession } from './agent-mailbox-repoint'
 
 export type ThreadSuccessionOutcome = {
   adoptedThreads: number
@@ -11,6 +12,10 @@ export type ThreadSuccessionOutcome = {
   // outright (by design — quarantine survives retire, agent-directory.ts's own precedent). The
   // caller renders this so a bare 0 never reads the same as "there was nothing to inherit".
   blockedByQuarantinedPredecessor: boolean
+  // F-18 (Ruling 32 Addendum 10 A3): unread mail this successor just inherited from every
+  // non-quarantined predecessor's `agent:<old id>` mailbox. Computed BEFORE adoption is blocked
+  // by a quarantined predecessor (that branch returns 0 — quarantine locks the mail too).
+  repointedMessages: number
 }
 
 /** Idempotent: a thread the successor already participates in is left alone (never
@@ -38,7 +43,7 @@ export function adoptPredecessorThreadMembership(
     )
     .get(hostId, displayName, successorId)
   if (anyQuarantinedPredecessor) {
-    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: true }
+    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: true, repointedMessages: 0 }
   }
 
   const predecessors = db
@@ -49,7 +54,18 @@ export function adoptPredecessorThreadMembership(
     )
     .all(hostId, displayName, successorId) as { id: string }[]
   if (predecessors.length === 0) {
-    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false }
+    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false, repointedMessages: 0 }
+  }
+
+  // F-18: run BEFORE thread membership is adopted below — the predecessor's durable
+  // `agent:<old id>` mailbox is a separate stranding surface from thread_participants, and
+  // both must land inside this same succession transaction.
+  let repointedMessages = 0
+  for (const predecessor of predecessors) {
+    repointedMessages += repointMailboxOnSuccession(db, predecessor.id, successorId, {
+      paneKey: null,
+      hostId
+    }).repointedMessages
   }
 
   let adopted = 0
@@ -110,7 +126,7 @@ export function adoptPredecessorThreadMembership(
       `${adopted} thread(s) adopted from ${predecessors.length} predecessor(s)`
     )
   }
-  return { adoptedThreads: adopted, blockedByQuarantinedPredecessor: false }
+  return { adoptedThreads: adopted, blockedByQuarantinedPredecessor: false, repointedMessages }
 }
 
 export type UninheritedPredecessorMailOutcome = {

@@ -251,7 +251,9 @@ describe('agent: routing + durability', () => {
       agentId?: string
       messages: unknown[]
     }
-    expect(result.mailbox).toBeUndefined()
+    // Ruling 32 Addendum 10 (B3): every bare-handle check now names the mailbox it read — but
+    // it is the bare handle itself, never the `agent:<id>` shape the durable branch would use.
+    expect(result.mailbox).toBe('term_b')
     expect(result.agentId).toBeUndefined()
     // Falls through to the bare-handle branch instead — never the durable agent: mailbox, and
     // never the agent-addressed mail (which was sent to `agent:<id>`, not `term_b`).
@@ -277,7 +279,9 @@ describe('agent: routing + durability', () => {
       mailbox?: string
       agentId?: string
     }
-    expect(result.mailbox).toBeUndefined()
+    // Ruling 32 Addendum 10 (B3): the bare-handle branch now names its own mailbox — the
+    // attacker's literal `--terminal`, never the `agent:<id>` shape the durable branch would use.
+    expect(result.mailbox).toBe('attacker_handle')
     expect(result.agentId).toBeUndefined()
     // The victim's cached terminal_handle must be untouched by the attacker's claimed handle.
     const victim = db.getAgentById(agentBId)
@@ -351,7 +355,9 @@ describe('agent: routing + durability', () => {
       agentId?: string
       messages: { subject: string }[]
     }
-    expect(result.mailbox).toBeUndefined()
+    // Ruling 32 Addendum 10 (B3): named as the bare handle, never the `agent:<id>` shape the
+    // durable branch would use.
+    expect(result.mailbox).toBe('term_c')
     expect(result.agentId).toBeUndefined()
     // Still delivered — just through the pre-existing bare-handle path, not the durable one.
     expect(result.messages.map((msg) => msg.subject)).toEqual(['bare handle mail'])

@@ -259,6 +259,67 @@ describe('adoptPredecessorThreadMembership', () => {
     expect(row.pact_turn_agent_id).toBe('agt_pred')
     db.close()
   })
+
+  // Ruling 32 Addendum 10 (A3/F-18): register-after-retire never repointed the predecessor's
+  // durable `agent:<old id>` mailbox — unread mail addressed to it before the retire sat
+  // unreadable forever (no read path resolves a tombstoned id).
+  it('T-A6: repoints the tombstoned predecessor mailbox to the successor id, with an audit row', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred', 'local', 'alpha')
+    for (let i = 0; i < 3; i += 1) {
+      db.insertGatedMessage({
+        from: 'someone',
+        to: 'agent:agt_pred',
+        subject: `mail ${i}`,
+        type: 'status',
+        priority: 'normal'
+      })
+    }
+
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'alpha', 'agt_succ')
+    expect(outcome.repointedMessages).toBe(3)
+
+    const moved = raw
+      .prepare("SELECT COUNT(*) AS n FROM messages WHERE to_handle = 'agent:agt_succ'")
+      .get() as { n: number }
+    expect(moved.n).toBe(3)
+    const stillOnOld = raw
+      .prepare("SELECT COUNT(*) AS n FROM messages WHERE to_handle = 'agent:agt_pred'")
+      .get() as { n: number }
+    expect(stillOnOld.n).toBe(0)
+
+    const audit = raw
+      .prepare(
+        "SELECT outcome, reason_code FROM agent_audit WHERE verb = 'mailbox_repoint' AND agent_id = 'agt_succ'"
+      )
+      .get() as { outcome: string; reason_code: string } | undefined
+    expect(audit?.outcome).toBe('ok')
+    expect(audit?.reason_code).toContain('agent:agt_pred')
+    db.close()
+  })
+
+  it('a quarantined predecessor blocks BOTH thread adoption and mailbox repoint', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    tombstone(raw, 'agt_pred', 'local', 'alpha', 1)
+    db.insertGatedMessage({
+      from: 'someone',
+      to: 'agent:agt_pred',
+      subject: 'locked mail',
+      type: 'status',
+      priority: 'normal'
+    })
+
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'alpha', 'agt_succ')
+    expect(outcome.blockedByQuarantinedPredecessor).toBe(true)
+    expect(outcome.repointedMessages).toBe(0)
+    const stillOnOld = raw
+      .prepare("SELECT COUNT(*) AS n FROM messages WHERE to_handle = 'agent:agt_pred'")
+      .get() as { n: number }
+    expect(stillOnOld.n).toBe(1)
+    db.close()
+  })
 })
 
 function insertPendingQuestion(raw: Database.Database, messageId: string, toAgentId: string): void {

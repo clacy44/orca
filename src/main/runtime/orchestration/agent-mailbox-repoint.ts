@@ -89,3 +89,100 @@ export function repointMailboxOnReMint(
   }
   return { repointedMessages: moved, pendingOnOldHandle }
 }
+
+/** F-18 (Ruling 32 Addendum 10 A3): register-after-retire never repointed the predecessor's
+ * durable `agent:<old id>` mailbox — mail addressed to it before the retire sat unreadable
+ * forever (no read path resolves a tombstoned id). `repointUnreadBareHandleMail`'s predicate
+ * (`to_handle = ? AND read = 0 AND delivery_contract = 'current_delivery' AND purged_at IS
+ * NULL`) is identical to what an `agent:<old id>` handle needs — reused verbatim, never a second
+ * drifting copy. Called from inside the succession transaction (agent-thread-succession.ts), so
+ * it lands atomically with thread-membership adoption. */
+export function repointMailboxOnSuccession(
+  db: Database.Database,
+  predecessorId: string,
+  successorId: string,
+  actor: { paneKey: string | null; hostId: string }
+): MailboxRepointOutcome {
+  const { moved, pendingOnOldHandle } = repointUnreadBareHandleMail(
+    db,
+    `agent:${predecessorId}`,
+    successorId
+  )
+  if (moved > 0) {
+    const reason =
+      pendingOnOldHandle > 0
+        ? `${moved} from agent:${predecessorId} (succession), ${pendingOnOldHandle} still pending`
+        : `${moved} from agent:${predecessorId} (succession)`
+    db.prepare(
+      `INSERT INTO agent_audit (agent_id, actor_pane_key, actor_host_id, verb, outcome, reason_code)
+       VALUES (?, ?, ?, 'mailbox_repoint', 'ok', ?)`
+    ).run(successorId, actor.paneKey, actor.hostId, reason)
+  }
+  return { repointedMessages: moved, pendingOnOldHandle }
+}
+
+// Ruling 32 Addendum 10 (A3/F-5b): a bare DISPLAY NAME addressed before the name was ever bound
+// to an agent (`recipient_pane_key IS NULL` — no live terminal resolved it at send time, same
+// distinguishing predicate as db.ts's repointStrandedDisplayNameAddressedMessages/v38 repair)
+// never gets a second chance once the name registers, because no read path scans a bare-name
+// mailbox (orchestration.ts's check, db.getUnreadMessages). Re-resolve on register: same batch
+// loop, same audit verb, as the terminal-handle repoint above.
+function repointableNameMailPredicate(): string {
+  return (
+    `to_handle = ? AND read = 0 AND recipient_pane_key IS NULL ` +
+    `AND delivery_contract = 'current_delivery' AND purged_at IS NULL`
+  )
+}
+
+function repointUnreadNameAddressedMail(
+  db: Database.Database,
+  displayName: string,
+  agentId: string
+): { moved: number; pendingOnOldHandle: number } {
+  const moveBatch = db.prepare(
+    `UPDATE messages SET to_handle = ?
+     WHERE sequence IN (
+       SELECT sequence FROM messages WHERE ${repointableNameMailPredicate()}
+       ORDER BY sequence ASC LIMIT ?
+     )`
+  )
+  let moved = 0
+  for (let batch = 0; batch < MAILBOX_REPOINT_MAX_BATCHES; batch += 1) {
+    const result = moveBatch.run(`agent:${agentId}`, displayName, MAILBOX_REPOINT_BATCH_SIZE) as {
+      changes: number
+    }
+    moved += result.changes
+    if (result.changes < MAILBOX_REPOINT_BATCH_SIZE) {
+      break
+    }
+  }
+  const pendingOnOldHandle = (
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${repointableNameMailPredicate()}`)
+      .get(displayName) as { n: number }
+  ).n
+  return { moved, pendingOnOldHandle }
+}
+
+/** Called from inside upsertAgentByPaneSuffix's own transaction (agent-directory.ts), on BOTH
+ * the fresh-insert and re-mint paths — a name can be bound to an agent either way. No-ops (0/0,
+ * no audit row) when nothing was stranded under this name. */
+export function repointMailboxOnNameBind(
+  db: Database.Database,
+  displayName: string,
+  agentId: string,
+  actor: { paneKey: string; hostId: string }
+): MailboxRepointOutcome {
+  const { moved, pendingOnOldHandle } = repointUnreadNameAddressedMail(db, displayName, agentId)
+  if (moved > 0) {
+    const reason =
+      pendingOnOldHandle > 0
+        ? `${moved} from bare name "${displayName}", ${pendingOnOldHandle} still pending`
+        : `${moved} from bare name "${displayName}"`
+    db.prepare(
+      `INSERT INTO agent_audit (agent_id, actor_pane_key, actor_host_id, verb, outcome, reason_code)
+       VALUES (?, ?, ?, 'mailbox_repoint', 'ok', ?)`
+    ).run(agentId, actor.paneKey, actor.hostId, reason)
+  }
+  return { repointedMessages: moved, pendingOnOldHandle }
+}

@@ -303,3 +303,68 @@ describe('formatOrchestrationCheckText: linkBindingAttention on all eight return
     expect(rendered).toBe(`No messages.\n${attentionLine}\nparked notice text`)
   })
 })
+
+// Ruling 32 Addendum 10 (B1/F-17): a blocked mailbox (an outstanding Delivery whose messages are
+// currently all unreadable, or one with mail queued behind it) used to render exactly
+// "No messages." — indistinguishable from a genuinely empty mailbox. The Delivery id and the
+// omission counts must appear BEFORE the fallback text whenever either signal is present.
+describe('formatOrchestrationCheckText: blocked delivery at count===0 (Ruling 32 Addendum 10 B1)', () => {
+  it('T-B2: renders the Delivery id and the omitted-rows line before "No messages."', () => {
+    const rendered = formatOrchestrationCheckText(
+      {
+        messages: [],
+        count: 0,
+        deliveryId: 'mdel_stuck',
+        replayed: true,
+        pendingBehind: 1,
+        omitted: { purged: 2, withheld: 0 }
+      },
+      'term_coord'
+    )
+    expect(rendered).toContain('mdel_stuck')
+    expect(rendered).toContain('1 newer messages are blocked behind it')
+    expect(rendered).toContain('2 purged')
+    expect(rendered).toContain('No messages.')
+    expect(rendered.indexOf('mdel_stuck')).toBeLessThan(rendered.indexOf('No messages.'))
+  })
+
+  it('a fresh Delivery with mail queued behind it (pendingBehind > 0) also renders before "No messages."', () => {
+    const rendered = formatOrchestrationCheckText(
+      {
+        messages: [],
+        count: 0,
+        deliveryId: 'mdel_fresh',
+        replayed: false,
+        pendingBehind: 3
+      },
+      'term_coord'
+    )
+    expect(rendered).toContain('mdel_fresh')
+    expect(rendered).toContain('3 more queued behind this batch')
+    expect(rendered.indexOf('mdel_fresh')).toBeLessThan(rendered.indexOf('No messages.'))
+  })
+
+  it('a genuinely empty mailbox (no deliveryId, no pendingBehind) still renders exactly "No messages."', () => {
+    const rendered = formatOrchestrationCheckText({ messages: [], count: 0 }, 'term_coord')
+    expect(rendered).toBe('No messages.')
+  })
+})
+
+// Ruling 32 Addendum 10 (B3/F-17): an attestation/pane-key mismatch used to fall silently into
+// the bare-handle branch — the loud notice must render, always after any other suffix.
+describe('formatOrchestrationCheckText: mailboxMismatchNotice (Ruling 32 Addendum 10 B3)', () => {
+  it('renders the notice after "No messages."', () => {
+    const rendered = formatOrchestrationCheckText(
+      {
+        messages: [],
+        count: 0,
+        mailboxMismatchNotice:
+          'Read mailbox "term_c"; your registered mailbox agent:agt_1 was not read.'
+      },
+      'term_coord'
+    )
+    expect(rendered).toBe(
+      'No messages.\nRead mailbox "term_c"; your registered mailbox agent:agt_1 was not read.'
+    )
+  })
+})

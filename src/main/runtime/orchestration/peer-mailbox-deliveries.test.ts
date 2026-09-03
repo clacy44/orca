@@ -229,4 +229,61 @@ describe('peer-mailbox-deliveries (BUG 5)', () => {
     })
     expect(replay?.pendingBehind).toBe(2)
   })
+
+  // Ruling 32 Addendum 10 (B2/F-17): a replayed Delivery whose frozen ids are now ALL
+  // unreadable (purged/quarantine-withheld) used to replay forever — a permanent head-of-line
+  // block on every message queued behind it. This proves the self-clear: the stuck delivery
+  // auto-acks and a fresh mint reaches the message that arrived after the freeze.
+  it('T-B1 (B2): a fully-purged frozen delivery self-clears and mints fresh from the current candidate set', () => {
+    const db = rawDb()
+    const frozen = seedMessages(2)
+    const first = getOrCreateMailboxDelivery(db, {
+      mailboxHandle: 'agent:recipient',
+      messageIds: frozen
+    })
+    expect(first?.replayed).toBe(false)
+    // Purge both frozen messages — the outstanding delivery is now stuck: every future replay
+    // would compute messages.length === 0 forever.
+    for (const id of frozen) {
+      db.prepare(
+        "UPDATE messages SET purged_at = datetime('now'), body = '', subject = '[purged]', payload = NULL WHERE id = ?"
+      ).run(id)
+    }
+    const third = seedMessages(1)
+    // Candidate set as `readMailboxDelivery`'s fetchCandidates would compute it: getUnreadMessages
+    // already excludes purged rows at the SQL level, so only the third message is a candidate.
+    const replay = getOrCreateMailboxDelivery(db, {
+      mailboxHandle: 'agent:recipient',
+      messageIds: third
+    })
+    expect(replay?.replayed).toBe(false)
+    expect(replay?.messages.map((m) => m.id)).toEqual(third)
+    expect(replay?.pendingBehind).toBe(0)
+
+    const oldDelivery = db
+      .prepare('SELECT status FROM mailbox_deliveries WHERE id = ?')
+      .get(first?.delivery.id ?? '') as { status: string } | undefined
+    expect(oldDelivery?.status).toBe('acknowledged')
+    const oldMessagesRead = db
+      .prepare(`SELECT read FROM messages WHERE id IN (${frozen.map(() => '?').join(',')})`)
+      .all(...frozen) as { read: number }[]
+    expect(oldMessagesRead.every((r) => r.read === 1)).toBe(true)
+  })
+
+  it('a PARTIALLY-purged frozen delivery still replays as usual (self-clear is all-or-nothing)', () => {
+    const db = rawDb()
+    const frozen = seedMessages(2)
+    getOrCreateMailboxDelivery(db, { mailboxHandle: 'agent:recipient', messageIds: frozen })
+    db.prepare(
+      "UPDATE messages SET purged_at = datetime('now'), body = '', subject = '[purged]', payload = NULL WHERE id = ?"
+    ).run(frozen[0])
+
+    const replay = getOrCreateMailboxDelivery(db, {
+      mailboxHandle: 'agent:recipient',
+      messageIds: frozen
+    })
+    expect(replay?.replayed).toBe(true)
+    expect(replay?.messages.map((m) => m.id)).toEqual([frozen[1]])
+    expect(replay?.omitted).toEqual({ purged: 1, withheld: 0 })
+  })
 })

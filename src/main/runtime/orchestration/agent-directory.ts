@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
+import { repointMailboxOnNameBind } from './agent-mailbox-repoint'
 import {
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
@@ -47,10 +48,18 @@ export type UpsertAgentByPaneSuffixResult =
       agent: AgentRow
       adoptedThreads: number
       blockedByQuarantinedPredecessor: boolean
-      // F-9 (Ruling 32 Addendum 9): what a tombstoned predecessor's peer-facing authority and
-      // bare-handle mailbox left behind -- never repointed, so register owes an honest count.
+      // F-9 (Ruling 32 Addendum 9): what a tombstoned predecessor's peer-facing authority
+      // left behind -- never repointed, so register owes an honest count. (Its bare-handle
+      // mailbox IS repointed, by adoptPredecessorThreadMembership's F-18 succession repoint
+      // below, before this count is taken -- unreadMailOnRetiredId reflects the post-repoint
+      // remainder, never double-counting what repointedMessages already moved.)
       pendingPeerQuestions: number
       unreadMailOnRetiredId: number
+      // Ruling 32 Addendum 10 (A3/F-5b): mail addressed to this display name before it was ever
+      // registered (no read path scans a bare-name mailbox) repoints into the fresh id here,
+      // plus F-18's succession repoint of the tombstoned predecessor's `agent:<old id>` mail.
+      repointedMessages: number
+      pendingOnOldHandle: number
     }
   | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
   | {
@@ -212,18 +221,29 @@ export function upsertAgentByPaneSuffix(
     const created = db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as AgentRow
     // R2: a tombstoned predecessor under this same host+name (retired, or just tombstoned
     // above by the reclaim branch) leaves its thread membership behind unless adopted here.
-    const { adoptedThreads, blockedByQuarantinedPredecessor } = adoptPredecessorThreadMembership(
-      db,
-      params.hostId,
-      params.displayName,
-      id
-    )
+    // F-18's succession repoint (inside adoptPredecessorThreadMembership) MUST run before
+    // countUninheritedPredecessorMail below: it moves each predecessor's `agent:<old id>`
+    // unread mail off that handle, so the uninherited count only reflects what genuinely did
+    // NOT come with the successor rather than double-counting mail this call already repointed.
+    const {
+      adoptedThreads,
+      blockedByQuarantinedPredecessor,
+      repointedMessages: succeededRepoint
+    } = adoptPredecessorThreadMembership(db, params.hostId, params.displayName, id)
     const { pendingPeerQuestions, unreadMailOnRetiredId } = countUninheritedPredecessorMail(
       db,
       params.hostId,
       params.displayName,
       id
     )
+    // Ruling 32 Addendum 10 (A3/F-5b): a fresh id can still inherit stranded bare-name mail —
+    // the name existed (and was sent to) before this pane ever registered it. Additive to F-18's
+    // succession repoint above — the two cover disjoint row shapes (bare name vs `agent:<old
+    // id>`), so nothing is double-counted.
+    const nameRepoint = repointMailboxOnNameBind(db, params.displayName, id, {
+      paneKey: params.paneKey,
+      hostId: params.hostId
+    })
     db.exec('COMMIT')
     return {
       outcome: 'created',
@@ -231,7 +251,9 @@ export function upsertAgentByPaneSuffix(
       adoptedThreads,
       blockedByQuarantinedPredecessor,
       pendingPeerQuestions,
-      unreadMailOnRetiredId
+      unreadMailOnRetiredId,
+      repointedMessages: succeededRepoint + nameRepoint.repointedMessages,
+      pendingOnOldHandle: nameRepoint.pendingOnOldHandle
     }
   } catch (error) {
     db.exec('ROLLBACK')

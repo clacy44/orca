@@ -1043,6 +1043,28 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         if (to.startsWith('agent:')) {
           agentRecipient = requireAddressableAgentRecipient(db, to.slice('agent:'.length))
         }
+        // Ruling 32 Addendum 10 (A1/F-5b): a bare display name that resolves in the LOCAL
+        // directory binds to that agent's mailbox at send time. Before this, a resolvable name
+        // fell straight through to the bare-handle branch below with `to` left as the literal
+        // name — no recipient_pane_key, no 1:1 thread, no wake ever bound to it (the S10-15
+        // finding 11 refusal a few lines down only catches the UNRESOLVABLE case; a name that
+        // DOES resolve fell through unchanged). Rewriting `to` here means the pane key, thread
+        // minting and wake below all bind exactly as an explicit `agent:<id>` target would.
+        // Peers cannot reach this: `remoteRunMailbox`/`from` are refused for accessProfile ===
+        // 'peer' well above (S10-19 §8.1/§8.2), so `senderHostId` here is always this host's own
+        // directory, never a peer-supplied id.
+        if (
+          !agentRecipient &&
+          isBarePeerHandle(to) &&
+          validateDisplayNameCandidate(to).ok &&
+          runtime.getTerminalPaneKey(to) == null
+        ) {
+          const named = db.getAgentByName(senderHostId, to)
+          if (named) {
+            agentRecipient = requireAddressableAgentRecipient(db, named.id)
+            to = `agent:${named.id}`
+          }
+        }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()
         // Why: a bare peer handle has no mailbox row to fall back through on a
@@ -1053,14 +1075,16 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // hit stops queuing into the void (the reported "queued / recipient unresolved" symptom)
         // — runtime-side, not CLI-side, because only the runtime holds the live terminal-handle
         // map needed to tell a legacy bare handle (e.g. `worker-one`, still delivered via the
-        // bare-handle path below) apart from a genuinely unaddressable name.
+        // bare-handle path below) apart from a genuinely unaddressable name. A2 (Ruling 32
+        // Addendum 10): the `db.getAgentByName(...) == null` conjunct this refusal used to carry
+        // is redundant now — A1 above already ran that exact lookup on the same `to`/host, so
+        // reaching here with `!agentRecipient` already means it resolved to nothing.
         if (
           !agentRecipient &&
           isBareHandleTarget &&
           !routing.run &&
           validateDisplayNameCandidate(to).ok &&
-          runtime.getTerminalPaneKey(to) == null &&
-          db.getAgentByName(senderHostId, to) == null
+          runtime.getTerminalPaneKey(to) == null
         ) {
           throw new OrchestrationError(
             'agent_unknown',
@@ -1699,6 +1723,22 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           attestedForAgentCheck && attestedForAgentCheck.terminalHandle === handle
             ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
             : undefined
+        // B3 (Ruling 32 Addendum 10/F-17): an attestation/pane-key mismatch (the caller's live
+        // pane resolves to a DIFFERENT terminal handle than the one this `check` names, e.g. a
+        // stale `--terminal`) used to fall silently into the bare-handle branch below and read
+        // `handle`'s mailbox instead of the caller's own `agent:<id>` — with nothing in the
+        // response saying so. Looked up regardless of the handle match above so a mismatch can
+        // be reported even though `callerAgentRow` itself stays undefined for routing purposes.
+        const attestedAgentRowOnMismatch =
+          attestedForAgentCheck && attestedForAgentCheck.terminalHandle !== handle
+            ? db.getAgentByPaneKey(agentHostId, attestedForAgentCheck.paneKey)
+            : undefined
+        const skippedAgentMailboxNotice =
+          attestedAgentRowOnMismatch &&
+          !attestedAgentRowOnMismatch.tombstoned_at &&
+          attestedAgentRowOnMismatch.derived !== 1
+            ? `Read mailbox "${handle}"; your registered mailbox agent:${attestedAgentRowOnMismatch.id} was not read (this pane resolves to terminal "${attestedForAgentCheck?.terminalHandle}", check requested "${handle}").`
+            : undefined
         // Why derived !== 1: a derived row is minted by ANY caller's `agents list`/`find` for
         // every live pane (agent-directory-rpc-liveness.ts) — the pane's own owner never opted
         // in. Routing a never-registered pane through the durable agent: branch would silently
@@ -1802,7 +1842,20 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // MUTATION PROOF: reinstating the old `throw new OrchestrationError('legacy_read_only', …)`
         // here fails T2-equivalent coverage for the bare-handle mailbox (peer mail must never throw
         // even when genuine legacy debt shares the same address).
+        // B3 (Ruling 32 Addendum 10/F-17): every bare-handle check result names which mailbox it
+        // actually read, and — when this call's caller has a registered agent row this read
+        // skipped over (attestation/pane-key mismatch) — the loud notice computed above.
         const readAndReturn = () => {
+          const result = readAndReturnInner()
+          return {
+            ...result,
+            mailbox: handle,
+            ...(skippedAgentMailboxNotice
+              ? { mailboxMismatchNotice: skippedAgentMailboxNotice }
+              : {})
+          }
+        }
+        const readAndReturnInner = () => {
           if (!consumeUnread) {
             // --peek / --all: inspect everything (legacy rows included), no mutation, no throw.
             const messages = showAll

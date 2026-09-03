@@ -175,14 +175,21 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
           : null
       })
 
+      // Ruling 32 Addendum 10 (A3/F-5b/F-18): both outcomes can now repoint stranded mail —
+      // 'created' from a bare-name address (agent-mailbox-repoint.ts's name-bind repoint) and/or
+      // a retired predecessor's `agent:<old id>` mailbox (F-18, agent-thread-succession.ts);
+      // 'reminted' from a bare terminal handle and/or a bare-name address. Always the true total
+      // moved into `result.agent.id`'s mailbox this call, never just one contributing surface.
+      const repointedMessages = result.repointedMessages
+      if (repointedMessages > 0) {
+        runtime.notifyMessageArrived(`agent:${result.agent.id}`, 'status', null, null)
+      }
+
       return {
         agent: toPublicAgentView(result.agent, true),
         created: result.outcome === 'created',
         reMinted: result.outcome === 'reminted',
-        // S10-7 F-C: how many of the OLD terminal_handle's unread bare-handle messages this
-        // re-mint just repointed into the row's durable agent:<id> mailbox. Always 0 on a fresh
-        // 'created' row (no prior handle to repoint from).
-        repointedMessages: result.outcome === 'reminted' ? result.repointedMessages : 0,
+        repointedMessages,
         // Nonzero only past the per-call batch ceiling (agent-mailbox-repoint.ts) — those rows
         // are not reachable by any other path once this re-mint's transaction commits.
         pendingOnOldHandle: result.outcome === 'reminted' ? result.pendingOnOldHandle : 0,
