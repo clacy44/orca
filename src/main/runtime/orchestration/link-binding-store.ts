@@ -265,11 +265,17 @@ export function findBindingsByEnvironment(
   return rows.map(fromSqlBindingRow)
 }
 
-// R18.4(b): the retarget lookup — the only routable binding, if any, matching a peer key.
+// R18.4(b): the retarget lookup — a CANDIDATE binding matching a peer key, not necessarily a
+// routable one. Ruling 26 Addendum 5(nn)/C5e review F2: this applies only two of R15's clauses
+// (state = 'confirmed', revoked_at IS NULL) — no quarantine check, no pin comparison, no
+// legacy_unattested exclusion. Renamed from `findRoutableBindingByKeyFingerprint` (which claimed
+// more than this predicate delivers) so it cannot be mistaken for the routable predicate; every
+// caller MUST filter the result through `getRoutableLinkBinding` (link-binding-routable.ts)
+// before treating it as a destination.
 // Review F16: INV-P-008 makes >=2 confirmed rows under one key a contest, not a route choice —
 // ORDER BY makes the (should-be-impossible) pick deterministic rather than SQLite's unspecified
 // `LIMIT 1` row order.
-export function findRoutableBindingByKeyFingerprint(
+export function findBindingCandidateByKeyFingerprint(
   db: Database.Database,
   peerKeyFingerprint: string
 ): PeerLinkBindingRow | null {

@@ -90,7 +90,7 @@ import {
   contestPeerLinkBinding as contestPeerLinkBindingImpl,
   revokePeerLinkBinding as revokePeerLinkBindingImpl,
   findBindingsByEnvironment as findBindingsByEnvironmentImpl,
-  findRoutableBindingByKeyFingerprint as findRoutableBindingByKeyFingerprintImpl,
+  findBindingCandidateByKeyFingerprint as findBindingCandidateByKeyFingerprintImpl,
   type PeerLinkBindingRow,
   type ContestFirstWinner
 } from './link-binding-store'
@@ -147,6 +147,7 @@ import {
   holdReplyOutboxItemCollision as holdReplyOutboxItemCollisionImpl,
   retryReplyOutboxItem as retryReplyOutboxItemImpl,
   retargetReplyOutboxItem as retargetReplyOutboxItemImpl,
+  replyOutboxLinkLastAdvisoryNotifiedAt as replyOutboxLinkLastAdvisoryNotifiedAtImpl,
   type ReplyOutboxSettle
 } from './reply-outbox-lifecycle'
 import {
@@ -4675,8 +4676,10 @@ export class OrchestrationDb {
     return findBindingsByEnvironmentImpl(this.db, environmentId)
   }
 
-  findRoutableBindingByKeyFingerprint(peerKeyFingerprint: string): PeerLinkBindingRow | null {
-    return findRoutableBindingByKeyFingerprintImpl(this.db, peerKeyFingerprint)
+  // Ruling 26 Addendum 5(nn): a CANDIDATE, not a routable destination — callers must filter
+  // through `getRoutableLinkBinding` before retargeting onto it.
+  findBindingCandidateByKeyFingerprint(peerKeyFingerprint: string): PeerLinkBindingRow | null {
+    return findBindingCandidateByKeyFingerprintImpl(this.db, peerKeyFingerprint)
   }
 
   getBindingAttempt(linkDeviceId: string): BindingAttemptRow | null {
@@ -4823,6 +4826,11 @@ export class OrchestrationDb {
 
   replyOutboxLinkLastDispositionNotifiedAt(linkDeviceId: string): number | null {
     return replyOutboxLinkLastDispositionNotifiedAtImpl(this.db, linkDeviceId)
+  }
+
+  // Ruling 26 Addendum 5(oo): the R20.2 advisory's own persisted per-link interval, restart-safe.
+  replyOutboxLinkLastAdvisoryNotifiedAt(linkDeviceId: string): number | null {
+    return replyOutboxLinkLastAdvisoryNotifiedAtImpl(this.db, linkDeviceId)
   }
 
   nextReplyOutboxWakeAt(): number | null {

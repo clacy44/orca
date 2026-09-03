@@ -618,13 +618,20 @@ describe('S10-16 C5: durable reply relay (two-runtime harness)', () => {
     // Per-method scripted responses on BOTH runtimes — `orchestration.federatedSend` routes to
     // the peer's REAL handler (the pump's own leg); `status.get` (the prover's capability check,
     // R10.3) answers `method_not_found` — a genuine, cheap capability decline that short-circuits
-    // the round before any probe/confirm call. Each method has its OWN branch and its OWN
-    // counter — never one shared mock queue a caller could steal an entry from (the exact
-    // harness defect Ruling 26 Addendum 3(bb)/F1 named for the disarmed version of this test).
-    const statusGetCalls = { h: 0, p: 0 }
+    // the round before any probe/confirm call. Each method has its OWN branch — never one shared
+    // mock queue a caller could steal an entry from (the exact harness defect Ruling 26 Addendum
+    // 3(bb)/F1 named for the disarmed version of this test).
+    // Ruling 26 Addendum 5(pp)/C5e review F6: this branch used to count `status.get` calls into a
+    // `statusGetCalls` object that no assertion ever read. Deleted rather than asserted on: the
+    // round's candidate-selection floor (LINK_BINDING_MIN_KICK_INTERVAL_MS, 15s) means `status.get`
+    // structurally cannot fire within this test's real-time budget — confirmed by instrumenting
+    // both runtimes' `peer_link_attempts` rows, which show a round attempt recorded
+    // (`last_attempt_at`/`last_round_at`, `lastOutcome: 'pending'`) with `nextAttemptAfter` still
+    // in the future when the test's own delivery-plus-attempt polling already exceeds its budget.
+    // `last_attempt_at` (asserted below) is the honest signal this harness can observe — proof a
+    // round was SCHEDULED for the link, not that it reached a probe.
     vi.spyOn(pRuntime, 'callPinnedEnvironment').mockImplementation(async (args) => {
       if (args.method === 'status.get') {
-        statusGetCalls.p += 1
         throw new OrchestrationError('method_not_found', 'no orchestration support')
       }
       appState.userData = hDataPath
@@ -646,7 +653,6 @@ describe('S10-16 C5: durable reply relay (two-runtime harness)', () => {
     })
     vi.spyOn(hRuntime, 'callPinnedEnvironment').mockImplementation(async (args) => {
       if (args.method === 'status.get') {
-        statusGetCalls.h += 1
         throw new OrchestrationError('method_not_found', 'no orchestration support')
       }
       appState.userData = pDataPath

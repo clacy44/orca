@@ -38,7 +38,6 @@ export type ReplyOutboxPump = {
 
 export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxPump {
   const inFlightGuard = createInFlightGuard()
-  const lastAdvisoryNotifiedAt = new Map<string, number>()
   let stopped = false
   let wakeTimer: ReturnType<typeof setTimeout> | null = null
   let loopRunning = false
@@ -47,9 +46,9 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
   // otherwise just no-op. This flag is consumed at the running tick's own tail.
   let rerunRequested = false
 
-  // Ruling 26 Addendum 4(hh)/(jj): the DISPOSITION family's own sender — stamps
-  // last_notified_condition + last_notified_at (guarded to queued/sending) before firing. Never
-  // shares a budget with lastAdvisoryNotifiedAt (the R20.2 advisory's own map) or with the
+  // Ruling 26 Addendum 4(hh)/(jj)/5(oo): the DISPOSITION family's own sender — stamps
+  // last_notified_condition + last_notified_at (guarded to queued/sending) after firing. Never
+  // shares a budget with the R20.2 advisory's own persisted notified_at interval or with the
   // unreachable/recovered edge (the consecutive_failures counter).
   const fireDispositionNotice = (
     item: ReplyOutboxRow,
@@ -197,9 +196,9 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       // column (last_notified_condition), never on last_error_code — a hold's write to
       // last_error_code (binding_changed etc.) must not re-arm this edge (F2). Bounded by the
       // DISPOSITION family's OWN persisted per-link interval — MAX(last_notified_at) over this
-      // link's rows — never the R20.2 advisory's lastAdvisoryNotifiedAt map (F1): a peer cannot
-      // buy silence on one family by tripping the other, and the interval survives a restart
-      // (F2) because it is read from the database, not from a Map.
+      // link's rows — never the R20.2 advisory's own persisted notified_at interval (F1): a peer
+      // cannot buy silence on one family by tripping the other, and both intervals survive a
+      // restart because they are read from the database, not from a Map.
       if (
         disposition.noticeCode &&
         item.lastNotifiedCondition !== disposition.noticeCode &&
@@ -225,7 +224,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       return
     }
 
-    settleReplyOutboxDelivery(runtime, item, guardResult, lastAdvisoryNotifiedAt)
+    settleReplyOutboxDelivery(runtime, item, guardResult)
   }
 
   async function runTickLoop(): Promise<void> {

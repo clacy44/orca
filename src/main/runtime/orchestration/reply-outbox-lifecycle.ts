@@ -271,3 +271,20 @@ export function holdReplyOutboxItemCollision(
     .run(nextAttemptAfter, REPLY_RELAY_COLLISION_CODE, id)
   return result.changes === 1
 }
+
+// Ruling 26 Addendum 5(oo)/plan §P-4: the R20.2 advisory's per-link interval, persisted the same
+// way the disposition family's is (reply-outbox-store.ts's replyOutboxLinkLastDispositionNotifiedAt)
+// — derived from `notified_at` (markReplyOutboxNotified's own column), the last in-memory
+// advisory map deleted.
+export function replyOutboxLinkLastAdvisoryNotifiedAt(
+  db: Database.Database,
+  linkDeviceId: string
+): number | null {
+  const row = db
+    .prepare(
+      `SELECT MAX(notified_at) AS t FROM peer_reply_outbox
+        WHERE link_device_id = ? AND notified_at IS NOT NULL`
+    )
+    .get(linkDeviceId) as { t: number | null }
+  return row.t
+}

@@ -46,7 +46,7 @@ export function auditReplyRelaySettleRaced(
 // fireReplyRelayDispositionNotice below, which stamps BEFORE calling this. Firing the
 // unreachable/recovered edge or the R20.2 advisory through this function touches neither notice
 // column — those families keep their own separate budgets (unreachable/recovered: the
-// consecutive_failures counter; advisory: notified_at + the caller's own per-link map).
+// consecutive_failures counter; advisory: notified_at + its own persisted per-link interval).
 export function fireReplyRelayNotice(
   runtime: OrcaRuntimeService,
   item: ReplyOutboxRow,
@@ -98,22 +98,23 @@ export function fireReplyRelayNotice(
   })
 }
 
-// Ruling 26 Addendum 4(hh)/(ii)/(jj): the DISPOSITION family's own notice sender — stale,
-// unsupported, unauthorized, abandoned, refused, route_moved, peer_receipt_poisoned,
-// id_conflict — every code the disposition table (reply-outbox-pump-disposition.ts) and the
-// same-route/no-route hold deadline (reply-outbox-pump-hold.ts) can fire. Stamps
-// last_notified_condition + last_notified_at BEFORE sending (guarded to queued/sending rows —
-// a no-op for the terminal codes, which settle to a non-queued/sending state before their
-// notice fires, exactly as intended: a terminal item never re-fires for itself, so nothing needs
-// persisting for it, and the guard is what keeps a settled row's columns untouched).
+// Ruling 26 Addendum 4(hh)/(ii)/(jj), Addendum 5(oo): the DISPOSITION family's own notice
+// sender — stale, unsupported, unauthorized, abandoned, refused, route_moved,
+// peer_receipt_poisoned, id_conflict — every code the disposition table
+// (reply-outbox-pump-disposition.ts) and the same-route/no-route hold deadline
+// (reply-outbox-pump-hold.ts) can fire. Stamps last_notified_condition + last_notified_at AFTER
+// the mailbox write succeeds (guarded to queued/sending rows — a no-op for the terminal codes,
+// which settle to a non-queued/sending state before their notice fires): a thrown send leaves the
+// condition unstamped so it re-fires next tick, instead of being permanently suppressed by a
+// stamp for a notice that never went out.
 export function fireReplyRelayDispositionNotice(
   runtime: OrcaRuntimeService,
   item: ReplyOutboxRow,
   code: ReplyRelayNoticeCode,
   incidentId: string | null
 ): void {
-  runtime.getOrchestrationDb().markReplyOutboxDispositionNotice(item.id, code, Date.now())
   fireReplyRelayNotice(runtime, item, code, incidentId)
+  runtime.getOrchestrationDb().markReplyOutboxDispositionNotice(item.id, code, Date.now())
 }
 
 // H5/Ruling 26(f): the R19.3 health-transition edge, driven ONLY from the row's own persisted

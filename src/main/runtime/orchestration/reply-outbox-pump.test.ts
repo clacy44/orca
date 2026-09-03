@@ -73,8 +73,10 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
   let root: string
   let db: OrchestrationDb
   let runtime: OrcaRuntimeService
+  let registry: DeviceRegistry
   let linkDeviceId: string
   let environmentId: string
+  let environmentEndpointId: string
   let askerId: string
   let outboundId: string
   let originalRunId: string
@@ -121,7 +123,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
           : null
       )
 
-    const registry = new DeviceRegistry(root)
+    registry = new DeviceRegistry(root)
     const link = registry.mintPendingDevice('peer-host', 'runtime')
     registry.updateLastSeen(link.deviceId)
     linkDeviceId = link.deviceId
@@ -138,6 +140,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       pairingCode: offer
     })
     environmentId = env.id
+    environmentEndpointId = env.preferredEndpointId
 
     db.putPeerLinkBinding({
       linkDeviceId,
@@ -367,7 +370,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
 
     const now = Date.now()
     // The ONLY routable binding for this peer key fingerprint IS the row's own current route
-    // (beforeEach set up exactly one peer_link_bindings row) — findRoutableBindingByKeyFingerprint
+    // (beforeEach set up exactly one peer_link_bindings row) — findBindingCandidateByKeyFingerprint
     // resolves to the SAME route, which used to be treated as a retarget onto itself.
     holdOrRetargetReplyOutboxItem(runtime, claimed!, now)
 
@@ -378,7 +381,10 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(after?.linkDeviceId).toBe(linkDeviceId)
     expect(after?.boundPairingRevision).toBe(claimed!.boundPairingRevision)
     expect(after?.state).toBe('queued')
-    expect(after?.lastErrorCode).toBe('binding_changed')
+    // Ruling 26 Addendum 5(mm): the same-route hold carries the peer's ACTUAL disposition
+    // (runtime_environment_changed) — never binding_changed, which would be false here (the
+    // route genuinely has not changed).
+    expect(after?.lastErrorCode).toBe('runtime_environment_changed')
     expect(after?.nextAttemptAfter).not.toBeNull()
     expect(after?.nextAttemptAfter as number).toBeGreaterThan(now)
     expect(after?.firstHeldAt).not.toBeNull()
@@ -663,15 +669,21 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(claimed?.state).toBe('sending')
 
     // A second, routable binding sharing the SAME peer key fingerprint — the re-pair shape
-    // findRoutableBindingByKeyFingerprint matches on.
-    const retargetedLinkId = 'retargeted-link-device'
+    // findBindingCandidateByKeyFingerprint matches on. Ruling 26 Addendum 5(nn)/F2: the
+    // candidate must pass the FULL routable predicate (getRoutableLinkBinding), not just the
+    // raw SQL clauses — so it needs a REAL registered device (registryLinkCredentialFingerprint)
+    // and pins that match the environment's actual current endpoint (resolveEnvironmentEndpoint),
+    // exactly like the beforeEach's own binding does.
+    const retargetedLink = registry.mintPendingDevice('peer-host-2', 'runtime')
+    registry.updateLastSeen(retargetedLink.deviceId)
+    const retargetedLinkId = retargetedLink.deviceId
     db.putPeerLinkBinding({
       linkDeviceId: retargetedLinkId,
       environmentId,
-      boundEndpointId: 'retargeted-endpoint',
-      boundPairingRevision: 999,
-      linkCredentialFp: 'retargeted-link-credential-fp',
-      peerCredentialFp: 'retargeted-peer-credential-fp',
+      boundEndpointId: environmentEndpointId,
+      boundPairingRevision: claimed!.boundPairingRevision,
+      linkCredentialFp: hashCallerCredential(retargetedLink.token),
+      peerCredentialFp: claimed!.peerCredentialFp,
       peerKeyFingerprint: fingerprintOrchestrationPeer('peer_own_pubkey_b64'),
       grantClass: 'minted',
       scanCompleteness: 'complete',
@@ -684,7 +696,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
 
     const after = db.getReplyOutboxItem(outboxId)
     expect(after?.linkDeviceId).toBe(retargetedLinkId)
-    expect(after?.boundPairingRevision).toBe(999)
+    expect(after?.boundPairingRevision).toBe(claimed!.boundPairingRevision)
     expect(after?.state).toBe('queued')
     // Ruling 26(b): released, never re-held — the hold fields all reset, not advanced.
     expect(after?.holdCount).toBe(0)
@@ -692,12 +704,65 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(after?.nextAttemptAfter).toBeNull()
   })
 
+  it('Ruling 26 Addendum 5(nn)/C5e review F2: a quarantined candidate sharing the peer key fingerprint is never retargeted onto — the row holds with the existing hold code', async () => {
+    const { outboxId } = await enqueueOneReply()
+    const claimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(claimed?.id).toBe(outboxId)
+    expect(claimed?.state).toBe('sending')
+
+    // A second, `confirmed`/unrevoked binding sharing the SAME peer key fingerprint — passes the
+    // raw SQL candidate lookup's two clauses — but under an active quarantine containment row.
+    // R15/R16.2: a quarantined link must never become a routing destination in either direction.
+    const quarantinedLinkId = 'quarantined-link-device'
+    db.putPeerLinkBinding({
+      linkDeviceId: quarantinedLinkId,
+      environmentId,
+      boundEndpointId: 'quarantined-endpoint',
+      boundPairingRevision: 999,
+      linkCredentialFp: 'quarantined-link-credential-fp',
+      peerCredentialFp: 'quarantined-peer-credential-fp',
+      peerKeyFingerprint: fingerprintOrchestrationPeer('peer_own_pubkey_b64'),
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'orca.link-binding.v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    db.putContainment({
+      subjectKind: 'link',
+      subjectId: quarantinedLinkId,
+      action: 'quarantine',
+      reasonCode: 'test_quarantine',
+      reasonText: null,
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+
+    holdOrRetargetReplyOutboxItem(runtime, claimed!, Date.now())
+
+    // Never retargeted: the row still names its ORIGINAL link — no destination record (R16.2)
+    // is ever written naming the quarantined link.
+    const after = db.getReplyOutboxItem(outboxId)
+    expect(after?.linkDeviceId).toBe(linkDeviceId)
+    expect(after?.state).toBe('queued')
+    // The existing hold code — a quarantined candidate reads as "no routable binding", so this
+    // is the ordinary !isSameRoute hold, not the same-route (mm) path.
+    expect(after?.lastErrorCode).toBe('binding_changed')
+    const retargetAudit = raw(db)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'replyRelayRetarget' AND outcome LIKE ?`
+      )
+      .get(`%to:${quarantinedLinkId}%`) as { n: number }
+    expect(retargetAudit.n).toBe(0)
+  })
+
   it('Ruling 26(c)/B2: route_moved settles from `sending`, its deadline read from firstHeldAt BEFORE any hold write, and the notice fires only when the settle wrote a row', async () => {
     const { outboxId } = await enqueueOneReply()
     const claimed = db.claimNextReplyOutboxItem(Date.now())
     expect(claimed?.id).toBe(outboxId)
 
-    // No routable binding at all for this peer key — findRoutableBindingByKeyFingerprint finds
+    // No routable binding at all for this peer key — findBindingCandidateByKeyFingerprint finds
     // nothing, and localEvidenceUnavailable is false (the registry/environment store both read
     // fine), so the deadline check is reached.
     db.revokePeerLinkBinding(linkDeviceId, Date.now())
@@ -717,7 +782,7 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     expect(notice.n).toBe(1)
   })
 
-  it('Ruling 26 Addendum 4(kk): a same-route hold past the deadline never settles at all — it keeps holding, and only R18.3 eventually abandons it, with the rendered body naming no peer refusal', async () => {
+  it('Ruling 26 Addendum 5(mm): a same-route hold carries the honest runtime_environment_changed code while held, never binding_changed, and settles abandoned at REPLY_OUTBOX_HOLD_MAX_MS — not the 7-day age deadline', async () => {
     const { outboxId } = await enqueueOneReply()
     const claimed = db.claimNextReplyOutboxItem(Date.now())
     expect(claimed?.id).toBe(outboxId)
@@ -725,16 +790,38 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
     // The ONLY routable binding for this peer key fingerprint IS the row's own current route
     // (beforeEach's single peer_link_bindings row is untouched) — isSameRoute resolves true,
     // exactly the F1/(n) fall-through shape, not the (c)/B2 "no binding at all" shape above.
-    const now = Date.now()
-    const pastHoldDeadline = now - REPLY_OUTBOX_HOLD_MAX_MS - 1000
-    holdOrRetargetReplyOutboxItem(runtime, { ...claimed!, firstHeldAt: pastHoldDeadline }, now)
+    const firstTick = Date.now()
+    holdOrRetargetReplyOutboxItem(runtime, claimed!, firstTick)
 
-    // Not settled at all — (kk): no binding_changed, no route_moved, no reply_relay_refused.
-    // The item is held again (bounded, re-checked), exactly like every other same-route
-    // re-check (test at Ruling 26 Addendum 1(n)/F1 above).
-    const after = db.getReplyOutboxItem(outboxId)
-    expect(after?.state).toBe('queued')
-    expect(after?.lastErrorCode).toBe('binding_changed')
+    // (mm): while held, last_error_code is the peer-returned disposition
+    // (runtime_environment_changed) — never binding_changed, which is false when the route has
+    // not moved. No counter bump: a peer-chosen disposition is never unreachable evidence.
+    const held = db.getReplyOutboxItem(outboxId)
+    expect(held?.state).toBe('queued')
+    expect(held?.lastErrorCode).toBe('runtime_environment_changed')
+    expect(held?.consecutiveFailures).toBe(0)
+
+    // Force the hold's next_attempt_after into the past to re-claim, exactly like every other
+    // test here that needs a held row reclaimed sooner than its real schedule — first_held_at
+    // (COALESCEd on the first hold write) survives the reclaim untouched (Ruling 26(a)).
+    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
+      .prepare('UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?')
+      .run(Date.now() - 1, outboxId)
+    const reclaimed = db.claimNextReplyOutboxItem(Date.now())
+    expect(reclaimed?.id).toBe(outboxId)
+    expect(reclaimed?.firstHeldAt).toBe(firstTick)
+
+    // Re-check again, past REPLY_OUTBOX_HOLD_MAX_MS from first-held-at — same isSameRoute shape.
+    const now = firstTick + REPLY_OUTBOX_HOLD_MAX_MS + 1000
+    holdOrRetargetReplyOutboxItem(runtime, reclaimed!, now)
+
+    // (mm): settles abandoned with the existing reply_relay_abandoned code/notice — no
+    // register change, no binding_changed, no route_moved, no reply_relay_refused — inside the
+    // hold window instead of waiting REPLY_OUTBOX_MAX_AGE_MS (7 days).
+    const settled = db.getReplyOutboxItem(outboxId)
+    expect(settled?.state).toBe('abandoned')
+    expect(settled?.lastErrorCode).toBe('runtime_environment_changed')
+    expect(settled?.consecutiveFailures).toBe(0)
     const routeMovedNotice = raw(db)
       .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%route%'`)
       .get(originalRunId) as { n: number }
@@ -743,29 +830,11 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       .prepare(`SELECT COUNT(*) AS n FROM messages WHERE run_id = ? AND subject LIKE '%refused%'`)
       .get(originalRunId) as { n: number }
     expect(refusedNotice.n).toBe(0)
-
-    // R18.3's REPLY_OUTBOX_MAX_AGE_MS deadline — evaluated at the head of processItem on every
-    // claim, before holdOrRetarget ever runs — is the ONLY thing that eventually settles a
-    // same-route hold: abandoned, with reply_relay_abandoned. The rendered body is asserted, not
-    // only the count (the C5d review's own gap): it names the deadline and the attempt count,
-    // never a peer refusal code.
-    // A held row's next_attempt_after is untouched by kick() (P-6's own guard: `hold_count = 0`)
-    // — force it into the past directly, same as every other test here that needs a held/backed-
-    // off row reclaimed sooner than its real schedule.
-    ;(db as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => unknown } } }).db
-      .prepare('UPDATE peer_reply_outbox SET created_at = ?, next_attempt_after = ? WHERE id = ?')
-      .run(now - REPLY_OUTBOX_MAX_AGE_MS - 1000, Date.now() - 1, outboxId)
-    runtime.replyOutbox?.kick(linkDeviceId)
-    let settled = db.getReplyOutboxItem(outboxId)
-    for (let i = 0; i < 80 && settled?.state !== 'abandoned'; i++) {
-      await new Promise((r) => setTimeout(r, 50))
-      settled = db.getReplyOutboxItem(outboxId)
-    }
-    expect(settled?.state).toBe('abandoned')
     const abandonedNotice = raw(db)
       .prepare(`SELECT body FROM messages WHERE run_id = ? AND subject LIKE '%abandoned%'`)
       .get(originalRunId) as { body: string } | undefined
     expect(abandonedNotice?.body).toContain('could not be delivered within the retry deadline')
+    expect(abandonedNotice?.body).toContain('runtime_environment_changed')
     expect(abandonedNotice?.body).not.toContain('refused')
     expect(abandonedNotice?.body).not.toContain('route moved')
   })
@@ -866,14 +935,18 @@ describe('S10-16 C5: reply-outbox-pump (R18)', () => {
       .run(Date.now() - 1, outboxId)
     const claimed = db.claimNextReplyOutboxItem(Date.now())
     expect(claimed?.id).toBe(outboxId)
-    const retargetedLinkId = 'retargeted-link-device-2'
+    // Ruling 26 Addendum 5(nn)/F2: a REAL registered device with pins matching the environment's
+    // actual current endpoint, so the candidate passes the full routable predicate.
+    const retargetedLink = registry.mintPendingDevice('peer-host-3', 'runtime')
+    registry.updateLastSeen(retargetedLink.deviceId)
+    const retargetedLinkId = retargetedLink.deviceId
     db.putPeerLinkBinding({
       linkDeviceId: retargetedLinkId,
       environmentId,
-      boundEndpointId: 'retargeted-endpoint-2',
-      boundPairingRevision: 998,
-      linkCredentialFp: 'retargeted-link-credential-fp-2',
-      peerCredentialFp: 'retargeted-peer-credential-fp-2',
+      boundEndpointId: environmentEndpointId,
+      boundPairingRevision: claimed!.boundPairingRevision,
+      linkCredentialFp: hashCallerCredential(retargetedLink.token),
+      peerCredentialFp: claimed!.peerCredentialFp,
       peerKeyFingerprint: fingerprintOrchestrationPeer('peer_own_pubkey_b64'),
       grantClass: 'minted',
       scanCompleteness: 'complete',

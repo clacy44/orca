@@ -26,8 +26,7 @@ export type FederatedSendResultShape = {
 export function settleReplyOutboxDelivery(
   runtime: OrcaRuntimeService,
   item: ReplyOutboxRow,
-  result: FederatedSendResultShape,
-  lastAdvisoryNotifiedAt: Map<string, number>
+  result: FederatedSendResultShape
 ): void {
   const db = runtime.getOrchestrationDb()
 
@@ -91,11 +90,10 @@ export function settleReplyOutboxDelivery(
       if (
         shouldFireReplyRelayNotice(
           item,
-          lastAdvisoryNotifiedAt.get(item.linkDeviceId) ?? null,
+          db.replyOutboxLinkLastAdvisoryNotifiedAt(item.linkDeviceId),
           Date.now()
         )
       ) {
-        lastAdvisoryNotifiedAt.set(item.linkDeviceId, Date.now())
         db.markReplyOutboxNotified(item.id, Date.now())
         fireReplyRelayNotice(
           runtime,

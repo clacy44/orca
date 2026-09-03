@@ -139,6 +139,9 @@ export const LOCAL_EVIDENCE_UNAVAILABLE_CODE = 'local_evidence_unavailable'
 export const AUTHORSHIP_UNCONFIRMED_CODE = 'authorship_unconfirmed'
 export const CANCELLED_LOCAL_RESET_CODE = 'cancelled_local_reset'
 export const BINDING_CHANGED_CODE = 'binding_changed'
+// Ruling 26 Addendum 5(mm): the same-route hold's honest word — the peer-returned disposition
+// (runtime_environment_changed), never BINDING_CHANGED_CODE, while the host's route is unchanged.
+export const RUNTIME_ENVIRONMENT_CHANGED_CODE = 'runtime_environment_changed'
 export const ROUTE_MOVED_CODE = 'route_moved'
 export const UNKNOWN_PEER_REFUSAL_CODE = 'unknown_peer_refusal'
 // Ruling 26(j): the in-flight-registry collision hold's own code — distinct from

@@ -1,7 +1,7 @@
 // S10-16 C5, R18.4(a)/(b): the pre-dial bounded hold and the retarget — split out of
 // reply-outbox-pump.ts to stay under the max-lines ratchet. Never touches consecutive_failures.
 import type { OrcaRuntimeService } from '../orca-runtime'
-import { localEvidenceUnavailable } from './link-binding-routable'
+import { localEvidenceUnavailable, getRoutableLinkBinding } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import {
   fireReplyRelayDispositionNotice,
@@ -11,8 +11,10 @@ import {
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_HOLD_MAX_MS,
   REPLY_RELAY_ROUTE_MOVED_NOTICE,
+  REPLY_RELAY_ABANDONED_NOTICE,
   ROUTE_MOVED_CODE,
-  BINDING_CHANGED_CODE
+  BINDING_CHANGED_CODE,
+  RUNTIME_ENVIRONMENT_CHANGED_CODE
 } from './link-binding-constants'
 
 // B1/B2/Ruling 26(b)/(c): a hold is expressed by next_attempt_after alone; a retarget is one
@@ -38,7 +40,13 @@ export function holdOrRetargetReplyOutboxItem(
     }
     return
   }
-  const retargeted = db.findRoutableBindingByKeyFingerprint(item.peerKeyFingerprint)
+  // Ruling 26 Addendum 5(nn)/F2: the SQL candidate applies only two of R15's clauses (state,
+  // revoked_at) — filtered here through the full routable predicate so a retarget can never
+  // re-point onto a quarantined, pin-mismatched, or legacy_unattested link. A candidate that
+  // fails the predicate is treated exactly like "no candidate" (falls through to the hold below).
+  const candidate = db.findBindingCandidateByKeyFingerprint(item.peerKeyFingerprint)
+  const retargeted =
+    candidate && getRoutableLinkBinding(db, runtime, candidate.linkDeviceId) ? candidate : null
   // Ruling 26 Addendum 1(n)/F1: a re-check that resolves to the row's CURRENT route is not a
   // retarget — retargeting it onto itself and releasing with next_attempt_after = NULL turns
   // every `runtime_environment_changed` re-check into an unbounded, unclamped dial loop (the
@@ -88,14 +96,10 @@ export function holdOrRetargetReplyOutboxItem(
   // hold write below (which is the only statement in this function that could advance it).
   const firstHeldAt = item.firstHeldAt ?? now
   // Ruling 26 Addendum 4(kk): a same-route hold (isSameRoute true — this tick's own re-check
-  // resolved to the row's CURRENT route) NEVER settles at this deadline — not route_moved (the
-  // route did not move) and not the binding_changed/reply_relay_refused pairing the C5d review
-  // found dishonest (a peer refusal that never happened). Only the genuine "no routable binding
-  // found at all" case (retargeted === null, !isSameRoute) settles here, with route_moved. A
-  // same-route item falls through to the bounded hold below and keeps being re-checked;
-  // R18.3's REPLY_OUTBOX_MAX_AGE_MS deadline (processItem, evaluated on every claim) is the ONLY
-  // thing that can eventually settle it — abandoned, with reply_relay_abandoned — exactly the
-  // shape R18.4(a) already prescribes for the local-evidence hold.
+  // resolved to the row's CURRENT route) NEVER settles route_moved (the route did not move) nor
+  // the binding_changed/reply_relay_refused pairing the C5d review found dishonest (a peer
+  // refusal that never happened). Only the genuine "no routable binding found at all" case
+  // (retargeted === null, !isSameRoute) settles here, with route_moved.
   if (!isSameRoute && now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
     const settled = db.settleReplyOutboxItem(item.id, {
       state: 'refused',
@@ -113,15 +117,42 @@ export function holdOrRetargetReplyOutboxItem(
     }
     return
   }
+  // Ruling 26 Addendum 5(mm): the same-route hold is bounded by REPLY_OUTBOX_HOLD_MAX_MS too —
+  // not the 7-day REPLY_OUTBOX_MAX_AGE_MS deadline C5e left it to. At the same deadline
+  // route_moved uses, a same-route item settles abandoned with the existing
+  // reply_relay_abandoned code and notice — an honest word (the route never moved, and no
+  // refusal happened) reached inside the R19.3 detection window instead of seven days later.
+  if (isSameRoute && now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
+    const settled = db.settleReplyOutboxItem(item.id, {
+      state: 'abandoned',
+      settledAt: now,
+      consecutiveFailures: item.consecutiveFailures,
+      nextAttemptAfter: null,
+      lastErrorCode: item.lastErrorCode,
+      lastError: item.lastError
+    })
+    if (settled) {
+      fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, null)
+    } else {
+      auditReplyRelaySettleRaced(db, item, 'abandoned')
+    }
+    return
+  }
   // Ruling 26 Addendum 3(dd)/F4: the boolean is checked — a lost hold (row cancelled underneath
   // this call) is audited, never silently dropped.
-  const heldBindingChanged = db.holdReplyOutboxItem(
+  // Ruling 26 Addendum 5(mm): while held, last_error_code carries the disposition the peer
+  // actually returned (runtime_environment_changed) for a same-route hold — never
+  // BINDING_CHANGED_CODE, which is false when the route has not changed. The no-route-found case
+  // (!isSameRoute, still within the window) keeps BINDING_CHANGED_CODE; it is genuinely a
+  // binding change from this row's point of view. Neither path bumps consecutive_failures — a
+  // peer-chosen disposition is never evidence the transport is unreachable.
+  const heldRow = db.holdReplyOutboxItem(
     item.id,
     now,
     now + REPLY_OUTBOX_HOLD_INTERVAL_MS,
-    BINDING_CHANGED_CODE
+    isSameRoute ? RUNTIME_ENVIRONMENT_CHANGED_CODE : BINDING_CHANGED_CODE
   )
-  if (!heldBindingChanged) {
+  if (!heldRow) {
     auditReplyRelaySettleRaced(db, item, 'hold')
   }
 }

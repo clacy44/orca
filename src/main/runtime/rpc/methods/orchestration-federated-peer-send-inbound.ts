@@ -70,7 +70,10 @@ export function resolveForeignThread(
         if (toEnv === callerBinding.environmentId) {
           clauseII = true
         } else {
-          const retargeted = db.findRoutableBindingByKeyFingerprint(
+          // Ruling 26 Addendum 5(nn): mechanical rename follow (findBindingCandidateByKeyFingerprint
+          // is not the routable predicate); this clause only reads the candidate's environmentId
+          // for an authorship comparison and never retargets — behaviour unchanged.
+          const retargeted = db.findBindingCandidateByKeyFingerprint(
             callerBinding.peerKeyFingerprint
           )
           clauseII = retargeted?.environmentId === toEnv

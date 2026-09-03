@@ -8,7 +8,7 @@ import {
   contestPeerLinkBinding,
   revokePeerLinkBinding,
   findBindingsByEnvironment,
-  findRoutableBindingByKeyFingerprint,
+  findBindingCandidateByKeyFingerprint,
   LinkBindingCapError,
   type ContestFirstWinner
 } from './link-binding-store'
@@ -57,7 +57,7 @@ describe('link-binding-store: smoke (every exported statement runs against a fre
     expect(getPeerLinkBinding(sqlite, linkDeviceId)).not.toBeNull()
     expect(listPeerLinkBindings(sqlite)).toHaveLength(1)
     expect(findBindingsByEnvironment(sqlite, 'env_smoke_1')).toHaveLength(1)
-    expect(findRoutableBindingByKeyFingerprint(sqlite, 'peer_key_fp_1')).not.toBeNull()
+    expect(findBindingCandidateByKeyFingerprint(sqlite, 'peer_key_fp_1')).not.toBeNull()
 
     contestPeerLinkBinding(
       sqlite,
@@ -82,7 +82,7 @@ describe('link-binding-store: smoke (every exported statement runs against a fre
     revokePeerLinkBinding(sqlite, linkDeviceId, now)
     expect(getPeerLinkBinding(sqlite, linkDeviceId)?.state).toBe('revoked')
     // A revoked binding is no longer routable.
-    expect(findRoutableBindingByKeyFingerprint(sqlite, 'peer_key_fp_1')).toBeNull()
+    expect(findBindingCandidateByKeyFingerprint(sqlite, 'peer_key_fp_1')).toBeNull()
   })
 })
 
