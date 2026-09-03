@@ -449,4 +449,63 @@ describe('Ruling 28(a): unrevokePeerLinkBinding and resolvePeerLinkBindingContes
     })
     expect(getPeerLinkBinding(sqlite, linkDeviceId)?.environmentId).toBe('env_b')
   })
+
+  // Ruling 28 Addendum 1(r)/D3: a revoke never strands a contest — unrevoking a row that is
+  // ALSO contested must not downgrade it to 'confirmed'; only `resolvePeerLinkBindingContest`
+  // clears contested_at/contest_incident_id.
+  it('revoke -> link-bind on a contested link keeps it contested with the incident id', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const linkDeviceId = 'link_revoke_contested'
+    contestPeerLinkBinding(sqlite, linkDeviceId, 100, 'incident_revoke_contested', 'two winners', {
+      environmentId: 'env_a',
+      boundEndpointId: 'endpoint_a',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_a',
+      peerCredentialFp: 'peer_fp_a',
+      peerKeyFingerprint: 'peer_key_fp_a',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1'
+    })
+    expect(getPeerLinkBinding(sqlite, linkDeviceId)?.state).toBe('contested')
+
+    // revokePeerLinkBinding on a contested row keeps the contest columns intact.
+    revokePeerLinkBinding(sqlite, linkDeviceId, 200)
+    const revoked = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(revoked?.state).toBe('revoked')
+    expect(revoked?.revokedAt).toBe(200)
+    expect(revoked?.contestIncidentId).toBe('incident_revoke_contested')
+    expect(revoked?.contestedAt).not.toBeNull()
+
+    // linkBind's own unrevoke step: must NOT downgrade a still-contested row to 'confirmed'.
+    expect(unrevokePeerLinkBinding(sqlite, linkDeviceId, 300)).toBe(true)
+    const lifted = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(lifted?.state).toBe('contested')
+    expect(lifted?.revokedAt).toBeNull()
+    expect(lifted?.contestIncidentId).toBe('incident_revoke_contested')
+    expect(lifted?.contestedAt).not.toBeNull()
+
+    // Only resolvePeerLinkBindingContest clears the contest — and D-8: it never touches
+    // revoked_at (already NULL here, from the unrevoke above).
+    resolvePeerLinkBindingContest(sqlite, {
+      linkDeviceId,
+      environmentId: 'env_b',
+      boundEndpointId: 'endpoint_b',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_b',
+      peerCredentialFp: 'peer_fp_b',
+      peerKeyFingerprint: 'peer_key_fp_b',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: 400,
+      lastVerifiedAt: 400
+    })
+    const resolved = getPeerLinkBinding(sqlite, linkDeviceId)
+    expect(resolved?.state).toBe('confirmed')
+    expect(resolved?.contestIncidentId).toBeNull()
+    expect(resolved?.contestedAt).toBeNull()
+    expect(resolved?.revokedAt).toBeNull()
+  })
 })

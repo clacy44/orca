@@ -265,7 +265,7 @@ export function resolvePeerLinkBindingContest(
        link_credential_fp = ?, peer_credential_fp = ?, peer_key_fingerprint = ?,
        grant_class = ?, scan_completeness = ?, proof_protocol = ?,
        state = 'confirmed', detail = NULL, contest_incident_id = NULL,
-       proved_at = ?, last_verified_at = ?, contested_at = NULL, revoked_at = NULL
+       proved_at = ?, last_verified_at = ?, contested_at = NULL
      WHERE link_device_id = ? AND state = 'contested'`
   ).run(
     row.environmentId,
@@ -297,6 +297,12 @@ export function revokePeerLinkBinding(
 // `linkBind` RPC handler (`orchestration-link-binding-local.ts`), audited `link_revoke_lifted`,
 // BEFORE the operator round it then requests. Guarded by `WHERE revoked_at IS NOT NULL`: a no-op
 // (returns false) on a link that was never revoked. Returns whether a row was actually changed.
+// Ruling 28 Addendum 1(r): a revoke never strands a contest — if the row is ALSO contested
+// (`contested_at IS NOT NULL`), lifting the revoke must not downgrade it to 'confirmed'; state
+// stays 'contested' and `contested_at`/`contest_incident_id` are left untouched (cleared only by
+// `resolvePeerLinkBindingContest`, above). The operator round then re-probes the link on the next
+// sweep — `runOneRound`'s contested exclusion (`link-binding-prover-round.ts`) still applies —
+// and only a forced (proveNow) round can resolve it, exactly as an ordinary contested link.
 export function unrevokePeerLinkBinding(
   db: Database.Database,
   linkDeviceId: string,
@@ -304,7 +310,9 @@ export function unrevokePeerLinkBinding(
 ): boolean {
   const result = db
     .prepare(
-      `UPDATE peer_link_bindings SET state = 'confirmed', revoked_at = NULL, last_verified_at = ?
+      `UPDATE peer_link_bindings SET
+         state = CASE WHEN contested_at IS NOT NULL THEN 'contested' ELSE 'confirmed' END,
+         revoked_at = NULL, last_verified_at = ?
         WHERE link_device_id = ? AND revoked_at IS NOT NULL`
     )
     .run(now, linkDeviceId)

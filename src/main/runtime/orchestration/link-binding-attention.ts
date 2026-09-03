@@ -25,7 +25,8 @@ import {
   readEnvironmentSnapshot,
   type EnvironmentSnapshot
 } from './link-binding-routable'
-import { routingClassOf } from './link-binding-liveness'
+import { routingClassOf, type LinkBindingRoutingClass } from './link-binding-liveness'
+import type { PeerLinkBindingRow } from './link-binding-store'
 import { describeReplyRelayLinkHealth } from './reply-outbox-health'
 import {
   LINK_BINDING_REVERIFY_MS,
@@ -66,6 +67,29 @@ function liveLegacyAttestation(
   } catch {
     return false
   }
+}
+
+// Ruling 28 Addendum 1(s): the ONE place `routingClass` is computed from a binding row — reused
+// here (the 'proven'-but-not-routable branch below) and by `link-status`'s `buildLinkRow`
+// (orchestration-link-binding-local.ts), which used to keep a second, weaker copy that checked
+// only `liftedAt` and dropped `routingClassOf`'s expiry/environment/key-match checks (D-4/D4).
+// Exported rather than duplicated, per Ruling 23(g)'s "one predicate" precedent.
+export function linkRoutingClassOf(
+  db: OrchestrationDb,
+  binding: Pick<
+    PeerLinkBindingRow,
+    'grantClass' | 'linkDeviceId' | 'environmentId' | 'peerKeyFingerprint'
+  > | null,
+  now: number
+): LinkBindingRoutingClass | null {
+  if (binding === null) {
+    return null
+  }
+  return routingClassOf(
+    binding,
+    { liveLegacyAttestation: (l, e, k, n) => liveLegacyAttestation(db, l, e, k, n) },
+    now
+  )
 }
 
 export type LinkBindingHealthResult = {

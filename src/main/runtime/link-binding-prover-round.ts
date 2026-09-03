@@ -139,7 +139,11 @@ export async function runOneRound(args: {
     if (binding?.state === 'contested' && !forced) {
       continue
     }
-    if (attempt?.nextAttemptAfter != null && attempt.nextAttemptAfter > now) {
+    // Ruling 28 Addendum 1(p): 'operator_bind' (proveNow) is licensed to bypass the backoff
+    // exclusion too — the same forced bypass already applied to the revoked and contested
+    // gates above — otherwise the round `linkBind` itself just kicked drops that very link on
+    // the floor `scheduleBindingPatch` just wrote for it (D1).
+    if (attempt?.nextAttemptAfter != null && attempt.nextAttemptAfter > now && !forced) {
       continue
     }
     linkCandidates.push({

@@ -195,3 +195,55 @@ describe('scenario 71 (P18): the claim/settle lease', () => {
     expect(reclaimedClaim?.id).toBe(id)
   })
 })
+
+// Ruling 28 Addendum 1(q)/D2/D-3: `settled_at IS NULL` in both the claim's SELECT and its
+// UPDATE — a `repair_rejected` row (state left 'queued', settled_at stamped, next_attempt_after
+// NULL — the v40 repair's fallback shape, `peer-link-binding-migration.test.ts`) sits ahead of
+// real work in `seq` order and must never be claimed.
+describe('Ruling 28 Addendum 1(q): the claim skips a settled (repair_rejected) row', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('a repair_rejected row ahead of real work in seq order is skipped and the real row is claimed', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+
+    // The v40 repair fallback's own shape (db.ts's repair for a pre-review row, which allowed a
+    // NULL payload/link_device_id — not representable against this fresh db's own NOT NULL
+    // schema, so the row here uses dummy non-null values): state left 'queued',
+    // settled_at stamped, next_attempt_after NULL — inserted directly (never through
+    // enqueueReplyOutbox) at seq 1, strictly ahead of the real row enqueued below.
+    sqlite
+      .prepare(
+        `INSERT INTO peer_reply_outbox (
+           id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
+           peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
+           payload, byte_count, state, settled_at, last_error_code, created_at
+         ) VALUES (?, 1, 'msg_repair_rejected_claim', 'link_rr_claim', 'env_rr_claim', 1, 'pfp',
+                   'pkf', 'orig_rr_claim', 'agent_rr_claim', '{}', 0, 'queued', ?,
+                   'repair_rejected', ?)`
+      )
+      .run('outbox_repair_rejected_claim', now, now)
+
+    const realId = enqueueOne(sqlite, now, 'claim-skips-repair-rejected')
+
+    const claimed = claimNextReplyOutboxItem(sqlite, now)
+    expect(claimed?.id).toBe(realId)
+    expect(claimed?.state).toBe('sending')
+
+    // The repair_rejected row is left completely alone — never claimed, ever.
+    const zombie = sqlite
+      .prepare('SELECT state, settled_at FROM peer_reply_outbox WHERE id = ?')
+      .get('outbox_repair_rejected_claim') as { state: string; settled_at: number | null }
+    expect(zombie.state).toBe('queued')
+    expect(zombie.settled_at).not.toBeNull()
+
+    // No further candidate — a second claim call finds nothing else to do.
+    expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+  })
+})

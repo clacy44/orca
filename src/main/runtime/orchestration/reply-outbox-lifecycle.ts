@@ -57,6 +57,7 @@ export function claimNextReplyOutboxItem(
     .prepare(
       `SELECT id, consecutive_failures AS consecutiveFailures FROM peer_reply_outbox a
         WHERE state = 'queued'
+          AND settled_at IS NULL
           AND (next_attempt_after IS NULL OR next_attempt_after <= ?)
           AND NOT EXISTS (
             SELECT 1 FROM peer_reply_outbox b
@@ -83,6 +84,7 @@ export function claimNextReplyOutboxItem(
             SET state = 'sending', lease_expires_at = ?, attempts = attempts + 1,
                 last_attempt_at = ?, next_attempt_after = ?
           WHERE id = ? AND state = 'queued'
+            AND settled_at IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM peer_reply_outbox b
                WHERE b.link_device_id = a.link_device_id

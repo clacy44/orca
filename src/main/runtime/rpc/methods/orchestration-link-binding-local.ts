@@ -8,7 +8,8 @@ import { defineMethod, type RpcMethod, type RpcContext } from '../core'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
   describeLinkBindingHealth,
-  resolveEnvironmentName
+  resolveEnvironmentName,
+  linkRoutingClassOf
 } from '../../orchestration/link-binding-attention'
 import {
   readEnvironmentSnapshot,
@@ -30,12 +31,16 @@ function clampWaitMs(timeoutMs: number | undefined): number {
 
 // Ruling 28(f): the design's link-status row — routes, routingClass, peerKeyFingerprint,
 // attestationExpiresAt, advisories[], environmentName (host-resolved), health word, counts.
+// Ruling 28 Addendum 1(s)/D-9: `snapshot` is hoisted by the caller (one read per call, not one
+// per link) and `routingClass` is `linkRoutingClassOf` — the same predicate `routingClassOf`
+// checks expiry and the environment/key match; this file no longer keeps a weaker, liftedAt-only
+// copy.
 function buildLinkRow(
   runtime: RpcContext['runtime'],
-  linkDeviceId: string
+  linkDeviceId: string,
+  snapshot: ReturnType<typeof readEnvironmentSnapshot>
 ): Record<string, unknown> {
   const db = runtime.getOrchestrationDb()
-  const snapshot = readEnvironmentSnapshot()
   const binding = db.getPeerLinkBinding(linkDeviceId)
   const attempt = db.getBindingAttempt(linkDeviceId)
   const health = describeLinkBindingHealth(db, runtime, linkDeviceId, snapshot)
@@ -47,14 +52,7 @@ function buildLinkRow(
       : null
   const liveAttestation =
     legacyAttestation && legacyAttestation.liftedAt === null ? legacyAttestation : null
-  const routingClass: 'minted' | 'legacy_attested' | 'legacy_unattested' | null =
-    binding === null
-      ? null
-      : binding.grantClass === 'minted'
-        ? 'minted'
-        : liveAttestation !== null
-          ? 'legacy_attested'
-          : 'legacy_unattested'
+  const routingClass = linkRoutingClassOf(db, binding, Date.now())
   return {
     linkDeviceId,
     environmentId: binding?.environmentId ?? null,
@@ -110,6 +108,12 @@ const LINK_BINDINGS_METHOD: RpcMethod = defineMethod({
   handler: async (params, ctx) => {
     requireLocalCaller(ctx)
     const { runtime } = ctx
+    // Ruling 28 Addendum 1(p)/D-6: `--wait` is only meaningful against a single named link — a
+    // wait with no `--link` waited on nothing and must never report `state: 'settled'` as though
+    // it had. Hard refusal, not a silent no-op.
+    if (params.wait && !params.link) {
+      throw new OrchestrationError('invalid_argument', '--wait requires --link <deviceId>.')
+    }
     // Ruling 28(c)/design test 61: server-side wait — only meaningful against a single named
     // link. Capped at LINK_BINDING_STATUS_WAIT_CAP_MS regardless of the caller's own
     // --timeout-ms (R22.1's ONE cap); a wait that expires is a report, never an error.
@@ -121,7 +125,10 @@ const LINK_BINDINGS_METHOD: RpcMethod = defineMethod({
       timedOut = settled === 'timeout'
     }
     const ids = params.link ? [params.link] : collectLinkIds(runtime)
-    let links = ids.map((linkDeviceId) => buildLinkRow(runtime, linkDeviceId))
+    // Ruling 27(b)/D-9: hoisted out of the .map — one environment-store read per call, not one
+    // per link.
+    const snapshot = readEnvironmentSnapshot()
+    let links = ids.map((linkDeviceId) => buildLinkRow(runtime, linkDeviceId, snapshot))
     if (params.environment !== undefined) {
       const resolvedEnvironmentId = resolveEnvironmentFilterId(params.environment)
       links = links.filter((l) => l.environmentId === resolvedEnvironmentId)

@@ -342,4 +342,56 @@ describe('orchestration-link-binding-local RPC methods', () => {
       expect(RUNTIME_PEER_RPC_METHOD_ALLOWLIST.has(method.name)).toBe(false)
     }
   })
+
+  // Ruling 28 Addendum 1(s)/D-4: `buildLinkRow`'s `routingClass` now goes through the ONE
+  // predicate (`linkRoutingClassOf`/`routingClassOf`), which checks attestation EXPIRY — the
+  // deleted local copy only checked `liftedAt`, so an expired-but-not-lifted attestation used to
+  // read `legacy_attested` even though `routes` (via `getRoutableLinkBinding`) had already gone
+  // `no`.
+  describe('Ruling 28 Addendum 1(s): routingClass is routingClassOf, expiry included', () => {
+    it('an expired attestation renders routingClass consistent with routes=no', async () => {
+      setup()
+      const linkDeviceId = 'link_expired_attestation'
+      const environmentId = 'env_expired_attestation'
+      const now = Date.now()
+      db.putPeerLinkBinding({
+        linkDeviceId,
+        environmentId,
+        boundEndpointId: 'endpoint_1',
+        boundPairingRevision: 1,
+        linkCredentialFp: 'fp_link',
+        peerCredentialFp: 'fp_peer',
+        peerKeyFingerprint: 'fp_key',
+        grantClass: 'legacy_coalesced',
+        scanCompleteness: 'complete',
+        proofProtocol: 'v1',
+        provedAt: now,
+        lastVerifiedAt: now
+      })
+      // A live-at-write-time attestation naming this exact environment+key, but its expiresAt is
+      // already in the past — `liftedAt` stays NULL (never withdrawn), so the deleted local copy
+      // (liftedAt-only) would have read this as `legacy_attested`.
+      db.putContainment({
+        subjectKind: 'link',
+        subjectId: linkDeviceId,
+        action: 'accept_legacy',
+        reasonCode: 'operator_attestation',
+        reasonText: 'test',
+        detail: JSON.stringify({ environmentId, peerKeyFingerprint: 'fp_key' }),
+        createdAt: now - 10_000,
+        expiresAt: now - 1_000
+      })
+
+      const result = (await call(
+        'orchestration.linkBindings',
+        { link: linkDeviceId },
+        { runtime }
+      )) as {
+        links: { routes: boolean; routingClass: string | null }[]
+      }
+      expect(result.links).toHaveLength(1)
+      expect(result.links[0]?.routes).toBe(false)
+      expect(result.links[0]?.routingClass).toBe('legacy_unattested')
+    })
+  })
 })
