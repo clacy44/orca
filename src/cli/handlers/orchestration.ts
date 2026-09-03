@@ -792,6 +792,8 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       connectionLost?: boolean
       waitInterrupted?: 'consumer_fenced' | 'outcome_unknown' | 'waiter_exists'
       legacyCompatibility?: LegacyCompatibilityResult
+      // F-6c (Ruling 32(b)): passed through formatOrchestrationCheckText unchanged.
+      parkedDeliveryNotice?: string
     }
     let result: Awaited<ReturnType<typeof client.call<CheckResult>>>
     try {

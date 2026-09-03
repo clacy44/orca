@@ -10,6 +10,7 @@ import type { RuntimeTerminalSummary } from '../../../../shared/runtime-types'
 import { ORCHESTRATION_ASK_MAX_TIMEOUT_MS } from '../../../../shared/orchestration-ask-timeout'
 import { ORCHESTRATION_CONTRACT_VERSION } from '../../../../shared/protocol-version'
 import { FLOATING_TERMINAL_WORKTREE_ID } from '../../../../shared/constants'
+import type Database from '../../../sqlite/sync-database'
 
 function lifecycleGroupRecipientError(type: 'worker_done' | 'heartbeat'): string {
   return `${type} messages belong to one exact Dispatch and cannot target a group address.`
@@ -3908,6 +3909,125 @@ describe('orchestration RPC methods', () => {
       await expect(
         call('orchestration.check', { run: activeRunId, remoteRunMailbox: true, wait: true })
       ).rejects.toMatchObject({ code: 'run_wait_local_only' })
+    })
+
+    // F-12 (Ruling 32 Addendum 1; field-run-10i OL-07): a peer-supplied run:/dispatch:
+    // pointer must pass the S10-20 id grammar before any lookup — refused invalid_argument,
+    // exactly one host-keyed audit row, and the wire string never echoed. Spies on the db
+    // lookups the pre-fix code ran unconditionally (getRun/getDispatchContextById/
+    // getRemoteDispatchAttachment) to prove they are never reached for a hostile id.
+    it('send refuses a hostile run: pointer before any lookup, one audit row, no echo', async () => {
+      setup()
+      ctx = {
+        runtime,
+        accessProfile: 'peer',
+        authenticatedCallerFingerprint: 'fp_peer',
+        pairedDeviceId: 'dev_peer',
+        clientKind: 'runtime'
+      }
+      const hostile = "run:'; DROP TABLE messages;--"
+      const getRunSpy = vi.spyOn(db, 'getRun')
+      const getDispatchSpy = vi.spyOn(db, 'getDispatchContextById')
+
+      let caught: { code?: string; message?: string } | undefined
+      try {
+        await call('orchestration.send', {
+          to: hostile,
+          subject: 'hi',
+          body: 'body',
+          remoteRunMailbox: true
+        })
+      } catch (error) {
+        caught = error as { code?: string; message?: string }
+      }
+
+      expect(caught?.code).toBe('invalid_argument')
+      expect(caught?.message).not.toContain('DROP TABLE')
+      expect(getRunSpy).not.toHaveBeenCalled()
+      expect(getDispatchSpy).not.toHaveBeenCalled()
+
+      const rawDb = (db as unknown as { db: Database.Database }).db
+      const auditRows = rawDb
+        .prepare(
+          "SELECT verb, outcome, reason_code, actor_host_id FROM agent_audit WHERE reason_code = 'malformed_relay_id'"
+        )
+        .all() as { verb: string; outcome: string; reason_code: string; actor_host_id: string }[]
+      expect(auditRows.length).toBe(1)
+      expect(auditRows[0].outcome).toBe('invalid_argument')
+      expect(auditRows[0].actor_host_id).toBe('fp_peer')
+    })
+
+    it('send refuses a hostile dispatch: pointer before any lookup, one audit row, no echo', async () => {
+      setup()
+      ctx = {
+        runtime,
+        accessProfile: 'peer',
+        authenticatedCallerFingerprint: 'fp_peer',
+        pairedDeviceId: 'dev_peer',
+        clientKind: 'runtime'
+      }
+      const hostile = 'dispatch:not-a-real-id'
+      const getAttachmentSpy = vi.spyOn(db, 'getRemoteDispatchAttachment')
+      const getDispatchSpy = vi.spyOn(db, 'getDispatchContextById')
+
+      let caught: { code?: string; message?: string } | undefined
+      try {
+        await call('orchestration.send', {
+          to: hostile,
+          subject: 'hi',
+          body: 'body',
+          remoteRunMailbox: true
+        })
+      } catch (error) {
+        caught = error as { code?: string; message?: string }
+      }
+
+      expect(caught?.code).toBe('invalid_argument')
+      expect(caught?.message).not.toContain('not-a-real-id')
+      expect(getAttachmentSpy).not.toHaveBeenCalled()
+      expect(getDispatchSpy).not.toHaveBeenCalled()
+
+      const rawDb = (db as unknown as { db: Database.Database }).db
+      const auditRows = rawDb
+        .prepare(
+          "SELECT verb, outcome, reason_code, actor_host_id FROM agent_audit WHERE reason_code = 'malformed_relay_id'"
+        )
+        .all() as { verb: string; outcome: string; reason_code: string; actor_host_id: string }[]
+      expect(auditRows.length).toBe(1)
+      expect(auditRows[0].outcome).toBe('invalid_argument')
+    })
+
+    it('a well-formed run: pointer from a peer is unaffected by the grammar gate (still reaches routing)', async () => {
+      setup()
+      ctx = {
+        runtime,
+        accessProfile: 'peer',
+        authenticatedCallerFingerprint: 'fp_peer',
+        pairedDeviceId: 'dev_peer',
+        clientKind: 'runtime'
+      }
+
+      await expect(
+        call('orchestration.send', {
+          to: `run:${activeRunId}`,
+          run: activeRunId,
+          subject: 'hi',
+          body: 'body',
+          remoteRunMailbox: true
+        })
+      ).resolves.not.toMatchObject({ code: 'invalid_argument' })
+    })
+
+    it('a local (non-peer) caller with a malformed run: pointer is unaffected by the grammar gate (still gets run_not_found)', async () => {
+      setup()
+
+      await expect(
+        call('orchestration.send', {
+          to: 'run:not-a-real-id',
+          subject: 'hi',
+          body: 'body'
+        })
+      ).rejects.toMatchObject({ code: 'run_not_found' })
     })
   })
 })

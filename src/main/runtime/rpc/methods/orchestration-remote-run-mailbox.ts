@@ -4,6 +4,7 @@ import type { RunRow } from '../../orchestration/types'
 import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { RpcContext } from '../core'
 import { resolveRunScope, type RunScopeParams } from './orchestration-run-scope'
+import { isHostScopedId } from '../../orchestration/orchestration-id-grammar'
 
 // Why: the Run mailbox lives in exactly one runtime's SQLite, so an agent told "there is
 // mail for you in run_X" on another runtime has no local row to read. This path lets a
@@ -103,6 +104,53 @@ export type PeerMailDestination =
   | { readonly kind: 'run'; readonly runId: string }
   | { readonly kind: 'dispatch'; readonly dispatchId: string }
   | { readonly kind: 'other' }
+
+// F-12 (Ruling 32 Addendum 1; field-run-10i OL-07): a peer-supplied run:/dispatch: pointer must
+// pass the S10-20 id grammar BEFORE any lookup. Without this, assertPeerMailDestinationAllowed's
+// own `db.getRemoteDispatchAttachment(destination.dispatchId)` below, and resolveMessageRun's
+// `db.getDispatchContextById`/`db.getRun` right after it (orchestration.ts), both ran a raw,
+// unvalidated wire string straight into a lookup and then echoed it verbatim in a
+// `dispatch_not_found`/`run_not_found` refusal — no audit row, wrong error code. Call this FIRST,
+// ahead of assertPeerMailDestinationAllowed, on the same raw destination. A non-peer caller is a
+// no-op, same boundary as assertPeerMailDestinationAllowed: a local caller's own typed id is
+// unaffected and may still be echoed on a genuine not-found, unchanged.
+export function assertPeerMailPointerGrammar(
+  db: OrchestrationDb,
+  accessProfile: 'full' | 'peer' | undefined,
+  callerFingerprint: string | undefined,
+  destination: PeerMailDestination
+): void {
+  if (accessProfile !== 'peer') {
+    return
+  }
+  const malformed =
+    (destination.kind === 'run' && !isHostScopedId(destination.runId, ['run'])) ||
+    (destination.kind === 'dispatch' && !isHostScopedId(destination.dispatchId, ['ctx']))
+  if (!malformed) {
+    return
+  }
+  // Host-keyed, never wire-keyed: exactly one audit row per refusal, the pointer's own bytes
+  // never enter it (agentId/actorPaneKey are null — no local identity is implicated).
+  db.writeAgentAudit({
+    agentId: null,
+    actorPaneKey: null,
+    actorHostId: callerFingerprint ?? null,
+    verb: 'send',
+    outcome: 'invalid_argument',
+    reasonCode: 'malformed_relay_id'
+  })
+  // Host-constant message — the wire string is never interpolated.
+  throw new OrchestrationError(
+    'invalid_argument',
+    'The relayed recipient pointer is not a valid host-minted id.',
+    {
+      effectsApplied: false,
+      nextSteps: [
+        'this indicates a version-mismatched or malformed peer relay — update Orca on the sending host'
+      ]
+    }
+  )
+}
 
 export function assertPeerMailDestinationAllowed(
   db: OrchestrationDb,

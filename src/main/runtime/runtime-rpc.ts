@@ -500,6 +500,20 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
     const params = request.params as { wait?: unknown } | undefined
     return params?.wait === true ? 'wait' : null
   }
+  // F-15 (Ruling 32 Addendum 2; field-run-10i): orchestration.wait parks on
+  // runtime.waitForMessage for up to the clamp (1_800_000ms via --timeout-ms; 120_000ms default
+  // for --for step), so without keepalive the 30s socket idle timer
+  // (unix-socket-transport.ts RUNTIME_RPC_SOCKET_IDLE_TIMEOUT_MS) destroys the connection
+  // mid-park, and without the abort signal the waiter is orphaned. Same reason as
+  // orchestration.ask above; this method was simply never added to the classifier.
+  if (request.method === 'orchestration.wait') {
+    return 'wait'
+  }
+  // F-15: orchestration.workerStart calls waitForTerminal(..., timeoutMs: params.timeoutMs ??
+  // 60_000) — up to 60s, also past the 30s socket idle wall with the identical symptom.
+  if (request.method === 'orchestration.workerStart') {
+    return 'wait'
+  }
   return null
 }
 

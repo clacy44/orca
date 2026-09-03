@@ -43,6 +43,7 @@ import {
 import { describeLinkBindingAttention } from '../../orchestration/link-binding-attention'
 import {
   assertPeerMailDestinationAllowed,
+  assertPeerMailPointerGrammar,
   assertRemoteRunMailboxCaller,
   isRemoteRunMailboxRequest,
   resolveRemoteRunMailboxScope,
@@ -457,6 +458,11 @@ function appendOmittedMessagesLine(
 // worker's own heartbeat reply is the beat that can still tell it coordinator mail is waiting.
 // Zero is omitted, not sent: the field is additive and optional, and a "0 unread" line on every
 // heartbeat would train workers to skip it.
+// F-6c (Ruling 32(b); field-run-10i): host-constant — never interpolates a pane/handle so it
+// stays the same string regardless of which mailbox or how many deliveries were parked.
+const PARKED_DELIVERY_NOTICE =
+  'Some mail addressed to you was queued for ambient delivery but your pane was not resolvable at the time; it is included below (or in your next check).'
+
 function pendingDispatchMail(
   db: OrchestrationDb,
   params: { dispatchId: string | undefined; senderPaneKey: string | null | undefined }
@@ -878,11 +884,22 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // refusal for a nonexistent dispatch byte-identical to the refusal for a foreign one — both
       // fall through assertPeerMailDestinationAllowed's single `forbidden` throw, never
       // resolveMessageRun's distinguishable `dispatch_not_found`.
+      // F-12 (Ruling 32 Addendum 1): the S10-20 id grammar gate runs BEFORE the destination
+      // check below (whose dispatch branch already does its own db lookup) and before
+      // resolveMessageRun's run:/dispatch: lookups — same raw, unvalidated destination, checked
+      // once and reused for both.
+      const rawPeerMailDestination = classifyRawPeerMailDestination(params)
+      assertPeerMailPointerGrammar(
+        db,
+        accessProfile,
+        authenticatedCallerFingerprint,
+        rawPeerMailDestination
+      )
       assertPeerMailDestinationAllowed(
         db,
         accessProfile,
         authenticatedCallerFingerprint,
-        classifyRawPeerMailDestination(params)
+        rawPeerMailDestination
       )
       const routing = resolveMessageRun(runtime, {
         from,
@@ -1663,6 +1680,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
           const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
           const address = `agent:${callerAgentRow.id}`
+          // F-6c: exactly one host-constant line, present only when this row has a parked
+          // (withheld-and-not-since-retried) ambient delivery — never per-count/per-pane text.
+          const parkedDeliveryNotice = runtime.hasParkedDelivery(address)
+            ? PARKED_DELIVERY_NOTICE
+            : undefined
           db.refreshAgentLiveness({
             id: callerAgentRow.id,
             state: 'idle',
@@ -1695,6 +1717,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               messages: visible,
               count: visible.length,
               legacyPending,
+              ...(parkedDeliveryNotice ? { parkedDeliveryNotice } : {}),
               ...(params.format || params.inject
                 ? { formatted: visible.map(formatMessageBanner).join('\n\n') }
                 : {})
@@ -1728,6 +1751,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             legacyPending: durable.legacyPending,
             acknowledged: durable.acknowledged,
             ...(durable.omitted ? { omitted: durable.omitted } : {}),
+            ...(parkedDeliveryNotice ? { parkedDeliveryNotice } : {}),
             ...(params.format || params.inject
               ? {
                   formatted: appendOmittedMessagesLine(

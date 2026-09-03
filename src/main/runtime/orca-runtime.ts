@@ -13591,7 +13591,10 @@ export class OrcaRuntimeService {
     lastAgentStatus: 'working' | 'permission' | 'idle' | null
     observedLive: boolean
   } {
-    const terminalHandle = this.getTerminalHandleForPaneKey(paneKey)
+    // F-6b (Ruling 32(b); field-run-10i): CONNECTED-only, unlike getTerminalHandleForPaneKey's
+    // permissive ladder — this feeds classifyAgentLiveness's paneResolves, so a disconnected leaf
+    // must age to `gone` on schedule rather than reading live forever.
+    const terminalHandle = this.getConnectedTerminalHandleForPaneKey(paneKey)
     const parsed = parsePaneKey(paneKey)
     const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
     return {
@@ -34251,6 +34254,22 @@ export class OrcaRuntimeService {
     return panePty ? this.issuePtyHandle(panePty) : null
   }
 
+  // F-6b (Ruling 32(b)): the first two branches only, no disconnected fallback — for callers
+  // that must not treat a dead pane as resolvable (directory liveness). The permissive ladder
+  // above stays as-is for display/read paths that legitimately want a handle for a sleeping pane.
+  private getConnectedTerminalHandleForPaneKey(paneKey: string): string | null {
+    const parsed = parsePaneKey(paneKey)
+    const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
+    if (leaf?.ptyId && leaf.connected) {
+      return this.issueHandle(leaf)
+    }
+    const panePty = this.getPtyRecordForPaneKey(paneKey)
+    if (panePty?.connected) {
+      return this.issuePtyHandle(panePty)
+    }
+    return null
+  }
+
   private getPtyRecordForPaneKey(paneKey: string): RuntimePtyWorktreeRecord | null {
     const parsed = parsePaneKey(paneKey)
     let leafPty: RuntimePtyWorktreeRecord | null = null
@@ -34968,6 +34987,13 @@ export class OrcaRuntimeService {
     this.withheldDeliveryAttemptsByHandle.set(mailboxHandle, { at: Date.now(), reason })
     console.warn('[orchestration] pointer delivery withheld', { mailboxHandle, reason })
     this.scheduleSlowMailboxRetry(mailboxHandle)
+  }
+
+  // F-6c (Ruling 32(b); field-run-10i): whether an ambient-push delivery to this mailbox was
+  // withheld and no successful retry has cleared it since — orchestration.check reads this to
+  // surface one host-constant notice on the recipient's own host (F-6's silent-degradation gap).
+  hasParkedDelivery(mailboxHandle: string): boolean {
+    return this.withheldDeliveryAttemptsByHandle.has(mailboxHandle)
   }
 
   private scheduleSlowMailboxRetry(mailboxHandle: string): void {

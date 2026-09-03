@@ -5499,6 +5499,183 @@ describe('OrcaRuntimeRpcServer', () => {
       }
     })
 
+    // F-15 (Ruling 32 Addendum 2; field-run-10i): clone of the orchestration.ask keepalive test
+    // above for orchestration.wait — before the fix, orchestration.wait was absent from
+    // longPollClassOf, so no keepalive was ever emitted and the 30s socket idle timer (not
+    // exercised directly here — see the bound-crossing test below) would tear the connection
+    // down mid-park. This test fails on the parent commit for the right reason: zero keepalive
+    // frames within the 300ms window (classification was null, so startKeepalive() never ran),
+    // not a timeout or a crash.
+    it('emits keepalive frames while orchestration.wait --for step blocks', async () => {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const paneA = 'tab_a:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const paneB = 'tab_b:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const evidenceA = { terminalHandle: 'term_a', paneKey: paneA, launchToken: 'lt-a' }
+      const evidenceB = { terminalHandle: 'term_b', paneKey: paneB, launchToken: 'lt-b' }
+      vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+        if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === paneA) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneA,
+            terminalHandle: 'term_a',
+            processIncarnation: 'proc-a',
+            launchTokenHash: 'hash-a'
+          } as never
+        }
+        if (evidence?.terminalHandle === 'term_b' && evidence.paneKey === paneB) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneB,
+            terminalHandle: 'term_b',
+            processIncarnation: 'proc-b',
+            launchTokenHash: 'hash-b'
+          } as never
+        }
+        return null
+      })
+      const server = new OrcaRuntimeRpcServer({
+        runtime,
+        userDataPath,
+        keepaliveIntervalMs: 50
+      })
+      await server.start()
+
+      try {
+        const metadata = readRuntimeMetadata(userDataPath)
+        const endpoint = metadata!.transports[0]!.endpoint
+        const authToken = metadata!.authToken
+
+        const registered = (await sendRequest(endpoint, {
+          id: 'req_register_a',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-a', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { agent: { id: string } } }
+        const agentAId = registered.result!.agent.id
+
+        const registeredB = (await sendRequest(endpoint, {
+          id: 'req_register_b',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-b', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceB
+        })) as { result?: { agent: { id: string } } }
+        const agentBId = registeredB.result!.agent.id
+
+        const createdThread = (await sendRequest(endpoint, {
+          id: 'req_thread_create',
+          authToken,
+          method: 'orchestration.threads.create',
+          params: { subject: 'F-15 keepalive', with: `agent:${agentBId}` },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { thread: { id: string } } }
+        const threadId = createdThread.result!.thread.id
+        expect(agentAId).toBeDefined()
+
+        // Why: no step is ever posted, so `wait --for step` blocks the full window on the same
+        // hold-the-socket path check --wait/ask use. Without wait in the long-poll set the 30s
+        // idle timer would tear this down before it keepalives.
+        const session = openFramedSession(endpoint, {
+          id: 'req_wait_step',
+          authToken,
+          method: 'orchestration.wait',
+          params: { threadId, for: 'step', timeoutMs: 300 },
+          orchestrationCompatibilityEvidence: evidenceA
+        })
+        await session.done
+
+        const keepalives = session.frames.filter((f) => f._keepalive === true)
+        const terminals = session.frames.filter((f) => f.ok !== undefined)
+        expect(terminals).toHaveLength(1)
+        expect(terminals[0]).toMatchObject({
+          id: 'req_wait_step',
+          ok: true,
+          result: { outcome: 'timeout' }
+        })
+        expect(keepalives.length).toBeGreaterThanOrEqual(3)
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
+    // F-15: same clone for orchestration.workerStart, which calls
+    // runtime.waitForTerminal(..., timeoutMs: params.timeoutMs ?? 60_000) — up to 60s, also past
+    // the 30s socket idle wall with the identical symptom. waitForTerminal itself is spied with a
+    // real (not instant) delay so the transport-level keepalive timer has time to fire — the
+    // point of this test is the classifier/keepalive wiring, not worker-topology business logic.
+    it('emits keepalive frames while orchestration.workerStart blocks on agent readiness', async () => {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const coordinatorPaneKey = 'tab_coord:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      vi.spyOn(runtime, 'getTerminalPaneKey').mockImplementation((handle) =>
+        handle === 'term_coord' ? coordinatorPaneKey : null
+      )
+      vi.spyOn(runtime, 'showTerminal').mockImplementation(
+        async (handle) => ({ handle, worktreeId: 'repo::worktree', status: 'running' }) as never
+      )
+      vi.spyOn(runtime, 'showManagedTerminalWorkspace').mockResolvedValue({
+        id: 'repo::worktree'
+      } as never)
+      vi.spyOn(runtime, 'isTerminalRunningAgent').mockResolvedValue(true)
+      vi.spyOn(runtime, 'waitForTerminal').mockImplementation(
+        async () =>
+          await new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  handle: 'term_worker',
+                  condition: 'tui-idle',
+                  satisfied: false,
+                  status: 'unknown',
+                  exitCode: null
+                }),
+              250
+            )
+          )
+      )
+      const run = db.createRun({
+        objective: 'F-15 workerStart keepalive',
+        coordinatorHandle: 'term_coord',
+        coordinatorPaneKey
+      })
+      const task = db.createTask({ spec: 'F-15 keepalive task', runId: run.id })
+      const server = new OrcaRuntimeRpcServer({
+        runtime,
+        userDataPath,
+        keepaliveIntervalMs: 50
+      })
+      await server.start()
+
+      try {
+        const metadata = readRuntimeMetadata(userDataPath)
+        const endpoint = metadata!.transports[0]!.endpoint
+        const authToken = metadata!.authToken
+
+        const session = openFramedSession(endpoint, {
+          id: 'req_worker_start',
+          authToken,
+          method: 'orchestration.workerStart',
+          params: { task: task.id, from: 'term_coord', terminal: 'term_worker', timeoutMs: 250 }
+        })
+        await session.done
+
+        const keepalives = session.frames.filter((f) => f._keepalive === true)
+        const terminals = session.frames.filter((f) => f.ok !== undefined)
+        expect(terminals).toHaveLength(1)
+        expect(keepalives.length).toBeGreaterThanOrEqual(3)
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
     it('emits keepalive frames while terminal.wait blocks and returns its structured timeout', async () => {
       const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
       const runtime = new OrcaRuntimeService()
@@ -7123,8 +7300,12 @@ describe('W-5..W-7 review finding 1 (Ruling 24 addendum 4(aa)): peer mail destin
           remoteRunMailbox: true,
           ...(payload ? { payload } : {})
         })
+        // F-12 (Ruling 32 Addendum 1): host-shaped but nonexistent — a garbage string is now
+        // caught earlier by the id-grammar gate (invalid_argument, not forbidden), a DIFFERENT
+        // threat category than "shaped like a real id but not owned by this link", which is what
+        // this test's byte-identical/no-oracle property is actually about.
         const nonexistentReply = await sendFrame(server, peerToken, 'orchestration.send', {
-          to: 'dispatch:disp_does_not_exist',
+          to: 'dispatch:ctx_000000000000',
           subject: 'hi',
           body: 'body',
           type,

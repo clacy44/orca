@@ -34,6 +34,12 @@ export async function sendRequest<TResult>(
     let buffer = ''
     let settled = false
     const requestId = randomUUID()
+    const startedAt = Date.now()
+    // F-15 (Ruling 32 Addendum 2): at least one keepalive frame is proof the server classified
+    // this call as a long-poll and armed it — a close after that point is the runtime dropping a
+    // call it was still holding open, never evidence the runtime is absent. See the close
+    // handler below.
+    let receivedKeepalive = false
 
     const timeout = setTimeout(() => {
       if (settled) {
@@ -80,6 +86,24 @@ export async function sendRequest<TResult>(
     // timeout fires. Reject promptly. finish() guards double-settle, so this
     // no-ops on the normal success/error paths that already called socket.end().
     socket.once('close', () => {
+      // F-15 (Ruling 32 Addendum 2; field-run-10i F-15): a long-poll call (orchestration.ask/
+      // wait/workerStart, terminal.wait, check --wait) that already received a keepalive was
+      // alive and held open by a runtime that IS running — a close here is a dropped call, not
+      // an absent runtime. Render that distinctly and never append "Orca is not running.".
+      // A call that never received one keeps the original message: it may genuinely be a dead
+      // runtime, and this preserves the pre-fix behavior the absent-runtime test asserts.
+      if (receivedKeepalive) {
+        const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
+        finish({
+          ok: false,
+          error: new RuntimeClientError(
+            'runtime_connection_closed',
+            `The runtime dropped this call after ${elapsedSeconds}s; the runtime is still running — re-arm it.`,
+            { nextSteps: ['Re-run the command.'] }
+          )
+        })
+        return
+      }
       finish({
         ok: false,
         error: new RuntimeClientError(
@@ -124,6 +148,7 @@ export async function sendRequest<TResult>(
         // major). See §7 risk #9.
         if (isKeepaliveFrame(raw)) {
           timeout.refresh()
+          receivedKeepalive = true
           newlineIndex = buffer.indexOf('\n')
           continue
         }
@@ -150,6 +175,7 @@ export async function sendRequest<TResult>(
         const frame = parsed.data
         if ('_keepalive' in frame) {
           timeout.refresh()
+          receivedKeepalive = true
           newlineIndex = buffer.indexOf('\n')
           continue
         }

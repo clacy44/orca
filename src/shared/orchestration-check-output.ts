@@ -58,6 +58,10 @@ export type OrchestrationCheckOutput = {
   // degraded). Local callers only (rpc/methods/orchestration.ts's wrap site) — absent for a
   // paired peer and for a healthy host. Printed after the message list on every return path.
   linkBindingAttention?: string
+  // F-6c (Ruling 32(b); field-run-10i): one host-constant line, present only when the caller's
+  // own row has a parked (withheld-and-not-since-retried) ambient delivery. Never per-count or
+  // per-pane text — see orca-runtime.ts's hasParkedDelivery / orchestration.ts's PARKED_DELIVERY_NOTICE.
+  parkedDeliveryNotice?: string
 }
 
 export function formatMessageReadOnlyTag(
@@ -110,39 +114,42 @@ export function formatOrchestrationCheckText(
   const attentionSuffix = prepared.linkBindingAttention
     ? `\n${escapeTerminalControlCharacters(prepared.linkBindingAttention)}`
     : ''
+  // F-6c: same additive, always-last-appended shape as attentionSuffix above — host-constant
+  // text, so no escaping is needed (nothing peer/caller-chosen is interpolated into it).
+  const parkedSuffix = prepared.parkedDeliveryNotice ? `\n${prepared.parkedDeliveryNotice}` : ''
   if (prepared.formatted) {
     // Why prepended here too: --format and --inject return before the Delivery line is built, so
     // without this the injected banner is byte-identical on every replay and the starvation stays
     // invisible in the one mode that writes into a pane. An untagged batch renders as it did.
     const deliveryLine = deliveryTag ? `Delivery ${prepared.deliveryId}${deliveryTag}\n` : ''
-    return `${legacyHeader}${deliveryLine}${prepared.formatted}${deliveryNotice}${attentionSuffix}`
+    return `${legacyHeader}${deliveryLine}${prepared.formatted}${deliveryNotice}${attentionSuffix}${parkedSuffix}`
   }
   if (prepared.count === 0) {
     if (prepared.timedOut) {
-      return `${legacyHeader}Wait timed out; no messages were consumed.${deliveryNotice}${attentionSuffix}`
+      return `${legacyHeader}Wait timed out; no messages were consumed.${deliveryNotice}${attentionSuffix}${parkedSuffix}`
     }
     if (prepared.cancelled) {
       const cancelled = prepared.connectionLost
         ? 'Wait cancelled because the connection closed; no messages were consumed.'
         : 'Wait cancelled; no messages were consumed.'
-      return `${legacyHeader}${cancelled}${deliveryNotice}${attentionSuffix}`
+      return `${legacyHeader}${cancelled}${deliveryNotice}${attentionSuffix}${parkedSuffix}`
     }
     // Why before the fallback: an interrupted acknowledged wait is success-shaped with count 0,
     // so without this it reads as an empty mailbox and the coordinator keeps looping on a Run
     // it no longer owns.
     if (prepared.waitInterrupted === 'consumer_fenced') {
-      return `${legacyHeader}Wait ended: this mailbox consumer was replaced. Rebind with: orca orchestration run-use --id ${prepared.runId ?? '<runId>'}${deliveryNotice}${attentionSuffix}`
+      return `${legacyHeader}Wait ended: this mailbox consumer was replaced. Rebind with: orca orchestration run-use --id ${prepared.runId ?? '<runId>'}${deliveryNotice}${attentionSuffix}${parkedSuffix}`
     }
     if (prepared.waitInterrupted === 'waiter_exists') {
-      return `${legacyHeader}Wait ended: another actionable waiter already owns this Run's mailbox; only one can block on it at a time.${deliveryNotice}${attentionSuffix}`
+      return `${legacyHeader}Wait ended: another actionable waiter already owns this Run's mailbox; only one can block on it at a time.${deliveryNotice}${attentionSuffix}${parkedSuffix}`
     }
     // Why its own branch: this value is the stored receipt a retried request replays, so reading
     // it as an empty mailbox tells the coordinator nothing arrived on a call whose --ack already
     // consumed a batch.
     if (prepared.waitInterrupted === 'outcome_unknown') {
-      return `${legacyHeader}Wait ended: this check acknowledged its Delivery but the wait's outcome is unknown. Re-run check to see the current mailbox.${deliveryNotice}${attentionSuffix}`
+      return `${legacyHeader}Wait ended: this check acknowledged its Delivery but the wait's outcome is unknown. Re-run check to see the current mailbox.${deliveryNotice}${attentionSuffix}${parkedSuffix}`
     }
-    return `${legacyHeader}No messages.${deliveryNotice}${attentionSuffix}`
+    return `${legacyHeader}No messages.${deliveryNotice}${attentionSuffix}${parkedSuffix}`
   }
   const rendered = prepared.messages
     .map(
@@ -156,7 +163,7 @@ export function formatOrchestrationCheckText(
   const output = prepared.deliveryId
     ? `Delivery ${prepared.deliveryId}${deliveryTag}\n${rendered}`
     : rendered
-  return `${legacyHeader}${output}${deliveryNotice}${attentionSuffix}`
+  return `${legacyHeader}${output}${deliveryNotice}${attentionSuffix}${parkedSuffix}`
 }
 
 export function prepareOrchestrationCheckOutput<T extends OrchestrationCheckOutput>(

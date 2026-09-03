@@ -136,4 +136,68 @@ describe.skipIf(process.platform === 'win32')('runtime transport', () => {
     })
     expect(Date.now() - start).toBeLessThan(5000)
   })
+
+  // F-15 (Ruling 32 Addendum 2; field-run-10i): a long-poll call the server already armed (at
+  // least one keepalive frame received) that then has its socket closed by the server was ALIVE
+  // and dropped, never evidence of an absent runtime. Distinct code, distinct message, and the
+  // dropped-call message never appends "Orca is not running." (that append lives in
+  // src/cli/format.ts, gated on the OLD code).
+  it('reports a dropped call, not an absent runtime, when a long-poll socket closes after a keepalive', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-transport-'))
+    const endpoint = join(userDataPath, 'runtime.sock')
+    const server = createServer((socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      socket.once('data', () => {
+        socket.write(`${JSON.stringify({ _keepalive: true })}\n`)
+        // Drop the connection without a terminal frame, as a runtime restart mid-park would.
+        socket.end()
+      })
+    })
+    servers.add(server)
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve))
+
+    const metadata: RuntimeMetadata = {
+      runtimeId: 'runtime-1',
+      pid: 123,
+      transports: [{ kind: 'unix', endpoint }],
+      authToken: 'token',
+      startedAt: 1
+    }
+
+    await expect(
+      sendRequest(metadata, 'orchestration.wait', undefined, 60000)
+    ).rejects.toMatchObject({
+      code: 'runtime_connection_closed',
+      message: expect.stringMatching(/dropped this call after \d+s.*runtime is still running/i)
+    })
+  })
+
+  it('still reports the absent-runtime message when no keepalive was ever received', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-transport-'))
+    const endpoint = join(userDataPath, 'runtime.sock')
+    const server = createServer((socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      socket.once('data', () => socket.end())
+    })
+    servers.add(server)
+    await new Promise<void>((resolve) => server.listen(endpoint, resolve))
+
+    const metadata: RuntimeMetadata = {
+      runtimeId: 'runtime-1',
+      pid: 123,
+      transports: [{ kind: 'unix', endpoint }],
+      authToken: 'token',
+      startedAt: 1
+    }
+
+    await expect(
+      sendRequest(metadata, 'orchestration.wait', undefined, 60000)
+    ).rejects.toMatchObject({
+      code: 'runtime_unavailable',
+      message:
+        'The Orca runtime closed the connection before responding. Restart Orca and try again.'
+    })
+  })
 })

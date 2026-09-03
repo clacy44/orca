@@ -272,4 +272,34 @@ describe('formatOrchestrationCheckText: linkBindingAttention on all eight return
     expect(rendered).not.toContain('\x01')
     expect(rendered).toContain('\\x01')
   })
+
+  // F-6c (Ruling 32(b); field-run-10i): same all-eight-paths, additive/absent proof for the
+  // parked-delivery notice — exactly one host-constant line when set, none when unset.
+  for (const [name, base] of Object.entries(bases)) {
+    it(`parkedDeliveryNotice on "${name}": additive when set, absent when unset`, () => {
+      const notice =
+        'Some mail addressed to you was queued for ambient delivery but your pane was not resolvable at the time; it is included below (or in your next check).'
+      const without = formatOrchestrationCheckText(base, 'term_coord')
+      const withNotice = formatOrchestrationCheckText(
+        { ...base, parkedDeliveryNotice: notice },
+        'term_coord'
+      )
+
+      expect(without).not.toContain('queued for ambient delivery')
+      expect(withNotice).toBe(`${without}\n${notice}`)
+    })
+  }
+
+  it('parkedDeliveryNotice composes after linkBindingAttention when both are present', () => {
+    const rendered = formatOrchestrationCheckText(
+      {
+        messages: [],
+        count: 0,
+        linkBindingAttention: attentionLine,
+        parkedDeliveryNotice: 'parked notice text'
+      },
+      'term_coord'
+    )
+    expect(rendered).toBe(`No messages.\n${attentionLine}\nparked notice text`)
+  })
 })

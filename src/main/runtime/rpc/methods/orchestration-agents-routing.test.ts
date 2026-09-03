@@ -525,4 +525,48 @@ describe('agent: routing + durability', () => {
       ?.nextSteps
     expect(nextSteps).toContain('orca agents list')
   })
+
+  // F-6c (Ruling 32(b); field-run-10i): exactly one host-constant line on
+  // orchestration.check when the caller's own agent: mailbox has a parked delivery, and none
+  // otherwise — proves the RPC-level wiring (runtime.hasParkedDelivery -> parkedDeliveryNotice),
+  // not just the formatter (covered separately in orchestration-check-output.test.ts).
+  it('F-6c: check carries parkedDeliveryNotice when the caller has a parked delivery', async () => {
+    setup()
+    vi.spyOn(runtime, 'hasParkedDelivery').mockImplementation(
+      (handle) => handle === `agent:${agentBId}`
+    )
+
+    const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
+      parkedDeliveryNotice?: string
+    }
+
+    expect(checked.parkedDeliveryNotice).toBeTruthy()
+    expect(typeof checked.parkedDeliveryNotice).toBe('string')
+  })
+
+  it('F-6c: check omits parkedDeliveryNotice when there is no parked delivery', async () => {
+    setup()
+    vi.spyOn(runtime, 'hasParkedDelivery').mockReturnValue(false)
+
+    const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
+      parkedDeliveryNotice?: string
+    }
+
+    expect(checked.parkedDeliveryNotice).toBeUndefined()
+  })
+
+  it('F-6c: the notice is host-constant — identical text regardless of which agent asks', async () => {
+    setup()
+    vi.spyOn(runtime, 'hasParkedDelivery').mockReturnValue(true)
+
+    const first = (await call('orchestration.check', { terminal: 'term_b' })) as {
+      parkedDeliveryNotice?: string
+    }
+    const second = (await call('orchestration.check', { terminal: 'term_b', peek: true })) as {
+      parkedDeliveryNotice?: string
+    }
+
+    expect(first.parkedDeliveryNotice).toBe(second.parkedDeliveryNotice)
+    expect(first.parkedDeliveryNotice).not.toContain(agentBId)
+  })
 })
