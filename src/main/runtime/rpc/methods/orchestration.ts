@@ -2157,15 +2157,25 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // R16 (v6, lifecycle M6): commit against the last proven binding row, never dial —
         // enqueueForeignReply is a durable intent, gated by the live routability predicate on
         // every pump attempt, never on this refusal path.
-        const foreignReplyAttestedCaller =
-          orchestrationCompatibilityCallerAuthority?.terminalHandle === original.to_handle
-            ? orchestrationCompatibilityCallerAuthority
+        // F-8 fix (H2, Ruling 32a): original.to_handle is `agent:<id>` for every foreign-origin
+        // row, never a terminal handle — orchestrationCompatibilityCallerAuthority.terminalHandle
+        // can never equal it. Resolve the replying caller's directory identity the way the
+        // sibling peer-ASK-reply branch does (~1993-2023: verifyOrchestrationCompatibilityCaller
+        // -> getAgentByPaneKey) and compare against the addressee's directory id instead.
+        const foreignReplyAttested = runtime.verifyOrchestrationCompatibilityCaller(
+          orchestrationCompatibilityEvidence,
+          { currentRuntimeLaunchSufficient: true }
+        )
+        const foreignReplyCallerAgent = foreignReplyAttested
+          ? db.getAgentByPaneKey(replyHostId, foreignReplyAttested.paneKey)
+          : undefined
+        // R16.2(2)/Ruling 1 class B: the ADDRESSEE replies as itself; anyone else (or an
+        // unregistered pane) still replies, unattributed, exactly as a plain send with no
+        // registered caller does.
+        const foreignReplySenderPaneKey =
+          foreignReplyCallerAgent && `agent:${foreignReplyCallerAgent.id}` === original.to_handle
+            ? foreignReplyAttested?.paneKey
             : undefined
-        const foreignReplySenderPaneKey = foreignReplyAttestedCaller
-          ? foreignReplyAttestedCaller.paneKey
-          : orchestrationCompatibilityCallerAuthority
-            ? undefined
-            : (runtime.getTerminalPaneKey(original.to_handle) ?? undefined)
         if (db.isPeerLinkQuarantined(original.peer_link_device_id)) {
           db.writeAgentAudit({
             agentId: null,

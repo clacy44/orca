@@ -263,6 +263,41 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
     })
   })
 
+  it('reason: no-launch-token — F-6a (H2, Ruling 32a): endpoint file present, no launch token in evidence', async () => {
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-client-reattest-r4-'))
+    await startAlwaysRefusingRpcServer(userDataPath)
+    process.env.ORCA_TERMINAL_HANDLE = 'term-1'
+    process.env.ORCA_PANE_KEY = 'tab-1:11111111-1111-4111-8111-111111111111'
+    // Why: no ORCA_AGENT_LAUNCH_TOKEN — this pane was never launched as an Orca agent pane
+    // (e.g. `orca terminal create`), so evidence.launchToken is absent even though the
+    // endpoint file below is present, current and readable.
+    const endpointPath = join(userDataPath, 'endpoint.env')
+    writeFileSync(
+      endpointPath,
+      [
+        'ORCA_AGENT_HOOK_PORT=1',
+        'ORCA_AGENT_HOOK_TOKEN=hook-token',
+        'ORCA_AGENT_HOOK_ENV=production',
+        'ORCA_AGENT_HOOK_VERSION=1',
+        ''
+      ].join('\n'),
+      'utf8'
+    )
+    process.env.ORCA_AGENT_HOOK_ENDPOINT = endpointPath
+
+    const client = new RuntimeClient(userDataPath, 2_000)
+    await expect(
+      client.call('orchestration.agents.register', { name: 'foo' })
+    ).rejects.toMatchObject({
+      code: 'no_pane_identity',
+      data: {
+        nextSteps: [
+          "this pane was not launched as an Orca agent pane (no launch token), so re-attesting cannot fix it and the state is not recoverable in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
+        ]
+      }
+    })
+  })
+
   async function startStubReattestServer(userDataPath: string, status: number): Promise<void> {
     const httpServer = createHttpServer((req, res) => {
       req.on('data', () => {})
@@ -335,7 +370,7 @@ describe.skipIf(process.platform === 'win32')('RuntimeClient reattest S10-6 (R4)
       code: 'no_pane_identity',
       data: {
         nextSteps: [
-          're-attestation was accepted but this pane still has no attested identity; relaunch this agent in a fresh Orca pane (claude --resume keeps its context)'
+          "re-attestation was accepted but this pane still has no attested identity, and that cannot be fixed in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
         ]
       }
     })

@@ -60,7 +60,7 @@ describe('attemptOrchestrationReattest', () => {
     })
   })
 
-  it('reports no-endpoint-file when evidence has no launchToken (S10-6 R1 deviation)', async () => {
+  it('reports no-launch-token when the endpoint file is present but evidence has no launchToken (F-6a, H2, Ruling 32a)', async () => {
     dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
     const endpointPath = join(dir, 'endpoint.env')
     writeFileSync(endpointPath, endpointBody(1, 'x'), 'utf8')
@@ -68,9 +68,12 @@ describe('attemptOrchestrationReattest', () => {
     // Why: launchToken is the one field this module refuses to source from the endpoint file
     // (see the DEVIATION comment on attemptOrchestrationReattest) — without it in evidence,
     // there is no genuine per-pane secret to present, so reattest never even reaches the file.
+    // F-6a: the endpoint file being present and readable is a DIFFERENT precondition from
+    // holding a launch token — this pane was simply never launched as an Orca agent pane, so
+    // the reason must be 'no-launch-token', not the misdiagnosing 'no-endpoint-file'.
     await expect(
       attemptOrchestrationReattest({ terminalHandle: 'term-1', paneKey: EVIDENCE.paneKey })
-    ).resolves.toEqual({ ok: false, reason: 'no-endpoint-file' })
+    ).resolves.toEqual({ ok: false, reason: 'no-launch-token' })
   })
 
   it('reports ok:true when the runtime accepts the reattest (204)', async () => {

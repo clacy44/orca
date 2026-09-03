@@ -345,13 +345,143 @@ describe('S10-16 C5: durable reply relay (two-runtime harness)', () => {
 
     appState.userData = hDataPath
     const replyOnA = raw(hDb)
-      .prepare('SELECT thread_id FROM messages WHERE to_handle = ?')
-      .get(`agent:${askerId}`) as { thread_id: string | null } | undefined
+      .prepare('SELECT thread_id, from_handle, peer_agent_id FROM messages WHERE to_handle = ?')
+      .get(`agent:${askerId}`) as
+      | { thread_id: string | null; from_handle: string; peer_agent_id: string | null }
+      | undefined
     expect(replyOnA?.thread_id).toBeTruthy()
+    // F-8 (H2, Ruling 32a): the replying caller (P's answerer, attested as PANE_B/term_b) must
+    // ride the wire as fromAgent so A's importer verifies it — not the pre-fix
+    // `remote:<link>:unverified` with peer_agent_id NULL.
+    expect(replyOnA?.from_handle).toBe(`remote:${hLinkDeviceId}:${answererId}`)
+    expect(replyOnA?.peer_agent_id).toBe(answererId)
     const backfilledOriginal = raw(hDb)
       .prepare('SELECT thread_id FROM messages WHERE id = ?')
       .get(outboundId) as { thread_id: string | null }
     expect(backfilledOriginal.thread_id).toBe(replyOnA?.thread_id)
+
+    // F-8 reply-to-reply: A now replies to the relayed reply — must queue (not
+    // no_return_route) and settle delivered, landing on P's SAME thread.
+    appState.userData = hDataPath
+    const replyOnARow = raw(hDb)
+      .prepare('SELECT id FROM messages WHERE to_handle = ?')
+      .get(`agent:${askerId}`) as { id: string }
+    const replyToReply = (await call(
+      'orchestration.reply',
+      { id: replyOnARow.id, body: 'thanks P, following up' },
+      {
+        runtime: hRuntime,
+        orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A }
+      }
+    )) as { relay: { state: string; outboxId: string } }
+    expect(replyToReply.relay.state).toBe('queued')
+
+    appState.userData = hDataPath
+    hRuntime.replyOutbox?.kick(hLinkDeviceId)
+    let replyToReplySettled: ReturnType<typeof hDb.getReplyOutboxItem> = null
+    for (let i = 0; i < 40; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      replyToReplySettled = hDb.getReplyOutboxItem(replyToReply.relay.outboxId)
+      if (replyToReplySettled?.state === 'delivered') {
+        break
+      }
+    }
+    expect({
+      state: replyToReplySettled?.state,
+      code: replyToReplySettled?.lastErrorCode,
+      err: replyToReplySettled?.lastError
+    }).toEqual({ state: 'delivered', code: null, err: null })
+
+    appState.userData = pDataPath
+    const replyToReplyOnP = raw(pDb)
+      .prepare('SELECT thread_id FROM messages WHERE to_handle = ?')
+      .get(`agent:${answererId}`) as { thread_id: string | null } | undefined
+    const answererOriginalRow = raw(pDb)
+      .prepare('SELECT thread_id FROM messages WHERE id = ?')
+      .get(outboundId) as { thread_id: string | null }
+    expect(replyToReplyOnP?.thread_id).toBeTruthy()
+    expect(replyToReplyOnP?.thread_id).toBe(answererOriginalRow.thread_id)
+  }, 15000)
+
+  it('test 59b: a caller attested as a pane that is NOT the reply row addressee still gets fromAgent omitted (Ruling 1 class B, no impersonation)', async () => {
+    appState.userData = hDataPath
+    const askerId = await registerAgent(hRuntime, 'asker', {
+      terminalHandle: 'term_a',
+      paneKey: PANE_A
+    })
+
+    appState.userData = pDataPath
+    const answererId = await registerAgent(pRuntime, 'answerer', {
+      terminalHandle: 'term_b',
+      paneKey: PANE_B
+    })
+    // A second, unrelated registered agent on P, attested as its own pane — NOT the addressee
+    // of the reply row below.
+    const bystanderId = await registerAgent(pRuntime, 'bystander', {
+      terminalHandle: 'term_a',
+      paneKey: PANE_A
+    })
+
+    appState.userData = hDataPath
+    const outboundId = 'msg_bb5714cabcde'
+    hDb.insertGatedMessage({
+      id: outboundId,
+      from: `agent:${askerId}`,
+      to: `remote:${hEnvironmentIdForP}:${answererId}`,
+      subject: 'hello',
+      body: 'hello P',
+      runId: 'run_local_test',
+      verb: 'send',
+      peerAgentId: answererId,
+      threadId: null
+    })
+
+    appState.userData = pDataPath
+    await call(
+      'orchestration.federatedSend',
+      {
+        fromAgent: { id: askerId, displayName: 'home-asker' },
+        toAgentId: answererId,
+        messageId: outboundId,
+        subject: 'hello',
+        body: 'hello P'
+      },
+      pLinkCtx()
+    )
+
+    // Reply is issued as the bystander pane (term_a/PANE_A), attested, registered — but not
+    // the row's addressee (answererId). fromAgent must be omitted; the receiver stamps
+    // unverified, exactly as an unregistered pane would.
+    appState.userData = pDataPath
+    const reply = (await call(
+      'orchestration.reply',
+      { id: outboundId, body: 'not actually the addressee' },
+      {
+        runtime: pRuntime,
+        orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A }
+      }
+    )) as { relay: { state: string; outboxId: string } }
+    expect(reply.relay.state).toBe('queued')
+    void bystanderId
+
+    appState.userData = pDataPath
+    pRuntime.replyOutbox?.kick(pLinkDeviceId)
+    let settled: ReturnType<typeof pDb.getReplyOutboxItem> = null
+    for (let i = 0; i < 40; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      settled = pDb.getReplyOutboxItem(reply.relay.outboxId)
+      if (settled?.state === 'delivered') {
+        break
+      }
+    }
+    expect(settled?.state).toBe('delivered')
+
+    appState.userData = hDataPath
+    const replyOnA = raw(hDb)
+      .prepare('SELECT from_handle, peer_agent_id FROM messages WHERE to_handle = ?')
+      .get(`agent:${askerId}`) as { from_handle: string; peer_agent_id: string | null } | undefined
+    expect(replyOnA?.from_handle).toBe(`remote:${hLinkDeviceId}:unverified`)
+    expect(replyOnA?.peer_agent_id).toBeNull()
   }, 15000)
 
   it('test 41: a reply on a sensitive thread refuses sensitive_thread_no_federation before any outbox row', async () => {

@@ -1868,6 +1868,9 @@ type RuntimePtyController = {
     wslDistro?: string
     stablePaneOwner?: { handle: string; tabId: string; leafId: string }
     agentSessionEnsure?: AgentSessionClaimedSpawnResult
+    /** F-6d (H2, Ruling 32a): true only when a real spawn happened and its env
+     *  carried ORCA_AGENT_LAUNCH_TOKEN — see pty-spawn-result.ts. */
+    launchTokenDelivered?: boolean
   }>
   write(ptyId: string, data: string): boolean
   /** Attach-only adoption of a live local daemon session so its output streams
@@ -28034,8 +28037,11 @@ export class OrcaRuntimeService {
             // token is in the env" — it can equally mean a daemon-survived pane resumed as
             // 'adopted' after a runtime restart (providerResult null, pty.ts:5054-5060) and
             // still holding its genuine persisted anchor. Skip the write unconditionally for
-            // any resume-adopt so that anchor is never overwritten with an undeliverable token.
-            if (!resumedLiveAgentSession) {
+            // any resume-adopt so that anchor is never overwritten with an undeliverable token —
+            // UNLESS pty.ts proves (result.launchTokenDelivered) that a real spawn ran and the
+            // token genuinely reached the process env: that pane can never attest otherwise
+            // (F-6d, H2, Ruling 32a — the residual corner Ruling 11(d)/S10-17 left open).
+            if (!resumedLiveAgentSession || result.launchTokenDelivered === true) {
               pty.launchToken = launchToken ?? null
               pty.launchIncarnationId = launchToken ? pty.incarnationId : null
               pty.launchAgent = launchOpts.launchAgent ?? null
@@ -28072,6 +28078,14 @@ export class OrcaRuntimeService {
                   )
                 }
               }
+            } else if (launchToken) {
+              // F-6d (H2, Ruling 32a): a resume-adopt that did NOT prove delivery still had a
+              // token minted for it above — loud degradation instead of a silent, permanently
+              // unattestable pane (doctrine: "prefer loud degradation").
+              console.warn(
+                '[runtime] createTerminal: launch token minted but not recorded for resume-adopted pane',
+                { paneKey }
+              )
             }
           }
           pty.tabId = tabId

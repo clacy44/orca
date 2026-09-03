@@ -65,8 +65,8 @@ function readHookEndpointCoordinates(endpointPath: string): HookEndpointCoordina
   }
 }
 
-// S10-6 (R4): 'no-endpoint-file' and 'stale-endpoint-token' are the two reasons
-// attemptOrchestrationReattest can determine for itself below — one without a round trip, one
+// S10-6 (R4): 'no-endpoint-file', 'no-launch-token' and 'stale-endpoint-token' are the reasons
+// attemptOrchestrationReattest can determine for itself below — two without a round trip, one
 // from an unambiguous 403 (the header token it has is not this generation's, regardless of
 // whose pane it's for). 'still-unattested-after-reattest' is NOT produced here:
 // handleReattestRequest returns the identical 204 for a genuine success and for a
@@ -80,8 +80,14 @@ function readHookEndpointCoordinates(endpointPath: string): HookEndpointCoordina
 // 'accept' (genuinely not admitted) is only one; the others (no hydrated commitment for the
 // pane, a live-recheck conjunct failing, attestation ambiguity) all mean the pane IS admitted.
 // This client-inferred case can only ever tell that reattest didn't help, never why — so its
-// name and message are cause-neutral now; only 'no-endpoint-file'/'stale-endpoint-token' assert
-// a specific cause, because those two really are determined unambiguously above.
+// name and message are cause-neutral now; only 'no-endpoint-file'/'no-launch-token'/
+// 'stale-endpoint-token' assert a specific cause, because those really are determined
+// unambiguously above.
+//
+// F-6a (H2, Ruling 32a): 'no-launch-token' split out of what used to be a single
+// 'no-endpoint-file' reason (see attemptOrchestrationReattest below) — a pane with a current,
+// readable endpoint file but no ORCA_AGENT_LAUNCH_TOKEN in its own env was never launched as
+// an Orca agent pane and, per Ruling 12 (E1), never will attest: re-attesting cannot fix it.
 //
 // A 404 (older runtime, no /reattest route) and other outcomes (429 rate-limited,
 // network/timeout, malformed shape) intentionally produce no reason: client.ts leaves the
@@ -89,6 +95,7 @@ function readHookEndpointCoordinates(endpointPath: string): HookEndpointCoordina
 // the command" is still reasonably accurate advice for them.
 export type OrchestrationReattestFailureReason =
   | 'no-endpoint-file'
+  | 'no-launch-token'
   | 'stale-endpoint-token'
   | 'still-unattested-after-reattest'
 
@@ -99,8 +106,16 @@ export type OrchestrationReattestOutcome =
       reason?: Exclude<OrchestrationReattestFailureReason, 'still-unattested-after-reattest'>
     }
 
+// F-6a/F-6d (H2, Ruling 32a): both a pane that never had a token ('no-launch-token') and a pane
+// whose token was minted but never recorded by the runtime (the cause-neutral case below, which
+// covers that corner among others) share the same remedy and the same unrecoverable-in-place
+// fact — say both plainly, and name an Orca AGENT pane specifically: `orca terminal create`
+// mints no token and reproduces the identical failure.
+const AGENT_PANE_UNRECOVERABLE_NEXT_STEP =
+  "this pane was not launched as an Orca agent pane (no launch token), so re-attesting cannot fix it and the state is not recoverable in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
+
 const CAUSE_NEUTRAL_NEXT_STEP =
-  're-attestation was accepted but this pane still has no attested identity; relaunch this agent in a fresh Orca pane (claude --resume keeps its context)'
+  "re-attestation was accepted but this pane still has no attested identity, and that cannot be fixed in place; close this pane's tab and open a new Orca AGENT pane (the app launcher, or `orca worktree create --agent claude`) — never `orca terminal create`, which mints no token — then `claude --resume <session>` there"
 
 /** S10-6 (R4): swap in the accurate first nextStep — the server's canned
  *  `NO_PANE_IDENTITY_NEXT_STEPS[0]` ("re-run the command — the CLI re-attests this pane
@@ -123,13 +138,16 @@ export function withReattestFailureNextStep(
     return response
   }
   const nextSteps = (data as { nextSteps: unknown[] }).nextSteps
-  // Why: only 'no-endpoint-file'/'stale-endpoint-token' are a specific, client-determined cause
-  // — state them. 'still-unattested-after-reattest' is inferred, not determined (see the Why
-  // above the type), so its sentence never claims a specific cause.
+  // Why: only 'no-endpoint-file'/'no-launch-token'/'stale-endpoint-token' are a specific,
+  // client-determined cause — state them. 'still-unattested-after-reattest' is inferred, not
+  // determined (see the Why above the type), so its sentence never claims a specific cause —
+  // but 'no-launch-token' and the cause-neutral case share the same AGENT-pane remedy text.
   const nextStep =
     reason === 'still-unattested-after-reattest'
       ? CAUSE_NEUTRAL_NEXT_STEP
-      : `this pane cannot re-attest (reason: ${reason}); relaunch this agent in a fresh Orca pane (claude --resume keeps its context)`
+      : reason === 'no-launch-token'
+        ? AGENT_PANE_UNRECOVERABLE_NEXT_STEP
+        : `this pane cannot re-attest (reason: ${reason}); relaunch this agent in a fresh Orca pane (claude --resume keeps its context)`
   return {
     ...response,
     error: {
@@ -175,8 +193,15 @@ export async function attemptOrchestrationReattest(
   evidence: OrchestrationCompatibilityEvidence | undefined
 ): Promise<OrchestrationReattestOutcome> {
   const endpointPath = process.env.ORCA_AGENT_HOOK_ENDPOINT
-  if (!endpointPath || !evidence?.launchToken) {
+  if (!endpointPath) {
     return { ok: false, reason: 'no-endpoint-file' }
+  }
+  // F-6a (H2, Ruling 32a): the endpoint file and the launch token are two unrelated
+  // preconditions that used to share one reason string — a pane with a current, readable
+  // endpoint file but genuinely no launch token (never launched as an Orca agent pane, and
+  // never will be — Ruling 12 E1) was misdiagnosed as "no endpoint file", which is false.
+  if (!evidence?.launchToken) {
+    return { ok: false, reason: 'no-launch-token' }
   }
   const coordinates = readHookEndpointCoordinates(endpointPath)
   if (!coordinates) {
