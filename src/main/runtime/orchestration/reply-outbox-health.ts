@@ -185,7 +185,7 @@ const REPLY_RELAY_LINK_HEALTH_RANK: Record<ReplyRelayLinkHealthWord, number> = {
 export function describeReplyRelayLinkHealth(
   rows: readonly Pick<
     ReplyOutboxRow,
-    'state' | 'consecutiveFailures' | 'lastErrorCode' | 'createdAt'
+    'state' | 'consecutiveFailures' | 'lastErrorCode' | 'createdAt' | 'settledAt'
   >[],
   now: number
 ): ReplyRelayLinkHealthWord | null {
@@ -204,7 +204,12 @@ export function describeReplyRelayLinkHealth(
     if (!live && !terminal) {
       continue
     }
-    if (terminal && now - row.createdAt >= LINK_BINDING_REVERIFY_MS) {
+    // Ruling 27 Addendum 1(i): the terminal attention window anchors on settled_at (written on
+    // every settle, reply-outbox-lifecycle.ts), falling back to created_at when null (a row from
+    // a schema/back-compat path that never wrote settled_at). An ordinary seven-day abandonment
+    // (REPLY_OUTBOX_MAX_AGE_MS) is now visible for LINK_BINDING_REVERIFY_MS AFTER it settles,
+    // not after it was created (s10-16-review-C6a.md C6a-3).
+    if (terminal && now - (row.settledAt ?? row.createdAt) >= LINK_BINDING_REVERIFY_MS) {
       continue
     }
     if (live && row.consecutiveFailures >= REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD) {

@@ -17,6 +17,7 @@ type Row = {
   consecutiveFailures: number
   lastErrorCode: string | null
   createdAt: number
+  settledAt: number | null
 }
 
 const row = (r: Partial<Row>): Row => ({
@@ -24,6 +25,7 @@ const row = (r: Partial<Row>): Row => ({
   consecutiveFailures: 0,
   lastErrorCode: null,
   createdAt: NOW,
+  settledAt: null,
   ...r
 })
 
@@ -149,6 +151,43 @@ describe('describeReplyRelayLinkHealth', () => {
         NOW
       )
     ).toBe('unsupported')
+  })
+
+  // Ruling 27 Addendum 1(i)/C6a-3: the terminal window anchors on settled_at, falling back to
+  // created_at when null. A row created long before REPLY_OUTBOX_MAX_AGE_MS (the pump's own
+  // 7-day abandon threshold — reply-outbox-pump.ts) but settled recently is still ON the line.
+  it('an abandoned row created long ago but settled recently is on the line (settled_at anchor)', () => {
+    expect(
+      describeReplyRelayLinkHealth(
+        [
+          row({
+            state: 'abandoned',
+            lastErrorCode: 'capability_unsupported',
+            createdAt: NOW - 30 * 24 * 60 * 60 * 1000,
+            settledAt: NOW - LINK_BINDING_REVERIFY_MS + 1000
+          })
+        ],
+        NOW
+      )
+    ).toBe('unsupported')
+  })
+
+  // ...and OFF the line once LINK_BINDING_REVERIFY_MS has elapsed since settled_at, even though
+  // it settled recently in absolute terms relative to created_at.
+  it('an abandoned row is off the line once LINK_BINDING_REVERIFY_MS has passed since it settled', () => {
+    expect(
+      describeReplyRelayLinkHealth(
+        [
+          row({
+            state: 'abandoned',
+            lastErrorCode: 'capability_unsupported',
+            createdAt: NOW - 1000,
+            settledAt: NOW - LINK_BINDING_REVERIFY_MS - 1000
+          })
+        ],
+        NOW
+      )
+    ).toBeNull()
   })
 
   it('across many rows on one link, unreachable outranks unsupported outranks stale (A4-02 order)', () => {

@@ -17,7 +17,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
 import { describeLinkBindingHealth, describeLinkBindingAttention } from './link-binding-attention'
-import { LINK_BINDING_REVERIFY_MS, LINK_BINDING_ATTEST_WARN_MS } from './link-binding-constants'
+import * as linkBindingRoutable from './link-binding-routable'
+import {
+  LINK_BINDING_REVERIFY_MS,
+  LINK_BINDING_ATTEST_WARN_MS,
+  LINK_BINDING_STATES,
+  LINK_BINDING_LAST_OUTCOMES
+} from './link-binding-constants'
+import { LINK_BINDING_HEALTH_PRECEDENCE } from '../../../shared/link-binding-health'
 import type { LinkBindingSelfView } from '../device-registry-link-credential'
 
 function workingSelfView(): LinkBindingSelfView {
@@ -295,6 +302,60 @@ describe('describeLinkBindingHealth / describeLinkBindingAttention', () => {
       .prepare(`UPDATE peer_reply_outbox SET consecutive_failures = 7 WHERE link_device_id = ?`)
       .run('link_l')
     expect(describeLinkBindingHealth(db, runtime, 'link_l').word).toBe('unreachable')
+  })
+
+  // Ruling 27 Addendum 1(k)/C6a-4: totality of describeLinkBindingHealth (the DB-reading half)
+  // over every stored peer_link_bindings.state x peer_link_attempts.last_outcome combination —
+  // distinct from link-binding-health.test.ts's TOTALITY block, which only exercises the pure,
+  // DB-free half (worstLinkBindingHealth) and never calls describeLinkBindingHealth itself. No
+  // combination may throw or resolve to a word outside LINK_BINDING_HEALTH_PRECEDENCE.
+  describe('describeLinkBindingHealth: totality over every stored state/outcome combination', () => {
+    const combos = LINK_BINDING_STATES.flatMap((state) =>
+      LINK_BINDING_LAST_OUTCOMES.map((outcome) => [state, outcome] as const)
+    )
+
+    it.each(combos)(
+      'peer_link_bindings.state=%s x peer_link_attempts.last_outcome=%s never throws and yields a member of the precedence list',
+      (state, outcome) => {
+        const linkDeviceId = `link_totality_${state}_${outcome}`
+        if (state === 'confirmed') {
+          db.putPeerLinkBinding(boundRow(linkDeviceId, 'env_totality'))
+        } else if (state === 'contested') {
+          db.contestPeerLinkBinding(linkDeviceId, Date.now(), 'incident_totality', 'detail', {
+            environmentId: 'env_totality',
+            boundEndpointId: 'ep_1',
+            boundPairingRevision: 1,
+            linkCredentialFp: 'fp_link',
+            peerCredentialFp: 'fp_peer',
+            peerKeyFingerprint: 'fp_key',
+            grantClass: 'minted',
+            scanCompleteness: 'complete',
+            proofProtocol: 'p1'
+          })
+        } else {
+          db.putPeerLinkBinding(boundRow(linkDeviceId, 'env_totality'))
+          db.revokePeerLinkBinding(linkDeviceId, Date.now())
+        }
+        db.putBindingAttempt(linkDeviceId)
+        db.settleBindingAttempt(linkDeviceId, {
+          lastAttemptAt: Date.now(),
+          lastRoundAt: Date.now(),
+          lastOutcome: outcome,
+          lastDetail: null,
+          consecutiveFailures: 0,
+          consecutiveNoWinner: 0,
+          nextAttemptAfter: null
+        })
+
+        let result: ReturnType<typeof describeLinkBindingHealth> | undefined
+        expect(() => {
+          result = describeLinkBindingHealth(db, runtime, linkDeviceId)
+        }).not.toThrow()
+        expect(result).toBeDefined()
+        expect(result?.word).toBeDefined()
+        expect(LINK_BINDING_HEALTH_PRECEDENCE).toContain(result?.word)
+      }
+    )
   })
 })
 
@@ -729,5 +790,89 @@ describe('describeLinkBindingAttention', () => {
 
     const messagesAfter = raw.prepare('SELECT COUNT(*) AS n FROM messages').get().n
     expect(messagesAfter).toBe(messagesBefore)
+  })
+
+  // Ruling 27 Addendum 1(k)/C6a-5: `parked` is a Ruling 21 B2 original attention-set member with
+  // the longest standing claim to the line, but until now was tested only at the health level
+  // (describeLinkBindingHealth(...).word === 'parked', first describe block) — never driven
+  // through describeLinkBindingAttention.
+  it('unpaired_parked renders "1 parked" on the line', () => {
+    db.putBindingAttempt('link_parked')
+    db.settleBindingAttempt('link_parked', {
+      lastAttemptAt: Date.now(),
+      lastRoundAt: Date.now(),
+      lastOutcome: 'unpaired_parked',
+      lastDetail: null,
+      consecutiveFailures: 0,
+      consecutiveNoWinner: 3,
+      nextAttemptAfter: null
+    })
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).toContain('1 parked')
+  })
+
+  // Ruling 27(b)'s last sentence/C6a-1: "A test asserts the environment file is read once
+  // regardless of link count." Spies the store read itself (readEnvironmentSnapshot, hoisted at
+  // link-binding-attention.ts:293) rather than the mechanism (default-parameter threading) — a
+  // later call site that omits the fifth argument and reintroduces per-link reads fails THIS
+  // test even though the threading itself still type-checks.
+  it('reads the environment store exactly once per check call, regardless of link count', () => {
+    const spy = vi.spyOn(linkBindingRoutable, 'readEnvironmentSnapshot')
+    try {
+      for (const linkDeviceId of ['link_ro_a', 'link_ro_b', 'link_ro_c']) {
+        db.putContainment({
+          subjectKind: 'link',
+          subjectId: linkDeviceId,
+          action: 'quarantine',
+          reasonCode: 'test',
+          reasonText: 'test',
+          detail: null,
+          createdAt: Date.now(),
+          expiresAt: null
+        })
+      }
+      const line = describeLinkBindingAttention(db, runtime)
+      expect(line).toContain('3 quarantined')
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  // Ruling 27 Addendum 1(l)/C6a-6: resolveEnvironmentName strips \r/\n before the clamp, closing
+  // F13 by construction. The name grammar (runtime-environment-name.ts) never lets this arise
+  // through a real write path, so the fixture constructs the newline directly, per the brief.
+  it('an environment name containing a newline is stripped before it reaches the line', () => {
+    vi.spyOn(runtime, 'resolveOrchestrationWorkerServer').mockImplementation(
+      (selector: string) => ({ name: `evil\nname\r\nfor:${selector}`, id: selector }) as never
+    )
+    db.putPeerLinkBinding({
+      linkDeviceId: 'link_nl',
+      environmentId: 'env_nl',
+      boundEndpointId: 'ep_1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'fp_link',
+      peerCredentialFp: 'fp_peer',
+      peerKeyFingerprint: 'fp_key',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'p1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    db.putContainment({
+      subjectKind: 'link',
+      subjectId: 'link_nl',
+      action: 'quarantine',
+      reasonCode: 'test',
+      reasonText: 'test',
+      detail: null,
+      createdAt: Date.now(),
+      expiresAt: null
+    })
+    const line = describeLinkBindingAttention(db, runtime)
+    expect(line).not.toBeNull()
+    expect(line).not.toMatch(/[\r\n]/)
+    expect(line).toContain('evil name for:env_nl')
   })
 })

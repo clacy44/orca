@@ -217,19 +217,26 @@ export function describeLinkBindingHealth(
 
 // F16: label a link with no environment (a quarantine-only link, no binding row) as a link id,
 // never as a bare device id passed off as an environment name.
+// Ruling 27 Addendum 1(l)/C6a-6: the name is operator-chosen and the grammar
+// (runtime-environment-name.ts) permits an embedded \r or \n, which would otherwise break the
+// one-line-per-signal discipline agents parse the check line with. Strip \r/\n BEFORE the clamp,
+// same line, same function — closing F13 by construction rather than by grammar.
 function resolveEnvironmentName(
   runtime: OrcaRuntimeService,
   environmentId: string | null,
   linkDeviceId: string
 ): string {
-  if (environmentId === null) {
-    return `link ${linkDeviceId}`
-  }
-  try {
-    return runtime.resolveOrchestrationWorkerServer(environmentId).name
-  } catch {
-    return environmentId
-  }
+  const raw =
+    environmentId === null
+      ? `link ${linkDeviceId}`
+      : (() => {
+          try {
+            return runtime.resolveOrchestrationWorkerServer(environmentId).name
+          } catch {
+            return environmentId
+          }
+        })()
+  return raw.replace(/[\r\n]+/g, ' ').slice(0, LINK_BINDING_ATTENTION_ENVIRONMENT_NAME_CLAMP)
 }
 
 type AttentionCandidate = {
@@ -339,11 +346,9 @@ export function describeLinkBindingAttention(
   const summary = ordered.map((g) => `${g.count} ${g.label}`).join(', ')
 
   const worst = candidates.reduce((a, b) => (attentionRank(b) < attentionRank(a) ? b : a))
-  const environmentName = resolveEnvironmentName(
-    runtime,
-    worst.environmentId,
-    worst.linkDeviceId
-  ).slice(0, LINK_BINDING_ATTENTION_ENVIRONMENT_NAME_CLAMP)
+  // Ruling 27 Addendum 1(l): the \r/\n strip and the clamp both now live inside
+  // resolveEnvironmentName itself (same line, same function) — not duplicated here.
+  const environmentName = resolveEnvironmentName(runtime, worst.environmentId, worst.linkDeviceId)
 
   return (
     `Link binding needs attention: ${summary} (${environmentName}) — ` +

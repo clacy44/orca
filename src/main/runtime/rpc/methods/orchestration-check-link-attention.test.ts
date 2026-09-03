@@ -112,4 +112,24 @@ describe('orchestration.check: linkBindingAttention (S10-16 C6)', () => {
     expect(row.verb).toBe('check')
     expect(row.outcome).toBe('link_attention_unavailable')
   })
+
+  // Ruling 27 Addendum 1(j)/C6a-2: the F3 guard's own audit write is guarded in its own
+  // try/catch, and the degradation literal is set BEFORE that write is attempted — so a DB whose
+  // writeAgentAudit ALSO throws (the broken-DB case the guard exists for) still yields the
+  // literal and a successful `check`, never a thrown check.
+  it('a DB whose writeAgentAudit also throws still yields the degradation line and a successful check', async () => {
+    vi.spyOn(db, 'listPeerLinkBindings').mockImplementation(() => {
+      throw new Error('v40 table missing')
+    })
+    vi.spyOn(db, 'writeAgentAudit').mockImplementation(() => {
+      throw new Error('audit table missing too')
+    })
+
+    const result = await check()
+
+    expect(result.linkBindingAttention).toBe(
+      'Link binding health could not be read on this host — orca environment link-status'
+    )
+    expect(result.messages).toBeDefined()
+  })
 })

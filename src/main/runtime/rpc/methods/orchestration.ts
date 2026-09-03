@@ -1856,19 +1856,35 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // instead of the computed line, plus an audit row — never a silent `catch {}` back to "no
       // attention".
       let attention: string | null = null
+      // Ruling 27 Addendum 1(j)/C6a-2: `orchestrationDb` is captured once, here — the same
+      // reference `describeLinkBindingAttention` needs as its first argument anyway — so the
+      // catch below has a cheaper way to reach it than calling the lazy `getOrchestrationDb()`
+      // constructor (join(), `require('electron')`, six side-effecting arm/resume calls,
+      // orca-runtime.ts:4162+) a second time from inside a catch handler. When the constructor
+      // itself is what throws, `orchestrationDb` stays null and the audit write below is skipped
+      // rather than risking a second construction attempt on a runtime with no DB attached.
+      let orchestrationDb: OrchestrationDb | null = null
       try {
-        attention = describeLinkBindingAttention(runtime.getOrchestrationDb(), runtime)
+        orchestrationDb = runtime.getOrchestrationDb()
+        attention = describeLinkBindingAttention(orchestrationDb, runtime)
       } catch (error) {
-        runtime.getOrchestrationDb().writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: 'local',
-          verb: 'check',
-          outcome: 'link_attention_unavailable',
-          reasonCode: error instanceof Error ? error.name : 'unknown'
-        })
+        // Ruling 27 Addendum 1(j): set the degradation literal FIRST — the loud degradation this
+        // guard exists to produce must stand even if the audit write below also throws.
         attention =
           'Link binding health could not be read on this host — orca environment link-status'
+        try {
+          orchestrationDb?.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: 'local',
+            verb: 'check',
+            outcome: 'link_attention_unavailable',
+            reasonCode: error instanceof Error ? error.name : 'unknown'
+          })
+        } catch {
+          // C6a-2: the audit write is a best-effort record of the fault, never a second way for
+          // this guard to fail `check` — the degradation literal above already stands.
+        }
       }
       return attention
         ? { ...(result as Record<string, unknown>), linkBindingAttention: attention }
