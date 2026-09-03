@@ -131,7 +131,10 @@ export class ClaimedAgentPtyOwnerRegistry {
             generation: spawned.owner.generation,
             phase: 'live',
             ptyId: spawned.owner.ptyId,
-            surface: cloneSurface(spawned.owner.surface)
+            surface: cloneSurface(spawned.owner.surface),
+            ...(spawned.owner.launchTokenHash !== undefined
+              ? { launchTokenHash: spawned.owner.launchTokenHash }
+              : {})
           }
         : {
             claim: requestedClaim,

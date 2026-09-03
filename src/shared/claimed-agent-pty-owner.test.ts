@@ -349,8 +349,31 @@ describe('ClaimedAgentPtyOwnerRegistry', () => {
 
     it("a fresh owner built from the spawn callback's own owner keeps ITS hash, not the caller's", async () => {
       // Why: the else-branch (spawned.owner present) already carries an owner object built by
-      // a lower layer (e.g. an adopted early return whose owner was constructed elsewhere) —
-      // args.launchTokenHash only backfills the registry's OWN fresh-owner construction.
+      // a lower layer (e.g. the provider's own registry) — that lower registry's stored hash
+      // must propagate; args.launchTokenHash is the CALLER's hash and must never override it.
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+
+      const result = await registry.ensure({
+        claim: claim(),
+        surface,
+        launchTokenHash: HASH_B,
+        spawn: async () => ({
+          ptyId: 'pty-1',
+          owner: {
+            claim: claim(),
+            generation: 'gen-1',
+            phase: 'live',
+            ptyId: 'pty-1',
+            surface,
+            launchTokenHash: HASH_A
+          }
+        })
+      })
+
+      expect(result.owner.launchTokenHash).toBe(HASH_A)
+    })
+
+    it('a hash-less lower owner yields undefined even when the caller passed a hash', async () => {
       const registry = new ClaimedAgentPtyOwnerRegistry()
 
       const result = await registry.ensure({
@@ -422,6 +445,42 @@ describe('ClaimedAgentPtyOwnerRegistry', () => {
         surface,
         launchTokenHash: HASH_A
       })
+
+      expect(registry.find(claim())?.launchTokenHash).toBe(HASH_A)
+    })
+
+    // H2d (Ruling 32 Addendum 12): addUniqueEvidence's dedup key (agentSessionOwnerBindingsEqual)
+    // ignores launchTokenHash entirely, so two evidence records for the SAME owner (same claim,
+    // generation, ptyId, surface) that differ only by hash collapse to one "duplicate" — the
+    // hash-bearing record must win regardless of arrival order within one incoming batch.
+    it('reconcileAuthoritative keeps the hash-bearing record when it arrives AFTER a hash-less duplicate in the same batch', () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+      const hashLess = {
+        claim: claim(),
+        generation: 'gen-1',
+        phase: 'live' as const,
+        ptyId: 'pty-1',
+        surface
+      }
+      const hashBearing = { ...hashLess, launchTokenHash: HASH_A }
+
+      registry.reconcileAuthoritative([hashLess, hashBearing])
+
+      expect(registry.find(claim())?.launchTokenHash).toBe(HASH_A)
+    })
+
+    it('reconcileAuthoritative keeps the hash-bearing record when it arrives BEFORE a hash-less duplicate in the same batch', () => {
+      const registry = new ClaimedAgentPtyOwnerRegistry()
+      const hashLess = {
+        claim: claim(),
+        generation: 'gen-1',
+        phase: 'live' as const,
+        ptyId: 'pty-1',
+        surface
+      }
+      const hashBearing = { ...hashLess, launchTokenHash: HASH_A }
+
+      registry.reconcileAuthoritative([hashBearing, hashLess])
 
       expect(registry.find(claim())?.launchTokenHash).toBe(HASH_A)
     })

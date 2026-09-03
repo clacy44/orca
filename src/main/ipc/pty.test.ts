@@ -1853,6 +1853,72 @@ describe('registerPtyHandlers', () => {
     clearProviderPtyState(owner.ptyId)
   })
 
+  // H2d (Ruling 32 Addendum 12) T9, composed-path (a): drives the REAL pty.ts spawn handler
+  // with a provider stub whose spawn returns agentSessionEnsure.owner carrying the hash of the
+  // SAME env token it received — the daemon adapter's real shape (pty.ts:5051-5058 always
+  // propagates providerEnsure.owner as-is into the registry's ensure()). Proves the MAIN
+  // registry's wrapped owner (claimed-agent-pty-owner.ts's `spawned.owner` branch) keeps that
+  // hash instead of dropping it, so the result handed back up carries
+  // agentSessionEnsure.owner.launchTokenHash. Must fail at f7d05bc214.
+  it("T9: the result handed to the runtime carries the provider-supplied owner's launchTokenHash", async () => {
+    const claim = {
+      ...recoveredAgentClaim,
+      identityDigest: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+    }
+    const token = 'pty-ts-t9-launch-token'
+    let capturedEnv: Record<string, string> | undefined
+    const spawn = vi.fn(async (options: { env?: Record<string, string> }) => {
+      capturedEnv = options.env
+      return {
+        id: 'pty-t9-created',
+        incarnationId: 'incarnation-t9',
+        agentSessionEnsure: {
+          disposition: 'adopted' as const,
+          owner: {
+            claim,
+            generation: 'generation-t9',
+            phase: 'live' as const,
+            ptyId: 'pty-t9-created',
+            surface: recoveredAgentSurface,
+            launchTokenHash: createHash('sha256')
+              .update(options.env?.ORCA_AGENT_LAUNCH_TOKEN ?? '')
+              .digest('hex')
+          }
+        }
+      }
+    })
+    const sessions = [
+      {
+        id: 'pty-t9-created',
+        incarnationId: 'incarnation-t9',
+        cwd: '/tmp/recovered-worktree',
+        title: 'Codex'
+      }
+    ]
+    const provider = createAgentClaimProvider({
+      spawn,
+      sessions,
+      authoritativeOwnerListings: false
+    })
+    setLocalPtyProvider(provider as never)
+    const controller = registerAgentClaimController()
+
+    const result = (await controller.spawn({
+      cols: 80,
+      rows: 24,
+      cwd: '/tmp/recovered-worktree',
+      env: { ORCA_AGENT_LAUNCH_TOKEN: token },
+      agentSessionEnsure: { claim, surface: recoveredAgentSurface }
+    })) as { agentSessionEnsure?: { owner?: { launchTokenHash?: string } } }
+
+    expect(capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN).toBe(token)
+    expect(result.agentSessionEnsure?.owner?.launchTokenHash).toBe(
+      createHash('sha256').update(token).digest('hex')
+    )
+
+    clearProviderPtyState('pty-t9-created')
+  })
+
   function getPtyAckDataListener(): (
     event: unknown,
     args: { id: string; charCount?: number; processedChars?: number }

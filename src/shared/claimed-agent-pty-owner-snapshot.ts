@@ -158,8 +158,20 @@ function addUniqueEvidence(
   if (sameGeneration && !agentSessionOwnerBindingsEqual(sameGeneration, cloned)) {
     throw new Error('agent_session_ownership_unknown')
   }
-  if (!evidence.some((candidate) => agentSessionOwnerBindingsEqual(candidate, cloned))) {
+  const duplicateIndex = evidence.findIndex((candidate) =>
+    agentSessionOwnerBindingsEqual(candidate, cloned)
+  )
+  if (duplicateIndex === -1) {
     evidence.push(cloned)
+    evidenceByKey.set(key, evidence)
+  } else if (
+    evidence[duplicateIndex].launchTokenHash === undefined &&
+    cloned.launchTokenHash !== undefined
+  ) {
+    // H2d (Ruling 32 Addendum 12): agentSessionOwnerBindingsEqual ignores launchTokenHash, so
+    // a hash-bearing record arriving after a hash-less duplicate must upgrade it in place —
+    // never keep the hash-less one over a hash-bearing one.
+    evidence[duplicateIndex] = cloned
     evidenceByKey.set(key, evidence)
   }
 }

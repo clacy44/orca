@@ -244,33 +244,35 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
     expect((authority as { paneKey?: string }).paneKey ?? authority.agent?.paneKey).toBeTruthy()
   })
 
-  // T3': attach-only adopt of a pre-existing pane. The owner's stored launchTokenHash belongs
-  // to a DIFFERENT (or no) create — this call's own minted token was never delivered to that
-  // process. H_old must survive untouched; nothing is written; pty.launchToken stays unset;
-  // exactly one warn.
-  it.each([
-    ['a mismatched hash', () => 'f'.repeat(64)],
-    ['no hash at all', () => undefined]
-  ])(
-    'T3: %s on the owner leaves the anchor untouched and warns exactly once',
-    async (_label, ownerHash) => {
-      const { store, sessionSnapshot } = createSharedStore()
-      const runtime = new OrcaRuntimeService(store)
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-      runtime.setPtyController({
-        spawn: async (args: {
-          tabId?: string
-          leafId?: string
-          preAllocatedHandle?: string
-          agentSessionEnsure?: { claim: AgentSessionExecutionClaim }
-        }) => ({
+  // H2d (Ruling 32 Addendum 12) T4, composed-path (b): a genuine fresh spawn — disposition
+  // 'created', the everyday daemon path — with a ptyController shaped exactly like pty.ts's
+  // real result (agentSessionEnsure.owner carrying the hash of the spawned env's token). Must
+  // keep anchoring correctly after the H2d fix to claimed-agent-pty-owner.ts's `spawned.owner`
+  // branch, which now also runs on the 'created' disposition.
+  it("T4: a 'created' disposition anchors the token and registers with authority", async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    db = new OrchestrationDb(':memory:')
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setOrchestrationDb(db)
+    let capturedEnv: Record<string, string> | undefined
+    runtime.setPtyController({
+      spawn: async (args: {
+        env?: Record<string, string>
+        tabId?: string
+        leafId?: string
+        preAllocatedHandle?: string
+        agentSessionEnsure?: { claim: AgentSessionExecutionClaim }
+      }) => {
+        capturedEnv = args.env
+        const token = args.env?.ORCA_AGENT_LAUNCH_TOKEN
+        return {
           id: NEW_PTY_ID,
-          incarnationId: 'h2c-t3-incarnation',
+          incarnationId: 'h2c-t4-incarnation',
           agentSessionEnsure: {
-            disposition: 'adopted' as const,
+            disposition: 'created' as const,
             owner: {
               claim: args.agentSessionEnsure!.claim,
-              generation: 'live-gen-1',
+              generation: 'live-gen-t4',
               phase: 'live' as const,
               ptyId: NEW_PTY_ID,
               surface: {
@@ -279,40 +281,189 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
                 leafId: args.leafId!,
                 terminalHandle: args.preAllocatedHandle!
               },
-              launchTokenHash: ownerHash()
+              launchTokenHash: token ? createHash('sha256').update(token).digest('hex') : undefined
             }
           }
-        }),
-        write: () => true,
-        kill: () => true,
-        getForegroundProcess: async () => null
-      })
-      runtime.attachWindow(1)
-      runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+        }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
-      const hOld = createHash('sha256').update('h-old-genuine-token').digest('hex')
-      store!.persistTerminalLaunchTokenHash?.({
-        tabId: TAB_ID,
-        leafId: LEAF_ID,
-        launchTokenHash: hOld
-      })
-      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
+    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      command: 'claude',
+      launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'h2c-t4',
+      agentSessionClaim: claimFor()
+    })
 
-      await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
-        credentialLane: { kind: 'shared' },
-        command: 'claude',
-        launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
-        tabId: TAB_ID,
-        leafId: LEAF_ID,
-        title: 'h2c-t3',
-        agentSessionClaim: claimFor()
-      })
+    const token = capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN
+    expect(token).toBeTruthy()
+    const hash = createHash('sha256').update(token!).digest('hex')
 
-      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
-      expect(getPtyLaunchToken(runtime, NEW_PTY_ID)).toBeNull()
-      expect(warnSpy).toHaveBeenCalledTimes(1)
-      expect(warnSpy.mock.calls[0]?.[0]).toContain('does not hold it')
-      warnSpy.mockRestore()
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash)
+    expect(getPtyLaunchToken(runtime, NEW_PTY_ID)).toBe(token)
+
+    const authority = (await callRegister(runtime, {
+      terminalHandle: terminal.handle,
+      paneKey: PANE_KEY,
+      launchToken: token!
+    })) as { agent?: { paneKey?: string } }
+    expect(authority).toBeTruthy()
+    expect((authority as { paneKey?: string }).paneKey ?? authority.agent?.paneKey).toBeTruthy()
+  })
+
+  // T3': attach-only adopt of a pre-existing pane. The owner's stored launchTokenHash belongs
+  // to a DIFFERENT (or no) create — this call's own minted token was never delivered to that
+  // process. H_old must survive untouched; nothing is written; pty.launchToken stays unset;
+  // exactly one warn.
+  it.each([
+    ['a mismatched hash', () => 'f'.repeat(64), 'launch token hash mismatch'],
+    ['no hash at all', () => undefined, 'launch token hash absent on owner']
+  ])(
+    'T3: %s on the owner leaves the anchor untouched and warns exactly once',
+    async (_label, ownerHash, expectedReason) => {
+      const { store, sessionSnapshot } = createSharedStore()
+      const runtime = new OrcaRuntimeService(store)
+      // Why try/finally: an assertion failure below (e.g. proving the parent-commit bug) must
+      // not leave a stray spy active for the next it.each case — vi.spyOn on an already-spied
+      // method reuses the same mock, so a stray spy would silently pool the next case's calls
+      // in with this one's.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        runtime.setPtyController({
+          spawn: async (args: {
+            tabId?: string
+            leafId?: string
+            preAllocatedHandle?: string
+            agentSessionEnsure?: { claim: AgentSessionExecutionClaim }
+          }) => ({
+            id: NEW_PTY_ID,
+            incarnationId: 'h2c-t3-incarnation',
+            agentSessionEnsure: {
+              disposition: 'adopted' as const,
+              owner: {
+                claim: args.agentSessionEnsure!.claim,
+                generation: 'live-gen-1',
+                phase: 'live' as const,
+                ptyId: NEW_PTY_ID,
+                surface: {
+                  worktreeId: WORKTREE_ID,
+                  tabId: args.tabId!,
+                  leafId: args.leafId!,
+                  terminalHandle: args.preAllocatedHandle!
+                },
+                launchTokenHash: ownerHash()
+              }
+            }
+          }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => null
+        })
+        runtime.attachWindow(1)
+        runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+        const hOld = createHash('sha256').update('h-old-genuine-token').digest('hex')
+        store!.persistTerminalLaunchTokenHash?.({
+          tabId: TAB_ID,
+          leafId: LEAF_ID,
+          launchTokenHash: hOld
+        })
+        expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
+
+        await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+          credentialLane: { kind: 'shared' },
+          command: 'claude',
+          launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
+          tabId: TAB_ID,
+          leafId: LEAF_ID,
+          title: 'h2c-t3',
+          agentSessionClaim: claimFor()
+        })
+
+        expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
+        expect(getPtyLaunchToken(runtime, NEW_PTY_ID)).toBeNull()
+        expect(warnSpy).toHaveBeenCalledTimes(1)
+        expect(warnSpy.mock.calls[0]?.[0]).toContain(expectedReason)
+      } finally {
+        warnSpy.mockRestore()
+      }
     }
   )
+
+  // H2d (Ruling 32 Addendum 12) item 3: the reset/forget leg must fire whenever no token was
+  // minted for THIS create (launchToken === undefined), independent of deliveredToThisPane —
+  // an agentSessionEnsure resume-adopt of an attach-only pane never mints one, so it must still
+  // forget a stale anchor left by an earlier create instead of leaving it live untouched.
+  it('T5: no launchToken minted forgets a previous anchor and leaves pty.launchToken null', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    let capturedEnv: Record<string, string> | undefined
+    runtime.setPtyController({
+      spawn: async (args: {
+        env?: Record<string, string>
+        tabId?: string
+        leafId?: string
+        preAllocatedHandle?: string
+        agentSessionEnsure?: { claim: AgentSessionExecutionClaim }
+      }) => {
+        capturedEnv = args.env
+        return {
+          id: NEW_PTY_ID,
+          incarnationId: 'h2c-t5-incarnation',
+          agentSessionEnsure: {
+            disposition: 'adopted' as const,
+            owner: {
+              claim: args.agentSessionEnsure!.claim,
+              generation: 'live-gen-t5',
+              phase: 'live' as const,
+              ptyId: NEW_PTY_ID,
+              surface: {
+                worktreeId: WORKTREE_ID,
+                tabId: args.tabId!,
+                leafId: args.leafId!,
+                terminalHandle: args.preAllocatedHandle!
+              }
+            }
+          }
+        }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    const hOld = createHash('sha256').update('h-old-t5-genuine-token').digest('hex')
+    store!.persistTerminalLaunchTokenHash?.({
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      launchTokenHash: hOld
+    })
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
+
+    // Why no `command`/launchConfig: orca-runtime.ts only mints a launchToken when
+    // launchOpts.launchConfig is present (and the pane wasn't adopted before launch);
+    // resolveAgentTerminalCreateOptions only derives one FROM opts.command, so a bare-shell
+    // create (no command) reproduces the no-token-minted case without an adoptStablePane fixture.
+    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      credentialLane: { kind: 'shared' },
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      title: 'h2c-t5',
+      agentSessionClaim: claimFor()
+    })
+
+    expect(capturedEnv?.ORCA_AGENT_LAUNCH_TOKEN).toBeUndefined()
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+    expect(getPtyLaunchToken(runtime, NEW_PTY_ID)).toBeNull()
+  })
 })

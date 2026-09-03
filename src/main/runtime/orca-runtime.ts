@@ -28037,55 +28037,63 @@ export class OrcaRuntimeService {
             // to 'created' and 'adopted': a genuine fresh spawn's own hash always matches its
             // own token, so this reduces to "always write" there and only excludes a stale
             // resume-adopt whose stored hash belongs to an earlier create (or none).
+            const ownerLaunchTokenHash = result.agentSessionEnsure?.owner.launchTokenHash
             const deliveredToThisPane = result.agentSessionEnsure
               ? launchToken !== undefined &&
-                result.agentSessionEnsure.owner.launchTokenHash ===
-                  createHash('sha256').update(launchToken).digest('hex')
+                ownerLaunchTokenHash === createHash('sha256').update(launchToken).digest('hex')
               : true
-            if (deliveredToThisPane) {
-              pty.launchToken = launchToken ?? null
-              pty.launchIncarnationId = launchToken ? pty.incarnationId : null
+            const launchTokenHostId = workspace.connectionId
+              ? toSshExecutionHostId(workspace.connectionId)
+              : undefined
+            if (launchToken === undefined) {
+              // H2d (Ruling 32 Addendum 12): the reset/forget leg runs whenever no token was
+              // minted for THIS create, independent of deliveredToThisPane above — that gate
+              // only judges a MINTED token's delivery and says nothing when none was minted
+              // (e.g. an agentSessionEnsure resume-adopt of an attach-only pane). Matches
+              // fd0b4833d8's unconditional forget on the 'created'-disposition path.
+              pty.launchToken = null
+              pty.launchIncarnationId = null
+              pty.launchAgent = launchOpts.launchAgent ?? null
+              // S10-17/F1: drop any queued retry for this pane too, or a later successful
+              // drain could resurrect the anchor this forget is about to delete.
+              this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${launchTokenHostId ?? ''}`)
+              try {
+                // F4: a null-token relaunch (plain shell) must not leave the previous agent's
+                // anchor live for this pane — it would still verify against a stale token.
+                this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
+              } catch (error) {
+                console.warn(
+                  '[runtime] createTerminal: failed to update launch-token-hash anchor',
+                  error
+                )
+              }
+            } else if (deliveredToThisPane) {
+              pty.launchToken = launchToken
+              pty.launchIncarnationId = pty.incarnationId
               pty.launchAgent = launchOpts.launchAgent ?? null
               // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
               // restart — which has no live launchToken, only its own process env — can still
               // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
               // F8: a spawned pty must not abort its launch over a persistence flush failure;
               // S10-17: failure is queued for retry instead of being silently lost.
-              const launchTokenHostId = workspace.connectionId
-                ? toSshExecutionHostId(workspace.connectionId)
-                : undefined
-              if (launchToken) {
-                this.persistLaunchTokenHashAnchorWithRetry(
-                  {
-                    tabId,
-                    leafId,
-                    launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
-                  },
-                  launchTokenHostId,
-                  'createTerminal'
-                )
-              } else {
-                // S10-17/F1: drop any queued retry for this pane too, or a later successful
-                // drain could resurrect the anchor this forget is about to delete.
-                this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${launchTokenHostId ?? ''}`)
-                try {
-                  // F4: a null-token relaunch (plain shell) must not leave the previous agent's
-                  // anchor live for this pane — it would still verify against a stale token.
-                  this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
-                } catch (error) {
-                  console.warn(
-                    '[runtime] createTerminal: failed to update launch-token-hash anchor',
-                    error
-                  )
-                }
-              }
-            } else if (launchToken) {
-              // F-6d (H2c, Ruling 32 Addendum 7): a token was minted for this create but the
-              // owner record proves the pane's process does not hold it — loud degradation
-              // instead of a silent, permanently unattestable pane (doctrine: "prefer loud
-              // degradation").
+              this.persistLaunchTokenHashAnchorWithRetry(
+                {
+                  tabId,
+                  leafId,
+                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
+                },
+                launchTokenHostId,
+                'createTerminal'
+              )
+            } else {
+              // F-6d (H2c, Ruling 32 Addendum 7 / H2d, Addendum 12): a token was minted for
+              // this create but the owner record proves the pane's process does not hold it —
+              // loud degradation instead of a silent, permanently unattestable pane (doctrine:
+              // "prefer loud degradation"). Name which of the two ways the gate failed.
               console.warn(
-                "[runtime] createTerminal: launch token minted but the pane's process does not hold it",
+                ownerLaunchTokenHash === undefined
+                  ? '[runtime] createTerminal: launch token minted but not delivered — launch token hash absent on owner'
+                  : '[runtime] createTerminal: launch token minted but not delivered — launch token hash mismatch',
                 { paneKey }
               )
             }
