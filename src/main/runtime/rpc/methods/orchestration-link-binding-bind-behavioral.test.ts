@@ -75,9 +75,9 @@ describe('Ruling 28 Addendum 1(p): linkBind, behaviourally, through the RPC disp
   // R10-B: candidates are collapsed to the newest per hashCallerCredential(deviceToken) — the
   // environment's OWN stored pairing token, unrelated to what the fake responder actually proves
   // with below. `deviceToken` defaults to `linkToken` (a single surviving candidate); pass a
-  // distinct one (as the two-winner test does) so BOTH environments survive the collapse as
-  // separate round candidates — exactly the "different grant to the same host" (multi_grant)
-  // shape the collapse's own doc comment names, not a defect in the fixture.
+  // distinct one (as "two winners: stays contested..." below does) so BOTH environments survive
+  // the collapse as separate round candidates — exactly the "different grant to the same host"
+  // (multi_grant) shape the collapse's own doc comment names, not a defect in the fixture.
   function saveMatchingEnvironmentWithKey(
     key: E2EEKeypair,
     label: string,
@@ -113,9 +113,19 @@ describe('Ruling 28 Addendum 1(p): linkBind, behaviourally, through the RPC disp
   // A generalised responder over a MAP of environmentId -> answering key, so one round can seat
   // TWO distinct, genuinely-verifying peers (the two-winner scenario) — `args.selector` is the
   // environmentId `callPinnedEnvironment` was called with.
-  function multiKeyResponder(keysByEnv: Map<string, E2EEKeypair>) {
+  // `tokensByEnv` lets a caller give an environment its OWN `deviceToken` (as pinned on it at
+  // `saveMatchingEnvironmentWithKey` time) for the `observedChannelFp` the responder embeds —
+  // per link-binding-prover-probe.ts:91-92, that field is derived from THIS HOST's local record
+  // of the environment's pairing token, not from the shared link-registry secret; a genuinely-
+  // verifying peer must reproduce it to match the selector the prover built locally. Unlisted
+  // environments default to `linkToken` (the harness's prior single-winner shape, unchanged).
+  function multiKeyResponder(
+    keysByEnv: Map<string, E2EEKeypair>,
+    tokensByEnv: Map<string, string> = new Map<string, string>()
+  ) {
     return vi.fn(async (args: { selector: string; method: string; params: unknown }) => {
       const key = keysByEnv.get(args.selector) ?? peerE2ee
+      const deviceToken = tokensByEnv.get(args.selector) ?? linkToken
       if (args.method === 'status.get') {
         return { capabilities: [ORCHESTRATION_LINK_BINDING_RUNTIME_CAPABILITY] }
       }
@@ -133,7 +143,7 @@ describe('Ruling 28 Addendum 1(p): linkBind, behaviourally, through the RPC disp
           epoch: number
           selectors: string[]
         }
-        const observedChannelFp = hashCallerCredential(linkToken)
+        const observedChannelFp = hashCallerCredential(deviceToken)
         const dstKeyFp = fingerprintOrchestrationPeer(key.publicKeyB64)
         const results: unknown[] = []
         for (let s = 0; s < p.selectors.length; s += 1) {
@@ -223,7 +233,8 @@ describe('Ruling 28 Addendum 1(p): linkBind, behaviourally, through the RPC disp
     expect(db.getPeerLinkBinding(linkId)?.state).toBe('contested')
 
     // Exclude envA from this round's candidates so envB is the ROUND's sole winner — isolating
-    // the forced-resolve-with-one-winner path from the two-winner contest path (covered below).
+    // the forced-resolve-with-one-winner path from the two-winner contest path pinned by
+    // "two winners: stays contested..." below.
     db.putContainment({
       subjectKind: 'environment',
       subjectId: envA,
@@ -260,20 +271,87 @@ describe('Ruling 28 Addendum 1(p): linkBind, behaviourally, through the RPC disp
     expect(reason.incidentId).toBe(incidentId)
   })
 
-  // "Two winners in one round" (classifyLinkRound's own >=2-different-key branch) is not
-  // constructible through two DISTINCT saved environments in this harness: R10-B's collapse
-  // groups candidates by peerCredentialFp = hashCallerCredential(deviceToken), the SAME formula
-  // probeOneEnvironment uses for `observedChannelFp` — so any two environments that could BOTH
-  // genuinely match (deviceToken === the real linkToken) always collapse to one before probing,
-  // and two environments with genuinely DIFFERENT tokens can never both match the one real
-  // token. `link-binding-prover-round.test.ts`'s own F1/R11.4 test notes exactly this ("isolating
-  // R11.4's ACROSS-ROUND incumbent check from R11.3's SAME-round >=2-winner contest, already
-  // unit-tested by classifyLinkRound") — the same-round branch is covered at
-  // `link-binding-classify.test.ts`'s pure-function level, never through a full round. What IS
-  // reachable and IS the property Ruling 28(a)'s single-writer guarantee depends on: a forced
-  // round that finds NO clean single winner (here: zero live candidates) must leave an existing
-  // contest completely alone — `resolvePeerLinkBindingContest` is the ONE path that clears one,
-  // and it requires `forcedResolve && exactly one winner`.
+  // Ruling 28 Addendum 1(p)/review E1: "two winners in one round" (classifyLinkRound's own
+  // >=2-different-key branch) IS constructible through two DISTINCT saved environments in this
+  // harness — the earlier claim that it wasn't conflated two different secrets. The proof MAC
+  // key is THIS HOST'S OWN registry credential for the link
+  // (`selfView.macWithRegistryToken(link.linkDeviceId, ...)`, link-binding-prover-outcome.ts:
+  // 265-273), not the environment's stored `deviceToken`. `observedChannelFp`/`dstKeyFp` are
+  // per-environment transcript fields the verifier derives itself from that environment's own
+  // record (link-binding-prover-probe.ts:91-92). So two saved environments with DIFFERENT
+  // `deviceToken`s survive R10-B's collapse as separate round candidates, and a responder
+  // holding the real link token — `multiKeyResponder` above, given each environment's own
+  // `deviceToken` via its `tokensByEnv` map so it reproduces the correct `observedChannelFp`
+  // per environment — produces a verifying proof for both, each under its own
+  // `observedChannelFp`/`dstKeyFp`. Give them different `publicKeyB64`
+  // and the two winners carry different `dstKeyFp`, which is exactly `classifyLinkRound`'s
+  // contested branch. What this test pins that `link-binding-classify.test.ts:57`'s pure-function
+  // coverage cannot: that `writeContest` runs under `forcedResolve` for a two-winner outcome,
+  // that `contestPeerLinkBinding`'s `WHERE state = 'confirmed'` guard correctly no-ops on an
+  // already-contested row (a pre-existing contest's incumbent/incident id survive untouched),
+  // and that the verb reports `contested` rather than resolving it — the one place a wrong
+  // `forcedResolve` branch would silently clear a live contest.
+  it('two winners: stays contested, no binding written for either winner, no resolve audit, existing contest untouched', async () => {
+    const keyB = loadOrCreateE2EEKeypair(join(root, 'peer-userdata-two-winner-b'))
+    const tokenA = `token-two-a-${randomBytes(8).toString('hex')}`
+    const tokenB = `token-two-b-${randomBytes(8).toString('hex')}`
+    const envA = saveMatchingEnvironmentWithKey(peerE2ee, 'two-a', tokenA)
+    const envB = saveMatchingEnvironmentWithKey(keyB, 'two-b', tokenB)
+
+    // Seed a pre-existing contest so this test also pins that a genuine two-winner round leaves
+    // an already-contested row's identity untouched — `contestPeerLinkBinding`'s UPDATE half
+    // guards on `WHERE state = 'confirmed'`, so re-running `writeContest` against an
+    // already-contested row must no-op rather than mint a fresh incident.
+    const priorIncidentId = `incident_${randomBytes(4).toString('hex')}`
+    db.contestPeerLinkBinding(linkId, Date.now(), priorIncidentId, 'prior contest', {
+      environmentId: 'env_prior_incumbent',
+      boundEndpointId: 'endpoint_prior',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'link_fp_prior',
+      peerCredentialFp: 'peer_fp_prior',
+      peerKeyFingerprint: 'peer_key_fp_prior',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1'
+    })
+    expect(db.getPeerLinkBinding(linkId)?.contestIncidentId).toBe(priorIncidentId)
+
+    vi.spyOn(runtime, 'callPinnedEnvironment').mockImplementation(
+      multiKeyResponder(
+        new Map([
+          [envA, peerE2ee],
+          [envB, keyB]
+        ]),
+        new Map([
+          [envA, tokenA],
+          [envB, tokenB]
+        ])
+      )
+    )
+
+    const beforeAudit = listAudit(db).length
+    const result = (await call('orchestration.linkBind', { link: linkId }, localCtx())) as {
+      state: string
+    }
+    expect(result.state).toBe('contested')
+
+    const binding = db.getPeerLinkBinding(linkId)
+    expect(binding?.state).toBe('contested')
+    expect(binding?.contestedAt).not.toBeNull()
+    expect(binding?.contestIncidentId).toBe(priorIncidentId)
+    // No binding was written for either round winner — the pre-existing incumbent's identity
+    // (never envA's or envB's) is still what the row names.
+    expect(binding?.environmentId).toBe('env_prior_incumbent')
+
+    const audit = listAudit(db)
+    expect(audit.length).toBeGreaterThan(beforeAudit)
+    expect(audit.find((a) => a.outcome === 'link_contest_resolved')).toBeUndefined()
+  })
+
+  // A forced round that finds NO clean single winner (here: zero live candidates) must also
+  // leave an existing contest completely alone — `resolvePeerLinkBindingContest` is the ONE path
+  // that clears one, and it requires `forcedResolve && exactly one winner`; this isolates that
+  // zero-winner shape from the two-winner shape pinned immediately above.
   it('an existing contest with no clean winner this round: stays contested, the verb reports contested', async () => {
     const incidentId = `incident_${randomBytes(4).toString('hex')}`
     db.contestPeerLinkBinding(linkId, Date.now(), incidentId, 'two winners', {
