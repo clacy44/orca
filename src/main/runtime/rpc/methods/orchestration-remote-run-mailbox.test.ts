@@ -90,6 +90,9 @@ describe('remote run mailbox on the Run-owning peer', () => {
       ok: true,
       result: {
         runId,
+        // H4d: every path through the run branch names the mailbox it read, same as the
+        // agent/bare-handle branches (Ruling 32 Addendum 13).
+        mailbox: `run:${runId}`,
         count: 1,
         messages: [{ subject: 'Mail for the other runtime', to_handle: `run:${runId}` }]
       }

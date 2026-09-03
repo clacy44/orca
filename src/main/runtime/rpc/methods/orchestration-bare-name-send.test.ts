@@ -153,6 +153,34 @@ describe('orchestration.send: bare display-name resolution (Ruling 32 Addendum 1
     ).rejects.toMatchObject({ code: 'agent_quarantined' })
   })
 
+  it('T-A5 (Ruling 32 Addendum 13): a peer caller sending --to <bare registered name> is refused forbidden before the name ever resolves', async () => {
+    await setup()
+    const getAgentByNameSpy = vi.spyOn(db, 'getAgentByName')
+
+    const ctx: RpcContext = {
+      runtime,
+      accessProfile: 'peer',
+      pairedDeviceId: 'dev_peer_1',
+      clientKind: 'runtime',
+      authenticatedCallerFingerprint: 'peer_fp_1',
+      orchestrationMutation: {
+        callerFingerprint: 'peer_fp_1',
+        requestId: 'request_peer_bare_name',
+        method: 'orchestration.send',
+        payloadHash: 'payload_peer_bare_name'
+      }
+    } as RpcContext
+
+    const m = method('orchestration.send')
+    const parsed = m.params!.parse({
+      to: 'alpha',
+      subject: 'hi peer',
+      remoteRunMailbox: true
+    })
+    await expect(m.handler(parsed, ctx)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(getAgentByNameSpy).not.toHaveBeenCalled()
+  })
+
   it('T-A3 (no regression): a live terminal handle that is not a registered name is still stored bare, with its live pane key', async () => {
     const { callerHandle } = await setup()
     // A third, unregistered-but-live terminal: worker-one.

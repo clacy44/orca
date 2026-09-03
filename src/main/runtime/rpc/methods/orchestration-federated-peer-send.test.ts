@@ -222,6 +222,26 @@ describe('S10-15 F1 cross-host send relay (R1-R7, ruling 7)', () => {
     workerRuntime.getLinkBindingProver().stop()
   })
 
+  // H4d (Ruling 32 Addendum 13/T-A5 companion): federatedSend's toAgentId is resolved ONLY as
+  // an agent id (requireAddressableAgentRecipient -> db.getAgentById) — a bare display name
+  // never resolves it, so a peer cannot reach a local bare-name mailbox this way either.
+  it('federatedSend refuses a name-shaped toAgentId (bare display name, not an agent id)', async () => {
+    setup()
+    await registerAgent(workerRuntime, 'answerer', evidenceB)
+    const envelope = {
+      fromAgent: { id: 'agt_00000000ab03', displayName: 'peer-sender' },
+      toAgentId: 'answerer',
+      messageId: 'msg_0000000abc55',
+      subject: 'hi',
+      body: 'hello',
+      type: 'status'
+    }
+
+    await expect(
+      call('orchestration.federatedSend', envelope, workerLinkCtx())
+    ).rejects.toMatchObject({ code: 'agent_unknown' })
+  })
+
   it('a same-id retry with matching type is an idempotent replay; a same-id collision with a DIFFERENT type refuses request_mismatch (m-1)', async () => {
     setup()
     const agentB = await registerAgent(workerRuntime, 'answerer', evidenceB)

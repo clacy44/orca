@@ -124,6 +124,34 @@ describe('orchestration.agents.register: mailbox repoint wiring (Ruling 32 Adden
     expect(moved?.to_handle).toBe(`agent:${result.agent.id}`)
   })
 
+  // H4d (Ruling 32 Addendum 13): pendingOnOldHandle used to be zeroed on a 'created' outcome
+  // (`result.outcome === 'reminted' ? result.pendingOnOldHandle : 0`) even though
+  // UpsertAgentByPaneSuffixResult carries the field on BOTH outcomes — a 'created' row whose
+  // bare-name backlog exceeds the per-call batch ceiling silently under-reported.
+  it('a fresh (created) register with a backlog past the per-call ceiling reports a truthful pendingOnOldHandle', async () => {
+    setup()
+    ctx = { runtime, orchestrationCompatibilityEvidence: evidence }
+    const total = 2005 // MAILBOX_REPOINT_BATCH_SIZE(200) * MAILBOX_REPOINT_MAX_BATCHES(10) + 5
+    for (let i = 0; i < total; i += 1) {
+      db.insertGatedMessage({
+        from: 'someone',
+        to: 'alpha',
+        subject: `stranded ${i}`,
+        type: 'status',
+        priority: 'normal'
+      })
+    }
+
+    const result = (await call('orchestration.agents.register', { name: 'alpha' })) as {
+      created: boolean
+      repointedMessages: number
+      pendingOnOldHandle: number
+    }
+    expect(result.created).toBe(true)
+    expect(result.repointedMessages).toBe(2000)
+    expect(result.pendingOnOldHandle).toBe(5)
+  })
+
   it('a register with nothing stranded returns 0 and never wakes the mailbox', async () => {
     setup()
     ctx = { runtime, orchestrationCompatibilityEvidence: evidence }

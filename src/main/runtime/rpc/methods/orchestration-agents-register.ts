@@ -190,9 +190,13 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         created: result.outcome === 'created',
         reMinted: result.outcome === 'reminted',
         repointedMessages,
-        // Nonzero only past the per-call batch ceiling (agent-mailbox-repoint.ts) — those rows
-        // are not reachable by any other path once this re-mint's transaction commits.
-        pendingOnOldHandle: result.outcome === 'reminted' ? result.pendingOnOldHandle : 0,
+        // H4d (Ruling 32 Addendum 13): both outcomes carry pendingOnOldHandle now — a 'created'
+        // row can leave a bare-name/succession backlog past the batch ceiling exactly like a
+        // 'reminted' row can (agent-directory.ts's UpsertAgentByPaneSuffixResult carries the
+        // field on both). Nonzero only past that per-call batch ceiling
+        // (agent-mailbox-repoint.ts) — those rows are not reachable by any other path once this
+        // call's transaction commits.
+        pendingOnOldHandle: result.pendingOnOldHandle,
         // R2: a tombstoned predecessor under this same host+name whose thread membership this
         // fresh id just inherited. Always 0 on a 'reminted' row (its id, and so its membership,
         // was never orphaned in the first place).

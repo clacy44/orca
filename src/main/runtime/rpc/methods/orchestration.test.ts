@@ -3274,8 +3274,9 @@ describe('orchestration RPC methods', () => {
         to_handle: `dispatch:${dispatch.id}`,
         read: 1
       })
+      // H4d: the dispatch branch names the mailbox it read too (Ruling 32 Addendum 13).
       await expect(call('orchestration.check', { terminal: 'term_worker' })).resolves.toMatchObject(
-        { count: 0, messages: [] }
+        { count: 0, messages: [], mailbox: `dispatch:${dispatch.id}` }
       )
     })
 

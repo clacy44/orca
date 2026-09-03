@@ -618,7 +618,9 @@ describe('agent: routing + durability', () => {
         run: run.id
       })) as { runId?: string; mailbox?: string }
       expect(checked.runId).toBe(run.id)
-      expect(checked.mailbox).toBeUndefined()
+      // H4d: the run branch now names its own mailbox too (Ruling 32 Addendum 13) — the point
+      // of this test is that it is the RUN mailbox, never the agent: one.
+      expect(checked.mailbox).toBe(`run:${run.id}`)
     })
 
     it('T1d: a --types filter that only the run mailbox would satisfy still reaches the run branch', async () => {
@@ -641,7 +643,7 @@ describe('agent: routing + durability', () => {
       // The agent: mailbox has nothing of type worker_done, so ownAgentMailWaiting is false —
       // this falls through to the run branch exactly as before F1.
       expect(checked.runId).toBe(run.id)
-      expect(checked.mailbox).toBeUndefined()
+      expect(checked.mailbox).toBe(`run:${run.id}`)
     })
 
     it('T1e: after acking the agent: delivery, the next plain check falls back to the run branch', async () => {
@@ -674,7 +676,59 @@ describe('agent: routing + durability', () => {
         mailbox?: string
       }
       expect(after.runId).toBe(run.id)
-      expect(after.mailbox).toBeUndefined()
+      expect(after.mailbox).toBe(`run:${run.id}`)
+    })
+
+    // H4d (Ruling 32 Addendum 13/item 12): --all does not bypass F1's ownAgentMailWaiting gate
+    // — a run-bound pane with genuine unread agent mail still routes through the agent: branch
+    // even with --all set, and the agent: branch's own --all handling (params.all) returns the
+    // merged agent:<id> + bare-handle rows, not the run's history.
+    it('check --all on a run-bound pane with unread agent mail returns the agent mailbox rows', async () => {
+      setup()
+      db.createRun({ objective: 'x', coordinatorHandle: 'term_b', coordinatorPaneKey: PANE_B })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'directory mail to the chair'
+      })
+
+      const checked = (await call('orchestration.check', {
+        terminal: 'term_b',
+        all: true
+      })) as { mailbox?: string; agentId?: string; messages: { subject: string }[] }
+      expect(checked.mailbox).toBe(`agent:${agentBId}`)
+      expect(checked.agentId).toBe(agentBId)
+      expect(checked.messages.map((m) => m.subject)).toEqual(['directory mail to the chair'])
+    })
+
+    // H4d (item 12 companion): the explicit-run case (T1c's sibling) with --all still returns
+    // the RUN's mailbox history, never the agent: one — same "explicit --run always wins" rule.
+    it('check --run <id> --all still returns run history, never the agent: mailbox', async () => {
+      setup()
+      const run = db.createRun({
+        objective: 'x',
+        coordinatorHandle: 'term_b',
+        coordinatorPaneKey: PANE_B
+      })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `run:${run.id}`,
+        subject: 'run history mail'
+      })
+      await call('orchestration.send', {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'directory mail to the chair'
+      })
+
+      const checked = (await call('orchestration.check', {
+        terminal: 'term_b',
+        run: run.id,
+        all: true
+      })) as { runId?: string; mailbox?: string; messages: { subject: string }[] }
+      expect(checked.runId).toBe(run.id)
+      expect(checked.mailbox).toBe(`run:${run.id}`)
+      expect(checked.messages.map((m) => m.subject)).toEqual(['run history mail'])
     })
   })
 })

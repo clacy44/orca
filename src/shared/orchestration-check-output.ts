@@ -143,9 +143,12 @@ export function formatOrchestrationCheckText(
     : ''
   // H4c (Ruling 32 Addendum 11): host-constant shape, same additive always-last-appended
   // pattern — names how much mail waits on the run mailbox F1's own-mailbox read stepped past.
+  // H4d: escaped through the same control-character escaper mailboxMismatchSuffix uses above —
+  // runMailbox is host-derived (`run:${run.id}`) today, but the escaper is cheap insurance
+  // against a future caller-influenced run id breaking the one-line-per-signal discipline.
   const runMailboxSuffix =
     prepared.runMailbox && (prepared.runPending ?? 0) > 0
-      ? `\n${prepared.runPending} message(s) waiting on ${prepared.runMailbox}; read them with --run ${prepared.runMailbox.replace(/^run:/, '')}`
+      ? `\n${prepared.runPending} message(s) waiting on ${escapeTerminalControlCharacters(prepared.runMailbox)}; read them with --run ${escapeTerminalControlCharacters(prepared.runMailbox.replace(/^run:/, ''))}`
       : ''
   if (prepared.formatted) {
     // Why prepended here too: --format and --inject return before the Delivery line is built, so

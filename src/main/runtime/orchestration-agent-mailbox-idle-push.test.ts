@@ -5,12 +5,14 @@
 // calls: a live, non-quarantined, non-derived, non-tombstoned registered pane resolves to its
 // agent:<id> mailbox; every other state resolves to null (same guard `check`'s durable branch
 // uses, orchestration.ts).
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationDb } from './orchestration/db'
 import { OrcaRuntimeService } from './orca-runtime'
 
 type RuntimeInternals = {
   resolveAgentMailboxForPaneKey: (paneKey: string) => string | null
+  deliverPendingMessagesForLeaf: (leaf: { tabId: string; leafId: string }) => void
+  deliverPendingMessages: (target: unknown, options?: { mailboxHandle?: string }) => void
 }
 
 function internals(runtime: OrcaRuntimeService): RuntimeInternals {
@@ -123,5 +125,40 @@ describe('resolveAgentMailboxForPaneKey (Ruling 32 Addendum 11 F2)', () => {
     }
     db.retireAgent(created.agent.id)
     expect(internals(runtime).resolveAgentMailboxForPaneKey('tabD:leaf-ddd')).toBeNull()
+  })
+
+  // H4d (Ruling 32 Addendum 13): the resolver alone is already proven above — this proves the
+  // F2 WIRING itself, that deliverPendingMessagesForLeaf actually calls deliverPendingMessages
+  // with mailboxHandle 'agent:<id>' for a registered pane (~:35103-35106).
+  it('deliverPendingMessagesForLeaf calls deliverPendingMessages with mailboxHandle agent:<id> for a registered pane', () => {
+    setup()
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'delta',
+      role: null,
+      hostId: 'local',
+      paneKey: 'tabE:leaf-eee',
+      terminalHandle: 'term_e',
+      processIncarnation: 'inc1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_e',
+      originHostId: 'local'
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const deliver = vi
+      .spyOn(internals(runtime), 'deliverPendingMessages')
+      .mockImplementation(() => {})
+
+    internals(runtime).deliverPendingMessagesForLeaf({ tabId: 'tabE', leafId: 'leaf-eee' })
+
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ tabId: 'tabE', leafId: 'leaf-eee' }),
+      { mailboxHandle: `agent:${created.agent.id}` }
+    )
   })
 })

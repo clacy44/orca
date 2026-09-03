@@ -231,10 +231,10 @@ describe('peer-mailbox-deliveries (BUG 5)', () => {
   })
 
   // Ruling 32 Addendum 10 (B2/F-17): a replayed Delivery whose frozen ids are now ALL
-  // unreadable (purged/quarantine-withheld) used to replay forever — a permanent head-of-line
-  // block on every message queued behind it. This proves the self-clear: the stuck delivery
-  // auto-acks and a fresh mint reaches the message that arrived after the freeze.
-  it('T-B1 (B2): a fully-purged frozen delivery self-clears and mints fresh from the current candidate set', () => {
+  // unreadable (purged) used to replay forever — a permanent head-of-line block on every
+  // message queued behind it. This proves the self-clear: the stuck delivery auto-acks and a
+  // fresh mint reaches the message that arrived after the freeze.
+  it('T-B2: a fully-purged frozen delivery self-clears and mints fresh from the current candidate set', () => {
     const db = rawDb()
     const frozen = seedMessages(2)
     const first = getOrCreateMailboxDelivery(db, {
@@ -285,5 +285,55 @@ describe('peer-mailbox-deliveries (BUG 5)', () => {
     expect(replay?.replayed).toBe(true)
     expect(replay?.messages.map((m) => m.id)).toEqual([frozen[1]])
     expect(replay?.omitted).toEqual({ purged: 1, withheld: 0 })
+  })
+
+  // H4d (Ruling 32 Addendum 13): withheld is quarantine-derived and reversible via `--lift` —
+  // auto-acking a delivery whose frozen rows are ALL withheld (never purged) would destroy
+  // recoverable mail the moment the author is lifted. Only an all-PURGED delivery self-clears.
+  it('T-B1: an outstanding delivery whose frozen rows are ALL withheld (author quarantined after the freeze) is NOT auto-acked', () => {
+    const db = rawDb()
+    const dbHandle = orchestrationDb as OrchestrationDb
+    db.prepare(
+      `INSERT INTO agents (id, display_name, host_id, origin_kind, origin_host_id, quarantined)
+       VALUES ('agt_sender', 'sender', 'local', 'pane', 'local', 0)`
+    ).run()
+    const ids: string[] = []
+    for (let i = 0; i < 2; i += 1) {
+      const message = dbHandle.insertMessage({
+        from: 'agent:agt_sender',
+        to: 'agent:recipient',
+        subject: `msg ${i}`,
+        runId: PEER_RUN_ID,
+        senderAgentId: 'agt_sender'
+      })
+      ids.push(message.id)
+    }
+    const first = getOrCreateMailboxDelivery(db, {
+      mailboxHandle: 'agent:recipient',
+      messageIds: ids
+    })
+    expect(first?.replayed).toBe(false)
+
+    db.prepare('UPDATE agents SET quarantined = 1 WHERE id = ?').run('agt_sender')
+
+    const replay = getOrCreateMailboxDelivery(db, {
+      mailboxHandle: 'agent:recipient',
+      messageIds: ids
+    })
+    // B1: still names the outstanding delivery (not silently dropped), replays it, and the
+    // frozen rows stay read=0 rather than being auto-acked away.
+    expect(replay?.replayed).toBe(true)
+    expect(replay?.delivery.id).toBe(first?.delivery.id)
+    expect(replay?.messages).toEqual([])
+    expect(replay?.omitted).toEqual({ purged: 0, withheld: 2 })
+
+    const stillOutstanding = db
+      .prepare('SELECT status FROM mailbox_deliveries WHERE id = ?')
+      .get(first?.delivery.id ?? '') as { status: string } | undefined
+    expect(stillOutstanding?.status).toBe('outstanding')
+    const readFlags = db
+      .prepare(`SELECT read FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`)
+      .all(...ids) as { read: number }[]
+    expect(readFlags.every((r) => r.read === 0)).toBe(true)
   })
 })

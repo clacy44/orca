@@ -77,17 +77,15 @@ export function getOrCreateMailboxDelivery(
       const pendingBehind = params.messageIds.filter((id) => !frozenSet.has(id)).length
       const { messages, omitted } = fetchMessagesByIds(db, frozenIds)
       // B2 (Ruling 32 Addendum 10/F-17): every frozen id in this replayed Delivery is now
-      // unreadable (purged, or its author quarantined) — nothing will ever make `messages`
-      // non-empty again, so replaying it forever is a permanent head-of-line block on every
-      // message queued behind it (F-17's "check prints No messages. forever" symptom). This is
-      // NOT a row reclassification (no message row's own state changes beyond the ordinary
-      // ack `read=1`) — it clears the STUCK DELIVERY the same way an explicit `--ack` would, and
-      // falls through to mint a fresh one from the caller's current candidate set.
-      if (
-        messages.length === 0 &&
-        frozenIds.length > 0 &&
-        omitted.purged + omitted.withheld === frozenIds.length
-      ) {
+      // permanently unreadable (PURGED — never quarantine-withheld, which is reversible via
+      // `--lift` and would destroy recoverable mail if auto-acked, Ruling 32 Addendum 13) —
+      // nothing will ever make `messages` non-empty again, so replaying it forever is a
+      // permanent head-of-line block on every message queued behind it (F-17's "check prints
+      // No messages. forever" symptom). This is NOT a row reclassification (no message row's
+      // own state changes beyond the ordinary ack `read=1`) — it clears the STUCK DELIVERY the
+      // same way an explicit `--ack` would, and falls through to mint a fresh one from the
+      // caller's current candidate set.
+      if (messages.length === 0 && frozenIds.length > 0 && omitted.purged === frozenIds.length) {
         const placeholders = frozenIds.map(() => '?').join(',')
         db.prepare(`UPDATE messages SET read = 1 WHERE id IN (${placeholders})`).run(...frozenIds)
         db.prepare(

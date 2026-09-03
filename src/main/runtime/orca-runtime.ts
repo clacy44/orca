@@ -34664,17 +34664,15 @@ export class OrcaRuntimeService {
   // opted into (same guard `check`'s durable branch uses, orchestration.ts).
   private resolveAgentMailboxForPaneKey(paneKey: string): string | null {
     const db = this._orchestrationDb
-    // Why typeof-guarded, not just `!db`: this fires on the hottest idle-edge path (every
-    // title-driven busy->idle transition), which a great many existing tests reach through a
-    // hand-rolled orchestration-db double that implements only the handful of methods its own
-    // scenario needs — never the full OrchestrationDb surface. A newly added call here must
-    // degrade to "no agent mailbox" against such a double rather than throwing, exactly as
-    // `!db` already does for a runtime with no orchestration db attached at all.
-    if (!db || typeof db.getAgentByPaneKey !== 'function') {
-      return null
-    }
+    // H4d (Ruling 32 Addendum 13): the file's own optional-call idiom (getCurrentRunForPane?.()
+    // above) rather than a typeof guard — same reason: this fires on the hottest idle-edge path
+    // (every title-driven busy->idle transition), which a great many existing tests reach
+    // through a hand-rolled orchestration-db double that implements only the handful of methods
+    // its own scenario needs — never the full OrchestrationDb surface. Degrades to "no agent
+    // mailbox" against such a double rather than throwing, exactly as `!db` already does for a
+    // runtime with no orchestration db attached at all.
     const hostId = this.getOrchestrationCompatibilityHostId()
-    const row = db.getAgentByPaneKey(hostId, paneKey)
+    const row = db?.getAgentByPaneKey?.(hostId, paneKey)
     return row && !row.tombstoned_at && row.derived !== 1 && !row.quarantined
       ? `agent:${row.id}`
       : null

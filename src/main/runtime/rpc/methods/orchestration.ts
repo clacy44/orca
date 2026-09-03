@@ -1446,7 +1446,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // S10-19 refusal above still stands unchanged). `.some(...)` over `getUnreadMessages`
         // reuses the exact same live-row filtering (liveMessageSqlClause) every other read path
         // already applies — never a second, drifting definition of "mail waiting".
+        // H4d (Ruling 32 Addendum 13): `boundRun !== undefined &&` leads so this extra unread
+        // read is paid only by a run-bound pane — every OTHER registered pane's check used to
+        // load its whole unread set a second time here for nothing, since the outer `if`
+        // below only ever consults this value when `boundRun` is set (an explicit --run with
+        // no boundRun already short-circuits via `!params.run` and never reaches the branch).
         const ownAgentMailWaiting =
+          boundRun !== undefined &&
           callerAgentMailbox !== undefined &&
           !params.run &&
           db
@@ -1496,10 +1502,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               return {
                 ...result,
                 formatted: messages.map(formatMessageBanner).join('\n\n'),
-                runId: run.id
+                runId: run.id,
+                mailbox: address
               }
             }
-            return { ...result, runId: run.id }
+            return { ...result, runId: run.id, mailbox: address }
           }
 
           const readDelivery = (wakeTypes?: MessageType[]) =>
@@ -1512,6 +1519,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           if (current) {
             return {
               runId: run.id,
+              mailbox: address,
               deliveryId: current.delivery.id,
               messages: current.messages,
               count: current.messages.length,
@@ -1529,6 +1537,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           if (!params.wait) {
             return {
               runId: run.id,
+              mailbox: address,
               deliveryId: null,
               messages: [],
               count: 0,
@@ -1588,6 +1597,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           if (waitResult === 'timed_out') {
             return {
               runId: run.id,
+              mailbox: address,
               deliveryId: null,
               messages: [],
               count: 0,
@@ -1600,6 +1610,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           if (waitResult === 'cancelled') {
             return {
               runId: run.id,
+              mailbox: address,
               deliveryId: null,
               messages: [],
               count: 0,
@@ -1613,6 +1624,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           current = readDelivery(typeFilter)
           return {
             runId: run.id,
+            mailbox: address,
             deliveryId: current?.delivery.id ?? null,
             messages: current?.messages ?? [],
             count: current?.messages.length ?? 0,
@@ -1690,6 +1702,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             return {
               ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
               dispatchId: workerMailbox.dispatchId,
+              mailbox: address,
               messages,
               count: messages.length,
               ...deliveryMeta,
@@ -1717,6 +1730,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             return {
               ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
               dispatchId: workerMailbox.dispatchId,
+              mailbox: address,
               messages: [],
               count: 0,
               timedOut: waitResult === 'timed_out',
@@ -1749,6 +1763,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           return {
             ...(workerMailbox.runId ? { runId: workerMailbox.runId } : {}),
             dispatchId: workerMailbox.dispatchId,
+            mailbox: address,
             messages: arrived,
             count: arrived.length,
             ...arrivedDeliveryMeta,
@@ -1787,10 +1802,14 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // branch just read its own agent mailbox instead (ownAgentMailWaiting stepped past the
           // run branch above), so say what was stepped past rather than leaving the run mailbox
           // invisible to a caller that only reads its own agent: mailbox from here on.
+          // H4d (Ruling 32 Addendum 13): getUnreadMessages, not countUnreadMessages — the
+          // latter counts purged/quarantined rows too and ignores the caller's --types filter,
+          // so it could over-report against what an actual `--run <id>` check would return.
+          // Same live-row + --types shape legacyPending uses elsewhere in this file.
           const runMailboxFields = boundRun
             ? {
                 runMailbox: `run:${boundRun.id}`,
-                runPending: db.countUnreadMessages(`run:${boundRun.id}`)
+                runPending: db.getUnreadMessages(`run:${boundRun.id}`, typeFilter).length
               }
             : {}
 
