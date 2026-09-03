@@ -1361,7 +1361,10 @@ export class OrchestrationDb {
   // it would never get the install-day retention floor and every pre-existing settled row would
   // be evaluated against the unmodified 7-day predicate on the very next prune tick. Guarded on
   // user_version >= 39 (INV-P-016: no v39/v40 artifact is installed anywhere, so this table may
-  // still ride the v39 step) plus a hasTable probe, same discipline as every repair above.
+  // still ride the v39 step) plus a hasTable probe, same discipline as every repair above. F7:
+  // in practice this method's own INSERT OR IGNORE is also a guaranteed no-op — createTables()
+  // calls this repair before it runs the unconditional CREATE TABLE IF NOT EXISTS +
+  // INSERT OR IGNORE for this table (see that site's comment), which stamps first on every open.
   private repairUnshippedV39AttachmentRetentionFloor(): void {
     const storedVersion = this.db.pragma('user_version', { simple: true }) as number
     if (storedVersion < 39) {
@@ -1897,9 +1900,12 @@ export class OrchestrationDb {
       CREATE INDEX IF NOT EXISTS idx_rda_terminal_handle
         ON remote_dispatch_attachments(terminal_handle);
 
-      -- Ruling 31(b): install-day retention floor for pruneSettledRemoteAttachments. A fresh
-      -- store stamps it here, at creation, so no pre-existing row is ever evaluated — there are
-      -- none. An upgraded store stamps it in the v39 migration step / the unshipped-v39 repair.
+      -- Ruling 31(b): install-day retention floor for pruneSettledRemoteAttachments. F7:
+      -- createTables() runs before migrate() on every open (db.ts open()), so THIS is the one
+      -- site that actually stamps it — for a fresh store (no pre-existing row is ever evaluated)
+      -- and for an upgraded store alike (INSERT OR IGNORE against PRIMARY KEY CHECK(id=1) makes
+      -- it idempotent). The v39 migration step's INSERT OR IGNORE and
+      -- repairUnshippedV39AttachmentRetentionFloor's INSERT OR IGNORE are both guaranteed no-ops.
       CREATE TABLE IF NOT EXISTS peer_attachment_retention_floor (
         id       INTEGER PRIMARY KEY CHECK(id = 1),
         floor_at TEXT NOT NULL
@@ -2694,9 +2700,11 @@ export class OrchestrationDb {
             granted_at              TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (run_id, peer_link_device_id)
           );
-          -- Ruling 31(b): stamp the retention floor exactly once, atomically with the v39 bump,
-          -- so every pre-existing settled row gets a full retention window counted from THIS
-          -- upgrade rather than from its own (long-past) updated_at.
+          -- Ruling 31(b): install-day retention floor, so every pre-existing settled row gets a
+          -- full retention window counted from THIS upgrade rather than its own (long-past)
+          -- updated_at. F7: this INSERT OR IGNORE is a guaranteed no-op in practice — createTables()
+          -- runs before migrate() on every open and already stamps the floor first (see the
+          -- CREATE TABLE comment above); kept for defense-in-depth against a future ordering change.
           CREATE TABLE IF NOT EXISTS peer_attachment_retention_floor (
             id       INTEGER PRIMARY KEY CHECK(id = 1),
             floor_at TEXT NOT NULL
@@ -7582,7 +7590,7 @@ export class OrchestrationDb {
                SELECT dispatch_id,
                       ROW_NUMBER() OVER (
                         PARTITION BY home_peer_fingerprint
-                        ORDER BY ${floorFloored} DESC, rowid DESC
+                        ORDER BY COALESCE(agent_exited_at, updated_at) DESC, rowid DESC
                       ) AS rn
                FROM remote_dispatch_attachments
                WHERE ${settledPredicate}

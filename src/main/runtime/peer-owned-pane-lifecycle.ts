@@ -190,10 +190,18 @@ export async function runPeerAttachmentRuntimePrune(args: {
     }
     const liveHandle = args.runtime.resolveLivePeerPaneHandle(row.process_incarnation)
     if (!liveHandle) {
-      // Ruling 31(d): an incarnation this pass cannot resolve is stamped and audited HERE, never
-      // silently skipped — otherwise the row stays unstamped forever with a live-but-unresolvable
-      // pane, which is exactly the delete-without-close orphan the retention prune must never do.
-      markOwnerUnresolved(args.db, row.dispatch_id, 'incarnation_unresolvable')
+      // Ruling 31(d')/Add.1(f): a resolution failure is NOT proof the pane is gone — it is also
+      // what "the pty graph has not re-adopted it yet" looks like (Ruling 24 Add.4(bb)). Stamp
+      // only on POSITIVE proof (same oracle + profile-blind rule as runPeerAttachmentBootSweep);
+      // otherwise leave the row untouched for the next pass. Delete-safety comes from the DELETE
+      // predicate, which already refuses any settled row still carrying a terminal_handle.
+      const liveness = await args.runtime.inspectTerminalProcessIncarnationLiveness(
+        row.process_incarnation,
+        PEER_OWNED_PANE_LOCAL_HOST_SCOPE
+      )
+      if (liveness === 'dead') {
+        markOwnerUnresolved(args.db, row.dispatch_id, 'incarnation_dead')
+      }
       continue
     }
     const disposition = peerOwnedPaneDisposition(row, args.lookup)

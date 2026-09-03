@@ -4371,14 +4371,20 @@ export class OrcaRuntimeService {
         console.warn('[orchestration] settled remote attachment prune deleted rows', {
           count: pruned
         })
-        db.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: null,
-          actorHostId: 'local',
-          verb: 'attachmentRetentionPrune',
-          outcome: 'pruned',
-          reasonCode: `count=${pruned}`
-        })
+        // F8: kept out of the outer try/catch below — an audit-write failure here must never be
+        // misreported as a prune failure (the DELETE already succeeded and rows are already gone).
+        try {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: 'local',
+            verb: 'attachmentRetentionPrune',
+            outcome: 'pruned',
+            reasonCode: `count=${pruned}`
+          })
+        } catch (error) {
+          console.warn('[orchestration] settled remote attachment prune audit write failed', error)
+        }
       }
     } catch (error) {
       console.warn('[orchestration] settled remote attachment prune failed', error)

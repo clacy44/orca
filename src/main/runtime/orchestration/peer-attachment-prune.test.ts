@@ -224,6 +224,12 @@ function buildV36AttachmentFixture(
     );
     DROP TABLE remote_dispatch_attachments_v38shape;
     DROP TABLE IF EXISTS peer_run_grants;
+    -- F6: the seed's OrchestrationDb(dbPath) construction already ran createTables(), which
+    -- unconditionally CREATEs and STAMPs peer_attachment_retention_floor before migrate() ever
+    -- runs (F7). Drop it here so the v39 migration step (the thing test (i) exists to prove) is
+    -- the only thing that can create/stamp it — otherwise the assertion below passes even with
+    -- the v39 stamp deleted.
+    DROP TABLE IF EXISTS peer_attachment_retention_floor;
   `)
   for (const row of rows) {
     raw
@@ -334,7 +340,7 @@ describe('Ruling 31: install-day retention floor + loud prune + close-before-del
     warnSpy.mockRestore()
   })
 
-  it('(iii) an expired row whose pane incarnation cannot be resolved is stamped + audited, never deleted unclosed', async () => {
+  it("(iii) Ruling 31 Add.1(d'): an expired row whose pane incarnation cannot be resolved this pass, and whose liveness is unproven, is LEFT ALONE — retried, never stamped, never deleted", async () => {
     const dbPath = buildV36AttachmentFixture([])
     db = new OrchestrationDb(dbPath)
     const raw = new Database(dbPath)
@@ -356,25 +362,65 @@ describe('Ruling 31: install-day retention floor + loud prune + close-before-del
     runtime.setOrchestrationDb(db)
     runtime.setPeerGrantProfileLookup(() => 'peer')
     // The incarnation cannot be resolved to a live handle on this pass — the exact shape a
-    // reconnect race leaves behind.
+    // reconnect race leaves behind — and its liveness cannot be proven either way (no ptyController
+    // wired in this test service, matching the real 'unknown' fallback at orca-runtime.ts:17167-17168).
     vi.spyOn(runtime, 'resolveLivePeerPaneHandle').mockReturnValue(null)
+    vi.spyOn(runtime, 'inspectTerminalProcessIncarnationLiveness').mockResolvedValue('unknown')
+    const closeTerminal = vi.spyOn(runtime, 'closeTerminal')
+
+    runtime.tickDispatchLivenessMonitor()
+    await vi.waitFor(() => {
+      // tickDispatchLivenessMonitor's peer-attachment prune is async fire-and-forget; give it a
+      // microtask/macrotask turn, then assert the row is provably still untouched.
+      expect(db?.getRemoteDispatchAttachment('disp_unresolvable')).toBeDefined()
+    })
+    expect(closeTerminal).not.toHaveBeenCalled()
+    const row = db.getRemoteDispatchAttachment('disp_unresolvable')
+    expect(row?.agent_exited_at).toBeNull()
+    const auditRows = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'peerPaneClose'`)
+      .all()
+    expect(auditRows).toHaveLength(0)
+  })
+
+  it("(iii-b) Ruling 31 Add.1(d'): an expired row whose pane incarnation is PROVEN dead this pass is stamped with cause incarnation_dead and audited, never closed", async () => {
+    const dbPath = buildV36AttachmentFixture([])
+    db = new OrchestrationDb(dbPath)
+    const raw = new Database(dbPath)
+    raw
+      .prepare(`UPDATE peer_attachment_retention_floor SET floor_at = ? WHERE id = 1`)
+      .run(sqlAgo(PEER_ATTACHMENT_RETENTION_MS + 60_000))
+    raw
+      .prepare(
+        `INSERT INTO remote_dispatch_attachments
+           (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage,
+            terminal_handle, process_incarnation, created_at, updated_at)
+         VALUES ('disp_dead', 'task_v36', 'fp_v36', 'epoch1', 'succeeded',
+                 'worker_report_queued', 'term_stale_dead', 'pty_stale_dead:inc_1', ?, ?)`
+      )
+      .run(sqlAgo(20 * 24 * 60 * 60 * 1000), sqlAgo(20 * 24 * 60 * 60 * 1000))
+    raw.close()
+
+    runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb(db)
+    runtime.setPeerGrantProfileLookup(() => 'peer')
+    vi.spyOn(runtime, 'resolveLivePeerPaneHandle').mockReturnValue(null)
+    vi.spyOn(runtime, 'inspectTerminalProcessIncarnationLiveness').mockResolvedValue('dead')
     const closeTerminal = vi.spyOn(runtime, 'closeTerminal')
 
     runtime.tickDispatchLivenessMonitor()
 
     await vi.waitFor(() => {
-      expect(db?.getRemoteDispatchAttachment('disp_unresolvable')?.agent_exited_at).not.toBeNull()
+      expect(db?.getRemoteDispatchAttachment('disp_dead')?.agent_exited_at).not.toBeNull()
     })
-    // Never closed (nothing to close a handle we could not resolve) and never deleted — the
-    // row survives this pass, stamped and audited, exactly as Ruling 31(d) requires.
     expect(closeTerminal).not.toHaveBeenCalled()
-    expect(db.getRemoteDispatchAttachment('disp_unresolvable')).toBeDefined()
+    expect(db.getRemoteDispatchAttachment('disp_dead')).toBeDefined()
     const auditRows = rawDb(db)
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'peerPaneClose' AND outcome = 'owner_unresolved'`
       )
       .all() as { reason_code: string }[]
-    expect(auditRows.some((r) => r.reason_code === 'incarnation_unresolvable')).toBe(true)
+    expect(auditRows.some((r) => r.reason_code === 'incarnation_dead')).toBe(true)
   })
 })
 

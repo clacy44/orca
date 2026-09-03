@@ -422,7 +422,7 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
   })
 
-  it('review B3: a row whose process_incarnation does not (yet) resolve to a live handle in this process is left alone', async () => {
+  it('F5 / review B3: a row whose process_incarnation does not (yet) resolve to a live handle in this process, and whose liveness cannot be proven, is LEFT ALONE — no stamp, no audit', async () => {
     db = new OrchestrationDb(':memory:')
     const dispatchId = insertAttachment(db, {
       homeFingerprint: 'fp_peer',
@@ -440,7 +440,14 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     }
     await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
     expect(closeTerminal).not.toHaveBeenCalled()
-    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
+    const row = db.getRemoteDispatchAttachment(dispatchId)
+    expect(row).toBeDefined()
+    // F5: positively pin the untouched state — not just "not closed" (which a stamp-and-audit
+    // outcome would also satisfy).
+    expect(row?.agent_exited_at).toBeNull()
+    expect(row?.state).toBe('ready')
+    const audit = rawDb(db).prepare(`SELECT * FROM agent_audit WHERE verb = 'peerPaneClose'`).all()
+    expect(audit).toHaveLength(0)
   })
 
   // Review D1 (2026-09-02) REPLACES the prior "finding 2 / 24(bb): a row whose grant is
@@ -554,16 +561,13 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     expect(pruneAudit).toEqual(exitAudit)
   })
 
-  // W-5..W-7 review finding 2 (Ruling 24 addendum 4(bb)) SUPERSEDED by Ruling 31(d): the prior
-  // "retry a later pass" design left an unresolvable incarnation unstamped in between passes,
-  // which is exactly the delete-without-close gap the migration-rehearsal root cause (D-R59)
-  // found — pruneSettledRemoteAttachments has no visibility into "still being retried" and could
-  // delete a settled row whose pane was never closed. Ruling 31(d) requires the FIRST
-  // unresolvable pass to stamp+audit immediately (never skip), so the row is (a) never deleted
-  // unclosed and (b) no longer a re-run candidate once resolvable — an unresolved disposition is
-  // not proof of peer ownership (D1), so it must never be force-closed even if the handle later
-  // resolves.
-  it('Ruling 31(d): a row unresolvable on the first call is stamped + audited immediately, and is not closed even once the handle later resolves', async () => {
+  // Ruling 31 Addendum 1 (d')/(f), restoring Ruling 24 Add.4(bb): a resolution failure
+  // (resolveLivePeerPaneHandle === null) is NOT proof of death — it is also what "the pty graph
+  // has not re-adopted the pty yet" looks like on the first pass after a restart. H1's "stamp on
+  // any unresolvable" was a REGRESSION (F1/F4 of the H1 review) that permanently orphaned a live
+  // peer pane. The row must be left untouched (no stamp, no audit) while liveness is 'unknown',
+  // and RE-RUN on the next pass — once the handle resolves, it is closed normally.
+  it("Ruling 31 Add.1(d') / Ruling 24 Add.4(bb): a row unresolvable on the first pass (liveness 'unknown') is left untouched, and closed on a later pass once the handle resolves", async () => {
     db = new OrchestrationDb(':memory:')
     const dispatchId = insertAttachment(db, {
       homeFingerprint: 'fp_peer',
@@ -575,7 +579,44 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
     let resolved = false
     const runtime: PeerOwnedPaneRuntime = {
       resolveLivePeerPaneHandle: () => (resolved ? 'term_later_reconnected' : null),
-      inspectTerminalProcessIncarnationLiveness: async () => 'live',
+      inspectTerminalProcessIncarnationLiveness: async () => 'unknown',
+      closeTerminal,
+      isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
+      getRuntimeId: () => 'epoch-current'
+    }
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
+    expect(closeTerminal).not.toHaveBeenCalled()
+    const untouchedRow = db.getRemoteDispatchAttachment(dispatchId)
+    expect(untouchedRow).toBeDefined()
+    expect(untouchedRow?.agent_exited_at).toBeNull()
+    expect(untouchedRow?.state).toBe('ready')
+    const auditAfterFirstPass = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'peerPaneClose'`)
+      .all()
+    expect(auditAfterFirstPass).toHaveLength(0)
+
+    // Second pass: the pty graph has now re-adopted the handle — the row is retried, not
+    // abandoned, and closes normally.
+    resolved = true
+    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
+    expect(closeTerminal).toHaveBeenCalledWith('term_later_reconnected')
+    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeUndefined()
+  })
+
+  // F1/F4 sibling: the ONLY way an unresolvable incarnation may be stamped is POSITIVE proof of
+  // death from the same oracle + profile-blind rule the boot sweep already uses.
+  it("Ruling 31 Add.1(d'): a row unresolvable on this pass, whose incarnation the daemon table proves DEAD, is stamped with cause incarnation_dead and audited — profile-blind, never closed", async () => {
+    db = new OrchestrationDb(':memory:')
+    const dispatchId = insertAttachment(db, {
+      homeFingerprint: 'fp_peer',
+      terminalHandle: 'term_dead',
+      processIncarnation: 'pty_dead:inc_1',
+      state: 'ready'
+    })
+    const closeTerminal = vi.fn().mockResolvedValue({})
+    const runtime: PeerOwnedPaneRuntime = {
+      resolveLivePeerPaneHandle: () => null,
+      inspectTerminalProcessIncarnationLiveness: async () => 'dead',
       closeTerminal,
       isTerminalRunningAgent: vi.fn().mockResolvedValue(false),
       getRuntimeId: () => 'epoch-current'
@@ -590,14 +631,7 @@ describe('S10-19 W2-T1 (Ruling 24 addendum 2(p)/(q); review B3): runPeerAttachme
       .all() as { outcome: string; reason_code: string }[]
     expect(audit).toHaveLength(1)
     expect(audit[0]?.outcome).toBe('owner_unresolved')
-    expect(audit[0]?.reason_code).toBe('incarnation_unresolvable')
-
-    // The row is now stamped (agent_exited_at set), so it is no longer a
-    // findLivePeerCandidateAttachments candidate at all — the later resolve is a no-op.
-    resolved = true
-    await runPeerAttachmentRuntimePrune({ db, runtime, lookup: () => 'peer' })
-    expect(closeTerminal).not.toHaveBeenCalled()
-    expect(db.getRemoteDispatchAttachment(dispatchId)).toBeDefined()
+    expect(audit[0]?.reason_code).toBe('incarnation_dead')
   })
 
   it('a full-profile row whose agent has exited is never inspected for closing or deletion', async () => {
