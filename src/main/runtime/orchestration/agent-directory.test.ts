@@ -352,10 +352,14 @@ describe('agent-directory', () => {
       }
     })
 
-    // F-9 item (a) (delta review, Ruling 32 Addendum 9): register must surface what a
-    // tombstoned predecessor's peer-facing authority and unread mail left behind — neither is
-    // repointed onto the fresh successor id.
-    it('surfaces pending peer questions and unread mail left behind on the tombstoned predecessor', () => {
+    // F-9 item (a) (delta review, Ruling 32 Addendum 9), updated by H4/F-18 (Ruling 32
+    // Addendum 10) + H4d's ordering fix (Ruling 32 Addendum 13): register must surface what a
+    // tombstoned predecessor's peer-facing authority left behind — question_threads is never
+    // repointed. Its `agent:<old id>` unread mail, however, IS repointed now (F-18, inside
+    // adoptPredecessorThreadMembership, which runs BEFORE this count) — so
+    // unreadMailOnRetiredId correctly reflects the POST-repoint remainder (0 here, the repoint
+    // moved it), not "left behind" the way it read before F-18 existed.
+    it('surfaces pending peer questions left behind on the tombstoned predecessor; unread mail is repointed, not left behind', () => {
       const db = rawDb()
       const first = upsertAgentByPaneSuffix(db, baseParams({ paneKey: 'tab1:leaf-aaa' }))
       const predecessorId = first.outcome === 'created' ? first.agent.id : ''
@@ -383,7 +387,8 @@ describe('agent-directory', () => {
         return
       }
       expect(successor.pendingPeerQuestions).toBe(1)
-      expect(successor.unreadMailOnRetiredId).toBe(1)
+      expect(successor.unreadMailOnRetiredId).toBe(0)
+      expect(successor.repointedMessages).toBe(1)
     })
 
     it('reclaims a name held by a gone+derived row (tombstones it, then inserts fresh)', () => {
