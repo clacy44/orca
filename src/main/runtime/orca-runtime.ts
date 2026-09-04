@@ -127,8 +127,10 @@ import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
 import {
   RestoreTicketRegistry,
   type RestoreTicketId,
+  type RestoreTicketMintArgs,
   type RestoreTicketPayload
 } from './restore-ticket-registry'
+import { isRestoreSweepLockHeld } from './restore-sweep-lock'
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
@@ -13840,6 +13842,16 @@ export class OrcaRuntimeService {
       d2: { inventory: inventoryState },
       d3: { liveNow, firstObservedNotLiveAt, now }
     }
+  }
+
+  /** [S10-21a C7, INV-P-021, §2.2] The sweep's own mint point — the ONLY public entry to this
+   * instance's `RestoreTicketRegistry`. No RPC/IPC surface calls this (it is not exposed on any
+   * wire-facing type); the sweep (`src/main/startup/restore-registered-agent-panes.ts`) calls
+   * it directly, in-process, and hands the returned id straight to `ensureAgentSession`'s
+   * `internal.restoreProvenance`, which `createTerminal`'s E1 redeems against this same
+   * instance. */
+  mintRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId {
+    return this.restoreTickets.mint(payload)
   }
 
   registerOrchestrationCompatibilitySshAttachment(
@@ -28104,6 +28116,28 @@ export class OrcaRuntimeService {
       gateLeafId !== undefined &&
       isTerminalLeafId(gateLeafId)
     if (gateHasPlacement) {
+      // [S10-21a C7, design v3.2 §2.1a, T24] "Any renderer-invoked restore/recovery path that
+      // would touch a pane the sweep has not yet finished with … must wait on this lock or
+      // refuse outright rather than race the sweep for the same pane key." Scoped to PLACED
+      // creates only (a bare/unplaced create targets no existing pane, so there is nothing for
+      // it to race the sweep over) and exempt for the sweep's own host-restore calls (it holds
+      // the lock itself; a self-check would deadlock the sweep against itself). Refuse outright
+      // rather than wait: the sweep's own bound is 30s and a renderer caller retrying after that
+      // is simpler and safer than threading a wait queue through this synchronous gate.
+      if (isRestoreSweepLockHeld() && opts.restoreProvenance.kind !== 'host-restore') {
+        const gateDbForLock = this.getOrchestrationDbForGate()
+        if (gateDbForLock) {
+          writeLaunchAdmissionAudit(
+            gateDbForLock,
+            makePaneKey(gateTabId as string, gateLeafId as string),
+            this.getOrchestrationCompatibilityHostId(),
+            'launch_refused',
+            'refused',
+            'sweep_lock_held'
+          )
+        }
+        throw new LaunchAdmissionRefusedError('sweep_lock_held')
+      }
       const gateDb = this.getOrchestrationDbForGate()
       this.assertPaneKeyNotOwned(
         gateDb,

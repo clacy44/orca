@@ -39,6 +39,7 @@ import {
   registerBrowserHandlers
 } from './browser'
 import { registerSessionHandlers } from './session'
+import { registerSweepRestoreMarkHandler } from './sweep-restore-mark'
 import { registerSettingsHandlers } from './settings'
 import { registerDiagnosticsHandlers } from './diagnostics'
 import { registerSkillsHandlers } from './skills'
@@ -200,6 +201,7 @@ export function registerCoreHandlers(
   registerShellHandlers(store)
   registerPetHandlers()
   registerSessionHandlers(store)
+  registerSweepRestoreMarkHandler(runtime)
   registerUIHandlers(store, { isDashboardPopoutRenderer })
   registerEmulatorFrameStreamHandlers()
   registerEmulatorVideoStreamHandlers()

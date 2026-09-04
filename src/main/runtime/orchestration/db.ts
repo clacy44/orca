@@ -87,6 +87,7 @@ import {
 import {
   deleteLaunchRowsForAgent as deleteLaunchRowsForAgentImpl,
   launchBySessionId as launchBySessionIdImpl,
+  listNewestLaunchRowsForHost as listNewestLaunchRowsForHostImpl,
   newestLaunchForPane as newestLaunchForPaneImpl,
   recordLaunch as recordLaunchImpl,
   recordSelfReportRotation as recordSelfReportRotationImpl,
@@ -4860,6 +4861,11 @@ export class OrchestrationDb {
 
   newestLaunchForPane(hostId: string, paneKey: string): AgentLaunchSessionRow | undefined {
     return newestLaunchForPaneImpl(this.db, hostId, paneKey)
+  }
+
+  // S10-21a C7 (design v3.2 §2.1): the sweep's own enumeration input — one row per pane.
+  listNewestLaunchRowsForHost(hostId: string): AgentLaunchSessionRow[] {
+    return listNewestLaunchRowsForHostImpl(this.db, hostId)
   }
 
   launchBySessionId(sessionId: string): AgentLaunchSessionRow | undefined {

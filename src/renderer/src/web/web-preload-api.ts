@@ -806,7 +806,9 @@ function createWebPreloadApi(): Partial<PreloadApi> {
       readTerminalScrollback: () => null,
       setSync: (session, hostId) => {
         writeJson(sessionStorageKeyForHost(hostId), sanitizeWebRuntimeWorkspaceSession(session))
-      }
+      },
+      // Web has no main-process restore sweep (S10-21a C7) — never marked.
+      sweepRestoreMarkGet: () => Promise.resolve(false)
     },
     onboarding: {
       get: () => Promise.resolve(getStoredOnboarding()),

@@ -23,6 +23,7 @@ const {
   registerShellHandlersMock,
   registerPetHandlersMock,
   registerSessionHandlersMock,
+  registerSweepRestoreMarkHandlerMock,
   registerUIHandlersMock,
   setTrustedUIRendererWebContentsIdMock,
   registerFilesystemHandlersMock,
@@ -88,6 +89,7 @@ const {
   registerShellHandlersMock: vi.fn(),
   registerPetHandlersMock: vi.fn(),
   registerSessionHandlersMock: vi.fn(),
+  registerSweepRestoreMarkHandlerMock: vi.fn(),
   registerUIHandlersMock: vi.fn(),
   setTrustedUIRendererWebContentsIdMock: vi.fn(),
   registerFilesystemHandlersMock: vi.fn(),
@@ -262,6 +264,10 @@ vi.mock('./session', () => ({
   registerSessionHandlers: registerSessionHandlersMock
 }))
 
+vi.mock('./sweep-restore-mark', () => ({
+  registerSweepRestoreMarkHandler: registerSweepRestoreMarkHandlerMock
+}))
+
 vi.mock('./ui', () => ({
   registerUIHandlers: registerUIHandlersMock,
   setTrustedUIRendererWebContentsId: setTrustedUIRendererWebContentsIdMock
@@ -406,6 +412,7 @@ describe('registerCoreHandlers', () => {
     registerShellHandlersMock.mockReset()
     registerPetHandlersMock.mockReset()
     registerSessionHandlersMock.mockReset()
+    registerSweepRestoreMarkHandlerMock.mockReset()
     registerUIHandlersMock.mockReset()
     setTrustedUIRendererWebContentsIdMock.mockReset()
     registerFilesystemHandlersMock.mockReset()

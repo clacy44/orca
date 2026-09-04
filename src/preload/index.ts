@@ -3179,7 +3179,9 @@ const api = {
     /** Synchronous session save for beforeunload — blocks until flushed to disk. */
     setSync: (args, hostId) => {
       ipcRenderer.sendSync('session:set-sync', args, hostId)
-    }
+    },
+    sweepRestoreMarkGet: (paneKey) =>
+      ipcRenderer.invoke('orchestration:sweepRestoreMark:get', paneKey)
   } satisfies PreloadApi['session'],
 
   remoteWorkspace: {

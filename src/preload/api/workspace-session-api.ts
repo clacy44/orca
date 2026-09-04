@@ -20,6 +20,10 @@ export type WorkspaceSessionApi = {
     flush: () => Promise<void>
     readTerminalScrollback: (args: { ref: string }) => string | null
     setSync: (args: WorkspaceSessionState, hostId?: ExecutionHostId) => void
+    /** [S10-21a C7, T32] READ-ONLY — no writable counterpart exists on any wire. The renderer's
+     * own wake path consults this before resuming a sleeping record; a `true` result means the
+     * main-process sweep already restored this pane and the renderer must not resume it again. */
+    sweepRestoreMarkGet: (paneKey: string) => Promise<boolean>
   }
   cache: {
     getGitHub: () => Promise<{

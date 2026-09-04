@@ -322,6 +322,26 @@ export function launchBySessionId(
     | undefined
 }
 
+/** [S10-21a C7, design v3.2 §2.1 pseudocode "launchRows := db.getAgentLaunchSessions(hostId)
+ * (newest by seq per pane_key)"] One row per `pane_key` — whichever has the highest `seq` — for
+ * every pane this host has ever recorded a launch for. The sweep's own enumeration input; no
+ * other caller needs "every pane," only `newestLaunchForPane`'s single-pane form. */
+export function listNewestLaunchRowsForHost(
+  db: Database.Database,
+  hostId: string
+): AgentLaunchSessionRow[] {
+  return db
+    .prepare(
+      `SELECT a.* FROM agent_launch_sessions a
+       WHERE a.host_id = ?
+         AND a.seq = (
+           SELECT MAX(b.seq) FROM agent_launch_sessions b
+           WHERE b.host_id = a.host_id AND b.pane_key = a.pane_key
+         )`
+    )
+    .all(hostId) as AgentLaunchSessionRow[]
+}
+
 /** By `seq` (unambiguous) or by the pane's newest row (JUDGMENT CALL: the brief's
  * `setLaunchAgentId(seq|paneKey, agentId)` read as "either form should work" — see RETURN
  * block). */

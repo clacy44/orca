@@ -167,6 +167,7 @@ import { maybeRedirectAppImageCliLaunch } from './startup/appimage-cli-redirect'
 import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entry-redirect'
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
 import { recoverLegacyWorkerTerminalsForRendererStartup } from './startup/legacy-worker-renderer-recovery'
+import { runRestoreSweep, type RestoreSweepDeps } from './startup/restore-registered-agent-panes'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
 import { getDevInstanceIdentity } from './startup/dev-instance-identity'
 import { hydrateShellPath, mergePathSegments } from './startup/hydrate-shell-path'
@@ -1019,6 +1020,35 @@ function bindTerminalRuntimeStartupServices(
   firstWindowStartupServicesReady = services.then((value) => value.firstWindowReady)
   localPtyStartupReady = services.then((value) => value.localPtyReady)
   localPtyProviderStartupReady = services.then((value) => value.localPtyProviderReady)
+}
+
+// [S10-21a C7, design v3.2 §2.1/§2.7 call site 1] Invoked directly from main startup — NEVER
+// `ipcMain.handle` — after the orchestration store attaches (both call sites below run it right
+// after `refreshRestoredOrchestrationAuthority`/the store is known live, before the RPC
+// transport or the renderer window can offer any renderer-invoked restore path a race). A
+// throw here must never take startup down with it (the sweep is best-effort recovery, not a
+// startup precondition) — loud console.error, never silent, matching the HARNESS style §2.1a's
+// own lock-bound audit uses.
+async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promise<void> {
+  const deps: RestoreSweepDeps = {
+    getOrchestrationDb: () => runtimeService.getOrchestrationDb(),
+    getOrchestrationCompatibilityHostId: () => runtimeService.getOrchestrationCompatibilityHostId(),
+    getLaunchGenerationId: () => runtimeService.getLaunchGenerationId(),
+    leafHoldsLiveOrStablePane: (leafId, connectionId) =>
+      runtimeService.leafHoldsLiveOrStablePane(leafId, connectionId ?? null),
+    ensureAgentSession: (request, caller, internal) =>
+      runtimeService.ensureAgentSession(request, caller, internal),
+    collectIncumbentEvidence: (paneKey, ptyId, now) =>
+      runtimeService.collectIncumbentEvidence(paneKey, ptyId, now),
+    getTerminalProcessIncarnation: (handle) => runtimeService.getTerminalProcessIncarnation(handle),
+    mintRestoreTicket: (payload) => runtimeService.mintRestoreTicket(payload)
+  }
+  try {
+    const summary = await runRestoreSweep(deps)
+    logStartupMilestone('restore-sweep-done', summary)
+  } catch (error) {
+    console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
+  }
 }
 
 function prepareCodexRuntimeHomeForLaunch(
@@ -3168,6 +3198,11 @@ void app.whenReady().then(async () => {
       }
     )
     await runtime.refreshRestoredOrchestrationAuthority()
+    // [S10-21a C7, design v3.2 §2.7 call site 1] After the store attaches
+    // (`refreshRestoredOrchestrationAuthority` is what makes it live for `orca serve`'s cold
+    // start), before RPC start below and before `reconcileLegacyWorkerTerminals` — the legacy
+    // recovery path is one of the renderer/recovery-shaped callers §2.1a's lock must exclude.
+    await runStartupRestoreSweep(runtime)
     await runtime.reconcileLegacyWorkerTerminals()
     // Why: headless servers can't mount <webview> panes; use offscreen WebContents, gated on a real display so browser.headless.v1 stays honest.
     if (headlessBrowserDisplayAvailable) {
@@ -3226,6 +3261,11 @@ void app.whenReady().then(async () => {
     return
   }
 
+  // [S10-21a C7, design v3.2 §2.7 call site 1] Desktop's store-attach point: `getOrchestrationDb()`
+  // (called inside the sweep) is the lazy attach itself, so running the sweep here both attaches
+  // the store and restores every registered pane before the window opens or RPC starts below —
+  // no renderer-invoked restore path can reach a pane ahead of it.
+  await runStartupRestoreSweep(runtime)
   // Why: window and RPC startup run in parallel; registerPtyHandlers gates PTY spawns so RPC binds without racing the daemon provider swap.
   const desktopRuntimeRpc = runtimeRpc
   if (!desktopRuntimeRpc) {

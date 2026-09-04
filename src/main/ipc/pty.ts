@@ -1011,9 +1011,16 @@ async function attachStablePaneOwner(
   return { result, owner }
 }
 
+// [S10-21a C7, D-R105 F-5 partial] `onAdmitted`, threaded straight through to the fresh-spawn
+// `spawnWithLane` call below — the reattach branch (`attachStablePaneOwner`) never calls it,
+// exactly as it never runs admission at all (no command, no fresh process). Without this, a
+// caller of `spawnForStablePane` has no way to reach the `AdmittedLaunch` this call closes
+// over, so a throw from ITS OWN post-spawn asserts (`assertSpawnReplyWasLive`,
+// `assertPtyRegistrationAllowed`) audits nothing — the exact gap D-R105 found.
 async function spawnForStablePane(
   /** `paneLane` is the pane RECORD's lane; the attach below never needs one (S9 §2 preamble). */
-  args: StablePaneSpawnContext & { paneLane: PaneLaneLaunch }
+  args: StablePaneSpawnContext & { paneLane: PaneLaneLaunch },
+  onAdmitted?: (admitted: AdmittedLaunch) => void
 ): Promise<{ result: PtySpawnResult; owner: StablePaneOwner | null }> {
   if (args.owner) {
     const attached = await attachStablePaneOwner({ ...args, owner: args.owner })
@@ -1025,7 +1032,8 @@ async function spawnForStablePane(
     args.provider,
     args.spawnOptions,
     args.paneLane,
-    launchAdmissionBundle(args.runtime, args.connectionId)
+    launchAdmissionBundle(args.runtime, args.connectionId),
+    onAdmitted
   )
   args.onFreshSpawn?.(result)
   return { result, owner: null }
@@ -5223,26 +5231,40 @@ export function registerPtyHandlers(
             assertClientStillConnected()
             const stablePaneSpawn = preAdoptedStablePane
               ? preAdoptedStablePane
-              : await spawnForStablePane({
-                  runtime,
-                  store,
-                  provider,
-                  spawnOptions,
-                  paneLane,
-                  owner: stablePaneOwnerCandidate,
-                  worktreeId: args.worktreeId,
-                  connectionId: args.connectionId,
-                  resolveOwner: () =>
-                    resolveStablePaneOwner(
-                      runtime,
-                      store,
-                      spawnIdentityPaneKey,
-                      args.worktreeId,
-                      args.connectionId
-                    ),
-                  onFreshSpawn: reportPtySpawnCommitted
-                })
+              : await spawnForStablePane(
+                  {
+                    runtime,
+                    store,
+                    provider,
+                    spawnOptions,
+                    paneLane,
+                    owner: stablePaneOwnerCandidate,
+                    worktreeId: args.worktreeId,
+                    connectionId: args.connectionId,
+                    resolveOwner: () =>
+                      resolveStablePaneOwner(
+                        runtime,
+                        store,
+                        spawnIdentityPaneKey,
+                        args.worktreeId,
+                        args.connectionId
+                      ),
+                    onFreshSpawn: reportPtySpawnCommitted
+                  },
+                  (admitted) => {
+                    // [S10-21a C7, D-R105 F-5 partial] Same capture the `agentSessionEnsure`
+                    // branch above uses — makes this branch's own post-spawn asserts
+                    // (`assertSpawnReplyWasLive`/`assertPtyRegistrationAllowed` below) reach the
+                    // shared catch's `admittedLaunch && providerResult` compensate(true) gate
+                    // instead of auditing nothing on a throw after a committed spawn.
+                    admittedLaunch = admitted
+                  }
+                )
             result = stablePaneSpawn.result
+            // [S10-21a C7, D-R105 F-5 partial] Mirrors the `agentSessionEnsure` branch's own
+            // `providerResult` assignment — `preAdoptedStablePane` (no fresh spawn) never sets
+            // `admittedLaunch` via `onAdmitted`, so the shared catch's gate stays closed for it.
+            providerResult = stablePaneSpawn.result
             stablePaneOwner = stablePaneSpawn.owner
             if (
               stablePaneOwner &&
