@@ -42,6 +42,23 @@ export async function resolveAgentByNameOrId(
   return result.result.agent
 }
 
+// F-20/A1: pacts are host-local by design (pact-shared.ts requireAccountablePeer) - a
+// `name@host` (or `agt_<id>@host`) selector on `agents pact --with` / `agents invite --agent`
+// is refused here, in the CLI, before any RPC reaches the runtime (which would otherwise die
+// on a second, misleading agent_unknown). Mirrors requireAccountablePeer's own wording.
+export function refuseCrossHostPact(rawSelector: string, host: string): never {
+  throw new RuntimeClientError(
+    'pact_not_federated',
+    `Refused: pacts are host-local; ${rawSelector} names a different host (${host}).`,
+    {
+      nextSteps: [
+        `orca orchestration send --to ${rawSelector} --subject "<subject>" --body "<body>"`,
+        `orca agents ask ${rawSelector} "<question>"`
+      ]
+    }
+  )
+}
+
 export function requireNonQuarantined(agent: ResolvedAgentIdentity): ResolvedAgentIdentity {
   if (agent.quarantined) {
     throw new RuntimeClientError(

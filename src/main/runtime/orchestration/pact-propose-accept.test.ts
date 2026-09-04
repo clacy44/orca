@@ -1,6 +1,7 @@
 // S10-3 pact spec — propose/accept/decline through the public OrchestrationDb API.
 // Mutation-guard comments match the pact-spec TESTS table ids (K#).
 import { afterEach, describe, expect, it } from 'vitest'
+import type Database from '../../sqlite/sync-database'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -255,6 +256,38 @@ describe('pact propose/accept/decline', () => {
       d.proposePact({ ...actor(a), threadId, peerAgentId: 'b@otherhost', stepsTotal: null })
     ).toThrow(/host-local/)
     expect(d.getThread(threadId)?.pact_state).toBeNull()
+  })
+
+  it('R2 (Ruling 33 Addendum 2, F-20): the per-pair engaged-pact guard survives a stale id reference left behind by a counterpart re-register', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b1 = seedAgent(d, 'b')
+    const thr1 = seedThreadWithParticipants(d, [a, b1])
+    d.proposePact({ ...actor(a), threadId: thr1, peerAgentId: b1, stepsTotal: null })
+    d.acceptPact({ ...actor(b1), threadId: thr1 })
+
+    // b retires and re-registers under a new pane -> a fresh agents.id, same display_name.
+    // upsertAgentByPaneSuffix's own succession adoption (F-18) already repoints thr1's pact
+    // columns onto b2 in this exact path, which would mask this guard's own id-pair blind
+    // spot. Revert that repoint by hand so this test proves the GUARD's contract in
+    // isolation, independent of which registration path (e.g. a derived row minted by
+    // upsertDerivedAgentForPane, which never calls adoptPredecessorThreadMembership) left a
+    // stale predecessor id behind.
+    d.retireAgent(b1)
+    const b2 = seedAgent(d, 'b', {
+      paneKey: 'tab:b2',
+      terminalHandle: 'term_b2',
+      originHandle: 'term_b2'
+    })
+    expect(b2).not.toBe(b1)
+    const raw = (d as unknown as { db: Database.Database }).db
+    raw.prepare(`UPDATE threads SET pact_with_agent_id = ? WHERE id = ?`).run(b1, thr1)
+
+    const thr2 = seedThreadWithParticipants(d, [a, b2])
+    expect(() =>
+      d.proposePact({ ...actor(a), threadId: thr2, peerAgentId: b2, stepsTotal: null })
+    ).toThrow(/pact_exists_with_peer|pact with b/)
+    expect(d.getThread(thr2)?.pact_state).toBeNull()
   })
 
   it('verify major: a QUARANTINED CALLER may not propose - refused agent_quarantined, pact_state stays NULL', () => {

@@ -48,6 +48,7 @@ orca agents pact --with <name> --on <thread>          -> propose/engage
 orca agents step --thread <t> --done "<what you did>" -> your turn, once
 orca agents wait --thread <t> --for step               -> blocks for theirs
 orca agents pact --show <t>                            -> a third party can check it tomorrow
+(Pacts are host-local: propose only with an agent on this host; reach a cross-host counterpart with orca orchestration send / orca agents ask instead.)
 
 New turn / lost context -> orca agents threads
   -> "Read one: orca agents thread --id thr_9fk2"
@@ -215,6 +216,8 @@ Rules:
 
 - `find`'s name resolution is CLI-layer sugar: every write RPC underneath (`ask`, `thread --new`,
   `pact --with`, `invite`) takes only a resolved `agent:<id>` address — never a bare name.
+- `pact --with`/`invite --agent` are host-local — a `name@host` selector naming a different host is
+  refused; coordinate across hosts with `orchestration send`/`agents ask` instead.
 - One engaged pact per agent pair at a time; propose only while the pact is unclaimed
   (`pact_state` null or `released`) — `pact --show <t>` says whose turn it is and how far along.
 - `pact --resume` is a boolean on the `pact` noun (`--resume --on <t>`); `wait --resume <token>`

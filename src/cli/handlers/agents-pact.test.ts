@@ -71,6 +71,43 @@ describe('agents pact CLI', () => {
     expect(printed).toContain('Next: orca agents wait --thread thr_9fk2 --for pact')
   })
 
+  // T1 (F-20/A1): a cross-host `name@host` selector is refused in the CLI itself, never
+  // reaching the runtime as a raw literal (the S10-20 defect: it would misresolve as a local
+  // display name and print a misleading "not found").
+  it('propose: --with a name@host selector is refused pact_not_federated before any RPC call', async () => {
+    const call = vi.fn().mockResolvedValue({ result: {} })
+    await expect(
+      AGENT_PACT_HANDLERS['agents pact']({
+        flags: new Map<string, string | boolean>([
+          ['with', 'peer@desktop'],
+          ['on', 'thr_9fk2']
+        ]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp',
+        json: false
+      } as never)
+    ).rejects.toMatchObject({ code: 'pact_not_federated' })
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  // T2 (F-20/A1): the `agt_<id>@host` form is parsed the same way (id part + host) and refused
+  // identically.
+  it('propose: --with an agt_<id>@host selector is refused pact_not_federated before any RPC call', async () => {
+    const call = vi.fn().mockResolvedValue({ result: {} })
+    await expect(
+      AGENT_PACT_HANDLERS['agents pact']({
+        flags: new Map<string, string | boolean>([
+          ['with', 'agt_16c53bc726b9@desktop'],
+          ['on', 'thr_9fk2']
+        ]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp',
+        json: false
+      } as never)
+    ).rejects.toMatchObject({ code: 'pact_not_federated' })
+    expect(call).not.toHaveBeenCalled()
+  })
+
   it('accept: --on and --accept only, no peer resolution round trip', async () => {
     const call = vi.fn().mockResolvedValue({
       result: {
@@ -365,6 +402,40 @@ describe('agents invite CLI', () => {
     const printed = String(log.mock.calls[0]?.[0])
     expect(printed).toContain('Invited backend-merge to thread thr_9fk2.')
     expect(printed).toContain('Next: orca agents thread --id thr_9fk2')
+  })
+
+  // T1 (F-20/A1): same host-local refusal as `agents pact --with`.
+  it('--agent a name@host selector is refused pact_not_federated before any RPC call', async () => {
+    const call = vi.fn().mockResolvedValue({ result: {} })
+    await expect(
+      AGENT_PACT_HANDLERS['agents invite']({
+        flags: new Map<string, string | boolean>([
+          ['thread', 'thr_9fk2'],
+          ['agent', 'peer@desktop']
+        ]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp',
+        json: false
+      } as never)
+    ).rejects.toMatchObject({ code: 'pact_not_federated' })
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  // T2 (F-20/A1): the `agt_<id>@host` form is refused identically.
+  it('--agent an agt_<id>@host selector is refused pact_not_federated before any RPC call', async () => {
+    const call = vi.fn().mockResolvedValue({ result: {} })
+    await expect(
+      AGENT_PACT_HANDLERS['agents invite']({
+        flags: new Map<string, string | boolean>([
+          ['thread', 'thr_9fk2'],
+          ['agent', 'agt_16c53bc726b9@desktop']
+        ]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp',
+        json: false
+      } as never)
+    ).rejects.toMatchObject({ code: 'pact_not_federated' })
+    expect(call).not.toHaveBeenCalled()
   })
 
   it('a quarantine refusal from the invite RPC propagates with its nextSteps intact', async () => {

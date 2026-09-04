@@ -179,6 +179,7 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
       'reason'
     ],
     notes: [
+      'Pacts are host-local — both parties must be on this host; coordinate across hosts with orca orchestration send / orca agents ask instead.',
       'One engaged pact per agent pair at a time — release or finish an existing one first.',
       '--steps and --open are mutually exclusive.',
       'Neither side may advance past a step until the other confirms — use for lock-step work, not ordinary coordination.'

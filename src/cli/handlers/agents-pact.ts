@@ -20,7 +20,13 @@ import {
 } from '../flags'
 import { printResult } from '../format'
 import { RuntimeClientError } from '../runtime/types'
-import { requireNonQuarantined, resolveAgentByNameOrId } from './agents-shared'
+import {
+  parseAgentSelector,
+  refuseCrossHostPact,
+  requireNonQuarantined,
+  resolveAgentByNameOrId
+} from './agents-shared'
+import { LOCAL_FIND_HOST } from './agents-cross-host'
 
 type PactThread = {
   id: string
@@ -212,6 +218,14 @@ export const AGENT_PACT_HANDLERS: Record<string, CommandHandler> = {
     let withParam: string | undefined
     let withDisplayName: string | undefined
     if (withName) {
+      // F-20/A1: pacts are host-local (pact-shared.ts requireAccountablePeer) - refuse a
+      // cross-host `name@host` selector here, before any RPC, rather than letting the raw
+      // string reach the local directory lookup below (which would misresolve it as a local
+      // display name and print a misleading "not found").
+      const withHost = parseAgentSelector(withName).host
+      if (withHost !== LOCAL_FIND_HOST) {
+        refuseCrossHostPact(withName, withHost)
+      }
       const agent = requireNonQuarantined(await resolveAgentByNameOrId(client, withName))
       withParam = `agent:${agent.id}`
       withDisplayName = agent.displayName
@@ -260,6 +274,11 @@ export const AGENT_PACT_HANDLERS: Record<string, CommandHandler> = {
   'agents invite': async ({ flags, client, json }) => {
     const threadId = getRequiredStringFlag(flags, 'thread')
     const agentName = getRequiredStringFlag(flags, 'agent')
+    // F-20/A1: same host-local refusal as `agents pact --with` above.
+    const agentHost = parseAgentSelector(agentName).host
+    if (agentHost !== LOCAL_FIND_HOST) {
+      refuseCrossHostPact(agentName, agentHost)
+    }
     const agent = await resolveAgentByNameOrId(client, agentName)
     const result = await client.call<InviteResult>('orchestration.threads.invite', {
       threadId,
