@@ -220,6 +220,7 @@ import {
   type FederationSyncHealth
 } from './orchestration/federation-sync-health'
 import { formatMessagePointer } from './orchestration/formatter'
+import { RUNTIME_NOTIFICATION_SENDER } from './orchestration/runtime-notification'
 import { resolveStaleBarePeerHandle } from './orchestration/stale-handle-resolution'
 import { MailPointerRepointScheduler } from './orchestration/mail-pointer-repoint-scheduler'
 import { selectExactWorkerProviderSession } from './orchestration/worker-provider-session'
@@ -1967,6 +1968,9 @@ function getAgentLaunchPlatformForRepo(
 
 // Why: long enough for a phone to reconnect and retry a create whose response
 // was lost, short enough that an intentional later re-resume forks fresh.
+// C2/F-19 (Ruling 33(a)): the orphaned-identity idle-edge notice fires at most once per pane
+// per this window.
+const ORPHANED_IDENTITY_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000
 const MOBILE_TERMINAL_CREATE_RESULT_TTL_MS = 60_000
 // Why: same idempotency window for worktree.create — a phone whose create was
 // interrupted by a connection migration retries with the same clientMutationId
@@ -34678,6 +34682,67 @@ export class OrcaRuntimeService {
       : null
   }
 
+  // C2/F-19 (Ruling 33(a)): resolveAgentMailboxForPaneKey returned null for this pane — no
+  // wake header at all, pull-only until its next `check`. If exactly one live registered row on
+  // THIS worktree has gone dark and is carrying unread mail, tell the pane once (24h rate limit
+  // per pane) which identity waits for it, via one host-authored row through the SAME delivery
+  // path (deliverPendingMessages) every other wake on this edge already uses — no new
+  // pane-injection primitive.
+  private notifyOrphanedIdentityForPane(
+    paneKey: string,
+    handle: string | undefined,
+    worktreeId: string | undefined,
+    target: PendingMessageDeliveryTarget
+  ): void {
+    const db = this._orchestrationDb
+    if (!db || !handle || !worktreeId) {
+      return
+    }
+    const worktreePath = splitWorktreeIdForFilesystem(worktreeId)?.worktreePath
+    if (!worktreePath) {
+      return
+    }
+    const hostId = this.getOrchestrationCompatibilityHostId()
+    const candidate = db.findOrphanedIdentityCandidate?.(
+      hostId,
+      worktreePath,
+      (candidatePaneKey) => {
+        const signals = this.getAgentDirectoryLivenessSignals(candidatePaneKey)
+        return signals.terminalHandle !== null || signals.observedLive
+      }
+    )
+    if (!candidate) {
+      return
+    }
+    const unreadCount = db.getUnreadMessages(`agent:${candidate.id}`).length
+    if (unreadCount === 0) {
+      return
+    }
+    const rate = db.checkAndBumpRate({
+      subjectKey: paneKey,
+      verb: 'orphan_notice',
+      windowMs: ORPHANED_IDENTITY_NOTICE_WINDOW_MS,
+      limit: 1
+    })
+    if (!rate.allowed) {
+      return
+    }
+    db.insertMessage({
+      from: RUNTIME_NOTIFICATION_SENDER,
+      to: handle,
+      subject: 'An identity waits on this worktree',
+      body:
+        `This pane carries a derived identity. "${candidate.display_name}" (registered here, ` +
+        `pane gone, ${unreadCount} unread) is the row for this worktree — run: orca agents ` +
+        `register --name ${candidate.display_name} --role "<your role>"`,
+      type: 'status'
+    })
+    // Why re-invoke rather than notifyMessageArrived: the row didn't exist when this edge's own
+    // deliverPendingMessages(leaf/target) ran above — this delivers it through the same shipped
+    // banner formatter/modal gate/sanitiser/dedupe, never a second delivery mechanism.
+    this.deliverPendingMessages(target)
+  }
+
   // Why notifiedThreadIdKnown (message-loss blocker fix, S10-3a): defaults true so every
   // caller but notifyMessageArrived's no-consumer branch keeps today's exact filtering.
   // Why a read-only pre-check, not just calling getLivePtyForHandle directly (S10-15 F8 fix
@@ -35098,9 +35163,20 @@ export class OrcaRuntimeService {
     }
     // F2 (Ruling 32 Addendum 11): a busy pane that owns a registered agent:<id> mailbox got no
     // wake header for agent-addressed mail on this edge at all.
-    const agentMailbox = this.resolveAgentMailboxForPaneKey(`${leaf.tabId}:${leaf.leafId}`)
+    const paneKey = `${leaf.tabId}:${leaf.leafId}`
+    const agentMailbox = this.resolveAgentMailboxForPaneKey(paneKey)
     if (agentMailbox) {
       this.deliverPendingMessages(leaf, { mailboxHandle: agentMailbox })
+    } else {
+      // C2/F-19 (Ruling 33(a)): this pane has no live agent mailbox at all — tell it, once,
+      // which identity waits on its worktree if exactly one dead-pane row on this worktree has
+      // unread mail.
+      this.notifyOrphanedIdentityForPane(
+        paneKey,
+        this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId)),
+        leaf.worktreeId,
+        leaf
+      )
     }
   }
 
@@ -35124,6 +35200,14 @@ export class OrcaRuntimeService {
     const agentMailbox = pty.paneKey ? this.resolveAgentMailboxForPaneKey(pty.paneKey) : null
     if (agentMailbox) {
       this.deliverPendingMessages(target, { mailboxHandle: agentMailbox })
+    } else if (pty.paneKey) {
+      // C2/F-19 (Ruling 33(a)): the pty-only mirror of the leaf-side orphan wake above.
+      this.notifyOrphanedIdentityForPane(
+        pty.paneKey,
+        this.handleByPtyId.get(pty.ptyId),
+        pty.worktreeId,
+        target
+      )
     }
   }
 

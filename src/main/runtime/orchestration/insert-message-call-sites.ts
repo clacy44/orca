@@ -29,8 +29,10 @@ export type InsertMessageCallSite = {
 }
 
 export const INSERT_MESSAGE_CALL_SITES: readonly InsertMessageCallSite[] = [
-  // host-lifecycle — host-generated rows, never sender-controlled prose
-  { file: 'main/runtime/orca-runtime.ts', count: 1, kind: 'host-lifecycle' },
+  // host-lifecycle — host-generated rows, never sender-controlled prose. Count 2:
+  // failActiveDispatchOnExit's escalation, plus notifyOrphanedIdentityForPane's C2/F-19
+  // (Ruling 33(a)) orphaned-identity wake — host-composed text, no peer/sender input.
+  { file: 'main/runtime/orca-runtime.ts', count: 2, kind: 'host-lifecycle' },
   { file: 'main/runtime/orchestration/runtime-notification.ts', count: 1, kind: 'host-lifecycle' },
   {
     file: 'main/runtime/rpc/methods/orchestration-worker-topology.ts',
