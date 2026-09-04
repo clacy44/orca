@@ -44,3 +44,10 @@ describe('formatAgentRegister: unreadWaiting (Ruling 33(a) B2)', () => {
     expect(text).not.toContain('unread message(s) waiting')
   })
 })
+
+describe('formatAgentRegister: adoptedThreads on a reMinted row (Ruling 33 Addendum 1 F-9b)', () => {
+  it('prints the inherited-threads line even when reMinted is true', () => {
+    const text = formatAgentRegister(baseResult({ reMinted: true, adoptedThreads: 1 }))
+    expect(text).toContain('Inherited 1 thread(s)')
+  })
+})

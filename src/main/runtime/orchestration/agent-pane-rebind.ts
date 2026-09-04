@@ -5,6 +5,10 @@
 // back from it; every caller's params/result already satisfies these shapes structurally.
 import type Database from '../../sqlite/sync-database'
 import { repointMailboxOnNameBind, repointMailboxOnReMint } from './agent-mailbox-repoint'
+import {
+  adoptPredecessorThreadMembership,
+  countUninheritedPredecessorMail
+} from './agent-thread-succession'
 import type { AgentRow } from './types'
 
 // R1: ground truth for "is this row's own pane still alive" — a null pane_key (unresolvable by
@@ -67,6 +71,13 @@ export type RemintRowResult = {
   agent: AgentRow
   repointedMessages: number
   pendingOnOldHandle: number
+  // F-9b (Ruling 33 Addendum 1): populated only when `succession` was true — a rename that
+  // PROMOTES an existing row into a name whose predecessors are found by that name. 0/false on
+  // every other re-mint (a same-identity rebind was never orphaned in the first place).
+  adoptedThreads: number
+  blockedByQuarantinedPredecessor: boolean
+  pendingPeerQuestions: number
+  unreadMailOnRetiredId: number
 }
 
 /** R1 rebind, shared by both paths that re-adopt an existing row (found by live pane-suffix
@@ -86,7 +97,14 @@ export type RemintRowResult = {
 export function remintRow(
   db: Database.Database,
   existing: { id: string; terminal_handle: string | null },
-  params: RemintRowParams
+  params: RemintRowParams,
+  // F-9b (Ruling 33 Addendum 1): true ONLY for the rename/promote fallback (a pane's own
+  // existing row picking up a name that currently has no holder at all) — the shape where
+  // predecessors under the NEW name are found by that name and their threads/pacts/mail never
+  // otherwise reach this row. False (default) for every re-mint that re-adopts a row already
+  // holding its own identity (a same-name refresh, or H5's dead-pane-by-name takeover) — that
+  // row's own history was never orphaned, so there is nothing name-keyed to adopt.
+  succession = false
 ): RemintRowResult {
   db.prepare(
     `UPDATE agents SET
@@ -108,6 +126,36 @@ export function remintRow(
     existing.id
   )
   const reminted = db.prepare('SELECT * FROM agents WHERE id = ?').get(existing.id) as AgentRow
+
+  let adoptedThreads = 0
+  let blockedByQuarantinedPredecessor = false
+  let pendingPeerQuestions = 0
+  let unreadMailOnRetiredId = 0
+  let successionRepoint = 0
+  if (succession) {
+    // F-18 (via adoptPredecessorThreadMembership): the succession repoint MUST run before
+    // countUninheritedPredecessorMail below, same ordering agent-directory.ts's 'created'
+    // branch already relies on — otherwise the uninherited count double-counts mail this same
+    // call just moved.
+    const outcome = adoptPredecessorThreadMembership(
+      db,
+      params.hostId,
+      params.displayName,
+      existing.id
+    )
+    adoptedThreads = outcome.adoptedThreads
+    blockedByQuarantinedPredecessor = outcome.blockedByQuarantinedPredecessor
+    successionRepoint = outcome.repointedMessages
+    const uninherited = countUninheritedPredecessorMail(
+      db,
+      params.hostId,
+      params.displayName,
+      existing.id
+    )
+    pendingPeerQuestions = uninherited.pendingPeerQuestions
+    unreadMailOnRetiredId = uninherited.unreadMailOnRetiredId
+  }
+
   // S10-7 F-C: pending mail follows the agent across a re-mint, same as its identity does.
   const fromHandle = repointMailboxOnReMint(db, existing, params)
   // Ruling 32 Addendum 10 (A3/F-5b): a bare NAME address is a separate stranding surface from
@@ -121,7 +169,12 @@ export function remintRow(
   return {
     outcome: 'reminted',
     agent: reminted,
-    repointedMessages: fromHandle.repointedMessages + fromName.repointedMessages,
-    pendingOnOldHandle: fromHandle.pendingOnOldHandle + fromName.pendingOnOldHandle
+    repointedMessages:
+      successionRepoint + fromHandle.repointedMessages + fromName.repointedMessages,
+    pendingOnOldHandle: fromHandle.pendingOnOldHandle + fromName.pendingOnOldHandle,
+    adoptedThreads,
+    blockedByQuarantinedPredecessor,
+    pendingPeerQuestions,
+    unreadMailOnRetiredId
   }
 }

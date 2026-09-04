@@ -75,6 +75,10 @@ import {
 } from './agent-liveness-classification'
 import { findSoleOrphanedIdentityCandidate } from './agent-pane-rebind'
 import {
+  catchUpThreadSuccession as catchUpThreadSuccessionImpl,
+  type ThreadSuccessionOutcome
+} from './agent-thread-succession'
+import {
   getAgentByIdIncludingTombstoned as getAgentByIdIncludingTombstonedImpl,
   retireAgent as retireAgentImpl,
   type RetireAgentResult
@@ -4750,6 +4754,17 @@ export class OrchestrationDb {
     isPaneLive?: (paneKey: string) => boolean
   ): AgentRow | undefined {
     return findSoleOrphanedIdentityCandidate(this.db, hostId, worktreePath, isPaneLive)
+  }
+
+  // F-9b (Ruling 33 Addendum 1): idempotent catch-up for a successor that missed succession on
+  // an earlier register (e.g. one registered before this fix landed) — null (no-op) once a
+  // `thread_succession` audit row already marks this successor id.
+  catchUpThreadSuccession(
+    hostId: string,
+    displayName: string,
+    successorId: string
+  ): ThreadSuccessionOutcome | null {
+    return catchUpThreadSuccessionImpl(this.db, hostId, displayName, successorId)
   }
 
   // S10-16 R14.6: link-binding-store.ts / link-binding-attempts-store.ts /

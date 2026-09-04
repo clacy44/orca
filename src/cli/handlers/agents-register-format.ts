@@ -26,7 +26,9 @@ export function formatAgentRegister(result: RegisterResult): string {
     result.pendingOnOldHandle > 0
       ? `\n${result.pendingOnOldHandle} more unread message(s) on your previous terminal handle were NOT moved (backlog too large for one re-mint) and are no longer reachable from this agent.`
       : ''
-  // R2 (S10-11): only on a fresh id (never reMinted — a rebind's threads were never orphaned).
+  // R2 (S10-11) / F-9b (Ruling 33 Addendum 1): nonzero on a fresh id (a retired predecessor's
+  // membership), on the rename/promote reMint shape, on H5's B1 reclaim, and on a catch-up —
+  // never on an ordinary same-identity reMint that had nothing to adopt.
   const adopted =
     result.adoptedThreads > 0
       ? `\nInherited ${result.adoptedThreads} thread(s) (including pact state) from a previous registration under this name.`

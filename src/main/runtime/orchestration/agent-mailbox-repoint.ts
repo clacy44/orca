@@ -58,6 +58,33 @@ function repointUnreadBareHandleMail(
 
 export type MailboxRepointOutcome = { repointedMessages: number; pendingOnOldHandle: number }
 
+/** F-9b (Ruling 33 Addendum 1): H5's B1 reclaim tombstones a derived row whose OWN
+ * terminal_handle may differ from the caller's current one (a pane relaunch between the
+ * derived row minting and this register call) — its bare-handle mailbox is a stranding surface
+ * distinct from repointMailboxOnSuccession's `agent:<id>` one above, and distinct from
+ * repointMailboxOnReMint's (that one only ever fires for `existing`, never a THIRD row like the
+ * displaced derived row here). No-op (0/0, no audit row) when there is no old handle to move
+ * off of. */
+export function repointMailboxFromBareHandle(
+  db: Database.Database,
+  oldHandle: string,
+  successorId: string,
+  actor: { paneKey: string | null; hostId: string }
+): MailboxRepointOutcome {
+  const { moved, pendingOnOldHandle } = repointUnreadBareHandleMail(db, oldHandle, successorId)
+  if (moved > 0) {
+    const reason =
+      pendingOnOldHandle > 0
+        ? `${moved} from ${oldHandle} (displaced predecessor), ${pendingOnOldHandle} still pending`
+        : `${moved} from ${oldHandle} (displaced predecessor)`
+    db.prepare(
+      `INSERT INTO agent_audit (agent_id, actor_pane_key, actor_host_id, verb, outcome, reason_code)
+       VALUES (?, ?, ?, 'mailbox_repoint', 'ok', ?)`
+    ).run(successorId, actor.paneKey, actor.hostId, reason)
+  }
+  return { repointedMessages: moved, pendingOnOldHandle }
+}
+
 /** Called from inside upsertAgentByPaneSuffix's own re-mint transaction (agent-directory.ts) —
  * same db handle, same BEGIN IMMEDIATE/COMMIT, so a repoint always lands atomically with the
  * re-mint it belongs to and never partially applies. No-ops (0/0, no audit row) when the handle

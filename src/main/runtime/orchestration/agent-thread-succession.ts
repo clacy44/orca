@@ -56,6 +56,29 @@ export function adoptPredecessorThreadMembership(
   if (predecessors.length === 0) {
     return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false, repointedMessages: 0 }
   }
+  return adoptFromPredecessors(
+    db,
+    hostId,
+    predecessors.map((p) => p.id),
+    successorId
+  )
+}
+
+/** F-9b (Ruling 33 Addendum 1): the transfer body itself, split out so a caller that already
+ * has its own predecessor id list (not name-keyed — e.g. H5's B1 reclaim, whose displaced
+ * derived row never shared the reclaimed name) can drive the same transfer without a second,
+ * drifting copy. `adoptPredecessorThreadMembership` (above) is the name-keyed entry point;
+ * this is the mechanism both it and a direct caller share. */
+export function adoptFromPredecessors(
+  db: Database.Database,
+  hostId: string,
+  predecessorIds: readonly string[],
+  successorId: string
+): ThreadSuccessionOutcome {
+  if (predecessorIds.length === 0) {
+    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false, repointedMessages: 0 }
+  }
+  const predecessors = predecessorIds.map((id) => ({ id }))
 
   // F-18: run BEFORE thread membership is adopted below — the predecessor's durable
   // `agent:<old id>` mailbox is a separate stranding surface from thread_participants, and
@@ -169,4 +192,46 @@ export function countUninheritedPredecessorMail(
     unreadMailOnRetiredId += mailRow.n
   }
   return { pendingPeerQuestions, unreadMailOnRetiredId }
+}
+
+// F-9b (Ruling 33 Addendum 1): before R1/H5, a rename that PROMOTED an existing row (the plain
+// `remintRow` fallback, agent-directory.ts) never ran succession at all — a chair whose pane
+// held only a derived row, retired then re-registered, silently lost every thread/pact under
+// its old name. This is the marker succession's own audit insert (above) already gives for
+// free: a `thread_succession` row naming this successor id means adoption already ran for it,
+// so a chair that missed it (registered before this fix landed) catches up on its next PLAIN
+// register — at most once, since the very success of THIS call writes the same marker.
+function hasThreadSuccessionMarker(db: Database.Database, successorId: string): boolean {
+  return Boolean(
+    db
+      .prepare(
+        `SELECT 1 FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession' LIMIT 1`
+      )
+      .get(successorId)
+  )
+}
+
+/** Idempotent catch-up, own transaction (called OUTSIDE upsertAgentByPaneSuffix's, from the
+ * register RPC, after that call's own transaction has already committed): a no-op (null) once
+ * a `thread_succession` marker exists for this successor, so a chair with nothing left to
+ * adopt does not re-run the transfer scan on every single register — only the cheap marker
+ * check repeats. */
+export function catchUpThreadSuccession(
+  db: Database.Database,
+  hostId: string,
+  displayName: string,
+  successorId: string
+): ThreadSuccessionOutcome | null {
+  if (hasThreadSuccessionMarker(db, successorId)) {
+    return null
+  }
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const outcome = adoptPredecessorThreadMembership(db, hostId, displayName, successorId)
+    db.exec('COMMIT')
+    return outcome
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
 }

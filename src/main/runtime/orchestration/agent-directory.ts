@@ -6,11 +6,15 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
-import { repointMailboxOnNameBind, repointMailboxOnSuccession } from './agent-mailbox-repoint'
+import { repointMailboxOnNameBind } from './agent-mailbox-repoint'
 import {
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
 } from './agent-thread-succession'
+import {
+  canReclaimDerivedPlaceholder,
+  reclaimDerivedPlaceholder
+} from './agent-directory-derived-reclaim'
 import type { AgentRow, AgentState } from './types'
 
 // Why a local generator, not db.ts's generateId: importing it back from db.ts (which will
@@ -61,7 +65,19 @@ export type UpsertAgentByPaneSuffixResult =
       repointedMessages: number
       pendingOnOldHandle: number
     }
-  | { outcome: 'reminted'; agent: AgentRow; repointedMessages: number; pendingOnOldHandle: number }
+  | {
+      outcome: 'reminted'
+      agent: AgentRow
+      repointedMessages: number
+      pendingOnOldHandle: number
+      // F-9b (Ruling 33 Addendum 1): populated on the rename/promote shape (remintRow's
+      // succession:true) and on H5's B1 reclaim (its own explicit adoptFromPredecessors call
+      // for the displaced derived row); 0/false on a same-identity re-mint that adopted nothing.
+      adoptedThreads: number
+      blockedByQuarantinedPredecessor: boolean
+      pendingPeerQuestions: number
+      unreadMailOnRetiredId: number
+    }
   | {
       outcome: 'name_taken'
       alternative: string
@@ -149,23 +165,9 @@ export function upsertAgentByPaneSuffix(
           // never something its "owner" opted into — unlike the registered-row rename guard
           // below, it does not deserve the same protection against losing a name. If the name
           // holder itself is dead (and not quarantined), reclaim the holder's identity onto THIS
-          // pane instead of refusing: move the derived row's mail, tombstone it to free the
-          // UNIQUE pane-suffix slot, then re-mint the holder in place.
-          if (
-            existing.derived === 1 &&
-            existing.quarantined !== 1 &&
-            nameHolder.quarantined !== 1 &&
-            !holderPaneIsLive(nameHolder, params.isPaneLive)
-          ) {
-            repointMailboxOnSuccession(db, existing.id, nameHolder.id, {
-              paneKey: params.paneKey,
-              hostId: params.hostId
-            })
-            db.prepare(
-              `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL,
-                 role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
-            ).run(existing.id)
-            return remintRow(db, nameHolder, params)
+          // pane instead of refusing (agent-directory-derived-reclaim.ts).
+          if (canReclaimDerivedPlaceholder(existing, nameHolder, params.isPaneLive)) {
+            return reclaimDerivedPlaceholder(db, existing, nameHolder, params)
           }
           // A DIFFERENT agent's row holds the requested name. Register never destroys that
           // identity to free a name — live, dead, or in between (S10-11 verify blocker: the
@@ -186,7 +188,11 @@ export function upsertAgentByPaneSuffix(
           }
         }
       }
-      return remintRow(db, existing, params)
+      // F-9b (Ruling 33 Addendum 1): succession:true — this is the rename/promote fallback
+      // (including the no-op same-name refresh): `existing`'s own row is picking up
+      // `params.displayName`, and any tombstoned predecessor sharing that name (found by
+      // remintRow's own name-keyed lookup) never otherwise reaches this row.
+      return remintRow(db, existing, params, true)
     }
 
     const nameHolder = findByName(db, params.hostId, params.displayName)
@@ -212,7 +218,9 @@ export function upsertAgentByPaneSuffix(
       } else {
         // R1: non-derived holder, not quarantined, pane confirmed dead/unresolvable (or the
         // row never had one) — rebind in place rather than mint a second, anonymous identity.
-        return remintRow(db, nameHolder, params)
+        // F-9b: succession:false — nameHolder already holds this name directly; there is no
+        // name-keyed predecessor to adopt (its own history was never orphaned).
+        return remintRow(db, nameHolder, params, false)
       }
     }
 

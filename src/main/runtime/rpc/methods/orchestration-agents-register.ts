@@ -157,19 +157,26 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       }
 
       // Auditability: `existingForPane` (computed above, before the upsert) already tells apart
-      // the two ways a 'reminted' outcome happens — the SAME pane re-registering (its own row,
+      // the ways a 'reminted' outcome happens — the SAME pane re-registering (its own row,
       // found by pane-suffix, no identity change of hands) vs. a DIFFERENT pane taking over a
-      // name-holder row whose pane read dead (an actual identity handover). Both used to write
-      // the same outcome with no reason — indistinguishable in the audit trail from each other,
-      // and from any other 'reminted' row. Only the handover case gets the descriptive code.
+      // name-holder row whose pane read dead (an actual identity handover) vs. this pane's own
+      // (possibly derived) row PROMOTING into a name it did not hold before (F-9b, Ruling 33
+      // Addendum 1). Only the noteworthy shapes get a descriptive code.
       // F-19 (Ruling 33(a)): a reclaim is a 'reminted' row whose PANE-FOUND row (existingForPane)
       // was a derived placeholder distinct from the id register actually landed on — the
-      // dead-pane-by-NAME takeover above (existingForPane null) is a different shape entirely.
+      // dead-pane-by-NAME takeover below (existingForPane null) is a different shape entirely.
       const isDerivedPlaceholderReclaim =
         result.outcome === 'reminted' &&
         existingForPane != null &&
         existingForPane.derived === 1 &&
         existingForPane.id !== result.agent.id
+      // F-9b: the rename/promote shape — `existingForPane` IS `result.agent` (same id), was
+      // derived before this call, and is not the reclaim above (that requires a DIFFERENT id).
+      const isPromoteSuccession =
+        result.outcome === 'reminted' &&
+        existingForPane != null &&
+        existingForPane.derived === 1 &&
+        existingForPane.id === result.agent.id
       const isDeadPaneIdentityTakeover = result.outcome === 'reminted' && !existingForPane
       db.writeAgentAudit({
         agentId: result.agent.id,
@@ -183,18 +190,32 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
           : isDerivedPlaceholderReclaim
             ? `derived-placeholder reclaim: name "${params.name}" re-bound to this pane over a ` +
               'derived row minted by a directory listing'
-            : null
+            : isPromoteSuccession
+              ? `name succession: "${params.name}" acquired by an existing row; ` +
+                `${result.adoptedThreads} thread(s) from its predecessor(s)`
+              : null
       })
+
+      // F-9b catch-up (Ruling 33 Addendum 1): a successor that missed succession on an earlier
+      // register (registered before this fix landed) catches up here, idempotently — a no-op
+      // once a `thread_succession` audit row already marks this id (that row, inserted by
+      // adoptPredecessorThreadMembership itself when it adopts anything, IS the marker — no
+      // second audit row needed here). Runs on EVERY outcome (created or reminted), not just
+      // the promote shape above, since the historical bug this repairs could have left ANY
+      // successor's row un-adopted.
+      const catchUp = db.catchUpThreadSuccession(hostId, result.agent.display_name, result.agent.id)
 
       // Ruling 32 Addendum 10 (A3/F-5b/F-18): both outcomes can now repoint stranded mail —
       // 'created' from a bare-name address (agent-mailbox-repoint.ts's name-bind repoint) and/or
       // a retired predecessor's `agent:<old id>` mailbox (F-18, agent-thread-succession.ts);
-      // 'reminted' from a bare terminal handle and/or a bare-name address. Always the true total
-      // moved into `result.agent.id`'s mailbox this call, never just one contributing surface.
-      const repointedMessages = result.repointedMessages
+      // 'reminted' from a bare terminal handle and/or a bare-name address, and now (F-9b) from
+      // succession/catch-up too. Always the true total moved into `result.agent.id`'s mailbox
+      // this call, never just one contributing surface.
+      const repointedMessages = result.repointedMessages + (catchUp?.repointedMessages ?? 0)
       // F-19 B2 (Ruling 33(a)): any unread mail sitting on the landed id's mailbox — whether it
-      // arrived via the repoint above or was already waiting (e.g. a reclaimed identity's own
+      // arrived via a repoint above or was already waiting (e.g. a reclaimed identity's own
       // prior mail) — must wake the pane, not just the subset this call itself just moved.
+      // Computed AFTER catch-up so a succession repoint it just performed is included.
       const unreadWaiting = db.getUnreadMessages(`agent:${result.agent.id}`).length
       if (unreadWaiting > 0) {
         runtime.notifyMessageArrived(`agent:${result.agent.id}`, 'status', null, null)
@@ -216,21 +237,24 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // (agent-mailbox-repoint.ts) — those rows are not reachable by any other path once this
         // call's transaction commits.
         pendingOnOldHandle: result.pendingOnOldHandle,
-        // R2: a tombstoned predecessor under this same host+name whose thread membership this
-        // fresh id just inherited. Always 0 on a 'reminted' row (its id, and so its membership,
-        // was never orphaned in the first place).
-        adoptedThreads: result.outcome === 'created' ? result.adoptedThreads : 0,
+        // R2/F-9b: a tombstoned predecessor under this same host+name whose thread membership
+        // this id just inherited — on 'created' (a fresh id), on 'reminted' (the rename/promote
+        // shape, or H5's B1 reclaim adopting its displaced derived row), and now (F-9b
+        // catch-up) on any outcome that had missed succession on an earlier register.
+        adoptedThreads: result.adoptedThreads + (catchUp?.adoptedThreads ?? 0),
         // F-9 (Ruling 32(b)): true when a quarantined predecessor under this name blocked
         // adoption outright (by design). Lets the CLI say WHICH threads were not inherited and
         // why, instead of a bare 0 reading the same as "nothing to inherit".
         blockedByQuarantinedPredecessor:
-          result.outcome === 'created' ? result.blockedByQuarantinedPredecessor : false,
+          result.blockedByQuarantinedPredecessor ||
+          (catchUp?.blockedByQuarantinedPredecessor ?? false),
         // F-9 (Ruling 32 Addendum 9): what a tombstoned predecessor's pending peer questions and
-        // unread bare-handle mail left behind on register -- neither is repointed onto the fresh
+        // unread bare-handle mail left behind on register -- neither is repointed onto the
         // successor id (deferred by ruling), so this counts what the CLI must say was NOT
-        // inherited. Always 0 on a 'reminted' row (its id was never orphaned).
-        pendingPeerQuestions: result.outcome === 'created' ? result.pendingPeerQuestions : 0,
-        unreadMailOnRetiredId: result.outcome === 'created' ? result.unreadMailOnRetiredId : 0
+        // inherited. Read on BOTH outcomes now (F-9b) — a 'reminted' row's own predecessors can
+        // leave exactly the same uninherited backlog a 'created' row's can.
+        pendingPeerQuestions: result.pendingPeerQuestions,
+        unreadMailOnRetiredId: result.unreadMailOnRetiredId
       }
     }
   })
