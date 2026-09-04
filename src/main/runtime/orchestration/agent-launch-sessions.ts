@@ -137,25 +137,34 @@ export function recordLaunch(
     db.exec('ROLLBACK')
     if (isCurrentSessionsSuccessorViolation(err)) {
       // [errata 5(p)-5 item 4, D-R104 F-12] Same-target restatement is an idempotent success:
-      // only when the row ALREADY on disk for this session_id agrees on pane, session_id AND
-      // evidence — not merely on pane — is this insert a no-op restatement of what is already
-      // there, rather than a different write (e.g. a different evidence source) racing a
-      // genuine collision. A genuinely different pane already holding this session_id is a
+      // only when the pane CURRENTLY holding this session_id (per current_sessions — the
+      // uniqueness fence that just threw) is THIS insert's own pane, and that pane's own newest
+      // launch row agrees on session_id AND evidence, is this a no-op restatement of what is
+      // already there, rather than a different write (e.g. a different evidence source) racing
+      // a genuine collision. A genuinely different pane already holding this session_id is a
       // foreign collision either way.
-      const existing = launchBySessionId(db, params.sessionId)
-      if (
-        existing !== undefined &&
-        existing.pane_key === params.paneKey &&
-        existing.session_id === params.sessionId &&
-        existing.evidence === params.evidence
-      ) {
-        return { ok: true, row: existing, restated: true }
+      //
+      // [D-R104 F-4, forced deviation] Deliberately NOT `launchBySessionId` (ambiguous — a
+      // session_id can legitimately appear on more than one HISTORICAL agent_launch_sessions
+      // row across a host-resume pane move, e.g. the predecessor pane's own now-superseded row;
+      // `launchBySessionId` has no ORDER BY and can return either one). Scoped to
+      // (hostId, paneKey) instead, which is unambiguous: it is always THIS pane's newest row.
+      const conflicting = db
+        .prepare(`SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?`)
+        .get(params.hostId, params.sessionId) as { pane_key: string } | undefined
+      if (conflicting?.pane_key === params.paneKey) {
+        const existing = newestLaunchForPane(db, params.hostId, params.paneKey)
+        if (existing?.session_id === params.sessionId && existing.evidence === params.evidence) {
+          return { ok: true, row: existing, restated: true }
+        }
       }
       return { ok: false, reason: 'foreign_session_id' }
     }
     throw err
   }
-  const row = launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow
+  // [D-R104 F-4, forced deviation] Same ambiguity fix as above — this pane's own newest row,
+  // not an arbitrary row sharing this session_id.
+  const row = newestLaunchForPane(db, params.hostId, params.paneKey) as AgentLaunchSessionRow
   prunePaneRows(db, params.hostId, params.paneKey)
   pruneGlobalRows(db, params.hostId)
   return { ok: true, row, restated: false }

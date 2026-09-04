@@ -216,6 +216,45 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
     expect(controller.spawnCallCount()).toBe(0)
   })
 
+  // [D-R104 F-9/T45] clause A (assertPaneKeyNotOwned, leaf-suffix match via getAgentByPaneKey)
+  // must win over clause B (assertLeafNotOccupied) for a placement naming a DIFFERENT tab but
+  // the SAME leaf as a REGISTERED pane — pane_key_owned, not leaf_occupied. Both clauses would
+  // fire here (the controller also reports the leaf occupied); clause A runs first in
+  // createTerminal's E2 block and must be the one that throws.
+  it('T45: a different-tab/same-leaf placement naming a registered pane is refused pane_key_owned (clause A wins over clause B)', async () => {
+    db = new OrchestrationDb(':memory:')
+    const registeredPaneKey = makePaneKey(REGISTERED_TAB, LEAF_A)
+    insertRegisteredAgent(db, registeredPaneKey)
+    const store = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setOrchestrationDb(db)
+    const controller = fakePtyController()
+    runtime.setPtyController({
+      ...controller,
+      // Same leaf as the registered pane -> clause B would ALSO refuse (leaf_occupied) if it
+      // ran first; this proves clause A's leaf-suffix match takes priority.
+      hasStablePaneForLeaf: (args: { leafId: string }) => args.leafId === LEAF_A,
+      adoptStablePane: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    await expect(
+      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' },
+        tabId: OTHER_TAB,
+        leafId: LEAF_A
+      })
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'pane_key_owned'
+    })
+    const audited = lastAuditRow(db)
+    expect(audited.reason_code).toBe('pane_key_owned')
+    expect(controller.spawnCallCount()).toBe(0)
+  })
+
   // T43: [JUDGMENT CALL, see RETURN] a covered, placed launch with NO db ever attached in this
   // process is admitted at the gate — vacuously safe, since no db means no row was ever
   // registered to own this pane, never a silent skip of a real risk (see the doc comment on

@@ -318,6 +318,157 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(auditRow.verb).toBe('launch_self_resume') // ALWAYS audited (v2.1 V1)
     expect(notices).toEqual([]) // no registered row -> no notice/contest
   })
+
+  const REMOTE_EXECUTION_HOST_ID = 'ssh:conn-1'
+
+  it('T-B1 (D-R104 B-1): a covered, remote launch naming a REGISTERED pane is UNRECORDED(pane_key_owned), no row, notice called', async () => {
+    const db = freshDb()
+    insertRegisteredAgent(db, 'tab1:leaf-a')
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude', commandDelivery: 'provider' }),
+      CALLER,
+      ctx({
+        executionHostId: REMOTE_EXECUTION_HOST_ID,
+        notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode })
+      })
+    )
+    expect(admitted.spawnOptions.command).toBe('claude') // no splice
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined() // no row, HOST_ID (compat), not the ssh id
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string; actor_host_id: string }
+    expect(auditRow.verb).toBe('launch_unrecorded')
+    expect(auditRow.reason_code).toBe('pane_key_owned')
+    expect(auditRow.actor_host_id).toBe(HOST_ID) // the compatibility id, never the ssh execution id
+    expect(notices).toEqual([
+      { paneKey: 'tab1:leaf-a', verb: 'launch_unrecorded', reasonCode: 'pane_key_owned' }
+    ])
+  })
+
+  it('T-B2 (D-R104 B-2): a remote covered launch with NO commandDelivery is UNRECORDED(command_not_host_delivered), no splice, no row', async () => {
+    const db = freshDb()
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude' }), // no commandDelivery at all — the relay's own default is 'renderer'
+      CALLER,
+      ctx({ executionHostId: REMOTE_EXECUTION_HOST_ID })
+    )
+    expect(admitted.spawnOptions.command).toBe('claude')
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_unrecorded')
+    expect(auditRow.reason_code).toBe('command_not_host_delivered')
+  })
+
+  it('T-B2 (D-R104 B-2): a remote covered launch WITH commandDelivery: provider is HOST_MINTED (splices, writes a row)', async () => {
+    const db = freshDb()
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude', commandDelivery: 'provider' }),
+      CALLER,
+      ctx({ executionHostId: REMOTE_EXECUTION_HOST_ID })
+    )
+    const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+    expect(row).toBeDefined()
+    // Whichever UUID the (possibly-stubbed) minter returned, the SAME value must appear in
+    // both the spliced argv and the row — not a hardcoded literal (T51 leaves a queued mock
+    // return value from its own concurrent-serialization scenario; this asserts on
+    // self-consistency instead of a specific minted id).
+    expect(admitted.spawnOptions.command).toBe(`claude --session-id '${row?.session_id}'`)
+    expect(row?.execution_host_id).toBe(REMOTE_EXECUTION_HOST_ID)
+  })
+
+  it('D-R104 F-4: a HOST_RESUME compensate() deletes its row and restores the predecessor pane current_sessions row', async () => {
+    const db = freshDb()
+    // Seed the predecessor pane's own launch history so it has something to restore to.
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-old',
+      agentType: 'claude',
+      sessionId: 'predecessor-sess',
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'predecessor-sess',
+      predecessorPaneKey: 'tab1:leaf-old',
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1'
+    }
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume predecessor-sess' }),
+      admission,
+      ctx()
+    )
+    // supersedePaneKey already deleted the predecessor's current_sessions row.
+    expect(
+      rawDb(db)
+        .prepare('SELECT 1 FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+        .get(HOST_ID, 'tab1:leaf-old')
+    ).toBeUndefined()
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')?.session_id).toBe('predecessor-sess')
+
+    admitted.compensate() // simulates provider.spawn throwing
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    const restored = rawDb(db)
+      .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab1:leaf-old') as { session_id: string } | undefined
+    expect(restored?.session_id).toBe('predecessor-sess')
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string }
+    expect(auditRow.verb).toBe('launch_spawn_failed')
+  })
+
+  it('D-R104 F-5: compensate(true) still audits launch_ensure_failed_after_spawn AFTER confirm() already settled, and never deletes the row', async () => {
+    const db = freshDb()
+    const admitted = await admitAgentLaunch(() => db, opts({ command: 'claude' }), CALLER, ctx())
+    const matchingSurface: PtySpawnResult = {
+      id: 'pty-1',
+      agentSessionEnsure: {
+        disposition: 'created',
+        owner: {
+          claim: {
+            digestVersion: 1,
+            keyId: 'k',
+            identityDigest: 'd',
+            worktreeScopeDigest: 'w',
+            agent: 'claude'
+          },
+          generation: 'g',
+          phase: 'live',
+          ptyId: 'pty-1',
+          surface: { worktreeId: 'wt', tabId: 'tab1', leafId: 'leaf-a', terminalHandle: 'h' }
+        }
+      }
+    }
+    admitted.confirm(matchingSurface) // surface matches -> settles cleanly, no delete
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeDefined()
+
+    admitted.compensate(true) // the LATER agentSessionOwners.ensure post-callback throw
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeDefined() // never destroyed
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string }
+    expect(auditRow.verb).toBe('launch_ensure_failed_after_spawn')
+
+    // Idempotent: a second compensate(true) does not audit again.
+    const countBefore = (
+      rawDb(db).prepare('SELECT COUNT(*) as n FROM agent_audit').get() as { n: number }
+    ).n
+    admitted.compensate(true)
+    const countAfter = (
+      rawDb(db).prepare('SELECT COUNT(*) as n FROM agent_audit').get() as { n: number }
+    ).n
+    expect(countAfter).toBe(countBefore)
+  })
 })
 
 describe("S10-21a C3-v2, errata 5(p) T50: no non-test writer of delivery: 'terminal-paste'", () => {

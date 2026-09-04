@@ -44,3 +44,8 @@ export async function withPaneLock<T>(key: string, fn: () => Promise<T> | T): Pr
     }
   }
 }
+
+/** [D-R104 F-11, test-only] Live-tail introspection for one key — no production caller. */
+export function _paneLockHasTailForTest(key: string): boolean {
+  return paneLockTails.has(key)
+}
