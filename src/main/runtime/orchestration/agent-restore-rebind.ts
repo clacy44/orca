@@ -19,6 +19,16 @@
 // collision rolls back the WHOLE rebind (agent row, mailboxes, threads) and refuses; the prunes
 // (host-scoped, self-transacting) still run after this transaction commits, same as
 // `recordLaunch`'s own wrapper does for every other caller.
+//
+// [S10-21a C5b, D-R107 MEDIUM-3, accepted per Ruling 34 Addendum 18] `evaluateRebindPredicate`'s
+// clause 8 (`checkAndBumpRate`) commits its own BEGIN IMMEDIATE...COMMIT BEFORE this function
+// opens its own transaction below — a refusal at step 5, or a throw anywhere in this
+// transaction, permanently consumes 1/20 of the rate budget for a rebind that never landed.
+// Accepted rather than restructured: every refusal (including this one) is now audited (this
+// commit), so the budget loss is visible and diagnosable rather than silent, which was the
+// actual defect MEDIUM-3 named — moving the bump inside this function's own transaction would
+// require `evaluateRebindPredicate` to stop being callable standalone (every other clause is a
+// pure read), a larger restructuring this brief did not ask for.
 import type Database from '../../sqlite/sync-database'
 import { adoptFromPredecessors, adoptPredecessorThreadMembership } from './agent-thread-succession'
 import {
@@ -28,7 +38,11 @@ import {
   repointMailboxOnSuccession
 } from './agent-mailbox-repoint'
 import { writeAgentAudit } from './agent-audit-log'
-import { recordLaunchInTransaction, setLaunchAgentId } from './agent-launch-sessions'
+import {
+  newestLaunchForPane,
+  recordLaunchInTransaction,
+  setLaunchAgentId
+} from './agent-launch-sessions'
 import { prunePaneRows, pruneGlobalRows } from './agent-launch-sessions-retention'
 import {
   evaluateRebindPredicate,
@@ -49,9 +63,21 @@ export type RebindRestoredPaneResult =
       repointedMessages: number
       pendingOnOldHandle: number
       pactsToUnpause: string[]
+      // [S10-21a C5b, D-R107 MEDIUM-4] Surfaced so a caller renders the honest zero — a
+      // quarantined predecessor sharing this name blocked H6 catch-up outright, distinct from
+      // "there was nothing to inherit" (adoptPredecessorThreadMembership's own F-9 reasoning).
+      blockedByQuarantinedPredecessor: boolean
     }
   | { ok: true; rebound: false; agentId: string }
   | { ok: false; reason: RebindRefusalReason }
+
+// [S10-21a C5b, D-R107 fix item 14] verb 'rebind' for every refusal — 'contested' outcome for
+// the two identity-contest reasons (predicate.ts sets `agentId` for exactly these), 'refused'
+// for everything else (agentId null: nothing to attribute besides the attempted claim itself).
+const CONTESTED_REFUSAL_REASONS: ReadonlySet<RebindRefusalReason> = new Set([
+  'incumbent_alive',
+  'predecessor_moved'
+])
 
 function pactsAwaitingUnpause(db: Database.Database, agentId: string): string[] {
   const rows = db
@@ -75,25 +101,24 @@ export function rebindRestoredPane(
 ): RebindRestoredPaneResult {
   const predicate = evaluateRebindPredicate(db, params)
   if (predicate.kind === 'refuse') {
-    // [S10-21a C6, §2.6 SCOPE(a)] Fail-closed contest: a live incumbent still holds this
-    // lineage (including C4a's 'conflicting_signals' verdict, which forces this same
-    // refusal — resolveIncumbentDeath never reports `dead: true` while d3.liveNow). No
-    // rebind, no row change (predicate performed no write besides its own rate bump); one
-    // `contested` audit row names the refused claim. Pure DB — no notice from here (the
-    // caller, the sweep, owns runtime access for that).
-    if (predicate.reason === 'incumbent_alive') {
-      writeAgentAudit(db, {
-        agentId: predicate.agentId ?? null,
-        actorPaneKey: params.newPaneKey,
-        actorHostId: params.hostId,
-        verb: 'contested',
-        outcome: 'refused',
-        reasonCode:
-          `restore lineage contested: incumbent ` +
-          `${params.incumbent.dead ? params.incumbent.signal : params.incumbent.reason} ` +
-          `at ${params.ticketPayload.predecessorPaneKey}; claimant ${params.newPaneKey}`
-      })
-    }
+    // [S10-21a C5b, D-R107 fix item 14 / MEDIUM-2] Every refusal reason is now audited — the
+    // prior code left every reason but 'incumbent_alive' silent (loud-degradation rule).
+    // Fail-closed: no rebind, no row change, no write besides this one audit row (and the
+    // predicate's own rate bump, MEDIUM-3, documented above). 'incumbent_alive' and
+    // 'predecessor_moved' are contested-lineage events (§2.6 SCOPE(a); errata 5(z)); every other
+    // reason is a plain refusal. Pure DB — no notice from here (the caller owns runtime access).
+    const contested = CONTESTED_REFUSAL_REASONS.has(predicate.reason)
+    writeAgentAudit(db, {
+      agentId: predicate.agentId ?? null,
+      actorPaneKey: params.newPaneKey,
+      actorHostId: params.hostId,
+      verb: 'rebind',
+      outcome: contested ? 'contested' : 'refused',
+      reasonCode:
+        `restore lineage refused (${predicate.reason}): ` +
+        `incumbent=${params.incumbent.dead ? params.incumbent.signal : params.incumbent.reason} ` +
+        `predecessor=${params.ticketPayload.predecessorPaneKey} claimant=${params.newPaneKey}`
+    })
     return { ok: false, reason: predicate.reason }
   }
   if (predicate.kind === 'noop') {
@@ -105,9 +130,24 @@ export function rebindRestoredPane(
   let repointedMessages = 0
   let pendingOnOldHandle = 0
   let pactsToUnpause: string[] = []
+  let blockedByQuarantinedPredecessor = false
 
   db.exec('BEGIN IMMEDIATE')
   try {
+    // [S10-21a C5b, D-R107 MEDIUM-4] Snapshot the succession marker BEFORE step 1 runs. Step 1's
+    // own `adoptFromPredecessors` call (below, when a derived placeholder occupies the target
+    // leaf) writes the SAME 'thread_succession' audit marker step 4 later reads as its own
+    // "already ran" gate — reading it AFTER step 1 would let step 1's placeholder-only adoption
+    // (a single predecessor: targetRow) silently suppress step 4's broader, name-keyed H6
+    // catch-up (every tombstoned row sharing this display_name), which is a strict superset.
+    const hasSuccessionMarker = Boolean(
+      db
+        .prepare(
+          `SELECT 1 FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession' LIMIT 1`
+        )
+        .get(row.id)
+    )
+
     // Step 1: adopt-or-tombstone a derived placeholder sitting on the target leaf. Same sequence
     // as agent-directory-derived-reclaim.ts's reclaimDerivedPlaceholder (the only other call site
     // that adopts a derived row's history onto a different id inside its own transaction).
@@ -172,37 +212,86 @@ export function rebindRestoredPane(
     pendingOnOldHandle += fromName.pendingOnOldHandle
 
     // Step 4: H6 idempotent succession catch-up, inlined (FORCED DEVIATION — see file header).
-    const hasSuccessionMarker = Boolean(
-      db
-        .prepare(
-          `SELECT 1 FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession' LIMIT 1`
-        )
-        .get(row.id)
-    )
+    // Uses the marker SNAPSHOT taken before step 1 (D-R107 MEDIUM-4) — step 1's own
+    // placeholder-only adoption must never suppress this broader, name-keyed catch-up.
     if (!hasSuccessionMarker) {
       const caughtUp = adoptPredecessorThreadMembership(db, params.hostId, row.display_name, row.id)
       adoptedThreads += caughtUp.adoptedThreads
       repointedMessages += caughtUp.repointedMessages
+      blockedByQuarantinedPredecessor = caughtUp.blockedByQuarantinedPredecessor
     }
 
-    // Step 5 [Ruling 34 Addendum 16(c)]: the launch-row write, INSIDE this transaction. A
-    // genuine cross-pane collision rolls back the whole rebind and refuses — nothing above (the
-    // adopt/tombstone, the narrow UPDATE, the mailbox repoints, H6 catch-up) is left half-applied.
-    const launchResult = recordLaunchInTransaction(db, {
-      hostId: params.hostId,
-      paneKey: params.newPaneKey,
-      agentType: 'claude',
-      sessionId: params.ticketPayload.sessionId,
-      launchGeneration: params.launchGeneration,
-      executionHostId: params.executionHostId,
-      evidence: 'sweep_record',
-      supersedePaneKey: params.ticketPayload.predecessorPaneKey
-    })
-    if (!launchResult.ok) {
-      db.exec('ROLLBACK')
-      return { ok: false, reason: 'launch_row_foreign_session_id' }
+    // Step 5 [Ruling 34 Addendum 16(c)/18(v), D-R107 MEDIUM-5]: the launch-row write, INSIDE
+    // this transaction — UNLESS the admission already wrote this exact restore's row at spawn
+    // (agent-launch-admission.ts's HOST_RESUME branch: evidence 'sweep_record',
+    // supersedePaneKey = predecessorPaneKey, same session id). `recordLaunchInTransaction`'s own
+    // `restated` classification does NOT catch this case — its collision detector only fires on
+    // a cross-pane `current_sessions` UNIQUE violation, and a same-pane repeat write (as this
+    // would be, targeting the SAME newPaneKey the admission already wrote) hits no unique
+    // constraint at all (agent-launch-sessions.ts carries none across generations for one pane;
+    // T41's own documented behaviour), so it would silently insert a genuine second row — the
+    // duplicate MEDIUM-5 found, with the admission's compensating delete then repointing
+    // current_sessions to that duplicate instead of removing the fact. Recognise the admission's
+    // row FIRST and bind to it directly, never re-inserting.
+    const existingForPane = newestLaunchForPane(db, params.hostId, params.newPaneKey)
+    const isAdmissionsOwnRow =
+      existingForPane !== undefined &&
+      existingForPane.session_id === params.ticketPayload.sessionId &&
+      existingForPane.evidence === 'sweep_record'
+    if (isAdmissionsOwnRow) {
+      setLaunchAgentId(db, { seq: existingForPane.seq }, row.id)
+    } else {
+      const launchResult = recordLaunchInTransaction(db, {
+        hostId: params.hostId,
+        paneKey: params.newPaneKey,
+        agentType: 'claude',
+        sessionId: params.ticketPayload.sessionId,
+        launchGeneration: params.launchGeneration,
+        executionHostId: params.executionHostId,
+        evidence: 'sweep_record',
+        supersedePaneKey: params.ticketPayload.predecessorPaneKey
+      })
+      if (!launchResult.ok) {
+        db.exec('ROLLBACK')
+        // [S10-21a C5b, D-R107 MEDIUM-2/fix item 14] Was silent before this commit — a genuine
+        // cross-pane session-id collision at step 5 now audits like every other refusal.
+        writeAgentAudit(db, {
+          agentId: row.id,
+          actorPaneKey: params.newPaneKey,
+          actorHostId: params.hostId,
+          verb: 'rebind',
+          outcome: 'refused',
+          reasonCode: 'launch_row_foreign_session_id'
+        })
+        return { ok: false, reason: 'launch_row_foreign_session_id' }
+      }
+      if (launchResult.restated) {
+        // [Ruling 34 Addendum 18(v)] Unreachable through this call's own params today —
+        // `isAdmissionsOwnRow` above already recognises the one shape that could reach it (same
+        // pane, same session, same evidence), and `recordLaunchInTransaction`'s own restatement
+        // branch requires the exact same conjuncts to classify as `restated` in the first place
+        // (agent-launch-sessions.test.ts's own JUDGMENT CALL notes this branch is unreachable
+        // via ordinary recordLaunch calls too). Kept as a typed fence rather than an
+        // unconditional bind: ANY other restated shape reaching here would mean this call
+        // collided with a row this restore does not own, and must refuse, not silently adopt it.
+        const isThisRestoresOwnRow =
+          launchResult.row.session_id === params.ticketPayload.sessionId &&
+          launchResult.row.evidence === 'sweep_record'
+        if (!isThisRestoresOwnRow) {
+          db.exec('ROLLBACK')
+          writeAgentAudit(db, {
+            agentId: row.id,
+            actorPaneKey: params.newPaneKey,
+            actorHostId: params.hostId,
+            verb: 'rebind',
+            outcome: 'refused',
+            reasonCode: `launch_row_restated_mismatch: seq=${launchResult.row.seq}`
+          })
+          return { ok: false, reason: 'launch_row_restated_mismatch' }
+        }
+      }
+      setLaunchAgentId(db, { seq: launchResult.row.seq }, row.id)
     }
-    setLaunchAgentId(db, { seq: launchResult.row.seq }, row.id)
 
     // Pact un-pause is C10's job (§2.11 N4) — this is a read-only lookup of the candidates so
     // C10 can act on them post-commit; no thread row is written here.
@@ -240,6 +329,7 @@ export function rebindRestoredPane(
     adoptedThreads,
     repointedMessages,
     pendingOnOldHandle,
-    pactsToUnpause
+    pactsToUnpause,
+    blockedByQuarantinedPredecessor
   }
 }
