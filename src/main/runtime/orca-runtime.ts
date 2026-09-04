@@ -123,6 +123,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
+import type { RestoreTicketId } from './restore-ticket-registry'
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
@@ -1508,6 +1509,14 @@ type TerminalCreateOptions = {
   // Why: required so the compiler enumerates every spawner; the funnel binds it to the pane it
   // mints and every spawn edge reads it back from there, never from the request (S9 §2a).
   credentialLane: TerminalCredentialLaneOption
+  // Why required, non-wire (INV-P-021, design v3.2 §2.2/§2.1d): every spawner must state whether
+  // this create carries host-restore provenance. `{ kind: 'none' }` is the answer for every
+  // caller-driven create; only the sweep (C7), redeeming its own ticket from
+  // RestoreTicketRegistry (restore-ticket-registry.ts), may ever pass `host-restore`. No RPC/IPC
+  // params schema carries this field — the ones that could accept terminal-create/
+  // ensureAgentSession options from a caller are `.strict()` (e.g.
+  // rpc/methods/agent-session.ts:138, :184), so an injected field is rejected, not ignored.
+  restoreProvenance: { kind: 'none' } | { kind: 'host-restore'; ticket: RestoreTicketId }
   command?: string
   claudeAgentTeamsSourceCommand?: string
   cwd?: string
@@ -18169,6 +18178,7 @@ export class OrcaRuntimeService {
     }
     // Why: disconnected PTYs can reissue handles during graph cleanup; only a connected replacement satisfies the pane CAS.
     const recovery = this.createTerminal(`id:${expectedWorktreeId}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: {
         kind: 'inherit',
         fromPtyId: pty.ptyId,
@@ -23567,6 +23577,7 @@ export class OrcaRuntimeService {
       try {
         const command = template.command?.trim()
         const terminal = await this.createTerminal(worktreeSelector, {
+          restoreProvenance: { kind: 'none' },
           credentialLane,
           ...(template.title ? { title: template.title } : {}),
           ...(command && defaultTabs.runCommands ? { command } : {}),
@@ -23629,6 +23640,7 @@ export class OrcaRuntimeService {
         ).setupScriptLaunchMode ?? 'new-tab'
       if (!args.hasStartupTerminal && !primaryTerminalHandle) {
         const terminal = await this.createTerminal(args.worktreeSelector, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: args.credentialLane,
           ...surfacing
         })
@@ -23666,6 +23678,7 @@ export class OrcaRuntimeService {
               ...surfacing
             })
           : this.createTerminal(args.worktreeSelector, {
+              restoreProvenance: { kind: 'none' },
               credentialLane: args.credentialLane,
               title: 'Setup',
               command: setupCommand,
@@ -23957,6 +23970,7 @@ export class OrcaRuntimeService {
             this.markLocalWorkspaceTrustedForAgent(startupTrustAgent, worktree.path)
           }
           const terminal = await this.createTerminal(`id:${worktree.id}`, {
+            restoreProvenance: { kind: 'none' },
             credentialLane,
             command: effectiveStartup.command,
             env: effectiveStartup.env,
@@ -23999,6 +24013,7 @@ export class OrcaRuntimeService {
       } else if (this.ptyController?.spawn && !didSpawnStartup) {
         try {
           await this.createTerminal(`id:${worktree.id}`, {
+            restoreProvenance: { kind: 'none' },
             credentialLane,
             surfaceOwner: false
           })
@@ -24715,6 +24730,7 @@ export class OrcaRuntimeService {
           this.markLocalWorkspaceTrustedForAgent(startupTrustAgent, worktreePath)
         }
         const terminal = await this.createTerminal(`id:${worktree.id}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane,
           command: sequencedStartup.command,
           ...(setup && effectiveStartup
@@ -24838,7 +24854,11 @@ export class OrcaRuntimeService {
       }
     } else if (this.ptyController?.spawn) {
       try {
-        await this.createTerminal(`id:${worktree.id}`, { credentialLane, surfaceOwner: false })
+        await this.createTerminal(`id:${worktree.id}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane,
+          surfaceOwner: false
+        })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         warning = warning
@@ -25066,6 +25086,7 @@ export class OrcaRuntimeService {
           )
         }
         const terminal = await this.createTerminal(`path:${result.worktree.path}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: args.credentialLane,
           command: sequencedStartup.command,
           ...(result.setup && args.startup
@@ -25191,6 +25212,7 @@ export class OrcaRuntimeService {
     } else if (!shouldActivate && this.ptyController?.spawn) {
       try {
         await this.createTerminal(`path:${result.worktree.path}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: args.credentialLane,
           surfaceOwner: false
         })
@@ -27313,6 +27335,7 @@ export class OrcaRuntimeService {
       throw new Error('client_disconnected')
     }
     const terminal = await this.createTerminal(`id:${workspace.id}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane,
       command: startup.launchCommand,
       env: startup.env,
@@ -27506,6 +27529,7 @@ export class OrcaRuntimeService {
       const operationHandle = `term_${deterministicAgentSessionUuid(`${executionOperationId}:handle`)}`
       try {
         terminal = await this.createTerminal(`id:${workspace.id}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane,
           command: startup.launchCommand,
           env: startup.env,
@@ -27674,6 +27698,7 @@ export class OrcaRuntimeService {
       )
     }
     const created = await this.createTerminal(`id:${source.worktreeId}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: callerLane,
       focus: args.focus === true,
       activate: args.activate === true
@@ -28387,6 +28412,7 @@ export class OrcaRuntimeService {
       this.markLocalWorkspaceTrustedForAgent(opts.agent, worktree.path)
     }
     return await this.createTerminal(`id:${worktree.id}`, {
+      restoreProvenance: { kind: 'none' },
       // Why: local IPC only — an anonymous local launch keeps today's shared `~/.claude` (§2a).
       credentialLane: SHARED_CREDENTIAL_LANE,
       command: startup.startup.command,
@@ -28845,6 +28871,7 @@ export class OrcaRuntimeService {
       opts.identity?.sessionId ?? (workspace.connectionId ? undefined : `serve-${randomUUID()}`)
     const isNewSession = stableSessionId !== undefined && opts.identity?.sessionId === undefined
     const terminal = await this.createTerminal(`id:${worktreeId}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: opts.credentialLane,
       focus: false,
       command: opts.command,

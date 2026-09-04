@@ -237,6 +237,7 @@ describe('agent session RPC methods', () => {
     )
     expect(createTerminal).toHaveBeenCalledWith('id:worktree-1', {
       credentialLane: { kind: 'shared' },
+      restoreProvenance: { kind: 'none' },
       command: 'codex resume provider-session-1',
       startupCommandDelivery: undefined,
       env: undefined,

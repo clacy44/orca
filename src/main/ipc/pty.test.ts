@@ -19297,6 +19297,7 @@ describe('registerPtyHandlers', () => {
     } as never)
 
     const created = await runtime.createTerminal(`id:${worktreeId}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       presentation: 'background'
     })

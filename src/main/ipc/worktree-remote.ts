@@ -313,6 +313,7 @@ async function spawnLocalStartupAndSetupTerminals(args: {
       }
     }
     const terminal = await runtime.createTerminal(`id:${worktree.id}`, {
+      restoreProvenance: { kind: 'none' },
       // Why: local IPC bridge, no paired grant — today's shared `~/.claude`, stated (S9 §2a).
       credentialLane: { kind: 'shared' },
       command: sequencedStartup.command,
@@ -365,6 +366,7 @@ async function spawnLocalStartupAndSetupTerminals(args: {
         })
       } else {
         await runtime.createTerminal(`id:${worktree.id}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: { kind: 'shared' },
           title: 'Setup',
           command: setupCommand,

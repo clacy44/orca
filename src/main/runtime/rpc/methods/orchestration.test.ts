@@ -2632,6 +2632,7 @@ describe('orchestration RPC methods', () => {
       expect(runtime.createTerminal).toHaveBeenCalledWith('id:repo::worktree', {
         // Why: the coordinator pane carries no lane in this fixture, so the worker inherits shared.
         credentialLane: { kind: 'shared' },
+        restoreProvenance: { kind: 'none' },
         startupAgent: 'codex',
         title: `worker-${task.id}`,
         surfaceOwner: false

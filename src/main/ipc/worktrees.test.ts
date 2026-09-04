@@ -1218,6 +1218,7 @@ describe('registerWorktreeHandlers', () => {
       {
         // Why: the local IPC bridge states the shared lane explicitly (S9 §2a).
         credentialLane: { kind: 'shared' },
+        restoreProvenance: { kind: 'none' },
         claudeAgentTeamsSourceCommand: 'claude --prefill test',
         command: 'claude --prefill test',
         env: { ORCA_AGENT_MODE: 'direct' },
@@ -1237,6 +1238,7 @@ describe('registerWorktreeHandlers', () => {
       'id:repo-1::/workspace/improve-dashboard',
       {
         credentialLane: { kind: 'shared' },
+        restoreProvenance: { kind: 'none' },
         title: 'Setup',
         command: expect.stringContaining('bash /workspace/repo/.git/orca/setup-runner.sh'),
         env: {

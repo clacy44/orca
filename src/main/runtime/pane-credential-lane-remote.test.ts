@@ -68,6 +68,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
     const { runtime, spawn } = createRuntime('conn-1')
 
     const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 
@@ -84,6 +85,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
     const { runtime, spawn } = createRuntime(null)
 
     await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 
@@ -99,6 +101,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
     const { runtime, persistPaneCredentialLane } = createRuntime('conn-1')
 
     await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 
@@ -108,6 +111,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
   it('lets a lane holder split their own remote pane rather than refusing it', async () => {
     const { runtime, spawn } = createRuntime('conn-1')
     const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
     spawn.mockClear()
@@ -127,6 +131,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
   it('lets a lane holder re-open their own remote pane by its identity', async () => {
     const { runtime, spawn } = createRuntime('conn-1')
     const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
     expect(created.handle).toBeTruthy()
@@ -136,6 +141,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
     // refuses the pane's own holder the #11598 wake gesture across their own devices (§3).
     const refusal = await runtime
       .createTerminal(`id:${WORKTREE}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: runtime.resolveCallerCredentialLane('device-a'),
         tabId,
         leafId
@@ -149,6 +155,7 @@ describe('createTerminal — an SSH-backed workspace', () => {
   it('refuses the same split when the parent is a local pane of another principal', async () => {
     const { runtime } = createRuntime(null)
     const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 

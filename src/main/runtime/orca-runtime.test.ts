@@ -3299,6 +3299,7 @@ describe('OrcaRuntimeService', () => {
     expect(createTerminal).toHaveBeenCalledWith(`id:${TEST_WORKTREE_ID}`, {
       // Why: recovery re-enters the funnel as an inherit edge over the pane it is replacing.
       credentialLane: { kind: 'inherit', fromPtyId: 'pty-expired' },
+      restoreProvenance: { kind: 'none' },
       tabId,
       leafId: HEADLESS_LEAF_ID,
       focus: false,
@@ -9736,6 +9737,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const created = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
 
@@ -11709,6 +11711,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       title: 'worker'
@@ -13352,6 +13355,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const result = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       launchConfig: {
@@ -13441,6 +13445,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const terminal = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       launchConfig: { agentCommand: 'codex', agentArgs: '', agentEnv: {} }
@@ -13966,6 +13971,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex'
     })
@@ -14000,6 +14006,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'codex',
         presentation: 'background',
@@ -14150,6 +14157,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       title: 'worker'
@@ -14193,6 +14201,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       startupAgent: 'cursor',
       title: 'worker'
@@ -14232,6 +14241,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       startupAgent: 'cursor'
     })
@@ -14272,6 +14282,7 @@ describe('OrcaRuntimeService', () => {
       })
 
       await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         startupAgent: 'claude-agent-teams'
       })
@@ -14303,6 +14314,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       startupAgent: 'cursor'
     })
@@ -14325,6 +14337,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(undefined, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         startupAgent: 'cursor',
         rendererBacked: true
@@ -14357,6 +14370,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`id:${TEST_FOLDER_WORKSPACE_KEY}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       startupAgent: 'cursor'
     })
@@ -14400,6 +14414,7 @@ describe('OrcaRuntimeService', () => {
     ]) {
       await expect(
         runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: { kind: 'shared' },
           startupAgent: 'cursor',
           ...conflicting
@@ -14429,6 +14444,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         startupAgent: 'cursor'
       })
@@ -14459,6 +14475,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       title: 'worker'
@@ -14514,6 +14531,7 @@ describe('OrcaRuntimeService', () => {
 
     try {
       const terminal = await runtime.createTerminal('path:C:/remote/repo', {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'claude',
         title: 'worker'
@@ -14551,6 +14569,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex'
     })
@@ -14582,6 +14601,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex exec summarize'
     })
@@ -14614,6 +14634,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex'
     })
@@ -14667,6 +14688,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       rendererBacked: true
@@ -14710,6 +14732,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       env: {
@@ -14758,6 +14781,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(selector, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'codex',
         title: 'multi-repo worker'
@@ -14801,6 +14825,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(selector, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'codex',
         title: 'floating worker'
@@ -14846,7 +14871,10 @@ describe('OrcaRuntimeService', () => {
     })
 
     await expect(
-      runtime.createTerminal(TEST_FOLDER_WORKSPACE_KEY, { credentialLane: { kind: 'shared' } })
+      runtime.createTerminal(TEST_FOLDER_WORKSPACE_KEY, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' }
+      })
     ).rejects.toThrow('folder_workspace_path_missing')
     expect(spawn).not.toHaveBeenCalled()
   })
@@ -14884,14 +14912,17 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: "claude 'hello'"
     })
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: "echo ok; claude 'hello'"
     })
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex'
     })
@@ -14954,6 +14985,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchAgent: 'claude',
@@ -15008,6 +15040,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: "claude 'hello'",
       launchAgent: 'claude',
@@ -15060,6 +15093,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command:
         'bash -lc \'echo Waiting for setup to finish before starting agent... >&2; exec claude "hello"\'',
@@ -15122,6 +15156,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude --resume claude-session',
       env: {
@@ -15214,6 +15249,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude --resume claude-session',
       launchAgent: 'claude',
@@ -15255,6 +15291,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       focus: false,
       tabId,
@@ -15284,6 +15321,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       focus: false,
       tabId,
@@ -15308,7 +15346,10 @@ describe('OrcaRuntimeService', () => {
     })
 
     await expect(
-      runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, { credentialLane: { kind: 'shared' } })
+      runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' }
+      })
     ).resolves.toMatchObject({
       worktreeId: TEST_WORKTREE_ID,
       surface: 'background'
@@ -15339,6 +15380,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -15360,6 +15402,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'codex',
         rendererBacked: true
@@ -15416,6 +15459,7 @@ describe('OrcaRuntimeService', () => {
     // `orca terminal create --worktree <wt> --command "echo test" --focus`
     await expect(
       runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'echo test',
         focus: true
@@ -15453,6 +15497,7 @@ describe('OrcaRuntimeService', () => {
     // Paired desktop `+` button: clients send presentation:'focused', not focus.
     await expect(
       runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'codex',
         presentation: 'focused'
@@ -15506,6 +15551,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const created = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'echo test',
       focus: true
@@ -15571,6 +15617,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'echo test',
         focus: true
@@ -15633,6 +15680,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         command: 'codex',
         rendererBacked: true,
@@ -15692,6 +15740,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const sourceEnv =
@@ -15922,6 +15971,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const split = runtime.splitTerminal(handle, { direction: 'vertical' })
@@ -15971,6 +16021,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(TEST_FOLDER_WORKSPACE_KEY, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const sourceCall = spawn.mock.calls[0]?.[0] as
@@ -16117,6 +16168,7 @@ describe('OrcaRuntimeService', () => {
 
     try {
       const created = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
       expect(created).toMatchObject({
@@ -16158,6 +16210,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const created = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -16181,6 +16234,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const created = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       presentation: 'background'
     })
@@ -16204,6 +16258,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -16232,6 +16287,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     ;(
@@ -16260,6 +16316,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     ;(
@@ -16285,6 +16342,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -16305,6 +16363,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     ;(
@@ -16336,6 +16395,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -16397,6 +16457,7 @@ describe('OrcaRuntimeService', () => {
     const handles: string[] = []
     for (let index = 0; index < 140; index += 1) {
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
       handles.push(handle)
@@ -16549,6 +16610,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -16617,6 +16679,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
 
@@ -16666,6 +16729,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -16696,6 +16760,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData('pty-bg', antigravityReadyScreen('Gemini 4 Experimental (High)'), Date.now())
@@ -16718,6 +16783,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     let pastedTail = ''
@@ -16763,6 +16829,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -16830,6 +16897,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -16869,6 +16937,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -16901,6 +16970,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -16934,6 +17004,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'codex'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -16970,6 +17041,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17003,6 +17075,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17031,6 +17104,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'cursor-agent'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     // Cursor's dismissed trust dialog stays in scrollback; the later idle prompt must clear that stale hit and satisfy idle.
@@ -17067,6 +17141,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'cursor-agent'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17098,6 +17173,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'codex'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17131,6 +17207,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'codex'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17163,6 +17240,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'codex'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17197,6 +17275,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => 'codex'
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     runtime.onPtyData(
@@ -17232,6 +17311,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
       runtime.onPtyData('pty-bg', 'Press enter to continue\n', Date.now())
@@ -17261,6 +17341,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => 'codex'
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
       runtime.onPtyData('pty-bg', 'OpenAI Codex\n', Date.now())
@@ -17296,6 +17377,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -17319,6 +17401,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' }
       })
       const prompt = 'line one\nline two\x1b[201~'
@@ -17386,6 +17469,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         launchAgent: 'claude'
       })
@@ -17429,6 +17513,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         launchAgent: 'claude'
       })
@@ -17469,6 +17554,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         launchAgent: 'claude'
       })
@@ -17500,6 +17586,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         launchAgent: 'claude'
       })
@@ -17540,6 +17627,7 @@ describe('OrcaRuntimeService', () => {
         getForegroundProcess: async () => null
       })
       const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         launchAgent: 'claude'
       })
@@ -17571,6 +17659,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const text = ['x'.repeat(TERMINAL_INPUT_CHUNK_MAX_BYTES), 'tail'].join('')
@@ -17598,6 +17687,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const text = 'é'.repeat(CLIPBOARD_TEXT_MEASURE_YIELD_CODE_UNITS + 1)
@@ -17636,6 +17726,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -17671,6 +17762,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       title: 'worker'
     })
@@ -17715,6 +17807,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       launchAgent: 'codex',
@@ -17773,6 +17866,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       title: 'Claude working'
     })
@@ -17815,6 +17909,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     revealTerminalSession.mockClear()
@@ -17835,6 +17930,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -17875,6 +17971,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       title: 'worker'
     })
@@ -17919,16 +18016,19 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const a = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       title: 'a',
       presentation: 'background'
     })
     const b = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       title: 'b',
       presentation: 'background'
     })
     const c = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       title: 'c',
       presentation: 'background'
@@ -19888,6 +19988,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -19925,6 +20026,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'hook-tab',
       leafId: HEADLESS_LEAF_ID
@@ -19980,6 +20082,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'omp-tab',
       leafId: HEADLESS_LEAF_ID
@@ -20030,6 +20133,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'hook-ping-tab',
       leafId: HEADLESS_LEAF_ID
@@ -20060,6 +20164,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'hook-exit-tab',
       leafId: HEADLESS_LEAF_ID
@@ -24654,6 +24759,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
 
@@ -24682,6 +24788,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const incarnation = runtime.getTerminalProcessIncarnation(handle)
@@ -24705,6 +24812,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const created = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' }
     })
     const [tabId, leafId] = created.paneKey?.split(':') ?? []
@@ -24764,6 +24872,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       title: 'Codex package-cache cleanup'
@@ -24840,6 +24949,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       title: 'OC | zsh'
@@ -24943,6 +25053,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -24963,6 +25074,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude'
     })
@@ -24998,6 +25110,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25180,6 +25293,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       title: 'claude working'
@@ -25202,6 +25316,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       title: 'claude working'
@@ -25224,6 +25339,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       title: 'bash'
@@ -25249,6 +25365,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       title: 'bash'
@@ -25272,6 +25389,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       title: 'bash'
@@ -25302,6 +25420,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       title: 'bash'
@@ -25324,6 +25443,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       title: 'bash'
@@ -25376,6 +25496,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25398,6 +25519,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25419,6 +25541,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       title: 'Codex working'
@@ -25444,6 +25567,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25467,6 +25591,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25504,6 +25629,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       title: 'claude working'
@@ -25541,6 +25667,7 @@ describe('OrcaRuntimeService', () => {
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25562,6 +25689,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25584,6 +25712,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25605,6 +25734,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       title: 'Claude working'
@@ -25626,6 +25756,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       title: 'zsh'
@@ -25661,6 +25792,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude agents',
       title: 'claude agents'
@@ -25686,6 +25818,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'codex',
       title: 'worker'
@@ -25711,6 +25844,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'agy',
       title: 'worker'
@@ -25732,6 +25866,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'agy',
       title: 'worker'
@@ -25788,6 +25923,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'agy',
       title: 'worker'
@@ -25817,6 +25953,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'agy',
       title: 'worker'
@@ -25848,6 +25985,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'agy',
       title: 'worker'
@@ -25879,6 +26017,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'agy',
       title: 'worker'
@@ -26656,6 +26795,7 @@ describe('OrcaRuntimeService', () => {
     runtime.attachWindow(1)
 
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'omp',
       launchAgent: 'omp',
@@ -26737,6 +26877,7 @@ describe('OrcaRuntimeService', () => {
     })
     runtime.attachWindow(1)
     await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'omp',
       launchAgent: 'omp',
@@ -26790,6 +26931,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess
     })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'typed-omp-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -26848,6 +26990,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     const first = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'stable-owner-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -26865,6 +27008,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const adopted = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'stable-owner-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -26912,6 +27056,7 @@ describe('OrcaRuntimeService', () => {
 
     await expect(
       runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         tabId: 'aborted-stable-pane',
         leafId: HEADLESS_LEAF_ID,
@@ -26954,6 +27099,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'claude-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27007,6 +27153,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'shell-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27045,6 +27192,7 @@ describe('OrcaRuntimeService', () => {
     })
     for (const tabId of ['fan-a', 'fan-b', 'fan-c']) {
       await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         tabId,
         leafId: HEADLESS_LEAF_ID,
@@ -27094,6 +27242,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'quiet-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27145,6 +27294,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'pi-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27191,6 +27341,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'stale-pi-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27240,6 +27391,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'exited-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27269,6 +27421,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess
     })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'typed-omp-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27319,6 +27472,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess
     })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'typed-omp-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27379,6 +27533,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess
     })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'typed-omp-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27443,6 +27598,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess
     })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'typed-omp-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -27503,6 +27659,7 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess
     })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'typed-pi-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -30023,6 +30180,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const created = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       presentation: 'background',
       persistHostSessionBinding: true,
@@ -30088,6 +30246,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: "claude 'work on the issue'",
       tabId: 'laptop-tab',
@@ -30129,6 +30288,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true,
       presentation: 'background',
@@ -30184,6 +30344,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30214,6 +30375,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30257,6 +30419,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30297,6 +30460,7 @@ describe('OrcaRuntimeService', () => {
     const unsubscribe = runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30329,6 +30493,7 @@ describe('OrcaRuntimeService', () => {
     })
     const leafId = HEADLESS_LEAF_ID
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId
@@ -30405,6 +30570,7 @@ describe('OrcaRuntimeService', () => {
     })
     const leafId = HEADLESS_LEAF_ID
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId
@@ -30483,6 +30649,7 @@ describe('OrcaRuntimeService', () => {
     runtime.onMobileSessionTabsChanged((snapshot) => events.push(snapshot))
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30518,6 +30685,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30828,6 +30996,7 @@ describe('OrcaRuntimeService', () => {
     })
     runtime.syncWindowGraph(0, { tabs: [], leaves: [] })
     const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'durable-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30854,6 +31023,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID
@@ -30886,6 +31056,7 @@ describe('OrcaRuntimeService', () => {
     })
 
     const laptopTerminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'laptop-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -30996,10 +31167,12 @@ describe('OrcaRuntimeService', () => {
     })
 
     const first = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
     const second = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
@@ -31022,6 +31195,7 @@ describe('OrcaRuntimeService', () => {
 
     // The actual bug: creating a new tab must NOT collapse the split.
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
@@ -31127,6 +31301,7 @@ describe('OrcaRuntimeService', () => {
     })
     // Bind a live pty to the persisted 'host-tab' so rename resolves by handle.
     const created = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'host-tab',
       leafId: HEADLESS_LEAF_ID,
@@ -31362,10 +31537,12 @@ describe('OrcaRuntimeService', () => {
       getForegroundProcess: async () => null
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
     const second = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
@@ -31410,10 +31587,12 @@ describe('OrcaRuntimeService', () => {
     // Why: createMobileSessionTerminal asserts the graph is ready; serve marks it ready via syncWindowGraph(0,...) (windowId 0 ≠ a real renderer).
     runtime.syncWindowGraph(0, { tabs: [], leaves: [] })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
     const second = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       activate: true
     })
@@ -33316,11 +33495,13 @@ describe('OrcaRuntimeService', () => {
     const SECOND_LEAF = '33333333-3333-4333-8333-333333333333'
     // The first-created headless terminal is the one the snapshot marks active.
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-first',
       leafId: FIRST_LEAF
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-other',
       leafId: SECOND_LEAF
@@ -33367,6 +33548,7 @@ describe('OrcaRuntimeService', () => {
 
     const LEAF = '44444444-4444-4444-8444-444444444444'
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-solo',
       leafId: LEAF
@@ -33395,11 +33577,13 @@ describe('OrcaRuntimeService', () => {
     const LEAF_A = '55555555-5555-4555-8555-555555555555'
     const LEAF_B = '66666666-6666-4666-8666-666666666666'
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-a',
       leafId: LEAF_A
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-b',
       leafId: LEAF_B
@@ -33438,11 +33622,13 @@ describe('OrcaRuntimeService', () => {
     const LEAF_B = '88888888-8888-4888-8888-888888888888'
     // tab-a (first-created) is the snapshot's active tab.
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-a',
       leafId: LEAF_A
     })
     await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: 'tab-b',
       leafId: LEAF_B

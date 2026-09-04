@@ -57,6 +57,7 @@ async function exitedLanePane(callerDeviceId: string | undefined): Promise<{
     getForegroundProcess: async () => null
   })
   const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+    restoreProvenance: { kind: 'none' },
     credentialLane: runtime.resolveCallerCredentialLane(callerDeviceId)
   })
   const { tabId, leafId } = spawn.mock.calls[0][0] as { tabId: string; leafId: string }

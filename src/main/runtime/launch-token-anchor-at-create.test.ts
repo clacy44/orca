@@ -219,6 +219,7 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -294,6 +295,7 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -379,6 +381,7 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
         expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
 
         await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: { kind: 'shared' },
           command: 'claude',
           launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -455,6 +458,7 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
     // resolveAgentTerminalCreateOptions only derives one FROM opts.command, so a bare-shell
     // create (no command) reproduces the no-token-minted case without an adoptStablePane fixture.
     await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: TAB_ID,
       leafId: LEAF_ID,

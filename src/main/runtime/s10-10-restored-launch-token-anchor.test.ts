@@ -168,6 +168,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -295,6 +296,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -370,6 +372,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -384,6 +387,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
 
     // Relaunch the SAME pane as a plain shell — no launchToken this time.
     await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
       tabId: TAB_ID,
@@ -416,6 +420,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
 
     await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },

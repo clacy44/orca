@@ -94,6 +94,7 @@ export async function resolveExistingFederatedWorktree(args: {
   }
   args.setFailedStage('terminal_create')
   const terminal = await args.runtime.createTerminal(`id:${worktree.id}`, {
+    restoreProvenance: { kind: 'none' },
     credentialLane: args.credentialLane,
     // Why: agent ids are not shell commands (`cursor` is the desktop app, its CLI is
     // `cursor-agent`); resolve through the TUI agent config.

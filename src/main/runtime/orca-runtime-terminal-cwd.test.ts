@@ -43,6 +43,7 @@ describe('OrcaRuntimeService terminal startup cwd', () => {
     })
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       cwd: '/repo/app/packages/web'
     })
@@ -67,6 +68,7 @@ describe('OrcaRuntimeService terminal startup cwd', () => {
     })
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       cwd: '/repo/app-other'
     })
@@ -106,6 +108,7 @@ describe('OrcaRuntimeService terminal startup cwd', () => {
     })
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       cwd: '/repo/app/packages/web'
     })

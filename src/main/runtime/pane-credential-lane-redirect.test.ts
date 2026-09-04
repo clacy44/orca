@@ -82,6 +82,7 @@ async function ownerPane(
   spawn: ReturnType<typeof vi.fn>
 ): Promise<{ tabId: string; leafId: string; handle: string }> {
   const created = await runtime.createTerminal(`id:${WORKTREE}`, {
+    restoreProvenance: { kind: 'none' },
     credentialLane: runtime.resolveCallerCredentialLane('device-a')
   })
   const { tabId, leafId } = spawn.mock.calls[0][0] as { tabId: string; leafId: string }
@@ -104,6 +105,7 @@ describe('createTerminal — the post-spawn pane redirect', () => {
 
     const refusal = await runtime
       .createTerminal(`id:${WORKTREE}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: runtime.resolveCallerCredentialLane('device-b')
       })
       .then(() => 'no-refusal')
@@ -126,6 +128,7 @@ describe('createTerminal — the post-spawn pane redirect', () => {
     setRedirect({ handle: owner.handle, tabId: owner.tabId, leafId: owner.leafId })
 
     await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 
@@ -139,7 +142,10 @@ describe('createTerminal — the post-spawn pane redirect', () => {
     setRedirect({ handle: owner.handle, tabId: owner.tabId, leafId: owner.leafId })
 
     const refusal = await runtime
-      .createTerminal(`id:${WORKTREE}`, { credentialLane: { kind: 'shared' } })
+      .createTerminal(`id:${WORKTREE}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' }
+      })
       .then(() => 'no-refusal')
       .catch((error: unknown) => (isClaudeLaneRefusal(error) ? error.code : String(error)))
 
@@ -154,6 +160,7 @@ describe('createTerminal — the post-spawn pane redirect', () => {
 
     const refusal = await runtime
       .createTerminal(`id:${WORKTREE}`, {
+        restoreProvenance: { kind: 'none' },
         credentialLane: runtime.resolveCallerCredentialLane('device-b'),
         tabId: HINTED_TAB,
         leafId: HINTED_LEAF
@@ -178,6 +185,7 @@ describe('createTerminal — the post-spawn pane redirect', () => {
     const { runtime, spawn } = createRuntime()
 
     await runtime.createTerminal(`id:${WORKTREE}`, {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-b')
     })
 

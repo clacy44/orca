@@ -1592,6 +1592,7 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
         params.reconcileExisting === true,
         (canonicalWorktreeSelector, preAllocatedHandle) =>
           runtime.createTerminal(canonicalWorktreeSelector, {
+            restoreProvenance: { kind: 'none' },
             credentialLane: runtime.resolveCallerCredentialLane(pairedDeviceId),
             command: params.command,
             startupCommandDelivery: params.startupCommandDelivery,

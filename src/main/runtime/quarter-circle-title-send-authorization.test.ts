@@ -52,6 +52,7 @@ async function createRuntimeWithTitle(
     getForegroundProcess
   })
   const terminal = await runtime.createTerminal(`id:${WORKTREE_ID}`, {
+    restoreProvenance: { kind: 'none' },
     credentialLane: { kind: 'shared' },
     tabId: TAB_ID,
     leafId: LEAF_ID,

@@ -48,6 +48,7 @@ async function createRuntime(rows: AgentStatusIpcPayload[] = []): Promise<OrcaRu
     getForegroundProcess: async () => null
   })
   await runtime.createTerminal(`id:${WORKTREE_ID}`, {
+    restoreProvenance: { kind: 'none' },
     credentialLane: { kind: 'shared' },
     tabId: TAB_ID,
     leafId: LEAF_ID,

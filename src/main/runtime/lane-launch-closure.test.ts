@@ -71,6 +71,7 @@ describe('a peer’s host-wide launch settings against a lane launch', () => {
     const { runtime, spawn } = createRuntime()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a'),
       ...launch
     })
@@ -88,6 +89,7 @@ describe('a peer’s host-wide launch settings against a lane launch', () => {
     const { runtime, spawn } = createRuntime()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'claude'
     })
@@ -170,6 +172,7 @@ describe('the launch config the host create built', () => {
     const { runtime, spawn } = createRuntime()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a'),
       command: 'claude',
       launchConfig: {

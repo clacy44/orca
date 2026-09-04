@@ -70,6 +70,7 @@ describe('createTerminal funnel — lane binding', () => {
     const { runtime, spawn } = createRuntime()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 
@@ -84,9 +85,11 @@ describe('createTerminal funnel — lane binding', () => {
     const { runtime, spawn } = createRuntime()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-unbound')
     })
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane(undefined)
     })
 
@@ -103,7 +106,10 @@ describe('createTerminal funnel — lane binding', () => {
 
     expect(
       await refusalCodeOf(() =>
-        runtime.createTerminal('id:wt-1', {} as unknown as { credentialLane: { kind: 'shared' } })
+        runtime.createTerminal('id:wt-1', { restoreProvenance: { kind: 'none' } } as unknown as {
+          credentialLane: { kind: 'shared' }
+          restoreProvenance: { kind: 'none' }
+        })
       )
     ).toBe('terminal.lane_unspecified')
     expect(spawn).not.toHaveBeenCalled()
@@ -115,6 +121,7 @@ describe('createTerminal funnel — lane binding', () => {
     expect(
       await refusalCodeOf(() =>
         runtime.createTerminal(undefined, {
+          restoreProvenance: { kind: 'none' },
           credentialLane: { kind: 'principal', principalId: PRINCIPAL_A }
         })
       )
@@ -131,6 +138,7 @@ describe('createTerminal funnel — lane binding', () => {
     ).mockReturnValue({ webContents: { send, isDestroyed: () => false } })
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'principal', principalId: PRINCIPAL_A },
       focus: true,
       rendererBacked: true,
@@ -156,6 +164,7 @@ describe('createTerminal funnel — the adopt gate', () => {
   }> {
     const { runtime, spawn } = createRuntime()
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
     const { tabId, leafId } = spawn.mock.calls[0][0]
@@ -169,6 +178,7 @@ describe('createTerminal funnel — the adopt gate', () => {
     expect(
       await refusalCodeOf(() =>
         runtime.createTerminal('id:wt-1', {
+          restoreProvenance: { kind: 'none' },
           credentialLane: runtime.resolveCallerCredentialLane('device-b'),
           tabId,
           leafId
@@ -184,6 +194,7 @@ describe('createTerminal funnel — the adopt gate', () => {
     expect(
       await refusalCodeOf(() =>
         runtime.createTerminal('id:wt-1', {
+          restoreProvenance: { kind: 'none' },
           credentialLane: { kind: 'shared' },
           tabId,
           leafId
@@ -198,6 +209,7 @@ describe('createTerminal funnel — the adopt gate', () => {
 
     await refusalCodeOf(() =>
       runtime.createTerminal('id:wt-1', {
+        restoreProvenance: { kind: 'none' },
         credentialLane: { kind: 'shared' },
         tabId,
         leafId
@@ -214,6 +226,7 @@ describe('createTerminal funnel — the adopt gate', () => {
     const { runtime, spawn, tabId, leafId } = await boundPane()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a'),
       tabId,
       leafId
@@ -257,6 +270,7 @@ describe('createTerminal funnel — a pane the host knows but never attributed',
     const { runtime } = runtimeWithKnownUnboundPane()
 
     await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       tabId: UNBOUND_TAB,
       leafId: UNBOUND_LEAF
@@ -270,6 +284,7 @@ describe('createTerminal funnel — a pane the host knows but never attributed',
     expect(
       await refusalCodeOf(() =>
         runtime.createTerminal('id:wt-1', {
+          restoreProvenance: { kind: 'none' },
           credentialLane: runtime.resolveCallerCredentialLane('device-a'),
           tabId: UNBOUND_TAB,
           leafId: UNBOUND_LEAF
@@ -283,6 +298,7 @@ describe('splitPtyBackedTerminal — the ownership predicate', () => {
   it('refuses grant B splitting grant A’s lane pane, and spawns nothing', async () => {
     const { runtime, spawn } = createRuntime()
     const created = await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
     spawn.mockClear()
@@ -298,6 +314,7 @@ describe('splitPtyBackedTerminal — the ownership predicate', () => {
   it('lets the pane’s own principal split it, and binds the new pane to the same lane', async () => {
     const { runtime, spawn } = createRuntime()
     const created = await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
     spawn.mockClear()
@@ -314,6 +331,7 @@ describe('splitPtyBackedTerminal — the ownership predicate', () => {
   it('stamps the split pane’s own lane onto its pty record, not the funnel’s only', async () => {
     const { runtime, spawn } = createRuntime()
     const created = await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
     spawn.mockClear()
@@ -362,6 +380,7 @@ describe('splitPtyBackedTerminal — the ownership predicate', () => {
   it('refuses a worker-start inherit from another principal’s pane', async () => {
     const { runtime } = createRuntime()
     const created = await runtime.createTerminal('id:wt-1', {
+      restoreProvenance: { kind: 'none' },
       credentialLane: runtime.resolveCallerCredentialLane('device-a')
     })
 

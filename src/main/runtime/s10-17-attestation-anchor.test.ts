@@ -57,6 +57,23 @@ const LEAF_ID_4 = '55555555-5555-4555-8555-555555555555'
 const PTY_ID = 'pty-s10-17-1'
 const PTY_ID_2 = 'pty-s10-17-2'
 
+function attachEmptyWindow(instance: OrcaRuntimeService): void {
+  instance.attachWindow(1)
+  instance.syncWindowGraph(1, { tabs: [], leaves: [] })
+}
+
+// Why: every createTerminal call in this suite targets WORKTREE_PATH; centralize
+// restoreProvenance (required, non-wire — S10-21a C2, INV-P-021) here rather than at each site.
+function spawnTerminal(
+  instance: OrcaRuntimeService,
+  opts: Omit<Parameters<OrcaRuntimeService['createTerminal']>[1], 'restoreProvenance'>
+): ReturnType<OrcaRuntimeService['createTerminal']> {
+  return instance.createTerminal(`path:${WORKTREE_PATH}`, {
+    restoreProvenance: { kind: 'none' },
+    ...opts
+  })
+}
+
 // Why real semantics matter (mirrors s10-10-restored-launch-token-anchor.test.ts): faking the
 // storage medium is fine, faking persistTerminalLaunchTokenHash's/flush's behavior would defeat
 // the test. `flushFailuresRemaining` lets a test force the E3 retry path.
@@ -291,10 +308,9 @@ describe('S10-17: launch-token anchor correctness', () => {
     const spawnCalls: { env?: Record<string, string>; adoptedStablePane?: unknown }[] = []
     const controller = fakeAdoptingPtyController((args) => spawnCalls.push(args))
     runtime.setPtyController(controller)
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -309,7 +325,7 @@ describe('S10-17: launch-token anchor correctness', () => {
 
     // Second createTerminal on the SAME pane adopts (attach-only) instead of minting fresh.
     controller.armAdoption(true)
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -329,10 +345,9 @@ describe('S10-17: launch-token anchor correctness', () => {
     const runtime = new OrcaRuntimeService(store)
     let capturedEnv: Record<string, string> | undefined
     runtime.setPtyController(fakePtyController((env) => (capturedEnv = env)))
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
-    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    const terminal = await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -381,10 +396,9 @@ describe('S10-17: launch-token anchor correctness', () => {
       kill: () => true,
       getForegroundProcess: async () => null
     })
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
-    const p1 = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    const p1 = await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -392,7 +406,7 @@ describe('S10-17: launch-token anchor correctness', () => {
       leafId: LEAF_ID,
       title: 'p1'
     })
-    const p2 = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    const p2 = await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -419,10 +433,9 @@ describe('S10-17: launch-token anchor correctness', () => {
     const spawnCalls: { env?: Record<string, string>; adoptedStablePane?: unknown }[] = []
     const controller = fakeAdoptingPtyController((args) => spawnCalls.push(args))
     runtime.setPtyController(controller)
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -431,7 +444,7 @@ describe('S10-17: launch-token anchor correctness', () => {
       title: 'agent-t1'
     })
     controller.armAdoption(true)
-    const adopted = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    const adopted = await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -463,10 +476,9 @@ describe('S10-17: launch-token anchor correctness', () => {
     runtime.setPtyController(controller)
     const { notifier, revealCalls } = fakeRevealCapturingNotifier()
     runtime.setNotifier(notifier as Parameters<typeof runtime.setNotifier>[0])
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -476,7 +488,7 @@ describe('S10-17: launch-token anchor correctness', () => {
       presentation: 'focused'
     })
     controller.armAdoption(true)
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -498,12 +510,11 @@ describe('S10-17: launch-token anchor correctness', () => {
     runtime.setPtyController(controller)
     const { notifier, revealCalls } = fakeRevealCapturingNotifier()
     runtime.setNotifier(notifier as Parameters<typeof runtime.setNotifier>[0])
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
     // Generation 1: adoptStablePane never resolves an owner and spawn does not report one
     // either — a genuine mint, so pane P is left with a live token/anchor.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -520,7 +531,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     // in-spawn adoption E2 exists for. Without E2 this reveal would carry a dead-on-arrival
     // token.
     controller.armAdoption(true)
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -545,11 +556,10 @@ describe('S10-17: launch-token anchor correctness', () => {
     const runtime = new OrcaRuntimeService(store)
     let capturedEnv: Record<string, string> | undefined
     runtime.setPtyController(fakePtyController((env) => (capturedEnv = env)))
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
     setFlushFailuresRemaining(1)
-    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    const terminal = await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -567,7 +577,7 @@ describe('S10-17: launch-token anchor correctness', () => {
 
     // A second, unrelated launch causes the next anchor-persist call to succeed, which must
     // drain the queued retry from generation 1 as a side effect.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -592,12 +602,11 @@ describe('S10-17: launch-token anchor correctness', () => {
       kill: () => true,
       getForegroundProcess: async () => null
     })
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
     // --- Case 1: the S10-10/F1 retire lever (orca-runtime.ts ~:13497). ---
     setFlushFailuresRemaining(1)
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -611,7 +620,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     runtime.emitDaemonPtyTransientFact('pty-f1-1', { kind: 'command-finished', exitCode: 0 })
 
     // An unrelated successful anchor persist must not resurrect P's retired anchor.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -623,7 +632,7 @@ describe('S10-17: launch-token anchor correctness', () => {
 
     // --- Case 2: the F4 plain-shell relaunch forget (orca-runtime.ts ~:27517). ---
     setFlushFailuresRemaining(1)
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -633,7 +642,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     })
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY_3]).toBeUndefined()
     // Relaunch the same pane as a plain shell (no launchConfig) — the forget branch fires.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'bash',
       tabId: TAB_ID_3,
@@ -642,7 +651,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     })
 
     // Another unrelated successful anchor persist must not resurrect P3's forgotten anchor.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -666,8 +675,7 @@ describe('S10-17: launch-token anchor correctness', () => {
       kill: () => true,
       getForegroundProcess: async () => null
     })
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
     const FAILED_PANE_COUNT = 9
     const paneKeys: string[] = []
@@ -676,7 +684,7 @@ describe('S10-17: launch-token anchor correctness', () => {
       const leafId = `66666666-6666-4666-8666-66666666666${i}`
       paneKeys.push(makePaneKey(tabId, leafId))
       setFlushFailuresRemaining(1)
-      await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      await spawnTerminal(runtime, {
         credentialLane: { kind: 'shared' },
         command: 'claude',
         launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -690,7 +698,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     }
 
     // One more launch succeeds on the first attempt, triggering exactly one bounded drain.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -712,11 +720,10 @@ describe('S10-17: launch-token anchor correctness', () => {
     const runtime = new OrcaRuntimeService(store)
     let capturedEnv: Record<string, string> | undefined
     runtime.setPtyController(fakePtyController((env) => (capturedEnv = env)))
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
     setWritesFrozen(true)
-    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    const terminal = await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -734,7 +741,7 @@ describe('S10-17: launch-token anchor correctness', () => {
 
     // Unfreeze and cause an unrelated anchor persist to succeed — must drain the queued retry.
     setWritesFrozen(false)
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -790,11 +797,10 @@ describe('S10-17: launch-token anchor correctness', () => {
       kill: () => true,
       getForegroundProcess: async () => null
     })
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    attachEmptyWindow(runtime)
 
     // Generation 1: a genuine spawn mints and anchors a live token for pane P.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -808,7 +814,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash1)
 
     // Resume: agentSessionEnsure adopts the SAME live pty without spawning.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -849,9 +855,8 @@ describe('S10-17: launch-token anchor correctness', () => {
       kill: () => true,
       getForegroundProcess: async () => null
     })
-    runtime1.attachWindow(1)
-    runtime1.syncWindowGraph(1, { tabs: [], leaves: [] })
-    await runtime1.createTerminal(`path:${WORKTREE_PATH}`, {
+    attachEmptyWindow(runtime1)
+    await spawnTerminal(runtime1, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
@@ -904,7 +909,7 @@ describe('S10-17: launch-token anchor correctness', () => {
       getForegroundProcess: async () => null
     })
 
-    await runtime2.createTerminal(`path:${WORKTREE_PATH}`, {
+    await spawnTerminal(runtime2, {
       credentialLane: { kind: 'shared' },
       command: 'claude',
       launchConfig: { agentCommand: 'claude', agentArgs: '', agentEnv: {} },
