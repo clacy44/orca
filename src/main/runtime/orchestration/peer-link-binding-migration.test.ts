@@ -59,7 +59,7 @@ describe('S10-16 C2: schema v40 migration and repair', () => {
 
     db = new OrchestrationDb(path)
     const sqlite = rawDb(db)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(40)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(41)
     for (const table of SIX_TABLES) {
       expect(hasTable(sqlite, table)).toBe(true)
     }
@@ -80,7 +80,7 @@ describe('S10-16 C2: schema v40 migration and repair', () => {
     oldDb.close()
 
     db = new OrchestrationDb(path)
-    expect(rawDb(db).pragma('user_version', { simple: true })).toBe(40)
+    expect(rawDb(db).pragma('user_version', { simple: true })).toBe(41)
     for (const table of SIX_TABLES) {
       expect(hasTable(rawDb(db), table)).toBe(true)
     }

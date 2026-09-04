@@ -271,7 +271,7 @@ describe('Ruling 31: install-day retention floor + loud prune + close-before-del
 
     db = new OrchestrationDb(dbPath)
     const raw = new Database(dbPath)
-    expect(raw.pragma('user_version', { simple: true })).toBe(40)
+    expect(raw.pragma('user_version', { simple: true })).toBe(41)
     expect(
       (
         raw.prepare(`SELECT COUNT(*) AS n FROM remote_dispatch_attachments`).get() as {

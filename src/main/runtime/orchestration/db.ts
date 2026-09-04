@@ -85,6 +85,22 @@ import {
   type RetireAgentResult
 } from './agent-retire'
 import {
+  clearSweepRestoreMark as clearSweepRestoreMarkImpl,
+  deleteLaunchRowsForAgent as deleteLaunchRowsForAgentImpl,
+  getSweepRestoreMark as getSweepRestoreMarkImpl,
+  launchBySessionId as launchBySessionIdImpl,
+  newestLaunchForPane as newestLaunchForPaneImpl,
+  recordLaunch as recordLaunchImpl,
+  recordSelfReportRotation as recordSelfReportRotationImpl,
+  setLaunchAgentId as setLaunchAgentIdImpl,
+  setSweepRestoreMark as setSweepRestoreMarkImpl,
+  type AgentLaunchSessionRow,
+  type RecordLaunchParams,
+  type RecordLaunchResult,
+  type RecordSelfReportRotationParams,
+  type RecordSelfReportRotationResult
+} from './agent-launch-sessions'
+import {
   checkAndBumpRate as checkAndBumpRateImpl,
   type CheckAndBumpRateParams,
   type RateLimitResult
@@ -1056,6 +1072,65 @@ const S10_16_LINK_BINDING_SCHEMA_SQL = `
                              next_attempt_after, seq);
 `
 
+// S10-21a C1 (§7, Ruling 34 Addendum 5): host-authored launch-session provenance. No FK
+// (foreign_keys = 0 on the installed store, so a CASCADE would be decorative) — agent_id is
+// cleared explicitly by retire's own transaction (agent-retire.ts). Never bootstrapped/backfilled
+// (§2.9) and EXEMPT from resetAll (§7, db.ts resetAll() below) — purging it would leave every
+// registered agent row alive with no way to be restored automatically, reimposing the ritual
+// this slice removes. Written only by createTerminal's own launch path and the sweep's ticket
+// redemption (both host-local) — never peer-writable, so INV-P-006 does not reach it.
+const AGENT_LAUNCH_SESSIONS_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS agent_launch_sessions (
+        seq                     INTEGER PRIMARY KEY AUTOINCREMENT,  -- the monotonic ordering
+                                 -- column: launch_generation has no ordering and recorded_at
+                                 -- (1-second resolution) can tie. Every "newest" read and the
+                                 -- prune select use THIS column explicitly.
+        host_id                 TEXT NOT NULL,
+        pane_key                TEXT NOT NULL,
+        agent_type              TEXT NOT NULL,
+        session_id              TEXT NOT NULL,
+        previous_session_id     TEXT,            -- set on a rotation update; NULL for a row's
+                                                   -- first launch
+        launch_generation       TEXT NOT NULL,
+        agent_id                TEXT,             -- NULL until the pane registers
+        execution_host_id       TEXT NOT NULL,
+        evidence                TEXT NOT NULL,   -- 'host_launch' | 'sweep_record' |
+                                                   -- 'self_report_rotation' (§7) — not a CHECK
+                                                   -- constraint; the design's schema block omits
+                                                   -- one, unlike current_sessions' explicit
+                                                   -- UNIQUEs, so this stays literal to §7's text
+        recorded_at              TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (host_id, pane_key, launch_generation)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_launch_sessions_session
+        ON agent_launch_sessions(session_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_launch_sessions_agent
+        ON agent_launch_sessions(agent_id);
+
+      -- errata 5(l): the newest-session-per-pane_key projection, maintained in the SAME
+      -- transaction as every agent_launch_sessions write that establishes a pane's current
+      -- session. UNIQUE(host_id, session_id) IS the successor-collision check (T33) — derived,
+      -- host-only state; agent_launch_sessions stays the source of lineage truth.
+      CREATE TABLE IF NOT EXISTS current_sessions (
+        host_id       TEXT NOT NULL,
+        pane_key      TEXT NOT NULL,
+        session_id    TEXT NOT NULL,
+        PRIMARY KEY (host_id, pane_key),
+        UNIQUE (host_id, session_id)
+      );
+
+      -- D-R92 P2: durable double-resume-prevention state, host-only and main-owned. Written only
+      -- by the sweep's own transaction, read only via the read-only
+      -- orchestration:sweepRestoreMark:get IPC — never reachable from WorkspaceSessionState or
+      -- session:set.
+      CREATE TABLE IF NOT EXISTS agent_sweep_restore_marks (
+        host_id       TEXT NOT NULL,
+        pane_key      TEXT NOT NULL,
+        restored_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (host_id, pane_key)
+      );
+`
+
 const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS remote_agents (
         environment_id          TEXT NOT NULL,   -- local link key (D5: paired_device = pairedDeviceId, environment = KnownRuntimeEnvironment.id)
@@ -1159,8 +1234,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23).
-const SCHEMA_VERSION = 40
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7).
+const SCHEMA_VERSION = 41
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
 // NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
@@ -2047,6 +2122,7 @@ export class OrchestrationDb {
       ${THREAD_DIRECTORY_SCHEMA_SQL}
       ${S10_4_FEDERATION_SCHEMA_SQL}
       ${S10_16_LINK_BINDING_SCHEMA_SQL}
+      ${AGENT_LAUNCH_SESSIONS_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
     this.createThreadDirectoryIndexesIfPossible()
@@ -2779,6 +2855,15 @@ export class OrchestrationDb {
       // discipline as v37/v38/v39.
       if (current < 40) {
         this.db.exec(S10_16_LINK_BINDING_SCHEMA_SQL)
+      }
+      // v40 -> v41 (S10-21a C1, Ruling 34 Addendum 5, §7): agent_launch_sessions +
+      // current_sessions + agent_sweep_restore_marks. Tables only, no ALTER — createTables()
+      // already ran this exact CREATE TABLE IF NOT EXISTS text, so this is a no-op on a fresh
+      // DB and creates the tables on an upgraded one. Same "version bump and schema land in one
+      // atomic migration" discipline as v37/v38/v39/v40. Per INV-P-016 this must NOT ride
+      // repairUnshippedV40LinkBinding — it is its own numbered migration.
+      if (current < 41) {
+        this.db.exec(AGENT_LAUNCH_SESSIONS_SCHEMA_SQL)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -4737,6 +4822,46 @@ export class OrchestrationDb {
 
   retireAgent(id: string): RetireAgentResult {
     return retireAgentImpl(this.db, id)
+  }
+
+  // S10-21a C1 (§7): store-only delegates, no caller wired yet.
+  recordLaunch(params: RecordLaunchParams): RecordLaunchResult {
+    return recordLaunchImpl(this.db, params)
+  }
+
+  recordSelfReportRotation(params: RecordSelfReportRotationParams): RecordSelfReportRotationResult {
+    return recordSelfReportRotationImpl(this.db, params)
+  }
+
+  newestLaunchForPane(hostId: string, paneKey: string): AgentLaunchSessionRow | undefined {
+    return newestLaunchForPaneImpl(this.db, hostId, paneKey)
+  }
+
+  launchBySessionId(sessionId: string): AgentLaunchSessionRow | undefined {
+    return launchBySessionIdImpl(this.db, sessionId)
+  }
+
+  setLaunchAgentId(
+    by: { seq: number } | { hostId: string; paneKey: string },
+    agentId: string
+  ): void {
+    setLaunchAgentIdImpl(this.db, by, agentId)
+  }
+
+  deleteLaunchRowsForAgent(agentId: string): number {
+    return deleteLaunchRowsForAgentImpl(this.db, agentId)
+  }
+
+  getSweepRestoreMark(hostId: string, paneKey: string): boolean {
+    return getSweepRestoreMarkImpl(this.db, hostId, paneKey)
+  }
+
+  setSweepRestoreMark(hostId: string, paneKey: string): void {
+    setSweepRestoreMarkImpl(this.db, hostId, paneKey)
+  }
+
+  clearSweepRestoreMark(hostId: string, paneKey: string): void {
+    clearSweepRestoreMarkImpl(this.db, hostId, paneKey)
   }
 
   writeAgentAudit(params: WriteAgentAuditParams): void {
@@ -10613,6 +10738,12 @@ export class OrchestrationDb {
       -- proofs and its operator's own decisions); see A2_RESET_EXEMPT_TABLES for the ONE list.
       DELETE FROM peer_reply_outbox;
       DELETE FROM peer_link_confirm_observations;
+      -- S10-21a C1 (§7): agent_launch_sessions, current_sessions, and agent_sweep_restore_marks
+      -- are DELIBERATELY ABSENT from this list — the same exemption pattern this method already
+      -- gives \`agents\` (also never deleted here): purging the launch table would leave every
+      -- chair row alive with no way to be restored automatically, reimposing the ritual this
+      -- slice removes. None of the three is peer-writable (host-local writers only), so
+      -- INV-P-006 does not reach them.
       DELETE FROM worker_terminal_archives;
       DELETE FROM worker_terminal_resources;
       DELETE FROM worker_dispatches;
