@@ -1630,6 +1630,30 @@ describe('shared agent-hook-listener', () => {
     expect(stopped?.payload.sessionBoundary).toBeUndefined()
   })
 
+  it('S10-21a C6a/C6b, D-R107 fix item 4: a fork SessionStart survives normalization and carries sessionStartSource; startup/resume/clear behave as before (pinned)', () => {
+    for (const source of ['startup', 'resume', 'clear', 'fork'] as const) {
+      const event = normalizeHookPayload(
+        state,
+        'claude',
+        { paneKey: PANE_KEY, payload: { hook_event_name: 'SessionStart', source } },
+        'production'
+      )
+      expect(event).not.toBeNull()
+      expect(event?.hookEventName).toBe('SessionStart')
+      expect(event?.sessionStartSource).toBe(source)
+      expect(event?.payload).toMatchObject({ state: 'done', sessionBoundary: true })
+    }
+    // Still refused: an unknown source, and a compact restart — 'fork' joining the allowlist
+    // must not widen it beyond the four measured values.
+    const unknownSource = normalizeHookPayload(
+      state,
+      'claude',
+      { paneKey: PANE_KEY, payload: { hook_event_name: 'SessionStart', source: 'compact' } },
+      'production'
+    )
+    expect(unknownSource).toBeNull()
+  })
+
   it('normalizes Devin documented lifecycle events', () => {
     const started = normalizeHookPayload(
       state,

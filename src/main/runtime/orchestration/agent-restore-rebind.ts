@@ -234,10 +234,30 @@ export function rebindRestoredPane(
     // current_sessions to that duplicate instead of removing the fact. Recognise the admission's
     // row FIRST and bind to it directly, never re-inserting.
     const existingForPane = newestLaunchForPane(db, params.hostId, params.newPaneKey)
-    const isAdmissionsOwnRow =
+    const matchesShape =
       existingForPane !== undefined &&
       existingForPane.session_id === params.ticketPayload.sessionId &&
       existingForPane.evidence === 'sweep_record'
+    // [S10-21a C6b, Ruling 34 Addendum 19 R3] Same session/evidence is not enough — a STALE row
+    // from a prior generation or a different execution host sharing this exact session id (e.g.
+    // a retried restore after a crash-restart) must never be silently adopted as "this restore's
+    // own row". Both must match too, or this is refused, not adopted.
+    const isAdmissionsOwnRow =
+      matchesShape &&
+      existingForPane.launch_generation === params.launchGeneration &&
+      existingForPane.execution_host_id === params.executionHostId
+    if (matchesShape && !isAdmissionsOwnRow) {
+      db.exec('ROLLBACK')
+      writeAgentAudit(db, {
+        agentId: row.id,
+        actorPaneKey: params.newPaneKey,
+        actorHostId: params.hostId,
+        verb: 'rebind',
+        outcome: 'refused',
+        reasonCode: `launch_row_restated_mismatch: stale generation/host, seq=${existingForPane.seq}`
+      })
+      return { ok: false, reason: 'launch_row_restated_mismatch' }
+    }
     if (isAdmissionsOwnRow) {
       setLaunchAgentId(db, { seq: existingForPane.seq }, row.id)
     } else {

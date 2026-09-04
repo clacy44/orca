@@ -1890,6 +1890,43 @@ describe('AgentHookServer listener replay', () => {
     ])
   })
 
+  it('D-R108 fix item iii: a real corroborated hook POST yields a provider-session identity carrying anchorCorroborated and sessionStartSource', async () => {
+    const server = new AgentHookServer()
+    // S10-6/S10-10: corroborate exactly as index.ts wires it — a live pty holding this token.
+    server.setPaneLaunchAuthorityVerifier(() => true)
+    const sessions = vi.fn()
+    server.subscribeProviderSessionChanges(sessions)
+    await server.start({ env: 'production' })
+    try {
+      const env = server.buildPtyEnv()
+      const response = await fetch(`http://127.0.0.1:${env.ORCA_AGENT_HOOK_PORT}/hook/claude`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Orca-Agent-Hook-Token': env.ORCA_AGENT_HOOK_TOKEN
+        },
+        body: JSON.stringify(
+          buildBody(
+            { hook_event_name: 'SessionStart', source: 'fork', session_id: 'sess-forked' },
+            { launchToken: 'fork-launch-token' }
+          )
+        )
+      })
+      expect(response.status).toBe(204)
+      const identities = sessions.mock.calls.at(-1)?.[0]
+      expect(identities).toEqual([
+        expect.objectContaining({
+          paneKey: PANE,
+          sessionId: 'sess-forked',
+          sessionStartSource: 'fork',
+          anchorCorroborated: true
+        })
+      ])
+    } finally {
+      server.stop()
+    }
+  })
+
   it('keeps status-change subscribers when renderer fanout listener is cleared', () => {
     const server = new AgentHookServer()
     const statusChangeListener = vi.fn()

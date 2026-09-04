@@ -1,35 +1,43 @@
-// S10-21a C6/C6a (design v3.2 §2.3, §2.6, §1.6; errata 5(l)/5(m)/5(n); D-R107; Ruling 34
-// Addendum 18): Layer 1's own detection surface — a live pane's hook-reported session id
-// compared against its own agent_launch_sessions row (never current_sessions, and never a peer
-// pane's row: §2.3's continuity rule reads agent_launch_sessions as the sole source of lineage
-// truth). This module is pure DB: the caller supplies the already-verified anchor/shape
-// conjuncts (1: launch-token anchor, per verifyLivePaneLaunchTokenHash, captured as
-// `anchorCorroborated` at hook-ingestion time — server.ts's `recordCurrentAuthorityObservation`;
-// 4: the SessionStart `source` value Claude Code itself reported) — this file has no runtime
-// handle to derive those itself, matching agent-restore-rebind.ts's own split between pure
-// predicate and runtime-supplied evidence (C4a/C5).
+// S10-21a C6/C6a/C6b (design v3.2 §2.3, §2.6, §1.6; errata 5(l)/5(m)/5(n)/5(aa)/5(ab); D-R107;
+// D-R108; Ruling 34 Addendum 18/19): Layer 1's own detection surface — a live pane's
+// hook-reported session id compared against its own agent_launch_sessions row (never
+// current_sessions, and never a peer pane's row: §2.3's continuity rule reads
+// agent_launch_sessions as the sole source of lineage truth). This module is pure DB: the caller
+// supplies the already-verified anchor/shape conjuncts (1: launch-token anchor, per
+// verifyLivePaneLaunchTokenHash, captured as `anchorCorroborated` at hook-ingestion time —
+// server.ts's `recordCurrentAuthorityObservation`; 4: the SessionStart `source` value Claude Code
+// itself reported) — this file has no runtime handle to derive those itself, matching
+// agent-restore-rebind.ts's own split between pure predicate and runtime-supplied evidence
+// (C4a/C5).
 //
-// §1.6's four conjuncts, as checked here:
-//   1. anchorCorroborated        — caller-supplied (isCorroboratedAuthority's captured verdict)
-//   2. reportedPreviousSessionId === the pane's own last-recorded session_id — checked here
-//   3. successor uniqueness      — enforced by recordSelfReportRotation's current_sessions
-//                                   UNIQUE(host_id, session_id) violation, not re-checked here
-//   4. sessionStartSource === 'fork' — [D-R107 fix item 8, Addendum 18] narrowed to the ONE
-//      measured rotation trigger (errata 5(u)); 'startup'/'resume'/'clear' never satisfy this
-//      conjunct even with a matching previous id — a plain restart is not a rotation.
+// [Ruling 34 Addendum 19 / errata 5(ab)] §1.6 conjunct 2 (the report's previous id equals the
+// pane's own last-recorded id) is TAUTOLOGICAL on the live path: no Claude Code hook payload
+// carries a previous-session field at all, so the only value a caller could ever supply for it
+// is this function's OWN `row.session_id` read back at itself — never independent corroboration.
+// This function therefore no longer takes a caller-supplied `reportedPreviousSessionId` at all;
+// it derives the value internally from `row.session_id` for the one shape that can ever need it
+// (a `fork` report). THE PRODUCTION ROTATION FENCE IS CONJUNCTS 1 + 3 + 4:
+//   1. anchorCorroborated — caller-supplied (isCorroboratedAuthority's captured verdict)
+//   3. successor uniqueness — enforced by recordSelfReportRotation's current_sessions
+//                              UNIQUE(host_id, session_id) violation, not re-checked here
+//   4. sessionStartSource === 'fork' — [D-R107 fix item 8] the ONE measured rotation trigger
+//      (errata 5(u)); 'startup'/'resume'/'clear' never satisfy this conjunct.
 //
-// All four hold -> recordSelfReportRotation (T30). Any conjunct fails, INCLUDING a conjunct-3
+// All three hold -> recordSelfReportRotation (T30). Any conjunct fails, INCLUDING a conjunct-3
 // collision recordSelfReportRotation itself refuses -> the foreign-id mismatch alarm (T31/T33):
 // a `session_identity_mismatch` audit row — UNCONDITIONAL (Addendum 18, correcting Ruling 34
-// Addendum 17's C6 error that bundled the audit under the same clamp as the notice). This module
-// never touches current_sessions directly; only recordSelfReportRotation's own upsert does, on
-// the accepted rotation path.
+// Addendum 17's C6 error that bundled the audit under the same clamp as the notice), UNLESS
+// [Ruling 34 Addendum 18(iii)/19, D-R108 R1] the pane's newest admission audit of ANY verb, THIS
+// launch generation, resolved by pane suffix, is itself the UNRECORDED outcome — then
+// `unrecorded_launch`, not a contest. This module never touches current_sessions directly; only
+// recordSelfReportRotation's own upsert does, on the accepted rotation path.
 import type Database from '../../sqlite/sync-database'
 import {
   newestLaunchForPaneSuffix,
   recordSelfReportRotation,
   type AgentLaunchSessionRow
 } from './agent-launch-sessions'
+import { paneSuffix } from './agent-restore-rebind-predicate'
 import { writeAgentAudit } from './agent-audit-log'
 
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'fork'
@@ -39,19 +47,17 @@ export type LiveHookReportMismatchParams = {
   paneKey: string
   /** The session id the pane's own live hook report carries right now. */
   reportedSessionId: string
-  /** The report's own claimed predecessor id, when the report carries one (§1.6 conjunct 2).
-   * [D-R107 BLOCKER-2/fix item 3] Claude Code's `fork` SessionStart carries no field naming its
-   * parent session — always undefined from that one channel that could populate conjunct 4's
-   * source. Left as an explicit parameter (rather than removed) for a future measured carrier;
-   * callers today pass the pane's own recorded id directly when `sessionStartSource === 'fork'`
-   * (the fallback Addendum 18/errata 5(aa) names), never invented from `undefined`. */
-  reportedPreviousSessionId: string | null
   /** Conjunct 1: `isCorroboratedAuthority`'s ACTUAL, captured verdict for this hook report
    * (server.ts's `anchorCorroborated`, stamped at ingestion — never re-derived later). */
   anchorCorroborated: boolean
   /** Conjunct 4 [D-R107 fix item 8]: the explicit SessionStart `source` value this generation
    * observed for this pane, when any — undefined when no SessionStart was observed at all. */
   sessionStartSource: SessionStartSource | undefined
+  /** [S10-21a C6b, Ruling 34 Addendum 19 / D-R108 R1(b)] The caller's OWN current launch
+   * generation (`runtime.getLaunchGenerationId()`) — binds the `unrecorded_launch` downgrade to
+   * this generation: a stale prior-generation launch row (or the admission history attached to
+   * it) can never suppress a genuine contest in the CURRENT generation. */
+  launchGeneration: string
 }
 
 export type LiveHookReportMismatchResult =
@@ -59,18 +65,18 @@ export type LiveHookReportMismatchResult =
   | { kind: 'no_row' }
   | { kind: 'rotated'; row: AgentLaunchSessionRow }
   | { kind: 'foreign_mismatch' }
-  // [Ruling 34 Addendum 18(iii)] Honest floors do not false-alarm: the admission's own newest
-  // outcome for this pane, this generation, was UNRECORDED(reason) — the disagreement is fully
-  // explained by "nothing was ever recorded to agree with", not a contest.
+  // [Ruling 34 Addendum 18(iii)/19] Honest floors do not false-alarm: the pane's newest
+  // admission audit of ANY verb, THIS generation, was itself the UNRECORDED outcome — the
+  // disagreement is fully explained by "nothing was ever recorded to agree with", not a contest.
   | { kind: 'unrecorded_launch'; reason: string }
 
 /** §2.3/§2.6/§1.6, Layer 1. Compares a live pane's hook-reported session id against its own
  * newest `agent_launch_sessions` row (resolved by pane SUFFIX, D-R107 MEDIUM-1 — identity is by
- * suffix everywhere else in this design). A disagreement satisfying all four §1.6 conjuncts is a
- * legitimate self-report rotation (T30, no alarm); a disagreement on a pane whose newest
- * admission outcome this generation was UNRECORDED is `unrecorded_launch` (Addendum 18(iii));
- * any other disagreement is a foreign-id mismatch (T31/T33) — audited UNCONDITIONALLY
- * (Addendum 18), row unchanged. */
+ * suffix everywhere else in this design). A disagreement satisfying conjuncts 1+3+4 (conjunct 2
+ * is tautological here, errata 5(ab) — see the file header) is a legitimate self-report rotation
+ * (T30, no alarm); a disagreement on a pane whose newest admission outcome, THIS generation, was
+ * UNRECORDED is `unrecorded_launch` (Addendum 18(iii)/19); any other disagreement is a
+ * foreign-id mismatch (T31/T33) — audited UNCONDITIONALLY (Addendum 18), row unchanged. */
 export function evaluateLiveHookReportMismatch(
   db: Database.Database,
   params: LiveHookReportMismatchParams
@@ -84,15 +90,16 @@ export function evaluateLiveHookReportMismatch(
   }
 
   const conjunct1 = params.anchorCorroborated
-  const conjunct2 = params.reportedPreviousSessionId === row.session_id
   const conjunct4 = params.sessionStartSource === 'fork'
 
-  if (conjunct1 && conjunct2 && conjunct4) {
-    // Conjunct 3 (successor uniqueness) is enforced INSIDE this call, as the
-    // current_sessions UNIQUE(host_id, session_id) violation (errata 5(l)/5(m)) — never
-    // re-derived here. `row.pane_key` (the row's OWN key, from the suffix-resolved lookup
-    // above) is used, not `params.paneKey` — they can legitimately differ (MEDIUM-1) and
-    // recordSelfReportRotation's own UPDATE targets its pane argument by EXACT match.
+  if (conjunct1 && conjunct4) {
+    // Conjunct 2 [errata 5(ab)]: derived from `row.session_id` itself — the only value that
+    // could ever satisfy it on this channel, so it is not re-checked as an independent gate.
+    // Conjunct 3 (successor uniqueness) is enforced INSIDE this call, as the current_sessions
+    // UNIQUE(host_id, session_id) violation (errata 5(l)/5(m)) — never re-derived here.
+    // `row.pane_key` (the row's OWN key, from the suffix-resolved lookup above) is used, not
+    // `params.paneKey` — they can legitimately differ (MEDIUM-1) and recordSelfReportRotation's
+    // own UPDATE targets its pane argument by EXACT match.
     const rotation = recordSelfReportRotation(db, {
       hostId: params.hostId,
       paneKey: row.pane_key,
@@ -109,7 +116,7 @@ export function evaluateLiveHookReportMismatch(
     // concurrently retired) — either way this is not a rotation; fall through to the alarm.
   }
 
-  const unrecorded = newestUnrecordedLaunchThisGeneration(db, params.paneKey, row)
+  const unrecorded = newestUnrecordedAdmissionThisGeneration(db, params, row)
   if (unrecorded) {
     writeAgentAudit(db, {
       agentId: row.agent_id,
@@ -126,27 +133,56 @@ export function evaluateLiveHookReportMismatch(
   return { kind: 'foreign_mismatch' }
 }
 
-// [Ruling 34 Addendum 18(iii)] The pane's newest 'launch_unrecorded' audit row
-// (agent-launch-admission.ts's `unrecorded()` helper writes verb 'launch_unrecorded', outcome
-// 'admitted', reasonCode = the UNRECORDED reason) — compared by timestamp against the launch
-// row's own `recorded_at` (both 1-second-resolution `datetime('now')` TEXT, directly
-// comparable). Newer-or-equal means the admission's LAST word on this pane was "nothing
-// recorded, here's why" — the disagreement this call is about is explained, not contested.
-function newestUnrecordedLaunchThisGeneration(
+// [S10-21a C6b, D-R108 R1] Every verb agent-launch-admission.ts (and pty.ts's contestedLineage,
+// R(i)) writes, enumerated by grep against agent-launch-admission*.ts — a plain HOST_MINTED/
+// HOST_RESUME success writes NO audit row at all (the launch row write itself is the record), so
+// it is deliberately absent from this list: its "signal" is the launch row's own recorded_at,
+// already the baseline `row` this function compares against.
+const ADMISSION_AUDIT_VERBS = [
+  'launch_unrecorded',
+  'launch_refused',
+  'launch_self_resume',
+  'launch_surface_diverged',
+  'launch_ensure_failed_after_spawn',
+  'launch_spawn_failed',
+  'launch' // pty.ts's contestedLineage (R(i)) — verb 'launch', outcome 'contested'
+] as const
+
+/** [Ruling 34 Addendum 18(iii)/19, D-R108 R1] (a) selects the pane's newest admission audit of
+ * ANY of the verbs above (not just 'launch_unrecorded') and downgrades ONLY when THAT newest one
+ * is itself the unrecorded outcome — a later launch_self_resume/launch_refused/launch (contest)
+ * audit, or a later plain HOST_MINTED/HOST_RESUME launch (no audit, but a newer `row`), must
+ * restore normal classification, not be shadowed by an older unrecorded audit. (b) generation-
+ * bound: `row.launch_generation` must equal `params.launchGeneration` — agent_audit carries no
+ * generation column to filter the audit query itself, so the launch ROW's own generation is the
+ * anchor; a stale prior-generation row (and whatever admission history is attached to it) can
+ * never suppress a genuine contest in the CURRENT generation. (c) resolved by pane SUFFIX, same
+ * rule as `newestLaunchForPaneSuffix`. */
+function newestUnrecordedAdmissionThisGeneration(
   db: Database.Database,
-  paneKey: string,
+  params: LiveHookReportMismatchParams,
   row: AgentLaunchSessionRow
 ): string | undefined {
-  const audit = db
-    .prepare(
-      `SELECT reason_code, at FROM agent_audit
-         WHERE actor_pane_key = ? AND verb = 'launch_unrecorded'
-         ORDER BY seq DESC LIMIT 1`
-    )
-    .get(paneKey) as { reason_code: string | null; at: string } | undefined
-  if (!audit || audit.reason_code === null) {
+  if (row.launch_generation !== params.launchGeneration) {
     return undefined
   }
+  const placeholders = ADMISSION_AUDIT_VERBS.map(() => '?').join(', ')
+  const audit = db
+    .prepare(
+      `SELECT verb, reason_code, at FROM agent_audit
+         WHERE substr(actor_pane_key, instr(actor_pane_key, ':') + 1) = ?
+           AND verb IN (${placeholders})
+         ORDER BY seq DESC LIMIT 1`
+    )
+    .get(paneSuffix(params.paneKey), ...ADMISSION_AUDIT_VERBS) as
+    | { verb: string; reason_code: string | null; at: string }
+    | undefined
+  if (!audit || audit.verb !== 'launch_unrecorded' || audit.reason_code === null) {
+    return undefined
+  }
+  // Newer-or-equal than the launch row means the admission's LAST word on this pane, this
+  // generation, was "nothing recorded, here's why" — a later real launch (a fresher `row`)
+  // supersedes an earlier unrecorded audit even though both share the same generation id.
   return audit.at >= row.recorded_at ? audit.reason_code : undefined
 }
 

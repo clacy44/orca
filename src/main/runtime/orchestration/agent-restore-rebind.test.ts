@@ -615,6 +615,58 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     expect(launchRow?.agent_id).toBe('agent-rs')
   })
 
+  it('S10-21a C6b, Ruling 34 Addendum 19 R3: a stale prior-generation sweep_record row (same session/evidence) is NOT adopted — refused, not rebound', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-stale',
+      display_name: 'chair-stale',
+      pane_key: 'tab1:leaf-stale',
+      terminal_handle: 'handle-stale'
+    })
+    // Same session id, same evidence 'sweep_record' as this restore's own ticket — but minted in
+    // a DIFFERENT (prior) launch generation, e.g. a crash-restart replayed the same session id.
+    const staleWrite = recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: 'tab2:leaf-stale2',
+      agentType: 'claude',
+      sessionId: 'sess-r',
+      launchGeneration: 'stale-gen-0',
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'sweep_record',
+      supersedePaneKey: 'tab1:leaf-stale'
+    })
+    if (!staleWrite.ok) {
+      throw new Error('setup failed')
+    }
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-stale'),
+      newPaneKey: 'tab2:leaf-stale2',
+      newTerminalHandle: 'handle-stale2',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN, // the CURRENT generation, distinct from staleWrite's
+      incumbent: DEAD_INCUMBENT
+    })
+    expect(result).toEqual({ ok: false, reason: 'launch_row_restated_mismatch' })
+
+    // Fail-closed: no rebind, no row change, no duplicate/adopted row.
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-stale') as AgentRow
+    expect(row.pane_key).toBe('tab1:leaf-stale')
+    const rowCount = (
+      db
+        .prepare(`SELECT COUNT(*) as n FROM agent_launch_sessions WHERE pane_key = ?`)
+        .get('tab2:leaf-stale2') as { n: number }
+    ).n
+    expect(rowCount).toBe(1) // the stale row alone — nothing adopted, nothing inserted
+    const audit = db
+      .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'`)
+      .all('agent-stale') as { outcome: string; reason_code: string }[]
+    expect(audit).toHaveLength(1)
+    expect(audit[0].outcome).toBe('refused')
+    expect(audit[0].reason_code).toContain('launch_row_restated_mismatch')
+  })
+
   it('S10-21a C5b, D-R107 fix item 14/MEDIUM-2: every predicate refusal reason writes exactly one audit row', () => {
     const db = rawDb()
 

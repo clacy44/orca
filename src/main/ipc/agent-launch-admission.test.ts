@@ -309,17 +309,20 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     // by suffix (derived-agent-rows.ts), so this row is found even though its own pane_key
     // string differs from the SELF_RESUME's claimed paneKey.
     insertRegisteredAgent(db, 'tabOLD:leaf-a')
-    const contested: [string, string][] = []
+    // [S10-21a C6b, Ruling 34 Addendum 19] contestedLineage's signature widened to carry the
+    // registered row's own id — the admission-side contest audit is attributed to it (verb
+    // 'launch', outcome 'contested'), not left agentId: null.
+    const contested: [string, string, string][] = []
     await admitAgentLaunch(
       () => db,
       opts({ command: 'claude --resume self-sess' }),
       CALLER,
       ctx({
-        contestedLineage: (claimantPaneKey, registeredPaneKey) =>
-          contested.push([claimantPaneKey, registeredPaneKey])
+        contestedLineage: (claimantPaneKey, registeredPaneKey, registeredAgentId) =>
+          contested.push([claimantPaneKey, registeredPaneKey, registeredAgentId])
       })
     )
-    expect(contested).toEqual([['tab1:leaf-a', 'tabOLD:leaf-a']])
+    expect(contested).toEqual([['tab1:leaf-a', 'tabOLD:leaf-a', 'agt_tabOLD:leaf-a']])
   })
 
   it('SELF_RESUME(v2.1 V1): always audits, even into an UNregistered pane (no notice/contest)', async () => {

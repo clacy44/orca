@@ -266,6 +266,7 @@ import {
 } from './claude-accounts/live-pty-gate'
 import { StarNagService } from './star-nag/service'
 import { agentHookServer, type AgentHookProviderSessionIdentity } from './agent-hooks/server'
+import { raiseSessionIdentityMismatchAlarms } from './startup/session-identity-mismatch-alarm'
 import { createHookProviderSessionInvalidator } from './agent-hooks/hook-provider-session-invalidation'
 import { createHookStatusSessionTabsInvalidator } from './agent-hooks/hook-status-session-tabs-invalidation'
 import { wslHookRelayManager } from './agent-hooks/wsl-hook-relay-manager'
@@ -2325,17 +2326,14 @@ void app.whenReady().then(async () => {
   const unsubscribeStatusChanges = agentHookServer.subscribeStatusChanges((statuses) => {
     agentAwakeService?.setStatuses(statuses)
   })
-  // [S10-21a C6a, D-R107 fix item 6, Ruling 34 Addendum 18] T23's missing half: subscribeProviderSessionChanges
-  // is the live-hook-ingestion call site the D-R107 review names (§(d)) — the hook server has no
-  // store of its own, so the mismatch check runs here, runtime-side, once per reported identity.
-  // 24h notice clamp (Addendum 18); the audit row itself (agent-lineage-mismatch.ts) is
-  // unconditional. `previousSessionId` is always undefined from this channel (BLOCKER-2: Claude
-  // Code's `fork` SessionStart carries no parent-session field) — the fallback Addendum 18/errata
-  // 5(aa) names instead: when `sessionStartSource === 'fork'`, pass the pane's OWN currently
-  // recorded id as the "previous" claim, satisfying conjunct 2 by construction for the one
-  // channel that can ever supply conjunct 4 at all (this is a deliberate, documented choice —
-  // see the RETURN block).
-  const raiseSessionIdentityMismatchAlarms = (
+  // [S10-21a C6a/C6b, D-R107 fix item 6, D-R108 R2, Ruling 34 Addendum 18/19] T23's missing
+  // half: subscribeProviderSessionChanges is the live-hook-ingestion call site the D-R107 review
+  // names (§(d)) — the hook server has no store of its own, so the mismatch check runs here,
+  // runtime-side, once per reported identity. The actual isolation/notice logic is
+  // session-identity-mismatch-alarm.ts (extracted for its own direct fence test); this closure
+  // only supplies the runtime-derived dependencies. [R2] No `reportedPreviousSessionId` param —
+  // conjunct 2 is tautological on the live path (errata 5(ab)); the evaluator no longer takes it.
+  const dispatchSessionIdentityMismatchAlarms = (
     sessions: AgentHookProviderSessionIdentity[]
   ): void => {
     const db = runtime?.getOrchestrationDb?.()
@@ -2343,43 +2341,26 @@ void app.whenReady().then(async () => {
       return
     }
     const hostId = runtime?.getOrchestrationCompatibilityHostId?.() ?? undefined
-    if (!hostId) {
+    const launchGeneration = runtime?.getLaunchGenerationId?.() ?? undefined
+    if (!hostId || !launchGeneration) {
       return
     }
-    for (const identity of sessions) {
-      const existingRow = db.newestLaunchForPane?.(hostId, identity.paneKey)
-      const reportedPreviousSessionId =
-        identity.sessionStartSource === 'fork' ? (existingRow?.session_id ?? null) : null
-      const result = db.evaluateLiveHookReportMismatch({
+    raiseSessionIdentityMismatchAlarms(
+      {
         hostId,
-        paneKey: identity.paneKey,
-        reportedSessionId: identity.sessionId,
-        reportedPreviousSessionId,
-        anchorCorroborated: identity.anchorCorroborated === true,
-        sessionStartSource: identity.sessionStartSource
-      })
-      if (result.kind === 'foreign_mismatch') {
-        runtime?.writeHostNoticeToPane(
-          identity.paneKey,
-          `This pane's reported session id disagrees with the one Orca recorded at launch — ` +
-            `treated as a foreign session, not a rotation.`,
-          { rateKey: 'session_identity_mismatch', windowMs: 24 * 60 * 60 * 1000 }
-        )
-      } else if (result.kind === 'unrecorded_launch') {
-        runtime?.writeHostNoticeToPane(
-          identity.paneKey,
-          `This pane's session id was never recorded by Orca (${result.reason}) — the reported ` +
-            `id is not compared against anything.`,
-          { rateKey: 'session_identity_unrecorded_launch', windowMs: 24 * 60 * 60 * 1000 }
-        )
-      }
-    }
+        launchGeneration,
+        evaluateLiveHookReportMismatch: (params) => db.evaluateLiveHookReportMismatch(params),
+        writeHostNoticeToPane: (paneKey, text, opts) =>
+          runtime?.writeHostNoticeToPane(paneKey, text, opts)
+      },
+      sessions
+    )
   }
   const unsubscribeProviderSessionChanges = agentHookServer.subscribeProviderSessionChanges(
     (sessions) => {
       // Healthy session.tabs streams need a push when transcript identity changes.
       publishProviderSessionChanges(sessions)
-      raiseSessionIdentityMismatchAlarms(sessions)
+      dispatchSessionIdentityMismatchAlarms(sessions)
     }
   )
   // Why: hook rows are the only carrier of live agent state on a headless host, and
