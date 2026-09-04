@@ -36,6 +36,7 @@ import {
 } from '../../shared/terminal-output-side-effects'
 import { getDecorativeAgentTitleSignature } from '../../shared/agent-decorative-title-signature'
 import { createCommandCodeOutputStatusDetector } from '../../shared/command-code-output-status'
+import { SettleObservations, type IncumbentEvidence } from './incumbent-death'
 import type {
   TerminalSideEffectBatch,
   TerminalSideEffectFact
@@ -3261,6 +3262,12 @@ export class OrcaRuntimeService {
   private providerSnapshotsWithLiveModeTransition = new WeakSet<PtyProviderBufferSnapshot>()
   private ptyLifecycleGenerationById = new Map<string, number>()
   private nextPtyLifecycleGeneration = 1
+  // S10-21a C4 (Ruling 34 Addendum 9): D1's exit-observed record for this runtime's current
+  // generation — a fresh OrcaRuntimeService instance (a fresh `runtimeId`) starts with an empty
+  // set, so "cleared on generation start" needs no explicit reset. Capped oldest-first; a Set
+  // iterates in insertion order, so the first entry is always the oldest.
+  private exitedPtyIdsThisGeneration = new Set<string>()
+  private readonly incumbentSettleObservations = new SettleObservations()
   private recentPtyPathCandidatesById = new Map<string, string[]>()
   // Why: candidates only feed mobile file-tap provenance; desktop-only
   // sessions skip the 3-regex extraction on every PTY chunk until a
@@ -13614,6 +13621,50 @@ export class OrcaRuntimeService {
     }
   }
 
+  /** S10-21a C4 (Ruling 34 Addendum 9): assembles the evidence bundle resolveIncumbentDeath
+   * (incumbent-death.ts) reads — the only IO/mutable-state this slice performs. D1 from
+   * ptysById + exitedPtyIdsThisGeneration; D2 from a live controller-inventory round (absence
+   * proof via allLivePtyIds, never the worktree-scoped livePtyIds — a misattributed live pty
+   * must not read as dead); D3 from getAgentDirectoryLivenessSignals + the runtime-owned settle
+   * clock. No DB writes, no audit rows, no timers. */
+  async collectIncumbentEvidence(
+    paneKey: string,
+    ptyId?: string,
+    now: number = Date.now()
+  ): Promise<IncumbentEvidence> {
+    // Why connected, not mere map presence: pruneDisconnectedPtyRecords/dropDisconnectedPtyRecord
+    // (`:32605-32616`) keeps exited records around, bounded, for the archive — an exited pty
+    // stays in ptysById well past its exit, so presence alone would never let D1 fire.
+    const ptyKnownToRuntime = ptyId !== undefined && this.ptysById.get(ptyId)?.connected === true
+    const exitObservedThisGeneration =
+      ptyId !== undefined && this.exitedPtyIdsThisGeneration.has(ptyId)
+
+    let inventoryState: 'present' | 'absent' | 'unknown' = 'unknown'
+    if (ptyId !== undefined) {
+      const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
+      const inventory =
+        await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
+      inventoryState = inventory
+        ? inventory.allLivePtyIds.has(ptyId)
+          ? 'present'
+          : 'absent'
+        : 'unknown'
+    }
+
+    const signals = this.getAgentDirectoryLivenessSignals(paneKey)
+    const liveNow = signals.observedLive
+    this.incumbentSettleObservations.observe(paneKey, liveNow, now)
+    const firstObservedNotLiveAt = this.incumbentSettleObservations.firstNotLiveAt(paneKey)
+
+    return {
+      paneKey,
+      ptyId,
+      d1: { ptyKnownToRuntime, exitObservedThisGeneration },
+      d2: { inventory: inventoryState },
+      d3: { liveNow, firstObservedNotLiveAt, now }
+    }
+  }
+
   registerOrchestrationCompatibilitySshAttachment(
     targetId: string,
     connectionIncarnation: string
@@ -15173,6 +15224,15 @@ export class OrcaRuntimeService {
       this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
     } else {
       this.retirePtyAgentLaunchAuthority(ptyId)
+      // S10-21a C4 (Ruling 34 Addendum 9): D1's exit-observed record — the real pty-exit event,
+      // not the command-finished fact (§2.5 cites this call site specifically).
+      this.exitedPtyIdsThisGeneration.add(ptyId)
+      if (this.exitedPtyIdsThisGeneration.size > EXITED_PTY_IDS_THIS_GENERATION_CAP) {
+        const oldest = this.exitedPtyIdsThisGeneration.values().next().value
+        if (oldest !== undefined) {
+          this.exitedPtyIdsThisGeneration.delete(oldest)
+        }
+      }
       // S10-19 W-2: pty-exit hook (site 4/4) — excluded on the abnormal-SSH branch, which
       // preserves the surface rather than tearing it down.
       this.closePeerOwnedPaneOnAgentExit(ptyId, 'pty_exit')
@@ -39698,6 +39758,8 @@ export function resolveWorktreeScanCacheTtlMs(repo: Pick<Repo, 'path' | 'connect
     : WORKTREE_SCAN_CACHE_TTL_MS
 }
 const PTY_CONTROLLER_LIST_TIMEOUT_MS = 3000
+// S10-21a C4: bounds exitedPtyIdsThisGeneration (D1 exit-observed record).
+const EXITED_PTY_IDS_THIS_GENERATION_CAP = 4096
 // Why: the renderer waits 15s; leave room for the verified failure response and release the spawn fence before its caller times out.
 const WORKTREE_TERMINAL_SLEEP_TIMEOUT_MS = 12_000
 
