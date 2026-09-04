@@ -12,6 +12,7 @@ export type RegisterResult = {
   blockedByQuarantinedPredecessor: boolean
   pendingPeerQuestions: number
   unreadMailOnRetiredId: number
+  unreadWaiting: number
 }
 
 export function formatAgentRegister(result: RegisterResult): string {
@@ -46,8 +47,14 @@ export function formatAgentRegister(result: RegisterResult): string {
     result.unreadMailOnRetiredId > 0
       ? `\n${result.unreadMailOnRetiredId} unread message(s) on your previous registration were NOT inherited; read them with \`orca orchestration inbox --thread-id\` on the old threads -- they remain addressed to the old id.`
       : ''
+  // F-19 B2 (Ruling 33(a)): waiting mail on the landed id — reclaimed or otherwise — needs a
+  // loud, one-line nudge toward `check` instead of sitting pull-only.
+  const unreadWaiting =
+    result.unreadWaiting > 0
+      ? `\n${result.unreadWaiting} unread message(s) waiting — run: orca orchestration check`
+      : ''
   return (
-    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}${adopted}${blocked}${pendingQuestions}${unreadOnRetired}\n` +
+    `${verb} agent "${result.agent.displayName}" (${result.agent.id})${role}.${repointed}${pending}${adopted}${blocked}${pendingQuestions}${unreadOnRetired}${unreadWaiting}\n` +
     `Next: orca orchestration send --to agent:${result.agent.id} --subject "..."`
   )
 }

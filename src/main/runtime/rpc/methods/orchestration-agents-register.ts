@@ -162,6 +162,14 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       // name-holder row whose pane read dead (an actual identity handover). Both used to write
       // the same outcome with no reason — indistinguishable in the audit trail from each other,
       // and from any other 'reminted' row. Only the handover case gets the descriptive code.
+      // F-19 (Ruling 33(a)): a reclaim is a 'reminted' row whose PANE-FOUND row (existingForPane)
+      // was a derived placeholder distinct from the id register actually landed on — the
+      // dead-pane-by-NAME takeover above (existingForPane null) is a different shape entirely.
+      const isDerivedPlaceholderReclaim =
+        result.outcome === 'reminted' &&
+        existingForPane != null &&
+        existingForPane.derived === 1 &&
+        existingForPane.id !== result.agent.id
       const isDeadPaneIdentityTakeover = result.outcome === 'reminted' && !existingForPane
       db.writeAgentAudit({
         agentId: result.agent.id,
@@ -172,7 +180,10 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         reasonCode: isDeadPaneIdentityTakeover
           ? `dead-pane identity takeover: name "${params.name}" reclaimed by a new pane after ` +
             'its previous holder pane stopped resolving live'
-          : null
+          : isDerivedPlaceholderReclaim
+            ? `derived-placeholder reclaim: name "${params.name}" re-bound to this pane over a ` +
+              'derived row minted by a directory listing'
+            : null
       })
 
       // Ruling 32 Addendum 10 (A3/F-5b/F-18): both outcomes can now repoint stranded mail —
@@ -181,7 +192,11 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       // 'reminted' from a bare terminal handle and/or a bare-name address. Always the true total
       // moved into `result.agent.id`'s mailbox this call, never just one contributing surface.
       const repointedMessages = result.repointedMessages
-      if (repointedMessages > 0) {
+      // F-19 B2 (Ruling 33(a)): any unread mail sitting on the landed id's mailbox — whether it
+      // arrived via the repoint above or was already waiting (e.g. a reclaimed identity's own
+      // prior mail) — must wake the pane, not just the subset this call itself just moved.
+      const unreadWaiting = db.getUnreadMessages(`agent:${result.agent.id}`).length
+      if (unreadWaiting > 0) {
         runtime.notifyMessageArrived(`agent:${result.agent.id}`, 'status', null, null)
       }
 
@@ -190,6 +205,10 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         created: result.outcome === 'created',
         reMinted: result.outcome === 'reminted',
         repointedMessages,
+        // F-19 B2 (Ruling 33(a)): unread mail waiting on the landed id's mailbox right now,
+        // whether from this call's own repoint or already present — the CLI prints one line
+        // when nonzero so a reclaimed pane knows to run `check` instead of sitting pull-only.
+        unreadWaiting,
         // H4d (Ruling 32 Addendum 13): both outcomes carry pendingOnOldHandle now — a 'created'
         // row can leave a bare-name/succession backlog past the batch ceiling exactly like a
         // 'reminted' row can (agent-directory.ts's UpsertAgentByPaneSuffixResult carries the

@@ -161,4 +161,74 @@ describe('resolveAgentMailboxForPaneKey (Ruling 32 Addendum 11 F2)', () => {
       { mailboxHandle: `agent:${created.agent.id}` }
     )
   })
+
+  // T7 (F-19/C1+C2, Ruling 33(a)): after a plain register reclaims a dead-pane name holder
+  // over this pane's own derived row (H5's B1), the pane's own agent: mailbox resolves again —
+  // and the idle-edge push delivers to it — under the SAME (preserved) id.
+  it('T7: after a derived-placeholder reclaim, resolveAgentMailboxForPaneKey resolves the reclaimed id and the idle-edge push delivers to it', () => {
+    setup()
+    const holder = db.upsertAgentByPaneSuffix({
+      displayName: 'chair',
+      role: null,
+      hostId: 'local',
+      paneKey: 'tabF:leaf-old',
+      terminalHandle: 'term_f_old',
+      processIncarnation: 'inc1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_f_old',
+      originHostId: 'local'
+    })
+    if (holder.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    db.upsertDerivedAgentForPane({
+      hostId: 'local',
+      paneKey: 'tabF:leaf-new',
+      terminalHandle: 'term_f_new',
+      processIncarnation: 'inc2',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null
+    })
+
+    const reclaimed = db.upsertAgentByPaneSuffix({
+      displayName: 'chair',
+      role: null,
+      hostId: 'local',
+      paneKey: 'tabF:leaf-new',
+      terminalHandle: 'term_f_new',
+      processIncarnation: 'inc2',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_f_new',
+      originHostId: 'local',
+      isPaneLive: () => false
+    })
+    expect(reclaimed.outcome).toBe('reminted')
+    if (reclaimed.outcome !== 'reminted') {
+      throw new Error('fixture setup failed')
+    }
+    expect(reclaimed.agent.id).toBe(holder.outcome === 'created' ? holder.agent.id : '')
+    expect(internals(runtime).resolveAgentMailboxForPaneKey('tabF:leaf-new')).toBe(
+      `agent:${reclaimed.agent.id}`
+    )
+
+    const deliver = vi
+      .spyOn(internals(runtime), 'deliverPendingMessages')
+      .mockImplementation(() => {})
+    internals(runtime).deliverPendingMessagesForLeaf({ tabId: 'tabF', leafId: 'leaf-new' })
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ tabId: 'tabF', leafId: 'leaf-new' }),
+      { mailboxHandle: `agent:${reclaimed.agent.id}` }
+    )
+  })
 })

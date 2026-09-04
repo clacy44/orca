@@ -69,6 +69,10 @@ export type OrchestrationCheckOutput = {
   // agent:<id> mailbox this call did NOT read. Printed loudly rather than silently reading the
   // bare handle instead.
   mailboxMismatchNotice?: string
+  // C1/F-19 (Ruling 33(a)): present only when this pane's own row is derived/absent AND exactly
+  // one live registered row on the same worktree has gone dark — names it so `check` can point a
+  // restarted, unregistered pane at the identity waiting for it.
+  orphanedIdentityNotice?: string
   // B1 (Ruling 32 Addendum 10/F-17): the same purged/quarantine-withheld omission counts
   // readMailboxDelivery/getOrCreateMailboxDelivery compute — carried through so a blocked
   // mailbox's zero-count text can say why, not just that a Delivery id exists.
@@ -141,6 +145,11 @@ export function formatOrchestrationCheckText(
   const mailboxMismatchSuffix = prepared.mailboxMismatchNotice
     ? `\n${escapeTerminalControlCharacters(prepared.mailboxMismatchNotice)}`
     : ''
+  // C1/F-19 (Ruling 33(a)): same additive, always-last-appended shape as mailboxMismatchSuffix —
+  // the interpolated display name/count are caller-derived-but-validated, escaped the same way.
+  const orphanedIdentitySuffix = prepared.orphanedIdentityNotice
+    ? `\n${escapeTerminalControlCharacters(prepared.orphanedIdentityNotice)}`
+    : ''
   // H4c (Ruling 32 Addendum 11): host-constant shape, same additive always-last-appended
   // pattern — names how much mail waits on the run mailbox F1's own-mailbox read stepped past.
   // H4d: escaped through the same control-character escaper mailboxMismatchSuffix uses above —
@@ -155,32 +164,32 @@ export function formatOrchestrationCheckText(
     // without this the injected banner is byte-identical on every replay and the starvation stays
     // invisible in the one mode that writes into a pane. An untagged batch renders as it did.
     const deliveryLine = deliveryTag ? `Delivery ${prepared.deliveryId}${deliveryTag}\n` : ''
-    return `${legacyHeader}${deliveryLine}${prepared.formatted}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+    return `${legacyHeader}${deliveryLine}${prepared.formatted}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
   }
   if (prepared.count === 0) {
     if (prepared.timedOut) {
-      return `${legacyHeader}Wait timed out; no messages were consumed.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+      return `${legacyHeader}Wait timed out; no messages were consumed.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
     }
     if (prepared.cancelled) {
       const cancelled = prepared.connectionLost
         ? 'Wait cancelled because the connection closed; no messages were consumed.'
         : 'Wait cancelled; no messages were consumed.'
-      return `${legacyHeader}${cancelled}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+      return `${legacyHeader}${cancelled}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
     }
     // Why before the fallback: an interrupted acknowledged wait is success-shaped with count 0,
     // so without this it reads as an empty mailbox and the coordinator keeps looping on a Run
     // it no longer owns.
     if (prepared.waitInterrupted === 'consumer_fenced') {
-      return `${legacyHeader}Wait ended: this mailbox consumer was replaced. Rebind with: orca orchestration run-use --id ${prepared.runId ?? '<runId>'}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+      return `${legacyHeader}Wait ended: this mailbox consumer was replaced. Rebind with: orca orchestration run-use --id ${prepared.runId ?? '<runId>'}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
     }
     if (prepared.waitInterrupted === 'waiter_exists') {
-      return `${legacyHeader}Wait ended: another actionable waiter already owns this Run's mailbox; only one can block on it at a time.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+      return `${legacyHeader}Wait ended: another actionable waiter already owns this Run's mailbox; only one can block on it at a time.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
     }
     // Why its own branch: this value is the stored receipt a retried request replays, so reading
     // it as an empty mailbox tells the coordinator nothing arrived on a call whose --ack already
     // consumed a batch.
     if (prepared.waitInterrupted === 'outcome_unknown') {
-      return `${legacyHeader}Wait ended: this check acknowledged its Delivery but the wait's outcome is unknown. Re-run check to see the current mailbox.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+      return `${legacyHeader}Wait ended: this check acknowledged its Delivery but the wait's outcome is unknown. Re-run check to see the current mailbox.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
     }
     // B1 (Ruling 32 Addendum 10/F-17): a blocked mailbox (an outstanding Delivery whose messages
     // are all currently unreadable, or one with mail queued behind it) used to render exactly
@@ -193,9 +202,9 @@ export function formatOrchestrationCheckText(
         : ''
       const omittedLine = formatOmittedRowsLine(prepared.omitted)
       const omittedBlock = omittedLine ? `${omittedLine}\n` : ''
-      return `${legacyHeader}${blockedDeliveryLine}${omittedBlock}No messages.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+      return `${legacyHeader}${blockedDeliveryLine}${omittedBlock}No messages.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
     }
-    return `${legacyHeader}No messages.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+    return `${legacyHeader}No messages.${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
   }
   const rendered = prepared.messages
     .map(
@@ -209,7 +218,7 @@ export function formatOrchestrationCheckText(
   const output = prepared.deliveryId
     ? `Delivery ${prepared.deliveryId}${deliveryTag}\n${rendered}`
     : rendered
-  return `${legacyHeader}${output}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${runMailboxSuffix}`
+  return `${legacyHeader}${output}${deliveryNotice}${attentionSuffix}${parkedSuffix}${mailboxMismatchSuffix}${orphanedIdentitySuffix}${runMailboxSuffix}`
 }
 
 export function prepareOrchestrationCheckOutput<T extends OrchestrationCheckOutput>(

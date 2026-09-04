@@ -23,6 +23,7 @@ import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
 import { isBarePeerHandle } from '../../orchestration/stale-handle-resolution'
 import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
 import { waitForFederatedLifecycleSettlement } from '../../orchestration/federation-lifecycle-settlement'
+import { findLiveTerminalByHandle } from './agent-directory-rpc-liveness'
 import { abbreviateOrchestrationTasks } from '../../../../shared/orchestration-task-summary'
 import {
   ORCHESTRATION_LEGACY_RUN_ID,
@@ -1439,6 +1440,36 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           attestedAgentRowOnMismatch.derived !== 1
             ? `Read mailbox "${handle}"; your registered mailbox agent:${attestedAgentRowOnMismatch.id} was not read (this pane resolves to terminal "${attestedForAgentCheck?.terminalHandle}", check requested "${handle}").`
             : undefined
+        // C1/F-19 (Ruling 33(a)): this pane's own row is derived (or absent) — a restart-minted
+        // placeholder, never something the pane's owner opted into. When exactly one live
+        // registered row on this SAME worktree has gone dark, name it so the caller can reclaim
+        // it with a plain `register` instead of reading as a stranger with no identity at all.
+        let orphanedIdentityNotice: string | undefined
+        if (attestedForAgentCheck && (!callerAgentRow || callerAgentRow.derived === 1)) {
+          const liveTerminalForCaller = await findLiveTerminalByHandle(
+            runtime,
+            attestedForAgentCheck.terminalHandle
+          )
+          const orphanedIdentityCandidate = liveTerminalForCaller?.worktreePath
+            ? db.findOrphanedIdentityCandidate(
+                agentHostId,
+                liveTerminalForCaller.worktreePath,
+                (paneKey) => {
+                  const signals = runtime.getAgentDirectoryLivenessSignals(paneKey)
+                  return signals.terminalHandle !== null || signals.observedLive
+                }
+              )
+            : undefined
+          if (orphanedIdentityCandidate) {
+            const orphanedUnreadCount = db.getUnreadMessages(
+              `agent:${orphanedIdentityCandidate.id}`
+            ).length
+            orphanedIdentityNotice =
+              `This pane carries a derived identity. "${orphanedIdentityCandidate.display_name}" ` +
+              `(registered here, pane gone, ${orphanedUnreadCount} unread) is the row for this ` +
+              `worktree — run: orca agents register --name ${orphanedIdentityCandidate.display_name} --role "<your role>"`
+          }
+        }
         // F1 (Ruling 32 Addendum 11): an IMPLICIT run binding (boundRun, no explicit --run) no
         // longer shadows the caller's own agent mailbox when that mailbox actually has
         // non-legacy mail waiting — an explicit `--run <id>` still always selects the run
@@ -1906,7 +1937,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             mailbox: handle,
             ...(skippedAgentMailboxNotice
               ? { mailboxMismatchNotice: skippedAgentMailboxNotice }
-              : {})
+              : {}),
+            ...(orphanedIdentityNotice ? { orphanedIdentityNotice } : {})
           }
         }
         const readAndReturnInner = () => {

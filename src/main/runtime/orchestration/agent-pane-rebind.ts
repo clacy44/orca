@@ -19,6 +19,35 @@ export function holderPaneIsLive(
   return (isPaneLive ?? (() => true))(holder.pane_key)
 }
 
+// F-19/C1+C2 (Ruling 33(a)): shared by `orchestration.check`'s orphaned-identity notice and the
+// idle-edge pane wake — the single row on THIS worktree whose pane went dark and left a name
+// waiting for this pane to reclaim (register --name <that name>). Undefined for 0 or >=1
+// candidates: an ambiguous or empty match names nothing.
+export function findOrphanedIdentityCandidates(
+  db: Database.Database,
+  hostId: string,
+  worktreePath: string,
+  isPaneLive: ((paneKey: string) => boolean) | undefined
+): AgentRow[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM agents
+       WHERE host_id = ? AND tombstoned_at IS NULL AND derived = 0 AND worktree_path = ?`
+    )
+    .all(hostId, worktreePath) as AgentRow[]
+  return rows.filter((row) => row.quarantined !== 1 && !holderPaneIsLive(row, isPaneLive))
+}
+
+export function findSoleOrphanedIdentityCandidate(
+  db: Database.Database,
+  hostId: string,
+  worktreePath: string,
+  isPaneLive: ((paneKey: string) => boolean) | undefined
+): AgentRow | undefined {
+  const candidates = findOrphanedIdentityCandidates(db, hostId, worktreePath, isPaneLive)
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
 export type RemintRowParams = {
   displayName: string
   role: string | null

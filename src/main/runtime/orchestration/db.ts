@@ -73,6 +73,7 @@ import {
   type RefreshAgentLivenessParams,
   type SetAgentQuarantineParams
 } from './agent-liveness-classification'
+import { findSoleOrphanedIdentityCandidate } from './agent-pane-rebind'
 import {
   getAgentByIdIncludingTombstoned as getAgentByIdIncludingTombstonedImpl,
   retireAgent as retireAgentImpl,
@@ -4739,6 +4740,16 @@ export class OrchestrationDb {
 
   checkAndBumpRate(params: CheckAndBumpRateParams): RateLimitResult {
     return checkAndBumpRateImpl(this.db, params)
+  }
+
+  // C1/C2 (Ruling 33(a)): the sole live registered row on `worktreePath` whose pane went dark —
+  // shared by `orchestration.check`'s notice and the idle-edge pane wake.
+  findOrphanedIdentityCandidate(
+    hostId: string,
+    worktreePath: string,
+    isPaneLive?: (paneKey: string) => boolean
+  ): AgentRow | undefined {
+    return findSoleOrphanedIdentityCandidate(this.db, hostId, worktreePath, isPaneLive)
   }
 
   // S10-16 R14.6: link-binding-store.ts / link-binding-attempts-store.ts /

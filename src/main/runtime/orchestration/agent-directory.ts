@@ -6,7 +6,7 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
-import { repointMailboxOnNameBind } from './agent-mailbox-repoint'
+import { repointMailboxOnNameBind, repointMailboxOnSuccession } from './agent-mailbox-repoint'
 import {
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
@@ -145,6 +145,28 @@ export function upsertAgentByPaneSuffix(
       if (params.displayName !== existing.display_name) {
         const nameHolder = findByName(db, params.hostId, params.displayName)
         if (nameHolder && nameHolder.id !== existing.id) {
+          // F-19 (Ruling 33(a)): a DERIVED row on this pane is a directory-listing placeholder,
+          // never something its "owner" opted into — unlike the registered-row rename guard
+          // below, it does not deserve the same protection against losing a name. If the name
+          // holder itself is dead (and not quarantined), reclaim the holder's identity onto THIS
+          // pane instead of refusing: move the derived row's mail, tombstone it to free the
+          // UNIQUE pane-suffix slot, then re-mint the holder in place.
+          if (
+            existing.derived === 1 &&
+            existing.quarantined !== 1 &&
+            nameHolder.quarantined !== 1 &&
+            !holderPaneIsLive(nameHolder, params.isPaneLive)
+          ) {
+            repointMailboxOnSuccession(db, existing.id, nameHolder.id, {
+              paneKey: params.paneKey,
+              hostId: params.hostId
+            })
+            db.prepare(
+              `UPDATE agents SET tombstoned_at = datetime('now'), pane_key = NULL,
+                 role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
+            ).run(existing.id)
+            return remintRow(db, nameHolder, params)
+          }
           // A DIFFERENT agent's row holds the requested name. Register never destroys that
           // identity to free a name — live, dead, or in between (S10-11 verify blocker: the
           // prior draft tombstoned a dead-pane holder here, stranding its queued mail and

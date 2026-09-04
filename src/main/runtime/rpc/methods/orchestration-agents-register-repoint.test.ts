@@ -163,4 +163,28 @@ describe('orchestration.agents.register: mailbox repoint wiring (Ruling 32 Adden
     expect(result.repointedMessages).toBe(0)
     expect(wake).not.toHaveBeenCalled()
   })
+
+  it('T6 (F-19 B2, Ruling 33(a)): reminted with unread mail already on agent:<id> wakes the mailbox and reports unreadWaiting', async () => {
+    setup()
+    ctx = { runtime, orchestrationCompatibilityEvidence: evidence }
+    const first = (await call('orchestration.agents.register', { name: 'alpha' })) as {
+      agent: { id: string; displayName: string }
+    }
+    db.insertMessage({
+      from: 'peer',
+      to: `agent:${first.agent.id}`,
+      subject: 'already addressed',
+      type: 'status'
+    })
+    const wake = vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
+
+    const result = (await call('orchestration.agents.register', { name: 'alpha' })) as {
+      agent: { id: string }
+      reMinted: boolean
+      unreadWaiting: number
+    }
+    expect(result.reMinted).toBe(true)
+    expect(result.unreadWaiting).toBe(1)
+    expect(wake).toHaveBeenCalledWith(`agent:${result.agent.id}`, 'status', null, null)
+  })
 })
