@@ -326,7 +326,10 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
     })
     vi.restoreAllMocks()
 
-    expect(retry).toEqual({ ok: true, row: first.row })
+    // [D-R104 F-12, forced deviation — pre-existing fixture] `recordLaunch`'s idempotent branch
+    // now returns `restated: true` so its caller (admission) never closes confirm/compensate
+    // over a row it did not insert.
+    expect(retry).toEqual({ ok: true, row: first.row, restated: true })
     // no duplicate row: the retry's own insert was rolled back with the rest of its transaction.
     const count = db.prepare('SELECT COUNT(*) AS c FROM agent_launch_sessions').get() as {
       c: number

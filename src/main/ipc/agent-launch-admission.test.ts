@@ -56,11 +56,16 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       .run(`agt_${paneKey}`, `disp-${paneKey}`, HOST_ID, paneKey, paneKey, HOST_ID)
   }
 
+  // [D-R104 F-3, forced deviation — pre-existing fixture] `notice`/`contestedLineage` are now
+  // REQUIRED on AgentLaunchAdmissionContext; every test that doesn't care supplies a no-op spy
+  // here so the type checks, exactly as `ctx({ notice: ... })` etc. already override below.
   function ctx(overrides: Partial<Parameters<typeof admitAgentLaunch>[3]> = {}) {
     return {
       hostId: HOST_ID,
       executionHostId: HOST_ID,
       launchGeneration: 'gen-1',
+      notice: () => {},
+      contestedLineage: () => {},
       ...overrides
     }
   }

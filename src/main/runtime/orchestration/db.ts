@@ -100,7 +100,10 @@ import {
 // [S10-21a C3-v2, errata 5(p)-5 item 5] `deleteLaunchRow` had no OrchestrationDb wrapper yet —
 // `db` is private on this class, so admitAgentLaunch's compensation path cannot reach it without
 // one. Added here rather than left unreachable; mirrors every other launch-session delegate above.
-import { deleteLaunchRow as deleteLaunchRowImpl } from './agent-launch-sessions-retention'
+import {
+  deleteLaunchRow as deleteLaunchRowImpl,
+  restoreCurrentSessionForPane as restoreCurrentSessionForPaneImpl
+} from './agent-launch-sessions-retention'
 import {
   clearSweepRestoreMark as clearSweepRestoreMarkImpl,
   getSweepRestoreMark as getSweepRestoreMarkImpl,
@@ -4868,6 +4871,13 @@ export class OrchestrationDb {
   // on a spawn failure or a post-spawn surface divergence.
   deleteLaunchRow(seq: number): void {
     deleteLaunchRowImpl(this.db, seq)
+  }
+
+  // [S10-21a C3-v2d, D-R104 F-4] HOST_RESUME's compensation half: restores the predecessor
+  // pane's current_sessions row (from its own newest surviving launch row) after a failed
+  // restore undoes recordLaunch's supersedePaneKey delete.
+  restoreCurrentSessionForPane(hostId: string, paneKey: string): void {
+    restoreCurrentSessionForPaneImpl(this.db, hostId, paneKey)
   }
 
   getSweepRestoreMark(hostId: string, paneKey: string): boolean {

@@ -104,7 +104,11 @@ import {
 } from './lane-pinned-spawn'
 import type { PaneLaneLaunch } from '../runtime/lane-launch-computation'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
-import type { LaunchAdmission, AgentLaunchAdmissionContext } from './agent-launch-admission'
+import type {
+  AdmittedLaunch,
+  LaunchAdmission,
+  AgentLaunchAdmissionContext
+} from './agent-launch-admission'
 import { deleteEnvKeyVariants } from '../../shared/lane-env-key-case'
 import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
@@ -799,7 +803,20 @@ function launchAdmissionBundle(
   launchAdmission: LaunchAdmission
   ctx: AgentLaunchAdmissionContext
 } {
-  const hostId = connectionId ? toSshExecutionHostId(connectionId) : LOCAL_EXECUTION_HOST_ID
+  // [D-R104 B-1 BLOCKER fix] The directory's host namespace is the constant 'local'
+  // (getOrchestrationCompatibilityHostId, orca-runtime.ts:13651) for EVERY agents
+  // read/write (rpc/methods/orchestration.ts:801 etc.) — never the SSH execution host. Only
+  // `executionHostId` may vary with `connectionId`; `ctx.hostId` must always be the
+  // compatibility id, or a remote covered launch's `db.getAgentByPaneKey(ctx.hostId, paneKey)` /
+  // `db.newestLaunchForPane(ctx.hostId, paneKey)` (agent-launch-admission.ts) always misses a
+  // registered agent's pane and classifies HOST_MINTED for an already-owned pane.
+  const hostId =
+    typeof runtime?.getOrchestrationCompatibilityHostId === 'function'
+      ? runtime.getOrchestrationCompatibilityHostId()
+      : LOCAL_EXECUTION_HOST_ID
+  const executionHostId = connectionId
+    ? toSshExecutionHostId(connectionId)
+    : LOCAL_EXECUTION_HOST_ID
   return {
     // Why the typeof guard, not just `runtime?.getOrchestrationDb()`: a partial `runtime` stub
     // (test doubles that implement only the subset of OrcaRuntimeService a given test exercises)
@@ -811,7 +828,7 @@ function launchAdmissionBundle(
     launchAdmission: { kind: 'caller' },
     ctx: {
       hostId,
-      executionHostId: hostId,
+      executionHostId,
       // [S10-21a C3-v2c, errata 5(o)] Sourced from the runtime's own per-process id — no more
       // module-lifetime fallback UUID. [JUDGMENT CALL, see RETURN] The same typeof guard as
       // `getDb` above: a `runtime` stub lacking this method (or `runtime` undefined outright)
@@ -823,7 +840,37 @@ function launchAdmissionBundle(
       // (agent-launch-admission.ts's HOST_MINTED branch, the only reader, is unreachable without a
       // db). An UNCOVERED launch never reaches `ctx` at all (§C.3 coverage-first ordering).
       launchGeneration:
-        typeof runtime?.getLaunchGenerationId === 'function' ? runtime.getLaunchGenerationId() : ''
+        typeof runtime?.getLaunchGenerationId === 'function' ? runtime.getLaunchGenerationId() : '',
+      // [D-R104 F-3] Wired to the runtime's generic pane-notice helper (writeHostNoticeToPane,
+      // orca-runtime.ts) — silent no-op when `runtime` cannot answer (same typeof guard as
+      // `getDb`/`launchGeneration` above), never a throw from admission's hot path.
+      notice: (paneKey, verb, reasonCode) => {
+        if (typeof runtime?.writeHostNoticeToPane === 'function') {
+          runtime.writeHostNoticeToPane(paneKey, `Launch admission: ${verb} (${reasonCode}).`, {
+            rateKey: `${verb}:${reasonCode}`
+          })
+        }
+      },
+      // [D-R104 F-3] "for now = audit verb 'contested' + notice on the pane (C6 extends)".
+      contestedLineage: (paneKey) => {
+        const contestDb =
+          typeof runtime?.getOrchestrationDb === 'function'
+            ? runtime.getOrchestrationDb()
+            : undefined
+        contestDb?.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: paneKey,
+          actorHostId: hostId,
+          verb: 'contested',
+          outcome: 'admitted',
+          reasonCode: null
+        })
+        if (typeof runtime?.writeHostNoticeToPane === 'function') {
+          runtime.writeHostNoticeToPane(paneKey, 'Launch admission: contested lineage.', {
+            rateKey: 'contested'
+          })
+        }
+      }
     }
   }
 }
@@ -5026,6 +5073,15 @@ export function registerPtyHandlers(
       let stablePaneBindingPersisted = false
       let rejectedRegistrationCandidate: PtySpawnResult | null = null
       let pendingRegistrationPtyId: string | null = null
+      // [D-R104 F-5] Both hoisted here (not inside the `agentSessionEnsure` branch below,
+      // despite being set only in there) so the outer `catch` can reach them: `admittedLaunch`
+      // is captured by `spawnWithLane`'s `onAdmitted` right after admission resolves, so it
+      // stays reachable after the spawn callback returns — `agentSessionOwners.ensure`
+      // (claimed-agent-pty-owner.ts) does its own promotion logic after invoking that callback
+      // and can still throw, outside spawnWithLane's own try/catch. `providerResult` truthy is
+      // how the outer `catch` distinguishes that later throw from a spawn failure.
+      let admittedLaunch: AdmittedLaunch | undefined
+      let providerResult: PtySpawnResult | null = null
       // Why hoisted to the reply scope: main reconciles the provider sequence
       // deep inside the spawn path, but the pane needs that renderer-domain
       // boundary beside the daemon snapshot's kitty flags.
@@ -5090,7 +5146,6 @@ export function registerPtyHandlers(
               )
               pendingRegistrationPtyId = recoveredOwner.ptyId
             }
-            let providerResult: PtySpawnResult | null = null
             const spawnEnvLaunchToken = spawnOptions.env?.ORCA_AGENT_LAUNCH_TOKEN
             const ensured = await agentSessionOwners.ensure({
               claim: args.agentSessionEnsure.claim,
@@ -5104,7 +5159,10 @@ export function registerPtyHandlers(
                   provider,
                   spawnOptions,
                   paneLane,
-                  launchAdmissionBundle(runtime, args.connectionId)
+                  launchAdmissionBundle(runtime, args.connectionId),
+                  (admitted) => {
+                    admittedLaunch = admitted
+                  }
                 )
                 rejectedRegistrationCandidate = providerResult
                 // Why: a successful lower-owner return proves physical work committed even if admission sees an early exit.
@@ -5219,6 +5277,15 @@ export function registerPtyHandlers(
                 : result.wslDistro
           )
         } catch (err) {
+          // [D-R104 F-5] `providerResult` truthy means `spawnWithLane` already returned
+          // successfully (so `admitted.confirm` already ran) — this `err` is therefore a LATER
+          // failure, from `agentSessionOwners.ensure`'s own post-callback promotion logic
+          // (claimed-agent-pty-owner.ts), not from the spawn itself. The row is already
+          // confirmed and the process may still be alive: never destroy a fact not proven
+          // false, only audit it.
+          if (admittedLaunch && providerResult) {
+            admittedLaunch.compensate(true)
+          }
           if (
             (isNewDaemonSession || preparedProvisionalExecutionContext) &&
             effectiveSessionAppId

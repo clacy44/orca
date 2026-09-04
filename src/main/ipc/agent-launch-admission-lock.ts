@@ -27,6 +27,12 @@ export async function withPaneLock<T>(key: string, fn: () => Promise<T> | T): Pr
   clearTimeout(timer!)
   if (raced === LOCK_TIMEOUT) {
     releaseThis()
+    // [D-R104 F-11 fix] The `finally` below never runs on this path (it throws before the
+    // `try`) — without this, `paneLockTails` keeps this (already-resolved) `chained` entry
+    // forever once this is the newest waiter for `key`.
+    if (paneLockTails.get(key) === chained) {
+      paneLockTails.delete(key)
+    }
     throw new LaunchAdmissionRefusedError('launch_admission_timeout')
   }
   try {

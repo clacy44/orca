@@ -1,17 +1,23 @@
-// S10-21a C3-v2c (errata 5(p) v2.1 §C.5, T44). `LaunchAdmission`'s `kind: 'host-resume'` variant
-// is a non-wire, in-process descriptor — no RPC/IPC params schema, renderer module, or relay
-// module may ever name it (only `agent-launch-admission.ts`'s own type declaration does, and the
-// sweep that will construct one, C3a-v2, is not landed yet). This fails if the literal
-// `'host-resume'` appears in any rpc/ipc-schema/relay/renderer module.
+// S10-21a C3-v2c (errata 5(p) v2.1 §C.5, T44; extended D-R104 F-14). `LaunchAdmission`'s
+// `kind: 'host-resume'` variant is a non-wire, in-process descriptor — no RPC/IPC params schema,
+// renderer, relay, preload or shared module may ever name it (only `agent-launch-admission.ts`'s
+// own type declaration does, and the sweep that will construct one, C3a-v2, is not landed yet).
+// This fails if the literal `'host-resume'` appears in any rpc/ipc-schema/relay/renderer/preload/
+// shared module.
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..')
+// [D-R104 F-14] Extended to src/preload and src/shared — the fence's own name promises
+// "no rpc/ipc-schema/relay/renderer module", but a wire-adjacent module reachable from
+// preload or shared code is exactly as capable of carrying the literal onto the wire.
 const FORBIDDEN_ROOTS = [
   resolve(REPO_ROOT, 'src', 'main', 'runtime', 'rpc'),
   resolve(REPO_ROOT, 'src', 'relay'),
-  resolve(REPO_ROOT, 'src', 'renderer')
+  resolve(REPO_ROOT, 'src', 'renderer'),
+  resolve(REPO_ROOT, 'src', 'preload'),
+  resolve(REPO_ROOT, 'src', 'shared')
 ]
 // ipc/*: every module EXCEPT the admission descriptor's own type declaration and this fence's own
 // source (which necessarily names the literal it scans for).

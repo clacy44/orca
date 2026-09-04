@@ -64,7 +64,16 @@ export type ForeignSessionIdRefusal = { ok: false; reason: 'foreign_session_id' 
  * fence, not a substitute. */
 export type NoMatchingLaunchRowRefusal = { ok: false; reason: 'no_matching_launch_row' }
 
-export type RecordLaunchResult = { ok: true; row: AgentLaunchSessionRow } | ForeignSessionIdRefusal
+export type RecordLaunchResult =
+  | {
+      ok: true
+      row: AgentLaunchSessionRow
+      /** [D-R104 F-12] True only for the idempotent same-target restatement branch below — this
+       * call did not insert `row`, so its caller (admission) must not close confirm/compensate
+       * over it (never delete a row it did not insert). */
+      restated: boolean
+    }
+  | ForeignSessionIdRefusal
 
 export type RecordSelfReportRotationResult =
   | { ok: true; row: AgentLaunchSessionRow }
@@ -84,21 +93,6 @@ function isCurrentSessionsSuccessorViolation(err: unknown): boolean {
     err.message.includes('current_sessions') &&
     err.message.includes('session_id')
   )
-}
-
-/** [S10-21a C1a, errata 5(p)-5 item 4] Reads the row (if any) currently holding `sessionId` for
- * `hostId` in current_sessions — the row that raised the UNIQUE(host_id, session_id) violation
- * `isCurrentSessionsSuccessorViolation` just classified. Called AFTER ROLLBACK (the aborted
- * insert is already undone), so this is a clean read of durably-committed state, not a read
- * inside the failed transaction. */
-function conflictingCurrentSession(
-  db: Database.Database,
-  hostId: string,
-  sessionId: string
-): { pane_key: string } | undefined {
-  return db
-    .prepare(`SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?`)
-    .get(hostId, sessionId) as { pane_key: string } | undefined
 }
 
 /** [§2.2] INSERT into agent_launch_sessions + current_sessions upsert, one
@@ -142,11 +136,20 @@ export function recordLaunch(
   } catch (err) {
     db.exec('ROLLBACK')
     if (isCurrentSessionsSuccessorViolation(err)) {
-      // [errata 5(p)-5 item 4] Same-target restatement is an idempotent success: only a
-      // genuinely different pane already holding this session_id is a foreign collision.
-      const conflicting = conflictingCurrentSession(db, params.hostId, params.sessionId)
-      if (conflicting?.pane_key === params.paneKey) {
-        return { ok: true, row: launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow }
+      // [errata 5(p)-5 item 4, D-R104 F-12] Same-target restatement is an idempotent success:
+      // only when the row ALREADY on disk for this session_id agrees on pane, session_id AND
+      // evidence — not merely on pane — is this insert a no-op restatement of what is already
+      // there, rather than a different write (e.g. a different evidence source) racing a
+      // genuine collision. A genuinely different pane already holding this session_id is a
+      // foreign collision either way.
+      const existing = launchBySessionId(db, params.sessionId)
+      if (
+        existing !== undefined &&
+        existing.pane_key === params.paneKey &&
+        existing.session_id === params.sessionId &&
+        existing.evidence === params.evidence
+      ) {
+        return { ok: true, row: existing, restated: true }
       }
       return { ok: false, reason: 'foreign_session_id' }
     }
@@ -155,7 +158,7 @@ export function recordLaunch(
   const row = launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow
   prunePaneRows(db, params.hostId, params.paneKey)
   pruneGlobalRows(db, params.hostId)
-  return { ok: true, row }
+  return { ok: true, row, restated: false }
 }
 
 /** [§1.6/§2.3] Updates the pane's NEWEST row by seq IN PLACE — never a new row — then upserts

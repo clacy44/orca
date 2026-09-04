@@ -14,6 +14,7 @@ import type { IPtyProvider, PtySpawnOptions } from '../providers/pty-provider-co
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import {
   admitAgentLaunch,
+  type AdmittedLaunch,
   type AgentLaunchAdmissionContext,
   type LaunchAdmission
 } from './agent-launch-admission'
@@ -29,9 +30,19 @@ import type { OrchestrationDb } from '../runtime/orchestration/db'
  *
  * [S10-21a C3-v2, errata 5(p) v2.1 §C.1] `admission` is a REQUIRED 4th parameter — a new
  * fresh-spawn caller anywhere in the tree cannot compile without answering it (§B [v2, R10]).
- * `admitAgentLaunch` runs between the lane computation and the provider call, inside the
- * (hostId, paneKey) lock it itself acquires; `confirm`/`compensate` bracket the spawn so the
- * launch-session row this call wrote (if any) is settled before this function returns or throws.
+ * `admitAgentLaunch` runs between the lane computation and the provider call. [D-R104 F-8
+ * fix] The (hostId, paneKey) lock it acquires spans ONLY the ownership read + row write —
+ * `withPaneLock`'s callback returns before `provider.spawn` runs, so the lock is released
+ * BEFORE the spawn, not around it (errata 5(v); a hung spawn cannot wedge the pane for 30s).
+ * `confirm`/`compensate` bracket the spawn itself, outside the lock, so the launch-session row
+ * this call wrote (if any) is settled before this function returns or throws.
+ *
+ * [D-R104 F-5] `onAdmitted`, if given, fires right after admission resolves, before
+ * `provider.spawn` — the ONLY way a caller can reach the `AdmittedLaunch` this call closes over
+ * (it is never returned). pty.ts's `agentSessionOwners.ensure` spawn callback uses it to keep
+ * the admitted launch reachable in its OWN enclosing scope, so a throw from `ensure`'s own
+ * post-callback promotion logic (after this function already returned successfully) can still
+ * call `compensate(true)` on the same row.
  */
 export async function spawnWithLane<TLaunchConfig extends LaneLaunchConfigInput>(
   provider: IPtyProvider,
@@ -42,7 +53,8 @@ export async function spawnWithLane<TLaunchConfig extends LaneLaunchConfigInput>
     getDb: () => OrchestrationDb | undefined
     launchAdmission: LaunchAdmission
     ctx: AgentLaunchAdmissionContext
-  }
+  },
+  onAdmitted?: (admitted: AdmittedLaunch) => void
 ): Promise<PtySpawnResult> {
   const computed = computeLaneLaunch(lane, spawnOptions).spawnOptions
   const admitted = await admitAgentLaunch(
@@ -51,6 +63,7 @@ export async function spawnWithLane<TLaunchConfig extends LaneLaunchConfigInput>
     admission.launchAdmission,
     admission.ctx
   )
+  onAdmitted?.(admitted)
   try {
     const result = await provider.spawn(admitted.spawnOptions)
     admitted.confirm(result)

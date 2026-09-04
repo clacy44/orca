@@ -1,7 +1,9 @@
 // S10-21a C3-v2 (errata 5(p) v2.1 §B, §C.1-§C.4, §C.6, §G): the one launch-admission point.
 // `spawnWithLane` (lane-pinned-spawn.ts) calls `admitAgentLaunch` between the lane computation
-// and the provider call, inside the (hostId, paneKey) lock; `confirmAdmittedLaunch` /
-// `compensateAdmittedLaunch` run after/on-throw. This module never touches the restore-ticket
+// and the provider call. [D-R104 F-8 fix] The (hostId, paneKey) lock spans ONLY the ownership
+// read + row write below — released before `provider.spawn` runs (errata 5(v)); `confirm`/
+// `compensate` bracket the spawn itself, outside the lock, run after/on-throw. This module
+// never touches the restore-ticket
 // registry (C2) or the pane-key gate (C3a-v2) — it consumes what its caller already redeemed.
 // Split across agent-launch-classification.ts (pure token scanners) and
 // agent-launch-admission-lock.ts (the (host,pane) mutex) to stay under the max-lines budget.
@@ -10,6 +12,7 @@ import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import { spliceHostMintedSessionId } from '../../shared/agent-resume-launch-command'
 import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
+import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
 import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
 // [JUDGMENT CALL, see RETURN] `OrchestrationDb` (db.ts), not the raw `Database.Database` the
@@ -37,8 +40,8 @@ export { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
 /** [errata 5(p) v2.1 §C.5] non-wire. REQUIRED on `RuntimePtyController.spawn`'s opts (C3-v2c) and
  * as `spawnWithLane`'s 4th parameter (this commit). NEVER on `PtySpawnOptions` — so it reaches no
  * provider, no socket, no daemon, and no persisted record. A compile-time fence
- * (`agent-launch-admission-import-boundary.test.ts`) asserts no rpc/ipc-schema/relay/renderer
- * module names 'host-resume'. */
+ * (`agent-launch-admission-host-resume-literal-fence.test.ts`, D-R104 F-14) asserts no
+ * rpc/ipc-schema/relay/renderer/preload/shared module names 'host-resume'. */
 export type LaunchAdmission =
   | { kind: 'caller'; sequencedAgentLine?: string }
   | {
@@ -55,18 +58,85 @@ export type AgentLaunchAdmissionContext = {
   hostId: string
   executionHostId: string
   launchGeneration: string
-  /** [§2.6] Raised on SELF_RESUME(caller) into a registered pane and on every UNRECORDED. */
-  notice?: (paneKey: string, verb: string, reasonCode: string) => void
-  /** [§C.4 SELF_RESUME v2.1 V1] The §2.6 contested-lineage signal. If the real helper (C6) does
-   * not exist yet, callers may omit this — the audit row and notice still fire; nothing swallows
-   * the signal, it is simply not yet wired to C6's consumer. */
-  contestedLineage?: (paneKey: string) => void
+  /** [D-R104 F-3] REQUIRED — every production caller (launchAdmissionBundle, pty.ts) now wires a
+   * real pane notice; a caller cannot silently omit it and have every UNRECORDED/self-resume
+   * signal go audit-only. [§2.6] Raised on SELF_RESUME(caller) into a registered pane and on
+   * every UNRECORDED. */
+  notice: (paneKey: string, verb: string, reasonCode: string) => void
+  /** [D-R104 F-3] REQUIRED, same reasoning as `notice`. [§C.4 SELF_RESUME v2.1 V1] The §2.6
+   * contested-lineage signal — for now, audit verb 'contested' plus a pane notice (C6 extends). */
+  contestedLineage: (paneKey: string) => void
 }
 
 export type { AdmittedLaunch } from './agent-launch-admission-support'
 
+/** [D-R104 F-4/F-5] Shared confirm/compensate builder for a launch that recorded a row —
+ * HOST_MINTED and (now) HOST_RESUME both close over it. `onRowDeleted` runs whenever the row is
+ * actually deleted (surface divergence at confirm, or a spawn failure at compensate) — HOST_RESUME
+ * uses it to restore the predecessor pane's current_sessions row; HOST_MINTED has none to restore.
+ *
+ * [D-R104 F-5 fix] `compensate(true)` (the `agentSessionOwners.ensure` post-callback-throw path,
+ * pty.ts) is tracked by its OWN `ensureFailureAudited` flag, independent of `settled` — it must
+ * still fire (and audit) even after `confirm` already ran and set `settled`, because it reports a
+ * LATER, separate failure than anything `confirm`/`compensate(false)` already resolved, and it
+ * never mutates the row (`§C.6`: never destroy a fact not proven false), so it cannot race either
+ * of them. */
+function buildRecordedAdmission(
+  db: OrchestrationDb,
+  ctx: AgentLaunchAdmissionContext,
+  paneKey: string,
+  seq: number,
+  spawnOptions: PtySpawnOptions,
+  onRowDeleted?: () => void
+): AdmittedLaunch {
+  let settled = false
+  let ensureFailureAudited = false
+  return {
+    spawnOptions,
+    confirm: (spawnResult: PtySpawnResult) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      const surface = spawnResult.agentSessionEnsure?.owner.surface
+      if (surface !== undefined) {
+        // [forced deviation] Not `makePaneKey`: it throws on a malformed tabId/leafId, and
+        // confirm() must never throw post-spawn. Same `tab:leaf` format, without the
+        // validation — a malformed surface still compares (and, correctly, diverges).
+        const actualPaneKey = `${surface.tabId}:${surface.leafId}`
+        if (actualPaneKey !== paneKey) {
+          db.deleteLaunchRow(seq)
+          onRowDeleted?.()
+          audit(db, paneKey, ctx.hostId, 'launch_surface_diverged', 'compensated', null)
+          ctx.notice(paneKey, 'launch_surface_diverged', 'launch_surface_diverged')
+        }
+      }
+    },
+    compensate: (fromEnsureFailure?: boolean) => {
+      if (fromEnsureFailure) {
+        if (ensureFailureAudited) {
+          return
+        }
+        ensureFailureAudited = true
+        // [§C.6] The process may still be alive: never destroy a fact not proven false.
+        audit(db, paneKey, ctx.hostId, 'launch_ensure_failed_after_spawn', 'compensated', null)
+        return
+      }
+      if (settled) {
+        return
+      }
+      settled = true
+      db.deleteLaunchRow(seq)
+      onRowDeleted?.()
+      audit(db, paneKey, ctx.hostId, 'launch_spawn_failed', 'compensated', null)
+    }
+  }
+}
+
 /** [errata 5(p) v2.1 §C.1-§C.4] The one launch-admission point. Called from `spawnWithLane`
- * between the lane computation and `provider.spawn`, inside the (hostId, paneKey) lock.
+ * between the lane computation and `provider.spawn`. [D-R104 F-8 fix] The (hostId, paneKey)
+ * lock below (`withPaneLock`) spans only the ownership read + row write, released before this
+ * function returns to its caller — `provider.spawn` runs OUTSIDE the lock (errata 5(v)).
  *
  * [JUDGMENT CALL, see RETURN] §C.4's table lists "db attached" as step 0, ahead of coverage
  * determination — read literally, EVERY spawn (plain shells included) would refuse whenever the
@@ -116,7 +186,7 @@ export async function admitAgentLaunch(
 
   const unrecorded = (reasonCode: string): AdmittedLaunch => {
     audit(db, paneKey, ctx.hostId, 'launch_unrecorded', 'admitted', reasonCode)
-    ctx.notice?.(paneKey, 'launch_unrecorded', reasonCode)
+    ctx.notice(paneKey, 'launch_unrecorded', reasonCode)
     return passThrough(spawnOptions)
   }
   const refuse = (reasonCode: string): never => {
@@ -127,10 +197,19 @@ export async function admitAgentLaunch(
   if (!channelResolution.ok) {
     return unrecorded(channelResolution.reason)
   }
-  // [§C.2 deliverability] `commandDelivery === 'renderer'` is terminal-paste — the only shape a
-  // remote provider can receive without itself running `subject` (T50 pins this to zero
-  // production writers, so this branch is defence, not the common case).
-  if (spawnOptions.commandDelivery === 'renderer') {
+  // [D-R104 B-2 BLOCKER fix, §C.2 deliverability] Host-delivered iff LOCAL, or REMOTE and the
+  // relay actually promised provider delivery. The relay's own default
+  // (src/relay/pty-handler.ts:1524) is 'renderer' (terminal-paste) whenever the caller omits
+  // `commandDelivery` at all — refusing only the literal `'renderer'` value let a remote covered
+  // launch with NO `commandDelivery` through as host-delivered (production path:
+  // launch-agent-background-session.ts:198-220 spawns command+launchAgent+connectionId with no
+  // `commandDelivery`); the relay then discards the command
+  // (pty-handler.ts:1631/:684) while admission had already minted and committed a row for it.
+  const hostDelivered =
+    ctx.executionHostId === LOCAL_EXECUTION_HOST_ID
+      ? true
+      : spawnOptions.commandDelivery === 'provider'
+  if (!hostDelivered) {
     return unrecorded('command_not_host_delivered')
   }
   if (channelResolution.subject.length === 0) {
@@ -180,15 +259,23 @@ export async function admitAgentLaunch(
         if (!result.ok) {
           return refuse('launch_record_write_failed')
         }
-        return passThrough(spawnOptions)
+        // [D-R104 F-4] A restated row is not this call's to confirm/compensate over — it was
+        // already there (F-12).
+        if (result.restated) {
+          return passThrough(spawnOptions)
+        }
+        const predecessorPaneKey = admission.predecessorPaneKey
+        return buildRecordedAdmission(db, ctx, paneKey, result.row.seq, spawnOptions, () => {
+          db.restoreCurrentSessionForPane(ctx.hostId, predecessorPaneKey)
+        })
       }
       if (newestRow !== undefined && newestRow.session_id === x) {
         // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice.
         const reasonCode = admission.kind === 'host-resume' ? 'host' : 'caller'
         audit(db, paneKey, ctx.hostId, 'launch_self_resume', 'admitted', reasonCode)
         if (reasonCode === 'caller' && registeredRow !== undefined && registeredRow.derived === 0) {
-          ctx.notice?.(paneKey, 'launch_self_resume', 'caller')
-          ctx.contestedLineage?.(paneKey)
+          ctx.notice(paneKey, 'launch_self_resume', 'caller')
+          ctx.contestedLineage(paneKey)
         }
         return passThrough(spawnOptions)
       }
@@ -233,41 +320,10 @@ export async function admitAgentLaunch(
     if (!result.ok) {
       return refuse('launch_record_write_failed')
     }
-    const seq = result.row.seq
-    let settled = false
-    return {
-      spawnOptions: nextSpawnOptions,
-      confirm: (spawnResult: PtySpawnResult) => {
-        if (settled) {
-          return
-        }
-        settled = true
-        const surface = spawnResult.agentSessionEnsure?.owner.surface
-        if (surface !== undefined) {
-          // [forced deviation] Not `makePaneKey`: it throws on a malformed tabId/leafId, and
-          // confirm() must never throw post-spawn. Same `tab:leaf` format, without the
-          // validation — a malformed surface still compares (and, correctly, diverges).
-          const actualPaneKey = `${surface.tabId}:${surface.leafId}`
-          if (actualPaneKey !== paneKey) {
-            db.deleteLaunchRow(seq)
-            audit(db, paneKey, ctx.hostId, 'launch_surface_diverged', 'compensated', null)
-            ctx.notice?.(paneKey, 'launch_surface_diverged', 'launch_surface_diverged')
-          }
-        }
-      },
-      compensate: (fromEnsureFailure?: boolean) => {
-        if (settled) {
-          return
-        }
-        settled = true
-        if (fromEnsureFailure) {
-          // [§C.6] The process may still be alive: never destroy a fact not proven false.
-          audit(db, paneKey, ctx.hostId, 'launch_ensure_failed_after_spawn', 'compensated', null)
-          return
-        }
-        db.deleteLaunchRow(seq)
-        audit(db, paneKey, ctx.hostId, 'launch_spawn_failed', 'compensated', null)
-      }
+    // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
+    if (result.restated) {
+      return passThrough(nextSpawnOptions)
     }
+    return buildRecordedAdmission(db, ctx, paneKey, result.row.seq, nextSpawnOptions)
   })
 }

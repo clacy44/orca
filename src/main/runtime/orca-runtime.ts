@@ -2019,6 +2019,9 @@ function getAgentLaunchPlatformForRepo(
 // C2/F-19 (Ruling 33(a)): the orphaned-identity idle-edge notice fires at most once per pane
 // per this window.
 const ORPHANED_IDENTITY_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000
+// [S10-21a C3-v2d, D-R104 F-3] Launch-admission pane notices (UNRECORDED, self-resume-contested,
+// surface-diverged) rate-limited per pane+reason, 1h.
+const LAUNCH_ADMISSION_NOTICE_WINDOW_MS = 60 * 60 * 1000
 const MOBILE_TERMINAL_CREATE_RESULT_TTL_MS = 60_000
 // Why: same idempotency window for worktree.create — a phone whose create was
 // interrupted by a connection migration retries with the same clientMutationId
@@ -13661,6 +13664,16 @@ export class OrcaRuntimeService {
   // runtime-suite tests that construct a placement with no orchestration db ever attached —
   // `launch_store_unavailable` for a covered, DB-required launch is F-12's admission-level
   // refusal (`agent-launch-admission.ts`, unchanged by this commit), not this gate's.
+  //
+  // [D-R104 F-6 — NOT applied, see RETURN] The reviewed fix (arm the store for a placed create;
+  // refuse loudly on a DB-open failure) was implemented and run against the battery: it breaks
+  // 130 pre-existing tests across 14 files (e.g. s10-17-attestation-anchor.test.ts) that spawn a
+  // COVERED, PLACED launch (`command: 'claude'`, `tabId`/`leafId` set) against a bare
+  // `new OrcaRuntimeService(store)` with no orchestration db ever attached and no Electron
+  // `app.getPath` available — exactly the STOP condition this brief named. Left as the
+  // pre-existing peek (an honest floor, not a silent skip of a NEW risk) pending a chair call on
+  // whether to touch those tests, whitelist-arm the gate off `_orchestrationDb`-truthy-implies-
+  // 'was ever attached' some other way, or accept the peek as errata 5(p)'s standing floor.
   private getOrchestrationDbForGate(): OrchestrationDb | undefined {
     return this._orchestrationDb ?? undefined
   }
@@ -28257,6 +28270,11 @@ export class OrcaRuntimeService {
         // redeemed ticket payload (redeem-once; every field copied, including
         // `executionHostId`, §2.4 clause 5) — `opts.restoreProvenance.kind === 'host-restore'`
         // without a payload here is unreachable: E1 already redeemed or refused above.
+        // [D-R104 F-7 fix] `sequencedStartupCommand` wins when both exist: it is the value
+        // ACTUALLY written into `ORCA_SEQUENCED_STARTUP_COMMAND` above (env's
+        // `sequencedStartupCommand ? {...} : {}`) — when a createWorktree sequencing composes
+        // with an Agent-Teams plan, `opts.sequencedAgentLine` is a stale caller attestation of a
+        // line the env no longer carries, which would falsely validate against the wrong value.
         const launchAdmission: LaunchAdmission =
           opts.restoreProvenance.kind === 'host-restore' && hostRestorePayload
             ? {
@@ -28268,11 +28286,11 @@ export class OrcaRuntimeService {
                 ...(hostRestorePayload.launchSeq !== undefined
                   ? { launchSeq: hostRestorePayload.launchSeq }
                   : {}),
-                sequencedAgentLine: opts.sequencedAgentLine ?? sequencedStartupCommand
+                sequencedAgentLine: sequencedStartupCommand ?? opts.sequencedAgentLine
               }
             : {
                 kind: 'caller',
-                sequencedAgentLine: opts.sequencedAgentLine ?? sequencedStartupCommand
+                sequencedAgentLine: sequencedStartupCommand ?? opts.sequencedAgentLine
               }
         let result: Awaited<ReturnType<NonNullable<RuntimePtyController['spawn']>>>
         try {
@@ -35135,29 +35153,81 @@ export class OrcaRuntimeService {
     if (unreadCount === 0) {
       return
     }
-    const rate = db.checkAndBumpRate({
+    this.sendHostNoticeToTarget(
+      paneKey,
+      handle,
+      target,
+      `This pane carries a derived identity. "${candidate.display_name}" (registered here, ` +
+        `pane gone, ${unreadCount} unread) is the row for this worktree — run: orca agents ` +
+        `register --name ${candidate.display_name} --role "<your role>"`,
+      { rateKey: 'orphan_notice', windowMs: ORPHANED_IDENTITY_NOTICE_WINDOW_MS },
+      'An identity waits on this worktree'
+    )
+  }
+
+  // [S10-21a C3-v2d, D-R104 F-3] The rate+insert+deliver primitive extracted from
+  // notifyOrphanedIdentityForPane (H5b) — shared by every host-authored pane notice, not just the
+  // orphan-identity one. `subject` matches notifyOrphanedIdentityForPane's original literal for
+  // that one caller; every other caller passes its own.
+  private sendHostNoticeToTarget(
+    paneKey: string,
+    handle: string,
+    target: PendingMessageDeliveryTarget,
+    body: string,
+    rate: { rateKey: string; windowMs: number },
+    subject: string
+  ): void {
+    const db = this._orchestrationDb
+    if (!db) {
+      return
+    }
+    const allowed = db.checkAndBumpRate({
       subjectKey: paneKey,
-      verb: 'orphan_notice',
-      windowMs: ORPHANED_IDENTITY_NOTICE_WINDOW_MS,
+      verb: rate.rateKey,
+      windowMs: rate.windowMs,
       limit: 1
     })
-    if (!rate.allowed) {
+    if (!allowed.allowed) {
       return
     }
     db.insertMessage({
       from: RUNTIME_NOTIFICATION_SENDER,
       to: handle,
-      subject: 'An identity waits on this worktree',
-      body:
-        `This pane carries a derived identity. "${candidate.display_name}" (registered here, ` +
-        `pane gone, ${unreadCount} unread) is the row for this worktree — run: orca agents ` +
-        `register --name ${candidate.display_name} --role "<your role>"`,
+      subject,
+      body,
       type: 'status'
     })
     // Why re-invoke rather than notifyMessageArrived: the row didn't exist when this edge's own
     // deliverPendingMessages(leaf/target) ran above — this delivers it through the same shipped
     // banner formatter/modal gate/sanitiser/dedupe, never a second delivery mechanism.
     this.deliverPendingMessages(target)
+  }
+
+  // [S10-21a C3-v2d, D-R104 F-3] Generic pane notice from a bare paneKey — for admitAgentLaunch's
+  // ctx.notice, which has no leaf/pty object in hand, only the pane key it admitted against.
+  // Silent (no-op) when the pane has no live, connected handle to write to — an admission notice
+  // for a pane with nothing live behind it is inert, not a failure.
+  writeHostNoticeToPane(paneKey: string, text: string, opts: { rateKey: string }): void {
+    const parsed = parsePaneKey(paneKey)
+    const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
+    const target: PendingMessageDeliveryTarget | undefined =
+      leaf ??
+      (() => {
+        const pty = this.getPtyRecordForPaneKey(paneKey)
+        return pty ? { deliveryKind: 'pty' as const, ptyId: pty.ptyId } : undefined
+      })()
+    const handle = this.getTerminalHandleForPaneKey(paneKey)
+    if (!target || !handle) {
+      return
+    }
+    this.sendHostNoticeToTarget(
+      paneKey,
+      handle,
+      target,
+      text,
+      { rateKey: opts.rateKey, windowMs: LAUNCH_ADMISSION_NOTICE_WINDOW_MS },
+      'Launch admission notice'
+    )
   }
 
   // Why notifiedThreadIdKnown (message-loss blocker fix, S10-3a): defaults true so every

@@ -99,3 +99,30 @@ export function deleteCurrentSessionForPane(
 ): void {
   db.prepare(`DELETE FROM current_sessions WHERE host_id = ? AND pane_key = ?`).run(hostId, paneKey)
 }
+
+/** [S10-21a C3-v2d, D-R104 F-4] HOST_RESUME's compensation half: a failed restore (provider.spawn
+ * throws, or the surface diverges post-spawn) must not leave the predecessor pane's
+ * current_sessions row deleted with nothing to show for it — `recordLaunch`'s `supersedePaneKey`
+ * already deleted that row inside the same transaction that inserted the new one (item 3 above);
+ * `deleteLaunchRow(seq)` undoes the insert, this undoes that delete. Reads the predecessor pane's
+ * own newest surviving launch row (NOT the just-deleted one — `deleteLaunchRow` already ran) and
+ * upserts current_sessions from it; a no-op when the predecessor pane has no launch row left (it
+ * never had one, or C1a's retention already pruned it — nothing to restore to). Not imported from
+ * agent-launch-sessions.ts's `newestLaunchForPane` to avoid the import cycle that module already
+ * has with this one (it imports `prunePaneRows`/`pruneGlobalRows` from here). */
+export function restoreCurrentSessionForPane(
+  db: Database.Database,
+  hostId: string,
+  paneKey: string
+): void {
+  const newest = db
+    .prepare(
+      `SELECT session_id FROM agent_launch_sessions WHERE host_id = ? AND pane_key = ?
+         ORDER BY seq DESC LIMIT 1`
+    )
+    .get(hostId, paneKey) as { session_id: string } | undefined
+  if (!newest) {
+    return
+  }
+  upsertCurrentSession(db, hostId, paneKey, newest.session_id)
+}
