@@ -95,47 +95,72 @@ function isCurrentSessionsSuccessorViolation(err: unknown): boolean {
   )
 }
 
-/** [§2.2] INSERT into agent_launch_sessions + current_sessions upsert, one
- * BEGIN IMMEDIATE…COMMIT. Not best-effort: caller (C3) must refuse the launch loudly on
- * non-ok, never spawn with an unrecorded session id.
- *
- * [errata 5(p)-5 item 6] The §7 prunes run AFTER this transaction commits, each in its own
- * BEGIN IMMEDIATE — a prune that throws does NOT undo the just-recorded launch; the throw
- * propagates out of this call so it is never silently swallowed. */
-export function recordLaunch(
+/** [S10-21a C5a, Ruling 34 Addendum 16] The transaction BODY of `recordLaunch`, split out so a
+ * caller that already holds its own open `BEGIN IMMEDIATE` (rebindRestoredPane, C5) can perform
+ * this write inside ITS transaction instead of nesting a second one (which throws — "cannot
+ * start a transaction within a transaction"). CONTRACT: the caller must already be inside an
+ * open transaction on `db`. This function issues no BEGIN/COMMIT/ROLLBACK of its own — SQLite
+ * cannot verify that precondition, so there is no fence for it; violate it and the ambient
+ * autocommit-per-statement behaviour silently changes what "atomic" means, which is on the
+ * caller to avoid. Performs the supersedePaneKey delete, the insert, the current_sessions
+ * upsert, and the restatement/foreign_session_id classification exactly as `recordLaunch`
+ * always has. On `isCurrentSessionsSuccessorViolation`, returns the typed result (restated
+ * success or `foreign_session_id`) WITHOUT rolling back — that decision belongs to whichever
+ * function owns the transaction. Any other error propagates (throws) to the caller's own
+ * ROLLBACK. Never prunes (§7's prunes are host-scoped, self-transacting, and run only after a
+ * commit the caller controls). */
+export function recordLaunchInTransaction(
   db: Database.Database,
   params: RecordLaunchParams
 ): RecordLaunchResult {
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    if (params.supersedePaneKey !== undefined) {
-      // [errata 5(p)-5 item 3] Layer-2 restore only — frees the predecessor pane's
-      // current_sessions row before the insert so UNIQUE(host_id, session_id) does not refuse
-      // the host's own legitimate move of a session from P_pred to P_new.
-      db.prepare(`DELETE FROM current_sessions WHERE host_id = ? AND pane_key = ?`).run(
-        params.hostId,
-        params.supersedePaneKey
-      )
-    }
-    db.prepare(
-      `INSERT INTO agent_launch_sessions
-         (host_id, pane_key, agent_type, session_id, previous_session_id, launch_generation,
-          agent_id, execution_host_id, evidence)
-       VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?)`
-    ).run(
+  if (params.supersedePaneKey !== undefined) {
+    // [errata 5(p)-5 item 3] Layer-2 restore only — frees the predecessor pane's
+    // current_sessions row before the insert so UNIQUE(host_id, session_id) does not refuse
+    // the host's own legitimate move of a session from P_pred to P_new.
+    db.prepare(`DELETE FROM current_sessions WHERE host_id = ? AND pane_key = ?`).run(
       params.hostId,
-      params.paneKey,
-      params.agentType,
-      params.sessionId,
-      params.launchGeneration,
-      params.executionHostId,
-      params.evidence
+      params.supersedePaneKey
     )
+  }
+  // [S10-21a C5a, forced adjustment for the split — see the doc comment above] The INSERT is
+  // hoisted out of the try/catch (unlike today's single try wrapping both statements) so its
+  // `seq` can be captured and, on a downstream current_sessions violation, DELETEd before the
+  // restatement/foreign_session_id classification reads "this pane's newest row" — otherwise
+  // that read would see the just-inserted (and about to be discarded) row instead of the row
+  // already on record, silently changing which row a restatement reports. The INSERT itself
+  // cannot fail on this constraint (agent_launch_sessions carries no UNIQUE across generations,
+  // errata 5(p)-5 item 1), so hoisting it changes no observable behaviour.
+  db.prepare(
+    `INSERT INTO agent_launch_sessions
+       (host_id, pane_key, agent_type, session_id, previous_session_id, launch_generation,
+        agent_id, execution_host_id, evidence)
+     VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?)`
+  ).run(
+    params.hostId,
+    params.paneKey,
+    params.agentType,
+    params.sessionId,
+    params.launchGeneration,
+    params.executionHostId,
+    params.evidence
+  )
+  const insertedSeq = (
+    db
+      .prepare(
+        `SELECT seq FROM agent_launch_sessions WHERE host_id = ? AND pane_key = ?
+           ORDER BY seq DESC LIMIT 1`
+      )
+      .get(params.hostId, params.paneKey) as { seq: number }
+  ).seq
+  try {
     upsertCurrentSession(db, params.hostId, params.paneKey, params.sessionId)
-    db.exec('COMMIT')
   } catch (err) {
-    db.exec('ROLLBACK')
     if (isCurrentSessionsSuccessorViolation(err)) {
+      // Undo the just-inserted row before classifying — it turned out either duplicate
+      // (restated) or invalid (foreign collision) either way, and this function does not own
+      // the transaction: a caller that inspects `ok`/`restated` and goes on to COMMIT anyway
+      // must never inherit an orphan row from a write that did not actually land.
+      db.prepare(`DELETE FROM agent_launch_sessions WHERE seq = ?`).run(insertedSeq)
       // [errata 5(p)-5 item 4, D-R104 F-12] Same-target restatement is an idempotent success:
       // only when the pane CURRENTLY holding this session_id (per current_sessions — the
       // uniqueness fence that just threw) is THIS insert's own pane, and that pane's own newest
@@ -165,9 +190,41 @@ export function recordLaunch(
   // [D-R104 F-4, forced deviation] Same ambiguity fix as above — this pane's own newest row,
   // not an arbitrary row sharing this session_id.
   const row = newestLaunchForPane(db, params.hostId, params.paneKey) as AgentLaunchSessionRow
+  return { ok: true, row, restated: false }
+}
+
+/** [§2.2] INSERT into agent_launch_sessions + current_sessions upsert, one
+ * BEGIN IMMEDIATE…COMMIT. Not best-effort: caller (C3) must refuse the launch loudly on
+ * non-ok, never spawn with an unrecorded session id.
+ *
+ * [S10-21a C5a] Thin transaction wrapper around `recordLaunchInTransaction` — behaviour is
+ * byte-identical to before the split: a restatement or foreign_session_id classification rolls
+ * back (nothing was durably written either way) and skips the prunes below; only a fresh insert
+ * commits and prunes.
+ *
+ * [errata 5(p)-5 item 6] The §7 prunes run AFTER this transaction commits, each in its own
+ * BEGIN IMMEDIATE — a prune that throws does NOT undo the just-recorded launch; the throw
+ * propagates out of this call so it is never silently swallowed. */
+export function recordLaunch(
+  db: Database.Database,
+  params: RecordLaunchParams
+): RecordLaunchResult {
+  db.exec('BEGIN IMMEDIATE')
+  let result: RecordLaunchResult
+  try {
+    result = recordLaunchInTransaction(db, params)
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  if (!result.ok || result.restated) {
+    db.exec('ROLLBACK')
+    return result
+  }
+  db.exec('COMMIT')
   prunePaneRows(db, params.hostId, params.paneKey)
   pruneGlobalRows(db, params.hostId)
-  return { ok: true, row, restated: false }
+  return result
 }
 
 /** [§1.6/§2.3] Updates the pane's NEWEST row by seq IN PLACE — never a new row — then upserts

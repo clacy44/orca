@@ -109,7 +109,7 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     expect(auditRows).toHaveLength(1)
     expect(auditRows[0].outcome).toBe('reminted')
 
-    // The launch-row write (recordLaunch, post-commit) landed too.
+    // The launch-row write (recordLaunchInTransaction, inside this same transaction) landed too.
     const launchRow = newestLaunchForPane(db, HOST_ID, 'tab2:leaf-new')
     expect(launchRow?.session_id).toBe('sess-r')
     expect(launchRow?.agent_id).toBe('agent-r')
@@ -138,8 +138,8 @@ describe('S10-21a C5: rebindRestoredPane', () => {
 
     // Tombstoned but still pane-keyed (idx_agents_pane_suffix's UNIQUE excludes tombstoned rows
     // via its WHERE clause, so this fixture is legal) — retireAgent nulls pane_key on a real
-    // retire, which makes this branch unreachable via that path; see the RETURN block's open
-    // question on `T.agentId`.
+    // retire, which makes this branch unreachable via that path; see the separate
+    // retire-nulled-pane_key test below (Ruling 34 Addendum 16(a): RULED correct as-is).
     insertAgent(db, {
       id: 'agent-t',
       display_name: 'chair-t',
@@ -305,5 +305,80 @@ describe('S10-21a C5: rebindRestoredPane', () => {
 
     const after = db.prepare('SELECT * FROM threads WHERE id = ?').get('thr-1')
     expect(after).toEqual(before)
+  })
+
+  it('Ruling 34 Addendum 16(a): a retired predecessor (pane_key nulled) refuses, writes nothing', () => {
+    const db = rawDb()
+    // Mirrors retireAgent's own UPDATE (agent-retire.ts): pane_key nulled, tombstoned_at set.
+    insertAgent(db, {
+      id: 'agent-retired',
+      display_name: 'chair-retired',
+      pane_key: null,
+      tombstoned_at: new Date().toISOString()
+    })
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-retired'),
+      newPaneKey: 'tab2:leaf-retired2',
+      newTerminalHandle: null,
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT
+    })
+    expect(result).toEqual({ ok: false, reason: 'predecessor_row_not_found' })
+
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-retired') as AgentRow
+    expect(row.pane_key).toBeNull()
+    const auditRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'`)
+      .all('agent-retired')
+    expect(auditRows).toHaveLength(0)
+    expect(newestLaunchForPane(db, HOST_ID, 'tab2:leaf-retired2')).toBeUndefined()
+  })
+
+  it('Ruling 34 Addendum 16(c): foreign_session_id on the launch-row write rolls back the whole rebind', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-f',
+      display_name: 'chair-f',
+      pane_key: 'tab1:leaf-f',
+      terminal_handle: 'handle-f'
+    })
+    // A different, unrelated pane already holds the session id the ticket names — a genuine
+    // cross-pane collision, not the same-target restatement branch.
+    db.prepare(`INSERT INTO current_sessions (host_id, pane_key, session_id) VALUES (?, ?, ?)`).run(
+      HOST_ID,
+      'tab3:leaf-other',
+      'sess-r'
+    )
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-f'),
+      newPaneKey: 'tab2:leaf-f2',
+      newTerminalHandle: 'handle-f2',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT
+    })
+    expect(result).toEqual({ ok: false, reason: 'launch_row_foreign_session_id' })
+
+    // The whole rebind rolled back — agent row, mailboxes, threads all unchanged.
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-f') as AgentRow
+    expect(row.pane_key).toBe('tab1:leaf-f')
+    expect(row.terminal_handle).toBe('handle-f')
+    const auditRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'`)
+      .all('agent-f')
+    expect(auditRows).toHaveLength(0)
+    expect(newestLaunchForPane(db, HOST_ID, 'tab2:leaf-f2')).toBeUndefined()
+    // The predecessor's own current_sessions row (had there been one) is untouched by the
+    // supersedePaneKey delete — nothing here to assert a row for since none was seeded, but the
+    // unrelated pane's row must survive verbatim.
+    const other = db
+      .prepare('SELECT * FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab3:leaf-other')
+    expect(other).toBeDefined()
   })
 })

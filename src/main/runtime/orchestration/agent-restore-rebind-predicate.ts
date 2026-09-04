@@ -22,6 +22,10 @@ export type RebindRefusalReason =
   | 'incumbent_alive'
   | 'target_leaf_occupied'
   | 'rate_limited'
+  // [Ruling 34 Addendum 16] The launch-row write (recordLaunchInTransaction, inside this
+  // function's own transaction) hit a genuine cross-pane collision — a different pane already
+  // holds this session id. Rolls back the whole rebind, not just the launch row.
+  | 'launch_row_foreign_session_id'
 
 export type RebindRestoredPaneParams = {
   ticketPayload: RestoreTicketPayload
@@ -31,6 +35,13 @@ export type RebindRestoredPaneParams = {
   executionHostId: string
   launchGeneration: string
   incumbent: IncumbentVerdict
+  // [Ruling 34 Addendum 16] Optional: the agents table carries this column and the runtime can
+  // supply a value (`runtime.getTerminalProcessIncarnation(newTerminalHandle)`, same source
+  // agent-directory-rpc-liveness.ts's RPC layer already reads for every other liveness/refresh
+  // path), but C5 itself is pure DB and has no runtime handle — so the caller (C7) threads it
+  // through. Undefined leaves the column untouched; a caller that has no value should simply
+  // omit this rather than invent one.
+  processIncarnation?: string | null
 }
 
 export type RebindPredicateOutcome =
@@ -52,9 +63,10 @@ export function paneSuffix(paneKey: string): string {
 // Deliberately UNFILTERED on derived/quarantined/tombstoned_at, unlike agent-directory.ts's
 // findByPaneSuffix — clause 4 below is what classifies those states into a typed refusal; a
 // filtered lookup would make a tombstoned-but-still-paneKeyed row read as "not found" (clause 2)
-// instead of the specific reason clause 4 names. Rows a bare `retireAgent` already nulled
-// pane_key for are structurally unreachable here (§8.4's own limitation, not something this
-// predicate can recover — see the RETURN block's open question on `T.agentId`).
+// instead of the specific reason clause 4 names. [Ruling 34 Addendum 16(a)] A row a bare
+// `retireAgent` already nulled pane_key for is structurally unreachable by this lookup — RULED:
+// this is the correct refusal (the pane key IS identity, §1.1), not a gap to fix. It surfaces as
+// `predecessor_row_not_found` below, same as any other unresolvable predecessor.
 function findRowByPaneSuffix(
   db: Database.Database,
   hostId: string,

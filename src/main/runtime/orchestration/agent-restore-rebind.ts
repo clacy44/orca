@@ -1,26 +1,24 @@
-// S10-21a C5 (design v3.2 §2.4; errata 5(p)-5 v2.1 §C.5/§F): the restore rebind — predicate and
-// transaction, pure DB. Predicate evaluation is agent-restore-rebind-predicate.ts (split to stay
-// under the max-lines ratchet). Pact un-pause (§2.11 N4) is NOT called here — this returns the
-// paused-pact thread ids for C10 to act on post-commit, its own separate call.
+// S10-21a C5/C5a (design v3.2 §2.4; errata 5(p)-5 v2.1 §C.5/§F; Ruling 34 Addendum 16): the
+// restore rebind — predicate and transaction, pure DB. Predicate evaluation is
+// agent-restore-rebind-predicate.ts (split to stay under the max-lines ratchet). Pact un-pause
+// (§2.11 N4) is NOT called here — this returns the paused-pact thread ids for C10 to act on
+// post-commit, its own separate call.
 //
-// FORCED DEVIATIONS (recorded per _common-rules.md; see the RETURN block for full citations):
-//   (1) §2.4 lists "H6 idempotent succession catch-up" and "launch-row write via recordLaunch"
-//       as steps 4 and 5 of ONE `BEGIN IMMEDIATE...COMMIT`. Both `catchUpThreadSuccession`
-//       (agent-thread-succession.ts:272, own BEGIN IMMEDIATE) and `recordLaunch`
-//       (agent-launch-sessions.ts:109, own BEGIN IMMEDIATE) manage their own transaction and
-//       throw ("cannot start a transaction within a transaction") if nested inside another open
-//       one — the exact conflict §2.11 already found and fixed for `resumePact` (N4). H6 catch-up
-//       is inlined here using the same nesting-safe primitive `remintRow` itself uses when it is
-//       the one holding the open transaction (`adoptPredecessorThreadMembership`, exported,
-//       carries no BEGIN/COMMIT of its own) — same marker-gated idempotence, no behaviour change.
-//       `recordLaunch` cannot be inlined (its constraint-violation/restatement handling must not
-//       be re-implemented, per the brief) — it runs in its own transaction immediately after this
-//       function's own BEGIN IMMEDIATE commits, mirroring N4's already-accepted precedent: "a
-//       crash between the rebind commit and the un-pause call leaves the row correctly rebound...
-//       recoverable" (§2.11) applies identically here to a crash between the rebind commit and
-//       the launch-row write.
-//   (2) §2.4's narrow UPDATE (step 2) writes `process_incarnation`; SCOPE's stated call signature
-//       carries no such field. Left unchanged (not overwritten) rather than invented — see RETURN.
+// FORCED DEVIATION (recorded per _common-rules.md; see the RETURN block for the citation):
+//   §2.4 lists "H6 idempotent succession catch-up" as step 4 of ONE `BEGIN IMMEDIATE...COMMIT`.
+//   `catchUpThreadSuccession` (agent-thread-succession.ts:272) manages its own transaction and
+//   throws ("cannot start a transaction within a transaction") if nested inside another open
+//   one. H6 catch-up is inlined here using the same nesting-safe primitive `remintRow` itself
+//   uses when it is the one holding the open transaction (`adoptPredecessorThreadMembership`,
+//   exported, carries no BEGIN/COMMIT of its own) — same marker-gated idempotence, no behaviour
+//   change.
+//
+// [Ruling 34 Addendum 16(c)] The launch-row write is now INSIDE this function's own transaction,
+// via `recordLaunchInTransaction` (agent-launch-sessions.ts, split off `recordLaunch` for
+// exactly this caller) — no longer a forced post-commit deviation. A genuine foreign_session_id
+// collision rolls back the WHOLE rebind (agent row, mailboxes, threads) and refuses; the prunes
+// (host-scoped, self-transacting) still run after this transaction commits, same as
+// `recordLaunch`'s own wrapper does for every other caller.
 import type Database from '../../sqlite/sync-database'
 import { adoptFromPredecessors, adoptPredecessorThreadMembership } from './agent-thread-succession'
 import {
@@ -30,7 +28,8 @@ import {
   repointMailboxOnSuccession
 } from './agent-mailbox-repoint'
 import { writeAgentAudit } from './agent-audit-log'
-import { recordLaunch, setLaunchAgentId } from './agent-launch-sessions'
+import { recordLaunchInTransaction, setLaunchAgentId } from './agent-launch-sessions'
+import { prunePaneRows, pruneGlobalRows } from './agent-launch-sessions-retention'
 import {
   evaluateRebindPredicate,
   type RebindRefusalReason,
@@ -68,8 +67,8 @@ function pactsAwaitingUnpause(db: Database.Database, agentId: string): string[] 
 
 /** §2.4's rebind: predicate, then the transaction. `db` is the caller's raw handle (same
  * convention as every other orchestration/*.ts primitive) — the caller (C7) never opens a
- * transaction of its own around this call. See the FORCED DEVIATIONS note above for the two
- * places this cannot literally be "one BEGIN IMMEDIATE...COMMIT" as §2.4's text states. */
+ * transaction of its own around this call. See the FORCED DEVIATION note above for the one place
+ * this cannot literally be "one BEGIN IMMEDIATE...COMMIT" as §2.4's text states. */
 export function rebindRestoredPane(
   db: Database.Database,
   params: RebindRestoredPaneParams
@@ -116,13 +115,22 @@ export function rebindRestoredPane(
       }
     }
 
-    // Step 2: the NARROW update — pane_key/terminal_handle only (plus last_seen_at). Never
-    // display_name, id, quarantine, or tombstone fields. See FORCED DEVIATION (2) on
-    // process_incarnation.
-    db.prepare(
-      `UPDATE agents SET pane_key = ?, terminal_handle = ?, last_seen_at = datetime('now')
-       WHERE id = ?`
-    ).run(params.newPaneKey, params.newTerminalHandle, row.id)
+    // Step 2: the NARROW update — pane_key/terminal_handle (+last_seen_at), and
+    // process_incarnation only when the caller supplied one (Ruling 34 Addendum 16(b): the
+    // column exists and the runtime can supply a value, but C5 itself has no runtime handle to
+    // derive one from — undefined leaves the column untouched). Never display_name, id,
+    // quarantine, or tombstone fields.
+    if (params.processIncarnation !== undefined) {
+      db.prepare(
+        `UPDATE agents SET pane_key = ?, terminal_handle = ?, process_incarnation = ?,
+           last_seen_at = datetime('now') WHERE id = ?`
+      ).run(params.newPaneKey, params.newTerminalHandle, params.processIncarnation, row.id)
+    } else {
+      db.prepare(
+        `UPDATE agents SET pane_key = ?, terminal_handle = ?, last_seen_at = datetime('now')
+         WHERE id = ?`
+      ).run(params.newPaneKey, params.newTerminalHandle, row.id)
+    }
 
     // Step 3: mailbox repoints — bare handle then bare name, same order agent-pane-rebind.ts's
     // remintRow uses.
@@ -144,7 +152,7 @@ export function rebindRestoredPane(
     repointedMessages += fromName.repointedMessages
     pendingOnOldHandle += fromName.pendingOnOldHandle
 
-    // Step 4: H6 idempotent succession catch-up, inlined (FORCED DEVIATION (1) — see file header).
+    // Step 4: H6 idempotent succession catch-up, inlined (FORCED DEVIATION — see file header).
     const hasSuccessionMarker = Boolean(
       db
         .prepare(
@@ -157,6 +165,25 @@ export function rebindRestoredPane(
       adoptedThreads += caughtUp.adoptedThreads
       repointedMessages += caughtUp.repointedMessages
     }
+
+    // Step 5 [Ruling 34 Addendum 16(c)]: the launch-row write, INSIDE this transaction. A
+    // genuine cross-pane collision rolls back the whole rebind and refuses — nothing above (the
+    // adopt/tombstone, the narrow UPDATE, the mailbox repoints, H6 catch-up) is left half-applied.
+    const launchResult = recordLaunchInTransaction(db, {
+      hostId: params.hostId,
+      paneKey: params.newPaneKey,
+      agentType: 'claude',
+      sessionId: params.ticketPayload.sessionId,
+      launchGeneration: params.launchGeneration,
+      executionHostId: params.executionHostId,
+      evidence: 'sweep_record',
+      supersedePaneKey: params.ticketPayload.predecessorPaneKey
+    })
+    if (!launchResult.ok) {
+      db.exec('ROLLBACK')
+      return { ok: false, reason: 'launch_row_foreign_session_id' }
+    }
+    setLaunchAgentId(db, { seq: launchResult.row.seq }, row.id)
 
     // Pact un-pause is C10's job (§2.11 N4) — this is a read-only lookup of the candidates so
     // C10 can act on them post-commit; no thread row is written here.
@@ -182,33 +209,10 @@ export function rebindRestoredPane(
     throw err
   }
 
-  // Step 5 (FORCED DEVIATION (1)): the launch-row write, in its own transaction, immediately
-  // after the rebind above commits. Never best-effort — a failure here throws rather than being
-  // swallowed; the rebind itself is already durable at this point (N4's accepted tradeoff).
-  const launchResult = recordLaunch(db, {
-    hostId: params.hostId,
-    paneKey: params.newPaneKey,
-    agentType: 'claude',
-    sessionId: params.ticketPayload.sessionId,
-    launchGeneration: params.launchGeneration,
-    executionHostId: params.executionHostId,
-    evidence: 'sweep_record',
-    supersedePaneKey: params.ticketPayload.predecessorPaneKey
-  })
-  if (!launchResult.ok) {
-    writeAgentAudit(db, {
-      agentId: row.id,
-      actorPaneKey: params.newPaneKey,
-      actorHostId: params.hostId,
-      verb: 'rebind_launch_row',
-      outcome: 'error',
-      reasonCode: launchResult.reason
-    })
-    throw new Error(
-      `rebindRestoredPane: recordLaunch refused post-commit (${launchResult.reason}) for agent ${row.id}`
-    )
-  }
-  setLaunchAgentId(db, { seq: launchResult.row.seq }, row.id)
+  // Post-commit: the §7 prunes, host-scoped and self-transacting, same as recordLaunch's own
+  // wrapper runs for every other caller.
+  prunePaneRows(db, params.hostId, params.newPaneKey)
+  pruneGlobalRows(db, params.hostId)
 
   return {
     ok: true,
