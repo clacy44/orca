@@ -2,7 +2,12 @@
 // evidence-bundle-in, verdict-out assertion; no runtime, no IO, no fake timers (the caller
 // supplies `now`).
 import { describe, expect, it } from 'vitest'
-import { REBIND_SETTLE_MS, resolveIncumbentDeath, SettleObservations } from './incumbent-death'
+import {
+  REBIND_SETTLE_MS,
+  resolveIncumbentDeath,
+  SettleObservations,
+  SETTLE_OBSERVATIONS_CAP
+} from './incumbent-death'
 import type { IncumbentEvidence } from './incumbent-death'
 
 const PANE_KEY = 'tab-1:11111111-1111-4111-8111-111111111111'
@@ -44,7 +49,7 @@ describe('resolveIncumbentDeath', () => {
     const evidence = baseEvidence({
       d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
       d2: { inventory: 'present' },
-      d3: { liveNow: true, firstObservedNotLiveAt: null, now: 1_000_000 }
+      d3: { liveNow: false, firstObservedNotLiveAt: null, now: 1_000_000 }
     })
     expect(resolveIncumbentDeath(evidence)).toMatchObject({ dead: true, signal: 'D1' })
   })
@@ -62,9 +67,38 @@ describe('resolveIncumbentDeath', () => {
     const evidence = baseEvidence({
       d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
       d2: { inventory: 'absent' },
-      d3: { liveNow: true, firstObservedNotLiveAt: null, now: 1_000_000 }
+      d3: { liveNow: false, firstObservedNotLiveAt: null, now: 1_000_000 }
     })
     expect(resolveIncumbentDeath(evidence)).toMatchObject({ dead: true, signal: 'D2' })
+  })
+
+  // Ruling 34 Addendum 10 (F3): a live D3 reading outranks D1/D2 death evidence — the pair is
+  // reported as a conflict, never accepted as dead.
+  it('T-conflict: liveNow true + D2 absent ⇒ not dead, reason conflicting_signals', () => {
+    const evidence = baseEvidence({
+      d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
+      d2: { inventory: 'absent' },
+      d3: { liveNow: true, firstObservedNotLiveAt: null, now: 1_000_000 }
+    })
+    expect(resolveIncumbentDeath(evidence)).toEqual({ dead: false, reason: 'conflicting_signals' })
+  })
+
+  it('T-conflict: liveNow true + D1 dead ⇒ not dead, reason conflicting_signals', () => {
+    const evidence = baseEvidence({
+      d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
+      d2: { inventory: 'present' },
+      d3: { liveNow: true, firstObservedNotLiveAt: null, now: 1_000_000 }
+    })
+    expect(resolveIncumbentDeath(evidence)).toEqual({ dead: false, reason: 'conflicting_signals' })
+  })
+
+  it('T-conflict: liveNow true, nothing else ⇒ not dead, reason live', () => {
+    const evidence = baseEvidence({
+      d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
+      d2: { inventory: 'present' },
+      d3: { liveNow: true, firstObservedNotLiveAt: null, now: 1_000_000 }
+    })
+    expect(resolveIncumbentDeath(evidence)).toEqual({ dead: false, reason: 'live' })
   })
 
   it('D3 alone ⇒ dead once now - firstObservedNotLiveAt >= REBIND_SETTLE_MS, signal D3', () => {
@@ -131,5 +165,20 @@ describe('SettleObservations', () => {
   it('a pane never observed reads null', () => {
     const clock = new SettleObservations()
     expect(clock.firstNotLiveAt(PANE_KEY)).toBeNull()
+  })
+
+  // F1 (Ruling 34 Addendum 10): bounded map, oldest insertion evicted first.
+  it('evicts the oldest insertion once the cap is exceeded', () => {
+    const clock = new SettleObservations()
+    for (let i = 0; i < SETTLE_OBSERVATIONS_CAP; i++) {
+      clock.observe(`pane-${i}`, false, i)
+    }
+    expect(clock.firstNotLiveAt('pane-0')).toBe(0)
+
+    clock.observe(`pane-${SETTLE_OBSERVATIONS_CAP}`, false, SETTLE_OBSERVATIONS_CAP)
+
+    expect(clock.firstNotLiveAt('pane-0')).toBeNull()
+    expect(clock.firstNotLiveAt('pane-1')).toBe(1)
+    expect(clock.firstNotLiveAt(`pane-${SETTLE_OBSERVATIONS_CAP}`)).toBe(SETTLE_OBSERVATIONS_CAP)
   })
 })

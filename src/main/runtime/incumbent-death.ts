@@ -28,28 +28,43 @@ export type IncumbentEvidence = {
 
 export type IncumbentVerdict =
   | { dead: true; signal: 'D1' | 'D2' | 'D3'; evidence: IncumbentEvidence }
-  | { dead: false; reason: 'live' | 'inventory_unknown' | 'settling' | 'insufficient_evidence' }
+  | {
+      dead: false
+      reason:
+        | 'live'
+        | 'inventory_unknown'
+        | 'settling'
+        | 'insufficient_evidence'
+        | 'conflicting_signals'
+    }
 
-/** Pure. Reads exactly the three signals §2.5 enumerates, in the priority order the design
- * states them (D1, then D2, then D3) — the first satisfied signal wins; a bundle can carry
- * corroborating evidence for more than one and this deliberately does not require agreement
- * between them, matching v3's "any one of" framing. No side effects, no DB writes, no timers. */
+/** Pure. Reads exactly the three signals §2.5 enumerates — a live reading outranks every death
+ * signal (Ruling 34 Addendum 10): if D3 currently reads live, D1/D2 death evidence is reported
+ * as a conflict rather than accepted, and only a genuinely all-alive bundle reads plain 'live'.
+ * Otherwise D1, then D2, then D3 are checked in the priority order the design states them; a
+ * bundle can carry corroborating evidence for more than one and this deliberately does not
+ * require agreement between them, matching v3's "any one of" framing. No side effects, no DB
+ * writes, no timers. */
 export function resolveIncumbentDeath(evidence: IncumbentEvidence): IncumbentVerdict {
-  if (!evidence.d1.ptyKnownToRuntime && evidence.d1.exitObservedThisGeneration) {
+  const d1Dead = !evidence.d1.ptyKnownToRuntime && evidence.d1.exitObservedThisGeneration
+  const d2Dead = evidence.d2.inventory === 'absent'
+  if (evidence.d3.liveNow) {
+    if (d1Dead || d2Dead) {
+      return { dead: false, reason: 'conflicting_signals' }
+    }
+    return { dead: false, reason: 'live' }
+  }
+  if (d1Dead) {
     return { dead: true, signal: 'D1', evidence }
   }
-  if (evidence.d2.inventory === 'absent') {
+  if (d2Dead) {
     return { dead: true, signal: 'D2', evidence }
   }
   if (
-    !evidence.d3.liveNow &&
     evidence.d3.firstObservedNotLiveAt !== null &&
     evidence.d3.now - evidence.d3.firstObservedNotLiveAt >= REBIND_SETTLE_MS
   ) {
     return { dead: true, signal: 'D3', evidence }
-  }
-  if (evidence.d3.liveNow) {
-    return { dead: false, reason: 'live' }
   }
   if (evidence.d2.inventory === 'unknown') {
     return { dead: false, reason: 'inventory_unknown' }
@@ -59,6 +74,11 @@ export function resolveIncumbentDeath(evidence: IncumbentEvidence): IncumbentVer
   }
   return { dead: false, reason: 'insufficient_evidence' }
 }
+
+/** F1 (Ruling 34 Addendum 10): bound on the settle map's live pane-key count. A runtime that
+ * churns through many panes over a long lifetime must not grow this map unbounded; the oldest
+ * insertion (Map insertion order) is evicted first once the cap is exceeded. */
+export const SETTLE_OBSERVATIONS_CAP = 4096
 
 /** Host-only, in-memory clock for D3's settle window: the first time a pane was observed
  * not-live, cleared the moment it is observed live again. No timers — the caller supplies `now`
@@ -73,6 +93,12 @@ export class SettleObservations {
     }
     if (!this.firstNotLiveAtByPaneKey.has(paneKey)) {
       this.firstNotLiveAtByPaneKey.set(paneKey, now)
+      if (this.firstNotLiveAtByPaneKey.size > SETTLE_OBSERVATIONS_CAP) {
+        const oldestKey = this.firstNotLiveAtByPaneKey.keys().next().value
+        if (oldestKey !== undefined) {
+          this.firstNotLiveAtByPaneKey.delete(oldestKey)
+        }
+      }
     }
   }
 

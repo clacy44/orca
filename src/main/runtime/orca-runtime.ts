@@ -32609,6 +32609,13 @@ export class OrcaRuntimeService {
     // Why: pruning can remove a PTY without the normal exit callback.
     this.advancePtyLifecycleGeneration(ptyId)
     this.pairedRendererSessionOwnedPtyIds.delete(ptyId)
+    // S10-21a C4a F1 (Ruling 34 Addendum 10): this is the pane key's final removal — the pty
+    // record it belonged to is gone for good below — so its D3 settle-clock entry must go with
+    // it, or the bounded map's LRU eviction would otherwise have to do this job blind.
+    const droppedPaneKey = this.ptysById.get(ptyId)?.paneKey
+    if (droppedPaneKey) {
+      this.incumbentSettleObservations.forget(droppedPaneKey)
+    }
     this.ptysById.delete(ptyId)
     this.recentPtyOutputById.delete(ptyId)
     this.setupCompletionTokenByPtyId.delete(ptyId)

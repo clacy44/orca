@@ -13637,6 +13637,35 @@ describe('OrcaRuntimeService', () => {
     expect(internals.syntheticTerminalHandles.has(handle)).toBe(false)
   })
 
+  // S10-21a C4a F1 (Ruling 34 Addendum 10): dropDisconnectedPtyRecord is the pane-removal site
+  // that owns the pane key — its D3 settle-clock entry must be forgotten with it.
+  it('forgets the incumbent-death D3 settle clock when a disconnected PTY record is pruned', () => {
+    const runtime = new OrcaRuntimeService(store)
+    const internals = runtime as unknown as {
+      recordPtyWorktree: (
+        ptyId: string,
+        worktreeId: string,
+        state: Record<string, unknown>
+      ) => unknown
+      dropDisconnectedPtyRecord: (ptyId: string) => void
+      incumbentSettleObservations: {
+        observe: (k: string, l: boolean, n: number) => void
+        firstNotLiveAt: (k: string) => number | null
+      }
+    }
+    const paneKey = makePaneKey('host-tab', HEADLESS_LEAF_ID)
+    internals.recordPtyWorktree('pty-settle-pruned', TEST_WORKTREE_ID, {
+      connected: false,
+      paneKey
+    })
+    internals.incumbentSettleObservations.observe(paneKey, false, 1_000_000)
+    expect(internals.incumbentSettleObservations.firstNotLiveAt(paneKey)).toBe(1_000_000)
+
+    internals.dropDisconnectedPtyRecord('pty-settle-pruned')
+
+    expect(internals.incumbentSettleObservations.firstNotLiveAt(paneKey)).toBeNull()
+  })
+
   it('drops an out-of-order aggregate inventory after a newer SSH inventory', async () => {
     const targetId = 'ssh-1'
     const ptyId = `ssh:${targetId}@@persisted-pty`
