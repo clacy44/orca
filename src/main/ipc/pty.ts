@@ -18,7 +18,7 @@ import { retireTerminalSurfaceFromPersistence } from '../runtime/mobile-session-
 import { terminalPresenceRegistry } from '../runtime/terminal-presence-registry'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { TuiAgent } from '../../shared/tui-agent'
-import { toSshExecutionHostId } from '../../shared/execution-host'
+import { toSshExecutionHostId, LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import { AGENT_HOOK_RUNTIME_ENV_KEYS } from '../../shared/agent-hook-identity-env'
 import { normalizeRuntimePathForComparison } from '../../shared/cross-platform-path'
 import { terminalOutputBacklogCapChars } from '../../shared/terminal-scrollback-policy'
@@ -103,6 +103,8 @@ import {
   spawnWithLane
 } from './lane-pinned-spawn'
 import type { PaneLaneLaunch } from '../runtime/lane-launch-computation'
+import type { OrchestrationDb } from '../runtime/orchestration/db'
+import type { LaunchAdmission, AgentLaunchAdmissionContext } from './agent-launch-admission'
 import { deleteEnvKeyVariants } from '../../shared/lane-env-key-case'
 import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
@@ -783,6 +785,43 @@ function retirePersistedStablePaneOwner(
   return true
 }
 
+// [S10-21a C3-v2, errata 5(p) v2.1 §C.1/§C.5] `spawnWithLane`'s required 4th parameter. C3-v2c
+// threads a real per-request descriptor from orca-runtime.ts; until then, every call site in this
+// file constructs the literal `{kind:'caller'}` — no wire or renderer value can express
+// host-resume (§C.5), so this is honest, not a placeholder that pretends to more than it proves.
+// `getDb` is lazy (see admitAgentLaunch's doc comment: F-H4 — a plain shell must never attach the
+// orchestration DB). `launchGeneration` has no real per-`OrcaRuntimeService` id yet (errata 5(o)
+// mints one; that is C3-v2c's `orca-runtime.ts` change) — this module mints one fallback id for
+// its own lifetime rather than leave the field unset.
+// REMOVED BY C3-v2c: ctx.launchGeneration must come from the runtime's launchGenerationId.
+const FALLBACK_LAUNCH_GENERATION_REMOVED_BY_C3_V2C = randomUUID()
+
+function launchAdmissionBundle(
+  runtime: OrcaRuntimeService | undefined,
+  connectionId: string | null | undefined
+): {
+  getDb: () => OrchestrationDb | undefined
+  launchAdmission: LaunchAdmission
+  ctx: AgentLaunchAdmissionContext
+} {
+  const hostId = connectionId ? toSshExecutionHostId(connectionId) : LOCAL_EXECUTION_HOST_ID
+  return {
+    // Why the typeof guard, not just `runtime?.getOrchestrationDb()`: a partial `runtime` stub
+    // (test doubles that implement only the subset of OrcaRuntimeService a given test exercises)
+    // has no `getOrchestrationDb` property at all, which throws a raw TypeError rather than
+    // admission's own typed `launch_store_unavailable` refusal. This keeps degradation loud but
+    // in the shape callers expect (a `LaunchAdmissionRefusedError`), never an unrelated crash.
+    getDb: () =>
+      typeof runtime?.getOrchestrationDb === 'function' ? runtime.getOrchestrationDb() : undefined,
+    launchAdmission: { kind: 'caller' },
+    ctx: {
+      hostId,
+      executionHostId: hostId,
+      launchGeneration: FALLBACK_LAUNCH_GENERATION_REMOVED_BY_C3_V2C
+    }
+  }
+}
+
 type StablePaneSpawnContext = {
   runtime: OrcaRuntimeService | undefined
   store?: Store
@@ -916,7 +955,12 @@ async function spawnForStablePane(
       return attached
     }
   }
-  const result = await spawnWithLane(args.provider, args.spawnOptions, args.paneLane)
+  const result = await spawnWithLane(
+    args.provider,
+    args.spawnOptions,
+    args.paneLane,
+    launchAdmissionBundle(args.runtime, args.connectionId)
+  )
   args.onFreshSpawn?.(result)
   return { result, owner: null }
 }
@@ -5034,7 +5078,12 @@ export function registerPtyHandlers(
                 : {}),
               spawn: async () => {
                 assertClientStillConnected()
-                providerResult = await spawnWithLane(provider, spawnOptions, paneLane)
+                providerResult = await spawnWithLane(
+                  provider,
+                  spawnOptions,
+                  paneLane,
+                  launchAdmissionBundle(runtime, args.connectionId)
+                )
                 rejectedRegistrationCandidate = providerResult
                 // Why: a successful lower-owner return proves physical work committed even if admission sees an early exit.
                 reportPtySpawnCommitted()

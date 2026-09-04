@@ -1,6 +1,7 @@
 /* eslint-disable max-lines -- Why: stateful registration helper + shared mocked IPC/node-pty harness keep spawn-env assertions in one focused file. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { mkdirSync as realMkdirSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { delimiter, join, posix } from 'node:path'
 import { prepareCodexSessionResume } from '../codex/codex-session-resume-preparation'
@@ -19,6 +20,8 @@ import { PtyWriteUnavailableError } from '../providers/pty-write-unavailable-err
 import { TerminalSessionOwnerUnverifiedError } from '../daemon/daemon-errors'
 import type * as Wsl from '../wsl'
 import { getBundledLauncherPath } from '../cli/bundled-cli-launcher-path'
+import { makeRuntimeStubWithStore } from './runtime-stub-with-store'
+import { OrchestrationDb } from '../runtime/orchestration/db'
 
 const isWindowsHost = process.platform === 'win32'
 const posixOnlyIt = isWindowsHost ? it.skip : it
@@ -444,6 +447,12 @@ describe('registerPtyHandlers', () => {
     getPathMock.mockReturnValue('/tmp/orca-user-data')
     // Why: wrapper roots resolve from ORCA_USER_DATA_PATH; mirror the mocked userData so ZDOTDIR/wrapper assertions match.
     process.env.ORCA_USER_DATA_PATH = '/tmp/orca-user-data'
+    // [S10-21a C3-v2, Ruling 34 Addendum 13] node:sqlite (OrchestrationDb) opens a REAL file at
+    // this mocked userData path and bypasses the `fs` mock above entirely (native binding, not
+    // the `fs` module) — real Electron auto-creates userData, so this mirrors that contract for
+    // the handful of tests that construct a real `OrcaRuntimeService` and call
+    // `getOrchestrationDb()` (admission's `getDb()`).
+    realMkdirSync('/tmp/orca-user-data', { recursive: true })
     existsSyncMock.mockReturnValue(true)
     statSyncMock.mockReturnValue({ isDirectory: () => true, mode: 0o755 })
     readFileSyncMock.mockReturnValue('')
@@ -2064,7 +2073,7 @@ describe('registerPtyHandlers', () => {
       handlers.clear()
       registerPtyHandlers(
         mainWindow as never,
-        undefined,
+        makeRuntimeStubWithStore() as never,
         getSelectedCodexHomePath,
         getSettings as never
       )
@@ -2232,7 +2241,13 @@ describe('registerPtyHandlers', () => {
         stripAuthEnv: false,
         provenance: 'managed:account-1'
       }))
-      registerPtyHandlers(mainWindow as never, undefined, undefined, undefined, prepareClaudeAuth)
+      registerPtyHandlers(
+        mainWindow as never,
+        makeRuntimeStubWithStore() as never,
+        undefined,
+        undefined,
+        prepareClaudeAuth
+      )
 
       const spawnResult = (await handlers.get('pty:spawn')!(null, {
         cols: 80,
@@ -3708,7 +3723,7 @@ describe('registerPtyHandlers', () => {
           handlers.clear()
           registerPtyHandlers(
             mainWindow as never,
-            undefined,
+            makeRuntimeStubWithStore() as never,
             getSelectedCodexHomePath,
             getSettings as never
           )
@@ -3883,15 +3898,20 @@ describe('registerPtyHandlers', () => {
         })
         const daemonSpawn = setupDaemonAdapter()
         handlers.clear()
-        registerPtyHandlers(mainWindow as never, undefined, () => TEST_CODEX_HOME, (() => ({
-          codexManagedAccounts: [
-            {
-              id: 'account-1',
-              managedHomePath: TEST_CODEX_HOME,
-              managedHomeRuntime: 'host'
-            }
-          ]
-        })) as never)
+        registerPtyHandlers(
+          mainWindow as never,
+          makeRuntimeStubWithStore() as never,
+          () => TEST_CODEX_HOME,
+          (() => ({
+            codexManagedAccounts: [
+              {
+                id: 'account-1',
+                managedHomePath: TEST_CODEX_HOME,
+                managedHomeRuntime: 'host'
+              }
+            ]
+          })) as never
+        )
 
         await handlers.get('pty:spawn')!(null, {
           cols: 80,
@@ -4707,14 +4727,14 @@ describe('registerPtyHandlers', () => {
           }): Promise<{ id: string }>
         }
         const daemonSpawn = setupDaemonAdapter()
-        const runtime = {
+        const runtime = makeRuntimeStubWithStore({
           setPtyController: vi.fn(),
           registerPty: vi.fn(),
           noteTerminalSpawnCommand: vi.fn(),
           onPtySpawned: vi.fn(),
           onPtyExit: vi.fn(),
           onPtyData: vi.fn()
-        }
+        })
         handlers.clear()
         registerPtyHandlers(mainWindow as never, runtime as never)
         const controller = runtime.setPtyController.mock.calls[0]?.[0] as RuntimeSpawnController
@@ -4742,14 +4762,14 @@ describe('registerPtyHandlers', () => {
           }): Promise<{ id: string }>
         }
         const daemonSpawn = setupDaemonAdapter()
-        const runtime = {
+        const runtime = makeRuntimeStubWithStore({
           setPtyController: vi.fn(),
           registerPty: vi.fn(),
           noteTerminalSpawnCommand: vi.fn(),
           onPtySpawned: vi.fn(),
           onPtyExit: vi.fn(),
           onPtyData: vi.fn()
-        }
+        })
         handlers.clear()
         registerPtyHandlers(mainWindow as never, runtime as never)
         const controller = runtime.setPtyController.mock.calls[0]?.[0] as RuntimeSpawnController
@@ -5095,14 +5115,14 @@ describe('registerPtyHandlers', () => {
           }): Promise<{ id: string }>
         }
         const daemonSpawn = setupDaemonAdapter()
-        const runtime = {
+        const runtime = makeRuntimeStubWithStore({
           setPtyController: vi.fn(),
           registerPty: vi.fn(),
           noteTerminalSpawnCommand: vi.fn(),
           onPtySpawned: vi.fn(),
           onPtyExit: vi.fn(),
           onPtyData: vi.fn()
-        }
+        })
         handlers.clear()
         registerPtyHandlers(mainWindow as never, runtime as never)
         const controller = runtime.setPtyController.mock.calls[0]?.[0] as RuntimeSpawnController
@@ -8122,7 +8142,7 @@ describe('registerPtyHandlers', () => {
     }
 
     function registerController(prepareClaudeAuth?: unknown): SpawnController {
-      const runtime = {
+      const runtime = makeRuntimeStubWithStore({
         setPtyController: vi.fn(),
         registerPty: vi.fn(),
         noteTerminalSpawnCommand: vi.fn(),
@@ -8131,7 +8151,7 @@ describe('registerPtyHandlers', () => {
         onPtySpawned: vi.fn(),
         onPtyExit: vi.fn(),
         onPtyData: vi.fn()
-      }
+      })
       handlers.clear()
       registerPtyHandlers(
         mainWindow as never,
@@ -8804,7 +8824,7 @@ describe('registerPtyHandlers', () => {
 
   it('refreshes captured native Agent Teams env for renderer PTY spawns', async () => {
     const leafId = '11111111-1111-4111-8111-111111111111'
-    const runtime = {
+    const runtime = makeRuntimeStubWithStore({
       setPtyController: vi.fn(),
       createPreAllocatedTerminalHandle: vi.fn(() => 'term_agent_teams'),
       prepareClaudeAgentTeamsLeaderForHandle: vi.fn(async () => ({
@@ -8823,7 +8843,7 @@ describe('registerPtyHandlers', () => {
       onPtySpawned: vi.fn(),
       onPtyExit: vi.fn(),
       onPtyData: vi.fn()
-    }
+    })
 
     registerPtyHandlers(mainWindow as never, runtime as never)
     const result = (await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
@@ -8982,6 +9002,13 @@ describe('registerPtyHandlers', () => {
     }
   ])('binds only $label from renderer pty:spawn to runtime authority', async (testCase) => {
     const runtime = new OrcaRuntimeService()
+    // [S10-21a C3-v2, Ruling 34 Addendum 13] Not the real `getOrchestrationDb()`: on a bare
+    // `new OrcaRuntimeService()` it arms federation relay / dispatch-liveness / reply-outbox
+    // bootstrapping this isolated unit test never sets up for, throwing unrelated to admission.
+    // Same real in-memory OrchestrationDb construction as `makeRuntimeStubWithStore`, applied
+    // directly to the one method admission calls, leaving the rest of the real instance intact.
+    const orchestrationDb = new OrchestrationDb(':memory:')
+    runtime.getOrchestrationDb = () => orchestrationDb
     registerPtyHandlers(mainWindow as never, runtime)
     const worktreeId = 'repo-1::/tmp/renderer-authority'
     const tabId = 'tab-renderer-authority'
@@ -9066,7 +9093,7 @@ describe('registerPtyHandlers', () => {
 
   it('refreshes native Agent Teams env when captured teammate mode lives in launch args', async () => {
     const leafId = '11111111-1111-4111-8111-111111111111'
-    const runtime = {
+    const runtime = makeRuntimeStubWithStore({
       setPtyController: vi.fn(),
       createPreAllocatedTerminalHandle: vi.fn(() => 'term_agent_teams'),
       prepareClaudeAgentTeamsLeaderForHandle: vi.fn(async () => ({
@@ -9082,7 +9109,7 @@ describe('registerPtyHandlers', () => {
       onPtySpawned: vi.fn(),
       onPtyExit: vi.fn(),
       onPtyData: vi.fn()
-    }
+    })
 
     registerPtyHandlers(mainWindow as never, runtime as never)
     await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
@@ -9643,9 +9670,12 @@ describe('registerPtyHandlers', () => {
         ORCA_WORKTREE_ID: 'repo-1::/tmp'
       }
     }) as Promise<{ id: string }>
-    await Promise.resolve()
 
-    expect(providerSpawn).toHaveBeenCalledTimes(1)
+    // Why vi.waitFor, not a fixed `await Promise.resolve()` count: S10-21a C3-v2's admission
+    // layer (the (host,pane) lock's own await) adds microtask hops before the first caller
+    // reaches provider.spawn; the invariant under test — exactly one provider.spawn while the
+    // second racer is still deduping — is unchanged, only how many ticks it takes to observe it.
+    await vi.waitFor(() => expect(providerSpawn).toHaveBeenCalledTimes(1))
     resolveSpawn({ id: 'pty-shared' })
     await expect(Promise.all([runtimeSpawn, rendererSpawn])).resolves.toEqual([
       { id: 'pty-shared' },
@@ -13676,7 +13706,7 @@ describe('registerPtyHandlers', () => {
       spawnMock.mockReturnValue(mockProc.proc)
 
       try {
-        registerPtyHandlers(mainWindow as never)
+        registerPtyHandlers(mainWindow as never, makeRuntimeStubWithStore() as never)
         await handlers.get('pty:spawn')!(null, {
           cols: 80,
           rows: 24,
@@ -19988,7 +20018,7 @@ describe('registerPtyHandlers', () => {
       } as never)
       classifyErrorMock.mockReturnValue({ error_class: 'unknown' })
       handlers.clear()
-      registerPtyHandlers(mainWindow as never)
+      registerPtyHandlers(mainWindow as never, makeRuntimeStubWithStore() as never)
       await expect(
         handlers.get('pty:spawn')!(null, {
           cols: 80,

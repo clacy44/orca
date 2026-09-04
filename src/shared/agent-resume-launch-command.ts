@@ -27,8 +27,15 @@ function isClaudeExecutableToken(token: string): boolean {
 /** Accepts a claude token only in command position — index 0, right after a
  * wrapper's `--`, behind PowerShell's `&` call operator, or preceded solely by
  * NAME=value assignments — so an argument that merely ends in /claude (an ssh
- * key, a project dir) can never be mistaken for the executable. */
-function findClaudeExecutableIndex(tokens: readonly string[], shell: AgentStartupShell): number {
+ * key, a project dir) can never be mistaken for the executable.
+ *
+ * [S10-21a C3-v2, errata 5(p) §C.3/§C.4] Exported so the launch-admission classifier
+ * (`agent-launch-admission.ts`) can locate the claude token itself, sharing exactly this
+ * command-position discipline rather than re-implementing it. */
+export function findClaudeExecutableIndex(
+  tokens: readonly string[],
+  shell: AgentStartupShell
+): number {
   let commandPosition = true
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i]
@@ -165,4 +172,51 @@ export function buildClaudeResumeLaunchCommand(
     result = `${result.slice(0, cuts[i].start)}${result.slice(cuts[i].end)}`
   }
   return terminatorStart !== null ? result : `${result} ${quotedResume}`
+}
+
+export type ClaudeSessionIdSpliceResult = { ok: true; command: string } | { ok: false }
+
+/** [S10-21a C3-v2, errata 5(p) §C.4 HOST_MINTED] Inserts `--session-id <id>` immediately after
+ * the claude executable token, by source span, shell-safe quoted, never string concatenation.
+ * Reuses `buildClaudeResumeLaunchCommand`'s divergence discipline but FAIL-CLOSED: where that
+ * function falls back to `appended` on a tokenizer divergence, this returns `{ok:false}` — it
+ * never splices a line it could not fully model. Only ever called on a launch with no existing
+ * selector/refusal token (classification already refused those shapes), so this only ever adds a
+ * token; nothing is stripped. */
+export function spliceHostMintedSessionId(
+  command: string,
+  sessionId: string,
+  shell: AgentStartupShell
+): ClaudeSessionIdSpliceResult {
+  const tokenized = tokenizeStartupCommand(command, shell)
+  if (!tokenized.ok) {
+    return { ok: false }
+  }
+  const { tokens, spans } = tokenized
+  const claudeIndex = findClaudeExecutableIndex(tokens, shell)
+  if (claudeIndex === -1) {
+    return { ok: false }
+  }
+  for (let i = 0; i <= tokens.length; i += 1) {
+    const gapStart = i === 0 ? 0 : spans[i - 1].end
+    const gapEnd = i === tokens.length ? command.length : spans[i].start
+    if (!/^[ \t]*$/.test(command.slice(gapStart, gapEnd))) {
+      return { ok: false }
+    }
+    if (i === tokens.length) {
+      break
+    }
+    if (shell === 'powershell' && command.slice(spans[i].start, spans[i].end) === '--%') {
+      return { ok: false }
+    }
+    if (spans[i].divergesFromShell) {
+      const isCallOperator = shell === 'powershell' && i === 0 && tokens[i] === '&'
+      if (!isCallOperator) {
+        return { ok: false }
+      }
+    }
+  }
+  const insertAt = spans[claudeIndex].end
+  const flag = `--session-id ${quoteStartupArg(sessionId, shell)}`
+  return { ok: true, command: `${command.slice(0, insertAt)} ${flag}${command.slice(insertAt)}` }
 }

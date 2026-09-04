@@ -12,6 +12,12 @@ import {
 import type { PaneCredentialLane } from '../runtime/pane-credential-lane-registry'
 import type { IPtyProvider, PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
+import {
+  admitAgentLaunch,
+  type AgentLaunchAdmissionContext,
+  type LaunchAdmission
+} from './agent-launch-admission'
+import type { OrchestrationDb } from '../runtime/orchestration/db'
 
 /**
  * The one place `pty.ts` reaches a provider for a *fresh* process (S9 §2 preamble).
@@ -20,13 +26,39 @@ import type { PtySpawnResult } from '../providers/pty-spawn-result'
  * `attachOnly: true` with no command and then proves it reattached the same incarnation, so it
  * creates nothing a lane computation could govern — and running one over its bare
  * `{ cols, rows, cwd }` would refuse a legitimate reattach whose lane happens to be unloaded.
+ *
+ * [S10-21a C3-v2, errata 5(p) v2.1 §C.1] `admission` is a REQUIRED 4th parameter — a new
+ * fresh-spawn caller anywhere in the tree cannot compile without answering it (§B [v2, R10]).
+ * `admitAgentLaunch` runs between the lane computation and the provider call, inside the
+ * (hostId, paneKey) lock it itself acquires; `confirm`/`compensate` bracket the spawn so the
+ * launch-session row this call wrote (if any) is settled before this function returns or throws.
  */
 export async function spawnWithLane<TLaunchConfig extends LaneLaunchConfigInput>(
   provider: IPtyProvider,
   spawnOptions: PtySpawnOptions,
-  lane: PaneLaneLaunch<TLaunchConfig>
+  lane: PaneLaneLaunch<TLaunchConfig>,
+  admission: {
+    /** [errata 5(p) v2.1] Lazy — see `admitAgentLaunch`'s own doc comment (F-H4). */
+    getDb: () => OrchestrationDb | undefined
+    launchAdmission: LaunchAdmission
+    ctx: AgentLaunchAdmissionContext
+  }
 ): Promise<PtySpawnResult> {
-  return await provider.spawn(computeLaneLaunch(lane, spawnOptions).spawnOptions)
+  const computed = computeLaneLaunch(lane, spawnOptions).spawnOptions
+  const admitted = await admitAgentLaunch(
+    admission.getDb,
+    computed,
+    admission.launchAdmission,
+    admission.ctx
+  )
+  try {
+    const result = await provider.spawn(admitted.spawnOptions)
+    admitted.confirm(result)
+    return result
+  } catch (error) {
+    admitted.compensate()
+    throw error
+  }
 }
 
 /** The pane a spawn lands in, named the same way on both spawn paths. */

@@ -97,6 +97,10 @@ import {
   type RecordSelfReportRotationParams,
   type RecordSelfReportRotationResult
 } from './agent-launch-sessions'
+// [S10-21a C3-v2, errata 5(p)-5 item 5] `deleteLaunchRow` had no OrchestrationDb wrapper yet —
+// `db` is private on this class, so admitAgentLaunch's compensation path cannot reach it without
+// one. Added here rather than left unreachable; mirrors every other launch-session delegate above.
+import { deleteLaunchRow as deleteLaunchRowImpl } from './agent-launch-sessions-retention'
 import {
   clearSweepRestoreMark as clearSweepRestoreMarkImpl,
   getSweepRestoreMark as getSweepRestoreMarkImpl,
@@ -4858,6 +4862,12 @@ export class OrchestrationDb {
 
   deleteLaunchRowsForAgent(agentId: string): number {
     return deleteLaunchRowsForAgentImpl(this.db, agentId)
+  }
+
+  // [S10-21a C3-v2, errata 5(p)-5 item 5 / §C.6] The compensation primitive admitAgentLaunch calls
+  // on a spawn failure or a post-spawn surface divergence.
+  deleteLaunchRow(seq: number): void {
+    deleteLaunchRowImpl(this.db, seq)
   }
 
   getSweepRestoreMark(hostId: string, paneKey: string): boolean {

@@ -65,6 +65,7 @@ import {
   SHARED_CLAUDE_LANE_KEY
 } from '../claude-accounts/live-pty-gate'
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
+import { makeRuntimeStubWithStore } from './runtime-stub-with-store'
 
 const LANE_DIR = '/tmp/orca-test-userdata/claude-lanes/11111111-2222-4333-8444-555555555555'
 const SHARED_DIR = '/home/dev/.claude'
@@ -156,7 +157,7 @@ function setup(
     provenance: lanePrincipalId ? 'lane:label' : 'host'
   }))
   let controller: { spawn(args: Record<string, unknown>): Promise<unknown> } | undefined
-  const runtime = {
+  const runtime = makeRuntimeStubWithStore({
     setPtyController: vi.fn((next: never) => {
       controller = next
     }),
@@ -173,7 +174,7 @@ function setup(
     onPtyData: vi.fn(),
     getDriver: () => ({ kind: 'idle' as const }),
     handleMobileUnsubscribe: vi.fn()
-  }
+  })
   registerPtyHandlers(
     mainWindow as never,
     runtime as never,
