@@ -55,7 +55,8 @@ import {
   rebindLocalProviderListeners
 } from '../ipc/pty'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from '../startup/startup-diagnostics'
-import { getDaemonLogFilePath } from '../observability/logs-directory'
+import { getDaemonLogFilePath, getDaemonStderrLogFilePath } from '../observability/logs-directory'
+import { createDaemonStderrLog } from './daemon-stderr-log'
 import {
   confirmSeededClaudeLivePtys,
   hasSeededUnconfirmedClaudePtys
@@ -801,6 +802,39 @@ function createOutOfProcessLauncher(
         child.stderr?.off('data', onStartupStderr)
         child.stderr?.destroy()
       }
+      // Why (H10, incident 2026-09-04 §2.2(a)): destroying the read end at readiness (as
+      // releaseStderr above still does on a startup failure) discarded every native write from
+      // that instant on — a V8 OOM banner or native-module abort left no record anywhere. On a
+      // successful start, keep the pipe open for the daemon's life instead, unref'd so it can't
+      // hold Electron's loop open, redirected into a rotating daemon.stderr.log. The last
+      // DAEMON_STDERR_TAIL_LINES land in a breadcrumb when the pipe closes.
+      const attachDaemonStderrLog = (): void => {
+        collectingStderr = false
+        child.stderr?.off('data', onStartupStderr)
+        if (isDiagnosticsDisabled()) {
+          child.stderr?.destroy()
+          return
+        }
+        const stderrLog = createDaemonStderrLog(getDaemonStderrLogFilePath())
+        // Why: child.stderr is a pipe stream backed by its own handle — unref so a still-open
+        // stderr never blocks the app from exiting, matching child.unref() just below.
+        ;(child.stderr as unknown as { unref?: () => void } | null)?.unref?.()
+        let tailEmitted = false
+        const emitStderrTail = (): void => {
+          if (tailEmitted) {
+            return
+          }
+          tailEmitted = true
+          const lines = stderrLog.getTailLines()
+          stderrLog.close()
+          if (lines.length > 0) {
+            recordDurableCrashBreadcrumb('daemon-stderr-tail', { entryPath, lines })
+          }
+        }
+        child.stderr?.on('data', (chunk: Buffer) => stderrLog.write(chunk))
+        child.stderr?.once('close', emitStderrTail)
+        child.stderr?.once('error', emitStderrTail)
+      }
 
       // Wait for the daemon to signal readiness via IPC
       let launchedIdentity: DaemonEndpointIdentity | null = null
@@ -876,8 +910,8 @@ function createOutOfProcessLauncher(
             settled = true
             // Why: daemon is detached after readiness; detach startup listeners so the launch promise closure isn't retained.
             cleanupStartupListeners()
-            // Why: release IPC/stderr and unref so Electron can exit without waiting; the daemon keeps running detached.
-            releaseStderr()
+            // Why: release IPC and hand stderr off to the rotating log; unref so Electron can exit without waiting — the daemon keeps running detached.
+            attachDaemonStderrLog()
             child.disconnect()
             child.unref()
             resolve()

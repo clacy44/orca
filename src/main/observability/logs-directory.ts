@@ -39,3 +39,10 @@ export function getTraceFilePath(): string {
 export function getDaemonLogFilePath(): string {
   return join(getLogsDirectory(), 'daemon.log')
 }
+
+/** Raw (non-NDJSON) capture of the detached daemon's stderr, written by the launcher's
+ *  parent-side pipe reader — a separate file from daemon.log so raw crash text can never
+ *  interleave with the NDJSON lines classifyPredecessorLogEnd parses. */
+export function getDaemonStderrLogFilePath(): string {
+  return join(getLogsDirectory(), 'daemon.stderr.log')
+}

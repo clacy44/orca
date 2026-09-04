@@ -2867,7 +2867,9 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     expect(stderrDestroy).toHaveBeenCalled()
   })
 
-  it('destroys the daemon stderr pipe once the daemon signals ready', async () => {
+  it('H10: keeps the daemon stderr pipe open, unref-ed and redirected once the daemon signals ready', async () => {
+    // Why: pre-H10 this destroyed the parent's read end at readiness, discarding every native
+    // write (V8 OOM banner, native module abort) from that point on — incident 2026-09-04 §2.2(a).
     const mod = await importFresh()
     checkDaemonHealthMock.mockResolvedValue('unreachable')
     await mod.initDaemonPtyProvider()
@@ -2883,11 +2885,14 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     }
     const stderrOff = vi.fn()
     const stderrDestroy = vi.fn()
+    const stderrUnref = vi.fn()
+    const stderrOn = vi.fn()
+    const stderrOnce = vi.fn()
     const stderr = {
-      on() {
-        return this
-      },
+      on: stderrOn,
       off: stderrOff,
+      once: stderrOnce,
+      unref: stderrUnref,
       destroy: stderrDestroy
     }
     const child = {
@@ -2912,10 +2917,83 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     await launcher('/fake/socket', '/fake/token')
 
+    // The startup-window tail listener is detached, but the pipe itself is kept alive.
     expect(stderrOff).toHaveBeenCalledWith('data', expect.any(Function))
-    expect(stderrDestroy).toHaveBeenCalledOnce()
+    expect(stderrDestroy).not.toHaveBeenCalled()
+    expect(stderrUnref).toHaveBeenCalledOnce()
+    // A fresh 'data' listener forwards ongoing output into daemon.stderr.log, and the pipe's
+    // close/error is watched to flush the daemon-stderr-tail breadcrumb.
+    expect(stderrOn).toHaveBeenCalledWith('data', expect.any(Function))
+    expect(stderrOnce).toHaveBeenCalledWith('close', expect.any(Function))
+    expect(stderrOnce).toHaveBeenCalledWith('error', expect.any(Function))
     expect(child.disconnect).toHaveBeenCalledOnce()
     expect(child.unref).toHaveBeenCalledOnce()
+  })
+
+  it('H10: copies the stderr tail into a daemon-stderr-tail breadcrumb when the pipe closes', async () => {
+    const mod = await importFresh()
+    checkDaemonHealthMock.mockResolvedValue('unreachable')
+    await mod.initDaemonPtyProvider()
+
+    const launcher = spawnerInstances[0].launcher as (
+      socketPath: string,
+      tokenPath: string
+    ) => Promise<{ shutdown(): Promise<void> }>
+    const handlers: Record<string, ((arg?: unknown) => void)[]> = {
+      message: [],
+      error: [],
+      exit: []
+    }
+    const stderrListeners: Record<string, ((arg?: unknown) => void)[]> = { data: [], close: [] }
+    const stderr = {
+      on(event: string, cb: (arg?: unknown) => void) {
+        stderrListeners[event]?.push(cb)
+        return this
+      },
+      off() {
+        return this
+      },
+      once(event: string, cb: (arg?: unknown) => void) {
+        stderrListeners[event]?.push(cb)
+        return this
+      },
+      unref: vi.fn()
+    }
+    const child = {
+      pid: 12345,
+      stderr,
+      on(event: string, cb: (arg?: unknown) => void) {
+        handlers[event]?.push(cb)
+        if (event === 'message') {
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
+        }
+        return this
+      },
+      once(event: string, cb: (arg?: unknown) => void) {
+        handlers[event]?.push(cb)
+        return this
+      },
+      off: vi.fn(() => child),
+      disconnect: vi.fn(),
+      unref: vi.fn()
+    }
+    forkMock.mockReturnValueOnce(child)
+
+    await launcher('/fake/socket', '/fake/token')
+
+    for (const dataCb of stderrListeners.data) {
+      dataCb(Buffer.from('native abort tail\n'))
+    }
+    for (const closeCb of stderrListeners.close) {
+      closeCb()
+    }
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon-stderr-tail',
+      expect.objectContaining({ lines: ['native abort tail'] })
+    )
   })
 
   it('preserves a health-check-failing daemon when it owns live sessions', async () => {
