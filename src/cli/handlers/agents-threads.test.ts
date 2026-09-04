@@ -127,6 +127,25 @@ describe('agents threads CLI', () => {
     expect(String(log.mock.calls[0]?.[0])).toContain('Started thread thr_9fk2')
   })
 
+  // D-R91: threads are host-local to create — a `name@host` token in --with is refused in the
+  // CLI itself, before any RPC call (mirrors agents pact/invite's own host-local refusal).
+  it('thread --new refuses a name@host token in --with before any RPC call', async () => {
+    const call = vi.fn().mockResolvedValue({ result: {} })
+    await expect(
+      AGENT_THREAD_HANDLERS['agents thread']({
+        flags: new Map<string, string | boolean>([
+          ['new', true],
+          ['with', 'backend-merge,peer@desktop'],
+          ['subject', 'db.ts conflict']
+        ]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp',
+        json: false
+      } as never)
+    ).rejects.toMatchObject({ code: 'thread_not_federated' })
+    expect(call).not.toHaveBeenCalled()
+  })
+
   it('thread --id reads a thread and prints a resumable Continue hint (T9 shape)', async () => {
     const call = vi.fn().mockResolvedValue({
       result: {

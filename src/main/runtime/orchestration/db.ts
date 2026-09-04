@@ -257,7 +257,7 @@ import {
   type AppendPactStepParams,
   type AppendPactStepResult
 } from './pact-step'
-import { getEngagedPactWith as getEngagedPactWithImpl } from './pact-shared'
+import { getEngagedPactWith as getEngagedPactWithImpl } from './pact-pair-identity'
 import {
   getPactState as getPactStateImpl,
   getTurnsHeldBy as getTurnsHeldByImpl,

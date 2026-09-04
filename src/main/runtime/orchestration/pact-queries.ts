@@ -1,5 +1,5 @@
 // S10-3 pact spec — read paths: getPactState, getTurnsHeldBy, getPactLedger.
-// getEngagedPactWith lives in pact-shared.ts (shared with proposePact's own guard).
+// getEngagedPactWith lives in pact-pair-identity.ts (shared with proposePact's own guard).
 // Split out per the max-lines ratchet.
 import type Database from '../../sqlite/sync-database'
 import type { PactLedgerEntry, PactLedgerResult, PactStepKind } from './pact-types'

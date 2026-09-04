@@ -22,7 +22,8 @@ import { printResult } from '../format'
 import { RuntimeClientError } from '../runtime/types'
 import { sanitizeMessageText } from '../../shared/message-text'
 import { resolveOrchestrationAskClientTimeoutMs } from '../../shared/orchestration-ask-timeout'
-import { resolveAgentByNameOrId } from './agents-shared'
+import { parseAgentSelector, resolveAgentByNameOrId } from './agents-shared'
+import { LOCAL_FIND_HOST } from './agents-cross-host'
 
 type ThreadPact = { state: 'proposed' | 'engaged' | 'released'; turnAgentId: string | null } | null
 
@@ -222,6 +223,23 @@ function formatWait(result: WaitResult, threadId: string, forParam: string): str
   return steps ? `${headline}\n${steps}` : headline
 }
 
+// D-R91: threads are host-local to create (mirrors agents pact/invite's own host-local
+// refusal, agents-pact.ts) - refuse any `name@host` token in the CLI, before any RPC call,
+// rather than letting the raw string reach resolveAgentByNameOrId (which would misresolve it
+// as a local display name).
+function refuseCrossHostThread(rawSelector: string, host: string): never {
+  throw new RuntimeClientError(
+    'thread_not_federated',
+    `Refused: threads are host-local to create; ${rawSelector} names a different host (${host}).`,
+    {
+      nextSteps: [
+        `orca orchestration send --to ${rawSelector} --subject "<subject>" --body "<body>"`,
+        `orca agents ask ${rawSelector} "<question>"`
+      ]
+    }
+  )
+}
+
 async function resolveWithParam(client: RuntimeClient, raw: string): Promise<string> {
   const names = raw
     .split(',')
@@ -229,6 +247,12 @@ async function resolveWithParam(client: RuntimeClient, raw: string): Promise<str
     .filter(Boolean)
   if (names.length === 0) {
     throw new RuntimeClientError('invalid_argument', '--with must name at least one agent.')
+  }
+  for (const name of names) {
+    const host = parseAgentSelector(name).host
+    if (host !== LOCAL_FIND_HOST) {
+      refuseCrossHostThread(name, host)
+    }
   }
   const resolved = await Promise.all(names.map((n) => resolveAgentByNameOrId(client, n)))
   return resolved.map((a) => `agent:${a.id}`).join(',')

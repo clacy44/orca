@@ -197,7 +197,10 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     summary: 'Invite an agent to join a durable thread',
     usage: 'orca agents invite --thread <t> --agent <name> [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'thread', 'agent'],
-    notes: ['Needed to bring a third party into a sensitive thread before a pact can involve them.']
+    notes: [
+      'Host-local — the invited agent must be on this host; coordinate across hosts with orca orchestration send / orca agents ask instead.',
+      'Needed to bring a third party into a sensitive thread before a pact can involve them.'
+    ]
   },
   {
     path: ['agents', 'purge'],

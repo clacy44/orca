@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import { getAgentById, writeAgentAudit } from './agent-directory'
-import { getAgentByIdIncludingTombstoned } from './agent-retire'
+import { getEngagedPactWith } from './pact-pair-identity'
 import type { AgentRow, ThreadRow } from './types'
 import type { PactStepKind } from './pact-types'
 
@@ -153,67 +153,6 @@ export function requireUnclaimedPact(thread: ThreadRow): void {
   }
 }
 
-// Symmetric (rev 3): matches either id in either column, 'proposed' or 'engaged'.
-export function getEngagedPactWith(
-  db: Database.Database,
-  agentId: string,
-  peerAgentId: string
-): ThreadRow | undefined {
-  const byId = db
-    .prepare(
-      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state IN ('proposed','engaged')
-       AND ((pact_proposer_agent_id = ? AND pact_with_agent_id = ?)
-         OR (pact_proposer_agent_id = ? AND pact_with_agent_id = ?))`
-    )
-    .get(agentId, peerAgentId, peerAgentId, agentId) as ThreadRow | undefined
-  return byId ?? getEngagedPactWithByIdentity(db, agentId, peerAgentId)
-}
-
-type PactIdentity = { hostId: string; displayName: string }
-
-function pactIdentity(db: Database.Database, agentId: string): PactIdentity | undefined {
-  const row = getAgentByIdIncludingTombstoned(db, agentId)
-  return row ? { hostId: row.host_id, displayName: row.display_name } : undefined
-}
-
-function samePactIdentity(a: PactIdentity, b: PactIdentity): boolean {
-  return a.hostId === b.hostId && a.displayName === b.displayName
-}
-
-// R2 (Ruling 33 Addendum 2, F-20): the id-pair match above stops seeing an engaged pact once a
-// party re-registers under a new agents.id (retire + re-register mints a fresh id for the same
-// display_name), so the "one engaged pact per pair" guard falls back here to (host_id,
-// display_name) identity of both threads' parties, resolved via getAgentByIdIncludingTombstoned
-// so a tombstoned predecessor's engaged pact still counts.
-function getEngagedPactWithByIdentity(
-  db: Database.Database,
-  agentId: string,
-  peerAgentId: string
-): ThreadRow | undefined {
-  const caller = pactIdentity(db, agentId)
-  const peer = pactIdentity(db, peerAgentId)
-  if (!caller || !peer) {
-    return undefined
-  }
-  const candidates = db
-    .prepare(
-      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state IN ('proposed','engaged')
-       AND pact_proposer_agent_id IS NOT NULL AND pact_with_agent_id IS NOT NULL`
-    )
-    .all() as ThreadRow[]
-  return candidates.find((row) => {
-    const proposer = pactIdentity(db, row.pact_proposer_agent_id as string)
-    const withParty = pactIdentity(db, row.pact_with_agent_id as string)
-    if (!proposer || !withParty) {
-      return false
-    }
-    return (
-      (samePactIdentity(proposer, caller) && samePactIdentity(withParty, peer)) ||
-      (samePactIdentity(proposer, peer) && samePactIdentity(withParty, caller))
-    )
-  })
-}
-
 export function requireNoEngagedPactWithPeer(
   db: Database.Database,
   agentId: string,
@@ -222,11 +161,24 @@ export function requireNoEngagedPactWithPeer(
 ): void {
   const existing = getEngagedPactWith(db, agentId, peerAgentId)
   if (existing) {
+    // D-R91: the identity-fallback path above (R2) can return a thread whose literal
+    // pact_proposer_agent_id/pact_with_agent_id never match this caller's CURRENT id (a stale
+    // predecessor id is on record instead) - requirePactParticipant reads only those columns,
+    // so this caller cannot release it themselves via `orca agents pact --release`. Say so
+    // instead of pointing them at a command that would just refuse them not_a_participant.
+    const callerIsIdParty =
+      existing.pact_proposer_agent_id === agentId || existing.pact_with_agent_id === agentId
+    const releaseClause = callerIsIdParty
+      ? ''
+      : ' Your current id is not on record for it - only the counterpart holding it can release it.'
+    const releaseStep = callerIsIdParty
+      ? []
+      : [`Ask the counterpart to release it: orca agents pact --release --on ${existing.id}`]
     throw new OrchestrationError(
       'pact_exists_with_peer',
       `Refused: you already have a ${existing.pact_state} pact with ${peerDisplayName} on ${existing.id}. ` +
-        `One pact per pair at a time - release or finish ${existing.id} first (orca agents pact --show ${existing.id}), then propose here.`,
-      { nextSteps: [`orca agents pact --show ${existing.id}`] }
+        `One pact per pair at a time - release or finish ${existing.id} first (orca agents pact --show ${existing.id}), then propose here.${releaseClause}`,
+      { nextSteps: [`orca agents pact --show ${existing.id}`, ...releaseStep] }
     )
   }
 }

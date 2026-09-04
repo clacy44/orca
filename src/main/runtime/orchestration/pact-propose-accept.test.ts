@@ -1,7 +1,6 @@
 // S10-3 pact spec — propose/accept/decline through the public OrchestrationDb API.
 // Mutation-guard comments match the pact-spec TESTS table ids (K#).
 import { afterEach, describe, expect, it } from 'vitest'
-import type Database from '../../sqlite/sync-database'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -266,13 +265,13 @@ describe('pact propose/accept/decline', () => {
     d.proposePact({ ...actor(a), threadId: thr1, peerAgentId: b1, stepsTotal: null })
     d.acceptPact({ ...actor(b1), threadId: thr1 })
 
-    // b retires and re-registers under a new pane -> a fresh agents.id, same display_name.
-    // upsertAgentByPaneSuffix's own succession adoption (F-18) already repoints thr1's pact
-    // columns onto b2 in this exact path, which would mask this guard's own id-pair blind
-    // spot. Revert that repoint by hand so this test proves the GUARD's contract in
-    // isolation, independent of which registration path (e.g. a derived row minted by
-    // upsertDerivedAgentForPane, which never calls adoptPredecessorThreadMembership) left a
-    // stale predecessor id behind.
+    // b1 quarantined then retired: agent-thread-succession.ts's own quarantined-predecessor
+    // guard refuses ANY succession adoption from this name outright (F-9/Ruling 32(b) - a
+    // quarantined identity's access never launders onto whoever reclaims its name), so when
+    // 'b' re-registers under a fresh pane, thr1's pact_with_agent_id is left pointing at the
+    // now-tombstoned b1 rather than repointed to the new id - the REAL path that leaves a
+    // stale id reference behind (D-R91), not a constructed one.
+    d.setAgentQuarantine({ id: b1, quarantined: true, reasonCode: 'test' })
     d.retireAgent(b1)
     const b2 = seedAgent(d, 'b', {
       paneKey: 'tab:b2',
@@ -280,13 +279,26 @@ describe('pact propose/accept/decline', () => {
       originHandle: 'term_b2'
     })
     expect(b2).not.toBe(b1)
-    const raw = (d as unknown as { db: Database.Database }).db
-    raw.prepare(`UPDATE threads SET pact_with_agent_id = ? WHERE id = ?`).run(b1, thr1)
+    expect(d.getThread(thr1)?.pact_with_agent_id).toBe(b1) // succession blocked, stale on record
 
     const thr2 = seedThreadWithParticipants(d, [a, b2])
-    expect(() =>
-      d.proposePact({ ...actor(a), threadId: thr2, peerAgentId: b2, stepsTotal: null })
-    ).toThrow(/pact_exists_with_peer|pact with b/)
+    let caught: unknown
+    try {
+      d.proposePact({ ...actor(b2), threadId: thr2, peerAgentId: a, stepsTotal: null })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    const refusal = caught as { code: string; message: string; data?: { nextSteps?: string[] } }
+    expect(refusal.code).toBe('pact_exists_with_peer')
+    expect(refusal.message).toContain(`pact with a on ${thr1}`)
+    // D-R91: the caller (b2) is not literally on record for thr1 (only a and the tombstoned
+    // b1 are) - the refusal must say only the counterpart holding it can release it, not
+    // point the caller at a release command that would just refuse them too.
+    expect(refusal.message).toContain('Your current id is not on record for it')
+    expect(refusal.data?.nextSteps).toContain(
+      `Ask the counterpart to release it: orca agents pact --release --on ${thr1}`
+    )
     expect(d.getThread(thr2)?.pact_state).toBeNull()
   })
 
