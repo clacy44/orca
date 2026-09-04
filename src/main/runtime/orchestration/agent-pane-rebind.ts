@@ -4,7 +4,11 @@
 // import — agent-directory.ts imports remintRow from this file, so this file cannot import
 // back from it; every caller's params/result already satisfies these shapes structurally.
 import type Database from '../../sqlite/sync-database'
-import { repointMailboxOnNameBind, repointMailboxOnReMint } from './agent-mailbox-repoint'
+import {
+  repointMailboxFromCallerHandle,
+  repointMailboxOnNameBind,
+  repointMailboxOnReMint
+} from './agent-mailbox-repoint'
 import {
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
@@ -108,7 +112,19 @@ export function remintRow(
   // otherwise reach this row. False (default) for every re-mint that re-adopts a row already
   // holding its own identity (a same-name refresh, or H5's dead-pane-by-name takeover) — that
   // row's own history was never orphaned, so there is nothing name-keyed to adopt.
-  succession = false
+  succession = false,
+  // F-8 completion (Ruling 33 Addendum 1): true (default) runs the bare-caller-handle repoint
+  // below — covers the dead-pane-by-name takeover call site (agent-directory.ts:227, which
+  // otherwise moves only the holder's OLD handle). agent-directory.ts's own "existing" branch
+  // (:199-202) passes this explicitly, true only for a genuine derived-placeholder promote
+  // (existing.derived === 1 — that row was never a live identity before, so its pane's
+  // bare-handle backlog had no earlier chance to be claimed; repointMailboxOnReMint no-ops
+  // there because oldHandle === params.terminalHandle). False for agent-directory.ts's mundane
+  // same-identity refresh of an already-real row (existing.derived === 0 — unchanged from
+  // before this fix) and for agent-directory-derived-reclaim.ts's reclaim call, which already
+  // repoints the caller's bare handle itself (repointMailboxFromCallerHandle, after this
+  // function returns) — running it here too would double-count and double-move those rows.
+  repointCallerHandle = true
 ): RemintRowResult {
   db.prepare(
     `UPDATE agents SET
@@ -184,13 +200,30 @@ export function remintRow(
     paneKey: params.paneKey,
     hostId: params.hostId
   })
+  // F-8 completion: the caller's own CURRENT bare terminal handle (params.terminalHandle) is a
+  // stranding surface distinct from repointMailboxOnReMint's OLD-handle move above — mail
+  // addressed to it before this register call (e.g. a C2 orphan notice) never otherwise follows
+  // the row this call lands on. No-op (0/0) when there is no terminal handle to check.
+  const fromCallerHandle =
+    repointCallerHandle && params.terminalHandle
+      ? repointMailboxFromCallerHandle(db, params.terminalHandle, existing.id, {
+          paneKey: params.paneKey,
+          hostId: params.hostId
+        })
+      : { repointedMessages: 0, pendingOnOldHandle: 0 }
   db.exec('COMMIT')
   return {
     outcome: 'reminted',
     agent: reminted,
     repointedMessages:
-      successionRepoint + fromHandle.repointedMessages + fromName.repointedMessages,
-    pendingOnOldHandle: fromHandle.pendingOnOldHandle + fromName.pendingOnOldHandle,
+      successionRepoint +
+      fromHandle.repointedMessages +
+      fromName.repointedMessages +
+      fromCallerHandle.repointedMessages,
+    pendingOnOldHandle:
+      fromHandle.pendingOnOldHandle +
+      fromName.pendingOnOldHandle +
+      fromCallerHandle.pendingOnOldHandle,
     adoptedThreads,
     blockedByQuarantinedPredecessor,
     pendingPeerQuestions,

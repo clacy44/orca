@@ -191,7 +191,14 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       // upsert plus any catch-up), never just the upsert's own share.
       const catchUp = db.catchUpThreadSuccession(hostId, result.agent.display_name, result.agent.id)
       const totalAdoptedThreads = result.adoptedThreads + (catchUp?.adoptedThreads ?? 0)
-      const totalPredecessorCount = result.predecessorCount + (catchUp?.predecessorCount ?? 0)
+      // F-9 (BLOCKER, Ruling 33 Addendum 1): predecessorCount is NOT incremental like
+      // adoptedThreads/repointedMessages above — both the inline upsert's own succession call
+      // and the catch-up re-derive it over the SAME predecessor set (countUninheritedPredecessorMail
+      // and adoptFromPredecessors's `predecessors.length`, agent-thread-succession.ts:170/177/198-202),
+      // so summing double-counts every predecessor once the catch-up runs. When the catch-up ran
+      // it is the authoritative post-repoint figure (computed after its own mailbox repoint); use
+      // it alone. Otherwise (no catch-up needed) the inline figure is the only figure there is.
+      const totalPredecessorCount = catchUp ? catchUp.predecessorCount : result.predecessorCount
 
       db.writeAgentAudit({
         agentId: result.agent.id,
@@ -262,8 +269,14 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // F-2 (attacker-lens review, Ruling 33(a) H6a): also summed with the catch-up's own
         // uninherited count — the register-RPC catch-up (agent-thread-succession.ts) is a
         // second place succession can run, and it left this same backlog unreported before.
-        pendingPeerQuestions: result.pendingPeerQuestions + (catchUp?.pendingPeerQuestions ?? 0),
-        unreadMailOnRetiredId: result.unreadMailOnRetiredId + (catchUp?.unreadMailOnRetiredId ?? 0)
+        // F-9 (BLOCKER): same re-derived-total shape as totalPredecessorCount above — when the
+        // catch-up ran, its own countUninheritedPredecessorMail scan (post-repoint) is the
+        // authoritative figure; summing it with the inline result double-counts the same
+        // predecessors' backlog. Use the catch-up's figure alone when it ran.
+        pendingPeerQuestions: catchUp ? catchUp.pendingPeerQuestions : result.pendingPeerQuestions,
+        unreadMailOnRetiredId: catchUp
+          ? catchUp.unreadMailOnRetiredId
+          : result.unreadMailOnRetiredId
       }
     }
   })

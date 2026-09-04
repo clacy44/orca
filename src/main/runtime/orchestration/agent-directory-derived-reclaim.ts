@@ -66,7 +66,10 @@ export function reclaimDerivedPlaceholder(
   // row's display_name != params.displayName on this branch), so nothing is double-adopted.
   // Runs inside this same transaction, before any thread_succession marker is consulted, so the
   // later register-RPC catch-up (which only fires post-commit) never needed to run for this id.
-  const reminted = remintRow(db, nameHolder, params, true)
+  // F-8: repointCallerHandle:false — this reclaim already repoints the caller's own bare
+  // terminal handle explicitly below (repointMailboxFromCallerHandle); remintRow running the
+  // same repoint internally would double-move/double-count those rows.
+  const reminted = remintRow(db, nameHolder, params, true, false)
   // F-8: the caller's own current bare terminal handle can carry unread backlog (e.g. this
   // worktree's own C2 orphan notice) that neither the derived row's nor the name holder's
   // old-handle repoints above ever touch — repoint it into the reclaimed identity too.

@@ -6,7 +6,7 @@
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { holderPaneIsLive, remintRow } from './agent-pane-rebind'
-import { repointMailboxOnNameBind } from './agent-mailbox-repoint'
+import { repointMailboxFromCallerHandle, repointMailboxOnNameBind } from './agent-mailbox-repoint'
 import {
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
@@ -196,7 +196,12 @@ export function upsertAgentByPaneSuffix(
       // (including the no-op same-name refresh): `existing`'s own row is picking up
       // `params.displayName`, and any tombstoned predecessor sharing that name (found by
       // remintRow's own name-keyed lookup) never otherwise reaches this row.
-      return remintRow(db, existing, params, true)
+      // F-8 completion: repointCallerHandle only for a genuine DERIVED-placeholder promote
+      // (existing.derived === 1) — that row was never a live identity before, so mail on its
+      // pane's bare handle had no earlier chance to be claimed. An already-real row's mundane
+      // same-identity refresh (existing.derived === 0) leaves its bare-handle mail untouched,
+      // same as before this fix (agent-directory.test.ts's "unchanged terminal_handle" case).
+      return remintRow(db, existing, params, true, existing.derived === 1)
     }
 
     const nameHolder = findByName(db, params.hostId, params.displayName)
@@ -279,6 +284,17 @@ export function upsertAgentByPaneSuffix(
       paneKey: params.paneKey,
       hostId: params.hostId
     })
+    // F-8 completion (Ruling 33 Addendum 1): the caller's own bare terminal handle (e.g. a C2
+    // orphan notice addressed there before this fresh id ever existed) is a stranding surface
+    // distinct from the name-bind repoint above — repoint it exactly once, same as the
+    // promote/dead-pane-takeover paths (agent-pane-rebind.ts's remintRow) and the reclaim path
+    // (agent-directory-derived-reclaim.ts) already do.
+    const callerHandleRepoint = params.terminalHandle
+      ? repointMailboxFromCallerHandle(db, params.terminalHandle, id, {
+          paneKey: params.paneKey,
+          hostId: params.hostId
+        })
+      : { repointedMessages: 0, pendingOnOldHandle: 0 }
     db.exec('COMMIT')
     return {
       outcome: 'created',
@@ -287,8 +303,9 @@ export function upsertAgentByPaneSuffix(
       blockedByQuarantinedPredecessor,
       pendingPeerQuestions,
       unreadMailOnRetiredId,
-      repointedMessages: succeededRepoint + nameRepoint.repointedMessages,
-      pendingOnOldHandle: nameRepoint.pendingOnOldHandle,
+      repointedMessages:
+        succeededRepoint + nameRepoint.repointedMessages + callerHandleRepoint.repointedMessages,
+      pendingOnOldHandle: nameRepoint.pendingOnOldHandle + callerHandleRepoint.pendingOnOldHandle,
       predecessorCount
     }
   } catch (error) {
