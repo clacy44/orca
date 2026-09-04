@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from '../../sqlite/sync-database'
 import { upsertAgentByPaneSuffix } from './agent-directory'
-import { getSweepRestoreMark, recordLaunch, setSweepRestoreMark } from './agent-launch-sessions'
+import { recordLaunch } from './agent-launch-sessions'
+import { getSweepRestoreMark, setSweepRestoreMark } from './agent-sweep-restore-marks'
 import { OrchestrationDb } from './db'
 
 const NEW_TABLES = ['agent_launch_sessions', 'current_sessions', 'agent_sweep_restore_marks']

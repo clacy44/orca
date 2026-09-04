@@ -125,4 +125,41 @@ describe('S10-21a C1: retireAgent launch-row transaction', () => {
     expect(stillPresent).toBeDefined()
     expect(stillPresent?.agent_id).toBe(id)
   })
+
+  it("[S10-21a C1a, errata 5(p)-5 §F item 6] deletes the retired agent's current_sessions row in the same transaction as the tombstone", () => {
+    const db = rawDb()
+    const created = upsertAgentByPaneSuffix(db, baseParams())
+    const id = created.outcome === 'created' ? created.agent.id : ''
+
+    const launch = recordLaunch(db, {
+      hostId: 'local',
+      paneKey: 'tab1:leaf-aaa',
+      agentType: 'claude',
+      sessionId: 'sess-3',
+      launchGeneration: 'gen-1',
+      executionHostId: 'local',
+      evidence: 'host_launch'
+    })
+    expect(launch.ok).toBe(true)
+    if (launch.ok) {
+      db.prepare('UPDATE agent_launch_sessions SET agent_id = ? WHERE seq = ?').run(
+        id,
+        launch.row.seq
+      )
+    }
+    expect(
+      db
+        .prepare('SELECT 1 FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+        .get('local', 'tab1:leaf-aaa')
+    ).toBeDefined()
+
+    const result = retireAgent(db, id)
+    expect(result.outcome).toBe('retired')
+
+    expect(
+      db
+        .prepare('SELECT 1 FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+        .get('local', 'tab1:leaf-aaa')
+    ).toBeUndefined()
+  })
 })

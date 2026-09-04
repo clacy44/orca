@@ -85,21 +85,23 @@ import {
   type RetireAgentResult
 } from './agent-retire'
 import {
-  clearSweepRestoreMark as clearSweepRestoreMarkImpl,
   deleteLaunchRowsForAgent as deleteLaunchRowsForAgentImpl,
-  getSweepRestoreMark as getSweepRestoreMarkImpl,
   launchBySessionId as launchBySessionIdImpl,
   newestLaunchForPane as newestLaunchForPaneImpl,
   recordLaunch as recordLaunchImpl,
   recordSelfReportRotation as recordSelfReportRotationImpl,
   setLaunchAgentId as setLaunchAgentIdImpl,
-  setSweepRestoreMark as setSweepRestoreMarkImpl,
   type AgentLaunchSessionRow,
   type RecordLaunchParams,
   type RecordLaunchResult,
   type RecordSelfReportRotationParams,
   type RecordSelfReportRotationResult
 } from './agent-launch-sessions'
+import {
+  clearSweepRestoreMark as clearSweepRestoreMarkImpl,
+  getSweepRestoreMark as getSweepRestoreMarkImpl,
+  setSweepRestoreMark as setSweepRestoreMarkImpl
+} from './agent-sweep-restore-marks'
 import {
   checkAndBumpRate as checkAndBumpRateImpl,
   type CheckAndBumpRateParams,
@@ -1099,8 +1101,14 @@ const AGENT_LAUNCH_SESSIONS_SCHEMA_SQL = `
                                                    -- constraint; the design's schema block omits
                                                    -- one, unlike current_sessions' explicit
                                                    -- UNIQUEs, so this stays literal to §7's text
-        recorded_at              TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE (host_id, pane_key, launch_generation)
+        recorded_at              TEXT NOT NULL DEFAULT (datetime('now'))
+        -- [S10-21a C1a, errata 5(p)-5 item 1] UNIQUE(host_id, pane_key, launch_generation)
+        -- DROPPED: launch_generation is one UUID per OrcaRuntimeService (errata 5(o)), so the
+        -- constraint forbade a second covered launch into the same pane for the app's whole
+        -- lifetime — every restart-in-place and relaunch-agent-in-this-pane. seq stays the
+        -- PRIMARY KEY; the newest row by seq per (host_id, pane_key) is that pane's current row
+        -- (every read is already ORDER BY seq DESC). The concurrency fence this incidentally
+        -- provided is replaced by admission's (hostId, paneKey) lock (§C.1 F-H2), not lost.
       );
       CREATE INDEX IF NOT EXISTS idx_agent_launch_sessions_session
         ON agent_launch_sessions(session_id);

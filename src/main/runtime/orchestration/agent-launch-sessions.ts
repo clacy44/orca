@@ -1,7 +1,13 @@
 // S10-21a C1 (§7, §2.2, §2.11; Ruling 34 Addendum 5): host-authored launch-session provenance.
 // Store only — called by C3/C6/C7 and agent-retire.ts, none wired by this commit. Every write
-// here is host-local (createTerminal's launch path, the sweep), never peer-writable.
+// here is host-local (createTerminal's launch path, the sweep), never peer-writable. Retention
+// (pruning + the compensating delete) is agent-launch-sessions-retention.ts; sweep restore marks
+// are agent-sweep-restore-marks.ts; the current_sessions upsert is current-session-upsert.ts (a
+// dependency both this file and the retention module need, split out to avoid an import cycle
+// between them) — all split out to stay under the max-lines budget.
 import type Database from '../../sqlite/sync-database'
+import { prunePaneRows, pruneGlobalRows } from './agent-launch-sessions-retention'
+import { upsertCurrentSession } from './current-session-upsert'
 
 /** [D-R92 P5] 'self_report_rotation' is the one value not written by the launch path itself —
  * only by recordSelfReportRotation, gated by §1.6's four conjuncts (checked by C6, not here). */
@@ -29,6 +35,15 @@ export type RecordLaunchParams = {
   launchGeneration: string
   executionHostId: string
   evidence: Extract<LaunchEvidence, 'host_launch' | 'sweep_record'>
+  /** [S10-21a C1a, errata 5(p)-5 item 3] Set ONLY from a verified host-resume (Layer-2 restore)
+   * admission. Deletes `supersedePaneKey`'s current_sessions row inside this same transaction,
+   * before the insert — without it, a restore's recordLaunch(P_new, X) collides with
+   * UNIQUE(host_id, session_id) against the still-present (P_pred, X) row and the host's own
+   * legitimate restore is refused as a foreign session. C1a provides the mechanism; it does not
+   * decide who may set this field — that is C3-v2's admission classification. Every ordinary
+   * launch leaves it unset, so the cross-pane UNIQUE stays the successor fence for everything
+   * except this one sanctioned pane-to-pane move. */
+  supersedePaneKey?: string
 }
 
 export type RecordSelfReportRotationParams = {
@@ -56,9 +71,6 @@ export type RecordSelfReportRotationResult =
   | ForeignSessionIdRefusal
   | NoMatchingLaunchRowRefusal
 
-const PRUNE_PER_PANE = 3
-const PRUNE_GLOBAL = 512
-
 // node:sqlite (sync-database.ts) throws ERR_SQLITE_ERROR with a message naming the offending
 // index's columns; matched by substring rather than errcode alone (2067 is shared by every
 // UNIQUE violation on the connection).
@@ -74,56 +86,43 @@ function isCurrentSessionsSuccessorViolation(err: unknown): boolean {
   )
 }
 
-/** [errata 5(l), FORCED DEVIATION from §7's literal `INSERT OR REPLACE` text] Verified
- * empirically against node:sqlite: `INSERT OR REPLACE` applies its conflict resolution to EVERY
- * UNIQUE index on the table, not just the one in conflict — so a colliding session_id under a
- * different pane_key silently deletes that pane's row instead of raising, defeating the fence
- * errata 5(l) introduces this table for. `INSERT ... ON CONFLICT(host_id, pane_key) DO UPDATE`
- * targets only the same-pane conflict, so same-pane rewrites still upsert cleanly while a
- * cross-pane UNIQUE(host_id, session_id) collision is left unhandled and correctly raises
- * SQLITE_CONSTRAINT_UNIQUE, caught by isCurrentSessionsSuccessorViolation. */
-function upsertCurrentSession(
+/** [S10-21a C1a, errata 5(p)-5 item 4] Reads the row (if any) currently holding `sessionId` for
+ * `hostId` in current_sessions — the row that raised the UNIQUE(host_id, session_id) violation
+ * `isCurrentSessionsSuccessorViolation` just classified. Called AFTER ROLLBACK (the aborted
+ * insert is already undone), so this is a clean read of durably-committed state, not a read
+ * inside the failed transaction. */
+function conflictingCurrentSession(
   db: Database.Database,
   hostId: string,
-  paneKey: string,
   sessionId: string
-): void {
-  db.prepare(
-    `INSERT INTO current_sessions (host_id, pane_key, session_id) VALUES (?, ?, ?)
-     ON CONFLICT(host_id, pane_key) DO UPDATE SET session_id = excluded.session_id`
-  ).run(hostId, paneKey, sessionId)
+): { pane_key: string } | undefined {
+  return db
+    .prepare(`SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?`)
+    .get(hostId, sessionId) as { pane_key: string } | undefined
 }
 
-// §7: <=3 rows per pane_key (newest by seq), <=512 globally (oldest by seq). ORDER BY seq only.
-function prunePaneRows(db: Database.Database, hostId: string, paneKey: string): void {
-  db.prepare(
-    `DELETE FROM agent_launch_sessions
-       WHERE host_id = ? AND pane_key = ? AND seq NOT IN (
-         SELECT seq FROM agent_launch_sessions
-           WHERE host_id = ? AND pane_key = ?
-           ORDER BY seq DESC LIMIT ?
-       )`
-  ).run(hostId, paneKey, hostId, paneKey, PRUNE_PER_PANE)
-}
-
-function pruneGlobalRows(db: Database.Database): void {
-  db.prepare(
-    `DELETE FROM agent_launch_sessions
-       WHERE seq NOT IN (
-         SELECT seq FROM agent_launch_sessions ORDER BY seq DESC LIMIT ?
-       )`
-  ).run(PRUNE_GLOBAL)
-}
-
-/** [§2.2] INSERT into agent_launch_sessions + current_sessions upsert + §7 prune, one
+/** [§2.2] INSERT into agent_launch_sessions + current_sessions upsert, one
  * BEGIN IMMEDIATE…COMMIT. Not best-effort: caller (C3) must refuse the launch loudly on
- * non-ok, never spawn with an unrecorded session id. */
+ * non-ok, never spawn with an unrecorded session id.
+ *
+ * [errata 5(p)-5 item 6] The §7 prunes run AFTER this transaction commits, each in its own
+ * BEGIN IMMEDIATE — a prune that throws does NOT undo the just-recorded launch; the throw
+ * propagates out of this call so it is never silently swallowed. */
 export function recordLaunch(
   db: Database.Database,
   params: RecordLaunchParams
 ): RecordLaunchResult {
   db.exec('BEGIN IMMEDIATE')
   try {
+    if (params.supersedePaneKey !== undefined) {
+      // [errata 5(p)-5 item 3] Layer-2 restore only — frees the predecessor pane's
+      // current_sessions row before the insert so UNIQUE(host_id, session_id) does not refuse
+      // the host's own legitimate move of a session from P_pred to P_new.
+      db.prepare(`DELETE FROM current_sessions WHERE host_id = ? AND pane_key = ?`).run(
+        params.hostId,
+        params.supersedePaneKey
+      )
+    }
     db.prepare(
       `INSERT INTO agent_launch_sessions
          (host_id, pane_key, agent_type, session_id, previous_session_id, launch_generation,
@@ -139,27 +138,35 @@ export function recordLaunch(
       params.evidence
     )
     upsertCurrentSession(db, params.hostId, params.paneKey, params.sessionId)
-    prunePaneRows(db, params.hostId, params.paneKey)
-    pruneGlobalRows(db)
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     if (isCurrentSessionsSuccessorViolation(err)) {
+      // [errata 5(p)-5 item 4] Same-target restatement is an idempotent success: only a
+      // genuinely different pane already holding this session_id is a foreign collision.
+      const conflicting = conflictingCurrentSession(db, params.hostId, params.sessionId)
+      if (conflicting?.pane_key === params.paneKey) {
+        return { ok: true, row: launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow }
+      }
       return { ok: false, reason: 'foreign_session_id' }
     }
     throw err
   }
-  return { ok: true, row: launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow }
+  const row = launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow
+  prunePaneRows(db, params.hostId, params.paneKey)
+  pruneGlobalRows(db, params.hostId)
+  return { ok: true, row }
 }
 
-/** [§1.6/§2.3] Updates the pane's existing row IN PLACE — never a new row, since
- * UNIQUE(host_id, pane_key, launch_generation) would reject a second row for the same
- * generation — then upserts current_sessions, same transaction. `seq` is left untouched: it was
- * already assigned at the row's original INSERT, after every other generation's row for this
- * pane, so it is already the newest by seq without reassignment (JUDGMENT CALL: reads the
- * design's "advances the monotonic ordering column" as "remains correctly newest," not "seq's
- * value changes" — see RETURN block). Caller (C6) is expected to have verified §1.6's other
- * three conjuncts; this enforces only the fourth (successor uniqueness). */
+/** [§1.6/§2.3] Updates the pane's NEWEST row by seq IN PLACE — never a new row — then upserts
+ * current_sessions, same transaction. [errata 5(p)-5 item 2] Targets
+ * `WHERE seq = (SELECT seq … ORDER BY seq DESC LIMIT 1)` instead of
+ * `(host_id, pane_key, launch_generation)`: dropping that UNIQUE (item 1) means a pane can now
+ * carry more than one row per generation, so matching on generation alone no longer identifies
+ * the pane's current row. `seq` is left untouched: it was already assigned at the row's original
+ * INSERT, after every other row for this pane, so it is already the newest by seq without
+ * reassignment. Caller (C6) is expected to have verified §1.6's other three conjuncts; this
+ * enforces only the fourth (successor uniqueness). */
 export function recordSelfReportRotation(
   db: Database.Database,
   params: RecordSelfReportRotationParams
@@ -171,15 +178,13 @@ export function recordSelfReportRotation(
         `UPDATE agent_launch_sessions
            SET session_id = ?, previous_session_id = ?, evidence = 'self_report_rotation',
                recorded_at = datetime('now')
-         WHERE host_id = ? AND pane_key = ? AND launch_generation = ?`
+         WHERE seq = (
+           SELECT seq FROM agent_launch_sessions
+             WHERE host_id = ? AND pane_key = ?
+             ORDER BY seq DESC LIMIT 1
+         )`
       )
-      .run(
-        params.sessionId,
-        params.previousSessionId,
-        params.hostId,
-        params.paneKey,
-        params.launchGeneration
-      )
+      .run(params.sessionId, params.previousSessionId, params.hostId, params.paneKey)
     if (updated.changes === 0) {
       db.exec('ROLLBACK')
       return { ok: false, reason: 'no_matching_launch_row' }
@@ -245,36 +250,4 @@ export function setLaunchAgentId(
 export function deleteLaunchRowsForAgent(db: Database.Database, agentId: string): number {
   const result = db.prepare(`DELETE FROM agent_launch_sessions WHERE agent_id = ?`).run(agentId)
   return Number(result.changes)
-}
-
-/** [D-R92 P2] Write side only, called from the sweep's own transaction (C7) before its lock
- * releases. Idempotent (INSERT OR IGNORE). */
-export function setSweepRestoreMark(db: Database.Database, hostId: string, paneKey: string): void {
-  db.prepare(
-    `INSERT OR IGNORE INTO agent_sweep_restore_marks (host_id, pane_key) VALUES (?, ?)`
-  ).run(hostId, paneKey)
-}
-
-export function getSweepRestoreMark(
-  db: Database.Database,
-  hostId: string,
-  paneKey: string
-): boolean {
-  return (
-    db
-      .prepare(`SELECT 1 FROM agent_sweep_restore_marks WHERE host_id = ? AND pane_key = ?`)
-      .get(hostId, paneKey) !== undefined
-  )
-}
-
-/** Marks are keyed by pane only per §7 — cleared as a whole, no per-generation clearing. */
-export function clearSweepRestoreMark(
-  db: Database.Database,
-  hostId: string,
-  paneKey: string
-): void {
-  db.prepare(`DELETE FROM agent_sweep_restore_marks WHERE host_id = ? AND pane_key = ?`).run(
-    hostId,
-    paneKey
-  )
 }

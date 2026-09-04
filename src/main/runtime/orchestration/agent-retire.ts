@@ -2,6 +2,7 @@
 // budget) to stay under the repo's ratchet, same precedent as derived-agent-rows.ts.
 import type Database from '../../sqlite/sync-database'
 import { deleteLaunchRowsForAgent } from './agent-launch-sessions'
+import { deleteCurrentSessionForPane } from './agent-launch-sessions-retention'
 import { OrchestrationError } from './orchestration-error'
 import type { AgentRow } from './types'
 
@@ -32,7 +33,13 @@ export type RetireAgentResult =
  * transaction at all. v3 wraps `retireAgent`'s UPDATE and the launch-table row DELETE for that
  * agent in an explicit `BEGIN IMMEDIATE … COMMIT`, so the two writes are atomic — a retire
  * never leaves a launch-table row orphaned against a retired agent, nor a retired agent with a
- * stray launch row that could seed a future contest. */
+ * stray launch row that could seed a future contest.
+ *
+ * [S10-21a C1a, errata 5(p)-5 §F item 6/D-R93 line 571] "the only deleters of current_sessions
+ * are supersedePaneKey, retire, and deleteLaunchRow" names retire as a sanctioned deleter — not
+ * silent on this, so no RETURN-block question. The retired agent's `current_sessions` row (its
+ * pane, captured before the tombstone UPDATE clears `agents.pane_key`) is deleted in the same
+ * transaction. */
 export function retireAgent(db: Database.Database, id: string): RetireAgentResult {
   const existing = getAgentByIdIncludingTombstoned(db, id)
   if (!existing) {
@@ -48,6 +55,9 @@ export function retireAgent(db: Database.Database, id: string): RetireAgentResul
          role = NULL, title = NULL, worktree_path = NULL WHERE id = ?`
     ).run(id)
     deleteLaunchRowsForAgent(db, id)
+    if (existing.pane_key) {
+      deleteCurrentSessionForPane(db, existing.host_id, existing.pane_key)
+    }
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
