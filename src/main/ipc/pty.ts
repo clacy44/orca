@@ -851,24 +851,33 @@ function launchAdmissionBundle(
           })
         }
       },
-      // [D-R104 F-3] "for now = audit verb 'contested' + notice on the pane (C6 extends)".
-      contestedLineage: (paneKey) => {
+      // [D-R104 F-3, S10-21a C6 SCOPE 3(b)] Audit verb 'contested' + a pane notice on BOTH the
+      // claimant's pane and the registered agent's own pane, when they differ — getAgentByPaneKey
+      // (agent-launch-admission.ts) matches by pane SUFFIX, so a SELF_RESUME's claimed paneKey
+      // and the registered row's own pane_key are not always the same string even though they
+      // named the same row. One audit row per distinct pane (never two for the common case where
+      // they coincide); each pane gets its own rate-limited notice (writeHostNoticeToPane's own
+      // per-paneKey clamp — no shared counter to double-consume across the two panes).
+      contestedLineage: (claimantPaneKey, registeredPaneKey) => {
         const contestDb =
           typeof runtime?.getOrchestrationDb === 'function'
             ? runtime.getOrchestrationDb()
             : undefined
-        contestDb?.writeAgentAudit({
-          agentId: null,
-          actorPaneKey: paneKey,
-          actorHostId: hostId,
-          verb: 'contested',
-          outcome: 'admitted',
-          reasonCode: null
-        })
-        if (typeof runtime?.writeHostNoticeToPane === 'function') {
-          runtime.writeHostNoticeToPane(paneKey, 'Launch admission: contested lineage.', {
-            rateKey: 'contested'
+        const panes = new Set([claimantPaneKey, registeredPaneKey])
+        for (const paneKey of panes) {
+          contestDb?.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: paneKey,
+            actorHostId: hostId,
+            verb: 'contested',
+            outcome: 'admitted',
+            reasonCode: null
           })
+          if (typeof runtime?.writeHostNoticeToPane === 'function') {
+            runtime.writeHostNoticeToPane(paneKey, 'Launch admission: contested lineage.', {
+              rateKey: 'contested'
+            })
+          }
         }
       }
     }

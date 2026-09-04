@@ -45,7 +45,14 @@ export type RebindRestoredPaneParams = {
 }
 
 export type RebindPredicateOutcome =
-  | { kind: 'refuse'; reason: RebindRefusalReason }
+  | {
+      kind: 'refuse'
+      reason: RebindRefusalReason
+      // [S10-21a C6, §2.6] Set ONLY for 'incumbent_alive' — the one refusal that is also a
+      // contested-lineage event (§2.6). Every other refusal reason leaves this undefined; the
+      // row `agentId` names is R itself, found by clause 2 above before clause 6 ever runs.
+      agentId?: string
+    }
   // Clause 3 / T13: R already sits on the target pane, or a prior call for this exact lineage
   // already committed the move (double fire) — no clause failed, there is simply nothing left
   // to do. Distinguished from a refusal so the caller returns ok:true, not ok:false.
@@ -161,9 +168,11 @@ export function evaluateRebindPredicate(
     return { kind: 'refuse', reason: 'cross_execution_host' }
   }
 
-  // Clause 6.
+  // Clause 6. [S10-21a C6, §2.6] Contested lineage: a live incumbent still holds this row's
+  // lineage. `agentId` is threaded through so the caller (rebindRestoredPane) can attribute the
+  // `contested` audit row to R without a second lookup.
   if (!params.incumbent.dead) {
-    return { kind: 'refuse', reason: 'incumbent_alive' }
+    return { kind: 'refuse', reason: 'incumbent_alive', agentId: row.id }
   }
 
   // Clause 7.

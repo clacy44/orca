@@ -294,6 +294,34 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(contested).toEqual(['tab1:leaf-a'])
   })
 
+  it("S10-21a C6 SCOPE 3(b): contestedLineage receives BOTH panes when the registered row's own pane_key differs (pane-suffix match)", async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'self-sess',
+      launchGeneration: 'gen-1',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    // Registered under a DIFFERENT tabId prefix, same leaf suffix — getAgentByPaneKey matches
+    // by suffix (derived-agent-rows.ts), so this row is found even though its own pane_key
+    // string differs from the SELF_RESUME's claimed paneKey.
+    insertRegisteredAgent(db, 'tabOLD:leaf-a')
+    const contested: [string, string][] = []
+    await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume self-sess' }),
+      CALLER,
+      ctx({
+        contestedLineage: (claimantPaneKey, registeredPaneKey) =>
+          contested.push([claimantPaneKey, registeredPaneKey])
+      })
+    )
+    expect(contested).toEqual([['tab1:leaf-a', 'tabOLD:leaf-a']])
+  })
+
   it('SELF_RESUME(v2.1 V1): always audits, even into an UNregistered pane (no notice/contest)', async () => {
     const db = freshDb()
     db.recordLaunch({

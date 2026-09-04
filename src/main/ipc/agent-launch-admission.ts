@@ -64,8 +64,12 @@ export type AgentLaunchAdmissionContext = {
    * every UNRECORDED. */
   notice: (paneKey: string, verb: string, reasonCode: string) => void
   /** [D-R104 F-3] REQUIRED, same reasoning as `notice`. [§C.4 SELF_RESUME v2.1 V1] The §2.6
-   * contested-lineage signal — for now, audit verb 'contested' plus a pane notice (C6 extends). */
-  contestedLineage: (paneKey: string) => void
+   * contested-lineage signal — audit verb 'contested' plus a pane notice.
+   * [S10-21a C6, SCOPE 3(b)] `registeredPaneKey` is the registered agent's OWN pane_key
+   * (`getAgentByPaneKey` matches by pane SUFFIX — derived-agent-rows.ts:22-34 — so it can
+   * legitimately differ from `claimantPaneKey`, the pane the caller-origin SELF_RESUME actually
+   * landed on). The runtime-side handler notices BOTH when they differ, one when they don't. */
+  contestedLineage: (claimantPaneKey: string, registeredPaneKey: string) => void
 }
 
 export type { AdmittedLaunch } from './agent-launch-admission-support'
@@ -275,7 +279,10 @@ export async function admitAgentLaunch(
         audit(db, paneKey, ctx.hostId, 'launch_self_resume', 'admitted', reasonCode)
         if (reasonCode === 'caller' && registeredRow !== undefined && registeredRow.derived === 0) {
           ctx.notice(paneKey, 'launch_self_resume', 'caller')
-          ctx.contestedLineage(paneKey)
+          // getAgentByPaneKey matches by pane SUFFIX (derived-agent-rows.ts) and its own WHERE
+          // clause requires pane_key IS NOT NULL for any row it returns — the `?? paneKey`
+          // fallback is defensive only, never actually reached.
+          ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey)
         }
         return passThrough(spawnOptions)
       }

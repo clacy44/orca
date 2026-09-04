@@ -381,4 +381,64 @@ describe('S10-21a C5: rebindRestoredPane', () => {
       .get(HOST_ID, 'tab3:leaf-other')
     expect(other).toBeDefined()
   })
+
+  it('S10-21a C6, §2.6 SCOPE(a): conflicting_signals => contested audit, no rebind, row unchanged', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-c',
+      display_name: 'chair-c',
+      pane_key: 'tab1:leaf-c',
+      terminal_handle: 'handle-c'
+    })
+    const conflictingSignals: IncumbentVerdict = { dead: false, reason: 'conflicting_signals' }
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-c'),
+      newPaneKey: 'tab2:leaf-c2',
+      newTerminalHandle: 'handle-c2',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: conflictingSignals
+    })
+    expect(result).toEqual({ ok: false, reason: 'incumbent_alive' })
+
+    // Fail-closed: no rebind, no row change.
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-c') as AgentRow
+    expect(row.pane_key).toBe('tab1:leaf-c')
+    expect(row.terminal_handle).toBe('handle-c')
+
+    const contested = db
+      .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'contested'`)
+      .all('agent-c') as { outcome: string; reason_code: string | null }[]
+    expect(contested).toHaveLength(1)
+    expect(contested[0].outcome).toBe('refused')
+    expect(contested[0].reason_code).toContain('conflicting_signals')
+  })
+
+  it('a plain live incumbent (no conflicting_signals) also raises the contested audit, per SCOPE(a)', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-l',
+      display_name: 'chair-l',
+      pane_key: 'tab1:leaf-l',
+      terminal_handle: 'handle-l'
+    })
+    const liveIncumbent: IncumbentVerdict = { dead: false, reason: 'live' }
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-l'),
+      newPaneKey: 'tab2:leaf-l2',
+      newTerminalHandle: 'handle-l2',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: liveIncumbent
+    })
+    expect(result).toEqual({ ok: false, reason: 'incumbent_alive' })
+    const contested = db
+      .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'contested'`)
+      .all('agent-l')
+    expect(contested).toHaveLength(1)
+  })
 })

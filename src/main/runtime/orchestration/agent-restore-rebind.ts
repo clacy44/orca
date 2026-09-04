@@ -75,6 +75,25 @@ export function rebindRestoredPane(
 ): RebindRestoredPaneResult {
   const predicate = evaluateRebindPredicate(db, params)
   if (predicate.kind === 'refuse') {
+    // [S10-21a C6, §2.6 SCOPE(a)] Fail-closed contest: a live incumbent still holds this
+    // lineage (including C4a's 'conflicting_signals' verdict, which forces this same
+    // refusal — resolveIncumbentDeath never reports `dead: true` while d3.liveNow). No
+    // rebind, no row change (predicate performed no write besides its own rate bump); one
+    // `contested` audit row names the refused claim. Pure DB — no notice from here (the
+    // caller, the sweep, owns runtime access for that).
+    if (predicate.reason === 'incumbent_alive') {
+      writeAgentAudit(db, {
+        agentId: predicate.agentId ?? null,
+        actorPaneKey: params.newPaneKey,
+        actorHostId: params.hostId,
+        verb: 'contested',
+        outcome: 'refused',
+        reasonCode:
+          `restore lineage contested: incumbent ` +
+          `${params.incumbent.dead ? params.incumbent.signal : params.incumbent.reason} ` +
+          `at ${params.ticketPayload.predecessorPaneKey}; claimant ${params.newPaneKey}`
+      })
+    }
     return { ok: false, reason: predicate.reason }
   }
   if (predicate.kind === 'noop') {
