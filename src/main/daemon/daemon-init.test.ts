@@ -2992,7 +2992,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
       'daemon-stderr-tail',
-      expect.objectContaining({ lines: ['native abort tail'] })
+      expect.objectContaining({ lines: 'native abort tail' })
     )
   })
 

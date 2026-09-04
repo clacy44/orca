@@ -828,7 +828,10 @@ function createOutOfProcessLauncher(
           const lines = stderrLog.getTailLines()
           stderrLog.close()
           if (lines.length > 0) {
-            recordDurableCrashBreadcrumb('daemon-stderr-tail', { entryPath, lines })
+            recordDurableCrashBreadcrumb('daemon-stderr-tail', {
+              entryPath,
+              lines: lines.join('\n')
+            })
           }
         }
         child.stderr?.on('data', (chunk: Buffer) => stderrLog.write(chunk))
