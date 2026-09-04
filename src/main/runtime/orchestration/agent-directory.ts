@@ -64,6 +64,8 @@ export type UpsertAgentByPaneSuffixResult =
       // plus F-18's succession repoint of the tombstoned predecessor's `agent:<old id>` mail.
       repointedMessages: number
       pendingOnOldHandle: number
+      // F-7: predecessor count behind adoptedThreads, for the audit reason string.
+      predecessorCount: number
     }
   | {
       outcome: 'reminted'
@@ -77,6 +79,8 @@ export type UpsertAgentByPaneSuffixResult =
       blockedByQuarantinedPredecessor: boolean
       pendingPeerQuestions: number
       unreadMailOnRetiredId: number
+      // F-7: predecessor count behind adoptedThreads, for the audit reason string.
+      predecessorCount: number
     }
   | {
       outcome: 'name_taken'
@@ -258,6 +262,7 @@ export function upsertAgentByPaneSuffix(
     const {
       adoptedThreads,
       blockedByQuarantinedPredecessor,
+      predecessorCount,
       repointedMessages: succeededRepoint
     } = adoptPredecessorThreadMembership(db, params.hostId, params.displayName, id)
     const { pendingPeerQuestions, unreadMailOnRetiredId } = countUninheritedPredecessorMail(
@@ -283,7 +288,8 @@ export function upsertAgentByPaneSuffix(
       pendingPeerQuestions,
       unreadMailOnRetiredId,
       repointedMessages: succeededRepoint + nameRepoint.repointedMessages,
-      pendingOnOldHandle: nameRepoint.pendingOnOldHandle
+      pendingOnOldHandle: nameRepoint.pendingOnOldHandle,
+      predecessorCount
     }
   } catch (error) {
     db.exec('ROLLBACK')

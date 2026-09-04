@@ -1444,8 +1444,19 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // placeholder, never something the pane's owner opted into. When exactly one live
         // registered row on this SAME worktree has gone dark, name it so the caller can reclaim
         // it with a plain `register` instead of reading as a stranger with no identity at all.
+        // F-6 (attacker-lens review, Ruling 33(a) H6a): gate on the ATTESTED pane's own row, not
+        // bare `callerAgentRow` — that variable is undefined whenever `handle` mismatches the
+        // attested pane's terminal (a stale `--terminal`), even for an already-registered chair,
+        // which used to fall into this branch and get told to register ANOTHER dead identity.
+        // `attestedAgentRowOnMismatch` and `callerAgentRow` are mutually exclusive (one keys off
+        // a handle match, the other off a mismatch), so this is exactly the attested pane's row
+        // either way.
+        const effectiveCallerAgentRow = attestedAgentRowOnMismatch ?? callerAgentRow
         let orphanedIdentityNotice: string | undefined
-        if (attestedForAgentCheck && (!callerAgentRow || callerAgentRow.derived === 1)) {
+        if (
+          attestedForAgentCheck &&
+          (!effectiveCallerAgentRow || effectiveCallerAgentRow.derived === 1)
+        ) {
           const liveTerminalForCaller = await findLiveTerminalByHandle(
             runtime,
             attestedForAgentCheck.terminalHandle

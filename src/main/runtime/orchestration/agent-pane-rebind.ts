@@ -9,6 +9,7 @@ import {
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
 } from './agent-thread-succession'
+import { writeAgentAudit } from './agent-audit-log'
 import type { AgentRow } from './types'
 
 // R1: ground truth for "is this row's own pane still alive" — a null pane_key (unresolvable by
@@ -78,6 +79,9 @@ export type RemintRowResult = {
   blockedByQuarantinedPredecessor: boolean
   pendingPeerQuestions: number
   unreadMailOnRetiredId: number
+  // F-1/F-7 (attacker-lens review, Ruling 33(a) H6a): predecessor count behind adoptedThreads,
+  // for the audit reason string's "N thread(s) from M predecessor(s)".
+  predecessorCount: number
 }
 
 /** R1 rebind, shared by both paths that re-adopt an existing row (found by live pane-suffix
@@ -131,8 +135,22 @@ export function remintRow(
   let blockedByQuarantinedPredecessor = false
   let pendingPeerQuestions = 0
   let unreadMailOnRetiredId = 0
+  let predecessorCount = 0
   let successionRepoint = 0
-  if (succession) {
+  if (succession && reminted.quarantined === 1) {
+    // F-3 (attacker-lens review, Ruling 33(a) H6a): a quarantined successor must never adopt —
+    // quarantine survives a rename/promote exactly the way it survives a name-keyed predecessor
+    // scan (adoptPredecessorThreadMembership's own guard above). No 'thread_succession' marker
+    // is written (nothing was adopted), so an un-quarantine later still lets succession run.
+    writeAgentAudit(db, {
+      agentId: reminted.id,
+      actorPaneKey: params.paneKey,
+      actorHostId: params.hostId,
+      verb: 'thread_succession_skipped',
+      outcome: 'skipped',
+      reasonCode: 'succession_skipped_quarantined'
+    })
+  } else if (succession) {
     // F-18 (via adoptPredecessorThreadMembership): the succession repoint MUST run before
     // countUninheritedPredecessorMail below, same ordering agent-directory.ts's 'created'
     // branch already relies on — otherwise the uninherited count double-counts mail this same
@@ -145,6 +163,7 @@ export function remintRow(
     )
     adoptedThreads = outcome.adoptedThreads
     blockedByQuarantinedPredecessor = outcome.blockedByQuarantinedPredecessor
+    predecessorCount = outcome.predecessorCount
     successionRepoint = outcome.repointedMessages
     const uninherited = countUninheritedPredecessorMail(
       db,
@@ -175,6 +194,7 @@ export function remintRow(
     adoptedThreads,
     blockedByQuarantinedPredecessor,
     pendingPeerQuestions,
-    unreadMailOnRetiredId
+    unreadMailOnRetiredId,
+    predecessorCount
   }
 }

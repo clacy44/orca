@@ -216,4 +216,53 @@ describe('orchestration.check: orphaned-identity notice (Ruling 33(a) C1/F-19)',
     }
     expect(result.orphanedIdentityNotice).toBeUndefined()
   })
+
+  // F-6 (attacker-lens review, Ruling 33(a) H6a): `callerAgentRow` reads undefined whenever the
+  // requested `terminal` mismatches the attested pane's own terminal handle (a stale
+  // `--terminal`) — even for an already-registered, non-derived chair. Before this fix that fell
+  // straight into the orphanedIdentityNotice branch and told a REGISTERED chair to register
+  // another (possibly dead) identity. The gate must key off the attested pane's own row
+  // (`attestedAgentRowOnMismatch ?? callerAgentRow`), not the handle-matched variable alone.
+  it('T10 (F-6): a registered caller whose --terminal mismatches attestation never gets the notice', async () => {
+    setup()
+    // Replace the caller pane's derived placeholder (set up by setup()) with a REAL
+    // registration — the attested pane's own row is no longer derived.
+    db.upsertAgentByPaneSuffix({
+      displayName: 'self',
+      role: null,
+      hostId: 'local',
+      paneKey: PANE_C,
+      terminalHandle: 'term_c',
+      processIncarnation: 'proc-1',
+      worktreeId: 'wt_other',
+      // Deliberately NOT WORKTREE_PATH: the caller's own registered row must not itself count
+      // as a second orphan candidate on WORKTREE_PATH (findOrphanedIdentityCandidate has no
+      // notion of "the pane asking" vs. "a candidate" — it is a plain worktree_path scan) and
+      // turn this into the >=2-candidates ambiguous-suppression case (T9b) instead of the F-6
+      // gate this test exists to prove.
+      worktreePath: '/repo/other',
+      branch: 'other',
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_c',
+      originHostId: 'local'
+    })
+    // A genuine orphan candidate exists on this worktree, so a bare "zero candidates" outcome
+    // cannot explain a missing notice here.
+    const candidateId = registerCandidate('tabX:leaf-old', 'chair')
+    db.insertGatedMessage({
+      from: 'peer',
+      to: `agent:${candidateId}`,
+      subject: 'first',
+      type: 'status',
+      priority: 'normal',
+      runId: PEER_RUN_ID
+    })
+
+    // `check` requested a DIFFERENT terminal than the one the attested pane actually resolves to.
+    const result = (await call('orchestration.check', { terminal: 'some_other_terminal' })) as {
+      orphanedIdentityNotice?: string
+    }
+    expect(result.orphanedIdentityNotice).toBeUndefined()
+  })
 })

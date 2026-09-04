@@ -5,6 +5,7 @@
 // mechanism that reattaches that successor to every thread its predecessor(s) belonged to.
 import type Database from '../../sqlite/sync-database'
 import { repointMailboxOnSuccession } from './agent-mailbox-repoint'
+import { writeAgentAudit } from './agent-audit-log'
 
 export type ThreadSuccessionOutcome = {
   adoptedThreads: number
@@ -16,6 +17,11 @@ export type ThreadSuccessionOutcome = {
   // non-quarantined predecessor's `agent:<old id>` mailbox. Computed BEFORE adoption is blocked
   // by a quarantined predecessor (that branch returns 0 — quarantine locks the mail too).
   repointedMessages: number
+  // F-1/F-7 (attacker-lens review, Ruling 33(a) H6a): how many tombstoned predecessors this
+  // scan found, for the audit reason string's "N thread(s) from M predecessor(s)" — a bare
+  // adoptedThreads count alone cannot say whether one predecessor held many threads or many
+  // predecessors held one each.
+  predecessorCount: number
 }
 
 /** Idempotent: a thread the successor already participates in is left alone (never
@@ -43,7 +49,12 @@ export function adoptPredecessorThreadMembership(
     )
     .get(hostId, displayName, successorId)
   if (anyQuarantinedPredecessor) {
-    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: true, repointedMessages: 0 }
+    return {
+      adoptedThreads: 0,
+      blockedByQuarantinedPredecessor: true,
+      repointedMessages: 0,
+      predecessorCount: 0
+    }
   }
 
   const predecessors = db
@@ -54,7 +65,12 @@ export function adoptPredecessorThreadMembership(
     )
     .all(hostId, displayName, successorId) as { id: string }[]
   if (predecessors.length === 0) {
-    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false, repointedMessages: 0 }
+    return {
+      adoptedThreads: 0,
+      blockedByQuarantinedPredecessor: false,
+      repointedMessages: 0,
+      predecessorCount: 0
+    }
   }
   return adoptFromPredecessors(
     db,
@@ -76,7 +92,12 @@ export function adoptFromPredecessors(
   successorId: string
 ): ThreadSuccessionOutcome {
   if (predecessorIds.length === 0) {
-    return { adoptedThreads: 0, blockedByQuarantinedPredecessor: false, repointedMessages: 0 }
+    return {
+      adoptedThreads: 0,
+      blockedByQuarantinedPredecessor: false,
+      repointedMessages: 0,
+      predecessorCount: 0
+    }
   }
   const predecessors = predecessorIds.map((id) => ({ id }))
 
@@ -149,7 +170,12 @@ export function adoptFromPredecessors(
       `${adopted} thread(s) adopted from ${predecessors.length} predecessor(s)`
     )
   }
-  return { adoptedThreads: adopted, blockedByQuarantinedPredecessor: false, repointedMessages }
+  return {
+    adoptedThreads: adopted,
+    blockedByQuarantinedPredecessor: false,
+    repointedMessages,
+    predecessorCount: predecessors.length
+  }
 }
 
 export type UninheritedPredecessorMailOutcome = {
@@ -221,15 +247,38 @@ export function catchUpThreadSuccession(
   hostId: string,
   displayName: string,
   successorId: string
-): ThreadSuccessionOutcome | null {
+): (ThreadSuccessionOutcome & UninheritedPredecessorMailOutcome) | null {
   if (hasThreadSuccessionMarker(db, successorId)) {
+    return null
+  }
+  // F-3 (attacker-lens review, Ruling 33(a) H6a): a quarantined successor must never adopt via
+  // catch-up either — same guard as remintRow's succession block (agent-pane-rebind.ts). No
+  // 'thread_succession' marker is written here (nothing was adopted), so an un-quarantine later
+  // still lets catch-up run.
+  const successorRow = db
+    .prepare('SELECT quarantined FROM agents WHERE id = ?')
+    .get(successorId) as { quarantined: number } | undefined
+  if (successorRow?.quarantined === 1) {
+    writeAgentAudit(db, {
+      agentId: successorId,
+      actorPaneKey: null,
+      actorHostId: hostId,
+      verb: 'thread_succession_skipped',
+      outcome: 'skipped',
+      reasonCode: 'succession_skipped_quarantined'
+    })
     return null
   }
   db.exec('BEGIN IMMEDIATE')
   try {
     const outcome = adoptPredecessorThreadMembership(db, hostId, displayName, successorId)
+    // F-2: the reclaim path's remintRow(succession:true) already returns
+    // countUninheritedPredecessorMail's fields directly — this catch-up call is the OTHER place
+    // succession can run (outside upsertAgentByPaneSuffix's transaction), and it must return the
+    // same honest counts so register.ts:256-257 can sum both sources.
+    const uninherited = countUninheritedPredecessorMail(db, hostId, displayName, successorId)
     db.exec('COMMIT')
-    return outcome
+    return { ...outcome, ...uninherited }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error

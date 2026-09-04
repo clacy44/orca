@@ -178,6 +178,21 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         existingForPane.derived === 1 &&
         existingForPane.id === result.agent.id
       const isDeadPaneIdentityTakeover = result.outcome === 'reminted' && !existingForPane
+
+      // F-9b catch-up (Ruling 33 Addendum 1): a successor that missed succession on an earlier
+      // register (registered before this fix landed) catches up here, idempotently — a no-op
+      // once a `thread_succession` audit row already marks this id (that row, inserted by
+      // adoptPredecessorThreadMembership itself when it adopts anything, IS the marker — no
+      // second audit row needed here). Runs on EVERY outcome (created or reminted), not just
+      // the promote shape above, since the historical bug this repairs could have left ANY
+      // successor's row un-adopted.
+      // F-7 (attacker-lens review, Ruling 33(a) H6a): moved ABOVE the audit write below — the
+      // isPromoteSuccession reason string must report the TOTAL adopted (this call's own
+      // upsert plus any catch-up), never just the upsert's own share.
+      const catchUp = db.catchUpThreadSuccession(hostId, result.agent.display_name, result.agent.id)
+      const totalAdoptedThreads = result.adoptedThreads + (catchUp?.adoptedThreads ?? 0)
+      const totalPredecessorCount = result.predecessorCount + (catchUp?.predecessorCount ?? 0)
+
       db.writeAgentAudit({
         agentId: result.agent.id,
         actorPaneKey: authority.paneKey,
@@ -192,18 +207,9 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
               'derived row minted by a directory listing'
             : isPromoteSuccession
               ? `name succession: "${params.name}" acquired by an existing row; ` +
-                `${result.adoptedThreads} thread(s) from its predecessor(s)`
+                `${totalAdoptedThreads} thread(s) from ${totalPredecessorCount} predecessor(s)`
               : null
       })
-
-      // F-9b catch-up (Ruling 33 Addendum 1): a successor that missed succession on an earlier
-      // register (registered before this fix landed) catches up here, idempotently — a no-op
-      // once a `thread_succession` audit row already marks this id (that row, inserted by
-      // adoptPredecessorThreadMembership itself when it adopts anything, IS the marker — no
-      // second audit row needed here). Runs on EVERY outcome (created or reminted), not just
-      // the promote shape above, since the historical bug this repairs could have left ANY
-      // successor's row un-adopted.
-      const catchUp = db.catchUpThreadSuccession(hostId, result.agent.display_name, result.agent.id)
 
       // Ruling 32 Addendum 10 (A3/F-5b/F-18): both outcomes can now repoint stranded mail —
       // 'created' from a bare-name address (agent-mailbox-repoint.ts's name-bind repoint) and/or
@@ -241,7 +247,7 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // this id just inherited — on 'created' (a fresh id), on 'reminted' (the rename/promote
         // shape, or H5's B1 reclaim adopting its displaced derived row), and now (F-9b
         // catch-up) on any outcome that had missed succession on an earlier register.
-        adoptedThreads: result.adoptedThreads + (catchUp?.adoptedThreads ?? 0),
+        adoptedThreads: totalAdoptedThreads,
         // F-9 (Ruling 32(b)): true when a quarantined predecessor under this name blocked
         // adoption outright (by design). Lets the CLI say WHICH threads were not inherited and
         // why, instead of a bare 0 reading the same as "nothing to inherit".
@@ -253,8 +259,11 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // successor id (deferred by ruling), so this counts what the CLI must say was NOT
         // inherited. Read on BOTH outcomes now (F-9b) — a 'reminted' row's own predecessors can
         // leave exactly the same uninherited backlog a 'created' row's can.
-        pendingPeerQuestions: result.pendingPeerQuestions,
-        unreadMailOnRetiredId: result.unreadMailOnRetiredId
+        // F-2 (attacker-lens review, Ruling 33(a) H6a): also summed with the catch-up's own
+        // uninherited count — the register-RPC catch-up (agent-thread-succession.ts) is a
+        // second place succession can run, and it left this same backlog unreported before.
+        pendingPeerQuestions: result.pendingPeerQuestions + (catchUp?.pendingPeerQuestions ?? 0),
+        unreadMailOnRetiredId: result.unreadMailOnRetiredId + (catchUp?.unreadMailOnRetiredId ?? 0)
       }
     }
   })

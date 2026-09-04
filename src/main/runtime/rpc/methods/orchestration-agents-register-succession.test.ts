@@ -533,4 +533,268 @@ describe('orchestration.agents.register: F-9b succession on rename/promote (Ruli
     expect(result.blockedByQuarantinedPredecessor).toBe(true)
     expect(result.adoptedThreads).toBe(0)
   })
+
+  // F-4 (attacker-lens review, Ruling 33(a) H6a): T3 above always lands on the SAME pane as the
+  // pre-existing successor row, which goes through remintRow's own succession:true (the
+  // rename/promote fallback, agent-directory.ts:195) — the register-RPC catch-up call never
+  // actually runs there (its marker is already written by that direct succession). This drives
+  // the dead-pane-BY-NAME takeover instead (agent-directory.ts:223, remintRow succession:false):
+  // a DIFFERENT pane with no row of its own reclaims a dead, non-derived name holder that itself
+  // never got a thread_succession marker — the catch-up in orchestration-agents-register.ts is
+  // the ONLY thing that can adopt here.
+  const PANE_C = 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+
+  it('T5 (F-4): catch-up is the sole adoption mechanism on the dead-pane-by-name takeover path, and also surfaces uninherited peer questions (F-2)', async () => {
+    setup()
+    const predecessorId = 'agt_pred_takeover'
+    sqlite
+      .prepare(
+        `INSERT INTO agents (id, display_name, host_id, state, derived, quarantined, origin_kind, origin_host_id, tombstoned_at)
+         VALUES (?, 'chair', 'local', 'gone', 0, 0, 'pane', 'local', datetime('now'))`
+      )
+      .run(predecessorId)
+    const { thread } = db.createThread({
+      subject: 'plan',
+      createdByAgentId: predecessorId,
+      participants: [{ participantKey: predecessorId, agentId: predecessorId, role: 'owner' }]
+    })
+    sqlite
+      .prepare(
+        `INSERT INTO question_threads (message_id, run_id, dispatch_id, asker_handle, status, to_agent_id)
+         VALUES ('q_takeover', 'peer_questions', 'peer:t1', 'remote:env:asker', 'pending', ?)`
+      )
+      .run(predecessorId)
+
+    // The current name holder: a real registered row (NOT derived), dead pane, no
+    // thread_succession marker for it yet — simulates a row that existed before this fix.
+    const holderId = 'agt_holder_takeover'
+    sqlite
+      .prepare(
+        `INSERT INTO agents (
+           id, display_name, role, host_id, pane_key, terminal_handle, process_incarnation,
+           worktree_id, worktree_path, branch, title, agent_label, state, derived,
+           origin_kind, origin_pane_key, origin_handle, origin_host_id
+         ) VALUES (?, 'chair', NULL, 'local', 'tabX:leaf-old', 'term_old', 'proc-old',
+           NULL, NULL, NULL, NULL, NULL, 'idle', 0, 'pane', 'tabX:leaf-old', 'term_old', 'local')`
+      )
+      .run(holderId)
+
+    // Register from PANE_C — no row of its own, so upsertAgentByPaneSuffix falls into the
+    // no-existing-row branch, finds `holderId` by name, dead pane, non-derived, non-quarantined
+    // -> remintRow(succession:false) at agent-directory.ts:223.
+    vi.spyOn(runtime, 'listTerminals').mockResolvedValue({
+      terminals: [
+        terminal({
+          handle: 'term_c',
+          ptyId: 'pty-c',
+          tabId: 'tabC',
+          leafId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+        })
+      ],
+      totalCount: 1,
+      truncated: false
+    })
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+      if (
+        evidence?.terminalHandle === 'term_c' &&
+        evidence.paneKey === PANE_C &&
+        evidence.launchToken
+      ) {
+        return authorityFor(PANE_C, 'term_c')
+      }
+      return null
+    })
+    ctx = {
+      runtime,
+      orchestrationCompatibilityEvidence: {
+        terminalHandle: 'term_c',
+        paneKey: PANE_C,
+        launchToken: 'lt-c'
+      }
+    }
+
+    const result = (await call('orchestration.agents.register', { name: 'chair' })) as {
+      agent: { id: string }
+      adoptedThreads: number
+      pendingPeerQuestions: number
+    }
+    expect(result.agent.id).toBe(holderId)
+    expect(result.adoptedThreads).toBe(1)
+    expect(db.isThreadParticipant(thread.id, holderId)).toBe(true)
+    expect(result.pendingPeerQuestions).toBe(1)
+
+    const auditCountAfterFirst = (
+      sqlite
+        .prepare(
+          `SELECT COUNT(*) AS n FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession'`
+        )
+        .get(holderId) as { n: number }
+    ).n
+    expect(auditCountAfterFirst).toBe(1)
+
+    const second = (await call('orchestration.agents.register', { name: 'chair' })) as {
+      adoptedThreads: number
+    }
+    expect(second.adoptedThreads).toBe(0)
+  })
+
+  // F-3 (attacker-lens review, Ruling 33(a) H6a): a QUARANTINED successor must never adopt,
+  // whether succession runs inline (remintRow's own succession:true) or via the register-RPC
+  // catch-up call — exercised here through the catch-up path (T5's exact shape, but the
+  // successor row itself is quarantined).
+  it('T6 (F-3): a quarantined successor adopts nothing via catch-up, and the skip is audited', async () => {
+    setup()
+    const predecessorId = 'agt_pred_quarantined_succ'
+    sqlite
+      .prepare(
+        `INSERT INTO agents (id, display_name, host_id, state, derived, quarantined, origin_kind, origin_host_id, tombstoned_at)
+         VALUES (?, 'chair', 'local', 'gone', 0, 0, 'pane', 'local', datetime('now'))`
+      )
+      .run(predecessorId)
+    const { thread } = db.createThread({
+      subject: 'plan',
+      createdByAgentId: predecessorId,
+      participants: [{ participantKey: predecessorId, agentId: predecessorId, role: 'owner' }]
+    })
+
+    const holderId = 'agt_holder_quarantined'
+    sqlite
+      .prepare(
+        `INSERT INTO agents (
+           id, display_name, role, host_id, pane_key, terminal_handle, process_incarnation,
+           worktree_id, worktree_path, branch, title, agent_label, state, derived, quarantined,
+           origin_kind, origin_pane_key, origin_handle, origin_host_id
+         ) VALUES (?, 'chair', NULL, 'local', 'tabX:leaf-old', 'term_old', 'proc-old',
+           NULL, NULL, NULL, NULL, NULL, 'idle', 0, 1, 'pane', 'tabX:leaf-old', 'term_old', 'local')`
+      )
+      .run(holderId)
+
+    vi.spyOn(runtime, 'listTerminals').mockResolvedValue({
+      terminals: [
+        terminal({
+          handle: 'term_c',
+          ptyId: 'pty-c',
+          tabId: 'tabC',
+          leafId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+        })
+      ],
+      totalCount: 1,
+      truncated: false
+    })
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+      if (
+        evidence?.terminalHandle === 'term_c' &&
+        evidence.paneKey === PANE_C &&
+        evidence.launchToken
+      ) {
+        return authorityFor(PANE_C, 'term_c')
+      }
+      return null
+    })
+    ctx = {
+      runtime,
+      orchestrationCompatibilityEvidence: {
+        terminalHandle: 'term_c',
+        paneKey: PANE_C,
+        launchToken: 'lt-c'
+      }
+    }
+
+    // A quarantined holder refuses the name outright (existing name_taken semantics) — the
+    // catch-up guard is exercised directly at the db layer here instead, since the RPC surface
+    // for a quarantined name holder never reaches remintRow/catch-up at all.
+    const catchUp = db.catchUpThreadSuccession('local', 'chair', holderId)
+    expect(catchUp).toBeNull()
+    expect(db.isThreadParticipant(thread.id, holderId)).toBe(false)
+    const skipAudit = sqlite
+      .prepare(
+        `SELECT outcome, reason_code FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession_skipped' ORDER BY seq DESC LIMIT 1`
+      )
+      .get(holderId) as { outcome: string; reason_code: string } | undefined
+    expect(skipAudit?.reason_code).toBe('succession_skipped_quarantined')
+    const marker = sqlite
+      .prepare(`SELECT 1 FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession'`)
+      .get(holderId)
+    expect(marker).toBeUndefined()
+  })
+
+  // F-7 (attacker-lens review, Ruling 33(a) H6a): the 'name succession' audit reason must carry
+  // BOTH the adopted-thread count and the predecessor count ("N thread(s) from M
+  // predecessor(s)"), and that count must be the TOTAL after catch-up runs, not just the
+  // upsert's own share.
+  it('T7 (F-7): the name-succession audit reason reports "N thread(s) from M predecessor(s)"', async () => {
+    setup()
+    const predA = 'agt_pred_a'
+    const predB = 'agt_pred_b'
+    for (const id of [predA, predB]) {
+      sqlite
+        .prepare(
+          `INSERT INTO agents (id, display_name, host_id, state, derived, quarantined, origin_kind, origin_host_id, tombstoned_at)
+           VALUES (?, 'chair', 'local', 'gone', 0, 0, 'pane', 'local', datetime('now'))`
+        )
+        .run(id)
+    }
+    db.createThread({
+      subject: 'plan a',
+      createdByAgentId: predA,
+      participants: [{ participantKey: predA, agentId: predA, role: 'owner' }]
+    })
+    db.createThread({
+      subject: 'plan b',
+      createdByAgentId: predB,
+      participants: [{ participantKey: predB, agentId: predB, role: 'owner' }]
+    })
+
+    // derived: 1 — the isPromoteSuccession audit-reason classification (register.ts) requires
+    // `existingForPane.derived === 1` (a placeholder promoting into the name), which is also
+    // exactly the shape the register RPC actually mints on a restart (T1's own flow); a
+    // non-derived row here would take the plain-refresh path and never carry the
+    // "name succession" reason at all.
+    const successorId = 'agt_successor_multi'
+    sqlite
+      .prepare(
+        `INSERT INTO agents (
+           id, display_name, role, host_id, pane_key, terminal_handle, process_incarnation,
+           worktree_id, worktree_path, branch, title, agent_label, state, derived,
+           origin_kind, origin_pane_key, origin_handle, origin_host_id
+         ) VALUES (?, 'chair', NULL, 'local', ?, 'term_a', 'proc-1', 'wt_1', '/repo/alpha',
+           'alpha', NULL, NULL, 'idle', 1, 'pane', ?, 'term_a', 'local')`
+      )
+      .run(successorId, PANE_A, PANE_A)
+
+    vi.spyOn(runtime, 'listTerminals').mockResolvedValue({
+      terminals: [terminal()],
+      totalCount: 1,
+      truncated: false
+    })
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+      if (
+        evidence?.terminalHandle === 'term_a' &&
+        evidence.paneKey === PANE_A &&
+        evidence.launchToken
+      ) {
+        return authorityFor(PANE_A, 'term_a')
+      }
+      return null
+    })
+    ctx = {
+      runtime,
+      orchestrationCompatibilityEvidence: {
+        terminalHandle: 'term_a',
+        paneKey: PANE_A,
+        launchToken: 'lt-a'
+      }
+    }
+    const result = (await call('orchestration.agents.register', { name: 'chair' })) as {
+      agent: { id: string }
+      adoptedThreads: number
+    }
+    expect(result.adoptedThreads).toBe(2)
+    const audit = sqlite
+      .prepare(
+        `SELECT reason_code FROM agent_audit WHERE agent_id = ? AND verb = 'register' AND reason_code LIKE 'name succession%' ORDER BY seq DESC LIMIT 1`
+      )
+      .get(result.agent.id) as { reason_code: string } | undefined
+    expect(audit?.reason_code).toContain('2 thread(s) from 2 predecessor(s)')
+  })
 })

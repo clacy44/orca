@@ -11,7 +11,11 @@ import {
   type RemintRowParams,
   type RemintRowResult
 } from './agent-pane-rebind'
-import { repointMailboxFromBareHandle, repointMailboxOnSuccession } from './agent-mailbox-repoint'
+import {
+  repointMailboxFromBareHandle,
+  repointMailboxFromCallerHandle,
+  repointMailboxOnSuccession
+} from './agent-mailbox-repoint'
 import { adoptFromPredecessors } from './agent-thread-succession'
 import type { AgentRow } from './types'
 
@@ -55,14 +59,37 @@ export function reclaimDerivedPlaceholder(
           hostId: params.hostId
         })
       : { repointedMessages: 0, pendingOnOldHandle: 0 }
-  const reminted = remintRow(db, nameHolder, params)
+  // F-1 (attacker-lens review, Ruling 33(a) H6a): succession:true — the derived row adopted
+  // above is id-keyed (it never shared nameHolder's display_name), but nameHolder itself can
+  // have its OWN tombstoned same-name predecessors, found only by remintRow's name-keyed
+  // adoptPredecessorThreadMembership. Those two predecessor sets are disjoint (the derived
+  // row's display_name != params.displayName on this branch), so nothing is double-adopted.
+  // Runs inside this same transaction, before any thread_succession marker is consulted, so the
+  // later register-RPC catch-up (which only fires post-commit) never needed to run for this id.
+  const reminted = remintRow(db, nameHolder, params, true)
+  // F-8: the caller's own current bare terminal handle can carry unread backlog (e.g. this
+  // worktree's own C2 orphan notice) that neither the derived row's nor the name holder's
+  // old-handle repoints above ever touch — repoint it into the reclaimed identity too.
+  const callerBacklog = params.terminalHandle
+    ? repointMailboxFromCallerHandle(db, params.terminalHandle, nameHolder.id, {
+        paneKey: params.paneKey,
+        hostId: params.hostId
+      })
+    : { repointedMessages: 0, pendingOnOldHandle: 0 }
   return {
     ...reminted,
     adoptedThreads: reminted.adoptedThreads + displaced.adoptedThreads,
     blockedByQuarantinedPredecessor:
       reminted.blockedByQuarantinedPredecessor || displaced.blockedByQuarantinedPredecessor,
     repointedMessages:
-      reminted.repointedMessages + displaced.repointedMessages + displacedMailbox.repointedMessages,
-    pendingOnOldHandle: reminted.pendingOnOldHandle + displacedMailbox.pendingOnOldHandle
+      reminted.repointedMessages +
+      displaced.repointedMessages +
+      displacedMailbox.repointedMessages +
+      callerBacklog.repointedMessages,
+    pendingOnOldHandle:
+      reminted.pendingOnOldHandle +
+      displacedMailbox.pendingOnOldHandle +
+      callerBacklog.pendingOnOldHandle,
+    predecessorCount: reminted.predecessorCount + displaced.predecessorCount
   }
 }

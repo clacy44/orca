@@ -85,6 +85,33 @@ export function repointMailboxFromBareHandle(
   return { repointedMessages: moved, pendingOnOldHandle }
 }
 
+/** F-8 (attacker-lens review, Ruling 33(a) H6a): a derived-placeholder reclaim (H5's B1) moves
+ * the DISPLACED derived row's own old handle (repointMailboxFromBareHandle above) and the name
+ * holder's old handle (repointMailboxOnReMint below), but never the CALLER's own current bare
+ * terminal handle — mail addressed there before the reclaim (e.g. the C2 orphan notice this
+ * same worktree's `check` edge inserted, agent-directory-derived-reclaim.ts) stayed on that
+ * bare handle instead of following the reclaimed identity. No-op (0/0, no audit row) when
+ * there is nothing repointable on the caller's handle. */
+export function repointMailboxFromCallerHandle(
+  db: Database.Database,
+  callerHandle: string,
+  holderId: string,
+  actor: { paneKey: string | null; hostId: string }
+): MailboxRepointOutcome {
+  const { moved, pendingOnOldHandle } = repointUnreadBareHandleMail(db, callerHandle, holderId)
+  if (moved > 0) {
+    const reason =
+      pendingOnOldHandle > 0
+        ? `${moved} from ${callerHandle} (caller backlog), ${pendingOnOldHandle} still pending`
+        : `${moved} from ${callerHandle} (caller backlog)`
+    db.prepare(
+      `INSERT INTO agent_audit (agent_id, actor_pane_key, actor_host_id, verb, outcome, reason_code)
+       VALUES (?, ?, ?, 'mailbox_repoint', 'ok', ?)`
+    ).run(holderId, actor.paneKey, actor.hostId, reason)
+  }
+  return { repointedMessages: moved, pendingOnOldHandle }
+}
+
 /** Called from inside upsertAgentByPaneSuffix's own re-mint transaction (agent-directory.ts) —
  * same db handle, same BEGIN IMMEDIATE/COMMIT, so a repoint always lands atomically with the
  * re-mint it belongs to and never partially applies. No-ops (0/0, no audit row) when the handle

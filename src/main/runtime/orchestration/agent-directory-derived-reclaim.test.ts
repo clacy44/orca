@@ -206,4 +206,161 @@ describe('F-19 (Ruling 33(a)): derived-placeholder reclaim on rename collision',
       .get('agt_derived5') as { tombstoned_at: string | null }
     expect(derivedRow.tombstoned_at).toBeNull()
   })
+
+  // F-1 (attacker-lens review, Ruling 33(a) H6a): the name holder itself can have its OWN
+  // tombstoned same-name predecessor (a THIRD row, from before the holder was ever minted) —
+  // disjoint from the derived row's id-keyed adoption above, and only reachable via
+  // remintRow's own name-keyed adoptPredecessorThreadMembership. Before this fix, remintRow was
+  // always called with succession defaulted false on this path, so that predecessor's
+  // threads/pacts/mail were never adopted on a reclaim.
+  it("T5: composed reclaim — the name holder's own tombstoned predecessor is adopted too (thread, pact column, mail), exactly once", () => {
+    const db = rawDb()
+    const predecessorId = 'agt_pred_chair'
+    db.prepare(
+      `INSERT INTO agents (
+         id, display_name, role, host_id, pane_key, terminal_handle, process_incarnation,
+         worktree_id, worktree_path, branch, title, agent_label, state, derived, quarantined,
+         origin_kind, origin_pane_key, origin_handle, origin_host_id, tombstoned_at
+       ) VALUES (?, 'chair', NULL, 'local', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+         'gone', 0, 0, 'pane', NULL, NULL, 'local', datetime('now'))`
+    ).run(predecessorId)
+
+    const holder = upsertAgentByPaneSuffix(
+      db,
+      baseParams({ paneKey: 'tab1:leaf-aaa', terminalHandle: 'term_a', displayName: 'chair' })
+    )
+    const holderId = holder.outcome === 'created' ? holder.agent.id : ''
+
+    const { thread } = orchestrationDb!.createThread({
+      subject: 'plan',
+      createdByAgentId: predecessorId,
+      participants: [{ participantKey: predecessorId, agentId: predecessorId, role: 'owner' }]
+    })
+    db.prepare('UPDATE threads SET pact_proposer_agent_id = ? WHERE id = ?').run(
+      predecessorId,
+      thread.id
+    )
+    db.prepare(
+      `INSERT INTO messages (id, run_id, from_handle, to_handle, subject, type, priority, read)
+       VALUES ('msg_pred_mail', 'run_peer_local', 'peer', ?, 'poke', 'status', 'normal', 0)`
+    ).run(`agent:${predecessorId}`)
+    // F-2 (attacker-lens review, Ruling 33(a) H6a): a pending peer question addressed to the
+    // predecessor is never repointed by design (Ruling 32 Addendum 9) — the reclaim must still
+    // report it honestly via remintRow's own countUninheritedPredecessorMail (succession:true).
+    db.prepare(
+      `INSERT INTO question_threads (message_id, run_id, dispatch_id, asker_handle, status, to_agent_id)
+       VALUES ('q_pred', 'peer_questions', 'peer:t1', 'remote:env:asker', 'pending', ?)`
+    ).run(predecessorId)
+
+    insertDerivedRow(db, { id: 'agt_derived6', paneKey: 'tab2:leaf-bbb' })
+
+    const result = upsertAgentByPaneSuffix(
+      db,
+      baseParams({
+        paneKey: 'tab2:leaf-bbb',
+        terminalHandle: 'term_a_new',
+        displayName: 'chair',
+        isPaneLive: () => false
+      })
+    )
+    expect(result.outcome).toBe('reminted')
+    if (result.outcome !== 'reminted') {
+      throw new Error('fixture setup failed')
+    }
+    expect(result.agent.id).toBe(holderId)
+    expect(result.adoptedThreads).toBe(1)
+    expect(result.pendingPeerQuestions).toBe(1)
+    expect(orchestrationDb!.isThreadParticipant(thread.id, holderId)).toBe(true)
+
+    const pactRow = db
+      .prepare('SELECT pact_proposer_agent_id FROM threads WHERE id = ?')
+      .get(thread.id) as { pact_proposer_agent_id: string | null }
+    expect(pactRow.pact_proposer_agent_id).toBe(holderId)
+
+    const movedMail = db
+      .prepare(`SELECT to_handle FROM messages WHERE id = 'msg_pred_mail'`)
+      .get() as { to_handle: string }
+    expect(movedMail.to_handle).toBe(`agent:${holderId}`)
+
+    const auditCount = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM agent_audit WHERE agent_id = ? AND verb = 'thread_succession'`
+        )
+        .get(holderId) as { n: number }
+    ).n
+    expect(auditCount).toBe(1)
+
+    // A second plain register (no derived row left to reclaim through) adopts nothing more —
+    // the predecessor's history already landed on the holder id.
+    const second = upsertAgentByPaneSuffix(
+      db,
+      baseParams({
+        paneKey: 'tab2:leaf-bbb',
+        terminalHandle: 'term_a_new',
+        displayName: 'chair'
+      })
+    )
+    expect(second.outcome).toBe('reminted')
+    if (second.outcome === 'reminted') {
+      expect(second.adoptedThreads).toBe(0)
+    }
+  })
+
+  // F-8 (attacker-lens review, Ruling 33(a) H6a): mail sitting at the CALLER's own current bare
+  // terminal handle (e.g. H5b's C2 orphan-identity notice, inserted while the pane still only
+  // held a derived row) is a distinct stranding surface from the displaced derived row's OLD
+  // handle (T2 above) — neither repointMailboxFromBareHandle (moves `existing.terminal_handle`
+  // only when it DIFFERS from the caller's current one) nor remintRow's own repoint
+  // (moves `nameHolder`'s old handle) ever reaches it.
+  it("T6: the caller's own current bare-handle backlog is repointed onto the reclaimed id", () => {
+    const db = rawDb()
+    const holder = upsertAgentByPaneSuffix(
+      db,
+      baseParams({ paneKey: 'tab1:leaf-aaa', terminalHandle: 'term_a', displayName: 'chair' })
+    )
+    const holderId = holder.outcome === 'created' ? holder.agent.id : ''
+
+    // A derived row whose OWN terminal_handle is already the caller's current handle (the same
+    // pane relaunched under the same handle) — the T2 old-handle repoint is a deliberate no-op
+    // here (existing.terminal_handle === params.terminalHandle).
+    db.prepare(
+      `INSERT INTO agents (
+         id, display_name, role, host_id, pane_key, terminal_handle, process_incarnation,
+         worktree_id, worktree_path, branch, title, agent_label, state, derived, quarantined,
+         origin_kind, origin_pane_key, origin_handle, origin_host_id
+       ) VALUES ('agt_derived6', 'agt_derived6', NULL, 'local', 'tab2:leaf-bbb', 'term_caller',
+         NULL, NULL, NULL, NULL, NULL, NULL, 'gone', 1, 0, 'derived', 'tab2:leaf-bbb', NULL,
+         'local')`
+    ).run()
+
+    // H5b's own notice row (or any other backlog) sitting at the bare handle before the reclaim.
+    db.prepare(
+      `INSERT INTO messages (id, run_id, from_handle, to_handle, subject, type, priority, read)
+       VALUES ('msg_caller_backlog', 'run_peer_local', 'runtime', 'term_caller', 'waits', 'status', 'normal', 0)`
+    ).run()
+
+    const result = upsertAgentByPaneSuffix(
+      db,
+      baseParams({
+        paneKey: 'tab2:leaf-bbb',
+        terminalHandle: 'term_caller',
+        displayName: 'chair',
+        isPaneLive: () => false
+      })
+    )
+    expect(result.outcome).toBe('reminted')
+
+    const movedMail = db
+      .prepare(`SELECT to_handle FROM messages WHERE id = 'msg_caller_backlog'`)
+      .get() as { to_handle: string }
+    expect(movedMail.to_handle).toBe(`agent:${holderId}`)
+
+    const audit = db
+      .prepare(
+        `SELECT reason_code FROM agent_audit WHERE agent_id = ? AND verb = 'mailbox_repoint' AND reason_code LIKE '%caller backlog%' ORDER BY seq DESC LIMIT 1`
+      )
+      .get(holderId) as { reason_code: string } | undefined
+    expect(audit?.reason_code).toContain('term_caller')
+  })
 })

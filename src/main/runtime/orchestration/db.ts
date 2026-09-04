@@ -76,7 +76,8 @@ import {
 import { findSoleOrphanedIdentityCandidate } from './agent-pane-rebind'
 import {
   catchUpThreadSuccession as catchUpThreadSuccessionImpl,
-  type ThreadSuccessionOutcome
+  type ThreadSuccessionOutcome,
+  type UninheritedPredecessorMailOutcome
 } from './agent-thread-succession'
 import {
   getAgentByIdIncludingTombstoned as getAgentByIdIncludingTombstonedImpl,
@@ -4763,7 +4764,7 @@ export class OrchestrationDb {
     hostId: string,
     displayName: string,
     successorId: string
-  ): ThreadSuccessionOutcome | null {
+  ): (ThreadSuccessionOutcome & UninheritedPredecessorMailOutcome) | null {
     return catchUpThreadSuccessionImpl(this.db, hostId, displayName, successorId)
   }
 
