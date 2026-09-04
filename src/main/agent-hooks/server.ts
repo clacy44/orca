@@ -1951,6 +1951,11 @@ export class AgentHookServer {
       providerSession?: unknown
       providerSessionOnly?: unknown
       isReplay?: boolean
+      /** [S10-21a C6c, Ruling 34 Addendum 20, closes residual R-21a-2] Claude SessionStart's own
+       * `source` value, when the relay child already normalized it (agent-hook-listener.ts's
+       * `AgentHookEventPayload.sessionStartSource`) — OPTIONAL so an older relay bundle that
+       * predates this field keeps working unchanged (it simply omits the key). */
+      sessionStartSource?: unknown
       /** Payload fields the relay dropped to fit an oversized frame; validated below. */
       shedFields?: unknown
       claudeRunningNonAgentTask?: unknown
@@ -2131,6 +2136,16 @@ export class AgentHookServer {
       claudeRunningNonAgentTask:
         typeof envelope.claudeRunningNonAgentTask === 'boolean'
           ? envelope.claudeRunningNonAgentTask
+          : undefined,
+      // [S10-21a C6c, Ruling 34 Addendum 20] Re-validated against the same allowlist the local
+      // path enforces (agent-hook-listener.ts) — a wire value crosses a trust boundary and is
+      // never assumed well-shaped just because a field with this name exists.
+      sessionStartSource:
+        envelope.sessionStartSource === 'startup' ||
+        envelope.sessionStartSource === 'resume' ||
+        envelope.sessionStartSource === 'clear' ||
+        envelope.sessionStartSource === 'fork'
+          ? envelope.sessionStartSource
           : undefined,
       payload: normalizedPayload
     }

@@ -103,6 +103,11 @@ export type AgentHookRelayEnvelope = {
   isReplay?: boolean
   /** Claude background-work evidence for input-interrupt inference on the receiving host. */
   claudeRunningNonAgentTask?: boolean
+  /** [S10-21a C6c, Ruling 34 Addendum 20, closes residual R-21a-2] Claude SessionStart's own
+   * `source` value, preserved from the relay-side normalized hook event — OPTIONAL so an older
+   * relay bundle (predating this field) keeps forwarding events unchanged; the receiving host
+   * treats an absent value the same as an unobserved SessionStart (§1.6 conjunct 4 evidence). */
+  sessionStartSource?: 'startup' | 'resume' | 'clear' | 'fork'
   /** Forwarded from the agent CLI POST body. The relay default is `remote`,
    *  which marks transport location rather than dev/prod build env. */
   env?: string

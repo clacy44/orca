@@ -32,6 +32,7 @@ import {
 } from '../../shared/agent-hook-listener'
 import { makePaneKey } from '../../shared/stable-pane-id'
 import { createShedSubagentsField } from '../../shared/agent-hook-relay'
+import { OrchestrationDb } from '../runtime/orchestration/db'
 
 const { getCohortAtEmitMock, trackMock } = vi.hoisted(() => ({
   getCohortAtEmitMock: vi.fn(),
@@ -1920,6 +1921,107 @@ describe('AgentHookServer listener replay', () => {
           sessionId: 'sess-forked',
           sessionStartSource: 'fork',
           anchorCorroborated: true
+        })
+      ])
+    } finally {
+      server.stop()
+    }
+  })
+
+  it('S10-21a C6c, Ruling 34 Addendum 20 (closes residual R-21a-2): a relay-ingested fork carries sessionStartSource "fork" and, fed into the real evaluator, classifies rotated (not foreign_mismatch)', () => {
+    const server = new AgentHookServer()
+    server.setPaneLaunchAuthorityVerifier(() => true)
+    const sessions = vi.fn()
+    server.subscribeProviderSessionChanges(sessions)
+
+    // The exact shape src/relay/agent-hook-server.ts's forwardEvent (SSH/WSL relay child) now
+    // builds, decoded by src/main/ssh/ssh-relay-session.ts's SSH transport before reaching here.
+    server.ingestRemote(
+      {
+        paneKey: PANE,
+        tabId: 'tab-1',
+        worktreeId: 'wt-1',
+        source: 'claude',
+        launchToken: 'fork-relay-launch-token',
+        sessionStartSource: 'fork',
+        hookEventName: 'SessionStart',
+        providerSession: { key: 'session_id', id: 'sess-forked-remote' },
+        payload: { state: 'done', sessionBoundary: true }
+      },
+      'conn-1'
+    )
+
+    const identities = sessions.mock.calls.at(-1)?.[0]
+    expect(identities).toEqual([
+      expect.objectContaining({
+        paneKey: PANE,
+        sessionId: 'sess-forked-remote',
+        sessionStartSource: 'fork',
+        anchorCorroborated: true
+      })
+    ])
+
+    // Fed into the real evaluator (agent-lineage-mismatch.ts) exactly as index.ts's
+    // session-identity-mismatch-alarm.ts wiring does: this is a rotation, not a permanent
+    // foreign mismatch — closing residual R-21a-2 (the relay path previously had no evidence
+    // carrier for conjunct 4 at all).
+    const identity = identities[0]
+    const db = new OrchestrationDb(':memory:')
+    try {
+      const seeded = db.recordLaunch({
+        hostId: 'local',
+        paneKey: PANE,
+        agentType: 'claude',
+        sessionId: 'sess-original',
+        launchGeneration: 'gen-1',
+        executionHostId: 'local',
+        evidence: 'host_launch'
+      })
+      expect(seeded.ok).toBe(true)
+      const result = db.evaluateLiveHookReportMismatch({
+        hostId: 'local',
+        paneKey: identity.paneKey,
+        reportedSessionId: identity.sessionId,
+        anchorCorroborated: identity.anchorCorroborated === true,
+        sessionStartSource: identity.sessionStartSource,
+        launchGeneration: 'gen-1'
+      })
+      expect(result.kind).toBe('rotated')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('S10-21a C6c, Ruling 34 Addendum 20(d): a NEGATIVE corroboration verdict (verifier returns false) yields anchorCorroborated: false on the identity', async () => {
+    const server = new AgentHookServer()
+    // The launch-token anchor deliberately does NOT corroborate this pane.
+    server.setPaneLaunchAuthorityVerifier(() => false)
+    const sessions = vi.fn()
+    server.subscribeProviderSessionChanges(sessions)
+    await server.start({ env: 'production' })
+    try {
+      const env = server.buildPtyEnv()
+      const response = await fetch(`http://127.0.0.1:${env.ORCA_AGENT_HOOK_PORT}/hook/claude`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Orca-Agent-Hook-Token': env.ORCA_AGENT_HOOK_TOKEN
+        },
+        body: JSON.stringify(
+          buildBody(
+            { hook_event_name: 'SessionStart', source: 'fork', session_id: 'sess-uncorroborated' },
+            { launchToken: 'uncorroborated-launch-token' }
+          )
+        )
+      })
+      expect(response.status).toBe(204)
+      const identities = sessions.mock.calls.at(-1)?.[0]
+      expect(identities).toEqual([
+        expect.objectContaining({
+          paneKey: PANE,
+          sessionId: 'sess-uncorroborated',
+          sessionStartSource: 'fork',
+          anchorCorroborated: false
         })
       ])
     } finally {

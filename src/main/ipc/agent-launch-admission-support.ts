@@ -35,3 +35,22 @@ export function audit(
     reasonCode
   })
 }
+
+/** [S10-21a C6c, Ruling 34 Addendum 20] The ONE shared enumeration of every audit verb the
+ * launch-admission surface writes — agent-launch-admission.ts's own `audit()` calls, plus
+ * pty.ts's `contestedLineage` (R(i), verb 'launch'). A plain HOST_MINTED/HOST_RESUME success
+ * writes NO audit row at all (the launch row write itself is the record), so it is deliberately
+ * absent from this list. agent-lineage-mismatch.ts's `unrecorded_launch` downgrade consumes this
+ * SAME constant (D-R108 R1(a)) — a future admission verb must be added here deliberately, or it
+ * is silently excluded from the downgrade (fail toward contest, the safe default), never silently
+ * included. `agent-launch-admission-audit-verbs.test.ts` greps every verb literal in
+ * agent-launch-admission*.ts/pty.ts's contestedLineage and asserts none escapes this list. */
+export const ADMISSION_AUDIT_VERBS = [
+  'launch_unrecorded',
+  'launch_refused',
+  'launch_self_resume',
+  'launch_surface_diverged',
+  'launch_ensure_failed_after_spawn',
+  'launch_spawn_failed',
+  'launch'
+] as const

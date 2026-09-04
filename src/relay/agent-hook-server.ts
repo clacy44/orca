@@ -324,6 +324,11 @@ export class RelayAgentHookServer {
       toolAgentId: event.toolAgentId,
       toolAgentType: event.toolAgentType,
       claudeRunningNonAgentTask: event.claudeRunningNonAgentTask,
+      // [S10-21a C6c, Ruling 34 Addendum 20] Preserved from the relay-side normalized event —
+      // the shared listener (agent-hook-listener.ts) already validated it against the same
+      // allowlist the receiving host re-checks (server.ts's ingestRemote, defense in depth
+      // across the trust boundary).
+      ...(event.sessionStartSource ? { sessionStartSource: event.sessionStartSource } : {}),
       ...(event.providerSession ? { providerSession: event.providerSession } : {}),
       ...(event.providerSessionOnly ? { providerSessionOnly: true } : {}),
       isReplay: options.isReplay === true ? true : undefined,

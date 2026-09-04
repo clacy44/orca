@@ -138,7 +138,7 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', () => {
     expect(newestLaunchForPane(db, HOST_ID, PANE)?.session_id).toBe('sess-a')
   })
 
-  it('T31: anchor not corroborated — foreign-id mismatch, alarm, row unchanged', () => {
+  it('T31 (anchor clause; previous-id clause retired by errata 5(ab)): anchor not corroborated — foreign-id mismatch, alarm, row unchanged', () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
     const result = evaluateLiveHookReportMismatch(db, {
@@ -206,7 +206,7 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', () => {
     expect(result).toEqual({ kind: 'match' })
   })
 
-  it('Ruling 34 Addendum 18: the audit is UNCONDITIONAL — two mismatches produce TWO audit rows', () => {
+  it('Ruling 34 Addendum 18/20: two DIFFERENT mismatches (each a new fact) produce TWO audit rows', () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
     const first = evaluateLiveHookReportMismatch(db, {
@@ -228,6 +228,67 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', () => {
     expect(first).toEqual({ kind: 'foreign_mismatch' })
     expect(second).toEqual({ kind: 'foreign_mismatch' })
     expect(auditRows(db, PANE)).toHaveLength(2)
+  })
+
+  it('Ruling 34 Addendum 20: a REPEATED identical mismatch (same recorded/reported pair) is DEDUPED — one audit row, not clamped away', () => {
+    const db = rawDb()
+    seedLaunch(db, 'sess-a')
+    const first = evaluateLiveHookReportMismatch(db, {
+      hostId: HOST_ID,
+      paneKey: PANE,
+      reportedSessionId: 'sess-b',
+      anchorCorroborated: false,
+      sessionStartSource: undefined,
+      launchGeneration: GEN
+    })
+    const second = evaluateLiveHookReportMismatch(db, {
+      hostId: HOST_ID,
+      paneKey: PANE,
+      reportedSessionId: 'sess-b', // identical reported id — the SAME fact as `first`
+      anchorCorroborated: false,
+      sessionStartSource: undefined,
+      launchGeneration: GEN
+    })
+    expect(first).toEqual({ kind: 'foreign_mismatch' })
+    expect(second).toEqual({ kind: 'foreign_mismatch' })
+    const rows = auditRows(db, PANE)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reason_code).toBe('recorded=sess-a reported=sess-b')
+  })
+
+  it('Ruling 34 Addendum 20: a CHANGED reported id after a dedupe run still writes a NEW row', () => {
+    const db = rawDb()
+    seedLaunch(db, 'sess-a')
+    evaluateLiveHookReportMismatch(db, {
+      hostId: HOST_ID,
+      paneKey: PANE,
+      reportedSessionId: 'sess-b',
+      anchorCorroborated: false,
+      sessionStartSource: undefined,
+      launchGeneration: GEN
+    })
+    evaluateLiveHookReportMismatch(db, {
+      hostId: HOST_ID,
+      paneKey: PANE,
+      reportedSessionId: 'sess-b', // duplicate — deduped
+      anchorCorroborated: false,
+      sessionStartSource: undefined,
+      launchGeneration: GEN
+    })
+    evaluateLiveHookReportMismatch(db, {
+      hostId: HOST_ID,
+      paneKey: PANE,
+      reportedSessionId: 'sess-c', // a NEW fact — must audit regardless of the dedupe above
+      anchorCorroborated: false,
+      sessionStartSource: undefined,
+      launchGeneration: GEN
+    })
+    const rows = auditRows(db, PANE)
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.reason_code)).toEqual([
+      'recorded=sess-a reported=sess-b',
+      'recorded=sess-a reported=sess-c'
+    ])
   })
 
   // ---- D-R108 R1: the unrecorded_launch downgrade ----

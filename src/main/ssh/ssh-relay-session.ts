@@ -1508,6 +1508,9 @@ export class SshRelaySession {
         providerSessionOnly?: unknown
         shedFields?: unknown
         claudeRunningNonAgentTask?: unknown
+        // [S10-21a C6c, Ruling 34 Addendum 20, closes residual R-21a-2] Optional — an older
+        // relay bundle predating this field simply omits the key.
+        sessionStartSource?: unknown
         payload?: unknown
       }
       if (typeof envelope.paneKey !== 'string') {
@@ -1545,6 +1548,7 @@ export class SshRelaySession {
             typeof envelope.claudeRunningNonAgentTask === 'boolean'
               ? envelope.claudeRunningNonAgentTask
               : undefined,
+          sessionStartSource: envelope.sessionStartSource,
           payload: envelope.payload
         },
         this.targetId
