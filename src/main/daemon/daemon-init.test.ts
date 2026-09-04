@@ -52,7 +52,8 @@ const {
   unbindLocalProviderListenersMock,
   rebindLocalProviderListenersMock,
   trackDaemonReplacedMock,
-  trackDaemonRetiredMock
+  trackDaemonRetiredMock,
+  recordDurableCrashBreadcrumbMock
 } = vi.hoisted(() => {
   const getPathMock = vi.fn(() => '/fake/userData')
   const getAppPathMock = vi.fn(() => '/fake/app')
@@ -180,6 +181,7 @@ const {
   const rebindLocalProviderListenersMock = vi.fn()
   const trackDaemonReplacedMock = vi.fn()
   const trackDaemonRetiredMock = vi.fn()
+  const recordDurableCrashBreadcrumbMock = vi.fn()
 
   return {
     getPathMock,
@@ -222,7 +224,8 @@ const {
     unbindLocalProviderListenersMock,
     rebindLocalProviderListenersMock,
     trackDaemonReplacedMock,
-    trackDaemonRetiredMock
+    trackDaemonRetiredMock,
+    recordDurableCrashBreadcrumbMock
   }
 })
 
@@ -305,6 +308,10 @@ vi.mock('./client', () => ({ DaemonClient: daemonClientMock }))
 vi.mock('./daemon-lifecycle-event', () => ({
   trackDaemonReplaced: trackDaemonReplacedMock,
   trackDaemonRetired: trackDaemonRetiredMock
+}))
+
+vi.mock('../crash-reporting/durable-crash-breadcrumb', () => ({
+  recordDurableCrashBreadcrumb: recordDurableCrashBreadcrumbMock
 }))
 
 vi.mock('./daemon-spawner', () => ({
@@ -452,6 +459,7 @@ async function importFresh() {
   rebindLocalProviderListenersMock.mockClear()
   trackDaemonReplacedMock.mockClear()
   trackDaemonRetiredMock.mockClear()
+  recordDurableCrashBreadcrumbMock.mockClear()
   checkDaemonHealthMock.mockClear()
   checkDaemonHealthMock.mockResolvedValue('healthy')
   healthCheckDaemonMock.mockClear()
@@ -917,8 +925,14 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     // STA-2376: death → respawn retires, exactly once.
     expect(trackDaemonRetiredMock).toHaveBeenCalledTimes(1)
     expect(trackDaemonRetiredMock).toHaveBeenCalledWith('died_respawn')
+    // H9: the console-only "died — respawning" line also lands as a durable main-trace breadcrumb.
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({ reason: 'died_respawn', sessionCount: 0 })
+    )
     trackDaemonRetiredMock.mockClear()
     trackDaemonReplacedMock.mockClear()
+    recordDurableCrashBreadcrumbMock.mockClear()
     // STA-2376: the resolver respawn attributes rather than emits — the launch it triggers reports it.
     // Emitting here too would double-count, and would fire before the outcome is known.
     await replacementAdapter.options.respawn?.('unhealthy_resolver')
@@ -1000,6 +1014,24 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     expect(respawnedMidSecondRestart).toBe(true)
     expect(trackDaemonRetiredMock).not.toHaveBeenCalled()
+  })
+
+  // H9: runRestartDaemon's respawn closure (daemon-init.ts step 5, newCurrent) is the second of
+  // the two 'died — respawning' call sites and must record the breadcrumb independently of the
+  // first (adapterInstances[0], covered above).
+  it('H9: the restarted adapter respawn closure also records a daemon_lifecycle breadcrumb on death', async () => {
+    const mod = await importFresh()
+    await mod.initDaemonPtyProvider()
+    await mod.restartDaemon()
+    const restartedRespawn = adapterInstances[1].options.respawn
+    recordDurableCrashBreadcrumbMock.mockClear()
+
+    await restartedRespawn?.('daemon_died')
+
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({ reason: 'died_respawn', sessionCount: 0 })
+    )
   })
 
   it('preserves legacy adapter instances by identity, drains outgoing router via disposeRouterOnly, and re-discovers legacy sessions on the new router', async () => {
@@ -1981,6 +2013,51 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     // STA-2376: an unreachable daemon with no live sessions is replaced via the failed-health path, once.
     expect(trackDaemonReplacedMock).toHaveBeenCalledTimes(1)
     expect(trackDaemonReplacedMock).toHaveBeenCalledWith('failed_health_check', 0)
+    // H9: the health-check replace decision is a durable breadcrumb before the kill, and the
+    // post-kill outcome is a second one — both must be present, not just the telemetry call.
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({ reason: 'failed_health_check', sessionCount: 0 })
+    )
+  })
+
+  // H9: the unhealthy branch's console.warn is gated on an announcement predicate (liveSessionCount
+  // !== null || graceRetry > 0 || health === 'rejected') — the exact incident shape (an unreachable
+  // socket with an unverifiable session count) exits with the predicate false, so nothing was ever
+  // printed. The breadcrumb must fire regardless.
+  it('H9: records the daemon_lifecycle breadcrumb even when the console announcement is suppressed', async () => {
+    const mod = await importFresh()
+    checkDaemonHealthMock.mockResolvedValue('unreachable')
+    await mod.initDaemonPtyProvider()
+
+    // Why: every DaemonClient (adoptionClient AND getAliveDaemonSessionCount's own instance)
+    // fails to connect, so the count is unverifiable (null), not zero.
+    daemonClientMock.mockImplementation(function MockUninterrogableClient() {
+      return {
+        ensureConnected: vi.fn(async () => {
+          throw new Error('connection refused')
+        }),
+        request: vi.fn(),
+        disconnect: vi.fn()
+      }
+    })
+
+    const launcher = spawnerInstances[0].launcher as (
+      socketPath: string,
+      tokenPath: string
+    ) => Promise<{ shutdown(): Promise<void> }>
+    forkMock.mockImplementationOnce(() => {
+      throw new Error('stop after replacement decision')
+    })
+
+    await expect(launcher('/fake/socket', '/fake/token')).rejects.toThrow(
+      'stop after replacement decision'
+    )
+
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({ reason: 'failed_health_check', sessionCount: null })
+    )
   })
 
   it('does not report a replacement when startup finds no daemon to remove', async () => {
@@ -2038,6 +2115,11 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       )
       expect(trackDaemonReplacedMock).toHaveBeenCalledTimes(1)
       expect(trackDaemonReplacedMock).toHaveBeenCalledWith(reason, 0)
+      // H9: the post-kill outcome (attributedReason branch) is also a durable breadcrumb.
+      expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+        'daemon_lifecycle',
+        expect.objectContaining({ reason, sessionCount: 0 })
+      )
 
       // One-shot: a later unrelated launch must not inherit the attribution.
       trackDaemonReplacedMock.mockClear()

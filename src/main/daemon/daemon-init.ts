@@ -46,6 +46,7 @@ import {
 } from './daemon-host-relocation'
 import { DegradedDaemonPtyProvider } from './degraded-daemon-pty-provider'
 import { trackDaemonReplaced, trackDaemonRetired } from './daemon-lifecycle-event'
+import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import type { DaemonReplaceReason } from '../../shared/daemon-lifecycle-telemetry'
 import {
   getLocalPtyProvider,
@@ -126,13 +127,41 @@ function getDaemonEntryPath(): string {
   return join(basePath, 'out', 'main', 'daemon-entry.js')
 }
 
+function isDiagnosticsDisabled(): boolean {
+  const disabled = (process.env.ORCA_DIAGNOSTICS_DISABLED ?? '').trim().toLowerCase()
+  return disabled === '1' || disabled === 'true'
+}
+
 // Why: pass a log-file arg so field failures are diagnosable, but honor the ORCA_DIAGNOSTICS_DISABLED privacy switch.
 function daemonLogArgs(): string[] {
-  const disabled = (process.env.ORCA_DIAGNOSTICS_DISABLED ?? '').trim().toLowerCase()
-  if (disabled === '1' || disabled === 'true') {
+  if (isDiagnosticsDisabled()) {
     return []
   }
   return ['--log-file', getDaemonLogFilePath()]
+}
+
+// Why (H9, incident 2026-09-04 §2.2(b)): the daemon_lifecycle telemetry (trackDaemonReplaced /
+// trackDaemonRetired) only reaches the remote sink — 09-04's forensics found zero daemon rows in
+// orca-stats.json. Mirror every emission into a durable main-trace breadcrumb, which is the file
+// the owner already captures, so the next occurrence is diagnosable without the remote sink.
+function recordDaemonLifecycleBreadcrumb(
+  reason: string,
+  pidPath: string,
+  sessionCount: number | null
+): void {
+  let daemonPid: number | null = null
+  try {
+    daemonPid = parseDaemonPidFile(readFileSync(pidPath, 'utf8'))?.pid ?? null
+  } catch {
+    daemonPid = null
+  }
+  recordDurableCrashBreadcrumb('daemon_lifecycle', {
+    reason,
+    daemonPid,
+    entryPath: getDaemonEntryPath(),
+    sessionCount,
+    at: new Date().toISOString()
+  })
 }
 
 // Why: a socket that accepts a connection proves a daemon survived a previous app session and can be reused.
@@ -641,6 +670,12 @@ function createOutOfProcessLauncher(
             `[daemon] Replacing daemon that failed the health check (health=${health}, liveSessions=${liveSessionCount ?? 'unverifiable'}, graceRetries=${graceRetry})`
           )
         }
+        // Why (H9): unlike the console line above — gated so a cold start with nothing to
+        // replace stays quiet — the breadcrumb is unconditional. This is precisely the branch
+        // the incident traced: an unreachable socket with an unverifiable session count exits
+        // the grace loop at graceRetry === 0 with the announcement predicate false, so nothing
+        // was ever printed for the exact case that then killed the daemon.
+        recordDaemonLifecycleBreadcrumb('failed_health_check', pidPath, liveSessionCount)
         // Why: unlike the log above, telemetry gates on confirmedReplacement below — the
         // post-kill truth — so a cold start that killed nothing never reports a replacement.
         pendingReplacement = {
@@ -685,10 +720,21 @@ function createOutOfProcessLauncher(
           : null
       if (identifiedReplacement) {
         trackDaemonReplaced(identifiedReplacement.reason, identifiedReplacement.liveSessionCount)
+        recordDaemonLifecycleBreadcrumb(
+          identifiedReplacement.reason,
+          pidPath,
+          identifiedReplacement.liveSessionCount
+        )
       } else if (attributedReason) {
         trackDaemonReplaced(attributedReason, 0)
+        recordDaemonLifecycleBreadcrumb(attributedReason, pidPath, 0)
       } else if (pendingReplacement && confirmedReplacement) {
         trackDaemonReplaced(pendingReplacement.reason, pendingReplacement.liveSessionCount)
+        recordDaemonLifecycleBreadcrumb(
+          pendingReplacement.reason,
+          pidPath,
+          pendingReplacement.liveSessionCount
+        )
       }
 
       const userDataPath = app.getPath('userData')
@@ -1002,6 +1048,13 @@ export async function initDaemonPtyProvider(
       // failed_health_check from the launcher — the app cannot tell wedged from dead at this point.
       if (reason === 'daemon_died') {
         console.warn('[daemon] Daemon process died — respawning')
+        // Why (H9): route the console line above into the same durable breadcrumb the launcher
+        // uses, so a died_respawn is diagnosable from main.trace.ndjson without the remote sink.
+        recordDaemonLifecycleBreadcrumb(
+          'died_respawn',
+          getDaemonPidPath(runtimeDir),
+          newAdapter.getActiveSessionIds().length
+        )
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
@@ -1237,6 +1290,13 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
       // failed_health_check from the launcher — the app cannot tell wedged from dead at this point.
       if (reason === 'daemon_died') {
         console.warn('[daemon] Daemon process died — respawning')
+        // Why (H9): route the console line above into the same durable breadcrumb the launcher
+        // uses, so a died_respawn is diagnosable from main.trace.ndjson without the remote sink.
+        recordDaemonLifecycleBreadcrumb(
+          'died_respawn',
+          getDaemonPidPath(runtimeDir),
+          newCurrent.getActiveSessionIds().length
+        )
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
