@@ -327,6 +327,7 @@ async function main(): Promise<void> {
     onRpcShutdown: () => {
       deathWatch?.stop()
       shuttingDown = true
+      daemonLog.log('shutdown', { reason: 'rpc' }) // H11: symmetric with onIdleShutdown's record.
       daemonLog.close()
       process.exit(0)
     }
