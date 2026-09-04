@@ -247,7 +247,8 @@ describe('closeTerminalTab', () => {
       activeWorktreeId: 'wt-1',
       activeTabId: 'local-tab-1',
       closeTab,
-      setActiveTab: vi.fn()
+      setActiveTab: vi.fn(),
+      dropAgentStatusByTabPrefix: vi.fn()
     })
 
     await closeTerminalTab('local-tab-1')
@@ -416,7 +417,8 @@ describe('closeTerminalTab', () => {
       activeWorktreeId: 'wt-1',
       activeTabId: 'local-tab-1',
       closeTab,
-      setActiveTab: vi.fn()
+      setActiveTab: vi.fn(),
+      dropAgentStatusByTabPrefix: vi.fn()
     })
 
     await closeTerminalTab('local-tab-1')
@@ -565,7 +567,8 @@ describe('closeTerminalTab', () => {
       activeTabId: 'plain-uuid-tab',
       openFiles: [],
       closeTab,
-      setActiveTab: vi.fn()
+      setActiveTab: vi.fn(),
+      dropAgentStatusByTabPrefix: vi.fn()
     })
 
     await closeTerminalTab('plain-uuid-tab')
@@ -828,7 +831,8 @@ describe('closeOtherTerminalTabs', () => {
         'wt-1': [{ id: 'keep' }, { id: 'close-a' }, { id: 'close-b' }]
       },
       setActiveTab,
-      closeTab
+      closeTab,
+      dropAgentStatusByTabPrefix: vi.fn()
     })
 
     await closeOtherTerminalTabs('keep', 'wt-1')
@@ -872,7 +876,8 @@ describe('closeTerminalTabsToRight', () => {
       openFiles: [{ id: 'file-b', worktreeId: 'wt-1' }],
       tabBarOrderByWorktree: { 'wt-1': ['term-a', 'file-b', 'term-b', 'term-c'] },
       closeTab,
-      closeFile
+      closeFile,
+      dropAgentStatusByTabPrefix: vi.fn()
     })
 
     await closeTerminalTabsToRight('term-a', 'wt-1')

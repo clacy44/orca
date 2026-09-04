@@ -213,6 +213,14 @@ async function closeTerminalTabAttempt(
           ? { precomputedRetirementPlan: options.precomputedRetirementPlan }
           : {})
       })
+      // Why: a mirror prune ahead of this await can drop the tab row before closeTab
+      // runs, so its own dropAgentStatusByTabPrefix ack never fires (H8). A user close
+      // is unconditional acknowledgment, so redo it here; idempotent if closeTab already ran.
+      if (wireReason === 'user') {
+        useAppStore.getState().dropAgentStatusByTabPrefix(terminalTabId, {
+          preserveRetainedSnapshot: false
+        })
+      }
     } else {
       console.error(`[terminal-tab-actions] host refused to close tab ${terminalTabId}`)
     }

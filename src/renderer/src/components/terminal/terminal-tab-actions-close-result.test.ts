@@ -52,7 +52,8 @@ describe('closeTerminalTab return-value contract', () => {
       activeWorktreeId: 'wt-1',
       activeTabId: 'local-tab-1',
       closeTab,
-      setActiveTab: vi.fn()
+      setActiveTab: vi.fn(),
+      dropAgentStatusByTabPrefix: vi.fn()
     })
 
     // Why skipRunningProcessConfirm: isolates the host-confirmed return value
