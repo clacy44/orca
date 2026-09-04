@@ -1,10 +1,12 @@
-// S10-21a C3-v2c (errata 5(p) v2.1 §C.7, T29). §2.2's refusal promise, at the request boundary:
-// a caller-supplied session-selecting flag in `agentArgs` is refused before the plan is built, on
-// EVERY lane — unlike `assertLaneAgentArgsAllowed` (orca-runtime-agent-session-lane-args.test.ts),
-// which returns early for a shared (non-principal) lane. Two of the three named sites
-// (`ensureAgentSession`, `createAgentSession`) are covered here; the third
-// (`runCreateMobileSessionTerminal`) shares the same `assertNoCoveredLaunchSelectorAtRequestBoundary`
-// helper but needs a heavier ready-graph/window harness this file does not stand up.
+// S10-21a C3-v2c/C3-v2f (errata 5(p) v2.1 §C.7, T29; D-R104 (ii), Ruling 34 Addendum 15). §2.2's
+// refusal promise, at the request boundary: a caller-supplied session-selecting flag in
+// `agentArgs` is refused before the plan is built, on EVERY lane — unlike
+// `assertLaneAgentArgsAllowed` (orca-runtime-agent-session-lane-args.test.ts), which returns
+// early for a shared (non-principal) lane. All three named sites (`ensureAgentSession`,
+// `createAgentSession`, `runCreateMobileSessionTerminal`) are covered here — the third by
+// mocking `createTerminal` (the same trick `createRuntime()` already uses for the first two),
+// which lets `runCreateMobileSessionTerminal`'s own downstream window/PTY machinery — reached
+// only past the refusal check — stay unexercised rather than needing a full ready-graph harness.
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeCreateAgentSessionRequest } from '../../shared/agent-session-host-authority'
 import { OrcaRuntimeService } from './orca-runtime'
@@ -133,5 +135,80 @@ describe('request-boundary launch-selector refusal (T29)', () => {
       { disposition: 'created' }
     )
     expect(createTerminal).toHaveBeenCalledOnce()
+  })
+})
+
+// [D-R104 (ii), Ruling 34 Addendum 15] The third named site: runCreateMobileSessionTerminal's
+// refusal (orca-runtime.ts, assertNoCoveredLaunchSelectorAtRequestBoundary call inside it) is
+// reachable from the wire via session.tabs.createTerminal (rpc/methods/session-tabs.ts) ->
+// createMobileSessionTerminal -> runCreateMobileSessionTerminal. `activate: false` keeps
+// createMobileSessionTerminal's own post-create tab-navigation step (which needs a real window/
+// ready-graph) out of the way — the refusal (or its absence) happens entirely inside
+// runCreateMobileSessionTerminal, before that step runs.
+// runCreateMobileSessionTerminal's first line, `captureReadyGraphEpoch`, requires an attached,
+// synced window — reusing the pane-key-gate fixture's own `attachWindow(1)` +
+// `syncWindowGraph(1, { tabs: [], leaves: [] })` shape satisfies it with no PTY/renderer harness.
+function createRuntimeForMobile() {
+  const built = createRuntime()
+  built.runtime.attachWindow(1)
+  built.runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+  return built
+}
+
+describe('request-boundary launch-selector refusal (D-R104 (ii)): runCreateMobileSessionTerminal', () => {
+  it("createMobileSessionTerminal refuses a covered agent's --session-id command before the plan is built", async () => {
+    const { runtime, createTerminal } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        command: 'claude --session-id X'
+      })
+      .catch((thrown: unknown) => thrown)
+
+    expect(error).toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'launch_session_id_forbidden'
+    })
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  it("createMobileSessionTerminal refuses a covered agent's launchConfig.agentArgs: '--fork-session'", async () => {
+    const { runtime, createTerminal } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        launchConfig: { agentCommand: 'claude', agentArgs: '--fork-session', agentEnv: {} }
+      })
+      .catch((thrown: unknown) => thrown)
+
+    expect(error).toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'launch_fork_forbidden'
+    })
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  it('does not refuse a non-covered agent (codex) carrying the same --session-id text', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'codex',
+        command: 'codex --session-id X'
+      })
+      .catch((thrown: unknown) => thrown)
+
+    // Not a LaunchAdmissionRefusedError from the request-boundary check — proves the boundary
+    // itself let it through; whatever `createTerminal`'s own mock/downstream stub does past
+    // that is out of this fence's scope.
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
   })
 })

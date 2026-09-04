@@ -302,6 +302,52 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
     expect(controller.spawnCallCount()).toBe(1)
   })
 
+  // [D-R104 F-6, Ruling 34 Addendum 15] A store ATTACH that was attempted and FAILED (the boot
+  // path, getLegacyWorkerTerminalRecoveryPlan's own catch) is a different fact from "never
+  // attempted" (T43a above) — it must refuse a placed create loudly, not wave it through.
+  it('F-6: after a failed boot-path store attach, a PLACED create refuses launch_store_unavailable; an UNPLACED shell still succeeds', async () => {
+    const store = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const controller = fakePtyController()
+    runtime.setPtyController(controller)
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    // Drive the REAL boot-path seam (index.ts:2646 -> prepareLegacyWorkerTerminalRecovery ->
+    // getLegacyWorkerTerminalRecoveryPlan's catch), not a bypass hook: getOrchestrationDb()
+    // throwing here is exactly what a failed `new OrchestrationDb(dbPath)` at boot looks like.
+    vi.spyOn(runtime, 'getOrchestrationDb').mockImplementation(() => {
+      throw new Error('simulated boot-path store-open failure')
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    runtime.prepareLegacyWorkerTerminalRecovery()
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[orchestration] failed to open the orchestration store at boot',
+      expect.any(Error)
+    )
+    errorSpy.mockRestore()
+
+    await expect(
+      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' },
+        tabId: REGISTERED_TAB,
+        leafId: LEAF_A
+      })
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'launch_store_unavailable'
+    })
+    expect(controller.spawnCallCount()).toBe(0)
+
+    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
+      credentialLane: { kind: 'shared' }
+    })
+    expect(terminal).toBeTruthy()
+    expect(controller.spawnCallCount()).toBe(1)
+  })
+
   // T45 (F-13): the gate refuses a placement whose leafId matches a registered row's leaf
   // under a DIFFERENT tabId, and the sweep's own lookup (getAgentByPaneKey) resolves the same
   // row — proving gate and sweep never disagree. Both presentations are gated (E1 runs before

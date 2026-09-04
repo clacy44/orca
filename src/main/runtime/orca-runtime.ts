@@ -3207,6 +3207,13 @@ export class OrcaRuntimeService {
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  // [S10-21a C3-v2f, D-R104 F-6, Ruling 34 Addendum 15] Set true ONLY when a store ATTACH was
+  // actually attempted and threw (getLegacyWorkerTerminalRecoveryPlan's boot-path catch, below)
+  // — never on "never attempted at all". Distinguishes the production hole (a real open
+  // failure) from every unit fixture that simply never calls getOrchestrationDb() — the gate
+  // (assertPaneKeyNotOwned's caller) reads this to refuse loudly instead of waving a placed
+  // create through.
+  private orchestrationStoreOpenFailed = false
   // [S10-21a C3a-v2, errata 5(p) v2.1 §D "Wiring note"] The one instance for the process:
   // `createTerminal`'s E1 (below) is its first consumer (redeem-once, §C.5); C7's sweep mints
   // from the same instance later. No RPC/IPC surface ever sees a `RestoreTicketId` — it is
@@ -4591,7 +4598,19 @@ export class OrcaRuntimeService {
         this.getOrchestrationDb().listLegacyWorkerTerminalRecoveryRows()
       )
     } catch (error) {
-      console.warn('[orchestration] failed to plan legacy worker terminal recovery', error)
+      // [S10-21a C3-v2f, D-R104 F-6, Ruling 34 Addendum 15] This is the boot-path attach site
+      // (called once from index.ts's post-ready sequence via prepareLegacyWorkerTerminalRecovery)
+      // — `getOrchestrationDb()`'s own `new OrchestrationDb(dbPath)` is the only thing here that
+      // can throw before `_orchestrationDb` is assigned. `!this._orchestrationDb` after the
+      // catch means the attach itself failed (not e.g. `listLegacyWorkerTerminalRecoveryRows`
+      // throwing against an already-attached store) — the ONLY case the gate's flag should fire
+      // for.
+      if (!this._orchestrationDb) {
+        this.orchestrationStoreOpenFailed = true
+        console.error('[orchestration] failed to open the orchestration store at boot', error)
+      } else {
+        console.warn('[orchestration] failed to plan legacy worker terminal recovery', error)
+      }
       return { blockedPanes: [], candidates: [], ambiguousDispatchIds: [] }
     }
   }
@@ -13655,26 +13674,27 @@ export class OrcaRuntimeService {
     return 'local'
   }
 
-  // [S10-21a C3a-v2, errata 5(p) v2.1 §D F-H4] [JUDGMENT CALL, see RETURN] Peeks the ALREADY
-  // attached db (`this._orchestrationDb`) rather than calling the lazy, arming
-  // `getOrchestrationDb()` — no registered row can exist without a db having been attached at
-  // some point in this process's life, so "not yet attached" is vacuously safe to wave clause A
-  // through on, never a silent skip of a real risk. Forcing every placed create to lazily arm
-  // (and, off the real Electron runtime, crash acquiring) the db regressed ~100 pre-existing
-  // runtime-suite tests that construct a placement with no orchestration db ever attached —
-  // `launch_store_unavailable` for a covered, DB-required launch is F-12's admission-level
-  // refusal (`agent-launch-admission.ts`, unchanged by this commit), not this gate's.
-  //
-  // [D-R104 F-6 — NOT applied, see RETURN] The reviewed fix (arm the store for a placed create;
-  // refuse loudly on a DB-open failure) was implemented and run against the battery: it breaks
-  // 130 pre-existing tests across 14 files (e.g. s10-17-attestation-anchor.test.ts) that spawn a
-  // COVERED, PLACED launch (`command: 'claude'`, `tabId`/`leafId` set) against a bare
-  // `new OrcaRuntimeService(store)` with no orchestration db ever attached and no Electron
-  // `app.getPath` available — exactly the STOP condition this brief named. Left as the
-  // pre-existing peek (an honest floor, not a silent skip of a NEW risk) pending a chair call on
-  // whether to touch those tests, whitelist-arm the gate off `_orchestrationDb`-truthy-implies-
-  // 'was ever attached' some other way, or accept the peek as errata 5(p)'s standing floor.
+  // [S10-21a C3-v2f, D-R104 F-6, Ruling 34 Addendum 15] Peeks the ALREADY attached db
+  // (`this._orchestrationDb`) rather than calling the lazy, arming `getOrchestrationDb()` — but
+  // ONLY when a store attach was never even ATTEMPTED this process. "Never attempted" and
+  // "attempted and failed" are different facts: every unit fixture that never calls
+  // `getOrchestrationDb()` at all is the former (no registered row can exist to own this pane
+  // when no store has ever been opened — vacuously safe, not a skip of a real risk); the boot
+  // path's own attach attempt throwing (`getLegacyWorkerTerminalRecoveryPlan`'s catch, reached
+  // from `index.ts`'s post-ready sequence) is the latter — a real, in-production hole that
+  // peeking would silently wave every placed create through for the rest of the process's life.
+  // `orchestrationStoreOpenFailed` distinguishes them: set true ONLY by that boot-path catch,
+  // never by a fixture that simply never opened the store — so this refuses loudly instead of
+  // peeking whenever the flag is set, and only then. Both call sites below are already
+  // placement-gated (`gateHasPlacement` / `canAdoptPaneIdentity`), so this needs no separate
+  // "is this a placed/host-set-covered create" check of its own — it is only ever reached from
+  // one. `launch_store_unavailable` for a covered, DB-required launch with NO placement is
+  // F-12's admission-level refusal (`agent-launch-admission.ts`, unchanged by this commit), not
+  // this gate's.
   private getOrchestrationDbForGate(): OrchestrationDb | undefined {
+    if (this.orchestrationStoreOpenFailed) {
+      throw new LaunchAdmissionRefusedError('launch_store_unavailable')
+    }
     return this._orchestrationDb ?? undefined
   }
 

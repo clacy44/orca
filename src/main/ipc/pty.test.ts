@@ -265,6 +265,7 @@ import {
   isHiddenRendererPty
 } from './pty-hidden-delivery-gate'
 import { OrcaRuntimeService } from '../runtime/orca-runtime'
+import * as AgentLaunchAdmissionModule from './agent-launch-admission'
 import { hasLiveClaudePtys, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
 import * as livePtyGate from '../claude-accounts/live-pty-gate'
 import {
@@ -20370,6 +20371,389 @@ describe('registerPtyHandlers', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+  })
+
+  // [S10-21a C3-v2f, D-R104 (k)(3)/T34, Ruling 34 Addendum 15] Every path that admits a covered
+  // launch reaches `admitAgentLaunch` exactly once, via `spawnWithLane`'s two call sites
+  // (pty-spawn-anchor-coverage.test.ts proves there are exactly two, structurally). A spy on the
+  // real implementation (not a mock) proves the WIRING, not just the classification logic
+  // T22/T37/etc. already cover in agent-launch-admission.test.ts.
+  describe('T34: every admission route reaches admitAgentLaunch exactly once', () => {
+    let admitSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      admitSpy = vi.spyOn(AgentLaunchAdmissionModule, 'admitAgentLaunch')
+    })
+
+    afterEach(() => {
+      admitSpy.mockRestore()
+    })
+
+    it('direct pty:spawn (headless, no agentSessionEnsure) reaches admitAgentLaunch once, HOST_MINTED', async () => {
+      installDaemonTestProvider()
+      registerPtyHandlers(mainWindow as never, makeRuntimeStubWithStore() as never)
+
+      const result = (await handlers.get('pty:spawn')!(null, {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-t34',
+        command: 'claude',
+        launchAgent: 'claude',
+        worktreeId: 'worktree-t34',
+        tabId: '99999999-9999-4999-8999-999999999991',
+        leafId: '99999999-9999-4999-8999-999999999992'
+      })) as { command?: string }
+
+      expect(admitSpy).toHaveBeenCalledOnce()
+      const admitted = await admitSpy.mock.results[0]!.value
+      expect(admitted.spawnOptions.command).toMatch(/--session-id/)
+      void result
+    })
+
+    it('the agentSessionOwners.ensure spawn callback reaches admitAgentLaunch once, HOST_MINTED', async () => {
+      // `agentSessionOwners.ensure` proves liveness post-spawn via `isLive` ->
+      // `isProviderAgentSessionOwnerLive` -> `listProcesses()` + the incarnation pty.ts records
+      // from the spawn reply — both must agree, or `ensure` throws `agent_session_exited_during_start`.
+      const incarnationId = 'incarnation-t34-ensure'
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'daemon-pty', incarnationId })),
+        listProcesses: vi.fn(async () => [{ id: 'daemon-pty', incarnationId }])
+      })
+      let controller: { spawn(args: Record<string, unknown>): Promise<unknown> } | undefined
+      const runtime = {
+        ...makeRuntimeStubWithStore(),
+        setPtyController: vi.fn((next: typeof controller) => {
+          controller = next
+        }),
+        beginPtyRegistration: vi.fn(),
+        cancelPendingPtyRegistration: vi.fn(),
+        registerPreAllocatedHandleForPty: vi.fn(),
+        registerPty: vi.fn()
+      }
+      registerPtyHandlers(mainWindow as never, runtime as never)
+
+      await controller!.spawn({
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-t34-ensure',
+        command: 'claude',
+        agentSessionEnsure: { claim: recoveredAgentClaim, surface: recoveredAgentSurface }
+      })
+
+      expect(admitSpy).toHaveBeenCalledOnce()
+    })
+
+    it("createTerminal's background branch reaches admitAgentLaunch once, HOST_MINTED", async () => {
+      installDaemonTestProvider()
+      const runtime = new OrcaRuntimeService({
+        getSettings: () => ({
+          disabledTuiAgents: [],
+          agentCmdOverrides: {},
+          agentDefaultArgs: {},
+          agentDefaultEnv: {}
+        })
+      } as never)
+      const internal = runtime as unknown as {
+        resolveTerminalWorkspaceLaunchScope: ReturnType<typeof vi.fn>
+      }
+      internal.resolveTerminalWorkspaceLaunchScope = vi.fn(async () => ({
+        id: 'worktree-t34-ct',
+        path: '/tmp/worktree-t34-ct',
+        connectionId: null
+      }))
+      registerPtyHandlers(mainWindow as never, runtime, undefined, undefined, undefined, {
+        persistPtyBinding: () => {}
+      } as never)
+      runtime.setOrchestrationDb(new OrchestrationDb(':memory:'))
+
+      await runtime.createTerminal('id:worktree-t34-ct', {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' },
+        launchAgent: 'claude',
+        command: 'claude',
+        // No window attached -> persistHostSessionBinding fires (getAvailableAuthoritativeWindow
+        // is null) -> pty.ts requires a valid, explicit tabId/leafId to persist against.
+        tabId: 'tab-t34-background',
+        leafId: '99999999-9999-4999-8999-999999999993'
+      })
+
+      expect(admitSpy).toHaveBeenCalledOnce()
+      const admitted = await admitSpy.mock.results[0]!.value
+      expect(admitted.spawnOptions.command).toMatch(/--session-id/)
+    })
+
+    it('createMobileSessionTerminal reaches admitAgentLaunch once, HOST_MINTED', async () => {
+      installDaemonTestProvider()
+      const runtime = new OrcaRuntimeService({
+        getSettings: () => ({
+          disabledTuiAgents: [],
+          agentCmdOverrides: {},
+          agentDefaultArgs: {},
+          agentDefaultEnv: {}
+        })
+      } as never)
+      const internal = runtime as unknown as {
+        resolveTerminalWorkspaceLaunchScope: ReturnType<typeof vi.fn>
+      }
+      internal.resolveTerminalWorkspaceLaunchScope = vi.fn(async () => ({
+        id: 'worktree-t34-mobile',
+        path: '/tmp/worktree-t34-mobile',
+        connectionId: null
+      }))
+      registerPtyHandlers(mainWindow as never, runtime, undefined, undefined, undefined, {
+        persistPtyBinding: () => {}
+      } as never)
+      runtime.setOrchestrationDb(new OrchestrationDb(':memory:'))
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+      await runtime.createMobileSessionTerminal('id:worktree-t34-mobile', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        command: 'claude'
+      })
+
+      expect(admitSpy).toHaveBeenCalledOnce()
+      const admitted = await admitSpy.mock.results[0]!.value
+      expect(admitted.spawnOptions.command).toMatch(/--session-id/)
+    })
+
+    // [D-R104 (k)(3)] "renderer-backed" — a live, authoritative window is attached (unlike the
+    // headless direct pty:spawn test above), routing createTerminal's create through the
+    // renderer round-trip (terminal:tabCreate / terminal:tabCreateReply) rather than the
+    // background branch, before it reaches the same spawnWithLane call site.
+    it("createTerminal's renderer-backed branch (a live authoritative window) reaches admitAgentLaunch once, HOST_MINTED", async () => {
+      installDaemonTestProvider()
+      const runtime = new OrcaRuntimeService({
+        getSettings: () => ({
+          disabledTuiAgents: [],
+          agentCmdOverrides: {},
+          agentDefaultArgs: {},
+          agentDefaultEnv: {}
+        })
+      } as never)
+      const internal = runtime as unknown as {
+        resolveTerminalWorkspaceLaunchScope: ReturnType<typeof vi.fn>
+      }
+      internal.resolveTerminalWorkspaceLaunchScope = vi.fn(async () => ({
+        id: 'worktree-t34-renderer',
+        path: '/tmp/worktree-t34-renderer',
+        connectionId: null
+      }))
+      registerPtyHandlers(mainWindow as never, runtime, undefined, undefined, undefined, {
+        persistPtyBinding: () => {}
+      } as never)
+      runtime.setOrchestrationDb(new OrchestrationDb(':memory:'))
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+      const send = mainWindow.webContents.send as ReturnType<typeof vi.fn>
+      send.mockImplementation((channel: string, payload: { requestId: string }) => {
+        if (channel === 'terminal:tabCreate') {
+          const listenerCall = mainWindow.webContents.on.mock.calls.find(
+            (call: unknown[]) => call[0] === 'terminal:tabCreateReply'
+          )
+          const listener = listenerCall?.[1] as
+            | ((event: unknown, args: { requestId: string; tabId: string; title: string }) => void)
+            | undefined
+          listener?.(mainWindowIpcEvent, {
+            requestId: payload.requestId,
+            tabId: 'tab-t34-renderer',
+            title: 'Terminal'
+          })
+        }
+      })
+
+      await runtime.createTerminal('id:worktree-t34-renderer', {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' },
+        presentation: 'focused',
+        launchAgent: 'claude',
+        command: 'claude'
+      })
+
+      expect(admitSpy).toHaveBeenCalledOnce()
+      const admitted = await admitSpy.mock.results[0]!.value
+      expect(admitted.spawnOptions.command).toMatch(/--session-id/)
+    })
+  })
+
+  // [S10-21a C3-v2f, D-R104 T39, Ruling 34 Addendum 15] `agentSessionOwners.ensure`'s paired
+  // outcomes: 'created' (no live owner registered for this claim yet) calls the spawn callback
+  // and so admits/writes exactly one launch row; 'adopted' (the SAME claim, still live from the
+  // first call) short-circuits inside the registry itself (claimed-agent-pty-owner.ts:88-90) —
+  // the spawn callback, and so admission, never runs again — writing NO additional row.
+  describe('T39: ensureAgentSession paired — created writes one row, adopted writes none', () => {
+    it("disposition 'created' writes exactly one launch row; the SAME claim's 'adopted' re-ensure writes none", async () => {
+      const incarnationId = 'incarnation-t39'
+      const claim = {
+        digestVersion: 1 as const,
+        keyId: 'claim-t39',
+        identityDigest: 'cccccccccccccccccccccccccccccccccccccccccc',
+        worktreeScopeDigest: 'dddddddddddddddddddddddddddddddddddddddddd',
+        agent: 'claude' as const
+      }
+      const surface = {
+        worktreeId: 'repo-t39::/tmp/worktree-t39',
+        tabId: '11111111-1111-4111-8111-111111111199',
+        leafId: '22222222-2222-4222-8222-222222222299',
+        terminalHandle: 'term_t39'
+      }
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'daemon-pty-t39', incarnationId })),
+        listProcesses: vi.fn(async () => [{ id: 'daemon-pty-t39', incarnationId }])
+      })
+      let controller: { spawn(args: Record<string, unknown>): Promise<unknown> } | undefined
+      const runtimeStub = makeRuntimeStubWithStore()
+      const runtime = {
+        ...runtimeStub,
+        setPtyController: vi.fn((next: typeof controller) => {
+          controller = next
+        }),
+        beginPtyRegistration: vi.fn(),
+        cancelPendingPtyRegistration: vi.fn(),
+        registerPreAllocatedHandleForPty: vi.fn(),
+        registerPty: vi.fn()
+      }
+      registerPtyHandlers(mainWindow as never, runtime as never)
+
+      const paneKey = `${surface.tabId}:${surface.leafId}`
+      const db = runtimeStub.getOrchestrationDb()
+      const rowCount = (): number =>
+        db.newestLaunchForPane('local', paneKey) === undefined ? 0 : 1
+
+      expect(rowCount()).toBe(0)
+
+      const spawnArgs = {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-t39',
+        command: 'claude',
+        launchAgent: 'claude',
+        worktreeId: surface.worktreeId,
+        tabId: surface.tabId,
+        leafId: surface.leafId,
+        agentSessionEnsure: { claim, surface }
+      }
+      const first = (await controller!.spawn(spawnArgs)) as {
+        agentSessionEnsure?: { disposition: string }
+      }
+      expect(first.agentSessionEnsure?.disposition).toBe('created')
+      expect(rowCount()).toBe(1)
+      const firstSessionId = db.newestLaunchForPane('local', paneKey)?.session_id
+
+      const second = (await controller!.spawn(spawnArgs)) as {
+        agentSessionEnsure?: { disposition: string }
+      }
+      expect(second.agentSessionEnsure?.disposition).toBe('adopted')
+      // Still exactly one row, same session id — the second ensure wrote NOTHING new.
+      expect(rowCount()).toBe(1)
+      expect(db.newestLaunchForPane('local', paneKey)?.session_id).toBe(firstSessionId)
+    })
+  })
+
+  // [S10-21a C3-v2f, D-R104 T42, Ruling 34 Addendum 15] `splitPtyBackedTerminal` passes no
+  // `launchAgent` and (with no `command`) is UNCOVERED/unsniffed at admission (§C.3, §G F-10) —
+  // splitting a pane whose PARENT already has a launch row must write NO row for the new leaf,
+  // and must leave the parent's own row byte-identical (no field touched by the split).
+  describe('T42: splitPtyBackedTerminal writes no row for the new leaf; the parent row is untouched', () => {
+    it('splits a pane with a launch row: the new leaf gets no row, the parent row is byte-identical', async () => {
+      const runtime = new OrcaRuntimeService()
+      const orchestrationDb = new OrchestrationDb(':memory:')
+      runtime.getOrchestrationDb = () => orchestrationDb
+      installDaemonTestProvider()
+      registerPtyHandlers(mainWindow as never, runtime, undefined, undefined, undefined, {
+        persistPtyBinding: () => {}
+      } as never)
+
+      const worktreeId = 'repo-t42::/tmp/worktree-t42'
+      const tabId = 'tab-t42'
+      const leafId = '99999999-9999-4999-8999-999999999994'
+      const paneKey = makePaneKey(tabId, leafId)
+
+      const parentSpawn = (await handlers.get('pty:spawn')!(null, {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-t42',
+        command: 'claude',
+        launchAgent: 'claude',
+        worktreeId,
+        tabId,
+        leafId
+      })) as { id: string; incarnationId?: string }
+
+      const parentRowBefore = orchestrationDb.newestLaunchForPane('local', paneKey)
+      expect(parentRowBefore).toBeDefined()
+
+      runtime.registerPty(parentSpawn.id, worktreeId, null, {
+        tabId,
+        leafId,
+        ...(parentSpawn.incarnationId ? { incarnationId: parentSpawn.incarnationId } : {})
+      })
+      runtime.attachWindow(1)
+      // Why NOT `tabs`/`leaves` here: populating the renderer graph makes `getLivePtyForHandle`
+      // treat this pane as leaf-owned, routing `splitTerminal` into the OTHER (renderer, leaf-
+      // handle) branch, which then waits on a graph-sync round trip this fixture never drives.
+      // The mobile-session PROJECTION (`resolveTerminalSplitSourceAuthority`'s own "renderer
+      // adoption can precede graph sync" fallback) satisfies the source-authority check without
+      // that detour — this stays on the bare PTY-backed path (`getLivePtyForHandle`).
+      runtime.syncWindowGraph(1, {
+        tabs: [],
+        leaves: [],
+        mobileSessionTabs: [
+          {
+            worktree: worktreeId,
+            publicationEpoch: 'test-t42',
+            snapshotVersion: 1,
+            activeGroupId: 'group-t42',
+            activeTabId: `${tabId}::${leafId}`,
+            activeTabType: 'terminal',
+            tabGroups: [{ id: 'group-t42', activeTabId: tabId, tabOrder: [tabId] }],
+            tabs: [
+              {
+                type: 'terminal',
+                id: `${tabId}::${leafId}`,
+                parentTabId: tabId,
+                leafId,
+                ptyId: parentSpawn.id,
+                title: 'T42 parent',
+                isActive: true
+              }
+            ]
+          }
+        ] as never
+      })
+      const internal = runtime as unknown as {
+        issuePtyHandle: (pty: unknown) => string
+        ptysById: Map<string, unknown>
+      }
+      const handle = internal.issuePtyHandle(internal.ptysById.get(parentSpawn.id))
+
+      const internalScope = runtime as unknown as {
+        resolveTerminalWorkspaceLaunchScope: (selector: string) => Promise<unknown>
+      }
+      const originalResolveScope = internalScope.resolveTerminalWorkspaceLaunchScope.bind(runtime)
+      internalScope.resolveTerminalWorkspaceLaunchScope = async () => ({
+        id: worktreeId,
+        path: '/tmp/worktree-t42',
+        connectionId: null
+      })
+      try {
+        await runtime.splitTerminal(handle, { direction: 'horizontal' })
+      } finally {
+        internalScope.resolveTerminalWorkspaceLaunchScope = originalResolveScope
+      }
+
+      const parentRowAfter = orchestrationDb.newestLaunchForPane('local', paneKey)
+      expect(parentRowAfter).toEqual(parentRowBefore)
+
+      const allRows = (
+        orchestrationDb as unknown as { db: { prepare: (sql: string) => { all: () => unknown[] } } }
+      ).db
+        .prepare('SELECT pane_key FROM agent_launch_sessions')
+        .all() as { pane_key: string }[]
+      expect(allRows.every((row) => row.pane_key === paneKey)).toBe(true)
     })
   })
 })
