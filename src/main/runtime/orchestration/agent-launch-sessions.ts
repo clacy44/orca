@@ -210,7 +210,13 @@ export function recordSelfReportRotation(
     }
     throw err
   }
-  return { ok: true, row: launchBySessionId(db, params.sessionId) as AgentLaunchSessionRow }
+  // [D-R105 R-3] Same ambiguity fix as recordLaunch above (F-4): `launchBySessionId` has no
+  // ORDER BY and can return an unrelated historical row sharing this session_id across a pane
+  // move. This UPDATE targets THIS pane's newest row by seq — read it back the same way.
+  return {
+    ok: true,
+    row: newestLaunchForPane(db, params.hostId, params.paneKey) as AgentLaunchSessionRow
+  }
 }
 
 /** ORDER BY seq DESC — never launch_generation or recorded_at (§7). */

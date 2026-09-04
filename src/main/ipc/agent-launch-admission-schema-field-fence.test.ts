@@ -21,7 +21,11 @@ const ROOTS = [
   resolve(REPO_ROOT, 'src', 'preload'),
   resolve(REPO_ROOT, 'src', 'relay'),
   resolve(REPO_ROOT, 'src', 'renderer'),
-  resolve(REPO_ROOT, 'src', 'shared')
+  resolve(REPO_ROOT, 'src', 'shared'),
+  // [D-R105 R-2] PtySpawnOptions (pty-provider-contract.ts) is the shape every IPtyProvider
+  // receives — this root is in scope so a zod schema built here (directly or via .extend/.merge
+  // off a base schema) is caught too.
+  resolve(REPO_ROOT, 'src', 'main', 'providers')
 ]
 // [Ruling 34 Addendum 15] The two named non-wire construction sites — `pty.ts` builds the
 // in-process `LaunchAdmission` descriptor (its two `kind` variants, see agent-launch-admission.ts)
@@ -55,10 +59,12 @@ function listSourceFiles(dir: string): string[] {
   })
 }
 
-/** Every `z.object({`/`z.strictObject({`/`z.looseObject({` call's own balanced-brace body. */
+/** Every `z.object({`/`z.strictObject({`/`z.looseObject({` call's own balanced-brace body, PLUS
+ * `.extend({`/`.merge({` chains off an existing schema [D-R105 R-2] — both grow a schema's field
+ * set exactly like the base call does. */
 function zodSchemaBodies(source: string): string[] {
   const bodies: string[] = []
-  const callRe = /z\.(?:strictObject|looseObject|object)\(\s*\{/g
+  const callRe = /(?:z\.(?:strictObject|looseObject|object)|\.extend|\.merge)\(\s*\{/g
   let match: RegExpExecArray | null
   while ((match = callRe.exec(source))) {
     const start = match.index + match[0].length - 1 // position of the opening `{`
@@ -111,7 +117,7 @@ describe('D-R104 T44: no zod schema names launchAdmission/sequencedAgentLine/res
     expect(total).toBeGreaterThan(0)
   })
 
-  it('no zod schema under rpc/methods, ipc, preload, relay, renderer, or shared names any of the three fields', () => {
+  it('no zod schema under rpc/methods, ipc, preload, relay, renderer, shared, or providers names any of the three fields', () => {
     expect(findOffenses()).toEqual([])
   })
 })

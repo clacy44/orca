@@ -43,6 +43,14 @@ import type { OrchestrationDb } from '../runtime/orchestration/db'
  * the admitted launch reachable in its OWN enclosing scope, so a throw from `ensure`'s own
  * post-callback promotion logic (after this function already returned successfully) can still
  * call `compensate(true)` on the same row.
+ *
+ * [D-R105 LOW-2] `admitted.confirm(result)` runs AFTER `provider.spawn` already succeeded — the
+ * process is live. A throw from `confirm` itself (its own `ctx.notice`/db call) must never be
+ * treated as a spawn failure: `compensate()` (the deleting path) would destroy a row for a
+ * process that is provably still running. It gets its own try/catch, audits via
+ * `compensate(true)` (audit only, never deletes — `§C.6`: never destroy a fact not proven
+ * false) and rethrows, kept OUTSIDE the `provider.spawn` try/catch below so a confirm throw can
+ * never reach the deleting `compensate()`.
  */
 export async function spawnWithLane<TLaunchConfig extends LaneLaunchConfigInput>(
   provider: IPtyProvider,
@@ -64,14 +72,20 @@ export async function spawnWithLane<TLaunchConfig extends LaneLaunchConfigInput>
     admission.ctx
   )
   onAdmitted?.(admitted)
+  let result: PtySpawnResult
   try {
-    const result = await provider.spawn(admitted.spawnOptions)
-    admitted.confirm(result)
-    return result
+    result = await provider.spawn(admitted.spawnOptions)
   } catch (error) {
     admitted.compensate()
     throw error
   }
+  try {
+    admitted.confirm(result)
+  } catch (confirmError) {
+    admitted.compensate(true)
+    throw confirmError
+  }
+  return result
 }
 
 /** The pane a spawn lands in, named the same way on both spawn paths. */

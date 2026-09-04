@@ -4307,6 +4307,7 @@ export class OrcaRuntimeService {
     }
     this.agentMailboxSlowRetryTimersByHandle.clear()
     this._orchestrationDb = db
+    this.orchestrationStoreOpenFailed = false // [D-R105 LOW-1] a successful attach clears it
     this.ensureOrchestrationFederationRelay()
     this.ensureDispatchLivenessMonitor()
     this.resumeDispatchInputObservers()
@@ -28052,6 +28053,14 @@ export class OrcaRuntimeService {
         // spawned pane is still published and revealed with `activate`.
         availableAuthoritativeWindow === null)
 
+    // [S10-21a C3-v2g, D-R105 R-1] Hoisted ABOVE the restore-ticket redeem block below: the
+    // ticket is single-use, and a boot store-open failure refusing AFTER redemption would burn
+    // it for nothing (the caller gets `launch_store_unavailable`, never a chance to retry with
+    // the same ticket). A bare flag check, not `getOrchestrationDbForGate()` — that peek only
+    // makes sense once a placement is known (below); this is unconditional and self-contained.
+    if (this.orchestrationStoreOpenFailed) {
+      throw new LaunchAdmissionRefusedError('launch_store_unavailable')
+    }
     // [S10-21a C3a-v2, errata 5(p) v2.1 §D] E1 — unbypassable, before either branch's body and
     // before this function's first await on either branch. [JUDGMENT CALL, see RETURN] The
     // errata places E1 before `shouldCreateInBackground` is computed; the host-restore/branch

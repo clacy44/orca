@@ -305,7 +305,13 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
   // [D-R104 F-6, Ruling 34 Addendum 15] A store ATTACH that was attempted and FAILED (the boot
   // path, getLegacyWorkerTerminalRecoveryPlan's own catch) is a different fact from "never
   // attempted" (T43a above) — it must refuse a placed create loudly, not wave it through.
-  it('F-6: after a failed boot-path store attach, a PLACED create refuses launch_store_unavailable; an UNPLACED shell still succeeds', async () => {
+  // [D-R105 R-1, SCENARIO_CORRECTION] Was "...; an UNPLACED shell still succeeds" — R-1 hoists
+  // the flag check to a BARE, unconditional test above the restore-ticket redeem block (so a
+  // store-open failure can never burn a single-use ticket before the gate is even reached), which
+  // now also refuses an unplaced create once the flag is set. `getOrchestrationDbForGate` itself
+  // (the placement-scoped peek/refuse) is unchanged — T43b still proves a plain shell never
+  // touches the store when the flag is NOT set.
+  it('F-6/R-1: after a failed boot-path store attach, EVERY create refuses launch_store_unavailable — placed or not', async () => {
     const store = createSharedStore()
     const runtime = new OrcaRuntimeService(store)
     const controller = fakePtyController()
@@ -340,12 +346,71 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
     })
     expect(controller.spawnCallCount()).toBe(0)
 
-    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
-      restoreProvenance: { kind: 'none' },
-      credentialLane: { kind: 'shared' }
+    await expect(
+      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' }
+      })
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'launch_store_unavailable'
     })
-    expect(terminal).toBeTruthy()
-    expect(controller.spawnCallCount()).toBe(1)
+    expect(controller.spawnCallCount()).toBe(0)
+  })
+
+  // [D-R105 R-1] The store-failure refusal must precede restore-ticket redemption — the ticket
+  // is single-use, and refusing AFTER redeeming it would burn it for nothing (the caller cannot
+  // retry with the same ticket). Mints a ticket directly against the runtime's own registry
+  // (no C7 sweep landed yet to mint one through a public path), forces the boot-path store
+  // attach to fail, then asserts BOTH that the host-restore create refuses AND that the ticket
+  // is still redeemable afterwards (peek, which never consumes it).
+  it('R-1: a store-open failure refuses a host-restore create BEFORE its ticket is redeemed', async () => {
+    const store = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const controller = fakePtyController()
+    runtime.setPtyController(controller)
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    vi.spyOn(runtime, 'getOrchestrationDb').mockImplementation(() => {
+      throw new Error('simulated boot-path store-open failure')
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    runtime.prepareLegacyWorkerTerminalRecovery()
+
+    const internal = runtime as unknown as {
+      restoreTickets: {
+        mint: (payload: {
+          predecessorPaneKey: string
+          sessionId: string
+          executionHostId: string
+          launchGeneration: string
+        }) => string
+        peek: (id: string) => { ok: boolean; reason?: string }
+      }
+    }
+    const ticket = internal.restoreTickets.mint({
+      predecessorPaneKey: makePaneKey(REGISTERED_TAB, LEAF_A),
+      sessionId: 'sess-r1',
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-r1'
+    })
+
+    await expect(
+      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'host-restore', ticket: ticket as never },
+        credentialLane: { kind: 'shared' },
+        tabId: REGISTERED_TAB,
+        leafId: LEAF_A
+      })
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'launch_store_unavailable'
+    })
+    expect(controller.spawnCallCount()).toBe(0)
+
+    // Still redeemable — the ticket was never touched by the refused attempt.
+    expect(internal.restoreTickets.peek(ticket)).toMatchObject({ ok: true })
   })
 
   // T45 (F-13): the gate refuses a placement whose leafId matches a registered row's leaf
