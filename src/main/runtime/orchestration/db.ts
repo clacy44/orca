@@ -102,6 +102,11 @@ import {
   type RebindRestoredPaneParams,
   type RebindRestoredPaneResult
 } from './agent-restore-rebind'
+import {
+  evaluateLiveHookReportMismatch as evaluateLiveHookReportMismatchImpl,
+  type LiveHookReportMismatchParams,
+  type LiveHookReportMismatchResult
+} from './agent-lineage-mismatch'
 // [S10-21a C3-v2, errata 5(p)-5 item 5] `deleteLaunchRow` had no OrchestrationDb wrapper yet —
 // `db` is private on this class, so admitAgentLaunch's compensation path cannot reach it without
 // one. Added here rather than left unreachable; mirrors every other launch-session delegate above.
@@ -4908,6 +4913,13 @@ export class OrchestrationDb {
   // S10-21a C5 (design v3.2 §2.4): the Layer-2 rebind — predicate and transaction, pure DB.
   rebindRestoredPane(params: RebindRestoredPaneParams): RebindRestoredPaneResult {
     return rebindRestoredPaneImpl(this.db, params)
+  }
+
+  // S10-21a C6a (design v3.2 §2.3/§2.6/§1.6, D-R107): Layer 1's live-hook-report mismatch check.
+  evaluateLiveHookReportMismatch(
+    params: LiveHookReportMismatchParams
+  ): LiveHookReportMismatchResult {
+    return evaluateLiveHookReportMismatchImpl(this.db, params)
   }
 
   // C1/C2 (Ruling 33(a)): the sole live registered row on `worktreePath` whose pane went dark —

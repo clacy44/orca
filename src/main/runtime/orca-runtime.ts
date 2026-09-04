@@ -35238,7 +35238,13 @@ export class OrcaRuntimeService {
   // ctx.notice, which has no leaf/pty object in hand, only the pane key it admitted against.
   // Silent (no-op) when the pane has no live, connected handle to write to — an admission notice
   // for a pane with nothing live behind it is inert, not a failure.
-  writeHostNoticeToPane(paneKey: string, text: string, opts: { rateKey: string }): void {
+  // [S10-21a C6a, D-R107 fix item 1/7] `windowMs` optional override — the mismatch alarm's
+  // notice is clamped 24h (Ruling 34 Addendum 18), distinct from admission's own 1h default.
+  writeHostNoticeToPane(
+    paneKey: string,
+    text: string,
+    opts: { rateKey: string; windowMs?: number }
+  ): void {
     const parsed = parsePaneKey(paneKey)
     const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
     const target: PendingMessageDeliveryTarget | undefined =
@@ -35256,7 +35262,7 @@ export class OrcaRuntimeService {
       handle,
       target,
       text,
-      { rateKey: opts.rateKey, windowMs: LAUNCH_ADMISSION_NOTICE_WINDOW_MS },
+      { rateKey: opts.rateKey, windowMs: opts.windowMs ?? LAUNCH_ADMISSION_NOTICE_WINDOW_MS },
       'Launch admission notice'
     )
   }

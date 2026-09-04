@@ -1875,12 +1875,17 @@ describe('AgentHookServer listener replay', () => {
     )
 
     expect(statuses).toHaveBeenCalledWith([])
+    // [S10-21a C6a, D-R107 fix item 3, SCENARIO_CORRECTION] BEFORE: this event carried no
+    // `anchorCorroborated` field. AFTER: every provider-session identity now carries the
+    // captured `isCorroboratedAuthority` verdict (§1.6 conjunct 1's evidence) — `false` here
+    // since `ingestRemote`'s stub payload above supplies no launch-token evidence to corroborate.
     expect(sessions).toHaveBeenCalledWith([
       {
         paneKey: PANE,
         sessionId: 'pi-session-1',
         transcriptPath: '/tmp/pi-session-1.jsonl',
-        worktreeId: 'wt-1'
+        worktreeId: 'wt-1',
+        anchorCorroborated: false
       }
     ])
   })

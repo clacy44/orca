@@ -371,6 +371,12 @@ export type AgentHookEventPayload = {
   isReplay?: boolean
   /** Transport-only Claude background-work evidence used to reject false input-based interrupts. */
   claudeRunningNonAgentTask?: boolean
+  /** [S10-21a C6a, D-R107 fix item 4/Addendum 18(v)] Claude SessionStart's own `source` field,
+   * carried verbatim, ONLY for a SessionStart event (`hookEventName === 'SessionStart'`) whose
+   * source is one of the four Claude Code actually emits (D-I35 item 5). Previously dropped
+   * silently for 'fork' (the one measured rotation, errata 5(u)) — normalizeClaudeEvent's own
+   * SessionStart allowlist now admits it too. */
+  sessionStartSource?: 'startup' | 'resume' | 'clear' | 'fork'
   payload: ParsedAgentStatusPayload
 }
 
@@ -2842,7 +2848,12 @@ function normalizeClaudeEvent(
       eventAgentId !== undefined ||
       (sessionStartSource !== 'startup' &&
         sessionStartSource !== 'resume' &&
-        sessionStartSource !== 'clear')
+        sessionStartSource !== 'clear' &&
+        // [S10-21a C6a, D-R107 fix item 4, Ruling 34 Addendum 18] 'fork' is the one measured
+        // rotation (errata 5(u), D-I35 item 5) — previously dropped here, so it never reached
+        // the server at all and the mismatch alarm's rotation conjunct 4 had no evidence
+        // carrier. It is still a session-boundary 'done' row like the other three.
+        sessionStartSource !== 'fork')
     ) {
       // Why: allowlist idle boundaries and fail closed — a compact restart (or any unknown
       // source) fires mid-turn, and a child-attributed SessionStart must not flip the lead's
@@ -4481,6 +4492,19 @@ export function normalizeHookPayload(
       : null)
   const restoredUnconfirmed =
     source === 'claude' && state.claudeUnconfirmedRestoredStatusPaneKeys.delete(paneKey)
+  // [S10-21a C6a, D-R107 fix item 4] Same allowlist normalizeClaudeEvent's own SessionStart
+  // branch just validated (both must agree, or an event that branch dropped could still
+  // surface a source value here) — read fresh from the raw payload since that branch returns
+  // only the nested ParsedAgentStatusPayload, never this top-level envelope.
+  const rawSessionStartSource =
+    source === 'claude' && eventName === 'SessionStart' ? hookPayloadRecord.source : undefined
+  const sessionStartSource =
+    rawSessionStartSource === 'startup' ||
+    rawSessionStartSource === 'resume' ||
+    rawSessionStartSource === 'clear' ||
+    rawSessionStartSource === 'fork'
+      ? rawSessionStartSource
+      : undefined
   return transportPayload
     ? {
         paneKey,
@@ -4488,6 +4512,7 @@ export function normalizeHookPayload(
         launchToken,
         tabId,
         worktreeId,
+        ...(sessionStartSource ? { sessionStartSource } : {}),
         // Why: normalization is transport-agnostic — only ingestRemote knows the mux identity to stamp here.
         connectionId: null,
         ...(restoredUnconfirmed ? { restoredUnconfirmed: true } : {}),

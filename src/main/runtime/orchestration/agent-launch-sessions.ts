@@ -290,6 +290,29 @@ export function newestLaunchForPane(
     .get(hostId, paneKey) as AgentLaunchSessionRow | undefined
 }
 
+/** [S10-21a C6a, D-R107 MEDIUM-1] Suffix-scoped sibling of `newestLaunchForPane` — identity is
+ * by pane SUFFIX everywhere else in this design (agent-restore-rebind-predicate.ts's
+ * `paneSuffix`, db.ts's `getAgentByPaneKey`), but the exact-match lookup above misses a pane
+ * that moved tabs (a new tabId prefix, same leaf) or was re-keyed via
+ * `normalizeHookBodyPaneKeyAlias` (server.ts) — silently reading `no_row` and skipping the
+ * mismatch alarm entirely for a pane that plainly still has a launch record, just under a
+ * different tabId prefix. */
+export function newestLaunchForPaneSuffix(
+  db: Database.Database,
+  hostId: string,
+  paneKey: string
+): AgentLaunchSessionRow | undefined {
+  const idx = paneKey.indexOf(':')
+  const suffix = idx === -1 ? paneKey : paneKey.slice(idx + 1)
+  return db
+    .prepare(
+      `SELECT * FROM agent_launch_sessions
+         WHERE host_id = ? AND substr(pane_key, instr(pane_key, ':') + 1) = ?
+         ORDER BY seq DESC LIMIT 1`
+    )
+    .get(hostId, suffix) as AgentLaunchSessionRow | undefined
+}
+
 export function launchBySessionId(
   db: Database.Database,
   sessionId: string

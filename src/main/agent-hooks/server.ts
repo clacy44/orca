@@ -97,6 +97,13 @@ type EnrichedAgentHookEventPayload = AgentHookEventPayload & {
   restoredUnconfirmed?: true
   /** User-hidden resume identity retained solely for destructive liveness checks. */
   retainedForLiveness?: true
+  /** [S10-21a C6a, D-R107 fix item 3] `isCorroboratedAuthority`'s ACTUAL result for THIS event,
+   * captured at the ingestion call sites (recordCurrentAuthorityObservation's return value) —
+   * never recomputed later from `getCurrentAuthorityObservations()`, which records uncorroborated
+   * observations too when no prior entry exists (recordCurrentAuthorityObservation's own
+   * "may only fill a void" comment) and would silently misreport an unauthenticated event as
+   * anchored. Absent when the event carried no launch-token evidence to corroborate at all. */
+  anchorCorroborated?: boolean
 }
 
 type NormalizedLocalHook = {
@@ -131,6 +138,26 @@ export type AgentHookProviderSessionIdentity = {
   sessionId: string
   transcriptPath?: string
   worktreeId?: string
+  /** [S10-21a C6a, D-R107 fix item 3, Ruling 34 Addendum 18(v)] Not populated: Claude Code's
+   * `SessionStart` payload on a `fork` carries no field naming the parent session id it forked
+   * from (BLOCKER-2's own finding — measured absent, not merely unwired). §1.6 conjunct 2 is
+   * therefore satisfied differently for the one channel that can populate this at all: by
+   * `sessionStartSource === 'fork'` AND the pane's own newest recorded row already being the
+   * parent (checked host-side, in agent-lineage-mismatch.ts) — never by this field, which stays
+   * permanently undefined until Claude Code's hook payload adds one. Kept on the type (rather
+   * than omitted) so a future measured carrier has a place to land without a wire-shape change. */
+  previousSessionId?: string
+  /** [S10-21a C6a, D-R107 fix item 3/8, Addendum 18] Claude SessionStart's own `source`,
+   * carried verbatim from the hook event (`sessionStartSource` on the enriched entry) — the
+   * mismatch alarm's §1.6 conjunct 4 evidence. Absent for a non-SessionStart status entry. */
+  sessionStartSource?: 'startup' | 'resume' | 'clear' | 'fork'
+  /** [S10-21a C6a, D-R107 fix item 3] `isCorroboratedAuthority`'s captured verdict for the pane's
+   * NEWEST status entry (`anchorCorroborated` on the enriched entry) — §1.6 conjunct 1's
+   * evidence. Optional (a pre-existing test fixture predates this field) — absent must be read
+   * as uncorroborated by every consumer, same as `false`; never re-derived from
+   * `getCurrentAuthorityObservations()` (that map records uncorroborated fill-the-void
+   * observations too — see `recordCurrentAuthorityObservation`). */
+  anchorCorroborated?: boolean
 }
 
 export type AgentHookAuthorityEvidence = Readonly<{
@@ -978,7 +1005,11 @@ export class AgentHookServer {
           ...(enriched.providerSession.transcriptPath
             ? { transcriptPath: enriched.providerSession.transcriptPath }
             : {}),
-          ...(enriched.worktreeId ? { worktreeId: enriched.worktreeId } : {})
+          ...(enriched.worktreeId ? { worktreeId: enriched.worktreeId } : {}),
+          ...(enriched.sessionStartSource
+            ? { sessionStartSource: enriched.sessionStartSource }
+            : {}),
+          anchorCorroborated: enriched.anchorCorroborated === true
         })
       }
       if (!enriched.providerSessionOnly) {
@@ -2079,7 +2110,7 @@ export class AgentHookServer {
       env: envelope.env,
       expectedEnv: this.env
     })
-    const event: AgentHookEventPayload = {
+    const event: AgentHookEventPayload & { anchorCorroborated?: boolean } = {
       paneKey,
       source,
       launchToken: statusDisposition === 'restart' ? undefined : envelope.launchToken,
@@ -2103,7 +2134,7 @@ export class AgentHookServer {
           : undefined,
       payload: normalizedPayload
     }
-    this.recordCurrentAuthorityObservation(event)
+    event.anchorCorroborated = this.recordCurrentAuthorityObservation(event)
     this.applyNormalizedStatus(
       event,
       applyClaudeBackgroundWork
@@ -2202,11 +2233,11 @@ export class AgentHookServer {
             })
           : 'suppress'
         if (normalized.event && statusDisposition !== 'suppress') {
-          const event =
+          const event: AgentHookEventPayload & { anchorCorroborated?: boolean } =
             statusDisposition === 'restart'
               ? { ...normalized.event, launchToken: undefined }
               : normalized.event
-          this.recordCurrentAuthorityObservation(event)
+          event.anchorCorroborated = this.recordCurrentAuthorityObservation(event)
           const enriched = this.applyNormalizedStatus(event, normalized.onAccepted)
           this.scheduleAssistantMessageRetry(source, aliasedBody, enriched)
           this.scheduleCodexSubagentPoll(source, aliasedBody, enriched)
@@ -2976,13 +3007,17 @@ export class AgentHookServer {
     )
   }
 
+  // [S10-21a C6a, D-R107 fix item 3] Returns the ACTUAL `isCorroboratedAuthority` verdict for
+  // THIS event (undefined when the event carried no evidence to check at all) so callers can
+  // stamp it onto the event before `applyNormalizedStatus` — the mismatch alarm's conjunct 1
+  // must read this captured verdict, never re-derive it later from mutable state.
   private recordCurrentAuthorityObservation(
     payload: AgentHookEventPayload,
     options?: { persist?: boolean }
-  ): void {
+  ): boolean | undefined {
     const evidence = this.toAuthorityEvidence(payload)
     if (!evidence) {
-      return
+      return undefined
     }
     const corroborated = this.isCorroboratedAuthority(
       evidence.paneKey,
@@ -2992,7 +3027,7 @@ export class AgentHookServer {
     // An uncorroborated claim never DISPLACES existing authority state (the forged-/reattest
     // revocation lever) — it may only fill a void, observation-only.
     if (!corroborated && this.hasAnyAuthorityEntry(evidence.paneKey)) {
-      return
+      return corroborated
     }
     this.currentAuthorityObservations.set(evidence.paneKey, evidence)
     // Persistence (what the NEXT generation hydrates into authority) requires corroboration on
@@ -3002,6 +3037,7 @@ export class AgentHookServer {
       this.persistedAuthorityCommitmentsByPaneKey.set(evidence.paneKey, evidence)
       this.hydratedLaunchTokenHashByPaneKey.set(evidence.paneKey, evidence.launchTokenHash)
     }
+    return corroborated
   }
 
   private toAuthorityEvidence(
