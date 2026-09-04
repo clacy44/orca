@@ -124,7 +124,11 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { resolveWorktreeCreateBase } from '../worktree-create-base'
 import { resolveWorktreeAddBaseRef } from '../../shared/worktree/base-ref'
-import type { RestoreTicketId } from './restore-ticket-registry'
+import {
+  RestoreTicketRegistry,
+  type RestoreTicketId,
+  type RestoreTicketPayload
+} from './restore-ticket-registry'
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
@@ -346,6 +350,7 @@ import { getRegisteredSshState } from '../ipc/ssh'
 // [S10-21a C3-v2c, errata 5(p) v2.1 §C.5, §C.7] The in-process launch-admission descriptor and its
 // typed refusal — never on a wire schema (see `LaunchAdmission`'s own doc comment).
 import { LaunchAdmissionRefusedError, type LaunchAdmission } from '../ipc/agent-launch-admission'
+import { audit as writeLaunchAdmissionAudit } from '../ipc/agent-launch-admission-support'
 import {
   isCoveredLaunchAgent,
   isForkSessionRefusalToken,
@@ -1836,6 +1841,10 @@ type RuntimePtyController = {
     tabId: string
     leafId: string
   }): () => void
+  /** [S10-21a C3a-v2, errata 5(p) v2.1 §D clause B] Same stable-pane notion `adoptStablePane`
+   * itself resolves against (`resolveStablePaneOwner`, pty.ts), not only `this.leaves` — the
+   * gate's E2 (`leafHoldsLiveOrStablePane`) asks this for the persisted half. */
+  hasStablePaneForLeaf?(args: { leafId: string; connectionId: string | null }): boolean
   adoptStablePane?(opts: {
     cols: number
     rows: number
@@ -3195,6 +3204,11 @@ export class OrcaRuntimeService {
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  // [S10-21a C3a-v2, errata 5(p) v2.1 §D "Wiring note"] The one instance for the process:
+  // `createTerminal`'s E1 (below) is its first consumer (redeem-once, §C.5); C7's sweep mints
+  // from the same instance later. No RPC/IPC surface ever sees a `RestoreTicketId` — it is
+  // minted and redeemed entirely in-process (INV-P-021).
+  private readonly restoreTickets = new RestoreTicketRegistry()
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
   // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
@@ -13636,6 +13650,97 @@ export class OrcaRuntimeService {
 
   getOrchestrationCompatibilityHostId(): 'local' {
     return 'local'
+  }
+
+  // [S10-21a C3a-v2, errata 5(p) v2.1 §D F-H4] [JUDGMENT CALL, see RETURN] Peeks the ALREADY
+  // attached db (`this._orchestrationDb`) rather than calling the lazy, arming
+  // `getOrchestrationDb()` — no registered row can exist without a db having been attached at
+  // some point in this process's life, so "not yet attached" is vacuously safe to wave clause A
+  // through on, never a silent skip of a real risk. Forcing every placed create to lazily arm
+  // (and, off the real Electron runtime, crash acquiring) the db regressed ~100 pre-existing
+  // runtime-suite tests that construct a placement with no orchestration db ever attached —
+  // `launch_store_unavailable` for a covered, DB-required launch is F-12's admission-level
+  // refusal (`agent-launch-admission.ts`, unchanged by this commit), not this gate's.
+  private getOrchestrationDbForGate(): OrchestrationDb | undefined {
+    return this._orchestrationDb ?? undefined
+  }
+
+  // [S10-21a C3a-v2, errata 5(p) v2.1 §D clause A, F-13] Same leaf-suffix semantic as
+  // `getAgentByPaneKey` (derived-agent-rows.ts) — the gate and the sweep must never disagree
+  // about who owns a pane. Exempted only when the redeemed host-restore payload's own
+  // `predecessorPaneKey` names this same leaf (this create IS that pane's restore).
+  private assertPaneKeyNotOwned(
+    db: OrchestrationDb | undefined,
+    paneKey: string,
+    hostRestorePayload: RestoreTicketPayload | undefined
+  ): void {
+    if (!db) {
+      // No db has ever attached in this process's life: no registered row can exist to own
+      // this pane. Vacuously safe — not a skip of a real risk.
+      return
+    }
+    const hostId = this.getOrchestrationCompatibilityHostId()
+    const registered = db.getAgentByPaneKey(hostId, paneKey)
+    if (!registered || registered.derived !== 0 || registered.quarantined) {
+      return
+    }
+    const leafId = parsePaneKey(paneKey)?.leafId
+    if (
+      hostRestorePayload &&
+      leafId !== undefined &&
+      parsePaneKey(hostRestorePayload.predecessorPaneKey)?.leafId === leafId
+    ) {
+      return
+    }
+    writeLaunchAdmissionAudit(db, paneKey, hostId, 'launch_refused', 'refused', 'pane_key_owned')
+    throw new LaunchAdmissionRefusedError('pane_key_owned')
+  }
+
+  // [S10-21a C3a-v2, errata 5(p) v2.1 §D clause B] E2-only: is the leaf about to be adopted
+  // already live or bound to a stable pane. Same exemption as clause A.
+  private assertLeafNotOccupied(
+    db: OrchestrationDb | undefined,
+    paneKey: string,
+    leafId: string,
+    hostRestorePayload: RestoreTicketPayload | undefined
+  ): void {
+    if (!this.leafHoldsLiveOrStablePane(leafId)) {
+      return
+    }
+    if (
+      hostRestorePayload &&
+      parsePaneKey(hostRestorePayload.predecessorPaneKey)?.leafId === leafId
+    ) {
+      return
+    }
+    if (!db) {
+      throw new LaunchAdmissionRefusedError('leaf_occupied')
+    }
+    writeLaunchAdmissionAudit(
+      db,
+      paneKey,
+      this.getOrchestrationCompatibilityHostId(),
+      'launch_refused',
+      'refused',
+      'leaf_occupied'
+    )
+    throw new LaunchAdmissionRefusedError('leaf_occupied')
+  }
+
+  /** [S10-21a C3a-v2, errata 5(p) v2.1 §D clause B] Exported (public method) so C7's sweep can
+   * ask the same question against a row it did not itself create. [JUDGMENT CALL, see RETURN]
+   * Cross-tab by design (same leaf-suffix philosophy as clause A/F-13): a live pty or a stable
+   * pane bound to this leaf under ANY tab counts as occupied, the conservative direction.
+   * `connectionId` scopes the stable-pane half to one host (defaults to local) — a leaf id is a
+   * UUID, so cross-host collision is not a live concern, but the controller call still needs a
+   * connection to resolve against. */
+  leafHoldsLiveOrStablePane(leafId: string, connectionId: string | null = null): boolean {
+    for (const leaf of this.leaves.values()) {
+      if (leaf.leafId === leafId && leaf.ptyId) {
+        return true
+      }
+    }
+    return this.ptyController?.hasStablePaneForLeaf?.({ leafId, connectionId }) ?? false
   }
 
   /** S10-1: the exact liveness signals agent-directory.ts's classifyAgentLiveness needs for a
@@ -27914,6 +28019,55 @@ export class OrcaRuntimeService {
         // spawned pane is still published and revealed with `activate`.
         availableAuthoritativeWindow === null)
 
+    // [S10-21a C3a-v2, errata 5(p) v2.1 §D] E1 — unbypassable, before either branch's body and
+    // before this function's first await on either branch. [JUDGMENT CALL, see RETURN] The
+    // errata places E1 before `shouldCreateInBackground` is computed; the host-restore/branch
+    // refusal below needs that value (a host-restore create is refused if it would take the
+    // renderer-backed branch), and redeeming its ticket must happen exactly once for both
+    // clauses to see the same payload — so the whole gate sits here, one statement later, still
+    // ahead of both branch bodies and of every await.
+    if (opts.restoreProvenance.kind === 'host-restore' && !shouldCreateInBackground) {
+      throw new LaunchAdmissionRefusedError('host_restore_requires_background')
+    }
+    let hostRestorePayload: RestoreTicketPayload | undefined
+    if (opts.restoreProvenance.kind === 'host-restore') {
+      const redeemed = this.restoreTickets.redeem(opts.restoreProvenance.ticket)
+      if (!redeemed.ok) {
+        throw new LaunchAdmissionRefusedError(
+          redeemed.reason === 'already_redeemed'
+            ? 'restore_ticket_already_redeemed'
+            : redeemed.reason === 'expired'
+              ? 'restore_ticket_expired'
+              : 'restore_ticket_unknown'
+        )
+      }
+      hostRestorePayload = redeemed.payload
+    }
+    // [F-H4] `getOrchestrationDb()` is armed only when a placement is in play or the launch is
+    // covered by a host-set field — a plain shell with no placement never touches the DB.
+    // [JUDGMENT CALL, see RETURN] Clause (b) (covered, no placement) is deliberately NOT armed
+    // here: a covered launch with no placement has no ownership question for clause A to
+    // answer (the errata's own words: "the bare-command covered case is not handled here — it
+    // is caught at admission"), and arming the db purely on coverage regressed ~90 pre-existing
+    // runtime-suite tests that construct a covered ('claude') launch with no attached
+    // orchestration db and no placement to check. Clause (a) is unconditional, exactly as
+    // specified.
+    const gateTabId = opts.tabId?.trim()
+    const gateLeafId = opts.leafId
+    const gateHasPlacement =
+      gateTabId !== undefined &&
+      isValidHostTerminalTabId(gateTabId) &&
+      gateLeafId !== undefined &&
+      isTerminalLeafId(gateLeafId)
+    if (gateHasPlacement) {
+      const gateDb = this.getOrchestrationDbForGate()
+      this.assertPaneKeyNotOwned(
+        gateDb,
+        makePaneKey(gateTabId as string, gateLeafId as string),
+        hostRestorePayload
+      )
+    }
+
     if (shouldCreateInBackground) {
       if (!this.ptyController?.spawn) {
         throw new Error('runtime_unavailable')
@@ -27951,6 +28105,17 @@ export class OrcaRuntimeService {
       let tabId = canAdoptPaneIdentity ? (hintedTabId as string) : randomUUID()
       let leafId = canAdoptPaneIdentity ? (launchOpts.leafId as string) : randomUUID()
       let paneKey = makePaneKey(tabId, leafId)
+      // [S10-21a C3a-v2, errata 5(p) v2.1 §D] E2 — adopt-time re-evaluation, TOCTOU-closed: no
+      // await between here and `adoptForCreate` immediately below, and none between here and
+      // `adoptStablePane`'s own first await further down. Re-runs clause A against the minted
+      // pane key and adds clause B (occupied leaf) — restricted to `canAdoptPaneIdentity`
+      // (a real placement was supplied), matching E1's own F-H4 restriction; a freshly minted
+      // random leaf cannot already be owned or occupied.
+      if (canAdoptPaneIdentity) {
+        const gateDb = this.getOrchestrationDbForGate()
+        this.assertPaneKeyNotOwned(gateDb, paneKey, hostRestorePayload)
+        this.assertLeafNotOccupied(gateDb, paneKey, leafId, hostRestorePayload)
+      }
       // Why: the hint validated into a paneKey above; the adopt gate runs here, before
       // adoptStablePane and before any launch input is assembled, and is caller-class
       // independent — a lane-less caller may not adopt a lane-bound pane either (§2a(ii)).
@@ -28085,20 +28250,26 @@ export class OrcaRuntimeService {
           launchOpts.persistHostSessionBinding ||
           launchOpts.surfaceOwner === false ||
           this.getAvailableAuthoritativeWindow() === null
-        // [S10-21a C3-v2c, errata 5(p) v2.1 §C.5] `createTerminal` is the one place this
+        // [S10-21a C3a-v2, errata 5(p) v2.1 §C.5] `createTerminal` is the one place this
         // descriptor is built. `sequencedAgentLine` carries the literal Agent-Teams claude line
         // this same call handed to the env below — the only main-side value that can prove what
-        // `ORCA_SEQUENCED_STARTUP_COMMAND` actually holds (§C.2). [JUDGMENT CALL, see RETURN]
-        // `restoreProvenance.kind === 'host-restore'` has no live producer yet — no call site in
-        // this file sets it, and no `RestoreTicketRegistry` instance exists to redeem it (that
-        // instance and its redeem-once flow are C3a-v2's own §D addition). Refusing loudly here
-        // is the honest floor until C3a-v2 lands: a provenance this code cannot yet resolve must
-        // never be silently downgraded to `{kind:'caller'}` (§C.5's redeem-once rule).
+        // `ORCA_SEQUENCED_STARTUP_COMMAND` actually holds (§C.2). `hostRestorePayload` is E1's
+        // redeemed ticket payload (redeem-once; every field copied, including
+        // `executionHostId`, §2.4 clause 5) — `opts.restoreProvenance.kind === 'host-restore'`
+        // without a payload here is unreachable: E1 already redeemed or refused above.
         const launchAdmission: LaunchAdmission =
-          opts.restoreProvenance.kind === 'host-restore'
-            ? (() => {
-                throw new Error('host_restore_requires_ticket_registry')
-              })()
+          opts.restoreProvenance.kind === 'host-restore' && hostRestorePayload
+            ? {
+                kind: 'host-resume',
+                sessionId: hostRestorePayload.sessionId,
+                predecessorPaneKey: hostRestorePayload.predecessorPaneKey,
+                executionHostId: hostRestorePayload.executionHostId,
+                launchGeneration: hostRestorePayload.launchGeneration,
+                ...(hostRestorePayload.launchSeq !== undefined
+                  ? { launchSeq: hostRestorePayload.launchSeq }
+                  : {}),
+                sequencedAgentLine: opts.sequencedAgentLine ?? sequencedStartupCommand
+              }
             : {
                 kind: 'caller',
                 sequencedAgentLine: opts.sequencedAgentLine ?? sequencedStartupCommand

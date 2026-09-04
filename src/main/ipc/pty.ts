@@ -4512,6 +4512,22 @@ export function registerPtyHandlers(
       const ownerKey = makePaneSpawnReservationKey(args.worktreeId, args.connectionId, paneKey)
       return ownerKey ? claimRuntimePaneCreate(ownerKey) : () => {}
     },
+    // [S10-21a C3a-v2, errata 5(p) v2.1 §D clause B] Leaf-suffix, any tab — same persisted
+    // `terminalLayoutsByTabId` `resolvePersistedStablePaneOwner` reads, scoped to one host.
+    hasStablePaneForLeaf: (args) => {
+      if (!store || typeof store.getWorkspaceSession !== 'function') {
+        return false
+      }
+      const session = store.getWorkspaceSession(
+        args.connectionId ? toSshExecutionHostId(args.connectionId) : undefined
+      )
+      for (const layout of Object.values(session.terminalLayoutsByTabId ?? {})) {
+        if (layout?.ptyIdsByLeafId?.[args.leafId]) {
+          return true
+        }
+      }
+      return false
+    },
     adoptStablePane,
     spawn: async (args) => {
       const codexHomeLaunchStartedAt = !args.connectionId ? new Date() : undefined
