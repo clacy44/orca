@@ -113,18 +113,21 @@ export function remintRow(
   // holding its own identity (a same-name refresh, or H5's dead-pane-by-name takeover) — that
   // row's own history was never orphaned, so there is nothing name-keyed to adopt.
   succession = false,
-  // F-8 completion (Ruling 33 Addendum 1): true (default) runs the bare-caller-handle repoint
-  // below — covers the dead-pane-by-name takeover call site (agent-directory.ts:227, which
-  // otherwise moves only the holder's OLD handle). agent-directory.ts's own "existing" branch
-  // (:199-202) passes this explicitly, true only for a genuine derived-placeholder promote
-  // (existing.derived === 1 — that row was never a live identity before, so its pane's
+  // F-8 completion (Ruling 33 Addendum 1) / F-5 (D-R98 medium): required, no default — every
+  // call site states its own intent explicitly rather than relying on an implicit true. true
+  // runs the bare-caller-handle repoint below (repointMailboxFromCallerHandle) INSIDE this
+  // function's own transaction (COMMIT below) — covers the dead-pane-by-name takeover call
+  // site (agent-directory.ts's "nameHolder" branch, which otherwise moves only the holder's OLD
+  // handle) and agent-directory-derived-reclaim.ts's reclaim call (F-1: that repoint used to run
+  // separately, in autocommit, AFTER this function's COMMIT — now it runs here, inside the
+  // transaction, same handle and target id, so the totals are unchanged). agent-directory.ts's
+  // own "existing" branch passes this explicitly, true only for a genuine derived-placeholder
+  // promote (existing.derived === 1 — that row was never a live identity before, so its pane's
   // bare-handle backlog had no earlier chance to be claimed; repointMailboxOnReMint no-ops
   // there because oldHandle === params.terminalHandle). False for agent-directory.ts's mundane
   // same-identity refresh of an already-real row (existing.derived === 0 — unchanged from
-  // before this fix) and for agent-directory-derived-reclaim.ts's reclaim call, which already
-  // repoints the caller's bare handle itself (repointMailboxFromCallerHandle, after this
-  // function returns) — running it here too would double-count and double-move those rows.
-  repointCallerHandle = true
+  // before this fix).
+  repointCallerHandle: boolean
 ): RemintRowResult {
   db.prepare(
     `UPDATE agents SET

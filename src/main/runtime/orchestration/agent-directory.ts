@@ -229,7 +229,9 @@ export function upsertAgentByPaneSuffix(
         // row never had one) — rebind in place rather than mint a second, anonymous identity.
         // F-9b: succession:false — nameHolder already holds this name directly; there is no
         // name-keyed predecessor to adopt (its own history was never orphaned).
-        return remintRow(db, nameHolder, params, false)
+        // F-5 (D-R98 medium): repointCallerHandle:true — the takeover binds nameHolder to the
+        // caller's pane in this txn; the pane's bare-handle mail follows it.
+        return remintRow(db, nameHolder, params, false, true)
       }
     }
 

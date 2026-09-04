@@ -11,11 +11,7 @@ import {
   type RemintRowParams,
   type RemintRowResult
 } from './agent-pane-rebind'
-import {
-  repointMailboxFromBareHandle,
-  repointMailboxFromCallerHandle,
-  repointMailboxOnSuccession
-} from './agent-mailbox-repoint'
+import { repointMailboxFromBareHandle, repointMailboxOnSuccession } from './agent-mailbox-repoint'
 import { adoptFromPredecessors } from './agent-thread-succession'
 import type { AgentRow } from './types'
 
@@ -66,33 +62,22 @@ export function reclaimDerivedPlaceholder(
   // row's display_name != params.displayName on this branch), so nothing is double-adopted.
   // Runs inside this same transaction, before any thread_succession marker is consulted, so the
   // later register-RPC catch-up (which only fires post-commit) never needed to run for this id.
-  // F-8: repointCallerHandle:false — this reclaim already repoints the caller's own bare
-  // terminal handle explicitly below (repointMailboxFromCallerHandle); remintRow running the
-  // same repoint internally would double-move/double-count those rows.
-  const reminted = remintRow(db, nameHolder, params, true, false)
-  // F-8: the caller's own current bare terminal handle can carry unread backlog (e.g. this
-  // worktree's own C2 orphan notice) that neither the derived row's nor the name holder's
-  // old-handle repoints above ever touch — repoint it into the reclaimed identity too.
-  const callerBacklog = params.terminalHandle
-    ? repointMailboxFromCallerHandle(db, params.terminalHandle, nameHolder.id, {
-        paneKey: params.paneKey,
-        hostId: params.hostId
-      })
-    : { repointedMessages: 0, pendingOnOldHandle: 0 }
+  // F-1 (D-R98 medium, attacker-lens review): repointCallerHandle:true — the caller's own bare
+  // terminal handle backlog (e.g. this worktree's own C2 orphan notice) is repointed by
+  // remintRow itself now, inside remintRow's own transaction (COMMIT at
+  // agent-pane-rebind.ts:214), instead of via a separate repointMailboxFromCallerHandle call
+  // made here AFTER that COMMIT in autocommit. Same terminalHandle, same target id
+  // (nameHolder.id) either way, so repointedMessages/pendingOnOldHandle are unchanged — only
+  // the transaction boundary the move lands in changed.
+  const reminted = remintRow(db, nameHolder, params, true, true)
   return {
     ...reminted,
     adoptedThreads: reminted.adoptedThreads + displaced.adoptedThreads,
     blockedByQuarantinedPredecessor:
       reminted.blockedByQuarantinedPredecessor || displaced.blockedByQuarantinedPredecessor,
     repointedMessages:
-      reminted.repointedMessages +
-      displaced.repointedMessages +
-      displacedMailbox.repointedMessages +
-      callerBacklog.repointedMessages,
-    pendingOnOldHandle:
-      reminted.pendingOnOldHandle +
-      displacedMailbox.pendingOnOldHandle +
-      callerBacklog.pendingOnOldHandle,
+      reminted.repointedMessages + displaced.repointedMessages + displacedMailbox.repointedMessages,
+    pendingOnOldHandle: reminted.pendingOnOldHandle + displacedMailbox.pendingOnOldHandle,
     predecessorCount: reminted.predecessorCount + displaced.predecessorCount
   }
 }

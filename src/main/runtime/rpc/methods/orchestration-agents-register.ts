@@ -198,6 +198,14 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
       // so summing double-counts every predecessor once the catch-up runs. When the catch-up ran
       // it is the authoritative post-repoint figure (computed after its own mailbox repoint); use
       // it alone. Otherwise (no catch-up needed) the inline figure is the only figure there is.
+      // F-2 (D-R98, attacker-lens review): on the derived-reclaim arm the inline figure
+      // (result.predecessorCount) already includes the displaced derived row's own id-keyed
+      // predecessor (+1, adoptFromPredecessors by id) — a predecessor the catch-up's name-keyed
+      // scan can never see, since that row never shared nameHolder's display_name. Accepted
+      // here because predecessorCount is not returned over RPC, and the reclaim arm's
+      // reasonCode string (isDerivedPlaceholderReclaim below) never interpolates
+      // totalPredecessorCount at all — only the isPromoteSuccession arm does — so the
+      // catch-up figure's narrower count is never surfaced as wrong on the reclaim arm.
       const totalPredecessorCount = catchUp ? catchUp.predecessorCount : result.predecessorCount
 
       db.writeAgentAudit({
@@ -247,8 +255,12 @@ export const ORCHESTRATION_AGENTS_REGISTER_METHODS: RpcMethod[] = [
         // row can leave a bare-name/succession backlog past the batch ceiling exactly like a
         // 'reminted' row can (agent-directory.ts's UpsertAgentByPaneSuffixResult carries the
         // field on both). Nonzero only past that per-call batch ceiling
-        // (agent-mailbox-repoint.ts) — those rows are not reachable by any other path once this
-        // call's transaction commits.
+        // (agent-mailbox-repoint.ts). F-3 (D-R98, attacker-lens review): this does NOT mean
+        // those rows are unreachable by any other path — the caller's own bare-handle
+        // contribution to that ceiling stays readable through `check`'s own handle union
+        // (orchestration.ts's `address`/`handle` merge in both the peek/all branch, ~1861-1865,
+        // and readMailboxDelivery's fetchCandidates, ~1896-1897) for as long as it stays
+        // unread; this field only reports how much this register call itself did not move.
         pendingOnOldHandle: result.pendingOnOldHandle,
         // R2/F-9b: a tombstoned predecessor under this same host+name whose thread membership
         // this id just inherited — on 'created' (a fresh id), on 'reminted' (the rename/promote
