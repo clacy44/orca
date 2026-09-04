@@ -277,6 +277,10 @@ async function spawnLocalStartupAndSetupTerminals(args: {
 
   let sequencedStartup = startup
   let wrappedSetupCommandStr: string | undefined
+  // [S10-21a C3-v2c, errata 5(p) v2.1 §C.2] The literal line handed to
+  // `createSequencedSetupAgentCommands`, threaded to `createTerminal` below only when this block
+  // actually wrapped it.
+  let sequencedAgentLine: string | undefined
   if (startup && setup?.waitForAgentStartup === true) {
     const platform = getSetupRunnerCommandPlatformForLaunch(
       setup,
@@ -288,6 +292,7 @@ async function spawnLocalStartupAndSetupTerminals(args: {
       platform,
       shell: setup.shell
     })
+    sequencedAgentLine = startup.command
     sequencedStartup = {
       ...startup,
       command: sequenced.startupCommand,
@@ -317,6 +322,7 @@ async function spawnLocalStartupAndSetupTerminals(args: {
       // Why: local IPC bridge, no paired grant — today's shared `~/.claude`, stated (S9 §2a).
       credentialLane: { kind: 'shared' },
       command: sequencedStartup.command,
+      ...(sequencedAgentLine !== undefined ? { sequencedAgentLine } : {}),
       ...(setup ? { claudeAgentTeamsSourceCommand: startup.command } : {}),
       env: sequencedStartup.env,
       ...(sequencedStartup.launchConfig ? { launchConfig: sequencedStartup.launchConfig } : {}),

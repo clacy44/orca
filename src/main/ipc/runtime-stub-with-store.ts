@@ -18,6 +18,7 @@
 // (`runtime.foo(`) call sites pty.ts's spawn path reaches unconditionally — found by grepping
 // `runtime\?\.[a-zA-Z]+\(` (excluding ones ALSO reachable via `?.` on the call, which are already
 // no-op-safe) and `[^.?a-zA-Z]runtime\.[a-zA-Z]+\(` (excluding ones behind a `typeof` guard).
+import { randomUUID } from 'node:crypto'
 import { OrchestrationDb } from '../runtime/orchestration/db'
 
 function noOpRuntimeDefaults(): Record<string, (...args: unknown[]) => undefined> {
@@ -55,11 +56,15 @@ function noOpRuntimeDefaults(): Record<string, (...args: unknown[]) => undefined
 
 export function makeRuntimeStubWithStore<T extends Record<string, unknown>>(
   partial?: T
-): T & { getOrchestrationDb: () => OrchestrationDb } {
+): T & { getOrchestrationDb: () => OrchestrationDb; getLaunchGenerationId: () => string } {
   const store = new OrchestrationDb(':memory:')
+  // S10-21a C3-v2c (errata 5(o)): one id per stub construction, same "one per instance" contract
+  // as `OrcaRuntimeService`'s own `launchGenerationId`.
+  const launchGenerationId = randomUUID()
   return {
     ...noOpRuntimeDefaults(),
     ...(partial ?? ({} as T)),
-    getOrchestrationDb: () => store
+    getOrchestrationDb: () => store,
+    getLaunchGenerationId: () => launchGenerationId
   }
 }

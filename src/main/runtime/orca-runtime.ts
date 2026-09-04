@@ -343,6 +343,18 @@ import {
 import { preservedBranchCleanupScopeKey } from '../../shared/preserved-branch-cleanup'
 import { scopeLaunchConfigClaudeConfigDir } from '../ipc/claude-config-dir-launch-guard'
 import { getRegisteredSshState } from '../ipc/ssh'
+// [S10-21a C3-v2c, errata 5(p) v2.1 §C.5, §C.7] The in-process launch-admission descriptor and its
+// typed refusal — never on a wire schema (see `LaunchAdmission`'s own doc comment).
+import { LaunchAdmissionRefusedError, type LaunchAdmission } from '../ipc/agent-launch-admission'
+import {
+  isCoveredLaunchAgent,
+  isForkSessionRefusalToken,
+  isSessionIdRefusalToken
+} from '../../shared/covered-launch-agents'
+import {
+  tokenizeStartupCommand,
+  type AgentStartupShell
+} from '../../shared/tui-agent-startup-shell'
 import type {
   AgentProviderSessionMetadata,
   SleepingAgentLaunchConfig
@@ -1506,6 +1518,12 @@ type RuntimePtyWorktreeRecord = {
   tailWaitState?: TerminalTailWaitState
 }
 
+// [S10-21a C3-v2c, errata 5(p) v2.1 §C.5] Named so `ensureAgentSession`'s internal third
+// parameter can carry the same shape without repeating the inline union.
+export type TerminalRestoreProvenance =
+  | { kind: 'none' }
+  | { kind: 'host-restore'; ticket: RestoreTicketId }
+
 type TerminalCreateOptions = {
   // Why: required so the compiler enumerates every spawner; the funnel binds it to the pane it
   // mints and every spawn edge reads it back from there, never from the request (S9 §2a).
@@ -1517,7 +1535,14 @@ type TerminalCreateOptions = {
   // params schema carries this field — the ones that could accept terminal-create/
   // ensureAgentSession options from a caller are `.strict()` (e.g.
   // rpc/methods/agent-session.ts:138, :184), so an injected field is rejected, not ignored.
-  restoreProvenance: { kind: 'none' } | { kind: 'host-restore'; ticket: RestoreTicketId }
+  restoreProvenance: TerminalRestoreProvenance
+  // [S10-21a C3-v2c, errata 5(p) v2.1 §C.2/§C.5] Non-wire, host-set only. The literal agent line
+  // this same caller handed to `createSequencedSetupAgentCommands({startupCommand})` — the ONLY
+  // proof that `ORCA_SEQUENCED_STARTUP_COMMAND` (carried on `env` below) is what it claims to be.
+  // Set only by main-side sequenced callers (`ipc/worktree-remote.ts`, this file's two
+  // `waitForAgentStartup` branches); `createTerminal`'s own Agent-Teams sequencing computes its
+  // own value internally and does not read this field.
+  sequencedAgentLine?: string
   command?: string
   claudeAgentTeamsSourceCommand?: string
   cwd?: string
@@ -1860,6 +1885,10 @@ type RuntimePtyController = {
       surface: AgentSessionSurfaceBinding
     }
     agentSessionCreateOperationId?: string
+    /** [S10-21a C3-v2c, errata 5(p) v2.1 §C.5] REQUIRED so the compiler enumerates every
+     * `RuntimePtyController.spawn` caller — the same rationale as `TerminalCreateOptions`'s
+     * `credentialLane`/`restoreProvenance`. Non-wire; never on `PtySpawnOptions`. */
+    launchAdmission: LaunchAdmission
     signal?: AbortSignal
     onPtySpawnCommitted?: () => void
     adoptedStablePane?: {
@@ -2936,6 +2965,10 @@ export type RuntimeRendererReloadFence = Readonly<{
 
 export class OrcaRuntimeService {
   private readonly runtimeId = randomUUID()
+  // [S10-21a C3-v2c, errata 5(o)] One randomUUID() per `OrcaRuntimeService` construction — "this
+  // runtime generation's id" §7/§C.5 cite. Not `runtimeId`: that field predates this errata and
+  // has its own callers; this one exists solely to answer `LaunchAdmission`'s `launchGeneration`.
+  private readonly launchGenerationId = randomUUID()
   private readonly startedAt = Date.now()
   private readonly store: RuntimeStore | null
   // S10-17/F8: a flush failure must never abort a launch, so a failed anchor persist is
@@ -5289,6 +5322,11 @@ export class OrcaRuntimeService {
 
   getRuntimeId(): string {
     return this.runtimeId
+  }
+
+  /** [errata 5(o)] The per-process id `LaunchAdmission.launchGeneration`/`AgentLaunchAdmissionContext.launchGeneration` read. */
+  getLaunchGenerationId(): string {
+    return this.launchGenerationId
   }
 
   resolveOrchestrationWorkerServer(selector: string): OrchestrationWorkerServer {
@@ -24759,6 +24797,11 @@ export class OrcaRuntimeService {
 
     let sequencedStartup = effectiveStartup
     let wrappedSetupCommandStr: string | undefined
+    // [S10-21a C3-v2c, errata 5(p) v2.1 §C.2] The literal line handed to
+    // `createSequencedSetupAgentCommands`, threaded to `createTerminal` below only when this
+    // block actually wrapped it — an unsequenced `sequencedStartup === effectiveStartup` carries
+    // no `ORCA_SEQUENCED_STARTUP_COMMAND` env var for this to attest to.
+    let sequencedAgentLine: string | undefined
     if (effectiveStartup && setup?.waitForAgentStartup === true) {
       const platform = getSetupRunnerCommandPlatformForLaunch(
         setup,
@@ -24770,6 +24813,7 @@ export class OrcaRuntimeService {
         platform,
         shell: setup.shell
       })
+      sequencedAgentLine = effectiveStartup.command
       sequencedStartup = {
         ...effectiveStartup,
         command: sequenced.startupCommand,
@@ -24793,6 +24837,7 @@ export class OrcaRuntimeService {
           restoreProvenance: { kind: 'none' },
           credentialLane,
           command: sequencedStartup.command,
+          ...(sequencedAgentLine !== undefined ? { sequencedAgentLine } : {}),
           ...(setup && effectiveStartup
             ? { claudeAgentTeamsSourceCommand: effectiveStartup.command }
             : {}),
@@ -25119,6 +25164,8 @@ export class OrcaRuntimeService {
 
     let sequencedStartup = args.startup
     let wrappedSetupCommandStr: string | undefined
+    // [S10-21a C3-v2c, errata 5(p) v2.1 §C.2] Same rationale as the local `createWorktree` path.
+    let sequencedAgentLine: string | undefined
     if (args.startup && result.setup?.waitForAgentStartup === true) {
       const platform = getSetupRunnerCommandPlatformForLaunch(result.setup, 'posix')
       const sequenced = createSequencedSetupAgentCommands({
@@ -25127,6 +25174,7 @@ export class OrcaRuntimeService {
         platform,
         shell: result.setup.shell
       })
+      sequencedAgentLine = args.startup.command
       sequencedStartup = {
         ...args.startup,
         command: sequenced.startupCommand,
@@ -25149,6 +25197,7 @@ export class OrcaRuntimeService {
           restoreProvenance: { kind: 'none' },
           credentialLane: args.credentialLane,
           command: sequencedStartup.command,
+          ...(sequencedAgentLine !== undefined ? { sequencedAgentLine } : {}),
           ...(result.setup && args.startup
             ? { claudeAgentTeamsSourceCommand: args.startup.command }
             : {}),
@@ -27316,9 +27365,53 @@ export class OrcaRuntimeService {
     return Object.keys(options).length > 0 ? options : undefined
   }
 
+  /** [S10-21a C3-v2c, errata 5(p) v2.1 §C.7] §2.2's refusal promise, at the request boundary:
+   * unconditional, on every lane, for a covered agent, before the plan is built. Covers
+   * `agentArgs`/`launchConfig.agentArgs`/a caller-supplied raw command — the surfaces this
+   * function's THREE callers can see. Admission (§C.4, `agent-launch-admission.ts`) is the second,
+   * unconditional line for the surfaces this one cannot: the built command string and
+   * `launchConfig.agentCommand` (D-R101 F-3's three channels). */
+  private assertNoCoveredLaunchSelectorAtRequestBoundary(args: {
+    agent: TuiAgent | undefined
+    shell: AgentStartupShell | undefined
+    agentArgs?: string | null
+    command?: string | null
+  }): void {
+    if (!isCoveredLaunchAgent(args.agent)) {
+      return
+    }
+    // Why the fallback: `resolveLocalWindowsAgentStartupShell` returns `undefined` off Windows /
+    // on a remote host, where POSIX word-splitting rules are the correct tokenizer (same default
+    // `agent-launch-classification.ts#resolveAdmissionShell` uses for a non-win32 platform).
+    const shell = args.shell ?? 'posix'
+    for (const subject of [args.agentArgs, args.command]) {
+      if (!subject) {
+        continue
+      }
+      const tokenized = tokenizeStartupCommand(subject, shell)
+      if (!tokenized.ok) {
+        continue
+      }
+      for (const token of tokenized.tokens) {
+        if (isSessionIdRefusalToken(token)) {
+          throw new LaunchAdmissionRefusedError('launch_session_id_forbidden')
+        }
+        if (isForkSessionRefusalToken(token)) {
+          throw new LaunchAdmissionRefusedError('launch_fork_forbidden')
+        }
+      }
+    }
+  }
+
+  // [S10-21a C3-v2c, errata 5(p) v2.1 §D "R5"] `internal` is populated only by in-process callers
+  // (C7's sweep) — the RPC handler (`rpc/methods/agent-session.ts`) calls the two-argument form
+  // only; its `.strict()` params schema gains nothing, and no fence exists in this file to name
+  // (T44 asserts absence in the RPC module itself). `restoreProvenance: { kind: 'none' }` when
+  // omitted, matching every other `createTerminal` caller.
   async ensureAgentSession(
     request: RuntimeEnsureAgentSessionRequest,
-    caller: RuntimeAgentSessionRpcCaller = {}
+    caller: RuntimeAgentSessionRpcCaller = {},
+    internal?: { restoreProvenance?: TerminalRestoreProvenance }
   ): Promise<RuntimeEnsureAgentSessionResult> {
     if (request.kind === 'automatic') {
       // Legacy renderer sleep records are migration evidence, not host authority.
@@ -27353,6 +27446,14 @@ export class OrcaRuntimeService {
       platform,
       isRemote,
       terminalWindowsShell: settings.terminalWindowsShell
+    })
+    // [S10-21a C3-v2c, errata 5(p) v2.1 §C.7] The request-boundary refusal: unconditional, on
+    // every lane, before `assertLaneAgentArgsAllowed` — which returns early for a shared lane and
+    // is the gap §C.7 names.
+    this.assertNoCoveredLaunchSelectorAtRequestBoundary({
+      agent: request.agent,
+      shell,
+      agentArgs: request.agentArgs
     })
     // Why resolved here and not at the createTerminal call below: the launch is BUILT here, and
     // a peer's host-wide defaults may not shape this principal's lane (§2 rows 13/14).
@@ -27395,7 +27496,7 @@ export class OrcaRuntimeService {
       throw new Error('client_disconnected')
     }
     const terminal = await this.createTerminal(`id:${workspace.id}`, {
-      restoreProvenance: { kind: 'none' },
+      restoreProvenance: internal?.restoreProvenance ?? { kind: 'none' },
       credentialLane,
       command: startup.launchCommand,
       env: startup.env,
@@ -27529,6 +27630,12 @@ export class OrcaRuntimeService {
         platform,
         isRemote,
         terminalWindowsShell: settings.terminalWindowsShell
+      })
+      // [S10-21a C3-v2c, errata 5(p) v2.1 §C.7] Same request-boundary refusal as `ensureAgentSession`.
+      this.assertNoCoveredLaunchSelectorAtRequestBoundary({
+        agent: request.agent,
+        shell,
+        agentArgs: request.agentArgs
       })
       const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
       assertLaneAgentArgsAllowed({
@@ -27978,12 +28085,31 @@ export class OrcaRuntimeService {
           launchOpts.persistHostSessionBinding ||
           launchOpts.surfaceOwner === false ||
           this.getAvailableAuthoritativeWindow() === null
+        // [S10-21a C3-v2c, errata 5(p) v2.1 §C.5] `createTerminal` is the one place this
+        // descriptor is built. `sequencedAgentLine` carries the literal Agent-Teams claude line
+        // this same call handed to the env below — the only main-side value that can prove what
+        // `ORCA_SEQUENCED_STARTUP_COMMAND` actually holds (§C.2). [JUDGMENT CALL, see RETURN]
+        // `restoreProvenance.kind === 'host-restore'` has no live producer yet — no call site in
+        // this file sets it, and no `RestoreTicketRegistry` instance exists to redeem it (that
+        // instance and its redeem-once flow are C3a-v2's own §D addition). Refusing loudly here
+        // is the honest floor until C3a-v2 lands: a provenance this code cannot yet resolve must
+        // never be silently downgraded to `{kind:'caller'}` (§C.5's redeem-once rule).
+        const launchAdmission: LaunchAdmission =
+          opts.restoreProvenance.kind === 'host-restore'
+            ? (() => {
+                throw new Error('host_restore_requires_ticket_registry')
+              })()
+            : {
+                kind: 'caller',
+                sequencedAgentLine: opts.sequencedAgentLine ?? sequencedStartupCommand
+              }
         let result: Awaited<ReturnType<NonNullable<RuntimePtyController['spawn']>>>
         try {
           result = await this.ptyController.spawn({
             cols: 120,
             rows: 40,
             cwd,
+            launchAdmission,
             command: sequencedStartupCommand
               ? launchOpts.command
               : (agentTeamsPlan?.command ?? launchOpts.command),
@@ -28624,6 +28750,27 @@ export class OrcaRuntimeService {
         throw new Error('after_tab_not_found')
       }
       afterDesktopTabId = anchor.type === 'terminal' ? anchor.parentTabId : anchor.id
+    }
+    // [S10-21a C3-v2c, errata 5(p) v2.1 §C.7 F-M3] This function builds its own startup and never
+    // passes through `ensureAgentSession`/`createAgentSession`'s own boundary check — the third
+    // site the errata names explicitly. `opts.command` is the raw caller-supplied command this
+    // function otherwise returns verbatim (see `resolveMobileSessionTerminalCommand`'s own early
+    // return), so it — and `launchConfig.agentArgs` — must be scanned here too.
+    {
+      const settings = this.store?.getSettings()
+      const platform = this.getAgentLaunchPlatformForWorkspace(workspace)
+      const isRemote = workspace.repo ? repoIsRemote(workspace.repo) : repoIsRemote(workspace)
+      const shell = resolveLocalWindowsAgentStartupShell({
+        platform,
+        isRemote,
+        terminalWindowsShell: settings?.terminalWindowsShell
+      })
+      this.assertNoCoveredLaunchSelectorAtRequestBoundary({
+        agent: opts.launchAgent ?? opts.agent,
+        shell,
+        agentArgs: opts.launchConfig?.agentArgs,
+        command: opts.command
+      })
     }
     const startupCommand = await this.resolveMobileSessionTerminalCommand(workspace, opts)
     this.assertStableReadyGraph(graphEpoch)
@@ -29824,11 +29971,16 @@ export class OrcaRuntimeService {
     const preAllocatedHandle = this.createPreAllocatedTerminalHandle()
     const paneKey = makePaneKey(parentTabId, leafId)
     this.paneLanes.bind(workspace.id, parentTabId, leafId, inheritedLane, workspace.connectionId)
+    // [S10-21a C3-v2c, errata 5(p) v2.1 §G F-10] `splitPtyBackedTerminal` passes no
+    // `launchAgent` — it is UNCOVERED unless `opts.command` itself sniffs as claude, classified
+    // at admission (§C.3), not here. No sequenced-startup env is built on this path.
+    const launchAdmission: LaunchAdmission = { kind: 'caller' }
     const result = await this.ptyController.spawn({
       cols: 120,
       rows: 40,
       cwd: workspace.path,
       command: opts.command,
+      launchAdmission,
       commandDelivery: 'provider',
       env: this.buildTerminalWorkspaceEnv(workspace, opts.env ?? {}, paneKey, parentTabId),
       envToDelete: opts.envToDelete,

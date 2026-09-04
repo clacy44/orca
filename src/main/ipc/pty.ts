@@ -790,12 +790,7 @@ function retirePersistedStablePaneOwner(
 // file constructs the literal `{kind:'caller'}` — no wire or renderer value can express
 // host-resume (§C.5), so this is honest, not a placeholder that pretends to more than it proves.
 // `getDb` is lazy (see admitAgentLaunch's doc comment: F-H4 — a plain shell must never attach the
-// orchestration DB). `launchGeneration` has no real per-`OrcaRuntimeService` id yet (errata 5(o)
-// mints one; that is C3-v2c's `orca-runtime.ts` change) — this module mints one fallback id for
-// its own lifetime rather than leave the field unset.
-// REMOVED BY C3-v2c: ctx.launchGeneration must come from the runtime's launchGenerationId.
-const FALLBACK_LAUNCH_GENERATION_REMOVED_BY_C3_V2C = randomUUID()
-
+// orchestration DB).
 function launchAdmissionBundle(
   runtime: OrcaRuntimeService | undefined,
   connectionId: string | null | undefined
@@ -817,7 +812,18 @@ function launchAdmissionBundle(
     ctx: {
       hostId,
       executionHostId: hostId,
-      launchGeneration: FALLBACK_LAUNCH_GENERATION_REMOVED_BY_C3_V2C
+      // [S10-21a C3-v2c, errata 5(o)] Sourced from the runtime's own per-process id — no more
+      // module-lifetime fallback UUID. [JUDGMENT CALL, see RETURN] The same typeof guard as
+      // `getDb` above: a `runtime` stub lacking this method (or `runtime` undefined outright)
+      // falls to `''`, never a synthesized id pretending to be a real generation. That empty
+      // string is provably inert, not a fallback in the sense C3-v2's placeholder was: this
+      // function's `getDb` uses the identical guard, so whenever `runtime` cannot answer
+      // `getLaunchGenerationId`, it also cannot answer `getOrchestrationDb` — `admitAgentLaunch`
+      // refuses `launch_store_unavailable` for any covered launch before this field is ever read
+      // (agent-launch-admission.ts's HOST_MINTED branch, the only reader, is unreachable without a
+      // db). An UNCOVERED launch never reaches `ctx` at all (§C.3 coverage-first ordering).
+      launchGeneration:
+        typeof runtime?.getLaunchGenerationId === 'function' ? runtime.getLaunchGenerationId() : ''
     }
   }
 }
