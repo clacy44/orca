@@ -28053,14 +28053,6 @@ export class OrcaRuntimeService {
         // spawned pane is still published and revealed with `activate`.
         availableAuthoritativeWindow === null)
 
-    // [S10-21a C3-v2g, D-R105 R-1] Hoisted ABOVE the restore-ticket redeem block below: the
-    // ticket is single-use, and a boot store-open failure refusing AFTER redemption would burn
-    // it for nothing (the caller gets `launch_store_unavailable`, never a chance to retry with
-    // the same ticket). A bare flag check, not `getOrchestrationDbForGate()` — that peek only
-    // makes sense once a placement is known (below); this is unconditional and self-contained.
-    if (this.orchestrationStoreOpenFailed) {
-      throw new LaunchAdmissionRefusedError('launch_store_unavailable')
-    }
     // [S10-21a C3a-v2, errata 5(p) v2.1 §D] E1 — unbypassable, before either branch's body and
     // before this function's first await on either branch. [JUDGMENT CALL, see RETURN] The
     // errata places E1 before `shouldCreateInBackground` is computed; the host-restore/branch
@@ -28073,6 +28065,16 @@ export class OrcaRuntimeService {
     }
     let hostRestorePayload: RestoreTicketPayload | undefined
     if (opts.restoreProvenance.kind === 'host-restore') {
+      // [S10-21a C3-v2h, Ruling 34 Addendum 15] Scoped to the host-restore branch ONLY, and
+      // its first statement — before the ticket is redeemed. D-D2 F-H4 / Ruling 34 Addendum 15
+      // are explicit: a plain unplaced create must never touch (or be refused by) the store. A
+      // bare, file-wide check (C3-v2g's R-1, rejected) turned a store-open failure into a
+      // whole-app terminal outage; placed/covered creates still get their existing refusal from
+      // `getOrchestrationDbForGate()` below. This only prevents the ONE thing R-1 was for: a
+      // single-use ticket burned by a refusal that happens after `redeem()` already consumed it.
+      if (this.orchestrationStoreOpenFailed) {
+        throw new LaunchAdmissionRefusedError('launch_store_unavailable')
+      }
       const redeemed = this.restoreTickets.redeem(opts.restoreProvenance.ticket)
       if (!redeemed.ok) {
         throw new LaunchAdmissionRefusedError(

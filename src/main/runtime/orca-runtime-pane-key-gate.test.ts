@@ -305,13 +305,13 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
   // [D-R104 F-6, Ruling 34 Addendum 15] A store ATTACH that was attempted and FAILED (the boot
   // path, getLegacyWorkerTerminalRecoveryPlan's own catch) is a different fact from "never
   // attempted" (T43a above) — it must refuse a placed create loudly, not wave it through.
-  // [D-R105 R-1, SCENARIO_CORRECTION] Was "...; an UNPLACED shell still succeeds" — R-1 hoists
-  // the flag check to a BARE, unconditional test above the restore-ticket redeem block (so a
-  // store-open failure can never burn a single-use ticket before the gate is even reached), which
-  // now also refuses an unplaced create once the flag is set. `getOrchestrationDbForGate` itself
-  // (the placement-scoped peek/refuse) is unchanged — T43b still proves a plain shell never
-  // touches the store when the flag is NOT set.
-  it('F-6/R-1: after a failed boot-path store attach, EVERY create refuses launch_store_unavailable — placed or not', async () => {
+  // [S10-21a C3-v2h, Ruling 34 Addendum 15] C3-v2g's R-1 briefly made this a BARE, unconditional
+  // check (so a store-open failure could never burn a single-use restore ticket), which also
+  // refused an unplaced shell — the chair rejected that: D-D2 F-H4 / Ruling 34 Addendum 15 are
+  // explicit that a plain unplaced create must never touch or be refused by the store. C3-v2h
+  // moved the ticket-burn fix inside the host-restore branch only (see the new R-1 test below);
+  // this restores the original assertion byte-for-byte, as at 3b74e61593.
+  it('F-6: after a failed boot-path store attach, a PLACED create refuses launch_store_unavailable; an UNPLACED shell still succeeds', async () => {
     const store = createSharedStore()
     const runtime = new OrcaRuntimeService(store)
     const controller = fakePtyController()
@@ -346,16 +346,12 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
     })
     expect(controller.spawnCallCount()).toBe(0)
 
-    await expect(
-      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
-        restoreProvenance: { kind: 'none' },
-        credentialLane: { kind: 'shared' }
-      })
-    ).rejects.toMatchObject({
-      name: 'LaunchAdmissionRefusedError',
-      reasonCode: 'launch_store_unavailable'
+    const terminal = await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
+      credentialLane: { kind: 'shared' }
     })
-    expect(controller.spawnCallCount()).toBe(0)
+    expect(terminal).toBeTruthy()
+    expect(controller.spawnCallCount()).toBe(1)
   })
 
   // [D-R105 R-1] The store-failure refusal must precede restore-ticket redemption — the ticket
@@ -411,6 +407,22 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
 
     // Still redeemable — the ticket was never touched by the refused attempt.
     expect(internal.restoreTickets.peek(ticket)).toMatchObject({ ok: true })
+
+    // [S10-21a C3-v2h] All three shapes pinned together: a PLACED plain (non-host-restore)
+    // create still refuses under the same flag — via `getOrchestrationDbForGate`'s own,
+    // unmoved refusal (F-6 above), not the host-restore-scoped check this test targets.
+    await expect(
+      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' },
+        tabId: REGISTERED_TAB,
+        leafId: LEAF_A
+      })
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'launch_store_unavailable'
+    })
+    expect(controller.spawnCallCount()).toBe(0)
   })
 
   // T45 (F-13): the gate refuses a placement whose leafId matches a registered row's leaf
