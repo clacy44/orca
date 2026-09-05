@@ -107,6 +107,7 @@ import {
   type RefreshAgentHandleAfterRespawnParams,
   type RefreshAgentHandleAfterRespawnResult
 } from './agent-daemon-respawn-handle-refresh'
+import { resumePactsForRestoredAgent as resumePactsForRestoredAgentImpl } from './agent-pact-resume-after-restore'
 import {
   newestDaemonDeathOrRebindVerb as newestDaemonDeathOrRebindVerbImpl,
   type DaemonRespawnGateVerb
@@ -4944,6 +4945,12 @@ export class OrchestrationDb {
     params: RefreshAgentHandleAfterRespawnParams
   ): RefreshAgentHandleAfterRespawnResult {
     return refreshAgentHandleAfterRespawnImpl(this.db, params)
+  }
+
+  // S10-21a C10 (design v3.2 §2.11 N4 fix; Ruling 34 Addendum 25): host-authored pact un-pause
+  // for pacts paused `counterpart_gone` whose counterpart is the just-restored `agentId`.
+  resumePactsForRestoredAgent(agentId: string, pactIds: string[]): void {
+    resumePactsForRestoredAgentImpl(this.db, agentId, pactIds)
   }
 
   // S10-21a C7f (Ruling 34 Addendum 24): pty.ts's post-spawn-commit gate — the pane's newest

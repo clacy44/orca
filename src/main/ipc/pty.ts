@@ -6993,14 +6993,17 @@ export function registerPtyHandlers(
                   newTerminalHandle: stablePaneOwner.handle,
                   processIncarnation: stablePaneSpawn.result.incarnationId ?? null
                 })
-                // [Ruling 34 Addendum 25] `refreshResult.pactsToUnpause` stays for C10, which
-                // adds its own host-authored un-pause primitive there — `pact-lifecycle.ts`'s
+                // [S10-21a C10, Ruling 34 Addendum 25] `pact-lifecycle.ts`'s
                 // `resumePact`/`resumePactOrRequest` both require a real participant
                 // `callerAgentId` and refuse a host-authored resume with no actor of its own, so
-                // this gate must not call them. Left un-consumed here, exactly as
-                // `rebindRestoredPane`'s own `pactsToUnpause` already is (agent-restore-rebind.ts:
-                // "Pact un-pause is C10's job").
-                void refreshResult
+                // this gate calls C10's own host-authored `resumePactsForRestoredAgent` instead,
+                // post-commit — `refreshAgentHandleAfterRespawn` already committed above.
+                if (refreshResult.ok) {
+                  respawnGateDb.resumePactsForRestoredAgent(
+                    refreshResult.agentId,
+                    refreshResult.pactsToUnpause
+                  )
+                }
               } else if (gateAction.kind === 'refuse_fresh_session') {
                 respawnGateDb.writeAgentAudit({
                   agentId: null,

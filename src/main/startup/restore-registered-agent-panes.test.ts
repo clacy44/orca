@@ -153,6 +153,84 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     expect(skipAudit).toHaveLength(1)
   })
 
+  it('C10, drill criterion 8 (§6.4): a pact paused counterpart_gone resumes after its counterpart is rebound (Layer 2)', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000010'
+    const freshPaneKey = 'tab2:00000000-0000-4000-8000-00000000f0f0'
+    const peerPaneKey = 'tab3:00000000-0000-4000-8000-000000000011'
+    insertAgent(db, { id: 'agent-10', display_name: 'chair-10', pane_key: predPaneKey })
+    insertAgent(db, { id: 'agent-11', display_name: 'chair-11', pane_key: peerPaneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-10',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const { thread } = orchestrationDb!.createThread({
+      subject: 's',
+      createdByAgentId: 'agent-10',
+      participants: [
+        { participantKey: 'agent-10', agentId: 'agent-10' },
+        { participantKey: 'agent-11', agentId: 'agent-11' }
+      ]
+    })
+    orchestrationDb!.proposePact({
+      callerAgentId: 'agent-10',
+      callerPaneKey: predPaneKey,
+      callerHostId: HOST_ID,
+      threadId: thread.id,
+      peerAgentId: 'agent-11',
+      stepsTotal: null
+    })
+    orchestrationDb!.acceptPact({
+      callerAgentId: 'agent-11',
+      callerPaneKey: peerPaneKey,
+      callerHostId: HOST_ID,
+      threadId: thread.id
+    })
+    // The liveness auto-pause that fires when agent-10 goes live -> gone, BEFORE the restart's
+    // rebind lands (§2.11's own opening sentence).
+    orchestrationDb!.autoPausePactsForAgent('agent-10', 'counterpart_gone')
+    expect(orchestrationDb!.getThread(thread.id)?.pact_paused_at).not.toBeNull()
+
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-10',
+        paneKey: freshPaneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        // Forces Layer 2 (a fresh pane), the same shape T21 uses.
+        findConnectedLeafOccupant: () => ({ paneKey: 'tab9:other-leaf', ptyId: 'pty-other' })
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-10',
+      null,
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer2')
+    expect(orchestrationDb!.getThread(thread.id)?.pact_state).toBe('engaged')
+    expect(orchestrationDb!.getThread(thread.id)?.pact_paused_at).toBeNull()
+    const resumeAudit = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'pact_resumed_after_rebind' AND outcome = 'resumed'`
+      )
+      .all()
+    expect(resumeAudit).toHaveLength(1)
+  })
+
   it('Addendum 22(v): a pane whose newest admission audit (any generation) is UNRECORDED and newer than the row is Layer 3, never resumed', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-000000000004'

@@ -227,6 +227,12 @@ export async function restoreOneRegisteredPane(
   // §2.1c "the marks … written in the same synchronous step that redeems a row, before the
   // lock releases" — this call happens while the sweep's own lock is still held.
   db.setSweepRestoreMark(hostId, launchRow.pane_key)
+  // [S10-21a C10, §2.11 N4, Ruling 34 Addendum 25] Post-commit pact un-pause — own transaction
+  // per pact, never undoes the rebind above. Only the Layer-2 (`rebound: true`) result carries
+  // `pactsToUnpause`; Layer 1 (pane preserved) has nothing for C5 to have collected.
+  if (result.rebound) {
+    db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause)
+  }
   // [S10-21a C9 hand-off, D-I80] Arms any mail already waiting on `agent:<id>` — one call, only
   // after a SUCCESSFUL restore. [C7k, Addendum 28, item 8] A throw is an audited note, never a
   // failed restore — it already committed.
