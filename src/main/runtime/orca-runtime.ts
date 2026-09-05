@@ -5396,15 +5396,18 @@ export class OrcaRuntimeService {
   // arming), so the peek always saw an unarmed store and the watermark was permanently null —
   // row 7 (self-resume-since-this-process) could never fire.
   // [S10-21a C7m, Ruling 34 Addendum 30, item 5, D-R120] `getOrchestrationDb()` now runs OUTSIDE
-  // the try: an arming failure (the store cannot open) PROPAGATES — swallowing it here was a
-  // second, silent degradation on top of the boot-path attach site's own loud one
-  // (`getLegacyWorkerTerminalRecoveryPlan`'s catch, orca-runtime.ts, which sets
+  // the try: an arming failure (the store cannot open) PROPAGATES out of this method —
+  // swallowing it here was a second, silent degradation on top of the boot-path attach site's
+  // own loud one (`getLegacyWorkerTerminalRecoveryPlan`'s catch, orca-runtime.ts, which sets
   // `orchestrationStoreOpenFailed` and logs `'[orchestration] failed to open the orchestration
-  // store at boot'`). Both capture sites (index.ts's desktop branch and the serve
-  // `onLockAcquired` callback) run inside the startup chain `installUnhandledRejectionLogging`
-  // (main-process-error-guards.ts) already guards loudly — that is the handler this now relies
-  // on. Only the SEQ READ is guarded: a store that armed successfully but whose read throws is a
-  // half-armed capture, recorded loudly (never silently) with the watermark left absent.
+  // store at boot'`). [S10-21a C7o, D-R122 F2] The two capture sites do NOT handle that
+  // propagation the same way: on the DESKTOP site, `captureSelfResumeWatermarkSurvivingStoreFailure`
+  // (index.ts) catches it, releases the sweep lock, and logs the error — it never reaches
+  // `installUnhandledRejectionLogging`. It propagates uncaught only on the SERVE site (the
+  // `onLockAcquired` callback, uninstrumented by that wrapper), where `runStartupRestoreSweep`'s
+  // own try/catch (index.ts) logs it and `runRestoreSweep`'s `finally` still releases the lock.
+  // Only the SEQ READ below is guarded: a store that armed successfully but whose read throws is
+  // a half-armed capture, recorded loudly (never silently) with the watermark left absent.
   captureSelfResumeWatermark(): number | null {
     const db = this.getOrchestrationDb()
     try {

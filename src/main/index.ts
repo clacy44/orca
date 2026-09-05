@@ -170,6 +170,7 @@ import {
   captureSelfResumeWatermarkAtStartup,
   captureSelfResumeWatermarkSurvivingStoreFailure
 } from './startup/self-resume-watermark-capture'
+import { runStartupRestoreSweepBodyIfLockHeld } from './startup/restore-sweep-lock-release-guard'
 import { maybeRedirectAppImageCliLaunch } from './startup/appimage-cli-redirect'
 import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entry-redirect'
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
@@ -3272,6 +3273,10 @@ void app.whenReady().then(async () => {
   }
   const isDesktopStartup = !serveOptions
   let desktopSweepLockReleased = !isDesktopStartup
+  // [S10-21a C7o, D-R122 F1] Set only inside the capture-failure callback below; read at the
+  // later `runStartupRestoreSweepBodyIfLockHeld` call site (~:3417) so its SKIPPED log names the
+  // error class that caused the early release, not a generic label.
+  let desktopSweepLockReleaseErrorClassName: string | null = null
   if (isDesktopStartup) {
     acquireRestoreSweepLock()
     // [S10-21a C7j, Ruling 34 Addendum 27 row 7] Captured HERE, before EITHER openMainWindow
@@ -3287,12 +3292,17 @@ void app.whenReady().then(async () => {
     // `openMainWindow`. A failed store open is already recorded loudly at the earlier boot-path
     // attach site (`orchestrationStoreOpenFailed`, orca-runtime.ts); this is a SECOND loud record
     // naming the capture itself, then the lock releases and startup continues.
+    // [S10-21a C7o, D-R122 F2] The message names the error's own class/message generically — the
+    // capture can fail for any armer throw (D-R122 fact a), not only a store-open failure, and
+    // the prior hard-coded "failed to open the orchestration store" wording mislabelled every
+    // other case.
     captureSelfResumeWatermarkSurvivingStoreFailure(runtime, (error) => {
       releaseRestoreSweepLock()
       desktopSweepLockReleased = true
+      desktopSweepLockReleaseErrorClassName =
+        error instanceof Error ? error.constructor.name : typeof error
       console.error(
-        '[restore-sweep] self-resume watermark capture failed to open the orchestration store — releasing the sweep lock and continuing to open the window',
-        error
+        `[restore-sweep] self-resume watermark capture failed: ${error instanceof Error ? error.message : String(error)} — releasing the sweep lock and continuing to open the window`
       )
     })
   }
@@ -3414,9 +3424,24 @@ void app.whenReady().then(async () => {
       managedWslCliStartupBarrierReady,
       localPtyProviderStartupReady
     ])
-    await runStartupRestoreSweepBody(runtime)
-    releaseRestoreSweepLock()
-    desktopSweepLockReleased = true
+    // [S10-21a C7o, D-R122 F1] The window/barrier continuation above can run with the sweep
+    // lock ALREADY released (the capture-failure callback above released it before the window
+    // even opened). The sweep body must never run in that state — unlocked, it does real work
+    // while `createTerminal`'s E1 refusal and `pty:spawn`'s `awaitRestoreSweepLockRelease` both
+    // stand down, reopening the renderer-vs-sweep race the mutex exists to close. The guard
+    // below is the single gate: it runs the body only when the lock is still held, and when it
+    // is not, it is the one that records the loud SKIPPED log + breadcrumb + zero-count
+    // `restore-sweep-done` milestone — never a silent no-op.
+    if (
+      runStartupRestoreSweepBodyIfLockHeld(
+        desktopSweepLockReleased,
+        desktopSweepLockReleaseErrorClassName
+      )
+    ) {
+      await runStartupRestoreSweepBody(runtime)
+      releaseRestoreSweepLock()
+      desktopSweepLockReleased = true
+    }
     const runtimeRpcStartResult = await shellPathReady
       .then(() => desktopRuntimeRpc.start())
       .then(
