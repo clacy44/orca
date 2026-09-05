@@ -10,7 +10,7 @@ describe('startup ordering', () => {
     const attachBlock = source.slice(attachStart, attachEnd)
     // Why: anchor on the destructure head only — the settled-result variable's name is not the
     // contract, and pinning it turns a rename into a cryptic `expected -1` failure here.
-    const desktopStart = source.indexOf('const [win')
+    const desktopStart = source.indexOf('win = desktopWindow ?? openMainWindow()')
     // Why: anchor on code, not a comment — the previous comment anchor was silently reworded, so
     // this was -1 and sliced to EOF, letting the assertions below pass against never-run code.
     const desktopEnd = source.indexOf("win.once('show'", desktopStart)
@@ -31,7 +31,7 @@ describe('startup ordering', () => {
     )
     expect(source).toContain('localPtyStartupReady = services.then((value) => value.localPtyReady)')
 
-    const windowIndex = desktopStartup.indexOf('Promise.resolve(desktopWindow ?? openMainWindow())')
+    const windowIndex = desktopStartup.indexOf('desktopWindow ?? openMainWindow()')
     const rpcStartIndex = desktopStartup.indexOf('desktopRuntimeRpc.start()')
     const legacyRpcStartIndex = desktopStartup.indexOf('runtimeRpc.start()')
 
@@ -76,10 +76,7 @@ describe('startup ordering', () => {
     const desktopWindowStart = source.indexOf(
       'const desktopStartup = startWindowsDesktopBeforeShellPathReady('
     )
-    const desktopWindowJoin = source.indexOf(
-      'Promise.resolve(desktopWindow ?? openMainWindow())',
-      serveEnd
-    )
+    const desktopWindowJoin = source.indexOf('desktopWindow ?? openMainWindow()', serveEnd)
     const serveStartup = source.slice(serveStart, serveEnd)
     const desktopStartup = source.slice(reconciliationStart, serveStart)
 
@@ -133,10 +130,7 @@ describe('startup ordering', () => {
       inventoryIndex
     )
     const serveIndex = source.indexOf('if (serveOptions) {', reconciliationIndex)
-    const desktopIndex = source.indexOf(
-      'Promise.resolve(desktopWindow ?? openMainWindow())',
-      serveIndex
-    )
+    const desktopIndex = source.indexOf('desktopWindow ?? openMainWindow()', serveIndex)
 
     expect(daemonInitIndex).toBeGreaterThanOrEqual(0)
     expect(retainedPaneGateIndex).toBeGreaterThan(daemonInitIndex)

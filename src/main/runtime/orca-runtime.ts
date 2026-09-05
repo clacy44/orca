@@ -13779,6 +13779,70 @@ export class OrcaRuntimeService {
     return this.ptyController?.hasStablePaneForLeaf?.({ leafId, connectionId }) ?? false
   }
 
+  /** [S10-21a C7b, D-R110 B3, Ruling 34 Addendum 22] Liveness ONLY — this process's own
+   * connected leaves, never persisted layout (`hasStablePaneForLeaf`'s `ptyIdsByLeafId`, which
+   * survives a restart and made every sweep candidate read as occupied — B3). Any tab whose
+   * leaf id matches and whose pty is connected counts, mirroring `leafHoldsLiveOrStablePane`'s
+   * own leaf-suffix philosophy (a leaf can be re-tabbed) but dropping its persisted-fallback
+   * half entirely. The sweep uses this to distinguish "the pane's own live session survived"
+   * (occupant's own paneKey equals the row's) from "something else is live there" (Layer 2). */
+  // [S10-21a C7b, D-I item 14 residual] `connectionId` is accepted for interface parity with
+  // `leafHoldsLiveOrStablePane` and is NOT yet consulted (`RuntimeLeafRecord` carries no
+  // per-leaf connection id to scope against) — this process's own `leaves` map is host-local by
+  // construction today, so an SSH pane's liveness cannot be misattributed to the wrong host
+  // through this method; C7c's housekeeping decides whether remote panes are excluded from the
+  // sweep outright rather than fixed here.
+  findConnectedLeafOccupant(
+    leafId: string,
+    _connectionId: string | null = null
+  ): { paneKey: string; ptyId: string } | undefined {
+    for (const leaf of this.leaves.values()) {
+      if (leaf.leafId === leafId && leaf.ptyId && leaf.connected === true) {
+        return { paneKey: makePaneKey(leaf.tabId, leaf.leafId), ptyId: leaf.ptyId }
+      }
+    }
+    return undefined
+  }
+
+  /** [S10-21a C7b, D-R110 fix 6, design §2.1c] Whether the tab's PERSISTED layout tree (the
+   * leaf-id-preserving restore structure, `terminal-layout-leaf-ids.ts`) still contains this
+   * leaf id at all — distinct from `leafHoldsLiveOrStablePane`'s occupancy question. A closed
+   * tab's leaf is absent from this tree even though its `ptyIdsByLeafId` entry (a DIFFERENT,
+   * pty-binding structure) can still be present — walking the tree, not that map, is what §2.1c
+   * means by "the persisted layout does not resolve the leaf." Returns false (no placement
+   * offered) whenever the tab itself, or a workspace-session store, is unavailable. */
+  isLeafInPersistedLayout(tabId: string, leafId: string, hostId?: string | null): boolean {
+    const session = this.store?.getWorkspaceSession?.(hostId ?? undefined)
+    const snapshot = session?.terminalLayoutsByTabId?.[tabId]
+    if (!snapshot?.root) {
+      return false
+    }
+    const stack: TerminalPaneLayoutNode[] = [snapshot.root]
+    while (stack.length > 0) {
+      const node = stack.pop() as TerminalPaneLayoutNode
+      if (node.type === 'leaf') {
+        if (node.leafId === leafId) {
+          return true
+        }
+        continue
+      }
+      stack.push(node.first, node.second)
+    }
+    return false
+  }
+
+  /** [S10-21a C7b, D-R110 fix 4] The persisted (pty-binding, not layout-tree) ptyId for a
+   * leaf, when the workspace session records one — feeds `collectIncumbentEvidence`'s D1/D2
+   * lookup, never an occupancy decision (that is `findConnectedLeafOccupant`, B3's fix). */
+  getPersistedPtyIdForLeaf(
+    tabId: string,
+    leafId: string,
+    hostId?: string | null
+  ): string | undefined {
+    const session = this.store?.getWorkspaceSession?.(hostId ?? undefined)
+    return session?.terminalLayoutsByTabId?.[tabId]?.ptyIdsByLeafId?.[leafId]
+  }
+
   /** S10-1: the exact liveness signals agent-directory.ts's classifyAgentLiveness needs for a
    * durable pane key, mirroring the ambient-push gate's own read of these two leaf fields
    * (Why comment at deliverPendingMessagesForHandle). Delegating read, no new classification. */

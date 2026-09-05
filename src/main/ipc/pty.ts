@@ -110,6 +110,8 @@ import type {
   AgentLaunchAdmissionContext
 } from './agent-launch-admission'
 import { deleteEnvKeyVariants } from '../../shared/lane-env-key-case'
+import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
+import { awaitRestoreSweepLockRelease } from '../runtime/restore-sweep-lock'
 import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
   isSafePtySessionId,
@@ -5000,6 +5002,42 @@ export function registerPtyHandlers(
       const spawnIdentityPaneKey = materializedPaneKey ?? metadataPaneKey
       if (spawnIdentityPaneKey) {
         spawnOptions.paneKey = spawnIdentityPaneKey
+      }
+      // [S10-21a C7b, D-R110 finding 5, Ruling 34 Addendum 22] "The renderer's own spawn path
+      // waits on that lock for covered launches, bounded, and never receives a hard refusal for
+      // its own restore." Waits here, before `spawnWithLane`/`spawnForStablePane` below (which
+      // is where admission and the actual OS-level spawn happen) — never refuses; a timeout is
+      // audited and the spawn proceeds exactly as it would have with no sweep running. Also an
+      // `assertPaneKeyNotOwned`-EQUIVALENT consult that only AUDITS: admission (already reached
+      // via `spawnWithLane` below) is the actual enforcement point; this is visibility only, so
+      // a genuine restore racing a stale sweep observation is never blocked here.
+      if (spawnIdentityPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
+        const waitResult = await awaitRestoreSweepLockRelease()
+        const admissionBundle = launchAdmissionBundle(runtime, args.connectionId)
+        const gateDb = admissionBundle.getDb()
+        if (gateDb) {
+          if (waitResult === 'timeout') {
+            gateDb.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: spawnIdentityPaneKey,
+              actorHostId: admissionBundle.ctx.hostId,
+              verb: 'sweep_lock_wait_timeout',
+              outcome: 'proceeded',
+              reasonCode: 'pty_spawn_waited_for_sweep_lock'
+            })
+          }
+          const owner = gateDb.getAgentByPaneKey(admissionBundle.ctx.hostId, spawnIdentityPaneKey)
+          if (owner && owner.derived === 0 && owner.quarantined === 0) {
+            gateDb.writeAgentAudit({
+              agentId: owner.id,
+              actorPaneKey: spawnIdentityPaneKey,
+              actorHostId: admissionBundle.ctx.hostId,
+              verb: 'pty_spawn_pane_owned',
+              outcome: 'observed',
+              reasonCode: 'audit_only_no_refusal'
+            })
+          }
+        }
       }
       if (typeof args.tabId === 'string' && args.tabId.length > 0 && args.tabId.length <= 512) {
         spawnOptions.tabId = args.tabId

@@ -167,7 +167,12 @@ import { maybeRedirectAppImageCliLaunch } from './startup/appimage-cli-redirect'
 import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entry-redirect'
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
 import { recoverLegacyWorkerTerminalsForRendererStartup } from './startup/legacy-worker-renderer-recovery'
-import { runRestoreSweep, type RestoreSweepDeps } from './startup/restore-registered-agent-panes'
+import {
+  runRestoreSweep,
+  runRestoreSweepBody,
+  type RestoreSweepDeps
+} from './startup/restore-registered-agent-panes'
+import { acquireRestoreSweepLock, releaseRestoreSweepLock } from './runtime/restore-sweep-lock'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
 import { getDevInstanceIdentity } from './startup/dev-instance-identity'
 import { hydrateShellPath, mergePathSegments } from './startup/hydrate-shell-path'
@@ -1029,13 +1034,17 @@ function bindTerminalRuntimeStartupServices(
 // throw here must never take startup down with it (the sweep is best-effort recovery, not a
 // startup precondition) — loud console.error, never silent, matching the HARNESS style §2.1a's
 // own lock-bound audit uses.
-async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promise<void> {
-  const deps: RestoreSweepDeps = {
+function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweepDeps {
+  return {
     getOrchestrationDb: () => runtimeService.getOrchestrationDb(),
     getOrchestrationCompatibilityHostId: () => runtimeService.getOrchestrationCompatibilityHostId(),
     getLaunchGenerationId: () => runtimeService.getLaunchGenerationId(),
-    leafHoldsLiveOrStablePane: (leafId, connectionId) =>
-      runtimeService.leafHoldsLiveOrStablePane(leafId, connectionId ?? null),
+    findConnectedLeafOccupant: (leafId, connectionId) =>
+      runtimeService.findConnectedLeafOccupant(leafId, connectionId ?? null),
+    isLeafInPersistedLayout: (tabId, leafId, hostId) =>
+      runtimeService.isLeafInPersistedLayout(tabId, leafId, hostId ?? null),
+    getPersistedPtyIdForLeaf: (tabId, leafId, hostId) =>
+      runtimeService.getPersistedPtyIdForLeaf(tabId, leafId, hostId ?? null),
     ensureAgentSession: (request, caller, internal) =>
       runtimeService.ensureAgentSession(request, caller, internal),
     collectIncumbentEvidence: (paneKey, ptyId, now) =>
@@ -1043,8 +1052,22 @@ async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promi
     getTerminalProcessIncarnation: (handle) => runtimeService.getTerminalProcessIncarnation(handle),
     mintRestoreTicket: (payload) => runtimeService.mintRestoreTicket(payload)
   }
+}
+
+async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promise<void> {
   try {
-    const summary = await runRestoreSweep(deps)
+    const summary = await runRestoreSweep(buildRestoreSweepDeps(runtimeService))
+    logStartupMilestone('restore-sweep-done', summary)
+  } catch (error) {
+    console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
+  }
+}
+
+// [S10-21a C7b, D-R110 B2] The desktop path's own lock spans opening the window and awaiting
+// the startup barriers (see the call site) — this runs the sweep's BODY only, no acquire/release.
+async function runStartupRestoreSweepBody(runtimeService: OrcaRuntimeService): Promise<void> {
+  try {
+    const summary = await runRestoreSweepBody(buildRestoreSweepDeps(runtimeService))
     logStartupMilestone('restore-sweep-done', summary)
   } catch (error) {
     console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
@@ -3159,6 +3182,18 @@ void app.whenReady().then(async () => {
     }
   })
 
+  // [S10-21a C7b, D-R110 B2/finding 6, Ruling 34 Addendum 22] "The sweep lock is taken before
+  // the window opens." On Windows-packaged desktop the window opens INSIDE
+  // `startWindowsDesktopBeforeShellPathReady`, before `shellPathReady` even resolves — earlier
+  // than any other platform's window-open point — so the lock must be acquired here, before the
+  // platform branch, not only at the later "acquire lock; open window" call site the non-Windows
+  // path uses. Never for the serve path: `runStartupRestoreSweep` (below, serve branch) acquires
+  // its own lock, and acquiring twice throws `restore_sweep_lock_already_held`.
+  const isDesktopStartup = !serveOptions
+  let desktopSweepLockReleased = !isDesktopStartup
+  if (isDesktopStartup) {
+    acquireRestoreSweepLock()
+  }
   const shellPathReady = windowsShellPathHydration.whenReady()
   let desktopWindow: BrowserWindow | null = null
   if (process.platform === 'win32' && app.isPackaged && !serveOptions) {
@@ -3261,19 +3296,30 @@ void app.whenReady().then(async () => {
     return
   }
 
-  // [S10-21a C7, design v3.2 §2.7 call site 1] Desktop's store-attach point: `getOrchestrationDb()`
-  // (called inside the sweep) is the lazy attach itself, so running the sweep here both attaches
-  // the store and restores every registered pane before the window opens or RPC starts below —
-  // no renderer-invoked restore path can reach a pane ahead of it.
-  await runStartupRestoreSweep(runtime)
-  // Why: window and RPC startup run in parallel; registerPtyHandlers gates PTY spawns so RPC binds without racing the daemon provider swap.
   const desktopRuntimeRpc = runtimeRpc
   if (!desktopRuntimeRpc) {
     throw new Error('runtime_rpc_unavailable')
   }
-  const [win, runtimeRpcStartResult] = await Promise.all([
-    Promise.resolve(desktopWindow ?? openMainWindow()),
-    shellPathReady
+  // [S10-21a C7b, D-R110 B2, Ruling 34 Addendum 22] "The sweep lock is taken before the window
+  // opens; the window opens (registering the pty controller via registerPtyHandlers, reached
+  // only from openMainWindow); the startup barriers are awaited; the sweep runs; the lock
+  // releases." Before this fix the sweep ran BEFORE the window (and therefore before
+  // `setPtyController`), so every candidate's `ensureAgentSession` threw `runtime_unavailable`
+  // after its ticket had already been minted — a burnt ticket on every restore. The lock was
+  // already acquired above (before the platform branch, so Windows-packaged's earlier window
+  // open is covered too) — not re-acquired here.
+  let win: BrowserWindow
+  try {
+    win = desktopWindow ?? openMainWindow()
+    await Promise.all([
+      firstWindowStartupServicesReady,
+      managedWslCliStartupBarrierReady,
+      localPtyProviderStartupReady
+    ])
+    await runStartupRestoreSweepBody(runtime)
+    releaseRestoreSweepLock()
+    desktopSweepLockReleased = true
+    const runtimeRpcStartResult = await shellPathReady
       .then(() => desktopRuntimeRpc.start())
       .then(
         () => ({ ok: true as const }),
@@ -3282,9 +3328,13 @@ void app.whenReady().then(async () => {
           return { ok: false as const, error }
         }
       )
-  ])
-  if (!runtimeRpcStartResult.ok) {
-    void showRuntimeRpcStartupFailureDialog(win, runtimeRpcStartResult.error)
+    if (!runtimeRpcStartResult.ok) {
+      void showRuntimeRpcStartupFailureDialog(win, runtimeRpcStartResult.error)
+    }
+  } finally {
+    if (!desktopSweepLockReleased) {
+      releaseRestoreSweepLock()
+    }
   }
 
   const cloudAuth = getOrcaCloudAuthConfig()

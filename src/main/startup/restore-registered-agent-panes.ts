@@ -1,33 +1,32 @@
-// S10-21a C7 (design v3.2 §2.1/§2.1a/§2.1b/§2.1c; errata 5(p) v2.1 §C.5; Ruling 34 Addenda
-// 9/16/18): the main-process restore sweep. Invoked directly from main startup (index.ts) —
-// NEVER `ipcMain.handle` — after the orchestration store attaches, before the window/RPC start.
-// Layer 1 (same leaf, no rebind) and Layer 2 (fresh pane + C5's rebindRestoredPane) both go
-// through ONE `ensureAgentSession` call per sleeping registered pane, carrying a redeemed
-// restore ticket as in-process-only provenance (INV-P-021) — `createTerminal`'s own admission
-// (C3a-v2/errata 5(p)) decides whether the pane key is preserved (Layer 1) or moved (Layer 2);
-// this module never branches on that itself, it always calls `rebindRestoredPane` afterward,
-// whose own clause 3 is a structural no-op for the Layer-1 case (§2.4). Layer 3 is "leave for
-// register" — a loud audit row, never a silent skip.
+// S10-21a C7/C7b (design v3.2 §2.1/§2.1a/§2.1b/§2.1c; errata 5(p) v2.1 §C.5; Ruling 34 Addenda
+// 9/16/18/22; D-R110 fix list 1/3/4/6): the main-process restore sweep. Invoked directly from
+// main startup (index.ts) — NEVER `ipcMain.handle` — after the store attaches and the pty
+// controller exists, before RPC start. Layer 1 (same leaf, no rebind) and Layer 2 (fresh pane +
+// C5's rebindRestoredPane) both go through ONE `ensureAgentSession` call per sleeping registered
+// pane, carrying a redeemed restore ticket as in-process-only provenance (INV-P-021) —
+// `createTerminal`'s own admission (C3a-v2/errata 5(p)) decides whether the pane key is
+// preserved or moved; this module never branches on Layer 1 vs 2 itself, it always calls
+// `rebindRestoredPane` afterward, whose own clause 3 is a structural no-op for the Layer-1 case.
 //
-// [JUDGMENT CALL, see RETURN] The design's §2.1 pseudocode loops over `agent_launch_sessions`
-// rows first, then resolves the agents row. The brief's own SCOPE text frames the loop the other
-// way ("per sleeping registered pane: mint a ticket from its newest launch row … skip panes with
-// no row → Layer 3, audit 'sweep_no_launch_row'") — which is the only framing that can ever
-// reach that specific Layer-3 case, since a registered pane with NO launch row never appears in
-// the launch-rows enumeration at all. This module iterates registered rows (via `db.listAgents`)
-// and looks up each one's newest launch row, reconciling the two: every row the §2.1 pseudocode
-// would visit is still visited (it has a launch row by definition), and the brief's
-// no-launch-row case is now reachable.
+// [C7b, D-R110 B1] The ticket's `launchGeneration` is THIS process's current generation
+// (`deps.getLaunchGenerationId()`), never the launch row's own (possibly prior-process)
+// generation — the row's generation says when that fact was first written; the ticket's says
+// which runtime minted it, and `rebindRestoredPane`'s clause 1 compares the ticket's against the
+// CURRENT generation it is being redeemed in. Using the row's stale value refused every rebind.
 //
-// [JUDGMENT CALL, see RETURN] "if a live pty already occupies row.pane_key: continue (daemon
-// survived)" (§2.1) is implemented as: the pane's own leaf already reads live/stable
-// (`leafHoldsLiveOrStablePane`) — skipped with NO ticket minted and no audit row (this is the
-// ordinary "nothing to do" case, not a refusal). §2.1b's OWN occupied-leaf refusal (mint a fresh
-// pane, no placement) therefore never actually fires from this loop as written — an occupied
-// leaf here always means "this exact pane is still alive," which is the daemon-survived
-// shortcut, not a competing occupant. A future slice that can distinguish "the leaf is occupied
-// by something OTHER than this row's own pane" would restore §2.1b's fresh-pane branch; nothing
-// in this loop can currently tell the two apart from a boolean occupancy check alone.
+// [C7b, D-R110 B3] Occupancy is a LIVENESS question, answered from `findConnectedLeafOccupant`
+// (this process's own connected leaves) — never from persisted layout, which survives a restart
+// and made every candidate read as already-occupied. A leaf held by the pane's OWN live session
+// (occupant paneKey === the row's) is `skipped_daemon_survived`, audited, no ticket. A leaf held
+// by anything else proceeds to Layer 2 WITHOUT a placement offer, audited `leaf_occupied_by_other`.
+//
+// [C7b, D-R110 fix 6] A free leaf still withholds placement when the persisted layout tree no
+// longer resolves it (`isLeafInPersistedLayout`) — a closed tab's row must not resurrect into a
+// leaf the current layout does not contain.
+//
+// [C7b, Addendum 22(v)] Before minting, if the pane's newest admission audit (any generation) is
+// UNRECORDED and at least as new as the row's own `recorded_at`, the row is superseded — Layer 3,
+// audited, never resumed over a newer unrecorded conversation.
 import type { AgentLaunchSessionRow } from '../runtime/orchestration/agent-launch-sessions'
 import type { RebindRestoredPaneResult } from '../runtime/orchestration/agent-restore-rebind'
 import { resolveIncumbentDeath, type IncumbentEvidence } from '../runtime/incumbent-death'
@@ -46,7 +45,20 @@ export type RestoreSweepDeps = {
   getOrchestrationDb(): OrchestrationDb
   getOrchestrationCompatibilityHostId(): string
   getLaunchGenerationId(): string
-  leafHoldsLiveOrStablePane(leafId: string, connectionId?: string | null): boolean
+  /** [D-R110 B3] Liveness-only occupant lookup — `orca-runtime.ts#findConnectedLeafOccupant`.
+   * Distinguishes the pane's own live session from anything else on the leaf. */
+  findConnectedLeafOccupant(
+    leafId: string,
+    connectionId?: string | null
+  ): { paneKey: string; ptyId: string } | undefined
+  /** [D-R110 fix 6] Whether the tab's persisted layout TREE still resolves this leaf. */
+  isLeafInPersistedLayout(tabId: string, leafId: string, hostId?: string | null): boolean
+  /** [D-R110 fix 4] The persisted ptyId for a leaf (evidence input only, never occupancy). */
+  getPersistedPtyIdForLeaf(
+    tabId: string,
+    leafId: string,
+    hostId?: string | null
+  ): string | undefined
   ensureAgentSession(
     request: RuntimeEnsureAgentSessionRequest,
     caller: RuntimeAgentSessionRpcCaller,
@@ -58,13 +70,7 @@ export type RestoreSweepDeps = {
     now?: number
   ): Promise<IncumbentEvidence>
   getTerminalProcessIncarnation(handle: string): string | null
-  /** In-process only (INV-P-021) — backed by the runtime's own `RestoreTicketRegistry`
-   * instance, the same one `createTerminal`'s E1 redeems against. This module imports only the
-   * TYPES from `restore-ticket-registry.ts` (erased at compile time) — the registry instance
-   * and its `mint` call stay inside `orca-runtime.ts`, which is where INV-P-021's "minted only
-   * in-process" property is actually enforced (the import-boundary test scans forbidden roots
-   * for ANY specifier resolving to that module, `src/main/startup/**` is not one of them, and no
-   * VALUE import of it appears here regardless). */
+  /** In-process only (INV-P-021) — see orca-runtime.ts's `mintRestoreTicket`. */
   mintRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId
 }
 
@@ -73,32 +79,33 @@ export type RestoreSweepSummary = {
   layer1: number
   layer2: number
   layer3: number
-  skippedAlreadyLive: number
+  skippedDaemonSurvived: number
   errors: number
 }
 
-function auditNoLaunchRow(
-  db: OrchestrationDb,
-  hostId: string,
-  paneKey: string,
-  agentId: string
-): void {
-  db.writeAgentAudit({
-    agentId,
-    actorPaneKey: paneKey,
-    actorHostId: hostId,
-    verb: 'sweep_layer3',
-    outcome: 'deferred',
-    reasonCode: 'sweep_no_launch_row'
-  })
-}
-
-function auditLayer3Refused(
+function auditSweepSkip(
   db: OrchestrationDb,
   hostId: string,
   paneKey: string,
   agentId: string,
-  reason: string
+  reasonCode: string
+): void {
+  db.writeAgentAudit({
+    agentId,
+    actorPaneKey: paneKey,
+    actorHostId: hostId,
+    verb: 'sweep_skip',
+    outcome: 'deferred',
+    reasonCode
+  })
+}
+
+function auditLayer3(
+  db: OrchestrationDb,
+  hostId: string,
+  paneKey: string,
+  agentId: string,
+  reasonCode: string
 ): void {
   db.writeAgentAudit({
     agentId,
@@ -106,13 +113,19 @@ function auditLayer3Refused(
     actorHostId: hostId,
     verb: 'sweep_layer3',
     outcome: 'deferred',
-    reasonCode: `sweep_restore_failed: ${reason}`
+    reasonCode
   })
 }
 
-/** One sleeping registered pane's restore attempt — Layer 1/2 via `ensureAgentSession` +
- * `rebindRestoredPane`, Layer 3 (audited, no throw) on any refusal. Exported for direct
- * per-row testing (T1/T21/T24/T25) without driving the whole host enumeration. */
+export type RestoreOneOutcome =
+  | { kind: 'layer1' | 'layer2'; result: RebindRestoredPaneResult }
+  | { kind: 'layer3'; result?: RebindRestoredPaneResult }
+  | { kind: 'skipped_daemon_survived' }
+
+/** One sleeping registered pane's restore attempt. Exported for direct per-row testing without
+ * driving the whole host enumeration. Never throws for a refusal — every non-restore path is a
+ * typed, audited outcome; only a genuinely unexpected `ensureAgentSession` throw is caught by
+ * the caller (`runRestoreSweep`), not here, so its message reaches the Layer-3 audit unmodified. */
 export async function restoreOneRegisteredPane(
   deps: RestoreSweepDeps,
   db: OrchestrationDb,
@@ -120,22 +133,58 @@ export async function restoreOneRegisteredPane(
   agentId: string,
   worktreeId: string | null,
   launchRow: AgentLaunchSessionRow
-): Promise<{ layer: 1 | 2 | 3; result?: RebindRestoredPaneResult }> {
+): Promise<RestoreOneOutcome> {
   const parsed = parsePaneKey(launchRow.pane_key)
   if (!parsed || !worktreeId) {
-    auditLayer3Refused(db, hostId, launchRow.pane_key, agentId, 'unparseable_pane_or_no_worktree')
-    return { layer: 3 }
+    auditLayer3(
+      db,
+      hostId,
+      launchRow.pane_key,
+      agentId,
+      'sweep_no_placement: unparseable_pane_or_no_worktree'
+    )
+    return { kind: 'layer3' }
   }
-  // §2.1: "if a live pty already occupies row.pane_key: continue (daemon survived)" — see the
-  // file-header JUDGMENT CALL. No ticket, no audit: there is nothing wrong here to record.
-  if (deps.leafHoldsLiveOrStablePane(parsed.leafId)) {
-    return { layer: 1 }
+  const unrecorded = db.isNewestAdmissionUnrecordedAndNewer(
+    launchRow.pane_key,
+    launchRow.recorded_at
+  )
+  if (unrecorded.unrecorded) {
+    auditLayer3(
+      db,
+      hostId,
+      launchRow.pane_key,
+      agentId,
+      `unrecorded_launch: ${unrecorded.reasonCode}`
+    )
+    return { kind: 'layer3' }
   }
+  const occupant = deps.findConnectedLeafOccupant(parsed.leafId)
+  let offerPlacement = true
+  if (occupant) {
+    if (occupant.paneKey === launchRow.pane_key) {
+      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived')
+      return { kind: 'skipped_daemon_survived' }
+    }
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
+    offerPlacement = false
+  } else if (!deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)) {
+    offerPlacement = false
+  }
+  const predecessorPtyId =
+    occupant?.ptyId ?? deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
+  // [D-R110 fix 4] Collected BEFORE the spawn, with the predecessor's own ptyId.
+  const incumbentEvidence = await deps.collectIncumbentEvidence(
+    launchRow.pane_key,
+    predecessorPtyId
+  )
+  const incumbent = resolveIncumbentDeath(incumbentEvidence)
+  const currentGeneration = deps.getLaunchGenerationId()
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,
     sessionId: launchRow.session_id,
     executionHostId: launchRow.execution_host_id,
-    launchGeneration: launchRow.launch_generation,
+    launchGeneration: currentGeneration,
     launchSeq: launchRow.seq
   })
   let created: RuntimeEnsureAgentSessionResult
@@ -147,119 +196,126 @@ export async function restoreOneRegisteredPane(
         agent: launchRow.agent_type as ResumableTuiAgent,
         providerSession: { key: 'session_id', id: launchRow.session_id },
         presentation: 'background',
-        placement: { tabId: parsed.tabId, leafId: parsed.leafId }
+        placement: offerPlacement ? { tabId: parsed.tabId, leafId: parsed.leafId } : undefined
       },
       {},
       { restoreProvenance: { kind: 'host-restore', ticket } }
     )
   } catch (err) {
-    auditLayer3Refused(
+    auditLayer3(
       db,
       hostId,
       launchRow.pane_key,
       agentId,
-      err instanceof Error ? err.message : String(err)
+      `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
     )
-    return { layer: 3 }
+    return { kind: 'layer3' }
   }
   const newPaneKey = created.terminal.paneKey ?? launchRow.pane_key
   const newTerminalHandle = created.terminal.handle
-  const incumbentEvidence = await deps.collectIncumbentEvidence(launchRow.pane_key, undefined)
-  const incumbent = resolveIncumbentDeath(incumbentEvidence)
   const result = db.rebindRestoredPane({
     ticketPayload: {
       predecessorPaneKey: launchRow.pane_key,
       sessionId: launchRow.session_id,
       executionHostId: launchRow.execution_host_id,
-      launchGeneration: launchRow.launch_generation,
+      launchGeneration: currentGeneration,
       launchSeq: launchRow.seq
     },
     newPaneKey,
     newTerminalHandle,
     hostId,
     executionHostId: created.terminal.executionHostId ?? launchRow.execution_host_id,
-    launchGeneration: deps.getLaunchGenerationId(),
+    launchGeneration: currentGeneration,
     incumbent,
     processIncarnation: deps.getTerminalProcessIncarnation(newTerminalHandle)
   })
   if (!result.ok) {
-    auditLayer3Refused(db, hostId, launchRow.pane_key, agentId, result.reason)
-    return { layer: 3, result }
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, `rebind_refused: ${result.reason}`)
+    return { kind: 'layer3', result }
   }
   // §2.1c "the marks … written in the same synchronous step that redeems a row, before the
-  // lock releases" — this call happens while the sweep's own lock (below) is still held.
+  // lock releases" — this call happens while the sweep's own lock is still held.
   db.setSweepRestoreMark(hostId, launchRow.pane_key)
-  return { layer: result.rebound ? 2 : 1, result }
+  return { kind: result.rebound ? 'layer2' : 'layer1', result }
 }
 
-/** The sweep itself: acquires the lock, enumerates every sleeping registered pane for this
- * host, restores each (Layer 1/2) or defers it (Layer 3, audited), releases the lock. Never
- * throws for a single pane's failure — every failure is Layer 3, loud, per-pane. A throw from
- * enumeration itself (no db, e.g.) propagates — startup should see that, not swallow it. */
-export async function runRestoreSweep(deps: RestoreSweepDeps): Promise<RestoreSweepSummary> {
+/** [S10-21a C7b, D-R110 B2, Ruling 34 Addendum 22] The sweep's BODY — enumerates every
+ * registered pane with a launch row for this host, restores each (Layer 1/2), defers it
+ * (Layer 3, audited), or records it already alive (`skipped_daemon_survived`, audited). Does
+ * NOT acquire or release the lock itself: the desktop startup path must hold the lock across
+ * "open the window, await the startup barriers, THEN run the sweep" (B2's fix — the window has
+ * to open first so the pty controller exists), which spans more than this function's own call.
+ * `runRestoreSweep` below is the lock-owning convenience wrapper for callers (the serve path)
+ * that have no such ordering constraint. A single pane's unexpected throw is caught and
+ * downgraded to a Layer-3 audit; it never aborts the rest. */
+export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<RestoreSweepSummary> {
   const summary: RestoreSweepSummary = {
     candidates: 0,
     layer1: 0,
     layer2: 0,
     layer3: 0,
-    skippedAlreadyLive: 0,
+    skippedDaemonSurvived: 0,
     errors: 0
   }
   const db = deps.getOrchestrationDb()
   const hostId = deps.getOrchestrationCompatibilityHostId()
+  // [D-R110 finding 9] `includeDerived: false` explicit — `listAgents`'s own default INCLUDES
+  // derived rows in its 200-row window (registered_at ASC, sliced before this filter), so a
+  // recent chair could fall outside it under load; asking for non-derived only up front keeps
+  // the 200-row cap scoped to the population the sweep actually cares about.
+  const registered = db
+    .listAgents({ hostId, includeDerived: false, limit: 200 })
+    .agents.filter((a) => a.quarantined === 0 && a.pane_key !== null)
+  for (const R of registered) {
+    const paneKey = R.pane_key as string
+    const launchRow = db.newestLaunchForPane(hostId, paneKey)
+    if (!launchRow) {
+      auditLayer3(db, hostId, paneKey, R.id, 'sweep_no_launch_row')
+      summary.layer3 += 1
+      continue
+    }
+    summary.candidates += 1
+    try {
+      const outcome = await restoreOneRegisteredPane(
+        deps,
+        db,
+        hostId,
+        R.id,
+        R.worktree_id,
+        launchRow
+      )
+      if (outcome.kind === 'layer1') {
+        summary.layer1 += 1
+      } else if (outcome.kind === 'layer2') {
+        summary.layer2 += 1
+      } else if (outcome.kind === 'skipped_daemon_survived') {
+        summary.skippedDaemonSurvived += 1
+      } else {
+        summary.layer3 += 1
+      }
+    } catch (err) {
+      summary.errors += 1
+      auditLayer3(
+        db,
+        hostId,
+        paneKey,
+        R.id,
+        `sweep_row_threw: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+  return summary
+}
+
+/** Lock-owning convenience wrapper around `runRestoreSweepBody` — acquires before, releases
+ * (in `finally`) after. Used by callers with no window/barrier ordering constraint (the serve
+ * startup path); the desktop path calls `runRestoreSweepBody` directly, inside its own
+ * acquire/release that also spans opening the window and awaiting the startup barriers. */
+export async function runRestoreSweep(deps: RestoreSweepDeps): Promise<RestoreSweepSummary> {
   acquireRestoreSweepLock()
   try {
-    // [JUDGMENT CALL, see RETURN] `listAgents`'s own `limit` caps at 200 — the sweep needs every
-    // registered row, not a UI page, so the max is requested explicitly rather than trusting the
-    // default (100). A host with more than 200 registered, non-derived, non-quarantined panes
-    // would still truncate here; unraised because no fleet at this scale exists yet, but it is a
-    // real ceiling this commit does not lift.
-    const registered = db
-      .listAgents({ hostId, limit: 200 })
-      .agents.filter((a) => a.derived === 0 && a.quarantined === 0 && a.pane_key !== null)
-    for (const R of registered) {
-      const paneKey = R.pane_key as string
-      const parsed = parsePaneKey(paneKey)
-      if (parsed && deps.leafHoldsLiveOrStablePane(parsed.leafId)) {
-        summary.skippedAlreadyLive += 1
-        continue
-      }
-      summary.candidates += 1
-      const launchRow = db.newestLaunchForPane(hostId, paneKey)
-      if (!launchRow) {
-        auditNoLaunchRow(db, hostId, paneKey, R.id)
-        summary.layer3 += 1
-        continue
-      }
-      try {
-        const outcome = await restoreOneRegisteredPane(
-          deps,
-          db,
-          hostId,
-          R.id,
-          R.worktree_id,
-          launchRow
-        )
-        if (outcome.layer === 1) {
-          summary.layer1 += 1
-        } else if (outcome.layer === 2) {
-          summary.layer2 += 1
-        } else {
-          summary.layer3 += 1
-        }
-      } catch (err) {
-        summary.errors += 1
-        auditLayer3Refused(
-          db,
-          hostId,
-          paneKey,
-          R.id,
-          err instanceof Error ? err.message : String(err)
-        )
-      }
-    }
+    return await runRestoreSweepBody(deps)
   } finally {
     releaseRestoreSweepLock()
   }
-  return summary
 }

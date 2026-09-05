@@ -14,12 +14,43 @@ const SWEEP_LOCK_BOUND_MS = 30_000
 let held = false
 let heldSince: number | null = null
 let boundTimer: ReturnType<typeof setTimeout> | null = null
+// [S10-21a C7b, D-R110 finding 5, Ruling 34 Addendum 22] What `pty:spawn`'s own covered-launch
+// wait resolves against — a fresh promise per acquisition, resolved by `releaseRestoreSweepLock`.
+let releaseWaiters: (() => void)[] = []
 
 /** T24's fence point: any renderer-invoked restore/recovery path reaching a create for a
  * registered pane while the sweep holds this must consult it and refuse (createTerminal's E1,
  * orca-runtime.ts) rather than race the sweep for the same pane key. */
 export function isRestoreSweepLockHeld(): boolean {
   return held
+}
+
+/** [S10-21a C7b, D-R110 finding 5] The renderer's OWN restore path (`pty:spawn`) must never be
+ * hard-refused by the sweep's lock — it waits, bounded by the same `SWEEP_LOCK_BOUND_MS` the
+ * lock itself is held for at most, then proceeds regardless (never blocks a launch forever). A
+ * caller times out ONLY if the lock is still held after the bound; the timeout is generous by
+ * construction because the sweep's own overrun log fires at the exact same bound. */
+export async function awaitRestoreSweepLockRelease(): Promise<'released' | 'not-held' | 'timeout'> {
+  if (!held) {
+    return 'not-held'
+  }
+  return await new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        resolve('timeout')
+      }
+    }, SWEEP_LOCK_BOUND_MS)
+    timer.unref?.()
+    releaseWaiters.push(() => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve('released')
+      }
+    })
+  })
 }
 
 /** Acquired once, for the sweep's whole run. Re-entrant acquisition (a second sweep pass, or a
@@ -53,6 +84,11 @@ export function releaseRestoreSweepLock(): void {
     clearTimeout(boundTimer)
     boundTimer = null
   }
+  const waiters = releaseWaiters
+  releaseWaiters = []
+  for (const resolveWaiter of waiters) {
+    resolveWaiter()
+  }
 }
 
 /** Test-only introspection — no production caller. */
@@ -69,4 +105,5 @@ export function _resetRestoreSweepLockForTest(): void {
     clearTimeout(boundTimer)
     boundTimer = null
   }
+  releaseWaiters = []
 }
