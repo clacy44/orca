@@ -53,7 +53,8 @@ vi.mock('@/store', () => ({
       clearSleepingAgentSessionsByPaneKey,
       sweepRestoredPaneKeys,
       // [S10-21a C15, R52] Hydrated by default — this file's own tests are not about the
-      // deferral gate (that is wake-sleeping-agents-in-background-marks-pending.test.ts).
+      // deferral gate itself (that is resume-sleeping-agent-session-marks-hydration.test.ts,
+      // for the same gate shared with resumeSleepingAgentSessionsForWorktree).
       sweepRestoreMarksHydrated: true,
       notePendingSweepMarksResumeWorktreeId
     })

@@ -943,8 +943,8 @@ describe('connectPanePty', () => {
       },
       codexRestartNoticeByPtyId: {},
       // [S10-21a C15, R52] Hydrated by default — this suite's cold-restore-override tests are
-      // not about the deferral gate itself (that is the sweep-marks-hydration-gate describe
-      // block below).
+      // not about the deferral gate itself (see the dedicated 'does not --resume ... while
+      // marks are unhydrated' case below, which overrides this to false).
       sweepRestoreMarksHydrated: true,
       deferredSshReconnectTargets: [],
       deferredSshSessionIdsByTabId: {},
