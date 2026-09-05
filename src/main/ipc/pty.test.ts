@@ -21250,5 +21250,68 @@ describe('registerPtyHandlers', () => {
       expect(refreshSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId }))
       refreshSpy.mockRestore()
     })
+
+    // [S10-21a C14c, D-R130 F-4] The old gate-level "legacy/null identity" case went with the
+    // C14 block and had no gate-level replacement — this pins it against the new third handle
+    // source (`resolveExistingTerminalHandleForPty` fallback), which can legitimately yield a
+    // null incarnation. Primitive-level proof already exists
+    // (agent-daemon-respawn-handle-refresh.ts:85-89 / its own test); this proves the GATE still
+    // refreshes the handle, leaves `process_incarnation` untouched, and audits the reason.
+    // FAILS AT BASE only if the gate-level case is absent — it is: no such case exists at
+    // f818047b67.
+    it('Case E (D-R130 F-4): a null-identity third handle source leaves process_incarnation UNCHANGED, refreshes the handle, and audits identity_unavailable_at_refresh', async () => {
+      const { runtime, db } = setUpRealRuntime()
+      const tabId = '99999999-9999-4999-8999-eeeeeeeeee11'
+      const leafId = '99999999-9999-4999-8999-eeeeeeeeee12'
+      const paneKey = makePaneKey(tabId, leafId)
+      const agentId = seedRespawnAgent(db, {
+        paneKey,
+        oldTerminalHandle: 'term_dead_old_e',
+        oldProcessIncarnation: 'pty-old:inc-old-e'
+      })
+      const seeded = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey,
+        agentType: 'claude',
+        sessionId: 'sess-case-e',
+        launchGeneration: 'gen-case-e',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      if (!seeded.ok) {
+        throw new Error('seed launch row failed')
+      }
+      // A falsy incarnationId never sets `pty.incarnationId` (orca-runtime.ts's `onPtySpawned`),
+      // so `getTerminalProcessIncarnation` legitimately returns null even though the handle
+      // itself resolves via `resolveExistingTerminalHandleForPty`.
+      setLocalPtyProvider(createSelfResumeProvider(runtime, 'pty-case-e', '') as never)
+
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/case-e',
+        command: 'claude --resume sess-case-e',
+        launchAgent: 'claude',
+        worktreeId: 'repo-1::/tmp/case-e',
+        tabId,
+        leafId
+      })
+
+      const expectedHandle = runtime.resolveExistingTerminalHandleForPty('pty-case-e')
+      expect(expectedHandle).not.toBeNull()
+      const row = db.getAgentByIdIncludingTombstoned(agentId)
+      expect(row?.terminal_handle).toBe(expectedHandle)
+      // Identity refused at the write (agent-daemon-respawn-handle-refresh.ts:85-89) — the
+      // pre-refresh incarnation stays, only the handle moves.
+      expect(row?.process_incarnation).toBe('pty-old:inc-old-e')
+      const rawDb = (db as unknown as { db: Database.Database }).db
+      const auditRows = rawDb
+        .prepare(
+          `SELECT * FROM agent_audit WHERE actor_pane_key = ? AND verb = 'rebind' AND outcome = 'reminted'`
+        )
+        .all(paneKey) as { reason_code: string | null }[]
+      expect(auditRows).toHaveLength(1)
+      expect(auditRows[0]?.reason_code).toContain('identity_unavailable_at_refresh: null')
+    })
   })
 })

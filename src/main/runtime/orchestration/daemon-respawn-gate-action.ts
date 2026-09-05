@@ -8,7 +8,6 @@ import type { DaemonRespawnGateVerb } from './agent-daemon-respawn-gate'
 export type DaemonRespawnGateAction =
   | { kind: 'refresh' }
   | { kind: 'refuse_fresh_session' }
-  | { kind: 'notice_only' }
   | { kind: 'none' }
 
 export function resolveDaemonRespawnGateAction(

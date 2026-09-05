@@ -7325,8 +7325,8 @@ export function registerPtyHandlers(
         // now refreshes rather than merely noticing. F5: the whole block is wrapped in try/catch —
         // a store fault here must never fail an already-committed spawn and orphan a live PTY.
         if (reservationPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
+          const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
           try {
-            const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
             const respawnGateDb = respawnGateBundle.getDb()
             const respawnRefreshHandle =
               stablePaneOwner?.handle ??
@@ -7378,6 +7378,21 @@ export function registerPtyHandlers(
             }
           } catch (e) {
             console.error('[pty] daemon-respawn gate failed after spawn commit:', e)
+            // [S10-21a C14c, D-R130 F-2] A throw after the refresh committed (e.g.
+            // resumePactsForRestoredAgent) must not vanish silently — audit it. Keeps the
+            // swallow: the audit write itself is fenced so it can never fail an already-live PTY.
+            try {
+              respawnGateBundle.getDb()?.writeAgentAudit({
+                agentId: admittedLaunch?.registeredAgentId ?? null,
+                actorPaneKey: reservationPaneKey,
+                actorHostId: respawnGateBundle.ctx.hostId,
+                verb: 'rebind',
+                outcome: 'refused',
+                reasonCode: `gate_failed: ${e instanceof Error ? e.message : String(e)}`
+              })
+            } catch {
+              // Why: never let the failure audit itself mask the original error above.
+            }
           }
         }
         // Why: seed after registerPty binds the worktree — including on
