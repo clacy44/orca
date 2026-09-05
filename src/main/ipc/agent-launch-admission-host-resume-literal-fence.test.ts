@@ -4,6 +4,13 @@
 // own type declaration does, and the sweep that will construct one, C3a-v2, is not landed yet).
 // This fails if the literal `'host-resume'` appears in any rpc/ipc-schema/relay/renderer/preload/
 // shared module.
+//
+// [S10-21a C12, residual R-21a-1] This fence scans file CONTENTS for the literal, not import
+// specifiers — it never resolves a `from`/`require`/`import()` path at all, so a tsconfig `paths`
+// alias or an intermediate re-export barrel changes nothing about whether the literal text
+// `'host-resume'` appears inside a forbidden-root file. The alias/re-export gap R-21a-1 named is
+// specific to specifier-resolution fences (restore-ticket-registry-import-boundary.test.ts, fixed
+// in this same commit) and does not apply to this content-scan fence by construction.
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'

@@ -59,6 +59,55 @@ function listSourceFiles(dir: string): string[] {
   })
 }
 
+// [S10-21a C12, D-R105 note] The pre-C12 version of this brace walker counted every `{`/`}`
+// character verbatim, including ones inside a string/template literal or a comment (e.g. a
+// `.describe("a { forged } value")` call) — such a brace would desync `depth` from the schema
+// body's REAL nesting, closing the body early (truncating real field names off the scanned
+// text, a false negative) or late (pulling in unrelated trailing source, a potential false
+// positive). `findMatchingBrace` below walks the source with a minimal string/template/comment-
+// aware scanner so only braces that are actually code ever change `depth`. Regex literals are
+// deliberately NOT special-cased: none of the roots this fence scans need this walker to skip
+// over a regex containing a brace for the currently-known corpus, and doing so soundly needs a
+// division-vs-regex disambiguation this fence has no need to carry — noted as a residual
+// limitation rather than a silent gap (see the dedicated fence below).
+function findMatchingBrace(source: string, openIndex: number): number {
+  let depth = 0
+  let i = openIndex
+  for (; i < source.length; i++) {
+    const ch = source[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch
+      i++
+      while (i < source.length && source[i] !== quote) {
+        if (source[i] === '\\') {
+          i++
+        }
+        i++
+      }
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      const nl = source.indexOf('\n', i)
+      i = nl === -1 ? source.length : nl
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2)
+      i = end === -1 ? source.length : end + 1
+      continue
+    }
+    if (ch === '{') {
+      depth++
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0) {
+        return i
+      }
+    }
+  }
+  return i
+}
+
 /** Every `z.object({`/`z.strictObject({`/`z.looseObject({` call's own balanced-brace body, PLUS
  * `.extend({`/`.merge({` chains off an existing schema [D-R105 R-2] — both grow a schema's field
  * set exactly like the base call does. */
@@ -68,19 +117,8 @@ function zodSchemaBodies(source: string): string[] {
   let match: RegExpExecArray | null
   while ((match = callRe.exec(source))) {
     const start = match.index + match[0].length - 1 // position of the opening `{`
-    let depth = 0
-    let i = start
-    for (; i < source.length; i++) {
-      if (source[i] === '{') {
-        depth++
-      } else if (source[i] === '}') {
-        depth--
-        if (depth === 0) {
-          break
-        }
-      }
-    }
-    bodies.push(source.slice(start, i + 1))
+    const end = findMatchingBrace(source, start)
+    bodies.push(source.slice(start, end + 1))
   }
   return bodies
 }
@@ -119,5 +157,50 @@ describe('D-R104 T44: no zod schema names launchAdmission/sequencedAgentLine/res
 
   it('no zod schema under rpc/methods, ipc, preload, relay, renderer, shared, or providers names any of the three fields', () => {
     expect(findOffenses()).toEqual([])
+  })
+})
+
+describe('S10-21a C12, D-R105: the brace matcher is not fooled by a brace inside a string/template literal', () => {
+  it('a lone unmatched `}` inside a STRING no longer closes the body early and silently drops a forbidden field after it', () => {
+    // RED AT BASE (verified by hand against the pre-C12 walker, which counts every raw `{`/`}`
+    // character): the string's stray `}` decrements `depth` to 0 immediately, so the walker
+    // BREAKS right there -- `bodies[0]` ends mid-string, before `restoreProvenance:` ever
+    // appears in the sliced text, and `findOffenses` would report NO offense for a schema that
+    // plainly names the forbidden field. This is the exact "a schema body contains a brace-in-
+    // string today" shape the C12 brief names.
+    const source = `
+      const schema = z.object({
+        note: z.string().describe("closes early }"),
+        restoreProvenance: z.literal('none')
+      })
+    `
+    const bodies = zodSchemaBodies(source)
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toContain('restoreProvenance')
+    expect(FORBIDDEN_FIELD_RE.test(bodies[0]!)).toBe(true)
+  })
+
+  it('a lone unmatched `}` inside a TEMPLATE literal does not close the body early (RED at base, same shape as the string case)', () => {
+    const source = `
+      const schema = z.object({
+        note: z.string().describe(\`closes early }\`),
+        sequencedAgentLine: z.string()
+      })
+    `
+    const bodies = zodSchemaBodies(source)
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toContain('sequencedAgentLine')
+  })
+
+  it('a lone unmatched `}` inside a LINE COMMENT does not close the body early (RED at base, same shape as the string case)', () => {
+    const source = `
+      const schema = z.object({
+        // a stray } in a comment
+        launchAdmission: z.string()
+      })
+    `
+    const bodies = zodSchemaBodies(source)
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toContain('launchAdmission')
   })
 })
