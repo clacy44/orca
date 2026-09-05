@@ -5,6 +5,7 @@ import {
   type CrashReportDiagnosticBundle
 } from '../../shared/crash-reporting'
 import { collectDiagnosticBundle, getDiagnosticsStatus } from '../observability'
+import { stripUploadOnlyFields } from '../observability/bundle'
 import { resolveDiagnosticOrcaChannel } from '../observability/diagnostic-upload-endpoint'
 import type { FeedbackDiagnosticBundleAttachment, FeedbackSubmitResult } from '../ipc/feedback'
 
@@ -55,6 +56,12 @@ function collectCrashDiagnosticBundleAttachment(): CrashDiagnosticBundleAttachme
     return { diagnosticBundle: { status: 'not_uploaded', reason: formatUnknownError(error) } }
   }
 
+  // B3/H18: the crash-feedback route posts `content` to the vendor endpoint independently of
+  // the diagnostics-upload leg (ipc/diagnostics.ts), so it must strip the daemon stderr tail
+  // itself — stripUploadOnlyFields never drops spans, only replaces field values, so `bytes`
+  // is recomputed from the stripped string it actually attaches (it no longer equals
+  // bundle.bytes) while `spanCount` is unaffected and stays as collected.
+  const strippedContent = stripUploadOnlyFields(bundle.payload)
   return {
     diagnosticBundle: {
       status: 'attached',
@@ -64,8 +71,8 @@ function collectCrashDiagnosticBundleAttachment(): CrashDiagnosticBundleAttachme
     },
     feedbackDiagnosticBundle: {
       bundleSubmissionId: bundle.bundleSubmissionId,
-      content: bundle.payload,
-      bytes: bundle.bytes,
+      content: strippedContent,
+      bytes: Buffer.byteLength(strippedContent, 'utf8'),
       spanCount: bundle.spanCount
     }
   }
