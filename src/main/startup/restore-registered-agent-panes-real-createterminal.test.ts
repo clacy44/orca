@@ -57,6 +57,7 @@ function buildDeps(runtime: OrcaRuntimeService): RestoreSweepDeps {
     ensureAgentSession: (request, caller, internal) =>
       runtime.ensureAgentSession(request, caller, internal),
     takeControllerInventoryForSweep: () => runtime.takeControllerInventoryForSweep(),
+    getSelfResumeWatermark: () => runtime.getSelfResumeWatermark(),
     collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
       runtime.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtime.getTerminalProcessIncarnation(handle),

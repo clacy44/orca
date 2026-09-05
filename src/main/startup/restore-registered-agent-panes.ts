@@ -54,6 +54,7 @@ import {
   decideEarlyRows,
   routeDeadCandidate
 } from '../runtime/orchestration/restore-sweep-decision'
+import { noteSelfResumeWatermarkAbsent, evaluateRow7 } from './restore-sweep-row7-watermark'
 import {
   auditSweepSkip,
   auditLayer3,
@@ -89,6 +90,12 @@ export type RestoreSweepDeps = {
    * `runRestoreSweepBody`, before the candidate loop, and the same result handed to every
    * candidate. Retries once on a null round (orca-runtime.ts's own implementation). */
   takeControllerInventoryForSweep(): Promise<ControllerInventory | null>
+  /** [C7j, Ruling 34 Addendum 27 row 7] The watermark captured once, before openMainWindow,
+   * under the restore-sweep lock (`orca-runtime.ts#captureSelfResumeWatermark`) — null when the
+   * orchestration DB was not yet attached at that capture point (row 7 is then skipped for the
+   * whole sweep, never moved to a different capture site). Read once by `runRestoreSweepBody`,
+   * same shared-round shape as `takeControllerInventoryForSweep`. */
+  getSelfResumeWatermark(): number | null
   collectIncumbentEvidence(
     paneKey: string,
     ptyId: string | undefined,
@@ -131,7 +138,11 @@ export async function restoreOneRegisteredPane(
   processIncarnation: string | null,
   worktreeId: string | null,
   launchRow: AgentLaunchSessionRow,
-  inventory: ControllerInventory | null
+  inventory: ControllerInventory | null,
+  // [C7j, forced deviation — see RETURN] Optional, defaulting to null (row 7 simply never
+  // fires), so the pre-existing rows 1-11 call sites (which predate row 7) do not all need a
+  // mechanical arg-count edit for an unrelated row.
+  selfResumeWatermark: number | null = null
 ): Promise<RestoreOneOutcome> {
   const parsed = parsePaneKey(launchRow.pane_key)
   if (!parsed || !worktreeId) {
@@ -191,6 +202,12 @@ export async function restoreOneRegisteredPane(
   }
   if (early.noteReasonCode) {
     auditSweepNote(db, hostId, launchRow.pane_key, agentId, early.noteReasonCode)
+  }
+
+  // [C7j, Ruling 34 Addendum 27 row 7] Evaluated after rows 5-6 (above) and before rows 8-11
+  // (below) — see restore-sweep-row7-watermark.ts's own doc comment.
+  if (evaluateRow7(db, hostId, agentId, launchRow, selfResumeWatermark) === 'skipped_leaf_held') {
+    return { kind: 'skipped_leaf_held' }
   }
 
   // [C7e/C7h, D-R111 R2, Addendum 26] `this.leaves` occupancy is a RACE at this run point, not
@@ -314,6 +331,14 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
   // [C7i, Ruling 34 Addendum 27] ONE controller-inventory round for the WHOLE sweep — every
   // candidate below is judged from this same round, never a per-candidate one.
   const inventory = await deps.takeControllerInventoryForSweep()
+  // [C7j, Ruling 34 Addendum 27 row 7] ONE watermark for the WHOLE sweep, same shape as
+  // `inventory` above. Absent (DB not attached at the capture point, before openMainWindow)
+  // means row 7 never fires this sweep — recorded ONCE, sweep-level (no single candidate pane
+  // "caused" the absence), not per-candidate.
+  const selfResumeWatermark = deps.getSelfResumeWatermark()
+  if (selfResumeWatermark === null) {
+    noteSelfResumeWatermarkAbsent(db, hostId)
+  }
   for (const R of registered) {
     const paneKey = R.pane_key as string
     const launchRow = db.newestLaunchForPane(hostId, paneKey)
@@ -332,7 +357,8 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
         R.process_incarnation,
         R.worktree_id,
         launchRow,
-        inventory
+        inventory,
+        selfResumeWatermark
       )
       if (outcome.kind === 'layer1') {
         summary.layer1 += 1

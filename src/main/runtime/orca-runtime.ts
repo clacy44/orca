@@ -3215,6 +3215,10 @@ export class OrcaRuntimeService {
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
   private _orchestrationDb: OrchestrationDb | null = null
+  // [S10-21a C7j, Ruling 34 Addendum 27 row 7] Captured once by `captureSelfResumeWatermark`,
+  // before openMainWindow, under the restore-sweep lock. Null until captured, and stays null for
+  // this process's whole life when the db was not yet attached at that capture point.
+  private selfResumeWatermark: number | null = null
   // [S10-21a C3-v2f, D-R104 F-6, Ruling 34 Addendum 15] Set true ONLY when a store ATTACH was
   // actually attempted and threw (getLegacyWorkerTerminalRecoveryPlan's boot-path catch, below)
   // — never on "never attempted at all". Distinguishes the production hole (a real open
@@ -5372,6 +5376,21 @@ export class OrcaRuntimeService {
   /** [errata 5(o)] The per-process id `LaunchAdmission.launchGeneration`/`AgentLaunchAdmissionContext.launchGeneration` read. */
   getLaunchGenerationId(): string {
     return this.launchGenerationId
+  }
+
+  // [S10-21a C7j, Ruling 34 Addendum 27 row 7] Peeks `_orchestrationDb` (never the arming
+  // `getOrchestrationDb()` getter) — same reasoning as `tickDispatchLivenessMonitor`: a
+  // watermark capture must never be the thing that attaches the orchestration store. Called
+  // once, by index.ts, before openMainWindow, under the restore-sweep lock. Leaves the
+  // watermark null (never re-attempts) when no attach has happened yet at that call site.
+  captureSelfResumeWatermark(): number | null {
+    const db = this._orchestrationDb
+    this.selfResumeWatermark = db ? db.newestAgentAuditSeq() : null
+    return this.selfResumeWatermark
+  }
+
+  getSelfResumeWatermark(): number | null {
+    return this.selfResumeWatermark
   }
 
   resolveOrchestrationWorkerServer(selector: string): OrchestrationWorkerServer {

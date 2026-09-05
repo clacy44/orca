@@ -1051,6 +1051,7 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
     ensureAgentSession: (request, caller, internal) =>
       runtimeService.ensureAgentSession(request, caller, internal),
     takeControllerInventoryForSweep: () => runtimeService.takeControllerInventoryForSweep(),
+    getSelfResumeWatermark: () => runtimeService.getSelfResumeWatermark(),
     collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
       runtimeService.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtimeService.getTerminalProcessIncarnation(handle),
@@ -3244,6 +3245,11 @@ void app.whenReady().then(async () => {
   let desktopSweepLockReleased = !isDesktopStartup
   if (isDesktopStartup) {
     acquireRestoreSweepLock()
+    // [S10-21a C7j, Ruling 34 Addendum 27 row 7] Captured HERE, before EITHER openMainWindow
+    // call site below (the Windows-packaged early branch and the general one), under the SAME
+    // lock the sweep itself runs under — never moved later even if the db turns out unattached
+    // at this point (peeks only; `captureSelfResumeWatermark` never arms the store itself).
+    runtime.captureSelfResumeWatermark()
   }
   const shellPathReady = windowsShellPathHydration.whenReady()
   let desktopWindow: BrowserWindow | null = null

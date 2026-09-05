@@ -120,6 +120,11 @@ import {
   isNewestAdmissionUnrecordedAndNewer as isNewestAdmissionUnrecordedAndNewerImpl,
   type NewestAdmissionUnrecordedResult
 } from './agent-sweep-unrecorded-check'
+import {
+  newestAgentAuditSeq as newestAgentAuditSeqImpl,
+  newestSelfResumeAuditForPane as newestSelfResumeAuditForPaneImpl,
+  type SelfResumeAuditHit
+} from './agent-sweep-self-resume-watermark'
 // [S10-21a C3-v2, errata 5(p)-5 item 5] `deleteLaunchRow` had no OrchestrationDb wrapper yet —
 // `db` is private on this class, so admitAgentLaunch's compensation path cannot reach it without
 // one. Added here rather than left unreachable; mirrors every other launch-session delegate above.
@@ -4960,6 +4965,21 @@ export class OrchestrationDb {
     recordedAt: string
   ): NewestAdmissionUnrecordedResult {
     return isNewestAdmissionUnrecordedAndNewerImpl(this.db, paneKey, recordedAt)
+  }
+
+  // S10-21a C7j (Ruling 34 Addendum 27 row 7): the sweep's self-resume watermark capture.
+  newestAgentAuditSeq(): number | null {
+    return newestAgentAuditSeqImpl(this.db)
+  }
+
+  // S10-21a C7j (Ruling 34 Addendum 27 row 7): a self-resume audited for this pane since the
+  // captured watermark.
+  newestSelfResumeAuditForPane(
+    hostId: string,
+    paneKeySuffix: string,
+    afterSeq: number
+  ): SelfResumeAuditHit | null {
+    return newestSelfResumeAuditForPaneImpl(this.db, hostId, paneKeySuffix, afterSeq)
   }
 
   // C1/C2 (Ruling 33(a)): the sole live registered row on `worktreePath` whose pane went dark —

@@ -1,8 +1,8 @@
-// S10-21a C7i (Ruling 34 Addendum 27): pure decision-table logic for the restore sweep, split
-// out of restore-registered-agent-panes.ts to stay under the max-lines ratchet. Rows 1-6
-// (identity survival + this-generation launch-row hold) and rows 8-11 (dead-candidate occupant
-// routing) — row 7 (self-resume watermark) is C7j, not here. No IO, no DB, no timers; the
-// caller applies the returned audit reason codes.
+// S10-21a C7i/C7j (Ruling 34 Addendum 27): pure decision-table logic for the restore sweep,
+// split out of restore-registered-agent-panes.ts to stay under the max-lines ratchet. Rows 1-6
+// (identity survival + this-generation launch-row hold), row 7 (C7j: self-resume watermark hold),
+// and rows 8-11 (dead-candidate occupant routing). No IO, no DB, no timers; the caller runs the
+// DB reads (e.g. `db.newestSelfResumeAuditForPane`) and applies the returned audit reason codes.
 import {
   agentAlive,
   parseProcessIncarnation,
@@ -10,6 +10,7 @@ import {
   type ProcessIdentity
 } from './agent-process-identity'
 import type { LaunchEvidence } from './agent-launch-sessions'
+import type { SelfResumeAuditHit } from './agent-sweep-self-resume-watermark'
 
 export type EarlyRowsDecision =
   | { kind: 'skipped_daemon_survived'; reasonCode: string }
@@ -67,6 +68,24 @@ export function decideEarlyRows(
     }
   }
   return { kind: 'proceed', identity, noteReasonCode }
+}
+
+export type Row7Decision = { kind: 'skipped_leaf_held'; reasonCode: string } | { kind: 'proceed' }
+
+/** Row 7 (C7j, Ruling 34 Addendum 27): a self-resume audited since this process started holds
+ * the leaf. Evaluated only when `decideEarlyRows` returned `proceed` (dead/unknown_no_identity,
+ * not already leaf-held by rows 5-6) and only when the watermark was captured — an absent
+ * watermark is the caller's own concern (one sweep_note, row 7 skipped entirely), not this
+ * function's; it is never called with one. `newestAudit` is the caller's own
+ * `db.newestSelfResumeAuditForPane` read for this pane, already filtered to `seq > watermark`. */
+export function decideRow7(newestAudit: SelfResumeAuditHit | null): Row7Decision {
+  if (newestAudit) {
+    return {
+      kind: 'skipped_leaf_held',
+      reasonCode: `leaf_held: self_resume_audited_this_process seq=${newestAudit.seq}`
+    }
+  }
+  return { kind: 'proceed' }
 }
 
 export type DeadCandidateOccupant = { paneKey: string; ptyId: string }

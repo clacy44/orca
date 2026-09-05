@@ -94,6 +94,7 @@ export function baseDeps(
     getPersistedPtyIdForLeaf: () => undefined,
     ensureAgentSession: vi.fn(),
     takeControllerInventoryForSweep: async () => emptyInventory(),
+    getSelfResumeWatermark: () => null,
     collectIncumbentEvidence: defaultCollectIncumbentEvidence,
     getTerminalProcessIncarnation: () => null,
     mintRestoreTicket: (payload: RestoreTicketMintArgs) =>
