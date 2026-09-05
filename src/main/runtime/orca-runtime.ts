@@ -13781,23 +13781,23 @@ export class OrcaRuntimeService {
 
   /** [S10-21a C7b, D-R110 B3, Ruling 34 Addendum 22] Liveness ONLY — this process's own
    * connected leaves, never persisted layout (`hasStablePaneForLeaf`'s `ptyIdsByLeafId`, which
-   * survives a restart and made every sweep candidate read as occupied — B3). Any tab whose
-   * leaf id matches and whose pty is connected counts, mirroring `leafHoldsLiveOrStablePane`'s
-   * own leaf-suffix philosophy (a leaf can be re-tabbed) but dropping its persisted-fallback
-   * half entirely. The sweep uses this to distinguish "the pane's own live session survived"
-   * (occupant's own paneKey equals the row's) from "something else is live there" (Layer 2). */
-  // [S10-21a C7b, D-I item 14 residual] `connectionId` is accepted for interface parity with
-  // `leafHoldsLiveOrStablePane` and is NOT yet consulted (`RuntimeLeafRecord` carries no
-  // per-leaf connection id to scope against) — this process's own `leaves` map is host-local by
-  // construction today, so an SSH pane's liveness cannot be misattributed to the wrong host
-  // through this method; C7c's housekeeping decides whether remote panes are excluded from the
-  // sweep outright rather than fixed here.
+   * survives a restart and made every sweep candidate read as occupied — B3). The sweep uses
+   * this to distinguish "the pane's own live session survived" (occupant's own paneKey equals
+   * the row's) from "something else is live there" (Layer 2).
+   * [S10-21a C7h, Ruling 34 Addendum 26] The 2nd param — previously an unconsulted
+   * `connectionId` placeholder (D-I item 14) — is now `tabId`: match on tab AND leaf together, a
+   * leaf id alone matched the first tab in map order across every tab that reused it. */
   findConnectedLeafOccupant(
     leafId: string,
-    _connectionId: string | null = null
+    tabId: string | null = null
   ): { paneKey: string; ptyId: string } | undefined {
     for (const leaf of this.leaves.values()) {
-      if (leaf.leafId === leafId && leaf.ptyId && leaf.connected === true) {
+      if (
+        leaf.leafId === leafId &&
+        (tabId === null || leaf.tabId === tabId) &&
+        leaf.ptyId &&
+        leaf.connected === true
+      ) {
         return { paneKey: makePaneKey(leaf.tabId, leaf.leafId), ptyId: leaf.ptyId }
       }
     }
@@ -13883,10 +13883,12 @@ export class OrcaRuntimeService {
       ptyId !== undefined && this.exitedPtyIdsThisGeneration.has(ptyId)
 
     let inventoryState: 'present' | 'absent' | 'unknown' = 'unknown'
+    let inventoryLivePtyIds: ReadonlySet<string> | null = null
     if (ptyId !== undefined) {
       const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
       const inventory =
         await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
+      inventoryLivePtyIds = inventory?.allLivePtyIds ?? null
       inventoryState = inventory
         ? inventory.allLivePtyIds.has(ptyId)
           ? 'present'
@@ -13904,7 +13906,10 @@ export class OrcaRuntimeService {
       ptyId,
       d1: { ptyKnownToRuntime, exitObservedThisGeneration },
       d2: { inventory: inventoryState },
-      d3: { liveNow, firstObservedNotLiveAt, now }
+      d3: { liveNow, firstObservedNotLiveAt, now },
+      // [S10-21a C7h, Ruling 34 Addendum 26] Same inventory round as D2 above — no second
+      // controller round-trip for the occupant's (different) pty.
+      ptyLive: (pid: string) => inventoryLivePtyIds?.has(pid) ?? false
     }
   }
 

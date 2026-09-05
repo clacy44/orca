@@ -14,11 +14,11 @@
 // which runtime minted it, and `rebindRestoredPane`'s clause 1 compares the ticket's against the
 // CURRENT generation it is being redeemed in. Using the row's stale value refused every rebind.
 //
-// [C7b, D-R110 B3] Occupancy is a LIVENESS question, answered from `findConnectedLeafOccupant`
-// (this process's own connected leaves) — never from persisted layout, which survives a restart
-// and made every candidate read as already-occupied. A leaf held by the pane's OWN live session
-// (occupant paneKey === the row's) is `skipped_daemon_survived`, audited, no ticket. A leaf held
-// by anything else proceeds to Layer 2 WITHOUT a placement offer, audited `leaf_occupied_by_other`.
+// [C7b, D-R110 B3; C7h, Ruling 34 Addendum 26] Occupancy (`findConnectedLeafOccupant`, matched
+// on tab AND leaf) is never itself a survival verdict — that's judged from evidence about the
+// ROW's own pty. An own-pane occupant on a DIFFERENT, runtime-live pty is `skipped_leaf_held`
+// (yielded to the renderer's remount path); otherwise it's a stale surface, noted and restored
+// over. A leaf held by anything else proceeds to Layer 2 without placement, `leaf_occupied_by_other`.
 //
 // [C7b, D-R110 fix 6] A free leaf still withholds placement when the persisted layout tree no
 // longer resolves it (`isLeafInPersistedLayout`) — a closed tab's row must not resurrect into a
@@ -47,10 +47,12 @@ export type RestoreSweepDeps = {
   getOrchestrationCompatibilityHostId(): string
   getLaunchGenerationId(): string
   /** [D-R110 B3] Liveness-only occupant lookup — `orca-runtime.ts#findConnectedLeafOccupant`.
-   * Distinguishes the pane's own live session from anything else on the leaf. */
+   * Distinguishes the pane's own live session from anything else on the leaf.
+   * [C7h, Ruling 34 Addendum 26] `tabId` scopes the match — a leaf id alone matches the first
+   * tab in map order that reused it. */
   findConnectedLeafOccupant(
     leafId: string,
-    connectionId?: string | null
+    tabId?: string | null
   ): { paneKey: string; ptyId: string } | undefined
   /** [D-R110 fix 6] Whether the tab's persisted layout TREE still resolves this leaf. */
   isLeafInPersistedLayout(tabId: string, leafId: string, hostId?: string | null): boolean
@@ -81,7 +83,27 @@ export type RestoreSweepSummary = {
   layer2: number
   layer3: number
   skippedDaemonSurvived: number
+  skippedLeafHeld: number
   errors: number
+}
+
+function writeSweepAudit(
+  db: OrchestrationDb,
+  hostId: string,
+  paneKey: string,
+  agentId: string,
+  verb: string,
+  outcome: string,
+  reasonCode: string
+): void {
+  db.writeAgentAudit({
+    agentId,
+    actorPaneKey: paneKey,
+    actorHostId: hostId,
+    verb,
+    outcome,
+    reasonCode
+  })
 }
 
 function auditSweepSkip(
@@ -91,14 +113,7 @@ function auditSweepSkip(
   agentId: string,
   reasonCode: string
 ): void {
-  db.writeAgentAudit({
-    agentId,
-    actorPaneKey: paneKey,
-    actorHostId: hostId,
-    verb: 'sweep_skip',
-    outcome: 'deferred',
-    reasonCode
-  })
+  writeSweepAudit(db, hostId, paneKey, agentId, 'sweep_skip', 'deferred', reasonCode)
 }
 
 function auditLayer3(
@@ -108,20 +123,25 @@ function auditLayer3(
   agentId: string,
   reasonCode: string
 ): void {
-  db.writeAgentAudit({
-    agentId,
-    actorPaneKey: paneKey,
-    actorHostId: hostId,
-    verb: 'sweep_layer3',
-    outcome: 'deferred',
-    reasonCode
-  })
+  writeSweepAudit(db, hostId, paneKey, agentId, 'sweep_layer3', 'deferred', reasonCode)
+}
+
+/** [C7h, Ruling 34 Addendum 26] Not a skip — the sweep proceeds to restore. */
+function auditSweepNote(
+  db: OrchestrationDb,
+  hostId: string,
+  paneKey: string,
+  agentId: string,
+  reasonCode: string
+): void {
+  writeSweepAudit(db, hostId, paneKey, agentId, 'sweep_note', 'proceeded', reasonCode)
 }
 
 export type RestoreOneOutcome =
   | { kind: 'layer1' | 'layer2'; result: RebindRestoredPaneResult }
   | { kind: 'layer3'; result?: RebindRestoredPaneResult }
   | { kind: 'skipped_daemon_survived' }
+  | { kind: 'skipped_leaf_held' }
 
 /** One sleeping registered pane's restore attempt. Exported for direct per-row testing without
  * driving the whole host enumeration. Never throws for a refusal — every non-restore path is a
@@ -169,35 +189,27 @@ export async function restoreOneRegisteredPane(
     )
     return { kind: 'layer3' }
   }
-  // [S10-21a C7e, D-R111 R2] `findConnectedLeafOccupant` reads `this.leaves`, populated only by
-  // the renderer's `syncWindowGraph` — EMPTY at the sweep's own run point (main startup, before
-  // any renderer has mounted). Deciding "daemon survived" from it never fires, and the sweep
-  // would mint a competing `--resume` spawn for a session the daemon is still holding, ahead of
-  // the rebind's own (later) refusal. The primary decision is the pre-spawn incumbent EVIDENCE
-  // (§2.5's D1/D3, collected below) — `findConnectedLeafOccupant` is now only a SECONDARY signal,
-  // used to decide `leaf_occupied_by_other`/placement withholding on whatever platforms or
-  // startup orderings DO have a populated leaves map by this point (never load-bearing for the
-  // daemon-survived decision itself).
-  const occupant = deps.findConnectedLeafOccupant(parsed.leafId)
-  const predecessorPtyId =
-    occupant?.ptyId ?? deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
-  // [D-R110 fix 4] Collected BEFORE the spawn, with the predecessor's own ptyId.
+  // [C7e/C7h, D-R111 R2, Addendum 26] `this.leaves` occupancy is a RACE at this run point, not
+  // an invariant — the primary survival call is the ROW's own pty evidence below; the occupant
+  // lookup is a separate, later judgement about whatever pty sits on the leaf.
+  const occupant = deps.findConnectedLeafOccupant(parsed.leafId, parsed.tabId)
+  // [C7h, Addendum 26] Evidence is about the ROW's OWN pty, never the leaf's occupant — falls
+  // back to the occupant's ptyId ONLY when the row records none.
+  const rowPtyId = deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
+  const predecessorPtyId = rowPtyId ?? occupant?.ptyId
+  // [D-R110 fix 4] Collected BEFORE the spawn, with the row's own ptyId.
   const incumbentEvidence = await deps.collectIncumbentEvidence(
     launchRow.pane_key,
     predecessorPtyId
   )
   const incumbent = resolveIncumbentDeath(incumbentEvidence)
-  // [S10-21a C7e, D-R111 R2; S10-21a C7g, Ruling 34 Addendum 25] The daemon-survived decision,
-  // from evidence, BEFORE minting: a live D3 reading, a runtime-known D1 pty, or the daemon's
-  // OWN inventory still listing this pty (D2 'present' — the pre-spawn survival signal
-  // `collectIncumbentEvidence`'s controller-inventory round already proves, which `d1`/`d3`
-  // alone miss at this process's own boot-time sweep run point) all mean the incumbent is
-  // provably not dead — never mint a competing ticket or spawn a second `--resume` over it.
+  // [C7e, D-R111 R2; C7h, Addendum 26] Live D3, a runtime-known D1 pty, or D2 'present' all mean
+  // not dead — mint nothing over it. The D1 exit-observed arm never vetoes these: a pty id the
+  // inventory lists NOW is alive whatever exit was once observed under it (same-id respawn).
   if (
-    !incumbent.dead &&
-    (incumbentEvidence.d3.liveNow ||
-      incumbentEvidence.d1.ptyKnownToRuntime ||
-      incumbentEvidence.d2.inventory === 'present')
+    incumbentEvidence.d3.liveNow ||
+    incumbentEvidence.d1.ptyKnownToRuntime ||
+    incumbentEvidence.d2.inventory === 'present'
   ) {
     const survivalSignal = incumbentEvidence.d3.liveNow
       ? 'd3_live_now'
@@ -210,18 +222,23 @@ export async function restoreOneRegisteredPane(
   let offerPlacement = true
   if (occupant) {
     if (occupant.paneKey === launchRow.pane_key) {
-      // [S10-21a C7f/C7g fix, D-R114 fix 5 — CORRECTED] Reverting C7f's "audit-only, no return"
-      // reduction: it broke two passing tests (restore-registered-agent-panes.test.ts's own
-      // "leaf's own live occupant IS the row's own pane" and its D-R111 R2 case) that construct
-      // evidence where `incumbent.dead` is TRUE (e.g. D1 alone) yet an occupant still names this
-      // pane — a real, exercised state, not dead code as C7f's comment assumed. This branch IS a
-      // second, independent decision point (a live LOCAL occupant on this leaf, whenever
-      // `this.leaves` happens to be populated) and must keep its own early return.
-      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived')
-      return { kind: 'skipped_daemon_survived' }
+      // [C7h, Addendum 26] Positional occupancy alone is never a survival verdict.
+      if (
+        predecessorPtyId !== undefined &&
+        occupant.ptyId !== predecessorPtyId &&
+        (incumbentEvidence.ptyLive?.(occupant.ptyId) ?? false)
+      ) {
+        // A DIFFERENT, live pty holds this leaf — the renderer's remount path owns the resume.
+        auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_held_by_live_pty')
+        return { kind: 'skipped_leaf_held' }
+      }
+      // Same pty as the row, or one the runtime doesn't know live: a stale surface, restored over.
+      const staleSignal = incumbent.dead ? incumbent.signal : 'none'
+      auditSweepNote(db, hostId, launchRow.pane_key, agentId, `stale_own_surface: ${staleSignal}`)
+    } else {
+      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
+      offerPlacement = false
     }
-    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
-    offerPlacement = false
   } else if (!deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)) {
     offerPlacement = false
   }
@@ -301,6 +318,7 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
     layer2: 0,
     layer3: 0,
     skippedDaemonSurvived: 0,
+    skippedLeafHeld: 0,
     errors: 0
   }
   const db = deps.getOrchestrationDb()
@@ -336,6 +354,8 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
         summary.layer2 += 1
       } else if (outcome.kind === 'skipped_daemon_survived') {
         summary.skippedDaemonSurvived += 1
+      } else if (outcome.kind === 'skipped_leaf_held') {
+        summary.skippedLeafHeld += 1
       } else {
         summary.layer3 += 1
       }

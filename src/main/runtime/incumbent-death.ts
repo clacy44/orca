@@ -24,6 +24,10 @@ export type IncumbentEvidence = {
   /** D3 · settle interval. `firstObservedNotLiveAt` is the first of two (or more) successive
    * not-live readings; dead only once `now` has advanced REBIND_SETTLE_MS past it. */
   d3: { liveNow: boolean; firstObservedNotLiveAt: number | null; now: number }
+  /** [S10-21a C7h, Ruling 34 Addendum 26] Liveness over the SAME controller-inventory round
+   * already fetched for `ptyId` above — never a second daemon round-trip. Optional: pure
+   * fixtures (resolveIncumbentDeath's own tests) never read it. */
+  ptyLive?: (ptyId: string) => boolean
 }
 
 export type IncumbentVerdict =

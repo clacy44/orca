@@ -1042,8 +1042,8 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
     getOrchestrationDb: () => runtimeService.getOrchestrationDb(),
     getOrchestrationCompatibilityHostId: () => runtimeService.getOrchestrationCompatibilityHostId(),
     getLaunchGenerationId: () => runtimeService.getLaunchGenerationId(),
-    findConnectedLeafOccupant: (leafId, connectionId) =>
-      runtimeService.findConnectedLeafOccupant(leafId, connectionId ?? null),
+    findConnectedLeafOccupant: (leafId, tabId) =>
+      runtimeService.findConnectedLeafOccupant(leafId, tabId ?? null),
     isLeafInPersistedLayout: (tabId, leafId, hostId) =>
       runtimeService.isLeafInPersistedLayout(tabId, leafId, hostId ?? null),
     getPersistedPtyIdForLeaf: (tabId, leafId, hostId) =>
