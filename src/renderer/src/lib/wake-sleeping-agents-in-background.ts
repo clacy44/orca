@@ -180,10 +180,15 @@ export function wakeSleepingAgentsForWorktreeInBackground(
   const appState = useAppStore.getState()
   // [S10-21a C15, R52] Same gate as resumeSleepingAgentSessionsForWorktree — step (b) below
   // (passive-hibernation cold-restore mount) never reaches that function, so it must defer
-  // independently rather than mount against pre-sweep marks. Replayed once, plainly, via the
-  // pending set when hydration completes (not re-dispatched through this function).
+  // independently rather than mount against pre-sweep marks.
+  // [S10-21a C15b, F2] The id-keyed pending set (worktree-activation's plain resumes) cannot
+  // carry `withheldPaneKeys` — replaying by bare id would drop the lane partition and skip steps
+  // (a)/(b)/(d) entirely. Queue a thunk that re-invokes this exact call, replayed once when
+  // hydration completes.
   if (!appState.sweepRestoreMarksHydrated) {
-    appState.notePendingSweepMarksResumeWorktreeId(worktreeId)
+    appState.notePendingSweepMarksResumeWake(() =>
+      wakeSleepingAgentsForWorktreeInBackground(worktreeId, withheldPaneKeys)
+    )
     return
   }
   const withheld = new Set(withheldPaneKeys ?? [])

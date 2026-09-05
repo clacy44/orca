@@ -45,6 +45,10 @@ const clearSleepingAgentSessionsByPaneKey = vi.fn((paneKeys: readonly string[]) 
 // this mock just needs the field to exist so the real module's `.has()` read does not throw.
 const sweepRestoredPaneKeys = new Set<string>()
 const notePendingSweepMarksResumeWorktreeId = vi.fn()
+const notePendingSweepMarksResumeWake = vi.fn()
+// [S10-21a C15b, F2] Mutable so the one deferral test below can flip it false; every other test
+// in this file relies on the gate being open by default (unrelated to this file's own coverage).
+let sweepRestoreMarksHydrated = true
 vi.mock('@/store', () => ({
   useAppStore: {
     getState: () => ({
@@ -55,8 +59,11 @@ vi.mock('@/store', () => ({
       // [S10-21a C15, R52] Hydrated by default — this file's own tests are not about the
       // deferral gate itself (that is resume-sleeping-agent-session-marks-hydration.test.ts,
       // for the same gate shared with resumeSleepingAgentSessionsForWorktree).
-      sweepRestoreMarksHydrated: true,
-      notePendingSweepMarksResumeWorktreeId
+      get sweepRestoreMarksHydrated() {
+        return sweepRestoreMarksHydrated
+      },
+      notePendingSweepMarksResumeWorktreeId,
+      notePendingSweepMarksResumeWake
     })
   }
 }))
@@ -107,6 +114,8 @@ beforeEach(() => {
   isPassiveSpy.mockReset()
   resumeSpy.mockReset()
   resumeSpy.mockReturnValue(0)
+  sweepRestoreMarksHydrated = true
+  notePendingSweepMarksResumeWake.mockClear()
 })
 
 afterEach(() => {
@@ -456,5 +465,44 @@ describe('wakeSleepingAgentsForWorktreeInBackground', () => {
     expect(rec.events).toEqual([])
     expect(resumeSpy).not.toHaveBeenCalled()
     expect(isPassiveSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('wakeSleepingAgentsForWorktreeInBackground: marks-hydration gate (S10-21a C15b, F2)', () => {
+  it('queues a wake THUNK carrying the full options while marks are unhydrated, replayed once', () => {
+    sweepRestoreMarksHydrated = false
+    sleepingRecords = { k1: { worktreeId: 'wt-1', paneKey: 'tab-a:leaf-1', tabId: 'tab-a' } }
+    isPassiveSpy.mockReturnValue(false)
+    const rec = recordEvents()
+
+    wakeSleepingAgentsForWorktreeInBackground('wt-1', ['withheld-pane-1'])
+
+    rec.stop()
+    // The id-keyed queue (worktree-activation's plain resumes) is NOT used here — replaying by
+    // bare id would drop withheldPaneKeys/suppressNavigation/skipClaimKeys/onSessionLaunched and
+    // skip steps (a)/(b)/(d) entirely (F2). Nothing ran yet: no wake event, no resume call.
+    expect(notePendingSweepMarksResumeWorktreeId).not.toHaveBeenCalled()
+    expect(notePendingSweepMarksResumeWake).toHaveBeenCalledTimes(1)
+    expect(rec.events).toEqual([])
+    expect(resumeSpy).not.toHaveBeenCalled()
+
+    // Hydration completes: the queued thunk is the drain's replay unit — invoking it re-runs this
+    // exact wake with its original options intact, including the internal onSessionLaunched
+    // callback (step d's background mount) that a bare id-keyed replay could never carry.
+    const queuedWake = notePendingSweepMarksResumeWake.mock.calls[0]?.[0] as () => void
+    sweepRestoreMarksHydrated = true
+    resumeSpy.mockImplementationOnce((_worktreeId, options) => {
+      options?.onSessionLaunched?.('tab-launched')
+      return 1
+    })
+    const rec2 = recordEvents()
+    queuedWake()
+    rec2.stop()
+
+    expect(rec2.events).toEqual(['wake:wt-1', 'mount:wt-1'])
+    expect(rec2.mountDetails[0]?.tabIds).toEqual(['tab-launched'])
+    const replayedOptions = resumeSpy.mock.calls.at(-1)?.[1]
+    expect(replayedOptions?.suppressNavigation).toBe(true)
+    expect(replayedOptions?.withheldPaneKeys).toEqual(new Set(['withheld-pane-1']))
   })
 })

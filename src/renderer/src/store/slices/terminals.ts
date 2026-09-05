@@ -609,6 +609,13 @@ export type TerminalSlice = {
   pendingSweepMarksResumeWorktreeIds: ReadonlySet<string>
   notePendingSweepMarksResumeWorktreeId: (worktreeId: string) => void
   takePendingSweepMarksResumeWorktreeIds: () => string[]
+  /** [S10-21a C15b, F2] A deferred wake carries options (`withheldPaneKeys`, `suppressNavigation`,
+   * `skipClaimKeys`, `onSessionLaunched`) that the id-keyed queue above cannot represent — replaying
+   * by bare worktree id would run steps (a)/(b)/(d) never and drop the lane partition. Each deferred
+   * wake queues its own re-invocation thunk instead; replayed once, in order, when hydration completes. */
+  pendingSweepMarksResumeWakes: readonly (() => void)[]
+  notePendingSweepMarksResumeWake: (wake: () => void) => void
+  takePendingSweepMarksResumeWakes: () => (() => void)[]
   restoredRuntimeHostIdByWorkspaceSessionKey: Record<string, ExecutionHostId>
   defaultTerminalTabsAppliedByWorktreeId: Record<string, true>
   markDefaultTerminalTabsApplied: (worktreeId: string) => void
@@ -1107,6 +1114,14 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
     const ids = [...get().pendingSweepMarksResumeWorktreeIds]
     set({ pendingSweepMarksResumeWorktreeIds: new Set<string>() })
     return ids
+  },
+  pendingSweepMarksResumeWakes: [],
+  notePendingSweepMarksResumeWake: (wake) =>
+    set((s) => ({ pendingSweepMarksResumeWakes: [...s.pendingSweepMarksResumeWakes, wake] })),
+  takePendingSweepMarksResumeWakes: () => {
+    const wakes = [...get().pendingSweepMarksResumeWakes]
+    set({ pendingSweepMarksResumeWakes: [] })
+    return wakes
   },
   restoredRuntimeHostIdByWorkspaceSessionKey: {},
   defaultTerminalTabsAppliedByWorktreeId: {},

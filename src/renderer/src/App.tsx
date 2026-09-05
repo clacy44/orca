@@ -11,7 +11,10 @@ import {
   type SetStateAction
 } from 'react'
 import { lazyWithRetry as lazy } from '@/lib/lazy-with-retry'
-import { resumeSleepingAgentSessionsForWorktree } from '@/lib/resume-sleeping-agent-session'
+import {
+  applySweepRestoreMarkListReply,
+  finalizeSweepRestoreMarksHydration
+} from './startup/sweep-restore-marks-hydration'
 
 import {
   ArrowLeft,
@@ -1003,15 +1006,13 @@ function App(): React.JSX.Element {
         await timeRendererStartupStep('sweep-restore-marks-hydrate', async () => {
           try {
             const reply = await window.api.session.sweepRestoreMarkList()
-            useAppStore.getState().setSweepRestoredPaneKeys(reply.paneKeys)
+            applySweepRestoreMarkListReply(reply)
           } catch (error) {
             console.warn('[startup] sweepRestoreMarkList hydration failed:', error)
           } finally {
-            const state = useAppStore.getState()
-            state.setSweepRestoreMarksHydrated(true)
-            for (const worktreeId of state.takePendingSweepMarksResumeWorktreeIds()) {
-              resumeSleepingAgentSessionsForWorktree(worktreeId)
-            }
+            // [S10-21a C15b, F1/F4] The gate's first writer; see
+            // `finalizeSweepRestoreMarksHydration` for the cancelled/idempotent contract.
+            finalizeSweepRestoreMarksHydration(cancelled, null)
           }
         })
         await keybindingsPromise
@@ -1194,6 +1195,14 @@ function App(): React.JSX.Element {
           error
         )
         if (!cancelled) {
+          // [S10-21a C15b, F1] `sweepRestoreMarksHydrated`'s only other writer is the try's own
+          // `finally` inside the sweep-restore-marks-hydrate step above — a throw above that step
+          // (or from a later step that never reaches it again) would otherwise leave the flag
+          // false for the process lifetime while this catch still reaches
+          // `reconnectPersistedTerminals` below/at :1227, forcing every pane "already restored"
+          // and dropping every deferred resume/wake forever. Idempotent (no-op, no log) if the
+          // finally already ran.
+          finalizeSweepRestoreMarksHydration(cancelled, stepLabel)
           // Why: degraded mode stays interactive; later repo/runtime changes must not remain gated forever.
           useAppStore.setState({ startupWorktreeRefreshCompleted: true })
           // Why (issue #1158): only apply default UI if ui.get() never hydrated; otherwise defaults would clobber ui.json via the debounced writer.

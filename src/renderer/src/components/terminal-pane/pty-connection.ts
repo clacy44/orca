@@ -5261,6 +5261,16 @@ export function connectPanePty(
         !sweepAlreadyRestoredThisPane && startupOverride && 'launchConfig' in startupOverride
           ? (startupOverride as ColdRestoreAgentResumeStartup)
           : null
+      // [S10-21a C15b, R55] Zeroing only `coldRestoreOverride` above left `startupOverride.command`
+      // (the `--resume <sessionId>` line) and `.env` (ORCA_AGENT_LAUNCH_TOKEN) spread unconditionally
+      // below, so a suppressed cold restore still spawned a shell that resumed the same provider
+      // session unticketed and unattributed. Only a ColdRestoreAgentResumeStartup carries
+      // `launchConfig`; other startupOverride shapes (paste-on-connect, plain command) are
+      // untouched. The store's pre-registered launch config/token stays as applied — see
+      // `applyColdRestoreAgentResumeStartup` — for the later re-evaluation.
+      const coldRestoreStartupSuppressed =
+        sweepAlreadyRestoredThisPane && startupOverride && 'launchConfig' in startupOverride
+      const spawnStartupOverride = coldRestoreStartupSuppressed ? null : startupOverride
       // Why: pre-signal the main process so its cooperation gate suppresses
       // the daemon-snapshot seed for this paneKey. We issue declare and the
       // spawn back-to-back without awaiting, because Electron's
@@ -5278,15 +5288,15 @@ export function connectPanePty(
         url: '',
         cols,
         rows,
-        ...(startupOverride?.command ? { command: startupOverride.command } : {}),
-        ...(connectionId && startupOverride?.command && !shouldDeliverStartupViaTerminalPaste
+        ...(spawnStartupOverride?.command ? { command: spawnStartupOverride.command } : {}),
+        ...(connectionId && spawnStartupOverride?.command && !shouldDeliverStartupViaTerminalPaste
           ? { commandDelivery: 'provider' as const }
           : {}),
-        ...(connectionId && startupOverride?.command
+        ...(connectionId && spawnStartupOverride?.command
           ? { startupCommandDelivery: 'shell-ready' as const }
           : {}),
-        ...(startupOverride?.env
-          ? { env: mergeStartupEnvWithPaneIdentity(startupOverride.env) }
+        ...(spawnStartupOverride?.env
+          ? { env: mergeStartupEnvWithPaneIdentity(spawnStartupOverride.env) }
           : {}),
         ...(coldRestoreOverride ? { launchConfig: coldRestoreOverride.launchConfig } : {}),
         ...(coldRestoreOverride

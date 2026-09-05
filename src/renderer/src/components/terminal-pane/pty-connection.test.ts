@@ -3487,12 +3487,18 @@ describe('connectPanePty', () => {
           launchConfig?: unknown
           launchToken?: unknown
           launchAgent?: unknown
+          command?: string
+          env?: Record<string, string>
         }
       | undefined
     expect(resumeConnectOptions?.resumeProviderSession).toBeUndefined()
     expect(resumeConnectOptions?.launchConfig).toBeUndefined()
     expect(resumeConnectOptions?.launchToken).toBeUndefined()
     expect(resumeConnectOptions?.launchAgent).toBeUndefined()
+    // [S10-21a C15b, R55] A suppressed cold-restore override must not leak its command/env either
+    // — the spawn carries neither the `--resume` line nor ORCA_AGENT_LAUNCH_TOKEN.
+    expect(resumeConnectOptions?.command).toBeUndefined()
+    expect(resumeConnectOptions?.env?.ORCA_AGENT_LAUNCH_TOKEN).toBeUndefined()
   })
 
   it('resumes a hibernated agent from a navigation-free wake without a visibility reveal', async () => {
