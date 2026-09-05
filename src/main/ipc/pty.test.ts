@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync as realMkdirSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { delimiter, join, posix } from 'node:path'
+import type Database from '../sqlite/sync-database'
 import { prepareCodexSessionResume } from '../codex/codex-session-resume-preparation'
 import {
   TERMINAL_INPUT_CHUNK_MAX_BYTES,
@@ -270,7 +271,6 @@ import {
   isHiddenRendererPty
 } from './pty-hidden-delivery-gate'
 import { OrcaRuntimeService } from '../runtime/orca-runtime'
-import type { LaunchAdmission } from './agent-launch-admission'
 import * as AgentLaunchAdmissionModule from './agent-launch-admission'
 import { hasLiveClaudePtys, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
 import * as livePtyGate from '../claude-accounts/live-pty-gate'
@@ -20885,7 +20885,14 @@ describe('registerPtyHandlers', () => {
     })
   })
 
-  describe('S10-21a C14, D-R121 B4: the daemon-respawn refresh gate on the controller funnel a sweep restore actually traverses', () => {
+  // [S10-21a C14b, D-R128] The renderer-funnel gate after registerPty (pty:spawn's own funnel —
+  // the ONLY funnel this brief's classification can drive, D-R121 B1). Real OrcaRuntimeService,
+  // real in-memory OrchestrationDb, real admission (`admitAgentLaunch`) — no stub of
+  // `getTerminalProcessIncarnation`, `registerPty` or `registerPreAllocatedHandleForPty`. The
+  // provider double models the two real seams a local daemon-backed spawn performs itself
+  // (`pty.ts:2643`'s `preAllocateHandleForPty` + `onPtySpawned`), so the gate's `handle` and
+  // `processIncarnation` are computed by the REAL runtime, never asserted from a stub.
+  describe('S10-21a C14b, D-R128: the daemon-respawn refresh gate on the renderer funnel', () => {
     const HOST_ID = 'local'
 
     function seedRespawnAgent(
@@ -20911,8 +20918,8 @@ describe('registerPtyHandlers', () => {
         throw new Error(`seedRespawnAgent: expected 'created', got ${result.outcome}`)
       }
       const agentId = result.agent.id
-      // [D-R121 B4] `resolveDaemonRespawnGateAction`'s own precondition: a newest daemon_died
-      // audit for the pane (no later 'rebind' outranking it).
+      // [D-R128] `resolveDaemonRespawnGateAction`'s own precondition: a newest daemon_died audit
+      // for the pane (no later 'rebind' outranking it).
       db.writeAgentAudit({
         agentId,
         actorPaneKey: args.paneKey,
@@ -20924,8 +20931,8 @@ describe('registerPtyHandlers', () => {
       return agentId
     }
 
-    // A pact paused 'counterpart_gone' for `agentId`, so the T11 extension (pact resume) has
-    // something real to prove. Mirrors agent-pact-resume-after-restore.test.ts's own fixture.
+    // A pact paused 'counterpart_gone' for `agentId`, so C10's pact-resume thread has something
+    // real to prove. Mirrors agent-pact-resume-after-restore.test.ts's own fixture.
     function seedPausedPact(db: OrchestrationDb, agentId: string, paneKey: string): string {
       const peer = db.upsertAgentByPaneSuffix({
         displayName: `peer-${paneKey}`,
@@ -20972,64 +20979,61 @@ describe('registerPtyHandlers', () => {
       return thread.id
     }
 
-    // [FORCED DEVIATION, see RETURN] The brief's own TESTS section asks for this descriptor
-    // "redeemed through a real RestoreTicketRegistry". `restore-ticket-registry-import-boundary
-    // .test.ts` (INV-P-021) refuses ANY import of that module from anywhere under src/main/ipc —
-    // no per-file exception exists there (unlike the sibling literal-fence below), and this is a
-    // structural invariant well outside C14's scope to touch. This builds the identical payload
-    // shape a redeemed ticket carries (RestoreTicketPayload) by hand instead — the ticket
-    // registry itself is unmodified by C14 and already proven elsewhere (agent-launch-admission
-    // .test.ts T37; orca-runtime-host-resume-descriptor-provenance.test.ts); what THIS harness
-    // must prove is pty.ts's own threading + gate, which this payload shape drives identically.
-    function handCraftedHostResumeAdmission(payload: {
-      predecessorPaneKey: string
-      sessionId: string
-      executionHostId: string
-      launchGeneration: string
-    }): LaunchAdmission {
+    // [HARNESS SPEC] Models the two real seams a local daemon-backed spawn performs itself
+    // (pty.ts:2643's buildEnv + onSpawned) — never stubs the identity accessors themselves.
+    // `routesFreshSpawnsToLocalProvider: true` mirrors a real local-routed provider so pty.ts's
+    // own top-level `preAllocatedHandle` stays null (D-R128 sequence step 6), forcing the gate
+    // through its `resolveExistingTerminalHandleForPty` fallback exactly as a real daemon-backed
+    // local spawn would.
+    function createSelfResumeProvider(
+      runtime: OrcaRuntimeService,
+      ptyId: string,
+      incarnationId: string
+    ) {
       return {
-        kind: 'host-resume',
-        sessionId: payload.sessionId,
-        predecessorPaneKey: payload.predecessorPaneKey,
-        executionHostId: payload.executionHostId,
-        launchGeneration: payload.launchGeneration
-      }
-    }
-
-    // The captured controller seam (pty.test.ts already captures it via setPtyController) — a
-    // runtime double whose `getOrchestrationDb`/`getTerminalProcessIncarnation` this suite
-    // controls; classification, the gate, and the ticket registry are never stubbed.
-    function registerFunnelGateController(
-      db: OrchestrationDb,
-      runtimeOverrides: Record<string, unknown> = {}
-    ): { spawn: (args: Record<string, unknown>) => Promise<unknown> } {
-      let controller: { spawn: (args: Record<string, unknown>) => Promise<unknown> } | undefined
-      const runtime = {
-        ...makeRuntimeStubWithStore(),
-        getOrchestrationDb: () => db,
-        setPtyController: vi.fn((next: typeof controller) => {
-          controller = next
+        routesFreshSpawnsToLocalProvider: true,
+        spawn: vi.fn(async () => {
+          runtime.preAllocateHandleForPty(ptyId)
+          runtime.onPtySpawned(ptyId, incarnationId)
+          return { id: ptyId, incarnationId }
         }),
-        beginPtyRegistration: vi.fn(),
-        cancelPendingPtyRegistration: vi.fn(),
-        registerPreAllocatedHandleForPty: vi.fn(),
-        registerPty: vi.fn(),
-        getTerminalProcessIncarnation: vi.fn(() => null),
-        ...runtimeOverrides
+        write: vi.fn(),
+        resize: vi.fn(),
+        kill: vi.fn(),
+        shutdown: vi.fn(),
+        sendSignal: vi.fn(),
+        getCwd: vi.fn(),
+        getInitialCwd: vi.fn(),
+        clearBuffer: vi.fn(),
+        acknowledgeDataEvent: vi.fn(),
+        hasChildProcesses: vi.fn(),
+        getForegroundProcess: vi.fn(),
+        confirmForegroundProcess: vi.fn(),
+        serialize: vi.fn(),
+        revive: vi.fn(),
+        onData: vi.fn(() => () => {}),
+        onReplay: vi.fn(() => () => {}),
+        onExit: vi.fn(() => () => {}),
+        listProcesses: vi.fn(async () => []),
+        attach: vi.fn(),
+        getDefaultShell: vi.fn(),
+        getProfiles: vi.fn()
       }
-      registerPtyHandlers(mainWindow as never, runtime as never)
-      if (!controller) {
-        throw new Error('registerFunnelGateController: controller was not captured')
-      }
-      return controller
     }
 
-    it('Case A: a real fresh-spawn host_resume classification refreshes the NEW handle/identity — never the pre-spawn one — and resumes a paused pact', async () => {
-      installDaemonTestProvider({
-        spawn: vi.fn(async () => ({ id: 'pty-case-a', incarnationId: 'inc-provider-a' })),
-        listProcesses: vi.fn(async () => [{ id: 'pty-case-a', incarnationId: 'inc-provider-a' }])
-      })
+    function setUpRealRuntime(): { runtime: OrcaRuntimeService; db: OrchestrationDb } {
+      const runtime = new OrcaRuntimeService()
       const db = new OrchestrationDb(':memory:')
+      // [Ruling 34 Addendum 13 precedent, pty.test.ts:9011-9013] Not the real getOrchestrationDb
+      // bootstrap path — arms only the one method admission/the gate calls, leaving the rest of
+      // the real instance intact.
+      runtime.getOrchestrationDb = () => db
+      registerPtyHandlers(mainWindow as never, runtime)
+      return { runtime, db }
+    }
+
+    it('Case A: a real self-resume after daemon_died refreshes the NEW handle/identity via resolveExistingTerminalHandleForPty, resumes a paused pact, and outranks a later gate query', async () => {
+      const { runtime, db } = setUpRealRuntime()
       const tabId = '99999999-9999-4999-8999-aaaaaaaaaa01'
       const leafId = '99999999-9999-4999-8999-aaaaaaaaaa02'
       const paneKey = makePaneKey(tabId, leafId)
@@ -21040,60 +21044,50 @@ describe('registerPtyHandlers', () => {
       })
       const threadId = seedPausedPact(db, agentId, paneKey)
       expect(db.getThread(threadId)?.pact_paused_at).not.toBeNull()
-
-      const getTerminalProcessIncarnation = vi.fn((handle: string) =>
-        handle === 'term_new_handle_a' ? 'pty-new:inc-new-a' : null
-      )
-      const controller = registerFunnelGateController(db, { getTerminalProcessIncarnation })
-      const launchAdmission = handCraftedHostResumeAdmission({
-        predecessorPaneKey: paneKey,
+      const seeded = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey,
+        agentType: 'claude',
         sessionId: 'sess-case-a',
+        launchGeneration: 'gen-case-a',
         executionHostId: HOST_ID,
-        launchGeneration: 'gen-case-a'
+        evidence: 'host_launch'
       })
+      if (!seeded.ok) {
+        throw new Error('seed launch row failed')
+      }
 
-      await controller.spawn({
+      const ptyId = 'pty-case-a'
+      const incarnationId = 'inc-new-a'
+      setLocalPtyProvider(createSelfResumeProvider(runtime, ptyId, incarnationId) as never)
+
+      // FAILS AT BASE (be7a229c76): the renderer funnel's own gate sat at the pre-registerPty
+      // site keyed on `stablePaneOwner?.handle` (always null here), and `self_resume_caller`
+      // classified `notice_only` — nothing ever refreshed the row or resumed the pact.
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
         cols: 80,
         rows: 24,
-        cwd: '/tmp/worktree-c14-a',
+        cwd: '/tmp/case-a',
         command: 'claude --resume sess-case-a',
         launchAgent: 'claude',
-        worktreeId: 'worktree-c14-a',
+        worktreeId: 'repo-1::/tmp/case-a',
         tabId,
-        leafId,
-        preAllocatedHandle: 'term_new_handle_a',
-        launchAdmission,
-        agentSessionEnsure: {
-          claim: {
-            digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
-            keyId: 'claim-key-a',
-            identityDigest: 'c14-case-a-identity-digest-9999999999999999',
-            worktreeScopeDigest: 'c14-case-a-worktree-scope-99999999999999999',
-            agent: 'claude' as const
-          },
-          surface: {
-            worktreeId: 'worktree-c14-a',
-            tabId,
-            leafId,
-            terminalHandle: 'term_new_handle_a'
-          }
-        }
+        leafId
       })
 
-      expect(getTerminalProcessIncarnation).toHaveBeenCalledWith('term_new_handle_a')
-      expect(getTerminalProcessIncarnation).not.toHaveBeenCalledWith('term_dead_old_a')
+      const expectedHandle = runtime.resolveExistingTerminalHandleForPty(ptyId)
+      expect(expectedHandle).not.toBeNull()
       const row = db.getAgentByIdIncludingTombstoned(agentId)
-      expect(row?.terminal_handle).toBe('term_new_handle_a')
-      expect(row?.process_incarnation).toBe('pty-new:inc-new-a')
+      expect(row?.terminal_handle).toBe(expectedHandle)
+      expect(row?.process_incarnation).toBe(`${ptyId}:${incarnationId}`)
       expect(db.getThread(threadId)?.pact_paused_at).toBeNull()
+      // The gate's own prior fire wrote a 'rebind' audit — a newer verb than 'daemon_died', so a
+      // second spawn on this pane sees {kind: 'none'} and never re-fires.
+      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('rebind')
     })
 
-    it('Case B: legacy/null identity leaves process_incarnation UNCHANGED, handle still refreshed, audit carries identity_unavailable_at_refresh', async () => {
-      installDaemonTestProvider({
-        spawn: vi.fn(async () => ({ id: 'pty-case-b', incarnationId: 'inc-provider-b' })),
-        listProcesses: vi.fn(async () => [{ id: 'pty-case-b', incarnationId: 'inc-provider-b' }])
-      })
-      const db = new OrchestrationDb(':memory:')
+    it('Case B: a plain claude (no selector) on an already-owned pane classifies unrecorded — the gate never touches the row', async () => {
+      const { runtime, db } = setUpRealRuntime()
       const tabId = '99999999-9999-4999-8999-bbbbbbbbbb01'
       const leafId = '99999999-9999-4999-8999-bbbbbbbbbb02'
       const paneKey = makePaneKey(tabId, leafId)
@@ -21102,271 +21096,159 @@ describe('registerPtyHandlers', () => {
         oldTerminalHandle: 'term_dead_old_b',
         oldProcessIncarnation: 'pty-old:inc-old-b'
       })
-
-      const getTerminalProcessIncarnation = vi.fn(() => null)
-      const controller = registerFunnelGateController(db, { getTerminalProcessIncarnation })
-      const launchAdmission = handCraftedHostResumeAdmission({
-        predecessorPaneKey: paneKey,
-        sessionId: 'sess-case-b',
-        executionHostId: HOST_ID,
-        launchGeneration: 'gen-case-b'
-      })
-
-      await controller.spawn({
-        cols: 80,
-        rows: 24,
-        cwd: '/tmp/worktree-c14-b',
-        command: 'claude --resume sess-case-b',
-        launchAgent: 'claude',
-        worktreeId: 'worktree-c14-b',
-        tabId,
-        leafId,
-        preAllocatedHandle: 'term_new_handle_b',
-        launchAdmission,
-        agentSessionEnsure: {
-          claim: {
-            digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
-            keyId: 'claim-key-b',
-            identityDigest: 'c14-case-b-identity-digest-9999999999999999',
-            worktreeScopeDigest: 'c14-case-b-worktree-scope-99999999999999999',
-            agent: 'claude' as const
-          },
-          surface: {
-            worktreeId: 'worktree-c14-b',
-            tabId,
-            leafId,
-            terminalHandle: 'term_new_handle_b'
-          }
-        }
-      })
-
-      const row = db.getAgentByIdIncludingTombstoned(agentId)
-      expect(row?.terminal_handle).toBe('term_new_handle_b')
-      // [Case B] column UNCHANGED — never overwritten with null.
-      expect(row?.process_incarnation).toBe('pty-old:inc-old-b')
-      const rawDb = (
-        db as unknown as {
-          db: { prepare: (sql: string) => { all: (...a: unknown[]) => unknown[] } }
-        }
-      ).db
-      const audits = rawDb
-        .prepare(
-          `SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted' AND reason_code LIKE '%identity_unavailable_at_refresh%'`
-        )
-        .all()
-      expect(audits.length).toBeGreaterThanOrEqual(1)
-    })
-
-    it('Case C (fence): the renderer funnel with the literal `{kind:"caller"}` never reaches \'refresh\' — the agent row stays untouched', async () => {
-      installDaemonTestProvider({
-        spawn: vi.fn(async () => ({ id: 'pty-case-c', incarnationId: 'inc-provider-c' }))
-      })
-      const db = new OrchestrationDb(':memory:')
-      const tabId = '99999999-9999-4999-8999-cccccccccc01'
-      const leafId = '99999999-9999-4999-8999-cccccccccc02'
-      const paneKey = makePaneKey(tabId, leafId)
-      const agentId = seedRespawnAgent(db, {
-        paneKey,
-        oldTerminalHandle: 'term_dead_old_c',
-        oldProcessIncarnation: 'pty-old:inc-old-c'
-      })
-      // A self-resume-shaped launch — the newest row's own session id, so admission classifies
-      // self_resume_caller (never host_resume: the renderer funnel can only ever pass
-      // `{kind:'caller'}`, regardless of how resume-shaped the command looks).
-      db.recordLaunch({
+      const seeded = db.recordLaunch({
         hostId: HOST_ID,
         paneKey,
         agentType: 'claude',
-        sessionId: 'sess-case-c',
-        launchGeneration: 'gen-case-c',
+        sessionId: 'sess-case-b',
+        launchGeneration: 'gen-case-b',
         executionHostId: HOST_ID,
         evidence: 'host_launch'
       })
-      const getTerminalProcessIncarnation = vi.fn(() => 'pty-new:inc-new-c')
-      const runtime = {
-        ...makeRuntimeStubWithStore(),
-        getOrchestrationDb: () => db,
-        getTerminalProcessIncarnation
+      if (!seeded.ok) {
+        throw new Error('seed launch row failed')
       }
-      registerPtyHandlers(mainWindow as never, runtime as never)
+      setLocalPtyProvider(createSelfResumeProvider(runtime, 'pty-case-b', 'inc-new-b') as never)
 
       await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
         cols: 80,
         rows: 24,
-        worktreeId: 'worktree-c14-c',
-        command: 'claude --resume sess-case-c',
+        cwd: '/tmp/case-b',
+        command: 'claude',
         launchAgent: 'claude',
+        worktreeId: 'repo-1::/tmp/case-b',
         tabId,
         leafId
       })
 
       const row = db.getAgentByIdIncludingTombstoned(agentId)
-      expect(row?.terminal_handle).toBe('term_dead_old_c')
-      expect(row?.process_incarnation).toBe('pty-old:inc-old-c')
-      expect(getTerminalProcessIncarnation).not.toHaveBeenCalled()
+      expect(row?.terminal_handle).toBe('term_dead_old_b')
+      expect(row?.process_incarnation).toBe('pty-old:inc-old-b')
+      // No 'rebind' audit — the gate's action for 'unrecorded' is {kind: 'none'}, the newest
+      // daemon_died/rebind verb for the pane is still 'daemon_died'.
+      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('daemon_died')
     })
 
-    describe('Case D (T44 family): every launchAdmissionBundle call inside RuntimePtyController.spawn passes args.launchAdmission', () => {
-      let admitSpy: ReturnType<typeof vi.spyOn>
+    it('Case B2: host_minted on an unowned pane with a daemon_died fact refuses the fresh session and notices — row untouched', async () => {
+      const { runtime, db } = setUpRealRuntime()
+      const noticeSpy = vi.spyOn(runtime, 'writeHostNoticeToPane')
+      const tabId = '99999999-9999-4999-8999-cccccccccc01'
+      const leafId = '99999999-9999-4999-8999-cccccccccc02'
+      const paneKey = makePaneKey(tabId, leafId)
+      // [D-R128 correction] Not naturally reachable in production (index.ts skips the
+      // daemon_died audit for a pane with neither a launch row nor a registered row) — written
+      // directly to drive the gate's refuse_fresh_session arm in isolation, per the harness spec.
+      db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: paneKey,
+        actorHostId: HOST_ID,
+        verb: 'daemon_died',
+        outcome: 'observed',
+        reasonCode: null
+      })
+      setLocalPtyProvider(createSelfResumeProvider(runtime, 'pty-case-b2', 'inc-new-b2') as never)
 
-      beforeEach(() => {
-        admitSpy = vi.spyOn(AgentLaunchAdmissionModule, 'admitAgentLaunch')
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/case-b2',
+        command: 'claude',
+        launchAgent: 'claude',
+        worktreeId: 'repo-1::/tmp/case-b2',
+        tabId,
+        leafId
       })
 
-      afterEach(() => {
-        admitSpy.mockRestore()
-      })
-
-      it('the agentSessionEnsure branch threads args.launchAdmission end to end — {kind:"host-resume"} + matching sessionId classifies host_resume', async () => {
-        installDaemonTestProvider({
-          spawn: vi.fn(async () => ({ id: 'pty-case-d1', incarnationId: 'inc-provider-d1' })),
-          listProcesses: vi.fn(async () => [
-            { id: 'pty-case-d1', incarnationId: 'inc-provider-d1' }
-          ])
-        })
-        const db = new OrchestrationDb(':memory:')
-        const tabId = '99999999-9999-4999-8999-dddddddddd01'
-        const leafId = '99999999-9999-4999-8999-dddddddddd02'
-        const paneKey = makePaneKey(tabId, leafId)
-        const controller = registerFunnelGateController(db)
-        const launchAdmission = handCraftedHostResumeAdmission({
-          predecessorPaneKey: paneKey,
-          sessionId: 'sess-case-d1',
-          executionHostId: HOST_ID,
-          launchGeneration: 'gen-case-d1'
-        })
-
-        await controller.spawn({
-          cols: 80,
-          rows: 24,
-          cwd: '/tmp/worktree-c14-d1',
-          command: 'claude --resume sess-case-d1',
-          launchAgent: 'claude',
-          worktreeId: 'worktree-c14-d1',
-          tabId,
-          leafId,
-          preAllocatedHandle: 'term_new_handle_d1',
-          launchAdmission,
-          agentSessionEnsure: {
-            claim: {
-              digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
-              keyId: 'claim-key-d1',
-              identityDigest: 'c14-case-d1-identity-digest-999999999999999',
-              worktreeScopeDigest: 'c14-case-d1-worktree-scope-9999999999999999',
-              agent: 'claude' as const
-            },
-            surface: {
-              worktreeId: 'worktree-c14-d1',
-              tabId,
-              leafId,
-              terminalHandle: 'term_new_handle_d1'
-            }
-          }
-        })
-
-        expect(admitSpy).toHaveBeenCalledOnce()
-        expect(admitSpy.mock.calls[0]?.[2]).toEqual(launchAdmission)
-        const admitted = await admitSpy.mock.results[0]!.value
-        expect(admitted.classification).toBe('host_resume')
-      })
-
-      it('the spawnForStablePane (else) branch also threads args.launchAdmission end to end', async () => {
-        installDaemonTestProvider({
-          spawn: vi.fn(async () => ({ id: 'pty-case-d2', incarnationId: 'inc-provider-d2' }))
-        })
-        const db = new OrchestrationDb(':memory:')
-        const tabId = '99999999-9999-4999-8999-dddddddddd11'
-        const leafId = '99999999-9999-4999-8999-dddddddddd12'
-        const paneKey = makePaneKey(tabId, leafId)
-        const controller = registerFunnelGateController(db)
-        const launchAdmission = handCraftedHostResumeAdmission({
-          predecessorPaneKey: paneKey,
-          sessionId: 'sess-case-d2',
-          executionHostId: HOST_ID,
-          launchGeneration: 'gen-case-d2'
-        })
-
-        await controller.spawn({
-          cols: 80,
-          rows: 24,
-          cwd: '/tmp/worktree-c14-d2',
-          command: 'claude --resume sess-case-d2',
-          launchAgent: 'claude',
-          worktreeId: 'worktree-c14-d2',
-          tabId,
-          leafId,
-          preAllocatedHandle: 'term_new_handle_d2',
-          launchAdmission
-        })
-
-        expect(admitSpy).toHaveBeenCalledOnce()
-        expect(admitSpy.mock.calls[0]?.[2]).toEqual(launchAdmission)
-        const admitted = await admitSpy.mock.results[0]!.value
-        expect(admitted.classification).toBe('host_resume')
-      })
+      const rawDb = (db as unknown as { db: Database.Database }).db
+      const refused = rawDb
+        .prepare(
+          `SELECT * FROM agent_audit WHERE actor_pane_key = ? AND verb = 'rebind'
+             AND outcome = 'refused' AND reason_code = 'daemon_respawn_fresh_session'`
+        )
+        .all(paneKey)
+      expect(refused).toHaveLength(1)
+      expect(noticeSpy).toHaveBeenCalledWith(
+        paneKey,
+        expect.stringContaining('daemon_respawn_fresh_session'),
+        expect.objectContaining({ rateKey: 'rebind:daemon_respawn_fresh_session' })
+      )
+      expect(db.getAgentByPaneKey(HOST_ID, paneKey)).toBeUndefined()
     })
 
-    it("sweep-level fence (T11 extension): after a Layer-2 restore through the real controller funnel, the agents row handle/identity are the new pty's and paused pacts resume", async () => {
-      installDaemonTestProvider({
-        spawn: vi.fn(async () => ({ id: 'pty-sweep-fence', incarnationId: 'inc-provider-sweep' })),
-        listProcesses: vi.fn(async () => [
-          { id: 'pty-sweep-fence', incarnationId: 'inc-provider-sweep' }
-        ])
+    it('Case C: no daemon_died fact at all -> {none}, row/notices untouched', async () => {
+      const { runtime, db } = setUpRealRuntime()
+      const tabId = '99999999-9999-4999-8999-dddddddddd01'
+      const leafId = '99999999-9999-4999-8999-dddddddddd02'
+      const paneKey = makePaneKey(tabId, leafId)
+      setLocalPtyProvider(createSelfResumeProvider(runtime, 'pty-case-c', 'inc-new-c') as never)
+
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/case-c',
+        command: 'claude',
+        launchAgent: 'claude',
+        worktreeId: 'repo-1::/tmp/case-c',
+        tabId,
+        leafId
       })
-      const db = new OrchestrationDb(':memory:')
+
+      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBeNull()
+      const rawDb = (db as unknown as { db: Database.Database }).db
+      const rebindRows = rawDb
+        .prepare(`SELECT * FROM agent_audit WHERE actor_pane_key = ? AND verb = 'rebind'`)
+        .all(paneKey)
+      expect(rebindRows).toHaveLength(0)
+    })
+
+    // [D-R128 F6, forced deviation — see RETURN] `idx_agents_pane_suffix`'s own UNIQUE index
+    // (db.ts) keeps two non-tombstoned rows from EVER sharing one host's pane suffix at once —
+    // the same structural fact agent-restore-rebind.test.ts's own C7k item 6 comment relies on
+    // to defer that primitive's disambiguation proof to
+    // agent-daemon-respawn-handle-refresh.test.ts:187 ("agentId selects the row by id, bypassing
+    // the pane-suffix lookup entirely") rather than constructing two live same-suffix rows
+    // end-to-end. That primitive-level proof already exists and is untouched by this brief; what
+    // this case proves instead is the WIRING this brief adds — that the gate actually threads
+    // `admittedLaunch.registeredAgentId` (F6) into its `refreshAgentHandleAfterRespawn` call,
+    // rather than omitting it and relying on the primitive's own suffix fallback.
+    it('Case D: the gate threads the registered row own id (F6) into refreshAgentHandleAfterRespawn, not the bare suffix fallback', async () => {
+      const { runtime, db } = setUpRealRuntime()
       const tabId = '99999999-9999-4999-8999-eeeeeeeeee01'
       const leafId = '99999999-9999-4999-8999-eeeeeeeeee02'
       const paneKey = makePaneKey(tabId, leafId)
       const agentId = seedRespawnAgent(db, {
         paneKey,
-        oldTerminalHandle: 'term_dead_old_sweep',
-        oldProcessIncarnation: 'pty-old:inc-old-sweep'
+        oldTerminalHandle: 'term_dead_old_d',
+        oldProcessIncarnation: 'pty-old:inc-old-d'
       })
-      const threadId = seedPausedPact(db, agentId, paneKey)
-
-      const getTerminalProcessIncarnation = vi.fn((handle: string) =>
-        handle === 'term_new_handle_sweep' ? 'pty-new:inc-new-sweep' : null
-      )
-      const controller = registerFunnelGateController(db, { getTerminalProcessIncarnation })
-      const launchAdmission = handCraftedHostResumeAdmission({
-        predecessorPaneKey: paneKey,
-        sessionId: 'sess-sweep-fence',
+      const seeded = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey,
+        agentType: 'claude',
+        sessionId: 'sess-case-d',
+        launchGeneration: 'gen-case-d',
         executionHostId: HOST_ID,
-        launchGeneration: 'gen-sweep-fence'
+        evidence: 'host_launch'
       })
+      if (!seeded.ok) {
+        throw new Error('seed launch row failed')
+      }
+      const refreshSpy = vi.spyOn(OrchestrationDb.prototype, 'refreshAgentHandleAfterRespawn')
+      setLocalPtyProvider(createSelfResumeProvider(runtime, 'pty-case-d', 'inc-new-d') as never)
 
-      await controller.spawn({
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
         cols: 80,
         rows: 24,
-        cwd: '/tmp/worktree-c14-sweep',
-        command: 'claude --resume sess-sweep-fence',
+        cwd: '/tmp/case-d',
+        command: 'claude --resume sess-case-d',
         launchAgent: 'claude',
-        worktreeId: 'worktree-c14-sweep',
+        worktreeId: 'repo-1::/tmp/case-d',
         tabId,
-        leafId,
-        preAllocatedHandle: 'term_new_handle_sweep',
-        launchAdmission,
-        agentSessionEnsure: {
-          claim: {
-            digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
-            keyId: 'claim-key-sweep',
-            identityDigest: 'c14-sweep-fence-identity-999999999999999999',
-            worktreeScopeDigest: 'c14-sweep-fence-worktree-999999999999999999',
-            agent: 'claude' as const
-          },
-          surface: {
-            worktreeId: 'worktree-c14-sweep',
-            tabId,
-            leafId,
-            terminalHandle: 'term_new_handle_sweep'
-          }
-        }
+        leafId
       })
 
-      const row = db.getAgentByIdIncludingTombstoned(agentId)
-      expect(row?.terminal_handle).toBe('term_new_handle_sweep')
-      expect(row?.process_incarnation).toBe('pty-new:inc-new-sweep')
-      expect(db.getThread(threadId)?.pact_paused_at).toBeNull()
+      expect(refreshSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId }))
+      refreshSpy.mockRestore()
     })
   })
 })

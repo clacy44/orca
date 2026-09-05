@@ -28,7 +28,7 @@ describe('S10-21a C7g: newestDaemonDeathOrRebindVerbForPane', () => {
       outcome: 'admitted',
       reasonCode: null
     })
-    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY)).toBeNull()
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBeNull()
   })
 
   it("returns 'daemon_died' when that is the newest of the two verbs", () => {
@@ -41,7 +41,7 @@ describe('S10-21a C7g: newestDaemonDeathOrRebindVerbForPane', () => {
       outcome: 'observed',
       reasonCode: null
     })
-    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY)).toBe('daemon_died')
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBe('daemon_died')
   })
 
   it("a later 'rebind' always outranks an earlier 'daemon_died' — the gate must not re-fire", () => {
@@ -62,7 +62,7 @@ describe('S10-21a C7g: newestDaemonDeathOrRebindVerbForPane', () => {
       outcome: 'reminted',
       reasonCode: 'daemon respawn handle refresh'
     })
-    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY)).toBe('rebind')
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBe('rebind')
   })
 
   it('is scoped per pane (suffix match), never bleeding across panes', () => {
@@ -75,6 +75,20 @@ describe('S10-21a C7g: newestDaemonDeathOrRebindVerbForPane', () => {
       outcome: 'observed',
       reasonCode: null
     })
-    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY)).toBeNull()
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBeNull()
+  })
+
+  it('[S10-21a C14b, D-R128 host_id scoping] is scoped per host, never bleeding across hosts sharing a pane suffix', () => {
+    const db = freshDb()
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: PANE_KEY,
+      actorHostId: 'other-host',
+      verb: 'daemon_died',
+      outcome: 'observed',
+      reasonCode: null
+    })
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBeNull()
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, 'other-host')).toBe('daemon_died')
   })
 })

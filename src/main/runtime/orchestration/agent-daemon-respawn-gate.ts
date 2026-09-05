@@ -10,15 +10,17 @@ export type DaemonRespawnGateVerb = 'daemon_died' | 'rebind'
 
 export function newestDaemonDeathOrRebindVerb(
   db: Database.Database,
-  paneKey: string
+  paneKey: string,
+  hostId: string
 ): DaemonRespawnGateVerb | null {
   const row = db
     .prepare(
       `SELECT verb FROM agent_audit
          WHERE substr(actor_pane_key, instr(actor_pane_key, ':') + 1) = ?
+           AND actor_host_id = ?
            AND verb IN ('daemon_died', 'rebind')
          ORDER BY seq DESC LIMIT 1`
     )
-    .get(paneSuffix(paneKey)) as { verb: DaemonRespawnGateVerb } | undefined
+    .get(paneSuffix(paneKey), hostId) as { verb: DaemonRespawnGateVerb } | undefined
   return row?.verb ?? null
 }

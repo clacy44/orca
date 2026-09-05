@@ -4955,8 +4955,11 @@ export class OrchestrationDb {
 
   // S10-21a C7f (Ruling 34 Addendum 24): pty.ts's post-spawn-commit gate — the pane's newest
   // daemon_died/rebind audit.
-  newestDaemonDeathOrRebindVerbForPane(paneKey: string): DaemonRespawnGateVerb | null {
-    return newestDaemonDeathOrRebindVerbImpl(this.db, paneKey)
+  newestDaemonDeathOrRebindVerbForPane(
+    paneKey: string,
+    hostId: string
+  ): DaemonRespawnGateVerb | null {
+    return newestDaemonDeathOrRebindVerbImpl(this.db, paneKey, hostId)
   }
 
   // S10-21a C6a (design v3.2 §2.3/§2.6/§1.6, D-R107): Layer 1's live-hook-report mismatch check.

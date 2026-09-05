@@ -309,7 +309,10 @@ export async function admitAgentLaunch(
         }
         return passThrough(
           spawnOptions,
-          reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller'
+          reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller',
+          // [S10-21a C14b, D-R128 F6] Binds the renderer-funnel gate's refresh to this specific
+          // registered row — two registered rows can share a pane suffix.
+          reasonCode === 'caller' ? registeredRow?.id : undefined
         )
       }
       return unrecorded(owned ? 'pane_key_owned' : 'foreign_selector')

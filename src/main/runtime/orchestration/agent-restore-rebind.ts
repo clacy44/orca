@@ -169,6 +169,22 @@ export function rebindRestoredPane(
         })
       }
     }
+    // [S10-21a C14b, D-R128 F4] Bind the admission's own `sweep_record` row before returning —
+    // the same recognise-first-never-reinsert check step 5 below (`:305-331`) uses — so a
+    // same-pane restore never leaves `agent_launch_sessions.agent_id` NULL, which would wedge
+    // `paneAwaitingSweepRestore` at `sweep_record_pending_rebind` for the rest of the generation.
+    const noopExistingForPane = newestLaunchForPane(db, params.hostId, params.newPaneKey)
+    const noopMatchesShape =
+      noopExistingForPane !== undefined &&
+      noopExistingForPane.session_id === params.ticketPayload.sessionId &&
+      noopExistingForPane.evidence === 'sweep_record'
+    const noopIsAdmissionsOwnRow =
+      noopMatchesShape &&
+      noopExistingForPane.launch_generation === params.launchGeneration &&
+      noopExistingForPane.execution_host_id === params.executionHostId
+    if (noopIsAdmissionsOwnRow) {
+      setLaunchAgentId(db, { seq: noopExistingForPane.seq }, predicate.agentId)
+    }
     return {
       ok: true,
       rebound: false,

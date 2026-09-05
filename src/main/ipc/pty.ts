@@ -5576,65 +5576,6 @@ export function registerPtyHandlers(
         if (args.preAllocatedHandle && !stablePaneOwner?.handle) {
           runtime?.registerPreAllocatedHandleForPty(result.id, args.preAllocatedHandle)
         }
-        // [S10-21a C14, D-R121 B4] Post-spawn-commit gate on the controller funnel — the ONE
-        // funnel a sweep restore's host-resume descriptor actually traverses (the
-        // renderer funnel's own gate at `pty:spawn` sits on a funnel that can never produce
-        // `host_resume`/`self_resume_host`, D-R121 B1/B2). Placed after the shared
-        // `registerPreAllocatedHandleForPty` call above (not inside either arm of the
-        // `agentSessionEnsure`/`spawnForStablePane` branch) because the sweep's own restore
-        // (`ensureAgentSession` -> `agentSessionClaim`) always takes the `agentSessionEnsure`
-        // branch, where `stablePaneOwner` is never assigned — so this must run at a point common
-        // to both branches. Same decision function, same refresh + pact-resume semantics as the
-        // renderer's own dead `refresh` arm. Keyed on `stablePaneOwner?.handle ??
-        // args.preAllocatedHandle`: `stablePaneOwner` is only ever non-null on
-        // `spawnForStablePane`'s reattach arm; every other admitted path (including the sweep's)
-        // carries its new handle on `args.preAllocatedHandle`, now guaranteed registered above.
-        if (spawnIdentityPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
-          const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
-          const respawnGateDb = respawnGateBundle.getDb()
-          const respawnRefreshHandle = stablePaneOwner?.handle ?? args.preAllocatedHandle
-          if (respawnGateDb) {
-            const gateAction = resolveDaemonRespawnGateAction(
-              respawnGateDb.newestDaemonDeathOrRebindVerbForPane(spawnIdentityPaneKey),
-              admittedLaunch?.classification
-            )
-            if (gateAction.kind === 'refresh' && respawnRefreshHandle) {
-              const refreshResult = respawnGateDb.refreshAgentHandleAfterRespawn({
-                hostId: respawnGateBundle.ctx.hostId,
-                paneKey: spawnIdentityPaneKey,
-                newTerminalHandle: respawnRefreshHandle,
-                processIncarnation:
-                  runtime?.getTerminalProcessIncarnation(respawnRefreshHandle) ?? null
-              })
-              if (refreshResult.ok) {
-                respawnGateDb.resumePactsForRestoredAgent(
-                  refreshResult.agentId,
-                  refreshResult.pactsToUnpause
-                )
-              }
-            } else if (gateAction.kind === 'refuse_fresh_session') {
-              respawnGateDb.writeAgentAudit({
-                agentId: null,
-                actorPaneKey: spawnIdentityPaneKey,
-                actorHostId: respawnGateBundle.ctx.hostId,
-                verb: 'rebind',
-                outcome: 'refused',
-                reasonCode: 'daemon_respawn_fresh_session'
-              })
-              respawnGateBundle.ctx.notice(
-                spawnIdentityPaneKey,
-                'rebind',
-                'daemon_respawn_fresh_session'
-              )
-            } else if (gateAction.kind === 'notice_only') {
-              respawnGateBundle.ctx.notice(
-                spawnIdentityPaneKey,
-                'rebind',
-                'daemon_respawn_fresh_session_self_resume'
-              )
-            }
-          }
-        }
         if (args.worktreeId) {
           runtime?.registerPty(
             result.id,
@@ -7035,66 +6976,6 @@ export function registerPtyHandlers(
               classification: launchAdmissionClassificationToWire(admittedLaunch.classification)
             } satisfies LaunchAdmissionNoticePayload)
           }
-          // [S10-21a C7f, Ruling 34 Addendum 24, D-R114 fix 1] Post-spawn-commit gate: only for
-          // a covered launch whose pane's newest daemon_died/rebind audit is 'daemon_died' (a
-          // newer 'rebind' — this gate's own prior fire, or C5's Layer-2 rebind — always wins,
-          // so this never re-fires once the pane is resolved). Non-covered launches never reach
-          // it (matches D-R114's own scope note: no wait, no gate).
-          if (reservationPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
-            const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
-            const respawnGateDb = respawnGateBundle.getDb()
-            if (respawnGateDb) {
-              const gateAction = resolveDaemonRespawnGateAction(
-                respawnGateDb.newestDaemonDeathOrRebindVerbForPane(reservationPaneKey),
-                admittedLaunch?.classification
-              )
-              if (gateAction.kind === 'refresh' && stablePaneOwner?.handle) {
-                const refreshResult = respawnGateDb.refreshAgentHandleAfterRespawn({
-                  hostId: respawnGateBundle.ctx.hostId,
-                  paneKey: reservationPaneKey,
-                  newTerminalHandle: stablePaneOwner.handle,
-                  // [S10-21a C7l, Ruling 34 Addendum 29 item 1] The canonical two-part
-                  // "<ptyId>:<incarnationId>" form for the NEW handle, never the bare
-                  // incarnation id `stablePaneSpawn.result.incarnationId` used to pass —
-                  // `parseProcessIncarnation` rejects a bare id, so every gated daemon
-                  // respawn poisoned `agents.process_incarnation`.
-                  processIncarnation:
-                    runtime?.getTerminalProcessIncarnation(stablePaneOwner.handle) ?? null
-                })
-                // [S10-21a C10, Ruling 34 Addendum 25] `pact-lifecycle.ts`'s
-                // `resumePact`/`resumePactOrRequest` both require a real participant
-                // `callerAgentId` and refuse a host-authored resume with no actor of its own, so
-                // this gate calls C10's own host-authored `resumePactsForRestoredAgent` instead,
-                // post-commit — `refreshAgentHandleAfterRespawn` already committed above.
-                if (refreshResult.ok) {
-                  respawnGateDb.resumePactsForRestoredAgent(
-                    refreshResult.agentId,
-                    refreshResult.pactsToUnpause
-                  )
-                }
-              } else if (gateAction.kind === 'refuse_fresh_session') {
-                respawnGateDb.writeAgentAudit({
-                  agentId: null,
-                  actorPaneKey: reservationPaneKey,
-                  actorHostId: respawnGateBundle.ctx.hostId,
-                  verb: 'rebind',
-                  outcome: 'refused',
-                  reasonCode: 'daemon_respawn_fresh_session'
-                })
-                respawnGateBundle.ctx.notice(
-                  reservationPaneKey,
-                  'rebind',
-                  'daemon_respawn_fresh_session'
-                )
-              } else if (gateAction.kind === 'notice_only') {
-                respawnGateBundle.ctx.notice(
-                  reservationPaneKey,
-                  'rebind',
-                  'daemon_respawn_fresh_session_self_resume'
-                )
-              }
-            }
-          }
           if (
             stablePaneOwner &&
             isMintedSessionId &&
@@ -7434,6 +7315,70 @@ export function registerPtyHandlers(
         } else if (pendingRegistrationPtyId) {
           runtime?.cancelPendingPtyRegistration?.(pendingRegistrationPtyId, result.incarnationId)
           pendingRegistrationPtyId = null
+        }
+        // [S10-21a C14b, D-R128] Post-spawn-commit gate, moved here (after registerPty binds
+        // `ptysById[result.id].incarnationId`, D-R127 F1 correction) from its former pre-identity
+        // site — only for a covered launch whose pane's newest daemon_died/rebind audit is
+        // 'daemon_died' (a newer 'rebind' — this gate's own prior fire, or C5's Layer-2 rebind —
+        // always wins, so this never re-fires once the pane is resolved). `self_resume_caller` is
+        // definitionally same-session (agent-launch-admission.ts:299, under the pane lock), so it
+        // now refreshes rather than merely noticing. F5: the whole block is wrapped in try/catch —
+        // a store fault here must never fail an already-committed spawn and orphan a live PTY.
+        if (reservationPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
+          try {
+            const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
+            const respawnGateDb = respawnGateBundle.getDb()
+            const respawnRefreshHandle =
+              stablePaneOwner?.handle ??
+              preAllocatedHandle ??
+              runtime?.resolveExistingTerminalHandleForPty(result.id) ??
+              null
+            if (respawnGateDb) {
+              const gateAction = resolveDaemonRespawnGateAction(
+                respawnGateDb.newestDaemonDeathOrRebindVerbForPane(
+                  reservationPaneKey,
+                  respawnGateBundle.ctx.hostId
+                ),
+                admittedLaunch?.classification
+              )
+              if (gateAction.kind === 'refresh' && respawnRefreshHandle) {
+                const refreshResult = respawnGateDb.refreshAgentHandleAfterRespawn({
+                  hostId: respawnGateBundle.ctx.hostId,
+                  paneKey: reservationPaneKey,
+                  newTerminalHandle: respawnRefreshHandle,
+                  processIncarnation:
+                    runtime?.getTerminalProcessIncarnation(respawnRefreshHandle) ?? null,
+                  // [D-R128 F6] Binds this specific registered row when known — two registered
+                  // rows can share a pane suffix.
+                  ...(admittedLaunch?.registeredAgentId
+                    ? { agentId: admittedLaunch.registeredAgentId }
+                    : {})
+                })
+                if (refreshResult.ok) {
+                  respawnGateDb.resumePactsForRestoredAgent(
+                    refreshResult.agentId,
+                    refreshResult.pactsToUnpause
+                  )
+                }
+              } else if (gateAction.kind === 'refuse_fresh_session') {
+                respawnGateDb.writeAgentAudit({
+                  agentId: null,
+                  actorPaneKey: reservationPaneKey,
+                  actorHostId: respawnGateBundle.ctx.hostId,
+                  verb: 'rebind',
+                  outcome: 'refused',
+                  reasonCode: 'daemon_respawn_fresh_session'
+                })
+                respawnGateBundle.ctx.notice(
+                  reservationPaneKey,
+                  'rebind',
+                  'daemon_respawn_fresh_session'
+                )
+              }
+            }
+          } catch (e) {
+            console.error('[pty] daemon-respawn gate failed after spawn commit:', e)
+          }
         }
         // Why: seed after registerPty binds the worktree — including on
         // desktop, where the renderer-authority gate above skips the emulator

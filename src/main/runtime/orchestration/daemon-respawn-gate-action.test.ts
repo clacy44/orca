@@ -22,9 +22,9 @@ describe('S10-21a C7f/C7g: resolveDaemonRespawnGateAction', () => {
     })
   })
 
-  it('daemon_died newest + SELF_RESUME(caller) -> notice only (the contest path already fires)', () => {
+  it('daemon_died newest + SELF_RESUME(caller) -> refresh (S10-21a C14b: definitionally same-session)', () => {
     expect(resolveDaemonRespawnGateAction('daemon_died', 'self_resume_caller')).toEqual({
-      kind: 'notice_only'
+      kind: 'refresh'
     })
   })
 

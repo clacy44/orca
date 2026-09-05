@@ -24,17 +24,23 @@ export type AdmittedLaunch = {
    * after the spawn callback returned and may still have a live process. */
   compensate: (fromEnsureFailure?: boolean) => void
   classification?: LaunchAdmissionClassification
+  /** [S10-21a C14b, D-R128 F6] The already-registered row's agent id on a `self_resume_caller`
+   * pass-through, so the renderer-funnel gate's refresh binds that row specifically (two
+   * registered rows can share a pane suffix). */
+  registeredAgentId?: string
 }
 
 export function passThrough(
   spawnOptions: PtySpawnOptions,
-  classification?: LaunchAdmissionClassification
+  classification?: LaunchAdmissionClassification,
+  registeredAgentId?: string
 ): AdmittedLaunch {
   return {
     spawnOptions,
     confirm: () => {},
     compensate: () => {},
-    ...(classification ? { classification } : {})
+    ...(classification ? { classification } : {}),
+    ...(registeredAgentId ? { registeredAgentId } : {})
   }
 }
 
