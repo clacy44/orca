@@ -817,6 +817,45 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     expect(order).toEqual(['fanout', 'unbind'])
   })
 
+  it('S10-21a C7d: setDaemonDiedFanoutHandler is called with every killed ptyId, before the fanout reaches the renderer', async () => {
+    const mod = await importFresh()
+    await mod.initDaemonPtyProvider()
+
+    const originalAdapter = adapterInstances[0]
+    originalAdapter.getActiveSessionIds.mockImplementation(() => ['sess-x', 'sess-y'])
+
+    const seen: string[][] = []
+    mod.setDaemonDiedFanoutHandler((ptyIds: readonly string[]) => {
+      seen.push([...ptyIds])
+    })
+    try {
+      await mod.restartDaemon()
+    } finally {
+      mod.setDaemonDiedFanoutHandler(null)
+    }
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.sort()).toEqual(['sess-x', 'sess-y'])
+  })
+
+  it('S10-21a C7d: setDaemonDiedFanoutHandler is never called when nothing was active', async () => {
+    const mod = await importFresh()
+    await mod.initDaemonPtyProvider()
+
+    const originalAdapter = adapterInstances[0]
+    originalAdapter.getActiveSessionIds.mockImplementation(() => [])
+
+    const handler = vi.fn()
+    mod.setDaemonDiedFanoutHandler(handler)
+    try {
+      await mod.restartDaemon()
+    } finally {
+      mod.setDaemonDiedFanoutHandler(null)
+    }
+
+    expect(handler).not.toHaveBeenCalled()
+  })
+
   it('uses daemon-owned idle retirement after a failed manual-restart adoption', async () => {
     const mod = await importFresh()
     await mod.initDaemonPtyProvider()

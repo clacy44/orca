@@ -53,6 +53,11 @@ type RecoveryRequest = {
    *  in-flight line, and only it may quarantine input — a recovery that always
    *  keeps the same live shell would have a legitimate command eaten. */
   endpointReplaced?: boolean
+  /** [S10-21a C7d] The pane's own stable pane key, when the caller has one (only
+   * `pty-connection.ts`'s `input-undeliverable`/`input-rejected-by-host` path does today) —
+   * used to capture a sleeping record before a daemon-death-class remount, so it presents as a
+   * RESTORE rather than a fresh session. */
+  paneKey?: string
 }
 
 // Why a cap exists: recovery must never loop. If the remounted pane wedges
@@ -246,6 +251,20 @@ export async function requestTerminalPaneRecovery(request: RecoveryRequest): Pro
         scheduleRecoveryRetry(request, recheck.retryInMs)
       }
       return false
+    }
+  }
+  // [S10-21a C7d, Ruling 34 Addendum 23] BEFORE the remount: capture the pane's live status
+  // into a sleeping record for the daemon-death class ('input-undeliverable' — a live-but-
+  // unreachable pty, the shape a daemon respawn presents). Never for 'input-rejected-by-host'
+  // (a live connection's own rejection, not daemon death) or the other reasons (stall/wedge/
+  // certified-dead all reattach to the SAME still-alive shell, never a respawn). Idempotent
+  // (the action itself never overwrites an existing record) and best-effort — a throw here must
+  // never block the remount that actually recovers the pane.
+  if (request.reason === 'input-undeliverable' && request.paneKey) {
+    try {
+      useAppStore.getState().captureSleepingAgentSessionForDaemonDeath(request.paneKey)
+    } catch {
+      // Best-effort — see the comment above.
     }
   }
   let remounted = false

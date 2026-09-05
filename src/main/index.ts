@@ -29,6 +29,7 @@ import {
   getLocalPtyProvider,
   getSshPtyProvider,
   registerHeadlessPtyRuntime,
+  getPaneKeyForPtyId,
   type CodexHomeLaunchContext
 } from './ipc/pty'
 import {
@@ -36,7 +37,8 @@ import {
   disconnectDaemon,
   getDaemonProvider,
   listLiveDaemonPtyIds,
-  shutdownDaemon
+  shutdownDaemon,
+  setDaemonDiedFanoutHandler
 } from './daemon/daemon-init'
 import { warnIfServeExitAtRiskOnAppImageMount } from './daemon/linux-appimage-mount-risk'
 import {
@@ -2708,6 +2710,32 @@ void app.whenReady().then(async () => {
     orchestrationEnvironmentTransport
   })
   runtime = runtimeService
+  // [S10-21a C7d, Ruling 34 Addendum 23] One 'daemon_died' audit row per killed pane, from the
+  // synthetic-exit fanout (daemon-init.ts Step 1) — the host-authored "awaiting restore" fact.
+  // Best-effort: a throw here must never take the daemon-restart/death path down with it.
+  setDaemonDiedFanoutHandler((ptyIds) => {
+    try {
+      const db = runtimeService.getOrchestrationDb()
+      const hostId = runtimeService.getOrchestrationCompatibilityHostId()
+      for (const ptyId of ptyIds) {
+        const paneKey = getPaneKeyForPtyId(ptyId)
+        if (!paneKey) {
+          continue
+        }
+        const row = db.newestLaunchForPane(hostId, paneKey)
+        db.writeAgentAudit({
+          agentId: row?.agent_id ?? null,
+          actorPaneKey: paneKey,
+          actorHostId: hostId,
+          verb: 'daemon_died',
+          outcome: 'observed',
+          reasonCode: `session=${row?.session_id ?? 'unknown'} ptyId=${ptyId}`
+        })
+      }
+    } catch (error) {
+      console.error('[daemon] HARNESS: daemon_died audit fanout failed:', error)
+    }
+  })
   // S10-6: reverse wiring — the hook server consults the runtime before letting an authority
   // observation persist or displace existing state (corroboration against the live pty's token).
   agentHookServer.setPaneLaunchAuthorityVerifier((paneKey, launchTokenHash, connectionId) =>

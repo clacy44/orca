@@ -103,6 +103,19 @@ let adapter: DaemonProvider | null = null
 // Why: coalesce concurrent restartDaemon() calls so two entries can't race the 7-step sequence against a half-spawned replacement.
 let restartInFlight: Promise<RestartDaemonResult> | null = null
 
+// [S10-21a C7d, Ruling 34 Addendum 23] Set once from index.ts (which holds the orchestration db
+// and hostId this module has no coupling to) — invoked with every ptyId the synthetic-exit
+// fanout kills, so main can write one 'daemon_died' audit row per pane before the respawn lands.
+// A narrow callback, not a full runtime import, to keep this module's daemon-lifecycle-only
+// dependency graph unchanged.
+let onDaemonDiedFanout: ((ptyIds: readonly string[]) => void) | null = null
+
+export function setDaemonDiedFanoutHandler(
+  handler: ((ptyIds: readonly string[]) => void) | null
+): void {
+  onDaemonDiedFanout = handler
+}
+
 function getRuntimeDir(): string {
   const dir = join(app.getPath('userData'), 'daemon')
   mkdirSync(dir, { recursive: true })
@@ -1196,9 +1209,14 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     currentAdapter instanceof DegradedDaemonPtyProvider
       ? currentAdapter.getCurrentDaemonSessionIds()
       : []
-  const killedCount =
-    new Set([...currentOnly.getActiveSessionIds(), ...currentDaemonSessionIds]).size +
-    fallbackKilledCount
+  const killedPtyIds = new Set([...currentOnly.getActiveSessionIds(), ...currentDaemonSessionIds])
+  const killedCount = killedPtyIds.size + fallbackKilledCount
+  // [S10-21a C7d, Ruling 34 Addendum 23] One main-side 'daemon_died' fact per killed ptyId,
+  // BEFORE the fanout below reaches the renderer — see `setDaemonDiedFanoutHandler`'s own doc
+  // comment for why this is a callback rather than a direct orchestration-db import here.
+  if (killedPtyIds.size > 0) {
+    onDaemonDiedFanout?.([...killedPtyIds])
+  }
   currentOnly.fanoutSyntheticExits(-1)
   if (currentAdapter instanceof DegradedDaemonPtyProvider) {
     currentAdapter.fanoutCurrentDaemonSyntheticExits(-1)

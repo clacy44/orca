@@ -79,7 +79,9 @@ const CONTESTED_REFUSAL_REASONS: ReadonlySet<RebindRefusalReason> = new Set([
   'predecessor_moved'
 ])
 
-function pactsAwaitingUnpause(db: Database.Database, agentId: string): string[] {
+// [S10-21a C7d] Exported so the daemon-respawn handle-refresh module (a same-pane-key sibling
+// of this file's Layer-2 rebind) can reuse the SAME query rather than a second copy.
+export function pactsAwaitingUnpause(db: Database.Database, agentId: string): string[] {
   const rows = db
     .prepare(
       `SELECT id FROM threads

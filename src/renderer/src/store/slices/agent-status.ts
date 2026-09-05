@@ -293,6 +293,12 @@ export type AgentStatusSlice = {
   dropAgentStatusByWorktree: (worktreeId: string, opts?: DropAgentStatusByWorktreeOptions) => void
 
   captureSleepingAgentSessionsByWorktree: (worktreeId: string, paneKeys?: string[]) => void
+  /** [S10-21a C7d, Ruling 34 Addendum 23] Captures ONE pane's sleeping record from its LIVE
+   * agent status, right before a certified-dead-daemon remount rebuilds the pane over a new
+   * pty — so the remount is a RESTORE (a notice, `--resume`), never a fresh session. Never
+   * overwrites an existing record (idempotent against a retried remount); a no-op if the pane
+   * has no resumable live status to capture from. */
+  captureSleepingAgentSessionForDaemonDeath: (paneKey: string) => void
   /** Capture resumable agent sessions across every worktree for crash recovery or quit; mode sets live/quit precedence. */
   captureAllSleepingAgentSessions: (mode: AllAgentSessionCaptureMode) => void
   clearSleepingAgentSession: (paneKey: string) => void
@@ -3066,6 +3072,43 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
         }
 
         return changed ? { sleepingAgentSessionsByPaneKey: next } : s
+      })
+    },
+
+    // [S10-21a C7d, Ruling 34 Addendum 23] Reuses `sleepingRecordFromEntry` — the same builder
+    // `registerAgentLaunchConfig`'s own refresh branch (above) calls — rather than
+    // `captureSleepingAgentSessionsByWorktree`'s worktree-sleep-shaped path, which tags a
+    // different origin with its own ownership-preservation special cases that do not apply to a
+    // daemon-death remount.
+    captureSleepingAgentSessionForDaemonDeath: (paneKey) => {
+      set((s) => {
+        if (s.sleepingAgentSessionsByPaneKey[paneKey]) {
+          // Never overwrite — idempotent against a retried/duplicate remount call.
+          return s
+        }
+        const entry = s.agentStatusByPaneKey[paneKey]
+        if (!entry) {
+          return s
+        }
+        const worktreeId = entry.worktreeId ?? findAgentPaneWorktreeId(s, paneKey)
+        if (!worktreeId) {
+          return s
+        }
+        const launchConfig = getLaunchConfigForEntry(s, entry)
+        const record = sleepingRecordFromEntry({
+          state: s,
+          entry,
+          worktreeId,
+          capturedAt: Date.now(),
+          ...(launchConfig ? { launchConfig } : {}),
+          origin: 'quit'
+        })
+        if (!record) {
+          return s
+        }
+        return {
+          sleepingAgentSessionsByPaneKey: { ...s.sleepingAgentSessionsByPaneKey, [paneKey]: record }
+        }
       })
     },
 

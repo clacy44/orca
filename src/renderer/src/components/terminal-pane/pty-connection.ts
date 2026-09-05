@@ -4046,6 +4046,9 @@ export function connectPanePty(
       tabId: deps.tabId,
       ptyId: undeliverablePtyId,
       reason: hostRejectedRemoteInput ? 'input-rejected-by-host' : 'input-undeliverable',
+      // [S10-21a C7d] Only the 'input-undeliverable' branch consumes this (the daemon-death
+      // class) — see terminal-pane-recovery.ts's own gate.
+      paneKey: cacheKey,
       terminalRecoveryGeneration,
       terminalRecoveryInstanceId: terminalRecoveryInstance.id,
       // Why: pty:hasPty answers null for ids the local registry doesn't own,

@@ -103,6 +103,11 @@ import {
   type RebindRestoredPaneResult
 } from './agent-restore-rebind'
 import {
+  refreshAgentHandleAfterRespawn as refreshAgentHandleAfterRespawnImpl,
+  type RefreshAgentHandleAfterRespawnParams,
+  type RefreshAgentHandleAfterRespawnResult
+} from './agent-daemon-respawn-handle-refresh'
+import {
   evaluateLiveHookReportMismatch as evaluateLiveHookReportMismatchImpl,
   type LiveHookReportMismatchParams,
   type LiveHookReportMismatchResult
@@ -4923,6 +4928,13 @@ export class OrchestrationDb {
   // S10-21a C5 (design v3.2 §2.4): the Layer-2 rebind — predicate and transaction, pure DB.
   rebindRestoredPane(params: RebindRestoredPaneParams): RebindRestoredPaneResult {
     return rebindRestoredPaneImpl(this.db, params)
+  }
+
+  // S10-21a C7d (Ruling 34 Addendum 23): the same-pane-key "narrowed identity rebind" sibling.
+  refreshAgentHandleAfterRespawn(
+    params: RefreshAgentHandleAfterRespawnParams
+  ): RefreshAgentHandleAfterRespawnResult {
+    return refreshAgentHandleAfterRespawnImpl(this.db, params)
   }
 
   // S10-21a C6a (design v3.2 §2.3/§2.6/§1.6, D-R107): Layer 1's live-hook-report mismatch check.
