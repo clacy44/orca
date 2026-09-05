@@ -173,6 +173,49 @@ describe('bundle — collection', () => {
     expect(bundle.payload).not.toContain('"event":"session-exited"')
   })
 
+  it('H14: attaches daemon.stderr.log whole, raw text, not span-parsed', () => {
+    writeFileSync(traceFile, makeNDJSON([makeSpan({ name: 'recent' })]))
+    const stderrFile = join(dir, 'daemon.stderr.log')
+    const rawStderr =
+      '=== daemon pid 4242 entry abc123def456 started 2026-09-05T00:00:00.000Z ===\n' +
+      'FATAL ERROR: JavaScript heap out of memory\nnot,{valid json at all'
+    writeFileSync(stderrFile, rawStderr)
+    const bundle = collectBundle({
+      traceFilePath: traceFile,
+      maxFiles: 10,
+      daemonStderrLogFilePath: stderrFile,
+      daemonStderrLogMaxFiles: 3,
+      appVersion: '1',
+      platform: 'darwin',
+      arch: 'arm64',
+      osRelease: '24',
+      orcaChannel: 'dev'
+    })
+    const attachmentLine = bundle.payload
+      .split('\n')
+      .find((line) => line.includes('"type":"daemon-stderr-log"'))
+    expect(attachmentLine).toBeDefined()
+    const attachment = JSON.parse(attachmentLine as string)
+    expect(attachment.file).toBe('daemon.stderr.log')
+    // Raw text (including the non-JSON line) survives whole — never JSON.parse'd per line.
+    expect(attachment.content).toContain('FATAL ERROR: JavaScript heap out of memory')
+    expect(attachment.content).toContain('not,{valid json at all')
+  })
+
+  it('collects no daemon-stderr-log attachment when no path is given', () => {
+    writeFileSync(traceFile, makeNDJSON([makeSpan({ name: 'recent' })]))
+    const bundle = collectBundle({
+      traceFilePath: traceFile,
+      maxFiles: 10,
+      appVersion: '1',
+      platform: 'darwin',
+      arch: 'arm64',
+      osRelease: '24',
+      orcaChannel: 'dev'
+    })
+    expect(bundle.payload).not.toContain('daemon-stderr-log')
+  })
+
   it('collects no daemon log lines when no daemon log path is given', () => {
     writeFileSync(traceFile, makeNDJSON([makeSpan({ name: 'recent' })]))
     const bundle = collectBundle({

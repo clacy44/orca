@@ -34,8 +34,13 @@ import {
   getRotatedFamilySize,
   type LocalFileSink
 } from './local-file-sink'
-import { getDaemonLogFilePath, getTraceFilePath } from './logs-directory'
+import {
+  getDaemonLogFilePath,
+  getDaemonStderrLogFilePath,
+  getTraceFilePath
+} from './logs-directory'
 import { DAEMON_LOG_MAX_FILES } from '../daemon/daemon-file-log'
+import { DAEMON_STDERR_LOG_MAX_FILES } from '../daemon/daemon-stderr-log'
 import {
   collectBundle as _collectBundle,
   type CollectBundleOptions,
@@ -216,6 +221,9 @@ export function collectDiagnosticBundle(
     // the logs directory.
     daemonLogFilePath: getDaemonLogFilePath(),
     daemonLogMaxFiles: DAEMON_LOG_MAX_FILES,
+    // Why: H14 — daemon.stderr.log is a separate rotated family from daemon.log (raw text, not NDJSON).
+    daemonStderrLogFilePath: getDaemonStderrLogFilePath(),
+    daemonStderrLogMaxFiles: DAEMON_STDERR_LOG_MAX_FILES,
     ...meta
   })
 }

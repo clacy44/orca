@@ -8,6 +8,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
+import { basename } from 'node:path'
 import { MAX_BUNDLE_BYTES } from './diagnostic-bundle-limits'
 import { listRotatedFiles } from './local-file-sink'
 import { redactValue } from './redactor'
@@ -20,6 +21,9 @@ export type CollectBundleOptions = {
   /** Detached-daemon lifecycle log; its rotated family is merged in so daemon failures are diagnosable from a field report. */
   readonly daemonLogFilePath?: string
   readonly daemonLogMaxFiles?: number
+  /** Raw (non-NDJSON) daemon stderr capture (H14) — attached whole, never span-parsed like the two above. */
+  readonly daemonStderrLogFilePath?: string
+  readonly daemonStderrLogMaxFiles?: number
   readonly lookbackMinutes?: number
   readonly appVersion: string
   readonly platform: string
@@ -160,6 +164,39 @@ export function collectBundle(opts: CollectBundleOptions): CollectedBundle {
       lines.push(redacted)
       spanCount += 1
       currentBytes += redactedBytes
+    }
+  }
+
+  // Why raw, not span-parsed: daemon.stderr.log is arbitrary process output (native abort
+  // banners included), not NDJSON — attach each rotated file's redacted text whole rather than
+  // JSON.parse-ing it line by line like the trace/daemon-log files above (H14).
+  if (opts.daemonStderrLogFilePath) {
+    for (const file of listRotatedFiles(
+      opts.daemonStderrLogFilePath,
+      opts.daemonStderrLogMaxFiles ?? opts.maxFiles
+    )) {
+      let text: string
+      try {
+        const size = statSync(file).size
+        if (size > 50 * 1024 * 1024) {
+          continue
+        }
+        text = readFileSync(file, 'utf8')
+      } catch {
+        continue
+      }
+      const attachment = JSON.stringify({
+        type: 'daemon-stderr-log',
+        file: basename(file),
+        content: redactValue(text, 'server')
+      })
+      const attachmentBytes = Buffer.byteLength(attachment) + 1
+      if (currentBytes + attachmentBytes > MAX_BUNDLE_BYTES) {
+        // Best-effort: skip an attachment that would blow the cap rather than truncate raw text.
+        continue
+      }
+      lines.push(attachment)
+      currentBytes += attachmentBytes
     }
   }
 

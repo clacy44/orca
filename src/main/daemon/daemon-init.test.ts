@@ -53,7 +53,11 @@ const {
   rebindLocalProviderListenersMock,
   trackDaemonReplacedMock,
   trackDaemonRetiredMock,
-  recordDurableCrashBreadcrumbMock
+  recordDurableCrashBreadcrumbMock,
+  rotateAndOpenDaemonStderrLogFdMock,
+  writeDaemonStderrLogMarkerMock,
+  closeDaemonStderrLogFdMock,
+  readDaemonStderrTailMock
 } = vi.hoisted(() => {
   const getPathMock = vi.fn(() => '/fake/userData')
   const getAppPathMock = vi.fn(() => '/fake/app')
@@ -182,6 +186,10 @@ const {
   const trackDaemonReplacedMock = vi.fn()
   const trackDaemonRetiredMock = vi.fn()
   const recordDurableCrashBreadcrumbMock = vi.fn()
+  const rotateAndOpenDaemonStderrLogFdMock = vi.fn(() => 999)
+  const writeDaemonStderrLogMarkerMock = vi.fn()
+  const closeDaemonStderrLogFdMock = vi.fn()
+  const readDaemonStderrTailMock = vi.fn(() => '')
 
   return {
     getPathMock,
@@ -225,7 +233,11 @@ const {
     rebindLocalProviderListenersMock,
     trackDaemonReplacedMock,
     trackDaemonRetiredMock,
-    recordDurableCrashBreadcrumbMock
+    recordDurableCrashBreadcrumbMock,
+    rotateAndOpenDaemonStderrLogFdMock,
+    writeDaemonStderrLogMarkerMock,
+    closeDaemonStderrLogFdMock,
+    readDaemonStderrTailMock
   }
 })
 
@@ -312,6 +324,13 @@ vi.mock('./daemon-lifecycle-event', () => ({
 
 vi.mock('../crash-reporting/durable-crash-breadcrumb', () => ({
   recordDurableCrashBreadcrumb: recordDurableCrashBreadcrumbMock
+}))
+
+vi.mock('./daemon-stderr-log', () => ({
+  rotateAndOpenDaemonStderrLogFd: rotateAndOpenDaemonStderrLogFdMock,
+  writeDaemonStderrLogMarker: writeDaemonStderrLogMarkerMock,
+  closeDaemonStderrLogFd: closeDaemonStderrLogFdMock,
+  readDaemonStderrTail: readDaemonStderrTailMock
 }))
 
 vi.mock('./daemon-spawner', () => ({
@@ -460,6 +479,12 @@ async function importFresh() {
   trackDaemonReplacedMock.mockClear()
   trackDaemonRetiredMock.mockClear()
   recordDurableCrashBreadcrumbMock.mockClear()
+  rotateAndOpenDaemonStderrLogFdMock.mockClear()
+  rotateAndOpenDaemonStderrLogFdMock.mockReturnValue(999)
+  writeDaemonStderrLogMarkerMock.mockClear()
+  closeDaemonStderrLogFdMock.mockClear()
+  readDaemonStderrTailMock.mockClear()
+  readDaemonStderrTailMock.mockReturnValue('')
   checkDaemonHealthMock.mockClear()
   checkDaemonHealthMock.mockResolvedValue('healthy')
   healthCheckDaemonMock.mockClear()
@@ -2785,10 +2810,126 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     expect(child.unref).toHaveBeenCalledOnce()
   })
 
-  it('captures daemon startup stderr into the failure error', async () => {
+  it('H14: passes the rotated stderr fd as stdio[2] and writes a generation marker after spawn', async () => {
     const mod = await importFresh()
     checkDaemonHealthMock.mockResolvedValue('unreachable')
     await mod.initDaemonPtyProvider()
+
+    const launcher = spawnerInstances[0].launcher as (
+      socketPath: string,
+      tokenPath: string
+    ) => Promise<{ shutdown(): Promise<void> }>
+    const handlers: Record<string, ((arg?: unknown) => void)[]> = {
+      message: [],
+      error: [],
+      exit: []
+    }
+    const child = {
+      pid: 55123,
+      on(event: string, cb: (arg?: unknown) => void) {
+        handlers[event]?.push(cb)
+        if (event === 'message') {
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
+        }
+        return this
+      },
+      once(event: string, cb: (arg?: unknown) => void) {
+        handlers[event]?.push(cb)
+        return this
+      },
+      off: vi.fn(() => child),
+      disconnect: vi.fn(),
+      unref: vi.fn()
+    }
+    forkMock.mockReturnValueOnce(child)
+
+    await launcher('/fake/socket', '/fake/token')
+
+    expect(rotateAndOpenDaemonStderrLogFdMock).toHaveBeenCalledOnce()
+    expect(forkMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ stdio: ['ignore', 'ignore', 999, 'ipc'] })
+    )
+    // The marker is written (and the parent's fd copy closed) only once the pid is known.
+    expect(writeDaemonStderrLogMarkerMock).toHaveBeenCalledWith(
+      999,
+      expect.objectContaining({
+        pid: 55123,
+        entryHash: expect.any(String),
+        startedAt: expect.any(String)
+      })
+    )
+    expect(closeDaemonStderrLogFdMock).toHaveBeenCalledWith(999)
+    // Marker write must precede closing the parent's copy of the fd.
+    expect(writeDaemonStderrLogMarkerMock.mock.invocationCallOrder[0]).toBeLessThan(
+      closeDaemonStderrLogFdMock.mock.invocationCallOrder[0]
+    )
+    expect(child.disconnect).toHaveBeenCalledOnce()
+    expect(child.unref).toHaveBeenCalledOnce()
+  })
+
+  it('H14: falls back to an ignored stderr when diagnostics are disabled — no fd opened, no marker written', async () => {
+    process.env.ORCA_DIAGNOSTICS_DISABLED = 'true'
+    try {
+      const mod = await importFresh()
+      checkDaemonHealthMock.mockResolvedValue('unreachable')
+      await mod.initDaemonPtyProvider()
+
+      const launcher = spawnerInstances[0].launcher as (
+        socketPath: string,
+        tokenPath: string
+      ) => Promise<{ shutdown(): Promise<void> }>
+      const handlers: Record<string, ((arg?: unknown) => void)[]> = {
+        message: [],
+        error: [],
+        exit: []
+      }
+      const child = {
+        pid: 55124,
+        on(event: string, cb: (arg?: unknown) => void) {
+          handlers[event]?.push(cb)
+          if (event === 'message') {
+            queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
+          }
+          return this
+        },
+        once(event: string, cb: (arg?: unknown) => void) {
+          handlers[event]?.push(cb)
+          return this
+        },
+        off: vi.fn(() => child),
+        disconnect: vi.fn(),
+        unref: vi.fn()
+      }
+      forkMock.mockReturnValueOnce(child)
+
+      await launcher('/fake/socket', '/fake/token')
+
+      expect(rotateAndOpenDaemonStderrLogFdMock).not.toHaveBeenCalled()
+      expect(writeDaemonStderrLogMarkerMock).not.toHaveBeenCalled()
+      expect(closeDaemonStderrLogFdMock).not.toHaveBeenCalled()
+      expect(forkMock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({ stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+      )
+    } finally {
+      delete process.env.ORCA_DIAGNOSTICS_DISABLED
+    }
+  })
+
+  it('H14: a startup failure reads the stderr tail from the file, not an in-memory buffer', async () => {
+    // Why: pre-H14 this came from a pipe the parent buffered; the daemon now owns the fd
+    // directly (D-R112 M6), so the tail for a startup-failure error comes from the file.
+    const mod = await importFresh()
+    checkDaemonHealthMock.mockResolvedValue('unreachable')
+    await mod.initDaemonPtyProvider()
+    // mockReturnValue (not Once, and set after importFresh — which resets it to '' as part of
+    // its shared-mock hygiene): the pre-kill 'replacing'/post-kill 'replaced' daemon_lifecycle
+    // breadcrumbs earlier in this same launch also read the tail (includeStderrTail on the
+    // post-kill site) before the startup failure this test is actually checking.
+    readDaemonStderrTailMock.mockReturnValue("Error: Cannot find module 'electron'")
 
     const launcher = spawnerInstances[0].launcher as (
       socketPath: string,
@@ -2801,38 +2942,13 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       error: [],
       exit: []
     }
-    const stderrDataCbs: ((chunk: Buffer) => void)[] = []
-    const stderrDestroy = vi.fn()
-    const stderr = {
-      on(event: string, cb: (chunk: Buffer) => void) {
-        if (event === 'data') {
-          stderrDataCbs.push(cb)
-        }
-        return this
-      },
-      off(event: string, cb: (chunk: Buffer) => void) {
-        if (event === 'data') {
-          const idx = stderrDataCbs.indexOf(cb)
-          if (idx !== -1) {
-            stderrDataCbs.splice(idx, 1)
-          }
-        }
-        return this
-      },
-      destroy: stderrDestroy
-    }
     const child = {
       pid: 4321,
       exitCode: null as number | null,
-      stderr,
       on(event: string, cb: (arg?: unknown) => void) {
         handlers[event]?.push(cb)
         if (event === 'exit') {
-          // Why: deliver the stderr tail before exit so the failure path sees the crash reason (mirrors a module-load crash).
           queueMicrotask(() => {
-            for (const dataCb of stderrDataCbs.slice()) {
-              dataCb(Buffer.from("Error: Cannot find module 'electron'\n"))
-            }
             child.exitCode = 1
             cb(1)
           })
@@ -2863,136 +2979,36 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       4321,
       'failed-launch'
     )
-    // Why: release the piped stderr so the detached daemon can't keep the parent event loop alive after failure.
-    expect(stderrDestroy).toHaveBeenCalled()
   })
 
-  it('H10: keeps the daemon stderr pipe open, unref-ed and redirected once the daemon signals ready', async () => {
-    // Why: pre-H10 this destroyed the parent's read end at readiness, discarding every native
-    // write (V8 OOM banner, native module abort) from that point on — incident 2026-09-04 §2.2(a).
+  it('H14: a died_respawn also emits a daemon-stderr-tail breadcrumb from the file when non-empty', async () => {
     const mod = await importFresh()
-    checkDaemonHealthMock.mockResolvedValue('unreachable')
     await mod.initDaemonPtyProvider()
+    const outgoingRespawn = adapterInstances[0].options.respawn
+    readDaemonStderrTailMock.mockReturnValue('FATAL ERROR: JavaScript heap out of memory')
 
-    const launcher = spawnerInstances[0].launcher as (
-      socketPath: string,
-      tokenPath: string
-    ) => Promise<{ shutdown(): Promise<void> }>
-    const handlers: Record<string, ((arg?: unknown) => void)[]> = {
-      message: [],
-      error: [],
-      exit: []
-    }
-    const stderrOff = vi.fn()
-    const stderrDestroy = vi.fn()
-    const stderrUnref = vi.fn()
-    const stderrOn = vi.fn()
-    const stderrOnce = vi.fn()
-    const stderr = {
-      on: stderrOn,
-      off: stderrOff,
-      once: stderrOnce,
-      unref: stderrUnref,
-      destroy: stderrDestroy
-    }
-    const child = {
-      pid: 12345,
-      stderr,
-      on(event: string, cb: (arg?: unknown) => void) {
-        handlers[event]?.push(cb)
-        if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
-        }
-        return this
-      },
-      once(event: string, cb: (arg?: unknown) => void) {
-        handlers[event]?.push(cb)
-        return this
-      },
-      off: vi.fn(() => child),
-      disconnect: vi.fn(),
-      unref: vi.fn()
-    }
-    forkMock.mockReturnValueOnce(child)
-
-    await launcher('/fake/socket', '/fake/token')
-
-    // The startup-window tail listener is detached, but the pipe itself is kept alive.
-    expect(stderrOff).toHaveBeenCalledWith('data', expect.any(Function))
-    expect(stderrDestroy).not.toHaveBeenCalled()
-    expect(stderrUnref).toHaveBeenCalledOnce()
-    // A fresh 'data' listener forwards ongoing output into daemon.stderr.log, and the pipe's
-    // close/error is watched to flush the daemon-stderr-tail breadcrumb.
-    expect(stderrOn).toHaveBeenCalledWith('data', expect.any(Function))
-    expect(stderrOnce).toHaveBeenCalledWith('close', expect.any(Function))
-    expect(stderrOnce).toHaveBeenCalledWith('error', expect.any(Function))
-    expect(child.disconnect).toHaveBeenCalledOnce()
-    expect(child.unref).toHaveBeenCalledOnce()
-  })
-
-  it('H10: copies the stderr tail into a daemon-stderr-tail breadcrumb when the pipe closes', async () => {
-    const mod = await importFresh()
-    checkDaemonHealthMock.mockResolvedValue('unreachable')
-    await mod.initDaemonPtyProvider()
-
-    const launcher = spawnerInstances[0].launcher as (
-      socketPath: string,
-      tokenPath: string
-    ) => Promise<{ shutdown(): Promise<void> }>
-    const handlers: Record<string, ((arg?: unknown) => void)[]> = {
-      message: [],
-      error: [],
-      exit: []
-    }
-    const stderrListeners: Record<string, ((arg?: unknown) => void)[]> = { data: [], close: [] }
-    const stderr = {
-      on(event: string, cb: (arg?: unknown) => void) {
-        stderrListeners[event]?.push(cb)
-        return this
-      },
-      off() {
-        return this
-      },
-      once(event: string, cb: (arg?: unknown) => void) {
-        stderrListeners[event]?.push(cb)
-        return this
-      },
-      unref: vi.fn()
-    }
-    const child = {
-      pid: 12345,
-      stderr,
-      on(event: string, cb: (arg?: unknown) => void) {
-        handlers[event]?.push(cb)
-        if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
-        }
-        return this
-      },
-      once(event: string, cb: (arg?: unknown) => void) {
-        handlers[event]?.push(cb)
-        return this
-      },
-      off: vi.fn(() => child),
-      disconnect: vi.fn(),
-      unref: vi.fn()
-    }
-    forkMock.mockReturnValueOnce(child)
-
-    await launcher('/fake/socket', '/fake/token')
-
-    for (const dataCb of stderrListeners.data) {
-      dataCb(Buffer.from('native abort tail\n'))
-    }
-    for (const closeCb of stderrListeners.close) {
-      closeCb()
-    }
-    await Promise.resolve()
-    await Promise.resolve()
+    await outgoingRespawn?.('daemon_died')
 
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
       'daemon-stderr-tail',
-      expect.objectContaining({ lines: 'native abort tail' })
+      expect.objectContaining({
+        reason: 'died_respawn',
+        daemonStderrTail_stack: 'FATAL ERROR: JavaScript heap out of memory'
+      })
+    )
+  })
+
+  it('H14: no daemon-stderr-tail breadcrumb when the file has nothing to report', async () => {
+    const mod = await importFresh()
+    await mod.initDaemonPtyProvider()
+    const outgoingRespawn = adapterInstances[0].options.respawn
+    // readDaemonStderrTailMock defaults to '' per beforeEach.
+
+    await outgoingRespawn?.('daemon_died')
+
+    expect(recordDurableCrashBreadcrumbMock).not.toHaveBeenCalledWith(
+      'daemon-stderr-tail',
+      expect.anything()
     )
   })
 

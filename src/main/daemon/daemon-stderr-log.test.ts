@@ -1,17 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { closeSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-
-const { recordDurableCrashBreadcrumbMock } = vi.hoisted(() => ({
-  recordDurableCrashBreadcrumbMock: vi.fn()
-}))
-
-vi.mock('../crash-reporting/durable-crash-breadcrumb', () => ({
-  recordDurableCrashBreadcrumb: recordDurableCrashBreadcrumbMock
-}))
-
-import { createDaemonStderrLog } from './daemon-stderr-log'
+import {
+  formatDaemonStderrLogMarker,
+  readDaemonStderrTail,
+  rotateAndOpenDaemonStderrLogFd,
+  writeDaemonStderrLogMarker
+} from './daemon-stderr-log'
 
 let dir: string
 let filePath: string
@@ -19,81 +15,90 @@ let filePath: string
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'daemon-stderr-log-'))
   filePath = join(dir, 'daemon.stderr.log')
-  recordDurableCrashBreadcrumbMock.mockClear()
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-describe('createDaemonStderrLog', () => {
-  it('appends written chunks to the file', async () => {
-    const log = createDaemonStderrLog(filePath)
-    log.write(Buffer.from('FATAL ERROR: JavaScript heap out of memory\n'))
-    log.write(Buffer.from('stack line 2\n'))
-    await log.flush()
-    expect(readFileSync(filePath, 'utf8')).toBe(
-      'FATAL ERROR: JavaScript heap out of memory\nstack line 2\n'
-    )
-  })
-
-  it('tracks the last N non-empty lines for the tail breadcrumb', async () => {
-    const log = createDaemonStderrLog(filePath, { tailLines: 2 })
-    log.write(Buffer.from('line1\nline2\nline3\n'))
-    await log.flush()
-    expect(log.getTailLines()).toEqual(['line2', 'line3'])
-  })
-
-  it('rotates at maxBytes, keeping maxRotatedFiles', async () => {
-    const log = createDaemonStderrLog(filePath, { maxBytes: 20, maxRotatedFiles: 2 })
-    // Each write is 11 bytes ("chunk-N\n" varies; keep fixed width for a deterministic byte count).
-    for (let i = 0; i < 6; i++) {
-      log.write(Buffer.from(`chunk-${i}\n`))
-      await log.flush()
+describe('rotateAndOpenDaemonStderrLogFd', () => {
+  it('opens a real fd that a child process can be given as its stderr', () => {
+    const fd = rotateAndOpenDaemonStderrLogFd(filePath)
+    try {
+      writeDaemonStderrLogMarker(fd, {
+        pid: 4242,
+        entryHash: 'abc123def456',
+        startedAt: '2026-09-05T00:00:00.000Z'
+      })
+    } finally {
+      closeSync(fd)
     }
-    expect(existsSync(filePath)).toBe(true)
-    expect(existsSync(`${filePath}.1`)).toBe(true)
-    expect(existsSync(`${filePath}.2`)).toBe(true)
-    expect(statSync(filePath).size).toBeLessThanOrEqual(20)
-  })
-
-  it('picks up the on-disk size of a pre-existing file rather than treating it as empty', async () => {
-    const first = createDaemonStderrLog(filePath, { maxBytes: 1_000_000 })
-    first.write(Buffer.from('pre-existing\n'))
-    await first.flush()
-
-    const second = createDaemonStderrLog(filePath, { maxBytes: 1_000_000 })
-    second.write(Buffer.from('appended\n'))
-    await second.flush()
-
-    expect(readFileSync(filePath, 'utf8')).toBe('pre-existing\nappended\n')
-  })
-
-  it('drops future writes and emits one breadcrumb after a write failure', async () => {
-    const log = createDaemonStderrLog(join(dir, 'missing-dir', 'daemon.stderr.log'), {
-      maxBytes: 1_000_000
-    })
-    // Why: mkdirSync inside createDaemonStderrLog already created the parent, so force a real
-    // failure by removing it out from under the writer before the first write lands.
-    rmSync(join(dir, 'missing-dir'), { recursive: true, force: true })
-    log.write(Buffer.from('first\n'))
-    await log.flush()
-    log.write(Buffer.from('second\n'))
-    await log.flush()
-    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledTimes(1)
-    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
-      'daemon_stderr_log_write_failed',
-      {},
-      expect.any(String)
+    expect(readFileSync(filePath, 'utf8')).toBe(
+      '=== daemon pid 4242 entry abc123def456 started 2026-09-05T00:00:00.000Z ===\n'
     )
   })
 
-  it('close() stops accepting further writes', async () => {
-    const log = createDaemonStderrLog(filePath)
-    log.write(Buffer.from('kept\n'))
-    await log.flush()
-    log.close()
-    log.write(Buffer.from('dropped\n'))
-    await log.flush()
-    expect(readFileSync(filePath, 'utf8')).toBe('kept\n')
+  it('rotates the file at open time when it already exceeds maxBytes, keeping maxRotatedFiles', () => {
+    writeFileSync(filePath, 'x'.repeat(100))
+    const fd = rotateAndOpenDaemonStderrLogFd(filePath, { maxBytes: 50, maxRotatedFiles: 2 })
+    closeSync(fd)
+    expect(readFileSync(`${filePath}.1`, 'utf8')).toBe('x'.repeat(100))
+    expect(statSync(filePath).size).toBe(0)
+  })
+
+  it('does not rotate when the existing file is under maxBytes — generations share one file', () => {
+    writeFileSync(filePath, 'small\n')
+    const fd = rotateAndOpenDaemonStderrLogFd(filePath, { maxBytes: 1_000_000 })
+    writeDaemonStderrLogMarker(fd, {
+      pid: 1,
+      entryHash: 'aaaaaaaaaaaa',
+      startedAt: '2026-09-05T00:00:00.000Z'
+    })
+    closeSync(fd)
+    const content = readFileSync(filePath, 'utf8')
+    expect(content.startsWith('small\n')).toBe(true)
+    expect(content).toContain('=== daemon pid 1 ')
+  })
+})
+
+describe('formatDaemonStderrLogMarker', () => {
+  it('formats pid, entry hash and timestamp into one line', () => {
+    expect(
+      formatDaemonStderrLogMarker({
+        pid: 99,
+        entryHash: 'deadbeef0000',
+        startedAt: '2026-01-01T00:00:00.000Z'
+      })
+    ).toBe('=== daemon pid 99 entry deadbeef0000 started 2026-01-01T00:00:00.000Z ===\n')
+  })
+})
+
+describe('readDaemonStderrTail', () => {
+  it('returns the last N non-empty lines, oldest first', () => {
+    writeFileSync(filePath, 'line1\nline2\nline3\nline4\n')
+    expect(readDaemonStderrTail(filePath, { tailLines: 2 })).toBe('line3\nline4')
+  })
+
+  it('bounds the read to maxReadBytes even against a much larger file', () => {
+    // 2000 lines of "0123456789\n" (11 bytes each) = 22000 bytes; read only the last 100.
+    const lines = Array.from({ length: 2000 }, (_, i) => String(i).padStart(10, '0'))
+    writeFileSync(filePath, `${lines.join('\n')}\n`)
+    const tail = readDaemonStderrTail(filePath, { maxReadBytes: 100, tailLines: 40 })
+    expect(tail).toContain('1999')
+    expect(tail).not.toContain('0000000000')
+  })
+
+  it('produces a tail long enough to fill the crash-report *_stack lane (>= 4000 chars) for a long burst', () => {
+    // A native-abort stack can run to hundreds of frames; 40 lines of a realistic frame width
+    // comfortably clears the 4000-char *_stack budget this tail feeds (crash-reporting.ts).
+    const frame =
+      '    at Object.<anonymous> (/app/out/main/daemon-entry.js:123:45) some.native.frame.padding.to.reach.a.realistic.line.width'
+    const lines = Array.from({ length: 60 }, (_, i) => `${frame} #${i}`)
+    writeFileSync(filePath, `${lines.join('\n')}\n`)
+    const tail = readDaemonStderrTail(filePath)
+    expect(tail.length).toBeGreaterThanOrEqual(4000)
+  })
+
+  it('returns an empty string when the file does not exist (fail-open)', () => {
+    expect(readDaemonStderrTail(join(dir, 'missing.log'))).toBe('')
   })
 })

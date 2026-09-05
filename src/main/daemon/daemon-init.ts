@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- Why: owns the full daemon lifecycle (init, launch, adapter wiring,
 restart, teardown); the "swap the provider atomically" invariant keeps restart + singletons co-located. */
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { app } from 'electron'
 import { mkdirSync, existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { fork, type ChildProcess } from 'node:child_process'
@@ -56,7 +56,12 @@ import {
 } from '../ipc/pty'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from '../startup/startup-diagnostics'
 import { getDaemonLogFilePath, getDaemonStderrLogFilePath } from '../observability/logs-directory'
-import { createDaemonStderrLog } from './daemon-stderr-log'
+import {
+  closeDaemonStderrLogFd,
+  readDaemonStderrTail,
+  rotateAndOpenDaemonStderrLogFd,
+  writeDaemonStderrLogMarker
+} from './daemon-stderr-log'
 import {
   confirmSeededClaudeLivePtys,
   hasSeededUnconfirmedClaudePtys
@@ -141,6 +146,24 @@ function daemonLogArgs(): string[] {
   return ['--log-file', getDaemonLogFilePath()]
 }
 
+// Why (H14): the stderr-log marker names the forked bytes by content hash, not a redacted path —
+// cheap enough to compute once per launch (a JS entry file, not the native node-pty tree).
+const entryHashCache = new Map<string, string>()
+function getEntryHashCached(filePath: string): string {
+  const cached = entryHashCache.get(filePath)
+  if (cached !== undefined) {
+    return cached
+  }
+  let hash = 'unknown'
+  try {
+    hash = createHash('sha256').update(readFileSync(filePath)).digest('hex').slice(0, 12)
+  } catch {
+    hash = 'unknown'
+  }
+  entryHashCache.set(filePath, hash)
+  return hash
+}
+
 // Why (H9, incident 2026-09-04 §2.2(b)): the daemon_lifecycle telemetry (trackDaemonReplaced /
 // trackDaemonRetired) only reaches the remote sink — 09-04's forensics found zero daemon rows in
 // orca-stats.json. Mirror every emission into a durable main-trace breadcrumb, which is the file
@@ -162,6 +185,22 @@ function recordDaemonLifecycleBreadcrumb(
     entryPath: getDaemonEntryPath(),
     sessionCount,
     at: new Date().toISOString()
+  })
+}
+
+// Why (H14, D-R112 B2/H4): the daemon writes its own stderr straight to the file now (no parent
+// pipe to hold a tail in memory) — read the last DAEMON_STDERR_TAIL_LINES from the file at each
+// daemon-end site and land them in their own breadcrumb. A *_stack-suffixed key takes the
+// crash-report's long lane (4 000 chars, crash-reporting.ts) instead of the default 240 — a
+// 40-line native-abort tail needs the room.
+function recordDaemonStderrTailBreadcrumb(reason: string): void {
+  const tail = readDaemonStderrTail(getDaemonStderrLogFilePath())
+  if (!tail) {
+    return
+  }
+  recordDurableCrashBreadcrumb('daemon-stderr-tail', {
+    reason,
+    daemonStderrTail_stack: tail
   })
 }
 
@@ -726,9 +765,11 @@ function createOutOfProcessLauncher(
           pidPath,
           identifiedReplacement.liveSessionCount
         )
+        recordDaemonStderrTailBreadcrumb(identifiedReplacement.reason)
       } else if (attributedReason) {
         trackDaemonReplaced(attributedReason, 0)
         recordDaemonLifecycleBreadcrumb(attributedReason, pidPath, 0)
+        recordDaemonStderrTailBreadcrumb(attributedReason)
       } else if (pendingReplacement && confirmedReplacement) {
         trackDaemonReplaced(pendingReplacement.reason, pendingReplacement.liveSessionCount)
         recordDaemonLifecycleBreadcrumb(
@@ -736,6 +777,7 @@ function createOutOfProcessLauncher(
           pidPath,
           pendingReplacement.liveSessionCount
         )
+        recordDaemonStderrTailBreadcrumb(pendingReplacement.reason)
       }
 
       const userDataPath = app.getPath('userData')
@@ -744,6 +786,19 @@ function createOutOfProcessLauncher(
       // Fork the relocated entry when available; otherwise the install-dir entry.
       const forkEntryPath = relocatedHost ? relocatedHost.entryPath : entryPath
       warnIfDaemonSpawnAtRiskOnAppImageMount(forkEntryPath)
+      const stderrLogPath = getDaemonStderrLogFilePath()
+      // Why (H14, D-R112 M6 — replaces the H10 parent-pipe design): a pipe held open in the
+      // parent applies backpressure to the daemon's own fd 2 if Electron stalls — a hotfix meant
+      // to diagnose daemon wedges could cause one. Hand the daemon a raw fd for a file instead:
+      // the daemon (and any native abort) writes straight to disk, no parent-side intermediary.
+      let stderrFd: number | null = null
+      if (!isDiagnosticsDisabled()) {
+        try {
+          stderrFd = rotateAndOpenDaemonStderrLogFd(stderrLogPath)
+        } catch {
+          stderrFd = null
+        }
+      }
       const child = fork(
         forkEntryPath,
         [
@@ -767,9 +822,11 @@ function createOutOfProcessLauncher(
         {
           // Why: detached daemons outlive dev worktrees; userData keeps process.cwd() valid after a repo/worktree is deleted.
           cwd: userDataPath,
-          // Why: detached+unref outlives Electron; stdout 'ignore' (else blocks exit), stderr 'pipe' captures startup crashes lost in v1.4.129-rc.1.
+          // Why: detached+unref outlives Electron; stdout 'ignore' (else blocks exit); stderr is
+          // the rotated log's fd directly (H14) — 'ignore' only when diagnostics are disabled or
+          // the fd failed to open.
           detached: true,
-          stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+          stdio: ['ignore', 'ignore', stderrFd ?? 'ignore', 'ipc'],
           // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
           ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
           // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.
@@ -782,61 +839,27 @@ function createOutOfProcessLauncher(
         }
       )
 
-      // Why: keep only the startup-window stderr tail so a crash cause is visible without unbounded memory.
-      const STARTUP_STDERR_MAX_BYTES = 8192
-      let startupStderr = ''
-      let collectingStderr = true
-      const onStartupStderr = (chunk: Buffer): void => {
-        if (!collectingStderr) {
-          return
-        }
-        startupStderr += chunk.toString('utf8')
-        if (startupStderr.length > STARTUP_STDERR_MAX_BYTES) {
-          startupStderr = startupStderr.slice(-STARTUP_STDERR_MAX_BYTES)
-        }
-      }
-      child.stderr?.on('data', onStartupStderr)
-      // Why: release the detached daemon's stderr once up/failed — a live piped stream refs the parent loop and blocks Electron exit.
-      const releaseStderr = (): void => {
-        collectingStderr = false
-        child.stderr?.off('data', onStartupStderr)
-        child.stderr?.destroy()
-      }
-      // Why (H10, incident 2026-09-04 §2.2(a)): destroying the read end at readiness (as
-      // releaseStderr above still does on a startup failure) discarded every native write from
-      // that instant on — a V8 OOM banner or native-module abort left no record anywhere. On a
-      // successful start, keep the pipe open for the daemon's life instead, unref'd so it can't
-      // hold Electron's loop open, redirected into a rotating daemon.stderr.log. The last
-      // DAEMON_STDERR_TAIL_LINES land in a breadcrumb when the pipe closes.
-      const attachDaemonStderrLog = (): void => {
-        collectingStderr = false
-        child.stderr?.off('data', onStartupStderr)
-        if (isDiagnosticsDisabled()) {
-          child.stderr?.destroy()
-          return
-        }
-        const stderrLog = createDaemonStderrLog(getDaemonStderrLogFilePath())
-        // Why: child.stderr is a pipe stream backed by its own handle — unref so a still-open
-        // stderr never blocks the app from exiting, matching child.unref() just below.
-        ;(child.stderr as unknown as { unref?: () => void } | null)?.unref?.()
-        let tailEmitted = false
-        const emitStderrTail = (): void => {
-          if (tailEmitted) {
-            return
-          }
-          tailEmitted = true
-          const lines = stderrLog.getTailLines()
-          stderrLog.close()
-          if (lines.length > 0) {
-            recordDurableCrashBreadcrumb('daemon-stderr-tail', {
-              entryPath,
-              lines: lines.join('\n')
+      if (stderrFd !== null) {
+        // Why: the pid is only known once fork() returns. Write the generation marker through
+        // the parent's own copy of the fd, then close it immediately — the child (which inherited
+        // a duplicate at spawn) keeps writing to the same file with no parent involvement at all.
+        try {
+          if (Number.isSafeInteger(child.pid) && (child.pid as number) > 0) {
+            writeDaemonStderrLogMarker(stderrFd, {
+              pid: child.pid as number,
+              entryHash: getEntryHashCached(forkEntryPath),
+              startedAt: new Date().toISOString()
             })
           }
+        } catch {
+          // Why: a marker-write failure must not fail the launch — the daemon still owns the fd.
+        } finally {
+          try {
+            closeDaemonStderrLogFd(stderrFd)
+          } catch {
+            // Already invalid — nothing to close.
+          }
         }
-        child.stderr?.on('data', (chunk: Buffer) => stderrLog.write(chunk))
-        child.stderr?.once('close', emitStderrTail)
-        child.stderr?.once('error', emitStderrTail)
       }
 
       // Wait for the daemon to signal readiness via IPC
@@ -859,12 +882,13 @@ function createOutOfProcessLauncher(
           }
           settled = true
           cleanupStartupListeners()
-          // Why: attach the captured stderr tail to the thrown error and log it so a startup crash isn't just "exited with code 1".
-          const stderrTail = startupStderr.trim()
+          // Why (H14): the daemon writes stderr straight to the file — "the file is the stderr
+          // from the first byte, so there is nothing to destroy" — read the tail from there
+          // instead of an in-memory buffer so a startup crash isn't just "exited with code 1".
+          const stderrTail = readDaemonStderrTail(stderrLogPath)
           if (stderrTail) {
             console.warn(`[daemon] startup failed; captured stderr tail:\n${stderrTail}`)
           }
-          releaseStderr()
           const startupError = stderrTail
             ? new Error(`${error.message}\nDaemon stderr (tail):\n${stderrTail}`)
             : error
@@ -913,8 +937,8 @@ function createOutOfProcessLauncher(
             settled = true
             // Why: daemon is detached after readiness; detach startup listeners so the launch promise closure isn't retained.
             cleanupStartupListeners()
-            // Why: release IPC and hand stderr off to the rotating log; unref so Electron can exit without waiting — the daemon keeps running detached.
-            attachDaemonStderrLog()
+            // Why (H14): nothing left to release here — stderr is a plain fd the daemon already
+            // owns and writes directly; the parent's copy was closed right after spawn.
             child.disconnect()
             child.unref()
             resolve()
@@ -1092,6 +1116,7 @@ export async function initDaemonPtyProvider(
           getDaemonPidPath(runtimeDir),
           newAdapter.getActiveSessionIds().length
         )
+        recordDaemonStderrTailBreadcrumb('died_respawn')
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
@@ -1334,6 +1359,7 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
           getDaemonPidPath(runtimeDir),
           newCurrent.getActiveSessionIds().length
         )
+        recordDaemonStderrTailBreadcrumb('died_respawn')
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
