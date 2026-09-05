@@ -768,4 +768,37 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     expect(result.blockedByQuarantinedPredecessor).toBe(true)
     expect(result.adoptedThreads).toBe(0)
   })
+
+  it('S10-21a C7i, Ruling 34 Addendum 27: a same-pane (clause-3 noop) restore refreshes process_incarnation, not just terminal_handle', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-same',
+      display_name: 'chair-same',
+      pane_key: 'tab1:leaf-same',
+      terminal_handle: 'handle-old'
+    })
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-same'),
+      newPaneKey: 'tab1:leaf-same',
+      newTerminalHandle: 'handle-new',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT,
+      processIncarnation: 'pty-new:inc-new'
+    })
+    expect(result).toEqual({ ok: true, rebound: false, agentId: 'agent-same' })
+
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-same') as AgentRow
+    // FAILS AT BASE (033bc1f4d9): the clause-3 noop path returns before any UPDATE runs, so
+    // both columns stay at their pre-restore values ('handle-old', null).
+    expect(row.terminal_handle).toBe('handle-new')
+    expect(row.process_incarnation).toBe('pty-new:inc-new')
+
+    const auditRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'`)
+      .all('agent-same')
+    expect(auditRows).toHaveLength(1)
+  })
 })

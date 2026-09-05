@@ -88,4 +88,35 @@ describe('OrcaRuntimeService.collectIncumbentEvidence', () => {
     const evidence = await runtime.collectIncumbentEvidence(PANE_KEY, PTY_ID, 1_000)
     expect(evidence.d2).toEqual({ inventory: 'unknown' })
   })
+
+  it('[S10-21a C7i] a pre-fetched inventory (4th arg) performs NO round of its own — listProcesses is never called', async () => {
+    const listProcesses = vi.fn(async () => [{ id: PTY_ID, cwd: '/tmp/probe-worktree' }])
+    const runtime = makeRuntimeWithAgentPaneLeaf(listProcesses)
+
+    const preFetched = {
+      allLivePtyIds: new Set([PTY_ID]),
+      terminalIdentityByPtyId: new Map([[PTY_ID, { handle: 'term_x', incarnationId: 'inc-x' }]])
+    }
+    const evidence = await runtime.collectIncumbentEvidence(PANE_KEY, PTY_ID, 1_000, preFetched)
+
+    expect(listProcesses).not.toHaveBeenCalled()
+    expect(evidence.d2).toEqual({ inventory: 'present' })
+    expect(evidence.ptyState?.(PTY_ID)).toBe('present')
+    expect(evidence.terminalIdentity?.(PTY_ID)).toEqual({
+      handle: 'term_x',
+      incarnationId: 'inc-x'
+    })
+  })
+
+  it("[S10-21a C7i] an explicit null pre-fetched round (the sweep's shared round came back null) reads as unknown, never absent, and does NO round of its own", async () => {
+    const listProcesses = vi.fn(async () => [{ id: PTY_ID, cwd: '/tmp/probe-worktree' }])
+    const runtime = makeRuntimeWithAgentPaneLeaf(listProcesses)
+
+    const evidence = await runtime.collectIncumbentEvidence(PANE_KEY, PTY_ID, 1_000, null)
+
+    expect(listProcesses).not.toHaveBeenCalled()
+    expect(evidence.d2).toEqual({ inventory: 'unknown' })
+    expect(evidence.ptyState?.(PTY_ID)).toBe('unknown')
+    expect(evidence.terminalIdentity?.(PTY_ID)).toBeUndefined()
+  })
 })

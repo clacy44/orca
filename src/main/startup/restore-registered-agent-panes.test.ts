@@ -1,27 +1,27 @@
 // S10-21a C7b (design v3.2 §2.1; D-R110; Ruling 34 Addendum 22): the main-process restore sweep.
-// T21 restored to the DESIGN's own criterion (a leaf occupied by something other than the pane's
-// own live session -> fresh pane, no placement, Layer 2) — the prior version asserted the
-// implementation's (wrong) skip behaviour, the anti-weakening violation D-R110 named. Plus:
-// daemon_survived skip audit, the unrecorded-newer Layer-3 fence (Addendum 22(v)), T3/T3b.
+// The decision-table (rows 1-11, Ruling 34 Addendum 27, C7i) tests live in
+// restore-registered-agent-panes-decision-table.test.ts — split out to stay under the max-lines
+// ratchet. This file keeps the pre-existing, non-decision-table sweep-mechanics tests.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
 import { recordLaunch } from '../runtime/orchestration/agent-launch-sessions'
-import type { AgentRow } from '../runtime/orchestration/agent-directory-types'
-import type { RestoreTicketId, RestoreTicketMintArgs } from '../runtime/restore-ticket-registry'
 import {
   runRestoreSweep,
   runRestoreSweepBody,
-  restoreOneRegisteredPane,
-  type RestoreSweepDeps
+  restoreOneRegisteredPane
 } from './restore-registered-agent-panes'
 import { _resetRestoreSweepLockForTest } from '../runtime/restore-sweep-lock'
+import {
+  HOST_ID,
+  EXEC_HOST_ID,
+  PRIOR_GEN,
+  emptyInventory,
+  insertAgent,
+  baseDeps
+} from './restore-sweep-test-fixtures'
 
-const HOST_ID = 'local'
-const EXEC_HOST_ID = 'local'
-const LAUNCH_GEN = 'gen-current'
-
-describe('S10-21a C7b: runRestoreSweep', () => {
+describe('S10-21a C7b/C7i: runRestoreSweep', () => {
   let orchestrationDb: OrchestrationDb | undefined
 
   afterEach(() => {
@@ -32,60 +32,6 @@ describe('S10-21a C7b: runRestoreSweep', () => {
   function rawDb(): Database.Database {
     orchestrationDb = new OrchestrationDb(':memory:')
     return (orchestrationDb as unknown as { db: Database.Database }).db
-  }
-
-  function insertAgent(
-    db: Database.Database,
-    overrides: Partial<AgentRow> & { id: string; display_name: string; pane_key: string | null }
-  ): void {
-    db.prepare(
-      `INSERT INTO agents (
-         id, display_name, role, host_id, pane_key, terminal_handle, process_incarnation,
-         worktree_id, worktree_path, branch, title, agent_label, state, derived, quarantined,
-         quarantined_at, tombstoned_at, origin_kind, origin_pane_key, origin_handle,
-         origin_host_id
-       ) VALUES (?, ?, NULL, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, NULL, 'idle', 0, 0, NULL,
-         NULL, 'pane', ?, NULL, ?)`
-    ).run(
-      overrides.id,
-      overrides.display_name,
-      overrides.host_id ?? HOST_ID,
-      overrides.pane_key,
-      overrides.worktree_id ?? 'wt-1',
-      overrides.pane_key,
-      overrides.origin_host_id ?? HOST_ID
-    )
-  }
-
-  // [D-R110 B1] the row is seeded under a DIFFERENT, PRIOR generation than the current one —
-  // the production invariant every restart actually presents. A fixture using the SAME
-  // generation for both (as the pre-C7b test did) is vacuous against B1: the stale-generation
-  // ticket bug is invisible when there is only one generation in play.
-  const PRIOR_GEN = 'gen-prior'
-
-  function baseDeps(
-    db: OrchestrationDb,
-    overrides: Partial<RestoreSweepDeps> = {}
-  ): RestoreSweepDeps {
-    return {
-      getOrchestrationDb: () => db,
-      getOrchestrationCompatibilityHostId: () => HOST_ID,
-      getLaunchGenerationId: () => LAUNCH_GEN,
-      findConnectedLeafOccupant: () => undefined,
-      isLeafInPersistedLayout: () => true,
-      getPersistedPtyIdForLeaf: () => undefined,
-      ensureAgentSession: vi.fn(),
-      collectIncumbentEvidence: async () => ({
-        paneKey: 'tab1:leaf-a',
-        d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
-        d2: { inventory: 'unknown' },
-        d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
-      }),
-      getTerminalProcessIncarnation: () => null,
-      mintRestoreTicket: (payload: RestoreTicketMintArgs) =>
-        JSON.stringify(payload) as unknown as RestoreTicketId,
-      ...overrides
-    }
   }
 
   it('T1: Layer 1 preserve — same leaf, prior-generation row, mark written, no rebind audit row', async () => {
@@ -131,12 +77,17 @@ describe('S10-21a C7b: runRestoreSweep', () => {
     const rebindRows = db
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
       .all() as unknown[]
-    // Layer 1 (clause-3 noop) returns before rebindRestoredPane's transaction ever opens — no
-    // 'reminted' audit row for the pane-preserved case.
-    expect(rebindRows).toHaveLength(0)
+    // SCENARIO_CORRECTION (C7i, Ruling 34 Addendum 27, scope item 4 — "A same-pane restore
+    // refreshes the agents row's process identity"): was `expect(rebindRows).toHaveLength(0)`
+    // with the comment "Layer 1 (clause-3 noop) returns before rebindRestoredPane's transaction
+    // ever opens — no 'reminted' audit row for the pane-preserved case." That was true only
+    // because process_incarnation was never refreshed on the Layer-1 path before this commit —
+    // exactly the gap the companion fix closes. `refreshAgentHandleAfterRespawn` now writes its
+    // own 'reminted' row on this same noop path.
+    expect(rebindRows).toHaveLength(1)
   })
 
-  it("T21 (restored to the design, D-R110 anti-weakening finding): a leaf occupied by something OTHER than the pane's own live session gets a FRESH pane, no placement, Layer 2", async () => {
+  it("T21: a leaf occupied by something OTHER than the pane's own live session gets a FRESH pane, no placement, Layer 2 (row 9)", async () => {
     const db = rawDb()
     const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000002'
     const freshPaneKey = 'tab2:00000000-0000-4000-8000-00000000f00d'
@@ -165,19 +116,15 @@ describe('S10-21a C7b: runRestoreSweep', () => {
         ensureAgentSession,
         // [design §2.1b, D-R110 (δ)] someone else's live pty sits on this leaf — a DIFFERENT
         // paneKey than the row's own.
-        findConnectedLeafOccupant: () => ({ paneKey: 'tab9:other-leaf', ptyId: 'pty-other' }),
-        collectIncumbentEvidence: async () => ({
-          paneKey: predPaneKey,
-          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
-          d2: { inventory: 'unknown' },
-          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
-        })
+        findConnectedLeafOccupant: () => ({ paneKey: 'tab9:other-leaf', ptyId: 'pty-other' })
       }),
       orchestrationDb!,
       HOST_ID,
       'agent-2',
+      null,
       'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!
+      orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!,
+      emptyInventory()
     )
     expect(outcome.kind).toBe('layer2')
     // No placement offered — the request must carry NO placement field.
@@ -186,337 +133,13 @@ describe('S10-21a C7b: runRestoreSweep', () => {
       {},
       expect.anything()
     )
+    // [C7i FORCED DEVIATION, see RETURN] kept byte-identical to the pre-C7i reason code.
     const skipAudit = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'leaf_occupied_by_other'`
       )
       .all()
     expect(skipAudit).toHaveLength(1)
-  })
-
-  it('SCENARIO_CORRECTION (C7h, Ruling 34 Addendum 26): an own-pane occupant with the SAME pty as a dead-signalled row is a stale surface, restored over — not a survival verdict', async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-000000000003'
-    insertAgent(db, { id: 'agent-3', display_name: 'chair-3', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-3',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const ensureAgentSession = vi.fn().mockResolvedValue({
-      terminal: {
-        handle: 'handle-3',
-        paneKey,
-        worktreeId: 'wt-1',
-        title: null,
-        executionHostId: EXEC_HOST_ID
-      },
-      disposition: 'created'
-    })
-    const mintRestoreTicket = vi.fn(
-      (payload: RestoreTicketMintArgs) => JSON.stringify(payload) as unknown as RestoreTicketId
-    )
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        // Same pane, same pty as the row (baseDeps' default getPersistedPtyIdForLeaf returns
-        // undefined, so the row's evidence pty falls back to this occupant's own).
-        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-own' }),
-        ensureAgentSession,
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-3',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(outcome.kind).toBe('layer1')
-    expect(mintRestoreTicket).toHaveBeenCalled()
-    expect(ensureAgentSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        placement: { tabId: 'tab1', leafId: '00000000-0000-4000-8000-000000000003' }
-      }),
-      {},
-      expect.anything()
-    )
-    const skipRows = db.prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_skip'`).all()
-    expect(skipRows).toHaveLength(0)
-    const noteRows = db
-      .prepare(
-        `SELECT * FROM agent_audit WHERE verb = 'sweep_note' AND reason_code = 'stale_own_surface: D1'`
-      )
-      .all()
-    expect(noteRows).toHaveLength(1)
-  })
-
-  it("C7h, Ruling 34 Addendum 26: an own-pane occupant on a DIFFERENT, runtime-live pty is yielded to the remount path — 'skipped_leaf_held', no ticket, no spawn", async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-00000000dddd'
-    insertAgent(db, { id: 'agent-leafheld', display_name: 'chair-leafheld', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-leafheld',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const ensureAgentSession = vi.fn()
-    const mintRestoreTicket = vi.fn()
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        // The row's OWN persisted pty ('pty-row') is dead; a DIFFERENT pty ('pty-fresh') now
-        // occupies the same pane and the runtime's own inventory round says it is live.
-        getPersistedPtyIdForLeaf: () => 'pty-row',
-        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-fresh' }),
-        collectIncumbentEvidence: async () => ({
-          paneKey,
-          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
-          d2: { inventory: 'unknown' },
-          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 },
-          ptyLive: (pid: string) => pid === 'pty-fresh'
-        }),
-        ensureAgentSession,
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-leafheld',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(outcome.kind).toBe('skipped_leaf_held')
-    expect(mintRestoreTicket).not.toHaveBeenCalled()
-    expect(ensureAgentSession).not.toHaveBeenCalled()
-    const rows = db
-      .prepare(
-        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'leaf_held_by_live_pty'`
-      )
-      .all()
-    expect(rows).toHaveLength(1)
-  })
-
-  it('C7h, Ruling 34 Addendum 26: a same-id daemon respawn (D1 exit-observed AND D2 inventory present) survives — the exit-observed arm never vetoes the inventory', async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-00000000eeee'
-    insertAgent(db, { id: 'agent-respawn', display_name: 'chair-respawn', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-respawn',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const ensureAgentSession = vi.fn()
-    const mintRestoreTicket = vi.fn()
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        getPersistedPtyIdForLeaf: () => 'pty-row',
-        findConnectedLeafOccupant: () => undefined,
-        collectIncumbentEvidence: async () => ({
-          paneKey,
-          // D1 says exit-observed under this id (the OLD verdict would read this as dead) —
-          // D2's inventory says the daemon lists the same id again NOW (a same-id respawn).
-          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
-          d2: { inventory: 'present' },
-          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
-        }),
-        ensureAgentSession,
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-respawn',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(outcome.kind).toBe('skipped_daemon_survived')
-    expect(mintRestoreTicket).not.toHaveBeenCalled()
-    expect(ensureAgentSession).not.toHaveBeenCalled()
-    const rows = db
-      .prepare(
-        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived: d2_inventory_present'`
-      )
-      .all()
-    expect(rows).toHaveLength(1)
-  })
-
-  it("C7h, Ruling 34 Addendum 26: evidence is collected about the ROW's own pty, not the occupant's", async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-00000000ffff'
-    insertAgent(db, { id: 'agent-rowpty', display_name: 'chair-rowpty', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-rowpty',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const ensureAgentSession = vi.fn()
-    const mintRestoreTicket = vi.fn()
-    const collectIncumbentEvidence = vi.fn(async (pk: string) => ({
-      paneKey: pk,
-      d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
-      d2: { inventory: 'unknown' as const },
-      d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 },
-      ptyLive: (pid: string) => pid === 'pty-fresh'
-    }))
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        // Row records 'pty-row'; occupant sits on a DIFFERENT, live 'pty-fresh'.
-        getPersistedPtyIdForLeaf: () => 'pty-row',
-        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-fresh' }),
-        collectIncumbentEvidence,
-        ensureAgentSession,
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-rowpty',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(collectIncumbentEvidence).toHaveBeenCalledWith(paneKey, 'pty-row')
-    expect(outcome.kind).toBe('skipped_leaf_held')
-  })
-
-  it("D-R111 R2: daemon_survived fires from PRE-SPAWN EVIDENCE even when findConnectedLeafOccupant is empty (this.leaves is unpopulated at the sweep's own run point)", async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-00000000aaaa'
-    insertAgent(db, { id: 'agent-r2', display_name: 'chair-r2', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-r2',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const ensureAgentSession = vi.fn()
-    const mintRestoreTicket = vi.fn()
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        // R2's own fixture: no occupant at all (empty `this.leaves`, the production shape at
-        // the sweep's run point) — the OLD code could never reach `daemon_survived` this way.
-        findConnectedLeafOccupant: () => undefined,
-        // D3 reads live: the incumbent evidence itself proves the daemon survived.
-        collectIncumbentEvidence: async () => ({
-          paneKey,
-          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: false },
-          d2: { inventory: 'unknown' },
-          d3: { liveNow: true, firstObservedNotLiveAt: null, now: 0 }
-        }),
-        ensureAgentSession,
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-r2',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(outcome.kind).toBe('skipped_daemon_survived')
-    expect(mintRestoreTicket).not.toHaveBeenCalled()
-    expect(ensureAgentSession).not.toHaveBeenCalled()
-    const rows = db
-      .prepare(
-        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived: d3_live_now'`
-      )
-      .all()
-    expect(rows).toHaveLength(1)
-  })
-
-  it('D-R111 R2: d1.ptyKnownToRuntime true also fires daemon_survived, before minting', async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-00000000bbbb'
-    insertAgent(db, { id: 'agent-r2b', display_name: 'chair-r2b', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-r2b',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const mintRestoreTicket = vi.fn()
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        findConnectedLeafOccupant: () => undefined,
-        collectIncumbentEvidence: async () => ({
-          paneKey,
-          d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
-          d2: { inventory: 'unknown' },
-          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
-        }),
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-r2b',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(outcome.kind).toBe('skipped_daemon_survived')
-    expect(mintRestoreTicket).not.toHaveBeenCalled()
-  })
-
-  // [S10-21a C7g, Ruling 34 Addendum 25] The daemon's own inventory (D2) is a pre-spawn survival
-  // signal too — d1/d3 alone can both read false at this process's own boot-time sweep run point
-  // (nothing seeds `ptysById`/live-hook reports for a surviving daemon's panes before the sweep),
-  // so the daemon's own controller-inventory round must be consulted directly.
-  it("d2.inventory 'present' alone also fires daemon_survived, before minting", async () => {
-    const db = rawDb()
-    const paneKey = 'tab1:00000000-0000-4000-8000-00000000cccc'
-    insertAgent(db, { id: 'agent-r2c', display_name: 'chair-r2c', pane_key: paneKey })
-    recordLaunch(db, {
-      hostId: HOST_ID,
-      paneKey,
-      agentType: 'claude',
-      sessionId: 'sess-r2c',
-      launchGeneration: PRIOR_GEN,
-      executionHostId: EXEC_HOST_ID,
-      evidence: 'host_launch'
-    })
-    const ensureAgentSession = vi.fn()
-    const mintRestoreTicket = vi.fn()
-    const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, {
-        findConnectedLeafOccupant: () => undefined,
-        collectIncumbentEvidence: async () => ({
-          paneKey,
-          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: false },
-          d2: { inventory: 'present' },
-          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
-        }),
-        ensureAgentSession,
-        mintRestoreTicket
-      }),
-      orchestrationDb!,
-      HOST_ID,
-      'agent-r2c',
-      'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
-    )
-    expect(outcome.kind).toBe('skipped_daemon_survived')
-    expect(mintRestoreTicket).not.toHaveBeenCalled()
-    expect(ensureAgentSession).not.toHaveBeenCalled()
-    const rows = db
-      .prepare(
-        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived: d2_inventory_present'`
-      )
-      .all()
-    expect(rows).toHaveLength(1)
   })
 
   it('Addendum 22(v): a pane whose newest admission audit (any generation) is UNRECORDED and newer than the row is Layer 3, never resumed', async () => {
@@ -543,8 +166,10 @@ describe('S10-21a C7b: runRestoreSweep', () => {
       orchestrationDb!,
       HOST_ID,
       'agent-4',
+      null,
       'wt-1',
-      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      emptyInventory()
     )
     expect(outcome.kind).toBe('layer3')
     expect(ensureAgentSession).not.toHaveBeenCalled()
@@ -640,6 +265,11 @@ describe('S10-21a C7b: runRestoreSweep', () => {
     const rebindRows = db
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
       .all() as unknown[]
-    expect(rebindRows.length).toBeLessThanOrEqual(1)
+    // SCENARIO_CORRECTION (C7i, Ruling 34 Addendum 27, scope item 4): was
+    // `expect(rebindRows.length).toBeLessThanOrEqual(1)` — each pass is a Layer-1 (clause-3
+    // noop) restore of the SAME pane, and the companion fix now refreshes process_incarnation
+    // (writing its own 'reminted' row) on every such pass, not just the first. Two passes, two
+    // idempotent refreshes — never a duplicate FULL rebind.
+    expect(rebindRows.length).toBeLessThanOrEqual(2)
   })
 })

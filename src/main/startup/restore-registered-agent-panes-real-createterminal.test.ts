@@ -56,10 +56,12 @@ function buildDeps(runtime: OrcaRuntimeService): RestoreSweepDeps {
       runtime.getPersistedPtyIdForLeaf(tabId, leafId, hostId ?? null),
     ensureAgentSession: (request, caller, internal) =>
       runtime.ensureAgentSession(request, caller, internal),
-    collectIncumbentEvidence: (paneKey, ptyId, now) =>
-      runtime.collectIncumbentEvidence(paneKey, ptyId, now),
+    takeControllerInventoryForSweep: () => runtime.takeControllerInventoryForSweep(),
+    collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
+      runtime.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtime.getTerminalProcessIncarnation(handle),
-    mintRestoreTicket: (payload) => runtime.mintRestoreTicket(payload)
+    mintRestoreTicket: (payload) => runtime.mintRestoreTicket(payload),
+    notifyRebindDelivery: (agentId) => runtime.notifyRebindDelivery(agentId)
   }
 }
 
@@ -137,6 +139,11 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
       d2: { inventory: 'unknown' },
       d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
     })
+    // [S10-21a C7i] the settings-only store stub above has no `getAllWorktreeMeta`/`getRepos` —
+    // the real `takeControllerInventoryForSweep` needs both (via `getResolvedWorktreeMap`).
+    // Overridden here, same reasoning as `collectIncumbentEvidence` above: orthogonal to what T2
+    // proves, already covered by orca-runtime-take-controller-inventory-for-sweep.test.ts.
+    deps.takeControllerInventoryForSweep = async () => null
     const summary = await runRestoreSweep(deps)
 
     expect(summary.errors).toBe(0)

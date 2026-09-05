@@ -49,6 +49,8 @@ import {
   type RebindRefusalReason,
   type RebindRestoredPaneParams
 } from './agent-restore-rebind-predicate'
+import { refreshAgentHandleAfterRespawn } from './agent-daemon-respawn-handle-refresh'
+import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 export type {
   RebindRefusalReason,
   RebindRestoredPaneParams
@@ -79,19 +81,9 @@ const CONTESTED_REFUSAL_REASONS: ReadonlySet<RebindRefusalReason> = new Set([
   'predecessor_moved'
 ])
 
-// [S10-21a C7d] Exported so the daemon-respawn handle-refresh module (a same-pane-key sibling
-// of this file's Layer-2 rebind) can reuse the SAME query rather than a second copy.
-export function pactsAwaitingUnpause(db: Database.Database, agentId: string): string[] {
-  const rows = db
-    .prepare(
-      `SELECT id FROM threads
-       WHERE purged_at IS NULL AND pact_state = 'engaged' AND pact_paused_at IS NOT NULL
-         AND pact_pause_reason = 'counterpart_gone'
-         AND (pact_proposer_agent_id = ? OR pact_with_agent_id = ?)`
-    )
-    .all(agentId, agentId) as { id: string }[]
-  return rows.map((r) => r.id)
-}
+// [S10-21a C7d] Re-exported for back-compat — moved to agent-pact-unpause-lookup.ts (C7i) to
+// break the import cycle this file now has with agent-daemon-respawn-handle-refresh.ts.
+export { pactsAwaitingUnpause }
 
 /** §2.4's rebind: predicate, then the transaction. `db` is the caller's raw handle (same
  * convention as every other orchestration/*.ts primitive) — the caller (C7) never opens a
@@ -124,6 +116,21 @@ export function rebindRestoredPane(
     return { ok: false, reason: predicate.reason }
   }
   if (predicate.kind === 'noop') {
+    // [S10-21a C7i, Ruling 34 Addendum 27] The same-pane path returns here, BEFORE step 2's
+    // UPDATE below — process_incarnation is never otherwise refreshed on a Layer-1 restore.
+    // Refresh it now so the next sweep's identity join sees the truth. Guarded on the caller
+    // actually supplying one (every real caller does — restore-registered-agent-panes.ts's
+    // `deps.getTerminalProcessIncarnation` always returns `string | null`, never `undefined`):
+    // an `undefined` means there is nothing to refresh, so this is a true no-op, not a second
+    // audit/UPDATE pair for T13's already-covered idempotent double-fire.
+    if (params.processIncarnation !== undefined && params.newTerminalHandle !== null) {
+      refreshAgentHandleAfterRespawn(db, {
+        hostId: params.hostId,
+        paneKey: params.newPaneKey,
+        newTerminalHandle: params.newTerminalHandle,
+        processIncarnation: params.processIncarnation
+      })
+    }
     return { ok: true, rebound: false, agentId: predicate.agentId }
   }
   const { row, targetRow } = predicate

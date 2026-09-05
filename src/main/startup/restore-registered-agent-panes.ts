@@ -14,11 +14,19 @@
 // which runtime minted it, and `rebindRestoredPane`'s clause 1 compares the ticket's against the
 // CURRENT generation it is being redeemed in. Using the row's stale value refused every rebind.
 //
-// [C7b, D-R110 B3; C7h, Ruling 34 Addendum 26] Occupancy (`findConnectedLeafOccupant`, matched
-// on tab AND leaf) is never itself a survival verdict — that's judged from evidence about the
-// ROW's own pty. An own-pane occupant on a DIFFERENT, runtime-live pty is `skipped_leaf_held`
-// (yielded to the renderer's remount path); otherwise it's a stale surface, noted and restored
-// over. A leaf held by anything else proceeds to Layer 2 without placement, `leaf_occupied_by_other`.
+// [C7i, Ruling 34 Addendum 27; D-R116 REJECT of C7h, design by D-R117] Survival (rows 1-4) is
+// the agent's OWN process identity (`agents.process_incarnation`) joined against ONE
+// controller-inventory round the whole sweep takes (`deps.takeControllerInventoryForSweep`,
+// called once by `runRestoreSweepBody`, never per-candidate) — `agentAlive`
+// (agent-process-identity.ts). Leaf-observed agent status (the old D3) is no longer read for
+// survival at all. When the round is unavailable, or the agent's own pty is listed without an
+// identity, the pane is deferred loudly (Layer 3), never restored over and never read as dead.
+// A launch admitted THIS generation (rows 5-6) still holds the leaf. Otherwise (rows 8-11) an
+// own-pane occupant is judged by `ptyState` of ITS OWN ptyId over the SAME shared round — live
+// (row 11) is never yielded to and never spawned over (the agent restores into a fresh pane, no
+// placement); absent (row 10) is a stale surface, restored over with placement. D1/D2/D3 (the
+// old survival signals) stay only in the ticket's `incumbent` evidence field and the row-10
+// stale-signal audit, never a survival arm (row 7, self-resume watermark, is C7j — not here).
 //
 // [C7b, D-R110 fix 6] A free leaf still withholds placement when the persisted layout tree no
 // longer resolves it (`isLeafInPersistedLayout`) — a closed tab's row must not resurrect into a
@@ -41,6 +49,16 @@ import type { ResumableTuiAgent } from '../../shared/agent-session-resume'
 import type { RestoreTicketId, RestoreTicketMintArgs } from '../runtime/restore-ticket-registry'
 import { parsePaneKey } from '../../shared/stable-pane-id'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from '../runtime/restore-sweep-lock'
+import type { ControllerInventory } from '../runtime/orchestration/agent-process-identity'
+import {
+  decideEarlyRows,
+  routeDeadCandidate
+} from '../runtime/orchestration/restore-sweep-decision'
+import {
+  auditSweepSkip,
+  auditLayer3,
+  auditSweepNote
+} from '../runtime/orchestration/restore-sweep-audit'
 
 export type RestoreSweepDeps = {
   getOrchestrationDb(): OrchestrationDb
@@ -67,14 +85,22 @@ export type RestoreSweepDeps = {
     caller: RuntimeAgentSessionRpcCaller,
     internal: { restoreProvenance: { kind: 'host-restore'; ticket: RestoreTicketId } }
   ): Promise<RuntimeEnsureAgentSessionResult>
+  /** [C7i, Ruling 34 Addendum 27] ONE round for the WHOLE sweep — called once by
+   * `runRestoreSweepBody`, before the candidate loop, and the same result handed to every
+   * candidate. Retries once on a null round (orca-runtime.ts's own implementation). */
+  takeControllerInventoryForSweep(): Promise<ControllerInventory | null>
   collectIncumbentEvidence(
     paneKey: string,
     ptyId: string | undefined,
-    now?: number
+    now?: number,
+    preFetchedInventory?: ControllerInventory | null
   ): Promise<IncumbentEvidence>
   getTerminalProcessIncarnation(handle: string): string | null
   /** In-process only (INV-P-021) — see orca-runtime.ts's `mintRestoreTicket`. */
   mintRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId
+  /** [C9 hand-off, D-I80] `orca-runtime.ts#notifyRebindDelivery` — called once after a
+   * SUCCESSFUL Layer 1 or Layer 2 restore, never for a skipped/deferred candidate. */
+  notifyRebindDelivery(agentId: string): void
 }
 
 export type RestoreSweepSummary = {
@@ -85,56 +111,6 @@ export type RestoreSweepSummary = {
   skippedDaemonSurvived: number
   skippedLeafHeld: number
   errors: number
-}
-
-function writeSweepAudit(
-  db: OrchestrationDb,
-  hostId: string,
-  paneKey: string,
-  agentId: string,
-  verb: string,
-  outcome: string,
-  reasonCode: string
-): void {
-  db.writeAgentAudit({
-    agentId,
-    actorPaneKey: paneKey,
-    actorHostId: hostId,
-    verb,
-    outcome,
-    reasonCode
-  })
-}
-
-function auditSweepSkip(
-  db: OrchestrationDb,
-  hostId: string,
-  paneKey: string,
-  agentId: string,
-  reasonCode: string
-): void {
-  writeSweepAudit(db, hostId, paneKey, agentId, 'sweep_skip', 'deferred', reasonCode)
-}
-
-function auditLayer3(
-  db: OrchestrationDb,
-  hostId: string,
-  paneKey: string,
-  agentId: string,
-  reasonCode: string
-): void {
-  writeSweepAudit(db, hostId, paneKey, agentId, 'sweep_layer3', 'deferred', reasonCode)
-}
-
-/** [C7h, Ruling 34 Addendum 26] Not a skip — the sweep proceeds to restore. */
-function auditSweepNote(
-  db: OrchestrationDb,
-  hostId: string,
-  paneKey: string,
-  agentId: string,
-  reasonCode: string
-): void {
-  writeSweepAudit(db, hostId, paneKey, agentId, 'sweep_note', 'proceeded', reasonCode)
 }
 
 export type RestoreOneOutcome =
@@ -152,8 +128,10 @@ export async function restoreOneRegisteredPane(
   db: OrchestrationDb,
   hostId: string,
   agentId: string,
+  processIncarnation: string | null,
   worktreeId: string | null,
-  launchRow: AgentLaunchSessionRow
+  launchRow: AgentLaunchSessionRow,
+  inventory: ControllerInventory | null
 ): Promise<RestoreOneOutcome> {
   const parsed = parsePaneKey(launchRow.pane_key)
   if (!parsed || !worktreeId) {
@@ -189,60 +167,60 @@ export async function restoreOneRegisteredPane(
     )
     return { kind: 'layer3' }
   }
-  // [C7e/C7h, D-R111 R2, Addendum 26] `this.leaves` occupancy is a RACE at this run point, not
-  // an invariant — the primary survival call is the ROW's own pty evidence below; the occupant
-  // lookup is a separate, later judgement about whatever pty sits on the leaf.
-  const occupant = deps.findConnectedLeafOccupant(parsed.leafId, parsed.tabId)
-  // [C7h, Addendum 26] Evidence is about the ROW's OWN pty, never the leaf's occupant — falls
-  // back to the occupant's ptyId ONLY when the row records none.
-  const rowPtyId = deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
-  const predecessorPtyId = rowPtyId ?? occupant?.ptyId
-  // [D-R110 fix 4] Collected BEFORE the spawn, with the row's own ptyId.
-  const incumbentEvidence = await deps.collectIncumbentEvidence(
-    launchRow.pane_key,
-    predecessorPtyId
+  // [C7i, Ruling 34 Addendum 27] Rows 1-6 — pure, see restore-sweep-decision.ts.
+  const currentGeneration = deps.getLaunchGenerationId()
+  const early = decideEarlyRows(
+    processIncarnation,
+    inventory,
+    launchRow.launch_generation,
+    currentGeneration,
+    launchRow.evidence,
+    launchRow.seq
   )
-  const incumbent = resolveIncumbentDeath(incumbentEvidence)
-  // [C7e, D-R111 R2; C7h, Addendum 26] Live D3, a runtime-known D1 pty, or D2 'present' all mean
-  // not dead — mint nothing over it. The D1 exit-observed arm never vetoes these: a pty id the
-  // inventory lists NOW is alive whatever exit was once observed under it (same-id respawn).
-  if (
-    incumbentEvidence.d3.liveNow ||
-    incumbentEvidence.d1.ptyKnownToRuntime ||
-    incumbentEvidence.d2.inventory === 'present'
-  ) {
-    const survivalSignal = incumbentEvidence.d3.liveNow
-      ? 'd3_live_now'
-      : incumbentEvidence.d1.ptyKnownToRuntime
-        ? 'd1_pty_known_to_runtime'
-        : 'd2_inventory_present'
-    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, `daemon_survived: ${survivalSignal}`)
+  if (early.kind === 'skipped_daemon_survived') {
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
     return { kind: 'skipped_daemon_survived' }
   }
-  let offerPlacement = true
-  if (occupant) {
-    if (occupant.paneKey === launchRow.pane_key) {
-      // [C7h, Addendum 26] Positional occupancy alone is never a survival verdict.
-      if (
-        predecessorPtyId !== undefined &&
-        occupant.ptyId !== predecessorPtyId &&
-        (incumbentEvidence.ptyLive?.(occupant.ptyId) ?? false)
-      ) {
-        // A DIFFERENT, live pty holds this leaf — the renderer's remount path owns the resume.
-        auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_held_by_live_pty')
-        return { kind: 'skipped_leaf_held' }
-      }
-      // Same pty as the row, or one the runtime doesn't know live: a stale surface, restored over.
-      const staleSignal = incumbent.dead ? incumbent.signal : 'none'
-      auditSweepNote(db, hostId, launchRow.pane_key, agentId, `stale_own_surface: ${staleSignal}`)
-    } else {
-      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
-      offerPlacement = false
-    }
-  } else if (!deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)) {
-    offerPlacement = false
+  if (early.kind === 'layer3') {
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
+    return { kind: 'layer3' }
   }
-  const currentGeneration = deps.getLaunchGenerationId()
+  if (early.kind === 'skipped_leaf_held') {
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
+    return { kind: 'skipped_leaf_held' }
+  }
+  if (early.noteReasonCode) {
+    auditSweepNote(db, hostId, launchRow.pane_key, agentId, early.noteReasonCode)
+  }
+
+  // [C7e/C7h, D-R111 R2, Addendum 26] `this.leaves` occupancy is a RACE at this run point, not
+  // an invariant. [C7i, Ruling 34 Addendum 27] The evidence pty for `collectIncumbentEvidence`
+  // prefers the agent's OWN identity, then the row's persisted ptyId, then the occupant's —
+  // D1/D2/D3 stay in the ticket's evidence field and the row-10 stale-signal audit only, never a
+  // survival arm; rows 8-11 (restore-sweep-decision.ts) judge the OCCUPANT's own ptyId via
+  // `ptyState`, over the same shared round, regardless of which ptyId this evidence was
+  // collected for.
+  const occupant = deps.findConnectedLeafOccupant(parsed.leafId, parsed.tabId)
+  const rowPtyId = deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
+  const evidencePtyId = early.identity?.ptyId ?? rowPtyId ?? occupant?.ptyId
+  const incumbentEvidence = await deps.collectIncumbentEvidence(
+    launchRow.pane_key,
+    evidencePtyId,
+    undefined,
+    inventory
+  )
+  const incumbent = resolveIncumbentDeath(incumbentEvidence)
+  const routing = routeDeadCandidate(
+    occupant,
+    launchRow.pane_key,
+    occupant ? incumbentEvidence.ptyState?.(occupant.ptyId) : undefined,
+    deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)
+  )
+  const offerPlacement = routing.offerPlacement
+  if (routing.audit) {
+    const write = routing.audit.verb === 'sweep_skip' ? auditSweepSkip : auditSweepNote
+    write(db, hostId, launchRow.pane_key, agentId, routing.audit.reasonCode)
+  }
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,
     sessionId: launchRow.session_id,
@@ -299,6 +277,9 @@ export async function restoreOneRegisteredPane(
   // §2.1c "the marks … written in the same synchronous step that redeems a row, before the
   // lock releases" — this call happens while the sweep's own lock is still held.
   db.setSweepRestoreMark(hostId, launchRow.pane_key)
+  // [S10-21a C9 hand-off, D-I80] Arms any mail already waiting on `agent:<id>` — one call, only
+  // after a SUCCESSFUL restore, never for a skipped/deferred candidate.
+  deps.notifyRebindDelivery(agentId)
   return { kind: result.rebound ? 'layer2' : 'layer1', result }
 }
 
@@ -330,6 +311,9 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
   const registered = db
     .listAgents({ hostId, includeDerived: false, limit: 200 })
     .agents.filter((a) => a.quarantined === 0 && a.pane_key !== null)
+  // [C7i, Ruling 34 Addendum 27] ONE controller-inventory round for the WHOLE sweep — every
+  // candidate below is judged from this same round, never a per-candidate one.
+  const inventory = await deps.takeControllerInventoryForSweep()
   for (const R of registered) {
     const paneKey = R.pane_key as string
     const launchRow = db.newestLaunchForPane(hostId, paneKey)
@@ -345,8 +329,10 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
         db,
         hostId,
         R.id,
+        R.process_incarnation,
         R.worktree_id,
-        launchRow
+        launchRow,
+        inventory
       )
       if (outcome.kind === 'layer1') {
         summary.layer1 += 1

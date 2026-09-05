@@ -37,6 +37,7 @@ import {
 import { getDecorativeAgentTitleSignature } from '../../shared/agent-decorative-title-signature'
 import { createCommandCodeOutputStatusDetector } from '../../shared/command-code-output-status'
 import { SettleObservations, type IncumbentEvidence } from './incumbent-death'
+import type { ControllerInventory } from './orchestration/agent-process-identity'
 import type {
   TerminalSideEffectBatch,
   TerminalSideEffectFact
@@ -13878,7 +13879,12 @@ export class OrcaRuntimeService {
   async collectIncumbentEvidence(
     paneKey: string,
     ptyId?: string,
-    now: number = Date.now()
+    now: number = Date.now(),
+    // [S10-21a C7i, Ruling 34 Addendum 27] Explicitly passed (a value, or null for "the sweep's
+    // shared round came back null") -> no round of this call's own. Omitted (undefined) ->
+    // unchanged prior behaviour, an own round when `ptyId` is given. Distinguished by parameter
+    // PRESENCE, not truthiness — a caller sharing a failed round passes null on purpose.
+    preFetchedInventory?: ControllerInventory | null
   ): Promise<IncumbentEvidence> {
     // Why connected, not mere map presence: pruneDisconnectedPtyRecords/dropDisconnectedPtyRecord
     // (`:32605-32616`) keeps exited records around, bounded, for the archive — an exited pty
@@ -13887,19 +13893,21 @@ export class OrcaRuntimeService {
     const exitObservedThisGeneration =
       ptyId !== undefined && this.exitedPtyIdsThisGeneration.has(ptyId)
 
-    let inventoryState: 'present' | 'absent' | 'unknown' = 'unknown'
-    let inventoryLivePtyIds: ReadonlySet<string> | null = null
-    if (ptyId !== undefined) {
+    let inventory: ControllerInventory | null = null
+    if (preFetchedInventory !== undefined) {
+      inventory = preFetchedInventory
+    } else if (ptyId !== undefined) {
       const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
-      const inventory =
-        await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
-      inventoryLivePtyIds = inventory?.allLivePtyIds ?? null
-      inventoryState = inventory
-        ? inventory.allLivePtyIds.has(ptyId)
-          ? 'present'
-          : 'absent'
-        : 'unknown'
+      inventory = await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
     }
+    const inventoryState: 'present' | 'absent' | 'unknown' =
+      ptyId === undefined
+        ? 'unknown'
+        : inventory
+          ? inventory.allLivePtyIds.has(ptyId)
+            ? 'present'
+            : 'absent'
+          : 'unknown'
 
     const signals = this.getAgentDirectoryLivenessSignals(paneKey)
     const liveNow = signals.observedLive
@@ -13914,8 +13922,26 @@ export class OrcaRuntimeService {
       d3: { liveNow, firstObservedNotLiveAt, now },
       // [S10-21a C7h, Ruling 34 Addendum 26] Same inventory round as D2 above — no second
       // controller round-trip for the occupant's (different) pty.
-      ptyLive: (pid: string) => inventoryLivePtyIds?.has(pid) ?? false
+      ptyLive: (pid: string) => inventory?.allLivePtyIds.has(pid) ?? false,
+      // [S10-21a C7i, Ruling 34 Addendum 27]
+      ptyState: (pid: string) =>
+        inventory === null ? 'unknown' : inventory.allLivePtyIds.has(pid) ? 'present' : 'absent',
+      terminalIdentity: (pid: string) => inventory?.terminalIdentityByPtyId.get(pid)
     }
+  }
+
+  /** [S10-21a C7i, Ruling 34 Addendum 27] ONE controller-inventory round for the whole restore
+   * sweep — every candidate is judged from it, never a per-candidate round
+   * (`collectIncumbentEvidence`'s own round above stays for every OTHER caller). Retries once on
+   * a null round (a transient controller failure); still null after the retry is a genuine
+   * "inventory unavailable" the sweep must defer loudly, never read as absent. */
+  async takeControllerInventoryForSweep(): Promise<ControllerInventory | null> {
+    const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
+    const first = await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
+    if (first) {
+      return first
+    }
+    return await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
   }
 
   /** [S10-21a C7, INV-P-021, §2.2] The sweep's own mint point — the ONLY public entry to this

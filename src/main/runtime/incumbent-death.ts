@@ -28,6 +28,12 @@ export type IncumbentEvidence = {
    * already fetched for `ptyId` above — never a second daemon round-trip. Optional: pure
    * fixtures (resolveIncumbentDeath's own tests) never read it. */
   ptyLive?: (ptyId: string) => boolean
+  /** [S10-21a C7i, Ruling 34 Addendum 27] Same round as `ptyLive`, three-valued: 'unknown' iff
+   * the round is null. `ptyLive(id) === (ptyState(id) === 'present')`. */
+  ptyState?: (ptyId: string) => 'present' | 'absent' | 'unknown'
+  /** [S10-21a C7i, Ruling 34 Addendum 27] The round's identified handle+incarnation for a ptyId,
+   * when the controller could positively identify it — same round as `ptyLive`/`ptyState`. */
+  terminalIdentity?: (ptyId: string) => { handle: string; incarnationId: string } | undefined
 }
 
 export type IncumbentVerdict =

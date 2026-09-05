@@ -9,7 +9,7 @@
 import type Database from '../../sqlite/sync-database'
 import { getAgentByPaneKey } from './derived-agent-rows'
 import { writeAgentAudit } from './agent-audit-log'
-import { pactsAwaitingUnpause } from './agent-restore-rebind'
+import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 
 export type RefreshAgentHandleAfterRespawnParams = {
   hostId: string

@@ -1050,10 +1050,12 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
       runtimeService.getPersistedPtyIdForLeaf(tabId, leafId, hostId ?? null),
     ensureAgentSession: (request, caller, internal) =>
       runtimeService.ensureAgentSession(request, caller, internal),
-    collectIncumbentEvidence: (paneKey, ptyId, now) =>
-      runtimeService.collectIncumbentEvidence(paneKey, ptyId, now),
+    takeControllerInventoryForSweep: () => runtimeService.takeControllerInventoryForSweep(),
+    collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
+      runtimeService.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtimeService.getTerminalProcessIncarnation(handle),
-    mintRestoreTicket: (payload) => runtimeService.mintRestoreTicket(payload)
+    mintRestoreTicket: (payload) => runtimeService.mintRestoreTicket(payload),
+    notifyRebindDelivery: (agentId) => runtimeService.notifyRebindDelivery(agentId)
   }
 }
 
