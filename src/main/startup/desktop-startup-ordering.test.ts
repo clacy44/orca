@@ -268,4 +268,18 @@ describe('startup ordering', () => {
     expect(desktopSetWebContents).toBeGreaterThanOrEqual(0)
     expect(desktopAutomationStart).toBeGreaterThan(desktopSetWebContents)
   })
+
+  it('S10-21a C7e, D-R111 (lock leak): the fatal runtime_rpc_unavailable throw is checked before the sweep lock is ever acquired', () => {
+    const source = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
+    const throwIndex = source.indexOf("throw new Error('runtime_rpc_unavailable')")
+    // Why the leading newline+indent: a nearby comment mentions `acquireRestoreSweepLock()` in
+    // backticked prose — matching the bare call site (4-space indented, inside `if (...) {`)
+    // avoids that false hit.
+    const acquireIndex = source.indexOf('\n    acquireRestoreSweepLock()')
+
+    expect(throwIndex).toBeGreaterThanOrEqual(0)
+    expect(acquireIndex).toBeGreaterThan(throwIndex)
+    // Exactly one `runtime_rpc_unavailable` throw remains — the old post-acquire duplicate is gone.
+    expect(source.split("throw new Error('runtime_rpc_unavailable')")).toHaveLength(2)
+  })
 })

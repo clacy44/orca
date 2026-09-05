@@ -322,6 +322,12 @@ export function getPtyIdForPaneKey(paneKey: string): string | undefined {
   return paneKeyPtyId.get(paneKey)
 }
 
+// [S10-21a C7d, Ruling 34 Addendum 23] The forward direction — daemon-init.ts's synthetic-exit
+// fanout knows only the killed ptyIds, never their pane keys.
+export function getPaneKeyForPtyId(ptyId: string): string | undefined {
+  return ptyPaneKey.get(ptyId)
+}
+
 // Why: let consumers tear down paneKey-scoped state on PTY exit so their timers can't leak; a callback registry keeps the cross-module dependency narrow.
 type PaneKeyTeardownListener = (paneKey: string) => void
 const paneKeyTeardownListeners = new Set<PaneKeyTeardownListener>()
@@ -5003,42 +5009,12 @@ export function registerPtyHandlers(
       if (spawnIdentityPaneKey) {
         spawnOptions.paneKey = spawnIdentityPaneKey
       }
-      // [S10-21a C7b, D-R110 finding 5, Ruling 34 Addendum 22] "The renderer's own spawn path
-      // waits on that lock for covered launches, bounded, and never receives a hard refusal for
-      // its own restore." Waits here, before `spawnWithLane`/`spawnForStablePane` below (which
-      // is where admission and the actual OS-level spawn happen) — never refuses; a timeout is
-      // audited and the spawn proceeds exactly as it would have with no sweep running. Also an
-      // `assertPaneKeyNotOwned`-EQUIVALENT consult that only AUDITS: admission (already reached
-      // via `spawnWithLane` below) is the actual enforcement point; this is visibility only, so
-      // a genuine restore racing a stale sweep observation is never blocked here.
-      if (spawnIdentityPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
-        const waitResult = await awaitRestoreSweepLockRelease()
-        const admissionBundle = launchAdmissionBundle(runtime, args.connectionId)
-        const gateDb = admissionBundle.getDb()
-        if (gateDb) {
-          if (waitResult === 'timeout') {
-            gateDb.writeAgentAudit({
-              agentId: null,
-              actorPaneKey: spawnIdentityPaneKey,
-              actorHostId: admissionBundle.ctx.hostId,
-              verb: 'sweep_lock_wait_timeout',
-              outcome: 'proceeded',
-              reasonCode: 'pty_spawn_waited_for_sweep_lock'
-            })
-          }
-          const owner = gateDb.getAgentByPaneKey(admissionBundle.ctx.hostId, spawnIdentityPaneKey)
-          if (owner && owner.derived === 0 && owner.quarantined === 0) {
-            gateDb.writeAgentAudit({
-              agentId: owner.id,
-              actorPaneKey: spawnIdentityPaneKey,
-              actorHostId: admissionBundle.ctx.hostId,
-              verb: 'pty_spawn_pane_owned',
-              outcome: 'observed',
-              reasonCode: 'audit_only_no_refusal'
-            })
-          }
-        }
-      }
+      // [S10-21a C7e, D-R111 R1] The sweep-lock wait moved to the `pty:spawn` IPC handler
+      // itself (the renderer's actual entry point) — this controller-level `spawn` callback is
+      // ALSO what the sweep's own `createTerminal`-driven creates reach, so waiting here made
+      // the sweep block on its own lock, one pane at a time, for up to 30s each. E1's existing
+      // `sweep_lock_held` refusal (orca-runtime.ts) already covers `createTerminal` callers and
+      // exempts host-restore; see `pty:spawn`'s own handler for the renderer-side wait.
       if (typeof args.tabId === 'string' && args.tabId.length > 0 && args.tabId.length <= 512) {
         spawnOptions.tabId = args.tabId
       }
@@ -6233,6 +6209,44 @@ export function registerPtyHandlers(
         earlyLeafId
           ? makePaneKey(args.tabId, earlyLeafId)
           : null
+      // [S10-21a C7e, D-R111 R1] "The renderer's spawn path is where the sweep-lock wait
+      // belongs" (Ruling 34 Addendum 23) — `pty:spawn` is the renderer's actual entry point
+      // (cold-restore, fresh-tab, wake paths all reach it); the sweep's OWN `createTerminal`-
+      // driven creates reach the controller callback below, never this handler, so waiting here
+      // cannot make the sweep block on its own lock. Never refuses (a timeout only audits, per
+      // §2.1a) — this handler carries no `restoreProvenance` at all (only `createTerminal`'s E1
+      // can ever see host-restore), so every call here is, by construction, a caller/renderer
+      // spawn E1's own `sweep_lock_held` gate does not need to (and structurally cannot) exempt.
+      if (earlyPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
+        const waitResult = await awaitRestoreSweepLockRelease()
+        const admissionBundle = launchAdmissionBundle(runtime, args.connectionId)
+        const gateDb = admissionBundle.getDb()
+        if (gateDb) {
+          if (waitResult === 'timeout') {
+            gateDb.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: earlyPaneKey,
+              actorHostId: admissionBundle.ctx.hostId,
+              verb: 'sweep_lock_wait_timeout',
+              outcome: 'proceeded',
+              reasonCode: 'pty_spawn_waited_for_sweep_lock'
+            })
+          }
+          // Audit-only ownership consult — admission (reached later via `spawnWithLane`) is the
+          // actual enforcement point; this is visibility only, never a refusal here.
+          const owner = gateDb.getAgentByPaneKey(admissionBundle.ctx.hostId, earlyPaneKey)
+          if (owner && owner.derived === 0 && owner.quarantined === 0) {
+            gateDb.writeAgentAudit({
+              agentId: owner.id,
+              actorPaneKey: earlyPaneKey,
+              actorHostId: admissionBundle.ctx.hostId,
+              verb: 'pty_spawn_pane_owned',
+              outcome: 'observed',
+              reasonCode: 'audit_only_no_refusal'
+            })
+          }
+        }
+      }
       const earlyReservationKey = makePaneSpawnReservationKey(
         args.worktreeId,
         args.connectionId,

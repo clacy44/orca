@@ -169,7 +169,31 @@ export async function restoreOneRegisteredPane(
     )
     return { kind: 'layer3' }
   }
+  // [S10-21a C7e, D-R111 R2] `findConnectedLeafOccupant` reads `this.leaves`, populated only by
+  // the renderer's `syncWindowGraph` — EMPTY at the sweep's own run point (main startup, before
+  // any renderer has mounted). Deciding "daemon survived" from it never fires, and the sweep
+  // would mint a competing `--resume` spawn for a session the daemon is still holding, ahead of
+  // the rebind's own (later) refusal. The primary decision is the pre-spawn incumbent EVIDENCE
+  // (§2.5's D1/D3, collected below) — `findConnectedLeafOccupant` is now only a SECONDARY signal,
+  // used to decide `leaf_occupied_by_other`/placement withholding on whatever platforms or
+  // startup orderings DO have a populated leaves map by this point (never load-bearing for the
+  // daemon-survived decision itself).
   const occupant = deps.findConnectedLeafOccupant(parsed.leafId)
+  const predecessorPtyId =
+    occupant?.ptyId ?? deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
+  // [D-R110 fix 4] Collected BEFORE the spawn, with the predecessor's own ptyId.
+  const incumbentEvidence = await deps.collectIncumbentEvidence(
+    launchRow.pane_key,
+    predecessorPtyId
+  )
+  const incumbent = resolveIncumbentDeath(incumbentEvidence)
+  // [S10-21a C7e, D-R111 R2] The daemon-survived decision, from evidence, BEFORE minting: a
+  // live D3 reading or a runtime-known D1 pty means the incumbent is provably not dead — never
+  // mint a competing ticket or spawn a second `--resume` over it.
+  if (!incumbent.dead && (incumbentEvidence.d3.liveNow || incumbentEvidence.d1.ptyKnownToRuntime)) {
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived')
+    return { kind: 'skipped_daemon_survived' }
+  }
   let offerPlacement = true
   if (occupant) {
     if (occupant.paneKey === launchRow.pane_key) {
@@ -181,14 +205,6 @@ export async function restoreOneRegisteredPane(
   } else if (!deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)) {
     offerPlacement = false
   }
-  const predecessorPtyId =
-    occupant?.ptyId ?? deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
-  // [D-R110 fix 4] Collected BEFORE the spawn, with the predecessor's own ptyId.
-  const incumbentEvidence = await deps.collectIncumbentEvidence(
-    launchRow.pane_key,
-    predecessorPtyId
-  )
-  const incumbent = resolveIncumbentDeath(incumbentEvidence)
   const currentGeneration = deps.getLaunchGenerationId()
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,

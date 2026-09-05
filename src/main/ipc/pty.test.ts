@@ -22,6 +22,11 @@ import type * as Wsl from '../wsl'
 import { getBundledLauncherPath } from '../cli/bundled-cli-launcher-path'
 import { makeRuntimeStubWithStore } from './runtime-stub-with-store'
 import { OrchestrationDb } from '../runtime/orchestration/db'
+import {
+  acquireRestoreSweepLock,
+  releaseRestoreSweepLock,
+  _resetRestoreSweepLockForTest
+} from '../runtime/restore-sweep-lock'
 
 const isWindowsHost = process.platform === 'win32'
 const posixOnlyIt = isWindowsHost ? it.skip : it
@@ -20754,6 +20759,128 @@ describe('registerPtyHandlers', () => {
         .prepare('SELECT pane_key FROM agent_launch_sessions')
         .all() as { pane_key: string }[]
       expect(allRows.every((row) => row.pane_key === paneKey)).toBe(true)
+    })
+  })
+
+  // [S10-21a C7e, D-R111 R1] The sweep-lock wait moved here (the renderer's actual entry
+  // point) from the `setPtyController` callback the sweep's OWN creates used to also reach.
+  describe('S10-21a C7e: pty:spawn sweep-lock wait and admission UNRECORDED', () => {
+    afterEach(() => {
+      _resetRestoreSweepLockForTest()
+    })
+
+    function registerCoveredSpawnRuntime(): ReturnType<typeof makeRuntimeStubWithStore> {
+      const runtime = makeRuntimeStubWithStore({
+        setPtyController: vi.fn(),
+        registerPty: vi.fn(),
+        createPreAllocatedTerminalHandle: vi.fn(() => 'term_c7e'),
+        registerPreAllocatedHandleForPty: vi.fn(),
+        onPtySpawned: vi.fn(),
+        onPtyExit: vi.fn(),
+        onPtyData: vi.fn()
+      })
+      handlers.clear()
+      registerPtyHandlers(mainWindow as never, runtime as never)
+      return runtime
+    }
+
+    it('T24-real: a covered-launch pty:spawn waits while the sweep lock is held, proceeds after release, and the mark it was restored under is readable on the main side', async () => {
+      const runtime = registerCoveredSpawnRuntime()
+      const db = runtime.getOrchestrationDb()
+      // Simulate: the sweep already restored a DIFFERENT (predecessor) pane this generation.
+      db.setSweepRestoreMark('local', 'tab-old:00000000-0000-4000-8000-0000000000f1')
+
+      acquireRestoreSweepLock()
+      let settled = false
+      const spawnPromise = (
+        handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+          cols: 80,
+          rows: 24,
+          worktreeId: 'wt-c7e',
+          command: 'claude',
+          launchAgent: 'claude',
+          tabId: 'tab-c7e',
+          leafId: '00000000-0000-4000-8000-0000000000f2'
+        }) as Promise<unknown>
+      ).finally(() => {
+        settled = true
+      })
+      // Let pending microtasks flush without advancing past the lock wait.
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      releaseRestoreSweepLock()
+      await spawnPromise
+      expect(settled).toBe(true)
+      // No double-resume: the mark this sweep wrote for its own restored pane is still there,
+      // read on the main side (the renderer half is `sweepRestoredPaneKeys`, C7c).
+      expect(db.getSweepRestoreMark('local', 'tab-old:00000000-0000-4000-8000-0000000000f1')).toBe(
+        true
+      )
+    })
+
+    it('a caller-chosen pane key naming an already-registered row is admitted UNRECORDED(pane_key_owned) — no new launch-table row', async () => {
+      const runtime = registerCoveredSpawnRuntime()
+      const db = runtime.getOrchestrationDb()
+      const ownedPaneKey = makePaneKey('tab-owned', '00000000-0000-4000-8000-0000000000f3')
+      const created = db.upsertAgentByPaneSuffix({
+        displayName: 'chair-owned',
+        role: null,
+        hostId: 'local',
+        paneKey: ownedPaneKey,
+        terminalHandle: 'term_owned',
+        processIncarnation: 'inc-owned',
+        worktreeId: 'wt-owned',
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: 'term_owned',
+        originHostId: 'local'
+      })
+      if (created.outcome === 'name_taken') {
+        throw new Error('fixture setup failed')
+      }
+      db.recordLaunch({
+        hostId: 'local',
+        paneKey: ownedPaneKey,
+        agentType: 'claude',
+        sessionId: 'sess-owned',
+        launchGeneration: runtime.getLaunchGenerationId(),
+        executionHostId: 'local',
+        evidence: 'host_launch'
+      })
+
+      // A caller-driven spawn naming that SAME pane key — no `--resume`/`--session-id` selector,
+      // so admission's own classification table reaches `owned && not host-resume` ->
+      // UNRECORDED(pane_key_owned) — never HOST_MINTED, never a second row.
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        worktreeId: 'wt-owned',
+        command: 'claude',
+        launchAgent: 'claude',
+        tabId: 'tab-owned',
+        leafId: '00000000-0000-4000-8000-0000000000f3'
+      })
+
+      const rawDb = (
+        db as unknown as {
+          db: { prepare: (sql: string) => { all: (...args: unknown[]) => unknown[] } }
+        }
+      ).db
+      const launchRows = rawDb
+        .prepare(`SELECT * FROM agent_launch_sessions WHERE pane_key = ?`)
+        .all(ownedPaneKey) as unknown[]
+      expect(launchRows).toHaveLength(1)
+      const unrecordedAudit = rawDb
+        .prepare(
+          `SELECT * FROM agent_audit WHERE verb = 'launch_unrecorded' AND reason_code = 'pane_key_owned'`
+        )
+        .all()
+      expect(unrecordedAudit.length).toBeGreaterThanOrEqual(1)
     })
   })
 })

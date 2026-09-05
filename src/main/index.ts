@@ -3189,6 +3189,15 @@ void app.whenReady().then(async () => {
   // platform branch, not only at the later "acquire lock; open window" call site the non-Windows
   // path uses. Never for the serve path: `runStartupRestoreSweep` (below, serve branch) acquires
   // its own lock, and acquiring twice throws `restore_sweep_lock_already_held`.
+  // [S10-21a C7e, D-R111 (lock leak)] Moved above the lock acquisition below: this same check
+  // used to sit after `acquireRestoreSweepLock()` and outside its `try/finally`, so a fatal
+  // `runtimeRpc` unavailability on the desktop path threw with the lock still held forever —
+  // nothing downstream would ever call `releaseRestoreSweepLock()`. Checking it first means a
+  // throw here happens before the lock exists at all.
+  const desktopRuntimeRpc = runtimeRpc
+  if (!serveOptions && !desktopRuntimeRpc) {
+    throw new Error('runtime_rpc_unavailable')
+  }
   const isDesktopStartup = !serveOptions
   let desktopSweepLockReleased = !isDesktopStartup
   if (isDesktopStartup) {
@@ -3296,10 +3305,6 @@ void app.whenReady().then(async () => {
     return
   }
 
-  const desktopRuntimeRpc = runtimeRpc
-  if (!desktopRuntimeRpc) {
-    throw new Error('runtime_rpc_unavailable')
-  }
   // [S10-21a C7b, D-R110 B2, Ruling 34 Addendum 22] "The sweep lock is taken before the window
   // opens; the window opens (registering the pty controller via registerPtyHandlers, reached
   // only from openMainWindow); the startup barriers are awaited; the sweep runs; the lock

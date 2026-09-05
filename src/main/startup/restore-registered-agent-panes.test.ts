@@ -232,6 +232,88 @@ describe('S10-21a C7b: runRestoreSweep', () => {
     expect(rows).toHaveLength(1)
   })
 
+  it("D-R111 R2: daemon_survived fires from PRE-SPAWN EVIDENCE even when findConnectedLeafOccupant is empty (this.leaves is unpopulated at the sweep's own run point)", async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000aaaa'
+    insertAgent(db, { id: 'agent-r2', display_name: 'chair-r2', pane_key: paneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-r2',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn()
+    const mintRestoreTicket = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        // R2's own fixture: no occupant at all (empty `this.leaves`, the production shape at
+        // the sweep's run point) — the OLD code could never reach `daemon_survived` this way.
+        findConnectedLeafOccupant: () => undefined,
+        // D3 reads live: the incumbent evidence itself proves the daemon survived.
+        collectIncumbentEvidence: async () => ({
+          paneKey,
+          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: false },
+          d2: { inventory: 'unknown' },
+          d3: { liveNow: true, firstObservedNotLiveAt: null, now: 0 }
+        }),
+        ensureAgentSession,
+        mintRestoreTicket
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-r2',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    )
+    expect(outcome.kind).toBe('skipped_daemon_survived')
+    expect(mintRestoreTicket).not.toHaveBeenCalled()
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+    const rows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived'`
+      )
+      .all()
+    expect(rows).toHaveLength(1)
+  })
+
+  it('D-R111 R2: d1.ptyKnownToRuntime true also fires daemon_survived, before minting', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000bbbb'
+    insertAgent(db, { id: 'agent-r2b', display_name: 'chair-r2b', pane_key: paneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-r2b',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const mintRestoreTicket = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        findConnectedLeafOccupant: () => undefined,
+        collectIncumbentEvidence: async () => ({
+          paneKey,
+          d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
+          d2: { inventory: 'unknown' },
+          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
+        }),
+        mintRestoreTicket
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-r2b',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    )
+    expect(outcome.kind).toBe('skipped_daemon_survived')
+    expect(mintRestoreTicket).not.toHaveBeenCalled()
+  })
+
   it('Addendum 22(v): a pane whose newest admission audit (any generation) is UNRECORDED and newer than the row is Layer 3, never resumed', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-000000000004'
