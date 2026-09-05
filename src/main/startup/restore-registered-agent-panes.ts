@@ -51,6 +51,7 @@ import {
 } from '../runtime/orchestration/restore-sweep-decision'
 import { collectSweepEvidence } from '../runtime/orchestration/restore-sweep-evidence'
 import { noteSelfResumeWatermarkAbsent, evaluateRow7 } from './restore-sweep-row7-watermark'
+import { restoreSweepDeferralFamily } from './restore-sweep-deferral-family'
 import {
   auditSweepSkip,
   auditLayer3,
@@ -281,14 +282,17 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
     errors: 0,
     deferredByReason: {}
   }
-  // [S10-21a C7l, Ruling 34 Addendum 29 item 7, N6] Keyed on the reason FAMILY — the text
-  // before the first ':' or space — never the full reason code: per-pane detail (a ptyId, a
-  // seq, an error message) already lives in the `agent_audit` row this deferral wrote; folding
-  // it into the milestone's own key would fragment one deferral family into many near-unique
-  // keys with count 1 each, hiding the aggregate the milestone exists to surface.
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 7, N6; C7m, Ruling 34 Addendum 30, item 4, D-R120
+  // F4] Keyed on the reason FAMILY (`restoreSweepDeferralFamily` — the colon namespace kept,
+  // only the trailing per-pane suffix stripped), never the full reason code or the bare
+  // namespace: per-pane detail (a ptyId, a seq, an error message) already lives in the
+  // `agent_audit` row this deferral wrote; folding it into the milestone's own key would
+  // fragment one deferral family into many near-unique keys with count 1 each, while collapsing
+  // to the bare namespace hides genuinely distinct families (e.g. `sweep_deferred:
+  // controller_inventory_unavailable` vs `sweep_deferred: agent_pty_identity_ambiguous`) under
+  // one count.
   const recordDeferral = (reasonCode: string): void => {
-    const familyEnd = reasonCode.search(/[: ]/)
-    const family = familyEnd === -1 ? reasonCode : reasonCode.slice(0, familyEnd)
+    const family = restoreSweepDeferralFamily(reasonCode)
     summary.deferredByReason[family] = (summary.deferredByReason[family] ?? 0) + 1
   }
   const db = deps.getOrchestrationDb()

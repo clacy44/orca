@@ -5394,17 +5394,29 @@ export class OrcaRuntimeService {
   // `setOrchestrationDb` before either capture point (desktop: index.ts precedes any
   // `getOrchestrationDb()`; serve: capture runs in `onLockAcquired`, before the sweep body's own
   // arming), so the peek always saw an unarmed store and the watermark was permanently null —
-  // row 7 (self-resume-since-this-process) could never fire. Both capture sites already run
-  // after the restore-sweep lock, same as before; if `getOrchestrationDb()` throws (store open
-  // failure) or returns falsy, that is recorded as absence, never a capture-time crash.
+  // row 7 (self-resume-since-this-process) could never fire.
+  // [S10-21a C7m, Ruling 34 Addendum 30, item 5, D-R120] `getOrchestrationDb()` now runs OUTSIDE
+  // the try: an arming failure (the store cannot open) PROPAGATES — swallowing it here was a
+  // second, silent degradation on top of the boot-path attach site's own loud one
+  // (`getLegacyWorkerTerminalRecoveryPlan`'s catch, orca-runtime.ts, which sets
+  // `orchestrationStoreOpenFailed` and logs `'[orchestration] failed to open the orchestration
+  // store at boot'`). Both capture sites (index.ts's desktop branch and the serve
+  // `onLockAcquired` callback) run inside the startup chain `installUnhandledRejectionLogging`
+  // (main-process-error-guards.ts) already guards loudly — that is the handler this now relies
+  // on. Only the SEQ READ is guarded: a store that armed successfully but whose read throws is a
+  // half-armed capture, recorded loudly (never silently) with the watermark left absent.
   captureSelfResumeWatermark(): number | null {
-    let db: OrchestrationDb | null = null
+    const db = this.getOrchestrationDb()
     try {
-      db = this.getOrchestrationDb() ?? null
-    } catch {
-      db = null
+      this.selfResumeWatermark = db.newestAgentAuditSeq()
+    } catch (err) {
+      this.selfResumeWatermark = null
+      if (this._orchestrationDb) {
+        console.error(
+          `watermark_capture_partial_arm: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
     }
-    this.selfResumeWatermark = db ? db.newestAgentAuditSeq() : null
     return this.selfResumeWatermark
   }
 
@@ -18486,8 +18498,9 @@ export class OrcaRuntimeService {
     if (incarnationId) {
       return `${record.ptyId}:${incarnationId}`
     }
-    // Why: legacy providers may omit process incarnation; retain the prior restart-degraded fence.
-    return `${this.runtimeId}:${record.ptyId}:${record.ptyGeneration}`
+    // [S10-21a C7m, Ruling 34 Addendum 30, item 2] A legacy 3-segment form is not an identity —
+    // `parseProcessIncarnation` rejects it, and every writer/caller already handles `null`.
+    return null
   }
 
   getExactWorkerProviderSession(
@@ -32739,6 +32752,8 @@ export class OrcaRuntimeService {
     }
 
     pty.worktreeId = worktreeId
+    const wasConnectedBeforeUpdate = pty.connected
+    const priorIncarnationId = pty.incarnationId
     if (state.incarnationId !== undefined) {
       pty.incarnationId = state.incarnationId
     }
@@ -32772,6 +32787,13 @@ export class OrcaRuntimeService {
     if (state.connected !== undefined) {
       pty.connected = state.connected
       pty.disconnectedAt = state.connected ? null : (pty.disconnectedAt ?? Date.now())
+    }
+    // [S10-21a C7m, Ruling 34 Addendum 30, item 3] `seq` means "recorded as live at" — reassign
+    // it when a retained record transitions connected false->true, or its incarnationId changes,
+    // so a stale record (seeded/connected before the sweep's round) is never mistaken for one
+    // recorded after it (`ptyConnectedNow`'s `record.seq > roundSeq` comparison, C7l item N2).
+    if ((!wasConnectedBeforeUpdate && pty.connected) || pty.incarnationId !== priorIncarnationId) {
+      pty.seq = this.nextPtyRecordSeq()
     }
     if (state.lastOutputAt !== undefined) {
       pty.lastOutputAt = maxTimestamp(pty.lastOutputAt, state.lastOutputAt)

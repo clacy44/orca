@@ -627,9 +627,13 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       })
     )
     expect(summary.layer3).toBe(2)
+    // [S10-21a C7m, Ruling 34 Addendum 30, item 4, D-R120 F4, SCENARIO_CORRECTION] Was
+    // `{ sweep_no_launch_row: 1, sweep_deferred: 1 }` — item 4 keeps the colon namespace and
+    // strips only the trailing per-pane suffix, so this no longer collapses onto the bare
+    // `sweep_deferred` namespace.
     expect(summary.deferredByReason).toEqual({
       sweep_no_launch_row: 1,
-      sweep_deferred: 1
+      'sweep_deferred: agent_pty_identity_ambiguous': 1
     })
   })
 
@@ -674,7 +678,11 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       })
     )
     expect(summary.layer3).toBe(2)
-    expect(summary.deferredByReason).toEqual({ sweep_deferred: 2 })
+    // [S10-21a C7m, Ruling 34 Addendum 30, item 4, SCENARIO_CORRECTION] Was
+    // `{ sweep_deferred: 2 }`.
+    expect(summary.deferredByReason).toEqual({
+      'sweep_deferred: agent_pty_identity_ambiguous': 2
+    })
   })
 
   // [S10-21a C7k, Ruling 34 Addendum 28, item 8]

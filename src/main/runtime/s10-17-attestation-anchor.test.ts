@@ -167,7 +167,7 @@ function createSharedStore(): {
 
 /** Plain (non-adopting) fake pty controller — every spawn is a fresh mint. */
 function fakePtyController(onSpawn: (env: Record<string, string> | undefined) => void): {
-  spawn: (args: { env?: Record<string, string> }) => Promise<{ id: string }>
+  spawn: (args: { env?: Record<string, string> }) => Promise<{ id: string; incarnationId: string }>
   write: () => boolean
   kill: () => boolean
   getForegroundProcess: () => Promise<null>
@@ -175,7 +175,11 @@ function fakePtyController(onSpawn: (env: Record<string, string> | undefined) =>
   return {
     spawn: async (args) => {
       onSpawn(args.env)
-      return { id: PTY_ID }
+      // [S10-21a C7m, Ruling 34 Addendum 30, item 2] `getTerminalProcessIncarnation` now
+      // returns null (never a legacy fallback) for a pty with no incarnationId, and
+      // `verifyOrchestrationCompatibilityCaller` requires a non-null `processIncarnation` — a
+      // real identity is required for this fixture to attest at all.
+      return { id: PTY_ID, incarnationId: 'incarnation-s10-17' }
     },
     write: () => true,
     kill: () => true,

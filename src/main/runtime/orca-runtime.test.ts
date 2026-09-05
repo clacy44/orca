@@ -24806,6 +24806,24 @@ describe('OrcaRuntimeService', () => {
     expect(writes).toEqual(['still writable'])
   })
 
+  it('[S10-21a C7m, Ruling 34 Addendum 30, item 2] getTerminalProcessIncarnation returns null, never the legacy 3-segment form, for a record with no incarnationId (fails at base)', async () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-no-incarnation' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
+      credentialLane: { kind: 'shared' }
+    })
+
+    expect(runtime.getTerminalProcessIncarnation(handle)).toBeNull()
+  })
+
   it('preserves runtime-created PTY process identity after graph unavailable', async () => {
     const runtime = new OrcaRuntimeService(store)
     runtime.setPtyController({
@@ -45252,8 +45270,16 @@ describe('OrcaRuntimeService', () => {
       })
       const creatorAuthority = runtime.getOrchestrationDispatchAuthority(handles.creator)
       const coordinatorAuthority = runtime.getOrchestrationDispatchAuthority(handles.coordinator)
-      expect(creatorAuthority?.processIncarnation).toBeTruthy()
-      expect(coordinatorAuthority?.processIncarnation).toBeTruthy()
+      // [S10-21a C7m, Ruling 34 Addendum 30, item 2, SCENARIO_CORRECTION] Was
+      // `expect(creatorAuthority?.processIncarnation).toBeTruthy()` /
+      // `expect(coordinatorAuthority?.processIncarnation).toBeTruthy()` — these fixture ptys
+      // carry no `incarnationId`, so `getTerminalProcessIncarnation` now correctly returns
+      // `null` (a legacy 3-segment form is not an identity) rather than the prior fallback
+      // string. This test's subject (coordinator-run rebinding) never reads
+      // `processIncarnation`'s value beyond passing it through — the assertion was an
+      // incidental truthiness check on a value the ruling now legitimately nulls.
+      expect(creatorAuthority).not.toBeNull()
+      expect(coordinatorAuthority).not.toBeNull()
       const creatorTask = db.createTask({ spec: 'create nested work', runId: runA.id })
       db.createDispatchContext(
         creatorTask.id,

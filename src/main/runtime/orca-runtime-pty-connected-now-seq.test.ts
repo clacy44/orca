@@ -48,4 +48,41 @@ describe('OrcaRuntimeService#collectIncumbentEvidence ptyConnectedNow (C7l item 
     expect(evidence.ptyState?.('pty-after-round')).toBe('absent')
     expect(evidence.ptyConnectedNow?.('pty-after-round')).toBe(true)
   })
+
+  // [S10-21a C7m, Ruling 34 Addendum 30, item 3] `seq` means "recorded as live at" — a RETAINED
+  // record (not freshly created) that transitions connected false->true must be re-sequenced, or
+  // the round/connectedNow union can never see it as "recorded after the round" once it reconnects.
+  it('a retained record reused (reconnected) after the round reads ptyConnectedNow true (fails at base)', async () => {
+    const runtime = new OrcaRuntimeService()
+    const recordPtyWorktree = (
+      runtime as unknown as {
+        recordPtyWorktree: (
+          ptyId: string,
+          worktreeId: string,
+          state: { connected?: boolean; incarnationId?: string }
+        ) => { seq: number; connected: boolean }
+      }
+    ).recordPtyWorktree.bind(runtime)
+    // Create the record, then disconnect it — it now EXISTS (retained), not freshly created.
+    recordPtyWorktree('pty-retained', 'wt-1', { connected: true })
+    recordPtyWorktree('pty-retained', 'wt-1', { connected: false })
+    // The round is taken while the record is retained but disconnected.
+    const roundSeq = (runtime as unknown as { ptyRecordSeqCounter: number }).ptyRecordSeqCounter
+    const inventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map(),
+      roundSeq
+    }
+    // The SAME retained record reconnects after the round.
+    recordPtyWorktree('pty-retained', 'wt-1', { connected: true })
+
+    const evidence = await runtime.collectIncumbentEvidence(
+      'tab1:leaf-retained',
+      'pty-retained',
+      undefined,
+      inventory
+    )
+    expect(evidence.ptyState?.('pty-retained')).toBe('absent')
+    expect(evidence.ptyConnectedNow?.('pty-retained')).toBe(true)
+  })
 })

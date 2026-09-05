@@ -231,7 +231,14 @@ export function rebindRestoredPane(
     // column exists and the runtime can supply a value, but C5 itself has no runtime handle to
     // derive one from — undefined leaves the column untouched). Never display_name, id,
     // quarantine, or tombstone fields.
-    if (params.processIncarnation !== undefined) {
+    // [S10-21a C7m, Ruling 34 Addendum 30, item 2] A supplied-but-unparseable value (null or a
+    // legacy 3-segment form) is never written either — same refusal shape as the noop path
+    // above: leave the column untouched and audit `identity_unavailable_at_refresh`.
+    const layer2Identity =
+      params.processIncarnation !== undefined
+        ? parseProcessIncarnation(params.processIncarnation)
+        : undefined
+    if (params.processIncarnation !== undefined && layer2Identity) {
       db.prepare(
         `UPDATE agents SET pane_key = ?, terminal_handle = ?, process_incarnation = ?,
            last_seen_at = datetime('now') WHERE id = ?`
@@ -241,6 +248,16 @@ export function rebindRestoredPane(
         `UPDATE agents SET pane_key = ?, terminal_handle = ?, last_seen_at = datetime('now')
          WHERE id = ?`
       ).run(params.newPaneKey, params.newTerminalHandle, row.id)
+      if (params.processIncarnation !== undefined) {
+        writeAgentAudit(db, {
+          agentId: row.id,
+          actorPaneKey: params.newPaneKey,
+          actorHostId: params.hostId,
+          verb: 'sweep_note',
+          outcome: 'proceeded',
+          reasonCode: `identity_unavailable_at_refresh: ${params.processIncarnation === null ? 'null' : 'unparseable'}`
+        })
+      }
     }
 
     // Step 3: mailbox repoints — bare handle then bare name, same order agent-pane-rebind.ts's

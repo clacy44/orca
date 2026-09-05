@@ -927,4 +927,8 @@ describe('S10-21a C5: rebindRestoredPane', () => {
   // sharing one host's suffix, so this file only proves the parameter is threaded through, not
   // the ambiguity itself). Same-pane noop tests above already assert the row IS the predicate's
   // own row on success.
+
+  // [S10-21a C7m, Ruling 34 Addendum 30, item 2] The Layer-2 UPDATE's own identity guard is
+  // covered in agent-restore-rebind-layer2-identity-guard.test.ts (this file is at the 800-line
+  // test cap).
 })

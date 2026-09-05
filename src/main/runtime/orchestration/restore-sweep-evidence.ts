@@ -10,6 +10,11 @@ export type SweepOccupant = { paneKey: string; ptyId: string }
 
 export type CollectSweepEvidenceDeps = {
   findConnectedLeafOccupant(leafId: string, tabId?: string | null): SweepOccupant | undefined
+  /** [S10-21a C7m, Ruling 34 Addendum 30, item 1] Rows 8-11's own-pane occupant read falls back
+   * to the runtime's OWN pty records (same accessor C7l's rows 5-6 already use) — a surviving
+   * daemon pty on the persisted pane is an own-pane occupant even before the renderer graph
+   * (`findConnectedLeafOccupant`) has published it. Shapes already match (`SweepOccupant`). */
+  findConnectedPtyForPane(paneKey: string): SweepOccupant | undefined
   getPersistedPtyIdForLeaf(
     tabId: string,
     leafId: string,
@@ -46,7 +51,8 @@ export async function collectSweepEvidence(
   identity: ProcessIdentity | null,
   identityStatus: 'dead' | 'unknown_no_identity'
 ): Promise<SweepEvidence> {
-  const occupant = deps.findConnectedLeafOccupant(leafId, tabId)
+  const occupant =
+    deps.findConnectedLeafOccupant(leafId, tabId) ?? deps.findConnectedPtyForPane(paneKey)
   const rowPtyId = deps.getPersistedPtyIdForLeaf(tabId, leafId, hostId)
   const evidencePtyId = identity?.ptyId ?? rowPtyId ?? occupant?.ptyId
   const incumbentEvidenceRaw = await deps.collectIncumbentEvidence(
