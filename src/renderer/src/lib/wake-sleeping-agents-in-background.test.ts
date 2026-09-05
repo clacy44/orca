@@ -40,12 +40,17 @@ const clearSleepingAgentSessionsByPaneKey = vi.fn((paneKeys: readonly string[]) 
     delete sleepingRecords[paneKey]
   }
 })
+// [S10-21a C7c] `sweepRestoredPaneKeys` defaults to empty — no test in this file exercises the
+// sweep-mark exclusion itself (that is `resume-sleeping-agent-session.test.ts`'s T32 cases);
+// this mock just needs the field to exist so the real module's `.has()` read does not throw.
+const sweepRestoredPaneKeys = new Set<string>()
 vi.mock('@/store', () => ({
   useAppStore: {
     getState: () => ({
       sleepingAgentSessionsByPaneKey: sleepingRecords,
       tabsByWorktree: terminalTabsByWorktree,
-      clearSleepingAgentSessionsByPaneKey
+      clearSleepingAgentSessionsByPaneKey,
+      sweepRestoredPaneKeys
     })
   }
 }))

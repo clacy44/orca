@@ -172,6 +172,13 @@ export function resumeSleepingAgentSessionsForWorktree(
     if (options?.skipClaimKeys?.has(claimKey)) {
       continue
     }
+    // [S10-21a C7c, T32] The main-process sweep already restored this pane — never resume it
+    // here (this loop's claim-key bookkeeping treats every candidate as launchable, so this
+    // must short-circuit before any of it runs, not rely solely on `launchSleepingAgentSession`'s
+    // own internal check).
+    if (currentState.sweepRestoredPaneKeys?.has(record.paneKey)) {
+      continue
+    }
     if (record.automaticResumeBlockedBy === 'legacy-orchestration-worker') {
       continue
     }

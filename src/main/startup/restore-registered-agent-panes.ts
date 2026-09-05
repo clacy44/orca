@@ -31,6 +31,7 @@ import type { AgentLaunchSessionRow } from '../runtime/orchestration/agent-launc
 import type { RebindRestoredPaneResult } from '../runtime/orchestration/agent-restore-rebind'
 import { resolveIncumbentDeath, type IncumbentEvidence } from '../runtime/incumbent-death'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
+import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import type {
   RuntimeAgentSessionRpcCaller,
   RuntimeEnsureAgentSessionRequest,
@@ -143,6 +144,15 @@ export async function restoreOneRegisteredPane(
       agentId,
       'sweep_no_placement: unparseable_pane_or_no_worktree'
     )
+    return { kind: 'layer3' }
+  }
+  // [S10-21a C7c, D-R110 finding 14] `findConnectedLeafOccupant` reads only this process's OWN
+  // local `leaves` map — it has no per-leaf connection scoping yet, so a remote (SSH) pane's
+  // liveness cannot be answered honestly by it. Excluded outright, audited, rather than
+  // evaluated against a local-only signal that could read "no occupant" for a pane that is very
+  // much alive on its own execution host.
+  if (launchRow.execution_host_id !== LOCAL_EXECUTION_HOST_ID) {
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, 'sweep_remote_pane_excluded')
     return { kind: 'layer3' }
   }
   const unrecorded = db.isNewestAdmissionUnrecordedAndNewer(

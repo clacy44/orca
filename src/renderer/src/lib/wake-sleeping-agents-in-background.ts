@@ -177,10 +177,16 @@ export function wakeSleepingAgentsForWorktreeInBackground(
   /** The host's own partition: slept panes bound to a person's lane (S9 §2a). */
   withheldPaneKeys?: readonly string[]
 ): void {
+  const appState = useAppStore.getState()
   const withheld = new Set(withheldPaneKeys ?? [])
-  const worktreeRecords = Object.values(
-    useAppStore.getState().sleepingAgentSessionsByPaneKey
-  ).filter((record) => record.worktreeId === worktreeId)
+  // [S10-21a C7c, T32] Excluded at the very top — this filters BOTH the passive-hibernation
+  // cold-restore mount below (step b, which never reaches `resumeSleepingAgentSessionsForWorktree`
+  // at all) and the resume step (c). The main-process sweep already restored these panes; neither
+  // step may touch them again.
+  const worktreeRecords = Object.values(appState.sleepingAgentSessionsByPaneKey).filter(
+    (record) =>
+      record.worktreeId === worktreeId && !appState.sweepRestoredPaneKeys?.has(record.paneKey)
+  )
   // Why: nothing is slept here, so there is no wake work. Skipping is what keeps
   // a phone browsing many worktrees from permanently background-mounting each one
   // (and reattaching its PTYs) on the desktop host it is paired to.

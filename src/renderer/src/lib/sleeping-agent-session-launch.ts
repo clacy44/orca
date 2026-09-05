@@ -69,7 +69,14 @@ export function launchSleepingAgentSession(
   record: SleepingAgentSessionRecord,
   options?: ResumeSleepingAgentSessionsOptions
 ): boolean {
-  if (options?.withheldPaneKeys?.has(record.paneKey) || isLaneBoundSleepingRecord(record)) {
+  if (
+    options?.withheldPaneKeys?.has(record.paneKey) ||
+    isLaneBoundSleepingRecord(record) ||
+    // [S10-21a C7c, T32] The main-process sweep already restored this pane — resuming it here
+    // would mint a SECOND, competing pane for the same session. `sweepRestoredPaneKeys` is
+    // hydrated once at startup (App.tsx) and never cleared client-side.
+    useAppStore.getState().sweepRestoredPaneKeys?.has(record.paneKey)
+  ) {
     // Why: this builder mints a fresh, unbound tab, which resolves to the shared `~/.claude` — the
     // other person's credential. The record stays asleep and uncleared for the host create path.
     // The host's withheld set is the authority: `lanePrincipalId` is written only at hydration, so

@@ -989,6 +989,19 @@ function App(): React.JSX.Element {
           throw catalogOutcome.reason
         }
         const sessionRead = sessionOutcome.value
+        // [S10-21a C7c, D-R110 (ε)] Hydrated ONCE, before any wake path can run — a wake
+        // dispatched before this resolves would see an empty set and could double-resume a pane
+        // the main-process sweep already restored. `sweepRestoreMarkList` is READ-ONLY; a
+        // failure here must never block startup (best-effort — an empty set degrades to
+        // pre-C7c behaviour, not a startup crash).
+        await timeRendererStartupStep('sweep-restore-marks-hydrate', async () => {
+          try {
+            const paneKeys = await window.api.session.sweepRestoreMarkList()
+            useAppStore.getState().setSweepRestoredPaneKeys(paneKeys)
+          } catch (error) {
+            console.warn('[startup] sweepRestoreMarkList hydration failed:', error)
+          }
+        })
         await keybindingsPromise
         await timeRendererStartupStep('repo-catalog-final-settlement', () =>
           actions.awaitLocalRepoCatalogSettlement()

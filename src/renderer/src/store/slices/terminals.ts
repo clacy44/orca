@@ -593,6 +593,12 @@ export type TerminalSlice = {
   pendingIssueCommandSplitByTabId: Record<string, { command: string; env?: Record<string, string> }>
   tabBarOrderByWorktree: Record<string, string[]>
   workspaceSessionReady: boolean
+  /** [S10-21a C7c, D-R110 (ε)] Every pane key the main-process restore sweep has already
+   * restored, this host — hydrated ONCE via `sweepRestoreMarkList` before hydration proceeds.
+   * Every wake path must skip a record whose pane key is in this set: the sweep already
+   * resumed it, and a renderer-side wake would double-resume the same session into a fresh pane. */
+  sweepRestoredPaneKeys: ReadonlySet<string>
+  setSweepRestoredPaneKeys: (paneKeys: readonly string[]) => void
   restoredRuntimeHostIdByWorkspaceSessionKey: Record<string, ExecutionHostId>
   defaultTerminalTabsAppliedByWorktreeId: Record<string, true>
   markDefaultTerminalTabsApplied: (worktreeId: string) => void
@@ -1071,6 +1077,8 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   nativeChatLaunchDraftByTabId: {},
   tabBarOrderByWorktree: {},
   workspaceSessionReady: false,
+  sweepRestoredPaneKeys: new Set<string>(),
+  setSweepRestoredPaneKeys: (paneKeys) => set({ sweepRestoredPaneKeys: new Set(paneKeys) }),
   restoredRuntimeHostIdByWorkspaceSessionKey: {},
   defaultTerminalTabsAppliedByWorktreeId: {},
   markDefaultTerminalTabsApplied: (worktreeId) =>

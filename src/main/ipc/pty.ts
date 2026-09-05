@@ -6266,6 +6266,12 @@ export function registerPtyHandlers(
       let stablePaneBindingPersisted = false
       let rejectedRegistrationCandidate: PtySpawnResult | null = null
       let pendingRegistrationPtyId: string | null = null
+      // [S10-21a C7c, D-R110 finding 9] Mirrors the `agentSessionEnsure`-adjacent branch's own
+      // capture (pty.ts ~:5290) — `admittedLaunch` stays reachable for the catch below so a
+      // throw from THIS branch's own post-spawn asserts (`assertSpawnReplyWasLive`,
+      // `assertPtyRegistrationAllowed`) reaches `compensate(true)` instead of auditing nothing.
+      let admittedLaunch: AdmittedLaunch | undefined
+      let providerResult: PtySpawnResult | null = null
       // Why hoisted to the reply scope: main reconciles the provider sequence
       // deep inside the spawn path, but the pane needs that renderer-domain
       // boundary beside the daemon snapshot's kitty flags.
@@ -6886,25 +6892,34 @@ export function registerPtyHandlers(
             : 0
           const stablePaneSpawn = preAdoptedStablePane
             ? preAdoptedStablePane
-            : await spawnForStablePane({
-                runtime,
-                store,
-                provider,
-                spawnOptions,
-                paneLane,
-                owner: stablePaneOwnerCandidate,
-                worktreeId: args.worktreeId,
-                connectionId: args.connectionId,
-                resolveOwner: () =>
-                  resolveStablePaneOwner(
-                    runtime,
-                    store,
-                    reservationPaneKey,
-                    args.worktreeId,
-                    args.connectionId
-                  )
-              })
+            : await spawnForStablePane(
+                {
+                  runtime,
+                  store,
+                  provider,
+                  spawnOptions,
+                  paneLane,
+                  owner: stablePaneOwnerCandidate,
+                  worktreeId: args.worktreeId,
+                  connectionId: args.connectionId,
+                  resolveOwner: () =>
+                    resolveStablePaneOwner(
+                      runtime,
+                      store,
+                      reservationPaneKey,
+                      args.worktreeId,
+                      args.connectionId
+                    )
+                },
+                (admitted) => {
+                  // [S10-21a C7c, D-R110 finding 9] See the hoisted-var comment above.
+                  admittedLaunch = admitted
+                }
+              )
           result = stablePaneSpawn.result
+          // [S10-21a C7c, D-R110 finding 9] `preAdoptedStablePane` (no fresh spawn) never sets
+          // `admittedLaunch` via `onAdmitted` — mirrors the other branch's own assignment.
+          providerResult = stablePaneSpawn.result
           stablePaneOwner = stablePaneSpawn.owner
           if (
             stablePaneOwner &&
@@ -6950,6 +6965,13 @@ export function registerPtyHandlers(
           )
           spawnTiming.mark('provider_spawn')
         } catch (err) {
+          // [S10-21a C7c, D-R110 finding 9] `providerResult` truthy means the spawn already
+          // committed (mirrors the `agentSessionEnsure`-adjacent branch's own gate) — this `err`
+          // is a LATER failure (the post-spawn asserts below), never the spawn itself; audit
+          // only, never delete a row for a process that may still be alive.
+          if (admittedLaunch && providerResult) {
+            admittedLaunch.compensate(true)
+          }
           if ((isMintedSessionId || preparedProvisionalExecutionContext) && effectiveSessionAppId) {
             runtime?.preparePtyExecutionContext?.(effectiveSessionAppId, null, {
               resetIncarnation: true

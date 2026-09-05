@@ -15,4 +15,13 @@ export function registerSweepRestoreMarkHandler(runtime: OrcaRuntimeService): vo
     const hostId = runtime.getOrchestrationCompatibilityHostId()
     return db.getSweepRestoreMark(hostId, paneKey)
   })
+
+  // [S10-21a C7c, D-R110 (ε)] The bulk read the renderer hydrates ONCE at startup — the shipped
+  // per-key getter above would otherwise need one round-trip per sleeping record before any wake
+  // path could safely run. Host-scoped, read-only, no writable counterpart, same as the getter.
+  ipcMain.handle('orchestration:sweepRestoreMark:list', (): string[] => {
+    const db = runtime.getOrchestrationDb()
+    const hostId = runtime.getOrchestrationCompatibilityHostId()
+    return db.listSweepRestoreMarks(hostId)
+  })
 }

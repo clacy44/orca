@@ -23,6 +23,17 @@ export function getSweepRestoreMark(
   )
 }
 
+/** [S10-21a C7c, D-R110 (ε)] The bulk read the renderer's ONE-TIME hydration uses
+ * (`orchestration:sweepRestoreMark:list`) — every marked pane key for this host, so the
+ * renderer never has to round-trip the per-key getter once per sleeping record. */
+export function listSweepRestoreMarks(db: Database.Database, hostId: string): string[] {
+  return (
+    db.prepare(`SELECT pane_key FROM agent_sweep_restore_marks WHERE host_id = ?`).all(hostId) as {
+      pane_key: string
+    }[]
+  ).map((row) => row.pane_key)
+}
+
 /** Marks are keyed by pane only per §7 — cleared as a whole, no per-generation clearing. */
 export function clearSweepRestoreMark(
   db: Database.Database,

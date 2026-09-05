@@ -87,7 +87,6 @@ import {
 import {
   deleteLaunchRowsForAgent as deleteLaunchRowsForAgentImpl,
   launchBySessionId as launchBySessionIdImpl,
-  listNewestLaunchRowsForHost as listNewestLaunchRowsForHostImpl,
   newestLaunchForPane as newestLaunchForPaneImpl,
   recordLaunch as recordLaunchImpl,
   recordSelfReportRotation as recordSelfReportRotationImpl,
@@ -122,6 +121,7 @@ import {
 import {
   clearSweepRestoreMark as clearSweepRestoreMarkImpl,
   getSweepRestoreMark as getSweepRestoreMarkImpl,
+  listSweepRestoreMarks as listSweepRestoreMarksImpl,
   setSweepRestoreMark as setSweepRestoreMarkImpl
 } from './agent-sweep-restore-marks'
 import {
@@ -4867,11 +4867,6 @@ export class OrchestrationDb {
     return newestLaunchForPaneImpl(this.db, hostId, paneKey)
   }
 
-  // S10-21a C7 (design v3.2 §2.1): the sweep's own enumeration input — one row per pane.
-  listNewestLaunchRowsForHost(hostId: string): AgentLaunchSessionRow[] {
-    return listNewestLaunchRowsForHostImpl(this.db, hostId)
-  }
-
   launchBySessionId(sessionId: string): AgentLaunchSessionRow | undefined {
     return launchBySessionIdImpl(this.db, sessionId)
   }
@@ -4902,6 +4897,11 @@ export class OrchestrationDb {
 
   getSweepRestoreMark(hostId: string, paneKey: string): boolean {
     return getSweepRestoreMarkImpl(this.db, hostId, paneKey)
+  }
+
+  // S10-21a C7c (D-R110 (ε)): the renderer's one-time bulk hydration.
+  listSweepRestoreMarks(hostId: string): string[] {
+    return listSweepRestoreMarksImpl(this.db, hostId)
   }
 
   setSweepRestoreMark(hostId: string, paneKey: string): void {

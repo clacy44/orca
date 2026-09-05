@@ -3181,7 +3181,8 @@ const api = {
       ipcRenderer.sendSync('session:set-sync', args, hostId)
     },
     sweepRestoreMarkGet: (paneKey) =>
-      ipcRenderer.invoke('orchestration:sweepRestoreMark:get', paneKey)
+      ipcRenderer.invoke('orchestration:sweepRestoreMark:get', paneKey),
+    sweepRestoreMarkList: () => ipcRenderer.invoke('orchestration:sweepRestoreMark:list')
   } satisfies PreloadApi['session'],
 
   remoteWorkspace: {

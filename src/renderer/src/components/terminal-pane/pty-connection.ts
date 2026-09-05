@@ -5244,8 +5244,14 @@ export function connectPanePty(
       // a restart-in-place would leak the old TUI's flags into a fresh shell.
       kittyKeyboardModes.reset()
       prepareFreshShellViewportForSpawn(options)
+      // [S10-21a C7c, T32] The main-process sweep already restored this pane's session
+      // (possibly onto a DIFFERENT, freshly-minted pane, Layer 2) — a cold-restore override
+      // here would independently `--resume` the SAME session id into this stale pane too,
+      // the double-resume this whole mark exists to prevent (D-R110 finding 5's "worst case").
+      const sweepAlreadyRestoredThisPane =
+        useAppStore.getState().sweepRestoredPaneKeys?.has(cacheKey) ?? false
       const coldRestoreOverride =
-        startupOverride && 'launchConfig' in startupOverride
+        !sweepAlreadyRestoredThisPane && startupOverride && 'launchConfig' in startupOverride
           ? (startupOverride as ColdRestoreAgentResumeStartup)
           : null
       // Why: pre-signal the main process so its cooperation gate suppresses

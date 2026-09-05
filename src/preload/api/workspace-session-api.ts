@@ -24,6 +24,9 @@ export type WorkspaceSessionApi = {
      * own wake path consults this before resuming a sleeping record; a `true` result means the
      * main-process sweep already restored this pane and the renderer must not resume it again. */
     sweepRestoreMarkGet: (paneKey: string) => Promise<boolean>
+    /** [S10-21a C7c, D-R110 (ε)] Bulk, host-scoped, READ-ONLY — every marked pane key, hydrated
+     * ONCE at startup rather than one `sweepRestoreMarkGet` round-trip per sleeping record. */
+    sweepRestoreMarkList: () => Promise<string[]>
   }
   cache: {
     getGitHub: () => Promise<{

@@ -807,8 +807,14 @@ function createWebPreloadApi(): Partial<PreloadApi> {
       setSync: (session, hostId) => {
         writeJson(sessionStorageKeyForHost(hostId), sanitizeWebRuntimeWorkspaceSession(session))
       },
-      // Web has no main-process restore sweep (S10-21a C7) — never marked.
-      sweepRestoreMarkGet: () => Promise.resolve(false)
+      // [S10-21a C7c, D-R110 finding 15] The `orca serve` HOST this web client connects to DOES
+      // run the main-process restore sweep — the wrong rationale here previously claimed
+      // otherwise. What is actually true: this web client has no local `ipcRenderer` bridge to
+      // that host's sweep-mark table (unlike the desktop preload, which calls straight into the
+      // host process) — no RPC channel exposing `orchestration:sweepRestoreMark:get` to a remote
+      // web client exists yet, so this reads unmarked until one is added.
+      sweepRestoreMarkGet: () => Promise.resolve(false),
+      sweepRestoreMarkList: () => Promise.resolve([])
     },
     onboarding: {
       get: () => Promise.resolve(getStoredOnboarding()),
