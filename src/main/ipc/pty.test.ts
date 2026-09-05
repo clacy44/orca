@@ -270,6 +270,7 @@ import {
   isHiddenRendererPty
 } from './pty-hidden-delivery-gate'
 import { OrcaRuntimeService } from '../runtime/orca-runtime'
+import type { LaunchAdmission } from './agent-launch-admission'
 import * as AgentLaunchAdmissionModule from './agent-launch-admission'
 import { hasLiveClaudePtys, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
 import * as livePtyGate from '../claude-accounts/live-pty-gate'
@@ -20881,6 +20882,491 @@ describe('registerPtyHandlers', () => {
         )
         .all()
       expect(unrecordedAudit.length).toBeGreaterThanOrEqual(1)
+    })
+  })
+
+  describe('S10-21a C14, D-R121 B4: the daemon-respawn refresh gate on the controller funnel a sweep restore actually traverses', () => {
+    const HOST_ID = 'local'
+
+    function seedRespawnAgent(
+      db: OrchestrationDb,
+      args: { paneKey: string; oldTerminalHandle: string; oldProcessIncarnation?: string | null }
+    ): string {
+      const result = db.upsertAgentByPaneSuffix({
+        displayName: `agent-${args.paneKey}`,
+        role: null,
+        hostId: HOST_ID,
+        paneKey: args.paneKey,
+        terminalHandle: args.oldTerminalHandle,
+        processIncarnation: args.oldProcessIncarnation ?? null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: args.oldTerminalHandle,
+        originHostId: HOST_ID
+      })
+      if (result.outcome !== 'created') {
+        throw new Error(`seedRespawnAgent: expected 'created', got ${result.outcome}`)
+      }
+      const agentId = result.agent.id
+      // [D-R121 B4] `resolveDaemonRespawnGateAction`'s own precondition: a newest daemon_died
+      // audit for the pane (no later 'rebind' outranking it).
+      db.writeAgentAudit({
+        agentId,
+        actorPaneKey: args.paneKey,
+        actorHostId: HOST_ID,
+        verb: 'daemon_died',
+        outcome: 'observed',
+        reasonCode: null
+      })
+      return agentId
+    }
+
+    // A pact paused 'counterpart_gone' for `agentId`, so the T11 extension (pact resume) has
+    // something real to prove. Mirrors agent-pact-resume-after-restore.test.ts's own fixture.
+    function seedPausedPact(db: OrchestrationDb, agentId: string, paneKey: string): string {
+      const peer = db.upsertAgentByPaneSuffix({
+        displayName: `peer-${paneKey}`,
+        role: null,
+        hostId: HOST_ID,
+        paneKey: `peer-tab-${paneKey}:peer-leaf-${paneKey}`,
+        terminalHandle: `term_peer_${paneKey}`,
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: `term_peer_${paneKey}`,
+        originHostId: HOST_ID
+      })
+      if (peer.outcome !== 'created') {
+        throw new Error('seedPausedPact: peer seed failed')
+      }
+      const peerId = peer.agent.id
+      const { thread } = db.createThread({
+        subject: `pact-${paneKey}`,
+        createdByAgentId: agentId,
+        participants: [
+          { participantKey: agentId, agentId },
+          { participantKey: peerId, agentId: peerId }
+        ]
+      })
+      db.proposePact({
+        callerAgentId: agentId,
+        callerPaneKey: paneKey,
+        callerHostId: HOST_ID,
+        threadId: thread.id,
+        peerAgentId: peerId,
+        stepsTotal: null
+      })
+      db.acceptPact({
+        callerAgentId: peerId,
+        callerPaneKey: `peer-tab-${paneKey}:peer-leaf-${paneKey}`,
+        callerHostId: HOST_ID,
+        threadId: thread.id
+      })
+      db.autoPausePactsForAgent(agentId, 'counterpart_gone')
+      return thread.id
+    }
+
+    // [FORCED DEVIATION, see RETURN] The brief's own TESTS section asks for this descriptor
+    // "redeemed through a real RestoreTicketRegistry". `restore-ticket-registry-import-boundary
+    // .test.ts` (INV-P-021) refuses ANY import of that module from anywhere under src/main/ipc —
+    // no per-file exception exists there (unlike the sibling literal-fence below), and this is a
+    // structural invariant well outside C14's scope to touch. This builds the identical payload
+    // shape a redeemed ticket carries (RestoreTicketPayload) by hand instead — the ticket
+    // registry itself is unmodified by C14 and already proven elsewhere (agent-launch-admission
+    // .test.ts T37; orca-runtime-host-resume-descriptor-provenance.test.ts); what THIS harness
+    // must prove is pty.ts's own threading + gate, which this payload shape drives identically.
+    function handCraftedHostResumeAdmission(payload: {
+      predecessorPaneKey: string
+      sessionId: string
+      executionHostId: string
+      launchGeneration: string
+    }): LaunchAdmission {
+      return {
+        kind: 'host-resume',
+        sessionId: payload.sessionId,
+        predecessorPaneKey: payload.predecessorPaneKey,
+        executionHostId: payload.executionHostId,
+        launchGeneration: payload.launchGeneration
+      }
+    }
+
+    // The captured controller seam (pty.test.ts already captures it via setPtyController) — a
+    // runtime double whose `getOrchestrationDb`/`getTerminalProcessIncarnation` this suite
+    // controls; classification, the gate, and the ticket registry are never stubbed.
+    function registerFunnelGateController(
+      db: OrchestrationDb,
+      runtimeOverrides: Record<string, unknown> = {}
+    ): { spawn: (args: Record<string, unknown>) => Promise<unknown> } {
+      let controller: { spawn: (args: Record<string, unknown>) => Promise<unknown> } | undefined
+      const runtime = {
+        ...makeRuntimeStubWithStore(),
+        getOrchestrationDb: () => db,
+        setPtyController: vi.fn((next: typeof controller) => {
+          controller = next
+        }),
+        beginPtyRegistration: vi.fn(),
+        cancelPendingPtyRegistration: vi.fn(),
+        registerPreAllocatedHandleForPty: vi.fn(),
+        registerPty: vi.fn(),
+        getTerminalProcessIncarnation: vi.fn(() => null),
+        ...runtimeOverrides
+      }
+      registerPtyHandlers(mainWindow as never, runtime as never)
+      if (!controller) {
+        throw new Error('registerFunnelGateController: controller was not captured')
+      }
+      return controller
+    }
+
+    it('Case A: a real fresh-spawn host_resume classification refreshes the NEW handle/identity — never the pre-spawn one — and resumes a paused pact', async () => {
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'pty-case-a', incarnationId: 'inc-provider-a' })),
+        listProcesses: vi.fn(async () => [{ id: 'pty-case-a', incarnationId: 'inc-provider-a' }])
+      })
+      const db = new OrchestrationDb(':memory:')
+      const tabId = '99999999-9999-4999-8999-aaaaaaaaaa01'
+      const leafId = '99999999-9999-4999-8999-aaaaaaaaaa02'
+      const paneKey = makePaneKey(tabId, leafId)
+      const agentId = seedRespawnAgent(db, {
+        paneKey,
+        oldTerminalHandle: 'term_dead_old_a',
+        oldProcessIncarnation: 'pty-old:inc-old-a'
+      })
+      const threadId = seedPausedPact(db, agentId, paneKey)
+      expect(db.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+      const getTerminalProcessIncarnation = vi.fn((handle: string) =>
+        handle === 'term_new_handle_a' ? 'pty-new:inc-new-a' : null
+      )
+      const controller = registerFunnelGateController(db, { getTerminalProcessIncarnation })
+      const launchAdmission = handCraftedHostResumeAdmission({
+        predecessorPaneKey: paneKey,
+        sessionId: 'sess-case-a',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-case-a'
+      })
+
+      await controller.spawn({
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-c14-a',
+        command: 'claude --resume sess-case-a',
+        launchAgent: 'claude',
+        worktreeId: 'worktree-c14-a',
+        tabId,
+        leafId,
+        preAllocatedHandle: 'term_new_handle_a',
+        launchAdmission,
+        agentSessionEnsure: {
+          claim: {
+            digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
+            keyId: 'claim-key-a',
+            identityDigest: 'c14-case-a-identity-digest-9999999999999999',
+            worktreeScopeDigest: 'c14-case-a-worktree-scope-99999999999999999',
+            agent: 'claude' as const
+          },
+          surface: {
+            worktreeId: 'worktree-c14-a',
+            tabId,
+            leafId,
+            terminalHandle: 'term_new_handle_a'
+          }
+        }
+      })
+
+      expect(getTerminalProcessIncarnation).toHaveBeenCalledWith('term_new_handle_a')
+      expect(getTerminalProcessIncarnation).not.toHaveBeenCalledWith('term_dead_old_a')
+      const row = db.getAgentByIdIncludingTombstoned(agentId)
+      expect(row?.terminal_handle).toBe('term_new_handle_a')
+      expect(row?.process_incarnation).toBe('pty-new:inc-new-a')
+      expect(db.getThread(threadId)?.pact_paused_at).toBeNull()
+    })
+
+    it('Case B: legacy/null identity leaves process_incarnation UNCHANGED, handle still refreshed, audit carries identity_unavailable_at_refresh', async () => {
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'pty-case-b', incarnationId: 'inc-provider-b' })),
+        listProcesses: vi.fn(async () => [{ id: 'pty-case-b', incarnationId: 'inc-provider-b' }])
+      })
+      const db = new OrchestrationDb(':memory:')
+      const tabId = '99999999-9999-4999-8999-bbbbbbbbbb01'
+      const leafId = '99999999-9999-4999-8999-bbbbbbbbbb02'
+      const paneKey = makePaneKey(tabId, leafId)
+      const agentId = seedRespawnAgent(db, {
+        paneKey,
+        oldTerminalHandle: 'term_dead_old_b',
+        oldProcessIncarnation: 'pty-old:inc-old-b'
+      })
+
+      const getTerminalProcessIncarnation = vi.fn(() => null)
+      const controller = registerFunnelGateController(db, { getTerminalProcessIncarnation })
+      const launchAdmission = handCraftedHostResumeAdmission({
+        predecessorPaneKey: paneKey,
+        sessionId: 'sess-case-b',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-case-b'
+      })
+
+      await controller.spawn({
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-c14-b',
+        command: 'claude --resume sess-case-b',
+        launchAgent: 'claude',
+        worktreeId: 'worktree-c14-b',
+        tabId,
+        leafId,
+        preAllocatedHandle: 'term_new_handle_b',
+        launchAdmission,
+        agentSessionEnsure: {
+          claim: {
+            digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
+            keyId: 'claim-key-b',
+            identityDigest: 'c14-case-b-identity-digest-9999999999999999',
+            worktreeScopeDigest: 'c14-case-b-worktree-scope-99999999999999999',
+            agent: 'claude' as const
+          },
+          surface: {
+            worktreeId: 'worktree-c14-b',
+            tabId,
+            leafId,
+            terminalHandle: 'term_new_handle_b'
+          }
+        }
+      })
+
+      const row = db.getAgentByIdIncludingTombstoned(agentId)
+      expect(row?.terminal_handle).toBe('term_new_handle_b')
+      // [Case B] column UNCHANGED — never overwritten with null.
+      expect(row?.process_incarnation).toBe('pty-old:inc-old-b')
+      const rawDb = (
+        db as unknown as {
+          db: { prepare: (sql: string) => { all: (...a: unknown[]) => unknown[] } }
+        }
+      ).db
+      const audits = rawDb
+        .prepare(
+          `SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted' AND reason_code LIKE '%identity_unavailable_at_refresh%'`
+        )
+        .all()
+      expect(audits.length).toBeGreaterThanOrEqual(1)
+    })
+
+    it('Case C (fence): the renderer funnel with the literal `{kind:"caller"}` never reaches \'refresh\' — the agent row stays untouched', async () => {
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'pty-case-c', incarnationId: 'inc-provider-c' }))
+      })
+      const db = new OrchestrationDb(':memory:')
+      const tabId = '99999999-9999-4999-8999-cccccccccc01'
+      const leafId = '99999999-9999-4999-8999-cccccccccc02'
+      const paneKey = makePaneKey(tabId, leafId)
+      const agentId = seedRespawnAgent(db, {
+        paneKey,
+        oldTerminalHandle: 'term_dead_old_c',
+        oldProcessIncarnation: 'pty-old:inc-old-c'
+      })
+      // A self-resume-shaped launch — the newest row's own session id, so admission classifies
+      // self_resume_caller (never host_resume: the renderer funnel can only ever pass
+      // `{kind:'caller'}`, regardless of how resume-shaped the command looks).
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey,
+        agentType: 'claude',
+        sessionId: 'sess-case-c',
+        launchGeneration: 'gen-case-c',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      const getTerminalProcessIncarnation = vi.fn(() => 'pty-new:inc-new-c')
+      const runtime = {
+        ...makeRuntimeStubWithStore(),
+        getOrchestrationDb: () => db,
+        getTerminalProcessIncarnation
+      }
+      registerPtyHandlers(mainWindow as never, runtime as never)
+
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        worktreeId: 'worktree-c14-c',
+        command: 'claude --resume sess-case-c',
+        launchAgent: 'claude',
+        tabId,
+        leafId
+      })
+
+      const row = db.getAgentByIdIncludingTombstoned(agentId)
+      expect(row?.terminal_handle).toBe('term_dead_old_c')
+      expect(row?.process_incarnation).toBe('pty-old:inc-old-c')
+      expect(getTerminalProcessIncarnation).not.toHaveBeenCalled()
+    })
+
+    describe('Case D (T44 family): every launchAdmissionBundle call inside RuntimePtyController.spawn passes args.launchAdmission', () => {
+      let admitSpy: ReturnType<typeof vi.spyOn>
+
+      beforeEach(() => {
+        admitSpy = vi.spyOn(AgentLaunchAdmissionModule, 'admitAgentLaunch')
+      })
+
+      afterEach(() => {
+        admitSpy.mockRestore()
+      })
+
+      it('the agentSessionEnsure branch threads args.launchAdmission end to end — {kind:"host-resume"} + matching sessionId classifies host_resume', async () => {
+        installDaemonTestProvider({
+          spawn: vi.fn(async () => ({ id: 'pty-case-d1', incarnationId: 'inc-provider-d1' })),
+          listProcesses: vi.fn(async () => [
+            { id: 'pty-case-d1', incarnationId: 'inc-provider-d1' }
+          ])
+        })
+        const db = new OrchestrationDb(':memory:')
+        const tabId = '99999999-9999-4999-8999-dddddddddd01'
+        const leafId = '99999999-9999-4999-8999-dddddddddd02'
+        const paneKey = makePaneKey(tabId, leafId)
+        const controller = registerFunnelGateController(db)
+        const launchAdmission = handCraftedHostResumeAdmission({
+          predecessorPaneKey: paneKey,
+          sessionId: 'sess-case-d1',
+          executionHostId: HOST_ID,
+          launchGeneration: 'gen-case-d1'
+        })
+
+        await controller.spawn({
+          cols: 80,
+          rows: 24,
+          cwd: '/tmp/worktree-c14-d1',
+          command: 'claude --resume sess-case-d1',
+          launchAgent: 'claude',
+          worktreeId: 'worktree-c14-d1',
+          tabId,
+          leafId,
+          preAllocatedHandle: 'term_new_handle_d1',
+          launchAdmission,
+          agentSessionEnsure: {
+            claim: {
+              digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
+              keyId: 'claim-key-d1',
+              identityDigest: 'c14-case-d1-identity-digest-999999999999999',
+              worktreeScopeDigest: 'c14-case-d1-worktree-scope-9999999999999999',
+              agent: 'claude' as const
+            },
+            surface: {
+              worktreeId: 'worktree-c14-d1',
+              tabId,
+              leafId,
+              terminalHandle: 'term_new_handle_d1'
+            }
+          }
+        })
+
+        expect(admitSpy).toHaveBeenCalledOnce()
+        expect(admitSpy.mock.calls[0]?.[2]).toEqual(launchAdmission)
+        const admitted = await admitSpy.mock.results[0]!.value
+        expect(admitted.classification).toBe('host_resume')
+      })
+
+      it('the spawnForStablePane (else) branch also threads args.launchAdmission end to end', async () => {
+        installDaemonTestProvider({
+          spawn: vi.fn(async () => ({ id: 'pty-case-d2', incarnationId: 'inc-provider-d2' }))
+        })
+        const db = new OrchestrationDb(':memory:')
+        const tabId = '99999999-9999-4999-8999-dddddddddd11'
+        const leafId = '99999999-9999-4999-8999-dddddddddd12'
+        const paneKey = makePaneKey(tabId, leafId)
+        const controller = registerFunnelGateController(db)
+        const launchAdmission = handCraftedHostResumeAdmission({
+          predecessorPaneKey: paneKey,
+          sessionId: 'sess-case-d2',
+          executionHostId: HOST_ID,
+          launchGeneration: 'gen-case-d2'
+        })
+
+        await controller.spawn({
+          cols: 80,
+          rows: 24,
+          cwd: '/tmp/worktree-c14-d2',
+          command: 'claude --resume sess-case-d2',
+          launchAgent: 'claude',
+          worktreeId: 'worktree-c14-d2',
+          tabId,
+          leafId,
+          preAllocatedHandle: 'term_new_handle_d2',
+          launchAdmission
+        })
+
+        expect(admitSpy).toHaveBeenCalledOnce()
+        expect(admitSpy.mock.calls[0]?.[2]).toEqual(launchAdmission)
+        const admitted = await admitSpy.mock.results[0]!.value
+        expect(admitted.classification).toBe('host_resume')
+      })
+    })
+
+    it("sweep-level fence (T11 extension): after a Layer-2 restore through the real controller funnel, the agents row handle/identity are the new pty's and paused pacts resume", async () => {
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'pty-sweep-fence', incarnationId: 'inc-provider-sweep' })),
+        listProcesses: vi.fn(async () => [
+          { id: 'pty-sweep-fence', incarnationId: 'inc-provider-sweep' }
+        ])
+      })
+      const db = new OrchestrationDb(':memory:')
+      const tabId = '99999999-9999-4999-8999-eeeeeeeeee01'
+      const leafId = '99999999-9999-4999-8999-eeeeeeeeee02'
+      const paneKey = makePaneKey(tabId, leafId)
+      const agentId = seedRespawnAgent(db, {
+        paneKey,
+        oldTerminalHandle: 'term_dead_old_sweep',
+        oldProcessIncarnation: 'pty-old:inc-old-sweep'
+      })
+      const threadId = seedPausedPact(db, agentId, paneKey)
+
+      const getTerminalProcessIncarnation = vi.fn((handle: string) =>
+        handle === 'term_new_handle_sweep' ? 'pty-new:inc-new-sweep' : null
+      )
+      const controller = registerFunnelGateController(db, { getTerminalProcessIncarnation })
+      const launchAdmission = handCraftedHostResumeAdmission({
+        predecessorPaneKey: paneKey,
+        sessionId: 'sess-sweep-fence',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-sweep-fence'
+      })
+
+      await controller.spawn({
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/worktree-c14-sweep',
+        command: 'claude --resume sess-sweep-fence',
+        launchAgent: 'claude',
+        worktreeId: 'worktree-c14-sweep',
+        tabId,
+        leafId,
+        preAllocatedHandle: 'term_new_handle_sweep',
+        launchAdmission,
+        agentSessionEnsure: {
+          claim: {
+            digestVersion: AGENT_SESSION_CLAIM_DIGEST_VERSION,
+            keyId: 'claim-key-sweep',
+            identityDigest: 'c14-sweep-fence-identity-999999999999999999',
+            worktreeScopeDigest: 'c14-sweep-fence-worktree-999999999999999999',
+            agent: 'claude' as const
+          },
+          surface: {
+            worktreeId: 'worktree-c14-sweep',
+            tabId,
+            leafId,
+            terminalHandle: 'term_new_handle_sweep'
+          }
+        }
+      })
+
+      const row = db.getAgentByIdIncludingTombstoned(agentId)
+      expect(row?.terminal_handle).toBe('term_new_handle_sweep')
+      expect(row?.process_incarnation).toBe('pty-new:inc-new-sweep')
+      expect(db.getThread(threadId)?.pact_paused_at).toBeNull()
     })
   })
 })

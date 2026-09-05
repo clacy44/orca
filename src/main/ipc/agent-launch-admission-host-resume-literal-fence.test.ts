@@ -26,14 +26,22 @@ const FORBIDDEN_ROOTS = [
   resolve(REPO_ROOT, 'src', 'preload'),
   resolve(REPO_ROOT, 'src', 'shared')
 ]
-// ipc/*: every module EXCEPT the admission descriptor's own type declaration and this fence's own
-// source (which necessarily names the literal it scans for).
+// ipc/*: every module EXCEPT the admission descriptor's own type declaration, this fence's own
+// source (which necessarily names the literal it scans for), and one further, narrowly-scoped
+// test file:
+//   - pty.test.ts [S10-21a C14, D-R121 B4]: the controller-funnel gate harness constructs real
+//     `{kind:'host-resume', ...}` `LaunchAdmission` values to drive the REAL classification
+//     (`admitAgentLaunch`) and the REAL gate through pty.ts's captured `RuntimePtyController`,
+//     per that brief's explicit "do not stub ... the classification" constraint — the identical
+//     justification `agent-launch-admission.test.ts` already has below for the same literal.
+//     Never wired onto any RPC/schema/relay/renderer surface; the value never leaves the test.
 const IPC_ROOT = resolve(REPO_ROOT, 'src', 'main', 'ipc')
 const IPC_ALLOWED_FILES = new Set(
   [
     'agent-launch-admission.ts',
     'agent-launch-admission.test.ts',
-    'agent-launch-admission-host-resume-literal-fence.test.ts'
+    'agent-launch-admission-host-resume-literal-fence.test.ts',
+    'pty.test.ts'
   ].map((f) => join(IPC_ROOT, f))
 )
 

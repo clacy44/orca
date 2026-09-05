@@ -835,7 +835,8 @@ function launchAdmissionClassificationToWire(
 
 export function launchAdmissionBundle(
   runtime: OrcaRuntimeService | undefined,
-  connectionId: string | null | undefined
+  connectionId: string | null | undefined,
+  admission: LaunchAdmission = { kind: 'caller' }
 ): {
   getDb: () => OrchestrationDb | undefined
   launchAdmission: LaunchAdmission
@@ -863,7 +864,7 @@ export function launchAdmissionBundle(
     // in the shape callers expect (a `LaunchAdmissionRefusedError`), never an unrelated crash.
     getDb: () =>
       typeof runtime?.getOrchestrationDb === 'function' ? runtime.getOrchestrationDb() : undefined,
-    launchAdmission: { kind: 'caller' },
+    launchAdmission: admission,
     ctx: {
       hostId,
       executionHostId,
@@ -933,6 +934,7 @@ type StablePaneSpawnContext = {
   connectionId?: string | null
   resolveOwner?: () => StablePaneOwner | null
   onFreshSpawn?: (result: PtySpawnResult) => void
+  launchAdmission?: LaunchAdmission
 }
 
 function stablePanePersistenceFence(
@@ -1067,7 +1069,7 @@ async function spawnForStablePane(
     args.provider,
     args.spawnOptions,
     args.paneLane,
-    launchAdmissionBundle(args.runtime, args.connectionId),
+    launchAdmissionBundle(args.runtime, args.connectionId, args.launchAdmission),
     onAdmitted
   )
   args.onFreshSpawn?.(result)
@@ -5221,7 +5223,7 @@ export function registerPtyHandlers(
                   provider,
                   spawnOptions,
                   paneLane,
-                  launchAdmissionBundle(runtime, args.connectionId),
+                  launchAdmissionBundle(runtime, args.connectionId, args.launchAdmission),
                   (admitted) => {
                     admittedLaunch = admitted
                   }
@@ -5290,7 +5292,8 @@ export function registerPtyHandlers(
                         args.worktreeId,
                         args.connectionId
                       ),
-                    onFreshSpawn: reportPtySpawnCommitted
+                    onFreshSpawn: reportPtySpawnCommitted,
+                    launchAdmission: args.launchAdmission
                   },
                   (admitted) => {
                     // [S10-21a C7, D-R105 F-5 partial] Same capture the `agentSessionEnsure`
@@ -5572,6 +5575,65 @@ export function registerPtyHandlers(
         }
         if (args.preAllocatedHandle && !stablePaneOwner?.handle) {
           runtime?.registerPreAllocatedHandleForPty(result.id, args.preAllocatedHandle)
+        }
+        // [S10-21a C14, D-R121 B4] Post-spawn-commit gate on the controller funnel — the ONE
+        // funnel a sweep restore's host-resume descriptor actually traverses (the
+        // renderer funnel's own gate at `pty:spawn` sits on a funnel that can never produce
+        // `host_resume`/`self_resume_host`, D-R121 B1/B2). Placed after the shared
+        // `registerPreAllocatedHandleForPty` call above (not inside either arm of the
+        // `agentSessionEnsure`/`spawnForStablePane` branch) because the sweep's own restore
+        // (`ensureAgentSession` -> `agentSessionClaim`) always takes the `agentSessionEnsure`
+        // branch, where `stablePaneOwner` is never assigned — so this must run at a point common
+        // to both branches. Same decision function, same refresh + pact-resume semantics as the
+        // renderer's own dead `refresh` arm. Keyed on `stablePaneOwner?.handle ??
+        // args.preAllocatedHandle`: `stablePaneOwner` is only ever non-null on
+        // `spawnForStablePane`'s reattach arm; every other admitted path (including the sweep's)
+        // carries its new handle on `args.preAllocatedHandle`, now guaranteed registered above.
+        if (spawnIdentityPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
+          const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
+          const respawnGateDb = respawnGateBundle.getDb()
+          const respawnRefreshHandle = stablePaneOwner?.handle ?? args.preAllocatedHandle
+          if (respawnGateDb) {
+            const gateAction = resolveDaemonRespawnGateAction(
+              respawnGateDb.newestDaemonDeathOrRebindVerbForPane(spawnIdentityPaneKey),
+              admittedLaunch?.classification
+            )
+            if (gateAction.kind === 'refresh' && respawnRefreshHandle) {
+              const refreshResult = respawnGateDb.refreshAgentHandleAfterRespawn({
+                hostId: respawnGateBundle.ctx.hostId,
+                paneKey: spawnIdentityPaneKey,
+                newTerminalHandle: respawnRefreshHandle,
+                processIncarnation:
+                  runtime?.getTerminalProcessIncarnation(respawnRefreshHandle) ?? null
+              })
+              if (refreshResult.ok) {
+                respawnGateDb.resumePactsForRestoredAgent(
+                  refreshResult.agentId,
+                  refreshResult.pactsToUnpause
+                )
+              }
+            } else if (gateAction.kind === 'refuse_fresh_session') {
+              respawnGateDb.writeAgentAudit({
+                agentId: null,
+                actorPaneKey: spawnIdentityPaneKey,
+                actorHostId: respawnGateBundle.ctx.hostId,
+                verb: 'rebind',
+                outcome: 'refused',
+                reasonCode: 'daemon_respawn_fresh_session'
+              })
+              respawnGateBundle.ctx.notice(
+                spawnIdentityPaneKey,
+                'rebind',
+                'daemon_respawn_fresh_session'
+              )
+            } else if (gateAction.kind === 'notice_only') {
+              respawnGateBundle.ctx.notice(
+                spawnIdentityPaneKey,
+                'rebind',
+                'daemon_respawn_fresh_session_self_resume'
+              )
+            }
+          }
         }
         if (args.worktreeId) {
           runtime?.registerPty(
