@@ -57,10 +57,15 @@ export type SleepingAgentSessionRecord = {
   launchConfig?: SleepingAgentLaunchConfig
   /** How the record was captured. Worktree-sleep records (legacy records have
    *  no origin) are consumed by worktree activation, which opens a fresh tab.
-   *  Quit/live records describe panes that still exist in the restored session,
-   *  so only the pane's own cold-restore path may consume them — activation
-   *  launching a tab too would duplicate a warm-reattached session (#5232). */
-  origin?: 'worktree-sleep' | 'quit' | 'live'
+   *  Quit/live/daemon-death records describe panes that still exist in the restored
+   *  session, so only the pane's own cold-restore path may consume them — activation
+   *  launching a tab too would duplicate a warm-reattached session (#5232).
+   *  [S10-21a C7f, Ruling 34 Addendum 24] `daemon-death`: captured at the
+   *  `captureSleepingAgentSessionForDaemonDeath` remount, never at quit — carries
+   *  the same durable-resume-handle weight as `quit` but must never claim its
+   *  periodic-checkpoint precedence (agent-status.ts's `captureAllSleepingAgentSessions`
+   *  compares `=== 'quit'` literally). */
+  origin?: 'worktree-sleep' | 'quit' | 'live' | 'daemon-death'
   /** Prevents provider-session relaunch while main reconciles a durable
    *  orchestration assignment against authoritative PTY inventory. */
   automaticResumeBlockedBy?: 'legacy-orchestration-worker'

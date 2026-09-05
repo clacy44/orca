@@ -197,11 +197,16 @@ export async function restoreOneRegisteredPane(
   let offerPlacement = true
   if (occupant) {
     if (occupant.paneKey === launchRow.pane_key) {
-      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived')
-      return { kind: 'skipped_daemon_survived' }
+      // [S10-21a C7f, D-R114 fix 5] Corroboration only, never a second decision point — the
+      // evidence-based skip above (d1/d3) already decided "daemon survived" before minting. This
+      // branch was reachable only where `findConnectedLeafOccupant`'s `this.leaves` happens to be
+      // populated by this process's own sweep run point (empty on the desktop main-startup path,
+      // per D-R111 R2's own comment above), so it never disagreed with that decision in practice.
+      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived_corroborated')
+    } else {
+      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
+      offerPlacement = false
     }
-    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
-    offerPlacement = false
   } else if (!deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)) {
     offerPlacement = false
   }

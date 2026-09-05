@@ -2723,6 +2723,15 @@ void app.whenReady().then(async () => {
           continue
         }
         const row = db.newestLaunchForPane(hostId, paneKey)
+        // [S10-21a C7f, D-R114 fix 3] A plain shell with no launch row and no registered agent
+        // row on this pane has nothing for the audit to be "about" — skip it rather than write
+        // a `daemon_died` fact attributed to an agent that was never here.
+        if (!row) {
+          const registered = db.getAgentByPaneKey(hostId, paneKey)
+          if (!registered || registered.derived !== 0) {
+            continue
+          }
+        }
         db.writeAgentAudit({
           agentId: row?.agent_id ?? null,
           actorPaneKey: paneKey,

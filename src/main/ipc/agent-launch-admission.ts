@@ -24,7 +24,12 @@ import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-s
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
 import { withPaneLock } from './agent-launch-admission-lock'
-import { audit, passThrough, type AdmittedLaunch } from './agent-launch-admission-support'
+import {
+  audit,
+  passThrough,
+  type AdmittedLaunch,
+  type LaunchAdmissionClassification
+} from './agent-launch-admission-support'
 import {
   claudeIndexInSubject,
   resolveAdmissionShell,
@@ -96,12 +101,14 @@ function buildRecordedAdmission(
   paneKey: string,
   seq: number,
   spawnOptions: PtySpawnOptions,
+  classification: LaunchAdmissionClassification,
   onRowDeleted?: () => void
 ): AdmittedLaunch {
   let settled = false
   let ensureFailureAudited = false
   return {
     spawnOptions,
+    classification,
     confirm: (spawnResult: PtySpawnResult) => {
       if (settled) {
         return
@@ -254,6 +261,9 @@ export async function admitAgentLaunch(
       const x = effectiveId.sessionId
       if (admission.kind === 'host-resume' && admission.sessionId === x) {
         // HOST_RESUME
+        // [S10-21a C7f, D-R114 fix 2] Resume-shaped notice so a renderer store consumer can
+        // clear a pane's stale sleeping-session record (see RETURN: no such consumer exists yet).
+        ctx.notice(paneKey, 'launch_host_resume', 'launch_host_resume')
         const params: RecordLaunchParams = {
           hostId: ctx.hostId,
           paneKey,
@@ -271,12 +281,20 @@ export async function admitAgentLaunch(
         // [D-R104 F-4] A restated row is not this call's to confirm/compensate over — it was
         // already there (F-12).
         if (result.restated) {
-          return passThrough(spawnOptions)
+          return passThrough(spawnOptions, 'host_resume')
         }
         const predecessorPaneKey = admission.predecessorPaneKey
-        return buildRecordedAdmission(db, ctx, paneKey, result.row.seq, spawnOptions, () => {
-          db.restoreCurrentSessionForPane(ctx.hostId, predecessorPaneKey)
-        })
+        return buildRecordedAdmission(
+          db,
+          ctx,
+          paneKey,
+          result.row.seq,
+          spawnOptions,
+          'host_resume',
+          () => {
+            db.restoreCurrentSessionForPane(ctx.hostId, predecessorPaneKey)
+          }
+        )
       }
       if (newestRow !== undefined && newestRow.session_id === x) {
         // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice.
@@ -289,7 +307,10 @@ export async function admitAgentLaunch(
           // fallback is defensive only, never actually reached.
           ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
         }
-        return passThrough(spawnOptions)
+        return passThrough(
+          spawnOptions,
+          reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller'
+        )
       }
       return unrecorded(owned ? 'pane_key_owned' : 'foreign_selector')
     }
@@ -303,6 +324,9 @@ export async function admitAgentLaunch(
     }
 
     // HOST_MINTED
+    // [S10-21a C7f, D-R114 fix 2] Minted-shaped notice — distinct reason code from
+    // launch_host_resume so a renderer consumer can tell "keep sleeping" from "clear it".
+    ctx.notice(paneKey, 'launch_host_minted', 'launch_host_minted')
     const sessionId = randomUUID()
     const spliced = spliceHostMintedSessionId(channelResolution.subject, sessionId, shell)
     if (!spliced.ok) {
@@ -334,8 +358,8 @@ export async function admitAgentLaunch(
     }
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {
-      return passThrough(nextSpawnOptions)
+      return passThrough(nextSpawnOptions, 'host_minted')
     }
-    return buildRecordedAdmission(db, ctx, paneKey, result.row.seq, nextSpawnOptions)
+    return buildRecordedAdmission(db, ctx, paneKey, result.row.seq, nextSpawnOptions, 'host_minted')
   })
 }

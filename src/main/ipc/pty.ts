@@ -6935,6 +6935,63 @@ export function registerPtyHandlers(
           // `admittedLaunch` via `onAdmitted` — mirrors the other branch's own assignment.
           providerResult = stablePaneSpawn.result
           stablePaneOwner = stablePaneSpawn.owner
+          // [S10-21a C7f, Ruling 34 Addendum 24, D-R114 fix 1] Post-spawn-commit gate: only for
+          // a covered launch whose pane's newest daemon_died/rebind audit is 'daemon_died' (a
+          // newer 'rebind' — this gate's own prior fire, or C5's Layer-2 rebind — always wins,
+          // so this never re-fires once the pane is resolved). Non-covered launches never reach
+          // it (matches D-R114's own scope note: no wait, no gate).
+          if (reservationPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
+            const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
+            const respawnGateDb = respawnGateBundle.getDb()
+            if (
+              respawnGateDb &&
+              respawnGateDb.newestDaemonDeathOrRebindVerbForPane(reservationPaneKey) ===
+                'daemon_died'
+            ) {
+              const classification = admittedLaunch?.classification
+              if (
+                (classification === 'host_resume' || classification === 'self_resume_host') &&
+                stablePaneOwner?.handle
+              ) {
+                const refreshResult = respawnGateDb.refreshAgentHandleAfterRespawn({
+                  hostId: respawnGateBundle.ctx.hostId,
+                  paneKey: reservationPaneKey,
+                  newTerminalHandle: stablePaneOwner.handle,
+                  processIncarnation: stablePaneSpawn.result.incarnationId ?? null
+                })
+                // [OPEN QUESTION, see RETURN] `refreshResult.pactsToUnpause` — C10's own
+                // post-commit un-pause helper (§2.11 N4) has not landed anywhere in this repo
+                // yet, and `pact-lifecycle.ts`'s `resumePact`/`resumePactOrRequest` both require
+                // a real participant `callerAgentId`, refusing a host-authored resume with no
+                // actor of its own — there is no safe primitive to call here today. Left
+                // un-consumed, exactly as `rebindRestoredPane`'s own `pactsToUnpause` already is
+                // (agent-restore-rebind.ts: "Pact un-pause is C10's job").
+                void refreshResult
+              } else if (classification === 'host_minted') {
+                respawnGateDb.writeAgentAudit({
+                  agentId: null,
+                  actorPaneKey: reservationPaneKey,
+                  actorHostId: respawnGateBundle.ctx.hostId,
+                  verb: 'rebind',
+                  outcome: 'refused',
+                  reasonCode: 'daemon_respawn_fresh_session'
+                })
+                respawnGateBundle.ctx.notice(
+                  reservationPaneKey,
+                  'rebind',
+                  'daemon_respawn_fresh_session'
+                )
+              } else if (classification === 'self_resume_caller') {
+                // The contest path (ctx.contestedLineage) already fires from admission itself —
+                // notice only, no audit row, no refresh.
+                respawnGateBundle.ctx.notice(
+                  reservationPaneKey,
+                  'rebind',
+                  'daemon_respawn_fresh_session_self_resume'
+                )
+              }
+            }
+          }
           if (
             stablePaneOwner &&
             isMintedSessionId &&

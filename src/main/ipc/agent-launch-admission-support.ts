@@ -4,6 +4,16 @@ import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 
+/** [S10-21a C7f, D-R114 fix 1] The admission outcome pty.ts's post-spawn-commit gate needs at
+ * :6937 — HOST_MINTED and HOST_RESUME both come from `buildRecordedAdmission`; the two
+ * SELF_RESUME shapes come from their own `passThrough` calls. Undefined for every other
+ * pass-through (uncovered, unrecorded, refused) — the gate never runs for those. */
+export type LaunchAdmissionClassification =
+  | 'host_resume'
+  | 'host_minted'
+  | 'self_resume_caller'
+  | 'self_resume_host'
+
 export type AdmittedLaunch = {
   spawnOptions: PtySpawnOptions
   /** [§C.6] Compares the spawn's actual surface against the pane admission wrote for. */
@@ -12,10 +22,19 @@ export type AdmittedLaunch = {
    * (`launch_ensure_failed_after_spawn`) used by the `agentSessionOwners.ensure` catch, which runs
    * after the spawn callback returned and may still have a live process. */
   compensate: (fromEnsureFailure?: boolean) => void
+  classification?: LaunchAdmissionClassification
 }
 
-export function passThrough(spawnOptions: PtySpawnOptions): AdmittedLaunch {
-  return { spawnOptions, confirm: () => {}, compensate: () => {} }
+export function passThrough(
+  spawnOptions: PtySpawnOptions,
+  classification?: LaunchAdmissionClassification
+): AdmittedLaunch {
+  return {
+    spawnOptions,
+    confirm: () => {},
+    compensate: () => {},
+    ...(classification ? { classification } : {})
+  }
 }
 
 export function audit(

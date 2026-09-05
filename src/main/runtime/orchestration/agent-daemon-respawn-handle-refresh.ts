@@ -32,7 +32,15 @@ export type RefreshAgentHandleAfterRespawnResult =
  * `rebindRestoredPane`'s own audit shape so both surface identically in `agent_audit`. Returns
  * the same-shaped `pactsToUnpause` list `rebindRestoredPane` returns — the caller (C10, or
  * whichever wiring lands this) un-pauses them post-commit, exactly as C5's own contract states;
- * this function does not call `resumePact` itself. */
+ * this function does not call `resumePact` itself.
+ *
+ * TRANSACTION CONTRACT: opens its own `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` — never call this
+ * from inside a caller-held transaction (sqlite3 does not nest `BEGIN`; a nested call throws
+ * `cannot start a transaction within a transaction` and the outer transaction rolls back with
+ * it). Callers needing this alongside another write (e.g. C10's pact un-pause) must sequence
+ * them as separate, back-to-back transactions post-commit, the same convention `rebindRestoredPane`
+ * (agent-restore-rebind.ts) and `recordLaunch` (agent-launch-sessions.ts) already use for their
+ * own post-commit follow-ups (`prunePaneRows`/`pruneGlobalRows`). */
 export function refreshAgentHandleAfterRespawn(
   db: Database.Database,
   params: RefreshAgentHandleAfterRespawnParams

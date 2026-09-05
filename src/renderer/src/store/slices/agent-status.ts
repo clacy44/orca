@@ -660,9 +660,13 @@ function markManualSleepLazyRestore(record: SleepingAgentSessionRecord): void {
 }
 
 // Why: `live`/legacy rows are provisional checkpoints a fresh capture supersedes; an explicit
-// sleep or quit capture is the pane's only resume handle once its live row is gone.
+// sleep, quit, or daemon-death capture is the pane's only resume handle once its live row is gone.
 function isDurableSleepingCapture(record: SleepingAgentSessionRecord): boolean {
-  return record.origin === 'worktree-sleep' || record.origin === 'quit'
+  return (
+    record.origin === 'worktree-sleep' ||
+    record.origin === 'quit' ||
+    record.origin === 'daemon-death'
+  )
 }
 
 // Why: manual sleep kills the pty either way, so the record carries resume identity, not the dead
@@ -3101,7 +3105,7 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
           worktreeId,
           capturedAt: Date.now(),
           ...(launchConfig ? { launchConfig } : {}),
-          origin: 'quit'
+          origin: 'daemon-death'
         })
         if (!record) {
           return s
@@ -3150,7 +3154,10 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
             origin
           })
           const existing = next[entry.paneKey]
-          // Why: a periodic timer must not downgrade a confirmed-quit shutdown snapshot; a live hook event supersedes it elsewhere.
+          // Why: a periodic timer must not downgrade a confirmed-quit shutdown snapshot; a live
+          // hook event supersedes it elsewhere. [S10-21a C7f] Deliberately `=== 'quit'`, not
+          // `isDurableSleepingCapture` — a `daemon-death` record must NOT claim this precedence:
+          // a live hook re-report after a respawn is exactly the signal that should supersede it.
           if (
             mode === 'periodic' &&
             existing?.origin === 'quit' &&
