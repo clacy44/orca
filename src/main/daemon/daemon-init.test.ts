@@ -953,7 +953,13 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     // H9: the console-only "died — respawning" line also lands as a durable main-trace breadcrumb.
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
       'daemon_lifecycle',
-      expect.objectContaining({ reason: 'died_respawn', sessionCount: 0 })
+      expect.objectContaining({
+        reason: 'died_respawn',
+        transition: 'retired',
+        sessionCount: 0,
+        relocated: false,
+        entryHash: expect.any(String)
+      })
     )
     trackDaemonRetiredMock.mockClear()
     trackDaemonReplacedMock.mockClear()
@@ -1055,7 +1061,13 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
       'daemon_lifecycle',
-      expect.objectContaining({ reason: 'died_respawn', sessionCount: 0 })
+      expect.objectContaining({
+        reason: 'died_respawn',
+        transition: 'retired',
+        sessionCount: 0,
+        relocated: false,
+        entryHash: expect.any(String)
+      })
     )
   })
 
@@ -2038,11 +2050,27 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     // STA-2376: an unreachable daemon with no live sessions is replaced via the failed-health path, once.
     expect(trackDaemonReplacedMock).toHaveBeenCalledTimes(1)
     expect(trackDaemonReplacedMock).toHaveBeenCalledWith('failed_health_check', 0)
-    // H9: the health-check replace decision is a durable breadcrumb before the kill, and the
-    // post-kill outcome is a second one — both must be present, not just the telemetry call.
+    // H9/H15: the health-check replace decision is a durable breadcrumb before the kill
+    // (transition: 'replacing'), and the post-kill outcome is a second one
+    // (transition: 'replaced') — both must be present, not just the telemetry call.
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
       'daemon_lifecycle',
-      expect.objectContaining({ reason: 'failed_health_check', sessionCount: 0 })
+      expect.objectContaining({
+        reason: 'failed_health_check',
+        transition: 'replacing',
+        sessionCount: 0,
+        health: 'unreachable'
+      })
+    )
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({
+        reason: 'failed_health_check',
+        transition: 'replaced',
+        sessionCount: 0,
+        killed: true,
+        liveOwnerSurvived: false
+      })
     )
   })
 
@@ -2081,7 +2109,11 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
       'daemon_lifecycle',
-      expect.objectContaining({ reason: 'failed_health_check', sessionCount: null })
+      expect.objectContaining({
+        reason: 'failed_health_check',
+        transition: 'replacing',
+        sessionCount: null
+      })
     )
   })
 
@@ -2140,10 +2172,16 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       )
       expect(trackDaemonReplacedMock).toHaveBeenCalledTimes(1)
       expect(trackDaemonReplacedMock).toHaveBeenCalledWith(reason, 0)
-      // H9: the post-kill outcome (attributedReason branch) is also a durable breadcrumb.
+      // H9/H15: the post-kill outcome (attributedReason branch) is also a durable breadcrumb.
       expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
         'daemon_lifecycle',
-        expect.objectContaining({ reason, sessionCount: 0 })
+        expect.objectContaining({
+          reason,
+          transition: 'replaced',
+          sessionCount: 0,
+          killed: false,
+          liveOwnerSurvived: false
+        })
       )
 
       // One-shot: a later unrelated launch must not inherit the attribution.
@@ -2981,7 +3019,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     )
   })
 
-  it('H14: a died_respawn also emits a daemon-stderr-tail breadcrumb from the file when non-empty', async () => {
+  it('H14/H15: died_respawn carries the stderr tail in the daemon_lifecycle breadcrumb, under a *_stack key, when non-empty', async () => {
     const mod = await importFresh()
     await mod.initDaemonPtyProvider()
     const outgoingRespawn = adapterInstances[0].options.respawn
@@ -2990,15 +3028,16 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     await outgoingRespawn?.('daemon_died')
 
     expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
-      'daemon-stderr-tail',
+      'daemon_lifecycle',
       expect.objectContaining({
         reason: 'died_respawn',
+        transition: 'retired',
         daemonStderrTail_stack: 'FATAL ERROR: JavaScript heap out of memory'
       })
     )
   })
 
-  it('H14: no daemon-stderr-tail breadcrumb when the file has nothing to report', async () => {
+  it('H14/H15: omits daemonStderrTail_stack when the file has nothing to report', async () => {
     const mod = await importFresh()
     await mod.initDaemonPtyProvider()
     const outgoingRespawn = adapterInstances[0].options.respawn
@@ -3006,10 +3045,11 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     await outgoingRespawn?.('daemon_died')
 
-    expect(recordDurableCrashBreadcrumbMock).not.toHaveBeenCalledWith(
-      'daemon-stderr-tail',
-      expect.anything()
+    const call = recordDurableCrashBreadcrumbMock.mock.calls.find(
+      ([name]) => name === 'daemon_lifecycle'
     )
+    expect(call).toBeDefined()
+    expect(call?.[1]).not.toHaveProperty('daemonStderrTail_stack')
   })
 
   it('preserves a health-check-failing daemon when it owns live sessions', async () => {

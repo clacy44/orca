@@ -164,43 +164,66 @@ function getEntryHashCached(filePath: string): string {
   return hash
 }
 
+// Why (H15, D-R112 M9): a redacted constant path in every breadcrumb could never reveal a
+// relocation defect. A content hash of the actual forked bytes can, and survives redaction.
+// Breadcrumb sites outside the launcher closure (the respawn callbacks) don't have forkEntryPath
+// in scope — this recomputes the same decision materializeRelocatedDaemonHost already made
+// (idempotent/cached there) so they can report entryHash/relocated too.
+function resolveCurrentForkEntry(): { forkEntryPath: string; relocated: boolean } {
+  const entryPath = getDaemonEntryPath()
+  const relocatedHost = materializeRelocatedDaemonHost()
+  return {
+    forkEntryPath: relocatedHost ? relocatedHost.entryPath : entryPath,
+    relocated: relocatedHost !== null
+  }
+}
+
 // Why (H9, incident 2026-09-04 §2.2(b)): the daemon_lifecycle telemetry (trackDaemonReplaced /
 // trackDaemonRetired) only reaches the remote sink — 09-04's forensics found zero daemon rows in
 // orca-stats.json. Mirror every emission into a durable main-trace breadcrumb, which is the file
 // the owner already captures, so the next occurrence is diagnosable without the remote sink.
-function recordDaemonLifecycleBreadcrumb(
-  reason: string,
-  pidPath: string,
+//
+// H15 (D-R112 M10): carries the transition explicitly (pre-kill 'replacing' vs post-kill
+// 'replaced' were indistinguishable before) plus the health/grace/kill fields each site knows,
+// and a content hash + relocated flag instead of a redacted constant path (M9).
+function recordDaemonLifecycleBreadcrumb(opts: {
+  reason: string
+  transition: 'replacing' | 'replaced' | 'retired'
+  pidPath: string
   sessionCount: number | null
-): void {
+  health?: string
+  graceRetries?: number
+  killed?: boolean
+  liveOwnerSurvived?: boolean
+  restartInFlight?: boolean
+  /** H14 (D-R112 B2/H4): daemon-end sites attach the file's own tail — a *_stack-suffixed key
+   *  takes the crash-report's long lane (4 000 chars) instead of the default 240. */
+  includeStderrTail?: boolean
+}): void {
   let daemonPid: number | null = null
   try {
-    daemonPid = parseDaemonPidFile(readFileSync(pidPath, 'utf8'))?.pid ?? null
+    daemonPid = parseDaemonPidFile(readFileSync(opts.pidPath, 'utf8'))?.pid ?? null
   } catch {
     daemonPid = null
   }
+  const { forkEntryPath, relocated } = resolveCurrentForkEntry()
+  const stderrTail = opts.includeStderrTail
+    ? readDaemonStderrTail(getDaemonStderrLogFilePath())
+    : ''
   recordDurableCrashBreadcrumb('daemon_lifecycle', {
-    reason,
+    reason: opts.reason,
+    transition: opts.transition,
     daemonPid,
-    entryPath: getDaemonEntryPath(),
-    sessionCount,
+    entryHash: getEntryHashCached(forkEntryPath),
+    relocated,
+    sessionCount: opts.sessionCount,
+    ...(opts.health !== undefined ? { health: opts.health } : {}),
+    ...(opts.graceRetries !== undefined ? { graceRetries: opts.graceRetries } : {}),
+    ...(opts.killed !== undefined ? { killed: opts.killed } : {}),
+    ...(opts.liveOwnerSurvived !== undefined ? { liveOwnerSurvived: opts.liveOwnerSurvived } : {}),
+    ...(opts.restartInFlight !== undefined ? { restartInFlight: opts.restartInFlight } : {}),
+    ...(stderrTail ? { daemonStderrTail_stack: stderrTail } : {}),
     at: new Date().toISOString()
-  })
-}
-
-// Why (H14, D-R112 B2/H4): the daemon writes its own stderr straight to the file now (no parent
-// pipe to hold a tail in memory) — read the last DAEMON_STDERR_TAIL_LINES from the file at each
-// daemon-end site and land them in their own breadcrumb. A *_stack-suffixed key takes the
-// crash-report's long lane (4 000 chars, crash-reporting.ts) instead of the default 240 — a
-// 40-line native-abort tail needs the room.
-function recordDaemonStderrTailBreadcrumb(reason: string): void {
-  const tail = readDaemonStderrTail(getDaemonStderrLogFilePath())
-  if (!tail) {
-    return
-  }
-  recordDurableCrashBreadcrumb('daemon-stderr-tail', {
-    reason,
-    daemonStderrTail_stack: tail
   })
 }
 
@@ -715,7 +738,14 @@ function createOutOfProcessLauncher(
         // the incident traced: an unreachable socket with an unverifiable session count exits
         // the grace loop at graceRetry === 0 with the announcement predicate false, so nothing
         // was ever printed for the exact case that then killed the daemon.
-        recordDaemonLifecycleBreadcrumb('failed_health_check', pidPath, liveSessionCount)
+        recordDaemonLifecycleBreadcrumb({
+          reason: 'failed_health_check',
+          transition: 'replacing',
+          pidPath,
+          sessionCount: liveSessionCount,
+          health,
+          graceRetries: graceRetry
+        })
         // Why: unlike the log above, telemetry gates on confirmedReplacement below — the
         // post-kill truth — so a cold start that killed nothing never reports a replacement.
         pendingReplacement = {
@@ -760,24 +790,37 @@ function createOutOfProcessLauncher(
           : null
       if (identifiedReplacement) {
         trackDaemonReplaced(identifiedReplacement.reason, identifiedReplacement.liveSessionCount)
-        recordDaemonLifecycleBreadcrumb(
-          identifiedReplacement.reason,
+        recordDaemonLifecycleBreadcrumb({
+          reason: identifiedReplacement.reason,
+          transition: 'replaced',
           pidPath,
-          identifiedReplacement.liveSessionCount
-        )
-        recordDaemonStderrTailBreadcrumb(identifiedReplacement.reason)
+          sessionCount: identifiedReplacement.liveSessionCount,
+          killed: killOutcome.killed,
+          liveOwnerSurvived: killOutcome.liveOwnerSurvived,
+          includeStderrTail: true
+        })
       } else if (attributedReason) {
         trackDaemonReplaced(attributedReason, 0)
-        recordDaemonLifecycleBreadcrumb(attributedReason, pidPath, 0)
-        recordDaemonStderrTailBreadcrumb(attributedReason)
+        recordDaemonLifecycleBreadcrumb({
+          reason: attributedReason,
+          transition: 'replaced',
+          pidPath,
+          sessionCount: 0,
+          killed: killOutcome.killed,
+          liveOwnerSurvived: killOutcome.liveOwnerSurvived,
+          includeStderrTail: true
+        })
       } else if (pendingReplacement && confirmedReplacement) {
         trackDaemonReplaced(pendingReplacement.reason, pendingReplacement.liveSessionCount)
-        recordDaemonLifecycleBreadcrumb(
-          pendingReplacement.reason,
+        recordDaemonLifecycleBreadcrumb({
+          reason: pendingReplacement.reason,
+          transition: 'replaced',
           pidPath,
-          pendingReplacement.liveSessionCount
-        )
-        recordDaemonStderrTailBreadcrumb(pendingReplacement.reason)
+          sessionCount: pendingReplacement.liveSessionCount,
+          killed: killOutcome.killed,
+          liveOwnerSurvived: killOutcome.liveOwnerSurvived,
+          includeStderrTail: true
+        })
       }
 
       const userDataPath = app.getPath('userData')
@@ -1111,12 +1154,14 @@ export async function initDaemonPtyProvider(
         console.warn('[daemon] Daemon process died — respawning')
         // Why (H9): route the console line above into the same durable breadcrumb the launcher
         // uses, so a died_respawn is diagnosable from main.trace.ndjson without the remote sink.
-        recordDaemonLifecycleBreadcrumb(
-          'died_respawn',
-          getDaemonPidPath(runtimeDir),
-          newAdapter.getActiveSessionIds().length
-        )
-        recordDaemonStderrTailBreadcrumb('died_respawn')
+        recordDaemonLifecycleBreadcrumb({
+          reason: 'died_respawn',
+          transition: 'retired',
+          pidPath: getDaemonPidPath(runtimeDir),
+          sessionCount: newAdapter.getActiveSessionIds().length,
+          restartInFlight: Boolean(restartInFlight),
+          includeStderrTail: true
+        })
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
@@ -1354,12 +1399,14 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
         console.warn('[daemon] Daemon process died — respawning')
         // Why (H9): route the console line above into the same durable breadcrumb the launcher
         // uses, so a died_respawn is diagnosable from main.trace.ndjson without the remote sink.
-        recordDaemonLifecycleBreadcrumb(
-          'died_respawn',
-          getDaemonPidPath(runtimeDir),
-          newCurrent.getActiveSessionIds().length
-        )
-        recordDaemonStderrTailBreadcrumb('died_respawn')
+        recordDaemonLifecycleBreadcrumb({
+          reason: 'died_respawn',
+          transition: 'retired',
+          pidPath: getDaemonPidPath(runtimeDir),
+          sessionCount: newCurrent.getActiveSessionIds().length,
+          restartInFlight: Boolean(restartInFlight),
+          includeStderrTail: true
+        })
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
