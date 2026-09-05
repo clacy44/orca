@@ -2299,7 +2299,11 @@ type PtyWriteFlight = {
 // Why a pane never gets an armed Enter (S10-9 R1+R2 fallback outcomes; 'no_live_pane' added
 // S10-15 F8 for an unresolvable/stale handle — no live leaf or pty backs it at all;
 // 'blocked_modal' added S10-15 F9 — a busy Claude Code pane still refuses to inject into a
-// live permission/trust prompt, where an Enter would answer the dialog instead of the pane).
+// live permission/trust prompt, where an Enter would answer the dialog instead of the pane;
+// 'awaiting_idle_edge' added S10-21a C9, Ruling 34 Addendum 5 §5(1)/N5 — a leafless pane's
+// delivery attempt landed before it was ever observed live this generation; the applyTracked-
+// PtyTitle idle edge is the delivery edge that will eventually pick this record up, never a
+// silent delete).
 type WithheldDeliveryReason =
   | 'pane_busy'
   | 'not_agent_pane'
@@ -2307,6 +2311,7 @@ type WithheldDeliveryReason =
   | 'no_hydrated_status'
   | 'no_live_pane'
   | 'blocked_modal'
+  | 'awaiting_idle_edge'
 
 // Why (S10-15 F8): the pointer/Enter push targets either a live leaf or a leafless pty record
 // — no renderer leaf exists for it, e.g. a headless `orca serve` session or a desktop pane
@@ -35487,6 +35492,21 @@ export class OrcaRuntimeService {
             handle,
             { reservedTypes, notifiedThreadIdKnown }
           )
+        } else if (!pty.lastAgentStatusObservedLive) {
+          // [S10-21a C9, Ruling 34 Addendum 5 §5(1), N5 fix] Narrowed in code, not left to a
+          // comment: the pane has not been observed live THIS GENERATION (a restore seeds
+          // `lastAgentStatus` from a persisted title, never a live observation), so a real
+          // delivery failure here must not read as plain `queued` with nothing armed to
+          // retry. Gate-1 justification (fallback-behaviour change, called out per the
+          // charter's diff-review categories): the change narrows an unconditional delete to
+          // a conditional delete/record split; the condition is the pane's own `observedLive`
+          // this generation, a value already computed on this code path for the branch
+          // decision above it, not a new signal introduced to make the change appear narrower
+          // than it is. `recordWithheldDelivery` also arms `scheduleSlowMailboxRetry`, so this
+          // split is required precisely BECAUSE the sibling branch below (observedLive true)
+          // is the routine "tracking resumed" path — arming a repeating retry unconditionally
+          // there would fire it on every non-agent pane.
+          this.recordWithheldDelivery(handle, 'awaiting_idle_edge')
         } else {
           // Normal live tracking has resumed — any earlier fallback-withheld record is stale.
           // (The R1/R2 hydrated-probe fallback below stays leaf-scoped; a leafless pane's own
@@ -35544,6 +35564,26 @@ export class OrcaRuntimeService {
       // the slow retry and reports queued_awaiting_pane instead of a silent plain queued.
       this.recordWithheldDelivery(handle, 'no_live_pane')
     }
+  }
+
+  // [S10-21a C9, design v3.2 §5(2), Ruling 34 Addendum 5] Arm delivery at a restore rebind (and
+  // at a Layer-1 preserve — harmless there since the mailbox never moved). Post-commit hook: a
+  // caller that just moved `agent:<id>`'s pane ownership (C5's `rebindRestoredPane`, or an
+  // equivalent handle refresh) calls this so any mail already waiting on the mailbox surfaces
+  // without the operator having to run `register` again. Two explicit calls, not one: this is
+  // exactly what `register` already does when a repoint moves mail
+  // (orchestration-agents-register.ts's own `notifyMessageArrived` call) plus an immediate,
+  // synchronous delivery attempt rather than leaving it to notifyMessageArrived's own
+  // no-consumer microtask — a rebind just changed which pane a live pty ladder resolves to, so
+  // the attempt should run now, not on the next tick. deliverPendingMessagesForHandle's own
+  // gates (idle + observedLive) still decide whether anything actually lands; when the pane has
+  // not been observed live this generation yet, this call is exactly what lands the pty branch
+  // in the `awaiting_idle_edge` withheld record above, and the pane's own first observed idle
+  // edge (applyTrackedPtyTitle) delivers it — no register required.
+  notifyRebindDelivery(agentId: string): void {
+    const handle = `agent:${agentId}`
+    this.notifyMessageArrived(handle, 'status', null, null)
+    this.deliverPendingMessagesForHandle(handle)
   }
 
   // Why split from deliverPendingMessagesForHandle: R1+R2 both need an await, so this can only
