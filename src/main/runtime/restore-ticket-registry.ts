@@ -111,6 +111,24 @@ export class RestoreTicketRegistry {
     return { ok: true, payload: entry.payload }
   }
 
+  // [S10-21a C8, errata 5(p) v2.1 §C.5, design v3.2 §2.8] Read-only mint-ordering check: true
+  // while an unredeemed, unexpired ticket names `paneKey` as its predecessor — directory
+  // derivation defers minting a placeholder for such a pane rather than racing the sweep's own
+  // redeem. Never consumes (like `peek`), and needs no ticket id (unlike `peek`/`redeem`).
+  hasLiveTicketForPane(paneKey: string): boolean {
+    const now = this.clock()
+    for (const entry of this.tickets.values()) {
+      if (
+        entry.redeemedAt === null &&
+        now - entry.mintedAt <= RESTORE_TICKET_TTL_MS &&
+        entry.payload.predecessorPaneKey === paneKey
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+
   // Why opportunistic rather than a timer: this registry has no background interval (nothing here
   // should run when no sweep is minting), so expired/redeemed entries are dropped on the next mint
   // instead. Bounded by the sweep's own cadence (one sweep per startup), not by wall-clock idleness.

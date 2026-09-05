@@ -13918,6 +13918,12 @@ export class OrcaRuntimeService {
     return this.restoreTickets.mint(payload)
   }
 
+  /** [S10-21a C8, design v3.2 §2.8] Read-only — the mint-ordering fix's ticket check. Same
+   * instance boundary as `mintRestoreTicket` (no RPC/IPC surface). */
+  hasLiveTicketForPane(paneKey: string): boolean {
+    return this.restoreTickets.hasLiveTicketForPane(paneKey)
+  }
+
   registerOrchestrationCompatibilitySshAttachment(
     targetId: string,
     connectionIncarnation: string

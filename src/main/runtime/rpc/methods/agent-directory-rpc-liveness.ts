@@ -6,6 +6,70 @@ import { sanitizeTitle } from '../../orchestration/agent-name-sanitizer'
 import { deriveAgentLabelSlug } from '../../orchestration/agent-derivation'
 import type { AgentRow, AgentState } from '../../orchestration/types'
 import { wakePactThreadBoth } from './orchestration-pact-wake'
+import { isRestoreSweepLockHeld } from '../../restore-sweep-lock'
+
+// [S10-21a C8] Throttle for the 'derived_mint_deferred' audit below — in-process, not
+// persisted: a rate-limit for hygiene, not evidence that must survive a restart.
+const DERIVED_MINT_DEFERRED_AUDIT_INTERVAL_MS = 60 * 60 * 1000
+const lastDerivedMintDeferredAuditAt = new Map<string, number>()
+
+/** [S10-21a C8, design v3.2 §2.8] True while directory derivation must yield to the restore
+ * sweep for this pane, returning the reason code for the audit — checked ONLY before minting a
+ * fresh derived row (a registered row already occupying the pane is untouched regardless, per
+ * `upsertDerivedAgentForPane`'s own fence, so this never affects an ordinary already-registered
+ * pane). Three signals, any one sufficient: (a) the sweep's own lock is held — the whole sweep
+ * pass is mid-flight; (b) an unredeemed restore ticket names this pane as its predecessor — the
+ * sweep has started this pane's own restore and the create/redeem step has not landed yet; (c)
+ * this generation's sweep already wrote this pane's launch row (`evidence: 'sweep_record'`) but
+ * has not yet rebound an agent onto it — the gap between `createTerminal`'s launch-table write
+ * and `rebindRestoredPane`'s `setLaunchAgentId`. An ordinary (non-restore) pane's launch row is
+ * always `evidence: 'host_launch'`, so (c) never trips for it — the T10 fence. */
+function paneAwaitingSweepRestore(
+  runtime: OrcaRuntimeService,
+  db: ReturnType<OrcaRuntimeService['getOrchestrationDb']>,
+  hostId: string,
+  paneKey: string
+): string | false {
+  if (isRestoreSweepLockHeld()) {
+    return 'sweep_lock_held'
+  }
+  if (runtime.hasLiveTicketForPane(paneKey)) {
+    return 'live_restore_ticket'
+  }
+  const launch = db.newestLaunchForPane(hostId, paneKey)
+  if (
+    launch &&
+    launch.launch_generation === runtime.getLaunchGenerationId() &&
+    launch.evidence === 'sweep_record' &&
+    launch.agent_id === null
+  ) {
+    return 'sweep_record_pending_rebind'
+  }
+  return false
+}
+
+function auditDerivedMintDeferredOncePerHour(
+  db: ReturnType<OrcaRuntimeService['getOrchestrationDb']>,
+  hostId: string,
+  paneKey: string,
+  reasonCode: string
+): void {
+  const key = `${hostId}:${paneKey}`
+  const now = Date.now()
+  const last = lastDerivedMintDeferredAuditAt.get(key)
+  if (last !== undefined && now - last < DERIVED_MINT_DEFERRED_AUDIT_INTERVAL_MS) {
+    return
+  }
+  lastDerivedMintDeferredAuditAt.set(key, now)
+  db.writeAgentAudit({
+    agentId: null,
+    actorPaneKey: paneKey,
+    actorHostId: hostId,
+    verb: 'derived_mint_deferred',
+    outcome: 'deferred',
+    reasonCode
+  })
+}
 
 export async function findLiveTerminalByHandle(
   runtime: OrcaRuntimeService,
@@ -107,10 +171,18 @@ export async function refreshDerivedAgentsFromLiveGraph(
 ): Promise<void> {
   const { terminals } = await runtime.listTerminals(undefined, undefined, {})
   for (const terminal of terminals) {
+    const paneKey = `${terminal.tabId}:${terminal.leafId}`
+    // [S10-21a C8, design v3.2 §2.8] Mint ordering: yield to the restore sweep rather than
+    // racing it for a pane it is mid-restore on — see `paneAwaitingSweepRestore`.
+    const deferReason = paneAwaitingSweepRestore(runtime, db, hostId, paneKey)
+    if (deferReason) {
+      auditDerivedMintDeferredOncePerHour(db, hostId, paneKey, deferReason)
+      continue
+    }
     const sanitizedTitle = sanitizeTitle(terminal.title)
     db.upsertDerivedAgentForPane({
       hostId,
-      paneKey: `${terminal.tabId}:${terminal.leafId}`,
+      paneKey,
       terminalHandle: terminal.handle,
       processIncarnation: runtime.getTerminalProcessIncarnation(terminal.handle),
       worktreeId: terminal.worktreeId,
