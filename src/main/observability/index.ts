@@ -216,6 +216,9 @@ export function collectDiagnosticBundle(
     // the logs directory.
     daemonLogFilePath: getDaemonLogFilePath(),
     daemonLogMaxFiles: DAEMON_LOG_MAX_FILES,
+    // Why (H16, Ruling 35 Addendum 3 R2): daemon.stderr.log is LOCAL-ONLY evidence — it must
+    // never ride the uploaded/previewed NDJSON payload. It is copied beside the local preview
+    // file instead (ipc/diagnostics.ts, copyDaemonStderrLogBesidePreview), not wired here.
     ...meta
   })
 }

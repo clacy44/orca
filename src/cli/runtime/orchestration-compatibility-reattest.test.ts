@@ -2,11 +2,12 @@ import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   attemptOrchestrationReattest,
   withReattestFailureNextStep
 } from './orchestration-compatibility-reattest'
+import { cancelTrackingResponse } from '../../main/lib/unread-response-body.test-fixtures'
 import type { RuntimeRpcFailure } from '../../shared/runtime-rpc-envelope'
 
 const EVIDENCE = {
@@ -37,6 +38,7 @@ describe('attemptOrchestrationReattest', () => {
 
   afterEach(async () => {
     delete process.env.ORCA_AGENT_HOOK_ENDPOINT
+    vi.unstubAllGlobals()
     await Promise.all(
       servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))
     )
@@ -190,6 +192,28 @@ describe('attemptOrchestrationReattest', () => {
       ok: false,
       reason: 'stale-endpoint-token'
     })
+  })
+
+  it('cancels the unread response body on the 403 error path (orca#8695)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'orca-reattest-'))
+    const endpointPath = join(dir, 'endpoint.env')
+    writeFileSync(endpointPath, endpointBody(1, 'the-hook-token'), 'utf8')
+    process.env.ORCA_AGENT_HOOK_ENDPOINT = endpointPath
+
+    let cancelledBodies = 0
+    const fetchMock = vi.fn(async () =>
+      cancelTrackingResponse(403, () => {
+        cancelledBodies += 1
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(attemptOrchestrationReattest(EVIDENCE)).resolves.toEqual({
+      ok: false,
+      reason: 'stale-endpoint-token'
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(cancelledBodies).toBe(1)
   })
 
   it('reports ok:false with no reason on a 404 (older runtime with no /reattest route)', async () => {

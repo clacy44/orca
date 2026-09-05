@@ -35410,14 +35410,10 @@ export class OrcaRuntimeService {
       return
     }
     const hostId = this.getOrchestrationCompatibilityHostId()
-    const candidate = db.findOrphanedIdentityCandidate?.(
-      hostId,
-      worktreePath,
-      (candidatePaneKey) => {
-        const signals = this.getAgentDirectoryLivenessSignals(candidatePaneKey)
-        return signals.terminalHandle !== null || signals.observedLive
-      }
-    )
+    const candidate = db.findOrphanedIdentityCandidate(hostId, worktreePath, (candidatePaneKey) => {
+      const signals = this.getAgentDirectoryLivenessSignals(candidatePaneKey)
+      return signals.terminalHandle !== null || signals.observedLive
+    })
     if (!candidate) {
       return
     }

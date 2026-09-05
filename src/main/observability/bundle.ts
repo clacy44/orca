@@ -172,6 +172,47 @@ export function collectBundle(opts: CollectBundleOptions): CollectedBundle {
   }
 }
 
+// ── Upload-only redaction (B3, H17, Ruling 35 Addendum 4) ────────────────
+
+const LOCAL_ONLY_STDERR_TAIL_KEY = 'daemonStderrTail_stack'
+const LOCAL_ONLY_PLACEHOLDER = '[local-only]'
+
+function stripLocalOnlyFields(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripLocalOnlyFields)
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      result[key] =
+        key === LOCAL_ONLY_STDERR_TAIL_KEY ? LOCAL_ONLY_PLACEHOLDER : stripLocalOnlyFields(v)
+    }
+    return result
+  }
+  return value
+}
+
+/** The daemon stderr tail (daemon-init.ts's `daemonStderrTail_stack`) is local trace/preview
+ *  evidence only — it must never ride the uploaded payload. Called on the upload path only,
+ *  never on the payload written to the local preview file. A line that fails to parse is
+ *  passed through unchanged (defense in depth; every line here was already JSON at write
+ *  time). */
+export function stripUploadOnlyFields(payload: string): string {
+  return payload
+    .split('\n')
+    .map((line) => {
+      if (line.length === 0) {
+        return line
+      }
+      try {
+        return JSON.stringify(stripLocalOnlyFields(JSON.parse(line)))
+      } catch {
+        return line
+      }
+    })
+    .join('\n')
+}
+
 // ── Bundle submission ID ─────────────────────────────────────────────────
 
 /** 128-bit URL-safe-base64 random, per-bundle and NOT persisted — mitigation for Issue 8 (bundle ↔ install_id correlation). */

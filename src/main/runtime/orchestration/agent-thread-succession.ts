@@ -91,6 +91,28 @@ export function adoptFromPredecessors(
   predecessorIds: readonly string[],
   successorId: string
 ): ThreadSuccessionOutcome {
+  // B8 (H17, Ruling 35 Addendum 4): guard the successor's own quarantine here too — callers
+  // already check this (remintRow, catchUpThreadSuccession), but a third caller must not be
+  // able to bypass containment by calling this shared helper directly.
+  const successorRow = db
+    .prepare('SELECT quarantined FROM agents WHERE id = ?')
+    .get(successorId) as { quarantined: number } | undefined
+  if (successorRow?.quarantined === 1) {
+    writeAgentAudit(db, {
+      agentId: successorId,
+      actorPaneKey: null,
+      actorHostId: hostId,
+      verb: 'thread_succession_skipped',
+      outcome: 'skipped',
+      reasonCode: 'succession_skipped_quarantined'
+    })
+    return {
+      adoptedThreads: 0,
+      blockedByQuarantinedPredecessor: false,
+      repointedMessages: 0,
+      predecessorCount: 0
+    }
+  }
   if (predecessorIds.length === 0) {
     return {
       adoptedThreads: 0,

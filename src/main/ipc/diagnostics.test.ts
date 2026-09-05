@@ -113,6 +113,41 @@ describe('diagnostics IPC handlers', () => {
     expect(uploadDiagnosticBundleMock).not.toHaveBeenCalled()
   })
 
+  it('H16 R2: copies daemon.stderr.log beside the local preview file — never into the uploaded payload', async () => {
+    const realFs = await vi.importActual<typeof NodeFs>('node:fs')
+    const logsDir = '/tmp/logs'
+    const previewDir = '/tmp/orca-diagnostic-bundle-previews'
+    realFs.mkdirSync(logsDir, { recursive: true })
+    realFs.mkdirSync(previewDir, { recursive: true })
+    const stderrLogPath = `${logsDir}/daemon.stderr.log`
+    realFs.writeFileSync(stderrLogPath, 'FATAL ERROR: JavaScript heap out of memory\n')
+
+    const bundle = makeBundle({
+      bundleSubmissionId: 'stderrcopytestbundleid',
+      // The payload main actually uploads/previews — proves the stderr text never rides it.
+      payload: '{"type":"bundle-header"}\n{"safe":true}\n'
+    })
+    collectDiagnosticBundleMock.mockReturnValue(bundle)
+    const collect = handlers.get('diagnostics:collectBundle')!
+
+    try {
+      await collect({}, 30)
+
+      const copiedPath = `${previewDir}/${bundle.bundleSubmissionId}.stderr.log`
+      expect(realFs.existsSync(copiedPath)).toBe(true)
+      expect(realFs.readFileSync(copiedPath, 'utf8')).toContain(
+        'FATAL ERROR: JavaScript heap out of memory'
+      )
+      expect(bundle.payload).not.toContain('daemon-stderr-log')
+
+      const discard = handlers.get('diagnostics:discardBundlePreview')!
+      discard({}, bundle.bundleSubmissionId)
+      expect(realFs.existsSync(copiedPath)).toBe(false)
+    } finally {
+      realFs.rmSync(stderrLogPath, { force: true })
+    }
+  })
+
   it('uploads only the payload retained by main after collection', async () => {
     const bundle = makeBundle({
       bundleSubmissionId: 'bundleabcdefghijklmnop',

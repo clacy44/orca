@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- Why: owns the full daemon lifecycle (init, launch, adapter wiring,
 restart, teardown); the "swap the provider atomically" invariant keeps restart + singletons co-located. */
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { app } from 'electron'
 import { mkdirSync, existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { fork, type ChildProcess } from 'node:child_process'
@@ -41,11 +41,13 @@ import {
 } from './daemon-health'
 import {
   collectPinnedDaemonVersions,
+  getRelocatedDaemonHost,
   materializeRelocatedDaemonHost,
   pruneOldDaemonHosts
 } from './daemon-host-relocation'
 import { DegradedDaemonPtyProvider } from './degraded-daemon-pty-provider'
 import { trackDaemonReplaced, trackDaemonRetired } from './daemon-lifecycle-event'
+import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import type { DaemonReplaceReason } from '../../shared/daemon-lifecycle-telemetry'
 import {
   getLocalPtyProvider,
@@ -54,7 +56,13 @@ import {
   rebindLocalProviderListeners
 } from '../ipc/pty'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from '../startup/startup-diagnostics'
-import { getDaemonLogFilePath } from '../observability/logs-directory'
+import { getDaemonLogFilePath, getDaemonStderrLogFilePath } from '../observability/logs-directory'
+import {
+  closeDaemonStderrLogFd,
+  readDaemonStderrTail,
+  rotateAndOpenDaemonStderrLogFd,
+  writeDaemonStderrLogMarker
+} from './daemon-stderr-log'
 import {
   confirmSeededClaudeLivePtys,
   hasSeededUnconfirmedClaudePtys
@@ -139,13 +147,109 @@ function getDaemonEntryPath(): string {
   return join(basePath, 'out', 'main', 'daemon-entry.js')
 }
 
+function isDiagnosticsDisabled(): boolean {
+  const disabled = (process.env.ORCA_DIAGNOSTICS_DISABLED ?? '').trim().toLowerCase()
+  return disabled === '1' || disabled === 'true'
+}
+
 // Why: pass a log-file arg so field failures are diagnosable, but honor the ORCA_DIAGNOSTICS_DISABLED privacy switch.
 function daemonLogArgs(): string[] {
-  const disabled = (process.env.ORCA_DIAGNOSTICS_DISABLED ?? '').trim().toLowerCase()
-  if (disabled === '1' || disabled === 'true') {
+  if (isDiagnosticsDisabled()) {
     return []
   }
   return ['--log-file', getDaemonLogFilePath()]
+}
+
+// Why (H14): the stderr-log marker names the forked bytes by content hash, not a redacted path —
+// cheap enough to compute once per launch (a JS entry file, not the native node-pty tree).
+const entryHashCache = new Map<string, string>()
+function getEntryHashCached(filePath: string): string {
+  const cached = entryHashCache.get(filePath)
+  if (cached !== undefined) {
+    return cached
+  }
+  let hash = 'unknown'
+  try {
+    hash = createHash('sha256').update(readFileSync(filePath)).digest('hex').slice(0, 12)
+  } catch {
+    hash = 'unknown'
+  }
+  entryHashCache.set(filePath, hash)
+  return hash
+}
+
+// Why (H15, D-R112 M9): a redacted constant path in every breadcrumb could never reveal a
+// relocation defect. A content hash of the actual forked bytes can, and survives redaction.
+// Breadcrumb sites outside the launcher closure (the respawn callbacks) don't have forkEntryPath
+// in scope — this recomputes the same decision materializeRelocatedDaemonHost already made
+// (idempotent/cached there) so they can report entryHash/relocated too.
+// Why (H16, Ruling 35 Addendum 3 R1): materializeRelocatedDaemonHost() is uncached and, on a
+// marker miss, COPIES the daemon-host tree and rmSync/renameSync's the destination — which fails
+// pre-kill while the old daemon still holds the mapped exe (yielding a false `relocated: false`
+// on a relocated install) and inserts a large synchronous copy into the breadcrumb/respawn path.
+// getRelocatedDaemonHost() is the pure marker check (read-only) — exactly what a breadcrumb
+// needs. collectDaemonHostSources() inside it is unguarded, so wrap the whole thing: a breadcrumb
+// must never fail the launch it's trying to explain.
+function resolveCurrentForkEntry(): { forkEntryPath: string; relocated: boolean } {
+  try {
+    const relocatedHost = getRelocatedDaemonHost()
+    if (relocatedHost) {
+      return { forkEntryPath: relocatedHost.entryPath, relocated: true }
+    }
+  } catch {
+    // Fall through to the install-dir entry — never let this block the breadcrumb it feeds.
+  }
+  return { forkEntryPath: getDaemonEntryPath(), relocated: false }
+}
+
+// Why (H9, incident 2026-09-04 §2.2(b)): the daemon_lifecycle telemetry (trackDaemonReplaced /
+// trackDaemonRetired) only reaches the remote sink — 09-04's forensics found zero daemon rows in
+// orca-stats.json. Mirror every emission into a durable main-trace breadcrumb, which is the file
+// the owner already captures, so the next occurrence is diagnosable without the remote sink.
+//
+// H15 (D-R112 M10): carries the transition explicitly (pre-kill 'replacing' vs post-kill
+// 'replaced' were indistinguishable before) plus the health/grace/kill fields each site knows,
+// and a content hash + relocated flag instead of a redacted constant path (M9).
+function recordDaemonLifecycleBreadcrumb(opts: {
+  reason: string
+  transition: 'replacing' | 'replaced' | 'retired'
+  pidPath: string
+  sessionCount: number | null
+  health?: string
+  graceRetries?: number
+  killed?: boolean
+  liveOwnerSurvived?: boolean
+  restartInFlight?: boolean
+  /** H14 (D-R112 B2/H4): daemon-end sites attach the file's own tail — a *_stack-suffixed key
+   *  takes the crash-report's long lane (4 000 chars) instead of the default 240. */
+  includeStderrTail?: boolean
+}): void {
+  let daemonPid: number | null = null
+  try {
+    daemonPid = parseDaemonPidFile(readFileSync(opts.pidPath, 'utf8'))?.pid ?? null
+  } catch {
+    daemonPid = null
+  }
+  const { forkEntryPath, relocated } = resolveCurrentForkEntry()
+  const stderrTail =
+    opts.includeStderrTail && daemonPid !== null
+      ? readDaemonStderrTail(getDaemonStderrLogFilePath(), daemonPid)
+      : ''
+  recordDurableCrashBreadcrumb('daemon_lifecycle', {
+    reason: opts.reason,
+    transition: opts.transition,
+    daemonPid,
+    entryHash: getEntryHashCached(forkEntryPath),
+    relocated,
+    sessionCount: opts.sessionCount,
+    ...(opts.health !== undefined ? { health: opts.health } : {}),
+    ...(opts.graceRetries !== undefined ? { graceRetries: opts.graceRetries } : {}),
+    ...(opts.killed !== undefined ? { killed: opts.killed } : {}),
+    ...(opts.liveOwnerSurvived !== undefined ? { liveOwnerSurvived: opts.liveOwnerSurvived } : {}),
+    ...(opts.restartInFlight !== undefined ? { restartInFlight: opts.restartInFlight } : {}),
+    ...(stderrTail ? { daemonStderrTail_stack: stderrTail } : {}),
+    at: new Date().toISOString()
+  })
 }
 
 // Why: a socket that accepts a connection proves a daemon survived a previous app session and can be reused.
@@ -654,6 +758,19 @@ function createOutOfProcessLauncher(
             `[daemon] Replacing daemon that failed the health check (health=${health}, liveSessions=${liveSessionCount ?? 'unverifiable'}, graceRetries=${graceRetry})`
           )
         }
+        // Why (H9): unlike the console line above — gated so a cold start with nothing to
+        // replace stays quiet — the breadcrumb is unconditional. This is precisely the branch
+        // the incident traced: an unreachable socket with an unverifiable session count exits
+        // the grace loop at graceRetry === 0 with the announcement predicate false, so nothing
+        // was ever printed for the exact case that then killed the daemon.
+        recordDaemonLifecycleBreadcrumb({
+          reason: 'failed_health_check',
+          transition: 'replacing',
+          pidPath,
+          sessionCount: liveSessionCount,
+          health,
+          graceRetries: graceRetry
+        })
         // Why: unlike the log above, telemetry gates on confirmedReplacement below — the
         // post-kill truth — so a cold start that killed nothing never reports a replacement.
         pendingReplacement = {
@@ -698,10 +815,37 @@ function createOutOfProcessLauncher(
           : null
       if (identifiedReplacement) {
         trackDaemonReplaced(identifiedReplacement.reason, identifiedReplacement.liveSessionCount)
+        recordDaemonLifecycleBreadcrumb({
+          reason: identifiedReplacement.reason,
+          transition: 'replaced',
+          pidPath,
+          sessionCount: identifiedReplacement.liveSessionCount,
+          killed: killOutcome.killed,
+          liveOwnerSurvived: killOutcome.liveOwnerSurvived,
+          includeStderrTail: true
+        })
       } else if (attributedReason) {
         trackDaemonReplaced(attributedReason, 0)
+        recordDaemonLifecycleBreadcrumb({
+          reason: attributedReason,
+          transition: 'replaced',
+          pidPath,
+          sessionCount: 0,
+          killed: killOutcome.killed,
+          liveOwnerSurvived: killOutcome.liveOwnerSurvived,
+          includeStderrTail: true
+        })
       } else if (pendingReplacement && confirmedReplacement) {
         trackDaemonReplaced(pendingReplacement.reason, pendingReplacement.liveSessionCount)
+        recordDaemonLifecycleBreadcrumb({
+          reason: pendingReplacement.reason,
+          transition: 'replaced',
+          pidPath,
+          sessionCount: pendingReplacement.liveSessionCount,
+          killed: killOutcome.killed,
+          liveOwnerSurvived: killOutcome.liveOwnerSurvived,
+          includeStderrTail: true
+        })
       }
 
       const userDataPath = app.getPath('userData')
@@ -710,63 +854,95 @@ function createOutOfProcessLauncher(
       // Fork the relocated entry when available; otherwise the install-dir entry.
       const forkEntryPath = relocatedHost ? relocatedHost.entryPath : entryPath
       warnIfDaemonSpawnAtRiskOnAppImageMount(forkEntryPath)
-      const child = fork(
-        forkEntryPath,
-        [
-          '--socket',
-          socketPath,
-          '--token',
-          tokenPath,
-          '--pid-record',
-          pidPath,
-          '--launch-nonce',
-          launchNonce,
-          '--entry-path',
-          entryPath,
-          '--app-version',
-          app.getVersion(),
-          '--spawner-exec-path',
-          process.execPath,
-          ...(macosLoginSessionWatch ? ['--login-session-watch'] : []),
-          ...daemonLogArgs()
-        ],
-        {
-          // Why: detached daemons outlive dev worktrees; userData keeps process.cwd() valid after a repo/worktree is deleted.
-          cwd: userDataPath,
-          // Why: detached+unref outlives Electron; stdout 'ignore' (else blocks exit), stderr 'pipe' captures startup crashes lost in v1.4.129-rc.1.
-          detached: true,
-          stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-          // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
-          ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
-          // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.
-          env: {
-            ...process.env,
-            ELECTRON_RUN_AS_NODE: '1',
-            // Why: the detached plain-Node daemon can't call app.getPath(), but shell rcfiles must live outside swept tmp.
-            ORCA_USER_DATA_PATH: userDataPath
-          }
-        }
-      )
-
-      // Why: keep only the startup-window stderr tail so a crash cause is visible without unbounded memory.
-      const STARTUP_STDERR_MAX_BYTES = 8192
-      let startupStderr = ''
-      let collectingStderr = true
-      const onStartupStderr = (chunk: Buffer): void => {
-        if (!collectingStderr) {
-          return
-        }
-        startupStderr += chunk.toString('utf8')
-        if (startupStderr.length > STARTUP_STDERR_MAX_BYTES) {
-          startupStderr = startupStderr.slice(-STARTUP_STDERR_MAX_BYTES)
+      const stderrLogPath = getDaemonStderrLogFilePath()
+      // Why (H14, D-R112 M6 — replaces the H10 parent-pipe design): a pipe held open in the
+      // parent applies backpressure to the daemon's own fd 2 if Electron stalls — a hotfix meant
+      // to diagnose daemon wedges could cause one. Hand the daemon a raw fd for a file instead:
+      // the daemon (and any native abort) writes straight to disk, no parent-side intermediary.
+      let stderrFd: number | null = null
+      if (!isDiagnosticsDisabled()) {
+        try {
+          stderrFd = rotateAndOpenDaemonStderrLogFd(stderrLogPath)
+        } catch {
+          stderrFd = null
         }
       }
-      child.stderr?.on('data', onStartupStderr)
-      // Why: release the detached daemon's stderr once up/failed — a live piped stream refs the parent loop and blocks Electron exit.
-      const releaseStderr = (): void => {
-        collectingStderr = false
-        child.stderr?.off('data', onStartupStderr)
-        child.stderr?.destroy()
+      // Why (H16, Ruling 35 Addendum 3 fd leak): fork() can throw synchronously (EMFILE, a bad
+      // forkEntryPath). Without this, a throw here leaks the parent's copy of stderrFd forever —
+      // close it before the error reaches the outer catch, which owns everything else.
+      let child: ChildProcess
+      try {
+        child = fork(
+          forkEntryPath,
+          [
+            '--socket',
+            socketPath,
+            '--token',
+            tokenPath,
+            '--pid-record',
+            pidPath,
+            '--launch-nonce',
+            launchNonce,
+            '--entry-path',
+            entryPath,
+            '--app-version',
+            app.getVersion(),
+            '--spawner-exec-path',
+            process.execPath,
+            ...(macosLoginSessionWatch ? ['--login-session-watch'] : []),
+            ...daemonLogArgs()
+          ],
+          {
+            // Why: detached daemons outlive dev worktrees; userData keeps process.cwd() valid after a repo/worktree is deleted.
+            cwd: userDataPath,
+            // Why: detached+unref outlives Electron; stdout 'ignore' (else blocks exit); stderr is
+            // the rotated log's fd directly (H14) — 'ignore' only when diagnostics are disabled or
+            // the fd failed to open.
+            detached: true,
+            stdio: ['ignore', 'ignore', stderrFd ?? 'ignore', 'ipc'],
+            // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
+            ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
+            // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.
+            env: {
+              ...process.env,
+              ELECTRON_RUN_AS_NODE: '1',
+              // Why: the detached plain-Node daemon can't call app.getPath(), but shell rcfiles must live outside swept tmp.
+              ORCA_USER_DATA_PATH: userDataPath
+            }
+          }
+        )
+      } catch (forkError) {
+        if (stderrFd !== null) {
+          try {
+            closeDaemonStderrLogFd(stderrFd)
+          } catch {
+            // Already invalid — nothing to close.
+          }
+        }
+        throw forkError
+      }
+
+      if (stderrFd !== null) {
+        // Why: the pid is only known once fork() returns. Write the generation marker through
+        // the parent's own copy of the fd, then close it immediately — the child (which inherited
+        // a duplicate at spawn) keeps writing to the same file with no parent involvement at all.
+        try {
+          if (Number.isSafeInteger(child.pid) && (child.pid as number) > 0) {
+            writeDaemonStderrLogMarker(stderrFd, {
+              pid: child.pid as number,
+              entryHash: getEntryHashCached(forkEntryPath),
+              startedAt: new Date().toISOString()
+            })
+          }
+        } catch {
+          // Why: a marker-write failure must not fail the launch — the daemon still owns the fd.
+        } finally {
+          try {
+            closeDaemonStderrLogFd(stderrFd)
+          } catch {
+            // Already invalid — nothing to close.
+          }
+        }
       }
 
       // Wait for the daemon to signal readiness via IPC
@@ -789,12 +965,18 @@ function createOutOfProcessLauncher(
           }
           settled = true
           cleanupStartupListeners()
-          // Why: attach the captured stderr tail to the thrown error and log it so a startup crash isn't just "exited with code 1".
-          const stderrTail = startupStderr.trim()
+          // Why (H14): the daemon writes stderr straight to the file — "the file is the stderr
+          // from the first byte, so there is nothing to destroy" — read the tail from there
+          // instead of an in-memory buffer so a startup crash isn't just "exited with code 1".
+          // Why (H16 R3): scoped to THIS child's pid — the file can carry a previous generation's
+          // tail too, and this is exactly the startup-failure path that must never attach it.
+          const stderrTail = readDaemonStderrTail(
+            stderrLogPath,
+            Number.isSafeInteger(child.pid) ? (child.pid as number) : -1
+          )
           if (stderrTail) {
             console.warn(`[daemon] startup failed; captured stderr tail:\n${stderrTail}`)
           }
-          releaseStderr()
           const startupError = stderrTail
             ? new Error(`${error.message}\nDaemon stderr (tail):\n${stderrTail}`)
             : error
@@ -843,8 +1025,8 @@ function createOutOfProcessLauncher(
             settled = true
             // Why: daemon is detached after readiness; detach startup listeners so the launch promise closure isn't retained.
             cleanupStartupListeners()
-            // Why: release IPC/stderr and unref so Electron can exit without waiting; the daemon keeps running detached.
-            releaseStderr()
+            // Why (H14): nothing left to release here — stderr is a plain fd the daemon already
+            // owns and writes directly; the parent's copy was closed right after spawn.
             child.disconnect()
             child.unref()
             resolve()
@@ -1015,6 +1197,16 @@ export async function initDaemonPtyProvider(
       // failed_health_check from the launcher — the app cannot tell wedged from dead at this point.
       if (reason === 'daemon_died') {
         console.warn('[daemon] Daemon process died — respawning')
+        // Why (H9): route the console line above into the same durable breadcrumb the launcher
+        // uses, so a died_respawn is diagnosable from main.trace.ndjson without the remote sink.
+        recordDaemonLifecycleBreadcrumb({
+          reason: 'died_respawn',
+          transition: 'retired',
+          pidPath: getDaemonPidPath(runtimeDir),
+          sessionCount: newAdapter.getActiveSessionIds().length,
+          restartInFlight: Boolean(restartInFlight),
+          includeStderrTail: true
+        })
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {
@@ -1255,6 +1447,16 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
       // failed_health_check from the launcher — the app cannot tell wedged from dead at this point.
       if (reason === 'daemon_died') {
         console.warn('[daemon] Daemon process died — respawning')
+        // Why (H9): route the console line above into the same durable breadcrumb the launcher
+        // uses, so a died_respawn is diagnosable from main.trace.ndjson without the remote sink.
+        recordDaemonLifecycleBreadcrumb({
+          reason: 'died_respawn',
+          transition: 'retired',
+          pidPath: getDaemonPidPath(runtimeDir),
+          sessionCount: newCurrent.getActiveSessionIds().length,
+          restartInFlight: Boolean(restartInFlight),
+          includeStderrTail: true
+        })
         // Why: a manual restart tears the daemon down under a still-live adapter, so a pane
         // respawning on its synthetic exit would bill a user action to the crash bucket.
         if (!restartInFlight) {

@@ -277,6 +277,8 @@ function makeOrchestrationDbStub(toHandle: () => string) {
       getActiveDispatchForIdentity: () => undefined,
       findActiveRemoteAttachmentForPane: () => undefined,
       listDispatchInputObservationTargets: () => [],
+      // B6 (H17): notifyOrphanedIdentityForPane now calls this unconditionally.
+      findOrphanedIdentityCandidate: () => undefined,
       markAsDelivered,
       close: () => {}
     }

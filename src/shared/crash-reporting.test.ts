@@ -57,6 +57,14 @@ describe('crash-reporting shared helpers', () => {
     expect(String(sanitizeCrashReportDetails({ description: longStack }).description).length).toBe(
       243
     )
+    // H16 (Ruling 35 Addendum 3, lane pin): daemon-stderr-tail breadcrumbs key their tail
+    // `daemonStderrTail_stack` specifically so it lands in the long lane — pin the key's exact
+    // budget so a future rename can't silently drop it back to the 240-char default.
+    expect(
+      String(
+        sanitizeCrashReportDetails({ daemonStderrTail_stack: longStack }).daemonStderrTail_stack
+      ).length
+    ).toBe(4_003)
   })
 
   it('sanitizes breadcrumb data and caps to the latest thirty entries', () => {
