@@ -18,7 +18,8 @@ import {
   PRIOR_GEN,
   emptyInventory,
   insertAgent,
-  baseDeps
+  baseDeps,
+  defaultCollectIncumbentEvidence
 } from './restore-sweep-test-fixtures'
 
 describe('S10-21a C7b/C7i: runRestoreSweep', () => {
@@ -57,7 +58,17 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       },
       disposition: 'created'
     })
-    const summary = await runRestoreSweep(baseDeps(orchestrationDb!, { ensureAgentSession }))
+    const summary = await runRestoreSweep(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        // [S10-21a C7k, Ruling 34 Addendum 28, item 5 — SCENARIO_CORRECTION, forced deviation]
+        // A REAL 2-segment identity: item 5's companion-refresh guard now refuses to write an
+        // empty/legacy one, so the default fixture's `() => null` no longer produces the
+        // 'reminted' row this assertion (below) needs — the same fixture change T3b already
+        // required for the same reason.
+        getTerminalProcessIncarnation: () => 'pty-t1:inc-t1'
+      })
+    )
     expect(summary.layer1).toBe(1)
     expect(summary.layer2).toBe(0)
     expect(summary.layer3).toBe(0)
@@ -254,7 +265,13 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       },
       disposition: 'created'
     })
-    const deps = baseDeps(orchestrationDb!, { ensureAgentSession })
+    const deps = baseDeps(orchestrationDb!, {
+      ensureAgentSession,
+      // [S10-21a C7k, Ruling 34 Addendum 28, item 9b Gate-1 restoration] A REAL 2-segment
+      // identity — the companion refresh (item 5) now refuses to write an empty/legacy one, so
+      // the strict assertion below needs a value that actually parses.
+      getTerminalProcessIncarnation: () => 'pty-t3b:inc-t3b'
+    })
     const first = await runRestoreSweepBody(deps)
     expect(first.layer1).toBe(1)
     const second = await runRestoreSweepBody(deps)
@@ -262,14 +279,248 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     // rebind predicate's own clause 3 (or the daemon_survived path once a real pty exists) makes
     // a repeat a structural no-op — no duplicate rebind 'reminted' row is written.
     expect(second.layer3 + second.errors).toBe(0)
-    const rebindRows = db
-      .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
-      .all() as unknown[]
-    // SCENARIO_CORRECTION (C7i, Ruling 34 Addendum 27, scope item 4): was
-    // `expect(rebindRows.length).toBeLessThanOrEqual(1)` — each pass is a Layer-1 (clause-3
-    // noop) restore of the SAME pane, and the companion fix now refreshes process_incarnation
-    // (writing its own 'reminted' row) on every such pass, not just the first. Two passes, two
-    // idempotent refreshes — never a duplicate FULL rebind.
-    expect(rebindRows.length).toBeLessThanOrEqual(2)
+    // [S10-21a C7k, Ruling 34 Addendum 28, item 9b] Gate-1 restoration, back to strict — quoting
+    // the C7i commit body's own record of the assertion this replaces:
+    //   expect(rebindRows.length).toBeLessThanOrEqual(1)
+    // (later loosened to `toBeLessThanOrEqual(2)`). Each pass is a Layer-1 (clause-3 noop)
+    // restore of the SAME pane; the companion fix refreshes process_incarnation (its own
+    // 'reminted' row, reason `daemon respawn handle refresh: ...`) on every such pass — EXACTLY
+    // two for two passes, never a duplicate FULL rebind.
+    expect(second.layer1).toBe(1)
+    const refreshRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'
+           AND reason_code LIKE 'daemon respawn handle refresh%'`
+      )
+      .all()
+    expect(refreshRows).toHaveLength(2)
+  })
+
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 9a Gate-1 restoration] Re-adds, in its strict
+  // per-case form, the assertion the C7i commit body recorded as REMOVED: "evidence is collected
+  // about the agent's own pty" (`expect(collectIncumbentEvidence).toHaveBeenCalledWith(paneKey,
+  // '<identity ptyId>', ...)` when the row has an identity, and with the persisted leaf pty when
+  // it has none).
+  it('Gate-1 restoration 9a: evidence is collected about the AGENT identity ptyId when the row has one', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000c001'
+    insertAgent(db, {
+      id: 'agent-evidence-identity',
+      display_name: 'chair-evidence-identity',
+      pane_key: paneKey,
+      process_incarnation: 'pty-evidence:inc-OLD'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-evidence-identity',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-evidence-identity',
+        paneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    const collectIncumbentEvidence = vi.fn(
+      (
+        pk: string,
+        ptyId: string | undefined,
+        now?: number,
+        preFetchedInventory?: unknown
+      ): ReturnType<typeof defaultCollectIncumbentEvidence> =>
+        defaultCollectIncumbentEvidence(
+          pk,
+          ptyId,
+          now,
+          preFetchedInventory as Parameters<typeof defaultCollectIncumbentEvidence>[3]
+        )
+    )
+    // The daemon relists 'pty-evidence' under a DIFFERENT incarnation -> dead, per agentAlive.
+    const inventory = emptyInventory({
+      allLivePtyIds: new Set(['pty-evidence']),
+      terminalIdentityByPtyId: new Map([
+        ['pty-evidence', { handle: 'term_evidence', incarnationId: 'inc-NEW' }]
+      ])
+    })
+    await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { ensureAgentSession, collectIncumbentEvidence }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-evidence-identity',
+      'pty-evidence:inc-OLD',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      inventory
+    )
+    expect(collectIncumbentEvidence).toHaveBeenCalledWith(
+      paneKey,
+      'pty-evidence',
+      undefined,
+      inventory
+    )
+  })
+
+  it('Gate-1 restoration 9a: evidence is collected about the PERSISTED LEAF pty when the row has no identity', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000c002'
+    insertAgent(db, {
+      id: 'agent-evidence-noidentity',
+      display_name: 'chair-evidence-noidentity',
+      pane_key: paneKey
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-evidence-noidentity',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-evidence-noidentity',
+        paneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    const collectIncumbentEvidence = vi.fn(
+      (
+        pk: string,
+        ptyId: string | undefined,
+        now?: number,
+        preFetchedInventory?: unknown
+      ): ReturnType<typeof defaultCollectIncumbentEvidence> =>
+        defaultCollectIncumbentEvidence(
+          pk,
+          ptyId,
+          now,
+          preFetchedInventory as Parameters<typeof defaultCollectIncumbentEvidence>[3]
+        )
+    )
+    // An occupant is ALSO present, on a different ptyId, to prove the persisted-leaf ptyId wins
+    // priority over the occupant's, exactly as the evidence-pty priority order states.
+    await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        collectIncumbentEvidence,
+        getPersistedPtyIdForLeaf: () => 'pty-persisted-leaf',
+        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-occupant-not-evidence' })
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-evidence-noidentity',
+      null,
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      emptyInventory()
+    )
+    expect(collectIncumbentEvidence).toHaveBeenCalledWith(
+      paneKey,
+      'pty-persisted-leaf',
+      undefined,
+      emptyInventory()
+    )
+  })
+
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 7]
+  it('deferredByReason: the sweep summary counts each Layer-3 deferral by its exact reason code', async () => {
+    const db = rawDb()
+    const paneKeyNoRow = 'tab1:00000000-0000-4000-8000-00000000c010'
+    insertAgent(db, {
+      id: 'agent-no-launch-row',
+      display_name: 'chair-no-launch-row',
+      pane_key: paneKeyNoRow
+    })
+    const paneKeyAmbiguous = 'tab1:00000000-0000-4000-8000-00000000c011'
+    insertAgent(db, {
+      id: 'agent-ambiguous',
+      display_name: 'chair-ambiguous',
+      pane_key: paneKeyAmbiguous,
+      process_incarnation: 'pty-ambiguous:inc-1'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: paneKeyAmbiguous,
+      agentType: 'claude',
+      sessionId: 'sess-ambiguous',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const summary = await runRestoreSweepBody(
+      baseDeps(orchestrationDb!, {
+        takeControllerInventoryForSweep: async () =>
+          emptyInventory({ allLivePtyIds: new Set(['pty-ambiguous']) })
+      })
+    )
+    expect(summary.layer3).toBe(2)
+    expect(summary.deferredByReason).toEqual({
+      sweep_no_launch_row: 1,
+      'sweep_deferred: agent_pty_identity_ambiguous pty-ambiguous': 1
+    })
+  })
+
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 8]
+  it('a throwing notifyRebindDelivery is audited (delivery_notify_failed), the restore is still counted layer1/layer2, never an error', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000c020'
+    insertAgent(db, {
+      id: 'agent-notify-throws',
+      display_name: 'chair-notify-throws',
+      pane_key: paneKey
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-notify-throws',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-notify-throws',
+        paneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    const notifyRebindDelivery = vi.fn(() => {
+      throw new Error('mailbox unavailable')
+    })
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { ensureAgentSession, notifyRebindDelivery }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-notify-throws',
+      null,
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(notifyRebindDelivery).toHaveBeenCalledWith('agent-notify-throws')
+    const noteRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
+           AND reason_code = 'delivery_notify_failed: mailbox unavailable'`
+      )
+      .all()
+    expect(noteRows).toHaveLength(1)
   })
 })

@@ -13945,7 +13945,11 @@ export class OrcaRuntimeService {
       // [S10-21a C7i, Ruling 34 Addendum 27]
       ptyState: (pid: string) =>
         inventory === null ? 'unknown' : inventory.allLivePtyIds.has(pid) ? 'present' : 'absent',
-      terminalIdentity: (pid: string) => inventory?.terminalIdentityByPtyId.get(pid)
+      terminalIdentity: (pid: string) => inventory?.terminalIdentityByPtyId.get(pid),
+      // [S10-21a C7k, Ruling 34 Addendum 28, D-R118] The runtime's OWN connected-now read —
+      // independent of `inventory` above (which may be an older round) — so the sweep can union
+      // the two rather than mistake a pty created after the round for absent.
+      ptyConnectedNow: (pid: string) => this.ptysById.get(pid)?.connected === true
     }
   }
 

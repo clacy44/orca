@@ -144,7 +144,15 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
     // the real `takeControllerInventoryForSweep` needs both (via `getResolvedWorktreeMap`).
     // Overridden here, same reasoning as `collectIncumbentEvidence` above: orthogonal to what T2
     // proves, already covered by orca-runtime-take-controller-inventory-for-sweep.test.ts.
-    deps.takeControllerInventoryForSweep = async () => null
+    // [S10-21a C7k, Ruling 34 Addendum 28, item 2 — SCENARIO_CORRECTION, forced deviation] was
+    // `async () => null` — item 2 makes a null round defer EVERY candidate (row 2), regardless of
+    // identity, which this fixture's own null round would now trigger unconditionally. An empty
+    // but non-null round preserves T2's own stated intent (the round's content is orthogonal to
+    // what T2 proves) while satisfying the new hard "null always defers" rule.
+    deps.takeControllerInventoryForSweep = async () => ({
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    })
     const summary = await runRestoreSweep(deps)
 
     expect(summary.errors).toBe(0)
@@ -158,5 +166,91 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
       .all()
     expect(rebindAudit).toHaveLength(1)
+  })
+
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 1] D-R118: the identity verdict must dominate the
+  // REAL d1/d2/d3 evidence bundle `OrcaRuntimeService.collectIncumbentEvidence` assembles — not
+  // a test-only override of it, which is why T2 above deliberately overrides
+  // `collectIncumbentEvidence`/`takeControllerInventoryForSweep` and this test does not.
+  it('same ptyId, different incarnation -> restore completes (layer1/layer2), one rebind audit, never refused incumbent_alive', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = new OrcaRuntimeService({
+      getSettings: () => ({
+        disabledTuiAgents: [],
+        agentCmdOverrides: {},
+        agentDefaultArgs: {},
+        agentDefaultEnv: {}
+      })
+    } as never)
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    const spawnedPtyId = randomUUID()
+    runtime.setPtyController({
+      spawn: async () => ({ id: spawnedPtyId, isReattach: false }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    const predPaneKey = `tab-old:${randomUUID()}`
+    const reusedPtyId = 'pty-reused-by-daemon'
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'chair-t-identity',
+      role: null,
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      terminalHandle: 'term_old',
+      // The registered agent's OWN identity: this ptyId, an OLD incarnation.
+      processIncarnation: `${reusedPtyId}:inc-OLD`,
+      worktreeId: 'wt-1',
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_old',
+      originHostId: HOST_ID
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const agentId = created.agent.id
+    const launched = db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-t-identity',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    if (!launched.ok) {
+      throw new Error('fixture launch row failed')
+    }
+    const deps = buildDeps(runtime)
+    // The REAL `collectIncumbentEvidence` — no override. Its own d1/d2/d3 read no proven exit,
+    // no leaf-liveness signal, and (via the round below) the ptyId present — none of which, on
+    // their own, are proof of death (D-R118's whole point: identity must dominate this).
+    deps.takeControllerInventoryForSweep = async () => ({
+      allLivePtyIds: new Set([reusedPtyId]),
+      // The daemon relists the SAME ptyId under a NEW incarnation — provably not this agent.
+      terminalIdentityByPtyId: new Map([
+        [reusedPtyId, { handle: 'term_new', incarnationId: 'inc-NEW' }]
+      ])
+    })
+    const summary = await runRestoreSweep(deps)
+
+    expect(summary.errors).toBe(0)
+    expect(summary.layer1 + summary.layer2).toBe(1)
+    const row = db.getAgentByIdIncludingTombstoned(agentId)
+    expect(row?.pane_key).not.toBeNull()
+    const rawDb = (db as unknown as { db: Database.Database }).db
+    const contestedAudit = rawDb
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'contested'`)
+      .all()
+    expect(contestedAudit).toHaveLength(0)
+    const remintedAudit = rawDb
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
+      .all()
+    expect(remintedAudit).toHaveLength(1)
   })
 })

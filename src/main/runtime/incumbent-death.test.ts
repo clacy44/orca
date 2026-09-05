@@ -140,6 +140,39 @@ describe('resolveIncumbentDeath', () => {
   })
 })
 
+// [S10-21a C7k, Ruling 34 Addendum 28, item 1] The identity verdict dominates D1/D2/D3 entirely.
+describe('resolveIncumbentDeath: agentIdentity dominance (C7k)', () => {
+  it("agentIdentity.verdict 'dead' -> dead:true, signal 'IDENTITY', even when D1/D2/D3 all read alive", () => {
+    const evidence = baseEvidence({
+      d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
+      d2: { inventory: 'present' },
+      d3: { liveNow: true, firstObservedNotLiveAt: null, now: 1_000_000 },
+      agentIdentity: { verdict: 'dead', ptyId: 'pty-1', incarnationId: 'inc-OLD' }
+    })
+    expect(resolveIncumbentDeath(evidence)).toMatchObject({ dead: true, signal: 'IDENTITY' })
+  })
+
+  it("agentIdentity.verdict 'alive' -> dead:false, reason 'IDENTITY_ALIVE', even when D1/D2 read dead", () => {
+    const evidence = baseEvidence({
+      d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
+      d2: { inventory: 'absent' },
+      d3: { liveNow: false, firstObservedNotLiveAt: null, now: 1_000_000 },
+      agentIdentity: { verdict: 'alive', ptyId: 'pty-1', incarnationId: 'inc-1' }
+    })
+    expect(resolveIncumbentDeath(evidence)).toEqual({ dead: false, reason: 'IDENTITY_ALIVE' })
+  })
+
+  it("an 'unknown_*' agentIdentity verdict falls through to D1/D2/D3 unchanged", () => {
+    const evidence = baseEvidence({
+      d1: { ptyKnownToRuntime: true, exitObservedThisGeneration: false },
+      d2: { inventory: 'absent' },
+      d3: { liveNow: false, firstObservedNotLiveAt: null, now: 1_000_000 },
+      agentIdentity: { verdict: 'unknown_inventory', ptyId: 'pty-1', incarnationId: 'inc-1' }
+    })
+    expect(resolveIncumbentDeath(evidence)).toMatchObject({ dead: true, signal: 'D2' })
+  })
+})
+
 describe('SettleObservations', () => {
   it('records the first not-live timestamp and holds it across repeated not-live observations', () => {
     const clock = new SettleObservations()

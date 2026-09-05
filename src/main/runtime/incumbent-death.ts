@@ -8,6 +8,8 @@
 //
 // The design's REBIND_SETTLE_MS did not exist anywhere in the repo before this commit (grepped
 // clean across `git log --all`) — Ruling 34 Addendum 9 defines it here.
+import type { AgentAliveResult } from './orchestration/agent-process-identity'
+
 export const REBIND_SETTLE_MS = 10_000
 
 export type IncumbentEvidence = {
@@ -34,10 +36,22 @@ export type IncumbentEvidence = {
   /** [S10-21a C7i, Ruling 34 Addendum 27] The round's identified handle+incarnation for a ptyId,
    * when the controller could positively identify it — same round as `ptyLive`/`ptyState`. */
   terminalIdentity?: (ptyId: string) => { handle: string; incarnationId: string } | undefined
+  /** [S10-21a C7k, Ruling 34 Addendum 28, D-R118] Whether the runtime has THIS ptyId connected
+   * right NOW, independent of the (possibly older) shared round `ptyState` reads — the union of
+   * the two is the occupant-liveness signal the sweep routes rows 8-11 on (a pty created after
+   * the round was taken must never read as absent). Optional: pure fixtures never read it. */
+  ptyConnectedNow?: (ptyId: string) => boolean
+  /** [S10-21a C7k, Ruling 34 Addendum 28, D-R118] The agent's OWN process-identity verdict
+   * (`agentAlive`, agent-process-identity.ts), set by the sweep from the SAME shared inventory
+   * round — when present, it dominates D1/D2/D3 entirely: a 'dead' verdict is dead regardless of
+   * what the d1/d2/d3 fields say (a reused ptyId under another incarnation must never read
+   * 'insufficient_evidence'/'live' and refuse the rebind as `incumbent_alive`), and an 'alive'
+   * verdict is never dead. Absent (or an 'unknown_*' verdict) falls through to D1/D2/D3 as before. */
+  agentIdentity?: { verdict: AgentAliveResult; ptyId: string; incarnationId: string }
 }
 
 export type IncumbentVerdict =
-  | { dead: true; signal: 'D1' | 'D2' | 'D3'; evidence: IncumbentEvidence }
+  | { dead: true; signal: 'D1' | 'D2' | 'D3' | 'IDENTITY'; evidence: IncumbentEvidence }
   | {
       dead: false
       reason:
@@ -46,6 +60,7 @@ export type IncumbentVerdict =
         | 'settling'
         | 'insufficient_evidence'
         | 'conflicting_signals'
+        | 'IDENTITY_ALIVE'
     }
 
 /** Pure. Reads exactly the three signals §2.5 enumerates — a live reading outranks every death
@@ -56,6 +71,17 @@ export type IncumbentVerdict =
  * require agreement between them, matching v3's "any one of" framing. No side effects, no DB
  * writes, no timers. */
 export function resolveIncumbentDeath(evidence: IncumbentEvidence): IncumbentVerdict {
+  // [S10-21a C7k, Ruling 34 Addendum 28] The identity verdict dominates — checked BEFORE any
+  // D1/D2/D3 reasoning, including the D3-live conflict check below. An 'unknown_*' verdict (or
+  // no `agentIdentity` at all) falls through unchanged.
+  if (evidence.agentIdentity) {
+    if (evidence.agentIdentity.verdict === 'dead') {
+      return { dead: true, signal: 'IDENTITY', evidence }
+    }
+    if (evidence.agentIdentity.verdict === 'alive') {
+      return { dead: false, reason: 'IDENTITY_ALIVE' }
+    }
+  }
   const d1Dead = !evidence.d1.ptyKnownToRuntime && evidence.d1.exitObservedThisGeneration
   const d2Dead = evidence.d2.inventory === 'absent'
   if (evidence.d3.liveNow) {

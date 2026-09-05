@@ -50,6 +50,7 @@ import {
   type RebindRestoredPaneParams
 } from './agent-restore-rebind-predicate'
 import { refreshAgentHandleAfterRespawn } from './agent-daemon-respawn-handle-refresh'
+import { parseProcessIncarnation } from './agent-process-identity'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 export type {
   RebindRefusalReason,
@@ -123,13 +124,31 @@ export function rebindRestoredPane(
     // `deps.getTerminalProcessIncarnation` always returns `string | null`, never `undefined`):
     // an `undefined` means there is nothing to refresh, so this is a true no-op, not a second
     // audit/UPDATE pair for T13's already-covered idempotent double-fire.
+    // [S10-21a C7k, Ruling 34 Addendum 28, item 5] The refresh never writes an empty or legacy
+    // identity — `params.processIncarnation` must parse as a genuine 2-segment identity, not
+    // merely be non-`undefined` (a caller can supply `null`, or a stale 3-segment legacy form).
+    // A supplied-but-unparseable value is recorded (row left untouched), never silently written.
     if (params.processIncarnation !== undefined && params.newTerminalHandle !== null) {
-      refreshAgentHandleAfterRespawn(db, {
-        hostId: params.hostId,
-        paneKey: params.newPaneKey,
-        newTerminalHandle: params.newTerminalHandle,
-        processIncarnation: params.processIncarnation
-      })
+      if (parseProcessIncarnation(params.processIncarnation) !== null) {
+        refreshAgentHandleAfterRespawn(db, {
+          hostId: params.hostId,
+          paneKey: params.newPaneKey,
+          newTerminalHandle: params.newTerminalHandle,
+          processIncarnation: params.processIncarnation,
+          // [S10-21a C7k, Ruling 34 Addendum 28, item 6] Target exactly the predicate's own
+          // agent — never re-derive by pane suffix, which two rows can share.
+          agentId: predicate.agentId
+        })
+      } else {
+        writeAgentAudit(db, {
+          agentId: predicate.agentId,
+          actorPaneKey: params.newPaneKey,
+          actorHostId: params.hostId,
+          verb: 'sweep_note',
+          outcome: 'proceeded',
+          reasonCode: `identity_unavailable: ${params.processIncarnation === null ? 'null' : 'legacy_form'}`
+        })
+      }
     }
     return { ok: true, rebound: false, agentId: predicate.agentId }
   }

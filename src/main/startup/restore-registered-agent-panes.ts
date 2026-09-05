@@ -36,95 +36,36 @@
 // UNRECORDED and at least as new as the row's own `recorded_at`, the row is superseded — Layer 3,
 // audited, never resumed over a newer unrecorded conversation.
 import type { AgentLaunchSessionRow } from '../runtime/orchestration/agent-launch-sessions'
-import type { RebindRestoredPaneResult } from '../runtime/orchestration/agent-restore-rebind'
-import { resolveIncumbentDeath, type IncumbentEvidence } from '../runtime/incumbent-death'
+import { resolveIncumbentDeath } from '../runtime/incumbent-death'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
-import type {
-  RuntimeAgentSessionRpcCaller,
-  RuntimeEnsureAgentSessionRequest,
-  RuntimeEnsureAgentSessionResult
-} from '../../shared/agent-session-host-authority'
 import type { ResumableTuiAgent } from '../../shared/agent-session-resume'
-import type { RestoreTicketId, RestoreTicketMintArgs } from '../runtime/restore-ticket-registry'
+import type { RuntimeEnsureAgentSessionResult } from '../../shared/agent-session-host-authority'
 import { parsePaneKey } from '../../shared/stable-pane-id'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from '../runtime/restore-sweep-lock'
 import type { ControllerInventory } from '../runtime/orchestration/agent-process-identity'
 import {
   decideEarlyRows,
+  decideLeafHoldRows,
   routeDeadCandidate
 } from '../runtime/orchestration/restore-sweep-decision'
+import { collectSweepEvidence } from '../runtime/orchestration/restore-sweep-evidence'
 import { noteSelfResumeWatermarkAbsent, evaluateRow7 } from './restore-sweep-row7-watermark'
 import {
   auditSweepSkip,
   auditLayer3,
   auditSweepNote
 } from '../runtime/orchestration/restore-sweep-audit'
-
-export type RestoreSweepDeps = {
-  getOrchestrationDb(): OrchestrationDb
-  getOrchestrationCompatibilityHostId(): string
-  getLaunchGenerationId(): string
-  /** [D-R110 B3] Liveness-only occupant lookup — `orca-runtime.ts#findConnectedLeafOccupant`.
-   * Distinguishes the pane's own live session from anything else on the leaf.
-   * [C7h, Ruling 34 Addendum 26] `tabId` scopes the match — a leaf id alone matches the first
-   * tab in map order that reused it. */
-  findConnectedLeafOccupant(
-    leafId: string,
-    tabId?: string | null
-  ): { paneKey: string; ptyId: string } | undefined
-  /** [D-R110 fix 6] Whether the tab's persisted layout TREE still resolves this leaf. */
-  isLeafInPersistedLayout(tabId: string, leafId: string, hostId?: string | null): boolean
-  /** [D-R110 fix 4] The persisted ptyId for a leaf (evidence input only, never occupancy). */
-  getPersistedPtyIdForLeaf(
-    tabId: string,
-    leafId: string,
-    hostId?: string | null
-  ): string | undefined
-  ensureAgentSession(
-    request: RuntimeEnsureAgentSessionRequest,
-    caller: RuntimeAgentSessionRpcCaller,
-    internal: { restoreProvenance: { kind: 'host-restore'; ticket: RestoreTicketId } }
-  ): Promise<RuntimeEnsureAgentSessionResult>
-  /** [C7i, Ruling 34 Addendum 27] ONE round for the WHOLE sweep — called once by
-   * `runRestoreSweepBody`, before the candidate loop, and the same result handed to every
-   * candidate. Retries once on a null round (orca-runtime.ts's own implementation). */
-  takeControllerInventoryForSweep(): Promise<ControllerInventory | null>
-  /** [C7j, Ruling 34 Addendum 27 row 7] The watermark captured once, before openMainWindow,
-   * under the restore-sweep lock (`orca-runtime.ts#captureSelfResumeWatermark`) — null when the
-   * orchestration DB was not yet attached at that capture point (row 7 is then skipped for the
-   * whole sweep, never moved to a different capture site). Read once by `runRestoreSweepBody`,
-   * same shared-round shape as `takeControllerInventoryForSweep`. */
-  getSelfResumeWatermark(): number | null
-  collectIncumbentEvidence(
-    paneKey: string,
-    ptyId: string | undefined,
-    now?: number,
-    preFetchedInventory?: ControllerInventory | null
-  ): Promise<IncumbentEvidence>
-  getTerminalProcessIncarnation(handle: string): string | null
-  /** In-process only (INV-P-021) — see orca-runtime.ts's `mintRestoreTicket`. */
-  mintRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId
-  /** [C9 hand-off, D-I80] `orca-runtime.ts#notifyRebindDelivery` — called once after a
-   * SUCCESSFUL Layer 1 or Layer 2 restore, never for a skipped/deferred candidate. */
-  notifyRebindDelivery(agentId: string): void
-}
-
-export type RestoreSweepSummary = {
-  candidates: number
-  layer1: number
-  layer2: number
-  layer3: number
-  skippedDaemonSurvived: number
-  skippedLeafHeld: number
-  errors: number
-}
-
-export type RestoreOneOutcome =
-  | { kind: 'layer1' | 'layer2'; result: RebindRestoredPaneResult }
-  | { kind: 'layer3'; result?: RebindRestoredPaneResult }
-  | { kind: 'skipped_daemon_survived' }
-  | { kind: 'skipped_leaf_held' }
+import type {
+  RestoreSweepDeps,
+  RestoreSweepSummary,
+  RestoreOneOutcome
+} from './restore-sweep-types'
+export type {
+  RestoreSweepDeps,
+  RestoreSweepSummary,
+  RestoreOneOutcome
+} from './restore-sweep-types'
 
 /** One sleeping registered pane's restore attempt. Exported for direct per-row testing without
  * driving the whole host enumeration. Never throws for a refusal — every non-restore path is a
@@ -146,14 +87,9 @@ export async function restoreOneRegisteredPane(
 ): Promise<RestoreOneOutcome> {
   const parsed = parsePaneKey(launchRow.pane_key)
   if (!parsed || !worktreeId) {
-    auditLayer3(
-      db,
-      hostId,
-      launchRow.pane_key,
-      agentId,
-      'sweep_no_placement: unparseable_pane_or_no_worktree'
-    )
-    return { kind: 'layer3' }
+    const reasonCode = 'sweep_no_placement: unparseable_pane_or_no_worktree'
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
+    return { kind: 'layer3', reasonCode }
   }
   // [S10-21a C7c, D-R110 finding 14] `findConnectedLeafOccupant` reads only this process's OWN
   // local `leaves` map — it has no per-leaf connection scoping yet, so a remote (SSH) pane's
@@ -161,47 +97,63 @@ export async function restoreOneRegisteredPane(
   // evaluated against a local-only signal that could read "no occupant" for a pane that is very
   // much alive on its own execution host.
   if (launchRow.execution_host_id !== LOCAL_EXECUTION_HOST_ID) {
-    auditLayer3(db, hostId, launchRow.pane_key, agentId, 'sweep_remote_pane_excluded')
-    return { kind: 'layer3' }
+    const reasonCode = 'sweep_remote_pane_excluded'
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
+    return { kind: 'layer3', reasonCode }
   }
   const unrecorded = db.isNewestAdmissionUnrecordedAndNewer(
     launchRow.pane_key,
     launchRow.recorded_at
   )
   if (unrecorded.unrecorded) {
-    auditLayer3(
-      db,
-      hostId,
-      launchRow.pane_key,
-      agentId,
-      `unrecorded_launch: ${unrecorded.reasonCode}`
-    )
-    return { kind: 'layer3' }
+    const reasonCode = `unrecorded_launch: ${unrecorded.reasonCode}`
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
+    return { kind: 'layer3', reasonCode }
   }
-  // [C7i, Ruling 34 Addendum 27] Rows 1-6 — pure, see restore-sweep-decision.ts.
-  const currentGeneration = deps.getLaunchGenerationId()
-  const early = decideEarlyRows(
-    processIncarnation,
-    inventory,
-    launchRow.launch_generation,
-    currentGeneration,
-    launchRow.evidence,
-    launchRow.seq
-  )
+  // [C7k, Ruling 34 Addendum 28] Rows 1-4 — pure, inventory-availability judged before identity
+  // (see restore-sweep-decision.ts's own doc comment).
+  const early = decideEarlyRows(processIncarnation, inventory)
   if (early.kind === 'skipped_daemon_survived') {
     auditSweepSkip(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
     return { kind: 'skipped_daemon_survived' }
   }
   if (early.kind === 'layer3') {
     auditLayer3(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
-    return { kind: 'layer3' }
-  }
-  if (early.kind === 'skipped_leaf_held') {
-    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
-    return { kind: 'skipped_leaf_held' }
+    return { kind: 'layer3', reasonCode: early.reasonCode }
   }
   if (early.noteReasonCode) {
     auditSweepNote(db, hostId, launchRow.pane_key, agentId, early.noteReasonCode)
+  }
+
+  // Occupant, evidence (identity-tagged per item 1), and combined liveness (per item 3) —
+  // computed ONCE, shared by rows 5-6's own-pane liveness check (C7k, item 4) and rows 8-11's
+  // routing. See restore-sweep-evidence.ts's own doc comment.
+  const { occupant, incumbentEvidence, occupantLiveness } = await collectSweepEvidence(
+    deps,
+    launchRow.pane_key,
+    parsed.tabId,
+    parsed.leafId,
+    hostId,
+    inventory,
+    early.identity,
+    early.status
+  )
+
+  // Rows 5-6. [C7k, item 4] Hold ONLY while a live pty stands on the row's OWN pane.
+  const currentGeneration = deps.getLaunchGenerationId()
+  const leafHold = decideLeafHoldRows(
+    launchRow.launch_generation,
+    currentGeneration,
+    launchRow.evidence,
+    launchRow.seq,
+    occupant?.paneKey === launchRow.pane_key && occupantLiveness === 'present'
+  )
+  if (leafHold.kind === 'skipped_leaf_held') {
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, leafHold.reasonCode)
+    return { kind: 'skipped_leaf_held' }
+  }
+  if (leafHold.noteReasonCode) {
+    auditSweepNote(db, hostId, launchRow.pane_key, agentId, leafHold.noteReasonCode)
   }
 
   // [C7j, Ruling 34 Addendum 27 row 7] Evaluated after rows 5-6 (above) and before rows 8-11
@@ -210,28 +162,13 @@ export async function restoreOneRegisteredPane(
     return { kind: 'skipped_leaf_held' }
   }
 
-  // [C7e/C7h, D-R111 R2, Addendum 26] `this.leaves` occupancy is a RACE at this run point, not
-  // an invariant. [C7i, Ruling 34 Addendum 27] The evidence pty for `collectIncumbentEvidence`
-  // prefers the agent's OWN identity, then the row's persisted ptyId, then the occupant's —
-  // D1/D2/D3 stay in the ticket's evidence field and the row-10 stale-signal audit only, never a
-  // survival arm; rows 8-11 (restore-sweep-decision.ts) judge the OCCUPANT's own ptyId via
-  // `ptyState`, over the same shared round, regardless of which ptyId this evidence was
-  // collected for.
-  const occupant = deps.findConnectedLeafOccupant(parsed.leafId, parsed.tabId)
-  const rowPtyId = deps.getPersistedPtyIdForLeaf(parsed.tabId, parsed.leafId, hostId)
-  const evidencePtyId = early.identity?.ptyId ?? rowPtyId ?? occupant?.ptyId
-  const incumbentEvidence = await deps.collectIncumbentEvidence(
-    launchRow.pane_key,
-    evidencePtyId,
-    undefined,
-    inventory
-  )
   const incumbent = resolveIncumbentDeath(incumbentEvidence)
   const routing = routeDeadCandidate(
     occupant,
     launchRow.pane_key,
-    occupant ? incumbentEvidence.ptyState?.(occupant.ptyId) : undefined,
-    deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)
+    occupantLiveness,
+    deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId),
+    inventory
   )
   const offerPlacement = routing.offerPlacement
   if (routing.audit) {
@@ -260,14 +197,9 @@ export async function restoreOneRegisteredPane(
       { restoreProvenance: { kind: 'host-restore', ticket } }
     )
   } catch (err) {
-    auditLayer3(
-      db,
-      hostId,
-      launchRow.pane_key,
-      agentId,
-      `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
-    )
-    return { kind: 'layer3' }
+    const reasonCode = `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
+    return { kind: 'layer3', reasonCode }
   }
   const newPaneKey = created.terminal.paneKey ?? launchRow.pane_key
   const newTerminalHandle = created.terminal.handle
@@ -288,15 +220,27 @@ export async function restoreOneRegisteredPane(
     processIncarnation: deps.getTerminalProcessIncarnation(newTerminalHandle)
   })
   if (!result.ok) {
-    auditLayer3(db, hostId, launchRow.pane_key, agentId, `rebind_refused: ${result.reason}`)
-    return { kind: 'layer3', result }
+    const reasonCode = `rebind_refused: ${result.reason}`
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
+    return { kind: 'layer3', result, reasonCode }
   }
   // §2.1c "the marks … written in the same synchronous step that redeems a row, before the
   // lock releases" — this call happens while the sweep's own lock is still held.
   db.setSweepRestoreMark(hostId, launchRow.pane_key)
   // [S10-21a C9 hand-off, D-I80] Arms any mail already waiting on `agent:<id>` — one call, only
-  // after a SUCCESSFUL restore, never for a skipped/deferred candidate.
-  deps.notifyRebindDelivery(agentId)
+  // after a SUCCESSFUL restore. [C7k, Addendum 28, item 8] A throw is an audited note, never a
+  // failed restore — it already committed.
+  try {
+    deps.notifyRebindDelivery(agentId)
+  } catch (err) {
+    auditSweepNote(
+      db,
+      hostId,
+      launchRow.pane_key,
+      agentId,
+      `delivery_notify_failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
   return { kind: result.rebound ? 'layer2' : 'layer1', result }
 }
 
@@ -317,7 +261,11 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
     layer3: 0,
     skippedDaemonSurvived: 0,
     skippedLeafHeld: 0,
-    errors: 0
+    errors: 0,
+    deferredByReason: {}
+  }
+  const recordDeferral = (reasonCode: string): void => {
+    summary.deferredByReason[reasonCode] = (summary.deferredByReason[reasonCode] ?? 0) + 1
   }
   const db = deps.getOrchestrationDb()
   const hostId = deps.getOrchestrationCompatibilityHostId()
@@ -345,6 +293,7 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
     if (!launchRow) {
       auditLayer3(db, hostId, paneKey, R.id, 'sweep_no_launch_row')
       summary.layer3 += 1
+      recordDeferral('sweep_no_launch_row')
       continue
     }
     summary.candidates += 1
@@ -370,6 +319,7 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
         summary.skippedLeafHeld += 1
       } else {
         summary.layer3 += 1
+        recordDeferral(outcome.reasonCode)
       }
     } catch (err) {
       summary.errors += 1
@@ -388,10 +338,16 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
 /** Lock-owning convenience wrapper around `runRestoreSweepBody` — acquires before, releases
  * (in `finally`) after. Used by callers with no window/barrier ordering constraint (the serve
  * startup path); the desktop path calls `runRestoreSweepBody` directly, inside its own
- * acquire/release that also spans opening the window and awaiting the startup barriers. */
-export async function runRestoreSweep(deps: RestoreSweepDeps): Promise<RestoreSweepSummary> {
+ * acquire/release that also spans opening the window and awaiting the startup barriers.
+ * [C7k, Ruling 34 Addendum 28, item 10] `onLockAcquired` runs after the lock, before the body —
+ * the serve path's own capture-the-watermark point, without this module knowing what one is. */
+export async function runRestoreSweep(
+  deps: RestoreSweepDeps,
+  onLockAcquired?: () => void
+): Promise<RestoreSweepSummary> {
   acquireRestoreSweepLock()
   try {
+    onLockAcquired?.()
     return await runRestoreSweepBody(deps)
   } finally {
     releaseRestoreSweepLock()

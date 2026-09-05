@@ -8,6 +8,7 @@
 // same pane key, new handle/incarnation, no ticket, no lock, no full sweep.
 import type Database from '../../sqlite/sync-database'
 import { getAgentByPaneKey } from './derived-agent-rows'
+import { getAgentByIdIncludingTombstoned } from './agent-retire'
 import { writeAgentAudit } from './agent-audit-log'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 
@@ -16,6 +17,12 @@ export type RefreshAgentHandleAfterRespawnParams = {
   paneKey: string
   newTerminalHandle: string
   processIncarnation?: string | null
+  /** [S10-21a C7k, Ruling 34 Addendum 28, item 6] When given, selects the row by id instead of
+   * by pane suffix — two registered rows CAN share a pane suffix; a caller that already knows
+   * exactly which agent it means (agent-restore-rebind.ts's noop path, `predicate.agentId`) must
+   * not let this primitive's own suffix lookup silently pick a different, unrelated row.
+   * Existing callers (pty.ts's daemon-respawn gate) omit it and keep the pane-suffix lookup. */
+  agentId?: string
 }
 
 export type RefreshAgentHandleAfterRespawnResult =
@@ -45,7 +52,10 @@ export function refreshAgentHandleAfterRespawn(
   db: Database.Database,
   params: RefreshAgentHandleAfterRespawnParams
 ): RefreshAgentHandleAfterRespawnResult {
-  const row = getAgentByPaneKey(db, params.hostId, params.paneKey)
+  const row =
+    params.agentId !== undefined
+      ? getAgentByIdIncludingTombstoned(db, params.agentId)
+      : getAgentByPaneKey(db, params.hostId, params.paneKey)
   if (!row) {
     writeAgentAudit(db, {
       agentId: null,

@@ -204,7 +204,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     expect(rows).toHaveLength(1)
   })
 
-  it('row 5: dead, launch row admitted THIS generation via sweep_record — skipped_leaf_held', async () => {
+  it('row 5: dead, launch row admitted THIS generation via sweep_record, a LIVE occupant on the row own pane — skipped_leaf_held (yield)', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a005'
     insertAgent(db, { id: 'agent-row5', display_name: 'chair-row5', pane_key: paneKey })
@@ -220,15 +220,22 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
     const ensureAgentSession = vi.fn()
     const mintRestoreTicket = vi.fn()
+    // [S10-21a C7k, Ruling 34 Addendum 28, item 4 — SCENARIO_CORRECTION] rows 5-6 now hold ONLY
+    // while a live pty stands on the pane — a live own-pane occupant is required here to still
+    // reach 'skipped_leaf_held'; see the two new tests below for the "no live pty" case.
     const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, { ensureAgentSession, mintRestoreTicket }),
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        mintRestoreTicket,
+        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-row5-occ' })
+      }),
       orchestrationDb!,
       HOST_ID,
       'agent-row5',
       null,
       'wt-1',
       launchRow,
-      emptyInventory()
+      emptyInventory({ allLivePtyIds: new Set(['pty-row5-occ']) })
     )
     expect(outcome.kind).toBe('skipped_leaf_held')
     expect(ensureAgentSession).not.toHaveBeenCalled()
@@ -239,7 +246,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     expect(rows).toHaveLength(1)
   })
 
-  it('row 6: dead, launch row admitted THIS generation via host_launch — skipped_leaf_held', async () => {
+  it('row 6: dead, launch row admitted THIS generation via host_launch, a LIVE occupant on the row own pane — skipped_leaf_held (yield)', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a006'
     insertAgent(db, { id: 'agent-row6', display_name: 'chair-row6', pane_key: paneKey })
@@ -256,14 +263,18 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const ensureAgentSession = vi.fn()
     const mintRestoreTicket = vi.fn()
     const outcome = await restoreOneRegisteredPane(
-      baseDeps(orchestrationDb!, { ensureAgentSession, mintRestoreTicket }),
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        mintRestoreTicket,
+        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-row6-occ' })
+      }),
       orchestrationDb!,
       HOST_ID,
       'agent-row6',
       null,
       'wt-1',
       launchRow,
-      emptyInventory()
+      emptyInventory({ allLivePtyIds: new Set(['pty-row6-occ']) })
     )
     expect(outcome.kind).toBe('skipped_leaf_held')
     expect(ensureAgentSession).not.toHaveBeenCalled()

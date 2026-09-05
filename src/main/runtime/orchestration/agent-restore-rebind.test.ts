@@ -801,4 +801,89 @@ describe('S10-21a C5: rebindRestoredPane', () => {
       .all('agent-same')
     expect(auditRows).toHaveLength(1)
   })
+
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 5] The companion refresh never writes an empty or
+  // legacy identity — it notes instead and leaves the row untouched.
+  it('C7k item 5: a same-pane noop restore with processIncarnation NULL leaves the row untouched, notes identity_unavailable: null', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-same-null',
+      display_name: 'chair-same-null',
+      pane_key: 'tab1:leaf-same-null',
+      terminal_handle: 'handle-old-null'
+    })
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-same-null'),
+      newPaneKey: 'tab1:leaf-same-null',
+      newTerminalHandle: 'handle-new-null',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT,
+      processIncarnation: null
+    })
+    expect(result).toEqual({ ok: true, rebound: false, agentId: 'agent-same-null' })
+
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-same-null') as AgentRow
+    expect(row.terminal_handle).toBe('handle-old-null')
+    expect(row.process_incarnation).toBeNull()
+
+    const noteRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'sweep_note'
+           AND reason_code = 'identity_unavailable: null'`
+      )
+      .all('agent-same-null')
+    expect(noteRows).toHaveLength(1)
+    const refreshRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'
+           AND reason_code LIKE 'daemon respawn handle refresh%'`
+      )
+      .all('agent-same-null')
+    expect(refreshRows).toHaveLength(0)
+  })
+
+  it('C7k item 5: a same-pane noop restore with a LEGACY 3-segment processIncarnation leaves the row untouched, notes identity_unavailable: legacy_form', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-same-legacy',
+      display_name: 'chair-same-legacy',
+      pane_key: 'tab1:leaf-same-legacy',
+      terminal_handle: 'handle-old-legacy'
+    })
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-same-legacy'),
+      newPaneKey: 'tab1:leaf-same-legacy',
+      newTerminalHandle: 'handle-new-legacy',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT,
+      processIncarnation: 'runtime-1:pty-1:gen-1'
+    })
+    expect(result).toEqual({ ok: true, rebound: false, agentId: 'agent-same-legacy' })
+
+    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get('agent-same-legacy') as AgentRow
+    expect(row.terminal_handle).toBe('handle-old-legacy')
+    expect(row.process_incarnation).toBeNull()
+
+    const noteRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'sweep_note'
+           AND reason_code = 'identity_unavailable: legacy_form'`
+      )
+      .all('agent-same-legacy')
+    expect(noteRows).toHaveLength(1)
+  })
+
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 6] The noop-path refresh call now threads
+  // `agentId: predicate.agentId` through to `refreshAgentHandleAfterRespawn` — see
+  // agent-daemon-respawn-handle-refresh.test.ts for the direct unit test proving that parameter
+  // selects the row by id (idx_agents_pane_suffix's own UNIQUE keeps two LIVE rows from ever
+  // sharing one host's suffix, so this file only proves the parameter is threaded through, not
+  // the ambiguity itself). Same-pane noop tests above already assert the row IS the predicate's
+  // own row on success.
 })

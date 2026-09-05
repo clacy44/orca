@@ -77,7 +77,10 @@ export function defaultCollectIncumbentEvidence(
     ptyLive: (pid: string) => inv?.allLivePtyIds.has(pid) ?? false,
     ptyState: (pid: string) =>
       inv === null ? 'unknown' : inv.allLivePtyIds.has(pid) ? 'present' : 'absent',
-    terminalIdentity: (pid: string) => inv?.terminalIdentityByPtyId.get(pid)
+    terminalIdentity: (pid: string) => inv?.terminalIdentityByPtyId.get(pid),
+    // [C7k] Default fixture has no separate "connected now" model — false unless a test
+    // overrides `collectIncumbentEvidence` itself to exercise the union with `ptyState`.
+    ptyConnectedNow: () => false
   })
 }
 

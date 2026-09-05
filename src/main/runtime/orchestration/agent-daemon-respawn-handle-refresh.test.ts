@@ -111,6 +111,42 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
     expect(result).toEqual({ ok: false, reason: 'no_registered_row' })
   })
 
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 6] `agentId`, when given, selects the row by id —
+  // never re-derived by pane suffix. `paneKey` here deliberately names a DIFFERENT row's own
+  // pane/suffix to prove the id wins outright, not merely "usually agrees with the suffix".
+  it('agentId selects the row by id, bypassing the pane-suffix lookup entirely', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-by-id',
+      display_name: 'chair-by-id',
+      pane_key: 'tab1:leaf-by-id',
+      terminal_handle: 'term-by-id-old'
+    })
+    insertAgent(db, {
+      id: 'agent-other',
+      display_name: 'chair-other',
+      pane_key: 'tab2:leaf-other',
+      terminal_handle: 'term-other-old'
+    })
+
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      // Names the OTHER row's own pane/suffix — a pane-suffix lookup would find 'agent-other'.
+      paneKey: 'tab2:leaf-other',
+      newTerminalHandle: 'term-new',
+      processIncarnation: 'pty-x:inc-x',
+      agentId: 'agent-by-id'
+    })
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-by-id' })
+
+    const targetRow = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-by-id')
+    expect(targetRow?.terminal_handle).toBe('term-new')
+    expect(targetRow?.process_incarnation).toBe('pty-x:inc-x')
+
+    const otherRow = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-other')
+    expect(otherRow?.terminal_handle).toBe('term-other-old')
+  })
+
   it('refuses on a quarantined row, audited, row unchanged', () => {
     const db = rawDb()
     const paneKey = 'tab1:leaf-quarantined'

@@ -173,7 +173,8 @@ import { recoverLegacyWorkerTerminalsForRendererStartup } from './startup/legacy
 import {
   runRestoreSweep,
   runRestoreSweepBody,
-  type RestoreSweepDeps
+  type RestoreSweepDeps,
+  type RestoreSweepSummary
 } from './startup/restore-registered-agent-panes'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from './runtime/restore-sweep-lock'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
@@ -1060,10 +1061,31 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
   }
 }
 
+// [S10-21a C7k, Ruling 34 Addendum 28, item 7] Loud, once per sweep, only when a deferral
+// actually occurred — never for a clean sweep.
+function logRestoreSweepDeferrals(summary: RestoreSweepSummary): void {
+  const entries = Object.entries(summary.deferredByReason)
+  const total = entries.reduce((sum, [, count]) => sum + count, 0)
+  if (total > 0) {
+    const reasons = entries.map(([reason, count]) => `${reason}=${count}`).join(',')
+    console.warn(`[restore-sweep] restore sweep deferred ${total} pane(s): ${reasons}`)
+  }
+}
+
 async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promise<void> {
   try {
-    const summary = await runRestoreSweep(buildRestoreSweepDeps(runtimeService))
+    // [S10-21a C7k, Ruling 34 Addendum 28, item 10] The desktop path captures the self-resume
+    // watermark right after acquiring the sweep lock; the serve path never did. `onLockAcquired`
+    // runs at the equivalent point here — after `runRestoreSweep`'s own lock acquisition, before
+    // the sweep body runs (and therefore before the serve path's later graph publish) — same
+    // `captureSelfResumeWatermark()` primitive, same absent-branch behaviour (an unattached DB at
+    // capture time is peeked as null; `runRestoreSweepBody`'s own `noteSelfResumeWatermarkAbsent`
+    // records that once, sweep-level, not here).
+    const summary = await runRestoreSweep(buildRestoreSweepDeps(runtimeService), () =>
+      runtimeService.captureSelfResumeWatermark()
+    )
     logStartupMilestone('restore-sweep-done', summary)
+    logRestoreSweepDeferrals(summary)
   } catch (error) {
     console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
   }
@@ -1075,6 +1097,7 @@ async function runStartupRestoreSweepBody(runtimeService: OrcaRuntimeService): P
   try {
     const summary = await runRestoreSweepBody(buildRestoreSweepDeps(runtimeService))
     logStartupMilestone('restore-sweep-done', summary)
+    logRestoreSweepDeferrals(summary)
   } catch (error) {
     console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
   }
