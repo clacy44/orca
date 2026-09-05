@@ -15,6 +15,10 @@ const PANE_A_MOVED = 'tabA2:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 // PANE_A's leaf), the exact shape findByPaneSuffix cannot match — the S10-11 THE ONE BUG case.
 const PANE_A_RELAUNCH = 'tabA9:dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+// [C13] retire now requires an attested, registered caller (Addendum 5(k)(5)) — a dedicated
+// operator identity for the retire-describe tests below, so the pre-existing B fixtures (which
+// stay deliberately unregistered until their own register/reclaim assertions) are untouched.
+const PANE_OP = 'tabOp:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
 function makeAuthority(
   paneKey: string,
@@ -96,6 +100,13 @@ describe('orchestration.agents.* RPC methods', () => {
       ) {
         return makeAuthority(PANE_A_RELAUNCH, 'term_a_relaunched')
       }
+      if (
+        evidence?.terminalHandle === 'term_op' &&
+        evidence.paneKey === PANE_OP &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_OP, 'term_op')
+      }
       return null
     })
   }
@@ -133,6 +144,7 @@ describe('orchestration.agents.* RPC methods', () => {
     launchToken: 'lt-a'
   }
   const evidenceB = { terminalHandle: 'term_b', paneKey: PANE_B, launchToken: 'lt-b' }
+  const evidenceOp = { terminalHandle: 'term_op', paneKey: PANE_OP, launchToken: 'lt-op' }
   const evidenceARelaunch = {
     terminalHandle: 'term_a_relaunched',
     paneKey: PANE_A_RELAUNCH,
@@ -517,11 +529,18 @@ describe('orchestration.agents.* RPC methods', () => {
         { name: 'merge-backend', role: 'backend' },
         ctx(evidenceA)
       )) as { agent: { id: string } }
+      // [C13] retire requires an attested, registered caller — a dedicated operator identity,
+      // distinct from B, so B stays unregistered for the fresh-reclaim assertion below.
+      await call(
+        'orchestration.agents.register',
+        { name: 'retire-operator', role: 'operator' },
+        ctx(evidenceOp)
+      )
 
       const retired = (await call(
         'orchestration.agents.retire',
         { id: registered.agent.id },
-        ctx(evidenceB)
+        ctx(evidenceOp)
       )) as { agent: { id: string }; outcome: string }
       expect(retired.outcome).toBe('retired')
 
@@ -547,12 +566,18 @@ describe('orchestration.agents.* RPC methods', () => {
         { name: 'merge-backend', role: 'backend' },
         ctx(evidenceA)
       )) as { agent: { id: string } }
+      // [C13] retire requires an attested, registered caller.
+      await call(
+        'orchestration.agents.register',
+        { name: 'retire-operator', role: 'operator' },
+        ctx(evidenceOp)
+      )
 
-      await call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+      await call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceOp))
       const second = (await call(
         'orchestration.agents.retire',
         { id: registered.agent.id },
-        ctx(evidenceB)
+        ctx(evidenceOp)
       )) as { outcome: string }
       expect(second.outcome).toBe('already_retired')
     })
@@ -581,6 +606,12 @@ describe('orchestration.agents.* RPC methods', () => {
         { name: 'merge-backend', role: 'backend' },
         ctx(evidenceA)
       )) as { agent: { id: string } }
+      // [C13] retire requires an attested, registered caller.
+      await call(
+        'orchestration.agents.register',
+        { name: 'retire-operator', role: 'operator' },
+        ctx(evidenceOp)
+      )
 
       vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockReturnValue({
         terminalHandle: 'term_a',
@@ -589,13 +620,13 @@ describe('orchestration.agents.* RPC methods', () => {
       })
 
       await expect(
-        call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+        call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceOp))
       ).rejects.toMatchObject({ code: 'agent_live' })
 
       const forced = (await call(
         'orchestration.agents.retire',
         { id: registered.agent.id, force: true },
-        ctx(evidenceB)
+        ctx(evidenceOp)
       )) as { outcome: string }
       expect(forced.outcome).toBe('retired')
     })
@@ -622,7 +653,14 @@ describe('orchestration.agents.* RPC methods', () => {
         )
       ).rejects.toMatchObject({ code: 'name_taken' })
 
-      await call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+      // [C13] retire requires an attested, registered caller — a dedicated operator identity,
+      // distinct from B, so B stays unregistered for the fresh-reclaim assertion below.
+      await call(
+        'orchestration.agents.register',
+        { name: 'retire-operator', role: 'operator' },
+        ctx(evidenceOp)
+      )
+      await call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceOp))
 
       // Retire is the cleanup step that frees it.
       const reclaimed = (await call(
@@ -632,6 +670,46 @@ describe('orchestration.agents.* RPC methods', () => {
       )) as { created: boolean; agent: { displayName: string } }
       expect(reclaimed.created).toBe(true)
       expect(reclaimed.agent.displayName).toBe('merge-backend')
+    })
+
+    // [v3.2] T35 (Addendum 5(k)(5), D-R92 P4): retire requires attestation, checked BEFORE any
+    // mutation — not merely refused with the row already tombstoned.
+    it('T35: an unattested local caller is refused no_pane_identity before any mutation', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+      const retireAgentSpy = vi.spyOn(db, 'retireAgent')
+
+      await expect(
+        call('orchestration.agents.retire', { id: registered.agent.id }, ctx())
+      ).rejects.toMatchObject({ code: 'no_pane_identity' })
+
+      expect(retireAgentSpy).not.toHaveBeenCalled()
+      const untouched = db.getAgentByIdIncludingTombstoned(registered.agent.id)
+      expect(untouched?.tombstoned_at).toBeNull()
+    })
+
+    it('T35: an attested-but-unregistered local caller is refused no_registered_identity before any mutation', async () => {
+      setup()
+      const registered = (await call(
+        'orchestration.agents.register',
+        { name: 'merge-backend', role: 'backend' },
+        ctx(evidenceA)
+      )) as { agent: { id: string } }
+      const retireAgentSpy = vi.spyOn(db, 'retireAgent')
+
+      // evidenceB is attested (verifyOrchestrationCompatibilityCaller resolves it) but has never
+      // registered an agent for its pane.
+      await expect(
+        call('orchestration.agents.retire', { id: registered.agent.id }, ctx(evidenceB))
+      ).rejects.toMatchObject({ code: 'no_registered_identity' })
+
+      expect(retireAgentSpy).not.toHaveBeenCalled()
+      const untouched = db.getAgentByIdIncludingTombstoned(registered.agent.id)
+      expect(untouched?.tombstoned_at).toBeNull()
     })
   })
 

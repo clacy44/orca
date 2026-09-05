@@ -19,6 +19,7 @@ import { OptionalBoolean, OptionalString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { hostIdFor, toPublicAgentView } from './agent-directory-rpc-view'
 import { refreshLiveness } from './agent-directory-rpc-liveness'
+import { resolveCallerAgent } from './orchestration-caller-identity'
 
 const RetireParams = z.object({
   id: OptionalString,
@@ -46,6 +47,13 @@ export const ORCHESTRATION_AGENTS_RETIRE_METHODS: RpcMethod[] = [
       }
       const db = runtime.getOrchestrationDb()
       const hostId = hostIdFor(runtime)
+      // [C13, Addendum 5(k)(5), D-R92 P4] The attested, registered caller is verified BEFORE
+      // any mutation — same footing as orchestration-agents-register.ts's own first-line check
+      // (no_pane_identity / no_registered_identity), via the shared resolveCallerAgent helper
+      // (orchestration-caller-identity.ts:42-77) rather than a copy-pasted check. This used to
+      // run only after db.retireAgent(...) had already tombstoned the row, solely to name the
+      // audit row's actorPaneKey; it now gates the retire itself.
+      const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
       const target = params.id
         ? db.getAgentByIdIncludingTombstoned(params.id)
         : db.getAgentByName(hostId, params.name!)
@@ -73,13 +81,9 @@ export const ORCHESTRATION_AGENTS_RETIRE_METHODS: RpcMethod[] = [
       }
 
       const outcome = db.retireAgent(target.id)
-      const authority = runtime.verifyOrchestrationCompatibilityCaller(
-        orchestrationCompatibilityEvidence,
-        { currentRuntimeLaunchSufficient: true }
-      )
       db.writeAgentAudit({
         agentId: target.id,
-        actorPaneKey: authority?.paneKey ?? null,
+        actorPaneKey: caller.pane_key,
         actorHostId: hostId,
         verb: 'retire',
         outcome: 'ok',
