@@ -57,7 +57,11 @@ const {
   rotateAndOpenDaemonStderrLogFdMock,
   writeDaemonStderrLogMarkerMock,
   closeDaemonStderrLogFdMock,
-  readDaemonStderrTailMock
+  readDaemonStderrTailMock,
+  getRelocatedDaemonHostMock,
+  materializeRelocatedDaemonHostMock,
+  collectPinnedDaemonVersionsMock,
+  pruneOldDaemonHostsMock
 } = vi.hoisted(() => {
   const getPathMock = vi.fn(() => '/fake/userData')
   const getAppPathMock = vi.fn(() => '/fake/app')
@@ -190,6 +194,17 @@ const {
   const writeDaemonStderrLogMarkerMock = vi.fn()
   const closeDaemonStderrLogFdMock = vi.fn()
   const readDaemonStderrTailMock = vi.fn(() => '')
+  // Why: real getRelocatedDaemonHost()/materializeRelocatedDaemonHost() already return
+  // null/no-op on this non-win32, non-packaged test box — these defaults just make that
+  // explicit and controllable per-test (H16 R1).
+  const getRelocatedDaemonHostMock = vi.fn(
+    (): { execPath: string; entryPath: string } | null => null
+  )
+  const materializeRelocatedDaemonHostMock = vi.fn(
+    (): { execPath: string; entryPath: string } | null => null
+  )
+  const collectPinnedDaemonVersionsMock = vi.fn(() => new Set<string>())
+  const pruneOldDaemonHostsMock = vi.fn()
 
   return {
     getPathMock,
@@ -237,7 +252,11 @@ const {
     rotateAndOpenDaemonStderrLogFdMock,
     writeDaemonStderrLogMarkerMock,
     closeDaemonStderrLogFdMock,
-    readDaemonStderrTailMock
+    readDaemonStderrTailMock,
+    getRelocatedDaemonHostMock,
+    materializeRelocatedDaemonHostMock,
+    collectPinnedDaemonVersionsMock,
+    pruneOldDaemonHostsMock
   }
 })
 
@@ -331,6 +350,13 @@ vi.mock('./daemon-stderr-log', () => ({
   writeDaemonStderrLogMarker: writeDaemonStderrLogMarkerMock,
   closeDaemonStderrLogFd: closeDaemonStderrLogFdMock,
   readDaemonStderrTail: readDaemonStderrTailMock
+}))
+
+vi.mock('./daemon-host-relocation', () => ({
+  getRelocatedDaemonHost: getRelocatedDaemonHostMock,
+  materializeRelocatedDaemonHost: materializeRelocatedDaemonHostMock,
+  collectPinnedDaemonVersions: collectPinnedDaemonVersionsMock,
+  pruneOldDaemonHosts: pruneOldDaemonHostsMock
 }))
 
 vi.mock('./daemon-spawner', () => ({
@@ -485,6 +511,13 @@ async function importFresh() {
   closeDaemonStderrLogFdMock.mockClear()
   readDaemonStderrTailMock.mockClear()
   readDaemonStderrTailMock.mockReturnValue('')
+  getRelocatedDaemonHostMock.mockClear()
+  getRelocatedDaemonHostMock.mockReturnValue(null)
+  materializeRelocatedDaemonHostMock.mockClear()
+  materializeRelocatedDaemonHostMock.mockReturnValue(null)
+  collectPinnedDaemonVersionsMock.mockClear()
+  collectPinnedDaemonVersionsMock.mockReturnValue(new Set<string>())
+  pruneOldDaemonHostsMock.mockClear()
   checkDaemonHealthMock.mockClear()
   checkDaemonHealthMock.mockResolvedValue('healthy')
   healthCheckDaemonMock.mockClear()
@@ -2957,16 +2990,79 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     }
   })
 
+  it("H16 (fd leak): closes the parent's stderr fd when fork() throws synchronously", async () => {
+    const mod = await importFresh()
+    checkDaemonHealthMock.mockResolvedValue('unreachable')
+    await mod.initDaemonPtyProvider()
+    const launcher = spawnerInstances[0].launcher as (
+      socketPath: string,
+      tokenPath: string
+    ) => Promise<{ shutdown(): Promise<void> }>
+    forkMock.mockImplementationOnce(() => {
+      throw new Error('EMFILE: too many open files')
+    })
+
+    await expect(launcher('/fake/socket', '/fake/token')).rejects.toThrow(
+      'EMFILE: too many open files'
+    )
+
+    expect(rotateAndOpenDaemonStderrLogFdMock).toHaveBeenCalledOnce()
+    expect(closeDaemonStderrLogFdMock).toHaveBeenCalledWith(999)
+    expect(writeDaemonStderrLogMarkerMock).not.toHaveBeenCalled()
+  })
+
+  it('H16 R1: the daemon_lifecycle breadcrumb reads the relocation MARKER only — never materializes (copies) the daemon-host tree', async () => {
+    const mod = await importFresh()
+    await mod.initDaemonPtyProvider()
+    // initDaemonPtyProvider's own startup (pruneOldDaemonHosts) does not touch either function —
+    // clear anyway so this assertion is scoped to the respawn call below, not startup noise.
+    getRelocatedDaemonHostMock.mockClear()
+    materializeRelocatedDaemonHostMock.mockClear()
+    const outgoingRespawn = adapterInstances[0].options.respawn
+
+    await outgoingRespawn?.('daemon_died')
+
+    expect(getRelocatedDaemonHostMock).toHaveBeenCalled()
+    expect(materializeRelocatedDaemonHostMock).not.toHaveBeenCalled()
+  })
+
+  it('H16 R1: relocated is true when the relocation marker exists, and resolveCurrentForkEntry fails open (relocated: false) if the marker check throws', async () => {
+    const mod = await importFresh()
+    await mod.initDaemonPtyProvider()
+    const outgoingRespawn = adapterInstances[0].options.respawn
+
+    getRelocatedDaemonHostMock.mockReturnValue({
+      execPath: '/fake/relocated/Orca.exe',
+      entryPath: '/fake/relocated/daemon-entry.js'
+    })
+    await outgoingRespawn?.('daemon_died')
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({ relocated: true })
+    )
+
+    recordDurableCrashBreadcrumbMock.mockClear()
+    getRelocatedDaemonHostMock.mockImplementation(() => {
+      throw new Error('marker read failed')
+    })
+    await outgoingRespawn?.('daemon_died')
+    expect(recordDurableCrashBreadcrumbMock).toHaveBeenCalledWith(
+      'daemon_lifecycle',
+      expect.objectContaining({ relocated: false })
+    )
+  })
+
   it('H14: a startup failure reads the stderr tail from the file, not an in-memory buffer', async () => {
     // Why: pre-H14 this came from a pipe the parent buffered; the daemon now owns the fd
     // directly (D-R112 M6), so the tail for a startup-failure error comes from the file.
     const mod = await importFresh()
     checkDaemonHealthMock.mockResolvedValue('unreachable')
     await mod.initDaemonPtyProvider()
-    // mockReturnValue (not Once, and set after importFresh — which resets it to '' as part of
-    // its shared-mock hygiene): the pre-kill 'replacing'/post-kill 'replaced' daemon_lifecycle
-    // breadcrumbs earlier in this same launch also read the tail (includeStderrTail on the
-    // post-kill site) before the startup failure this test is actually checking.
+    // mockReturnValue (not Once, and set after importFresh, which resets it to '' as part of its
+    // shared-mock hygiene). readFileSyncMock still throws (unmodified default), so the pre-fork
+    // 'replacing'/'replaced' daemon_lifecycle breadcrumbs resolve daemonPid to null and never
+    // call readDaemonStderrTail at all (H16's guard) — only fail()'s call, keyed on child.pid
+    // (4321, known directly), reaches this mock.
     readDaemonStderrTailMock.mockReturnValue("Error: Cannot find module 'electron'")
 
     const launcher = spawnerInstances[0].launcher as (
@@ -3017,6 +3113,8 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       4321,
       'failed-launch'
     )
+    // H16 R3: scoped to the exact child that just failed to start.
+    expect(readDaemonStderrTailMock).toHaveBeenCalledWith(expect.any(String), 4321)
   })
 
   it('H14/H15: died_respawn carries the stderr tail in the daemon_lifecycle breadcrumb, under a *_stack key, when non-empty', async () => {
@@ -3024,6 +3122,10 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     await mod.initDaemonPtyProvider()
     const outgoingRespawn = adapterInstances[0].options.respawn
     readDaemonStderrTailMock.mockReturnValue('FATAL ERROR: JavaScript heap out of memory')
+    // H16: readDaemonStderrTail is only invoked once a pid is known — give the breadcrumb a
+    // resolvable daemonPid via the pid-file read/parse path.
+    readFileSyncMock.mockReturnValue('{"pid":4242}')
+    parseDaemonPidFileMock.mockReturnValue({ pid: 4242, startedAtMs: 1_000_000 })
 
     await outgoingRespawn?.('daemon_died')
 
@@ -3035,15 +3137,22 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
         daemonStderrTail_stack: 'FATAL ERROR: JavaScript heap out of memory'
       })
     )
+    // H16 R3: the read is scoped to the pid the breadcrumb actually resolved.
+    expect(readDaemonStderrTailMock).toHaveBeenCalledWith(expect.any(String), 4242)
   })
 
-  it('H14/H15: omits daemonStderrTail_stack when the file has nothing to report', async () => {
+  it('H14/H15: omits daemonStderrTail_stack when daemonPid is unresolvable (readDaemonStderrTail is never even invoked)', async () => {
     const mod = await importFresh()
     await mod.initDaemonPtyProvider()
     const outgoingRespawn = adapterInstances[0].options.respawn
-    // readDaemonStderrTailMock defaults to '' per beforeEach.
+    // readFileSyncMock throws by default (see importFresh) — daemonPid stays null, and H16's
+    // guard (opts.includeStderrTail && daemonPid !== null) must skip the read entirely rather
+    // than ask readDaemonStderrTail to guess a generation from an unknown pid.
+    readDaemonStderrTailMock.mockReturnValue('should never be attached')
 
     await outgoingRespawn?.('daemon_died')
+
+    expect(readDaemonStderrTailMock).not.toHaveBeenCalled()
 
     const call = recordDurableCrashBreadcrumbMock.mock.calls.find(
       ([name]) => name === 'daemon_lifecycle'

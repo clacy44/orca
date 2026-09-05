@@ -19,7 +19,7 @@
 // constant or env var and does the POST itself.
 
 import { app, dialog, ipcMain, shell } from 'electron'
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { arch as osArch, platform as osPlatform, release as osRelease, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -31,6 +31,7 @@ import {
 } from '../observability'
 import type { CollectedBundle } from '../observability/bundle'
 import type { UploadBundleResult } from '../observability/diagnostic-bundle-upload'
+import { getDaemonStderrLogFilePath } from '../observability/logs-directory'
 import {
   resolveDiagnosticOrcaChannel,
   resolveDiagnosticTokenEndpoint
@@ -153,6 +154,8 @@ function deletePendingBundle(bundleSubmissionId: string): void {
   if (pending) {
     clearTimeout(pending.ttlTimer)
     deletePreviewFile(pending.previewFilePath)
+    // Why: the local-only stderr.log copy (H16 R2) shares the preview's lifecycle.
+    deletePreviewFile(join(getPreviewDirectory(), `${bundleSubmissionId}.stderr.log`))
     pendingBundles.delete(bundleSubmissionId)
   }
 }
@@ -167,11 +170,31 @@ function getPreviewDirectory(): string {
   return join(base, 'orca-diagnostic-bundle-previews')
 }
 
+// Why (H16, Ruling 35 Addendum 3 R2): daemon.stderr.log is LOCAL-ONLY evidence — it never rides
+// the uploaded/previewed NDJSON payload (that would ship unredacted raw process output to the
+// vendor endpoint). Copy it beside the preview file instead, for local inspection only; a copy
+// failure (file absent, locked) is fine — there may simply be nothing to attach yet.
+function copyDaemonStderrLogBesidePreview(
+  previewDirectory: string,
+  bundleSubmissionId: string
+): void {
+  try {
+    const source = getDaemonStderrLogFilePath()
+    if (!existsSync(source)) {
+      return
+    }
+    copyFileSync(source, join(previewDirectory, `${bundleSubmissionId}.stderr.log`))
+  } catch {
+    /* best effort — local-only convenience, never blocks the preview */
+  }
+}
+
 function writeBundlePreviewFile(bundle: CollectedBundle): string {
   const previewDirectory = getPreviewDirectory()
   mkdirSync(previewDirectory, { mode: 0o700, recursive: true })
   const previewFilePath = join(previewDirectory, `${bundle.bundleSubmissionId}.ndjson`)
   writeFileSync(previewFilePath, bundle.payload, { encoding: 'utf8', mode: 0o600 })
+  copyDaemonStderrLogBesidePreview(previewDirectory, bundle.bundleSubmissionId)
   return previewFilePath
 }
 

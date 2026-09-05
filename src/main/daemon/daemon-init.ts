@@ -41,6 +41,7 @@ import {
 } from './daemon-health'
 import {
   collectPinnedDaemonVersions,
+  getRelocatedDaemonHost,
   materializeRelocatedDaemonHost,
   pruneOldDaemonHosts
 } from './daemon-host-relocation'
@@ -169,13 +170,23 @@ function getEntryHashCached(filePath: string): string {
 // Breadcrumb sites outside the launcher closure (the respawn callbacks) don't have forkEntryPath
 // in scope — this recomputes the same decision materializeRelocatedDaemonHost already made
 // (idempotent/cached there) so they can report entryHash/relocated too.
+// Why (H16, Ruling 35 Addendum 3 R1): materializeRelocatedDaemonHost() is uncached and, on a
+// marker miss, COPIES the daemon-host tree and rmSync/renameSync's the destination — which fails
+// pre-kill while the old daemon still holds the mapped exe (yielding a false `relocated: false`
+// on a relocated install) and inserts a large synchronous copy into the breadcrumb/respawn path.
+// getRelocatedDaemonHost() is the pure marker check (read-only) — exactly what a breadcrumb
+// needs. collectDaemonHostSources() inside it is unguarded, so wrap the whole thing: a breadcrumb
+// must never fail the launch it's trying to explain.
 function resolveCurrentForkEntry(): { forkEntryPath: string; relocated: boolean } {
-  const entryPath = getDaemonEntryPath()
-  const relocatedHost = materializeRelocatedDaemonHost()
-  return {
-    forkEntryPath: relocatedHost ? relocatedHost.entryPath : entryPath,
-    relocated: relocatedHost !== null
+  try {
+    const relocatedHost = getRelocatedDaemonHost()
+    if (relocatedHost) {
+      return { forkEntryPath: relocatedHost.entryPath, relocated: true }
+    }
+  } catch {
+    // Fall through to the install-dir entry — never let this block the breadcrumb it feeds.
   }
+  return { forkEntryPath: getDaemonEntryPath(), relocated: false }
 }
 
 // Why (H9, incident 2026-09-04 §2.2(b)): the daemon_lifecycle telemetry (trackDaemonReplaced /
@@ -207,9 +218,10 @@ function recordDaemonLifecycleBreadcrumb(opts: {
     daemonPid = null
   }
   const { forkEntryPath, relocated } = resolveCurrentForkEntry()
-  const stderrTail = opts.includeStderrTail
-    ? readDaemonStderrTail(getDaemonStderrLogFilePath())
-    : ''
+  const stderrTail =
+    opts.includeStderrTail && daemonPid !== null
+      ? readDaemonStderrTail(getDaemonStderrLogFilePath(), daemonPid)
+      : ''
   recordDurableCrashBreadcrumb('daemon_lifecycle', {
     reason: opts.reason,
     transition: opts.transition,
@@ -842,45 +854,60 @@ function createOutOfProcessLauncher(
           stderrFd = null
         }
       }
-      const child = fork(
-        forkEntryPath,
-        [
-          '--socket',
-          socketPath,
-          '--token',
-          tokenPath,
-          '--pid-record',
-          pidPath,
-          '--launch-nonce',
-          launchNonce,
-          '--entry-path',
-          entryPath,
-          '--app-version',
-          app.getVersion(),
-          '--spawner-exec-path',
-          process.execPath,
-          ...(macosLoginSessionWatch ? ['--login-session-watch'] : []),
-          ...daemonLogArgs()
-        ],
-        {
-          // Why: detached daemons outlive dev worktrees; userData keeps process.cwd() valid after a repo/worktree is deleted.
-          cwd: userDataPath,
-          // Why: detached+unref outlives Electron; stdout 'ignore' (else blocks exit); stderr is
-          // the rotated log's fd directly (H14) — 'ignore' only when diagnostics are disabled or
-          // the fd failed to open.
-          detached: true,
-          stdio: ['ignore', 'ignore', stderrFd ?? 'ignore', 'ipc'],
-          // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
-          ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
-          // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.
-          env: {
-            ...process.env,
-            ELECTRON_RUN_AS_NODE: '1',
-            // Why: the detached plain-Node daemon can't call app.getPath(), but shell rcfiles must live outside swept tmp.
-            ORCA_USER_DATA_PATH: userDataPath
+      // Why (H16, Ruling 35 Addendum 3 fd leak): fork() can throw synchronously (EMFILE, a bad
+      // forkEntryPath). Without this, a throw here leaks the parent's copy of stderrFd forever —
+      // close it before the error reaches the outer catch, which owns everything else.
+      let child: ChildProcess
+      try {
+        child = fork(
+          forkEntryPath,
+          [
+            '--socket',
+            socketPath,
+            '--token',
+            tokenPath,
+            '--pid-record',
+            pidPath,
+            '--launch-nonce',
+            launchNonce,
+            '--entry-path',
+            entryPath,
+            '--app-version',
+            app.getVersion(),
+            '--spawner-exec-path',
+            process.execPath,
+            ...(macosLoginSessionWatch ? ['--login-session-watch'] : []),
+            ...daemonLogArgs()
+          ],
+          {
+            // Why: detached daemons outlive dev worktrees; userData keeps process.cwd() valid after a repo/worktree is deleted.
+            cwd: userDataPath,
+            // Why: detached+unref outlives Electron; stdout 'ignore' (else blocks exit); stderr is
+            // the rotated log's fd directly (H14) — 'ignore' only when diagnostics are disabled or
+            // the fd failed to open.
+            detached: true,
+            stdio: ['ignore', 'ignore', stderrFd ?? 'ignore', 'ipc'],
+            // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
+            ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
+            // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.
+            env: {
+              ...process.env,
+              ELECTRON_RUN_AS_NODE: '1',
+              // Why: the detached plain-Node daemon can't call app.getPath(), but shell rcfiles must live outside swept tmp.
+              ORCA_USER_DATA_PATH: userDataPath
+            }
+          }
+        )
+      } catch (forkError) {
+        if (stderrFd !== null) {
+          try {
+            closeDaemonStderrLogFd(stderrFd)
+          } catch {
+            // Already invalid — nothing to close.
           }
         }
-      )
+        throw forkError
+      }
 
       if (stderrFd !== null) {
         // Why: the pid is only known once fork() returns. Write the generation marker through
@@ -928,7 +955,12 @@ function createOutOfProcessLauncher(
           // Why (H14): the daemon writes stderr straight to the file — "the file is the stderr
           // from the first byte, so there is nothing to destroy" — read the tail from there
           // instead of an in-memory buffer so a startup crash isn't just "exited with code 1".
-          const stderrTail = readDaemonStderrTail(stderrLogPath)
+          // Why (H16 R3): scoped to THIS child's pid — the file can carry a previous generation's
+          // tail too, and this is exactly the startup-failure path that must never attach it.
+          const stderrTail = readDaemonStderrTail(
+            stderrLogPath,
+            Number.isSafeInteger(child.pid) ? (child.pid as number) : -1
+          )
           if (stderrTail) {
             console.warn(`[daemon] startup failed; captured stderr tail:\n${stderrTail}`)
           }

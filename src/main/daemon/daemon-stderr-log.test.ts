@@ -72,19 +72,67 @@ describe('formatDaemonStderrLogMarker', () => {
   })
 })
 
-describe('readDaemonStderrTail', () => {
-  it('returns the last N non-empty lines, oldest first', () => {
-    writeFileSync(filePath, 'line1\nline2\nline3\nline4\n')
-    expect(readDaemonStderrTail(filePath, { tailLines: 2 })).toBe('line3\nline4')
+describe('readDaemonStderrTail (generation-scoped, H16 Ruling 35 Addendum 3 R3)', () => {
+  function markerLine(pid: number, at = '2026-09-05T00:00:00.000Z'): string {
+    return formatDaemonStderrLogMarker({ pid, entryHash: 'abc123def456', startedAt: at })
+  }
+
+  it("returns the last N non-empty lines written after this pid's marker, oldest first", () => {
+    writeFileSync(filePath, `${markerLine(4242)}line1\nline2\nline3\nline4\n`)
+    expect(readDaemonStderrTail(filePath, 4242, { tailLines: 2 })).toBe('line3\nline4')
   })
 
-  it('bounds the read to maxReadBytes even against a much larger file', () => {
-    // 2000 lines of "0123456789\n" (11 bytes each) = 22000 bytes; read only the last 100.
+  it("never attributes a NEWER generation's tail to an older pid, or vice versa — each pid's window stops at the next marker", () => {
+    writeFileSync(
+      filePath,
+      `${markerLine(1111)}old generation crash text\n${markerLine(2222)}line-a\nline-b\n`
+    )
+    // The new generation's read stops before it, never sees pid 1111's text.
+    expect(readDaemonStderrTail(filePath, 2222)).toBe('line-a\nline-b')
+    // The old generation's own read is exactly its own text — bounded at the NEXT marker,
+    // never bleeding into pid 2222's text that was appended after it in the shared file.
+    expect(readDaemonStderrTail(filePath, 1111)).toBe('old generation crash text')
+  })
+
+  it("returns '' when this generation's marker is absent (startup failure before any write) — fail-open, never a stale tail", () => {
+    writeFileSync(filePath, `${markerLine(9999)}unrelated pid's text\n`)
+    expect(readDaemonStderrTail(filePath, 4321)).toBe('')
+  })
+
+  it('slices at the LAST occurrence of a marker when a pid is reused across generations', () => {
+    writeFileSync(
+      filePath,
+      `${markerLine(5000)}first run text\n${markerLine(5000)}second run text\n`
+    )
+    expect(readDaemonStderrTail(filePath, 5000)).toBe('second run text')
+  })
+
+  it('rejects an invalid pid (non-positive or non-integer) — fail-open', () => {
+    writeFileSync(filePath, `${markerLine(4242)}line1\n`)
+    expect(readDaemonStderrTail(filePath, 0)).toBe('')
+    expect(readDaemonStderrTail(filePath, -1)).toBe('')
+    expect(readDaemonStderrTail(filePath, Number.NaN)).toBe('')
+  })
+
+  it('bounds the read to maxReadBytes without reading a much larger file whole, as long as the window reaches the marker', () => {
+    // A large prior generation's text, then this generation's marker and 2000 lines.
+    const priorGeneration = 'z'.repeat(200_000)
     const lines = Array.from({ length: 2000 }, (_, i) => String(i).padStart(10, '0'))
-    writeFileSync(filePath, `${lines.join('\n')}\n`)
-    const tail = readDaemonStderrTail(filePath, { maxReadBytes: 100, tailLines: 40 })
+    const marker = markerLine(7)
+    const thisGeneration = `${marker}${lines.join('\n')}\n`
+    writeFileSync(filePath, `${priorGeneration}${thisGeneration}`)
+    // Bounded to just enough to cover this generation's own marker + content — far less than
+    // the 200 KB+ total file size, proving the read genuinely does not scan the whole file.
+    const maxReadBytes = Buffer.byteLength(thisGeneration) + 16
+    const tail = readDaemonStderrTail(filePath, 7, { maxReadBytes, tailLines: 40 })
     expect(tail).toContain('1999')
     expect(tail).not.toContain('0000000000')
+  })
+
+  it("returns '' when maxReadBytes is too small to reach this generation's marker — fail-open, never a truncated guess", () => {
+    const lines = Array.from({ length: 2000 }, (_, i) => String(i).padStart(10, '0'))
+    writeFileSync(filePath, `${markerLine(7)}${lines.join('\n')}\n`)
+    expect(readDaemonStderrTail(filePath, 7, { maxReadBytes: 100, tailLines: 40 })).toBe('')
   })
 
   it('produces a tail long enough to fill the crash-report *_stack lane (>= 4000 chars) for a long burst', () => {
@@ -93,12 +141,12 @@ describe('readDaemonStderrTail', () => {
     const frame =
       '    at Object.<anonymous> (/app/out/main/daemon-entry.js:123:45) some.native.frame.padding.to.reach.a.realistic.line.width'
     const lines = Array.from({ length: 60 }, (_, i) => `${frame} #${i}`)
-    writeFileSync(filePath, `${lines.join('\n')}\n`)
-    const tail = readDaemonStderrTail(filePath)
+    writeFileSync(filePath, `${markerLine(42)}${lines.join('\n')}\n`)
+    const tail = readDaemonStderrTail(filePath, 42)
     expect(tail.length).toBeGreaterThanOrEqual(4000)
   })
 
   it('returns an empty string when the file does not exist (fail-open)', () => {
-    expect(readDaemonStderrTail(join(dir, 'missing.log'))).toBe('')
+    expect(readDaemonStderrTail(join(dir, 'missing.log'), 4242)).toBe('')
   })
 })

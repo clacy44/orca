@@ -112,13 +112,22 @@ function readSyncFull(fd: number, buffer: Buffer, position: number): number {
   return readTotal
 }
 
-/** Bounded, best-effort read of the file's last DAEMON_STDERR_TAIL_LINES non-empty lines — reads
- *  at most DAEMON_STDERR_TAIL_READ_BYTES from the end, regardless of the file's total size.
- *  Fail-open: any read trouble (missing file, EACCES) returns ''. */
+/** Bounded, best-effort, GENERATION-SCOPED read of the file's last DAEMON_STDERR_TAIL_LINES
+ *  non-empty lines — reads at most DAEMON_STDERR_TAIL_READ_BYTES from the end, then slices at the
+ *  last "=== daemon pid <pid> " marker for the given pid (H16, Ruling 35 Addendum 3 R3): daemon
+ *  generations share one file, so an unscoped tail read can attribute a PREVIOUS generation's
+ *  crash to this one — most visibly on a startup failure, where the daemon that just failed wrote
+ *  nothing and an old daemon's tail would otherwise be attached instead.
+ *  Fail-open: any read trouble (missing file, EACCES), an invalid pid, or no marker for this pid
+ *  within the bounded read window all return '' — never a possibly-wrong generation's text. */
 export function readDaemonStderrTail(
   filePath: string,
+  pid: number,
   opts: { maxReadBytes?: number; tailLines?: number } = {}
 ): string {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return ''
+  }
   const maxReadBytes = opts.maxReadBytes ?? DAEMON_STDERR_TAIL_READ_BYTES
   const tailLines = opts.tailLines ?? DAEMON_STDERR_TAIL_LINES
   try {
@@ -129,11 +138,23 @@ export function readDaemonStderrTail(
       const position = size - readLength
       const buffer = Buffer.alloc(readLength)
       const readTotal = readSyncFull(fd, buffer, position)
-      const lines = buffer
-        .subarray(0, readTotal)
-        .toString('utf8')
-        .split('\n')
-        .filter((line) => line.length > 0)
+      const text = buffer.subarray(0, readTotal).toString('utf8')
+      // Trailing space distinguishes pid 12 from pid 123 — the marker format always continues
+      // with "entry " right after the pid number.
+      const markerIndex = text.lastIndexOf(`=== daemon pid ${pid} `)
+      if (markerIndex === -1) {
+        return ''
+      }
+      const markerLineEnd = text.indexOf('\n', markerIndex)
+      const contentStart = markerLineEnd === -1 ? text.length : markerLineEnd + 1
+      // Bound to the NEXT generation marker (any pid) — otherwise a later generation's text,
+      // appended after this pid's marker in the same shared file, would be misattributed here.
+      const nextMarkerIndex = text.indexOf('=== daemon pid ', contentStart)
+      const afterMarker = text.slice(
+        contentStart,
+        nextMarkerIndex === -1 ? text.length : nextMarkerIndex
+      )
+      const lines = afterMarker.split('\n').filter((line) => line.length > 0)
       return lines.slice(-tailLines).join('\n')
     } finally {
       closeSync(fd)
