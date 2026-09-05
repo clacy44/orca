@@ -3,6 +3,8 @@ import type { SleepingAgentSessionRecord } from '../../../shared/agent-session-r
 import { useAppStore } from '@/store'
 import { resumeSleepingAgentSessionsForWorktree } from './resume-sleeping-agent-session'
 
+// [S10-21a C15, R52] Test baseline: hydration has already applied for every existing case here (the deferral itself is exercised by its own dedicated tests).
+useAppStore.setState({ sweepRestoreMarksHydrated: true })
 const initialAppStoreState = useAppStore.getState()
 const LEAF_ID = '11111111-1111-1111-8111-111111111111'
 const PANE_KEY = `pi-tab:${LEAF_ID}`

@@ -5,6 +5,7 @@ import type {
 } from '../../shared/workspace-session-state-types'
 import type { ExecutionHostId } from '../../shared/execution-host'
 import type { LaunchAdmissionNoticePayload } from '../../shared/launch-admission-notice'
+import type { SweepRestoreMarkListReply } from '../../shared/sweep-restore-mark-list'
 import type {
   RemoteWorkspaceChangedEvent,
   RemoteWorkspaceConnectedClient,
@@ -26,8 +27,10 @@ export type WorkspaceSessionApi = {
      * main-process sweep already restored this pane and the renderer must not resume it again. */
     sweepRestoreMarkGet: (paneKey: string) => Promise<boolean>
     /** [S10-21a C7c, D-R110 (ε)] Bulk, host-scoped, READ-ONLY — every marked pane key, hydrated
-     * ONCE at startup rather than one `sweepRestoreMarkGet` round-trip per sleeping record. */
-    sweepRestoreMarkList: () => Promise<string[]>
+     * ONCE at startup rather than one `sweepRestoreMarkGet` round-trip per sleeping record.
+     * [S10-21a C15] The reply awaits the sweep lock's release before answering (bounded 30s);
+     * `sweepIncomplete: true` on timeout signals `paneKeys` may be the pre-sweep view. */
+    sweepRestoreMarkList: () => Promise<SweepRestoreMarkListReply>
     /** [S10-21a C7g, Ruling 34 Addendum 25] READ-ONLY push, no writable counterpart, no
      * wire/RPC exposure — a covered launch's admission classification, so the renderer can
      * reconcile `sleepingAgentSessionsByPaneKey` (the host-notice path types text into the pty,

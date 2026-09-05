@@ -75,7 +75,11 @@ export function launchSleepingAgentSession(
     // [S10-21a C7c, T32] The main-process sweep already restored this pane — resuming it here
     // would mint a SECOND, competing pane for the same session. `sweepRestoredPaneKeys` is
     // hydrated once at startup (App.tsx) and never cleared client-side.
-    useAppStore.getState().sweepRestoredPaneKeys?.has(record.paneKey)
+    useAppStore.getState().sweepRestoredPaneKeys?.has(record.paneKey) ||
+    // [S10-21a C15, R52] Belt and braces: the caller (resumeSleepingAgentSessionsForWorktree)
+    // should already have deferred while marks are unhydrated, but this function has no other
+    // caller guarantee — refuse the same way rather than trust every call site forever.
+    !useAppStore.getState().sweepRestoreMarksHydrated
   ) {
     // Why: this builder mints a fresh, unbound tab, which resolves to the shared `~/.claude` — the
     // other person's credential. The record stays asleep and uncleared for the host create path.

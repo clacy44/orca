@@ -141,11 +141,25 @@ function isInvalidWorktreeActivationRecord(record: SleepingAgentSessionRecord): 
   )
 }
 
+/** [S10-21a C15, R52] `'deferred_marks_pending'` means the decision was skipped entirely (no
+ * `createTab`, no spawn, no override) because the post-sweep marks haven't hydrated yet — the
+ * caller's worktree id is queued and replayed once, automatically, when hydration completes. */
+export type ResumeSleepingAgentSessionsResult = number | 'deferred_marks_pending'
+
 export function resumeSleepingAgentSessionsForWorktree(
   worktreeId: string,
   options?: ResumeSleepingAgentSessionsOptions
-): number {
+): ResumeSleepingAgentSessionsResult {
   const state = useAppStore.getState()
+  // [S10-21a C15, R52] The decision below reads `sweepRestoredPaneKeys` synchronously with no
+  // await anywhere in this function — there is no "wait for the sweep, then decide" point once
+  // this loop starts. So the gate has to sit here, before it starts: refuse to decide at all
+  // until hydration has applied the post-sweep view, rather than deciding against a stale
+  // (possibly empty) set and re-reading too late to matter.
+  if (!state.sweepRestoreMarksHydrated) {
+    state.notePendingSweepMarksResumeWorktreeId(worktreeId)
+    return 'deferred_marks_pending'
+  }
   const worktreeRecords = Object.values(state.sleepingAgentSessionsByPaneKey)
     .filter((record) => record.worktreeId === worktreeId)
     .sort((a, b) => a.capturedAt - b.capturedAt || a.updatedAt - b.updatedAt)

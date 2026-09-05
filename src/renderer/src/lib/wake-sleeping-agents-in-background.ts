@@ -178,6 +178,14 @@ export function wakeSleepingAgentsForWorktreeInBackground(
   withheldPaneKeys?: readonly string[]
 ): void {
   const appState = useAppStore.getState()
+  // [S10-21a C15, R52] Same gate as resumeSleepingAgentSessionsForWorktree — step (b) below
+  // (passive-hibernation cold-restore mount) never reaches that function, so it must defer
+  // independently rather than mount against pre-sweep marks. Replayed once, plainly, via the
+  // pending set when hydration completes (not re-dispatched through this function).
+  if (!appState.sweepRestoreMarksHydrated) {
+    appState.notePendingSweepMarksResumeWorktreeId(worktreeId)
+    return
+  }
   const withheld = new Set(withheldPaneKeys ?? [])
   // [S10-21a C7c, T32] Excluded at the very top — this filters BOTH the passive-hibernation
   // cold-restore mount below (step b, which never reaches `resumeSleepingAgentSessionsForWorktree`

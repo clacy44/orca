@@ -599,6 +599,16 @@ export type TerminalSlice = {
    * resumed it, and a renderer-side wake would double-resume the same session into a fresh pane. */
   sweepRestoredPaneKeys: ReadonlySet<string>
   setSweepRestoredPaneKeys: (paneKeys: readonly string[]) => void
+  /** [S10-21a C15, R52] False until App.tsx's hydration applies the awaited (post-sweep)
+   * `sweepRestoreMarkList` reply. Every resume/spawn decision that consults
+   * `sweepRestoredPaneKeys` must defer while this is false — the set is not yet trustworthy. */
+  sweepRestoreMarksHydrated: boolean
+  setSweepRestoreMarksHydrated: (value: boolean) => void
+  /** Worktree ids whose resume was deferred because hydration hadn't landed yet; replayed once,
+   * exactly, when hydration completes. */
+  pendingSweepMarksResumeWorktreeIds: ReadonlySet<string>
+  notePendingSweepMarksResumeWorktreeId: (worktreeId: string) => void
+  takePendingSweepMarksResumeWorktreeIds: () => string[]
   restoredRuntimeHostIdByWorkspaceSessionKey: Record<string, ExecutionHostId>
   defaultTerminalTabsAppliedByWorktreeId: Record<string, true>
   markDefaultTerminalTabsApplied: (worktreeId: string) => void
@@ -1079,6 +1089,25 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   workspaceSessionReady: false,
   sweepRestoredPaneKeys: new Set<string>(),
   setSweepRestoredPaneKeys: (paneKeys) => set({ sweepRestoredPaneKeys: new Set(paneKeys) }),
+  sweepRestoreMarksHydrated: false,
+  setSweepRestoreMarksHydrated: (value) => set({ sweepRestoreMarksHydrated: value }),
+  pendingSweepMarksResumeWorktreeIds: new Set<string>(),
+  notePendingSweepMarksResumeWorktreeId: (worktreeId) =>
+    set((s) => {
+      if (s.pendingSweepMarksResumeWorktreeIds.has(worktreeId)) {
+        return {}
+      }
+      return {
+        pendingSweepMarksResumeWorktreeIds: new Set(s.pendingSweepMarksResumeWorktreeIds).add(
+          worktreeId
+        )
+      }
+    }),
+  takePendingSweepMarksResumeWorktreeIds: () => {
+    const ids = [...get().pendingSweepMarksResumeWorktreeIds]
+    set({ pendingSweepMarksResumeWorktreeIds: new Set<string>() })
+    return ids
+  },
   restoredRuntimeHostIdByWorkspaceSessionKey: {},
   defaultTerminalTabsAppliedByWorktreeId: {},
   markDefaultTerminalTabsApplied: (worktreeId) =>

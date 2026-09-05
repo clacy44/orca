@@ -35,7 +35,8 @@ const store = {
   claimAutomaticAgentResume: vi.fn(),
   clearSleepingAgentSession: mockClearSleepingAgentSession,
   setActiveTabType: vi.fn(),
-  setTabBarOrder: vi.fn()
+  setTabBarOrder: vi.fn(),
+  sweepRestoreMarksHydrated: true
 }
 
 vi.mock('@/store', () => ({ useAppStore: { getState: () => store } }))

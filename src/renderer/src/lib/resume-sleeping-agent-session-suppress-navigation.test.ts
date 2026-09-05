@@ -4,6 +4,8 @@ import { useAppStore } from '@/store'
 import { resumeSleepingAgentSessionsForWorktree } from './resume-sleeping-agent-session'
 import { getProviderSessionClaimKey } from './sleeping-agent-pane-ownership'
 
+// [S10-21a C15, R52] Test baseline: hydration has already applied for every existing case here (the deferral itself is exercised by its own dedicated tests).
+useAppStore.setState({ sweepRestoreMarksHydrated: true })
 const initialAppStoreState = useAppStore.getState()
 
 afterEach(() => {

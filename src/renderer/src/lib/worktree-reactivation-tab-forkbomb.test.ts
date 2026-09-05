@@ -4,6 +4,8 @@ import { useAppStore, type AppState } from '@/store'
 import { activateAndRevealWorktree } from './worktree-activation'
 import { makeCreatedAgentWorktree as makeWorktree } from '@/lib/worktree-activation-created-agent-test-state'
 
+// [S10-21a C15, R52] Test baseline: hydration has already applied for every existing case here.
+useAppStore.setState({ sweepRestoreMarksHydrated: true })
 const initialAppStoreState = useAppStore.getState()
 
 function baseState(worktree: ReturnType<typeof makeWorktree>): Partial<AppState> {

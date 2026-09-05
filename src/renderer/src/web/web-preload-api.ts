@@ -814,7 +814,10 @@ function createWebPreloadApi(): Partial<PreloadApi> {
       // host process) — no RPC channel exposing `orchestration:sweepRestoreMark:get` to a remote
       // web client exists yet, so this reads unmarked until one is added.
       sweepRestoreMarkGet: () => Promise.resolve(false),
-      sweepRestoreMarkList: () => Promise.resolve([]),
+      // [S10-21a C15] Reply shape matches the desktop preload's additive `sweepIncomplete`
+      // field (SweepRestoreMarkListReply) — no sweep to wait on here, so this resolves
+      // immediately with an empty list and `sweepIncomplete: false`.
+      sweepRestoreMarkList: () => Promise.resolve({ paneKeys: [], sweepIncomplete: false }),
       // [S10-21a C7g, Ruling 34 Addendum 25] Same rationale as sweepRestoreMarkGet/List above —
       // no RPC channel exposing this host push to a remote web client exists yet; a no-op
       // subscription (never fires, no-op unsubscribe) until one is added.

@@ -5251,8 +5251,12 @@ export function connectPanePty(
       // (possibly onto a DIFFERENT, freshly-minted pane, Layer 2) — a cold-restore override
       // here would independently `--resume` the SAME session id into this stale pane too,
       // the double-resume this whole mark exists to prevent (D-R110 finding 5's "worst case").
+      // [S10-21a C15, R52] Belt and braces: while the post-sweep marks haven't hydrated yet,
+      // treat every pane as if the sweep already restored it — the conservative direction — so
+      // a cold-restore override never fires against a stale (possibly empty) mark set.
       const sweepAlreadyRestoredThisPane =
-        useAppStore.getState().sweepRestoredPaneKeys?.has(cacheKey) ?? false
+        !useAppStore.getState().sweepRestoreMarksHydrated ||
+        (useAppStore.getState().sweepRestoredPaneKeys?.has(cacheKey) ?? false)
       const coldRestoreOverride =
         !sweepAlreadyRestoredThisPane && startupOverride && 'launchConfig' in startupOverride
           ? (startupOverride as ColdRestoreAgentResumeStartup)

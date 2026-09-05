@@ -6,6 +6,8 @@ import type { TerminalTab } from '../../../shared/terminal-tab-types'
 import { useAppStore } from '@/store'
 import { resumeSleepingAgentSessionsForWorktree } from './resume-sleeping-agent-session'
 
+// [S10-21a C15, R52] Test baseline: hydration has already applied for every existing case here (the deferral itself is exercised by its own dedicated tests).
+useAppStore.setState({ sweepRestoreMarksHydrated: true })
 const initialAppStoreState = useAppStore.getState()
 const PI_TRANSCRIPT_PATH = join(tmpdir(), 'pi-session-1.jsonl')
 

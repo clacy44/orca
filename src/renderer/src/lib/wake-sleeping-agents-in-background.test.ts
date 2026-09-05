@@ -44,13 +44,18 @@ const clearSleepingAgentSessionsByPaneKey = vi.fn((paneKeys: readonly string[]) 
 // sweep-mark exclusion itself (that is `resume-sleeping-agent-session.test.ts`'s T32 cases);
 // this mock just needs the field to exist so the real module's `.has()` read does not throw.
 const sweepRestoredPaneKeys = new Set<string>()
+const notePendingSweepMarksResumeWorktreeId = vi.fn()
 vi.mock('@/store', () => ({
   useAppStore: {
     getState: () => ({
       sleepingAgentSessionsByPaneKey: sleepingRecords,
       tabsByWorktree: terminalTabsByWorktree,
       clearSleepingAgentSessionsByPaneKey,
-      sweepRestoredPaneKeys
+      sweepRestoredPaneKeys,
+      // [S10-21a C15, R52] Hydrated by default — this file's own tests are not about the
+      // deferral gate (that is wake-sleeping-agents-in-background-marks-pending.test.ts).
+      sweepRestoreMarksHydrated: true,
+      notePendingSweepMarksResumeWorktreeId
     })
   }
 }))

@@ -5,6 +5,8 @@ import { resumeSleepingAgentSessionsForWorktree } from './resume-sleeping-agent-
 import { launchAiVaultSessionInNewTab } from './launch-ai-vault-session'
 import { buildWorkspaceSessionPayload } from './workspace-session'
 
+// [S10-21a C15, R52] Test baseline: hydration has already applied for every existing case here (the deferral itself is exercised by its own dedicated tests).
+useAppStore.setState({ sweepRestoreMarksHydrated: true })
 const initialAppStoreState = useAppStore.getState()
 
 afterEach(() => {

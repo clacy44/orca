@@ -11,6 +11,7 @@ import {
   type SetStateAction
 } from 'react'
 import { lazyWithRetry as lazy } from '@/lib/lazy-with-retry'
+import { resumeSleepingAgentSessionsForWorktree } from '@/lib/resume-sleeping-agent-session'
 
 import {
   ArrowLeft,
@@ -994,12 +995,23 @@ function App(): React.JSX.Element {
         // the main-process sweep already restored. `sweepRestoreMarkList` is READ-ONLY; a
         // failure here must never block startup (best-effort — an empty set degrades to
         // pre-C7c behaviour, not a startup crash).
+        // [S10-21a C15, R52] The reply now awaits the sweep lock's release main-side, so this
+        // IS the post-sweep view (or the pre-sweep view + `sweepIncomplete: true` on a 30s
+        // timeout). Every resume/spawn decision made before `sweepRestoreMarksHydrated` flips
+        // true was deferred into `pendingSweepMarksResumeWorktreeIds` — replay each exactly once,
+        // now that the marks are trustworthy, whether this step succeeded or failed.
         await timeRendererStartupStep('sweep-restore-marks-hydrate', async () => {
           try {
-            const paneKeys = await window.api.session.sweepRestoreMarkList()
-            useAppStore.getState().setSweepRestoredPaneKeys(paneKeys)
+            const reply = await window.api.session.sweepRestoreMarkList()
+            useAppStore.getState().setSweepRestoredPaneKeys(reply.paneKeys)
           } catch (error) {
             console.warn('[startup] sweepRestoreMarkList hydration failed:', error)
+          } finally {
+            const state = useAppStore.getState()
+            state.setSweepRestoreMarksHydrated(true)
+            for (const worktreeId of state.takePendingSweepMarksResumeWorktreeIds()) {
+              resumeSleepingAgentSessionsForWorktree(worktreeId)
+            }
           }
         })
         await keybindingsPromise

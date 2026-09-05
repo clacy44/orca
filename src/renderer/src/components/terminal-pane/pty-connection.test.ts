@@ -284,6 +284,8 @@ type StoreState = {
     }
   >
   settleDirectSshPaneRetry?: ReturnType<typeof vi.fn>
+  sweepRestoredPaneKeys?: Set<string>
+  sweepRestoreMarksHydrated?: boolean
 }
 
 type WindowsShiftEnterPaneState = Parameters<typeof resolveWindowsShiftEnterEncodingForPane>[0]
@@ -940,6 +942,10 @@ describe('connectPanePty', () => {
         terminalMainSideEffectAuthority: false
       },
       codexRestartNoticeByPtyId: {},
+      // [S10-21a C15, R52] Hydrated by default — this suite's cold-restore-override tests are
+      // not about the deferral gate itself (that is the sweep-marks-hydration-gate describe
+      // block below).
+      sweepRestoreMarksHydrated: true,
       deferredSshReconnectTargets: [],
       deferredSshSessionIdsByTabId: {},
       removeDeferredSshReconnectTarget: vi.fn(),
@@ -3429,6 +3435,64 @@ describe('connectPanePty', () => {
     binding.noteVisibilityResume()
     await flushAsyncTicks()
     expect(transport.connect.mock.calls.length).toBe(connectCallsAfterWake)
+  })
+
+  it('(S10-21a C15, R52) suppresses the cold-restore override fields while marks are unhydrated', async () => {
+    // Belt-and-braces gate at pty-connection.ts's coldRestoreOverride: while marks are
+    // unhydrated, `sweepAlreadyRestoredThisPane` is forced true, so `coldRestoreOverride` is
+    // null and none of its fields (resumeProviderSession/launchConfig/launchToken/launchAgent)
+    // reach `transport.connect` — the reveal still spawns a fresh shell (the pane cannot stay a
+    // frozen frame forever), just not as the gated resume.
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport('pty-pane-2')
+    transportFactoryQueue.push(transport)
+    const manager = createManager(1)
+    const deps = createDeps({
+      consumeSuppressedPtyExit: vi.fn(() => true),
+      isVisibleRef: { current: false }
+    })
+    const pane = createPane(2)
+    const paneKey = `tab-1:${leafIdForPane(2)}`
+    mockStoreState.sweepRestoreMarksHydrated = false
+    mockStoreState.sleepingAgentSessionsByPaneKey[paneKey] = {
+      paneKey,
+      tabId: 'tab-1',
+      worktreeId: 'wt-1',
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-hibernated-unhydrated' },
+      prompt: 'test prompt',
+      state: 'done',
+      capturedAt: 1,
+      updatedAt: 1,
+      origin: 'worktree-sleep'
+    }
+    mockStoreState.suppressedPtyExitIds['tab-pty'] = true
+
+    const binding = connectPanePty(pane as never, manager as never, deps as never) as unknown as {
+      noteVisibilityResume: () => void
+      dispose: () => void
+    }
+    await flushAsyncTicks()
+
+    const onPtyExit = createdTransportOptions[0]?.onPtyExit as ((ptyId: string) => void) | undefined
+    onPtyExit?.('tab-pty')
+    await flushAsyncTicks()
+
+    binding.noteVisibilityResume()
+    await flushAsyncTicks()
+
+    const resumeConnectOptions = transport.connect.mock.calls.at(-1)?.[0] as
+      | {
+          resumeProviderSession?: unknown
+          launchConfig?: unknown
+          launchToken?: unknown
+          launchAgent?: unknown
+        }
+      | undefined
+    expect(resumeConnectOptions?.resumeProviderSession).toBeUndefined()
+    expect(resumeConnectOptions?.launchConfig).toBeUndefined()
+    expect(resumeConnectOptions?.launchToken).toBeUndefined()
+    expect(resumeConnectOptions?.launchAgent).toBeUndefined()
   })
 
   it('resumes a hibernated agent from a navigation-free wake without a visibility reveal', async () => {

@@ -10,6 +10,8 @@ import { makePaneKey } from '../../../shared/stable-pane-id'
 // replacement tab per provider session — the husk is retained for scrollback —
 // while a pane that is live or will cold-restore in place gets NO replacement.
 
+// [S10-21a C15, R52] Test baseline: hydration has already applied for every existing case here.
+useAppStore.setState({ sweepRestoreMarksHydrated: true })
 const initialAppStoreState = useAppStore.getState()
 
 const LEAF_ID = '22222222-2222-4222-8222-222222222222'
