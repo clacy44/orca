@@ -45,8 +45,11 @@ export function raiseSessionIdentityMismatchAlarms(
         launchGeneration: deps.launchGeneration
       })
       if (result.kind === 'foreign_mismatch') {
+        // [F2, D-R125] Notice goes to `attributedPaneKey` when set — the row's real owner when
+        // the report was an uncorroborated claim on a different pane, never the unauthenticated
+        // claimant — else falls back to the (already-authoritative) reporting pane, unchanged.
         deps.writeHostNoticeToPane(
-          identity.paneKey,
+          result.attributedPaneKey ?? identity.paneKey,
           `This pane's reported session id disagrees with the one Orca recorded at launch — ` +
             `treated as a foreign session, not a rotation.`,
           {

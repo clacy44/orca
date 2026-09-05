@@ -65,7 +65,11 @@ export type LiveHookReportMismatchResult =
   | { kind: 'match' }
   | { kind: 'no_row' }
   | { kind: 'rotated'; row: AgentLaunchSessionRow }
-  | { kind: 'foreign_mismatch' }
+  // [F2, D-R125] `attributedPaneKey`, present ONLY when it differs from `params.paneKey` (an
+  // uncorroborated report naming a pane other than the row's own owner — an unauthenticated
+  // claim): the pane the audit was actually charged to (`row.pane_key`), so the caller
+  // (session-identity-mismatch-alarm.ts) can route any notice there instead of the claimant.
+  | { kind: 'foreign_mismatch'; attributedPaneKey?: string }
   // [Ruling 34 Addendum 18(iii)/19] Honest floors do not false-alarm: the pane's newest
   // admission audit of ANY verb, THIS generation, was itself the UNRECORDED outcome — the
   // disagreement is fully explained by "nothing was ever recorded to agree with", not a contest.
@@ -130,8 +134,10 @@ export function evaluateLiveHookReportMismatch(
     return { kind: 'unrecorded_launch', reason: unrecorded }
   }
 
-  raiseMismatchAlarm(db, row, params)
-  return { kind: 'foreign_mismatch' }
+  const attributedPaneKey = raiseMismatchAlarm(db, row, params)
+  return attributedPaneKey === params.paneKey
+    ? { kind: 'foreign_mismatch' }
+    : { kind: 'foreign_mismatch', attributedPaneKey }
 }
 
 /** [Ruling 34 Addendum 18(iii)/19, D-R108 R1; Ruling 34 Addendum 20 (c)] (a) selects the pane's
@@ -190,21 +196,28 @@ function raiseMismatchAlarm(
   db: Database.Database,
   row: AgentLaunchSessionRow,
   params: LiveHookReportMismatchParams
-): void {
-  const reasonCode = `recorded=${row.session_id} reported=${params.reportedSessionId}`
+): string {
+  // [F2, D-R125] An uncorroborated report naming a pane other than the row's own owner is an
+  // unauthenticated claim — attribute the audit (and notice, session-identity-mismatch-alarm.ts)
+  // to the row's real pane, never the claimant, and record the claimed key as a reason fragment.
+  const isUncorroboratedClaimant = !params.anchorCorroborated && params.paneKey !== row.pane_key
+  const attributedPaneKey = isUncorroboratedClaimant ? row.pane_key : params.paneKey
+  const reasonCode = isUncorroboratedClaimant
+    ? `recorded=${row.session_id} reported=${params.reportedSessionId} uncorroborated_claimant=${params.paneKey}`
+    : `recorded=${row.session_id} reported=${params.reportedSessionId}`
   const newest = db
     .prepare(
       `SELECT outcome, reason_code FROM agent_audit
          WHERE actor_pane_key = ? AND verb = 'session_identity_mismatch'
          ORDER BY seq DESC LIMIT 1`
     )
-    .get(params.paneKey) as { outcome: string; reason_code: string | null } | undefined
+    .get(attributedPaneKey) as { outcome: string; reason_code: string | null } | undefined
   const isDuplicateOfNewest =
     newest !== undefined && newest.outcome === 'contested' && newest.reason_code === reasonCode
   if (!isDuplicateOfNewest) {
     writeAgentAudit(db, {
       agentId: row.agent_id,
-      actorPaneKey: params.paneKey,
+      actorPaneKey: attributedPaneKey,
       actorHostId: params.hostId,
       verb: 'session_identity_mismatch',
       outcome: 'contested',
@@ -216,10 +229,11 @@ function raiseMismatchAlarm(
   // unconditional (Addendum 20 scopes the dedupe to "the audit write" only).
   console.warn('[S10-21a] session_identity_mismatch', {
     hostId: params.hostId,
-    paneKey: params.paneKey,
+    paneKey: attributedPaneKey,
     agentId: row.agent_id,
     recordedSessionId: row.session_id,
     reportedSessionId: params.reportedSessionId,
     deduped: isDuplicateOfNewest
   })
+  return attributedPaneKey
 }

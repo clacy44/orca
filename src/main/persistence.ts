@@ -6583,6 +6583,9 @@ export class Store {
     // Why: pane lanes are host-owned in *every* partition, not just the local one — binding rows
     // are written per execution host, so a renderer write here must not orphan them either (§2h).
     session = mergePersistedPaneCredentialLanes(session, prior)
+    // [F1, D-R125] Host-wins: the launch-token anchor is host-written only (persistTerminalLaunchTokenHash/
+    // forgetTerminalLaunchTokenHash below) — a renderer/relay-supplied session write must never replace it.
+    session.terminalLaunchTokenHashesByPaneKey = prior?.terminalLaunchTokenHashesByPaneKey ?? {}
     const pruned = pruneWorkspaceSessionBrowserHistory(
       pruneLocalTerminalScrollbackBuffers(session, this.state.repos)
     )
@@ -6606,6 +6609,9 @@ export class Store {
     // Why: the pane lane is host-owned; a renderer session write that omits it must not orphan
     // live panes into `unknown` (S9 §2h).
     session = mergePersistedPaneCredentialLanes(session, prior)
+    // [F1, D-R125] Host-wins: the launch-token anchor is host-written only (persistTerminalLaunchTokenHash/
+    // forgetTerminalLaunchTokenHash below) — a renderer-supplied session write must never replace it.
+    session.terminalLaunchTokenHashesByPaneKey = prior?.terminalLaunchTokenHashesByPaneKey ?? {}
     // Why (Issue #217): merge existing bindings when the incoming binding is empty, so a stale pre-spawn snapshot can't overwrite the durable PTY binding.
     const normalized = normalizeWorkspaceSessionPaneIdentities(
       session,

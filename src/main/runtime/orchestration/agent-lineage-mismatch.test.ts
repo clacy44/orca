@@ -415,4 +415,28 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', () => {
     })
     expect(currentSessionRow(db, PANE)).toEqual(before)
   })
+
+  it("[S10-21a C12b, D-R125 F2] an uncorroborated report naming a DIFFERENT pane than the row it resolves to (forged pane key, real leaf suffix) audits under the row's REAL pane, names the claimant, never trusts the claimed key", () => {
+    const db = rawDb()
+    seedLaunch(db, 'sess-a', PANE) // PANE = 'tab1:leaf-a' — the real, registered pane.
+    const forgedPaneKey = 'forged-tab:leaf-a' // same suffix (resolves to PANE's row), forged prefix.
+    const result = evaluateLiveHookReportMismatch(db, {
+      hostId: HOST_ID,
+      paneKey: forgedPaneKey,
+      reportedSessionId: 'sess-b',
+      anchorCorroborated: false,
+      sessionStartSource: undefined,
+      launchGeneration: GEN
+    })
+    expect(result).toEqual({ kind: 'foreign_mismatch', attributedPaneKey: PANE })
+    expect(newestLaunchForPane(db, HOST_ID, PANE)?.session_id).toBe('sess-a')
+    // Audited under the row's REAL pane key — never the forged claimant.
+    expect(auditRows(db, forgedPaneKey)).toHaveLength(0)
+    const rows = auditRows(db, PANE)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      outcome: 'contested',
+      reason_code: `recorded=sess-a reported=sess-b uncorroborated_claimant=${forgedPaneKey}`
+    })
+  })
 })
