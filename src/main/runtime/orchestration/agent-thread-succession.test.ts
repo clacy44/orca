@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import {
+  adoptFromPredecessors,
   adoptPredecessorThreadMembership,
   countUninheritedPredecessorMail
 } from './agent-thread-succession'
@@ -330,6 +331,73 @@ function insertPendingQuestion(raw: Database.Database, messageId: string, toAgen
     )
     .run(messageId, toAgentId)
 }
+
+// B8 (H17, Ruling 35 Addendum 4): the quarantine check must live inside adoptFromPredecessors
+// itself, not only in its callers — a caller that skips its own pre-check (or a future third
+// caller) must not be able to bypass containment by invoking this shared helper directly.
+describe('adoptFromPredecessors — quarantine guard', () => {
+  it('calling the helper directly for a quarantined successor adopts nothing and audits once', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 's',
+      createdByAgentId: 'agt_pred',
+      participants: [{ participantKey: 'agt_pred', agentId: 'agt_pred', role: 'owner' }]
+    })
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+    raw
+      .prepare(
+        `INSERT INTO agents (id, display_name, host_id, quarantined, origin_kind, origin_host_id)
+         VALUES ('agt_succ', 'merge-backend', 'local', 1, 'pane', 'local')`
+      )
+      .run()
+
+    const outcome = adoptFromPredecessors(raw, 'local', ['agt_pred'], 'agt_succ')
+
+    expect(outcome).toEqual({
+      adoptedThreads: 0,
+      blockedByQuarantinedPredecessor: false,
+      repointedMessages: 0,
+      predecessorCount: 0
+    })
+    expect(db.isThreadParticipant(thread.id, 'agt_succ')).toBe(false)
+    const audits = raw
+      .prepare(
+        `SELECT verb, outcome, reason_code FROM agent_audit WHERE agent_id = 'agt_succ' AND verb = 'thread_succession_skipped'`
+      )
+      .all() as { verb: string; outcome: string; reason_code: string }[]
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toEqual({
+      verb: 'thread_succession_skipped',
+      outcome: 'skipped',
+      reason_code: 'succession_skipped_quarantined'
+    })
+    db.close()
+  })
+
+  it('a non-quarantined successor still adopts normally through the direct helper', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 's',
+      createdByAgentId: 'agt_pred2',
+      participants: [{ participantKey: 'agt_pred2', agentId: 'agt_pred2', role: 'owner' }]
+    })
+    tombstone(raw, 'agt_pred2', 'local', 'merge-backend')
+    raw
+      .prepare(
+        `INSERT INTO agents (id, display_name, host_id, quarantined, origin_kind, origin_host_id)
+         VALUES ('agt_succ2', 'merge-backend', 'local', 0, 'pane', 'local')`
+      )
+      .run()
+
+    const outcome = adoptFromPredecessors(raw, 'local', ['agt_pred2'], 'agt_succ2')
+
+    expect(outcome.adoptedThreads).toBe(1)
+    expect(db.isThreadParticipant(thread.id, 'agt_succ2')).toBe(true)
+    db.close()
+  })
+})
 
 // F-9 honesty (Ruling 32 Addendum 9): question_threads.to_agent_id and unread bare-handle mail
 // are deliberately never repointed onto a successor — this counts what was left behind so

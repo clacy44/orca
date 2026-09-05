@@ -19,7 +19,7 @@
 // constant or env var and does the POST itself.
 
 import { app, dialog, ipcMain, shell } from 'electron'
-import { copyFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { arch as osArch, platform as osPlatform, release as osRelease, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -30,6 +30,7 @@ import {
   type DiagnosticsStatus
 } from '../observability'
 import type { CollectedBundle } from '../observability/bundle'
+import { stripUploadOnlyFields } from '../observability/bundle'
 import type { UploadBundleResult } from '../observability/diagnostic-bundle-upload'
 import { getDaemonStderrLogFilePath } from '../observability/logs-directory'
 import {
@@ -120,8 +121,10 @@ function getPendingBundleForUpload(bundleSubmissionId: unknown): {
     throw new Error('open the review file before sending')
   }
   // Why: the preview file is user-editable once opened in the OS. Upload only
-  // the redacted bytes main collected and retained before preview.
-  return { bundle: pending.bundle, payload: pending.bundle.payload }
+  // the redacted bytes main collected and retained before preview — B3 (H17,
+  // Ruling 35 Addendum 4): strip the local-only daemon stderr tail here; the
+  // local preview file (already written) keeps it.
+  return { bundle: pending.bundle, payload: stripUploadOnlyFields(pending.bundle.payload) }
 }
 
 function getPendingPreviewFilePath(bundleSubmissionId: unknown): string {
@@ -183,7 +186,10 @@ function copyDaemonStderrLogBesidePreview(
     if (!existsSync(source)) {
       return
     }
-    copyFileSync(source, join(previewDirectory, `${bundleSubmissionId}.stderr.log`))
+    const dest = join(previewDirectory, `${bundleSubmissionId}.stderr.log`)
+    copyFileSync(source, dest)
+    // B9 (H17, Ruling 35 Addendum 4): owner-only — this is raw, unredacted process output.
+    chmodSync(dest, 0o600)
   } catch {
     /* best effort — local-only convenience, never blocks the preview */
   }

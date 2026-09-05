@@ -8,7 +8,6 @@
 
 import { randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
-import { basename } from 'node:path'
 import { MAX_BUNDLE_BYTES } from './diagnostic-bundle-limits'
 import { listRotatedFiles } from './local-file-sink'
 import { redactValue } from './redactor'
@@ -21,9 +20,6 @@ export type CollectBundleOptions = {
   /** Detached-daemon lifecycle log; its rotated family is merged in so daemon failures are diagnosable from a field report. */
   readonly daemonLogFilePath?: string
   readonly daemonLogMaxFiles?: number
-  /** Raw (non-NDJSON) daemon stderr capture (H14) — attached whole, never span-parsed like the two above. */
-  readonly daemonStderrLogFilePath?: string
-  readonly daemonStderrLogMaxFiles?: number
   readonly lookbackMinutes?: number
   readonly appVersion: string
   readonly platform: string
@@ -167,39 +163,6 @@ export function collectBundle(opts: CollectBundleOptions): CollectedBundle {
     }
   }
 
-  // Why raw, not span-parsed: daemon.stderr.log is arbitrary process output (native abort
-  // banners included), not NDJSON — attach each rotated file's redacted text whole rather than
-  // JSON.parse-ing it line by line like the trace/daemon-log files above (H14).
-  if (opts.daemonStderrLogFilePath) {
-    for (const file of listRotatedFiles(
-      opts.daemonStderrLogFilePath,
-      opts.daemonStderrLogMaxFiles ?? opts.maxFiles
-    )) {
-      let text: string
-      try {
-        const size = statSync(file).size
-        if (size > 50 * 1024 * 1024) {
-          continue
-        }
-        text = readFileSync(file, 'utf8')
-      } catch {
-        continue
-      }
-      const attachment = JSON.stringify({
-        type: 'daemon-stderr-log',
-        file: basename(file),
-        content: redactValue(text, 'server')
-      })
-      const attachmentBytes = Buffer.byteLength(attachment) + 1
-      if (currentBytes + attachmentBytes > MAX_BUNDLE_BYTES) {
-        // Best-effort: skip an attachment that would blow the cap rather than truncate raw text.
-        continue
-      }
-      lines.push(attachment)
-      currentBytes += attachmentBytes
-    }
-  }
-
   const payload = `${lines.join('\n')}\n`
   return {
     bundleSubmissionId,
@@ -207,6 +170,47 @@ export function collectBundle(opts: CollectBundleOptions): CollectedBundle {
     bytes: Buffer.byteLength(payload),
     spanCount
   }
+}
+
+// ── Upload-only redaction (B3, H17, Ruling 35 Addendum 4) ────────────────
+
+const LOCAL_ONLY_STDERR_TAIL_KEY = 'daemonStderrTail_stack'
+const LOCAL_ONLY_PLACEHOLDER = '[local-only]'
+
+function stripLocalOnlyFields(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripLocalOnlyFields)
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      result[key] =
+        key === LOCAL_ONLY_STDERR_TAIL_KEY ? LOCAL_ONLY_PLACEHOLDER : stripLocalOnlyFields(v)
+    }
+    return result
+  }
+  return value
+}
+
+/** The daemon stderr tail (daemon-init.ts's `daemonStderrTail_stack`) is local trace/preview
+ *  evidence only — it must never ride the uploaded payload. Called on the upload path only,
+ *  never on the payload written to the local preview file. A line that fails to parse is
+ *  passed through unchanged (defense in depth; every line here was already JSON at write
+ *  time). */
+export function stripUploadOnlyFields(payload: string): string {
+  return payload
+    .split('\n')
+    .map((line) => {
+      if (line.length === 0) {
+        return line
+      }
+      try {
+        return JSON.stringify(stripLocalOnlyFields(JSON.parse(line)))
+      } catch {
+        return line
+      }
+    })
+    .join('\n')
 }
 
 // ── Bundle submission ID ─────────────────────────────────────────────────

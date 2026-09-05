@@ -1296,6 +1296,12 @@ class InMemoryOrchestrationMessages {
     return undefined
   }
 
+  // B6 (H17): notifyOrphanedIdentityForPane now calls this unconditionally; these fixtures
+  // own no orphaned-identity candidates.
+  findOrphanedIdentityCandidate(): undefined {
+    return undefined
+  }
+
   markAsDelivered(ids: string[]): void {
     const deliveredIds = new Set(ids)
     for (const message of this.messages) {

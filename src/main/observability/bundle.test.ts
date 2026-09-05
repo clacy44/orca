@@ -6,7 +6,12 @@ import { createServer, type RequestListener, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { _internalsForTests, collectBundle, generateBundleSubmissionId } from './bundle'
+import {
+  _internalsForTests,
+  collectBundle,
+  generateBundleSubmissionId,
+  stripUploadOnlyFields
+} from './bundle'
 import { deleteBundle, uploadBundle, validateUploadUrl } from './diagnostic-bundle-upload'
 import { MAX_RESPONSE_BYTES } from './diagnostic-upload-http'
 
@@ -173,37 +178,22 @@ describe('bundle — collection', () => {
     expect(bundle.payload).not.toContain('"event":"session-exited"')
   })
 
-  it('H14: attaches daemon.stderr.log whole, raw text, not span-parsed', () => {
-    writeFileSync(traceFile, makeNDJSON([makeSpan({ name: 'recent' })]))
-    const stderrFile = join(dir, 'daemon.stderr.log')
-    const rawStderr =
-      '=== daemon pid 4242 entry abc123def456 started 2026-09-05T00:00:00.000Z ===\n' +
-      'FATAL ERROR: JavaScript heap out of memory\nnot,{valid json at all'
-    writeFileSync(stderrFile, rawStderr)
-    const bundle = collectBundle({
-      traceFilePath: traceFile,
-      maxFiles: 10,
-      daemonStderrLogFilePath: stderrFile,
-      daemonStderrLogMaxFiles: 3,
-      appVersion: '1',
-      platform: 'darwin',
-      arch: 'arm64',
-      osRelease: '24',
-      orcaChannel: 'dev'
-    })
-    const attachmentLine = bundle.payload
-      .split('\n')
-      .find((line) => line.includes('"type":"daemon-stderr-log"'))
-    expect(attachmentLine).toBeDefined()
-    const attachment = JSON.parse(attachmentLine as string)
-    expect(attachment.file).toBe('daemon.stderr.log')
-    // Raw text (including the non-JSON line) survives whole — never JSON.parse'd per line.
-    expect(attachment.content).toContain('FATAL ERROR: JavaScript heap out of memory')
-    expect(attachment.content).toContain('not,{valid json at all')
-  })
-
-  it('collects no daemon-stderr-log attachment when no path is given', () => {
-    writeFileSync(traceFile, makeNDJSON([makeSpan({ name: 'recent' })]))
+  it('B3 (H17): the collected payload (preview) keeps daemonStderrTail_stack, but stripUploadOnlyFields removes it for upload', () => {
+    writeFileSync(
+      traceFile,
+      makeNDJSON([
+        makeSpan({
+          name: 'crash.breadcrumb',
+          attributes: {
+            kind: 'crash-breadcrumb',
+            'breadcrumb.name': 'daemon_lifecycle',
+            'breadcrumb.data': {
+              daemonStderrTail_stack: 'FATAL ERROR: JavaScript heap out of memory'
+            }
+          }
+        })
+      ])
+    )
     const bundle = collectBundle({
       traceFilePath: traceFile,
       maxFiles: 10,
@@ -213,7 +203,14 @@ describe('bundle — collection', () => {
       osRelease: '24',
       orcaChannel: 'dev'
     })
-    expect(bundle.payload).not.toContain('daemon-stderr-log')
+    // The local preview file is written from `bundle.payload` directly — it keeps the tail.
+    expect(bundle.payload).toContain('FATAL ERROR: JavaScript heap out of memory')
+    const uploadPayload = stripUploadOnlyFields(bundle.payload)
+    expect(uploadPayload).not.toContain('FATAL ERROR: JavaScript heap out of memory')
+    expect(uploadPayload).toContain('[local-only]')
+    // Shape otherwise preserved: same number of lines, other fields untouched.
+    expect(uploadPayload.split('\n').length).toBe(bundle.payload.split('\n').length)
+    expect(uploadPayload).toContain('"breadcrumb.name":"daemon_lifecycle"')
   })
 
   it('collects no daemon log lines when no daemon log path is given', () => {

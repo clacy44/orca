@@ -99,6 +99,8 @@ function makeOrchestrationDbStub(toHandle: () => string) {
       findActiveRemoteAttachmentForPane: () => undefined,
       listDispatchInputObservationTargets: () => [],
       getRecipientPaneKeyForBareHandle: () => null,
+      // B6 (H17): notifyOrphanedIdentityForPane now calls this unconditionally.
+      findOrphanedIdentityCandidate: () => undefined,
       markAsDelivered: vi.fn(),
       close: () => {}
     }
