@@ -234,9 +234,15 @@ describe('runRemoteOrcaCli', () => {
     )
 
     expect(result.exitCode).toBe(0)
-    expect(db.insertMessage).toHaveBeenCalledWith(
+    // D-R123 (SCENARIO_CORRECTION): orchestration.send has written through the gated choke
+    // db.insertGatedMessage since S10-2b (rpc/methods/orchestration.ts:1141-1144), never
+    // db.insertMessage directly — the asserted semantic (the derived senderPaneKey is
+    // undefined for an unattested SSH caller, resolved at orchestration.ts:792-796) is
+    // unchanged.
+    expect(db.insertGatedMessage).toHaveBeenCalledWith(
       expect.objectContaining({ senderPaneKey: undefined })
     )
+    expect(db.insertMessage).not.toHaveBeenCalled()
   })
 
   it('returns a non-zero status for lifecycle rejection through the legacy fallback', async () => {
