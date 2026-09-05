@@ -74,10 +74,10 @@
     "../src/main/hermes/hook-service.ts",
     "../src/main/kimi/hook-service.ts",
     "../src/main/kimi/kimi-hook-config-toml.ts",
-    // Why (R41): orchestration-compatibility-reattest.ts's global fetch call site must cancel
-    // an unread response body on every path (orca#8695) like every other audited call site —
-    // both files are pure (no imports), so listing them pulls in nothing else.
-    "../src/main/lib/unread-response-body.ts",
+    // Why (H19b/Ruling 29): orchestration-compatibility-reattest.test.ts's fetch-mock fixture
+    // (unread-body cancellation assertion, orca#8695) is test-only, so it doesn't cross the
+    // CLI packaging boundary the way a production import would; the file is pure (no
+    // imports), so listing it pulls in nothing else.
     "../src/main/lib/unread-response-body.test-fixtures.ts",
     "../src/main/openclaude/hook-service.ts",
     "../src/main/rolling-file-backup.ts",

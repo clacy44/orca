@@ -7,7 +7,7 @@
 // server-side security-equivalence argument.
 import { lstatSync, readFileSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
-import { cancelUnreadResponseBody } from '../../main/lib/unread-response-body'
+import { cancelUnreadResponseBody } from '../../shared/fetch-response-body'
 import {
   isAgentHookEndpointFileName,
   parseAgentHookEndpointFile

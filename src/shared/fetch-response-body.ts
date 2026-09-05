@@ -44,6 +44,23 @@ async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): Pr
   }
 }
 
+/**
+ * Cancel a fetch Response body that no code path will read. Why: leaving it
+ * unread can crash the whole process from inside Node's bundled undici
+ * (nodejs/undici#5360, orca#8695); see global-fetch-call-site-audit.test.ts.
+ * Lives in src/shared (not src/main/lib) so both cli and main call sites can
+ * import it without crossing the CLI import boundary (Ruling 29);
+ * src/main/lib/unread-response-body.ts re-exports this for existing main
+ * callers so there is one implementation.
+ */
+export async function cancelUnreadResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Cancelling an already-errored, locked, or closed stream is harmless.
+  }
+}
+
 export async function readFetchResponseBytesWithinLimit(
   response: Response,
   maxBytes = API_RESPONSE_MAX_BYTES
