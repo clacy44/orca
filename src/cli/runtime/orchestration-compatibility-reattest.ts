@@ -7,6 +7,7 @@
 // server-side security-equivalence argument.
 import { lstatSync, readFileSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
+import { cancelUnreadResponseBody } from '../../main/lib/unread-response-body'
 import {
   isAgentHookEndpointFileName,
   parseAgentHookEndpointFile
@@ -246,14 +247,17 @@ export async function attemptOrchestrationReattest(
       }
     )
     if (response.status === 204) {
+      await cancelUnreadResponseBody(response)
       return { ok: true }
     }
     if (response.status === 403) {
+      await cancelUnreadResponseBody(response)
       return { ok: false, reason: 'stale-endpoint-token' }
     }
     // Why: a 404 means an older runtime with no /reattest route — the caller keeps its original
     // refusal and its nextSteps rather than treating this as a retryable condition. 429/400 are
     // left equally reason-less (see the type's Why above).
+    await cancelUnreadResponseBody(response)
     return { ok: false }
   } catch {
     return { ok: false }

@@ -66,6 +66,23 @@ describe('runRemoteOrcaCli', () => {
           return row
         }
       ),
+      // Amendment A: the single write choke `orchestration.send` actually calls (never
+      // insertMessage directly) — mirrors insertMessage's row shape, wrapped in the
+      // { outcome, message } envelope the real gate-checked insert returns on acceptance.
+      insertGatedMessage: vi.fn(
+        (message: { from: string; to: string; subject: string; body?: string }) => {
+          const row = {
+            id: `msg_${nextMessage++}`,
+            from_handle: message.from,
+            to_handle: message.to,
+            subject: message.subject,
+            body: message.body,
+            read_at: null
+          }
+          messages.push(row)
+          return { outcome: 'accepted' as const, message: row }
+        }
+      ),
       getUnreadMessages: vi.fn((handle: string) =>
         messages.filter((message) => message.to_handle === handle && message.read_at === null)
       ),
@@ -86,6 +103,12 @@ describe('runRemoteOrcaCli', () => {
     }
     const runtime = {
       getRuntimeId: () => 'runtime-test',
+      getOrchestrationCompatibilityHostId: () => 'local',
+      // None of this fixture's tests supply an ORCA_AGENT_LAUNCH_TOKEN in env, so the real
+      // implementation would bail out at its own `!launchToken` guard (orca-runtime.ts:13662)
+      // before ever consulting live pty/store state — null is the real return value here, not
+      // a guess.
+      verifyOrchestrationCompatibilityCaller: () => null,
       getStatus: () => ({
         runtimeId: 'runtime-test',
         rendererGraphEpoch: 1,
