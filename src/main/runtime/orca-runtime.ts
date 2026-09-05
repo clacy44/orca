@@ -5411,11 +5411,12 @@ export class OrcaRuntimeService {
       this.selfResumeWatermark = db.newestAgentAuditSeq()
     } catch (err) {
       this.selfResumeWatermark = null
-      if (this._orchestrationDb) {
-        console.error(
-          `watermark_capture_partial_arm: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+      // [S10-21a C7n, D-R121 N6] Unconditional: the prior `if (this._orchestrationDb)` guard
+      // could silently drop this log on a seq-read failure — a half-armed capture must never be
+      // silent, guard or no guard.
+      console.error(
+        `watermark_capture_partial_arm: ${err instanceof Error ? err.message : String(err)}`
+      )
     }
     return this.selfResumeWatermark
   }

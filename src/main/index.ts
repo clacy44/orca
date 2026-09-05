@@ -166,7 +166,10 @@ import {
   shouldSuppressDevEducation,
   suppressDevEducationForStore
 } from './startup/dev-education-suppression'
-import { captureSelfResumeWatermarkAtStartup } from './startup/self-resume-watermark-capture'
+import {
+  captureSelfResumeWatermarkAtStartup,
+  captureSelfResumeWatermarkSurvivingStoreFailure
+} from './startup/self-resume-watermark-capture'
 import { maybeRedirectAppImageCliLaunch } from './startup/appimage-cli-redirect'
 import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entry-redirect'
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
@@ -3278,7 +3281,20 @@ void app.whenReady().then(async () => {
     // `getOrchestrationDb()` accessor now — a store that cannot open is recorded as absence).
     // Routed through the extracted `captureSelfResumeWatermarkAtStartup` step (item 2b) — same
     // call, directly testable with a fake runtime.
-    captureSelfResumeWatermarkAtStartup(runtime)
+    // [S10-21a C7n, D-R121 N1] `getOrchestrationDb()` (called through the capture) THROWS on a
+    // failed store open, and that throw used to escape here — before this same function's
+    // try/finally (below) exists — leaking the lock for the process lifetime and never reaching
+    // `openMainWindow`. A failed store open is already recorded loudly at the earlier boot-path
+    // attach site (`orchestrationStoreOpenFailed`, orca-runtime.ts); this is a SECOND loud record
+    // naming the capture itself, then the lock releases and startup continues.
+    captureSelfResumeWatermarkSurvivingStoreFailure(runtime, (error) => {
+      releaseRestoreSweepLock()
+      desktopSweepLockReleased = true
+      console.error(
+        '[restore-sweep] self-resume watermark capture failed to open the orchestration store — releasing the sweep lock and continuing to open the window',
+        error
+      )
+    })
   }
   const shellPathReady = windowsShellPathHydration.whenReady()
   let desktopWindow: BrowserWindow | null = null

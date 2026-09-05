@@ -12,3 +12,20 @@ export function captureSelfResumeWatermarkAtStartup(
 ): number | null {
   return runtime.captureSelfResumeWatermark()
 }
+
+// [S10-21a C7n, D-R121 N1] `captureSelfResumeWatermark`'s own `getOrchestrationDb()` call
+// deliberately propagates a failed store open (C7m/D-R120) — a caller with a lock held across
+// the capture must not let that propagate past it. Pure: takes the failure handler as a
+// parameter (releases the lock, records the absence) so this is testable without Electron or
+// the real lock module.
+export function captureSelfResumeWatermarkSurvivingStoreFailure(
+  runtime: SelfResumeWatermarkCaptureRuntime,
+  onStoreOpenFailed: (error: unknown) => void
+): number | null {
+  try {
+    return captureSelfResumeWatermarkAtStartup(runtime)
+  } catch (error) {
+    onStoreOpenFailed(error)
+    return null
+  }
+}

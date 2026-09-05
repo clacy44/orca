@@ -13476,6 +13476,61 @@ describe('OrcaRuntimeService', () => {
     ).toBeUndefined()
   })
 
+  // [S10-21a C7n, D-R121 N2] fails at base: no test covers this refusal. Since
+  // `getTerminalProcessIncarnation` stopped minting the legacy 3-segment fallback and returns
+  // `null` for a pty with no incarnationId (orca-runtime.ts, near "A legacy 3-segment form is
+  // not an identity"), `getOrchestrationDispatchAuthority`'s `processIncarnation` field is null
+  // too — `verifyOrchestrationCompatibilityCaller` must refuse rather than treat a missing
+  // identity as an implicit pass.
+  it('refuses a caller whose pty has no incarnationId even though the launch token matches', async () => {
+    const spawn = vi.fn().mockResolvedValue({ id: 'pty-no-incarnation' })
+    const runtime = new OrcaRuntimeService(store, undefined, {
+      attestAgentHookCompatibilityAuthority: (candidate) => ({
+        paneKey: candidate.paneKey,
+        source: 'current_hook'
+      })
+    })
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.setNotifier({
+      worktreesChanged: vi.fn(),
+      reposChanged: vi.fn(),
+      activateWorktree: vi.fn(),
+      createTerminal: vi.fn(),
+      revealTerminalSession: vi.fn().mockResolvedValue({ tabId: 'tab-no-incarnation' }),
+      splitTerminal: vi.fn(),
+      renameTerminal: vi.fn(),
+      focusTerminal: vi.fn(),
+      closeTerminal: vi.fn(),
+      sleepWorktree: vi.fn(),
+      terminalFitOverrideChanged: vi.fn(),
+      terminalDriverChanged: vi.fn()
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    const terminal = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      restoreProvenance: { kind: 'none' },
+      credentialLane: { kind: 'shared' },
+      command: 'codex',
+      launchConfig: { agentCommand: 'codex', agentArgs: '', agentEnv: {} }
+    })
+    const spawnEnv =
+      (spawn.mock.calls[0]?.[0] as { env?: Record<string, string> } | undefined)?.env ?? {}
+    const evidence = {
+      terminalHandle: terminal.handle,
+      paneKey: spawnEnv.ORCA_PANE_KEY,
+      launchToken: spawnEnv.ORCA_AGENT_LAUNCH_TOKEN
+    }
+
+    expect(runtime.getTerminalProcessIncarnation(terminal.handle)).toBeNull()
+    expect(runtime.verifyOrchestrationCompatibilityCaller(evidence)).toBeNull()
+  })
+
   it('retires only receipted restored PTY authority on command completion and exit', () => {
     const retireAuthority = vi.fn()
     const runtime = new OrcaRuntimeService(store, undefined, {
@@ -45280,6 +45335,11 @@ describe('OrcaRuntimeService', () => {
       // incidental truthiness check on a value the ruling now legitimately nulls.
       expect(creatorAuthority).not.toBeNull()
       expect(coordinatorAuthority).not.toBeNull()
+      // [S10-21a C7n, D-R121 N3] Coverage restoration, additive: the faithful corrected form of
+      // the deleted field assertion — these fixture ptys carry no incarnationId, so the field is
+      // legitimately null (not merely present), beside the object-level `.not.toBeNull()` above.
+      expect(creatorAuthority?.processIncarnation).toBeNull()
+      expect(coordinatorAuthority?.processIncarnation).toBeNull()
       const creatorTask = db.createTask({ spec: 'create nested work', runId: runA.id })
       db.createDispatchContext(
         creatorTask.id,
@@ -52840,6 +52900,31 @@ describe('OrcaRuntimeService', () => {
         vi.useRealTimers()
       }
     })
+  })
+
+  // [S10-21a C7n, D-R121 N6] fails at base: the log used to be gated on `this._orchestrationDb`,
+  // which a caller that reaches `captureSelfResumeWatermark` through an overridden
+  // `getOrchestrationDb()` (bypassing the real attach) never populates — a seq-read failure went
+  // silent. The guard is now dropped; the log fires unconditionally.
+  it('logs a half-arm failure even when the private _orchestrationDb field was never populated', () => {
+    const runtime = new OrcaRuntimeService(store)
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      ;(
+        runtime as unknown as { getOrchestrationDb: () => { newestAgentAuditSeq(): number } }
+      ).getOrchestrationDb = () => ({
+        newestAgentAuditSeq: () => {
+          throw new Error('seq_read_boom')
+        }
+      })
+      const watermark = runtime.captureSelfResumeWatermark()
+      expect(watermark).toBeNull()
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('watermark_capture_partial_arm: seq_read_boom')
+      )
+    } finally {
+      consoleErrorSpy.mockRestore()
+    }
   })
 })
 
