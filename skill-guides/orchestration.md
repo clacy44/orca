@@ -236,6 +236,34 @@ Rules:
   refusal's own suggested alternative is what you want — the identity you actually own is
   waiting to be re-adopted, not lost.
 
+### Restarts without ritual
+
+Restarting Orca should need nothing from you. When Orca starts your agent, it writes down — in a
+note only Orca itself can write — which pane is running which conversation, at the exact moment
+it starts that conversation. When Orca restarts, it reads its own notes and brings you back in
+the same pane you were in: same identity, same threads, same mail, pacts un-paused. Where the old
+pane is genuinely gone, it starts you in a new pane and moves your identity across, and writes a
+line in the audit log saying it did. Nothing to type, nothing to re-open, nothing to re-attest.
+
+**One honest exception.** Orca can only bring you back automatically if *Orca itself* wrote the
+note about your session, and it can only do that from the moment this feature was installed
+onward — nothing before that kept a note like this at all. So: any session that was already
+running before this update was installed has no note, and cannot be brought back automatically on
+the very first restart after the install. That restart looks like before: the pane comes back
+ordinary, it tells you so loudly (never silently), and it needs exactly one
+`orca agents register --name <same-name>`. Every restart after that, for a session launched on
+this build, is automatic — no recurrence, no per-restart cost.
+
+`orca agents show` reports this as `sessionLaunchKnown` on your own row only (never on another
+agent's row): `true` means Orca holds a fresh launch record for your pane and will restore it
+automatically next restart; `false` (or the field being absent because you asked about a row that
+is not your own) means it will not, and the next restart needs the one-time `register` above.
+
+If two panes ever claim the same identity at once, or a pane's own report of what it is running
+disagrees with Orca's note about it, Orca refuses to move anything, keeps the identity where it
+is, and puts a notice in the pane(s) involved — that is deliberate, and how you would find out if
+something tried to impersonate an agent.
+
 ## When It Goes Wrong
 
 | Symptom | Exact recovery command |

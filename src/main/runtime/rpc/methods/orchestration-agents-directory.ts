@@ -61,9 +61,18 @@ export const ORCHESTRATION_AGENTS_DIRECTORY_METHODS: RpcMethod[] = [
         includeQuarantined: params.includeQuarantined ?? false,
         limit: params.limit
       })
+      // [S10-21a C11] `sessionLaunchKnown` on the caller's own row only (§7/§8 row C11) — the
+      // caller's own agent id, resolved once, never per-row from caller-supplied input.
+      const callerRow = authority ? db.getAgentByPaneKey(hostId, authority.paneKey) : undefined
+      const currentGeneration = runtime.getLaunchGenerationId()
       const agents = listing.agents.map((row) => {
         const { row: refreshed } = refreshLiveness(runtime, db, row)
-        return toPublicAgentView(refreshed, false)
+        const sessionLaunchKnown =
+          authority && callerRow?.id === refreshed.id
+            ? db.newestLaunchForPane(hostId, authority.paneKey)?.launch_generation ===
+              currentGeneration
+            : undefined
+        return toPublicAgentView(refreshed, false, sessionLaunchKnown)
       })
 
       return {
@@ -116,7 +125,12 @@ export const ORCHESTRATION_AGENTS_DIRECTORY_METHODS: RpcMethod[] = [
       const callerRow = authority ? db.getAgentByPaneKey(hostId, authority.paneKey) : undefined
       const { row: refreshed, pushable } = refreshLiveness(runtime, db, row)
       const full = callerRow?.id === refreshed.id
-      return { agent: toPublicAgentView(refreshed, full), pushable }
+      // [S10-21a C11] Same own-row-only rule as .list above.
+      const sessionLaunchKnown = full
+        ? db.newestLaunchForPane(hostId, authority!.paneKey)?.launch_generation ===
+          runtime.getLaunchGenerationId()
+        : undefined
+      return { agent: toPublicAgentView(refreshed, full, sessionLaunchKnown), pushable }
     }
   })
 ]

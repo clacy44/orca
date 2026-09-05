@@ -17,7 +17,16 @@ export function rateLimited(retryAfterMs: number): OrchestrationError {
 
 // CONTAINMENT #2: a per-response field allowlist so a new schema column cannot silently widen
 // this surface. `full` additionally exposes fields safe only for the caller's own row.
-export function toPublicAgentView(row: AgentRow, full: boolean): Record<string, unknown> {
+// [S10-21a C11, design §7/§8 row C11] `sessionLaunchKnown` — whether THIS host holds a launch
+// row for the caller's own pane in the current launch generation. Pass it ONLY when `row` is the
+// caller's own row; omit (leave `undefined`) for every other row so the field never appears
+// there at all — never a `false` standing in for "not the caller", which would still be a bit of
+// information about a row that is not the caller's own.
+export function toPublicAgentView(
+  row: AgentRow,
+  full: boolean,
+  sessionLaunchKnown?: boolean
+): Record<string, unknown> {
   const base = {
     id: row.id,
     displayName: row.display_name,
@@ -34,7 +43,8 @@ export function toPublicAgentView(row: AgentRow, full: boolean): Record<string, 
     // for derived rows: it is already the address callers used before this row existed, not
     // new information CONTAINMENT #2 is guarding — EXCEPT a quarantined row, where handing
     // out the pane address would route mail around the quarantine.
-    terminalHandle: row.derived === 1 && row.quarantined !== 1 ? row.terminal_handle : undefined
+    terminalHandle: row.derived === 1 && row.quarantined !== 1 ? row.terminal_handle : undefined,
+    ...(sessionLaunchKnown === undefined ? {} : { sessionLaunchKnown })
   }
   if (!full) {
     return base

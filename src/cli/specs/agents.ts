@@ -13,7 +13,11 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
       '--name is a lowercase ASCII slug, 3-32 chars (e.g. merge-restructure-backend).',
       'Idempotent: re-registering from the same terminal after a restart updates the same agent.',
       'If the terminal handle changed since last registration, unread mail still addressed to ' +
-        'the old handle moves into this mailbox automatically (reported as repointedMessages).'
+        'the old handle moves into this mailbox automatically (reported as repointedMessages).',
+      'A session already running before this build was installed has no launch record yet, so ' +
+        'it is not auto-restored on its first restart after the install — that one restart ' +
+        'needs exactly one register, same as before this feature existed; every restart after ' +
+        'that, for a session launched on this build, is automatic and needs no register at all.'
     ]
   },
   {
@@ -31,7 +35,10 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
     positionalArgs: ['name'],
     notes: [
       'A `name@host` positional (from `agents find --all-hosts`) resolves against that saved ' +
-        'environment directly; `--id`/`--name` stay local-only.'
+        'environment directly; `--id`/`--name` stay local-only.',
+      '`sessionLaunchKnown` (shown only on your OWN agent, never on another row) reports ' +
+        'whether this host currently holds a launch record for your pane — false means this ' +
+        'pane will not be auto-restored on the next restart and needs one register then.'
     ]
   },
   {
