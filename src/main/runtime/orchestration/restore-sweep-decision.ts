@@ -144,13 +144,18 @@ export function combinedOccupantLiveness(
  * is the combined (round ∪ connected-now) liveness of `occupant.ptyId` specifically — it may
  * differ from whatever ptyId the candidate's own `IncumbentEvidence` was collected for.
  * [S10-21a C7k, Ruling 34 Addendum 28, D-R118] Row 10 requires liveness EXPLICITLY 'absent';
- * 'unknown' takes row 11's no-placement treatment, under its own reason code — never row 10's. */
+ * 'unknown' takes row 11's no-placement treatment, under its own reason code — never row 10's.
+ * [S10-21a C7l, Ruling 34 Addendum 29 item 5, N4] `identityStatus` distinguishes a candidate
+ * provably 'dead' from one whose identity was never determinable (`unknown_no_identity`,
+ * `decideEarlyRows`'s row 4) — row 11's reason must never call the latter "non_agent" (that
+ * asserts a fact the sweep never established); it says the identity is unknown instead. */
 export function routeDeadCandidate(
   occupant: DeadCandidateOccupant | undefined,
   candidatePaneKey: string,
   occupantLiveness: OccupantLiveness | undefined,
   isLeafInPersistedLayout: boolean,
-  inventory: ControllerInventory | null
+  inventory: ControllerInventory | null,
+  identityStatus: 'dead' | 'unknown_no_identity' = 'dead'
 ): OccupantRouting {
   if (occupant) {
     if (occupant.paneKey === candidatePaneKey) {
@@ -161,7 +166,10 @@ export function routeDeadCandidate(
           offerPlacement: false,
           audit: {
             verb: 'sweep_note',
-            reasonCode: `leaf_occupied_by_live_non_agent_pty ${occupant.ptyId}`
+            reasonCode:
+              identityStatus === 'unknown_no_identity'
+                ? `leaf_occupied_by_live_pty_identity_unknown ${occupant.ptyId}`
+                : `leaf_occupied_by_live_non_agent_pty ${occupant.ptyId}`
           }
         }
       }
@@ -178,12 +186,19 @@ export function routeDeadCandidate(
       }
       // 'unknown' (or the evidence supplied no liveness read at all) — never place, same as
       // row 11's caution, under its own distinct reason.
+      // [S10-21a C7l, Ruling 34 Addendum 29 item 6, N5] `round=` states what was OBSERVED from
+      // the actual `ptyState`, never 'present' as a stand-in for "the round existed" — a round
+      // that existed but did not list this ptyId is 'not_listed', not 'present'.
       return {
         offerPlacement: false,
         audit: {
           verb: 'sweep_note',
           reasonCode: `leaf_liveness_unknown: occupant ${occupant.ptyId} round=${
-            inventory === null ? 'null' : 'present'
+            inventory === null
+              ? 'null'
+              : inventory.allLivePtyIds.has(occupant.ptyId)
+                ? 'listed'
+                : 'not_listed'
           }`
         }
       }

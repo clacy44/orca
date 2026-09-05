@@ -93,6 +93,9 @@ export function baseDeps(
     getOrchestrationCompatibilityHostId: () => HOST_ID,
     getLaunchGenerationId: () => LAUNCH_GEN,
     findConnectedLeafOccupant: () => undefined,
+    // [C7l, Ruling 34 Addendum 29 item 3] Default fixture has no live runtime-record pty either
+    // — a test exercising the runtime-record read overrides this directly.
+    findConnectedPtyForPane: () => undefined,
     isLeafInPersistedLayout: () => true,
     getPersistedPtyIdForLeaf: () => undefined,
     ensureAgentSession: vi.fn(),

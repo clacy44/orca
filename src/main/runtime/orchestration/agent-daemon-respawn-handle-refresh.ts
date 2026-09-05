@@ -11,6 +11,7 @@ import { getAgentByPaneKey } from './derived-agent-rows'
 import { getAgentByIdIncludingTombstoned } from './agent-retire'
 import { writeAgentAudit } from './agent-audit-log'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
+import { parseProcessIncarnation } from './agent-process-identity'
 
 export type RefreshAgentHandleAfterRespawnParams = {
   hostId: string
@@ -76,9 +77,19 @@ export function refreshAgentHandleAfterRespawn(
   if (row.quarantined === 1) {
     return refuse(db, params, row.id, 'row_quarantined')
   }
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 1] Refuse at the write any identity
+  // `parseProcessIncarnation` rejects: leave `process_incarnation` untouched (the handle
+  // update still proceeds) and record why, rather than poisoning the column with a bare or
+  // legacy value. `undefined` (caller omits the field entirely) is unchanged prior behaviour
+  // — this only guards a field that WAS supplied.
+  const identityUnavailableNote =
+    params.processIncarnation !== undefined &&
+    parseProcessIncarnation(params.processIncarnation) === null
+      ? `identity_unavailable_at_refresh: ${params.processIncarnation === null ? 'null' : 'unparseable'}`
+      : null
   db.exec('BEGIN IMMEDIATE')
   try {
-    if (params.processIncarnation !== undefined) {
+    if (params.processIncarnation !== undefined && identityUnavailableNote === null) {
       db.prepare(
         `UPDATE agents SET terminal_handle = ?, process_incarnation = ?,
            last_seen_at = datetime('now') WHERE id = ?`
@@ -95,7 +106,9 @@ export function refreshAgentHandleAfterRespawn(
       actorHostId: params.hostId,
       verb: 'rebind',
       outcome: 'reminted',
-      reasonCode: `daemon respawn handle refresh: ${params.paneKey} -> ${params.newTerminalHandle}`
+      reasonCode: identityUnavailableNote
+        ? `daemon respawn handle refresh: ${params.paneKey} -> ${params.newTerminalHandle} (${identityUnavailableNote})`
+        : `daemon respawn handle refresh: ${params.paneKey} -> ${params.newTerminalHandle}`
     })
     db.exec('COMMIT')
     return { ok: true, agentId: row.id, pactsToUnpause }

@@ -8,6 +8,14 @@ export type ProcessIdentity = { ptyId: string; incarnationId: string }
 export type ControllerInventory = {
   allLivePtyIds: ReadonlySet<string>
   terminalIdentityByPtyId: ReadonlyMap<string, { handle: string; incarnationId: string }>
+  /** [S10-21a C7l, Ruling 34 Addendum 29 item 4] The runtime's own pty-record seq counter value
+   * at the moment this round was taken (`takeControllerInventoryForSweep`) — undefined for a
+   * round fetched any other way. A pty record's own `seq` > this value means the record was
+   * created/attached AFTER the round, so `ptyConnectedNow` never mistakes it for absent; a
+   * record already sitting connected BEFORE the round is judged by the round itself, never by
+   * this raw "connected now" flag alone (that was the N2 bug: a stale own-pane surface read
+   * 'present' forever). */
+  roundSeq?: number
 }
 
 /** `agents.process_incarnation` is `"<ptyId>:<incarnationId>"`, split at the FIRST ':' — a

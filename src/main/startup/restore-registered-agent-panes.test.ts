@@ -5,7 +5,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
+import { OrcaRuntimeService } from '../runtime/orca-runtime'
 import { recordLaunch } from '../runtime/orchestration/agent-launch-sessions'
+import { captureSelfResumeWatermarkAtStartup } from './self-resume-watermark-capture'
 import {
   runRestoreSweep,
   runRestoreSweepBody,
@@ -221,6 +223,83 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       emptyInventory()
     )
     expect(outcome.kind).toBe('layer2')
+    expect(orchestrationDb!.getThread(thread.id)?.pact_state).toBe('engaged')
+    expect(orchestrationDb!.getThread(thread.id)?.pact_paused_at).toBeNull()
+    const resumeAudit = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'pact_resumed_after_rebind' AND outcome = 'resumed'`
+      )
+      .all()
+    expect(resumeAudit).toHaveLength(1)
+  })
+
+  it('[S10-21a C7l item 8, C10 gap] a pact paused counterpart_gone resumes after a LAYER-1 (same-pane) restore of its counterpart', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000012'
+    const peerPaneKey = 'tab3:00000000-0000-4000-8000-000000000013'
+    insertAgent(db, { id: 'agent-12', display_name: 'chair-12', pane_key: predPaneKey })
+    insertAgent(db, { id: 'agent-13', display_name: 'chair-13', pane_key: peerPaneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-12',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const { thread } = orchestrationDb!.createThread({
+      subject: 's',
+      createdByAgentId: 'agent-12',
+      participants: [
+        { participantKey: 'agent-12', agentId: 'agent-12' },
+        { participantKey: 'agent-13', agentId: 'agent-13' }
+      ]
+    })
+    orchestrationDb!.proposePact({
+      callerAgentId: 'agent-12',
+      callerPaneKey: predPaneKey,
+      callerHostId: HOST_ID,
+      threadId: thread.id,
+      peerAgentId: 'agent-13',
+      stepsTotal: null
+    })
+    orchestrationDb!.acceptPact({
+      callerAgentId: 'agent-13',
+      callerPaneKey: peerPaneKey,
+      callerHostId: HOST_ID,
+      threadId: thread.id
+    })
+    orchestrationDb!.autoPausePactsForAgent('agent-12', 'counterpart_gone')
+    expect(orchestrationDb!.getThread(thread.id)?.pact_paused_at).not.toBeNull()
+
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-12',
+        // SAME pane key as the predecessor — the noop (Layer-1) path.
+        paneKey: predPaneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    // FAILS AT BASE: the noop path's own refresh discards pactsToUnpause entirely, so this
+    // pact never resumes on a Layer-1 restore.
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        getTerminalProcessIncarnation: () => 'pty-12:inc-12'
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-12',
+      null,
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer1')
     expect(orchestrationDb!.getThread(thread.id)?.pact_state).toBe('engaged')
     expect(orchestrationDb!.getThread(thread.id)?.pact_paused_at).toBeNull()
     const resumeAudit = db
@@ -512,8 +591,12 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     )
   })
 
-  // [S10-21a C7k, Ruling 34 Addendum 28, item 7]
-  it('deferredByReason: the sweep summary counts each Layer-3 deferral by its exact reason code', async () => {
+  // [S10-21a C7k, Ruling 34 Addendum 28, item 7 -> S10-21a C7l, Ruling 34 Addendum 29 item 7,
+  // SCENARIO_CORRECTION] Was keyed on the exact reason code (`'sweep_deferred:
+  // agent_pty_identity_ambiguous pty-ambiguous': 1`); C7l item 7/N6 re-keys `deferredByReason`
+  // on the reason FAMILY (the text before the first ':' or space) — per-pane detail stays in
+  // `agent_audit`, never fragmenting one family into many near-unique milestone keys.
+  it('deferredByReason: the sweep summary counts each Layer-3 deferral by its reason FAMILY', async () => {
     const db = rawDb()
     const paneKeyNoRow = 'tab1:00000000-0000-4000-8000-00000000c010'
     insertAgent(db, {
@@ -546,8 +629,52 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     expect(summary.layer3).toBe(2)
     expect(summary.deferredByReason).toEqual({
       sweep_no_launch_row: 1,
-      'sweep_deferred: agent_pty_identity_ambiguous pty-ambiguous': 1
+      sweep_deferred: 1
     })
+  })
+
+  it('[S10-21a C7l item 7, N6] two panes deferred for the SAME reason family count as one key with value 2', async () => {
+    const db = rawDb()
+    const paneKeyA = 'tab1:00000000-0000-4000-8000-00000000c012'
+    insertAgent(db, {
+      id: 'agent-ambiguous-a',
+      display_name: 'chair-ambiguous-a',
+      pane_key: paneKeyA,
+      process_incarnation: 'pty-ambiguous-a:inc-1'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: paneKeyA,
+      agentType: 'claude',
+      sessionId: 'sess-ambiguous-a',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const paneKeyB = 'tab1:00000000-0000-4000-8000-00000000c013'
+    insertAgent(db, {
+      id: 'agent-ambiguous-b',
+      display_name: 'chair-ambiguous-b',
+      pane_key: paneKeyB,
+      process_incarnation: 'pty-ambiguous-b:inc-1'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: paneKeyB,
+      agentType: 'claude',
+      sessionId: 'sess-ambiguous-b',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const summary = await runRestoreSweepBody(
+      baseDeps(orchestrationDb!, {
+        takeControllerInventoryForSweep: async () =>
+          emptyInventory({ allLivePtyIds: new Set(['pty-ambiguous-a', 'pty-ambiguous-b']) })
+      })
+    )
+    expect(summary.layer3).toBe(2)
+    expect(summary.deferredByReason).toEqual({ sweep_deferred: 2 })
   })
 
   // [S10-21a C7k, Ruling 34 Addendum 28, item 8]
@@ -600,5 +727,29 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       )
       .all()
     expect(noteRows).toHaveLength(1)
+  })
+
+  it('[S10-21a C7l item 2a] runRestoreSweep onLockAcquired: the serve path yields a non-null watermark when the store opens', async () => {
+    rawDb()
+    // A fresh DB's agent_audit is empty (newestAgentAuditSeq() null); seed one row so the
+    // watermark has something real to read.
+    orchestrationDb!.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: null,
+      verb: 'sweep_note',
+      outcome: 'proceeded',
+      reasonCode: 'seed_for_watermark_test'
+    })
+    // Not the real getOrchestrationDb() (arms federation relay/dispatch-liveness bootstrapping
+    // this isolated test never sets up) — same substitution pattern pty.test.ts uses.
+    const runtime = new OrcaRuntimeService()
+    runtime.getOrchestrationDb = () => orchestrationDb!
+    expect(runtime.getSelfResumeWatermark()).toBeNull()
+    await runRestoreSweep(baseDeps(orchestrationDb!), () =>
+      captureSelfResumeWatermarkAtStartup(runtime)
+    )
+    expect(runtime.getSelfResumeWatermark()).not.toBeNull()
+    expect(typeof runtime.getSelfResumeWatermark()).toBe('number')
   })
 })

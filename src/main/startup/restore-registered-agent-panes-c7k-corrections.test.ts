@@ -182,6 +182,10 @@ describe('S10-21a C7k: decision-table corrections (Ruling 34 Addendum 28)', () =
     expect(row4NoteRows).toHaveLength(0)
   })
 
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 6, N5, SCENARIO_CORRECTION] Was
+  // `round=present` — `round=` now states what was OBSERVED from `ptyState`, never 'present' as
+  // a stand-in for "the round existed"; the round here is non-null but does not list
+  // 'pty-unknown', so it reads `round=not_listed`.
   it('row 10/11 correction (C7k, Ruling 34 Addendum 28, item 2): occupant liveness UNKNOWN never places — restores without placement, distinct reason from row 11', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a018'
@@ -239,7 +243,7 @@ describe('S10-21a C7k: decision-table corrections (Ruling 34 Addendum 28)', () =
     const rows = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
-           AND reason_code = 'leaf_liveness_unknown: occupant pty-unknown round=present'`
+           AND reason_code = 'leaf_liveness_unknown: occupant pty-unknown round=not_listed'`
       )
       .all()
     expect(rows).toHaveLength(1)
@@ -301,10 +305,13 @@ describe('S10-21a C7k: decision-table corrections (Ruling 34 Addendum 28)', () =
       {},
       expect.anything()
     )
+    // [S10-21a C7l, Ruling 34 Addendum 29 item 5, N4, SCENARIO_CORRECTION] Was
+    // 'leaf_occupied_by_live_non_agent_pty pty-connected' — this candidate's
+    // `processIncarnation` is `null`, so its identity status is `unknown_no_identity`.
     const rows = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
-           AND reason_code = 'leaf_occupied_by_live_non_agent_pty pty-connected'`
+           AND reason_code = 'leaf_occupied_by_live_pty_identity_unknown pty-connected'`
       )
       .all()
     expect(rows).toHaveLength(1)

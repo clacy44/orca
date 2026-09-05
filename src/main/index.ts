@@ -166,6 +166,7 @@ import {
   shouldSuppressDevEducation,
   suppressDevEducationForStore
 } from './startup/dev-education-suppression'
+import { captureSelfResumeWatermarkAtStartup } from './startup/self-resume-watermark-capture'
 import { maybeRedirectAppImageCliLaunch } from './startup/appimage-cli-redirect'
 import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entry-redirect'
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
@@ -1045,6 +1046,7 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
     getLaunchGenerationId: () => runtimeService.getLaunchGenerationId(),
     findConnectedLeafOccupant: (leafId, tabId) =>
       runtimeService.findConnectedLeafOccupant(leafId, tabId ?? null),
+    findConnectedPtyForPane: (paneKey) => runtimeService.findConnectedPtyForPane(paneKey),
     isLeafInPersistedLayout: (tabId, leafId, hostId) =>
       runtimeService.isLeafInPersistedLayout(tabId, leafId, hostId ?? null),
     getPersistedPtyIdForLeaf: (tabId, leafId, hostId) =>
@@ -1078,11 +1080,12 @@ async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promi
     // watermark right after acquiring the sweep lock; the serve path never did. `onLockAcquired`
     // runs at the equivalent point here — after `runRestoreSweep`'s own lock acquisition, before
     // the sweep body runs (and therefore before the serve path's later graph publish) — same
-    // `captureSelfResumeWatermark()` primitive, same absent-branch behaviour (an unattached DB at
-    // capture time is peeked as null; `runRestoreSweepBody`'s own `noteSelfResumeWatermarkAbsent`
-    // records that once, sweep-level, not here).
+    // `captureSelfResumeWatermark()` primitive, same absent-branch behaviour ([S10-21a C7l,
+    // Ruling 34 Addendum 29 item 2] captured through the arming `getOrchestrationDb()` accessor;
+    // a store that cannot open is recorded as absence — `runRestoreSweepBody`'s own
+    // `noteSelfResumeWatermarkAbsent` records that once, sweep-level, not here).
     const summary = await runRestoreSweep(buildRestoreSweepDeps(runtimeService), () =>
-      runtimeService.captureSelfResumeWatermark()
+      captureSelfResumeWatermarkAtStartup(runtimeService)
     )
     logStartupMilestone('restore-sweep-done', summary)
     logRestoreSweepDeferrals(summary)
@@ -3271,8 +3274,11 @@ void app.whenReady().then(async () => {
     // [S10-21a C7j, Ruling 34 Addendum 27 row 7] Captured HERE, before EITHER openMainWindow
     // call site below (the Windows-packaged early branch and the general one), under the SAME
     // lock the sweep itself runs under — never moved later even if the db turns out unattached
-    // at this point (peeks only; `captureSelfResumeWatermark` never arms the store itself).
-    runtime.captureSelfResumeWatermark()
+    // at this point ([S10-21a C7l, Ruling 34 Addendum 29 item 2] captured through the arming
+    // `getOrchestrationDb()` accessor now — a store that cannot open is recorded as absence).
+    // Routed through the extracted `captureSelfResumeWatermarkAtStartup` step (item 2b) — same
+    // call, directly testable with a fake runtime.
+    captureSelfResumeWatermarkAtStartup(runtime)
   }
   const shellPathReady = windowsShellPathHydration.whenReady()
   let desktopWindow: BrowserWindow | null = null

@@ -802,6 +802,47 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     expect(auditRows).toHaveLength(1)
   })
 
+  it('[S10-21a C7l item 8, C10 gap, D-R118 F7] a same-pane (noop) restore with a counterpart_gone-paused pact carries pactsToUnpause out', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-same-pact',
+      display_name: 'chair-same-pact',
+      pane_key: 'tab1:leaf-same-pact',
+      terminal_handle: 'handle-old'
+    })
+    insertAgent(db, {
+      id: 'agent-peer-pact',
+      display_name: 'chair-peer-pact',
+      pane_key: 'tab1:leaf-peer-pact'
+    })
+    db.prepare(
+      `INSERT INTO threads (
+         id, subject, pact_with_agent_id, pact_state, pact_proposer_agent_id, pact_paused_at,
+         pact_pause_reason
+       ) VALUES ('thr-same-1', 'pact', 'agent-peer-pact', 'engaged', 'agent-same-pact',
+         datetime('now'), 'counterpart_gone')`
+    ).run()
+
+    // FAILS AT BASE: the noop (same-pane) branch discards refreshAgentHandleAfterRespawn's own
+    // pactsToUnpause entirely — the result never carried this field at all.
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-same-pact'),
+      newPaneKey: 'tab1:leaf-same-pact',
+      newTerminalHandle: 'handle-new',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT,
+      processIncarnation: 'pty-same-pact:inc-new'
+    })
+    expect(result).toEqual({
+      ok: true,
+      rebound: false,
+      agentId: 'agent-same-pact',
+      pactsToUnpause: ['thr-same-1']
+    })
+  })
+
   // [S10-21a C7k, Ruling 34 Addendum 28, item 5] The companion refresh never writes an empty or
   // legacy identity — it notes instead and leaves the row untouched.
   it('C7k item 5: a same-pane noop restore with processIncarnation NULL leaves the row untouched, notes identity_unavailable: null', () => {

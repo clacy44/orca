@@ -4,6 +4,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import type { AgentRow } from './types'
+import {
+  agentAlive,
+  parseProcessIncarnation,
+  type ControllerInventory
+} from './agent-process-identity'
 
 const HOST_ID = 'local'
 
@@ -57,6 +62,39 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
       terminal_handle: 'term_old'
     })
 
+    // [S10-21a C7l, Ruling 34 Addendum 29, SCENARIO_CORRECTION] Was:
+    //   processIncarnation: 'inc-new' ... expect(row?.process_incarnation).toBe('inc-new')
+    // A bare incarnation id is not a parseable identity (agent-process-identity.ts
+    // parseProcessIncarnation) — this encoded the bug C7l fixes. The canonical
+    // "<ptyId>:<incarnationId>" form is written verbatim; bare-id refusal is its own test below.
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      paneKey,
+      newTerminalHandle: 'term_new',
+      processIncarnation: 'pty-new:inc-new'
+    })
+
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-respawn', pactsToUnpause: [] })
+    const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-respawn')
+    expect(row?.pane_key).toBe(paneKey)
+    expect(row?.terminal_handle).toBe('term_new')
+    expect(row?.process_incarnation).toBe('pty-new:inc-new')
+    const audit = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
+      .all()
+    expect(audit).toHaveLength(1)
+  })
+
+  it('[S10-21a C7l item 1] refuses to write a bare incarnation id — handle update proceeds, note recorded', () => {
+    const db = rawDb()
+    const paneKey = 'tab1:leaf-bare'
+    insertAgent(db, {
+      id: 'agent-bare',
+      display_name: 'chair-bare',
+      pane_key: paneKey,
+      terminal_handle: 'term_old'
+    })
+
     const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
       hostId: HOST_ID,
       paneKey,
@@ -64,13 +102,45 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
       processIncarnation: 'inc-new'
     })
 
-    expect(result).toMatchObject({ ok: true, agentId: 'agent-respawn', pactsToUnpause: [] })
-    const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-respawn')
-    expect(row?.pane_key).toBe(paneKey)
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-bare', pactsToUnpause: [] })
+    const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-bare')
     expect(row?.terminal_handle).toBe('term_new')
-    expect(row?.process_incarnation).toBe('inc-new')
+    expect(row?.process_incarnation).toBeNull()
     const audit = db
-      .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'
+           AND reason_code LIKE '%identity_unavailable_at_refresh: unparseable%'`
+      )
+      .all()
+    expect(audit).toHaveLength(1)
+  })
+
+  it('[S10-21a C7l item 1] refuses to write a null identity — handle update proceeds, note recorded', () => {
+    const db = rawDb()
+    const paneKey = 'tab1:leaf-null'
+    insertAgent(db, {
+      id: 'agent-null',
+      display_name: 'chair-null',
+      pane_key: paneKey,
+      terminal_handle: 'term_old'
+    })
+
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      paneKey,
+      newTerminalHandle: 'term_new',
+      processIncarnation: null
+    })
+
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-null', pactsToUnpause: [] })
+    const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-null')
+    expect(row?.terminal_handle).toBe('term_new')
+    expect(row?.process_incarnation).toBeNull()
+    const audit = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'
+           AND reason_code LIKE '%identity_unavailable_at_refresh: null%'`
+      )
       .all()
     expect(audit).toHaveLength(1)
   })
@@ -166,5 +236,37 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
     expect(result).toEqual({ ok: false, reason: 'row_quarantined' })
     const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-quarantined')
     expect(row?.terminal_handle).toBe('term_old')
+  })
+
+  it('[S10-21a C7l item 1] identity chain: a canonical refresh reads alive at the next boot inventory round', () => {
+    const db = rawDb()
+    const paneKey = 'tab1:leaf-respawn-chain'
+    insertAgent(db, {
+      id: 'agent-chain',
+      display_name: 'chair-chain',
+      pane_key: paneKey,
+      terminal_handle: 'term_old'
+    })
+
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      paneKey,
+      newTerminalHandle: 'term_new',
+      processIncarnation: 'pty-chain:inc-chain'
+    })
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-chain' })
+
+    const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-chain')
+    const identity = parseProcessIncarnation(row?.process_incarnation ?? null)
+    expect(identity).toEqual({ ptyId: 'pty-chain', incarnationId: 'inc-chain' })
+
+    // The next sweep's inventory round lists the respawned pty under the SAME incarnation.
+    const inventory: ControllerInventory = {
+      allLivePtyIds: new Set(['pty-chain']),
+      terminalIdentityByPtyId: new Map([
+        ['pty-chain', { handle: 'term_new', incarnationId: 'inc-chain' }]
+      ])
+    }
+    expect(agentAlive(identity, inventory)).toBe('alive')
   })
 })

@@ -285,6 +285,52 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     expect(rows).toHaveLength(1)
   })
 
+  it("[S10-21a C7l item 3] row 5: no leaf occupant, but a connected pty record on the pane (runtime's own records) — skipped_leaf_held (yield)", async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000c003'
+    insertAgent(db, {
+      id: 'agent-row3-runtime',
+      display_name: 'chair-row3-runtime',
+      pane_key: paneKey
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-row3-runtime',
+      launchGeneration: LAUNCH_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'sweep_record'
+    })
+    const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    const ensureAgentSession = vi.fn()
+    const mintRestoreTicket = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        mintRestoreTicket,
+        // No renderer-graph occupant at all — only the runtime's OWN pty record on this pane.
+        findConnectedLeafOccupant: () => undefined,
+        findConnectedPtyForPane: (pk) =>
+          pk === paneKey ? { paneKey: pk, ptyId: 'pty-row3-runtime' } : undefined
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-row3-runtime',
+      null,
+      'wt-1',
+      launchRow,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('skipped_leaf_held')
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+    expect(mintRestoreTicket).not.toHaveBeenCalled()
+    const rows = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = ?`)
+      .all(`leaf_held: resume_admitted_this_generation seq=${launchRow.seq}`)
+    expect(rows).toHaveLength(1)
+  })
+
   it('row 8 (first half): dead, no occupant, leaf present in the persisted layout — restore WITH placement', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a008'
@@ -535,10 +581,14 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       {},
       expect.anything()
     )
+    // [S10-21a C7l, Ruling 34 Addendum 29 item 5, N4, SCENARIO_CORRECTION] Was
+    // 'leaf_occupied_by_live_non_agent_pty pty-live' — this candidate's `processIncarnation` is
+    // `null` (no row set one), so its identity status is `unknown_no_identity`, never provably
+    // 'dead'; row 11's reason must never assert "non_agent" (a fact never established) for it.
     const rows = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
-           AND reason_code = 'leaf_occupied_by_live_non_agent_pty pty-live'`
+           AND reason_code = 'leaf_occupied_by_live_pty_identity_unknown pty-live'`
       )
       .all()
     expect(rows).toHaveLength(1)

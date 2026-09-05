@@ -71,7 +71,17 @@ export type RebindRestoredPaneResult =
       // "there was nothing to inherit" (adoptPredecessorThreadMembership's own F-9 reasoning).
       blockedByQuarantinedPredecessor: boolean
     }
-  | { ok: true; rebound: false; agentId: string }
+  | {
+      ok: true
+      rebound: false
+      agentId: string
+      // [S10-21a C7l, Ruling 34 Addendum 29 item 8, C10 gap] Additive, optional: present only
+      // when the noop (same-pane) path's own companion refresh
+      // (`refreshAgentHandleAfterRespawn`) actually ran and reported pacts to unpause — a C10
+      // caller reads this the SAME way it reads the `rebound: true` arm's own field, rather than
+      // discarding a Layer-1 restore's pacts silently (D-R118 F7).
+      pactsToUnpause?: string[]
+    }
   | { ok: false; reason: RebindRefusalReason }
 
 // [S10-21a C5b, D-R107 fix item 14] verb 'rebind' for every refusal — 'contested' outcome for
@@ -128,9 +138,10 @@ export function rebindRestoredPane(
     // identity — `params.processIncarnation` must parse as a genuine 2-segment identity, not
     // merely be non-`undefined` (a caller can supply `null`, or a stale 3-segment legacy form).
     // A supplied-but-unparseable value is recorded (row left untouched), never silently written.
+    let noopPactsToUnpause: string[] | undefined
     if (params.processIncarnation !== undefined && params.newTerminalHandle !== null) {
       if (parseProcessIncarnation(params.processIncarnation) !== null) {
-        refreshAgentHandleAfterRespawn(db, {
+        const refreshResult = refreshAgentHandleAfterRespawn(db, {
           hostId: params.hostId,
           paneKey: params.newPaneKey,
           newTerminalHandle: params.newTerminalHandle,
@@ -139,6 +150,14 @@ export function rebindRestoredPane(
           // agent — never re-derive by pane suffix, which two rows can share.
           agentId: predicate.agentId
         })
+        // [S10-21a C7l, Ruling 34 Addendum 29 item 8, C10 gap] Was discarded — the Layer-1
+        // (same-pane) path's own companion refresh CAN report pacts to unpause; the caller
+        // must resume them exactly as it does for the `rebound: true` arm's own field. Field
+        // omitted (not merely `[]`) when there is nothing to unpause — additive, so every
+        // pre-existing no-pact `toEqual` assertion on this result shape is undisturbed.
+        if (refreshResult.ok && refreshResult.pactsToUnpause.length > 0) {
+          noopPactsToUnpause = refreshResult.pactsToUnpause
+        }
       } else {
         writeAgentAudit(db, {
           agentId: predicate.agentId,
@@ -150,7 +169,12 @@ export function rebindRestoredPane(
         })
       }
     }
-    return { ok: true, rebound: false, agentId: predicate.agentId }
+    return {
+      ok: true,
+      rebound: false,
+      agentId: predicate.agentId,
+      ...(noopPactsToUnpause !== undefined ? { pactsToUnpause: noopPactsToUnpause } : {})
+    }
   }
   const { row, targetRow } = predicate
 

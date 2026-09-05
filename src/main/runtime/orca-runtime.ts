@@ -1482,6 +1482,10 @@ type RuntimePtyWorktreeRecord = {
   // spawn-time tab/pane identity so later reveals can adopt under the env key.
   tabId: string | null
   paneKey: string | null
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 4] Monotonic, assigned when this record is
+  // created — never mutated afterward. Compared against a round's own `roundSeq` so
+  // `ptyConnectedNow` can tell "created after the round" from "already connected before it".
+  seq: number
   // Why: the pane's own lane, resolved once at bind time; never a device id, so neither a revoke
   // nor a re-bind can orphan or re-point a live pane (S9 §2h).
   lanePrincipalId?: string | null
@@ -3312,6 +3316,13 @@ export class OrcaRuntimeService {
   // iterates them all. Listeners are cleaned up via subscriptionCleanups.
   private notificationListeners = new Set<(event: MobileNotificationEvent) => void>()
   private ptysById = new Map<string, RuntimePtyWorktreeRecord>()
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 4] Monotonic counter backing each pty record's own
+  // `seq` — never reset, never reused.
+  private ptyRecordSeqCounter = 0
+  private nextPtyRecordSeq(): number {
+    this.ptyRecordSeqCounter += 1
+    return this.ptyRecordSeqCounter
+  }
   private readonly pairedRendererSessionOwnedPtyIds = new Set<string>()
   private wslDistroByPtyId = new Map<string, string>()
   private titleObservationSequence = 0
@@ -5378,13 +5389,21 @@ export class OrcaRuntimeService {
     return this.launchGenerationId
   }
 
-  // [S10-21a C7j, Ruling 34 Addendum 27 row 7] Peeks `_orchestrationDb` (never the arming
-  // `getOrchestrationDb()` getter) — same reasoning as `tickDispatchLivenessMonitor`: a
-  // watermark capture must never be the thing that attaches the orchestration store. Called
-  // once, by index.ts, before openMainWindow, under the restore-sweep lock. Leaves the
-  // watermark null (never re-attempts) when no attach has happened yet at that call site.
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 2] Captures through the ARMING `getOrchestrationDb()`
+  // accessor, not the bare `_orchestrationDb` peek C7j shipped: nothing production-side calls
+  // `setOrchestrationDb` before either capture point (desktop: index.ts precedes any
+  // `getOrchestrationDb()`; serve: capture runs in `onLockAcquired`, before the sweep body's own
+  // arming), so the peek always saw an unarmed store and the watermark was permanently null —
+  // row 7 (self-resume-since-this-process) could never fire. Both capture sites already run
+  // after the restore-sweep lock, same as before; if `getOrchestrationDb()` throws (store open
+  // failure) or returns falsy, that is recorded as absence, never a capture-time crash.
   captureSelfResumeWatermark(): number | null {
-    const db = this._orchestrationDb
+    let db: OrchestrationDb | null = null
+    try {
+      db = this.getOrchestrationDb() ?? null
+    } catch {
+      db = null
+    }
     this.selfResumeWatermark = db ? db.newestAgentAuditSeq() : null
     return this.selfResumeWatermark
   }
@@ -13829,6 +13848,21 @@ export class OrcaRuntimeService {
     return undefined
   }
 
+  /** [S10-21a C7l, Ruling 34 Addendum 29 item 3] `findConnectedLeafOccupant` above reads only
+   * the RENDERER's own leaf graph (`this.leaves`) — a race at the sweep's run point (Addendum
+   * 26). This reads the runtime's OWN pty records (`ptysById`) instead: a connected pty whose
+   * own `paneKey` (stamped at spawn time, C7c's background-CLI-survives-a-failed-reveal field)
+   * equals the candidate's. Rows 5-6 (`decideLeafHoldRows`) hold when EITHER read finds a live
+   * pty on the pane. */
+  findConnectedPtyForPane(paneKey: string): { paneKey: string; ptyId: string } | undefined {
+    for (const [ptyId, record] of this.ptysById) {
+      if (record.paneKey === paneKey && record.connected === true) {
+        return { paneKey, ptyId }
+      }
+    }
+    return undefined
+  }
+
   /** [S10-21a C7b, D-R110 fix 6, design §2.1c] Whether the tab's PERSISTED layout tree (the
    * leaf-id-preserving restore structure, `terminal-layout-leaf-ids.ts`) still contains this
    * leaf id at all — distinct from `leafHoldsLiveOrStablePane`'s occupancy question. A closed
@@ -13949,7 +13983,20 @@ export class OrcaRuntimeService {
       // [S10-21a C7k, Ruling 34 Addendum 28, D-R118] The runtime's OWN connected-now read —
       // independent of `inventory` above (which may be an older round) — so the sweep can union
       // the two rather than mistake a pty created after the round for absent.
-      ptyConnectedNow: (pid: string) => this.ptysById.get(pid)?.connected === true
+      // [S10-21a C7l, Ruling 34 Addendum 29 item 4] 'Connected now' means recorded AFTER the
+      // round: `record.seq > inventory.roundSeq`, not merely `connected === true` — a record
+      // seeded/connected BEFORE the round (`inventory` is undefined `roundSeq` for a round taken
+      // any other way; that keeps this a pure connected check for every non-sweep caller) is
+      // judged by the round itself (`ptyState` above), never forced 'present' forever by this
+      // flag alone (the N2 bug: a stale own-pane surface never reached row 10).
+      ptyConnectedNow: (pid: string) => {
+        const record = this.ptysById.get(pid)
+        if (record?.connected !== true) {
+          return false
+        }
+        const roundSeq = inventory?.roundSeq
+        return roundSeq === undefined ? true : record.seq > roundSeq
+      }
     }
   }
 
@@ -13959,12 +14006,16 @@ export class OrcaRuntimeService {
    * a null round (a transient controller failure); still null after the retry is a genuine
    * "inventory unavailable" the sweep must defer loudly, never read as absent. */
   async takeControllerInventoryForSweep(): Promise<ControllerInventory | null> {
+    // [S10-21a C7l, Ruling 34 Addendum 29 item 4] Captured BEFORE the (async) round is taken —
+    // any pty record created/attached during or after this call has `seq > roundSeq`.
+    const roundSeq = this.ptyRecordSeqCounter
     const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
     const first = await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
     if (first) {
-      return first
+      return { ...first, roundSeq }
     }
-    return await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
+    const retry = await this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees)
+    return retry ? { ...retry, roundSeq } : null
   }
 
   /** [S10-21a C7, INV-P-021, §2.2] The sweep's own mint point — the ONLY public entry to this
@@ -32639,6 +32690,7 @@ export class OrcaRuntimeService {
         wslDistro,
         tabId: state.tabId ?? null,
         paneKey: state.paneKey ?? null,
+        seq: this.nextPtyRecordSeq(),
         launchConfig: null,
         launchToken: null,
         launchIncarnationId: null,

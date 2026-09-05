@@ -146,10 +146,13 @@ describe('S10-21a C7i: SCENARIO_CORRECTIONS (Ruling 34 Addendum 27, D-R116 REJEC
       {},
       expect.anything()
     )
+    // [S10-21a C7l, Ruling 34 Addendum 29 item 5, N4, SCENARIO_CORRECTION] Was
+    // 'leaf_occupied_by_live_non_agent_pty pty-fresh' — this candidate's `processIncarnation`
+    // is `null`, so its identity status is `unknown_no_identity`, never provably 'dead'.
     const rows = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
-           AND reason_code = 'leaf_occupied_by_live_non_agent_pty pty-fresh'`
+           AND reason_code = 'leaf_occupied_by_live_pty_identity_unknown pty-fresh'`
       )
       .all()
     expect(rows).toHaveLength(1)

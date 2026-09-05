@@ -140,13 +140,18 @@ export async function restoreOneRegisteredPane(
   )
 
   // Rows 5-6. [C7k, item 4] Hold ONLY while a live pty stands on the row's OWN pane.
+  // [C7l, Ruling 34 Addendum 29 item 3] EITHER read finding a live pty is enough — the
+  // renderer's own leaf graph (`occupant`/`occupantLiveness`, a race at this run point) OR the
+  // runtime's OWN pty records (`findConnectedPtyForPane`, direct `record.connected` truth).
   const currentGeneration = deps.getLaunchGenerationId()
+  const runtimePtyOnOwnPane = deps.findConnectedPtyForPane(launchRow.pane_key)
   const leafHold = decideLeafHoldRows(
     launchRow.launch_generation,
     currentGeneration,
     launchRow.evidence,
     launchRow.seq,
-    occupant?.paneKey === launchRow.pane_key && occupantLiveness === 'present'
+    (occupant?.paneKey === launchRow.pane_key && occupantLiveness === 'present') ||
+      runtimePtyOnOwnPane !== undefined
   )
   if (leafHold.kind === 'skipped_leaf_held') {
     auditSweepSkip(db, hostId, launchRow.pane_key, agentId, leafHold.reasonCode)
@@ -168,7 +173,8 @@ export async function restoreOneRegisteredPane(
     launchRow.pane_key,
     occupantLiveness,
     deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId),
-    inventory
+    inventory,
+    early.status
   )
   const offerPlacement = routing.offerPlacement
   if (routing.audit) {
@@ -228,9 +234,14 @@ export async function restoreOneRegisteredPane(
   // lock releases" — this call happens while the sweep's own lock is still held.
   db.setSweepRestoreMark(hostId, launchRow.pane_key)
   // [S10-21a C10, §2.11 N4, Ruling 34 Addendum 25] Post-commit pact un-pause — own transaction
-  // per pact, never undoes the rebind above. Only the Layer-2 (`rebound: true`) result carries
-  // `pactsToUnpause`; Layer 1 (pane preserved) has nothing for C5 to have collected.
+  // per pact, never undoes the rebind above.
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 8, C10 gap] The Layer-1 (`rebound: false`) path's
+  // own companion refresh (agent-restore-rebind.ts's noop branch) now carries
+  // `pactsToUnpause` too when it ran — resume those exactly like the Layer-2 arm's, rather than
+  // discarding a same-pane restore's counterpart_gone-paused pacts (D-R118 F7).
   if (result.rebound) {
+    db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause)
+  } else if (result.pactsToUnpause && result.pactsToUnpause.length > 0) {
     db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause)
   }
   // [S10-21a C9 hand-off, D-I80] Arms any mail already waiting on `agent:<id>` — one call, only
@@ -270,8 +281,15 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
     errors: 0,
     deferredByReason: {}
   }
+  // [S10-21a C7l, Ruling 34 Addendum 29 item 7, N6] Keyed on the reason FAMILY — the text
+  // before the first ':' or space — never the full reason code: per-pane detail (a ptyId, a
+  // seq, an error message) already lives in the `agent_audit` row this deferral wrote; folding
+  // it into the milestone's own key would fragment one deferral family into many near-unique
+  // keys with count 1 each, hiding the aggregate the milestone exists to surface.
   const recordDeferral = (reasonCode: string): void => {
-    summary.deferredByReason[reasonCode] = (summary.deferredByReason[reasonCode] ?? 0) + 1
+    const familyEnd = reasonCode.search(/[: ]/)
+    const family = familyEnd === -1 ? reasonCode : reasonCode.slice(0, familyEnd)
+    summary.deferredByReason[family] = (summary.deferredByReason[family] ?? 0) + 1
   }
   const db = deps.getOrchestrationDb()
   const hostId = deps.getOrchestrationCompatibilityHostId()

@@ -23,6 +23,11 @@ export type RestoreSweepDeps = {
     leafId: string,
     tabId?: string | null
   ): { paneKey: string; ptyId: string } | undefined
+  /** [S10-21a C7l, Ruling 34 Addendum 29 item 3] A live pty stands on the pane per the RUNTIME's
+   * own pty records (`ptysById`), not the renderer's leaf graph — `orca-runtime.ts#
+   * findConnectedPtyForPane`. Rows 5-6 hold when EITHER this or `findConnectedLeafOccupant`
+   * finds a live pty on the candidate's own pane. */
+  findConnectedPtyForPane(paneKey: string): { paneKey: string; ptyId: string } | undefined
   /** [D-R110 fix 6] Whether the tab's persisted layout TREE still resolves this leaf. */
   isLeafInPersistedLayout(tabId: string, leafId: string, hostId?: string | null): boolean
   /** [D-R110 fix 4] The persisted ptyId for a leaf (evidence input only, never occupancy). */

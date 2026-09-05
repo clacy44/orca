@@ -6991,7 +6991,13 @@ export function registerPtyHandlers(
                   hostId: respawnGateBundle.ctx.hostId,
                   paneKey: reservationPaneKey,
                   newTerminalHandle: stablePaneOwner.handle,
-                  processIncarnation: stablePaneSpawn.result.incarnationId ?? null
+                  // [S10-21a C7l, Ruling 34 Addendum 29 item 1] The canonical two-part
+                  // "<ptyId>:<incarnationId>" form for the NEW handle, never the bare
+                  // incarnation id `stablePaneSpawn.result.incarnationId` used to pass —
+                  // `parseProcessIncarnation` rejects a bare id, so every gated daemon
+                  // respawn poisoned `agents.process_incarnation`.
+                  processIncarnation:
+                    runtime?.getTerminalProcessIncarnation(stablePaneOwner.handle) ?? null
                 })
                 // [S10-21a C10, Ruling 34 Addendum 25] `pact-lifecycle.ts`'s
                 // `resumePact`/`resumePactOrRequest` both require a real participant

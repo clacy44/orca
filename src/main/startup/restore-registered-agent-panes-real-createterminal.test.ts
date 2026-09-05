@@ -50,6 +50,7 @@ function buildDeps(runtime: OrcaRuntimeService): RestoreSweepDeps {
     getLaunchGenerationId: () => runtime.getLaunchGenerationId(),
     findConnectedLeafOccupant: (leafId, connectionId) =>
       runtime.findConnectedLeafOccupant(leafId, connectionId ?? null),
+    findConnectedPtyForPane: (paneKey) => runtime.findConnectedPtyForPane(paneKey),
     isLeafInPersistedLayout: (tabId, leafId, hostId) =>
       runtime.isLeafInPersistedLayout(tabId, leafId, hostId ?? null),
     getPersistedPtyIdForLeaf: (tabId, leafId, hostId) =>
