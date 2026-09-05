@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { toast } from 'sonner'
 import { useAppStore } from '../store'
 import { getTabIdsAwaitingHostHydrationRemount } from '@/lib/parked-terminal-host-hydration'
+import { resolveLaunchAdmissionNoticeAction } from '@/lib/launch-admission-notice-reconciliation'
 import { applyWorktreeHeadIdentities } from './worktree-head-identity-apply'
 import { getWorktreeMapFromState, getRepoMapFromState } from '@/store/selectors'
 import { applyUIZoom } from '@/lib/ui-zoom'
@@ -3694,6 +3695,28 @@ export function useIpcEvents(): void {
       })
     if (unsubscribeLegacyWorkerTerminalRecovery) {
       unsubs.push(unsubscribeLegacyWorkerTerminalRecovery)
+    }
+
+    // [S10-21a C7g, Ruling 34 Addendum 25] Read-only push of a covered launch's admission
+    // classification — the host-notice path (`writeHostNoticeToPane`) types text into the pty,
+    // never this store, so this is the second channel that reconciles
+    // `sleepingAgentSessionsByPaneKey` against a fresh admission decision. Only acts on a
+    // pane whose sleeping record was captured at a daemon-death remount (origin 'daemon-death')
+    // — every other origin (worktree-sleep/quit/live) is untouched by this push.
+    const unsubscribeLaunchAdmissionNotice = window.api.session?.onLaunchAdmissionNotice?.(
+      ({ paneKey, classification }) => {
+        const store = useAppStore.getState()
+        const record = store.sleepingAgentSessionsByPaneKey[paneKey]
+        const action = resolveLaunchAdmissionNoticeAction(record?.origin, classification)
+        if (action.kind === 'clear') {
+          store.clearSleepingAgentSession(paneKey)
+        } else if (action.kind === 'keep-and-notify') {
+          toast(action.text)
+        }
+      }
+    )
+    if (unsubscribeLaunchAdmissionNotice) {
+      unsubs.push(unsubscribeLaunchAdmissionNotice)
     }
 
     // Why: main hook server is the durable source of truth; pull the snapshot only after tabs are ready so early startup pushes can be ignored, not buffered.

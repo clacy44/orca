@@ -203,7 +203,7 @@ export async function admitAgentLaunch(
   const unrecorded = (reasonCode: string): AdmittedLaunch => {
     audit(db, paneKey, ctx.hostId, 'launch_unrecorded', 'admitted', reasonCode)
     ctx.notice(paneKey, 'launch_unrecorded', reasonCode)
-    return passThrough(spawnOptions)
+    return passThrough(spawnOptions, 'unrecorded')
   }
   const refuse = (reasonCode: string): never => {
     audit(db, paneKey, ctx.hostId, 'launch_refused', 'refused', reasonCode)

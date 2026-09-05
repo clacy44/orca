@@ -4,6 +4,7 @@ import type {
   WorkspaceSessionState
 } from '../../shared/workspace-session-state-types'
 import type { ExecutionHostId } from '../../shared/execution-host'
+import type { LaunchAdmissionNoticePayload } from '../../shared/launch-admission-notice'
 import type {
   RemoteWorkspaceChangedEvent,
   RemoteWorkspaceConnectedClient,
@@ -27,6 +28,11 @@ export type WorkspaceSessionApi = {
     /** [S10-21a C7c, D-R110 (ε)] Bulk, host-scoped, READ-ONLY — every marked pane key, hydrated
      * ONCE at startup rather than one `sweepRestoreMarkGet` round-trip per sleeping record. */
     sweepRestoreMarkList: () => Promise<string[]>
+    /** [S10-21a C7g, Ruling 34 Addendum 25] READ-ONLY push, no writable counterpart, no
+     * wire/RPC exposure — a covered launch's admission classification, so the renderer can
+     * reconcile `sleepingAgentSessionsByPaneKey` (the host-notice path types text into the pty,
+     * never the renderer store). */
+    onLaunchAdmissionNotice: (callback: (event: LaunchAdmissionNoticePayload) => void) => () => void
   }
   cache: {
     getGitHub: () => Promise<{

@@ -4,6 +4,10 @@ import { electronAPI } from '@electron-toolkit/preload'
 import { preloadE2EConfig } from './e2e-config'
 import { glApi } from './gitlab'
 import type { AppIdentity } from '../shared/app-identity'
+import {
+  LAUNCH_ADMISSION_NOTICE_CHANNEL,
+  type LaunchAdmissionNoticePayload
+} from '../shared/launch-admission-notice'
 import type { ComputerAwakeStatus } from '../shared/computer-awake-mode'
 import type {
   DashboardRevealAgentArgs,
@@ -3182,7 +3186,15 @@ const api = {
     },
     sweepRestoreMarkGet: (paneKey) =>
       ipcRenderer.invoke('orchestration:sweepRestoreMark:get', paneKey),
-    sweepRestoreMarkList: () => ipcRenderer.invoke('orchestration:sweepRestoreMark:list')
+    sweepRestoreMarkList: () => ipcRenderer.invoke('orchestration:sweepRestoreMark:list'),
+    onLaunchAdmissionNotice: (
+      callback: (event: LaunchAdmissionNoticePayload) => void
+    ): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: LaunchAdmissionNoticePayload) =>
+        callback(data)
+      ipcRenderer.on(LAUNCH_ADMISSION_NOTICE_CHANNEL, listener)
+      return () => ipcRenderer.removeListener(LAUNCH_ADMISSION_NOTICE_CHANNEL, listener)
+    }
   } satisfies PreloadApi['session'],
 
   remoteWorkspace: {

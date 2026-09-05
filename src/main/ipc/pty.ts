@@ -111,6 +111,13 @@ import type {
 } from './agent-launch-admission'
 import { deleteEnvKeyVariants } from '../../shared/lane-env-key-case'
 import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
+import {
+  LAUNCH_ADMISSION_NOTICE_CHANNEL,
+  type LaunchAdmissionNoticeClassification,
+  type LaunchAdmissionNoticePayload
+} from '../../shared/launch-admission-notice'
+import type { LaunchAdmissionClassification } from './agent-launch-admission-support'
+import { resolveDaemonRespawnGateAction } from '../runtime/orchestration/daemon-respawn-gate-action'
 import { awaitRestoreSweepLockRelease } from '../runtime/restore-sweep-lock'
 import { getClaudeLanesRoot } from '../claude-accounts/claude-lanes-root'
 import {
@@ -806,6 +813,26 @@ function retirePersistedStablePaneOwner(
 // [S10-21a C6b, exported test-only] No production caller outside this file needs it — exported
 // solely so the contest-audit shape (verb 'launch', outcome 'contested', agentId) has a direct
 // fence test, rather than only the indirect coverage admitAgentLaunch's own test double provides.
+// [S10-21a C7g, Ruling 34 Addendum 25] Maps admission's internal (lowercase) classification to
+// the wire shape `orchestration:launchAdmission` pushes. A plain UNCOVERED launch never sets
+// `AdmittedLaunch.classification` at all, so it never reaches this function or the push.
+function launchAdmissionClassificationToWire(
+  classification: LaunchAdmissionClassification
+): LaunchAdmissionNoticeClassification {
+  switch (classification) {
+    case 'host_resume':
+      return 'HOST_RESUME'
+    case 'host_minted':
+      return 'HOST_MINTED'
+    case 'self_resume_host':
+      return 'SELF_RESUME_HOST'
+    case 'self_resume_caller':
+      return 'SELF_RESUME_CALLER'
+    case 'unrecorded':
+      return 'UNRECORDED'
+  }
+}
+
 export function launchAdmissionBundle(
   runtime: OrcaRuntimeService | undefined,
   connectionId: string | null | undefined
@@ -6935,6 +6962,17 @@ export function registerPtyHandlers(
           // `admittedLaunch` via `onAdmitted` — mirrors the other branch's own assignment.
           providerResult = stablePaneSpawn.result
           stablePaneOwner = stablePaneSpawn.owner
+          // [S10-21a C7g, Ruling 34 Addendum 25] Read-only main->renderer push of this launch's
+          // admission classification, whenever admission classified one — unconditional, unlike
+          // the daemon_died gate below (the renderer decides what to do with it; a pane with no
+          // matching sleeping record just ignores the push). No writable counterpart, no
+          // wire/RPC exposure (mirrors `agentStatus:set`'s own local-only webContents.send).
+          if (reservationPaneKey && admittedLaunch?.classification && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(LAUNCH_ADMISSION_NOTICE_CHANNEL, {
+              paneKey: reservationPaneKey,
+              classification: launchAdmissionClassificationToWire(admittedLaunch.classification)
+            } satisfies LaunchAdmissionNoticePayload)
+          }
           // [S10-21a C7f, Ruling 34 Addendum 24, D-R114 fix 1] Post-spawn-commit gate: only for
           // a covered launch whose pane's newest daemon_died/rebind audit is 'daemon_died' (a
           // newer 'rebind' — this gate's own prior fire, or C5's Layer-2 rebind — always wins,
@@ -6943,31 +6981,27 @@ export function registerPtyHandlers(
           if (reservationPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
             const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
             const respawnGateDb = respawnGateBundle.getDb()
-            if (
-              respawnGateDb &&
-              respawnGateDb.newestDaemonDeathOrRebindVerbForPane(reservationPaneKey) ===
-                'daemon_died'
-            ) {
-              const classification = admittedLaunch?.classification
-              if (
-                (classification === 'host_resume' || classification === 'self_resume_host') &&
-                stablePaneOwner?.handle
-              ) {
+            if (respawnGateDb) {
+              const gateAction = resolveDaemonRespawnGateAction(
+                respawnGateDb.newestDaemonDeathOrRebindVerbForPane(reservationPaneKey),
+                admittedLaunch?.classification
+              )
+              if (gateAction.kind === 'refresh' && stablePaneOwner?.handle) {
                 const refreshResult = respawnGateDb.refreshAgentHandleAfterRespawn({
                   hostId: respawnGateBundle.ctx.hostId,
                   paneKey: reservationPaneKey,
                   newTerminalHandle: stablePaneOwner.handle,
                   processIncarnation: stablePaneSpawn.result.incarnationId ?? null
                 })
-                // [OPEN QUESTION, see RETURN] `refreshResult.pactsToUnpause` — C10's own
-                // post-commit un-pause helper (§2.11 N4) has not landed anywhere in this repo
-                // yet, and `pact-lifecycle.ts`'s `resumePact`/`resumePactOrRequest` both require
-                // a real participant `callerAgentId`, refusing a host-authored resume with no
-                // actor of its own — there is no safe primitive to call here today. Left
-                // un-consumed, exactly as `rebindRestoredPane`'s own `pactsToUnpause` already is
-                // (agent-restore-rebind.ts: "Pact un-pause is C10's job").
+                // [Ruling 34 Addendum 25] `refreshResult.pactsToUnpause` stays for C10, which
+                // adds its own host-authored un-pause primitive there — `pact-lifecycle.ts`'s
+                // `resumePact`/`resumePactOrRequest` both require a real participant
+                // `callerAgentId` and refuse a host-authored resume with no actor of its own, so
+                // this gate must not call them. Left un-consumed here, exactly as
+                // `rebindRestoredPane`'s own `pactsToUnpause` already is (agent-restore-rebind.ts:
+                // "Pact un-pause is C10's job").
                 void refreshResult
-              } else if (classification === 'host_minted') {
+              } else if (gateAction.kind === 'refuse_fresh_session') {
                 respawnGateDb.writeAgentAudit({
                   agentId: null,
                   actorPaneKey: reservationPaneKey,
@@ -6981,9 +7015,7 @@ export function registerPtyHandlers(
                   'rebind',
                   'daemon_respawn_fresh_session'
                 )
-              } else if (classification === 'self_resume_caller') {
-                // The contest path (ctx.contestedLineage) already fires from admission itself —
-                // notice only, no audit row, no refresh.
+              } else if (gateAction.kind === 'notice_only') {
                 respawnGateBundle.ctx.notice(
                   reservationPaneKey,
                   'rebind',

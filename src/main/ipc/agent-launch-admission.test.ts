@@ -81,6 +81,8 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
     expect(row?.session_id).toBe(MINTED_A)
     expect(row?.evidence).toBe('host_launch')
+    // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
+    expect(admitted.classification).toBe('host_minted')
   })
 
   it('T22: a record-write failure refuses, never yields a spawnable admission', async () => {
@@ -138,6 +140,8 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
     expect(row?.session_id).toBe('predecessor-sess')
     expect(row?.evidence).toBe('sweep_record')
+    // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
+    expect(admitted.classification).toBe('host_resume')
   })
 
   it('T40: an uncovered/unpaned launch never writes a row (pass-through)', async () => {
@@ -212,6 +216,8 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       .get() as { verb: string; reason_code: string }
     expect(auditRow.verb).toBe('launch_unrecorded')
     expect(auditRow.reason_code).toBe('pane_key_owned')
+    // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
+    expect(admitted.classification).toBe('unrecorded')
   })
 
   it('T49: launchAgent omitted, command carries claude + --session-id -> REFUSE (sniff reaches refusal)', async () => {
@@ -292,6 +298,40 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       { paneKey: 'tab1:leaf-a', verb: 'launch_self_resume', reasonCode: 'caller' }
     ])
     expect(contested).toEqual(['tab1:leaf-a'])
+    // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
+    expect(admitted.classification).toBe('self_resume_caller')
+  })
+
+  it("S10-21a C7g: SELF_RESUME(host) — a host-resume admission whose target mismatches the pane's own newest row classifies self_resume_host", async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'self-sess-host',
+      launchGeneration: 'gen-1',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'a-different-target',
+      predecessorPaneKey: 'tab1:leaf-old',
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1'
+    }
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume self-sess-host' }),
+      admission,
+      ctx()
+    )
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_self_resume')
+    expect(auditRow.reason_code).toBe('host')
+    expect(admitted.classification).toBe('self_resume_host')
   })
 
   it("S10-21a C6 SCOPE 3(b): contestedLineage receives BOTH panes when the registered row's own pane_key differs (pane-suffix match)", async () => {

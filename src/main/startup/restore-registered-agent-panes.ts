@@ -187,26 +187,41 @@ export async function restoreOneRegisteredPane(
     predecessorPtyId
   )
   const incumbent = resolveIncumbentDeath(incumbentEvidence)
-  // [S10-21a C7e, D-R111 R2] The daemon-survived decision, from evidence, BEFORE minting: a
-  // live D3 reading or a runtime-known D1 pty means the incumbent is provably not dead — never
-  // mint a competing ticket or spawn a second `--resume` over it.
-  if (!incumbent.dead && (incumbentEvidence.d3.liveNow || incumbentEvidence.d1.ptyKnownToRuntime)) {
-    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived')
+  // [S10-21a C7e, D-R111 R2; S10-21a C7g, Ruling 34 Addendum 25] The daemon-survived decision,
+  // from evidence, BEFORE minting: a live D3 reading, a runtime-known D1 pty, or the daemon's
+  // OWN inventory still listing this pty (D2 'present' — the pre-spawn survival signal
+  // `collectIncumbentEvidence`'s controller-inventory round already proves, which `d1`/`d3`
+  // alone miss at this process's own boot-time sweep run point) all mean the incumbent is
+  // provably not dead — never mint a competing ticket or spawn a second `--resume` over it.
+  if (
+    !incumbent.dead &&
+    (incumbentEvidence.d3.liveNow ||
+      incumbentEvidence.d1.ptyKnownToRuntime ||
+      incumbentEvidence.d2.inventory === 'present')
+  ) {
+    const survivalSignal = incumbentEvidence.d3.liveNow
+      ? 'd3_live_now'
+      : incumbentEvidence.d1.ptyKnownToRuntime
+        ? 'd1_pty_known_to_runtime'
+        : 'd2_inventory_present'
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, `daemon_survived: ${survivalSignal}`)
     return { kind: 'skipped_daemon_survived' }
   }
   let offerPlacement = true
   if (occupant) {
     if (occupant.paneKey === launchRow.pane_key) {
-      // [S10-21a C7f, D-R114 fix 5] Corroboration only, never a second decision point — the
-      // evidence-based skip above (d1/d3) already decided "daemon survived" before minting. This
-      // branch was reachable only where `findConnectedLeafOccupant`'s `this.leaves` happens to be
-      // populated by this process's own sweep run point (empty on the desktop main-startup path,
-      // per D-R111 R2's own comment above), so it never disagreed with that decision in practice.
-      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived_corroborated')
-    } else {
-      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
-      offerPlacement = false
+      // [S10-21a C7f/C7g fix, D-R114 fix 5 — CORRECTED] Reverting C7f's "audit-only, no return"
+      // reduction: it broke two passing tests (restore-registered-agent-panes.test.ts's own
+      // "leaf's own live occupant IS the row's own pane" and its D-R111 R2 case) that construct
+      // evidence where `incumbent.dead` is TRUE (e.g. D1 alone) yet an occupant still names this
+      // pane — a real, exercised state, not dead code as C7f's comment assumed. This branch IS a
+      // second, independent decision point (a live LOCAL occupant on this leaf, whenever
+      // `this.leaves` happens to be populated) and must keep its own early return.
+      auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'daemon_survived')
+      return { kind: 'skipped_daemon_survived' }
     }
+    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, 'leaf_occupied_by_other')
+    offerPlacement = false
   } else if (!deps.isLeafInPersistedLayout(parsed.tabId, parsed.leafId, hostId)) {
     offerPlacement = false
   }

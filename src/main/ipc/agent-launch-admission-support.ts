@@ -13,6 +13,7 @@ export type LaunchAdmissionClassification =
   | 'host_minted'
   | 'self_resume_caller'
   | 'self_resume_host'
+  | 'unrecorded'
 
 export type AdmittedLaunch = {
   spawnOptions: PtySpawnOptions

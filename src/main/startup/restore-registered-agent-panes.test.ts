@@ -273,7 +273,7 @@ describe('S10-21a C7b: runRestoreSweep', () => {
     expect(ensureAgentSession).not.toHaveBeenCalled()
     const rows = db
       .prepare(
-        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived'`
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived: d3_live_now'`
       )
       .all()
     expect(rows).toHaveLength(1)
@@ -312,6 +312,54 @@ describe('S10-21a C7b: runRestoreSweep', () => {
     )
     expect(outcome.kind).toBe('skipped_daemon_survived')
     expect(mintRestoreTicket).not.toHaveBeenCalled()
+  })
+
+  // [S10-21a C7g, Ruling 34 Addendum 25] The daemon's own inventory (D2) is a pre-spawn survival
+  // signal too — d1/d3 alone can both read false at this process's own boot-time sweep run point
+  // (nothing seeds `ptysById`/live-hook reports for a surviving daemon's panes before the sweep),
+  // so the daemon's own controller-inventory round must be consulted directly.
+  it("d2.inventory 'present' alone also fires daemon_survived, before minting", async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000cccc'
+    insertAgent(db, { id: 'agent-r2c', display_name: 'chair-r2c', pane_key: paneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-r2c',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn()
+    const mintRestoreTicket = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        findConnectedLeafOccupant: () => undefined,
+        collectIncumbentEvidence: async () => ({
+          paneKey,
+          d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: false },
+          d2: { inventory: 'present' },
+          d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
+        }),
+        ensureAgentSession,
+        mintRestoreTicket
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-r2c',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    )
+    expect(outcome.kind).toBe('skipped_daemon_survived')
+    expect(mintRestoreTicket).not.toHaveBeenCalled()
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+    const rows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = 'daemon_survived: d2_inventory_present'`
+      )
+      .all()
+    expect(rows).toHaveLength(1)
   })
 
   it('Addendum 22(v): a pane whose newest admission audit (any generation) is UNRECORDED and newer than the row is Layer 3, never resumed', async () => {

@@ -32,6 +32,7 @@ import {
   getPaneKeyForPtyId,
   type CodexHomeLaunchContext
 } from './ipc/pty'
+import { shouldSkipDaemonDiedAudit } from './runtime/orchestration/daemon-died-audit-skip'
 import {
   initDaemonPtyProvider,
   disconnectDaemon,
@@ -2726,11 +2727,13 @@ void app.whenReady().then(async () => {
         // [S10-21a C7f, D-R114 fix 3] A plain shell with no launch row and no registered agent
         // row on this pane has nothing for the audit to be "about" — skip it rather than write
         // a `daemon_died` fact attributed to an agent that was never here.
-        if (!row) {
-          const registered = db.getAgentByPaneKey(hostId, paneKey)
-          if (!registered || registered.derived !== 0) {
-            continue
-          }
+        if (
+          shouldSkipDaemonDiedAudit(
+            row !== undefined,
+            row === undefined ? db.getAgentByPaneKey(hostId, paneKey) : undefined
+          )
+        ) {
+          continue
         }
         db.writeAgentAudit({
           agentId: row?.agent_id ?? null,
