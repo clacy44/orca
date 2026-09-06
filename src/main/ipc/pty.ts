@@ -7358,7 +7358,8 @@ export function registerPtyHandlers(
                 if (refreshResult.ok) {
                   respawnGateDb.resumePactsForRestoredAgent(
                     refreshResult.agentId,
-                    refreshResult.pactsToUnpause
+                    refreshResult.pactsToUnpause,
+                    runtime ?? null
                   )
                 }
               } else if (gateAction.kind === 'refuse_fresh_session') {

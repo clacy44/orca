@@ -167,7 +167,7 @@ export const ORCHESTRATION_THREADS_METHODS: RpcMethod[] = [
       // when the leaver was actually a party to this thread's pact (a third member leaving a
       // pact thread it never joined the pact of changes nothing).
       if (thread.pact_proposer_agent_id === caller.id || thread.pact_with_agent_id === caller.id) {
-        const outcome = db.autoPausePactOnThread(params.id, 'counterpart_left')
+        const outcome = db.autoPausePactOnThread(params.id, 'counterpart_left', runtime)
         if (outcome) {
           wakePactThreadBoth(
             runtime,

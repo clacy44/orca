@@ -15,7 +15,7 @@ import { LINK_BINDING_PROBE_SLOTS } from './orchestration/link-binding-constants
 import type { LinkRoundWinner } from './orchestration/link-binding-classify'
 import type { PageCandidateLink } from './orchestration/link-binding-schedule'
 import type {
-  ScanFactRow,
+  ScanFactWriteRow,
   LinkScanFactOutcome
 } from './orchestration/link-binding-observations-store'
 
@@ -116,7 +116,7 @@ export function writeScanFact(
   if (linkCredentialFp === null) {
     return
   }
-  const row: ScanFactRow = {
+  const row: ScanFactWriteRow = {
     linkDeviceId,
     environmentId,
     outcome,

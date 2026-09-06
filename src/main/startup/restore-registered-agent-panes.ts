@@ -241,9 +241,9 @@ export async function restoreOneRegisteredPane(
   // `pactsToUnpause` too when it ran — resume those exactly like the Layer-2 arm's, rather than
   // discarding a same-pane restore's counterpart_gone-paused pacts (D-R118 F7).
   if (result.rebound) {
-    db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause)
+    db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause, deps.federatedPactEmitRuntime)
   } else if (result.pactsToUnpause && result.pactsToUnpause.length > 0) {
-    db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause)
+    db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause, deps.federatedPactEmitRuntime)
   }
   // [S10-21a C9 hand-off, D-I80] Arms any mail already waiting on `agent:<id>` — one call, only
   // after a SUCCESSFUL restore. [C7k, Addendum 28, item 8] A throw is an audited note, never a

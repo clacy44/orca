@@ -4,6 +4,11 @@ import type Database from '../../sqlite/sync-database'
 import type { ThreadRow } from './types'
 import type { PactPauseReason } from './pact-types'
 import { auditPact, insertPactStepRow } from './pact-shared'
+import { isFederatedPact } from './pact-federated-identity'
+import {
+  emitFederatedPactSideEffect,
+  type FederatedPactEmitRuntime
+} from './pact-federated-pause-resume-emit'
 
 export type AutoPauseOutcome = {
   threadId: string
@@ -17,8 +22,18 @@ export type AutoPauseOutcome = {
 function autoPauseOneThread(
   db: Database.Database,
   thread: ThreadRow,
-  reason: PactPauseReason
+  reason: PactPauseReason,
+  runtime: FederatedPactEmitRuntime | null = null
 ): AutoPauseOutcome {
+  if (isFederatedPact(thread)) {
+    emitFederatedPactSideEffect(db, runtime, thread.id, 'pause', reason)
+    return {
+      threadId: thread.id,
+      proposerAgentId: thread.pact_proposer_agent_id as string,
+      withAgentId: thread.pact_with_agent_id as string,
+      reason
+    }
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
     // R3 (D-R136): bumps pact_flight_token like every other pact-state writer — an auto-pause
@@ -65,7 +80,8 @@ function autoPauseOneThread(
 export function autoPausePactsForAgent(
   db: Database.Database,
   agentId: string,
-  reason: PactPauseReason
+  reason: PactPauseReason,
+  runtime: FederatedPactEmitRuntime | null = null
 ): AutoPauseOutcome[] {
   const rows = db
     .prepare(
@@ -73,7 +89,7 @@ export function autoPausePactsForAgent(
        AND pact_paused_at IS NULL AND (pact_proposer_agent_id = ? OR pact_with_agent_id = ?)`
     )
     .all(agentId, agentId) as ThreadRow[]
-  return rows.map((thread) => autoPauseOneThread(db, thread, reason))
+  return rows.map((thread) => autoPauseOneThread(db, thread, reason, runtime))
 }
 
 // K17 (thread_closed/thread_paused): a single thread's engaged pact, regardless of which side
@@ -93,7 +109,8 @@ function autoPauseEligible(thread: ThreadRow): boolean {
 export function autoPausePactOnThread(
   db: Database.Database,
   threadId: string,
-  reason: PactPauseReason
+  reason: PactPauseReason,
+  runtime: FederatedPactEmitRuntime | null = null
 ): AutoPauseOutcome | null {
   const thread = db
     .prepare(`SELECT * FROM threads WHERE id = ? AND purged_at IS NULL`)
@@ -101,5 +118,5 @@ export function autoPausePactOnThread(
   if (!thread || !autoPauseEligible(thread) || thread.pact_paused_at !== null) {
     return null
   }
-  return autoPauseOneThread(db, thread, reason)
+  return autoPauseOneThread(db, thread, reason, runtime)
 }

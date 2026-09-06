@@ -21,6 +21,7 @@ import type { PactStepKind } from './pact-types'
 import { insertGatedMessage } from './message-gate-writer'
 import { bumpThreadOnMessage } from './thread-directory'
 import {
+  applyPactPauseResumeState,
   insertPactStepRow,
   otherPactParticipant,
   pactWaiterHandle,
@@ -28,15 +29,12 @@ import {
 } from './pact-shared'
 import { isFederatedPact } from './pact-federated-identity'
 import type { RelayKind } from './reply-outbox-store'
-import { enqueueReplyOutboxCoalesced } from './reply-outbox-pact-answer-coalesce'
+import {
+  enqueueReplyOutboxCoalesced,
+  enqueueReplyOutboxCoalescedAcrossKinds
+} from './reply-outbox-pact-answer-coalesce'
 import { getPeerLinkBinding, LinkBindingCapError } from './link-binding-store'
-// 21b-D1: `fromAgent`'s shape mirrors buildFederatedSenderIdentity (federated-sender-identity.ts:56-70)
-// exactly, but that helper takes `OrchestrationDb`, which this module never has (it only ever
-// receives the raw `Database.Database` handle, matching pact-shared.ts's own `getAgentById`
-// import below for the identical reason) — so the same underlying free function is used directly
-// here instead of the wrapped helper. See buildFederatedSenderIdentityFromRawDb below.
-import { getAgentById } from './agent-directory'
-import type { FederatedSenderIdentity } from './federated-sender-identity'
+import { buildPactWirePayload } from './pact-federated-wire-envelope'
 
 export type FederatedPactVerb =
   | 'propose'
@@ -76,12 +74,15 @@ export const PACT_NO_LEDGER_VERBS: ReadonlySet<FederatedPactVerb> = new Set([
 ])
 
 // §2.11: admitted past the ordinary REPLY_OUTBOX_PER_LINK_CAP, up to +PACT_RESERVED_HEADROOM.
+// B15: pause/resume join the reserved set (§2.7 side effects, same headroom as release).
 export const PACT_RESERVED_VERBS: ReadonlySet<FederatedPactVerb> = new Set([
   'release',
   'rebind_party',
   'resync',
   'resync_request',
-  'gap_notice'
+  'gap_notice',
+  'pause',
+  'resume'
 ])
 
 // §2.2/§2.1: the in-flight guard applies to a verb that hands the turn to the peer. This
@@ -137,6 +138,12 @@ export type EnqueueFederatedPactVerbOpts = {
   rebind?: { oldAgentId: string }
   resyncRequest?: { nonce: string }
   resync?: FederatedPactResyncPayload
+  // B15 (§2.7, ruling 21b-E7): pause/resume's `threads` mutation, run in THIS transaction so
+  // the emit primitive stays the single atomic writer (mirrors `step`'s own precedent).
+  threadStateMutation?: { pausedAt: 'now' | null; pauseReason: string | null }
+  // B15 (§2.7 N10/T32): pause/resume coalesce CROSS-KIND — a queued pact_pause is replaced by
+  // a later resume (and vice versa) rather than left as two items.
+  coalesceAcrossRelayKinds?: readonly RelayKind[]
 }
 
 export type EnqueueFederatedPactVerbResult =
@@ -159,26 +166,6 @@ export type EnqueueFederatedPactVerbResult =
   | { outcome: 'refused'; verdict: Extract<GateVerdict, { tier: 'hard' }>; refusalId: number }
 
 export type FederatedPactEmitRuntime = { replyOutbox?: { kick(linkDeviceId: string): void } | null }
-
-// 21b-D1: same construction as buildFederatedSenderIdentity (federated-sender-identity.ts:56-70),
-// against the raw `Database.Database` handle this module has rather than `OrchestrationDb`.
-// Returns undefined when the actor has no registered `agents` row — the caller then omits
-// `fromAgent` from the envelope entirely, exactly as the mail path does.
-function buildFederatedSenderIdentityFromRawDb(
-  db: Database.Database,
-  actorAgentId: string
-): FederatedSenderIdentity | undefined {
-  const row = getAgentById(db, actorAgentId)
-  if (!row) {
-    return undefined
-  }
-  return {
-    id: row.id,
-    displayName: row.display_name,
-    role: row.role,
-    quarantined: row.quarantined === 1
-  }
-}
 
 // The shared emit primitive (design §2.3's six steps, one `BEGIN IMMEDIATE`):
 //   1. insertGatedMessage (single write choke)
@@ -258,6 +245,12 @@ export function enqueueFederatedPactVerb(
     const message = inserted.message
     bumpThreadOnMessage(db, thread.id, message)
 
+    // B15 (§2.7, ruling 21b-E7): pause/resume's state mutation, in this same transaction.
+    const psm = opts.threadStateMutation
+    if (psm) {
+      applyPactPauseResumeState(db, thread.id, psm.pausedAt, psm.pauseReason)
+    }
+
     // Step 2.
     if (!noLedger) {
       insertPactStepRow(db, {
@@ -296,82 +289,32 @@ export function enqueueFederatedPactVerb(
       )
     }
 
-    const wirePact: Record<string, unknown> = { verb, seq, era }
-    if (opts.stepsTotal !== undefined) {
-      wirePact.stepsTotal = opts.stepsTotal
-    }
-    if (opts.wireOrdinal !== undefined) {
-      wirePact.ordinal = opts.wireOrdinal
-    }
-    if (opts.reasonCode !== undefined) {
-      wirePact.reasonCode = opts.reasonCode
-    }
-    if (opts.rebind !== undefined) {
-      wirePact.rebind = opts.rebind
-    }
-    if (opts.resyncRequest !== undefined) {
-      wirePact.resyncRequest = opts.resyncRequest
-    }
-    if (opts.resync !== undefined) {
-      wirePact.resync = opts.resync
-    }
-
-    // 21b-D1 (F1-F4, README "after the 21b-D1 fact sweep"): the pump's dial sends `params:
-    // JSON.parse(item.payload)` verbatim (reply-outbox-pump.ts:135-147) against
-    // FederatedSendParams (orchestration-federated-peer-send.ts:41-56), which requires
-    // toAgentId/messageId/subject at top level — `{ pact: wirePact }` alone always failed that
-    // parse. The envelope below carries the mail literal's shape (orchestration-reply-
-    // foreign.ts:126-137) with `pact` attached; `wirePact` itself is byte-identical to before
-    // this commit.
-    //   fromAgent — buildFederatedSenderIdentityFromRawDb (above), for the pact's LOCAL actor
-    //     (opts.actorAgentId); omitted when the actor is unregistered/host, exactly as the mail
-    //     path omits it for an unregistered pane.
-    //   toAgentId — thread.pact_peer_agent_id (already read above as `peerAgentId`).
-    //   messageId — message.id, the id `insertGatedMessage` (step 1, above) already minted for
-    //     this row's own relay message via the same `msg_` + 12-hex generator the mail path's
-    //     inline mint (orchestration-reply-foreign.ts:117) uses — already stamped as
-    //     `localMessageId` in the enqueueReplyOutbox call below, so settleFederatedPactDelivery's
-    //     correlation (pact-federated-settle.ts) is unchanged.
-    //   threadId — thread.id (this host's OWN local thread id), REQUIRED on every pact verb
-    //     including `propose` (deviation from the brief's "threads.pact_peer_thread_id when
-    //     known, omit when null — first propose": gate 7, pact-federated-inbound-gates.ts:178-181,
-    //     refuses a null/missing threadId unconditionally for a pact envelope — the comment there
-    //     reads "Always present for a pact envelope (required here, optional at the general mail
-    //     site)". Gate 9's thread lookup (pact-federated-inbound-gates.ts:241-243) matches the
-    //     wire threadId against the RECEIVER's own `pact_peer_thread_id` column, which by
-    //     construction holds THIS side's thread id (T1's own fixture in orchestration-federated-
-    //     peer-send-pact-inbound.test.ts:118-131 seeds the receiver's `pact_peer_thread_id` to
-    //     the literal value the wire `threadId` carries) — so `thread.pact_peer_thread_id` is the
-    //     wrong field to send (it is null before any peer response, which would make every
-    //     federated propose refuse invalid_argument, a regression); `thread.id` is what gate 9
-    //     actually expects. The chair's own OPEN line on this brief anticipated "the threadId
-    //     rule" might need review amendment — flagging this as the amendment.
-    //   subject — message.subject (the same `opts.subject ?? \`pact ${verb}\`` default already
-    //     passed to insertGatedMessage above; chair default per the brief, batch-2 reviewer
-    //     invited to argue it).
-    //   type/priority — 'status' / 'normal', matching the mail literal. body omitted (brief).
-    //   pact — wirePact, unchanged.
-    const fromAgent = opts.actorAgentId
-      ? buildFederatedSenderIdentityFromRawDb(db, opts.actorAgentId)
-      : undefined
-    const envelope: Record<string, unknown> = {
-      ...(fromAgent ? { fromAgent } : {}),
-      toAgentId: peerAgentId,
-      messageId: message.id,
+    // 21b-D1: the envelope carries toAgentId/messageId/subject at top level (mail-literal
+    // shape, orchestration-reply-foreign.ts:126-137) with `pact` attached — see
+    // pact-federated-wire-envelope.ts for the full rationale (split out, max-lines ratchet).
+    const payloadJson = buildPactWirePayload(db, {
+      actorAgentId: opts.actorAgentId,
+      verb,
+      seq,
+      era,
+      peerAgentId,
       threadId: thread.id,
       subject: message.subject,
-      type: 'status',
-      priority: 'normal',
-      pact: wirePact
-    }
-    const payloadJson = JSON.stringify(envelope)
+      messageId: message.id,
+      stepsTotal: opts.stepsTotal,
+      wireOrdinal: opts.wireOrdinal,
+      reasonCode: opts.reasonCode,
+      rebind: opts.rebind,
+      resyncRequest: opts.resyncRequest,
+      resync: opts.resync
+    })
 
     // Step 5. B9c (D-R134 F7/D-R135 F6): `resync` (the ANSWER) occupies one slot per pact — an
     // existing unsettled row for it is REPLACED, never appended (enqueueReplyOutboxCoalesced).
     let outboxId: string | null = null
     let pendingToken: PactRelayPendingToken | null = null
     try {
-      outboxId = enqueueReplyOutboxCoalesced(db, verb === 'resync', {
+      const outboxParams = {
         localMessageId: message.id,
         linkDeviceId,
         environmentId,
@@ -393,7 +336,10 @@ export function enqueueFederatedPactVerb(
         pactEra: era,
         pactTurnAfter: opts.turnAfterAgentId ?? undefined,
         relayKind
-      })
+      }
+      outboxId = opts.coalesceAcrossRelayKinds
+        ? enqueueReplyOutboxCoalescedAcrossKinds(db, opts.coalesceAcrossRelayKinds, outboxParams)
+        : enqueueReplyOutboxCoalesced(db, verb === 'resync', outboxParams)
     } catch (err) {
       if (err instanceof LinkBindingCapError) {
         const token = PACT_RELAY_PENDING_TOKEN[verb]

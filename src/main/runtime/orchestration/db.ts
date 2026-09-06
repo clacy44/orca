@@ -109,6 +109,10 @@ import {
 } from './agent-daemon-respawn-handle-refresh'
 import { resumePactsForRestoredAgent as resumePactsForRestoredAgentImpl } from './agent-pact-resume-after-restore'
 import {
+  runPactLinkEvidenceSweep as runPactLinkEvidenceSweepImpl,
+  type PactLinkEvidenceSweepResult
+} from './pact-link-evidence-sweep'
+import {
   newestDaemonDeathOrRebindVerb as newestDaemonDeathOrRebindVerbImpl,
   type DaemonRespawnGateVerb
 } from './agent-daemon-respawn-gate'
@@ -189,6 +193,7 @@ import {
   deleteBindingsAndAttemptsNotIn as deleteBindingsAndAttemptsNotInImpl,
   deleteBindingsAndAttemptsIn as deleteBindingsAndAttemptsInImpl,
   type ScanFactRow,
+  type ScanFactWriteRow,
   type ConfirmObservationRow,
   type ContainmentRow
 } from './link-binding-observations-store'
@@ -5317,8 +5322,12 @@ export class OrchestrationDb {
 
   // S10-21a C10 (design v3.2 §2.11 N4 fix; Ruling 34 Addendum 25): host-authored pact un-pause
   // for pacts paused `counterpart_gone` whose counterpart is the just-restored `agentId`.
-  resumePactsForRestoredAgent(agentId: string, pactIds: string[]): void {
-    resumePactsForRestoredAgentImpl(this.db, agentId, pactIds)
+  resumePactsForRestoredAgent(
+    agentId: string,
+    pactIds: string[],
+    runtime: FederatedPactEmitRuntime | null = null
+  ): void {
+    resumePactsForRestoredAgentImpl(this.db, agentId, pactIds, runtime)
   }
 
   // S10-21a C7f (Ruling 34 Addendum 24): pty.ts's post-spawn-commit gate — the pane's newest
@@ -5483,7 +5492,7 @@ export class OrchestrationDb {
     return listScanFactLinkIdsImpl(this.db)
   }
 
-  putScanFact(row: ScanFactRow): void {
+  putScanFact(row: ScanFactWriteRow): void {
     putScanFactImpl(this.db, row)
   }
 
@@ -5900,12 +5909,26 @@ export class OrchestrationDb {
 
   // Liveness/leave/thread-state auto-pause hooks (K6/K16/K17) — called by the RPC layer, never
   // internally by these pact methods (which only ever act on the caller's own request).
-  autoPausePactsForAgent(agentId: string, reason: PactPauseReason): AutoPauseOutcome[] {
-    return autoPausePactsForAgentImpl(this.db, agentId, reason)
+  autoPausePactsForAgent(
+    agentId: string,
+    reason: PactPauseReason,
+    runtime: FederatedPactEmitRuntime | null = null
+  ): AutoPauseOutcome[] {
+    return autoPausePactsForAgentImpl(this.db, agentId, reason, runtime)
   }
 
-  autoPausePactOnThread(threadId: string, reason: PactPauseReason): AutoPauseOutcome | null {
-    return autoPausePactOnThreadImpl(this.db, threadId, reason)
+  autoPausePactOnThread(
+    threadId: string,
+    reason: PactPauseReason,
+    runtime: FederatedPactEmitRuntime | null = null
+  ): AutoPauseOutcome | null {
+    return autoPausePactOnThreadImpl(this.db, threadId, reason, runtime)
+  }
+
+  // S10-21b B15 (design §3.3): pure DB layer, like autoPausePactsForAgent above — the caller
+  // (link-binding-prover-maintenance.ts) wakes both parked waiters per returned outcome.
+  runPactLinkEvidenceSweep(now?: number): PactLinkEvidenceSweepResult {
+    return runPactLinkEvidenceSweepImpl(this.db, now)
   }
 
   markThreadRead(threadId: string, participantKey: string, sequence: number): void {

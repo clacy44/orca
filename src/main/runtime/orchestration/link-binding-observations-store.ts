@@ -25,7 +25,16 @@ export type ScanFactRow = {
   linkCredentialFp: string
   detail: string | null
   observedAt: number
+  // S10-21b B15 (design §3.3, errata NB2): stamped on the FIRST scan of an episode that
+  // transitions INTO 'unreachable' (previous outcome was something else, or no row existed);
+  // left untouched on every subsequent 'unreachable' scan; cleared to null on any other outcome.
+  // Derived by `putScanFact`, never caller-supplied — see `ScanFactWriteRow` below.
+  unreachableSince: number | null
 }
+
+// The write-side shape `writeScanFact`/callers construct: `unreachableSince` is NEVER supplied by
+// a caller — `putScanFact` derives it from the prior row per the NB2 rule.
+export type ScanFactWriteRow = Omit<ScanFactRow, 'unreachableSince'>
 
 export function getScanFact(
   db: Database.Database,
@@ -43,6 +52,7 @@ export function getScanFact(
         link_credential_fp: string
         detail: string | null
         observed_at: number
+        unreachable_since: number | null
       }
     | undefined
   return row
@@ -53,7 +63,8 @@ export function getScanFact(
         environmentPairingRevision: row.environment_pairing_revision,
         linkCredentialFp: row.link_credential_fp,
         detail: row.detail,
-        observedAt: row.observed_at
+        observedAt: row.observed_at,
+        unreachableSince: row.unreachable_since
       }
     : null
 }
@@ -80,6 +91,7 @@ export function listScanFacts(db: Database.Database, linkDeviceId: string): Scan
     link_credential_fp: string
     detail: string | null
     observed_at: number
+    unreachable_since: number | null
   }[]
   return rows.map((row) => ({
     linkDeviceId: row.link_device_id,
@@ -88,14 +100,20 @@ export function listScanFacts(db: Database.Database, linkDeviceId: string): Scan
     environmentPairingRevision: row.environment_pairing_revision,
     linkCredentialFp: row.link_credential_fp,
     detail: row.detail,
-    observedAt: row.observed_at
+    observedAt: row.observed_at,
+    unreachableSince: row.unreachable_since
   }))
 }
 
 // R12: single writer, the verifier round. Ruling 23(d) — the collapse writes NO scan fact for a
 // dropped duplicate; callers must never invoke this for a collapsed candidate.
-export function putScanFact(db: Database.Database, row: ScanFactRow): void {
-  if (getScanFact(db, row.linkDeviceId, row.environmentId) === null) {
+// S10-21b B15 (design §3.3, errata NB2): derives `unreachable_since` from the PRIOR row here —
+// the write rule's one enforcement point. Set on the first scan of an episode that transitions
+// INTO 'unreachable' (prior outcome was something else, or no row existed); untouched on a
+// repeat 'unreachable' scan of the same episode; cleared to NULL on any other outcome.
+export function putScanFact(db: Database.Database, row: ScanFactWriteRow): void {
+  const prior = getScanFact(db, row.linkDeviceId, row.environmentId)
+  if (prior === null) {
     const count = db.prepare('SELECT COUNT(*) AS n FROM peer_link_scan_facts').get() as {
       n: number
     }
@@ -103,16 +121,23 @@ export function putScanFact(db: Database.Database, row: ScanFactRow): void {
       throw new LinkBindingCapError('peer_link_scan_facts')
     }
   }
+  const unreachableSince =
+    row.outcome !== 'unreachable'
+      ? null
+      : prior !== null && prior.outcome === 'unreachable'
+        ? prior.unreachableSince
+        : row.observedAt
   db.prepare(
     `INSERT INTO peer_link_scan_facts (
        link_device_id, environment_id, outcome, environment_pairing_revision,
-       link_credential_fp, detail, observed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       link_credential_fp, detail, observed_at, unreachable_since
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(link_device_id, environment_id) DO UPDATE SET
        outcome = excluded.outcome,
        environment_pairing_revision = excluded.environment_pairing_revision,
        link_credential_fp = excluded.link_credential_fp,
-       detail = excluded.detail, observed_at = excluded.observed_at`
+       detail = excluded.detail, observed_at = excluded.observed_at,
+       unreachable_since = excluded.unreachable_since`
   ).run(
     row.linkDeviceId,
     row.environmentId,
@@ -120,7 +145,8 @@ export function putScanFact(db: Database.Database, row: ScanFactRow): void {
     row.environmentPairingRevision,
     row.linkCredentialFp,
     row.detail,
-    row.observedAt
+    row.observedAt,
+    unreachableSince
   )
 }
 
@@ -184,163 +210,19 @@ export function putConfirmObservation(db: Database.Database, row: ConfirmObserva
   ).run(row.linkDeviceId, row.environmentId, row.kind, row.detail, row.observedAt)
 }
 
-// --- peer_link_containment ----------------------------------------------------------------
-
-export type ContainmentSubjectKind = 'link' | 'environment'
-export type ContainmentAction = 'quarantine' | 'scan_exclude' | 'accept_legacy'
-
-export type ContainmentRow = {
-  subjectKind: ContainmentSubjectKind
-  subjectId: string
-  action: ContainmentAction
-  reasonCode: string | null
-  reasonText: string | null
-  detail: string | null
-  createdAt: number
-  expiresAt: number | null
-  liftedAt: number | null
-}
-
-type ContainmentSqlRow = {
-  subject_kind: ContainmentSubjectKind
-  subject_id: string
-  action: ContainmentAction
-  reason_code: string | null
-  reason_text: string | null
-  detail: string | null
-  created_at: number
-  expires_at: number | null
-  lifted_at: number | null
-}
-
-function fromSqlContainmentRow(row: ContainmentSqlRow): ContainmentRow {
-  return {
-    subjectKind: row.subject_kind,
-    subjectId: row.subject_id,
-    action: row.action,
-    reasonCode: row.reason_code,
-    reasonText: row.reason_text,
-    detail: row.detail,
-    createdAt: row.created_at,
-    expiresAt: row.expires_at,
-    liftedAt: row.lifted_at
-  }
-}
-
-export function getContainment(
-  db: Database.Database,
-  subjectKind: ContainmentSubjectKind,
-  subjectId: string,
-  action: ContainmentAction
-): ContainmentRow | null {
-  const row = db
-    .prepare(
-      'SELECT * FROM peer_link_containment WHERE subject_kind = ? AND subject_id = ? AND action = ?'
-    )
-    .get(subjectKind, subjectId, action) as ContainmentSqlRow | undefined
-  return row ? fromSqlContainmentRow(row) : null
-}
-
-export function listContainment(db: Database.Database): ContainmentRow[] {
-  const rows = db.prepare('SELECT * FROM peer_link_containment').all() as ContainmentSqlRow[]
-  return rows.map(fromSqlContainmentRow)
-}
-
-// R10-A / R15: is this link currently quarantined (a live, unlifted, unexpired quarantine row)?
-// Review F2 / design R3 (s10-16-design-link-binding-v6.md:880-883): a time-boxed quarantine must
-// stop refusing once past its own `expires_at` — omitting this clause left an operator's expiry
-// silently inert (fail-closed, not a security hole, but a live row that never actually lifts).
-export function isPeerLinkQuarantined(db: Database.Database, linkDeviceId: string): boolean {
-  const row = db
-    .prepare(
-      `SELECT 1 FROM peer_link_containment
-        WHERE subject_kind = 'link' AND subject_id = ? AND action = 'quarantine' AND lifted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > ?)`
-    )
-    .get(linkDeviceId, Date.now())
-  return row !== undefined
-}
-
-// R14.7 (Ruling 17(o)): re-assertion is an UPSERT on the PK — no new PK needed for lift→re-assert.
-// `peer_link_containment` is EXEMPT from the row cap (R14.5) — a safety table must never fail open.
-export function putContainment(db: Database.Database, row: Omit<ContainmentRow, 'liftedAt'>): void {
-  db.prepare(
-    `INSERT INTO peer_link_containment (
-       subject_kind, subject_id, action, reason_code, reason_text, detail,
-       created_at, expires_at, lifted_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-     ON CONFLICT(subject_kind, subject_id, action) DO UPDATE SET
-       lifted_at = NULL, created_at = excluded.created_at, expires_at = excluded.expires_at,
-       reason_code = excluded.reason_code, reason_text = excluded.reason_text, detail = excluded.detail`
-  ).run(
-    row.subjectKind,
-    row.subjectId,
-    row.action,
-    row.reasonCode,
-    row.reasonText,
-    row.detail,
-    row.createdAt,
-    row.expiresAt
-  )
-}
-
-export function liftContainment(
-  db: Database.Database,
-  subjectKind: ContainmentSubjectKind,
-  subjectId: string,
-  action: ContainmentAction,
-  now: number
-): void {
-  db.prepare(
-    `UPDATE peer_link_containment
-        SET lifted_at = ?
-      WHERE subject_kind = ? AND subject_id = ? AND action = ? AND lifted_at IS NULL`
-  ).run(now, subjectKind, subjectId, action)
-}
-
-// R13.4: the sweep's own retention purge — bindings, attempts, facts and confirm observations
-// for links NOT IN the currently-live runtime-scope device id set (containment is deliberately
-// excluded — operator intent must survive a sweep the same way it survives resetAll, R14.3).
-// Distinct from `deleteBindingsAndAttemptsIn` below (link-forget's OPERATOR-NAMED purge) — this
-// one's caller (link-binding-prover-maintenance.ts) genuinely needs exclusion-from-a-retained-set
-// semantics: "delete everything the registry no longer knows about."
-export function deleteBindingsAndAttemptsNotIn(
-  db: Database.Database,
-  retainedLinkDeviceIds: readonly string[]
-): void {
-  const placeholders = retainedLinkDeviceIds.map(() => '?').join(',') || "''"
-  const args = retainedLinkDeviceIds.length > 0 ? retainedLinkDeviceIds : []
-  for (const table of [
-    'peer_link_bindings',
-    'peer_link_attempts',
-    'peer_link_scan_facts',
-    'peer_link_confirm_observations'
-  ]) {
-    db.prepare(`DELETE FROM ${table} WHERE link_device_id NOT IN (${placeholders})`).run(...args)
-  }
-}
-
-// R5.1/Ruling 28(h)/protocol F9: per-row purge surface for `orca environment link-forget` —
-// bindings, attempts, facts and confirm observations for links IN the forgotten set. Deletes by
-// INCLUSION over the caller's own `forgotten` id list — never by exclusion from a possibly-
-// incomplete `retained` set — so a link the caller's own enumeration missed (or a row inserted
-// between that read and this write) can never be swept up by accident (protocol F9).
-export function deleteBindingsAndAttemptsIn(
-  db: Database.Database,
-  forgottenLinkDeviceIds: readonly string[]
-): void {
-  if (forgottenLinkDeviceIds.length === 0) {
-    return
-  }
-  const placeholders = forgottenLinkDeviceIds.map(() => '?').join(',')
-  for (const table of [
-    'peer_link_bindings',
-    'peer_link_attempts',
-    'peer_link_scan_facts',
-    'peer_link_confirm_observations'
-  ]) {
-    db.prepare(`DELETE FROM ${table} WHERE link_device_id IN (${placeholders})`).run(
-      ...forgottenLinkDeviceIds
-    )
-  }
-}
+// Split out to peer-link-containment-store.ts (max-lines ratchet, S10-21b B15); re-exported so
+// every existing importer of this module is unaffected.
+export type {
+  ContainmentSubjectKind,
+  ContainmentAction,
+  ContainmentRow
+} from './peer-link-containment-store'
+export {
+  getContainment,
+  listContainment,
+  isPeerLinkQuarantined,
+  putContainment,
+  liftContainment,
+  deleteBindingsAndAttemptsNotIn,
+  deleteBindingsAndAttemptsIn
+} from './peer-link-containment-store'

@@ -259,12 +259,14 @@ discipline as a local pact — `step`/`wait --for step`/`--show`/`--release` all
   is processed as the gap it announces and produces `pact_out_of_order`/`pact_desync`, not a code
   of its own.
 - There is **no** silence-based auto-pause — holding the turn for a long real task never pauses a
-  pact on its own. The *planned* auto-pause is link-evidence-driven, not yet wired on this build:
-  once the link's own liveness scan reports the peer unreachable continuously for
-  `PACT_LINK_SILENCE_MS = 900_000` (15 minutes), the pact will pause with reason
-  `counterpart_gone`/`counterpart_unreachable` — a pause *reason*, never an error code — and will
-  clear itself automatically once the link reports live again, with no operator verb needed
-  either way. Until that lands, the only way a federated pact pauses is the same as a local one:
+  pact on its own. The auto-pause that DOES exist is link-evidence-driven: once the link's own
+  liveness scan reports the peer unreachable continuously for `PACT_LINK_SILENCE_MS = 900_000`
+  (15 minutes), the pact pauses with reason `counterpart_gone`/`counterpart_unreachable` — a pause
+  *reason*, never an error code — and both sides are woken immediately rather than left to time
+  out. It clears itself automatically, no operator verb needed, once the link reports live again
+  continuously for `PACT_LINK_RECOVERY_MS = 1_800_000` (30 minutes) — deliberately longer than the
+  pause bound, so a single good scan is never enough and a flapping link cannot mint unbounded
+  pause/resume rows. Outside of that, a federated pact pauses the same way a local one does:
   `--pause`, or a genuine local liveness signal (quarantine, `gone`).
 - An unanswered remote proposal blocks your own `wait --for pact` park for at most
   `PACT_PROPOSAL_BLOCK_MS = 3_600_000` (1 hour); past that it stops blocking and surfaces on

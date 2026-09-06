@@ -1063,7 +1063,10 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
       runtimeService.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtimeService.getTerminalProcessIncarnation(handle),
     mintRestoreTicket: (payload) => runtimeService.mintRestoreTicket(payload),
-    notifyRebindDelivery: (agentId) => runtimeService.notifyRebindDelivery(agentId)
+    notifyRebindDelivery: (agentId) => runtimeService.notifyRebindDelivery(agentId),
+    // S10-21b B15 (design §2.7): so the restore-driven pact resume relays through
+    // emitFederatedPactSideEffect for a federated pact, same as every other producer.
+    federatedPactEmitRuntime: runtimeService
   }
 }
 

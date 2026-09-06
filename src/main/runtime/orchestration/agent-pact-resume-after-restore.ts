@@ -19,6 +19,12 @@
 import type Database from '../../sqlite/sync-database'
 import type { ThreadRow } from './types'
 import { insertPactStepRow, auditPact } from './pact-shared'
+import { latestHostPauseReasonCode } from './pact-federated-pause-remote-arm'
+import { isFederatedPact } from './pact-federated-identity'
+import {
+  emitFederatedPactSideEffect,
+  type FederatedPactEmitRuntime
+} from './pact-federated-pause-resume-emit'
 
 /** Resumes every listed pact still eligible: `pact_state = 'engaged'`, `pact_paused_at IS NOT
  * NULL`, `pact_pause_reason = 'counterpart_gone'`, and `agentId` a participant (the restored
@@ -29,11 +35,12 @@ import { insertPactStepRow, auditPact } from './pact-shared'
 export function resumePactsForRestoredAgent(
   db: Database.Database,
   agentId: string,
-  pactIds: string[]
+  pactIds: string[],
+  runtime: FederatedPactEmitRuntime | null = null
 ): void {
   for (const threadId of pactIds) {
     try {
-      resumeOnePactIfEligible(db, agentId, threadId)
+      resumeOnePactIfEligible(db, agentId, threadId, runtime)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       // [§2.11: "a pact that cannot resume does not undo a rebind"] Logged + audited, never
@@ -56,7 +63,32 @@ export function resumePactsForRestoredAgent(
   }
 }
 
-function resumeOnePactIfEligible(db: Database.Database, agentId: string, threadId: string): void {
+function resumeOnePactIfEligible(
+  db: Database.Database,
+  agentId: string,
+  threadId: string,
+  runtime: FederatedPactEmitRuntime | null
+): void {
+  const thread0 = db
+    .prepare(`SELECT * FROM threads WHERE id = ? AND purged_at IS NULL`)
+    .get(threadId) as ThreadRow | undefined
+  const eligible0 =
+    thread0 !== undefined &&
+    thread0.pact_state === 'engaged' &&
+    thread0.pact_paused_at !== null &&
+    thread0.pact_pause_reason === 'counterpart_gone' &&
+    (thread0.pact_proposer_agent_id === agentId || thread0.pact_with_agent_id === agentId) &&
+    // B15 (§4.4, errata NB1, ruling 21b-E7): matches `pauseConditionCleared`'s own predicate —
+    // exclude ONLY the link-evidence reason_code (resumable solely by B15's recovery sweep);
+    // a host row with no ledger match at all stays eligible, same as before this commit.
+    latestHostPauseReasonCode(db, threadId) !== 'counterpart_unreachable'
+  if (!eligible0 || !thread0) {
+    return
+  }
+  if (isFederatedPact(thread0)) {
+    emitFederatedPactSideEffect(db, runtime, threadId, 'resume', null)
+    return
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
     const thread = db

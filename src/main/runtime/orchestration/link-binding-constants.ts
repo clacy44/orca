@@ -118,6 +118,15 @@ export const PACT_RELEASED_RETENTION_MS = 604_800_000
 // `pact_applied_ids` rows before a new proposal is refused — no landed consumer yet; B14 imports
 // this for the ceiling refusal (T-NA4/T-NB7).
 export const PACT_STEPS_PER_LINK_CEILING = 65_536
+// S10-21b B15 (design §3.3, Addendum 6(13), errata NB2): a link's peer_link_scan_facts row
+// satisfying `outcome='unreachable' AND now - unreachable_since >= PACT_LINK_SILENCE_MS` auto-
+// pauses every engaged federated pact on that (link, environment) — same bound as the mail hold,
+// REPLY_OUTBOX_HOLD_MAX_MS.
+export const PACT_LINK_SILENCE_MS = 900_000
+// S10-21b B15 (design §3.3, errata NB3/NB5): the auto-resume sweep's own hysteresis bound —
+// deliberately >= LINK_BINDING_BACKOFF_MAX_MS (the link prover's own backoff ceiling) so a
+// genuinely-recovering link is never judged recovered while the prover is still confirming it.
+export const PACT_LINK_RECOVERY_MS = 1_800_000
 export const REPLY_OUTBOX_MAX_AGE_MS = 604_800_000
 export const REPLY_OUTBOX_MAX_BYTES = 65_536
 export const REPLY_OUTBOX_PER_LINK_CAP = 256

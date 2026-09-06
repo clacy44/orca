@@ -307,6 +307,20 @@ export function insertPactStepRow(db: Database.Database, params: InsertPactStepR
   )
 }
 
+// B15 (§2.7): the `threads` half of a pause/resume, shared by every writer (local + the
+// federated emit primitive) so the D-R134 F4 flight-token bump is never duplicated/forgotten.
+export function applyPactPauseResumeState(
+  db: Database.Database,
+  threadId: string,
+  pausedAt: 'now' | null,
+  pauseReason: string | null
+): void {
+  db.prepare(
+    `UPDATE threads SET pact_paused_at = ${pausedAt === 'now' ? "datetime('now')" : 'NULL'},
+       pact_pause_reason = ?, pact_flight_token = pact_flight_token + 1 WHERE id = ?`
+  ).run(pauseReason, threadId)
+}
+
 export function auditPact(
   db: Database.Database,
   params: {

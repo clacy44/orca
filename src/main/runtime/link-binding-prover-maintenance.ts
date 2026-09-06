@@ -14,6 +14,8 @@ import { createHash } from 'node:crypto'
 import type { OrcaRuntimeService } from './orca-runtime'
 import { listEnvironments } from '../../shared/runtime-environment-store'
 import { LINK_BINDING_REVERIFY_MS } from './orchestration/link-binding-constants'
+import { wakePactThreadBoth } from './rpc/methods/orchestration-pact-wake'
+import type { PactLinkEvidenceOutcome } from './orchestration/pact-link-evidence-sweep'
 import { resolveUserDataPath } from './rpc/methods/orchestration-link-binding-pending'
 import type { CapabilityCache } from './link-binding-prover-round'
 import type { RearmDebounce } from './orchestration/link-binding-schedule'
@@ -108,6 +110,20 @@ export function createMaintenanceTick(
     }
     try {
       maybePurgeStaleLinks(now)
+    } catch {
+      // best-effort — see above.
+    }
+    // S10-21b B15 (design §3.3): co-located with this sweep tick per the chair's task
+    // instruction — the two new producers piggyback on the existing 60s cadence rather than a
+    // new timer. Neither is relayed (§2.7); wake is local, same as every other auto-pause path.
+    try {
+      const result = runtime.getOrchestrationDb().runPactLinkEvidenceSweep(now)
+      const wake = (o: PactLinkEvidenceOutcome, outcome: string): void =>
+        wakePactThreadBoth(runtime, o.threadId, [o.proposerAgentId, o.withAgentId], outcome, [
+          `orca agents pact --release --on ${o.threadId}`
+        ])
+      result.paused.forEach((o) => wake(o, 'paused'))
+      result.resumed.forEach((o) => wake(o, 'resumed'))
     } catch {
       // best-effort — see above.
     }

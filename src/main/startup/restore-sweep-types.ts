@@ -10,6 +10,7 @@ import type {
 } from '../../shared/agent-session-host-authority'
 import type { RestoreTicketId, RestoreTicketMintArgs } from '../runtime/restore-ticket-registry'
 import type { ControllerInventory } from '../runtime/orchestration/agent-process-identity'
+import type { FederatedPactEmitRuntime } from '../runtime/orchestration/pact-federated-pause-resume-emit'
 
 export type RestoreSweepDeps = {
   getOrchestrationDb(): OrchestrationDb
@@ -63,6 +64,11 @@ export type RestoreSweepDeps = {
   /** [C9 hand-off, D-I80] `orca-runtime.ts#notifyRebindDelivery` — called once after a
    * SUCCESSFUL Layer 1 or Layer 2 restore, never for a skipped/deferred candidate. */
   notifyRebindDelivery(agentId: string): void
+  /** [S10-21b B15, design §2.7] Passed to `resumePactsForRestoredAgent` so a federated pact's
+   * restore-driven resume relays through `emitFederatedPactSideEffect` — omitted/null is a valid
+   * runtime (the emit primitive already degrades to "no post-commit kick"). Optional so every
+   * pre-existing `RestoreSweepDeps` fixture stays valid without a mechanical edit. */
+  federatedPactEmitRuntime?: FederatedPactEmitRuntime | null
 }
 
 export type RestoreSweepSummary = {

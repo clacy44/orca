@@ -78,7 +78,11 @@ export const ORCHESTRATION_AGENTS_QUARANTINE_METHODS: RpcMethod[] = [
       // only starve — auto-pause every engaged one and wake the counterpart now, with a
       // reason, instead of letting it run to the clamp. Never on lift: only quarantining pauses.
       if (!params.lift) {
-        for (const outcome of db.autoPausePactsForAgent(target.id, 'counterpart_quarantined')) {
+        for (const outcome of db.autoPausePactsForAgent(
+          target.id,
+          'counterpart_quarantined',
+          runtime
+        )) {
           wakePactThreadBoth(
             runtime,
             outcome.threadId,

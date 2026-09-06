@@ -149,7 +149,7 @@ export function refreshLiveness(
   // auto-pause every engaged pact this agent is party to and wake the counterpart immediately,
   // far inside the 30-minute clamp, instead of leaving a silent park.
   if (liveness.state === 'gone' && row.state !== 'gone') {
-    for (const outcome of db.autoPausePactsForAgent(row.id, 'counterpart_gone')) {
+    for (const outcome of db.autoPausePactsForAgent(row.id, 'counterpart_gone', runtime)) {
       wakePactThreadBoth(
         runtime,
         outcome.threadId,

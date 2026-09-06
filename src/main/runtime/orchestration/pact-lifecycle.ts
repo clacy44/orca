@@ -21,18 +21,43 @@ import {
   latestHostPauseReasonCode,
   latestPausingAgentId
 } from './pact-federated-pause-remote-arm'
+import {
+  emitFederatedPactSideEffect,
+  type FederatedPactEmitRuntime
+} from './pact-federated-pause-resume-emit'
 
 // S10-21b B12b (design §5, "`--evidence '<run id / suite citation>'`" — no length named; VERIFY
 // in b12-brief.md found no prior evidence-handling pattern for a pact release, so this reuses
 // pact-step.ts's own step-summary sanitizer/cap shape rather than inventing a second one).
 const PACT_RELEASE_EVIDENCE_MAX_LENGTH = 500
 
-export type PausePactParams = PactActorContext & { threadId: string; reasonCode: string | null }
+export type PausePactParams = PactActorContext & {
+  threadId: string
+  reasonCode: string | null
+  // S10-21b B15 (design §2.7, ruling 21b-E7): a federated pact's pause routes THROUGH
+  // emitFederatedPactSideEffect (the single atomic writer) instead of the local UPDATE below.
+  runtime?: FederatedPactEmitRuntime | null
+}
 
 export function pausePact(db: Database.Database, params: PausePactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
   requirePactParticipant(thread, params.callerAgentId)
   requireEngaged(thread)
+  if (isFederatedPact(thread)) {
+    emitFederatedPactSideEffect(
+      db,
+      params.runtime ?? null,
+      thread.id,
+      'pause',
+      params.reasonCode ?? 'operator',
+      {
+        agentId: params.callerAgentId,
+        paneKey: params.callerPaneKey,
+        hostId: params.callerHostId
+      }
+    )
+    return requireThread(db, thread.id)
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
     // D-R134 F4 local half: pact_flight_token bumped alongside the pause it guards.
@@ -142,7 +167,11 @@ const NEVER_RESUMABLE_REASONS: ReadonlySet<PactPauseReason> = new Set([
   'thread_paused'
 ])
 
-export type ResumePactParams = PactActorContext & { threadId: string }
+export type ResumePactParams = PactActorContext & {
+  threadId: string
+  // S10-21b B15 (design §2.7, ruling 21b-E7): see PausePactParams.runtime.
+  runtime?: FederatedPactEmitRuntime | null
+}
 export type ResumePactOutcome =
   | { kind: 'resumed'; thread: ThreadRow }
   | { kind: 'requested'; thread: ThreadRow; pausingAgentId: string }
@@ -227,6 +256,14 @@ export function requestPactResume(db: Database.Database, params: ResumePactParam
 // Clears the pause; the turn is left exactly where it was (pause never moved it, rev 4).
 export function resumePact(db: Database.Database, params: ResumePactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
+  if (isFederatedPact(thread)) {
+    emitFederatedPactSideEffect(db, params.runtime ?? null, thread.id, 'resume', null, {
+      agentId: params.callerAgentId,
+      paneKey: params.callerPaneKey,
+      hostId: params.callerHostId
+    })
+    return requireThread(db, thread.id)
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
     // D-R134 F4 local half: pact_flight_token bumped alongside the resume it guards.

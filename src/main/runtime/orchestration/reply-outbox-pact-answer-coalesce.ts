@@ -30,6 +30,9 @@ export function findUnsettledPactAnswerOutboxId(
 // thread exactly as enqueueReplyOutbox stamps them on a fresh insert — so settle's
 // markPeerRelayAccepted stamps the NEW message and the staleness guard compares the CURRENT
 // token, never the superseded row's.
+// B15 (§2.7 N10/T32): `relayKind`, when given, is ALSO refreshed — cross-kind coalescing (a
+// queued pact_pause replaced in place by a pact_resume) must turn the row INTO the new kind,
+// never leave it labelled as the superseded one.
 export function replacePactAnswerPayload(
   db: Database.Database,
   id: string,
@@ -38,7 +41,8 @@ export function replacePactAnswerPayload(
   byteCount: number,
   pactSeq: number,
   pactEra: number,
-  pactThreadId: string
+  pactThreadId: string,
+  relayKind?: RelayKind
 ): boolean {
   const thread = db
     .prepare('SELECT pact_state, pact_flight_token FROM threads WHERE id = ?')
@@ -46,7 +50,8 @@ export function replacePactAnswerPayload(
   const result = db
     .prepare(
       `UPDATE peer_reply_outbox SET local_message_id = ?, payload = ?, byte_count = ?,
-         pact_seq = ?, pact_era = ?, pact_state = ?, pact_flight_token = ?
+         pact_seq = ?, pact_era = ?, pact_state = ?, pact_flight_token = ?,
+         relay_kind = COALESCE(?, relay_kind)
         WHERE id = ? AND state = 'queued'`
     )
     .run(
@@ -57,9 +62,61 @@ export function replacePactAnswerPayload(
       pactEra,
       thread?.pact_state ?? null,
       thread?.pact_flight_token ?? null,
+      relayKind ?? null,
       id
     )
   return result.changes === 1
+}
+
+// B15 (§2.7 N10): the pause/resume cross-kind lookup — one unsettled row across BOTH
+// `pact_pause`/`pact_resume` for this pact, still `queued`.
+export function findUnsettledPactAnswerOutboxIdAcrossKinds(
+  db: Database.Database,
+  pactThreadId: string,
+  relayKinds: readonly RelayKind[]
+): string | null {
+  const placeholders = relayKinds.map(() => '?').join(',')
+  const row = db
+    .prepare(
+      `SELECT id FROM peer_reply_outbox
+        WHERE pact_thread_id = ? AND relay_kind IN (${placeholders}) AND state = 'queued'
+          AND settled_at IS NULL
+        LIMIT 1`
+    )
+    .get(pactThreadId, ...relayKinds) as { id: string } | undefined
+  return row?.id ?? null
+}
+
+// B15 (§2.7 N10, T32): a fresh pause/resume call REPLACES an already-queued item of EITHER
+// kind for this pact, carrying the current absolute state (verb, payload) at call time —
+// never leaves two outstanding items, and never touches a claimed 'sending' row.
+export function enqueueReplyOutboxCoalescedAcrossKinds(
+  db: Database.Database,
+  relayKinds: readonly RelayKind[],
+  p: EnqueueReplyOutboxParams
+): string {
+  const existing =
+    p.pactThreadId !== undefined
+      ? findUnsettledPactAnswerOutboxIdAcrossKinds(db, p.pactThreadId, relayKinds)
+      : null
+  if (
+    existing !== null &&
+    p.pactThreadId !== undefined &&
+    replacePactAnswerPayload(
+      db,
+      existing,
+      p.localMessageId,
+      p.payload,
+      p.byteCount,
+      p.pactSeq ?? 0,
+      p.pactEra ?? 0,
+      p.pactThreadId,
+      p.relayKind
+    )
+  ) {
+    return existing
+  }
+  return enqueueReplyOutbox(db, p)
 }
 
 // One call for "coalesce if this relay kind coalesces, else plain enqueue" — keeps the

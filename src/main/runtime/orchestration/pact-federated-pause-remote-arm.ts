@@ -65,3 +65,16 @@ export function latestPausingAgentId(db: Database.Database, threadId: string): s
     .get(threadId) as { actor_agent_id: string | null } | undefined
   return row?.actor_agent_id ?? null
 }
+
+// S10-21b B15 (design §3.3, errata NB3): the recovery sweep's anchor for "how long has this
+// pact been paused" — `pact_steps.at` on the latest un-resumed host pause row, ms since epoch.
+export function latestHostPauseAtMs(db: Database.Database, threadId: string): number | null {
+  const row = db
+    .prepare(
+      `SELECT at FROM pact_steps
+       WHERE thread_id = ? AND kind = 'pause' AND actor_is_remote = 0
+       ORDER BY seq DESC LIMIT 1`
+    )
+    .get(threadId) as { at: string } | undefined
+  return row ? Date.parse(row.at) : null
+}
