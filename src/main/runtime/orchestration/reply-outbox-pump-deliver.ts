@@ -7,6 +7,7 @@ import { isHostMessageId, requireOptionalThreadId } from './orchestration-id-gra
 import { shouldFireReplyRelayNotice } from './reply-outbox-health'
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import { fireReplyRelayNotice, onReplyOutboxDelivered } from './reply-outbox-pump-notify'
+import { wakeTurnArrived } from '../rpc/methods/orchestration-pact-wake'
 import {
   PEER_RESULT_MALFORMED_CODE,
   REPLY_RELAY_BOOKKEEPING_FAILED_CODE,
@@ -52,17 +53,36 @@ export function settleReplyOutboxDelivery(
       reasonCode: JSON.stringify({ outboxId: item.id })
     })
   }
-  db.markPeerRelayAccepted(item.localMessageId, validThreadId)
-  db.settleReplyOutboxItem(item.id, {
-    state: 'delivered',
-    settledAt: Date.now(),
-    consecutiveFailures: 0,
-    nextAttemptAfter: null,
-    lastErrorCode: null,
-    lastError: null,
-    peerMessageId: validMessageId,
-    peerReplyThreadId: validThreadId
-  })
+  // S10-21b B7 (design §2.8): a pact item settles through the guarded transaction — the prior
+  // unguarded two-statement shape (markPeerRelayAccepted then settleReplyOutboxItem, no guard,
+  // no boolean check) stays the mail path's only, UNCHANGED. `raced` means the row was
+  // concurrently cancelled (e.g. resetMessages) — the whole settle rolled back, so bookkeeping
+  // below (keyed to this now-stale `item`) is skipped for this item entirely.
+  if (item.pactThreadId !== null) {
+    const settled = db.settleFederatedPactDelivery(item, {
+      peerMessageId: validMessageId,
+      peerReplyThreadId: validThreadId
+    })
+    if (settled.outcome === 'raced') {
+      return
+    }
+    if (settled.outcome === 'settled' && settled.turnHolderAgentId !== null) {
+      // Step 6, outside the transaction: wake the LOCAL chair the turn just arrived for.
+      wakeTurnArrived(runtime, settled.turnHolderAgentId, item.pactThreadId)
+    }
+  } else {
+    db.markPeerRelayAccepted(item.localMessageId, validThreadId)
+    db.settleReplyOutboxItem(item.id, {
+      state: 'delivered',
+      settledAt: Date.now(),
+      consecutiveFailures: 0,
+      nextAttemptAfter: null,
+      lastErrorCode: null,
+      lastError: null,
+      peerMessageId: validMessageId,
+      peerReplyThreadId: validThreadId
+    })
+  }
 
   // H6/Ruling 26(g): post-delivery bookkeeping, OUTSIDE the send try. A throw here is audited
   // with a host-constant code — never classified as a transport failure, never a retry of an

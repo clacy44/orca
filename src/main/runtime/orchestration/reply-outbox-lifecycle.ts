@@ -136,6 +136,25 @@ export function claimNextReplyOutboxItem(
   return null
 }
 
+// S10-15 R6 (moved here at S10-21b B7 so the federated settle transaction —
+// pact-federated-settle.ts's settleFederatedPactDelivery — can call it inside its own
+// BEGIN IMMEDIATE against the raw connection, same as this file's own settleReplyOutboxItem,
+// without going through the OrchestrationDb wrapper): marks the sender's local mirror row as
+// accepted by the peer, and records the peer's own thread id for the conversation (COALESCE
+// preserves an already-stored value on a retry that reports no threadId). Behaviour unchanged
+// from the pre-B7 in-class version; every existing caller (db.markPeerRelayAccepted) now
+// delegates here.
+export function markPeerRelayAccepted(
+  db: Database.Database,
+  messageId: string,
+  peerThreadId: string | null
+): void {
+  db.prepare(
+    `UPDATE messages SET peer_relayed_at = datetime('now'),
+       peer_thread_id = COALESCE(?, peer_thread_id) WHERE id = ?`
+  ).run(peerThreadId, messageId)
+}
+
 export type ReplyOutboxSettle = {
   state: 'delivered' | 'refused' | 'abandoned'
   settledAt: number

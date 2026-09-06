@@ -222,8 +222,14 @@ import {
   retryReplyOutboxItem as retryReplyOutboxItemImpl,
   retargetReplyOutboxItem as retargetReplyOutboxItemImpl,
   replyOutboxLinkLastAdvisoryNotifiedAt as replyOutboxLinkLastAdvisoryNotifiedAtImpl,
+  markPeerRelayAccepted as markPeerRelayAcceptedImpl,
   type ReplyOutboxSettle
 } from './reply-outbox-lifecycle'
+import {
+  settleFederatedPactDelivery as settleFederatedPactDeliveryImpl,
+  type SettleFederatedPactDeliveryParams,
+  type SettleFederatedPactDeliveryResult
+} from './pact-federated-settle'
 import {
   getOrCreateMailboxDelivery as getOrCreateMailboxDeliveryImpl,
   acknowledgeMailboxDelivery as acknowledgeMailboxDeliveryImpl,
@@ -3168,6 +3174,16 @@ export class OrchestrationDb {
         // inequality list; relay_state/relay_settled_at deliberately omitted (A10, matching the
         // existing purge-column exclusion pattern — those two are settlement bookkeeping, not
         // ledger content).
+        // S10-21b B7 (forced deviation, found implementing the settle path's ledger stamp —
+        // T11): the inherited v35 summary clause was `OR NOT (<purge shape>)`, which is TRUE
+        // (and so aborts) for ANY update whenever OLD.summary is already non-null and the
+        // update doesn't null it out — including one that never touches `summary` at all. That
+        // silently defeated the very exclusion this comment claims for relay_state/
+        // relay_settled_at: pact_steps was never actually updatable post-insert except by the
+        // exact purge transition, pre-B7 (never previously exercised — nothing before this
+        // commit ever issued a second UPDATE against an existing pact_steps row). Corrected to
+        // gate on summary actually CHANGING first, matching the design's own stated intent and
+        // this migration's own comment; every other column's protection is unchanged.
         this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
         this.db.exec(`
           CREATE TRIGGER trg_pact_steps_append_only
@@ -3188,8 +3204,11 @@ export class OrchestrationDb {
             OR IFNULL(NEW.actor_remote_agent_id, '') <> IFNULL(OLD.actor_remote_agent_id, '')
             OR IFNULL(NEW.actor_environment_id, '') <> IFNULL(OLD.actor_environment_id, '')
             OR IFNULL(NEW.relay_seq, -1) <> IFNULL(OLD.relay_seq, -1)
-            OR NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
-                    AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+            OR (
+              IFNULL(NEW.summary, '') <> IFNULL(OLD.summary, '')
+              AND NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+                       AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+            )
           BEGIN
             SELECT RAISE(ABORT, 'pact ledger is append-only');
           END;
@@ -9058,16 +9077,23 @@ export class OrchestrationDb {
     return chain
   }
 
-  // S10-15 R6: marks the sender's local mirror row as accepted by the peer, and records the
+  // S10-15 R6 (impl moved to reply-outbox-lifecycle.ts at S10-21b B7 — see that file's own
+  // comment): marks the sender's local mirror row as accepted by the peer, and records the
   // peer's own thread id for the conversation (COALESCE preserves an already-stored value on a
   // retry that reports no threadId).
   markPeerRelayAccepted(messageId: string, peerThreadId: string | null): void {
-    this.db
-      .prepare(
-        `UPDATE messages SET peer_relayed_at = datetime('now'),
-           peer_thread_id = COALESCE(?, peer_thread_id) WHERE id = ?`
-      )
-      .run(peerThreadId, messageId)
+    markPeerRelayAcceptedImpl(this.db, messageId, peerThreadId)
+  }
+
+  // S10-21b B7 (design §2.8, Ruling 34 Addendum 6(4)): the federated settle path — one guarded
+  // transaction on (id, era, state, flight token), replacing the pact branch of the prior
+  // unguarded two-statement shape (markPeerRelayAccepted then settleReplyOutboxItem, no guard,
+  // no boolean check). See pact-federated-settle.ts for the six-step body.
+  settleFederatedPactDelivery(
+    item: ReplyOutboxRow,
+    params: SettleFederatedPactDeliveryParams
+  ): SettleFederatedPactDeliveryResult {
+    return settleFederatedPactDeliveryImpl(this.db, item, params)
   }
 
   // S10-16 C5, R28.1 rule 2: the continuation path for a multi-message exchange — a prior
