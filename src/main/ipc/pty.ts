@@ -7325,8 +7325,9 @@ export function registerPtyHandlers(
         // now refreshes rather than merely noticing. F5: the whole block is wrapped in try/catch —
         // a store fault here must never fail an already-committed spawn and orphan a live PTY.
         if (reservationPaneKey && isCoveredLaunchAgent(args.launchAgent)) {
-          const respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
+          let respawnGateBundle: ReturnType<typeof launchAdmissionBundle> | null = null
           try {
+            respawnGateBundle = launchAdmissionBundle(runtime, args.connectionId)
             const respawnGateDb = respawnGateBundle.getDb()
             const respawnRefreshHandle =
               stablePaneOwner?.handle ??
@@ -7381,17 +7382,22 @@ export function registerPtyHandlers(
             // [S10-21a C14c, D-R130 F-2] A throw after the refresh committed (e.g.
             // resumePactsForRestoredAgent) must not vanish silently — audit it. Keeps the
             // swallow: the audit write itself is fenced so it can never fail an already-live PTY.
-            try {
-              respawnGateBundle.getDb()?.writeAgentAudit({
-                agentId: admittedLaunch?.registeredAgentId ?? null,
-                actorPaneKey: reservationPaneKey,
-                actorHostId: respawnGateBundle.ctx.hostId,
-                verb: 'rebind',
-                outcome: 'refused',
-                reasonCode: `gate_failed: ${e instanceof Error ? e.message : String(e)}`
-              })
-            } catch {
-              // Why: never let the failure audit itself mask the original error above.
+            // [S10-21a C14d, D-R132 F5] `respawnGateBundle` is now built inside this try, so a
+            // throw from `launchAdmissionBundle` itself leaves it null — audit falls back to the
+            // console.error above only; never a second throw over the live PTY.
+            if (respawnGateBundle) {
+              try {
+                respawnGateBundle.getDb()?.writeAgentAudit({
+                  agentId: admittedLaunch?.registeredAgentId ?? null,
+                  actorPaneKey: reservationPaneKey,
+                  actorHostId: respawnGateBundle.ctx.hostId,
+                  verb: 'rebind',
+                  outcome: 'refused',
+                  reasonCode: `gate_failed: ${e instanceof Error ? e.message : String(e)}`
+                })
+              } catch {
+                // Why: never let the failure audit itself mask the original error above.
+              }
             }
           }
         }

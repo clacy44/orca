@@ -21063,7 +21063,7 @@ describe('registerPtyHandlers', () => {
 
       // FAILS AT BASE (be7a229c76): the renderer funnel's own gate sat at the pre-registerPty
       // site keyed on `stablePaneOwner?.handle` (always null here), and `self_resume_caller`
-      // classified `notice_only` — nothing ever refreshed the row or resumed the pact.
+      // classified as a fresh session → refused — nothing ever refreshed the row or resumed the pact.
       await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
         cols: 80,
         rows: 24,
@@ -21312,6 +21312,64 @@ describe('registerPtyHandlers', () => {
         .all(paneKey) as { reason_code: string | null }[]
       expect(auditRows).toHaveLength(1)
       expect(auditRows[0]?.reason_code).toContain('identity_unavailable_at_refresh: null')
+    })
+    // [S10-21a C14d, D-R132 F5] FAILS AT BASE (1b7ba3cbb9): `respawnGateBundle` was built via
+    // `launchAdmissionBundle(runtime, args.connectionId)` ABOVE this block's own try, so a throw
+    // from that call (a store fault) escaped the local catch entirely and propagated to the
+    // outer handler catch (pty.ts:7519), which rejects the pane-spawn reservation and rethrows
+    // over an already-committed, live PTY — the awaited `pty:spawn` call itself rejects. This
+    // pins the fix: the call moves inside the try, so the same fault is caught locally and the
+    // spawn settles normally.
+    it('Case F (D-R132 F5): a launchAdmissionBundle throw at the post-spawn-commit gate does not escape — the spawn settles normally', async () => {
+      const { runtime, db } = setUpRealRuntime()
+      const tabId = '99999999-9999-4999-8999-eeeeeeeeee21'
+      const leafId = '99999999-9999-4999-8999-eeeeeeeeee22'
+      const paneKey = makePaneKey(tabId, leafId)
+      seedRespawnAgent(db, {
+        paneKey,
+        oldTerminalHandle: 'term_dead_old_z',
+        oldProcessIncarnation: 'pty-old:inc-old-z'
+      })
+      const seeded = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey,
+        agentType: 'claude',
+        sessionId: 'sess-case-z',
+        launchGeneration: 'gen-case-z',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      if (!seeded.ok) {
+        throw new Error('seed launch row failed')
+      }
+      // Only the post-spawn-commit gate's OWN `launchAdmissionBundle` call (the 3rd call to
+      // `getOrchestrationCompatibilityHostId` in this scenario — the earlier sweep-lock and
+      // spawn-commit admission calls must still succeed) throws, isolating the fault to this
+      // gate.
+      let calls = 0
+      const origGetCompatHostId = runtime.getOrchestrationCompatibilityHostId.bind(runtime)
+      runtime.getOrchestrationCompatibilityHostId = (() => {
+        calls += 1
+        if (calls >= 3) {
+          throw new Error('injected: launch store unavailable')
+        }
+        return origGetCompatHostId()
+      }) as never
+      setLocalPtyProvider(createSelfResumeProvider(runtime, 'pty-case-z', 'inc-new-z') as never)
+
+      const result = await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
+        cols: 80,
+        rows: 24,
+        cwd: '/tmp/case-z',
+        command: 'claude --resume sess-case-z',
+        launchAgent: 'claude',
+        worktreeId: 'repo-1::/tmp/case-z',
+        tabId,
+        leafId
+      })
+
+      expect(result).toBeDefined()
+      expect((result as { id?: string }).id).toBe('pty-case-z')
     })
   })
 })
