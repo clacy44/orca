@@ -360,7 +360,8 @@ import { findRemotePartyByRenderedKey, isFederatedPact } from './pact-federated-
 import {
   queryCounterpartLiveState,
   queryLinkHealth,
-  type PactWaitExpiryFacts
+  type PactWaitExpiryFacts,
+  type PactCounterpartState
 } from './pact-wait-expiry-facts'
 import {
   findOrCreatePeerThread as findOrCreatePeerThreadImpl,
@@ -5874,14 +5875,67 @@ export class OrchestrationDb {
         peerStateQueryFailed: false
       }
     }
-    const linkHealth = queryLinkHealth(this.db, thread, Date.now())
+    const now = Date.now()
+    const linkHealth = queryLinkHealth(this.db, thread, now)
     const { state, failed } = queryCounterpartLiveState(this.db, thread)
+    // S10-21b B15b (design §3.3, "Second source — a live query at wait-expiry time"): a
+    // query failure or peer-reported tombstone/quarantine is the SAME scan-equivalent fact a
+    // periodic scan would write — through the one NB2 write rule (putScanFact), never a second
+    // rule. A live/idle result clears `unreachable_since` on the same (any-non-'unreachable')
+    // rule; 'unknown' with no failure (no mirror row yet) is neither signal and writes nothing.
+    if (thread.pact_peer_link_device_id && thread.pact_peer_environment_id) {
+      this.recordWaitExpiryScanEquivalentFact(
+        thread.pact_peer_link_device_id,
+        thread.pact_peer_environment_id,
+        state,
+        failed,
+        now
+      )
+    }
     return {
       lastInboundAt: thread.pact_last_inbound_at,
       linkHealth,
       peerState: state,
       peerStateQueryFailed: failed
     }
+  }
+
+  // S10-21b B15b (design §3.3 second source): promotes a wait-expiry fact-2 outcome into
+  // `peer_link_scan_facts` through `putScanFact` — the sweep's pause predicate (`outcome =
+  // 'unreachable' AND now - unreachable_since >= PACT_LINK_SILENCE_MS`,
+  // pact-link-evidence-sweep.ts) is unchanged and untouched by this writer. Preserves the prior
+  // row's `environmentPairingRevision`/`linkCredentialFp` when one exists (this call never
+  // performs a real link-credential probe); falls back to the same sentinel empty-fingerprint
+  // convention `link-binding-prover-settle.ts:266` already uses for "no probe ran" when no prior
+  // scan fact exists for this (link, environment).
+  private recordWaitExpiryScanEquivalentFact(
+    linkDeviceId: string,
+    environmentId: string,
+    peerState: PactCounterpartState,
+    peerStateQueryFailed: boolean,
+    now: number
+  ): void {
+    const adverse = peerStateQueryFailed || peerState === 'gone' || peerState === 'quarantined'
+    const reachable = !peerStateQueryFailed && (peerState === 'live' || peerState === 'idle')
+    if (!adverse && !reachable) {
+      return
+    }
+    const prior = this.getScanFact(linkDeviceId, environmentId)
+    this.putScanFact({
+      linkDeviceId,
+      environmentId,
+      outcome: adverse ? 'unreachable' : 'no_match',
+      environmentPairingRevision: prior?.environmentPairingRevision ?? 0,
+      linkCredentialFp: prior?.linkCredentialFp ?? '',
+      detail: adverse
+        ? peerStateQueryFailed
+          ? 'wait_expiry_query_failed'
+          : peerState === 'gone'
+            ? 'wait_expiry_peer_gone'
+            : 'wait_expiry_peer_quarantined'
+        : null,
+      observedAt: now
+    })
   }
 
   getIncomingUnansweredProposal(agentId: string): ThreadRow | undefined {

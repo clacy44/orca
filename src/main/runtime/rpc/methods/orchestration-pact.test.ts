@@ -13,6 +13,8 @@ import type Database from '../../../sqlite/sync-database'
 import { renderFederatedPartyKey } from '../../orchestration/pact-federated-identity'
 import * as pactWaitExpiryFacts from '../../orchestration/pact-wait-expiry-facts'
 import { putPeerLinkBinding } from '../../orchestration/link-binding-store'
+import { putScanFact } from '../../orchestration/link-binding-observations-store'
+import { PACT_LINK_SILENCE_MS } from '../../orchestration/link-binding-constants'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -509,6 +511,149 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
       .prepare(`SELECT pact_paused_at FROM threads WHERE id = ?`)
       .get(threadId) as { pact_paused_at: string | null }
     expect(threadRow.pact_paused_at).toBeNull()
+  })
+
+  // S10-21b B15b (design §3.3, "Second source — a live query at wait-expiry time"): the
+  // fact-2 live directory query the wait-timeout branch already runs (T22) is ALSO fed through
+  // the one NB2 write rule (`putScanFact`) — never a second rule — so a chair parked on `--for
+  // pact`/`--for step` (no outbox rows to derive fact 1 from) still contributes link evidence.
+  // Fails at base 7298dca7dd: the timeout branch never calls `putScanFact`; no row in
+  // `peer_link_scan_facts` is ever written or updated by a wait timeout.
+  async function setupFederatedWaitPact(
+    env: string,
+    remoteAgentId: string,
+    remoteState: 'live' | 'idle' | 'gone'
+  ): Promise<{ threadId: string; raw: Database.Database; a: string }> {
+    setup()
+    const a = await registerAgent('agent-a', evidenceA)
+    db.upsertRemoteAgent({
+      environmentId: env,
+      environmentName: env,
+      linkKind: 'environment',
+      remoteAgentId,
+      displayName: 'peer (remote)',
+      role: null,
+      state: remoteState,
+      derived: false,
+      remoteQuarantined: false
+    })
+    const raw = (db as unknown as { db: Database.Database }).db
+    putPeerLinkBinding(raw, {
+      linkDeviceId: env,
+      environmentId: env,
+      boundEndpointId: `endpoint-${env}`,
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({ linkDeviceId: env, remoteAgentId })
+    const { thread } = db.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    const threadId = thread.id
+    db.proposePact({
+      callerAgentId: a,
+      callerPaneKey: PANE_A,
+      callerHostId: 'local',
+      threadId,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    raw
+      .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
+      .run(peerKey, threadId)
+    return { threadId, raw, a }
+  }
+
+  it('B15b(a): a pact wait timeout against a tombstoned peer stamps unreachable_since when no scan has ever run', async () => {
+    const { threadId, raw } = await setupFederatedWaitPact('env-b15b-a', 'peer-b15b-a', 'gone')
+    expect(
+      raw
+        .prepare(
+          `SELECT COUNT(*) AS n FROM peer_link_scan_facts WHERE link_device_id = 'env-b15b-a'`
+        )
+        .get()
+    ).toEqual({ n: 0 })
+
+    const result = (await call(
+      'orchestration.wait',
+      { threadId, for: 'pact', timeoutMs: 30 },
+      ctx(evidenceA)
+    )) as { outcome: string; peerState: string | null }
+    expect(result.outcome).toBe('timeout')
+    expect(result.peerState).toBe('gone')
+
+    const fact = raw
+      .prepare(
+        `SELECT outcome, unreachable_since FROM peer_link_scan_facts
+         WHERE link_device_id = 'env-b15b-a' AND environment_id = 'env-b15b-a'`
+      )
+      .get() as { outcome: string; unreachable_since: number | null } | undefined
+    expect(fact?.outcome).toBe('unreachable')
+    expect(fact?.unreachable_since).toBeGreaterThan(0)
+  })
+
+  it('B15b(b): a pact wait timeout against a live peer clears a previously stamped unreachable_since', async () => {
+    const { threadId, raw } = await setupFederatedWaitPact('env-b15b-b', 'peer-b15b-b', 'live')
+    // Seed a prior unreachable episode (as an ordinary periodic scan would have written it).
+    putScanFact(raw, {
+      linkDeviceId: 'env-b15b-b',
+      environmentId: 'env-b15b-b',
+      outcome: 'unreachable',
+      environmentPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      detail: null,
+      observedAt: Date.now() - 1_000
+    })
+
+    const result = (await call(
+      'orchestration.wait',
+      { threadId, for: 'pact', timeoutMs: 30 },
+      ctx(evidenceA)
+    )) as { outcome: string; peerState: string | null }
+    expect(result.outcome).toBe('timeout')
+    expect(result.peerState).toBe('live')
+
+    const fact = raw
+      .prepare(
+        `SELECT outcome, unreachable_since FROM peer_link_scan_facts
+         WHERE link_device_id = 'env-b15b-b' AND environment_id = 'env-b15b-b'`
+      )
+      .get() as { outcome: string; unreachable_since: number | null } | undefined
+    expect(fact?.outcome).not.toBe('unreachable')
+    expect(fact?.unreachable_since).toBeNull()
+  })
+
+  it('B15b(c) / T-NA2a second-source half: the sweep pauses the pact from (a) on unreachable_since alone, no periodic scan ever run', async () => {
+    const { threadId, raw } = await setupFederatedWaitPact('env-b15b-c', 'peer-b15b-c', 'gone')
+
+    await call('orchestration.wait', { threadId, for: 'pact', timeoutMs: 30 }, ctx(evidenceA))
+    const fact = raw
+      .prepare(
+        `SELECT unreachable_since FROM peer_link_scan_facts
+         WHERE link_device_id = 'env-b15b-c' AND environment_id = 'env-b15b-c'`
+      )
+      .get() as { unreachable_since: number }
+    expect(fact.unreachable_since).toBeGreaterThan(0)
+
+    const before = db.runPactLinkEvidenceSweep(fact.unreachable_since + PACT_LINK_SILENCE_MS - 1)
+    expect(before.paused).toEqual([])
+    expect(db.getThread(threadId)?.pact_paused_at).toBeNull()
+
+    const after = db.runPactLinkEvidenceSweep(fact.unreachable_since + PACT_LINK_SILENCE_MS)
+    expect(after.paused.map((o) => o.threadId)).toEqual([threadId])
+    expect(db.getThread(threadId)?.pact_pause_reason).toBe('counterpart_gone')
   })
 
   it('K24: mixed cycle — turn holders refused any park; non-turn-holders admitted (not a cycle)', async () => {
