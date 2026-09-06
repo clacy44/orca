@@ -12,9 +12,21 @@ import { checkAndBumpRate } from './agent-rate-limit'
 import { settleReplyOutboxItem } from './reply-outbox-lifecycle'
 import { enqueueFederatedPactVerb } from './pact-federated-emit'
 import { insertPactStepRow, requireThread } from './pact-shared'
-import { LINK_BINDING_RATE_WINDOW_MS, PACT_RELAY_HOLD_MAX_MS } from './link-binding-constants'
+import { PACT_HOLD_CAUSES } from './reply-outbox-pump-disposition'
+import {
+  auditReplyRelaySettleRaced,
+  fireReplyRelayDispositionNotice,
+  shouldFireDispositionNotice
+} from './reply-outbox-pump-notify'
+import {
+  LINK_BINDING_RATE_WINDOW_MS,
+  PACT_RELAY_HOLD_MAX_MS,
+  PACT_RELAY_FAILED_NOTICE
+} from './link-binding-constants'
 import type { ReplyOutboxRow } from './reply-outbox-types'
 import type { ThreadRow } from './thread-directory-types'
+import type { OrcaRuntimeService } from '../orca-runtime'
+import type { OrchestrationDb } from './db'
 
 // §2.5's fence table — the oversize-gap boundary.
 export const PACT_MAX_GAP = 64
@@ -79,6 +91,57 @@ export function mintResyncRequestIfNeeded(db: Database.Database, threadId: strin
     runId: 'host',
     resyncRequest: { nonce }
   })
+  return true
+}
+
+// S10-21b B9b (design v3.1:560-570/684-700, §2.6(c), gap 21b-G1): true once a pact item's retry
+// (one of the four PACT_HOLD_CAUSES) has been held past PACT_RELAY_HOLD_MAX_MS, read from
+// first_held_at ONLY. Not in reply-outbox-pump-disposition.ts, which stays a pure classifier.
+function isPactHoldExpired(item: ReplyOutboxRow, disposition: string, now: number): boolean {
+  return (
+    item.relayKind !== 'reply' &&
+    item.pactThreadId !== null &&
+    PACT_HOLD_CAUSES.has(disposition) &&
+    item.firstHeldAt !== null &&
+    now - item.firstHeldAt > PACT_RELAY_HOLD_MAX_MS
+  )
+}
+
+// S10-21b B9 call-site shape, shared: settle a pact item's terminal disposition (B9's own
+// machinery), then the raced-audit/notice pair every terminal pact settle uses identically —
+// both the pre-existing `refused` call site (reply-outbox-pump.ts) and B9b's new POST-DIAL
+// hold-expired call site below reduce to one call each of this, no duplicated branching.
+export function applyPactTerminalSettle(
+  runtime: OrcaRuntimeService,
+  db: OrchestrationDb,
+  item: ReplyOutboxRow,
+  code: string,
+  errorMessage: string,
+  now: number
+): void {
+  const result = db.firePactTerminalSettleDisposition(item, code, errorMessage, now)
+  if (result.outcome === 'raced') {
+    auditReplyRelaySettleRaced(db, item, 'refused')
+  } else if (shouldFireDispositionNotice(runtime, item, PACT_RELAY_FAILED_NOTICE, now)) {
+    fireReplyRelayDispositionNotice(runtime, item, PACT_RELAY_FAILED_NOTICE, null)
+  }
+}
+
+// S10-21b B9b (gap 21b-G1): the pump's POST-DIAL call site — when isPactHoldExpired, fires B9's
+// terminal settle with the hold cause as the terminal code and reason 'pact_hold_expired' (chair
+// default: §2.6(c) names no code for an expired hold). Returns whether it fired, so the pump's
+// retry branch knows to return without ever calling retryReplyOutboxItem for this item.
+export function firePactHoldExpiredDisposition(
+  runtime: OrcaRuntimeService,
+  db: OrchestrationDb,
+  item: ReplyOutboxRow,
+  disposition: string,
+  now: number
+): boolean {
+  if (!isPactHoldExpired(item, disposition, now)) {
+    return false
+  }
+  applyPactTerminalSettle(runtime, db, item, disposition, 'pact_hold_expired', now)
   return true
 }
 

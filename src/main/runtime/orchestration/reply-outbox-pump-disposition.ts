@@ -75,7 +75,10 @@ const KNOWN_REFUSAL_CODES = new Set([
 // bound a clock to read (the bound-check-then-terminal-settle itself is commit 9's job — this
 // function only classifies the bucket). Checked BEFORE KNOWN_REFUSAL_CODES, which these four
 // codes also belong to, so a pact item never falls through to the terminal branch.
-const PACT_HOLD_CAUSES = new Set([
+// S10-21b B9b (design §2.6(c)): exported so the pump's retry branch can bound a held pact row's
+// four repairable causes at PACT_RELAY_HOLD_MAX_MS without re-deriving the set or adding a clock
+// to this pure classifier (21b-G1) — the set itself is untouched.
+export const PACT_HOLD_CAUSES = new Set([
   'agent_retired',
   'agent_unknown',
   'derived_agent_unaddressable',

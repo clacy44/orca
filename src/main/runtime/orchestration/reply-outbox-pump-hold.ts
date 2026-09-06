@@ -11,6 +11,7 @@ import {
 import {
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_HOLD_MAX_MS,
+  PACT_RELAY_HOLD_MAX_MS,
   REPLY_RELAY_ROUTE_MOVED_NOTICE,
   REPLY_RELAY_ABANDONED_NOTICE,
   ROUTE_MOVED_CODE,
@@ -110,12 +111,17 @@ export function holdOrRetargetReplyOutboxItem(
   // Ruling 26(c): evaluated from item.firstHeldAt as already read at claim time — BEFORE the
   // hold write below (which is the only statement in this function that could advance it).
   const firstHeldAt = item.firstHeldAt ?? now
+  // S10-21b B9b (design v3.1:566, gap 21b-G1): the PRE-DIAL bound — a pact row (relayKind !==
+  // 'reply') is bounded by PACT_RELAY_HOLD_MAX_MS (24h) instead of mail's REPLY_OUTBOX_HOLD_MAX_MS
+  // (15min), at BOTH deadlines below. One local constant, nothing else in this function changes —
+  // mail (relayKind === 'reply') reads REPLY_OUTBOX_HOLD_MAX_MS exactly as before, byte-identical.
+  const holdMax = item.relayKind === 'reply' ? REPLY_OUTBOX_HOLD_MAX_MS : PACT_RELAY_HOLD_MAX_MS
   // Ruling 26 Addendum 4(kk): a same-route hold (isSameRoute true — this tick's own re-check
   // resolved to the row's CURRENT route) NEVER settles route_moved (the route did not move) nor
   // the binding_changed/reply_relay_refused pairing the C5d review found dishonest (a peer
   // refusal that never happened). Only the genuine "no routable binding found at all" case
   // (retargeted === null, !isSameRoute) settles here, with route_moved.
-  if (!isSameRoute && now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
+  if (!isSameRoute && now - firstHeldAt > holdMax) {
     const settled = db.settleReplyOutboxItem(item.id, {
       state: 'refused',
       settledAt: now,
@@ -140,7 +146,7 @@ export function holdOrRetargetReplyOutboxItem(
   // route_moved uses, a same-route item settles abandoned with the existing
   // reply_relay_abandoned code and notice — an honest word (the route never moved, and no
   // refusal happened) reached inside the R19.3 detection window instead of seven days later.
-  if (isSameRoute && now - firstHeldAt > REPLY_OUTBOX_HOLD_MAX_MS) {
+  if (isSameRoute && now - firstHeldAt > holdMax) {
     const settled = db.settleReplyOutboxItem(item.id, {
       state: 'abandoned',
       settledAt: now,

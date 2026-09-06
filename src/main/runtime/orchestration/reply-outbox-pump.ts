@@ -8,6 +8,7 @@ import { createInFlightGuard } from './link-binding-schedule'
 import { getRoutableLinkBinding } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
+import { applyPactTerminalSettle, firePactHoldExpiredDisposition } from './pact-federated-repair'
 import {
   fireReplyRelayDispositionNotice,
   shouldFireDispositionNotice,
@@ -26,8 +27,7 @@ import {
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_LINK_CONCURRENCY,
   REPLY_OUTBOX_KICK_DEBOUNCE_MS,
-  REPLY_RELAY_ABANDONED_NOTICE,
-  PACT_RELAY_FAILED_NOTICE
+  REPLY_RELAY_ABANDONED_NOTICE
 } from './link-binding-constants'
 import { MAX_TIMER_DELAY_MS } from '../../../shared/timer-delay'
 
@@ -168,17 +168,7 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         // S10-21b B9 (design §2.6(c)): a pact item's terminal settle is the seven-step
         // cancel-tail/pause/queue-gap_notice transaction, never the plain settle mail uses.
         if (item.relayKind !== 'reply' && item.pactThreadId) {
-          const result = db.firePactTerminalSettleDisposition(
-            item,
-            disposition.code,
-            disposition.errorMessage,
-            at
-          )
-          if (result.outcome === 'raced') {
-            auditSettleRaced(db, item, 'refused')
-          } else if (shouldFireDispositionNotice(runtime, item, PACT_RELAY_FAILED_NOTICE, at)) {
-            fireDispositionNotice(item, PACT_RELAY_FAILED_NOTICE, null)
-          }
+          applyPactTerminalSettle(runtime, db, item, disposition.code, disposition.errorMessage, at)
           return
         }
         // Ruling 26 Addendum 1(q)/F4: check the settle's boolean before firing.
@@ -206,6 +196,12 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         // M9/R18.5's `runtime_environment_changed` row: no failure bump, immediate re-check
         // through the SAME routable-binding path the top of this function already runs.
         holdOrRetargetReplyOutboxItem(runtime, item, at)
+        return
+      }
+      // S10-21b B9b (design §2.6(c), gap 21b-G1): POST-DIAL bound — a held pact retry past
+      // PACT_RELAY_HOLD_MAX_MS (first_held_at only) takes B9's terminal settle via B9's own
+      // machinery, never a re-implementation.
+      if (firePactHoldExpiredDisposition(runtime, db, item, disposition.disposition, at)) {
         return
       }
       // H5/Ruling 26(f): consecutive_failures is driven from the row's OWN persisted counter,
