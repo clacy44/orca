@@ -1,20 +1,15 @@
-// S10-21b B8/B9 (design §2.5) — inbound pact-verb APPLY: gate 14's strict fence (exact
+// S10-21b B8/B9/B13 (design §2.5) — inbound pact-verb APPLY: gate 14's strict fence (exact
 // successor / gap / desync, §2.5's full table — B9), per-verb effect, wake descriptor.
-// resync_request/resync bypass gate 14 entirely and dispatch straight to
-// pact-federated-resync-apply.ts (B9); `rebind_party` still refuses
-// `pact_repair_not_yet_available` (B13's). Gates 6-13 live in pact-federated-inbound-gates.ts
-// (max-lines split); gate 6 runs in the RPC handler. `pact_ordinal` NEVER comes from the wire
-// (INV-P-021).
+// resync_request/resync/rebind_party all bypass gate 14 entirely and dispatch straight to their
+// own apply module (resync/resync_request: pact-federated-resync-apply.ts, B9; rebind_party:
+// pact-federated-rebind.ts, B13 — its own six-clause gate, not the seq fence, is its idempotency
+// story). gap_notice gets NO special case here — it is processed exactly as a gap of the shape
+// its seq implies, through the same fence every other verb uses. Gates 6-13 live in
+// pact-federated-inbound-gates.ts (max-lines split); gate 6 runs in the RPC handler.
+// `pact_ordinal` NEVER comes from the wire (INV-P-021).
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
-import { insertGatedMessage } from './message-gate-writer'
-import { bumpThreadOnMessage } from './thread-directory'
 import { auditPact, insertPactStepRow } from './pact-shared'
-import { adoptEraOnInboundPropose } from './pact-federated-era'
-import {
-  declineLosingLocalPropose,
-  resolveCrossProposeOutcome
-} from './pact-federated-propose-race'
 import type { ThreadRow } from './types'
 import {
   LEDGER_VERB_KIND,
@@ -26,7 +21,7 @@ import {
   resolvePactThreadAndGates,
   type ApplyInboundPactVerbArgs
 } from './pact-federated-inbound-gates'
-import { describeWake, type InboundPactWake } from './pact-federated-inbound-wake'
+import { describeWake } from './pact-federated-inbound-wake'
 import {
   firePactDesyncDispositionInbound,
   mintResyncRequestIfNeeded,
@@ -36,6 +31,10 @@ import {
   applyInboundResyncRequestVerb,
   applyInboundResyncVerb
 } from './pact-federated-resync-apply'
+import { applyInboundRebindPartyVerb, type SupersessionChainWalker } from './pact-federated-rebind'
+import { applyPropose, type ApplyInboundPactVerbResult } from './pact-federated-propose-apply'
+import { insertGatedMessage } from './message-gate-writer'
+import { bumpThreadOnMessage } from './thread-directory'
 
 export type {
   ApplyInboundPactVerbArgs,
@@ -44,17 +43,12 @@ export type {
 } from './pact-federated-inbound-gates'
 export { PACT_STEPS_PER_PACT_CAP } from './pact-federated-inbound-gates'
 export type { InboundPactWake } from './pact-federated-inbound-wake'
-
-export type ApplyInboundPactVerbResult = {
-  accepted: true
-  messageId: string
-  threadId: string
-  wake: InboundPactWake
-}
+export type { ApplyInboundPactVerbResult } from './pact-federated-propose-apply'
 
 export function applyInboundPactVerb(
   db: Database.Database,
-  args: ApplyInboundPactVerbArgs
+  args: ApplyInboundPactVerbArgs,
+  walkSupersessionChain: SupersessionChainWalker
 ): ApplyInboundPactVerbResult {
   const peerThreadId = runPactGrammarGate(args) // Gate 7
   const dedupe = runPactDedupeGate(db, args, peerThreadId) // Gate 8
@@ -82,6 +76,9 @@ export function applyInboundPactVerb(
   }
   if (args.pact.verb === 'resync') {
     return applyInboundResyncVerb(db, resolution.thread, args)
+  }
+  if (args.pact.verb === 'rebind_party') {
+    return applyInboundRebindPartyVerb(db, resolution.thread, args, walkSupersessionChain)
   }
 
   // Gate 14 — the strict fence (§2.5, Ruling 34 Addendum 6(2)).
@@ -118,107 +115,6 @@ export function applyInboundPactVerb(
     )
   }
   return applyLedgerOrNoLedgerVerb(db, resolution.thread, args, renderedSenderKey(args))
-}
-
-function applyPropose(
-  db: Database.Database,
-  thread: ThreadRow,
-  args: ApplyInboundPactVerbArgs
-): ApplyInboundPactVerbResult {
-  const senderKey = renderedSenderKey(args)
-  // B10 (design §2.13) — pair guard + cross-propose tie-break (pact-federated-propose-race.ts).
-  // 'incoming_wins': auto-decline+relay the local loser before era adoption/apply, below.
-  const race = resolveCrossProposeOutcome(db, thread, args, senderKey)
-  if (race === 'incoming_wins') {
-    declineLosingLocalPropose(db, thread.id, args)
-  }
-
-  // Era adoption + seq reset (B6, chair answer 3) — called, never re-derived.
-  adoptEraOnInboundPropose(db, { id: thread.id }, { era: args.pact.era })
-
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    db.prepare(
-      `UPDATE threads SET
-         pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',
-         pact_steps_total = ?, pact_ordinal = 0, pact_turn_agent_id = NULL,
-         pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now'),
-         pact_release_at = NULL, pact_peer_release_at = NULL, pact_turn_in_flight_at = NULL,
-         pact_peer_paused_at = NULL, pact_last_inbound_at = datetime('now'),
-         pact_last_resync_at = NULL, pact_relay_pending = NULL, pact_resync_nonce = NULL,
-         pact_resync_nonce_at = NULL, pact_repair_attempts = 0,
-         pact_peer_agent_id = ?, pact_peer_link_device_id = ?, pact_peer_environment_id = ?,
-         pact_peer_thread_id = ?, pact_peer_seq = ?
-       WHERE id = ?`
-    ).run(
-      senderKey,
-      args.toAgentId,
-      args.pact.stepsTotal ?? null,
-      args.senderAgentId,
-      args.pairedDeviceId,
-      args.senderEnvironmentId,
-      args.peerThreadId,
-      args.pact.seq,
-      thread.id
-    )
-    const inserted = insertGatedMessage(db, {
-      id: args.messageId,
-      from: senderKey,
-      to: `agent:${args.toAgentId}`,
-      subject: 'pact propose',
-      body: args.body ?? '',
-      type: 'status',
-      threadId: thread.id,
-      hostPayloadKind: 'pact_propose',
-      deliveryContract: 'audit_only',
-      runId: 'peer',
-      verb: 'federation_import',
-      peerLinkDeviceId: args.pairedDeviceId,
-      peerAgentId: args.senderAgentId,
-      peerThreadId: args.peerThreadId,
-      peerRelayedAt: null
-    })
-    if (inserted.outcome === 'refused') {
-      throw new OrchestrationError(
-        'gate_refused',
-        'The relayed propose was refused by the message gate.'
-      )
-    }
-    bumpThreadOnMessage(db, thread.id, inserted.message)
-    insertPactStepRow(db, {
-      threadId: thread.id,
-      ordinal: 0,
-      kind: 'propose',
-      actorAgentId: senderKey,
-      actorPaneKey: null,
-      actorHostId: args.pairedDeviceId,
-      messageId: inserted.message.id,
-      summary: null,
-      turnAfterAgentId: null,
-      reasonCode: null,
-      actorIsRemote: true,
-      actorRemoteAgentId: args.senderAgentId,
-      actorEnvironmentId: args.senderEnvironmentId,
-      relaySeq: args.pact.seq
-    })
-    auditPact(db, {
-      agentId: null,
-      actorPaneKey: null,
-      actorHostId: args.pairedDeviceId,
-      verb: 'pact_propose',
-      outcome: 'proposed'
-    })
-    db.exec('COMMIT')
-    return {
-      accepted: true,
-      messageId: inserted.message.id,
-      threadId: thread.id,
-      wake: { kind: 'proposed', toAgentId: args.toAgentId, threadId: thread.id }
-    }
-  } catch (err) {
-    db.exec('ROLLBACK')
-    throw err
-  }
 }
 
 function applyLedgerOrNoLedgerVerb(

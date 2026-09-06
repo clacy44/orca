@@ -235,6 +235,8 @@ import {
   type ApplyInboundPactVerbArgs,
   type ApplyInboundPactVerbResult
 } from './pact-federated-inbound-apply'
+import { drainPendingRebindParty as drainPendingRebindPartyImpl } from './pact-federated-rebind'
+import type { FederatedPactEmitRuntime } from './pact-federated-emit'
 import {
   firePactTerminalSettleDisposition as firePactTerminalSettleDispositionImpl,
   type PactTerminalSettleOutcome
@@ -9108,7 +9110,19 @@ export class OrchestrationDb {
   // S10-21b B8 (design §4.2 gates 6-13/14 happy path) — inbound pact-verb apply; see
   // pact-federated-inbound-apply.ts/pact-federated-inbound-gates.ts for the gate-by-gate body.
   applyInboundPactVerb(args: ApplyInboundPactVerbArgs): ApplyInboundPactVerbResult {
-    return applyInboundPactVerbImpl(this.db, args)
+    // B13: the bounded supersession-chain walker (B2) is an OrchestrationDb method, not a free
+    // function — threaded through as a callback so pact-federated-rebind.ts's six-clause apply
+    // never re-derives it (never touches raw db for this read; `this` stays bound).
+    return applyInboundPactVerbImpl(this.db, args, (remoteAgentId, linkKey) =>
+      this.walkRemoteAgentSupersessionChain(remoteAgentId, linkKey)
+    )
+  }
+
+  // S10-21b B13 (design §1.4 "Local side", §2.11) — drains threads.pact_relay_pending='rebind'
+  // rows the succession UPDATE (agent-thread-succession.ts) queued. Called by the reply-outbox
+  // pump once per tick, never inside upsertAgentByPaneSuffix's own transaction.
+  drainPendingRebindParty(runtime: FederatedPactEmitRuntime | null): number {
+    return drainPendingRebindPartyImpl(this.db, runtime)
   }
 
   // S10-21b B9 (design §2.6(c)) — the outbound pump's terminal-settle disposition for a pact

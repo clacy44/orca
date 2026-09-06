@@ -45,10 +45,8 @@ export const NO_LEDGER_VERBS: ReadonlySet<InboundPactVerb> = new Set([
   'gap_notice'
 ])
 
-// Real semantics land with B13 (rebind_party) — recognised here but refused loudly rather than
-// mis-applied. B9 (this commit) wires resync/resync_request/gap_notice's gap case for real, so
-// those three are no longer in this set.
-export const NOT_YET_IMPLEMENTED_VERBS: ReadonlySet<InboundPactVerb> = new Set(['rebind_party'])
+// B13 wires `rebind_party` for real (pact-federated-rebind.ts) — the set is now empty and the
+// mechanism it gated is retired (nothing else was ever added to it).
 
 export type InboundPactEnvelope = {
   verb: InboundPactVerb
@@ -280,8 +278,11 @@ export function resolvePactThreadAndGates(
     )
   }
 
-  // Gate 12 — party: sender must already be a pact party, re-read fresh each call.
-  if (!isPactParty(thread, senderKey)) {
+  // Gate 12 — party: sender must already be a pact party, re-read fresh each call. B13:
+  // `rebind_party` is exempt — its sender authenticates as the NEW identity, which by
+  // definition is not yet the recorded party; that check is the six-clause apply's own clause 5
+  // (`remote:<link>:<rebind.oldAgentId>` must be the party), pact-federated-rebind.ts.
+  if (pact.verb !== 'rebind_party' && !isPactParty(thread, senderKey)) {
     throw new OrchestrationError(
       'not_a_participant',
       `Refused: ${senderKey} is not a party to the pact on ${thread.id}.`
@@ -296,13 +297,6 @@ export function resolvePactThreadAndGates(
     pact.verb === 'resync_request' ||
     pact.verb === 'gap_notice' ||
     pact.verb === 'rebind_party'
-
-  if (NOT_YET_IMPLEMENTED_VERBS.has(pact.verb)) {
-    throw new OrchestrationError(
-      'pact_repair_not_yet_available',
-      `Refused: ${pact.verb} is recognised but this host does not yet apply it (S10-21b commit 9/13).`
-    )
-  }
 
   if (pact.verb === 'accept' || pact.verb === 'decline') {
     if (thread.pact_state !== 'proposed' || thread.pact_with_agent_id !== senderKey) {

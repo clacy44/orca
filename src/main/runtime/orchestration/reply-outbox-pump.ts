@@ -136,10 +136,22 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         `pump:${item.linkDeviceId}:${item.environmentId}`,
         REPLY_OUTBOX_RPC_BUDGET_MS,
         async () => {
+          // S10-21b B13 (design §2.10 "Relay addressing follows the party"): re-resolve the
+          // party at DIAL time, not just at enqueue. `repointFederatedPactParty` (B3) already
+          // repoints every unsettled outbox row's own `peer_agent_id` column for a rebound
+          // pact, but a rebind landing in the gap between enqueue and THIS dial would otherwise
+          // still send the toAgentId the JSON payload captured at enqueue time.
+          const dialParams = JSON.parse(item.payload) as Record<string, unknown>
+          if (item.pactThreadId !== null) {
+            const currentThread = db.getThread(item.pactThreadId)
+            if (currentThread?.pact_peer_agent_id) {
+              dialParams.toAgentId = currentThread.pact_peer_agent_id
+            }
+          }
           return runtime.callPinnedEnvironment({
             selector: item.environmentId,
             method: 'orchestration.federatedSend',
-            params: JSON.parse(item.payload),
+            params: dialParams,
             timeoutMs: REPLY_OUTBOX_RPC_BUDGET_MS,
             maxDurationMs: REPLY_OUTBOX_RPC_BUDGET_MS,
             expectedEnvironmentPairingRevision: item.boundPairingRevision,
@@ -295,6 +307,11 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
     loopRunning = true
     try {
       const db = runtime.getOrchestrationDb()
+      // S10-21b B13 (design §1.4 "Local side", §2.11): drain any succession-queued
+      // `pact_relay_pending = 'rebind'` flags once per tick, before the ordinary claim loop —
+      // never inside `upsertAgentByPaneSuffix`'s own transaction (that constraint is enforced
+      // at the WRITE site, agent-thread-succession.ts, not here).
+      db.drainPendingRebindParty(runtime)
       for (;;) {
         if (stopped) {
           return

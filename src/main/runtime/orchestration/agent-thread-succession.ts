@@ -160,6 +160,10 @@ export function adoptFromPredecessors(
     // successor `not_a_participant` even though `orca agents threads` already listed it as a
     // member, which is exactly the "peers had to open fresh threads" symptom. One UPDATE per
     // predecessor, scoped per-column so a column the predecessor never held is left untouched.
+    // S10-21b B13 (design §1.4 "Local side"): one plain UPDATE, same transaction, no enqueue —
+    // flags every federated thread this predecessor's rename touched so the pump (not this
+    // transaction) later tells the peer via `rebind_party`. `pact_peer_agent_id IS NOT NULL` is
+    // §1.2's own federated discriminator; a local (non-federated) pact is untouched.
     db.prepare(
       `UPDATE threads SET
          pact_proposer_agent_id =
@@ -167,7 +171,13 @@ export function adoptFromPredecessors(
          pact_with_agent_id =
            CASE WHEN pact_with_agent_id = ? THEN ? ELSE pact_with_agent_id END,
          pact_turn_agent_id =
-           CASE WHEN pact_turn_agent_id = ? THEN ? ELSE pact_turn_agent_id END
+           CASE WHEN pact_turn_agent_id = ? THEN ? ELSE pact_turn_agent_id END,
+         pact_relay_pending =
+           CASE
+             WHEN (pact_proposer_agent_id = ? OR pact_with_agent_id = ?) AND pact_peer_agent_id IS NOT NULL
+             THEN 'rebind'
+             ELSE pact_relay_pending
+           END
        WHERE pact_proposer_agent_id = ? OR pact_with_agent_id = ? OR pact_turn_agent_id = ?`
     ).run(
       predecessor.id,
@@ -176,6 +186,8 @@ export function adoptFromPredecessors(
       successorId,
       predecessor.id,
       successorId,
+      predecessor.id,
+      predecessor.id,
       predecessor.id,
       predecessor.id,
       predecessor.id

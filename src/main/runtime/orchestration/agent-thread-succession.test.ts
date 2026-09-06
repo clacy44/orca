@@ -482,3 +482,67 @@ describe('countUninheritedPredecessorMail', () => {
     db.close()
   })
 })
+
+describe('S10-21b B13: the succession UPDATE flags a federated pact for pump-side rebind_party, without enqueuing', () => {
+  it("T17 (local half): a federated thread the predecessor was party to gets pact_relay_pending='rebind', and no peer_reply_outbox row exists right after the transaction", () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 'federated pact',
+      createdByAgentId: 'agt_pred',
+      participants: [{ participantKey: 'agt_pred', agentId: 'agt_pred', role: 'owner' }]
+    })
+    raw
+      .prepare(
+        `UPDATE threads SET pact_with_agent_id = 'agt_pred', pact_proposer_agent_id = 'remote:dev1:peer_x',
+           pact_peer_agent_id = 'peer_x', pact_peer_link_device_id = 'dev1', pact_state = 'engaged',
+           pact_turn_agent_id = 'agt_pred'
+         WHERE id = ?`
+      )
+      .run(thread.id)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+
+    const outcome = adoptPredecessorThreadMembership(raw, 'local', 'merge-backend', 'agt_succ')
+    expect(outcome.adoptedThreads).toBe(1)
+
+    const row = raw
+      .prepare('SELECT pact_relay_pending, pact_with_agent_id FROM threads WHERE id = ?')
+      .get(thread.id) as { pact_relay_pending: string | null; pact_with_agent_id: string }
+    expect(row.pact_relay_pending).toBe('rebind')
+    expect(row.pact_with_agent_id).toBe('agt_succ')
+
+    // No enqueue ran inside this transaction (the design's own explicit constraint).
+    const outboxCount = raw.prepare('SELECT COUNT(*) AS n FROM peer_reply_outbox').get() as {
+      n: number
+    }
+    expect(outboxCount.n).toBe(0)
+    db.close()
+  })
+
+  it('a NON-federated (local-only) pact thread is left untouched — pact_relay_pending stays null', () => {
+    const db = freshDb()
+    const raw = rawDb(db)
+    const { thread } = db.createThread({
+      subject: 'local pact',
+      createdByAgentId: 'agt_pred',
+      participants: [{ participantKey: 'agt_pred', agentId: 'agt_pred', role: 'owner' }]
+    })
+    raw
+      .prepare(
+        `UPDATE threads SET pact_with_agent_id = 'agt_pred', pact_proposer_agent_id = 'agt_other',
+           pact_state = 'engaged', pact_turn_agent_id = 'agt_pred' WHERE id = ?`
+      )
+      .run(thread.id)
+    tombstone(raw, 'agt_pred', 'local', 'merge-backend')
+
+    adoptPredecessorThreadMembership(raw, 'local', 'merge-backend', 'agt_succ')
+
+    const row = raw
+      .prepare('SELECT pact_relay_pending FROM threads WHERE id = ?')
+      .get(thread.id) as {
+      pact_relay_pending: string | null
+    }
+    expect(row.pact_relay_pending).toBeNull()
+    db.close()
+  })
+})
