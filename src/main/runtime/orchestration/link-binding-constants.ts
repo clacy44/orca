@@ -194,6 +194,10 @@ export const REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE = 'reply_relay_authorship
 // M9 (C5 review)/Ruling 26(i): the two R18.5 notices the review found unimplemented.
 export const REPLY_RELAY_STALE_PAIRING_NOTICE = 'reply_relay_stale_pairing'
 export const REPLY_RELAY_UNSUPPORTED_NOTICE = 'reply_relay_unsupported'
+// S10-21b B9 (design §2.6(c) step 7): the pact-item terminal-settle disposition's own notice —
+// distinct from REPLY_RELAY_REFUSED_NOTICE (mail's generic wording) since this one names the
+// repair commands (`pact --show`/`pact --release`).
+export const PACT_RELAY_FAILED_NOTICE = 'pact_relay_failed'
 export const LINK_BINDING_CONTESTED_NOTICE = 'link_binding_contested'
 export const LINK_BINDING_UNAVAILABLE_NOTICE = 'link_binding_unavailable'
 export const LINK_BINDING_PEER_REPORTS_CONTEST_NOTICE = 'link_binding_peer_reports_contest'

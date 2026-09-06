@@ -45,13 +45,10 @@ export const NO_LEDGER_VERBS: ReadonlySet<InboundPactVerb> = new Set([
   'gap_notice'
 ])
 
-// Real semantics land with B9 (resync/resync_request/gap_notice's gap case)/B13 (rebind_party) —
-// recognised here but refused loudly rather than mis-applied.
-export const NOT_YET_IMPLEMENTED_VERBS: ReadonlySet<InboundPactVerb> = new Set([
-  'rebind_party',
-  'resync',
-  'resync_request'
-])
+// Real semantics land with B13 (rebind_party) — recognised here but refused loudly rather than
+// mis-applied. B9 (this commit) wires resync/resync_request/gap_notice's gap case for real, so
+// those three are no longer in this set.
+export const NOT_YET_IMPLEMENTED_VERBS: ReadonlySet<InboundPactVerb> = new Set(['rebind_party'])
 
 export type InboundPactEnvelope = {
   verb: InboundPactVerb
@@ -108,6 +105,31 @@ function requirePactNonce(value: string, field: string): string {
     )
   }
   return value
+}
+
+// §2.5/§4.5 — the durable applied-id record for the no-ledger verbs (resync/resync_request/
+// rebind_party/gap_notice), capped at PACT_STEPS_PER_PACT_CAP (commit 14 imports the cap). Split
+// out so B9's resync/resync_request apply (pact-federated-resync-apply.ts) can reuse the exact
+// same cap-checked write applyLedgerOrNoLedgerVerb already uses for gap_notice/rebind_party.
+export function recordPactAppliedId(
+  db: Database.Database,
+  threadId: string,
+  messageId: string,
+  verb: InboundPactVerb
+): void {
+  const count = db
+    .prepare(`SELECT COUNT(*) AS n FROM pact_applied_ids WHERE thread_id = ?`)
+    .get(threadId) as { n: number }
+  if (count.n >= PACT_STEPS_PER_PACT_CAP) {
+    throw new OrchestrationError(
+      'pact_ledger_capped',
+      `Refused: this pact has reached its ${PACT_STEPS_PER_PACT_CAP}-entry no-ledger-verb cap.`
+    )
+  }
+  db.prepare(
+    `INSERT INTO pact_applied_ids (thread_id, message_id, verb, applied_at)
+       VALUES (?, ?, ?, datetime('now'))`
+  ).run(threadId, messageId, verb)
 }
 
 export function renderedSenderKey(args: ApplyInboundPactVerbArgs): string {

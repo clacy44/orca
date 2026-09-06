@@ -236,6 +236,10 @@ import {
   type ApplyInboundPactVerbResult
 } from './pact-federated-inbound-apply'
 import {
+  firePactTerminalSettleDisposition as firePactTerminalSettleDispositionImpl,
+  type PactTerminalSettleOutcome
+} from './pact-federated-repair'
+import {
   getOrCreateMailboxDelivery as getOrCreateMailboxDeliveryImpl,
   acknowledgeMailboxDelivery as acknowledgeMailboxDeliveryImpl,
   type GetOrCreateMailboxDeliveryParams,
@@ -9105,6 +9109,18 @@ export class OrchestrationDb {
   // pact-federated-inbound-apply.ts/pact-federated-inbound-gates.ts for the gate-by-gate body.
   applyInboundPactVerb(args: ApplyInboundPactVerbArgs): ApplyInboundPactVerbResult {
     return applyInboundPactVerbImpl(this.db, args)
+  }
+
+  // S10-21b B9 (design §2.6(c)) — the outbound pump's terminal-settle disposition for a pact
+  // item: settle-with-checked-boolean, then cancel the pact's tail/pause/queue-gap_notice. See
+  // pact-federated-repair.ts for the seven-step body.
+  firePactTerminalSettleDisposition(
+    item: ReplyOutboxRow,
+    code: string,
+    errorMessage: string,
+    now: number
+  ): PactTerminalSettleOutcome {
+    return firePactTerminalSettleDispositionImpl(this.db, item, code, errorMessage, now)
   }
 
   // S10-16 C5, R28.1 rule 2: the continuation path for a multi-message exchange — a prior

@@ -26,7 +26,8 @@ import {
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_LINK_CONCURRENCY,
   REPLY_OUTBOX_KICK_DEBOUNCE_MS,
-  REPLY_RELAY_ABANDONED_NOTICE
+  REPLY_RELAY_ABANDONED_NOTICE,
+  PACT_RELAY_FAILED_NOTICE
 } from './link-binding-constants'
 import { MAX_TIMER_DELAY_MS } from '../../../shared/timer-delay'
 
@@ -164,6 +165,22 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         item.attempts
       )
       if (disposition.kind === 'refused') {
+        // S10-21b B9 (design §2.6(c)): a pact item's terminal settle is the seven-step
+        // cancel-tail/pause/queue-gap_notice transaction, never the plain settle mail uses.
+        if (item.relayKind !== 'reply' && item.pactThreadId) {
+          const result = db.firePactTerminalSettleDisposition(
+            item,
+            disposition.code,
+            disposition.errorMessage,
+            at
+          )
+          if (result.outcome === 'raced') {
+            auditSettleRaced(db, item, 'refused')
+          } else if (shouldFireDispositionNotice(runtime, item, PACT_RELAY_FAILED_NOTICE, at)) {
+            fireDispositionNotice(item, PACT_RELAY_FAILED_NOTICE, null)
+          }
+          return
+        }
         // Ruling 26 Addendum 1(q)/F4: check the settle's boolean before firing.
         const settled = db.settleReplyOutboxItem(item.id, {
           state: 'refused',

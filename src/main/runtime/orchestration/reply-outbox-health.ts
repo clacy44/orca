@@ -12,6 +12,7 @@ import {
   REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE,
   REPLY_RELAY_STALE_PAIRING_NOTICE,
   REPLY_RELAY_UNSUPPORTED_NOTICE,
+  PACT_RELAY_FAILED_NOTICE,
   UNKNOWN_PEER_REFUSAL_CODE,
   LINK_BINDING_REVERIFY_MS,
   REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD
@@ -29,6 +30,7 @@ export type ReplyRelayNoticeCode =
   | typeof REPLY_RELAY_AUTHORSHIP_UNCONFIRMED_NOTICE
   | typeof REPLY_RELAY_STALE_PAIRING_NOTICE
   | typeof REPLY_RELAY_UNSUPPORTED_NOTICE
+  | typeof PACT_RELAY_FAILED_NOTICE
 
 // R18.5's disposition column, keyed on the wire code — the ONE closed vocabulary (P17). A key
 // outside this map renders/settles as `unknown_peer_refusal` (transport-shaped: retry).
@@ -147,6 +149,14 @@ export function describeReplyRelayNotice(
           `Message ${ctx.localMessageId} to ${who} is held: the peer does not support this ` +
           `operation yet (${ctx.peerRefusalCode ?? 'capability_unsupported'}). Update Orca on ` +
           `that host.`
+      }
+    case PACT_RELAY_FAILED_NOTICE:
+      return {
+        subject: `A pact with ${ctx.environmentName} could not be relayed`,
+        body:
+          `Message ${ctx.localMessageId} to ${who} was refused: ${ctx.peerRefusalCode ?? 'unknown_peer_refusal'}. ` +
+          `The pact is now paused and a repair has been queued. Check \`orca agents pact --show\`, ` +
+          `or \`orca agents pact --release\` if the pact is unrecoverable.`
       }
   }
 }

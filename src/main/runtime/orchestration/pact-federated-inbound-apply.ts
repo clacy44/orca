@@ -1,8 +1,10 @@
-// S10-21b B8 (design §2.5's happy-path fence row) — inbound pact-verb APPLY: gate 14's
-// successor check (`seq == pact_peer_seq + 1`), per-verb effect, wake descriptor. Gates 6-13
-// live in pact-federated-inbound-gates.ts (max-lines split); gate 6 runs in the RPC handler.
-// NOT the strict fence (gap/desync/`resync` — commit 9; `rebind_party` — commit 13; both refuse
-// `pact_repair_not_yet_available`). `pact_ordinal` NEVER comes from the wire (INV-P-021).
+// S10-21b B8/B9 (design §2.5) — inbound pact-verb APPLY: gate 14's strict fence (exact
+// successor / gap / desync, §2.5's full table — B9), per-verb effect, wake descriptor.
+// resync_request/resync bypass gate 14 entirely and dispatch straight to
+// pact-federated-resync-apply.ts (B9); `rebind_party` still refuses
+// `pact_repair_not_yet_available` (B13's). Gates 6-13 live in pact-federated-inbound-gates.ts
+// (max-lines split); gate 6 runs in the RPC handler. `pact_ordinal` NEVER comes from the wire
+// (INV-P-021).
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import { insertGatedMessage } from './message-gate-writer'
@@ -13,7 +15,7 @@ import type { ThreadRow } from './types'
 import {
   LEDGER_VERB_KIND,
   NO_LEDGER_VERBS,
-  PACT_STEPS_PER_PACT_CAP,
+  recordPactAppliedId,
   renderedSenderKey,
   runPactGrammarGate,
   runPactDedupeGate,
@@ -21,6 +23,15 @@ import {
   type ApplyInboundPactVerbArgs
 } from './pact-federated-inbound-gates'
 import { describeWake, type InboundPactWake } from './pact-federated-inbound-wake'
+import {
+  firePactDesyncDispositionInbound,
+  mintResyncRequestIfNeeded,
+  resolvePactFenceOutcome
+} from './pact-federated-repair'
+import {
+  applyInboundResyncRequestVerb,
+  applyInboundResyncVerb
+} from './pact-federated-resync-apply'
 
 export type {
   ApplyInboundPactVerbArgs,
@@ -57,14 +68,46 @@ export function applyInboundPactVerb(
     return applyPropose(db, resolution.thread, args)
   }
 
-  // Gate 14 happy-path only (§2.5's first row; gap/desync are commit 9's).
-  if (args.pact.seq !== resolution.thread.pact_peer_seq + 1) {
+  // resync_request/resync bypass gate 14's strict fence entirely (§2.5: "the wire dedupe alone
+  // is sufficient for it" — gate 8, above, already supplied that). gap_notice gets NO special
+  // case here — it is processed exactly as a gap of the shape its seq implies, through the same
+  // fence every other verb uses, below.
+  if (args.pact.verb === 'resync_request') {
+    return applyInboundResyncRequestVerb(db, resolution.thread, args)
+  }
+  if (args.pact.verb === 'resync') {
+    return applyInboundResyncVerb(db, resolution.thread, args)
+  }
+
+  // Gate 14 — the strict fence (§2.5, Ruling 34 Addendum 6(2)).
+  const fence = resolvePactFenceOutcome(resolution.thread, args.pact.seq)
+  if (fence.kind === 'gap') {
+    // The RECEIVER mints a nonce (fresh-nonce gated, NA6) and queues one coalesced
+    // resync_request back to the sender — never applied speculatively (v2's tolerance is
+    // withdrawn).
+    mintResyncRequestIfNeeded(db, resolution.thread.id)
     throw new OrchestrationError(
       'pact_out_of_order',
       `Refused: relayed seq ${args.pact.seq} is not this pact's next expected seq (${resolution.thread.pact_peer_seq + 1}).`,
       {
         nextSteps: [
-          'this indicates a lost or reordered relay item — commit 9 lands the repair path'
+          'retryable — this host has queued a resync_request to repair the gap; retry once resync completes'
+        ]
+      }
+    )
+  }
+  if (fence.kind === 'desync') {
+    // Terminal — pause + tail-cancel fires on every occurrence; only the audit is metered
+    // (§2.9 [v3.1]).
+    firePactDesyncDispositionInbound(db, resolution.thread.id, args.pairedDeviceId)
+    throw new OrchestrationError(
+      'pact_desync',
+      `Refused: relayed seq ${args.pact.seq} cannot be explained as a legitimate duplicate or an ` +
+        `in-bound gap of this pact's ledger (this host's peer seq is ${resolution.thread.pact_peer_seq}).`,
+      {
+        nextSteps: [
+          `orca agents pact --show ${resolution.thread.id}`,
+          `orca agents pact --release --on ${resolution.thread.id}`
         ]
       }
     )
@@ -251,19 +294,7 @@ function applyLedgerOrNoLedgerVerb(
       })
     } else {
       // §2.5/§4.5: `pact_applied_ids`, capped at PACT_STEPS_PER_PACT_CAP (commit 14 imports it).
-      const count = db
-        .prepare(`SELECT COUNT(*) AS n FROM pact_applied_ids WHERE thread_id = ?`)
-        .get(thread.id) as { n: number }
-      if (count.n >= PACT_STEPS_PER_PACT_CAP) {
-        throw new OrchestrationError(
-          'pact_ledger_capped',
-          `Refused: this pact has reached its ${PACT_STEPS_PER_PACT_CAP}-entry no-ledger-verb cap.`
-        )
-      }
-      db.prepare(
-        `INSERT INTO pact_applied_ids (thread_id, message_id, verb, applied_at)
-         VALUES (?, ?, ?, datetime('now'))`
-      ).run(thread.id, messageId, pact.verb)
+      recordPactAppliedId(db, thread.id, messageId, pact.verb)
     }
 
     db.prepare(

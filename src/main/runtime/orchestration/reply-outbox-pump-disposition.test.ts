@@ -266,7 +266,15 @@ describe('S10-21b B5, T29: pact_settling audit suppression + growing backoff', (
 describe('S10-21b B5, T29: pact_desync audit metering in isolation', () => {
   let db: OrchestrationDb | undefined
 
+  // NOTE (chair, after B5b): same real-Date.now() minute-boundary flakiness as the block above
+  // — pin the clock just after a window start, frozen for the whole test, per that note.
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Math.ceil(Date.now() / 60_000) * 60_000 + 100)
+  })
+
   afterEach(() => {
+    vi.useRealTimers()
     db?.close()
     db = undefined
   })
