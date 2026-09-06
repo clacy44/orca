@@ -9,8 +9,12 @@ import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import { insertGatedMessage } from './message-gate-writer'
 import { bumpThreadOnMessage } from './thread-directory'
-import { auditPact, insertPactStepRow, requireUnclaimedPact } from './pact-shared'
+import { auditPact, insertPactStepRow } from './pact-shared'
 import { adoptEraOnInboundPropose } from './pact-federated-era'
+import {
+  declineLosingLocalPropose,
+  resolveCrossProposeOutcome
+} from './pact-federated-propose-race'
 import type { ThreadRow } from './types'
 import {
   LEDGER_VERB_KIND,
@@ -64,7 +68,8 @@ export function applyInboundPactVerb(
   }
   const resolution = resolvePactThreadAndGates(db, args, peerThreadId) // Gates 9-13
   if (resolution.mode === 'propose') {
-    requireUnclaimedPact(resolution.thread)
+    // B10 (design §2.13) — the pair guard + simultaneous cross-propose tie-break now live
+    // inside applyPropose itself, ahead of era adoption.
     return applyPropose(db, resolution.thread, args)
   }
 
@@ -120,6 +125,14 @@ function applyPropose(
   thread: ThreadRow,
   args: ApplyInboundPactVerbArgs
 ): ApplyInboundPactVerbResult {
+  const senderKey = renderedSenderKey(args)
+  // B10 (design §2.13) — pair guard + cross-propose tie-break (pact-federated-propose-race.ts).
+  // 'incoming_wins': auto-decline+relay the local loser before era adoption/apply, below.
+  const race = resolveCrossProposeOutcome(db, thread, args, senderKey)
+  if (race === 'incoming_wins') {
+    declineLosingLocalPropose(db, thread.id, args)
+  }
+
   // Era adoption + seq reset (B6, chair answer 3) — called, never re-derived.
   adoptEraOnInboundPropose(db, { id: thread.id }, { era: args.pact.era })
 
@@ -138,7 +151,7 @@ function applyPropose(
          pact_peer_thread_id = ?, pact_peer_seq = ?
        WHERE id = ?`
     ).run(
-      renderedSenderKey(args),
+      senderKey,
       args.toAgentId,
       args.pact.stepsTotal ?? null,
       args.senderAgentId,
@@ -150,7 +163,7 @@ function applyPropose(
     )
     const inserted = insertGatedMessage(db, {
       id: args.messageId,
-      from: renderedSenderKey(args),
+      from: senderKey,
       to: `agent:${args.toAgentId}`,
       subject: 'pact propose',
       body: args.body ?? '',
@@ -176,7 +189,7 @@ function applyPropose(
       threadId: thread.id,
       ordinal: 0,
       kind: 'propose',
-      actorAgentId: renderedSenderKey(args),
+      actorAgentId: senderKey,
       actorPaneKey: null,
       actorHostId: args.pairedDeviceId,
       messageId: inserted.message.id,
