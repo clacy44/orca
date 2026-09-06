@@ -5,7 +5,8 @@ import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import { getAgentById, writeAgentAudit } from './agent-directory'
 import { getEngagedPactWith } from './pact-pair-identity'
-import type { AgentRow, ThreadRow } from './types'
+import { resolveAccountableRemotePeer, type AccountablePeer } from './pact-federated-identity'
+import type { ThreadRow } from './types'
 import type { PactStepKind } from './pact-types'
 
 export function sha256Hex(value: string): string {
@@ -73,7 +74,7 @@ export function requireAccountablePeer(
   db: Database.Database,
   callerAgentId: string,
   peerAgentId: string
-): AgentRow {
+): AccountablePeer {
   if (peerAgentId.includes('@')) {
     throw new OrchestrationError(
       'pact_not_federated',
@@ -94,6 +95,14 @@ export function requireAccountablePeer(
       { nextSteps: ['orca agents ask'] }
     )
   }
+  // S10-21b B3 (design §4.4): the federated arm — tried first since a federated party's
+  // rendered key never collides with a local agents.id, so this never shadows the local
+  // lookup below. Returns undefined (falls through) only when peerAgentId names no
+  // remote_agents row at all.
+  const remote = resolveAccountableRemotePeer(db, peerAgentId)
+  if (remote) {
+    return remote
+  }
   const peer = getAgentById(db, peerAgentId)
   if (!peer) {
     throw new OrchestrationError('agent_unknown', `Agent ${peerAgentId} was not found.`, {
@@ -108,7 +117,7 @@ export function requireAccountablePeer(
       { nextSteps: [`orca agents quarantine ${peer.display_name} --lift`, 'orca agents ask'] }
     )
   }
-  return peer
+  return { id: peer.id, display_name: peer.display_name, federated: false }
 }
 
 export function requireSensitiveMembership(

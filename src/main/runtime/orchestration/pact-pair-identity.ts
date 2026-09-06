@@ -3,6 +3,7 @@
 // pact-shared.ts's requireNoEngagedPactWithPeer.
 import type Database from '../../sqlite/sync-database'
 import { getAgentByIdIncludingTombstoned } from './agent-retire'
+import { findRemotePartyByRenderedKey } from './pact-federated-identity'
 import type { ThreadRow } from './types'
 
 // Symmetric (rev 3): matches either id in either column, 'proposed' or 'engaged'.
@@ -21,15 +22,32 @@ export function getEngagedPactWith(
   return byId ?? getEngagedPactWithByIdentity(db, agentId, peerAgentId)
 }
 
-type PactIdentity = { hostId: string; displayName: string }
+type PactIdentity =
+  | { kind: 'local'; hostId: string; displayName: string }
+  | { kind: 'remote'; linkId: string; displayName: string }
 
+// S10-21b B3 (design §2.13): H7's (host, display_name) conjunct extended to a remote party as
+// (link, display_name) — a federated `agentId` (the rendered party key) never has a local
+// `agents` row, so it is resolved through `remote_agents` FIRST, by reconstructing and
+// comparing the full rendered key (never a substring parse of `agentId` itself — the same
+// discipline as message-visibility-filter.ts).
 function pactIdentity(db: Database.Database, agentId: string): PactIdentity | undefined {
+  const remote = findRemotePartyByRenderedKey(db, agentId)
+  if (remote) {
+    return { kind: 'remote', linkId: remote.environment_id, displayName: remote.display_name }
+  }
   const row = getAgentByIdIncludingTombstoned(db, agentId)
-  return row ? { hostId: row.host_id, displayName: row.display_name } : undefined
+  return row ? { kind: 'local', hostId: row.host_id, displayName: row.display_name } : undefined
 }
 
 function samePactIdentity(a: PactIdentity, b: PactIdentity): boolean {
-  return a.hostId === b.hostId && a.displayName === b.displayName
+  if (a.kind === 'local' && b.kind === 'local') {
+    return a.hostId === b.hostId && a.displayName === b.displayName
+  }
+  if (a.kind === 'remote' && b.kind === 'remote') {
+    return a.linkId === b.linkId && a.displayName === b.displayName
+  }
+  return false
 }
 
 // R2 (Ruling 33 Addendum 2, F-20): the id-pair match above stops seeing an engaged pact once a
