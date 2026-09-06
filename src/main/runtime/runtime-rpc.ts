@@ -185,6 +185,15 @@ const LONG_POLL_CAP = 16
 // clients sharing this runtime. Reserve half the budget for the other classes.
 const ASK_LONG_POLL_SHARE = 0.5
 
+// Why: S10-21b §3.2 (D-R69 residual R15) — a pact/step `wait` is the one long-poll class a
+// federated counterpart's own progress depends on; a caller-side flood of `ask`/`wait` (or
+// mobile/web/CLI/relay short-poll churn) must never starve it. Reserve 4 slots exclusively for
+// `'pact'`-class waits, on top of (not shared with) the `ask` sub-cap above — `'ask'`/`'wait'`
+// admission narrows to `longPollCap - PACT_LONG_POLL_RESERVE`; `'pact'` alone can still use the
+// full `longPollCap`. LONG_POLL_CAP itself is NOT raised by this reserve (recommended,
+// evidence-gated, explicitly deferred — see §3.2's second bullet).
+const PACT_LONG_POLL_RESERVE = 4
+
 function createWebClientUrl(endpoint: string, pairingUrl: string): string {
   const url = new URL(endpoint)
   url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'
@@ -481,7 +490,11 @@ const MOBILE_RPC_METHOD_ALLOWLIST = new Set([
 ])
 
 // Why: 'ask' is metered separately from 'wait' — same keepalive/abort wiring, its own sub-cap.
-type LongPollClass = 'ask' | 'wait'
+// S10-21b §3.2 (D-R69 residual R15): 'pact' is a THIRD class, split out of what used to be
+// bare 'wait' classification for `orchestration.wait` — it gets its own reserve (see
+// PACT_LONG_POLL_RESERVE) instead of sharing 'wait''s headroom, so a fleet of `ask`/`wait`
+// callers can never starve a pact/step counterpart's park.
+type LongPollClass = 'ask' | 'wait' | 'pact'
 
 // Why: single classifier for long-poll requests (handlers that block on an external event), shared by counter/abort/keepalive. See §3.1.
 function longPollClassOf(request: RpcRequest): LongPollClass | null {
@@ -506,8 +519,12 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
   // (unix-socket-transport.ts RUNTIME_RPC_SOCKET_IDLE_TIMEOUT_MS) destroys the connection
   // mid-park, and without the abort signal the waiter is orphaned. Same reason as
   // orchestration.ask above; this method was simply never added to the classifier.
+  // S10-21b §3.2: `for ∈ {'pact','step'}` is the class this park exists to protect — classify it
+  // 'pact' (its own reserve); every other `for` (`reply`/`message`) keeps the pre-existing 'wait'
+  // classification.
   if (request.method === 'orchestration.wait') {
-    return 'wait'
+    const params = request.params as { for?: unknown } | undefined
+    return params?.for === 'pact' || params?.for === 'step' ? 'pact' : 'wait'
   }
   // F-15: orchestration.workerStart calls waitForTerminal(..., timeoutMs: params.timeoutMs ??
   // 60_000) — up to 60s, also past the 30s socket idle wall with the identical symptom.
@@ -1820,7 +1837,7 @@ export class OrcaRuntimeRpcServer {
     const longPoll = longPollClassOf(request)
     const rejection = this.admitLongPoll(longPoll)
     if (rejection) {
-      return this.buildError(request.id, 'runtime_busy', rejection)
+      return this.buildError(request.id, 'runtime_busy', rejection.message, rejection.data)
     }
     if (longPoll) {
       // Why: arm keepalive only for long-polls; short RPCs never create the setInterval. See §3.1.
@@ -1837,25 +1854,39 @@ export class OrcaRuntimeRpcServer {
   }
 
   // Why: one fence for both transports — the total cap protects short RPCs, the ask
-  // sub-cap protects terminal.wait / check --wait from slow reply-blocked asks.
-  // Returns the rejection message, or null once the slot is reserved.
+  // sub-cap protects terminal.wait / check --wait from slow reply-blocked asks, and (S10-21b
+  // §3.2) the pact reserve protects a federated counterpart's `--for pact`/`--for step` park
+  // from being starved by a flood of the other two classes.
+  // Returns the rejection (message + optional structured recovery data), or null once the slot
+  // is reserved.
   private admitLongPoll(
     longPoll: LongPollClass | null,
     peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined }
-  ): string | null {
+  ): { message: string; data?: { nextSteps: readonly string[] } } | null {
     if (!longPoll) {
       return null
     }
-    if (this.activeLongPolls >= this.longPollCap) {
-      return 'long-poll capacity reached; retry with backoff'
+    // S10-21b §3.2 (D-R69 R15): 'pact' admits up to the full cap; 'ask'/'wait' admit only while
+    // PACT_LONG_POLL_RESERVE slots of headroom remain — the reserve is pact-exclusive, never
+    // shared. A pact-class refusal at the cap renders the operator-facing text below, never a
+    // bare "capacity reached" error (§3.2's third bullet).
+    if (longPoll === 'pact') {
+      if (this.activeLongPolls >= this.longPollCap) {
+        return {
+          message: 're-arm; steps are durable',
+          data: { nextSteps: ['re-arm; steps are durable'] }
+        }
+      }
+    } else if (this.activeLongPolls >= this.longPollCap - PACT_LONG_POLL_RESERVE) {
+      return { message: 'long-poll capacity reached; retry with backoff' }
     }
     if (longPoll === 'ask' && this.activeAskLongPolls >= this.askLongPollCap) {
-      return 'orchestration.ask capacity reached; retry with backoff'
+      return { message: 'orchestration.ask capacity reached; retry with backoff' }
     }
     if (peerKey?.accessProfile === 'peer') {
       const held = this.activePeerLongPollsByDevice.get(peerKey.pairedDeviceId) ?? 0
       if (held >= PEER_LONG_POLL_PER_DEVICE_CAP) {
-        return 'long-poll capacity reached for this device; retry with backoff'
+        return { message: 'long-poll capacity reached for this device; retry with backoff' }
       }
     }
     this.activeLongPolls += 1
@@ -2053,7 +2084,11 @@ export class OrcaRuntimeRpcServer {
     const peerLongPollKey = { pairedDeviceId: device.deviceId, accessProfile }
     const rejection = this.admitLongPoll(longPoll, peerLongPollKey)
     if (rejection) {
-      reply(JSON.stringify(this.buildError(request.id, 'runtime_busy', rejection)))
+      reply(
+        JSON.stringify(
+          this.buildError(request.id, 'runtime_busy', rejection.message, rejection.data)
+        )
+      )
       return
     }
 
