@@ -1312,6 +1312,11 @@ const SCHEMA_VERSION = 42
 // the legitimate row.
 export const REMOTE_AGENTS_PER_LINK_CAP = 64
 
+// S10-21b B2 (design §4.7): bound on walkRemoteAgentSupersessionChain — a structurally-impossible
+// cycle (the writer never creates one) still cannot hang a caller. Also imported by B14's
+// containment predicate/§1.4(b) clause 4 and B16's quarantine RPC/CLI caller.
+export const PACT_SUPERSESSION_CHAIN_MAX = 64
+
 // S10-19 (Ruling 24(e) / attacker 5 / ops BL-3): the ONE settled-state list for
 // remote_dispatch_attachments.state. beginRemoteAttachmentStop (below) and
 // orchestration-federation-control.ts's federationStop handler must agree on exactly this set —
@@ -8904,11 +8909,13 @@ export class OrchestrationDb {
   // S10-15 D5 interface point for the routing slice's `name@host` resolution: only 'environment'
   // rows are ever an address source, and the local-quarantine union (Rule 3) is applied here too
   // — a peer agent quarantined on its OTHER (paired_device) row must not resolve as a target.
+  // S10-21b B2 (design §1.4(a)): a superseded mirror row is never an address either.
   listAddressableRemoteAgents(params: { environmentId: string }): RemoteAgentRow[] {
     return this.db
       .prepare(
         `SELECT * FROM remote_agents
          WHERE link_kind = 'environment' AND environment_id = ? AND remote_quarantined = 0
+           AND superseded_at IS NULL
            AND NOT EXISTS (
              SELECT 1 FROM remote_agents q
              WHERE q.remote_agent_id = remote_agents.remote_agent_id AND q.local_quarantined = 1
@@ -8922,12 +8929,62 @@ export class OrchestrationDb {
   // refusal (never a per-key read there) — a peer agent quarantined on one link_kind row must be
   // refused when it arrives over the OTHER. `remote_quarantined` deliberately stays per-row
   // (D5 Rule 3): unioning IT would let one link's assertion deny another link's genuine traffic.
+  // S10-21b B2 (design §1.4(a)): deliberately NOT superseded-aware — stays keyed on
+  // remote_agent_id alone, so a superseded row still keeps participating in this union.
   isRemoteAgentLocallyQuarantined(remoteAgentId: string): boolean {
     return (
       this.db
         .prepare(`SELECT 1 FROM remote_agents WHERE remote_agent_id = ? AND local_quarantined = 1`)
         .get(remoteAgentId) !== undefined
     )
+  }
+
+  // S10-21b B2 (design §4.7): the ONE bounded chain-walk backing §4.4's `counterpart_quarantined`
+  // predicate, §1.4(b) clause 4, and B16's quarantine RPC/CLI caller — none of which call it yet
+  // (pure READ helper in this commit). Follows `succeeded_by_remote_agent_id` forward from
+  // `remoteAgentId` and walks backward to every predecessor that named it (or a predecessor of a
+  // predecessor, ...) as successor, all on the same `linkKey` (environment_id). Returns the
+  // ordered id list, oldest predecessor first. A `seen` set makes a structurally-impossible cycle
+  // (the writer never creates one) terminate immediately regardless of the bound; the
+  // PACT_SUPERSESSION_CHAIN_MAX cap on each direction's walk is the belt-and-suspenders bound.
+  walkRemoteAgentSupersessionChain(remoteAgentId: string, linkKey: string): string[] {
+    const seen = new Set<string>([remoteAgentId])
+    const chain: string[] = [remoteAgentId]
+
+    let cursor = remoteAgentId
+    while (chain.length < PACT_SUPERSESSION_CHAIN_MAX) {
+      const predecessor = this.db
+        .prepare(
+          `SELECT remote_agent_id FROM remote_agents
+           WHERE environment_id = ? AND succeeded_by_remote_agent_id = ?`
+        )
+        .get(linkKey, cursor) as { remote_agent_id: string } | undefined
+      if (!predecessor || seen.has(predecessor.remote_agent_id)) {
+        break
+      }
+      seen.add(predecessor.remote_agent_id)
+      chain.unshift(predecessor.remote_agent_id)
+      cursor = predecessor.remote_agent_id
+    }
+
+    cursor = remoteAgentId
+    while (chain.length < PACT_SUPERSESSION_CHAIN_MAX) {
+      const row = this.db
+        .prepare(
+          `SELECT succeeded_by_remote_agent_id FROM remote_agents
+           WHERE environment_id = ? AND remote_agent_id = ?`
+        )
+        .get(linkKey, cursor) as { succeeded_by_remote_agent_id: string | null } | undefined
+      const next = row?.succeeded_by_remote_agent_id
+      if (!next || seen.has(next)) {
+        break
+      }
+      seen.add(next)
+      chain.push(next)
+      cursor = next
+    }
+
+    return chain
   }
 
   // S10-15 R6: marks the sender's local mirror row as accepted by the peer, and records the
