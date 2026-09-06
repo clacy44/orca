@@ -127,8 +127,11 @@ describe('orchestration RPC methods', () => {
     // (orchestration-link-binding-local.ts, R22): orchestration.linkBindings/linkBind/linkRevoke/
     // linkForget/linkContainment/replyOutbox. S10-21b B14 adds
     // orchestration.threads.purgePeerLedger (orchestration-pact-purge.ts, design §4.6(b): the
-    // write side of the append-only ledger's operator purge verb).
-    expect(registry.size).toBe(71)
+    // write side of the append-only ledger's operator purge verb). S10-21b B16b adds
+    // orchestration.agents.quarantineRemote (orchestration-agents-quarantine-remote.ts, design
+    // §4.7: the RPC/CLI caller for setLocalRemoteAgentQuarantine).
+    expect(registry.size).toBe(72)
+    expect(registry.has('orchestration.agents.quarantineRemote')).toBe(true)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.federatedSend')).toBe(true)
     expect(registry.has('orchestration.federationAnswerPrompt')).toBe(true)

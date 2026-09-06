@@ -325,6 +325,7 @@ import {
   releasePact as releasePactImpl,
   autoPausePactsForAgent as autoPausePactsForAgentImpl,
   autoPausePactOnThread as autoPausePactOnThreadImpl,
+  autoPausePactsForRemoteAgentChain as autoPausePactsForRemoteAgentChainImpl,
   type PausePactParams,
   type ResumePactParams,
   type ResumePactOutcome,
@@ -5979,6 +5980,17 @@ export class OrchestrationDb {
     return autoPausePactOnThreadImpl(this.db, threadId, reason, runtime)
   }
 
+  // S10-21b B16b (design §4.7): the remote-quarantine RPC/CLI caller's own auto-pause, keyed on
+  // the resolved supersession-chain ids rather than a local agent id.
+  autoPausePactsForRemoteAgentChain(
+    remoteAgentIds: readonly string[],
+    linkKey: string,
+    reason: PactPauseReason,
+    runtime: FederatedPactEmitRuntime | null = null
+  ): AutoPauseOutcome[] {
+    return autoPausePactsForRemoteAgentChainImpl(this.db, remoteAgentIds, linkKey, reason, runtime)
+  }
+
   // S10-21b B15 (design §3.3): pure DB layer, like autoPausePactsForAgent above — the caller
   // (link-binding-prover-maintenance.ts) wakes both parked waiters per returned outcome.
   runPactLinkEvidenceSweep(now?: number): PactLinkEvidenceSweepResult {
@@ -9452,6 +9464,31 @@ export class OrchestrationDb {
       )
     }
     return row
+  }
+
+  // S10-21b B16b (design §4.7): resolves a CLI `<name|id>@<host>` quarantine selector against
+  // this host's OWN mirror only — never the peer, so containment works unreachable or hostile.
+  // A name match prefers the live (non-superseded) row, the walk's natural starting point; an id
+  // match is exact even if superseded, since the walk finds every predecessor/successor from
+  // either end regardless of which link in the chain the operator named.
+  getRemoteAgentBySelector(
+    environmentId: string,
+    selector: { name?: string; id?: string }
+  ): RemoteAgentRow | undefined {
+    if (selector.id) {
+      return this.db
+        .prepare(`SELECT * FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`)
+        .get(environmentId, selector.id) as RemoteAgentRow | undefined
+    }
+    if (!selector.name) {
+      throw new OrchestrationError('invalid_argument', 'Pass a remote agent name or id.')
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM remote_agents WHERE environment_id = ? AND display_name = ?
+         ORDER BY superseded_at IS NULL DESC, last_seen_at DESC LIMIT 1`
+      )
+      .get(environmentId, selector.name) as RemoteAgentRow | undefined
   }
 
   // S10-4 ruling 5: an epoch-rewind recovery verb for a reimaged/reinstalled peer. Zeroes the

@@ -333,5 +333,6 @@ export function releasePact(db: Database.Database, params: ReleasePactParams): T
 export {
   autoPausePactsForAgent,
   autoPausePactOnThread,
+  autoPausePactsForRemoteAgentChain,
   type AutoPauseOutcome
 } from './pact-lifecycle-autopause'

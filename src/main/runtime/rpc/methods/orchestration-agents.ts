@@ -9,6 +9,7 @@ import { ORCHESTRATION_AGENTS_REGISTER_METHODS } from './orchestration-agents-re
 import { ORCHESTRATION_AGENTS_DIRECTORY_METHODS } from './orchestration-agents-directory'
 import { ORCHESTRATION_AGENTS_FIND_METHODS } from './orchestration-agents-find'
 import { ORCHESTRATION_AGENTS_QUARANTINE_METHODS } from './orchestration-agents-quarantine'
+import { ORCHESTRATION_AGENTS_QUARANTINE_REMOTE_METHODS } from './orchestration-agents-quarantine-remote'
 import { ORCHESTRATION_AGENTS_RELINK_METHODS } from './orchestration-agents-relink'
 import { ORCHESTRATION_AGENTS_RETIRE_METHODS } from './orchestration-agents-retire'
 
@@ -17,6 +18,7 @@ export const ORCHESTRATION_AGENT_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_AGENTS_DIRECTORY_METHODS,
   ...ORCHESTRATION_AGENTS_FIND_METHODS,
   ...ORCHESTRATION_AGENTS_QUARANTINE_METHODS,
+  ...ORCHESTRATION_AGENTS_QUARANTINE_REMOTE_METHODS,
   ...ORCHESTRATION_AGENTS_RELINK_METHODS,
   ...ORCHESTRATION_AGENTS_RETIRE_METHODS
 ]

@@ -5,9 +5,10 @@ import { getDefaultUserDataPath, RuntimeClient } from '../runtime-client'
 import { RuntimeClientError } from '../runtime/types'
 import { resolveEnvironment } from '../runtime/environments'
 import type { RuntimeRpcSuccess } from '../runtime-client'
-import { nameOrId, resolveAgentAcrossHost } from './agents-shared'
+import { nameOrId, parseAgentSelector, resolveAgentAcrossHost } from './agents-shared'
 import { addressOf, findAgentsAcrossHosts, LOCAL_FIND_HOST } from './agents-cross-host'
 import { formatAgentRegister, type RegisterResult } from './agents-register-format'
+import { quarantineRemoteAgent } from './agents-quarantine-remote'
 
 export type AgentView = {
   id: string
@@ -283,9 +284,19 @@ export const AGENT_HANDLERS: Record<string, CommandHandler> = {
       formatAgentRelink
     )
   },
-  'agents quarantine': async ({ flags, client, json }) => {
+  'agents quarantine': async (ctx) => {
+    const { flags, client, json } = ctx
     const positional = getOptionalStringFlag(flags, 'name')
     const id = getOptionalStringFlag(flags, 'id')
+    // S10-21b B16b (design §7): `<name>@<host>` (or `agt_<id>@host`) addresses a REMOTE mirror
+    // row, not this host's own directory — `--id`/`--name` stay local-only (no host to carry).
+    if (!id && positional) {
+      const selector = parseAgentSelector(positional)
+      if (selector.host !== LOCAL_FIND_HOST) {
+        await quarantineRemoteAgent(ctx, selector)
+        return
+      }
+    }
     const target = id ? { id } : positional ? nameOrId(positional) : undefined
     if (!target) {
       throw new RuntimeClientError('invalid_argument', 'Pass an agent name or id.')

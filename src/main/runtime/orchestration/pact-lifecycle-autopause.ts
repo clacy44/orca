@@ -92,6 +92,32 @@ export function autoPausePactsForAgent(
   return rows.map((thread) => autoPauseOneThread(db, thread, reason, runtime))
 }
 
+// S10-21b B16b (design §4.7): the quarantine-caller's own auto-pause — every ENGAGED,
+// not-already-paused federated pact whose peer is one of the resolved supersession-chain ids on
+// this link. Every matched row has `pact_peer_agent_id` set (the query's own predicate), so
+// `autoPauseOneThread` always takes the federated branch: exactly one coalesced pause relay per
+// affected pact via B15's emitFederatedPactSideEffect, never a local-only fallback.
+export function autoPausePactsForRemoteAgentChain(
+  db: Database.Database,
+  remoteAgentIds: readonly string[],
+  linkKey: string,
+  reason: PactPauseReason,
+  runtime: FederatedPactEmitRuntime | null = null
+): AutoPauseOutcome[] {
+  if (remoteAgentIds.length === 0) {
+    return []
+  }
+  const placeholders = remoteAgentIds.map(() => '?').join(',')
+  const rows = db
+    .prepare(
+      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state = 'engaged'
+       AND pact_paused_at IS NULL AND pact_peer_link_device_id = ?
+       AND pact_peer_agent_id IN (${placeholders})`
+    )
+    .all(linkKey, ...remoteAgentIds) as ThreadRow[]
+  return rows.map((thread) => autoPauseOneThread(db, thread, reason, runtime))
+}
+
 // K17 (thread_closed/thread_paused): a single thread's engaged pact, regardless of which side
 // triggered the thread-state change.
 //

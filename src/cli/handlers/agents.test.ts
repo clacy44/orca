@@ -240,4 +240,34 @@ describe('agents CLI', () => {
     expect(printed).toContain('is now quarantined')
     expect(printed).toContain('Next: orca agents show --id agt_abc123')
   })
+
+  // S10-21b B16b (design §7): `<name>@<host>` routes to the REMOTE RPC, never the local one —
+  // `--id`/`--name` without `@` stay on the pre-existing local path (test above, untouched).
+  it('quarantine <name>@<host> routes to orchestration.agents.quarantineRemote, not the local verb', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        remoteAgent: { id: 'r1', displayName: 'peer', host: 'peer-host', quarantined: true },
+        chainLength: 1
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_HANDLERS['agents quarantine']({
+      flags: new Map([
+        ['name', 'peer@peer-host'],
+        ['reason-code', 'abuse']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(call).toHaveBeenCalledWith('orchestration.agents.quarantineRemote', {
+      name: 'peer',
+      id: undefined,
+      host: 'peer-host',
+      lift: undefined,
+      reasonCode: 'abuse'
+    })
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain('is now quarantined')
+  })
 })

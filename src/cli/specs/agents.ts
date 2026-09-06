@@ -76,11 +76,19 @@ export const AGENTS_COMMAND_SPECS: CommandSpec[] = [
   {
     path: ['agents', 'quarantine'],
     destructive: true,
-    summary: 'Quarantine (or lift quarantine on) an agent',
-    usage: 'orca agents quarantine <name|id> --reason-code <code> [--lift] [--json]',
+    summary: 'Quarantine (or lift quarantine on) an agent, local or federated-remote',
+    usage: 'orca agents quarantine <name|id|name@host> --reason-code <code> [--lift] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'id', 'name', 'lift', 'reason-code'],
     positionalArgs: ['name'],
-    notes: ['Local and non-federated only, except self-quarantine which is always allowed.']
+    notes: [
+      '`<name|id>` (no `@host`): local and non-federated only, except self-quarantine which is ' +
+        'always allowed.',
+      '`<name>@<host>` (or `agt_<id>@host`, S10-21b B16b): quarantines a federated peer in this ' +
+        "host's OWN mirror only — never dials the peer, so it works even when the peer is " +
+        'unreachable or hostile. Withholds every pact on the resolved supersession chain ' +
+        "(a rebound peer's pre-rebind pacts too) and auto-pauses each one; lifting never " +
+        'auto-resumes (`orca agents pact --release` is the only resume path).'
+    ]
   },
   {
     path: ['agents', 'retire'],
