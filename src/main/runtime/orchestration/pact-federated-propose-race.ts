@@ -45,6 +45,21 @@ export function resolveCrossProposeOutcome(
   args: ApplyInboundPactVerbArgs,
   senderKey: string
 ): ProposeRaceOutcome {
+  // B-F11: the (link, display_name) pair guard runs FIRST, unconditionally, before the
+  // tie-break — excluding the resolved thread itself (a legitimate simultaneous race is a
+  // conflict WITH that thread's own outstanding proposal, which the tie-break below exists to
+  // resolve, not a second-thread violation). Without this ordering, a second-thread engaged pact
+  // with the same peer surfaced only as `idx_pact_pair_live`'s raw UNIQUE constraint error once
+  // the tie-break's losing/winning UPDATE ran, rather than the typed `pact_exists_with_peer`
+  // refusal every other second-thread conflict gets.
+  requireNoEngagedPactWithPeer(
+    db,
+    args.toAgentId,
+    senderKey,
+    peerDisplayNameFor(db, senderKey),
+    thread.id
+  )
+
   if (thread.pact_state !== null && thread.pact_state !== 'released') {
     const isSimultaneousRace =
       thread.pact_proposer_agent_id === args.toAgentId &&
@@ -67,11 +82,6 @@ export function resolveCrossProposeOutcome(
     // did not already return — unreachable, kept only so TS sees an exhaustive return.
     throw new Error('unreachable: requireUnclaimedPact did not throw')
   }
-  // The resolved thread itself is unclaimed, but B3's (link, display_name) pair guard must still
-  // catch an outstanding proposal recorded on a DIFFERENT thread for the same peer identity
-  // (design §2.13's opening line; T30's re-registered-duplicate assertion) — requireUnclaimedPact
-  // alone cannot see this, since it only reads the resolved thread's own column.
-  requireNoEngagedPactWithPeer(db, args.toAgentId, senderKey, peerDisplayNameFor(db, senderKey))
   return 'fresh'
 }
 

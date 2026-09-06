@@ -36,11 +36,24 @@ export function applyPropose(
     declineLosingLocalPropose(db, thread.id, args)
   }
 
-  // Era adoption + seq reset (B6, chair answer 3) — called, never re-derived.
-  adoptEraOnInboundPropose(db, { id: thread.id }, { era: args.pact.era })
+  // A-F8: after the reset, a propose's own seq must be EXACTLY 1 — the peer choosing our fence
+  // value (`pact_peer_seq = pact.seq` for an arbitrary seq) let a peer set an arbitrary starting
+  // fence, desyncing its own next legitimate verb. Checked before the transaction so a bad seq
+  // never touches the era-adoption reset either.
+  if (args.pact.seq !== 1) {
+    throw new OrchestrationError(
+      'pact_out_of_order',
+      `Refused: a propose's seq must be 1 (relayed seq ${args.pact.seq}).`
+    )
+  }
 
   db.exec('BEGIN IMMEDIATE')
   try {
+    // A-F9/B-F7: era adoption now runs INSIDE this transaction (moved from before `BEGIN
+    // IMMEDIATE` — its prior auto-commit UPDATE left the era moved and both seqs zeroed with no
+    // pact written whenever the apply below then failed, e.g. the message-gate refusal at
+    // `gate_refused`).
+    adoptEraOnInboundPropose(db, { id: thread.id }, { era: args.pact.era })
     db.prepare(
       `UPDATE threads SET
          pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',
@@ -51,7 +64,7 @@ export function applyPropose(
          pact_last_resync_at = NULL, pact_relay_pending = NULL, pact_resync_nonce = NULL,
          pact_resync_nonce_at = NULL, pact_repair_attempts = 0,
          pact_peer_agent_id = ?, pact_peer_link_device_id = ?, pact_peer_environment_id = ?,
-         pact_peer_thread_id = ?, pact_peer_seq = ?
+         pact_peer_thread_id = ?, pact_peer_seq = 1, pact_flight_token = pact_flight_token + 1
        WHERE id = ?`
     ).run(
       senderKey,
@@ -61,7 +74,6 @@ export function applyPropose(
       args.pairedDeviceId,
       args.senderEnvironmentId,
       args.peerThreadId,
-      args.pact.seq,
       thread.id
     )
     const inserted = insertGatedMessage(db, {

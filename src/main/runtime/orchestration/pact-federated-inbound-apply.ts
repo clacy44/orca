@@ -14,13 +14,18 @@ import type { ThreadRow } from './types'
 import {
   LEDGER_VERB_KIND,
   NO_LEDGER_VERBS,
-  recordPactAppliedId,
+  otherLocalParty,
   renderedSenderKey,
   runPactGrammarGate,
-  runPactDedupeGate,
-  resolvePactThreadAndGates,
+  resolvePactThread,
+  runPactPartyAndMatrixGates,
   type ApplyInboundPactVerbArgs
 } from './pact-federated-inbound-gates'
+import {
+  recordPactAppliedId,
+  runPactStepsDedupeGate,
+  runPactAppliedIdsDedupeGate
+} from './pact-federated-inbound-dedupe'
 import { describeWake } from './pact-federated-inbound-wake'
 import {
   firePactDesyncDispositionInbound,
@@ -45,27 +50,42 @@ export { PACT_STEPS_PER_PACT_CAP } from './pact-federated-inbound-gates'
 export type { InboundPactWake } from './pact-federated-inbound-wake'
 export type { ApplyInboundPactVerbResult } from './pact-federated-propose-apply'
 
+function noopReceipt(messageId: string, threadId: string): ApplyInboundPactVerbResult {
+  return { accepted: true, messageId, threadId, wake: { kind: 'none' } }
+}
+
 export function applyInboundPactVerb(
   db: Database.Database,
   args: ApplyInboundPactVerbArgs,
   walkSupersessionChain: SupersessionChainWalker
 ): ApplyInboundPactVerbResult {
   const peerThreadId = runPactGrammarGate(args) // Gate 7
-  const dedupe = runPactDedupeGate(db, args, peerThreadId) // Gate 8
-  if (dedupe.outcome === 'duplicate') {
-    return {
-      accepted: true,
-      messageId: args.messageId,
-      threadId: dedupe.threadId,
-      wake: { kind: 'none' }
-    }
+  const stepDupe = runPactStepsDedupeGate(db, args) // Gate 8a (pact_steps leg, link+sender scoped)
+  if (stepDupe.outcome === 'duplicate') {
+    return noopReceipt(args.messageId, stepDupe.threadId)
   }
-  const resolution = resolvePactThreadAndGates(db, args, peerThreadId) // Gates 9-13
+
+  const resolution = resolvePactThread(db, args, peerThreadId) // Gate 10 (+ propose's gate 12 limb)
+  if (resolution.mode === 'release_noop') {
+    // A-F17: an inbound `release` on a thread this host has no pact record of is an accepted
+    // idempotent no-op (§2.9) — every other verb already refused `pact_no_pact` upstream.
+    return noopReceipt(args.messageId, peerThreadId)
+  }
+
+  // Gate 8b (D-R134 F16 / D-R135 A2): the no-ledger-verb applied-ids leg, scoped to the now
+  // RESOLVED thread — never the wire's own peerThreadId.
+  const appliedDupe = runPactAppliedIdsDedupeGate(db, args, resolution.thread.id)
+  if (appliedDupe.outcome === 'duplicate') {
+    return noopReceipt(args.messageId, resolution.thread.id)
+  }
+
   if (resolution.mode === 'propose') {
     // B10 (design §2.13) — the pair guard + simultaneous cross-propose tie-break now live
     // inside applyPropose itself, ahead of era adoption.
     return applyPropose(db, resolution.thread, args)
   }
+
+  runPactPartyAndMatrixGates(args, resolution.thread) // Gates 11-13
 
   // resync_request/resync bypass gate 14's strict fence entirely (§2.5: "the wire dedupe alone
   // is sufficient for it" — gate 8, above, already supplied that). gap_notice gets NO special
@@ -132,7 +152,8 @@ function applyLedgerOrNoLedgerVerb(
     if (pact.verb === 'accept') {
       turnAfterAgentId = thread.pact_proposer_agent_id
       db.prepare(
-        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_at = datetime('now')
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_at = datetime('now'),
+           pact_flight_token = pact_flight_token + 1
          WHERE id = ?`
       ).run(turnAfterAgentId, thread.id)
     } else if (pact.verb === 'decline' || pact.verb === 'release') {
@@ -141,18 +162,30 @@ function applyLedgerOrNoLedgerVerb(
       db.prepare(
         `UPDATE threads SET pact_state = 'released', pact_turn_agent_id = NULL,
            pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now'),
-           pact_peer_release_at = CASE WHEN ? = 'release' THEN datetime('now') ELSE pact_peer_release_at END
+           pact_peer_release_at = CASE WHEN ? = 'release' THEN datetime('now') ELSE pact_peer_release_at END,
+           pact_flight_token = pact_flight_token + 1
          WHERE id = ?`
       ).run(pact.verb, thread.id)
     } else if (pact.verb === 'pause') {
-      db.prepare(`UPDATE threads SET pact_peer_paused_at = datetime('now') WHERE id = ?`).run(
-        thread.id
-      )
+      db.prepare(
+        `UPDATE threads SET pact_peer_paused_at = datetime('now'), pact_flight_token = pact_flight_token + 1
+         WHERE id = ?`
+      ).run(thread.id)
     } else if (pact.verb === 'resume') {
-      db.prepare(`UPDATE threads SET pact_peer_paused_at = NULL WHERE id = ?`).run(thread.id)
+      db.prepare(
+        `UPDATE threads SET pact_peer_paused_at = NULL, pact_flight_token = pact_flight_token + 1
+         WHERE id = ?`
+      ).run(thread.id)
     } else if (pact.verb === 'step') {
+      // A-F2 (BLOCKER): an applied inbound `step` flips the turn to the OTHER LOCAL party (the
+      // local participant that is not the sender's rendered key), in the SAME UPDATE that bumps
+      // pact_ordinal — otherwise the local counterpart is permanently refused `not_your_turn`.
       ordinal = thread.pact_ordinal + 1
-      db.prepare(`UPDATE threads SET pact_ordinal = ? WHERE id = ?`).run(ordinal, thread.id)
+      turnAfterAgentId = otherLocalParty(thread, senderKey)
+      db.prepare(
+        `UPDATE threads SET pact_ordinal = ?, pact_turn_agent_id = ?, pact_flight_token = pact_flight_token + 1
+         WHERE id = ?`
+      ).run(ordinal, turnAfterAgentId, thread.id)
     } // gap_notice: no state effect beyond the fence advance + the pact_applied_ids write.
     let messageId = args.messageId
     if (!noLedger) {

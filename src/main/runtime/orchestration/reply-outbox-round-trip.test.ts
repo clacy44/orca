@@ -322,11 +322,6 @@ describe('S10-21b B8b (21b-D1): reply-outbox-pump round trip through the REAL or
     raw(senderDb)
       .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
       .run(senderAgentId, senderThread.id)
-    // The fabricated 'accept' below (raw-seeded receiver, no real propose/accept relay wired
-    // yet — B6's own scope note) occupies the receiver's peer_seq slot 1 for senderAgentId;
-    // bump the sender's own local_seq to 1 here so the REAL step that follows lands on seq 2,
-    // matching gate 14's fence expectation on the receiver.
-    raw(senderDb).prepare(`UPDATE threads SET pact_local_seq = 1 WHERE id = ?`).run(senderThread.id)
 
     // --- RECEIVER: the B8 fixture pattern (orchestration-federated-peer-send-pact-
     // inbound.test.ts's own seedPeerThread/T27) — a local thread pre-anchored to the SENDER's
@@ -350,25 +345,19 @@ describe('S10-21b B8b (21b-D1): reply-outbox-pump round trip through the REAL or
       return thread.id
     }
     const receiverThreadId = seedPeerThread(senderThread.id)
-    function pactSend(pact: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
-      return call(
-        'orchestration.federatedSend',
-        {
-          fromAgent: { id: senderAgentId, displayName: 'sender-a', role: null },
-          toAgentId: receiverAgentId,
-          messageId: overrides.messageId ?? 'msg_aaaaaaaaaaa1',
-          threadId: overrides.threadId ?? senderThread.id,
-          subject: 'pact',
-          pact,
-          ...overrides
-        },
-        receiverCtx(receiverRuntime)
-      )
-    }
-    // T27's own pattern: seed 'proposed' directly (propose/accept aren't wired as LOCAL-verb
-    // emit sources yet — B6's own scope note — so a real two-hop propose can't be driven here),
-    // then ONE real inbound `accept` RPC call, which is what B8 actually applies and this test
-    // exercises for real.
+    // A-F2 fixture correction (SCENARIO_CORRECTION, deviation declared): the original fixture
+    // seeded the RECEIVER as the (local) proposer — backwards from physical reality (the SENDER
+    // is the one that really called `proposePact` above) — purely so it could drive an inbound
+    // `accept` RPC (accept isn't wired as a LOCAL federated-emit source, B6's own scope note),
+    // and then HAND-SET the receiver's turn column to the remote sender key to fake the state a
+    // real peer step would need. That hand-set is what hid A-F2: the inbound `step` apply never
+    // flipped the turn at base, so the round trip below never actually exercised the fix. Fixed
+    // here by seeding the receiver's copy to match physical reality — proposer = the REMOTE
+    // sender key, with = the local receiver — and driving the acceptance through `acceptPact`
+    // (a real, non-fabricated, LOCAL call: this thread's local party is `pact_with_agent_id`
+    // here, so its own acceptance is legitimately local, not relayed). Turn correctly lands on
+    // the proposer — the remote sender — with zero raw hand-set, exactly the precondition the
+    // sender's real `step` below needs to reach gate 13's holder check at all.
     const senderEra = (
       raw(senderDb).prepare(`SELECT pact_era FROM threads WHERE id = ?`).get(senderThread.id) as {
         pact_era: number
@@ -379,23 +368,17 @@ describe('S10-21b B8b (21b-D1): reply-outbox-pump round trip through the REAL or
         `UPDATE threads SET pact_state = 'proposed', pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_era = ? WHERE id = ?`
       )
       .run(
-        receiverAgentId,
         `remote:${LINK_DEVICE_ID}:${senderAgentId}`,
+        receiverAgentId,
         senderEra,
         receiverThreadId
       )
-    await pactSend({ verb: 'accept', seq: 1, era: senderEra })
-    // Accept hands the turn to the local proposer (T2) — a peer step needs the turn, so hand it
-    // back to the (remote) sender, matching T27.
-    raw(receiverDb)
-      .prepare(`UPDATE threads SET pact_turn_agent_id = ? WHERE id = ?`)
-      .run(`remote:${LINK_DEVICE_ID}:${senderAgentId}`, receiverThreadId)
-    const mirroredAfterAccept = raw(receiverDb)
-      .prepare(`SELECT * FROM remote_agents WHERE remote_agent_id = ?`)
-      .get(senderAgentId)
-    if (!mirroredAfterAccept) {
-      throw new Error(`no remote_agents row for ${senderAgentId} after accept`)
-    }
+    receiverDb.acceptPact({
+      callerAgentId: receiverAgentId,
+      callerPaneKey: PANE_A,
+      callerHostId: 'local',
+      threadId: receiverThreadId
+    })
 
     // --- Drive the SENDER's real `step` through the emit primitive (the fix under test), then
     // pump one tick — the dial invokes the REAL receiver handler via the stubbed
@@ -431,7 +414,34 @@ describe('S10-21b B8b (21b-D1): reply-outbox-pump round trip through the REAL or
     const appliedStep = raw(receiverDb)
       .prepare(`SELECT relay_seq FROM pact_steps WHERE thread_id = ? AND kind = 'step'`)
       .get(receiverThreadId) as { relay_seq: number } | undefined
-    expect(appliedStep?.relay_seq).toBe(2) // sender's local_seq: 1 (pre-bumped) + 1 (this step)
+    // Neither side's seq was pre-bumped now that accept is a real LOCAL call (it never touches
+    // pact_peer_seq): receiver's peer_seq starts at 0, so this first real step is seq 1.
+    expect(appliedStep?.relay_seq).toBe(1)
+
+    // Identity mirroring: this is the FIRST inbound RPC call to touch receiverDb (accept was
+    // local) — the sender's remote_agents row is minted during this step's own apply.
+    const mirroredAfterStep = raw(receiverDb)
+      .prepare(`SELECT 1 FROM remote_agents WHERE remote_agent_id = ?`)
+      .get(senderAgentId)
+    if (!mirroredAfterStep) {
+      throw new Error(`no remote_agents row for ${senderAgentId} after the inbound step`)
+    }
+
+    // A-F2 (BLOCKER, the fix under test): the applied inbound `step` flips the RECEIVER's own
+    // turn to the OTHER LOCAL party — itself — not left dangling on the remote sender forever.
+    const receiverThreadAfter = receiverDb.getThread(receiverThreadId)
+    expect(receiverThreadAfter?.pact_turn_agent_id).toBe(receiverAgentId)
+    // ...and the receiver's own local `pact --step` now succeeds (RED at base: `not_your_turn`,
+    // since at base the turn column was never flipped by the inbound apply at all).
+    const receiverOwnStep = receiverDb.appendPactStep({
+      callerAgentId: receiverAgentId,
+      callerPaneKey: PANE_A,
+      callerHostId: 'local',
+      threadId: receiverThreadId,
+      done: 'receiver takes the turn back',
+      runId: 'run2'
+    })
+    expect(receiverOwnStep.outcome).toBe('stepped')
 
     const senderThreadAfter = senderDb.getThread(senderThread.id)
     expect(senderThreadAfter?.pact_turn_agent_id).toBe(

@@ -26,6 +26,20 @@ const PACT_RETRY_CODES = [
   'pact_ledger_capped'
 ]
 const PACT_TERMINAL_ONLY_CODES = ['pact_desync', 'pact_era_mismatch', 'pact_no_pact']
+// S10-21b B8c (D-R135 finding 10, item 12): seven refusal codes that were in NO classifier set
+// at base — falling through to the transport-shaped branch (bumpFailure:true), wrongly bumping
+// consecutive_failures toward the link's unreachable threshold for a non-transport pact refusal.
+// Pinned as all seven (not six) — see the source comment on PACT_RETRY_CAUSES for why B11's
+// `pact_paused` is included here too rather than left to a future rebase.
+const PACT_RETRY_CODES_B8C = [
+  'pact_paused',
+  'pact_exists',
+  'pact_no_route',
+  'pact_not_engaged',
+  'not_a_participant',
+  'not_found',
+  'pact_repair_not_yet_available'
+]
 
 describe('S10-21b B5: classifyReplyRelayError pact-item branch', () => {
   const now = Date.now()
@@ -78,6 +92,24 @@ describe('S10-21b B5: classifyReplyRelayError pact-item branch', () => {
       expect(d.kind).toBe('refused')
       if (d.kind === 'refused') {
         expect(d.code).toBe(code)
+      }
+    }
+  )
+
+  it.each(PACT_RETRY_CODES_B8C)(
+    "pact item, code '%s': non-bumping retry, never the transport-shaped bumpFailure:true fallback (D-R135 finding 10)",
+    (code) => {
+      const d = classifyReplyRelayError(
+        new OrchestrationError(code, 'peer says so'),
+        0,
+        now,
+        'pact_step',
+        3
+      )
+      expect(d.kind).toBe('retry')
+      if (d.kind === 'retry') {
+        expect(d.bumpFailure).toBe(false)
+        expect(d.disposition).toBe(code)
       }
     }
   )

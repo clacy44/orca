@@ -5,10 +5,11 @@
 // functions below, already supplies that). `pact_ordinal` is NEVER touched here (INV-P-021).
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
-import { auditPact, requireThread } from './pact-shared'
+import { auditPact, insertPactStepRow, requireThread } from './pact-shared'
 import { enqueueFederatedPactVerb } from './pact-federated-emit'
 import { isResyncNonceLive } from './pact-federated-repair'
-import { recordPactAppliedId, type ApplyInboundPactVerbArgs } from './pact-federated-inbound-gates'
+import { renderedSenderKey, type ApplyInboundPactVerbArgs } from './pact-federated-inbound-gates'
+import { recordPactAppliedId } from './pact-federated-inbound-dedupe'
 import type { InboundPactWake } from './pact-federated-inbound-wake'
 import type { ThreadRow } from './thread-directory-types'
 
@@ -149,21 +150,59 @@ export function applyInboundResyncVerb(
       pauseEpoch = resync.pauseEpoch
     }
     const releaseJoin = resync.senderReleased ? 1 : 0
+    // A(ix)/B-F12: a resync-driven release does exactly what the `release` verb does — clears
+    // pact_turn_agent_id AND pact_paused_at/pact_pause_reason (not just pact_state), and writes a
+    // ledger row — never pact_release_at (batch-1 binding: only a LOCAL release sets that).
     db.prepare(
       `UPDATE threads SET
          pact_peer_seq = ?, pact_peer_paused_at = ?, pact_pause_epoch = ?,
          pact_peer_release_at = CASE WHEN ? = 1 THEN COALESCE(pact_peer_release_at, datetime('now')) ELSE pact_peer_release_at END,
          pact_state = CASE WHEN ? = 1 THEN 'released' ELSE pact_state END,
+         pact_turn_agent_id = CASE WHEN ? = 1 THEN NULL ELSE pact_turn_agent_id END,
+         pact_paused_at = CASE WHEN ? = 1 THEN NULL ELSE pact_paused_at END,
+         pact_pause_reason = CASE WHEN ? = 1 THEN NULL ELSE pact_pause_reason END,
          pact_resync_nonce = NULL, pact_resync_nonce_at = NULL, pact_repair_attempts = 0,
-         pact_last_resync_at = datetime('now'), pact_last_inbound_at = datetime('now')
+         pact_last_resync_at = datetime('now'), pact_last_inbound_at = datetime('now'),
+         pact_flight_token = CASE WHEN ? = 1 THEN pact_flight_token + 1 ELSE pact_flight_token END
        WHERE id = ?`
-    ).run(resync.localSeq, peerPausedAt, pauseEpoch, releaseJoin, releaseJoin, thread.id)
+    ).run(
+      resync.localSeq,
+      peerPausedAt,
+      pauseEpoch,
+      releaseJoin,
+      releaseJoin,
+      releaseJoin,
+      releaseJoin,
+      releaseJoin,
+      releaseJoin,
+      thread.id
+    )
+    if (releaseJoin === 1) {
+      // No wire message backs this release (it rode the resync answer) — messageId stays null,
+      // the same shape cancelPactTailAndPause's own host-authored ledger rows use, so a future
+      // replay of THIS resync messageId never collides with the applied-ids dedupe leg (gate 8b).
+      insertPactStepRow(db, {
+        threadId: thread.id,
+        ordinal: 0,
+        kind: 'release',
+        actorAgentId: renderedSenderKey(args),
+        actorPaneKey: null,
+        actorHostId: args.pairedDeviceId,
+        messageId: null,
+        summary: null,
+        turnAfterAgentId: null,
+        reasonCode: null,
+        actorIsRemote: true,
+        actorRemoteAgentId: args.senderAgentId,
+        actorEnvironmentId: args.senderEnvironmentId
+      })
+    }
     auditPact(db, {
       agentId: null,
       actorPaneKey: null,
       actorHostId: args.pairedDeviceId,
       verb: 'pact_resync',
-      outcome: 'applied'
+      outcome: releaseJoin === 1 ? 'released' : 'applied'
     })
     db.exec('COMMIT')
     return {

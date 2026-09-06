@@ -7,19 +7,25 @@ import { findRemotePartyByRenderedKey } from './pact-federated-identity'
 import type { ThreadRow } from './types'
 
 // Symmetric (rev 3): matches either id in either column, 'proposed' or 'engaged'.
+// `excludeThreadId` (B-F11): omit one resolved thread from the search — used by the inbound
+// propose pair guard, which must catch a SECOND-thread engaged pact with the same peer without
+// also flagging the very thread B10's tie-break is about to resolve a legitimate simultaneous
+// race on.
 export function getEngagedPactWith(
   db: Database.Database,
   agentId: string,
-  peerAgentId: string
+  peerAgentId: string,
+  excludeThreadId?: string
 ): ThreadRow | undefined {
   const byId = db
     .prepare(
       `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state IN ('proposed','engaged')
+       AND id != ?
        AND ((pact_proposer_agent_id = ? AND pact_with_agent_id = ?)
          OR (pact_proposer_agent_id = ? AND pact_with_agent_id = ?))`
     )
-    .get(agentId, peerAgentId, peerAgentId, agentId) as ThreadRow | undefined
-  return byId ?? getEngagedPactWithByIdentity(db, agentId, peerAgentId)
+    .get(excludeThreadId ?? '', agentId, peerAgentId, peerAgentId, agentId) as ThreadRow | undefined
+  return byId ?? getEngagedPactWithByIdentity(db, agentId, peerAgentId, excludeThreadId)
 }
 
 type PactIdentity =
@@ -58,7 +64,8 @@ function samePactIdentity(a: PactIdentity, b: PactIdentity): boolean {
 function getEngagedPactWithByIdentity(
   db: Database.Database,
   agentId: string,
-  peerAgentId: string
+  peerAgentId: string,
+  excludeThreadId?: string
 ): ThreadRow | undefined {
   const caller = pactIdentity(db, agentId)
   const peer = pactIdentity(db, peerAgentId)
@@ -68,9 +75,9 @@ function getEngagedPactWithByIdentity(
   const candidates = db
     .prepare(
       `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state IN ('proposed','engaged')
-       AND pact_proposer_agent_id IS NOT NULL AND pact_with_agent_id IS NOT NULL`
+       AND pact_proposer_agent_id IS NOT NULL AND pact_with_agent_id IS NOT NULL AND id != ?`
     )
-    .all() as ThreadRow[]
+    .all(excludeThreadId ?? '') as ThreadRow[]
   return candidates.find((row) => {
     const proposer = pactIdentity(db, row.pact_proposer_agent_id as string)
     const withParty = pactIdentity(db, row.pact_with_agent_id as string)

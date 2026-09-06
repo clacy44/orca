@@ -16,6 +16,7 @@ import { OrcaRuntimeService } from '../../orca-runtime'
 import { createThread } from '../../orchestration/thread-directory'
 import type Database from '../../../sqlite/sync-database'
 import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
+import { putPeerLinkBinding } from '../../orchestration/link-binding-store'
 import type * as LinkBindingRoutable from '../../orchestration/link-binding-routable'
 import { PACT_STEPS_PER_PACT_CAP } from '../../orchestration/pact-federated-inbound-apply'
 import type { RpcContext } from '../core'
@@ -109,12 +110,28 @@ describe('S10-21b B8 inbound pact apply', () => {
 
   // Seeds a local thread already peer-anchored to (LINK_DEVICE_ID, peerThreadId) — the state an
   // ordinary mail exchange would have left before a pact is ever proposed on it (§1.4).
-  function seedPeerThread(peerThreadId: string): string {
+  // FORCED DEVIATION (A-F15, item 7): gate 12's propose limb now requires the rendered sender to
+  // be a live thread_participants row — a precondition every pre-existing test in this file
+  // relied on implicitly without ever seeding it. `includeSenderParticipant` (default true, so
+  // every existing call site is unaffected) adds the SENDER_A rendered key as a participant,
+  // matching the ordinary-mail-exchange precondition design's own comment describes; the new
+  // A-F15 test below passes `false` to construct the one case that must still be refused.
+  function seedPeerThread(peerThreadId: string, includeSenderParticipant = true): string {
+    const participants: { participantKey: string; agentId: string | null; role: 'member' }[] = [
+      { participantKey: agentB, agentId: agentB, role: 'member' }
+    ]
+    if (includeSenderParticipant) {
+      participants.push({
+        participantKey: `remote:${LINK_DEVICE_ID}:${SENDER_A}`,
+        agentId: null,
+        role: 'member' as const
+      })
+    }
     const { thread } = createThread(raw(db) as unknown as Database.Database, {
       subject: 'pact seed',
       createdByAgentId: null,
       origin: 'peer',
-      participants: [{ participantKey: agentB, agentId: agentB, role: 'member' }]
+      participants
     })
     raw(db)
       .prepare(
@@ -346,6 +363,320 @@ describe('S10-21b B8 inbound pact apply', () => {
     await expect(
       pactSend({ verb: 'gap_notice', seq: 2, era: 1 }, { messageId: 'msg_aaaaaaaaaaa2' })
     ).rejects.toMatchObject({ code: 'pact_ledger_capped' })
+  })
+
+  // S10-21b B8c (D-R134/D-R135 batch-2 review, README "after D-R134/D-R135") — the 13 items,
+  // each RED at base per the brief unless marked otherwise.
+
+  it('B8c item 2 (B-F3): inbound resume clears OUR RECORD of the peer pause, gated on it alone', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_peer_paused_at = datetime('now') WHERE id = ?`
+      )
+      .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentB, threadId)
+    await expect(pactSend({ verb: 'resume', seq: 1, era: 0 })).resolves.toMatchObject({
+      accepted: true
+    })
+    const row = raw(db)
+      .prepare('SELECT pact_peer_paused_at FROM threads WHERE id = ?')
+      .get(threadId) as { pact_peer_paused_at: string | null }
+    expect(row.pact_peer_paused_at).toBeNull()
+  })
+
+  it('B8c item 2 (B-F3): inbound resume refuses pact_not_paused when the peer was never recorded as paused, never on effectivePaused', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ? WHERE id = ?`
+      )
+      .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentB, threadId)
+    await expect(pactSend({ verb: 'resume', seq: 1, era: 0 })).rejects.toMatchObject({
+      code: 'pact_not_paused'
+    })
+  })
+
+  it('B8c item 3 (B-F13): inbound accept refuses pact_paused when this host has paused for containment', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'proposed', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_paused_at = datetime('now') WHERE id = ?`
+      )
+      .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, threadId)
+    await expect(pactSend({ verb: 'accept', seq: 1, era: 0 })).rejects.toMatchObject({
+      code: 'pact_paused'
+    })
+  })
+
+  it('B8c item 4 (A-F16/B-F4): pact_applied_ids dedupe is scoped per-thread, not globally by message_id', async () => {
+    // P and Q use DIFFERENT remote peers so their (proposer, with) pairs differ — idx_pact_pair_
+    // live (one live pact per literal pair) is orthogonal to this item and must not fire here.
+    const SENDER_Q = 'agt_bbbbbbbbbbbb'
+    // A real peer_link_bindings row — enqueueFederatedPactVerb's own anchor check reads this
+    // table directly, upstream of the RPC layer's mocked getRoutableLinkBinding.
+    putPeerLinkBinding(raw(db) as unknown as Database.Database, {
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: LINK_DEVICE_ID,
+      boundEndpointId: 'endpoint_item4',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: LINK_FINGERPRINT,
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const threadP = seedPeerThread('thr_bbbbbbbbbbb1')
+    const threadQ = seedPeerThread('thr_ccccccccccc1')
+    const senderKeyP = `remote:${LINK_DEVICE_ID}:${SENDER_A}`
+    const senderKeyQ = `remote:${LINK_DEVICE_ID}:${SENDER_Q}`
+    // pact_peer_agent_id makes each thread a genuinely federated pact (isFederatedPact) — needed
+    // since applyInboundResyncRequestVerb enqueues a real `resync` answer.
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_peer_agent_id = ?, pact_peer_environment_id = ? WHERE id = ?`
+      )
+      .run(agentB, senderKeyP, agentB, SENDER_A, LINK_DEVICE_ID, threadP)
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_peer_agent_id = ?, pact_peer_environment_id = ? WHERE id = ?`
+      )
+      .run(agentB, senderKeyQ, agentB, SENDER_Q, LINK_DEVICE_ID, threadQ)
+    await expect(
+      pactSend(
+        { verb: 'resync_request', seq: 1, era: 0, resyncRequest: { nonce: 'nonceP1' } },
+        { threadId: 'thr_bbbbbbbbbbb1', messageId: 'msg_ddddddddddd1' }
+      )
+    ).resolves.toMatchObject({ accepted: true, threadId: threadP })
+    // Same message_id, a DIFFERENT pact (Q, a different peer entirely) — must apply for real,
+    // never be swallowed as a duplicate of P's row, and never return P's (or the wire's)
+    // threadId in the receipt.
+    await expect(
+      pactSend(
+        { verb: 'resync_request', seq: 1, era: 0, resyncRequest: { nonce: 'nonceQ1' } },
+        {
+          threadId: 'thr_ccccccccccc1',
+          messageId: 'msg_ddddddddddd1',
+          fromAgent: { id: SENDER_Q, displayName: 'asker-q', role: null }
+        }
+      )
+    ).resolves.toMatchObject({ accepted: true, threadId: threadQ })
+    const rows = raw(db)
+      .prepare(`SELECT thread_id FROM pact_applied_ids WHERE message_id = 'msg_ddddddddddd1'`)
+      .all() as { thread_id: string }[]
+    expect(rows.map((r) => r.thread_id).sort()).toEqual([threadP, threadQ].sort())
+  })
+
+  it('B8c item 5 (A-F9/B-F7): era adoption commits only inside the propose transaction — a gate-refused propose leaves era/seq untouched', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    const before = raw(db)
+      .prepare('SELECT pact_era, pact_local_seq, pact_peer_seq FROM threads WHERE id = ?')
+      .get(threadId) as { pact_era: number; pact_local_seq: number; pact_peer_seq: number }
+    await expect(
+      pactSend(
+        { verb: 'propose', seq: 1, era: 5, stepsTotal: null },
+        { body: 'SECURITY: hostile relayed content' }
+      )
+    ).rejects.toMatchObject({ code: 'gate_refused' })
+    const after = raw(db)
+      .prepare(
+        'SELECT pact_era, pact_local_seq, pact_peer_seq, pact_state FROM threads WHERE id = ?'
+      )
+      .get(threadId) as {
+      pact_era: number
+      pact_local_seq: number
+      pact_peer_seq: number
+      pact_state: string | null
+    }
+    expect(after.pact_era).toBe(before.pact_era)
+    expect(after.pact_local_seq).toBe(before.pact_local_seq)
+    expect(after.pact_peer_seq).toBe(before.pact_peer_seq)
+    expect(after.pact_state).toBeNull()
+  })
+
+  it('B8c item 5 (A-F9/B-F7): an adopted era at the grammar ceiling is refused invalid_argument, never adopted', async () => {
+    seedPeerThread('thr_aaaaaaaaaaa1')
+    await expect(
+      pactSend({ verb: 'propose', seq: 1, era: 2 ** 31 - 2, stepsTotal: null })
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+  })
+
+  it('B8c item 6 (A-F8): inbound propose must have seq === 1; a peer proposing at seq 5 is refused pact_out_of_order', async () => {
+    seedPeerThread('thr_aaaaaaaaaaa1')
+    await expect(
+      pactSend({ verb: 'propose', seq: 5, era: 1, stepsTotal: null })
+    ).rejects.toMatchObject({ code: 'pact_out_of_order' })
+  })
+
+  it('B8c item 7 (A-F15): gate 12s propose limb refuses a sender who is not a live thread participant', async () => {
+    seedPeerThread('thr_aaaaaaaaaaa1', false)
+    await expect(
+      pactSend({ verb: 'propose', seq: 1, era: 1, stepsTotal: null })
+    ).rejects.toMatchObject({ code: 'not_a_participant' })
+  })
+
+  it('B8c item 8 (A-F17): inbound release on an unmapped thread is an accepted idempotent no-op; every other verb still pact_no_pact', async () => {
+    await expect(
+      pactSend(
+        { verb: 'release', seq: 1, era: 0 },
+        { threadId: 'thr_000000000000', messageId: 'msg_eeeeeeeeeee1' }
+      )
+    ).resolves.toMatchObject({ accepted: true })
+    await expect(
+      pactSend(
+        { verb: 'step', seq: 1, era: 0 },
+        { threadId: 'thr_000000000000', messageId: 'msg_eeeeeeeeeee2' }
+      )
+    ).rejects.toMatchObject({ code: 'pact_no_pact' })
+  })
+
+  it('B8c item 9 (B-F11): the pair guard runs before B10s tie-break — a second-thread engaged pact (via the identity fallback, T30s own re-registration shape) refuses typed, never the raw UNIQUE error', async () => {
+    const senderKey = `remote:${LINK_DEVICE_ID}:${SENDER_A}`
+    // A re-registered predecessor of the SAME (link, display_name) identity — matches T30's own
+    // "re-registered duplicate peer" fixture. Its LITERAL rendered key differs from SENDER_A's,
+    // so seeding Y's pair below never collides with idx_pact_pair_live (a literal-id unique
+    // index); only the identity-fallback pair guard (getEngagedPactWithByIdentity) sees it.
+    // NOTE: SENDER_A's OWN remote_agents row is (re)written by the RPC's own identity-import
+    // gate from the wire's `fromAgent.displayName` ('asker-a', pactSend's own default) — any
+    // pre-seeded display_name for SENDER_A here would just be clobbered, so the predecessor's
+    // display_name is set to match that wire-asserted value instead.
+    const SENDER_A_PREDECESSOR = 'agt_dddddddddddd'
+    db.upsertRemoteAgent({
+      environmentId: LINK_DEVICE_ID,
+      environmentName: LINK_DEVICE_ID,
+      linkKind: 'environment',
+      remoteAgentId: SENDER_A_PREDECESSOR,
+      displayName: 'asker-a',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    const threadX = seedPeerThread('thr_000000000000')
+    const threadY = seedPeerThread('thr_bbbbbbbbbbb1')
+    // X: an outstanding LOCAL proposal to this exact peer — shapes B10's own tie-break match.
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'proposed', pact_proposer_agent_id = ?, pact_with_agent_id = ? WHERE id = ?`
+      )
+      .run(agentB, senderKey, threadX)
+    // Y: a SECOND thread already engaged with the SAME (link, display_name) identity, under the
+    // re-registered predecessor id — the identity-aware pair guard (T30) must still catch this
+    // even though B10's own tie-break match (literal-column) never sees it.
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ? WHERE id = ?`
+      )
+      .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A_PREDECESSOR}`, agentB, threadY)
+    // The wire threadId ('thr_000000000000', all-zero, sorts below virtually any generated
+    // local id) makes X the tie-break's LOSER — 'incoming_wins' — the exact path that skipped
+    // the pair guard at base.
+    await expect(
+      pactSend(
+        { verb: 'propose', seq: 1, era: 1, stepsTotal: null },
+        { threadId: 'thr_000000000000', messageId: 'msg_fffffffffff1' }
+      )
+    ).rejects.toMatchObject({ code: 'pact_exists_with_peer' })
+  })
+
+  it('B8c item 10 (A-F5): a turn-consuming verb arriving during OUR own in-flight emit is retryable pact_settling, never not_a_participant', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    const senderKey = `remote:${LINK_DEVICE_ID}:${SENDER_A}`
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_turn_in_flight_at = datetime('now') WHERE id = ?`
+      )
+      .run(agentB, senderKey, senderKey, threadId)
+    await expect(
+      pactSend({ verb: 'step', seq: 1, era: 0 }, { body: 'peer steps mid-settle' })
+    ).rejects.toMatchObject({ code: 'pact_settling' })
+  })
+
+  it('B8c item 11 (A(ix)/B-F12): a resync-driven release clears turn/paused and writes a ledger row, never pact_release_at', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    const senderKey = `remote:${LINK_DEVICE_ID}:${SENDER_A}`
+    const nonce = 'resyncrelnonce1'
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_paused_at = datetime('now'), pact_pause_reason = 'operator',
+           pact_resync_nonce = ?, pact_resync_nonce_at = ? WHERE id = ?`
+      )
+      .run(agentB, senderKey, agentB, nonce, Date.now(), threadId)
+    await expect(
+      pactSend(
+        {
+          verb: 'resync',
+          seq: 1,
+          era: 0,
+          resync: {
+            nonce,
+            localSeq: 5,
+            ordinal: 3,
+            state: 'released',
+            turnHeldBySender: false,
+            pauseEpoch: 0,
+            senderReleased: true
+          }
+        },
+        { messageId: 'msg_000000000001' }
+      )
+    ).resolves.toMatchObject({ accepted: true })
+    const row = raw(db)
+      .prepare(
+        `SELECT pact_state, pact_turn_agent_id, pact_paused_at, pact_pause_reason,
+           pact_release_at, pact_peer_release_at FROM threads WHERE id = ?`
+      )
+      .get(threadId) as {
+      pact_state: string
+      pact_turn_agent_id: string | null
+      pact_paused_at: string | null
+      pact_pause_reason: string | null
+      pact_release_at: string | null
+      pact_peer_release_at: string | null
+    }
+    expect(row.pact_state).toBe('released')
+    expect(row.pact_turn_agent_id).toBeNull()
+    expect(row.pact_paused_at).toBeNull()
+    expect(row.pact_pause_reason).toBeNull()
+    expect(row.pact_release_at).toBeNull()
+    expect(row.pact_peer_release_at).not.toBeNull()
+    const ledgerRow = raw(db)
+      .prepare(`SELECT kind FROM pact_steps WHERE thread_id = ? AND kind = 'release'`)
+      .get(threadId)
+    expect(ledgerRow).toBeDefined()
+  })
+
+  it('B8c item 13 (A-F4 inbound half): an applied inbound propose bumps pact_flight_token', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    await pactSend({ verb: 'propose', seq: 1, era: 1, stepsTotal: null })
+    const row = raw(db)
+      .prepare('SELECT pact_flight_token FROM threads WHERE id = ?')
+      .get(threadId) as { pact_flight_token: number }
+    expect(row.pact_flight_token).toBeGreaterThan(0)
+  })
+
+  it('B8c item 13 (A-F4 inbound half): an applied inbound accept bumps pact_flight_token', async () => {
+    const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_state = 'proposed', pact_proposer_agent_id = ?, pact_with_agent_id = ? WHERE id = ?`
+      )
+      .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, threadId)
+    await pactSend({ verb: 'accept', seq: 1, era: 0 })
+    const row = raw(db)
+      .prepare('SELECT pact_flight_token FROM threads WHERE id = ?')
+      .get(threadId) as { pact_flight_token: number }
+    expect(row.pact_flight_token).toBeGreaterThan(0)
   })
 })
 

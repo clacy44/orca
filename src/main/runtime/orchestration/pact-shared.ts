@@ -166,9 +166,10 @@ export function requireNoEngagedPactWithPeer(
   db: Database.Database,
   agentId: string,
   peerAgentId: string,
-  peerDisplayName: string
+  peerDisplayName: string,
+  excludeThreadId?: string
 ): void {
-  const existing = getEngagedPactWith(db, agentId, peerAgentId)
+  const existing = getEngagedPactWith(db, agentId, peerAgentId, excludeThreadId)
   if (existing) {
     // D-R91: the identity-fallback path above (R2) can return a thread whose literal
     // pact_proposer_agent_id/pact_with_agent_id never match this caller's CURRENT id (a stale

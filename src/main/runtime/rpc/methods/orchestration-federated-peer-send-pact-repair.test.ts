@@ -110,12 +110,18 @@ describe('S10-21b B9: strict fence, resync/resync_request/gap_notice, terminal d
 
   let linkBindingSeeded = false
 
+  // FORCED DEVIATION (S10-21b B8c, A-F15, item 7): gate 12's propose limb now requires the
+  // rendered sender to be a live thread_participants row — added here so this file's existing
+  // propose-verb tests keep passing under the new precondition.
   function seedPeerThread(peerThreadId: string): string {
     const { thread } = createThread(raw(db) as unknown as Database.Database, {
       subject: 'pact repair seed',
       createdByAgentId: null,
       origin: 'peer',
-      participants: [{ participantKey: agentB, agentId: agentB, role: 'member' }]
+      participants: [
+        { participantKey: agentB, agentId: agentB, role: 'member' },
+        { participantKey: `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentId: null, role: 'member' }
+      ]
     })
     raw(db)
       .prepare(

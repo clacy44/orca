@@ -264,11 +264,19 @@ describe('pact-federated-propose-race (S10-21b B10, T30)', () => {
     })
 
     // A FRESH, unclaimed thread — requireUnclaimedPact alone would pass this thread; only the
-    // identity-aware pair guard sees the conflict.
+    // identity-aware pair guard sees the conflict. The re-registered peer's NEW rendered key
+    // (remote:ENV:r2) is added as a participant too — B8c's gate 12 propose limb (A-F15) now
+    // requires the sender to be a live participant before the pair guard even runs.
     const { thread: freshThread } = d.createThread({
       subject: 's2',
       createdByAgentId: a,
-      participants: [{ participantKey: a, agentId: a }]
+      participants: [
+        { participantKey: a, agentId: a },
+        {
+          participantKey: renderFederatedPartyKey({ linkDeviceId: ENV, remoteAgentId: 'r2' }),
+          agentId: null
+        }
+      ]
     })
     const peerThreadId = 'thr_222222222222'
     rawDb(d)

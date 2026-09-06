@@ -79,7 +79,9 @@ export type ApplyInboundPactVerbArgs = {
   pact: InboundPactEnvelope
 }
 
-const SAFE_INT_MAX = 2 ** 31 - 1
+// A-F9/B-F7: exported so era-adoption's ceiling check (pact-federated-era.ts) shares this exact
+// grammar bound rather than a second literal.
+export const SAFE_INT_MAX = 2 ** 31 - 1
 
 function requirePactSafeInt(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > SAFE_INT_MAX) {
@@ -103,31 +105,6 @@ function requirePactNonce(value: string, field: string): string {
     )
   }
   return value
-}
-
-// §2.5/§4.5 — the durable applied-id record for the no-ledger verbs (resync/resync_request/
-// rebind_party/gap_notice), capped at PACT_STEPS_PER_PACT_CAP (commit 14 imports the cap). Split
-// out so B9's resync/resync_request apply (pact-federated-resync-apply.ts) can reuse the exact
-// same cap-checked write applyLedgerOrNoLedgerVerb already uses for gap_notice/rebind_party.
-export function recordPactAppliedId(
-  db: Database.Database,
-  threadId: string,
-  messageId: string,
-  verb: InboundPactVerb
-): void {
-  const count = db
-    .prepare(`SELECT COUNT(*) AS n FROM pact_applied_ids WHERE thread_id = ?`)
-    .get(threadId) as { n: number }
-  if (count.n >= PACT_STEPS_PER_PACT_CAP) {
-    throw new OrchestrationError(
-      'pact_ledger_capped',
-      `Refused: this pact has reached its ${PACT_STEPS_PER_PACT_CAP}-entry no-ledger-verb cap.`
-    )
-  }
-  db.prepare(
-    `INSERT INTO pact_applied_ids (thread_id, message_id, verb, applied_at)
-       VALUES (?, ?, ?, datetime('now'))`
-  ).run(threadId, messageId, verb)
 }
 
 export function renderedSenderKey(args: ApplyInboundPactVerbArgs): string {
@@ -180,52 +157,38 @@ export function runPactGrammarGate(args: ApplyInboundPactVerbArgs): string {
   return args.peerThreadId as string
 }
 
-export type PactDedupeResult = { outcome: 'fresh' } | { outcome: 'duplicate'; threadId: string }
+export type PactThreadResolution =
+  | { mode: 'propose'; thread: ThreadRow }
+  | { mode: 'apply'; thread: ThreadRow }
+  | { mode: 'release_noop' }
 
-// Gate 8 — message dedupe, verb-aware, against BOTH `pact_steps` (ledger verbs) and
-// `pact_applied_ids` (the four no-ledger verbs) — §2.5's "already in the ledger" leg.
-export function runPactDedupeGate(
+// Gate 12's propose limb (A-F15): the rendered sender must already be a LIVE participant on the
+// mapped thread — any peer that has ever sent one message on a thread could otherwise propose a
+// pact on it.
+function requirePactProposeParticipant(
   db: Database.Database,
-  args: ApplyInboundPactVerbArgs,
-  peerThreadId: string
-): PactDedupeResult {
-  const existingStep = db
+  thread: ThreadRow,
+  senderKey: string
+): void {
+  const row = db
     .prepare(
-      `SELECT relay_seq, kind FROM pact_steps WHERE message_id = ? AND thread_id IN
-         (SELECT id FROM threads WHERE pact_peer_link_device_id = ? AND pact_peer_agent_id = ?)`
+      `SELECT 1 FROM thread_participants WHERE thread_id = ? AND participant_key = ? AND left_at IS NULL`
     )
-    .get(args.messageId, args.pairedDeviceId, args.senderAgentId) as
-    | { relay_seq: number | null; kind: string }
-    | undefined
-  const existingApplied = db
-    .prepare(`SELECT verb FROM pact_applied_ids WHERE message_id = ?`)
-    .get(args.messageId) as { verb: string } | undefined
-  if (existingStep === undefined && existingApplied === undefined) {
-    return { outcome: 'fresh' }
-  }
-  const mismatched =
-    (existingApplied !== undefined && existingApplied.verb !== args.pact.verb) ||
-    (existingStep !== undefined &&
-      (existingStep.kind !== args.pact.verb ||
-        (existingStep.relay_seq !== null && existingStep.relay_seq !== args.pact.seq)))
-  if (mismatched) {
+    .get(thread.id, senderKey)
+  if (!row) {
     throw new OrchestrationError(
-      'request_mismatch',
-      `Relayed pact message ${args.messageId} conflicts with an existing pact record on this host.`
+      'not_a_participant',
+      `Refused: ${senderKey} is not a participant on ${thread.id}.`
     )
   }
-  // A genuine duplicate replay — return the stored receipt, apply nothing (§2.5, audited under §2.9).
-  const priorThread = db
-    .prepare(`SELECT thread_id FROM pact_steps WHERE message_id = ? LIMIT 1`)
-    .get(args.messageId) as { thread_id: string } | undefined
-  return { outcome: 'duplicate', threadId: priorThread?.thread_id ?? peerThreadId }
 }
 
-export type PactThreadResolution = { mode: 'propose' | 'apply'; thread: ThreadRow }
-
-// Gates 10-13 — thread, era, party, matrix (gate 9/route runs in the RPC handler itself, which
-// already holds pairedDeviceId/runtime).
-export function resolvePactThreadAndGates(
+// Gate 10 (+ the propose limb's gate 12 participant check, A-F15) — thread resolution only (gate
+// 9/route runs in the RPC handler itself, which already holds pairedDeviceId/runtime). Era/party/
+// matrix (gates 11-13) are `runPactPartyAndMatrixGates`, below — split so the applied-ids dedupe
+// gate (8b) can run in between, scoped to the thread this function resolves (A-F17: an inbound
+// `release` on an unmapped thread is an accepted idempotent no-op, not a terminal refusal).
+export function resolvePactThread(
   db: Database.Database,
   args: ApplyInboundPactVerbArgs,
   peerThreadId: string
@@ -259,16 +222,32 @@ export function resolvePactThreadAndGates(
         `No local thread corresponds to the peer's thread ${peerThreadId}.`
       )
     }
+    requirePactProposeParticipant(db, mapped, senderKey)
     return { mode: 'propose', thread: mapped }
   }
 
   if (!threadRow) {
+    if (pact.verb === 'release') {
+      // §2.9 — a release on a thread this host has no record of is an accepted no-op, not a
+      // terminal refusal (idempotent: the peer may have already purged/never mapped it).
+      return { mode: 'release_noop' }
+    }
     throw new OrchestrationError(
       'pact_no_pact',
       `Refused: no pact thread corresponds to the peer's thread ${peerThreadId}.`
     )
   }
-  const thread = threadRow
+  return { mode: 'apply', thread: threadRow }
+}
+
+// Gates 11-13 — era, party, matrix, applied against OUR columns. Throws; returns nothing (the
+// resolved thread is unchanged by these checks).
+export function runPactPartyAndMatrixGates(
+  args: ApplyInboundPactVerbArgs,
+  thread: ThreadRow
+): void {
+  const { pact } = args
+  const senderKey = renderedSenderKey(args)
 
   // Gate 11 — era equality (every verb but `propose`); mismatch is terminal.
   if (thread.pact_era !== pact.era) {
@@ -290,13 +269,15 @@ export function resolvePactThreadAndGates(
   }
 
   // Gate 13 — the per-verb applicability matrix (§4.2), applied against OUR columns.
-  const effectivePaused = thread.pact_paused_at !== null || thread.pact_peer_paused_at !== null
-  const appliesWhilePaused =
-    pact.verb === 'release' ||
-    pact.verb === 'resync' ||
-    pact.verb === 'resync_request' ||
-    pact.verb === 'gap_notice' ||
-    pact.verb === 'rebind_party'
+  // B-F5/A-F5: a turn-consuming verb arriving while OUR own emit is mid-settle is retryable
+  // (`pact_settling`), never the transport-shaped `not_a_participant` the holder check below
+  // would otherwise raise — checked first, ahead of every other gate-13 precondition.
+  if (thread.pact_turn_in_flight_at !== null && (pact.verb === 'step' || pact.verb === 'accept')) {
+    throw new OrchestrationError(
+      'pact_settling',
+      `Refused: ${thread.id}'s prior turn is still settling; retry shortly.`
+    )
+  }
 
   if (pact.verb === 'accept' || pact.verb === 'decline') {
     if (thread.pact_state !== 'proposed' || thread.pact_with_agent_id !== senderKey) {
@@ -305,11 +286,16 @@ export function resolvePactThreadAndGates(
         `Refused: ${thread.id} has no pending proposal to ${senderKey}.`
       )
     }
-  } else if (pact.verb === 'step' || pact.verb === 'pause' || pact.verb === 'resume') {
+    // B-F13/§4.2: accept/decline regain the not-paused check — a local pause for containment
+    // must block the peer from moving proposed -> engaged (or declining) underneath it.
+    if (thread.pact_paused_at !== null) {
+      throw new OrchestrationError('pact_paused', `Refused: this pact is paused.`)
+    }
+  } else if (pact.verb === 'step' || pact.verb === 'pause') {
     if (thread.pact_state !== 'engaged') {
       throw new OrchestrationError('pact_not_engaged', `Refused: ${thread.id} has no engaged pact.`)
     }
-    if (!appliesWhilePaused && effectivePaused) {
+    if (thread.pact_paused_at !== null || thread.pact_peer_paused_at !== null) {
       throw new OrchestrationError('pact_paused', `Refused: this pact is paused.`)
     }
     if (pact.verb === 'step' && thread.pact_turn_agent_id !== senderKey) {
@@ -318,7 +304,20 @@ export function resolvePactThreadAndGates(
         `Refused: ${senderKey} does not hold the turn on ${thread.id}.`
       )
     }
+  } else if (pact.verb === 'resume') {
+    // B-F3: an inbound `resume` clears the PEER's pause as WE recorded it — gated on
+    // `pact_peer_paused_at` (their pause) only, NEVER on `effectivePaused`/our own pause; our
+    // own pause is lifted only by our own local `--resume`, never by a relayed one.
+    if (thread.pact_state !== 'engaged') {
+      throw new OrchestrationError('pact_not_engaged', `Refused: ${thread.id} has no engaged pact.`)
+    }
+    if (thread.pact_peer_paused_at === null) {
+      throw new OrchestrationError(
+        'pact_not_paused',
+        `Refused: ${thread.id}'s pact is not paused from the peer's side.`
+      )
+    }
   }
-  // `release`/`gap_notice`: applicable from any state, while paused — no gate, per §4.2/§2.5.
-  return { mode: 'apply', thread }
+  // `release`/`gap_notice`/`resync`/`resync_request`/`rebind_party`: applicable from any state,
+  // while paused — no gate, per §4.2/§2.5.
 }

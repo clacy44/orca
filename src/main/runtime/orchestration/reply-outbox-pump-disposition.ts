@@ -87,11 +87,28 @@ export const PACT_HOLD_CAUSES = new Set([
 
 // S10-21b B5 (design §2.9): none of these is evidence the transport is unreachable — retry,
 // bumpFailure:false, same growing-backoff derivation as PACT_HOLD_CAUSES above.
+// S10-21b B8c (D-R135 finding 10): seven more non-bumping refusal codes join this set —
+// pact_paused/pact_exists/pact_no_route/pact_not_engaged/not_a_participant/not_found/
+// pact_repair_not_yet_available were previously in none of the classifier sets, so a pact item
+// hit them fell through to the transport-shaped terminal branch with bumpFailure:true, which
+// drives the link's unreachable threshold and degrades unrelated mail on the same link.
+// DEVIATION (declared): B11 (lane 2, base 151845af72) already lands `pact_paused` here on a
+// SEPARATE worktree this commit cannot see or rebase onto; all seven are added here rather than
+// six so this lane's own battery is green today. The two edits are byte-identical on the
+// `pact_paused` member, so the eventual lane-2-onto-lane-1 rebase resolves it as a trivial
+// no-op duplicate, not a conflict — the set is the same seven-member union either way.
 const PACT_RETRY_CAUSES = new Set([
   'pact_settling',
   'pact_out_of_order',
   'pact_identity_unmirrored',
-  'pact_ledger_capped'
+  'pact_ledger_capped',
+  'pact_paused',
+  'pact_exists',
+  'pact_no_route',
+  'pact_not_engaged',
+  'not_a_participant',
+  'not_found',
+  'pact_repair_not_yet_available'
 ])
 
 // S10-21b B5 (design §2.9): deterministic on the same bytes, or a genuine protocol fault —
