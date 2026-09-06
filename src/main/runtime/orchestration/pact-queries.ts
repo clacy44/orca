@@ -62,6 +62,17 @@ export type GetPactLedgerParams = {
   // Computed by the RPC layer (ruling 3): the two pact participants, and a local non-federated
   // caller — never derived here from agent identity, which this db-level function does not see.
   revealSummaries: boolean
+  // S10-21b B11 (design §4.7, T31): resolves a remote actor's rendered party key
+  // (`remote:<link>:<remoteAgentId>`, B8 batch-2 review item 3) to a display name and a
+  // supersession-chain-wide quarantine verdict. Supplied only by OrchestrationDb.getPactLedger
+  // (db.ts), which alone holds the class methods this needs (`walkRemoteAgentSupersessionChain`,
+  // `isRemoteAgentLocallyQuarantined`) — this free function only ever takes a raw
+  // `Database.Database` handle (this file's standing shape) and never calls them directly.
+  // Optional so every pre-B11 direct caller of this function (pact-queries.test.ts) stays
+  // byte-identical.
+  resolveRemoteActor?: (
+    renderedKey: string
+  ) => { displayName: string | null; quarantined: boolean } | null
 }
 
 // Ruling 3: the skeleton (ordinal/actor/kind/timestamp/hash prefix) is unconditional for any
@@ -88,10 +99,22 @@ export function getPactLedger(
   let withheldCount = 0
   const entries: PactLedgerEntry[] = rows.map((row) => {
     const purged = row.summary_purged_at !== null
+    // S10-21b B11: `ps.actor_agent_id` for a remote actor is the RENDERED party key
+    // (`remote:<link>:<remoteAgentId>`), which never matches `agents.id` — the LEFT JOIN above
+    // always misses it, leaving `actor_display_name`/`actor_quarantined` null for every remote
+    // author. Resolve through the caller-supplied accessor instead; a local actor (or a caller
+    // that passed no resolver) falls through to the join's own columns unchanged.
+    const isRemoteActor = row.actor_agent_id !== null && row.actor_agent_id.startsWith('remote:')
+    const remote =
+      isRemoteActor && params.resolveRemoteActor
+        ? params.resolveRemoteActor(row.actor_agent_id as string)
+        : null
+    const actorDisplayName = remote ? remote.displayName : row.actor_display_name
+    const actorQuarantined = remote ? remote.quarantined : row.actor_quarantined === 1
     // Only a row that actually carries a summary can be withheld — propose/accept/decline/
     // pause/resume/release rows never have one, so a quarantined proposer's `propose` row isn't
     // double-counted alongside their real (summary-bearing) `step` rows.
-    const withheld = !purged && row.summary !== null && row.actor_quarantined === 1
+    const withheld = !purged && row.summary !== null && actorQuarantined
     if (purged) {
       purgedCount++
     }
@@ -103,7 +126,7 @@ export function getPactLedger(
       ordinal: row.ordinal,
       kind: row.kind,
       actorAgentId: row.actor_agent_id,
-      actorDisplayName: row.actor_display_name,
+      actorDisplayName,
       at: row.at,
       summary: params.revealSummaries && !purged && !withheld ? row.summary : null,
       summaryShaPrefix: row.summary_sha256 ? row.summary_sha256.slice(0, 12) : null,

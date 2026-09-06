@@ -87,16 +87,20 @@ export const PACT_HOLD_CAUSES = new Set([
 
 // S10-21b B5 (design §2.9): none of these is evidence the transport is unreachable — retry,
 // bumpFailure:false, same growing-backoff derivation as PACT_HOLD_CAUSES above.
-// S10-21b B8c (D-R135 finding 10): seven more non-bumping refusal codes join this set —
-// pact_paused/pact_exists/pact_no_route/pact_not_engaged/not_a_participant/not_found/
+// S10-21b B11 (design §3.3, SCOPE item 5): `pact_paused` added — the peer refusing an inbound
+// apply because ITS OWN copy of the pact is paused (e.g. the link-evidence auto-pause, commit
+// 15) is not evidence THIS host's transport is unreachable either; it was previously
+// unclassified here and fell through to the default bumpFailure:true branch, contradicting the
+// design's explicit "stays out of bumpFailure treatment the same way pact_settling/
+// pact_out_of_order do" (§3.3).
+// S10-21b B8c (D-R135 finding 10): six more non-bumping refusal codes join this set —
+// pact_exists/pact_no_route/pact_not_engaged/not_a_participant/not_found/
 // pact_repair_not_yet_available were previously in none of the classifier sets, so a pact item
 // hit them fell through to the transport-shaped terminal branch with bumpFailure:true, which
 // drives the link's unreachable threshold and degrades unrelated mail on the same link.
-// DEVIATION (declared): B11 (lane 2, base 151845af72) already lands `pact_paused` here on a
-// SEPARATE worktree this commit cannot see or rebase onto; all seven are added here rather than
-// six so this lane's own battery is green today. The two edits are byte-identical on the
-// `pact_paused` member, so the eventual lane-2-onto-lane-1 rebase resolves it as a trivial
-// no-op duplicate, not a conflict — the set is the same seven-member union either way.
+// RECONCILED (lane-2-onto-lane-1 rebase): B8c's `pact_paused` and B11's `pact_paused` were
+// byte-identical additions to the same member; the union below has each of the seven codes
+// exactly once.
 const PACT_RETRY_CAUSES = new Set([
   'pact_settling',
   'pact_out_of_order',

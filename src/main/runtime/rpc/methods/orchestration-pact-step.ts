@@ -118,7 +118,16 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
         // The local-operator carve-out: no agents row, so no participant check to make —
         // ruling 3 grants the read directly.
         const ledger = db.getPactLedger({ threadId: params.threadId, revealSummaries: true })
-        return { thread, ...ledger, nextSteps: [] }
+        // S10-21b B11 (design §3.3): the same three facts an expiring wait prints, durably
+        // visible outside a wait too — `--json`'s new fields.
+        const facts = db.computePactWaitExpiryFacts(params.threadId)
+        return {
+          thread,
+          ...ledger,
+          linkHealth: facts.linkHealth,
+          peerState: facts.peerState,
+          nextSteps: []
+        }
       }
 
       if (!db.isThreadParticipant(params.threadId, agent.id)) {
@@ -135,7 +144,16 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
         threadId: params.threadId,
         revealSummaries: isPactParticipant
       })
-      return { thread, ...ledger, nextSteps: [] }
+      // S10-21b B11 (design §3.3): the same three facts an expiring wait prints, durably
+      // visible outside a wait too — `--json`'s new fields.
+      const facts = db.computePactWaitExpiryFacts(params.threadId)
+      return {
+        thread,
+        ...ledger,
+        linkHealth: facts.linkHealth,
+        peerState: facts.peerState,
+        nextSteps: []
+      }
     }
   })
 ]
