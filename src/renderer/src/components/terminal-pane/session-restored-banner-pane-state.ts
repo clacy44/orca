@@ -3,8 +3,11 @@ import type { ManagedPane } from '@/lib/pane-manager/pane-manager'
 export type SessionRestoredBannerPane = Pick<ManagedPane, 'id' | 'container'>
 
 /** `resume-unavailable`: the pane asked to resume a provider session Orca could not
- *  verify, so it launched a fresh one — silence would read as a successful restore. */
-export type SessionRestoredBannerReason = 'restored' | 'resume-unavailable'
+ *  verify, so it launched a fresh one — silence would read as a successful restore.
+ *  `restored-elsewhere` [S10-21a C15c, D-R131 N2]: the cold-restore override was suppressed
+ *  because the host sweep already restored this pane — a plain shell with no notice would
+ *  read as data loss rather than "restored elsewhere". */
+export type SessionRestoredBannerReason = 'restored' | 'resume-unavailable' | 'restored-elsewhere'
 
 export type SessionRestoredBannerPaneReasons = ReadonlyMap<number, SessionRestoredBannerReason>
 

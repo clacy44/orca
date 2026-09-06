@@ -186,7 +186,7 @@ export function wakeSleepingAgentsForWorktreeInBackground(
   // (a)/(b)/(d) entirely. Queue a thunk that re-invokes this exact call, replayed once when
   // hydration completes.
   if (!appState.sweepRestoreMarksHydrated) {
-    appState.notePendingSweepMarksResumeWake(() =>
+    appState.notePendingSweepMarksResumeWake(worktreeId, () =>
       wakeSleepingAgentsForWorktreeInBackground(worktreeId, withheldPaneKeys)
     )
     return

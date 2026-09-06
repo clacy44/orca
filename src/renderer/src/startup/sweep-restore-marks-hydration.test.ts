@@ -11,20 +11,31 @@ vi.mock('@/lib/resume-sleeping-agent-session', () => ({
   resumeSleepingAgentSessionsForWorktree: (worktreeId: string) => resumeSpy(worktreeId)
 }))
 
+// [S10-21a C15c, D-R131 N1] Spy on the breadcrumb channel instead of the real implementation —
+// the real one is a no-op without `window.api`.
+const recordBreadcrumbSpy = vi.fn()
+vi.mock('../lib/crash-breadcrumb-recorder', () => ({
+  recordRendererCrashBreadcrumb: (name: string, data?: unknown) => recordBreadcrumbSpy(name, data)
+}))
+
 import {
   applySweepRestoreMarkListReply,
-  finalizeSweepRestoreMarksHydration
+  finalizeSweepRestoreMarksHydration,
+  finalizeSweepRestoreMarksHydrationFromCatch
 } from './sweep-restore-marks-hydration'
 
 const initialAppStoreState = useAppStore.getState()
+const originalWindowApi = window.api
 
 beforeEach(() => {
   useAppStore.setState(initialAppStoreState, true)
   resumeSpy.mockClear()
+  recordBreadcrumbSpy.mockClear()
 })
 
 afterEach(() => {
   useAppStore.setState(initialAppStoreState, true)
+  window.api = originalWindowApi
   vi.restoreAllMocks()
 })
 
@@ -75,12 +86,42 @@ describe('finalizeSweepRestoreMarksHydration (S10-21a C15b, F1/F4)', () => {
   it('(F2 drain) replays a queued wake thunk exactly once alongside the id-keyed queue', () => {
     useAppStore.setState({ sweepRestoreMarksHydrated: false } as never)
     const wake = vi.fn()
-    useAppStore.getState().notePendingSweepMarksResumeWake(wake)
+    useAppStore.getState().notePendingSweepMarksResumeWake('wt-1', wake)
 
     finalizeSweepRestoreMarksHydration(false, null)
 
     expect(wake).toHaveBeenCalledTimes(1)
-    expect(useAppStore.getState().pendingSweepMarksResumeWakes.length).toBe(0)
+    expect(useAppStore.getState().pendingSweepMarksResumeWakes.size).toBe(0)
+  })
+
+  // [S10-21a C15c, D-R131 N4] Fails at base: base's queue is a plain array (`.push`), so two
+  // wakes for one worktree would replay both, keyed test would fail to compile/assert dedupe.
+  it('(N4) two wakes queued for the same worktree replay only the most recent, once', () => {
+    useAppStore.setState({ sweepRestoreMarksHydrated: false } as never)
+    const firstWake = vi.fn()
+    const secondWake = vi.fn()
+    useAppStore.getState().notePendingSweepMarksResumeWake('wt-1', firstWake)
+    useAppStore.getState().notePendingSweepMarksResumeWake('wt-1', secondWake)
+
+    finalizeSweepRestoreMarksHydration(false, null)
+
+    expect(firstWake).not.toHaveBeenCalled()
+    expect(secondWake).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().pendingSweepMarksResumeWakes.size).toBe(0)
+  })
+
+  // [S10-21a C15c, D-R131 N1] Fails at base: `finalizeSweepRestoreMarksHydration` at base only
+  // `console.error`s, never reaching a durable channel.
+  it('(N1) a forced finalize records a durable breadcrumb, not just console.error', () => {
+    useAppStore.setState({ sweepRestoreMarksHydrated: false } as never)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    finalizeSweepRestoreMarksHydration(false, 'session-get rejected')
+
+    expect(recordBreadcrumbSpy).toHaveBeenCalledWith('sweep_restore_marks_forced', {
+      stepLabel: 'session-get rejected',
+      paneCount: 0
+    })
   })
 })
 
@@ -106,5 +147,77 @@ describe('applySweepRestoreMarkListReply (S10-21a C15b, F3)', () => {
       expect.stringContaining('timed out waiting for the sweep lock'),
       ['p1']
     )
+  })
+
+  // [S10-21a C15c, D-R131 N1] Fails at base: no breadcrumb call exists at base.
+  it('(N1) a timed-out sweep read also records a durable breadcrumb', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    applySweepRestoreMarkListReply({ paneKeys: ['p1', 'p2'], sweepIncomplete: true })
+
+    expect(recordBreadcrumbSpy).toHaveBeenCalledWith('sweep_restore_marks_incomplete', {
+      paneCount: 2
+    })
+  })
+})
+
+describe('finalizeSweepRestoreMarksHydrationFromCatch (S10-21a C15c, D-R131 N5)', () => {
+  // Fails at base: base's outer-catch path calls `finalizeSweepRestoreMarksHydration` directly,
+  // never reading the marks first — the set stays at its empty default.
+  it('reads and applies the marks before finalizing when a throw preceded the hydrate step', async () => {
+    useAppStore.setState({ sweepRestoreMarksHydrated: false } as never)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    window.api = {
+      session: {
+        sweepRestoreMarkList: vi.fn(async () => ({ paneKeys: ['p1'], sweepIncomplete: false }))
+      }
+    } as never
+
+    await finalizeSweepRestoreMarksHydrationFromCatch(false, 'session-get rejected')
+
+    expect(useAppStore.getState().sweepRestoredPaneKeys.has('p1')).toBe(true)
+    expect(useAppStore.getState().sweepRestoreMarksHydrated).toBe(true)
+  })
+
+  it('proceeds as before (finalizes anyway) when the best-effort read fails', async () => {
+    useAppStore.setState({ sweepRestoreMarksHydrated: false } as never)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    window.api = {
+      session: {
+        sweepRestoreMarkList: vi.fn(async () => {
+          throw new Error('ipc down')
+        })
+      }
+    } as never
+
+    await finalizeSweepRestoreMarksHydrationFromCatch(false, 'session-get rejected')
+
+    expect(useAppStore.getState().sweepRestoreMarksHydrated).toBe(true)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('best-effort catch-path read failed'),
+      expect.any(Error)
+    )
+  })
+
+  it('does not re-read when the finally already hydrated (idempotent)', async () => {
+    useAppStore.setState({ sweepRestoreMarksHydrated: true } as never)
+    const sweepRestoreMarkList = vi.fn(async () => ({ paneKeys: ['p1'], sweepIncomplete: false }))
+    window.api = { session: { sweepRestoreMarkList } } as never
+
+    await finalizeSweepRestoreMarksHydrationFromCatch(false, 'later throw')
+
+    expect(sweepRestoreMarkList).not.toHaveBeenCalled()
+  })
+
+  it('does not read or finalize when cancelled', async () => {
+    useAppStore.setState({ sweepRestoreMarksHydrated: false } as never)
+    const sweepRestoreMarkList = vi.fn(async () => ({ paneKeys: ['p1'], sweepIncomplete: false }))
+    window.api = { session: { sweepRestoreMarkList } } as never
+
+    await finalizeSweepRestoreMarksHydrationFromCatch(true, 'reason irrelevant when cancelled')
+
+    expect(sweepRestoreMarkList).not.toHaveBeenCalled()
+    expect(useAppStore.getState().sweepRestoreMarksHydrated).toBe(false)
   })
 })

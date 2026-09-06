@@ -5380,6 +5380,11 @@ export function connectPanePty(
               showSessionRestoredBanner('resume-unavailable')
             } else if (coldRestoreOverride?.hasSleepingRecord) {
               showSessionRestoredBanner()
+            } else if (coldRestoreStartupSuppressed) {
+              // [S10-21a C15c, D-R131 N2] The host sweep already restored this pane, so the
+              // cold-restore override was suppressed above — without this the pane is a silent
+              // bare shell.
+              showSessionRestoredBanner('restored-elsewhere')
             }
             clearSleepingRecordAfterColdRestoreSpawn(coldRestoreOverride)
           } else if (

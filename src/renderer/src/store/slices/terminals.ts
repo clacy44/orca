@@ -612,9 +612,11 @@ export type TerminalSlice = {
   /** [S10-21a C15b, F2] A deferred wake carries options (`withheldPaneKeys`, `suppressNavigation`,
    * `skipClaimKeys`, `onSessionLaunched`) that the id-keyed queue above cannot represent — replaying
    * by bare worktree id would run steps (a)/(b)/(d) never and drop the lane partition. Each deferred
-   * wake queues its own re-invocation thunk instead; replayed once, in order, when hydration completes. */
-  pendingSweepMarksResumeWakes: readonly (() => void)[]
-  notePendingSweepMarksResumeWake: (wake: () => void) => void
+   * wake queues its own re-invocation thunk instead; replayed once, in order, when hydration completes.
+   * [S10-21a C15c, D-R131 N4] Keyed by worktree id (last wins), not an unbounded array — N
+   * pre-hydration wakes for one worktree collapse to its most recent options/closure. */
+  pendingSweepMarksResumeWakes: ReadonlyMap<string, () => void>
+  notePendingSweepMarksResumeWake: (worktreeId: string, wake: () => void) => void
   takePendingSweepMarksResumeWakes: () => (() => void)[]
   restoredRuntimeHostIdByWorkspaceSessionKey: Record<string, ExecutionHostId>
   defaultTerminalTabsAppliedByWorktreeId: Record<string, true>
@@ -1115,12 +1117,14 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
     set({ pendingSweepMarksResumeWorktreeIds: new Set<string>() })
     return ids
   },
-  pendingSweepMarksResumeWakes: [],
-  notePendingSweepMarksResumeWake: (wake) =>
-    set((s) => ({ pendingSweepMarksResumeWakes: [...s.pendingSweepMarksResumeWakes, wake] })),
+  pendingSweepMarksResumeWakes: new Map<string, () => void>(),
+  notePendingSweepMarksResumeWake: (worktreeId, wake) =>
+    set((s) => ({
+      pendingSweepMarksResumeWakes: new Map(s.pendingSweepMarksResumeWakes).set(worktreeId, wake)
+    })),
   takePendingSweepMarksResumeWakes: () => {
-    const wakes = [...get().pendingSweepMarksResumeWakes]
-    set({ pendingSweepMarksResumeWakes: [] })
+    const wakes = [...get().pendingSweepMarksResumeWakes.values()]
+    set({ pendingSweepMarksResumeWakes: new Map<string, () => void>() })
     return wakes
   },
   restoredRuntimeHostIdByWorkspaceSessionKey: {},

@@ -3501,6 +3501,70 @@ describe('connectPanePty', () => {
     expect(resumeConnectOptions?.env?.ORCA_AGENT_LAUNCH_TOKEN).toBeUndefined()
   })
 
+  // [S10-21a C15c, D-R131 N3] Twin of the R55 test above: suppression driven by
+  // `sweepRestoredPaneKeys` containing the pane (marks ARE hydrated), not the unhydrated flag.
+  // The suppression assertions (no command/env/authority fields) are a FENCE — they already pass
+  // at base, since `sweepAlreadyRestoredThisPane` already checks this set. Only the banner
+  // assertion fails at base (N2's fix).
+  it('(N3) suppresses via sweepRestoredPaneKeys (marks hydrated) and shows the banner', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport('pty-pane-2')
+    transportFactoryQueue.push(transport)
+    const manager = createManager(1)
+    const deps = createDeps({
+      consumeSuppressedPtyExit: vi.fn(() => true),
+      isVisibleRef: { current: false }
+    })
+    const pane = createPane(2)
+    const paneKey = `tab-1:${leafIdForPane(2)}`
+    mockStoreState.sweepRestoreMarksHydrated = true
+    mockStoreState.sweepRestoredPaneKeys = new Set([paneKey])
+    mockStoreState.sleepingAgentSessionsByPaneKey[paneKey] = {
+      paneKey,
+      tabId: 'tab-1',
+      worktreeId: 'wt-1',
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-hibernated-swept' },
+      prompt: 'test prompt',
+      state: 'done',
+      capturedAt: 1,
+      updatedAt: 1,
+      origin: 'worktree-sleep'
+    }
+    mockStoreState.suppressedPtyExitIds['tab-pty'] = true
+
+    const binding = connectPanePty(pane as never, manager as never, deps as never) as unknown as {
+      noteVisibilityResume: () => void
+      dispose: () => void
+    }
+    await flushAsyncTicks()
+
+    const onPtyExit = createdTransportOptions[0]?.onPtyExit as ((ptyId: string) => void) | undefined
+    onPtyExit?.('tab-pty')
+    await flushAsyncTicks()
+
+    binding.noteVisibilityResume()
+    await flushAsyncTicks()
+
+    const resumeConnectOptions = transport.connect.mock.calls.at(-1)?.[0] as
+      | {
+          resumeProviderSession?: unknown
+          launchConfig?: unknown
+          launchToken?: unknown
+          launchAgent?: unknown
+          command?: string
+          env?: Record<string, string>
+        }
+      | undefined
+    expect(resumeConnectOptions?.resumeProviderSession).toBeUndefined()
+    expect(resumeConnectOptions?.launchConfig).toBeUndefined()
+    expect(resumeConnectOptions?.launchToken).toBeUndefined()
+    expect(resumeConnectOptions?.launchAgent).toBeUndefined()
+    expect(resumeConnectOptions?.command).toBeUndefined()
+    expect(resumeConnectOptions?.env?.ORCA_AGENT_LAUNCH_TOKEN).toBeUndefined()
+    expect(deps.onShowSessionRestoredBanner).toHaveBeenCalledWith(2, 'restored-elsewhere')
+  })
+
   it('resumes a hibernated agent from a navigation-free wake without a visibility reveal', async () => {
     // Mobile wake fanout drives wakeHibernatedAgentIfArmed on a still-hidden pane (no isVisible flip): the armed --resume must fire exactly once even if delivered twice (INV-1).
     const { connectPanePty } = await import('./pty-connection')

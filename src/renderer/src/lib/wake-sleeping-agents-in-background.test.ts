@@ -489,7 +489,9 @@ describe('wakeSleepingAgentsForWorktreeInBackground: marks-hydration gate (S10-2
     // Hydration completes: the queued thunk is the drain's replay unit — invoking it re-runs this
     // exact wake with its original options intact, including the internal onSessionLaunched
     // callback (step d's background mount) that a bare id-keyed replay could never carry.
-    const queuedWake = notePendingSweepMarksResumeWake.mock.calls[0]?.[0] as () => void
+    // [S10-21a C15c, D-R131 N4] Queue is keyed by worktree id (first arg); wake is the second.
+    expect(notePendingSweepMarksResumeWake.mock.calls[0]?.[0]).toBe('wt-1')
+    const queuedWake = notePendingSweepMarksResumeWake.mock.calls[0]?.[1] as () => void
     sweepRestoreMarksHydrated = true
     resumeSpy.mockImplementationOnce((_worktreeId, options) => {
       options?.onSessionLaunched?.('tab-launched')

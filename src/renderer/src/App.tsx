@@ -13,7 +13,8 @@ import {
 import { lazyWithRetry as lazy } from '@/lib/lazy-with-retry'
 import {
   applySweepRestoreMarkListReply,
-  finalizeSweepRestoreMarksHydration
+  finalizeSweepRestoreMarksHydration,
+  finalizeSweepRestoreMarksHydrationFromCatch
 } from './startup/sweep-restore-marks-hydration'
 
 import {
@@ -1202,7 +1203,10 @@ function App(): React.JSX.Element {
           // `reconnectPersistedTerminals` below/at :1227, forcing every pane "already restored"
           // and dropping every deferred resume/wake forever. Idempotent (no-op, no log) if the
           // finally already ran.
-          finalizeSweepRestoreMarksHydration(cancelled, stepLabel)
+          // [S10-21a C15c, D-R131 N5] A throw above the hydrate step never ran it, so the
+          // mark set is still the empty default; best-effort re-read before flipping so real
+          // marks aren't discarded. See `finalizeSweepRestoreMarksHydrationFromCatch`.
+          await finalizeSweepRestoreMarksHydrationFromCatch(cancelled, stepLabel)
           // Why: degraded mode stays interactive; later repo/runtime changes must not remain gated forever.
           useAppStore.setState({ startupWorktreeRefreshCompleted: true })
           // Why (issue #1158): only apply default UI if ui.get() never hydrated; otherwise defaults would clobber ui.json via the debounced writer.

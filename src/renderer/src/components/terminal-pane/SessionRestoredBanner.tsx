@@ -3,6 +3,7 @@ import type { SessionRestoredBannerReason } from './session-restored-banner-pane
 export const SESSION_RESTORED_BANNER_TEXT = '--- session restored ---'
 export const SESSION_RESUME_UNAVAILABLE_BANNER_TEXT =
   '--- previous session unavailable, started fresh ---'
+export const SESSION_RESTORED_ELSEWHERE_BANNER_TEXT = '--- restored elsewhere by the host sweep ---'
 
 type SessionRestoredBannerProps = {
   visible: boolean
@@ -21,7 +22,9 @@ export function SessionRestoredBanner({
     <div className="session-restored-banner">
       {reason === 'resume-unavailable'
         ? SESSION_RESUME_UNAVAILABLE_BANNER_TEXT
-        : SESSION_RESTORED_BANNER_TEXT}
+        : reason === 'restored-elsewhere'
+          ? SESSION_RESTORED_ELSEWHERE_BANNER_TEXT
+          : SESSION_RESTORED_BANNER_TEXT}
     </div>
   )
 }
