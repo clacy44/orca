@@ -111,7 +111,7 @@ describe('S10-21a C1: schema v41 migration', () => {
 
     db = new OrchestrationDb(path)
     const sqlite = rawDb(db)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(41)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(42)
     for (const table of NEW_TABLES) {
       expect(hasTable(sqlite, table)).toBe(true)
       expect(rowCount(sqlite, table)).toBe(0)
@@ -125,7 +125,7 @@ describe('S10-21a C1: schema v41 migration', () => {
     // Second open (migrate() re-runs on every open; current is already 41) is a no-op.
     db = new OrchestrationDb(path)
     const sqliteAgain = rawDb(db)
-    expect(sqliteAgain.pragma('user_version', { simple: true })).toBe(41)
+    expect(sqliteAgain.pragma('user_version', { simple: true })).toBe(42)
     for (const table of NEW_TABLES) {
       expect(rowCount(sqliteAgain, table)).toBe(0)
     }

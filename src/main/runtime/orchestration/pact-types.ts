@@ -47,6 +47,24 @@ export type PactStepRow = {
   turn_after_agent_id: string | null
   reason_code: string | null
   at: string
+  // v42 (S10-21b B1, federated pacts) — additive.
+  actor_is_remote: number
+  actor_remote_agent_id: string | null
+  actor_environment_id: string | null
+  relay_seq: number | null
+  relay_state: string | null
+  relay_settled_at: string | null
+}
+
+// v42 (S10-21b B1, design §6, errata 6(16) NB6): durable applied-id proof for the four
+// no-ledger verbs ('resync' | 'resync_request' | 'rebind_party' | 'gap_notice').
+export type PactAppliedIdVerb = 'resync' | 'resync_request' | 'rebind_party' | 'gap_notice'
+
+export type PactAppliedIdRow = {
+  thread_id: string
+  message_id: string
+  verb: PactAppliedIdVerb
+  applied_at: string
 }
 
 // Ruling 3's ledger read shape: skeleton always, summary only for the two participants / local

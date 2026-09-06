@@ -22,4 +22,7 @@ export type RemoteAgentRow = {
   // supplied one (e.g. a future `link_kind='environment'` writer).
   peer_fingerprint: string | null
   last_seen_at: string
+  // v42 (S10-21b B1, federated pacts) — additive; the mirror-supersession chain (design §4.2/4.7).
+  superseded_at: string | null
+  succeeded_by_remote_agent_id: string | null
 }

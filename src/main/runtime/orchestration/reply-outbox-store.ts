@@ -11,86 +11,9 @@ import {
   CANCELLED_LOCAL_RESET_CODE
 } from './link-binding-constants'
 import { LinkBindingCapError } from './link-binding-store'
+import type { ReplyOutboxRow, ReplyOutboxSqlRow } from './reply-outbox-types'
 
-export type ReplyOutboxState =
-  | 'queued'
-  | 'sending'
-  | 'delivered'
-  | 'refused'
-  | 'abandoned'
-  | 'cancelled'
-
-export type ReplyOutboxRow = {
-  id: string
-  seq: number
-  localMessageId: string
-  linkDeviceId: string
-  environmentId: string
-  boundPairingRevision: number
-  peerCredentialFp: string
-  peerKeyFingerprint: string
-  inReplyToMessageId: string
-  peerAgentId: string
-  peerThreadId: string | null
-  localThreadId: string | null
-  noticeRunId: string | null
-  noticePaneKey: string | null
-  payload: string
-  byteCount: number
-  state: ReplyOutboxState
-  leaseExpiresAt: number | null
-  attempts: number
-  consecutiveFailures: number
-  holdCount: number
-  firstHeldAt: number | null
-  lastAttemptAt: number | null
-  nextAttemptAfter: number | null
-  lastErrorCode: string | null
-  lastError: string | null
-  peerMessageId: string | null
-  peerReplyThreadId: string | null
-  createdAt: number
-  settledAt: number | null
-  notifiedAt: number | null
-  lastNotifiedCondition: string | null
-  lastNotifiedAt: number | null
-}
-
-type ReplyOutboxSqlRow = {
-  id: string
-  seq: number
-  local_message_id: string
-  link_device_id: string
-  environment_id: string
-  bound_pairing_revision: number
-  peer_credential_fp: string
-  peer_key_fingerprint: string
-  in_reply_to_message_id: string
-  peer_agent_id: string
-  peer_thread_id: string | null
-  local_thread_id: string | null
-  notice_run_id: string | null
-  notice_pane_key: string | null
-  payload: string
-  byte_count: number
-  state: ReplyOutboxState
-  lease_expires_at: number | null
-  attempts: number
-  consecutive_failures: number
-  hold_count: number
-  first_held_at: number | null
-  last_attempt_at: number | null
-  next_attempt_after: number | null
-  last_error_code: string | null
-  last_error: string | null
-  peer_message_id: string | null
-  peer_reply_thread_id: string | null
-  created_at: number
-  settled_at: number | null
-  notified_at: number | null
-  last_notified_condition: string | null
-  last_notified_at: number | null
-}
+export type { ReplyOutboxState, ReplyOutboxRow } from './reply-outbox-types'
 
 function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
   return {

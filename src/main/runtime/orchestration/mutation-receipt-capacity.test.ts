@@ -103,7 +103,7 @@ describe('mutation receipt capacity schema', () => {
 
     db = new OrchestrationDb(dbPath)
     const sqlite = sqliteFor(db)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(41)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(42)
     expect(sqlite.prepare('SELECT receipt_count FROM mutation_receipt_ledger').get()).toEqual({
       receipt_count: 20
     })

@@ -1029,6 +1029,10 @@ const S10_16_LINK_BINDING_SCHEMA_SQL = `
         link_credential_fp           TEXT NOT NULL,
         detail                       TEXT,
         observed_at                  INTEGER NOT NULL,
+        -- S10-21b B1 errata 6(16), NB2: set on the first 'unreachable' scan of an episode,
+        -- cleared to NULL on any other outcome (write rule is a commit-15 handler concern; this
+        -- commit only adds the column and its DROP-AND-RECREATE probe entry above).
+        unreachable_since            INTEGER,
         PRIMARY KEY (link_device_id, environment_id)
       );
 
@@ -1176,6 +1180,26 @@ const AGENT_LAUNCH_SESSIONS_SCHEMA_SQL = `
       );
 `
 
+// S10-21b B1 (v42, design §6, Addendum 6(15)/errata 6(16) NB6): durable applied-id proof for the
+// four no-ledger pact verbs ('resync', 'resync_request', 'rebind_party', 'gap_notice' — none of
+// which write a pact_steps row), so resetMessages (which deletes messages but not pact_steps or
+// this table) cannot turn a legitimate retry of one of these into a terminal pact_desync. No
+// column dependency on anything created later, so — like S10_4_FEDERATION_SCHEMA_SQL and
+// AGENT_LAUNCH_SESSIONS_SCHEMA_SQL above — this is a brand-new TABLE, order-safe to create
+// unconditionally in createTables() before migrate() runs (design §6, "Composition with
+// S10-21a"). Peer-writable only via the inbound apply transaction that also writes the verb's
+// effect (commit 8); never backfilled. Capped per pact at PACT_STEPS_PER_PACT_CAP (commit 8/14);
+// cleared by resetAll in full (commit 14, errata 6(16) NB6) and pruned with the era purge.
+const FEDERATED_PACTS_V42_SCHEMA_SQL = `
+      CREATE TABLE IF NOT EXISTS pact_applied_ids (
+        thread_id  TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        verb       TEXT NOT NULL,   -- one of 'resync', 'resync_request', 'rebind_party', 'gap_notice' [errata 6(16)]
+        applied_at TEXT NOT NULL,
+        PRIMARY KEY (thread_id, message_id)
+      );
+`
+
 const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS remote_agents (
         environment_id          TEXT NOT NULL,   -- local link key (D5: paired_device = pairedDeviceId, environment = KnownRuntimeEnvironment.id)
@@ -1279,8 +1303,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7).
-const SCHEMA_VERSION = 41
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7), v42 34 additive columns across threads (19)/pact_steps (6)/remote_agents (2)/peer_reply_outbox (7) + pact_applied_ids table + peer_link_scan_facts.unreachable_since (S10-21b B1, federated pacts, Ruling 34 Addendum 2/6/6(16)) — no CHECK widened anywhere (pact_pause_reason stays six values; a link-driven pause reuses 'counterpart_gone' with pact_steps.reason_code='counterpart_unreachable').
+const SCHEMA_VERSION = 42
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
 // NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
@@ -1749,7 +1773,12 @@ export class OrchestrationDb {
         'outcome',
         'environment_pairing_revision',
         'link_credential_fp',
-        'observed_at'
+        'observed_at',
+        // S10-21b B1 errata 6(16), NB2: the continuity source for the link-evidence auto-pause
+        // predicate (`outcome = 'unreachable' AND now - unreachable_since >= PACT_LINK_SILENCE_MS`,
+        // commit 15). Probed here, not added to a separate v42 ALTER set, because this table is
+        // already in the DROP-AND-RECREATE repair tier (genuinely re-derivable state).
+        'unreachable_since'
       ],
       peer_link_confirm_observations: ['link_device_id', 'environment_id', 'kind', 'observed_at']
     }
@@ -1765,6 +1794,94 @@ export class OrchestrationDb {
     }
     // Re-creates any dropped table above from the single source of truth.
     this.db.exec(S10_16_LINK_BINDING_SCHEMA_SQL)
+  }
+
+  // S10-21b B1 unshipped-v42 repair (same shape/guard discipline as repairUnshippedV40LinkBinding
+  // above): a DB already stamped v42 by an earlier, in-review copy of this branch never re-enters
+  // migrate()'s `current < 42` block, so a subsequent shape fix to these four ALTER tables or to
+  // pact_applied_ids would otherwise never land. Guarded on user_version >= 42 (own repair tier,
+  // never edited once artifact 10l installs, design §6 "Composition with S10-21a") plus a
+  // hasTable probe per table. ADD COLUMN only — no data repair, unlike v40's DROP-AND-RECREATE
+  // and revoked/abandoned fail-closed marks: every v42 column is nullable or has a DEFAULT, so
+  // there is no NOT NULL back-fill hazard to fail closed against.
+  private repairUnshippedV42FederatedPacts(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 42) {
+      return
+    }
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+
+    if (hasTable('threads')) {
+      for (const [column, ddl] of [
+        ['pact_peer_key_fingerprint', 'TEXT'],
+        ['pact_peer_agent_id', 'TEXT'],
+        ['pact_peer_link_device_id', 'TEXT'],
+        ['pact_peer_environment_id', 'TEXT'],
+        ['pact_peer_thread_id', 'TEXT'],
+        ['pact_turn_in_flight_at', 'TEXT'],
+        ['pact_peer_paused_at', 'TEXT'],
+        ['pact_release_at', 'TEXT'],
+        ['pact_peer_release_at', 'TEXT'],
+        ['pact_last_inbound_at', 'TEXT'],
+        ['pact_last_resync_at', 'TEXT'],
+        ['pact_relay_pending', 'TEXT'],
+        ['pact_local_seq', 'INTEGER NOT NULL DEFAULT 0'],
+        ['pact_peer_seq', 'INTEGER NOT NULL DEFAULT 0'],
+        ['pact_flight_token', 'INTEGER NOT NULL DEFAULT 0'],
+        ['pact_resync_nonce', 'TEXT'],
+        ['pact_resync_nonce_at', 'INTEGER'],
+        ['pact_repair_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+        ['pact_pause_epoch', 'INTEGER NOT NULL DEFAULT 0']
+      ] as const) {
+        if (!this.hasColumn('threads', column)) {
+          this.db.exec(`ALTER TABLE threads ADD COLUMN ${column} ${ddl}`)
+        }
+      }
+    }
+    if (hasTable('pact_steps')) {
+      for (const [column, ddl] of [
+        ['actor_is_remote', 'INTEGER NOT NULL DEFAULT 0'],
+        ['actor_remote_agent_id', 'TEXT'],
+        ['actor_environment_id', 'TEXT'],
+        ['relay_seq', 'INTEGER'],
+        ['relay_state', 'TEXT'],
+        ['relay_settled_at', 'TEXT']
+      ] as const) {
+        if (!this.hasColumn('pact_steps', column)) {
+          this.db.exec(`ALTER TABLE pact_steps ADD COLUMN ${column} ${ddl}`)
+        }
+      }
+    }
+    if (hasTable('remote_agents')) {
+      for (const [column, ddl] of [
+        ['superseded_at', 'TEXT'],
+        ['succeeded_by_remote_agent_id', 'TEXT']
+      ] as const) {
+        if (!this.hasColumn('remote_agents', column)) {
+          this.db.exec(`ALTER TABLE remote_agents ADD COLUMN ${column} ${ddl}`)
+        }
+      }
+    }
+    if (hasTable('peer_reply_outbox')) {
+      for (const [column, ddl] of [
+        ['relay_kind', `TEXT NOT NULL DEFAULT 'reply'`],
+        ['pact_thread_id', 'TEXT'],
+        ['pact_seq', 'INTEGER'],
+        ['pact_era', 'INTEGER'],
+        ['pact_turn_after', 'TEXT'],
+        ['pact_state', 'TEXT'],
+        ['pact_flight_token', 'INTEGER']
+      ] as const) {
+        if (!this.hasColumn('peer_reply_outbox', column)) {
+          this.db.exec(`ALTER TABLE peer_reply_outbox ADD COLUMN ${column} ${ddl}`)
+        }
+      }
+    }
+    if (!hasTable('pact_applied_ids')) {
+      this.db.exec(FEDERATED_PACTS_V42_SCHEMA_SQL)
+    }
   }
 
   // S10-15 review m-2: scoped to host_id and capped at one match — deterministic today only
@@ -1806,6 +1923,7 @@ export class OrchestrationDb {
     this.repairUnshippedV38PeerRouting()
     this.repairUnshippedV39AttachmentRetentionFloor()
     this.repairUnshippedV40LinkBinding()
+    this.repairUnshippedV42FederatedPacts()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,
@@ -2168,6 +2286,7 @@ export class OrchestrationDb {
       ${S10_4_FEDERATION_SCHEMA_SQL}
       ${S10_16_LINK_BINDING_SCHEMA_SQL}
       ${AGENT_LAUNCH_SESSIONS_SCHEMA_SQL}
+      ${FEDERATED_PACTS_V42_SCHEMA_SQL}
     `)
     this.createUndeliveredInboxIndexIfPossible()
     this.createThreadDirectoryIndexesIfPossible()
@@ -2909,6 +3028,137 @@ export class OrchestrationDb {
       // repairUnshippedV40LinkBinding — it is its own numbered migration.
       if (current < 41) {
         this.db.exec(AGENT_LAUNCH_SESSIONS_SCHEMA_SQL)
+      }
+      // v41 -> v42 (S10-21b B1, federated pacts, Ruling 34 Addendum 2/6/6(16)): 34 additive
+      // columns across threads (19)/pact_steps (6)/remote_agents (2)/peer_reply_outbox (7) +
+      // pact_applied_ids (table only, already created unconditionally above via
+      // FEDERATED_PACTS_V42_SCHEMA_SQL — this is a no-op on a fresh DB, same discipline as
+      // v37/v38/v39/v40/v41) + trg_pact_steps_append_only/trg_pact_steps_no_delete DROP+re-CREATE
+      // (§4.6(b)'s era-age-or-retention-aged exemption, replacing v35's unconditional abort) +
+      // three indexes. Intra-block order is load-bearing (design §6): ALTERs first, then the two
+      // trigger DROP/CREATEs, then the indexes. NO CHECK is widened anywhere in this block —
+      // pact_pause_reason stays exactly six values (errata 6(16), NB1); a link-driven pause
+      // reuses 'counterpart_gone' with pact_steps.reason_code = 'counterpart_unreachable'.
+      if (current < 42) {
+        for (const [column, ddl] of [
+          ['pact_peer_key_fingerprint', 'TEXT'],
+          ['pact_peer_agent_id', 'TEXT'],
+          ['pact_peer_link_device_id', 'TEXT'],
+          ['pact_peer_environment_id', 'TEXT'],
+          ['pact_peer_thread_id', 'TEXT'],
+          ['pact_turn_in_flight_at', 'TEXT'],
+          ['pact_peer_paused_at', 'TEXT'],
+          ['pact_release_at', 'TEXT'],
+          ['pact_peer_release_at', 'TEXT'],
+          ['pact_last_inbound_at', 'TEXT'],
+          ['pact_last_resync_at', 'TEXT'],
+          ['pact_relay_pending', 'TEXT'],
+          ['pact_local_seq', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_peer_seq', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_flight_token', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_resync_nonce', 'TEXT'],
+          ['pact_resync_nonce_at', 'INTEGER'],
+          ['pact_repair_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+          ['pact_pause_epoch', 'INTEGER NOT NULL DEFAULT 0']
+        ] as const) {
+          if (!this.hasColumn('threads', column)) {
+            this.db.exec(`ALTER TABLE threads ADD COLUMN ${column} ${ddl}`)
+          }
+        }
+        for (const [column, ddl] of [
+          ['actor_is_remote', 'INTEGER NOT NULL DEFAULT 0'],
+          ['actor_remote_agent_id', 'TEXT'],
+          ['actor_environment_id', 'TEXT'],
+          ['relay_seq', 'INTEGER'],
+          ['relay_state', 'TEXT'],
+          ['relay_settled_at', 'TEXT']
+        ] as const) {
+          if (!this.hasColumn('pact_steps', column)) {
+            this.db.exec(`ALTER TABLE pact_steps ADD COLUMN ${column} ${ddl}`)
+          }
+        }
+        for (const [column, ddl] of [
+          ['superseded_at', 'TEXT'],
+          ['succeeded_by_remote_agent_id', 'TEXT']
+        ] as const) {
+          if (!this.hasColumn('remote_agents', column)) {
+            this.db.exec(`ALTER TABLE remote_agents ADD COLUMN ${column} ${ddl}`)
+          }
+        }
+        for (const [column, ddl] of [
+          ['relay_kind', `TEXT NOT NULL DEFAULT 'reply'`],
+          ['pact_thread_id', 'TEXT'],
+          ['pact_seq', 'INTEGER'],
+          ['pact_era', 'INTEGER'],
+          ['pact_turn_after', 'TEXT'],
+          ['pact_state', 'TEXT'],
+          ['pact_flight_token', 'INTEGER']
+        ] as const) {
+          if (!this.hasColumn('peer_reply_outbox', column)) {
+            this.db.exec(`ALTER TABLE peer_reply_outbox ADD COLUMN ${column} ${ddl}`)
+          }
+        }
+        // design §6: DROPped and re-CREATEd with the four immutable new pact_steps columns
+        // (actor_is_remote, actor_remote_agent_id, actor_environment_id, relay_seq) added to the
+        // inequality list; relay_state/relay_settled_at deliberately omitted (A10, matching the
+        // existing purge-column exclusion pattern — those two are settlement bookkeeping, not
+        // ledger content).
+        this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
+        this.db.exec(`
+          CREATE TRIGGER trg_pact_steps_append_only
+          BEFORE UPDATE ON pact_steps
+          WHEN NEW.seq <> OLD.seq
+            OR NEW.thread_id <> OLD.thread_id
+            OR NEW.ordinal <> OLD.ordinal
+            OR NEW.kind <> OLD.kind
+            OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
+            OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
+            OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
+            OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
+            OR NEW.summary_sha256 <> OLD.summary_sha256
+            OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
+            OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
+            OR NEW.at <> OLD.at
+            OR IFNULL(NEW.actor_is_remote, 0) <> IFNULL(OLD.actor_is_remote, 0)
+            OR IFNULL(NEW.actor_remote_agent_id, '') <> IFNULL(OLD.actor_remote_agent_id, '')
+            OR IFNULL(NEW.actor_environment_id, '') <> IFNULL(OLD.actor_environment_id, '')
+            OR IFNULL(NEW.relay_seq, -1) <> IFNULL(OLD.relay_seq, -1)
+            OR NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+                    AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+          BEGIN
+            SELECT RAISE(ABORT, 'pact ledger is append-only');
+          END;
+        `)
+        // design §4.6(b) exact SQL, quoted verbatim (era-age OR released-and-aged-past-
+        // PACT_RELEASED_RETENTION_MS=604_800_000 exemption; replaces v35's unconditional abort;
+        // "keyed on era AGE ... never on pact_state alone" — relaying release does not advance
+        // pact_era, so a peer cannot make its own rows deletable merely by releasing the pact).
+        this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
+        this.db.exec(`
+          CREATE TRIGGER trg_pact_steps_no_delete BEFORE DELETE ON pact_steps
+          WHEN NOT (OLD.actor_is_remote = 1
+                    AND (
+                      OLD.pact_era < (SELECT pact_era FROM threads WHERE id = OLD.thread_id)
+                      OR EXISTS (
+                        SELECT 1 FROM threads t
+                        WHERE t.id = OLD.thread_id
+                          AND t.pact_state = 'released'
+                          AND t.pact_release_at IS NOT NULL
+                          AND (strftime('%s','now') - strftime('%s', t.pact_release_at)) * 1000
+                              >= 604800000  -- PACT_RELEASED_RETENTION_MS
+                      )
+                    ))
+          BEGIN SELECT RAISE(ABORT, 'pact ledger is append-only'); END;
+        `)
+        this.db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_threads_pact_peer
+            ON threads(pact_peer_link_device_id, pact_peer_thread_id)
+            WHERE pact_peer_agent_id IS NOT NULL;
+          CREATE INDEX IF NOT EXISTS idx_peer_reply_outbox_pact
+            ON peer_reply_outbox(pact_thread_id, seq) WHERE pact_thread_id IS NOT NULL;
+          CREATE INDEX IF NOT EXISTS idx_pact_steps_remote
+            ON pact_steps(actor_is_remote, actor_environment_id, thread_id);
+        `)
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf

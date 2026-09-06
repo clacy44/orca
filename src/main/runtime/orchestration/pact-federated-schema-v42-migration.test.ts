@@ -1,0 +1,354 @@
+// S10-21b B1 (design §6, Ruling 34 Addendum 2/6/6(16)): SCHEMA v41 -> v42 migration (T24).
+// Synthetic fixture (v2's T21 approach, updated column/index counts): a real store is built at
+// current code (v42), then downgraded via raw DROP COLUMN/TABLE/TRIGGER/INDEX + a rewound
+// user_version to fabricate a genuine v41 fixture, matching this repo's existing precedent
+// (agent-launch-sessions-migration.test.ts, pact-propose-accept.test.ts's blocker-regression
+// test) rather than a hand-maintained binary fixture.
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import Database from '../../sqlite/sync-database'
+import { OrchestrationDb } from './db'
+
+const THREADS_V42_COLUMNS = [
+  'pact_peer_key_fingerprint',
+  'pact_peer_agent_id',
+  'pact_peer_link_device_id',
+  'pact_peer_environment_id',
+  'pact_peer_thread_id',
+  'pact_turn_in_flight_at',
+  'pact_peer_paused_at',
+  'pact_release_at',
+  'pact_peer_release_at',
+  'pact_last_inbound_at',
+  'pact_last_resync_at',
+  'pact_relay_pending',
+  'pact_local_seq',
+  'pact_peer_seq',
+  'pact_flight_token',
+  'pact_resync_nonce',
+  'pact_resync_nonce_at',
+  'pact_repair_attempts',
+  'pact_pause_epoch'
+]
+const PACT_STEPS_V42_COLUMNS = [
+  'actor_is_remote',
+  'actor_remote_agent_id',
+  'actor_environment_id',
+  'relay_seq',
+  'relay_state',
+  'relay_settled_at'
+]
+const REMOTE_AGENTS_V42_COLUMNS = ['superseded_at', 'succeeded_by_remote_agent_id']
+const PEER_REPLY_OUTBOX_V42_COLUMNS = [
+  'relay_kind',
+  'pact_thread_id',
+  'pact_seq',
+  'pact_era',
+  'pact_turn_after',
+  'pact_state',
+  'pact_flight_token'
+]
+
+// 19 + 6 + 2 + 7 = 34.
+expect(
+  THREADS_V42_COLUMNS.length +
+    PACT_STEPS_V42_COLUMNS.length +
+    REMOTE_AGENTS_V42_COLUMNS.length +
+    PEER_REPLY_OUTBOX_V42_COLUMNS.length
+).toBe(34)
+
+function rawDb(db: OrchestrationDb): Database.Database {
+  return (db as unknown as { db: Database.Database }).db
+}
+
+function hasColumn(sqlite: Database.Database, table: string, column: string): boolean {
+  return (sqlite.pragma(`table_info(${table})`) as { name: string }[]).some(
+    (c) => c.name === column
+  )
+}
+
+function hasTable(sqlite: Database.Database, table: string): boolean {
+  return (
+    sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table) !==
+    undefined
+  )
+}
+
+function hasTrigger(sqlite: Database.Database, trigger: string): boolean {
+  return (
+    sqlite
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+      .get(trigger) !== undefined
+  )
+}
+
+function hasIndex(sqlite: Database.Database, index: string): boolean {
+  return (
+    sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(index) !==
+    undefined
+  )
+}
+
+function rowCount(sqlite: Database.Database, table: string): number {
+  return (sqlite.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c
+}
+
+function preexistingTableNames(sqlite: Database.Database): string[] {
+  return (
+    sqlite
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+           AND name != 'pact_applied_ids'`
+      )
+      .all() as { name: string }[]
+  ).map((r) => r.name)
+}
+
+// Fabricates a genuine v41 fixture from a real v42 store: drops every v42 addition and rewinds
+// user_version, so the reopen below exercises the actual `current < 42` migrate() block rather
+// than a hand-typed approximation of it.
+function downgradeToV41(sqlite: Database.Database): void {
+  // Drop the v42 indexes and triggers FIRST — SQLite refuses to DROP COLUMN a column that is
+  // still referenced by an index or a trigger.
+  sqlite.exec(`DROP INDEX IF EXISTS idx_threads_pact_peer`)
+  sqlite.exec(`DROP INDEX IF EXISTS idx_peer_reply_outbox_pact`)
+  sqlite.exec(`DROP INDEX IF EXISTS idx_pact_steps_remote`)
+  sqlite.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
+  sqlite.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
+
+  for (const column of THREADS_V42_COLUMNS) {
+    sqlite.exec(`ALTER TABLE threads DROP COLUMN ${column}`)
+  }
+  for (const column of PACT_STEPS_V42_COLUMNS) {
+    sqlite.exec(`ALTER TABLE pact_steps DROP COLUMN ${column}`)
+  }
+  for (const column of REMOTE_AGENTS_V42_COLUMNS) {
+    sqlite.exec(`ALTER TABLE remote_agents DROP COLUMN ${column}`)
+  }
+  for (const column of PEER_REPLY_OUTBOX_V42_COLUMNS) {
+    sqlite.exec(`ALTER TABLE peer_reply_outbox DROP COLUMN ${column}`)
+  }
+  sqlite.exec(`ALTER TABLE peer_link_scan_facts DROP COLUMN unreachable_since`)
+  sqlite.exec(`DROP TABLE IF EXISTS pact_applied_ids`)
+
+  // Restore the pre-v42 trigger shapes (v35's unconditional-abort no-delete trigger; the
+  // append-only trigger without the four new pact_steps columns in its inequality list) so the
+  // reopen's DROP+re-CREATE is exercised against the real "before" shape, not just a no-op.
+  sqlite.exec(`
+    CREATE TRIGGER trg_pact_steps_no_delete
+    BEFORE DELETE ON pact_steps
+    BEGIN
+      SELECT RAISE(ABORT, 'pact ledger is append-only');
+    END;
+  `)
+  sqlite.exec(`
+    CREATE TRIGGER trg_pact_steps_append_only
+    BEFORE UPDATE ON pact_steps
+    WHEN NEW.seq <> OLD.seq
+      OR NEW.thread_id <> OLD.thread_id
+      OR NEW.ordinal <> OLD.ordinal
+      OR NEW.kind <> OLD.kind
+      OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
+      OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
+      OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
+      OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
+      OR NEW.summary_sha256 <> OLD.summary_sha256
+      OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
+      OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
+      OR NEW.at <> OLD.at
+      OR NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+              AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+    BEGIN
+      SELECT RAISE(ABORT, 'pact ledger is append-only');
+    END;
+  `)
+  sqlite.pragma('user_version = 41')
+}
+
+describe('S10-21b B1: schema v42 migration (T24)', () => {
+  let db: OrchestrationDb | undefined
+  let tempDir: string | undefined
+
+  afterEach(() => {
+    db?.close()
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+    db = undefined
+    tempDir = undefined
+  })
+
+  function freshPath(): string {
+    tempDir = mkdtempSync(join(tmpdir(), 'orca-pact-v42-migration-'))
+    return join(tempDir, 'orchestration.db')
+  }
+
+  it('a v41 store migrates to user_version 42: all 34 columns present, pact_applied_ids present and empty, unreachable_since present, both triggers present and still aborting, both new indexes present, no CHECK widened, row counts unchanged, a second open is a no-op', () => {
+    const path = freshPath()
+
+    db = new OrchestrationDb(path)
+    const before = rawDb(db)
+    // A pre-existing thread + a local and a remote pact_steps row, so the downgrade/reopen
+    // round-trip has real rows to preserve and the trigger assertions below have fixtures.
+    before
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era)
+         VALUES ('thr_v42', 'v42 fixture', 'peer', 'agent:b', 'engaged', 'agent:a', 'agent:a', 0)`
+      )
+      .run()
+    before
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_agent_id, summary_sha256)
+         VALUES ('thr_v42', 0, 0, 'pause', NULL, 'deadbeef')`
+      )
+      .run()
+    const preexisting = preexistingTableNames(before)
+    const countsBefore = new Map(preexisting.map((t) => [t, rowCount(before, t)]))
+    downgradeToV41(before)
+    expect(before.pragma('user_version', { simple: true })).toBe(41)
+    for (const column of THREADS_V42_COLUMNS) {
+      expect(hasColumn(before, 'threads', column)).toBe(false)
+    }
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(42)
+
+    for (const column of THREADS_V42_COLUMNS) {
+      expect(hasColumn(sqlite, 'threads', column)).toBe(true)
+    }
+    for (const column of PACT_STEPS_V42_COLUMNS) {
+      expect(hasColumn(sqlite, 'pact_steps', column)).toBe(true)
+    }
+    for (const column of REMOTE_AGENTS_V42_COLUMNS) {
+      expect(hasColumn(sqlite, 'remote_agents', column)).toBe(true)
+    }
+    for (const column of PEER_REPLY_OUTBOX_V42_COLUMNS) {
+      expect(hasColumn(sqlite, 'peer_reply_outbox', column)).toBe(true)
+    }
+    expect(hasColumn(sqlite, 'peer_link_scan_facts', 'unreachable_since')).toBe(true)
+
+    expect(hasTable(sqlite, 'pact_applied_ids')).toBe(true)
+    expect(rowCount(sqlite, 'pact_applied_ids')).toBe(0)
+
+    expect(hasTrigger(sqlite, 'trg_pact_steps_append_only')).toBe(true)
+    expect(hasTrigger(sqlite, 'trg_pact_steps_no_delete')).toBe(true)
+    expect(hasIndex(sqlite, 'idx_threads_pact_peer')).toBe(true)
+    expect(hasIndex(sqlite, 'idx_peer_reply_outbox_pact')).toBe(true)
+    expect(hasIndex(sqlite, 'idx_pact_steps_remote')).toBe(true)
+
+    // Every pre-existing table's row count is unchanged (pact_applied_ids is new, excluded).
+    // Asserted BEFORE the mutation-exercising assertions below, which deliberately insert more
+    // rows to exercise the triggers/CHECK.
+    for (const table of preexisting) {
+      expect(rowCount(sqlite, table)).toBe(countsBefore.get(table))
+    }
+
+    // v41 (S10-21a) tables are present — the design's own citation names `agent_session_lineage`,
+    // which does not exist in this tree; 21a actually landed as these three tables (verified at
+    // this brief's base, db.ts's schema-version history comment).
+    for (const table of [
+      'agent_launch_sessions',
+      'current_sessions',
+      'agent_sweep_restore_marks'
+    ]) {
+      expect(hasTable(sqlite, table)).toBe(true)
+    }
+
+    // trg_pact_steps_append_only still aborts a summary-preserving UPDATE (changing `kind`,
+    // which is not the one permitted purge transition).
+    expect(() =>
+      sqlite.prepare(`UPDATE pact_steps SET kind = 'resume' WHERE thread_id = 'thr_v42'`).run()
+    ).toThrow(/append-only/)
+
+    // trg_pact_steps_no_delete still aborts deleting a local row (actor_is_remote = 0).
+    expect(() =>
+      sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_v42'`).run()
+    ).toThrow(/append-only/)
+
+    // ...and a remote row whose era equals the thread's current era (era 0 == thr_v42's era 0).
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_is_remote,
+           actor_agent_id, summary_sha256)
+         VALUES ('thr_v42', 0, 0, 'pause', 1, NULL, 'deadbee1')`
+      )
+      .run()
+    expect(() =>
+      sqlite
+        .prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_v42' AND actor_is_remote = 1`)
+        .run()
+    ).toThrow(/append-only/)
+
+    // No CHECK widened: pact_pause_reason still accepts exactly six values, and rejects a
+    // seventh ('counterpart_unreachable' — the link-driven pause carries that as
+    // pact_steps.reason_code instead, never as a pact_pause_reason value).
+    const validReasons = [
+      'counterpart_gone',
+      'counterpart_left',
+      'counterpart_quarantined',
+      'thread_paused',
+      'thread_closed',
+      'operator'
+    ]
+    for (const reason of validReasons) {
+      expect(() =>
+        sqlite
+          .prepare(
+            `INSERT INTO threads (id, subject, origin, pact_pause_reason) VALUES (?, 'x', 'peer', ?)`
+          )
+          .run(`thr_reason_${reason}`, reason)
+      ).not.toThrow()
+    }
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO threads (id, subject, origin, pact_pause_reason) VALUES ('thr_reason_bad', 'x', 'peer', 'counterpart_unreachable')`
+        )
+        .run()
+    ).toThrow()
+
+    db.close()
+    db = undefined
+
+    // Second open (migrate() re-runs on every open; current is already 42) is a no-op.
+    db = new OrchestrationDb(path)
+    const sqliteAgain = rawDb(db)
+    expect(sqliteAgain.pragma('user_version', { simple: true })).toBe(42)
+    expect(rowCount(sqliteAgain, 'pact_applied_ids')).toBe(0)
+  })
+
+  it('a v42-stamped DB with pact_applied_ids entirely absent is re-created empty on open (repairUnshippedV42FederatedPacts)', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    db.close()
+    db = undefined
+
+    const oldDb = new Database(path)
+    oldDb.exec(`DROP TABLE pact_applied_ids`)
+    oldDb.close()
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(hasTable(sqlite, 'pact_applied_ids')).toBe(true)
+    expect(rowCount(sqlite, 'pact_applied_ids')).toBe(0)
+  })
+
+  it('a v42-stamped DB missing a v42 column on threads is repaired on open (repairUnshippedV42FederatedPacts)', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const before = rawDb(db)
+    before.exec(`ALTER TABLE threads DROP COLUMN pact_pause_epoch`)
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(hasColumn(sqlite, 'threads', 'pact_pause_epoch')).toBe(true)
+  })
+})

@@ -339,6 +339,11 @@ describe('pact propose/accept/decline', () => {
       const first = new OrchestrationDb(file)
       const raw = (first as unknown as { db: Raw }).db
       raw.exec(`DROP INDEX IF EXISTS idx_pact_step_ordinal`)
+      // S10-21b B1 (v42): trg_pact_steps_no_delete now reads OLD.pact_era and
+      // threads.pact_era (design §4.6(b)'s era-age exemption), so SQLite refuses to DROP
+      // COLUMN pact_era while that trigger exists. Drop it first; the reopen below only checks
+      // pact_era's column/index repair, not trigger shape.
+      raw.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
       raw.exec(`ALTER TABLE pact_steps DROP COLUMN pact_era`)
       raw.exec(`ALTER TABLE threads DROP COLUMN pact_era`)
       first.close()

@@ -28,6 +28,26 @@ export type ThreadRow = {
   pact_ordinal: number
   pact_paused_at: string | null
   pact_pause_reason: PactPauseReason | null
+  // v42 (S10-21b B1, federated pacts) — additive, see pact-types.ts.
+  pact_peer_key_fingerprint: string | null
+  pact_peer_agent_id: string | null
+  pact_peer_link_device_id: string | null
+  pact_peer_environment_id: string | null
+  pact_peer_thread_id: string | null
+  pact_turn_in_flight_at: string | null
+  pact_peer_paused_at: string | null
+  pact_release_at: string | null
+  pact_peer_release_at: string | null
+  pact_last_inbound_at: string | null
+  pact_last_resync_at: string | null
+  pact_relay_pending: string | null
+  pact_local_seq: number
+  pact_peer_seq: number
+  pact_flight_token: number
+  pact_resync_nonce: string | null
+  pact_resync_nonce_at: number | null
+  pact_repair_attempts: number
+  pact_pause_epoch: number
   purged_at: string | null
   purge_reason: string | null
   purged_by_agent_id: string | null
