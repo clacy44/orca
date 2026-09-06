@@ -28,6 +28,13 @@ type ResyncApplyResult = {
 // (pact-lifecycle.ts's pausePact/resumePact); counting them gives a monotone toggle counter whose
 // PARITY is the current state, because pausePact/resumePact each refuse when the pact is already
 // in the state they would produce (pause/resume strictly alternate, starting from unpaused).
+// B9c (D-R134 F6/D-R135 F5, errata 21b-E4, chair: NO new column): the raw count's PARITY drifts
+// from the actual pause state because `cancelPactTailAndPause` appends an unconditional host
+// `pause` row on EVERY terminal settle, breaking the strict-alternation assumption — two
+// terminal settles with no intervening resume flips the reported parity back to "unpaused"
+// while `pact_paused_at` is still set. The parity is therefore corrected against
+// `pact_paused_at IS NOT NULL` (paused ⇒ odd); the row count still only supplies the
+// monotone tick, never the truth of the state.
 function localPauseEpoch(db: Database.Database, thread: ThreadRow): number {
   const row = db
     .prepare(
@@ -35,7 +42,8 @@ function localPauseEpoch(db: Database.Database, thread: ThreadRow): number {
         WHERE thread_id = ? AND pact_era = ? AND actor_is_remote = 0 AND kind IN ('pause','resume')`
     )
     .get(thread.id, thread.pact_era) as { n: number }
-  return row.n
+  const wantOdd = thread.pact_paused_at !== null
+  return row.n % 2 === (wantOdd ? 1 : 0) ? row.n : row.n + 1
 }
 
 // `resync_request` — the ask. This host is not the one that detected a gap (it is the party

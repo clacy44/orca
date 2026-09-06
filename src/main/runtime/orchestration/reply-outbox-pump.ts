@@ -8,7 +8,11 @@ import { createInFlightGuard } from './link-binding-schedule'
 import { getRoutableLinkBinding } from './link-binding-routable'
 import type { ReplyOutboxRow } from './reply-outbox-store'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
-import { applyPactTerminalSettle, firePactHoldExpiredDisposition } from './pact-federated-repair'
+import {
+  applyPactTerminalSettle,
+  firePactHoldExpiredDisposition,
+  fireReplyOutboxAgeAbandon
+} from './pact-federated-repair'
 import {
   fireReplyRelayDispositionNotice,
   shouldFireDispositionNotice,
@@ -26,8 +30,7 @@ import {
   REPLY_OUTBOX_MAX_AGE_MS,
   REPLY_OUTBOX_HOLD_INTERVAL_MS,
   REPLY_OUTBOX_LINK_CONCURRENCY,
-  REPLY_OUTBOX_KICK_DEBOUNCE_MS,
-  REPLY_RELAY_ABANDONED_NOTICE
+  REPLY_OUTBOX_KICK_DEBOUNCE_MS
 } from './link-binding-constants'
 import { MAX_TIMER_DELAY_MS } from '../../../shared/timer-delay'
 
@@ -85,28 +88,10 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
     const db = runtime.getOrchestrationDb()
     const now = Date.now()
 
-    // R18.3: the delivery deadline, checked before any RPC.
+    // R18.3: the delivery deadline, checked before any RPC. B9c (D-R134 F10): a pact row now
+    // routes through §2.6(c)'s terminal settle here; fireReplyOutboxAgeAbandon owns both halves.
     if (now - item.createdAt > REPLY_OUTBOX_MAX_AGE_MS) {
-      // Ruling 26 Addendum 1(q)/F4: the settle's boolean is checked — a lost write (the row was
-      // cancelled underneath this call) must never fire the notice.
-      const settled = db.settleReplyOutboxItem(item.id, {
-        state: 'abandoned',
-        settledAt: now,
-        consecutiveFailures: item.consecutiveFailures,
-        nextAttemptAfter: null,
-        lastErrorCode: item.lastErrorCode,
-        lastError: item.lastError
-      })
-      if (settled) {
-        // Ruling 26 Addendum 4(hh): abandoned is a disposition-family notice — its own budget,
-        // never the R20.2 advisory's. Ruling 28(k): terminal notices are edge-triggered/
-        // interval-bounded like the rest of the family too.
-        if (shouldFireDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, now)) {
-          fireDispositionNotice(item, REPLY_RELAY_ABANDONED_NOTICE, null)
-        }
-      } else {
-        auditSettleRaced(db, item, 'abandoned')
-      }
+      fireReplyOutboxAgeAbandon(runtime, db, item, now)
       return
     }
 

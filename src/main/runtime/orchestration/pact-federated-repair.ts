@@ -21,7 +21,8 @@ import {
 import {
   LINK_BINDING_RATE_WINDOW_MS,
   PACT_RELAY_HOLD_MAX_MS,
-  PACT_RELAY_FAILED_NOTICE
+  PACT_RELAY_FAILED_NOTICE,
+  REPLY_RELAY_ABANDONED_NOTICE
 } from './link-binding-constants'
 import type { ReplyOutboxRow } from './reply-outbox-types'
 import type { ThreadRow } from './thread-directory-types'
@@ -145,6 +146,46 @@ export function firePactHoldExpiredDisposition(
   return true
 }
 
+// B9c (D-R134 F10): the 7-day age-abandon — a pact row routes through §2.6(c)'s terminal settle
+// (tail cancel + pause + queue gap_notice); mail keeps the plain settle('abandoned') shape.
+// Owns the WHOLE R18.3 deadline branch (not just the pact half) so reply-outbox-pump.ts's own
+// call site stays a two-line guard, keeping that file under its max-lines budget.
+export function fireReplyOutboxAgeAbandon(
+  runtime: OrcaRuntimeService,
+  db: OrchestrationDb,
+  item: ReplyOutboxRow,
+  now: number
+): void {
+  if (item.relayKind !== 'reply' && item.pactThreadId !== null) {
+    applyPactTerminalSettle(
+      runtime,
+      db,
+      item,
+      'pact_relay_abandoned',
+      item.lastError ?? 'pact relay abandoned after the 7-day age deadline',
+      now
+    )
+    return
+  }
+  // Ruling 26 Addendum 1(q)/F4: the settle's boolean is checked — a lost write (the row was
+  // cancelled underneath this call) must never fire the notice.
+  const settled = db.settleReplyOutboxItem(item.id, {
+    state: 'abandoned',
+    settledAt: now,
+    consecutiveFailures: item.consecutiveFailures,
+    nextAttemptAfter: null,
+    lastErrorCode: item.lastErrorCode,
+    lastError: item.lastError
+  })
+  if (settled) {
+    if (shouldFireDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, now)) {
+      fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, null)
+    }
+  } else {
+    auditReplyRelaySettleRaced(db, item, 'abandoned')
+  }
+}
+
 export type PactDispositionResult = { queued: boolean; attempts: number; exhausted: boolean }
 
 // §2.6(c) steps 2/3/4/6 — the parts of the terminal-settle transaction that apply regardless of
@@ -153,6 +194,76 @@ export type PactDispositionResult = { queued: boolean; attempts: number; exhaust
 // see firePactDesyncDispositionInbound/firePactTerminalSettleDisposition below). Idempotent: a
 // pact that is already paused gets the same pact_paused_at/pact_pause_reason written again — a
 // no-op in effect, per §2.9's "the disposition itself is never suppressed" instruction.
+// B9c (D-R135 F9): the BODY only — no BEGIN/COMMIT/ROLLBACK of its own, so a caller that already
+// holds an open transaction (firePactTerminalSettleDisposition below) can include these steps in
+// its OWN transaction instead of committing them separately (SQLite has no nested transactions).
+// Exceptions propagate to the caller's own rollback.
+function cancelPactTailAndPauseBody(
+  db: Database.Database,
+  threadId: string,
+  terminalCode: string
+): PactDispositionResult {
+  // Step 2: cancel this PACT's own unsettled tail — every other queued/sending relay item on
+  // the same pact is now suspect, not merely the one item (if any) that just settled.
+  db.prepare(
+    `UPDATE peer_reply_outbox SET state = 'cancelled', last_error_code = 'pact_tail_cancelled'
+       WHERE pact_thread_id = ? AND state IN ('queued', 'sending')`
+  ).run(threadId)
+
+  // Step 3.
+  db.prepare(`UPDATE threads SET pact_turn_in_flight_at = NULL WHERE id = ?`).run(threadId)
+
+  // Step 4 — pause + a host `pause` ledger row. `pact_pause_reason` stays 'operator' (its CHECK
+  // is frozen at six values, NB1); the precise cause is the ledger row's `reason_code`, exactly
+  // §2.1's declared-deviation pattern.
+  db.prepare(
+    `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = 'operator' WHERE id = ?`
+  ).run(threadId)
+  insertPactStepRow(db, {
+    threadId,
+    ordinal: 0,
+    kind: 'pause',
+    actorAgentId: null,
+    actorPaneKey: null,
+    actorHostId: null,
+    messageId: null,
+    summary: null,
+    turnAfterAgentId: null,
+    reasonCode: terminalCode
+  })
+
+  // Step 6's no-repair-loop carve-out (Addendum 6(5)): nothing queued for these two codes,
+  // ever; the counter is left untouched.
+  if (terminalCode === 'pact_no_pact' || terminalCode === 'pact_era_mismatch') {
+    return { queued: false, attempts: 0, exhausted: false }
+  }
+
+  const thread = requireThread(db, threadId)
+  // Fresh-nonce gate, both directions: a live, undrained `gap_notice` OR a live
+  // pact_resync_nonce (the OTHER minting mechanism, mintResyncRequestIfNeeded above) suppresses
+  // re-queue AND the attempts bump (§2.5/§2.6(c) step 6 — one shared counter).
+  if (thread.pact_relay_pending === 'gap_notice' || isResyncNonceLive(thread, Date.now())) {
+    return { queued: false, attempts: thread.pact_repair_attempts, exhausted: false }
+  }
+  const nextAttempts = thread.pact_repair_attempts + 1
+  if (nextAttempts > PACT_REPAIR_ATTEMPTS_CAP) {
+    // Budget exhausted: step 5's queue is skipped even for an otherwise-repairable code; the
+    // counter still records the exhausted attempt so the notice can name it.
+    db.prepare(`UPDATE threads SET pact_repair_attempts = ? WHERE id = ?`).run(
+      nextAttempts,
+      threadId
+    )
+    return { queued: false, attempts: nextAttempts, exhausted: true }
+  }
+  // Step 5 — the emitter-push `gap_notice` (Addendum 6(11)/(15), REPLACES v3's receiver-pull
+  // `resync_request`). This carries `seq = pact_local_seq + 1` and no state at the moment the
+  // pump actually relays it — nothing further to compute or store here.
+  db.prepare(
+    `UPDATE threads SET pact_relay_pending = 'gap_notice', pact_repair_attempts = ? WHERE id = ?`
+  ).run(nextAttempts, threadId)
+  return { queued: true, attempts: nextAttempts, exhausted: false }
+}
+
 export function cancelPactTailAndPause(
   db: Database.Database,
   threadId: string,
@@ -160,69 +271,9 @@ export function cancelPactTailAndPause(
 ): PactDispositionResult {
   db.exec('BEGIN IMMEDIATE')
   try {
-    // Step 2: cancel this PACT's own unsettled tail — every other queued/sending relay item on
-    // the same pact is now suspect, not merely the one item (if any) that just settled.
-    db.prepare(
-      `UPDATE peer_reply_outbox SET state = 'cancelled', last_error_code = 'pact_tail_cancelled'
-         WHERE pact_thread_id = ? AND state IN ('queued', 'sending')`
-    ).run(threadId)
-
-    // Step 3.
-    db.prepare(`UPDATE threads SET pact_turn_in_flight_at = NULL WHERE id = ?`).run(threadId)
-
-    // Step 4 — pause + a host `pause` ledger row. `pact_pause_reason` stays 'operator' (its CHECK
-    // is frozen at six values, NB1); the precise cause is the ledger row's `reason_code`, exactly
-    // §2.1's declared-deviation pattern.
-    db.prepare(
-      `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = 'operator' WHERE id = ?`
-    ).run(threadId)
-    insertPactStepRow(db, {
-      threadId,
-      ordinal: 0,
-      kind: 'pause',
-      actorAgentId: null,
-      actorPaneKey: null,
-      actorHostId: null,
-      messageId: null,
-      summary: null,
-      turnAfterAgentId: null,
-      reasonCode: terminalCode
-    })
-
-    // Step 6's no-repair-loop carve-out (Addendum 6(5)): nothing queued for these two codes,
-    // ever; the counter is left untouched.
-    if (terminalCode === 'pact_no_pact' || terminalCode === 'pact_era_mismatch') {
-      db.exec('COMMIT')
-      return { queued: false, attempts: 0, exhausted: false }
-    }
-
-    const thread = requireThread(db, threadId)
-    // Fresh-nonce gate, both directions: a live, undrained `gap_notice` OR a live
-    // pact_resync_nonce (the OTHER minting mechanism, mintResyncRequestIfNeeded above) suppresses
-    // re-queue AND the attempts bump (§2.5/§2.6(c) step 6 — one shared counter).
-    if (thread.pact_relay_pending === 'gap_notice' || isResyncNonceLive(thread, Date.now())) {
-      db.exec('COMMIT')
-      return { queued: false, attempts: thread.pact_repair_attempts, exhausted: false }
-    }
-    const nextAttempts = thread.pact_repair_attempts + 1
-    if (nextAttempts > PACT_REPAIR_ATTEMPTS_CAP) {
-      // Budget exhausted: step 5's queue is skipped even for an otherwise-repairable code; the
-      // counter still records the exhausted attempt so the notice can name it.
-      db.prepare(`UPDATE threads SET pact_repair_attempts = ? WHERE id = ?`).run(
-        nextAttempts,
-        threadId
-      )
-      db.exec('COMMIT')
-      return { queued: false, attempts: nextAttempts, exhausted: true }
-    }
-    // Step 5 — the emitter-push `gap_notice` (Addendum 6(11)/(15), REPLACES v3's receiver-pull
-    // `resync_request`). This carries `seq = pact_local_seq + 1` and no state at the moment the
-    // pump actually relays it — nothing further to compute or store here.
-    db.prepare(
-      `UPDATE threads SET pact_relay_pending = 'gap_notice', pact_repair_attempts = ? WHERE id = ?`
-    ).run(nextAttempts, threadId)
+    const result = cancelPactTailAndPauseBody(db, threadId, terminalCode)
     db.exec('COMMIT')
-    return { queued: true, attempts: nextAttempts, exhausted: false }
+    return result
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
@@ -294,25 +345,38 @@ export function firePactTerminalSettleDisposition(
       `internal error: firePactTerminalSettleDisposition called for non-pact outbox item ${item.id}`
     )
   }
-  const settled = settleReplyOutboxItem(db, item.id, {
-    state: 'refused',
-    settledAt: now,
-    consecutiveFailures: item.consecutiveFailures,
-    nextAttemptAfter: null,
-    lastErrorCode: code,
-    lastError: errorMessage
-  })
-  if (!settled) {
-    return { outcome: 'raced' }
+  const pactThreadId = item.pactThreadId
+  // B9c (D-R135 F9): steps 1-6 are ONE transaction — settleReplyOutboxItem is a plain prepared
+  // UPDATE (no BEGIN/COMMIT of its own), so it and cancelPactTailAndPauseBody's steps now share
+  // this single BEGIN IMMEDIATE; a crash/throw between them rolls BOTH back, leaving the item
+  // 'sending' and the pact live rather than settled-but-unpaused.
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const settled = settleReplyOutboxItem(db, item.id, {
+      state: 'refused',
+      settledAt: now,
+      consecutiveFailures: item.consecutiveFailures,
+      nextAttemptAfter: null,
+      lastErrorCode: code,
+      lastError: errorMessage
+    })
+    if (!settled) {
+      db.exec('ROLLBACK')
+      return { outcome: 'raced' }
+    }
+    const disposition = cancelPactTailAndPauseBody(db, pactThreadId, code)
+    writeAgentAudit(db, {
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: item.linkDeviceId,
+      verb: 'pactRelay',
+      outcome: 'terminal_settle',
+      reasonCode: JSON.stringify({ pactThreadId, outboxId: item.id, code })
+    })
+    db.exec('COMMIT')
+    return { outcome: 'settled', disposition }
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
   }
-  const disposition = cancelPactTailAndPause(db, item.pactThreadId, code)
-  writeAgentAudit(db, {
-    agentId: null,
-    actorPaneKey: null,
-    actorHostId: item.linkDeviceId,
-    verb: 'pactRelay',
-    outcome: 'terminal_settle',
-    reasonCode: JSON.stringify({ pactThreadId: item.pactThreadId, outboxId: item.id, code })
-  })
-  return { outcome: 'settled', disposition }
 }

@@ -27,7 +27,8 @@ import {
   requireThread
 } from './pact-shared'
 import { isFederatedPact } from './pact-federated-identity'
-import { enqueueReplyOutbox, type RelayKind } from './reply-outbox-store'
+import type { RelayKind } from './reply-outbox-store'
+import { enqueueReplyOutboxCoalesced } from './reply-outbox-pact-answer-coalesce'
 import { getPeerLinkBinding, LinkBindingCapError } from './link-binding-store'
 // 21b-D1: `fromAgent`'s shape mirrors buildFederatedSenderIdentity (federated-sender-identity.ts:56-70)
 // exactly, but that helper takes `OrchestrationDb`, which this module never has (it only ever
@@ -48,6 +49,7 @@ export type FederatedPactVerb =
   | 'rebind_party'
   | 'resync'
   | 'resync_request'
+  | 'gap_notice'
 
 // §2.4's wire vocabulary, keyed by verb (RelayKind mirrors payload_kind 1:1, chair answer 2:
 // `relay_kind = 'pact_' + verb`).
@@ -61,15 +63,16 @@ const PACT_VERB_RELAY_KIND: Record<FederatedPactVerb, RelayKind> = {
   release: 'pact_release',
   rebind_party: 'pact_rebind_party',
   resync: 'pact_resync',
-  resync_request: 'pact_resync_request'
+  resync_request: 'pact_resync_request',
+  gap_notice: 'pact_gap_notice'
 }
 
-// §2.5: the four no-ledger verbs never call insertPactStepRow — `gap_notice` is the fourth
-// (B9's emitter-initiated verb, not one of this commit's ten local verbs).
+// §2.5: the four no-ledger verbs never call insertPactStepRow.
 export const PACT_NO_LEDGER_VERBS: ReadonlySet<FederatedPactVerb> = new Set([
   'resync',
   'resync_request',
-  'rebind_party'
+  'rebind_party',
+  'gap_notice'
 ])
 
 // §2.11: admitted past the ordinary REPLY_OUTBOX_PER_LINK_CAP, up to +PACT_RESERVED_HEADROOM.
@@ -77,7 +80,8 @@ export const PACT_RESERVED_VERBS: ReadonlySet<FederatedPactVerb> = new Set([
   'release',
   'rebind_party',
   'resync',
-  'resync_request'
+  'resync_request',
+  'gap_notice'
 ])
 
 // §2.2/§2.1: the in-flight guard applies to a verb that hands the turn to the peer. This
@@ -87,17 +91,19 @@ export const PACT_RESERVED_VERBS: ReadonlySet<FederatedPactVerb> = new Set([
 // test.
 export const PACT_TURN_CONSUMING_VERBS: ReadonlySet<FederatedPactVerb> = new Set(['step'])
 
-// §2.11: `threads.pact_relay_pending` is a CLOSED four-value vocabulary
-// ('release' | 'rebind' | 'resync_request' | 'gap_notice') — so only the three of THIS commit's
-// ten verbs that have a token in that vocabulary fall back to it on a full outbox
-// (`gap_notice` is B9's). Every other verb's `LinkBindingCapError` propagates and rolls back
-// the local transition — the brief's own T20/T21 citations name only register(rebind)/release
-// as needing the never-fails-on-cap guarantee; this table is the exact scope of that guarantee.
-export type PactRelayPendingToken = 'release' | 'rebind' | 'resync_request'
+// §2.11: `threads.pact_relay_pending` — DEVIATION (B9c, D-R134 F7/D-R135 F6): the design's
+// closed four-value vocabulary ('release'|'rebind'|'resync_request'|'gap_notice') has no slot
+// for the resync ANSWER, whose own `LinkBindingCapError` used to propagate AFTER
+// recordPactAppliedId already committed — the peer's retry then deduped and the answer was lost
+// for good. A fifth token, 'resync', closes that hole the same way the other three do; nothing
+// drains it yet (matching 'release'/'resync_request', neither of which has a drainer landed
+// either — future work, not this commit's scope).
+export type PactRelayPendingToken = 'release' | 'rebind' | 'resync_request' | 'resync'
 const PACT_RELAY_PENDING_TOKEN: Partial<Record<FederatedPactVerb, PactRelayPendingToken>> = {
   release: 'release',
   rebind_party: 'rebind',
-  resync_request: 'resync_request'
+  resync_request: 'resync_request',
+  resync: 'resync'
 }
 
 export type FederatedPactResyncPayload = {
@@ -351,11 +357,12 @@ export function enqueueFederatedPactVerb(
     }
     const payloadJson = JSON.stringify(envelope)
 
-    // Step 5.
+    // Step 5. B9c (D-R134 F7/D-R135 F6): `resync` (the ANSWER) occupies one slot per pact — an
+    // existing unsettled row for it is REPLACED, never appended (enqueueReplyOutboxCoalesced).
     let outboxId: string | null = null
     let pendingToken: PactRelayPendingToken | null = null
     try {
-      outboxId = enqueueReplyOutbox(db, {
+      outboxId = enqueueReplyOutboxCoalesced(db, verb === 'resync', {
         localMessageId: message.id,
         linkDeviceId,
         environmentId,

@@ -465,7 +465,11 @@ describe('S10-21b B5, T29 (third assertion): retryReplyOutboxItem first_held_at 
     expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBeNull()
   })
 
-  it("a pact item's first_held_at is stamped on the first retry and left alone on the second (COALESCE idempotency)", () => {
+  // SCENARIO_CORRECTION (B9c, D-R134 F12): this test originally used 'pact_settling' — a
+  // PACT_RETRY_CAUSE, never a hold cause — to stand in for "any pact retry". F12's fix scopes
+  // the stamp to PACT_HOLD_CAUSES only, so the cause here is corrected to 'agent_retired' (a
+  // genuine hold cause) to keep testing the COALESCE-idempotency property it was written for.
+  it("a pact item's first_held_at is stamped on the first HOLD-cause retry and left alone on the second (COALESCE idempotency)", () => {
     db = new OrchestrationDb(':memory:')
     const sqlite = rawDb(db)
     const now = Date.now()
@@ -485,8 +489,8 @@ describe('S10-21b B5, T29 (third assertion): retryReplyOutboxItem first_held_at 
       firstRetryAt,
       firstRetryAt + 10_000,
       0,
-      'pact_settling',
-      'peer settling',
+      'agent_retired',
+      'peer retired',
       'pact_step'
     )
     expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBe(firstRetryAt)
@@ -500,10 +504,39 @@ describe('S10-21b B5, T29 (third assertion): retryReplyOutboxItem first_held_at 
       secondRetryAt,
       secondRetryAt + 10_000,
       0,
-      'pact_settling',
-      'peer settling',
+      'agent_retired',
+      'peer retired',
       'pact_step'
     )
     expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBe(firstRetryAt)
+  })
+
+  // B9c (D-R134 F12): first_held_at must NEVER stamp for a PACT_RETRY_CAUSE (evidence of
+  // nothing worth timing) — only a genuine PACT_HOLD_CAUSE starts the 24h clock. FAILS AT BASE:
+  // base stamps for ANY relayKind !== 'reply' retry, so 25h of pact_out_of_order retries would
+  // make an agent_retired arriving afterwards look 25h into its hold instead of at hour zero.
+  it('a non-hold pact cause (pact_out_of_order) never stamps first_held_at — the clock starts only at the first genuine HOLD cause', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+    const id = enqueuePactItem(sqlite, now, {
+      suffix: 'f12-pact',
+      linkDeviceId: 'link_f12',
+      pactThreadId: 'thr_f12',
+      relayKind: 'pact_step'
+    })
+    claimNextReplyOutboxItem(sqlite, now)
+
+    let t = now
+    for (let i = 0; i < 5; i++) {
+      retryReplyOutboxItem(sqlite, id, t, t + 1000, 0, 'pact_out_of_order', 'gap', 'pact_step')
+      expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBeNull()
+      t += 5 * 60 * 60 * 1000 // 5h apart, ~25h total
+      claimNextReplyOutboxItem(sqlite, t)
+    }
+
+    // Now a genuine hold cause arrives — the clock starts HERE, not 25h ago.
+    retryReplyOutboxItem(sqlite, id, t, t + 1000, 0, 'agent_retired', 'retired', 'pact_step')
+    expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBe(t)
   })
 })

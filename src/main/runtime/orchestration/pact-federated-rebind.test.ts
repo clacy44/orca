@@ -173,3 +173,136 @@ describe('drainPendingRebindParty', () => {
     expect(outboxCount.n).toBe(0)
   })
 })
+
+// B9c (D-R134 F3/D-R135 F2, chair NOTE "after B13"): the SAME drain extended to
+// `pact_relay_pending = 'gap_notice'` — one scan, a per-token emit. FAILS AT BASE: base has no
+// 'gap_notice' member of FederatedPactVerb/PACT_VERB_RELAY_KIND and no reader of
+// pact_relay_pending='gap_notice' anywhere — the token is set (repair.ts) but never drained.
+describe('drainPendingRebindParty — gap_notice (B9c)', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function freshDb(): OrchestrationDb {
+    db = new OrchestrationDb(':memory:')
+    return db
+  }
+
+  function seedEngagedFederatedThread(d: OrchestrationDb): {
+    threadId: string
+    raw: Database.Database
+  } {
+    const raw = rawDb(d)
+    const successorId = (() => {
+      const params: UpsertAgentByPaneSuffixParams = {
+        displayName: 'gap-holder',
+        role: null,
+        hostId: 'local',
+        paneKey: 'tab:gap-holder',
+        terminalHandle: 'term_gap_holder',
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: 'term_gap_holder',
+        originHostId: 'local'
+      }
+      const result = d.upsertAgentByPaneSuffix(params)
+      if (result.outcome === 'name_taken') {
+        throw new Error('seedAgent: name taken')
+      }
+      return result.agent.id
+    })()
+    d.upsertRemoteAgent({
+      environmentId: 'env_gap_drain',
+      environmentName: 'env_gap_drain',
+      linkKind: 'environment',
+      remoteAgentId: 'peer_gap',
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw, {
+      linkDeviceId: 'env_gap_drain',
+      environmentId: 'env_gap_drain',
+      boundEndpointId: 'endpoint_gap',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp_gap',
+      peerCredentialFp: 'pcfp_gap',
+      peerKeyFingerprint: 'pkfp_gap',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({
+      linkDeviceId: 'env_gap_drain',
+      remoteAgentId: 'peer_gap'
+    })
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: successorId,
+      participants: [
+        { participantKey: successorId, agentId: successorId },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({
+      callerAgentId: successorId,
+      callerPaneKey: null,
+      callerHostId: 'local',
+      threadId: thread.id,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    raw
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?,
+           pact_relay_pending = 'gap_notice', pact_local_seq = 3 WHERE id = ?`
+      )
+      .run(successorId, thread.id)
+    return { threadId: thread.id, raw }
+  }
+
+  it('enqueues one gap_notice (seq = pact_local_seq + 1) and clears the token in one scan', () => {
+    const d = freshDb()
+    const { threadId, raw } = seedEngagedFederatedThread(d)
+
+    const drained = drainPendingRebindParty(raw, null)
+    expect(drained).toBe(1)
+
+    const row = raw
+      .prepare('SELECT pact_relay_pending, pact_local_seq FROM threads WHERE id = ?')
+      .get(threadId) as { pact_relay_pending: string | null; pact_local_seq: number }
+    expect(row.pact_relay_pending).toBeNull()
+    expect(row.pact_local_seq).toBe(4) // bumped by the emit primitive's own step 3
+
+    const outboxRow = raw
+      .prepare(`SELECT payload, relay_kind FROM peer_reply_outbox WHERE local_thread_id = ?`)
+      .get(threadId) as { payload: string; relay_kind: string } | undefined
+    expect(outboxRow).toBeDefined()
+    expect(outboxRow!.relay_kind).toBe('pact_gap_notice')
+    const payload = JSON.parse(outboxRow!.payload) as { pact: { verb: string; seq: number } }
+    expect(payload.pact.verb).toBe('gap_notice')
+    expect(payload.pact.seq).toBe(4)
+  })
+
+  it('a second tick is a no-op once the token is drained — never a duplicate gap_notice', () => {
+    const d = freshDb()
+    const { threadId, raw } = seedEngagedFederatedThread(d)
+    expect(drainPendingRebindParty(raw, null)).toBe(1)
+    expect(drainPendingRebindParty(raw, null)).toBe(0)
+    const outboxCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE local_thread_id = ?`)
+      .get(threadId) as { n: number }
+    expect(outboxCount.n).toBe(1)
+  })
+})

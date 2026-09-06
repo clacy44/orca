@@ -14,10 +14,14 @@ import { createThread } from './thread-directory'
 import { enqueueReplyOutbox, type RelayKind } from './reply-outbox-store'
 import { claimNextReplyOutboxItem, retryReplyOutboxItem } from './reply-outbox-lifecycle'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
-import { firePactHoldExpiredDisposition } from './pact-federated-repair'
+import { firePactHoldExpiredDisposition, fireReplyOutboxAgeAbandon } from './pact-federated-repair'
 import { holdOrRetargetReplyOutboxItem } from './reply-outbox-pump-hold'
 import type * as LinkBindingRoutable from './link-binding-routable'
-import { REPLY_OUTBOX_HOLD_MAX_MS, PACT_RELAY_HOLD_MAX_MS } from './link-binding-constants'
+import {
+  REPLY_OUTBOX_HOLD_MAX_MS,
+  PACT_RELAY_HOLD_MAX_MS,
+  REPLY_OUTBOX_MAX_AGE_MS
+} from './link-binding-constants'
 
 // PRE-DIAL tests only: bypasses the real registry/environment-store reads
 // (readEnvironmentSnapshot) that localEvidenceUnavailable would otherwise take — no candidate is
@@ -251,5 +255,79 @@ describe('S10-21b B9b, POST-DIAL: a held pact row takes the §2.6(c) terminal di
     const secondFired = firePactHoldExpiredDisposition(runtime, db, item!, 'agent_retired', now)
     expect(secondFired).toBe(true) // isPactHoldExpired is still true (relayKind/disposition/firstHeldAt unchanged)
     expect(db.getReplyOutboxItem(id)?.state).toBe('refused') // but the settle itself raced, not double-applied
+  })
+})
+
+// B9c (D-R134 F10): the pump's own 7-day age-abandon (reply-outbox-pump.ts) must route a pact
+// row through §2.6(c)'s terminal settle, never the mail-shaped plain abandon. FAILS AT BASE:
+// fireReplyOutboxAgeAbandon does not exist — base's age-abandon is the plain
+// settleReplyOutboxItem({state:'abandoned'}) path for every relay kind, pact included, so no
+// tail-cancel/pause/gap_notice ever fires on a pact row that ages out this way.
+describe('S10-21b B9c: fireReplyOutboxAgeAbandon routes a pact row through §2.6(c), mail unchanged', () => {
+  let db: OrchestrationDb
+  let runtime: OrcaRuntimeService
+  let threadId: string
+
+  beforeEach(() => {
+    db = new OrchestrationDb(':memory:')
+    runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb(db)
+    const { thread } = createThread(raw(db), {
+      subject: 'B9c age-abandon seed',
+      createdByAgentId: null,
+      origin: 'peer',
+      participants: []
+    })
+    threadId = thread.id
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('RED AT BASE: a pact row past REPLY_OUTBOX_MAX_AGE_MS takes the §2.6(c) terminal disposition, not the plain abandon', () => {
+    const sqlite = raw(db)
+    const start = 3_000_000_000_000
+    const id = enqueueItem(sqlite, 'pact_age_abandon', {
+      relayKind: 'pact_step',
+      pactThreadId: threadId,
+      createdAt: start
+    })
+    const claimed = claimNextReplyOutboxItem(sqlite, start)
+    expect(claimed?.id).toBe(id)
+    const now = start + REPLY_OUTBOX_MAX_AGE_MS + 1000
+    fireReplyOutboxAgeAbandon(runtime, db, claimed!, now)
+    const settled = db.getReplyOutboxItem(id)
+    expect(settled?.state).toBe('refused') // §2.6(c)'s terminal settle, never 'abandoned'
+    expect(settled?.lastErrorCode).toBe('pact_relay_abandoned')
+    const threadRow = sqlite
+      .prepare(
+        `SELECT pact_paused_at, pact_relay_pending, pact_turn_in_flight_at FROM threads WHERE id = ?`
+      )
+      .get(threadId) as {
+      pact_paused_at: string | null
+      pact_relay_pending: string | null
+      pact_turn_in_flight_at: string | null
+    }
+    expect(threadRow.pact_paused_at).not.toBeNull()
+    expect(threadRow.pact_relay_pending).toBe('gap_notice')
+    expect(threadRow.pact_turn_in_flight_at).toBeNull()
+  })
+
+  it('GREEN AT BASE (regression guard): a mail row still takes the plain abandon, unaffected by B9c', () => {
+    const sqlite = raw(db)
+    const start = 3_000_000_000_000
+    const id = enqueueItem(sqlite, 'mail_age_abandon', {
+      relayKind: 'reply',
+      pactThreadId: null,
+      createdAt: start
+    })
+    const claimed = claimNextReplyOutboxItem(sqlite, start)
+    expect(claimed?.id).toBe(id)
+    const now = start + REPLY_OUTBOX_MAX_AGE_MS + 1000
+    fireReplyOutboxAgeAbandon(runtime, db, claimed!, now)
+    const settled = db.getReplyOutboxItem(id)
+    expect(settled?.state).toBe('abandoned') // the mail-shaped settle, unchanged by B9c
+    expect(settled?.lastErrorCode).toBeNull()
   })
 })

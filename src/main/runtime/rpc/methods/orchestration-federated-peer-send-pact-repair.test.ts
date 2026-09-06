@@ -17,12 +17,21 @@ import type * as LinkBindingRoutable from '../../orchestration/link-binding-rout
 import { putPeerLinkBinding } from '../../orchestration/link-binding-store'
 import { enqueueReplyOutbox, type RelayKind } from '../../orchestration/reply-outbox-store'
 import { claimNextReplyOutboxItem } from '../../orchestration/reply-outbox-lifecycle'
-import { PACT_MAX_GAP } from '../../orchestration/pact-federated-repair'
+import { PACT_MAX_GAP, cancelPactTailAndPause } from '../../orchestration/pact-federated-repair'
+import { insertPactStepRow } from '../../orchestration/pact-shared'
+import type * as PactShared from '../../orchestration/pact-shared'
 import type { RpcContext } from '../core'
 
 vi.mock('../../orchestration/link-binding-routable', async (importOriginal) => {
   const actual = await importOriginal<typeof LinkBindingRoutable>()
   return { ...actual, getRoutableLinkBinding: vi.fn(actual.getRoutableLinkBinding) }
+})
+
+// B9c (D-R135 F9): a spy-wrapped real implementation — `mockImplementationOnce` in one test
+// injects a crash mid-transaction; every other call (every other test) passes straight through.
+vi.mock('../../orchestration/pact-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof PactShared>()
+  return { ...actual, insertPactStepRow: vi.fn(actual.insertPactStepRow) }
 })
 
 const LINK_DEVICE_ID = 'dev_pact_repair_1'
@@ -640,6 +649,170 @@ describe('S10-21b B9: strict fence, resync/resync_request/gap_notice, terminal d
         )
         .get(threadId) as { n: number }
       expect(outbox.n).toBe(2)
+    })
+  })
+
+  // B9c (D-R134 F7/D-R135 F6): the resync ANSWER coalesces — one unsettled `pact_resync` row per
+  // pact, replaced (not appended) on a repeat ask; a fresh row only once the prior one has
+  // settled. FAILS AT BASE: base always appends, so two inbound resync_request verbs leave TWO
+  // unsettled pact_resync rows.
+  describe('B9c: the resync ANSWER coalesces', () => {
+    function seedEngaged(threadId: string): void {
+      raw(db)
+        .prepare(
+          `UPDATE threads SET pact_state = 'engaged',
+             pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_turn_agent_id = ?,
+             pact_peer_seq = 3, pact_ordinal = 5
+           WHERE id = ?`
+        )
+        .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentB, threadId)
+    }
+
+    it('two inbound resync_request verbs on one pact leave exactly ONE unsettled pact_resync row (RED at base: two rows)', async () => {
+      const threadId = seedPeerThread('thr_a1a1a1a1a1a1')
+      seedEngaged(threadId)
+      await expect(
+        pactSend(
+          { verb: 'resync_request', seq: 99, era: 0, resyncRequest: { nonce: 'ask_1' } },
+          { messageId: 'msg_c0a1e5ce0001' }
+        )
+      ).resolves.toMatchObject({ accepted: true })
+      await expect(
+        pactSend(
+          { verb: 'resync_request', seq: 99, era: 0, resyncRequest: { nonce: 'ask_2' } },
+          { messageId: 'msg_c0a1e5ce0002' }
+        )
+      ).resolves.toMatchObject({ accepted: true })
+      const rows = raw(db)
+        .prepare(
+          `SELECT payload FROM peer_reply_outbox
+             WHERE pact_thread_id = ? AND relay_kind = 'pact_resync' AND state = 'queued'`
+        )
+        .all(threadId) as { payload: string }[]
+      expect(rows.length).toBe(1)
+      const payload = JSON.parse(rows[0].payload) as { pact: { resync: { nonce: string } } }
+      expect(payload.pact.resync.nonce).toBe('ask_2') // replaced by the LATEST request
+    })
+
+    it('a duplicate resync_request re-answers (a fresh row) once the prior answer has settled', async () => {
+      const threadId = seedPeerThread('thr_a1a1a1a1a1a1')
+      seedEngaged(threadId)
+      await pactSend(
+        { verb: 'resync_request', seq: 99, era: 0, resyncRequest: { nonce: 'ask_a' } },
+        { messageId: 'msg_c0a1e5ce00aa' }
+      )
+      const claimed = claimNextReplyOutboxItem(raw(db) as unknown as Database.Database, Date.now())
+      expect(claimed?.relayKind).toBe('pact_resync')
+      raw(db)
+        .prepare(`UPDATE peer_reply_outbox SET state = 'delivered', settled_at = ? WHERE id = ?`)
+        .run(Date.now(), claimed!.id)
+      await pactSend(
+        { verb: 'resync_request', seq: 99, era: 0, resyncRequest: { nonce: 'ask_b' } },
+        { messageId: 'msg_c0a1e5ce00bb' }
+      )
+      const rows = raw(db)
+        .prepare(
+          `SELECT id FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_resync'`
+        )
+        .all(threadId) as { id: string }[]
+      expect(rows.length).toBe(2) // the settled row plus a genuinely fresh re-answer
+    })
+  })
+
+  // B9c (D-R134 F6/D-R135 F5, errata 21b-E4): parity keyed on `pact_paused_at IS NOT NULL`, not
+  // raw pause/resume row-count alternation (cancelPactTailAndPause appends a `pause` row on EVERY
+  // terminal settle). FAILS AT BASE: two terminal settles with no resume return EVEN parity
+  // (reports unpaused) though `pact_paused_at` is still set.
+  describe('B9c: localPauseEpoch parity is keyed on pact_paused_at, not raw alternation', () => {
+    it('two terminal-settle pauses with no resume still report PAUSED parity (RED at base: parity even)', async () => {
+      const threadId = seedPeerThread('thr_a1a1a1a1a1a1')
+      raw(db)
+        .prepare(
+          `UPDATE threads SET pact_state = 'engaged',
+             pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_turn_agent_id = ?,
+             pact_peer_seq = 3, pact_ordinal = 5
+           WHERE id = ?`
+        )
+        .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentB, threadId)
+      // Two terminal settles, no resume in between.
+      cancelPactTailAndPause(raw(db) as unknown as Database.Database, threadId, 'agent_retired')
+      cancelPactTailAndPause(raw(db) as unknown as Database.Database, threadId, 'agent_unknown')
+      expect(threadRow(threadId).pact_paused_at).not.toBeNull()
+
+      await expect(
+        pactSend(
+          { verb: 'resync_request', seq: 99, era: 0, resyncRequest: { nonce: 'parity_ask' } },
+          { messageId: 'msg_9a417970001a' }
+        )
+      ).resolves.toMatchObject({ accepted: true })
+      const outbox = raw(db)
+        .prepare(
+          `SELECT payload FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_resync'`
+        )
+        .get(threadId) as { payload: string }
+      const payload = JSON.parse(outbox.payload) as { pact: { resync: { pauseEpoch: number } } }
+      expect(payload.pact.resync.pauseEpoch % 2).toBe(1) // odd = paused
+    })
+  })
+
+  // B9c (D-R135 F9): §2.6(c) steps 1-6 as ONE transaction. FAILS AT BASE: settleReplyOutboxItem
+  // commits its own write with no wrapping transaction, so a throw between it and
+  // cancelPactTailAndPause leaves the outbox item SETTLED while the pact is never paused/cancelled.
+  describe('B9c: §2.6(c) terminal settle is one transaction', () => {
+    it('a crash between settle and cancel leaves the item UNSETTLED and the pact untouched (RED at base: settled, pact live)', () => {
+      const threadId = seedPeerThread('thr_a1a1a1a1a1a1')
+      raw(db)
+        .prepare(
+          `UPDATE threads SET pact_state = 'engaged', pact_proposer_agent_id = ?,
+             pact_with_agent_id = ?, pact_turn_agent_id = ? WHERE id = ?`
+        )
+        .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentB, threadId)
+      const outboxId = enqueueReplyOutbox(raw(db) as unknown as Database.Database, {
+        localMessageId: 'msg_txn_crash',
+        linkDeviceId: LINK_DEVICE_ID,
+        environmentId: LINK_DEVICE_ID,
+        boundPairingRevision: 1,
+        peerCredentialFp: LINK_FINGERPRINT,
+        peerKeyFingerprint: LINK_FINGERPRINT,
+        inReplyToMessageId: 'msg_txn_crash',
+        peerAgentId: SENDER_A,
+        peerThreadId: null,
+        localThreadId: threadId,
+        noticeRunId: null,
+        noticePaneKey: null,
+        payload: '{}',
+        byteCount: 2,
+        createdAt: Date.now(),
+        pactThreadId: threadId,
+        pactEra: 0,
+        reserved: true,
+        relayKind: 'pact_release' as RelayKind
+      })
+      claimNextReplyOutboxItem(raw(db) as unknown as Database.Database, Date.now())
+
+      const boom = new Error('injected crash between settle and cancel')
+      vi.mocked(insertPactStepRow).mockImplementationOnce(() => {
+        throw boom
+      })
+      expect(() =>
+        db.firePactTerminalSettleDisposition(
+          {
+            id: outboxId,
+            pactThreadId: threadId,
+            linkDeviceId: LINK_DEVICE_ID,
+            consecutiveFailures: 0
+          } as never,
+          'body_gate_refused',
+          'refused',
+          Date.now()
+        )
+      ).toThrow(boom)
+
+      const item = raw(db)
+        .prepare(`SELECT state FROM peer_reply_outbox WHERE id = ?`)
+        .get(outboxId) as { state: string }
+      expect(item.state).toBe('sending') // UNSETTLED — the whole transaction rolled back
+      expect(threadRow(threadId).pact_paused_at).toBeNull() // pact still live, never partially paused
     })
   })
 })

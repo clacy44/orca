@@ -176,23 +176,48 @@ export function applyInboundRebindPartyVerb(
   return { accepted: true, messageId: args.messageId, threadId: thread.id, wake: { kind: 'none' } }
 }
 
-// §1.4's Local side / §2.11 — drains every thread the succession UPDATE
-// (agent-thread-succession.ts) flagged `pact_relay_pending = 'rebind'`, emitting `rebind_party`
-// via B6's shared primitive. Deliberately NOT called from inside `upsertAgentByPaneSuffix`'s own
-// transaction (the design's explicit "no enqueue runs inside that transaction" constraint) —
-// this is the PUMP's own, separate call (reply-outbox-pump.ts, once per tick, ahead of its
-// ordinary claim loop).
+// B9c (D-R134 F3/D-R135 F2, chair NOTE "after B13"): extends this SAME drain to
+// `pact_relay_pending = 'gap_notice'` (the terminal-settle emitter-push, repair.ts's own
+// `cancelPactTailAndPause`) — one scan, a per-token emit, never a second scan.
+function drainGapNotice(
+  db: Database.Database,
+  runtime: FederatedPactEmitRuntime | null,
+  threadId: string
+): number {
+  const result = enqueueFederatedPactVerb(db, runtime, threadId, 'gap_notice', {
+    actorAgentId: null,
+    actorPaneKey: null,
+    actorHostId: null,
+    runId: 'host'
+  })
+  if (result.outcome !== 'enqueued') {
+    return 0
+  }
+  db.prepare(
+    `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = 'gap_notice'`
+  ).run(threadId)
+  return 1
+}
+
+// §1.4's Local side / §2.11 — drains every thread flagged `pact_relay_pending = 'rebind'` (the
+// succession UPDATE, agent-thread-succession.ts) or `'gap_notice'` (B9c, above), emitting
+// `rebind_party`/`gap_notice` via B6's shared primitive. Deliberately NOT called from inside
+// `upsertAgentByPaneSuffix`'s own transaction (the design's explicit "no enqueue runs inside
+// that transaction" constraint) — this is the PUMP's own, separate call (reply-outbox-pump.ts,
+// once per tick, ahead of its ordinary claim loop).
 export function drainPendingRebindParty(
   db: Database.Database,
   runtime: FederatedPactEmitRuntime | null
 ): number {
   const rows = db
     .prepare(
-      `SELECT id, pact_proposer_agent_id, pact_with_agent_id FROM threads
-       WHERE pact_relay_pending = 'rebind' AND pact_peer_agent_id IS NOT NULL AND purged_at IS NULL`
+      `SELECT id, pact_relay_pending, pact_proposer_agent_id, pact_with_agent_id FROM threads
+       WHERE pact_relay_pending IN ('rebind', 'gap_notice')
+         AND pact_peer_agent_id IS NOT NULL AND purged_at IS NULL`
     )
     .all() as {
     id: string
+    pact_relay_pending: string
     pact_proposer_agent_id: string | null
     pact_with_agent_id: string | null
   }[]
@@ -200,6 +225,10 @@ export function drainPendingRebindParty(
   let drained = 0
   for (const row of rows) {
     try {
+      if (row.pact_relay_pending === 'gap_notice') {
+        drained += drainGapNotice(db, runtime, row.id)
+        continue
+      }
       const localPartyId = [row.pact_proposer_agent_id, row.pact_with_agent_id].find(
         (id): id is string => id !== null && !id.startsWith('remote:')
       )
@@ -257,7 +286,7 @@ export function drainPendingRebindParty(
         agentId: null,
         actorPaneKey: null,
         actorHostId: null,
-        verb: 'pact_rebind_party_drain_failed',
+        verb: 'pact_relay_pending_drain_failed',
         outcome: 'error',
         reasonCode:
           error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200)

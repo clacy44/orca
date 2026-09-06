@@ -14,6 +14,7 @@ import {
   replyOutboxIntervalMs,
   applyReplyOutboxJitter
 } from './reply-outbox-store'
+import { PACT_HOLD_CAUSES } from './reply-outbox-pump-disposition'
 
 // R18.7, and (v6, protocol M4) the first statement of every pump tick: a 'sending' row whose
 // lease expired (a crash mid-RPC) reverts to 'queued' so it is claimable again.
@@ -242,25 +243,28 @@ export function retryReplyOutboxItem(
   lastError: string | null,
   relayKind: RelayKind
 ): boolean {
-  const result =
-    relayKind !== 'reply'
-      ? db
-          .prepare(
-            `UPDATE peer_reply_outbox
+  // B9c (D-R134 F12): the clock starts only at the first HOLD cause (PACT_HOLD_CAUSES) — not at
+  // any pact retry (pact_out_of_order/pact_settling/etc. are evidence of nothing worth timing).
+  const isHoldRetry =
+    relayKind !== 'reply' && lastErrorCode !== null && PACT_HOLD_CAUSES.has(lastErrorCode)
+  const result = isHoldRetry
+    ? db
+        .prepare(
+          `UPDATE peer_reply_outbox
                 SET state = 'queued', lease_expires_at = NULL, consecutive_failures = ?,
                     next_attempt_after = ?, last_error_code = ?, last_error = ?,
                     first_held_at = COALESCE(first_held_at, ?)
               WHERE id = ? AND state = 'sending'`
-          )
-          .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, now, id)
-      : db
-          .prepare(
-            `UPDATE peer_reply_outbox
+        )
+        .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, now, id)
+    : db
+        .prepare(
+          `UPDATE peer_reply_outbox
                 SET state = 'queued', lease_expires_at = NULL, consecutive_failures = ?,
                     next_attempt_after = ?, last_error_code = ?, last_error = ?
               WHERE id = ? AND state = 'sending'`
-          )
-          .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, id)
+        )
+        .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, id)
   return result.changes === 1
 }
 
