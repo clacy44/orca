@@ -42,6 +42,16 @@ export function reclaimExpiredReplyOutboxLeases(db: Database.Database, now: numb
 // NOT EXISTS clause is therefore repeated in the UPDATE's own WHERE, correlated on the row being
 // updated, so the claim itself is atomic: it can succeed only if no sibling is 'sending' AT UPDATE
 // TIME, not merely at SELECT time.
+//
+// S10-21b B4 (design §2.5, corrected per Addendum 6(15)/NA7): a SECOND, PARENTHESISED group adds
+// the per-pact head-of-line clause (one in-flight item per pact_thread_id, in seq order) with an
+// exemption disjunct for release/resync/resync_request/gap_notice, strictly OR-ed INSIDE its own
+// parens — never unparenthesised into the outer AND chain, which would let the disjunct bypass
+// every guard above it (state/settled_at/backoff and the per-ROUTE NOT EXISTS), not just the
+// per-pact one. NULL pact_thread_id makes the per-pact NOT EXISTS's correlated equality NULL for
+// every row, so a plain mail item (pact_thread_id IS NULL) is always exempt-by-construction and
+// this clause is a no-op for it — MAIL-PATH CHANGE, pinned by T-NA7 and the mail-regression tests
+// in reply-outbox-lifecycle.test.ts.
 export function claimNextReplyOutboxItem(
   db: Database.Database,
   now: number
@@ -65,6 +75,18 @@ export function claimNextReplyOutboxItem(
                AND b.environment_id = a.environment_id
                AND b.bound_pairing_revision = a.bound_pairing_revision
                AND b.state = 'sending'
+          )
+          AND (
+            NOT EXISTS (
+              SELECT 1 FROM peer_reply_outbox c
+               WHERE c.pact_thread_id IS NOT NULL
+                 AND c.pact_thread_id = a.pact_thread_id
+                 AND c.settled_at IS NULL AND c.seq < a.seq
+            )
+            OR (
+              a.pact_thread_id IS NOT NULL
+              AND a.relay_kind IN ('pact_release','pact_resync','pact_resync_request','pact_gap_notice')
+            )
           )
         ORDER BY seq ASC`
     )
@@ -91,6 +113,18 @@ export function claimNextReplyOutboxItem(
                  AND b.environment_id = a.environment_id
                  AND b.bound_pairing_revision = a.bound_pairing_revision
                  AND b.state = 'sending'
+            )
+            AND (
+              NOT EXISTS (
+                SELECT 1 FROM peer_reply_outbox c
+                 WHERE c.pact_thread_id IS NOT NULL
+                   AND c.pact_thread_id = a.pact_thread_id
+                   AND c.settled_at IS NULL AND c.seq < a.seq
+              )
+              OR (
+                a.pact_thread_id IS NOT NULL
+                AND a.relay_kind IN ('pact_release','pact_resync','pact_resync_request','pact_gap_notice')
+              )
             )`
       )
       .run(leaseExpiresAt, now, preDialBackoff, candidate.id)

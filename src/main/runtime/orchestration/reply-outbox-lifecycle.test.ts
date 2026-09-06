@@ -4,7 +4,8 @@ import { OrchestrationDb } from './db'
 import {
   enqueueReplyOutbox,
   getReplyOutboxItem,
-  cancelQueuedReplyOutbox
+  cancelQueuedReplyOutbox,
+  type RelayKind
 } from './reply-outbox-store'
 import {
   reclaimExpiredReplyOutboxLeases,
@@ -245,5 +246,184 @@ describe('Ruling 28 Addendum 1(q): the claim skips a settled (repair_rejected) r
 
     // No further candidate — a second claim call finds nothing else to do.
     expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+  })
+})
+
+function enqueuePactItem(
+  sqlite: Database.Database,
+  now: number,
+  opts: {
+    suffix: string
+    linkDeviceId: string
+    pactThreadId: string
+    relayKind: RelayKind
+  }
+): string {
+  return enqueueReplyOutbox(sqlite, {
+    localMessageId: `msg_na7_${opts.suffix}`,
+    linkDeviceId: opts.linkDeviceId,
+    environmentId: 'env_na7',
+    boundPairingRevision: 1,
+    peerCredentialFp: 'peer_fp_na7',
+    peerKeyFingerprint: 'peer_key_fp_na7',
+    inReplyToMessageId: `msg_in_reply_na7_${opts.suffix}`,
+    peerAgentId: 'agent_na7',
+    peerThreadId: null,
+    localThreadId: null,
+    noticeRunId: null,
+    noticePaneKey: null,
+    payload: '{}',
+    byteCount: 2,
+    createdAt: now,
+    pactThreadId: opts.pactThreadId,
+    pactEra: 0,
+    reserved: true,
+    relayKind: opts.relayKind
+  })
+}
+
+// S10-21b B4, T-NA7 (design §2.5, corrected per Addendum 6(15) — the CLOSED bug the unparenthesised
+// v3 form had: the exemption disjunct must be OR-ed strictly INSIDE the per-pact NOT EXISTS's own
+// parens, never appended unparenthesised to the outer WHERE, or it bypasses every other guard).
+// FAILS AT BASE: at base the per-pact clause does not exist at all, so there is no head-of-line
+// enforcement to exempt anything FROM — every assertion below is against behaviour this commit
+// introduces.
+describe('S10-21b B4, T-NA7: the corrected parenthesised per-pact head-of-line exemption', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('an exempt item (pact_release) is claimable behind an unsettled, lower-seq predecessor on the SAME pact; a non-exempt item (pact_step) in the identical position is NOT', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+
+    // Predecessor: lower seq (enqueued first), SAME pact, on its OWN route so claiming it can
+    // never satisfy/interact with the per-ROUTE guard for the items below — isolates the
+    // per-pact clause from the per-route one, which the third test in this suite covers.
+    const predecessorId = enqueuePactItem(sqlite, now, {
+      suffix: 'predecessor',
+      linkDeviceId: 'link_na7_a_pred',
+      pactThreadId: 'thr_na7_a',
+      relayKind: 'pact_step'
+    })
+    // Claimed (not settled) — 'sending', settled_at IS NULL — the exact "in flight" shape the
+    // per-pact NOT EXISTS keys on: `c.settled_at IS NULL AND c.seq < a.seq`.
+    expect(claimNextReplyOutboxItem(sqlite, now)?.id).toBe(predecessorId)
+
+    // Non-exempt item, higher seq, SAME pact, own route — must NOT be claimable: the per-pact
+    // NOT EXISTS finds the unsettled predecessor and the OR's right side is false (relay_kind
+    // not in the exempt set).
+    const nonExemptId = enqueuePactItem(sqlite, now, {
+      suffix: 'non-exempt',
+      linkDeviceId: 'link_na7_a_nonexempt',
+      pactThreadId: 'thr_na7_a',
+      relayKind: 'pact_step'
+    })
+    expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+    expect(getReplyOutboxItem(sqlite, nonExemptId)?.state).toBe('queued')
+
+    // Exempt item, higher seq, SAME pact, own route — IS claimable: the OR's right side
+    // (`pact_thread_id IS NOT NULL AND relay_kind IN (...)`) is true, so the per-pact NOT
+    // EXISTS's false result no longer refuses the row.
+    const exemptId = enqueuePactItem(sqlite, now, {
+      suffix: 'exempt',
+      linkDeviceId: 'link_na7_a_exempt',
+      pactThreadId: 'thr_na7_a',
+      relayKind: 'pact_release'
+    })
+    const exemptClaim = claimNextReplyOutboxItem(sqlite, now)
+    expect(exemptClaim?.id).toBe(exemptId)
+    expect(exemptClaim?.relayKind).toBe('pact_release')
+
+    // The non-exempt item is still untouched throughout.
+    expect(getReplyOutboxItem(sqlite, nonExemptId)?.state).toBe('queued')
+  })
+
+  it('the SAME exemption does not override "sending", "settled", or backed-off — only the per-pact head-of-line NOT EXISTS is bypassed', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+
+    const exemptId = enqueuePactItem(sqlite, now, {
+      suffix: 'guard-sending',
+      linkDeviceId: 'link_na7_b',
+      pactThreadId: 'thr_na7_b',
+      relayKind: 'pact_resync'
+    })
+
+    // Guard 1: 'sending' — claim it once (state becomes 'sending'), then a second claim call
+    // must NOT re-claim it merely because it is exempt.
+    const firstClaim = claimNextReplyOutboxItem(sqlite, now)
+    expect(firstClaim?.id).toBe(exemptId)
+    expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+
+    // Guard 2: settled — settle it, then it must never be claimed again.
+    settleReplyOutboxItem(sqlite, exemptId, {
+      state: 'delivered',
+      settledAt: now,
+      consecutiveFailures: 0,
+      nextAttemptAfter: null,
+      lastErrorCode: null,
+      lastError: null
+    })
+    expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+
+    // Guard 3: backed off — a fresh exempt item with next_attempt_after in the future is not
+    // claimable before that time, exemption notwithstanding.
+    const backedOffId = enqueuePactItem(sqlite, now, {
+      suffix: 'guard-backoff',
+      linkDeviceId: 'link_na7_b2',
+      pactThreadId: 'thr_na7_b2',
+      relayKind: 'pact_gap_notice'
+    })
+    sqlite
+      .prepare('UPDATE peer_reply_outbox SET next_attempt_after = ? WHERE id = ?')
+      .run(now + 60_000, backedOffId)
+    expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+    expect(claimNextReplyOutboxItem(sqlite, now + 60_000)?.id).toBe(backedOffId)
+  })
+
+  it('the exemption does NOT bypass the per-ROUTE one-in-flight invariant — an exempt item on a DIFFERENT pact, SAME route, is not claimable while a sibling row on that route is sending', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+
+    // Two DIFFERENT pacts sharing the SAME route (link/environment/boundPairingRevision).
+    const routeLinkId = 'link_na7_c'
+    enqueuePactItem(sqlite, now, {
+      suffix: 'route-a',
+      linkDeviceId: routeLinkId,
+      pactThreadId: 'thr_na7_c1',
+      relayKind: 'pact_step'
+    })
+    const exemptOtherPactId = enqueuePactItem(sqlite, now, {
+      suffix: 'route-b-exempt',
+      linkDeviceId: routeLinkId,
+      pactThreadId: 'thr_na7_c2',
+      relayKind: 'pact_release'
+    })
+
+    // Claim the first (thr_na7_c1) item — the route is now 'sending'.
+    const claimed = claimNextReplyOutboxItem(sqlite, now)
+    expect(claimed?.pactThreadId).toBe('thr_na7_c1')
+
+    // The exempt item on the OTHER pact, same route, must NOT be claimable — the per-pact
+    // exemption only bypasses the per-PACT NOT EXISTS, never the per-ROUTE one.
+    expect(claimNextReplyOutboxItem(sqlite, now)).toBeNull()
+    expect(getReplyOutboxItem(sqlite, exemptOtherPactId)?.state).toBe('queued')
+  })
+
+  it('a plain mail item (pact_thread_id IS NULL) is entirely unaffected by the new clause — NULL makes the per-pact equality NULL, so it is exempt-by-construction', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+    const id = enqueueOne(sqlite, now, 'na7-mail')
+    expect(getReplyOutboxItem(sqlite, id)?.pactThreadId).toBeNull()
+    const claimed = claimNextReplyOutboxItem(sqlite, now)
+    expect(claimed?.id).toBe(id)
   })
 })

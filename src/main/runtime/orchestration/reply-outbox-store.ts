@@ -8,12 +8,13 @@ import {
   REPLY_OUTBOX_MAX_MS,
   REPLY_OUTBOX_PER_LINK_CAP,
   REPLY_OUTBOX_JITTER_RATIO,
+  PACT_RESERVED_HEADROOM,
   CANCELLED_LOCAL_RESET_CODE
 } from './link-binding-constants'
 import { LinkBindingCapError } from './link-binding-store'
-import type { ReplyOutboxRow, ReplyOutboxSqlRow } from './reply-outbox-types'
+import type { ReplyOutboxRow, ReplyOutboxSqlRow, RelayKind } from './reply-outbox-types'
 
-export type { ReplyOutboxState, ReplyOutboxRow } from './reply-outbox-types'
+export type { ReplyOutboxState, ReplyOutboxRow, RelayKind } from './reply-outbox-types'
 
 function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
   return {
@@ -49,7 +50,14 @@ function fromSqlRow(row: ReplyOutboxSqlRow): ReplyOutboxRow {
     settledAt: row.settled_at,
     notifiedAt: row.notified_at,
     lastNotifiedCondition: row.last_notified_condition,
-    lastNotifiedAt: row.last_notified_at
+    lastNotifiedAt: row.last_notified_at,
+    relayKind: (row.relay_kind ?? 'reply') as RelayKind,
+    pactThreadId: row.pact_thread_id ?? null,
+    pactSeq: row.pact_seq ?? null,
+    pactEra: row.pact_era ?? null,
+    pactTurnAfter: row.pact_turn_after ?? null,
+    pactState: row.pact_state ?? null,
+    pactFlightToken: row.pact_flight_token ?? null
   }
 }
 
@@ -69,12 +77,26 @@ export type EnqueueReplyOutboxParams = {
   payload: string
   byteCount: number
   createdAt: number
+  // S10-21b B4 (design §2.3 step 5, §2.4, §2.11) — additive, optional; a plain mail reply passes
+  // none of these and gets 'reply'/NULL exactly as before.
+  reserved?: boolean
+  pactThreadId?: string
+  pactSeq?: number
+  pactEra?: number
+  pactTurnAfter?: string
+  relayKind?: RelayKind
 }
 
-// R16 / R14.5: refuses `link_binding_conflict` past REPLY_OUTBOX_PER_LINK_CAP, never evicts.
+// R16 / R14.5: refuses `link_binding_conflict` past the per-link cap, never evicts.
+// S10-21b B4 (design §2.11): a `reserved` item (release/rebind_party/resync/resync_request/
+// gap_notice/§2.7 side-effect verbs) is admitted up to REPLY_OUTBOX_PER_LINK_CAP +
+// PACT_RESERVED_HEADROOM rather than the ordinary per-link cap.
 export function enqueueReplyOutbox(db: Database.Database, p: EnqueueReplyOutboxParams): string {
   const pending = countPendingReplyOutbox(db, p.linkDeviceId)
-  if (pending >= REPLY_OUTBOX_PER_LINK_CAP) {
+  const cap = p.reserved
+    ? REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
+    : REPLY_OUTBOX_PER_LINK_CAP
+  if (pending >= cap) {
     throw new LinkBindingCapError('peer_reply_outbox')
   }
   const id = randomUUID()
@@ -83,13 +105,28 @@ export function enqueueReplyOutbox(db: Database.Database, p: EnqueueReplyOutboxP
     .get() as {
     seq: number
   }
+  // S10-21b B4 (design §2.3 step 5): the outbox row is stamped at insert with the pact thread's
+  // CURRENT pact_state/pact_flight_token — read fresh here, never passed in by the caller, so a
+  // stale caller-held value can never be stamped onto the row.
+  let pactState: string | null = null
+  let pactFlightToken: number | null = null
+  if (p.pactThreadId !== undefined) {
+    const thread = db
+      .prepare('SELECT pact_state, pact_flight_token FROM threads WHERE id = ?')
+      .get(p.pactThreadId) as { pact_state: string | null; pact_flight_token: number } | undefined
+    pactState = thread?.pact_state ?? null
+    pactFlightToken = thread?.pact_flight_token ?? null
+  }
   db.prepare(
     `INSERT INTO peer_reply_outbox (
        id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
        peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
        peer_thread_id, local_thread_id, notice_run_id, notice_pane_key, payload, byte_count,
-       state, attempts, consecutive_failures, hold_count, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0, 0, ?)`
+       state, attempts, consecutive_failures, hold_count, created_at,
+       relay_kind, pact_thread_id, pact_seq, pact_era, pact_turn_after, pact_state,
+       pact_flight_token
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0, 0, ?,
+               ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     nextSeq.seq,
@@ -107,7 +144,14 @@ export function enqueueReplyOutbox(db: Database.Database, p: EnqueueReplyOutboxP
     p.noticePaneKey,
     p.payload,
     p.byteCount,
-    p.createdAt
+    p.createdAt,
+    p.relayKind ?? 'reply',
+    p.pactThreadId ?? null,
+    p.pactSeq ?? null,
+    p.pactEra ?? null,
+    p.pactTurnAfter ?? null,
+    pactState,
+    pactFlightToken
   )
   return id
 }

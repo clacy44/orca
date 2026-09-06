@@ -1,5 +1,25 @@
 // S10-16 R14.6: peer_reply_outbox row types. Split out of reply-outbox-store.ts (max-lines
 // ratchet) when S10-21b B1 (v42 federated-pact columns) pushed that file over the limit.
+
+// S10-21b B4 (design §2.4/§6): peer_reply_outbox's `relay_kind` column vocabulary — a CLOSED TS
+// union, deliberately with NO DB CHECK (design's explicit "no CHECK — closed vocabulary in TS
+// plus a test", §6); pinned by relay-kind-vocabulary.test.ts. Distinct from the unrelated
+// `relayKind: string` used by federation_relay_items import (db.ts's importFederatedRelayItem) —
+// same English word, two different columns, never imported together.
+export type RelayKind =
+  | 'reply'
+  | 'pact_propose'
+  | 'pact_accept'
+  | 'pact_decline'
+  | 'pact_step'
+  | 'pact_pause'
+  | 'pact_resume'
+  | 'pact_release'
+  | 'pact_rebind_party'
+  | 'pact_resync'
+  | 'pact_resync_request'
+  | 'pact_gap_notice'
+
 export type ReplyOutboxState =
   | 'queued'
   | 'sending'
@@ -42,15 +62,15 @@ export type ReplyOutboxRow = {
   notifiedAt: number | null
   lastNotifiedCondition: string | null
   lastNotifiedAt: number | null
-  // v42 (S10-21b B1, federated pacts) — additive; optional, fromSqlRow isn't extended to
-  // populate these until B4 (outbox generalisation).
-  relayKind?: string
-  pactThreadId?: string | null
-  pactSeq?: number | null
-  pactEra?: number | null
-  pactTurnAfter?: string | null
-  pactState?: string | null
-  pactFlightToken?: number | null
+  // v42 (S10-21b B1, federated pacts) — additive; populated by fromSqlRow as of B4 (outbox
+  // generalisation).
+  relayKind: RelayKind
+  pactThreadId: string | null
+  pactSeq: number | null
+  pactEra: number | null
+  pactTurnAfter: string | null
+  pactState: string | null
+  pactFlightToken: number | null
 }
 
 export type ReplyOutboxSqlRow = {

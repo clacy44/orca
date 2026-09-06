@@ -105,6 +105,9 @@ export const REPLY_OUTBOX_HOLD_MAX_MS = 900_000
 export const REPLY_OUTBOX_MAX_AGE_MS = 604_800_000
 export const REPLY_OUTBOX_MAX_BYTES = 65_536
 export const REPLY_OUTBOX_PER_LINK_CAP = 256
+// S10-21b B4 (design §2.11): reserved-item headroom past REPLY_OUTBOX_PER_LINK_CAP — release,
+// rebind_party, resync, resync_request, gap_notice and the §2.7 side-effect verbs.
+export const PACT_RESERVED_HEADROOM = 16
 export const REPLY_OUTBOX_LINK_CONCURRENCY = 4
 // A-arith(10): matches the existing relay timeout; passed as both timeoutMs and maxDurationMs.
 export const REPLY_OUTBOX_RPC_BUDGET_MS = 30_000
