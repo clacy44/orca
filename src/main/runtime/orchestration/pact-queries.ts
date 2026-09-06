@@ -27,12 +27,17 @@ export function getIncomingUnansweredProposal(
 }
 
 // K5/K24: a paused pact's turn is frozen — excluded here so its holder may park elsewhere
-// (rev 4). Ordering (seq/thread id) is not meaningful; callers print every entry.
+// (rev 4). S10-21b B6 (design §2.1/§2.9, T26): a thread with `pact_turn_in_flight_at IS NOT
+// NULL` is ALSO excluded — the emitting host still shows the turn as its own during the
+// in-flight interval (§2.2's INV-P-021 transient (i)), so counting it here would let the
+// emitter park a `wait --for step` on a turn it just handed away, alongside the peer who has
+// already advanced it — exactly the double-count INV-P-021 forbids outside the two named
+// transients. Ordering (seq/thread id) is not meaningful; callers print every entry.
 export function getTurnsHeldBy(db: Database.Database, agentId: string): string[] {
   const rows = db
     .prepare(
       `SELECT id FROM threads WHERE purged_at IS NULL AND pact_state = 'engaged'
-       AND pact_paused_at IS NULL AND pact_turn_agent_id = ?`
+       AND pact_paused_at IS NULL AND pact_turn_in_flight_at IS NULL AND pact_turn_agent_id = ?`
     )
     .all(agentId) as { id: string }[]
   return rows.map((r) => r.id)

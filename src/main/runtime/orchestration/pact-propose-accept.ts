@@ -16,6 +16,8 @@ import {
   requireUnclaimedPact,
   type PactActorContext
 } from './pact-shared'
+import { findRemotePartyByRenderedKey } from './pact-federated-identity'
+import { findBindingsByEnvironment } from './link-binding-store'
 import { OrchestrationError } from './orchestration-error'
 
 export type ProposePactParams = PactActorContext & {
@@ -40,13 +42,66 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
     // pact_era + 1 (blocker fix): a fresh era per propose, so idx_pact_step_ordinal's
     // (thread_id, pact_era, ordinal) never collides with a prior, released era's step rows —
     // the ledger keeps them (ruling 2), so pact_ordinal resetting to 0 alone is not enough.
+    //
+    // S10-21b B6 (design §2.12, errata 6(16) NB4): the emitting side's own reset list, extended
+    // to every v42 column a fresh era must inherit no state from — pact_release_at,
+    // pact_peer_release_at, pact_turn_in_flight_at, pact_peer_paused_at, pact_local_seq,
+    // pact_peer_seq, pact_last_inbound_at, pact_last_resync_at, pact_relay_pending,
+    // pact_resync_nonce, pact_resync_nonce_at, pact_repair_attempts. TWO columns are
+    // DELIBERATELY EXCLUDED and must never be added here:
+    //   - pact_flight_token: the settle guard's (§2.8) monotone per-thread counter. Resetting it
+    //     on re-propose would let a stale settle from a PRE-re-propose outbox row land on the
+    //     new era's state as if it belonged there — reopening N8's stale-settle hole.
+    //   - pact_pause_epoch: compared, never zeroed, per §6 — it is not this UPDATE's concern.
+    // S10-21b B6 (batch-1 review D-R133 F2, binding): pact_peer_* anchors are unconditionally
+    // cleared here — WITHOUT this a released federated pact re-proposed LOCALLY on the same
+    // thread/row would retain the prior era's stale non-NULL anchor columns, making
+    // isFederatedPact() wrongly true for a brand new local pact. Re-populated below, in the
+    // SAME transaction, only when `peer.federated` — closing the "half-formed federated pact"
+    // window (a propose that resolved a federated peer but left every anchor column NULL,
+    // constructible via local RPC at B3..B5 before this commit).
     db.prepare(
       `UPDATE threads SET
          pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',
          pact_steps_total = ?, pact_ordinal = 0, pact_era = pact_era + 1, pact_turn_agent_id = NULL,
-         pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now')
+         pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now'),
+         pact_release_at = NULL, pact_peer_release_at = NULL, pact_turn_in_flight_at = NULL,
+         pact_peer_paused_at = NULL, pact_local_seq = 0, pact_peer_seq = 0,
+         pact_last_inbound_at = NULL, pact_last_resync_at = NULL, pact_relay_pending = NULL,
+         pact_resync_nonce = NULL, pact_resync_nonce_at = NULL, pact_repair_attempts = 0,
+         pact_peer_agent_id = NULL, pact_peer_link_device_id = NULL,
+         pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL
        WHERE id = ?`
     ).run(params.callerAgentId, peer.id, params.stepsTotal, thread.id)
+    if (peer.federated) {
+      const remote = findRemotePartyByRenderedKey(db, peer.id)
+      if (!remote) {
+        throw new Error(
+          `internal error: federated peer ${peer.id} resolved by requireAccountablePeer but its remote_agents row vanished mid-transaction`
+        )
+      }
+      // R18.4(b)'s candidate lookup (link-binding-store.ts): a CONFIRMED, unrevoked binding for
+      // this environment — the same two clauses findBindingCandidateByKeyFingerprint applies.
+      // No binding yet (the environment was found by probe, never link-paired) leaves the two
+      // link-scoped anchors NULL; pact_peer_agent_id/pact_peer_environment_id are still set, so
+      // isFederatedPact() is correctly true and the emit path (pact-federated-emit.ts) refuses
+      // loudly rather than silently treating the pact as local.
+      const binding = findBindingsByEnvironment(db, remote.environment_id).find(
+        (b) => b.state === 'confirmed' && b.revokedAt === null
+      )
+      db.prepare(
+        `UPDATE threads SET
+           pact_peer_agent_id = ?, pact_peer_environment_id = ?,
+           pact_peer_link_device_id = ?, pact_peer_key_fingerprint = ?
+         WHERE id = ?`
+      ).run(
+        remote.remote_agent_id,
+        remote.environment_id,
+        binding?.linkDeviceId ?? null,
+        binding?.peerKeyFingerprint ?? remote.peer_fingerprint,
+        thread.id
+      )
+    }
     insertPactStepRow(db, {
       threadId: thread.id,
       ordinal: 0,

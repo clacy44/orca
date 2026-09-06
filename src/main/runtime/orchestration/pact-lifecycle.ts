@@ -314,6 +314,18 @@ export function autoPausePactsForAgent(
 
 // K17 (thread_closed/thread_paused): a single thread's engaged pact, regardless of which side
 // triggered the thread-state change.
+//
+// GATE-1 (S10-21b B6, design §10 row 6 — behaviour change for local pacts): widened from
+// `pact_state !== 'engaged'` to `pact_state NOT IN ('engaged', 'proposed')` — a `proposed`
+// (not-yet-accepted) pact is now eligible for the same thread-state auto-pause as an engaged
+// one. Without this widening a thread that closes/pauses WHILE a federated propose is still
+// outstanding (unanswered, `pact_state = 'proposed'`) never gets a host pause row at all, so
+// `resumePactOrRequest`'s pause-condition-cleared check (this same file) has nothing to clear
+// and the pact just sits proposed forever with no ledger trace of the thread-state change.
+function autoPauseEligible(thread: ThreadRow): boolean {
+  return thread.pact_state === 'engaged' || thread.pact_state === 'proposed'
+}
+
 export function autoPausePactOnThread(
   db: Database.Database,
   threadId: string,
@@ -322,7 +334,7 @@ export function autoPausePactOnThread(
   const thread = db
     .prepare(`SELECT * FROM threads WHERE id = ? AND purged_at IS NULL`)
     .get(threadId) as ThreadRow | undefined
-  if (!thread || thread.pact_state !== 'engaged' || thread.pact_paused_at !== null) {
+  if (!thread || !autoPauseEligible(thread) || thread.pact_paused_at !== null) {
     return null
   }
   return autoPauseOneThread(db, thread, reason)

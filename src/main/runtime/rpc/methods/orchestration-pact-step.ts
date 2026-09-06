@@ -40,7 +40,10 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
         done: params.done,
         acknowledgeGate: params.acknowledgeGate,
         senderPaneKey: caller.pane_key,
-        runId: PEER_RUN_ID
+        runId: PEER_RUN_ID,
+        // S10-21b B6: only consulted for a federated pact's deferred emit (pact-federated-emit.ts's
+        // post-commit outbox kick) — a no-op for every local pact.
+        runtime
       })
       if (result.outcome === 'refused') {
         throw gateVerdictRefusalError(result.verdict, result.refusalId)

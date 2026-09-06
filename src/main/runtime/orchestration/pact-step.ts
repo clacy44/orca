@@ -20,6 +20,8 @@ import {
   requireThread,
   type PactActorContext
 } from './pact-shared'
+import { isFederatedPact } from './pact-federated-identity'
+import { enqueueFederatedPactVerb, type FederatedPactEmitRuntime } from './pact-federated-emit'
 
 const PACT_STEP_SUMMARY_MAX_LENGTH = 120
 
@@ -35,6 +37,12 @@ export type AppendPactStepParams = PactActorContext &
     /** PEER_RUN_ID (db.ts) — injected by the caller to avoid a require cycle (peer-question.ts
      * precedent). */
     runId: string
+    // S10-21b B6 (design §2.3): only consulted for a federated pact (`isFederatedPact(thread)`)
+    // — never touches a local pact's step path. Optional/omittable so every existing local-pact
+    // caller (and every pre-existing test) is unaffected; a federated step called with no
+    // runtime simply skips the post-commit outbox kick (the pump's own idle-wake still drains
+    // it eventually — see the OPEN note in the commit body).
+    runtime?: FederatedPactEmitRuntime | null
   }
 
 export type AppendPactStepResult =
@@ -72,6 +80,44 @@ export function appendPactStep(
   const other = otherPactParticipant(thread, params.callerAgentId)
   const nextOrdinal = thread.pact_ordinal + 1
   const summary = sanitizeMessageText(params.done, PACT_STEP_SUMMARY_MAX_LENGTH).value
+
+  // S10-21b B6 (design §2.3, T3): a federated pact's step is the DEFERRED turn flip — the
+  // ledger/ordinal advance immediately (this host's own progress), but pact_turn_agent_id does
+  // NOT move here; that is commit 7's settle job. Delegates the whole write to the shared emit
+  // primitive rather than duplicating §2.3's six steps here.
+  if (isFederatedPact(thread)) {
+    const emitted = enqueueFederatedPactVerb(db, params.runtime ?? null, thread.id, 'step', {
+      actorAgentId: params.callerAgentId,
+      actorPaneKey: params.callerPaneKey,
+      actorHostId: params.callerHostId,
+      runId: params.runId,
+      senderPaneKey: params.senderPaneKey ?? params.callerPaneKey,
+      bodyText: params.done,
+      subject: 'pact step',
+      acknowledgeGate: params.acknowledgeGate,
+      infraAllowlist: params.infraAllowlist,
+      ordinal: nextOrdinal,
+      wireOrdinal: nextOrdinal,
+      turnAfterAgentId: other,
+      summary
+    })
+    if (emitted.outcome === 'refused') {
+      return { outcome: 'refused', verdict: emitted.verdict, refusalId: emitted.refusalId }
+    }
+    const gateFlags = emitted.message.gate_flags
+      ? (JSON.parse(emitted.message.gate_flags) as string[])
+      : null
+    return {
+      outcome: 'stepped',
+      thread: emitted.thread,
+      ordinal: nextOrdinal,
+      of: emitted.thread.pact_steps_total,
+      // The turn stays with the CALLER until settle (§2.2's in-flight interval) — never `other`.
+      turn: params.callerAgentId,
+      message: emitted.message,
+      gateFlags
+    }
+  }
 
   // P1 (blocker fix, S10-3b review): the gated message insert, the ledger append and the turn
   // flip commit atomically in ONE BEGIN IMMEDIATE, per spec RPCS § ("One transaction:

@@ -84,6 +84,26 @@ describe('pact queries', () => {
     expect(d.getTurnsHeldBy(a)).toEqual([])
   })
 
+  // T26 (S10-21b B6, design §2.1/§2.9): a thread with pact_turn_in_flight_at IS NOT NULL is
+  // excluded from getTurnsHeldBy — the emitting host still shows the turn as its own during the
+  // in-flight interval, so it must not ALSO be double-counted as a park-able turn. Fails at base
+  // 73984e659d (no pact_turn_in_flight_at clause in the query).
+  it('T26: getTurnsHeldBy excludes an in-flight thread', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = threadWith(d, [a, b])
+    engagedPact(d, a, b, threadId)
+    expect(d.getTurnsHeldBy(a)).toEqual([threadId])
+    const raw = (
+      d as unknown as { db: { prepare: (s: string) => { run: (...args: unknown[]) => unknown } } }
+    ).db
+    raw
+      .prepare(`UPDATE threads SET pact_turn_in_flight_at = datetime('now') WHERE id = ?`)
+      .run(threadId)
+    expect(d.getTurnsHeldBy(a)).toEqual([])
+  })
+
   it('K9: a thread participant outside the pact sees ordinals/actors/times/hashes and zero summaries', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')

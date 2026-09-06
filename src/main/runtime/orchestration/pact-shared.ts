@@ -255,6 +255,10 @@ export type InsertPactStepRowParams = {
   summary: string | null
   turnAfterAgentId: string | null
   reasonCode: string | null
+  // S10-21b B6 (design §2.3 step 2, v42) — additive, optional: a federated emit stamps
+  // relay_state='pending' at insert time (B7's settle later flips it to 'settled'); a purely
+  // local pact row (every pre-existing caller) leaves it NULL exactly as before.
+  relayState?: 'pending' | 'settled' | null
 }
 
 // pact_era (blocker fix, S10-3b review): stamped from threads.pact_era at write time, never
@@ -270,8 +274,8 @@ export function insertPactStepRow(db: Database.Database, params: InsertPactStepR
   db.prepare(
     `INSERT INTO pact_steps
        (thread_id, pact_era, ordinal, kind, actor_agent_id, actor_pane_key, actor_host_id,
-        message_id, summary, summary_sha256, turn_after_agent_id, reason_code)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        message_id, summary, summary_sha256, turn_after_agent_id, reason_code, relay_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.threadId,
     eraRow?.pact_era ?? 0,
@@ -284,7 +288,8 @@ export function insertPactStepRow(db: Database.Database, params: InsertPactStepR
     params.summary,
     sha256Hex(params.summary ?? ''),
     params.turnAfterAgentId,
-    params.reasonCode
+    params.reasonCode,
+    params.relayState ?? null
   )
 }
 
