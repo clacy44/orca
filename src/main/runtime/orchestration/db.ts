@@ -337,6 +337,14 @@ import {
   type GetPactLedgerParams
 } from './pact-queries'
 import type { PactLedgerResult, PactPauseReason } from './pact-types'
+// S10-21b B11: getPactLedger's remote-actor join (findRemotePartyByRenderedKey — the reverse
+// direction of renderFederatedPartyKey) and the wait-expiry/pact-show facts (§3.3).
+import { findRemotePartyByRenderedKey, isFederatedPact } from './pact-federated-identity'
+import {
+  queryCounterpartLiveState,
+  queryLinkHealth,
+  type PactWaitExpiryFacts
+} from './pact-wait-expiry-facts'
 import {
   findOrCreatePeerThread as findOrCreatePeerThreadImpl,
   type FindOrCreatePeerThreadParams,
@@ -5803,7 +5811,52 @@ export class OrchestrationDb {
   }
 
   getPactLedger(params: GetPactLedgerParams): PactLedgerResult {
-    return getPactLedgerImpl(this.db, params)
+    // S10-21b B11 (design §4.7, T31): the remote-actor resolver needs this class's own
+    // supersession-chain walk and quarantine union (B2) — see pact-queries.ts's own comment on
+    // why the free function cannot call them directly.
+    return getPactLedgerImpl(this.db, {
+      ...params,
+      resolveRemoteActor: (renderedKey) => {
+        const remote = findRemotePartyByRenderedKey(this.db, renderedKey)
+        if (!remote) {
+          return null
+        }
+        const chain = this.walkRemoteAgentSupersessionChain(
+          remote.remote_agent_id,
+          remote.environment_id
+        )
+        return {
+          displayName: remote.display_name,
+          quarantined: chain.some((id) => this.isRemoteAgentLocallyQuarantined(id))
+        }
+      }
+    })
+  }
+
+  // S10-21b B11 (design §3.3): the three informative facts an expiring `wait --for pact`/
+  // `--for step` prints, and `pact --show` prints durably outside a wait too. Never an
+  // auto-pause trigger — see pact-wait-expiry-facts.ts's own header note.
+  computePactWaitExpiryFacts(threadId: string): PactWaitExpiryFacts {
+    const thread = this.getThread(threadId)
+    if (!thread) {
+      return { lastInboundAt: null, linkHealth: null, peerState: null, peerStateQueryFailed: false }
+    }
+    if (!isFederatedPact(thread)) {
+      return {
+        lastInboundAt: thread.pact_last_inbound_at,
+        linkHealth: null,
+        peerState: null,
+        peerStateQueryFailed: false
+      }
+    }
+    const linkHealth = queryLinkHealth(this.db, thread, Date.now())
+    const { state, failed } = queryCounterpartLiveState(this.db, thread)
+    return {
+      lastInboundAt: thread.pact_last_inbound_at,
+      linkHealth,
+      peerState: state,
+      peerStateQueryFailed: failed
+    }
   }
 
   getIncomingUnansweredProposal(agentId: string): ThreadRow | undefined {

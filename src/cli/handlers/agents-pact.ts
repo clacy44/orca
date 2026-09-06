@@ -38,6 +38,7 @@ type PactThread = {
   pact_ordinal: number
   pact_paused_at: string | null
   pact_pause_reason: string | null
+  pact_last_inbound_at: string | null
 }
 type PactActionResult = { thread: PactThread; nextSteps: string[]; requested?: boolean }
 type PactLedgerEntry = {
@@ -56,6 +57,10 @@ type PactLedgerResult = {
   thread: PactThread
   entries: PactLedgerEntry[]
   omitted: { purged: number; withheld: number }
+  // S10-21b B11 (design §3.3): the same three facts an expiring wait prints, durably visible
+  // outside a wait too (lastInboundAt already rides on `thread.pact_last_inbound_at`).
+  linkHealth: string | null
+  peerState: string | null
   nextSteps: string[]
 }
 type StepResult = {
@@ -157,8 +162,15 @@ function formatPactShow(r: PactLedgerResult, threadId: string): string {
     r.omitted.purged > 0 || r.omitted.withheld > 0
       ? `\n(${r.omitted.withheld} withheld, ${r.omitted.purged} purged)`
       : ''
+  // S10-21b B11 (design §3.3): durably visible outside a wait too — same three facts an
+  // expiring `wait` prints. Local (non-federated) pact: `linkHealth`/`peerState` are null.
+  const factsLine =
+    t.pact_last_inbound_at !== null || r.linkHealth !== null || r.peerState !== null
+      ? `\nLast heard: ${t.pact_last_inbound_at ?? '(none)'}   ` +
+        `Link: ${r.linkHealth ?? 'n/a'}   Peer: ${r.peerState ?? 'n/a'}`
+      : ''
   return (
-    `${header}\n #   when      kind     who             what\n${rows.join('\n')}${omissionLine}\n` +
+    `${header}\n #   when      kind     who             what\n${rows.join('\n')}${omissionLine}${factsLine}\n` +
     `Third-party check: orca agents pact --show ${threadId} --json`
   )
 }

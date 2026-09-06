@@ -165,6 +165,103 @@ describe('pact queries', () => {
     ).toThrow(/turn held by a participant/)
   })
 
+  // T31 (design §4.7, "containment follows supersession") — rendering half only: B14's
+  // quarantine-chain-walk RPC/CLI caller is not yet landed at this base (151845af72), so this
+  // test flags the remote row's chain directly (as B14's writer eventually will) rather than
+  // going through a not-yet-existing `orca agents quarantine` caller, per this brief's own
+  // OPEN-item guidance ("test the WITHHOLD rendering in isolation against a directly-flagged
+  // quarantined row and re-run as integration once commit 14 lands"). Fails at base: the pre-B11
+  // `getPactLedger` LEFT JOINs `ps.actor_agent_id` against `agents.id`, which a rendered
+  // `remote:<link>:<id>` key never matches, so `actorDisplayName` stays null and `withheld`
+  // stays false regardless of `remote_agents.local_quarantined`.
+  it('T31: a step authored under a pre-rebind remote party id is withheld once the POST-rebind id is quarantined', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = threadWith(d, [a, b])
+    engagedPact(d, a, b, threadId)
+
+    const raw = (
+      d as unknown as {
+        db: {
+          prepare: (s: string) => { run: (...args: unknown[]) => unknown }
+        }
+      }
+    ).db
+
+    const linkId = 'env-1'
+    const oldRemoteId = 'remote-old'
+    const newRemoteId = 'remote-new'
+    raw
+      .prepare(
+        `INSERT INTO remote_agents
+           (environment_id, environment_name, link_kind, remote_agent_id, display_name, state,
+            superseded_at, succeeded_by_remote_agent_id)
+         VALUES (?, 'env', 'environment', ?, 'Old Peer', 'gone', datetime('now'), ?)`
+      )
+      .run(linkId, oldRemoteId, newRemoteId)
+    raw
+      .prepare(
+        `INSERT INTO remote_agents
+           (environment_id, environment_name, link_kind, remote_agent_id, display_name, state,
+            local_quarantined)
+         VALUES (?, 'env', 'environment', ?, 'New Peer', 'live', 1)`
+      )
+      .run(linkId, newRemoteId)
+
+    const renderedOldKey = `remote:${linkId}:${oldRemoteId}`
+    raw
+      .prepare(
+        `INSERT INTO pact_steps
+           (thread_id, ordinal, kind, actor_agent_id, message_id, summary, summary_sha256,
+            turn_after_agent_id)
+         VALUES (?, 1, 'step', ?, 'msg-1', 'pre-rebind summary', 'deadbeef', ?)`
+      )
+      .run(threadId, renderedOldKey, b)
+
+    const ledger = d.getPactLedger({ threadId, revealSummaries: true })
+    const step = ledger.entries.find((e) => e.actorAgentId === renderedOldKey)
+    expect(step).toBeDefined()
+    expect(step?.actorDisplayName).toBe('Old Peer')
+    expect(step?.withheld).toBe(true)
+    expect(step?.summary).toBeNull()
+    expect(ledger.omitted.withheld).toBeGreaterThanOrEqual(1)
+  })
+
+  it('T31 control: an UNQUARANTINED remote actor (no chain member flagged) resolves a display name but is not withheld', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = threadWith(d, [a, b])
+    engagedPact(d, a, b, threadId)
+
+    const raw = (
+      d as unknown as { db: { prepare: (s: string) => { run: (...args: unknown[]) => unknown } } }
+    ).db
+    const linkId = 'env-2'
+    const remoteId = 'remote-clean'
+    raw
+      .prepare(
+        `INSERT INTO remote_agents (environment_id, environment_name, link_kind, remote_agent_id, display_name, state)
+         VALUES (?, 'env', 'environment', ?, 'Clean Peer', 'live')`
+      )
+      .run(linkId, remoteId)
+    const renderedKey = `remote:${linkId}:${remoteId}`
+    raw
+      .prepare(
+        `INSERT INTO pact_steps
+           (thread_id, ordinal, kind, actor_agent_id, message_id, summary, summary_sha256, turn_after_agent_id)
+         VALUES (?, 1, 'step', ?, 'msg-2', 'ordinary summary', 'cafebabe', ?)`
+      )
+      .run(threadId, renderedKey, b)
+
+    const ledger = d.getPactLedger({ threadId, revealSummaries: true })
+    const step = ledger.entries.find((e) => e.actorAgentId === renderedKey)
+    expect(step?.actorDisplayName).toBe('Clean Peer')
+    expect(step?.withheld).toBe(false)
+    expect(step?.summary).toBe('ordinary summary')
+  })
+
   it('verify minor: ledger rows expose era, so repeated ordinals across re-proposes stay distinguishable', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')

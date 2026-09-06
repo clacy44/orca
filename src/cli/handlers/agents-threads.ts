@@ -101,6 +101,12 @@ type WaitResult = {
   messages: ThreadMessageRow[]
   resumeToken: string | null
   waitedMs: number
+  // S10-21b B11 (design §3.3): present only on a `timeout` from `--for pact`/`--for step` —
+  // the three informative facts, never an auto-pause trigger.
+  lastInboundAt?: string | null
+  linkHealth?: string | null
+  peerState?: string | null
+  peerStateQueryFailed?: boolean
   nextSteps: string[]
 }
 
@@ -209,7 +215,15 @@ function formatWait(result: WaitResult, threadId: string, forParam: string): str
     const hint =
       result.nextSteps[0] ??
       `orca agents wait --thread ${threadId} --for ${forParam} --resume ${result.resumeToken}`
-    return `Still pending on thread ${threadId} (waited ${result.waitedMs}ms).\nResume without re-asking: ${hint}`
+    // S10-21b B11 (design §3.3): only `--for pact`/`--for step` carry these facts; `--for
+    // message`/`--for reply` timeouts render as before.
+    const facts =
+      forParam === 'pact' || forParam === 'step'
+        ? `\nLast heard: ${formatAgeShort(result.lastInboundAt ?? null)}` +
+          `\nLink health: ${result.linkHealth ?? 'n/a'}` +
+          `\nPeer state: ${result.peerState ?? 'n/a'}${result.peerStateQueryFailed ? ' (query failed)' : ''}`
+        : ''
+    return `Still pending on thread ${threadId} (waited ${result.waitedMs}ms).${facts}\nResume without re-asking: ${hint}`
   }
   if (result.messages.length > 0) {
     const lines = result.messages.map(formatThreadMessageLine).join('\n')

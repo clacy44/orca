@@ -1,7 +1,7 @@
 // S10-3 pact spec — orchestration.threads.pact/.step/.pactLedger and orchestration.wait's
 // pact/step completion, through the real RPC + runtime waiter machinery (not mocked) so the
 // K19-K25 wake-timing acceptance tests are genuine, not simulated.
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { OrchestrationDb } from '../../orchestration/db'
 import {
@@ -9,6 +9,10 @@ import {
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
 import type { RpcContext } from '../core'
+import type Database from '../../../sqlite/sync-database'
+import { renderFederatedPartyKey } from '../../orchestration/pact-federated-identity'
+import * as pactWaitExpiryFacts from '../../orchestration/pact-wait-expiry-facts'
+import { putPeerLinkBinding } from '../../orchestration/link-binding-store'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -64,6 +68,7 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
 
   afterEach(() => {
     db?.close()
+    vi.restoreAllMocks()
   })
 
   function method(name: string) {
@@ -407,6 +412,103 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
     await expect(
       call('orchestration.wait', { threadId: thrBC, for: 'pact', timeoutMs: 30 }, ctx(evidenceB))
     ).resolves.toMatchObject({ outcome: 'timeout' })
+  })
+
+  // T22 (design §3.3, Addendum 6(3), rewritten per D-R90's closure note — [v3.1]): an engaged
+  // federated pact whose `pact_last_inbound_at` is 40 minutes old (well past v2's retired
+  // 30-minute `PACT_PEER_SILENCE_MS`, which does not exist in this tree — see
+  // pact-wait-expiry-facts.ts's header note) is NOT auto-paused by a `wait --for pact` timeout;
+  // the timeout branch invokes the fact-2 live query (asserted by spy, not merely by outcome)
+  // and returns the three informative facts. Fails at base: `handlePactOrStepWait`'s timeout
+  // branch returns no `lastInboundAt`/`linkHealth`/`peerState` fields and never calls
+  // `queryCounterpartLiveState`.
+  it('T22: a 40-minute-stale federated pact is not auto-paused on wait --for pact timeout; the fact-2 query runs and the three informative facts are returned', async () => {
+    setup()
+    const a = await registerAgent('agent-a', evidenceA)
+    const env = 'env-t22'
+    const remoteAgentId = 'peer-remote-t22'
+    db.upsertRemoteAgent({
+      environmentId: env,
+      environmentName: env,
+      linkKind: 'environment',
+      remoteAgentId,
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    // A confirmed, unrevoked binding — proposePact's federated anchor write only sets
+    // `pact_peer_link_device_id` from a matched binding (pact-propose-accept.ts); without one
+    // it stays NULL and this test's link-scoped facts (queryCounterpartLiveState/link health)
+    // never reach the DB read they exist to exercise.
+    putPeerLinkBinding((db as unknown as { db: Database.Database }).db, {
+      linkDeviceId: env,
+      environmentId: env,
+      boundEndpointId: 'endpoint-t22',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({ linkDeviceId: env, remoteAgentId })
+    // Federated thread: the peer's participant row carries the rendered key, no local agentId —
+    // same construction pact-federated-settle.test.ts's engagedFederatedPact helper uses.
+    const { thread } = db.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    const threadId = thread.id
+    db.proposePact({
+      callerAgentId: a,
+      callerPaneKey: PANE_A,
+      callerHostId: 'local',
+      threadId,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    const raw = (db as unknown as { db: Database.Database }).db
+    // Turn held by the PEER, not `a` — K24's turn guard refuses any park for a turn holder, so
+    // `a` must be the non-turn-holder here to actually park and time out.
+    raw
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?,
+           pact_last_inbound_at = datetime('now', '-40 minutes') WHERE id = ?`
+      )
+      .run(peerKey, threadId)
+
+    const spy = vi.spyOn(pactWaitExpiryFacts, 'queryCounterpartLiveState')
+
+    const result = (await call(
+      'orchestration.wait',
+      { threadId, for: 'pact', timeoutMs: 30 },
+      ctx(evidenceA)
+    )) as {
+      outcome: string
+      lastInboundAt: string | null
+      linkHealth: string | null
+      peerState: string | null
+    }
+
+    expect(result.outcome).toBe('timeout')
+    expect(spy).toHaveBeenCalled()
+    expect(result.lastInboundAt).toBeTruthy()
+    expect(result.peerState).toBe('live')
+    expect(result.linkHealth).toBeNull()
+
+    const threadRow = raw
+      .prepare(`SELECT pact_paused_at FROM threads WHERE id = ?`)
+      .get(threadId) as { pact_paused_at: string | null }
+    expect(threadRow.pact_paused_at).toBeNull()
   })
 
   it('K24: mixed cycle — turn holders refused any park; non-turn-holders admitted (not a cycle)', async () => {

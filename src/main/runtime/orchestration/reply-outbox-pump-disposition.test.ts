@@ -19,11 +19,17 @@ const PACT_HOLD_CODES = [
   'derived_agent_unaddressable',
   'agent_quarantined'
 ]
+// S10-21b B11 (design §3.3, SCOPE item 5): `pact_paused` added — a peer refusing an inbound
+// apply because ITS OWN copy is paused (e.g. the link-evidence auto-pause, commit 15) is not
+// evidence of an unreachable transport, "the same way pact_settling/pact_out_of_order" are not.
+// Fails at base: `pact_paused` was unclassified and fell through to the default
+// bumpFailure:true branch.
 const PACT_RETRY_CODES = [
   'pact_settling',
   'pact_out_of_order',
   'pact_identity_unmirrored',
-  'pact_ledger_capped'
+  'pact_ledger_capped',
+  'pact_paused'
 ]
 const PACT_TERMINAL_ONLY_CODES = ['pact_desync', 'pact_era_mismatch', 'pact_no_pact']
 

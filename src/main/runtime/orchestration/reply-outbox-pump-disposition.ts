@@ -87,11 +87,18 @@ export const PACT_HOLD_CAUSES = new Set([
 
 // S10-21b B5 (design §2.9): none of these is evidence the transport is unreachable — retry,
 // bumpFailure:false, same growing-backoff derivation as PACT_HOLD_CAUSES above.
+// S10-21b B11 (design §3.3, SCOPE item 5): `pact_paused` added — the peer refusing an inbound
+// apply because ITS OWN copy of the pact is paused (e.g. the link-evidence auto-pause, commit
+// 15) is not evidence THIS host's transport is unreachable either; it was previously
+// unclassified here and fell through to the default bumpFailure:true branch, contradicting the
+// design's explicit "stays out of bumpFailure treatment the same way pact_settling/
+// pact_out_of_order do" (§3.3).
 const PACT_RETRY_CAUSES = new Set([
   'pact_settling',
   'pact_out_of_order',
   'pact_identity_unmirrored',
-  'pact_ledger_capped'
+  'pact_ledger_capped',
+  'pact_paused'
 ])
 
 // S10-21b B5 (design §2.9): deterministic on the same bytes, or a genuine protocol fault —

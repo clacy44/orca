@@ -181,11 +181,20 @@ async function handlePactOrStepWait(
       nextSteps: []
     }
   }
+  // S10-21b B11 (design §3.3, Addendum 6(3), closes N4): no silence deadline — the expiry
+  // itself never auto-pauses. Fact-2's live counterpart query runs exactly here (T22's
+  // assertion point: spy `queryCounterpartLiveState`), and the three informative facts are
+  // rendered regardless of what it finds — a query failure included (never silently swallowed).
+  const facts = db.computePactWaitExpiryFacts(params.threadId)
   return {
     outcome: 'timeout',
     messages: [],
     resumeToken: `wait_${params.threadId}_${cursor}`,
     waitedMs: timeoutMs,
+    lastInboundAt: facts.lastInboundAt,
+    linkHealth: facts.linkHealth,
+    peerState: facts.peerState,
+    peerStateQueryFailed: facts.peerStateQueryFailed,
     nextSteps: [
       `orca agents wait --thread ${params.threadId} --for ${params.for} --resume wait_${params.threadId}_${cursor}`
     ]
