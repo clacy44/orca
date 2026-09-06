@@ -343,7 +343,11 @@ describe('pact propose/accept/decline', () => {
       // threads.pact_era (design §4.6(b)'s era-age exemption), so SQLite refuses to DROP
       // COLUMN pact_era while that trigger exists. Drop it first; the reopen below only checks
       // pact_era's column/index repair, not trigger shape.
+      // S10-21b B7b (D-R134 F14): trg_pact_steps_append_only now also reads NEW.pact_era/
+      // OLD.pact_era (pact_era immutability), so it must be dropped here too for the same
+      // reason — same accommodation as trg_pact_steps_no_delete above.
       raw.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
+      raw.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
       raw.exec(`ALTER TABLE pact_steps DROP COLUMN pact_era`)
       raw.exec(`ALTER TABLE threads DROP COLUMN pact_era`)
       first.close()

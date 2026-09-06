@@ -1224,6 +1224,81 @@ const FEDERATED_PACTS_V42_SCHEMA_SQL = `
       );
 `
 
+// S10-21b B7b (D-R134/D-R135 F1, BLOCKER; D-R134 F14): the two pact_steps enforcement triggers,
+// shared VERBATIM between migrate()'s `current < 42` block (a fresh v41->v42 upgrade) and
+// repairUnshippedV42FederatedPacts (a store already stamped v42 by an earlier, in-review copy of
+// this branch, which never re-enters the migration block on any later open — createTables() runs
+// BEFORE migrate() on every open, db.ts constructor). Before this constant existed the two sites
+// had drifted: the repair tier kept the pre-B7 bare summary clause `OR NOT (<purge shape>)`, which
+// is TRUE — and so aborts — for every UPDATE that doesn't null the summary via the exact purge
+// transition, including one that never touches `summary` at all (settle.ts's relay_state stamp),
+// so any federated settle on a reopened v42 store raised 'pact ledger is append-only' forever.
+// F14: `pact_era` and `summary_purged_at` were absent from the inequality list, leaving both
+// mutable outside the purge shape (pact_era is the key of the no-delete exemption below, so a
+// mutable pact_era makes a peer's rows deletable). Fixed by adding `pact_era` to the flat
+// inequality list (NOT NULL column, no IFNULL needed) and a dedicated summary_purged_at clause,
+// structured exactly like the existing summary clause, outside the summary conjunct: it permits
+// summary_purged_at to change ONLY in the same purge shape message-purge.ts:108 sets (summary and
+// summary_purged_at together); any other change to summary_purged_at aborts.
+export const PACT_STEPS_APPEND_ONLY_TRIGGER_SQL = `
+      CREATE TRIGGER trg_pact_steps_append_only
+      BEFORE UPDATE ON pact_steps
+      WHEN NEW.seq <> OLD.seq
+        OR NEW.thread_id <> OLD.thread_id
+        OR NEW.ordinal <> OLD.ordinal
+        OR NEW.kind <> OLD.kind
+        OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
+        OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
+        OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
+        OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
+        OR NEW.summary_sha256 <> OLD.summary_sha256
+        OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
+        OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
+        OR NEW.at <> OLD.at
+        OR IFNULL(NEW.actor_is_remote, 0) <> IFNULL(OLD.actor_is_remote, 0)
+        OR IFNULL(NEW.actor_remote_agent_id, '') <> IFNULL(OLD.actor_remote_agent_id, '')
+        OR IFNULL(NEW.actor_environment_id, '') <> IFNULL(OLD.actor_environment_id, '')
+        OR IFNULL(NEW.relay_seq, -1) <> IFNULL(OLD.relay_seq, -1)
+        OR NEW.pact_era <> OLD.pact_era
+        OR (
+          IFNULL(NEW.summary, '') <> IFNULL(OLD.summary, '')
+          AND NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+                   AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+        )
+        OR (
+          IFNULL(NEW.summary_purged_at, '') <> IFNULL(OLD.summary_purged_at, '')
+          AND NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+                   AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'pact ledger is append-only');
+      END;
+`
+
+// design §4.6(b): era-age OR released-and-aged-past-PACT_RELEASED_RETENTION_MS=604_800_000
+// exemption, replacing v35's unconditional abort. Errata 21b-E2 (D-R133 F8): the era subquery is
+// wrapped in IFNULL(..., -1) so an orphaned remote row (its thread already deleted) fails CLOSED
+// (aborts) instead of the bare-NULL fail-open. Already byte-identical between the two sites before
+// this commit (D-R135: "the two tiers ARE byte-identical for no_delete") — shared here alongside
+// its append-only sibling for the same single-source-of-truth discipline the brief asks for.
+export const PACT_STEPS_NO_DELETE_TRIGGER_SQL = `
+      CREATE TRIGGER trg_pact_steps_no_delete BEFORE DELETE ON pact_steps
+      WHEN NOT (OLD.actor_is_remote = 1
+                AND (
+                  OLD.pact_era < IFNULL(
+                    (SELECT pact_era FROM threads WHERE id = OLD.thread_id), -1)
+                  OR EXISTS (
+                    SELECT 1 FROM threads t
+                    WHERE t.id = OLD.thread_id
+                      AND t.pact_state = 'released'
+                      AND t.pact_release_at IS NOT NULL
+                      AND (strftime('%s','now') - strftime('%s', t.pact_release_at)) * 1000
+                          >= 604800000  -- PACT_RELEASED_RETENTION_MS
+                  )
+                ))
+      BEGIN SELECT RAISE(ABORT, 'pact ledger is append-only'); END;
+`
+
 const S10_4_FEDERATION_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS remote_agents (
         environment_id          TEXT NOT NULL,   -- local link key (D5: paired_device = pairedDeviceId, environment = KnownRuntimeEnvironment.id)
@@ -1911,56 +1986,17 @@ export class OrchestrationDb {
     if (!hasTable('pact_applied_ids')) {
       this.db.exec(FEDERATED_PACTS_V42_SCHEMA_SQL)
     }
-    // D-R133 F6: the trigger narrowing and the three v42 indexes previously lived ONLY in the
-    // `current < 42` migration block above — a store already stamped v42 by an earlier in-review
-    // copy (this repair tier's whole reason to exist) never re-enters that block, so it could
-    // keep v35's bare-abort trg_pact_steps_no_delete (or a pre-relay-seq trg_pact_steps_append_
-    // only, or no v42 indexes) forever. Idempotent DROP/CREATE + CREATE INDEX IF NOT EXISTS,
-    // IDENTICAL SQL to the migration block (including errata 21b-E2's IFNULL narrowing).
+    // S10-21b B7b (D-R134/D-R135 F1, BLOCKER): the trigger narrowing and the three v42 indexes
+    // previously lived ONLY in the `current < 42` migration block above — a store already stamped
+    // v42 by an earlier in-review copy (this repair tier's whole reason to exist) never re-enters
+    // that block, so it kept the pre-B7 bare-abort trg_pact_steps_append_only forever, aborting
+    // every federated settle on the second open. Both triggers now emit PACT_STEPS_APPEND_ONLY_
+    // TRIGGER_SQL / PACT_STEPS_NO_DELETE_TRIGGER_SQL VERBATIM, the same constants the migration
+    // block below uses — one shared source, byte-identical by construction, not merely by copy.
     this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
-    this.db.exec(`
-      CREATE TRIGGER trg_pact_steps_append_only
-      BEFORE UPDATE ON pact_steps
-      WHEN NEW.seq <> OLD.seq
-        OR NEW.thread_id <> OLD.thread_id
-        OR NEW.ordinal <> OLD.ordinal
-        OR NEW.kind <> OLD.kind
-        OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
-        OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
-        OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
-        OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
-        OR NEW.summary_sha256 <> OLD.summary_sha256
-        OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
-        OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
-        OR NEW.at <> OLD.at
-        OR IFNULL(NEW.actor_is_remote, 0) <> IFNULL(OLD.actor_is_remote, 0)
-        OR IFNULL(NEW.actor_remote_agent_id, '') <> IFNULL(OLD.actor_remote_agent_id, '')
-        OR IFNULL(NEW.actor_environment_id, '') <> IFNULL(OLD.actor_environment_id, '')
-        OR IFNULL(NEW.relay_seq, -1) <> IFNULL(OLD.relay_seq, -1)
-        OR NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
-                AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
-      BEGIN
-        SELECT RAISE(ABORT, 'pact ledger is append-only');
-      END;
-    `)
+    this.db.exec(PACT_STEPS_APPEND_ONLY_TRIGGER_SQL)
     this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
-    this.db.exec(`
-      CREATE TRIGGER trg_pact_steps_no_delete BEFORE DELETE ON pact_steps
-      WHEN NOT (OLD.actor_is_remote = 1
-                AND (
-                  OLD.pact_era < IFNULL(
-                    (SELECT pact_era FROM threads WHERE id = OLD.thread_id), -1)
-                  OR EXISTS (
-                    SELECT 1 FROM threads t
-                    WHERE t.id = OLD.thread_id
-                      AND t.pact_state = 'released'
-                      AND t.pact_release_at IS NOT NULL
-                      AND (strftime('%s','now') - strftime('%s', t.pact_release_at)) * 1000
-                          >= 604800000  -- PACT_RELEASED_RETENTION_MS
-                  )
-                ))
-      BEGIN SELECT RAISE(ABORT, 'pact ledger is append-only'); END;
-    `)
+    this.db.exec(PACT_STEPS_NO_DELETE_TRIGGER_SQL)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_threads_pact_peer
         ON threads(pact_peer_link_device_id, pact_peer_thread_id)
@@ -3201,35 +3237,13 @@ export class OrchestrationDb {
         // commit ever issued a second UPDATE against an existing pact_steps row). Corrected to
         // gate on summary actually CHANGING first, matching the design's own stated intent and
         // this migration's own comment; every other column's protection is unchanged.
+        // S10-21b B7b (D-R134/D-R135 F1, BLOCKER; D-R134 F14): this body now lives in
+        // PACT_STEPS_APPEND_ONLY_TRIGGER_SQL, shared VERBATIM with repairUnshippedV42FederatedPacts
+        // above — the two sites had drifted (the repair tier kept B7's PRE-fix bare clause,
+        // aborting every settle on a reopened store) — plus F14's pact_era/summary_purged_at
+        // immutability clauses. See the constant's own comment for the full narrative.
         this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
-        this.db.exec(`
-          CREATE TRIGGER trg_pact_steps_append_only
-          BEFORE UPDATE ON pact_steps
-          WHEN NEW.seq <> OLD.seq
-            OR NEW.thread_id <> OLD.thread_id
-            OR NEW.ordinal <> OLD.ordinal
-            OR NEW.kind <> OLD.kind
-            OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
-            OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
-            OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
-            OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
-            OR NEW.summary_sha256 <> OLD.summary_sha256
-            OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
-            OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
-            OR NEW.at <> OLD.at
-            OR IFNULL(NEW.actor_is_remote, 0) <> IFNULL(OLD.actor_is_remote, 0)
-            OR IFNULL(NEW.actor_remote_agent_id, '') <> IFNULL(OLD.actor_remote_agent_id, '')
-            OR IFNULL(NEW.actor_environment_id, '') <> IFNULL(OLD.actor_environment_id, '')
-            OR IFNULL(NEW.relay_seq, -1) <> IFNULL(OLD.relay_seq, -1)
-            OR (
-              IFNULL(NEW.summary, '') <> IFNULL(OLD.summary, '')
-              AND NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
-                       AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
-            )
-          BEGIN
-            SELECT RAISE(ABORT, 'pact ledger is append-only');
-          END;
-        `)
+        this.db.exec(PACT_STEPS_APPEND_ONLY_TRIGGER_SQL)
         // design §4.6(b) SQL (era-age OR released-and-aged-past-PACT_RELEASED_RETENTION_MS=
         // 604_800_000 exemption; replaces v35's unconditional abort; "keyed on era AGE ... never
         // on pact_state alone" — relaying release does not advance pact_era, so a peer cannot
@@ -3239,24 +3253,9 @@ export class OrchestrationDb {
         // the whole WHEN clause NULL, which SQLite treats as "does not fire" — fail-OPEN, letting
         // the DELETE through. IFNULL forces the era comparison false for an orphan, so the
         // trigger fires and aborts (fail-closed) unless the released-and-aged disjunct applies.
+        // S10-21b B7b: now PACT_STEPS_NO_DELETE_TRIGGER_SQL, shared with the repair tier above.
         this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
-        this.db.exec(`
-          CREATE TRIGGER trg_pact_steps_no_delete BEFORE DELETE ON pact_steps
-          WHEN NOT (OLD.actor_is_remote = 1
-                    AND (
-                      OLD.pact_era < IFNULL(
-                        (SELECT pact_era FROM threads WHERE id = OLD.thread_id), -1)
-                      OR EXISTS (
-                        SELECT 1 FROM threads t
-                        WHERE t.id = OLD.thread_id
-                          AND t.pact_state = 'released'
-                          AND t.pact_release_at IS NOT NULL
-                          AND (strftime('%s','now') - strftime('%s', t.pact_release_at)) * 1000
-                              >= 604800000  -- PACT_RELEASED_RETENTION_MS
-                      )
-                    ))
-          BEGIN SELECT RAISE(ABORT, 'pact ledger is append-only'); END;
-        `)
+        this.db.exec(PACT_STEPS_NO_DELETE_TRIGGER_SQL)
         this.db.exec(`
           CREATE INDEX IF NOT EXISTS idx_threads_pact_peer
             ON threads(pact_peer_link_device_id, pact_peer_thread_id)
