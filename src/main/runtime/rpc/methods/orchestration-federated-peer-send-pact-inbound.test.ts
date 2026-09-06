@@ -744,7 +744,9 @@ describe('K25 second minter (design §2.4 closing paragraph)', () => {
   it('no fourth caller sets hostPayloadKind capable of pact_step', () => {
     const allowed = new Set([
       'pact-step.ts',
-      'pact-federated-emit.ts',
+      // S10-21b B7c: the mint moved into this max-lines split of pact-federated-emit.ts — same
+      // single writer, new file.
+      'pact-federated-emit-steps.ts',
       'pact-federated-inbound-apply.ts'
     ])
     const root = join(__dirname, '..', '..')

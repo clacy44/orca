@@ -84,6 +84,11 @@ class SyncDatabase {
     return statement
   }
 
+  // S10-21b B7c: the precondition a nested-transaction-form callee asserts against.
+  get inTransaction(): boolean {
+    return this.db.isTransaction
+  }
+
   pragma(sql: string, options?: PragmaOptions): unknown {
     const statement = this.db.prepare(`PRAGMA ${sql}`)
     if (options?.simple) {

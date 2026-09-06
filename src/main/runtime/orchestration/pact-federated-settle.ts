@@ -55,6 +55,7 @@ type ThreadPactSnapshot = {
   pact_era: number
   pact_state: string | null
   pact_flight_token: number
+  pact_peer_thread_id: string | null
 }
 
 // Internal control-flow signal only — never escapes this module. Lets the single catch block
@@ -78,13 +79,16 @@ export function settleFederatedPactDelivery(
   try {
     // Step 1: the guard re-read.
     const threadRow = db
-      .prepare('SELECT pact_era, pact_state, pact_flight_token FROM threads WHERE id = ?')
+      .prepare(
+        'SELECT pact_era, pact_state, pact_flight_token, pact_peer_thread_id FROM threads WHERE id = ?'
+      )
       .get(pactThreadId) as ThreadPactSnapshot | undefined
     const stale =
       !threadRow ||
       threadRow.pact_era !== item.pactEra ||
       threadRow.pact_state !== item.pactState ||
       threadRow.pact_flight_token !== item.pactFlightToken
+    const currentPeerThreadId = threadRow ? threadRow.pact_peer_thread_id : null
 
     // Step 2.
     markPeerRelayAccepted(db, item.localMessageId, params.peerReplyThreadId)
@@ -124,6 +128,33 @@ export function settleFederatedPactDelivery(
       })
       db.exec('COMMIT')
       return { outcome: 'stale' }
+    }
+
+    // S10-21b B7c (defect 21b-D2): the fresh path only — stamp the peer's reply thread id onto
+    // the ORIGINATING side's own pact_peer_thread_id the first time a settle sees one, so a
+    // later inbound accept/step/release can resolve via gate 10. Never overwrites a non-null
+    // value; a disagreeing non-null value is audited (settle_peer_thread_mismatch), not applied.
+    if (params.peerReplyThreadId !== null) {
+      if (currentPeerThreadId === null) {
+        db.prepare(`UPDATE threads SET pact_peer_thread_id = ? WHERE id = ?`).run(
+          params.peerReplyThreadId,
+          pactThreadId
+        )
+      } else if (currentPeerThreadId !== params.peerReplyThreadId) {
+        writeAgentAudit(db, {
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: item.linkDeviceId,
+          verb: 'replyRelay',
+          outcome: 'settle_peer_thread_mismatch',
+          reasonCode: JSON.stringify({
+            outboxId: item.id,
+            pactThreadId,
+            existing: currentPeerThreadId,
+            incoming: params.peerReplyThreadId
+          })
+        })
+      }
     }
 
     // Steps 3/4 — the fresh path only. The marker clears UNCONDITIONALLY (closing B-16 properly

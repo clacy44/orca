@@ -214,6 +214,65 @@ describe('pact-federated-settle', () => {
   })
 
   // ---------------------------------------------------------------------------------------
+  // S10-21b B7c (defect 21b-D2) — a fresh settle with a null pact_peer_thread_id stamps the
+  // peer's reply thread id onto the ORIGINATING side. RED at base: pact_peer_thread_id stays
+  // null after settle.
+  // ---------------------------------------------------------------------------------------
+  it('B7c: a fresh settle stamps pact_peer_thread_id from peerReplyThreadId when it was null', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    expect(d.getThread(threadId)?.pact_peer_thread_id).toBeNull()
+
+    const { outboxId } = emitStep(d, a, threadId)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    const settled = d.settleFederatedPactDelivery(item, {
+      peerMessageId: 'peer_m1',
+      peerReplyThreadId: 'peer_thread_xyz'
+    })
+    expect(settled.outcome).toBe('settled')
+    expect(d.getThread(threadId)?.pact_peer_thread_id).toBe('peer_thread_xyz')
+  })
+
+  // ---------------------------------------------------------------------------------------
+  // S10-21b B7c — a settle whose peerReplyThreadId disagrees with an already-stamped non-null
+  // value never overwrites it; audited settle_peer_thread_mismatch instead. RED at base:
+  // pact-federated-settle.ts does not read/write pact_peer_thread_id at all yet.
+  // ---------------------------------------------------------------------------------------
+  it('B7c: a mismatching peerReplyThreadId against a non-null pact_peer_thread_id is audited, never overwritten', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    rawDb(d)
+      .prepare(`UPDATE threads SET pact_peer_thread_id = 'existing_thread' WHERE id = ?`)
+      .run(threadId)
+
+    const { outboxId } = emitStep(d, a, threadId)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    const settled = d.settleFederatedPactDelivery(item, {
+      peerMessageId: 'peer_m1',
+      peerReplyThreadId: 'different_thread'
+    })
+    expect(settled.outcome).toBe('settled')
+    expect(d.getThread(threadId)?.pact_peer_thread_id).toBe('existing_thread')
+
+    const audit = latestAudit(d)
+    expect(audit.outcome).toBe('settle_peer_thread_mismatch')
+    const reason = JSON.parse(audit.reason_code as string) as {
+      existing: string
+      incoming: string
+    }
+    expect(reason.existing).toBe('existing_thread')
+    expect(reason.incoming).toBe('different_thread')
+  })
+
+  // ---------------------------------------------------------------------------------------
   // T12(a) — stale re-read: a different (era, state, flight token) landed between emit and
   // settle. No-op on the pact half; audited settle_stale; the outbox row still settles
   // delivered.

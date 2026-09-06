@@ -8,11 +8,20 @@
 // `DELETE FROM peer_reply_outbox` runs; only then does `enqueueReservedReleasesAfterReset` (this
 // module) insert into the now-empty table — inserting before the delete would just have the
 // delete remove the row it inserted (v3 as drafted's bug).
-import { randomUUID } from 'node:crypto'
+//
+// S10-21b B7c (21b-Q3): a pending pact's release relay now goes through
+// `enqueueFederatedPactVerbWithin` (step 3, below), so it gets a REAL messages row (the settle
+// contract's local_message_id can never dangle) instead of a hand-built envelope aimed at a
+// message that was never inserted. That primitive's own guards (isFederatedPact, the peer
+// anchor columns, the live binding) require the thread to still read as federated — so a
+// pending row's anchors are left UNTOUCHED by `settleLiveFederatedPactsForReset` and are only
+// cleared by `enqueueReservedReleasesAfterReset`, AFTER the primitive's own call. A pact with no
+// relayable peer (never linked, or the link's binding is already gone) has no such call to make
+// and is released fully, right here, exactly as before.
 import type Database from '../../sqlite/sync-database'
 import { insertPactStepRow } from './pact-shared'
 import { getPeerLinkBinding } from './link-binding-store'
-import { enqueueReplyOutbox } from './reply-outbox-store'
+import { enqueueFederatedPactVerbWithin } from './pact-federated-emit'
 
 type LiveFederatedPactRow = {
   id: string
@@ -39,18 +48,15 @@ function localPartyOf(row: LiveFederatedPactRow): string {
 
 export type PendingReservedRelease = {
   threadId: string
-  linkDeviceId: string
-  environmentId: string
-  peerAgentId: string
-  peerThreadId: string | null
-  era: number
-  seq: number
+  actorAgentId: string
 }
 
-// Step 1 of §4.5's corrected ordering — releases every live federated pact locally and RECORDS
-// which peers need the reserved release, without touching `peer_reply_outbox` at all (that
-// happens later, after the caller's own deletes). Runs inside the caller's own transaction (no
-// BEGIN/COMMIT of its own — `resetAll` holds the one transaction this whole sequence shares).
+// Step 1 of §4.5's corrected ordering. A pact with no relayable peer is released fully here
+// (unchanged from before B7c). A pact WITH one is left untouched — its full release (state,
+// ledger row, local_seq bump) now happens inside step 3's `enqueueFederatedPactVerbWithin`
+// call, which needs the thread to still read as federated. Runs inside the caller's own
+// transaction (no BEGIN/COMMIT of its own — `resetAll` holds the one transaction this whole
+// sequence shares).
 export function settleLiveFederatedPactsForReset(db: Database.Database): PendingReservedRelease[] {
   const rows = db
     .prepare(
@@ -65,9 +71,17 @@ export function settleLiveFederatedPactsForReset(db: Database.Database): Pending
 
   const pending: PendingReservedRelease[] = []
   for (const row of rows) {
+    const canRelay =
+      row.pact_peer_link_device_id !== null &&
+      row.pact_peer_environment_id !== null &&
+      getPeerLinkBinding(db, row.pact_peer_link_device_id) !== null
+    if (canRelay) {
+      pending.push({ threadId: row.id, actorAgentId: localPartyOf(row) })
+      continue
+    }
+    // No relay is possible (never linked, or the link's binding is already gone) — release
+    // locally, right here, exactly as before B7c.
     const nextSeq = row.pact_local_seq + 1
-    // Attributed to the local party (see localPartyOf's comment) — `reason_code='local_reset'`
-    // is what actually marks this as the host's own reset act, not a participant's release call.
     insertPactStepRow(db, {
       threadId: row.id,
       ordinal: 0,
@@ -91,67 +105,42 @@ export function settleLiveFederatedPactsForReset(db: Database.Database): Pending
          pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL
        WHERE id = ?`
     ).run(nextSeq, row.id)
-
-    if (row.pact_peer_link_device_id && row.pact_peer_environment_id) {
-      pending.push({
-        threadId: row.id,
-        linkDeviceId: row.pact_peer_link_device_id,
-        environmentId: row.pact_peer_environment_id,
-        peerAgentId: row.pact_peer_agent_id,
-        peerThreadId: row.pact_peer_thread_id,
-        era: row.pact_era,
-        seq: nextSeq
-      })
-    }
   }
   return pending
 }
 
 // Step 3 of §4.5's corrected ordering — called ONLY after the caller's own
-// `DELETE FROM peer_reply_outbox` has run, in the SAME transaction. A link with no binding row
-// left (already unpaired) is silently skipped — there is no route left to relay a release over,
-// and the pact is already released locally regardless.
+// `DELETE FROM peer_reply_outbox`/`DELETE FROM messages` have run, in the SAME transaction (the
+// primitive's own message insert therefore lands in a table the delete already passed over).
+// `Within` still reads each pending thread as federated (its anchors were left untouched in
+// step 1) and does the actual release: state/turn/pause transition, the ledger row, the
+// local_seq bump, and the outbox row against a REAL message row. The follow-up UPDATE below
+// then does resetAll's OWN cleanup — the columns `Within`'s release branch does not know about
+// — and unconditionally re-asserts the released shape (a defensive no-op on the ordinary path;
+// it is what still leaves the pact released if the primitive's message gate ever refused).
 export function enqueueReservedReleasesAfterReset(
   db: Database.Database,
   pending: readonly PendingReservedRelease[]
 ): void {
   for (const item of pending) {
-    const binding = getPeerLinkBinding(db, item.linkDeviceId)
-    if (!binding) {
-      continue
-    }
-    const messageId = `msg_${randomUUID().replace(/-/g, '').slice(0, 12)}`
-    const envelope = {
-      toAgentId: item.peerAgentId,
-      messageId,
-      threadId: item.threadId,
-      subject: 'pact release',
-      type: 'status',
-      priority: 'normal',
-      pact: { verb: 'release', seq: item.seq, era: item.era }
-    }
-    const payload = JSON.stringify(envelope)
-    enqueueReplyOutbox(db, {
-      localMessageId: messageId,
-      linkDeviceId: item.linkDeviceId,
-      environmentId: item.environmentId,
-      boundPairingRevision: binding.boundPairingRevision,
-      peerCredentialFp: binding.peerCredentialFp,
-      peerKeyFingerprint: binding.peerKeyFingerprint,
-      inReplyToMessageId: messageId,
-      peerAgentId: item.peerAgentId,
-      peerThreadId: item.peerThreadId,
-      localThreadId: item.threadId,
-      noticeRunId: null,
-      noticePaneKey: null,
-      payload,
-      byteCount: Buffer.byteLength(payload, 'utf8'),
-      createdAt: Date.now(),
-      reserved: true,
-      pactThreadId: item.threadId,
-      pactSeq: item.seq,
-      pactEra: item.era,
-      relayKind: 'pact_release'
+    enqueueFederatedPactVerbWithin(db, item.threadId, 'release', {
+      actorAgentId: item.actorAgentId,
+      actorPaneKey: null,
+      actorHostId: null,
+      runId: 'reset',
+      reasonCode: 'local_reset'
     })
+    // resetAll's own reset-specific cleanup, plus an unconditional re-assert of the released
+    // shape — clears `pact_relay_pending` even if the call above just set it (a reset always
+    // fully clears coordination-bus state; that token has no drainer for 'release' regardless).
+    db.prepare(
+      `UPDATE threads SET
+         pact_state = 'released', pact_turn_agent_id = NULL, pact_paused_at = NULL,
+         pact_pause_reason = NULL, pact_at = datetime('now'), pact_turn_in_flight_at = NULL,
+         pact_relay_pending = NULL, pact_resync_nonce = NULL, pact_resync_nonce_at = NULL,
+         pact_repair_attempts = 0, pact_peer_agent_id = NULL, pact_peer_link_device_id = NULL,
+         pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL
+       WHERE id = ?`
+    ).run(item.threadId)
   }
 }

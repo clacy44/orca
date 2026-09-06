@@ -626,18 +626,11 @@ describe('S10-21b B8b (21b-D1): reply-outbox-pump round trip through the REAL or
     const senderAfterPropose = senderDb.getThread(senderThread.id)
     expect(receiverAfterPropose?.pact_era).toBe(senderAfterPropose?.pact_era)
 
-    // GAP (pre-existing, out of B6c's scope — see this commit's return notes): the propose's
-    // settle DOES correlate the receiver's thread id onto the sender's own PROPOSE MESSAGE row
-    // for real above (markPeerRelayAccepted, reply-outbox-lifecycle.ts:148-157, driven by
-    // `result.threadId` off the real dial), but nothing copies it onto
-    // `threads.pact_peer_thread_id` — so `resolvePactThread`'s ordinary (non-propose) lookup
-    // (pact-federated-inbound-gates.ts:212-217) can never find this thread for a LATER inbound
-    // accept/step/release. Fabricated here exactly as that correlation would eventually need to
-    // land (a follow-on commit's job, not B6c's — B6c wires the LOCAL emit side only) so this
-    // test can drive the REAL accept/release relays it exists to exercise.
-    raw(senderDb)
-      .prepare(`UPDATE threads SET pact_peer_thread_id = ? WHERE id = ?`)
-      .run(receiverThread.id, senderThread.id)
+    // S10-21b B7c (defect 21b-D2, RED at base): the propose's settle now stamps the receiver's
+    // thread id onto the sender's OWN `threads.pact_peer_thread_id` for real (no raw hand-set)
+    // — so `resolvePactThread`'s ordinary (non-propose) lookup can find this thread for the
+    // LATER inbound accept/release this test drives below.
+    expect(senderDb.getThread(senderThread.id)?.pact_peer_thread_id).toBe(receiverThread.id)
 
     // --- ACCEPT: receiver -> sender. The reverse direction needs its own dial stub (every
     // other test in this file dials one way only, sender -> receiver).
@@ -724,5 +717,181 @@ describe('S10-21b B8b (21b-D1): reply-outbox-pump round trip through the REAL or
     expect(receiverReleased?.pact_state).toBe('released')
     expect(receiverReleased?.pact_release_at).not.toBeNull()
     expect(receiverReleased?.pact_peer_release_at).toBeNull()
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // Case D (S10-21b B7c, item 2, 21b-Q3) — RED AT BASE: resetAll's reserved release relay is
+  // built by hand against a fabricated messageId with no `messages` row behind it, so
+  // `local_message_id` on the outbox row dangles. This drives it through the REAL pump: the
+  // outbox row's local_message_id must reference an existing messages row and its payload must
+  // parse against `orchestration.federatedSend`'s own params, and delivering it must show the
+  // PEER (not the resetting host) `pact_peer_release_at`.
+  // -----------------------------------------------------------------------------------------
+  it('Case D (S10-21b B7c): resetAll relays a real message row for its reserved release, and a pump tick delivers it', async () => {
+    function seedAgent(d: OrchestrationDb, id: string): string {
+      const params: UpsertAgentByPaneSuffixParams = {
+        displayName: id,
+        role: null,
+        hostId: 'local',
+        paneKey: `tab:${id}`,
+        terminalHandle: `term_${id}`,
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: `term_${id}`,
+        originHostId: 'local'
+      }
+      const result = d.upsertAgentByPaneSuffix(params)
+      if (result.outcome === 'name_taken') {
+        throw new Error(`seedAgent: name taken for ${id}`)
+      }
+      return result.agent.id
+    }
+    const senderAgentId = seedAgent(senderDb, 'senderd')
+
+    vi.spyOn(receiverRuntime, 'verifyOrchestrationCompatibilityCaller').mockImplementation(
+      (evidence) =>
+        evidence?.terminalHandle === 'term_d' && evidence.paneKey === PANE_A
+          ? makeAuthority('term_d', PANE_A)
+          : null
+    )
+    const registeredReceiver = (await call(
+      'orchestration.agents.register',
+      { name: 'receiverd', role: 'test agent' },
+      {
+        runtime: receiverRuntime,
+        orchestrationCompatibilityEvidence: { terminalHandle: 'term_d', paneKey: PANE_A }
+      }
+    )) as { agent: { id: string } }
+    const receiverAgentId = registeredReceiver.agent.id
+
+    senderDb.upsertRemoteAgent({
+      environmentId: LINK_DEVICE_ID,
+      environmentName: LINK_DEVICE_ID,
+      linkKind: 'environment',
+      remoteAgentId: receiverAgentId,
+      displayName: 'receiver (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw(senderDb), {
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: LINK_DEVICE_ID,
+      boundEndpointId: 'endpoint1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({
+      linkDeviceId: LINK_DEVICE_ID,
+      remoteAgentId: receiverAgentId
+    })
+    const { thread: senderThread } = senderDb.createThread({
+      subject: 's',
+      createdByAgentId: senderAgentId,
+      participants: [
+        { participantKey: senderAgentId, agentId: senderAgentId },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    senderDb.proposePact({
+      callerAgentId: senderAgentId,
+      callerPaneKey: `tab:senderd`,
+      callerHostId: 'local',
+      threadId: senderThread.id,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    raw(senderDb)
+      .prepare(
+        `UPDATE peer_reply_outbox SET state = 'delivered', settled_at = ? WHERE pact_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(Date.now(), senderThread.id)
+    raw(senderDb)
+      .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
+      .run(senderAgentId, senderThread.id)
+    // B6's era-adoption bumps the era at propose — the receiver's mirror must match it.
+    const senderEra = (
+      raw(senderDb).prepare(`SELECT pact_era FROM threads WHERE id = ?`).get(senderThread.id) as {
+        pact_era: number
+      }
+    ).pact_era
+
+    // Receiver: a mirrored engaged pact, pact_peer_link_device_id/pact_peer_thread_id anchored
+    // to the sender's thread — the fields resolvePactThread's inbound release needs to find it.
+    const { thread: receiverThread } = receiverDb.createThread({
+      subject: 'pact seed',
+      createdByAgentId: null,
+      origin: 'peer',
+      participants: [{ participantKey: receiverAgentId, agentId: receiverAgentId, role: 'member' }]
+    })
+    raw(receiverDb)
+      .prepare(
+        `UPDATE threads SET pact_peer_link_device_id = ?, pact_peer_thread_id = ?,
+           pact_peer_agent_id = ?, pact_state = 'engaged', pact_peer_seq = 1, pact_era = ?,
+           pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_turn_agent_id = ?
+         WHERE id = ?`
+      )
+      .run(
+        LINK_DEVICE_ID,
+        senderThread.id,
+        senderAgentId,
+        senderEra,
+        `remote:${LINK_DEVICE_ID}:${senderAgentId}`,
+        receiverAgentId,
+        `remote:${LINK_DEVICE_ID}:${senderAgentId}`,
+        receiverThread.id
+      )
+    putPeerLinkBinding(raw(receiverDb), {
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: LINK_DEVICE_ID,
+      boundEndpointId: 'endpoint1',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+
+    // --- The reset under test.
+    senderDb.resetAll()
+
+    const outboxRow = raw(senderDb)
+      .prepare(
+        `SELECT id, local_message_id, payload FROM peer_reply_outbox WHERE local_thread_id = ?`
+      )
+      .get(senderThread.id) as { id: string; local_message_id: string; payload: string }
+    const messageRow = raw(senderDb)
+      .prepare(`SELECT id FROM messages WHERE id = ?`)
+      .get(outboxRow.local_message_id) as { id: string } | undefined
+    expect(messageRow?.id).toBe(outboxRow.local_message_id)
+    const fedMethod = method('orchestration.federatedSend')
+    expect(() => fedMethod.params!.parse(JSON.parse(outboxRow.payload))).not.toThrow()
+
+    senderRuntime.replyOutbox?.kick(LINK_DEVICE_ID)
+    const settled = await pumpSettles(senderDb, outboxRow.id, ['delivered', 'refused', 'abandoned'])
+    if (settled?.state !== 'delivered') {
+      throw new Error(
+        `state=${settled?.state} code=${settled?.lastErrorCode} err=${settled?.lastError}`
+      )
+    }
+
+    const receiverAfter = receiverDb.getThread(receiverThread.id)
+    expect(receiverAfter?.pact_peer_release_at).not.toBeNull()
   })
 })
