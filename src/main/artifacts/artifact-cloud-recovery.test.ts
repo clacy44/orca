@@ -12,6 +12,7 @@ import { ArtifactCloudService } from './artifact-cloud-service'
 
 const createdPaths: string[] = []
 const apiUrl = 'http://localhost:3000'
+const FIXTURE_EXPIRES_AT = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
 const writeRequest = {
   sourceKey: '/repo/report.html',
   content: '<h1>Recovery</h1>',
@@ -336,7 +337,7 @@ function createResponseBody(slug: string): object {
       renderedContentType: 'text/html',
       createdAt: '2026-08-06T00:00:00.000Z',
       updatedAt: '2026-08-06T00:00:00.000Z',
-      expiresAt: '2026-09-06T00:00:00.000Z',
+      expiresAt: FIXTURE_EXPIRES_AT,
       byteSize: 17,
       deletedAt: null
     },
