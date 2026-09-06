@@ -231,6 +231,11 @@ import {
   type SettleFederatedPactDeliveryResult
 } from './pact-federated-settle'
 import {
+  applyInboundPactVerb as applyInboundPactVerbImpl,
+  type ApplyInboundPactVerbArgs,
+  type ApplyInboundPactVerbResult
+} from './pact-federated-inbound-apply'
+import {
   getOrCreateMailboxDelivery as getOrCreateMailboxDeliveryImpl,
   acknowledgeMailboxDelivery as acknowledgeMailboxDeliveryImpl,
   type GetOrCreateMailboxDeliveryParams,
@@ -9094,6 +9099,12 @@ export class OrchestrationDb {
     params: SettleFederatedPactDeliveryParams
   ): SettleFederatedPactDeliveryResult {
     return settleFederatedPactDeliveryImpl(this.db, item, params)
+  }
+
+  // S10-21b B8 (design §4.2 gates 6-13/14 happy path) — inbound pact-verb apply; see
+  // pact-federated-inbound-apply.ts/pact-federated-inbound-gates.ts for the gate-by-gate body.
+  applyInboundPactVerb(args: ApplyInboundPactVerbArgs): ApplyInboundPactVerbResult {
+    return applyInboundPactVerbImpl(this.db, args)
   }
 
   // S10-16 C5, R28.1 rule 2: the continuation path for a multi-message exchange — a prior

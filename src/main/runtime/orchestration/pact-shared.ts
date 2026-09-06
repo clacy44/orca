@@ -259,6 +259,14 @@ export type InsertPactStepRowParams = {
   // relay_state='pending' at insert time (B7's settle later flips it to 'settled'); a purely
   // local pact row (every pre-existing caller) leaves it NULL exactly as before.
   relayState?: 'pending' | 'settled' | null
+  // S10-21b B8 (design §2.1/§4.1) — additive, optional: an INBOUND ledger-verb apply is the
+  // first (and only) writer of the actor_is_remote/actor_remote_agent_id/actor_environment_id
+  // triple and of relay_seq (the sender's own wire `seq` for this row) — every pre-existing
+  // (local) caller omits these and the columns stay at their v42 defaults (0/NULL/NULL/NULL).
+  actorIsRemote?: boolean
+  actorRemoteAgentId?: string | null
+  actorEnvironmentId?: string | null
+  relaySeq?: number | null
 }
 
 // pact_era (blocker fix, S10-3b review): stamped from threads.pact_era at write time, never
@@ -274,8 +282,9 @@ export function insertPactStepRow(db: Database.Database, params: InsertPactStepR
   db.prepare(
     `INSERT INTO pact_steps
        (thread_id, pact_era, ordinal, kind, actor_agent_id, actor_pane_key, actor_host_id,
-        message_id, summary, summary_sha256, turn_after_agent_id, reason_code, relay_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        message_id, summary, summary_sha256, turn_after_agent_id, reason_code, relay_state,
+        actor_is_remote, actor_remote_agent_id, actor_environment_id, relay_seq)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     params.threadId,
     eraRow?.pact_era ?? 0,
@@ -289,7 +298,11 @@ export function insertPactStepRow(db: Database.Database, params: InsertPactStepR
     sha256Hex(params.summary ?? ''),
     params.turnAfterAgentId,
     params.reasonCode,
-    params.relayState ?? null
+    params.relayState ?? null,
+    params.actorIsRemote ? 1 : 0,
+    params.actorRemoteAgentId ?? null,
+    params.actorEnvironmentId ?? null,
+    params.relaySeq ?? null
   )
 }
 

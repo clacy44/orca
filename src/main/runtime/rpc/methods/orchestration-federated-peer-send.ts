@@ -1,8 +1,7 @@
 // S10-15 (chair ruling 1 / F1 R4-R7): the receiving half of a cross-host relayed SEND. Thin
-// wrapper around the shared importer (federated-sender-identity.ts) — never a second copy of
-// its guards. Ruling 1's inbound plain-mail policy: quarantined/fingerprint-conflicting sender
-// -> typed refusal of the mail; malformed/absent identity -> DELIVER the mail unattributed, skip
-// the remote_agents mirror (the importer already skipped it), write an audit row.
+// wrapper around the shared importer (federated-sender-identity.ts) — never a second copy of its
+// guards. Ruling 1's inbound plain-mail policy: quarantined/fingerprint-conflicting sender ->
+// typed refusal; malformed/absent identity -> DELIVER unattributed, skip the mirror, audit.
 import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalString, requiredString } from '../schemas'
@@ -34,6 +33,10 @@ import {
 import { FEDERATED_SEND_RATE_LIMIT } from '../../orchestration/link-binding-constants'
 import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
 import { resolveForeignThread } from './orchestration-federated-peer-send-inbound'
+import {
+  FederatedPactParams,
+  handleInboundPactEnvelope
+} from './orchestration-federated-peer-send-pact-inbound'
 
 const FederatedSendParams = z.object({
   // Optional (D3): an old sender, or one whose pane has no registered `agents` row, omits it.
@@ -48,7 +51,9 @@ const FederatedSendParams = z.object({
   body: OptionalString,
   type: z.string().optional(),
   priority: z.enum(['normal', 'high', 'urgent']).optional(),
-  payload: z.unknown().optional()
+  payload: z.unknown().optional(),
+  // S10-21b B8 — additive; absent leaves every plain-mail behaviour byte-identical.
+  pact: FederatedPactParams.optional()
 })
 
 type FederatedSendResult = {
@@ -104,6 +109,20 @@ export const ORCHESTRATION_FEDERATED_PEER_SEND_METHODS: RpcMethod[] = [
         // Ruling 1: quarantined / fingerprint-conflicting sender -> refuse the mail outright.
         if (imported.outcome === 'quarantined' || imported.outcome === 'fingerprint_conflict') {
           throw imported.error
+        }
+
+        // S10-21b B8 — the pact branch lives in its own module (max-lines ratchet); absent
+        // `pact`, every plain-mail behaviour below is byte-identical.
+        if (params.pact) {
+          return handleInboundPactEnvelope(
+            db,
+            runtime,
+            pairedDeviceId,
+            toAgent.id,
+            { messageId: params.messageId, threadId: params.threadId, body: params.body },
+            params.pact,
+            imported
+          ) satisfies FederatedSendResult
         }
 
         // Ruling 1 class B: malformed/absent identity delivers, unattributed, mirror skipped.

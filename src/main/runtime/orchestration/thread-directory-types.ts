@@ -28,6 +28,10 @@ export type ThreadRow = {
   pact_ordinal: number
   pact_paused_at: string | null
   pact_pause_reason: PactPauseReason | null
+  // pact_era (v35) — omitted from this type until S10-21b B8, which is the first `ThreadRow`
+  // consumer to need it (every prior reader did its own raw SELECT + cast, e.g.
+  // pact-federated-settle.ts/pact-federated-emit.ts).
+  pact_era: number
   // v42 (S10-21b B1, federated pacts) — additive, see pact-types.ts.
   pact_peer_key_fingerprint: string | null
   pact_peer_agent_id: string | null
