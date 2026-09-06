@@ -67,17 +67,38 @@ export function isResyncNonceLive(thread: ThreadRow, nowMs: number): boolean {
   )
 }
 
+// errata 21b-E5 (chair ruling, no TTL/column): the gap_notice token is transient — drained (and
+// cleared) by the next pump tick, so between drain and the row settling there is a window with
+// no token but a live in-flight gap_notice. Suppression therefore also checks for an unsettled
+// ('queued'/'sending') peer_reply_outbox row of that kind; it lifts only once that row settles
+// (delivered or terminal), no clock involved.
+function hasUnsettledGapNoticeOutbox(db: Database.Database, threadId: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM peer_reply_outbox
+        WHERE pact_thread_id = ? AND relay_kind = 'pact_gap_notice' AND state IN ('queued', 'sending')
+        LIMIT 1`
+    )
+    .get(threadId)
+  return row !== undefined
+}
+
 // §2.5's fresh-nonce gate (NA6), shared by the fence's own gap row and by a `gap_notice` whose
 // seq is itself gap-shaped (gap_notice gets NO special case in the fence — this is the only
-// call site). A live, unexpired nonce OR an already-queued, undrained `gap_notice` (the OTHER
-// fresh-mint mechanism sharing the same counter, §2.6(c) step 6) suppresses the re-mint
-// entirely: no re-queue, no attempts bump. Returns whether a fresh nonce was actually minted
-// this call. `pact_repair_attempts` bumps on this mint exactly as it does on cancelPactTailAndPause's
-// own fresh queue below — one shared counter, two minting mechanisms (§2.1's field table).
+// call site). A live, unexpired nonce OR an already-queued, undrained `gap_notice` token OR an
+// unsettled `gap_notice` outbox row (errata 21b-E5, the OTHER fresh-mint mechanism sharing the
+// same counter, §2.6(c) step 6) suppresses the re-mint entirely: no re-queue, no attempts bump.
+// Returns whether a fresh nonce was actually minted this call. `pact_repair_attempts` bumps on
+// this mint exactly as it does on cancelPactTailAndPause's own fresh queue below — one shared
+// counter, two minting mechanisms (§2.1's field table).
 export function mintResyncRequestIfNeeded(db: Database.Database, threadId: string): boolean {
   const now = Date.now()
   const thread = requireThread(db, threadId)
-  if (isResyncNonceLive(thread, now) || thread.pact_relay_pending === 'gap_notice') {
+  if (
+    isResyncNonceLive(thread, now) ||
+    thread.pact_relay_pending === 'gap_notice' ||
+    hasUnsettledGapNoticeOutbox(db, threadId)
+  ) {
     return false
   }
   const nonce = randomBytes(16).toString('hex')
@@ -239,10 +260,15 @@ function cancelPactTailAndPauseBody(
   }
 
   const thread = requireThread(db, threadId)
-  // Fresh-nonce gate, both directions: a live, undrained `gap_notice` OR a live
-  // pact_resync_nonce (the OTHER minting mechanism, mintResyncRequestIfNeeded above) suppresses
-  // re-queue AND the attempts bump (§2.5/§2.6(c) step 6 — one shared counter).
-  if (thread.pact_relay_pending === 'gap_notice' || isResyncNonceLive(thread, Date.now())) {
+  // Fresh-nonce gate, both directions: a live, undrained `gap_notice` token, an unsettled
+  // `gap_notice` outbox row (errata 21b-E5), OR a live pact_resync_nonce (the OTHER minting
+  // mechanism, mintResyncRequestIfNeeded above) suppresses re-queue AND the attempts bump
+  // (§2.5/§2.6(c) step 6 — one shared counter).
+  if (
+    thread.pact_relay_pending === 'gap_notice' ||
+    hasUnsettledGapNoticeOutbox(db, threadId) ||
+    isResyncNonceLive(thread, Date.now())
+  ) {
     return { queued: false, attempts: thread.pact_repair_attempts, exhausted: false }
   }
   const nextAttempts = thread.pact_repair_attempts + 1

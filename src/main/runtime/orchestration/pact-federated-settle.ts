@@ -121,8 +121,11 @@ export function settleFederatedPactDelivery(
     // Steps 3/4 — the fresh path only.
     let turnHolderAgentId: string | null = null
     if (item.pactTurnAfter !== null) {
+      // D-R134 F4 local half: the settle's own turn flip bumps pact_flight_token too, so a
+      // LATER settle's stale-guard re-read (step 1, above) can see this one landed.
       db.prepare(
-        `UPDATE threads SET pact_turn_in_flight_at = NULL, pact_turn_agent_id = ? WHERE id = ?`
+        `UPDATE threads SET pact_turn_in_flight_at = NULL, pact_turn_agent_id = ?,
+           pact_flight_token = pact_flight_token + 1 WHERE id = ?`
       ).run(item.pactTurnAfter, pactThreadId)
       turnHolderAgentId = item.pactTurnAfter.startsWith('remote:') ? null : item.pactTurnAfter
     }

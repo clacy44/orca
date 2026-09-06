@@ -22,8 +22,10 @@ export function pausePact(db: Database.Database, params: PausePactParams): Threa
   requireEngaged(thread)
   db.exec('BEGIN IMMEDIATE')
   try {
+    // D-R134 F4 local half: pact_flight_token bumped alongside the pause it guards.
     db.prepare(
-      `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = ? WHERE id = ?`
+      `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = ?,
+         pact_flight_token = pact_flight_token + 1 WHERE id = ?`
     ).run(params.reasonCode ?? 'operator', thread.id)
     insertPactStepRow(db, {
       threadId: thread.id,
@@ -197,8 +199,10 @@ export function resumePact(db: Database.Database, params: ResumePactParams): Thr
   const thread = requireThread(db, params.threadId)
   db.exec('BEGIN IMMEDIATE')
   try {
+    // D-R134 F4 local half: pact_flight_token bumped alongside the resume it guards.
     db.prepare(
-      `UPDATE threads SET pact_paused_at = NULL, pact_pause_reason = NULL WHERE id = ?`
+      `UPDATE threads SET pact_paused_at = NULL, pact_pause_reason = NULL,
+         pact_flight_token = pact_flight_token + 1 WHERE id = ?`
     ).run(thread.id)
     insertPactStepRow(db, {
       threadId: thread.id,

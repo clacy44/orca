@@ -4,8 +4,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
+import { renderFederatedPartyKey } from './pact-federated-identity'
+import { putPeerLinkBinding } from './link-binding-store'
+import { putContainment } from './link-binding-observations-store'
 
 describe('pact propose/accept/decline', () => {
   let db: OrchestrationDb | undefined
@@ -61,6 +65,64 @@ describe('pact propose/accept/decline', () => {
       participants: ids.map((id) => ({ participantKey: id, agentId: id }))
     })
     return thread.id
+  }
+
+  function rawDb(d: OrchestrationDb): Database.Database {
+    return (d as unknown as { db: Database.Database }).db
+  }
+
+  // S10-21b B6b (D-R134 F11 / D-R135 A10/B-F8): seeds a remote peer plus one confirmed,
+  // unrevoked peer_link_bindings row for `environmentId`. Returns the rendered party key.
+  function seedFederatedPeerWithBinding(
+    d: OrchestrationDb,
+    opts: {
+      environmentId: string
+      linkDeviceId: string
+      boundPairingRevision: number
+      quarantined?: boolean
+    }
+  ): string {
+    d.upsertRemoteAgent({
+      environmentId: opts.environmentId,
+      environmentName: opts.environmentId,
+      linkKind: 'environment',
+      remoteAgentId: 'peer_route',
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(rawDb(d), {
+      linkDeviceId: opts.linkDeviceId,
+      environmentId: opts.environmentId,
+      boundEndpointId: `endpoint_${opts.linkDeviceId}`,
+      boundPairingRevision: opts.boundPairingRevision,
+      linkCredentialFp: `lcfp_${opts.linkDeviceId}`,
+      peerCredentialFp: `pcfp_${opts.linkDeviceId}`,
+      peerKeyFingerprint: `pkfp_${opts.linkDeviceId}`,
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    if (opts.quarantined) {
+      putContainment(rawDb(d), {
+        subjectKind: 'link',
+        subjectId: opts.linkDeviceId,
+        action: 'quarantine',
+        reasonCode: 'test',
+        reasonText: null,
+        detail: null,
+        createdAt: Date.now(),
+        expiresAt: null
+      })
+    }
+    return renderFederatedPartyKey({
+      linkDeviceId: opts.environmentId,
+      remoteAgentId: 'peer_route'
+    })
   }
 
   it('propose -> engaged pact, turn held by proposer (accept)', () => {
@@ -368,5 +430,109 @@ describe('pact propose/accept/decline', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  // S10-21b B6b (D-R134 F11 / D-R135 A10/B-F8, batch-2 REJECT): the anchor binding is chosen
+  // deterministically among confirmed/unrevoked candidates, excluding a quarantined link. RED AT
+  // BASE: `.find()` over an unordered `findBindingsByEnvironment` result picked whichever row
+  // was physically first regardless of quarantine — here that is the LOWER-revision, quarantined
+  // row, inserted first.
+  it('D-R134 F11/D-R135 A10: anchors to the routable (non-quarantined, higher-revision) binding, deterministically across 20 runs', () => {
+    const d = freshDb()
+    const environmentId = 'env_route'
+    seedFederatedPeerWithBinding(d, {
+      environmentId,
+      linkDeviceId: 'link_lo_quarantined',
+      boundPairingRevision: 1,
+      quarantined: true
+    })
+    const peerKey = seedFederatedPeerWithBinding(d, {
+      environmentId,
+      linkDeviceId: 'link_hi_routable',
+      boundPairingRevision: 5
+    })
+    for (let i = 0; i < 20; i++) {
+      const a = seedAgent(d, `a${i}`)
+      const { thread: seededThread } = d.createThread({
+        subject: 's',
+        createdByAgentId: a,
+        participants: [
+          { participantKey: a, agentId: a },
+          { participantKey: peerKey, agentId: null }
+        ]
+      })
+      const thread = d.proposePact({
+        ...actor(a),
+        threadId: seededThread.id,
+        peerAgentId: peerKey,
+        stepsTotal: null
+      })
+      expect(thread.pact_peer_link_device_id).toBe('link_hi_routable')
+    }
+  })
+
+  it('D-R134 F11/D-R135 A10: refuses pact_no_route when every candidate binding is quarantined', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const environmentId = 'env_route_none'
+    const peerKey = seedFederatedPeerWithBinding(d, {
+      environmentId,
+      linkDeviceId: 'link_only_quarantined',
+      boundPairingRevision: 1,
+      quarantined: true
+    })
+    const { thread: seededThread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    const threadId = seededThread.id
+    let caught: unknown
+    try {
+      d.proposePact({ ...actor(a), threadId, peerAgentId: peerKey, stepsTotal: null })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as { code: string }).code).toBe('pact_no_route')
+    expect(d.getThread(threadId)?.pact_state).toBeNull()
+  })
+
+  // S10-21b B6b (D-R134 F4 local half): pact_flight_token bumps on every LOCAL commit that
+  // changes pact_state or the turn. RED AT BASE: no writer anywhere sets pact_flight_token
+  // outside the inbound apply path (B8c) — it stays 0 through every local write below.
+  it('D-R134 F4 local half: pact_flight_token increments on propose/accept/decline/release', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const thr1 = seedThreadWithParticipants(d, [a, b])
+    const proposed = d.proposePact({
+      ...actor(a),
+      threadId: thr1,
+      peerAgentId: b,
+      stepsTotal: null
+    })
+    expect(proposed.pact_flight_token).toBe(1)
+    const accepted = d.acceptPact({ ...actor(b), threadId: thr1 })
+    expect(accepted.pact_flight_token).toBe(2)
+
+    const c = seedAgent(d, 'c')
+    const dd = seedAgent(d, 'd')
+    const thr2 = seedThreadWithParticipants(d, [c, dd])
+    const p2 = d.proposePact({ ...actor(c), threadId: thr2, peerAgentId: dd, stepsTotal: null })
+    expect(p2.pact_flight_token).toBe(1)
+    const declined = d.declinePact({ ...actor(dd), threadId: thr2, reasonCode: 'not_now' })
+    expect(declined.pact_flight_token).toBe(2)
+
+    const e = seedAgent(d, 'e')
+    const f = seedAgent(d, 'f')
+    const thr3 = seedThreadWithParticipants(d, [e, f])
+    d.proposePact({ ...actor(e), threadId: thr3, peerAgentId: f, stepsTotal: null })
+    d.acceptPact({ ...actor(f), threadId: thr3 })
+    const released = d.releasePact({ ...actor(e), threadId: thr3, reasonCode: null })
+    expect(released.pact_flight_token).toBe(3)
   })
 })

@@ -217,7 +217,16 @@ export function enqueueFederatedPactVerb(
     )
   }
 
-  const counterpartKey = otherPactParticipant(thread, opts.actorAgentId ?? '')
+  // D-R135 F14: otherPactParticipant('') never matches either party, so it always fell through
+  // to pact_proposer_agent_id — OUR OWN key on a pact this host proposed, for every host-emitted
+  // verb (opts.actorAgentId null: gap_notice, resync_request, resync). A federated pact's two
+  // named parties are always {a local agents.id, a rendered `remote:<link>:<id>` peer key} — the
+  // peer is whichever one carries that prefix, independent of which side proposed.
+  const counterpartKey = opts.actorAgentId
+    ? otherPactParticipant(thread, opts.actorAgentId)
+    : (thread.pact_proposer_agent_id ?? '').startsWith('remote:')
+      ? (thread.pact_proposer_agent_id as string)
+      : (thread.pact_with_agent_id as string)
   const noLedger = PACT_NO_LEDGER_VERBS.has(verb)
   const turnConsuming = PACT_TURN_CONSUMING_VERBS.has(verb)
   const reserved = PACT_RESERVED_VERBS.has(verb)

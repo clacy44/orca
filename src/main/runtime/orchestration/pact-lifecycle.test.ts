@@ -253,4 +253,22 @@ describe('pact pause/resume/release', () => {
       raw.prepare("UPDATE pact_steps SET reason_code = 'x' WHERE thread_id = ?").run(threadId)
     ).toThrow(/append-only/)
   })
+
+  // S10-21b B6b (D-R134 F4 local half): pact_flight_token bumps on pause/resume — the settle
+  // guard's (§2.8) turn-unaware case, since pause/resume never change pact_state. RED AT BASE:
+  // no writer anywhere touches pact_flight_token outside the inbound apply path (B8c).
+  it('D-R134 F4 local half: pact_flight_token increments on pause and resume', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = engagedPact(d, a, b)
+    const base = d.getThread(threadId)?.pact_flight_token ?? -1
+    const paused = d.pausePact({ ...actor(a), threadId, reasonCode: 'operator' })
+    expect(paused.pact_flight_token).toBe(base + 1)
+    const resumed = d.resumePactOrRequest({ ...actor(a), threadId })
+    if (resumed.kind !== 'resumed') {
+      throw new Error(`unexpected outcome: ${resumed.kind}`)
+    }
+    expect(resumed.thread.pact_flight_token).toBe(base + 2)
+  })
 })

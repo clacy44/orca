@@ -18,6 +18,7 @@ import {
 } from './pact-shared'
 import { findRemotePartyByRenderedKey } from './pact-federated-identity'
 import { findBindingsByEnvironment } from './link-binding-store'
+import { isPeerLinkQuarantined } from './link-binding-observations-store'
 import { OrchestrationError } from './orchestration-error'
 
 export type ProposePactParams = PactActorContext & {
@@ -48,10 +49,12 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
     // pact_peer_release_at, pact_turn_in_flight_at, pact_peer_paused_at, pact_local_seq,
     // pact_peer_seq, pact_last_inbound_at, pact_last_resync_at, pact_relay_pending,
     // pact_resync_nonce, pact_resync_nonce_at, pact_repair_attempts. TWO columns are
-    // DELIBERATELY EXCLUDED and must never be added here:
+    // DELIBERATELY EXCLUDED and must never be RESET here:
     //   - pact_flight_token: the settle guard's (§2.8) monotone per-thread counter. Resetting it
     //     on re-propose would let a stale settle from a PRE-re-propose outbox row land on the
-    //     new era's state as if it belonged there — reopening N8's stale-settle hole.
+    //     new era's state as if it belonged there — reopening N8's stale-settle hole. It IS
+    //     incremented below (S10-21b B6b, D-R134 F4 local half) — a propose is itself a
+    //     state-changing local commit the settle guard must see.
     //   - pact_pause_epoch: compared, never zeroed, per §6 — it is not this UPDATE's concern.
     // S10-21b B6 (batch-1 review D-R133 F2, binding): pact_peer_* anchors are unconditionally
     // cleared here — WITHOUT this a released federated pact re-proposed LOCALLY on the same
@@ -65,6 +68,7 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
          pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',
          pact_steps_total = ?, pact_ordinal = 0, pact_era = pact_era + 1, pact_turn_agent_id = NULL,
          pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now'),
+         pact_flight_token = pact_flight_token + 1,
          pact_release_at = NULL, pact_peer_release_at = NULL, pact_turn_in_flight_at = NULL,
          pact_peer_paused_at = NULL, pact_local_seq = 0, pact_peer_seq = 0,
          pact_last_inbound_at = NULL, pact_last_resync_at = NULL, pact_relay_pending = NULL,
@@ -80,15 +84,44 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
           `internal error: federated peer ${peer.id} resolved by requireAccountablePeer but its remote_agents row vanished mid-transaction`
         )
       }
-      // R18.4(b)'s candidate lookup (link-binding-store.ts): a CONFIRMED, unrevoked binding for
+      // R18.4(b)'s candidate lookup (link-binding-store.ts): CONFIRMED, unrevoked bindings for
       // this environment — the same two clauses findBindingCandidateByKeyFingerprint applies.
       // No binding yet (the environment was found by probe, never link-paired) leaves the two
       // link-scoped anchors NULL; pact_peer_agent_id/pact_peer_environment_id are still set, so
       // isFederatedPact() is correctly true and the emit path (pact-federated-emit.ts) refuses
-      // loudly rather than silently treating the pact as local.
-      const binding = findBindingsByEnvironment(db, remote.environment_id).find(
+      // loudly rather than silently treating the pact as local — unchanged below.
+      //
+      // S10-21b B6b (D-R134 F11 / D-R135 A10/B-F8, batch-2 REJECT): with >=2 confirmed rows the
+      // prior unordered `.find()` picked SQLite's unspecified row order and could anchor to a
+      // quarantined/dead route. Deterministic selection: exclude a locally quarantined link,
+      // then order by boundPairingRevision DESC (tie-broken by linkDeviceId) so the same input
+      // always picks the same row. Not routed through getRoutableLinkBinding
+      // (link-binding-routable.ts): that helper needs OrcaRuntimeService for its registry/
+      // environment-file reads, which proposePact's raw-db signature does not carry and the
+      // brief's own "minimal, one small hunk" constraint rules out threading through here — this
+      // is D-R135's own stated fallback ("failing that, order by bound_pairing_revision DESC and
+      // exclude quarantined links").
+      const candidates = findBindingsByEnvironment(db, remote.environment_id).filter(
         (b) => b.state === 'confirmed' && b.revokedAt === null
       )
+      const routable = candidates
+        .filter((b) => !isPeerLinkQuarantined(db, b.linkDeviceId))
+        .sort((a, b) =>
+          b.boundPairingRevision !== a.boundPairingRevision
+            ? b.boundPairingRevision - a.boundPairingRevision
+            : a.linkDeviceId.localeCompare(b.linkDeviceId)
+        )
+      // Candidates existed but every one is quarantined — refuse rather than anchor to a known-
+      // bad route. Zero candidates at all is the pre-existing "never link-paired" case (comment
+      // above) and stays silent/deferred, unchanged.
+      if (candidates.length > 0 && routable.length === 0) {
+        throw new OrchestrationError(
+          'pact_no_route',
+          `Refused: every link binding for ${remote.environment_id} is quarantined; no route to propose this pact over.`,
+          { nextSteps: ['orca agents link --show'] }
+        )
+      }
+      const binding = routable[0] ?? null
       db.prepare(
         `UPDATE threads SET
            pact_peer_agent_id = ?, pact_peer_environment_id = ?,
@@ -139,8 +172,10 @@ export function acceptPact(db: Database.Database, params: AcceptPactParams): Thr
 
   db.exec('BEGIN IMMEDIATE')
   try {
+    // D-R134 F4 local half: pact_flight_token bumped alongside the state/turn write it guards.
     db.prepare(
-      `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_at = datetime('now')
+      `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_at = datetime('now'),
+         pact_flight_token = pact_flight_token + 1
        WHERE id = ?`
     ).run(thread.pact_proposer_agent_id, thread.id)
     insertPactStepRow(db, {
@@ -200,9 +235,11 @@ export function releasePactRow(
 ): ThreadRow {
   db.exec('BEGIN IMMEDIATE')
   try {
+    // D-R134 F4 local half: pact_flight_token bumped alongside the state/turn write it guards.
     db.prepare(
       `UPDATE threads SET pact_state = 'released', pact_turn_agent_id = NULL,
-         pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now')
+         pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now'),
+         pact_flight_token = pact_flight_token + 1
        WHERE id = ?`
     ).run(thread.id)
     insertPactStepRow(db, {

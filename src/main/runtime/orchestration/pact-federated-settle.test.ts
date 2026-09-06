@@ -304,4 +304,110 @@ describe('pact-federated-settle', () => {
     expect(audit.verb).toBe('replyRelay')
     expect(audit.outcome).toBe('settle_raced')
   })
+
+  // ---------------------------------------------------------------------------------------
+  // S10-21b B6b (D-R134 F4 local half): pact_flight_token has no writer anywhere at base
+  // outside the inbound apply path (B8c) — every LOCAL commit that changes pact_state or the
+  // turn must bump it too, so the settle guard (step 1's re-read) can see it. This suite's own
+  // pre-existing T12 test simulates staleness by hand-bumping the column directly (the token had
+  // no real writer to call); these two exercise the REAL local writers instead.
+  // ---------------------------------------------------------------------------------------
+
+  // A local PAUSE between emit and settle changes NEITHER pact_era NOR pact_state (only
+  // pact_paused_at/pact_pause_reason) — the ONE local staleness case the pre-existing state/era
+  // comparison cannot see on its own. RED AT BASE: pausePact never bumped pact_flight_token, so
+  // the guard's re-read matches the outbox row's stamped values and the settle wrongly proceeds
+  // as fresh, moving the turn on a pact this host just paused.
+  it('D-R134 F4 local half: a local pause between emit and settle is caught only via pact_flight_token — settle_stale', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+
+    const { outboxId, messageId } = emitStep(d, a, threadId)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    const turnBefore = d.getThread(threadId)?.pact_turn_agent_id
+
+    d.pausePact({ ...actor(a), threadId, reasonCode: 'operator' })
+    // Confirms the premise: era/state are unchanged by a pause — only flight_token can catch it.
+    const paused = d.getThread(threadId)
+    expect(paused?.pact_era).toBe(item.pactEra)
+    expect(paused?.pact_state).toBe(item.pactState)
+
+    const settled = d.settleFederatedPactDelivery(item, {
+      peerMessageId: 'peer_m1',
+      peerReplyThreadId: 'peer_t1'
+    })
+    expect(settled.outcome).toBe('stale')
+
+    const after = d.getThread(threadId)
+    expect(after?.pact_turn_in_flight_at).not.toBeNull()
+    expect(after?.pact_turn_agent_id).toBe(turnBefore)
+    const relay = pactStepRelay(d, threadId, messageId)
+    expect(relay.relay_state).not.toBe('delivered')
+
+    const audit = latestAudit(d)
+    expect(audit.outcome).toBe('settle_stale')
+  })
+
+  // The brief's own literal scenario (D-R134 F4 local half): a local RELEASE between emit and
+  // settle. GREEN AT BASE, honestly — releasePactRow already changes pact_state
+  // ('engaged' -> 'released'), which the pre-existing state comparison (unrelated to
+  // pact_flight_token) already catches on its own; the new flight-token bump is redundant here,
+  // not load-bearing. Kept as a guard: still asserts settle_stale, and additionally that
+  // pact_flight_token moved (the new write actually ran).
+  it('D-R134 F4 local half: a local release between emit and settle → settle_stale (state-comparison already caught this at base; flight_token now moves too)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+
+    const { outboxId, messageId } = emitStep(d, a, threadId)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    const tokenBefore = d.getThread(threadId)?.pact_flight_token ?? -1
+
+    d.releasePact({ ...actor(a), threadId, reasonCode: null })
+    const released = d.getThread(threadId)
+    expect(released?.pact_state).toBe('released')
+    expect(released?.pact_flight_token).toBe(tokenBefore + 1)
+
+    const settled = d.settleFederatedPactDelivery(item, {
+      peerMessageId: 'peer_m1',
+      peerReplyThreadId: 'peer_t1'
+    })
+    expect(settled.outcome).toBe('stale')
+
+    const relay = pactStepRelay(d, threadId, messageId)
+    expect(relay.relay_state).not.toBe('delivered')
+    const audit = latestAudit(d)
+    expect(audit.outcome).toBe('settle_stale')
+  })
+
+  // The settle's own turn flip (steps 3/4) must ALSO bump pact_flight_token, so a LATER settle's
+  // guard can see this one landed. RED AT BASE: the turn-flip UPDATE never touched the column.
+  it('D-R134 F4 local half: a fresh settle bumps pact_flight_token on its own turn flip', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+
+    const { outboxId } = emitStep(d, a, threadId)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    const before = d.getThread(threadId)?.pact_flight_token ?? -1
+
+    const settled = d.settleFederatedPactDelivery(item, {
+      peerMessageId: 'peer_m1',
+      peerReplyThreadId: 'peer_t1'
+    })
+    expect(settled.outcome).toBe('settled')
+
+    const after = d.getThread(threadId)?.pact_flight_token ?? -1
+    expect(after).toBe(before + 1)
+  })
 })

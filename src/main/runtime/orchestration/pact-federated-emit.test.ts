@@ -363,4 +363,72 @@ describe('pact-federated-emit', () => {
       quarantined: false
     })
   })
+
+  // S10-21b B6b (D-R134 A(xi) / D-R135 (xi), batch-2): field-parity between the pact envelope
+  // (pact-federated-emit.ts ~339-352) and the mail literal (orchestration-reply-
+  // foreign.ts:126-137) — same top-level field set excluding `body`/`inReplyToMessageId` (mail
+  // only) and `pact` (pact only). Both reviews read this as ALREADY MATCHING at base (D-R135
+  // (xi): "Confirmed... beside the mail literal's field-for-field shape") — this pins that
+  // shape as a regression guard. GREEN AT BASE (the two literals already agree); it would go RED
+  // only if a future edit to either literal drops/adds a shared field without the other.
+  const MAIL_SHARED_FIELDS = [
+    'fromAgent',
+    'toAgentId',
+    'messageId',
+    'threadId',
+    'subject',
+    'type',
+    'priority'
+  ].sort()
+
+  it("D-R134 A(xi)/D-R135 (xi): the pact envelope carries the mail literal's shared top-level field set", () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const result = enqueueFederatedPactVerb(rawDb(d), null, threadId, 'step', {
+      actorAgentId: a,
+      actorPaneKey: `tab:${a}`,
+      actorHostId: 'local',
+      runId: 'run1',
+      ordinal: 1
+    })
+    if (result.outcome !== 'enqueued') {
+      throw new Error(`unexpected outcome: ${result.outcome}`)
+    }
+    const item = d.getReplyOutboxItem(result.outboxId)
+    const parsed = JSON.parse(item!.payload) as Record<string, unknown>
+    const envelopeSharedKeys = Object.keys(parsed)
+      .filter((k) => k !== 'pact')
+      .sort()
+    expect(envelopeSharedKeys).toEqual(MAIL_SHARED_FIELDS)
+  })
+
+  it("D-R134 A(xi)/D-R135 (xi): a host-emitted verb omits fromAgent, matching mail's unregistered-caller shape", () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId, peerKey } = engagedFederatedPact(d, a)
+    const result = enqueueFederatedPactVerb(rawDb(d), null, threadId, 'resync_request', {
+      actorAgentId: null,
+      actorPaneKey: null,
+      actorHostId: null,
+      runId: 'host',
+      resyncRequest: { nonce: 'n1' }
+    })
+    if (result.outcome !== 'enqueued') {
+      throw new Error(`unexpected outcome: ${result.outcome}`)
+    }
+    const item = d.getReplyOutboxItem(result.outboxId)
+    const parsed = JSON.parse(item!.payload) as Record<string, unknown>
+    expect('fromAgent' in parsed).toBe(false)
+    const envelopeSharedKeys = Object.keys(parsed)
+      .filter((k) => k !== 'pact')
+      .sort()
+    expect(envelopeSharedKeys).toEqual(MAIL_SHARED_FIELDS.filter((k) => k !== 'fromAgent'))
+    // D-R135 F14 fix (B6b): a host-emitted verb (no actor) addresses the PEER, never our own
+    // proposer key — `a` proposed this pact (engagedFederatedPact), so the stored to_handle
+    // must be the remote peer's rendered key. RED AT BASE: otherPactParticipant(thread, '')
+    // always fell through to pact_proposer_agent_id, i.e. `a` itself.
+    expect(result.message.to_handle).toBe(peerKey)
+    expect(result.message.to_handle).not.toBe(a)
+  })
 })
