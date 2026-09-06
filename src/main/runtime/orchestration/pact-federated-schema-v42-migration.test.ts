@@ -9,7 +9,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from '../../sqlite/sync-database'
-import { OrchestrationDb } from './db'
+import {
+  OrchestrationDb,
+  PACT_STEPS_APPEND_ONLY_TRIGGER_SQL,
+  PACT_STEPS_NO_DELETE_TRIGGER_SQL
+} from './db'
 
 const THREADS_V42_COLUMNS = [
   'pact_peer_key_fingerprint',
@@ -499,5 +503,202 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
     expect(() =>
       sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_repair_trigger'`).run()
     ).not.toThrow()
+  })
+})
+
+// S10-21b B7b (D-R134/D-R135 F1, BLOCKER; D-R134 F14): every test above uses a store opened
+// EXACTLY ONCE, so none of them exercise repairUnshippedV42FederatedPacts's own trigger
+// DROP/CREATE — the class of defect the suite never exercised, per D-R134 F1/D-R135's own
+// wording. These tests CLOSE and REOPEN before asserting, so the second open's
+// repairUnshippedV42FederatedPacts call (db.ts, guarded on user_version >= 42) is what installs
+// the trigger under test.
+function triggerSql(sqlite: Database.Database, name: string): string {
+  return (
+    sqlite
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+      .get(name) as {
+      sql: string
+    }
+  ).sql
+}
+
+// sqlite_master stores the statement text trimmed of outer whitespace and without the
+// terminating `;` (that terminator ends the exec() call's statement list, it is not part of the
+// stored CREATE TRIGGER statement) — normalize the JS constant the same way before comparing.
+function asStoredTriggerSql(constantSql: string): string {
+  return constantSql.trim().replace(/;\s*$/, '')
+}
+
+describe('S10-21b B7b (D-R134/D-R135 F1, D-R134 F14): reopened-store trigger tests', () => {
+  let db: OrchestrationDb | undefined
+  let tempDir: string | undefined
+
+  afterEach(() => {
+    db?.close()
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+    db = undefined
+    tempDir = undefined
+  })
+
+  function freshPath(): string {
+    tempDir = mkdtempSync(join(tmpdir(), 'orca-pact-v42-reopen-'))
+    return join(tempDir, 'orchestration.db')
+  }
+
+  function seedThreadAndStep(sqlite: Database.Database, threadId: string): void {
+    sqlite
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era)
+         VALUES (?, 'reopen fixture', 'peer', 'agent:b', 'engaged', 'agent:a', 'agent:a', 0)`
+      )
+      .run(threadId)
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_agent_id,
+           message_id, summary, summary_sha256)
+         VALUES (?, 1, 0, 'step', 'agent:a', 'msg_1', 'a summary', 'deadbeef')`
+      )
+      .run(threadId)
+  }
+
+  // Item 2(a). FAILS AT BASE: repairUnshippedV42FederatedPacts's pre-fix bare summary clause
+  // (`OR NOT (<purge shape>)`) is TRUE for this row (it is not in the purge shape), so the WHEN
+  // clause fires and the settle-path stamp aborts with 'pact ledger is append-only' —
+  // pact-federated-settle.ts:129-132's exact UPDATE shape.
+  it('a reopened v42 store accepts the settle path relay_state/relay_settled_at stamp', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    seedThreadAndStep(rawDb(db), 'thr_settle')
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(() =>
+      sqlite
+        .prepare(
+          `UPDATE pact_steps SET relay_state = 'delivered', relay_settled_at = datetime('now')
+           WHERE thread_id = 'thr_settle'`
+        )
+        .run()
+    ).not.toThrow()
+  })
+
+  // Item 2(b). FAILS AT BASE (empirically verified against ad5b3d806f): base has no
+  // PACT_STEPS_APPEND_ONLY_TRIGGER_SQL/PACT_STEPS_NO_DELETE_TRIGGER_SQL export at all, so the
+  // import above resolves undefined and the append_only assertion throws a TypeError inside
+  // asStoredTriggerSql rather than an assertion mismatch — still a hard FAIL at base, by
+  // construction (this test cannot exist meaningfully before the shared constants do). Once the
+  // constants exist, the underlying claim is: the migration block's narrowed form and the repair
+  // tier's pre-fix bare form were different SQL text for trg_pact_steps_append_only.
+  // trg_pact_steps_no_delete already matched at base (D-R135: byte-identical for no_delete).
+  it('after reopen, both pact_steps triggers are byte-identical to the shared constants in sqlite_master', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(triggerSql(sqlite, 'trg_pact_steps_append_only')).toBe(
+      asStoredTriggerSql(PACT_STEPS_APPEND_ONLY_TRIGGER_SQL)
+    )
+    expect(triggerSql(sqlite, 'trg_pact_steps_no_delete')).toBe(
+      asStoredTriggerSql(PACT_STEPS_NO_DELETE_TRIGGER_SQL)
+    )
+  })
+
+  // Item 2(c). GREEN at base already (the guard): base's bare clause aborts every non-purge
+  // update including this one, so this assertion already holds pre-fix — kept to prove the fix
+  // does not loosen summary protection while narrowing everything else.
+  it('after reopen, a summary-changing update still aborts (not the purge shape)', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    seedThreadAndStep(rawDb(db), 'thr_summary')
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(() =>
+      sqlite
+        .prepare(`UPDATE pact_steps SET summary = 'edited' WHERE thread_id = 'thr_summary'`)
+        .run()
+    ).toThrow(/append-only/)
+  })
+
+  // Item 2(d), F14. DEVIATION from the brief's stated red/green (brief: "RED at base"),
+  // empirically verified against ad5b3d806f (pathspec-limited `git stash push -- db.ts`, ran this
+  // test against unmodified base db.ts, popped the stash): this assertion is GREEN at base, not
+  // red. Base's repair tier reinstates the pre-B7 bare clause `OR NOT (<purge shape>)` on this
+  // table (F1, the blocker this commit fixes), which is TRUE — and so aborts — for ANY UPDATE not
+  // in the exact purge shape, including one that changes ONLY pact_era; this row's summary is
+  // NULL both before and after, so it is not in the purge shape (which requires OLD.summary IS
+  // NOT NULL) and base's blanket bug aborts it anyway, coincidentally producing the same outward
+  // behavior F14's dedicated `OR NEW.pact_era <> OLD.pact_era` clause is meant to guarantee. Base
+  // therefore has NO dedicated pact_era protection — it has an unrelated bug that happens to
+  // cover this one case — so the assertion is asserted as its own test regardless, to prove the
+  // fix's dedicated clause keeps this true once F1's blanket abort is narrowed away (a narrowing
+  // of F1 that forgot `pact_era` would regress this test visibly instead of silently, since it
+  // would no longer be riding on the old bug for coverage).
+  it('after reopen, an UPDATE changing only pact_era aborts (F14: pact_era is immutable)', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const before = rawDb(db)
+    before
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era)
+         VALUES ('thr_era_immutable', 'reopen fixture', 'peer', 'agent:b', 'engaged',
+           'agent:a', 'agent:a', 0)`
+      )
+      .run()
+    before
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_agent_id, summary_sha256)
+         VALUES ('thr_era_immutable', 0, 0, 'pause', NULL, 'deadbeef')`
+      )
+      .run()
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(() =>
+      sqlite
+        .prepare(`UPDATE pact_steps SET pact_era = 1 WHERE thread_id = 'thr_era_immutable'`)
+        .run()
+    ).toThrow(/append-only/)
+  })
+
+  // Item 2(e). GREEN at base already (the guard): the purge transition is the one shape base's
+  // bare clause was written to permit, so it already succeeds pre-fix — kept to prove the F1/F14
+  // narrowing does not regress the one legitimate post-insert UPDATE this table supports
+  // (message-purge.ts:108's exact statement shape, reproduced here).
+  it('after reopen, the message-purge transition still succeeds', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    seedThreadAndStep(rawDb(db), 'thr_purge')
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(() =>
+      sqlite
+        .prepare(
+          `UPDATE pact_steps SET summary = NULL, summary_purged_at = datetime('now')
+           WHERE thread_id = 'thr_purge' AND summary IS NOT NULL`
+        )
+        .run()
+    ).not.toThrow()
+    const row = sqlite
+      .prepare(`SELECT summary, summary_purged_at FROM pact_steps WHERE thread_id = 'thr_purge'`)
+      .get() as { summary: string | null; summary_purged_at: string | null }
+    expect(row.summary).toBeNull()
+    expect(row.summary_purged_at).not.toBeNull()
   })
 })
