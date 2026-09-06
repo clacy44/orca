@@ -16,6 +16,13 @@ import {
 } from './pact-federated-emit'
 import { adoptEraOnInboundPropose } from './pact-federated-era'
 import { REPLY_OUTBOX_PER_LINK_CAP, PACT_RESERVED_HEADROOM } from './link-binding-constants'
+import { ORCHESTRATION_METHODS } from '../rpc/methods/orchestration'
+
+// 21b-D1: the real receiving schema — same lookup pattern as orchestration-federated-peer-
+// send.test.ts's `method()` helper.
+const FEDERATED_SEND_PARAMS = ORCHESTRATION_METHODS.find(
+  (m) => m.name === 'orchestration.federatedSend'
+)!.params!
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -296,5 +303,64 @@ describe('pact-federated-emit', () => {
     expect(era).toBe(2)
     expect(after?.pact_local_seq).toBe(0)
     expect(after?.pact_peer_seq).toBe(0)
+  })
+
+  // ---------------------------------------------------------------------------------------
+  // 21b-D1 (F1-F4): the emitted outbox payload must conform to FederatedSendParams — the
+  // schema the pump's verbatim dial (reply-outbox-pump.ts:135-147) parses against.
+  // ---------------------------------------------------------------------------------------
+  it('21b-D1: the emitted payload parses as FederatedSendParams (toAgentId/messageId/subject present)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const result = enqueueFederatedPactVerb(rawDb(d), null, threadId, 'step', {
+      actorAgentId: a,
+      actorPaneKey: `tab:${a}`,
+      actorHostId: 'local',
+      runId: 'run1',
+      ordinal: 1
+    })
+    if (result.outcome !== 'enqueued') {
+      throw new Error(`unexpected outcome: ${result.outcome}`)
+    }
+    const item = d.getReplyOutboxItem(result.outboxId)
+    if (!item) {
+      throw new Error('outbox item not found')
+    }
+    const parsed = JSON.parse(item.payload)
+    const verdict = FEDERATED_SEND_PARAMS.safeParse(parsed)
+    expect(verdict.success).toBe(true)
+    expect(parsed.toAgentId).toBe(REMOTE_AGENT_ID)
+    expect(parsed.messageId).toBe(result.message.id)
+    expect(parsed.subject).toBe(`pact step`)
+    expect(parsed.type).toBe('status')
+    expect(parsed.priority).toBe('normal')
+    // `pact` is byte-identical to the pre-fix shape: verb/seq/era only for a plain `step`.
+    expect(parsed.pact).toEqual({ verb: 'step', seq: result.seq, era: result.era })
+  })
+
+  it('21b-D1: fromAgent mirrors buildFederatedSenderIdentity for the local actor', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const result = enqueueFederatedPactVerb(rawDb(d), null, threadId, 'step', {
+      actorAgentId: a,
+      actorPaneKey: `tab:${a}`,
+      actorHostId: 'local',
+      runId: 'run1',
+      ordinal: 1
+    })
+    if (result.outcome !== 'enqueued') {
+      throw new Error(`unexpected outcome: ${result.outcome}`)
+    }
+    const item = d.getReplyOutboxItem(result.outboxId)
+    const parsed = JSON.parse(item!.payload)
+    const agentRow = d.getAgentById(a)
+    expect(parsed.fromAgent).toEqual({
+      id: a,
+      displayName: agentRow?.display_name,
+      role: agentRow?.role,
+      quarantined: false
+    })
   })
 })
