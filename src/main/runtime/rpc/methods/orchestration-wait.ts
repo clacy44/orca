@@ -77,24 +77,37 @@ function assertNoIncomingProposalOwed(
   callerAgentId: string
 ): void {
   const incoming = db.getIncomingUnansweredProposal(callerAgentId)
-  if (!incoming) {
-    return
+  if (incoming) {
+    const proposer = incoming.pact_proposer_agent_id
+      ? db.getAgentById(incoming.pact_proposer_agent_id)
+      : undefined
+    const proposerName = proposer?.display_name ?? incoming.pact_proposer_agent_id
+    throw new OrchestrationError(
+      'answer_first',
+      `Refused: ${proposerName} is waiting on YOUR answer to its proposal on ${incoming.id} — ` +
+        `accept or decline it first: orca agents pact --on ${incoming.id} --accept`,
+      {
+        nextSteps: [
+          `orca agents pact --on ${incoming.id} --accept`,
+          `orca agents pact --on ${incoming.id} --decline`
+        ]
+      }
+    )
   }
-  const proposer = incoming.pact_proposer_agent_id
-    ? db.getAgentById(incoming.pact_proposer_agent_id)
-    : undefined
-  const proposerName = proposer?.display_name ?? incoming.pact_proposer_agent_id
-  throw new OrchestrationError(
-    'answer_first',
-    `Refused: ${proposerName} is waiting on YOUR answer to its proposal on ${incoming.id} — ` +
-      `accept or decline it first: orca agents pact --on ${incoming.id} --accept`,
-    {
-      nextSteps: [
-        `orca agents pact --on ${incoming.id} --accept`,
-        `orca agents pact --on ${incoming.id} --decline`
-      ]
-    }
-  )
+  // S10-21b B14 (design §3.3, errata NB8): even with NO currently-unanswered proposal (it was
+  // answered/declined), a still-live per-(peer, local agent) block window keeps blocking until
+  // the window elapses — a peer that declines then re-proposes cannot use the re-propose itself
+  // to dodge this read (a fresh unanswered proposal from the SAME window still falls into the
+  // `incoming` branch above); this branch only ever ADDS blocking, never removes the check above.
+  const blockingPeers = db.pactProposalBlockingPeers(callerAgentId)
+  if (blockingPeers.length > 0) {
+    throw new OrchestrationError(
+      'answer_first',
+      `Refused: a federated pact proposal from ${blockingPeers[0]} is still inside its answer ` +
+        `window — accept or decline it first, or wait for the window to elapse.`,
+      { nextSteps: [`orca agents pact --show`] }
+    )
+  }
 }
 
 async function handlePactOrStepWait(

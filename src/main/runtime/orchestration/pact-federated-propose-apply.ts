@@ -15,6 +15,8 @@ import {
 import type { ThreadRow } from './types'
 import { renderedSenderKey, type ApplyInboundPactVerbArgs } from './pact-federated-inbound-gates'
 import type { InboundPactWake } from './pact-federated-inbound-wake'
+import { refuseIfLinkCeilingSaturated } from './pact-federated-ledger-ceiling'
+import { bumpProposalBlockWindow } from './pact-federated-proposal-block'
 
 export type ApplyInboundPactVerbResult = {
   accepted: true
@@ -29,6 +31,22 @@ export function applyPropose(
   args: ApplyInboundPactVerbArgs
 ): ApplyInboundPactVerbResult {
   const senderKey = renderedSenderKey(args)
+
+  // S10-21b B14 (design §4.6(a), errata NB7) — per-link ceiling, evaluated ONLY here (propose/
+  // inbound-propose-apply time), refusing only a NEW pact proposal; never touches an
+  // already-engaged pact.
+  refuseIfLinkCeilingSaturated(
+    db,
+    args.senderEnvironmentId,
+    args.senderAgentId,
+    args.pairedDeviceId
+  )
+
+  // S10-21b B14 (design §3.3, errata NB8) — a proposal from this (peer, local agent) pair bumps
+  // the per-peer-per-window park-block window on ARRIVAL, regardless of this propose's own
+  // eventual outcome (race loss, era mismatch, etc.) — "on arrival" per §3.3's own wording.
+  bumpProposalBlockWindow(db, senderKey, args.toAgentId)
+
   // B10 (design §2.13) — pair guard + cross-propose tie-break (pact-federated-propose-race.ts).
   // 'incoming_wins': auto-decline+relay the local loser before era adoption/apply, below.
   const race = resolveCrossProposeOutcome(db, thread, args, senderKey)

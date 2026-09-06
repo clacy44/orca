@@ -11,6 +11,7 @@ import type Database from '../../sqlite/sync-database'
 import { OrchestrationError } from './orchestration-error'
 import { auditPact, insertPactStepRow } from './pact-shared'
 import type { ThreadRow } from './types'
+import { autoPauseThreadForLedgerCap } from './pact-federated-ledger-cap-pause'
 import {
   LEDGER_VERB_KIND,
   NO_LEDGER_VERBS,
@@ -19,6 +20,7 @@ import {
   runPactGrammarGate,
   resolvePactThread,
   runPactPartyAndMatrixGates,
+  PACT_STEPS_PER_PACT_CAP,
   type ApplyInboundPactVerbArgs
 } from './pact-federated-inbound-gates'
 import {
@@ -140,6 +142,25 @@ export function applyInboundPactVerb(
   return applyLedgerOrNoLedgerVerb(db, resolution.thread, args, renderedSenderKey(args))
 }
 
+// S10-21b B14 (design §4.6(a)): the per-pact cap at the inbound write — `SELECT COUNT(*) FROM
+// pact_steps WHERE actor_is_remote=1 AND thread_id=?` immediately before `insertPactStepRow` on
+// the inbound path. Checked (and, on overflow, the auto-pause applied) BEFORE the write
+// transaction opens: the refusal and the auto-pause are two separate, deliberate writes — a
+// refused write must not also roll back the pause that closes the pact against further growth.
+function refuseIfPactStepsOverCap(db: Database.Database, threadId: string): void {
+  const count = db
+    .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE actor_is_remote = 1 AND thread_id = ?`)
+    .get(threadId) as { n: number }
+  if (count.n >= PACT_STEPS_PER_PACT_CAP) {
+    autoPauseThreadForLedgerCap(db, threadId)
+    throw new OrchestrationError(
+      'pact_ledger_capped',
+      `Refused: this pact has reached its ${PACT_STEPS_PER_PACT_CAP}-entry remote ledger cap; it has been auto-paused.`,
+      { nextSteps: [`orca agents pact --release --on ${threadId}`] }
+    )
+  }
+}
+
 function applyLedgerOrNoLedgerVerb(
   db: Database.Database,
   thread: ThreadRow,
@@ -148,6 +169,9 @@ function applyLedgerOrNoLedgerVerb(
 ): ApplyInboundPactVerbResult {
   const { pact } = args
   const noLedger = NO_LEDGER_VERBS.has(pact.verb)
+  if (!noLedger) {
+    refuseIfPactStepsOverCap(db, thread.id)
+  }
   db.exec('BEGIN IMMEDIATE')
   try {
     let turnAfterAgentId: string | null = null

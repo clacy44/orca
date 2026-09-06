@@ -125,8 +125,10 @@ describe('orchestration RPC methods', () => {
     // / orchestration.federatedLinkConfirm (orchestration-link-binding-peer.ts, R7: the two
     // peer-facing link-binding proof RPCs). S10-16 C7 adds the six local link-binding verbs
     // (orchestration-link-binding-local.ts, R22): orchestration.linkBindings/linkBind/linkRevoke/
-    // linkForget/linkContainment/replyOutbox.
-    expect(registry.size).toBe(70)
+    // linkForget/linkContainment/replyOutbox. S10-21b B14 adds
+    // orchestration.threads.purgePeerLedger (orchestration-pact-purge.ts, design §4.6(b): the
+    // write side of the append-only ledger's operator purge verb).
+    expect(registry.size).toBe(71)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.federatedSend')).toBe(true)
     expect(registry.has('orchestration.federationAnswerPrompt')).toBe(true)

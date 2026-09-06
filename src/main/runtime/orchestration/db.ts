@@ -340,6 +340,15 @@ import {
   type GetPactLedgerParams
 } from './pact-queries'
 import type { PactLedgerResult, PactPauseReason } from './pact-types'
+import { proposalBlockingPeerKeys } from './pact-federated-proposal-block'
+import {
+  settleLiveFederatedPactsForReset,
+  enqueueReservedReleasesAfterReset
+} from './pact-federated-reset-settlement'
+import {
+  purgePeerLedger as purgePeerLedgerImpl,
+  type PurgePeerLedgerParams
+} from './pact-federated-ledger-purge'
 // S10-21b B11: getPactLedger's remote-actor join (findRemotePartyByRenderedKey — the reverse
 // direction of renderFederatedPartyKey) and the wait-expiry/pact-show facts (§3.3).
 import { findRemotePartyByRenderedKey, isFederatedPact } from './pact-federated-identity'
@@ -5793,7 +5802,12 @@ export class OrchestrationDb {
   // Dispatcher behind the CLI's single `pact --resume` flag — internally calls
   // requestPactResume or resumePact depending on who the pausing side is (AUTHORITY §).
   resumePactOrRequest(params: ResumePactParams): ResumePactOutcome {
-    return resumePactOrRequestImpl(this.db, params)
+    // S10-21b B14 (design §4.4): threads the B2 bounded chain-walk through, same pattern as
+    // applyInboundPactVerb/getPactLedger above — pact-lifecycle.ts only ever holds the raw
+    // `Database.Database` handle, never `this`.
+    return resumePactOrRequestImpl(this.db, params, (remoteAgentId, linkKey) =>
+      this.walkRemoteAgentSupersessionChain(remoteAgentId, linkKey)
+    )
   }
 
   releasePact(params: ReleasePactParams): ThreadRow {
@@ -5863,6 +5877,21 @@ export class OrchestrationDb {
 
   getIncomingUnansweredProposal(agentId: string): ThreadRow | undefined {
     return getIncomingUnansweredProposalImpl(this.db, agentId)
+  }
+
+  // S10-21b B14 (design §3.3, errata NB8): read-only "still inside window" consult for the
+  // local-park-block decision — every peer party key with a still-live pact-propose-block window
+  // against `agentId`, regardless of whether that peer's proposal is currently unanswered.
+  pactProposalBlockingPeers(agentId: string): string[] {
+    return proposalBlockingPeerKeys(this.db, agentId)
+  }
+
+  // S10-21b B14 (design §4.6(b)): `orca agents pact --purge-peer-ledger --link <id>
+  // [--force-released]` — the write side of the purge trigger B1 built. See
+  // pact-federated-ledger-purge.ts's own header for the `--force-released` obstacle this method
+  // documents rather than silently drops.
+  purgePeerLedger(params: PurgePeerLedgerParams): { purged: number; nextSteps: string[] } {
+    return purgePeerLedgerImpl(this.db, params)
   }
 
   findOrCreatePeerThread(params: FindOrCreatePeerThreadParams): FindOrCreatePeerThreadResult {
@@ -11335,50 +11364,75 @@ export class OrchestrationDb {
   }
 
   resetAll(): void {
-    // Why: retain mutation receipts so a lost reset response cannot replay as a new mutation.
-    this.runResetTransaction(`
-      DELETE FROM coordinator_runs;
-      DELETE FROM decision_gates;
-      DELETE FROM remote_questions;
-      DELETE FROM question_threads;
-      DELETE FROM deliveries;
-      DELETE FROM legacy_mail_receipts;
-      DELETE FROM legacy_operation_receipts;
-      DELETE FROM legacy_compatibility_principals;
-      DELETE FROM legacy_adoptions;
-      DELETE FROM federation_relay_items;
-      DELETE FROM remote_dispatch_attachments;
-      -- S10-19: peer_run_grants is dispatch-scoped federation state, purged alongside attachments.
-      DELETE FROM peer_run_grants;
-      DELETE FROM federated_dispatches;
-      -- S10-15 ruling 3(a): remote_agents was unpurgeable before this slice (breaker finding 2).
-      DELETE FROM remote_agents;
-      -- S10-15 (INV-P-006): agent_rate is peer-writable (checkAndBumpRate, agent-rate-limit.ts)
-      -- and must be purgeable like every other coordination-bus table.
-      DELETE FROM agent_rate;
-      -- S10-16 R14.3 (v5, P10): peer_reply_outbox and peer_link_confirm_observations are the two
-      -- link-binding tables NOT exempt from resetAll — the outbox is coordination-bus state and
-      -- confirm observations are the only table a peer's own call causes a row in (INV-P-006(b)).
-      -- The other four — bindings, attempts, scan facts, containment — stay out (this host's own
-      -- proofs and its operator's own decisions); see A2_RESET_EXEMPT_TABLES for the ONE list.
-      DELETE FROM peer_reply_outbox;
-      DELETE FROM peer_link_confirm_observations;
-      -- S10-21a C1 (§7): agent_launch_sessions, current_sessions, and agent_sweep_restore_marks
-      -- are DELIBERATELY ABSENT from this list — the same exemption pattern this method already
-      -- gives \`agents\` (also never deleted here): purging the launch table would leave every
-      -- chair row alive with no way to be restored automatically, reimposing the ritual this
-      -- slice removes. None of the three is peer-writable (host-local writers only), so
-      -- INV-P-006 does not reach them.
-      DELETE FROM worker_terminal_archives;
-      DELETE FROM worker_terminal_resources;
-      DELETE FROM worker_dispatches;
-      DELETE FROM dispatch_contexts;
-      DELETE FROM tasks;
-      DELETE FROM messages;
-      DELETE FROM runs;
-      INSERT INTO runs (id, objective, home_database, consumer_generation, legacy)
-        VALUES ('${LEGACY_RUN_ID}', 'Legacy orchestration state (inspect only)', 'this_database', 0, 1);
-    `)
+    // S10-21b B14 (design §4.5, [v3.1, Addendum 6(15), closes NA5]): the corrected three-step
+    // ordering, ALL in the one transaction below —
+    //   (1) settlement FIRST: release every live federated pact locally (host `release` ledger
+    //       row, reason_code='local_reset'), clear anchors, RECORD which peers need the
+    //       reserved release;
+    //   (2) the ordinary deletes proceed, INCLUDING `DELETE FROM peer_reply_outbox` (now empty)
+    //       and `DELETE FROM pact_applied_ids` in full [errata 6(16), NB6];
+    //   (3) ONLY AFTER that delete, the reserved `release` item(s) from step 1 are inserted,
+    //       `reserved`, into the freshly-emptied `peer_reply_outbox` — inserting before the
+    //       delete would have the delete remove the row it just inserted (v3 as drafted's bug).
+    // Why retain mutation receipts: a lost reset response must not replay as a new mutation.
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const pendingReleases = settleLiveFederatedPactsForReset(this.db)
+      this.db.exec(`
+        DELETE FROM coordinator_runs;
+        DELETE FROM decision_gates;
+        DELETE FROM remote_questions;
+        DELETE FROM question_threads;
+        DELETE FROM deliveries;
+        DELETE FROM legacy_mail_receipts;
+        DELETE FROM legacy_operation_receipts;
+        DELETE FROM legacy_compatibility_principals;
+        DELETE FROM legacy_adoptions;
+        DELETE FROM federation_relay_items;
+        DELETE FROM remote_dispatch_attachments;
+        -- S10-19: peer_run_grants is dispatch-scoped federation state, purged alongside attachments.
+        DELETE FROM peer_run_grants;
+        DELETE FROM federated_dispatches;
+        -- S10-15 ruling 3(a): remote_agents was unpurgeable before this slice (breaker finding 2).
+        DELETE FROM remote_agents;
+        -- S10-15 (INV-P-006): agent_rate is peer-writable (checkAndBumpRate, agent-rate-limit.ts)
+        -- and must be purgeable like every other coordination-bus table — also the storage for
+        -- the B14 per-peer-per-window proposal block (errata NB8): clearing it here is what
+        -- lifts that block immediately after a reset.
+        DELETE FROM agent_rate;
+        -- S10-16 R14.3 (v5, P10): peer_reply_outbox and peer_link_confirm_observations are the two
+        -- link-binding tables NOT exempt from resetAll — the outbox is coordination-bus state and
+        -- confirm observations are the only table a peer's own call causes a row in (INV-P-006(b)).
+        -- The other four — bindings, attempts, scan facts, containment — stay out (this host's own
+        -- proofs and its operator's own decisions); see A2_RESET_EXEMPT_TABLES for the ONE list.
+        DELETE FROM peer_reply_outbox;
+        DELETE FROM peer_link_confirm_observations;
+        -- [errata 6(16), NB6]: unconditional, not scoped to the settlement's own touched threads
+        -- — closes the "persists forever on an already-released pact" gap the settlement's own
+        -- per-thread clear cannot reach on its own.
+        DELETE FROM pact_applied_ids;
+        -- S10-21a C1 (§7): agent_launch_sessions, current_sessions, and agent_sweep_restore_marks
+        -- are DELIBERATELY ABSENT from this list — the same exemption pattern this method already
+        -- gives \`agents\` (also never deleted here): purging the launch table would leave every
+        -- chair row alive with no way to be restored automatically, reimposing the ritual this
+        -- slice removes. None of the three is peer-writable (host-local writers only), so
+        -- INV-P-006 does not reach them.
+        DELETE FROM worker_terminal_archives;
+        DELETE FROM worker_terminal_resources;
+        DELETE FROM worker_dispatches;
+        DELETE FROM dispatch_contexts;
+        DELETE FROM tasks;
+        DELETE FROM messages;
+        DELETE FROM runs;
+        INSERT INTO runs (id, objective, home_database, consumer_generation, legacy)
+          VALUES ('${LEGACY_RUN_ID}', 'Legacy orchestration state (inspect only)', 'this_database', 0, 1);
+      `)
+      enqueueReservedReleasesAfterReset(this.db, pendingReleases)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
     this.hasAnyDispatchContextsCache = undefined
   }
 

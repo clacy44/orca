@@ -14,6 +14,13 @@ import {
   type PactActorContext
 } from './pact-shared'
 import { releasePactRow } from './pact-propose-accept'
+import { isFederatedPact } from './pact-federated-identity'
+import type { SupersessionChainWalker } from './pact-federated-rebind'
+import {
+  remoteMirrorQuarantined,
+  latestHostPauseReasonCode,
+  latestPausingAgentId
+} from './pact-federated-pause-remote-arm'
 
 // S10-21b B12b (design §5, "`--evidence '<run id / suite citation>'`" — no length named; VERIFY
 // in b12-brief.md found no prior evidence-handling pattern for a pact release, so this reuses
@@ -68,7 +75,13 @@ export function pausePact(db: Database.Database, params: PausePactParams): Threa
 // triggered the pause — the host row never records which side that was, and requiring the whole
 // pair to be clear is what stops the quarantined/gone/left side from lifting its own pause: if
 // it is still quarantined/gone/left, the condition has not cleared, no matter who calls resume.
-function pauseConditionCleared(db: Database.Database, thread: ThreadRow): boolean {
+// S10-21b B14 (design §4.4, D-R135 F17) gains the federated remote arms below: a rendered
+// `remote:<link>:<id>` key never matched `agents.id`, so both predicates read CLEARED before.
+function pauseConditionCleared(
+  db: Database.Database,
+  thread: ThreadRow,
+  walkSupersessionChain: SupersessionChainWalker
+): boolean {
   const proposer = thread.pact_proposer_agent_id
   const withAgent = thread.pact_with_agent_id
   if (!proposer || !withAgent) {
@@ -81,9 +94,25 @@ function pauseConditionCleared(db: Database.Database, thread: ThreadRow): boolea
         `SELECT 1 FROM agents WHERE id IN (?, ?) AND quarantined = 1 AND tombstoned_at IS NULL`
       )
       .get(proposer, withAgent)
-    return !row
+    if (row) {
+      return false
+    }
+    // Remote arm (design §4.4 row 1, split to pact-federated-pause-remote-arm.ts): a
+    // counterpart_quarantined pause on a federated pact is not resumable while the mirror
+    // (walked through B2's supersession chain) is quarantined.
+    if (isFederatedPact(thread) && remoteMirrorQuarantined(db, thread, walkSupersessionChain)) {
+      return false
+    }
+    return true
   }
   if (reason === 'counterpart_gone') {
+    // Errata NB1: both share pact_pause_reason='counterpart_gone' (no CHECK widened) — only the
+    // ledger row's own reason_code disambiguates. 'counterpart_unreachable' is NEVER cleared
+    // here; only commit 15's link-recovery sweep clears it (refuses manual --resume meanwhile).
+    const ledgerReasonCode = latestHostPauseReasonCode(db, thread.id)
+    if (ledgerReasonCode === 'counterpart_unreachable') {
+      return false
+    }
     const row = db
       .prepare(`SELECT 1 FROM agents WHERE id IN (?, ?) AND state = 'gone'`)
       .get(proposer, withAgent)
@@ -103,14 +132,8 @@ function pauseConditionCleared(db: Database.Database, thread: ThreadRow): boolea
   return false
 }
 
-function latestPausingAgentId(db: Database.Database, threadId: string): string | null {
-  const row = db
-    .prepare(
-      `SELECT actor_agent_id FROM pact_steps WHERE thread_id = ? AND kind = 'pause' ORDER BY seq DESC LIMIT 1`
-    )
-    .get(threadId) as { actor_agent_id: string | null } | undefined
-  return row?.actor_agent_id ?? null
-}
+// D-R134 F13 fix (filters actor_is_remote = 0) now lives in pact-federated-pause-remote-arm.ts,
+// split out per the max-lines ratchet.
 
 // Rev 5: thread-level pauses (thread_closed/thread_paused) have no reopen verb — resume is
 // refused forever and the only printed next step is release.
@@ -129,7 +152,8 @@ export type ResumePactOutcome =
 // pact paused (K16) — the pausing side's own later `--resume` call always succeeds regardless.
 export function resumePactOrRequest(
   db: Database.Database,
-  params: ResumePactParams
+  params: ResumePactParams,
+  walkSupersessionChain: SupersessionChainWalker
 ): ResumePactOutcome {
   const thread = requireThread(db, params.threadId)
   requirePactParticipant(thread, params.callerAgentId)
@@ -158,7 +182,7 @@ export function resumePactOrRequest(
   // may resume unconditionally" — AUTHORITY § grants either participant that authority only
   // once the pause's own condition has cleared. Without this check a quarantined/gone/left
   // participant lifts its own containment auto-pause and keeps driving the pact.
-  if (pausingAgentId === null && !pauseConditionCleared(db, thread)) {
+  if (pausingAgentId === null && !pauseConditionCleared(db, thread, walkSupersessionChain)) {
     throw new OrchestrationError(
       'pact_paused',
       `Refused: this pact is paused (${thread.pact_pause_reason}) and the condition has not ` +
@@ -263,101 +287,12 @@ export function releasePact(db: Database.Database, params: ReleasePactParams): T
   return releasePactRow(db, thread, { ...params, summary }, 'release')
 }
 
-export type AutoPauseOutcome = {
-  threadId: string
-  proposerAgentId: string
-  withAgentId: string
-  reason: PactPauseReason
-}
-
-// Liveness auto-pause (K6/K17): a HOST row (actor_agent_id NULL) — never params.from, never a
-// participant claim. Idempotent: a thread already paused is left alone (no double pause row).
-function autoPauseOneThread(
-  db: Database.Database,
-  thread: ThreadRow,
-  reason: PactPauseReason
-): AutoPauseOutcome {
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    // R3 (D-R136): bumps pact_flight_token like every other pact-state writer — an auto-pause
-    // between emit and settle must show up in the settle guard's re-read too.
-    db.prepare(
-      `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = ?,
-         pact_flight_token = pact_flight_token + 1 WHERE id = ?`
-    ).run(reason, thread.id)
-    insertPactStepRow(db, {
-      threadId: thread.id,
-      ordinal: 0,
-      kind: 'pause',
-      actorAgentId: null,
-      actorPaneKey: null,
-      actorHostId: null,
-      messageId: null,
-      summary: null,
-      turnAfterAgentId: null,
-      reasonCode: reason
-    })
-    auditPact(db, {
-      agentId: null,
-      actorPaneKey: null,
-      actorHostId: null,
-      verb: 'pact_auto_pause',
-      outcome: 'paused',
-      reasonCode: reason
-    })
-    db.exec('COMMIT')
-  } catch (err) {
-    db.exec('ROLLBACK')
-    throw err
-  }
-  return {
-    threadId: thread.id,
-    proposerAgentId: thread.pact_proposer_agent_id as string,
-    withAgentId: thread.pact_with_agent_id as string,
-    reason
-  }
-}
-
-// K6/K17 (counterpart_gone/counterpart_left/counterpart_quarantined): every ENGAGED,
-// not-already-paused pact where `agentId` is a participant.
-export function autoPausePactsForAgent(
-  db: Database.Database,
-  agentId: string,
-  reason: PactPauseReason
-): AutoPauseOutcome[] {
-  const rows = db
-    .prepare(
-      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state = 'engaged'
-       AND pact_paused_at IS NULL AND (pact_proposer_agent_id = ? OR pact_with_agent_id = ?)`
-    )
-    .all(agentId, agentId) as ThreadRow[]
-  return rows.map((thread) => autoPauseOneThread(db, thread, reason))
-}
-
-// K17 (thread_closed/thread_paused): a single thread's engaged pact, regardless of which side
-// triggered the thread-state change.
-//
-// GATE-1 (S10-21b B6, design §10 row 6 — behaviour change for local pacts): widened from
-// `pact_state !== 'engaged'` to `pact_state NOT IN ('engaged', 'proposed')` — a `proposed`
-// (not-yet-accepted) pact is now eligible for the same thread-state auto-pause as an engaged
-// one. Without this widening a thread that closes/pauses WHILE a federated propose is still
-// outstanding (unanswered, `pact_state = 'proposed'`) never gets a host pause row at all, so
-// `resumePactOrRequest`'s pause-condition-cleared check (this same file) has nothing to clear
-// and the pact just sits proposed forever with no ledger trace of the thread-state change.
-function autoPauseEligible(thread: ThreadRow): boolean {
-  return thread.pact_state === 'engaged' || thread.pact_state === 'proposed'
-}
-
-export function autoPausePactOnThread(
-  db: Database.Database,
-  threadId: string,
-  reason: PactPauseReason
-): AutoPauseOutcome | null {
-  const thread = db
-    .prepare(`SELECT * FROM threads WHERE id = ? AND purged_at IS NULL`)
-    .get(threadId) as ThreadRow | undefined
-  if (!thread || !autoPauseEligible(thread) || thread.pact_paused_at !== null) {
-    return null
-  }
-  return autoPauseOneThread(db, thread, reason)
-}
+// K6/K16/K17 liveness auto-pause hooks now live in pact-lifecycle-autopause.ts (split out per
+// the max-lines ratchet) — re-exported here so every existing importer of pact-lifecycle.ts
+// (db.ts) is untouched. R3 (D-R136) flight-token bump carried into the moved
+// autoPauseOneThread (pact-lifecycle-autopause.ts) so both intents survive.
+export {
+  autoPausePactsForAgent,
+  autoPausePactOnThread,
+  type AutoPauseOutcome
+} from './pact-lifecycle-autopause'

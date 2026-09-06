@@ -84,6 +84,7 @@ import {
 } from './orchestration-sensitive-thread-guard'
 import { ORCHESTRATION_PACT_METHODS } from './orchestration-pact'
 import { ORCHESTRATION_PACT_STEP_METHODS } from './orchestration-pact-step'
+import { ORCHESTRATION_PACT_PURGE_METHODS } from './orchestration-pact-purge'
 import { ORCHESTRATION_THREAD_INVITE_METHODS } from './orchestration-thread-invite'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import {
@@ -658,6 +659,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_WAIT_METHODS,
   ...ORCHESTRATION_PACT_METHODS,
   ...ORCHESTRATION_PACT_STEP_METHODS,
+  ...ORCHESTRATION_PACT_PURGE_METHODS,
   ...ORCHESTRATION_THREAD_INVITE_METHODS,
   ...ORCHESTRATION_FEDERATED_PEER_ASK_METHODS,
   ...ORCHESTRATION_FEDERATED_PEER_SEND_METHODS,

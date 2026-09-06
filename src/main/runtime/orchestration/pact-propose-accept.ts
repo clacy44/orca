@@ -17,6 +17,7 @@ import {
   type PactActorContext
 } from './pact-shared'
 import { findRemotePartyByRenderedKey } from './pact-federated-identity'
+import { refuseIfLinkCeilingSaturated } from './pact-federated-ledger-ceiling'
 import { findBindingsByEnvironment } from './link-binding-store'
 import { isPeerLinkQuarantined } from './link-binding-observations-store'
 import { OrchestrationError } from './orchestration-error'
@@ -84,6 +85,14 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
           `internal error: federated peer ${peer.id} resolved by requireAccountablePeer but its remote_agents row vanished mid-transaction`
         )
       }
+      // S10-21b B14 (design §4.6(a), errata NB7): the per-link ceiling, mirrored here for the
+      // LOCAL propose direction (inbound propose has its own call, pact-federated-propose-apply.ts).
+      refuseIfLinkCeilingSaturated(
+        db,
+        remote.environment_id,
+        remote.display_name,
+        remote.environment_id
+      )
       // R18.4(b)'s candidate lookup (link-binding-store.ts): CONFIRMED, unrevoked bindings for
       // this environment — the same two clauses findBindingCandidateByKeyFingerprint applies.
       // No binding yet (the environment was found by probe, never link-paired) leaves the two
@@ -238,12 +247,16 @@ export function releasePactRow(
   db.exec('BEGIN IMMEDIATE')
   try {
     // D-R134 F4 local half: pact_flight_token bumped alongside the state/turn write it guards.
+    // S10-21b B14 (design §4.6(b)): `pact_release_at` stamped here — the retention-based purge
+    // exemption (`trg_pact_steps_no_delete`) keys on it, and it was never set anywhere before
+    // this fix (a `decline` leaves it NULL too, matching a decline never having been released).
     db.prepare(
       `UPDATE threads SET pact_state = 'released', pact_turn_agent_id = NULL,
          pact_paused_at = NULL, pact_pause_reason = NULL, pact_at = datetime('now'),
-         pact_flight_token = pact_flight_token + 1
+         pact_flight_token = pact_flight_token + 1,
+         pact_release_at = CASE WHEN ? = 'release' THEN datetime('now') ELSE pact_release_at END
        WHERE id = ?`
-    ).run(thread.id)
+    ).run(kind, thread.id)
     insertPactStepRow(db, {
       threadId: thread.id,
       ordinal: 0,
