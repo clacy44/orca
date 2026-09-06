@@ -11,10 +11,19 @@
  * for a new failure here. B3 (`attachLaneDelegationLeaseStore`) closed this stage.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const SRC_MAIN = join(process.cwd(), 'src/main')
+
+/**
+ * Whether `path` is a lane module, judged by its location relative to `srcMain` — never by the
+ * absolute path. A checkout directory whose own name contains "lane" (e.g. a worktree at
+ * `.../orca-s10-21-lane2`) must not cause this to match every file under src/main.
+ */
+function isLaneModulePath(path: string, srcMain: string): boolean {
+  return /lane/i.test(relative(srcMain, path))
+}
 
 /** Tracked, audited gaps — composition work for a later stage, not a regression. Currently empty. */
 const KNOWN_OPEN_GAPS = new Set<string>()
@@ -38,7 +47,7 @@ function listSourceFiles(root: string): string[] {
 }
 
 const ALL_MAIN_FILES = listSourceFiles(SRC_MAIN)
-const LANE_MODULE_FILES = ALL_MAIN_FILES.filter((path) => /lane/i.test(path))
+const LANE_MODULE_FILES = ALL_MAIN_FILES.filter((path) => isLaneModulePath(path, SRC_MAIN))
 
 type ExportedSeam = { name: string; file: string }
 
@@ -107,5 +116,14 @@ describe('lane composition parity (release-audit T1)', () => {
     for (const gap of KNOWN_OPEN_GAPS) {
       expect(names.has(gap)).toBe(true)
     }
+  })
+
+  it('classifies lane modules by the path relative to src/main, not the checkout directory name', () => {
+    // A checkout whose absolute directory name contains "lane" (e.g. a worktree at
+    // .../orca-s10-21-lane2/src/main/runtime/foo.ts) must not be treated as a lane module just
+    // because "lane" appears in the absolute prefix above SRC_MAIN.
+    const srcMain = '/home/ubuntu/orca-s10-21-lane2/src/main'
+    expect(isLaneModulePath(join(srcMain, 'runtime/foo.ts'), srcMain)).toBe(false)
+    expect(isLaneModulePath(join(srcMain, 'runtime/lane-wire-composition.ts'), srcMain)).toBe(true)
   })
 })
