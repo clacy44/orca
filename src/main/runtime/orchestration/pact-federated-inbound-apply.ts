@@ -85,7 +85,10 @@ export function applyInboundPactVerb(
     return applyPropose(db, resolution.thread, args)
   }
 
-  runPactPartyAndMatrixGates(args, resolution.thread) // Gates 11-13
+  const matrixResult = runPactPartyAndMatrixGates(args, resolution.thread) // Gates 11-13
+  if (matrixResult.outcome === 'resume_noop') {
+    return noopReceipt(args.messageId, resolution.thread.id)
+  }
 
   // resync_request/resync bypass gate 14's strict fence entirely (§2.5: "the wire dedupe alone
   // is sufficient for it" — gate 8, above, already supplied that). gap_notice gets NO special
@@ -182,6 +185,15 @@ function applyLedgerOrNoLedgerVerb(
       // pact_ordinal — otherwise the local counterpart is permanently refused `not_your_turn`.
       ordinal = thread.pact_ordinal + 1
       turnAfterAgentId = otherLocalParty(thread, senderKey)
+      if (turnAfterAgentId === null) {
+        // N8: unreachable today (gate 12 guarantees the sender is a named party and exactly one
+        // party is local) but the write was unguarded — refuse rather than ever null the turn
+        // column out from under the pact.
+        throw new OrchestrationError(
+          'pact_party_unresolved',
+          `Refused: ${thread.id} has no resolvable local counterpart for the turn.`
+        )
+      }
       db.prepare(
         `UPDATE threads SET pact_ordinal = ?, pact_turn_agent_id = ?, pact_flight_token = pact_flight_token + 1
          WHERE id = ?`

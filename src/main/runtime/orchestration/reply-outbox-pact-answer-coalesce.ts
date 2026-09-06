@@ -26,20 +26,39 @@ export function findUnsettledPactAnswerOutboxId(
 }
 
 // Replaces (not appends) — guarded `state='queued'`, matching every other coalescing write here.
+// N6: also refreshes local_message_id, pact_state and pact_flight_token — re-read from the
+// thread exactly as enqueueReplyOutbox stamps them on a fresh insert — so settle's
+// markPeerRelayAccepted stamps the NEW message and the staleness guard compares the CURRENT
+// token, never the superseded row's.
 export function replacePactAnswerPayload(
   db: Database.Database,
   id: string,
+  localMessageId: string,
   payload: string,
   byteCount: number,
   pactSeq: number,
-  pactEra: number
+  pactEra: number,
+  pactThreadId: string
 ): boolean {
+  const thread = db
+    .prepare('SELECT pact_state, pact_flight_token FROM threads WHERE id = ?')
+    .get(pactThreadId) as { pact_state: string | null; pact_flight_token: number } | undefined
   const result = db
     .prepare(
-      `UPDATE peer_reply_outbox SET payload = ?, byte_count = ?, pact_seq = ?, pact_era = ?
+      `UPDATE peer_reply_outbox SET local_message_id = ?, payload = ?, byte_count = ?,
+         pact_seq = ?, pact_era = ?, pact_state = ?, pact_flight_token = ?
         WHERE id = ? AND state = 'queued'`
     )
-    .run(payload, byteCount, pactSeq, pactEra, id)
+    .run(
+      localMessageId,
+      payload,
+      byteCount,
+      pactSeq,
+      pactEra,
+      thread?.pact_state ?? null,
+      thread?.pact_flight_token ?? null,
+      id
+    )
   return result.changes === 1
 }
 
@@ -56,7 +75,17 @@ export function enqueueReplyOutboxCoalesced(
       : null
   if (
     existing !== null &&
-    replacePactAnswerPayload(db, existing, p.payload, p.byteCount, p.pactSeq ?? 0, p.pactEra ?? 0)
+    p.pactThreadId !== undefined &&
+    replacePactAnswerPayload(
+      db,
+      existing,
+      p.localMessageId,
+      p.payload,
+      p.byteCount,
+      p.pactSeq ?? 0,
+      p.pactEra ?? 0,
+      p.pactThreadId
+    )
   ) {
     return existing
   }

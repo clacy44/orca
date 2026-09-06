@@ -237,11 +237,11 @@ import {
 } from './pact-federated-inbound-apply'
 import { drainPendingRebindParty as drainPendingRebindPartyImpl } from './pact-federated-rebind'
 import type { FederatedPactEmitRuntime } from './pact-federated-emit'
+import { mintResyncRequestIfNeeded as mintResyncRequestIfNeededImpl } from './pact-federated-repair'
 import {
   firePactTerminalSettleDisposition as firePactTerminalSettleDispositionImpl,
-  mintResyncRequestIfNeeded as mintResyncRequestIfNeededImpl,
   type PactTerminalSettleOutcome
-} from './pact-federated-repair'
+} from './pact-federated-terminal-settle'
 import {
   getOrCreateMailboxDelivery as getOrCreateMailboxDeliveryImpl,
   acknowledgeMailboxDelivery as acknowledgeMailboxDeliveryImpl,

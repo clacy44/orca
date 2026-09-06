@@ -209,11 +209,24 @@ export function drainPendingRebindParty(
   db: Database.Database,
   runtime: FederatedPactEmitRuntime | null
 ): number {
+  // N7: enqueueFederatedPactVerb opens its OWN `BEGIN IMMEDIATE` (SQLite cannot nest), so the
+  // token clear cannot land inside its transaction — FORCED DEVIATION from the brief's preferred
+  // shape. The NOT EXISTS guard alone closes the window: a crash between the enqueue commit and
+  // the token-clear UPDATE leaves the token set, but this guard then excludes the thread from
+  // the NEXT tick's scan (the just-enqueued row is still 'queued'/'sending'), so no second
+  // gap_notice is minted; the token itself is cleared, late, whenever that tick's clear runs (or
+  // never, if the crash also lost the clear — a stuck token only ever suppresses a re-mint, per
+  // errata 21b-E5, never blocks anything else).
   const rows = db
     .prepare(
       `SELECT id, pact_relay_pending, pact_proposer_agent_id, pact_with_agent_id FROM threads
        WHERE pact_relay_pending IN ('rebind', 'gap_notice')
-         AND pact_peer_agent_id IS NOT NULL AND purged_at IS NULL`
+         AND pact_peer_agent_id IS NOT NULL AND purged_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM peer_reply_outbox
+            WHERE pact_thread_id = threads.id AND relay_kind = 'pact_gap_notice'
+              AND state IN ('queued', 'sending')
+         )`
     )
     .all() as {
     id: string

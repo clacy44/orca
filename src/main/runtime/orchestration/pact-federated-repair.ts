@@ -1,33 +1,20 @@
 // S10-21b B9 (design §2.5/§2.6(c)/§2.9, Ruling 34 Addendum 6(2)/6(11), errata NA6/NB4) — the
-// strict fence's gap/desync outcomes, the fresh-nonce-gated `resync_request` mint, and the
-// terminal-settle disposition (cancel tail + pause + queue `gap_notice` + bounded repair
-// counter). `resync`/`resync_request`'s own APPLY functions live in
-// pact-federated-resync-apply.ts (max-lines split). `pact_ordinal` is never touched here
-// (INV-P-021) — this file only ever writes pact_peer_seq/pact_paused_at/pact_relay_pending/
-// pact_repair_attempts/pact_resync_nonce(+_at)/pact_turn_in_flight_at.
+// strict fence's gap/desync outcomes and the fresh-nonce-gated `resync_request` mint.
+// `resync`/`resync_request`'s own APPLY functions live in pact-federated-resync-apply.ts
+// (max-lines split); the terminal-settle disposition call sites (a settling outbox item) live in
+// pact-federated-terminal-settle.ts (D-R136 B8d split) — this file keeps the shared
+// cancelPactTailAndPauseBody/cancelPactTailAndPause (exported for that module) and the INBOUND
+// (no settling item) disposition, firePactDesyncDispositionInbound. `pact_ordinal` is never
+// touched here (INV-P-021) — this file only ever writes pact_peer_seq/pact_paused_at/
+// pact_relay_pending/pact_repair_attempts/pact_resync_nonce(+_at)/pact_turn_in_flight_at.
 import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { writeAgentAudit } from './agent-audit-log'
 import { checkAndBumpRate } from './agent-rate-limit'
-import { settleReplyOutboxItem } from './reply-outbox-lifecycle'
 import { enqueueFederatedPactVerb } from './pact-federated-emit'
 import { insertPactStepRow, requireThread } from './pact-shared'
-import { PACT_HOLD_CAUSES } from './reply-outbox-pump-disposition'
-import {
-  auditReplyRelaySettleRaced,
-  fireReplyRelayDispositionNotice,
-  shouldFireDispositionNotice
-} from './reply-outbox-pump-notify'
-import {
-  LINK_BINDING_RATE_WINDOW_MS,
-  PACT_RELAY_HOLD_MAX_MS,
-  PACT_RELAY_FAILED_NOTICE,
-  REPLY_RELAY_ABANDONED_NOTICE
-} from './link-binding-constants'
-import type { ReplyOutboxRow } from './reply-outbox-types'
+import { LINK_BINDING_RATE_WINDOW_MS, PACT_RELAY_HOLD_MAX_MS } from './link-binding-constants'
 import type { ThreadRow } from './thread-directory-types'
-import type { OrcaRuntimeService } from '../orca-runtime'
-import type { OrchestrationDb } from './db'
 
 // §2.5's fence table — the oversize-gap boundary.
 export const PACT_MAX_GAP = 64
@@ -116,110 +103,22 @@ export function mintResyncRequestIfNeeded(db: Database.Database, threadId: strin
   return true
 }
 
-// S10-21b B9b (design v3.1:560-570/684-700, §2.6(c), gap 21b-G1): true once a pact item's retry
-// (one of the four PACT_HOLD_CAUSES) has been held past PACT_RELAY_HOLD_MAX_MS, read from
-// first_held_at ONLY. Not in reply-outbox-pump-disposition.ts, which stays a pure classifier.
-function isPactHoldExpired(item: ReplyOutboxRow, disposition: string, now: number): boolean {
-  return (
-    item.relayKind !== 'reply' &&
-    item.pactThreadId !== null &&
-    PACT_HOLD_CAUSES.has(disposition) &&
-    item.firstHeldAt !== null &&
-    now - item.firstHeldAt > PACT_RELAY_HOLD_MAX_MS
-  )
-}
-
-// S10-21b B9 call-site shape, shared: settle a pact item's terminal disposition (B9's own
-// machinery), then the raced-audit/notice pair every terminal pact settle uses identically —
-// both the pre-existing `refused` call site (reply-outbox-pump.ts) and B9b's new POST-DIAL
-// hold-expired call site below reduce to one call each of this, no duplicated branching.
-export function applyPactTerminalSettle(
-  runtime: OrcaRuntimeService,
-  db: OrchestrationDb,
-  item: ReplyOutboxRow,
-  code: string,
-  errorMessage: string,
-  now: number
-): void {
-  const result = db.firePactTerminalSettleDisposition(item, code, errorMessage, now)
-  if (result.outcome === 'raced') {
-    auditReplyRelaySettleRaced(db, item, 'refused')
-  } else if (shouldFireDispositionNotice(runtime, item, PACT_RELAY_FAILED_NOTICE, now)) {
-    fireReplyRelayDispositionNotice(runtime, item, PACT_RELAY_FAILED_NOTICE, null)
-  }
-}
-
-// S10-21b B9b (gap 21b-G1): the pump's POST-DIAL call site — when isPactHoldExpired, fires B9's
-// terminal settle with the hold cause as the terminal code and reason 'pact_hold_expired' (chair
-// default: §2.6(c) names no code for an expired hold). Returns whether it fired, so the pump's
-// retry branch knows to return without ever calling retryReplyOutboxItem for this item.
-export function firePactHoldExpiredDisposition(
-  runtime: OrcaRuntimeService,
-  db: OrchestrationDb,
-  item: ReplyOutboxRow,
-  disposition: string,
-  now: number
-): boolean {
-  if (!isPactHoldExpired(item, disposition, now)) {
-    return false
-  }
-  applyPactTerminalSettle(runtime, db, item, disposition, 'pact_hold_expired', now)
-  return true
-}
-
-// B9c (D-R134 F10): the 7-day age-abandon — a pact row routes through §2.6(c)'s terminal settle
-// (tail cancel + pause + queue gap_notice); mail keeps the plain settle('abandoned') shape.
-// Owns the WHOLE R18.3 deadline branch (not just the pact half) so reply-outbox-pump.ts's own
-// call site stays a two-line guard, keeping that file under its max-lines budget.
-export function fireReplyOutboxAgeAbandon(
-  runtime: OrcaRuntimeService,
-  db: OrchestrationDb,
-  item: ReplyOutboxRow,
-  now: number
-): void {
-  if (item.relayKind !== 'reply' && item.pactThreadId !== null) {
-    applyPactTerminalSettle(
-      runtime,
-      db,
-      item,
-      'pact_relay_abandoned',
-      item.lastError ?? 'pact relay abandoned after the 7-day age deadline',
-      now
-    )
-    return
-  }
-  // Ruling 26 Addendum 1(q)/F4: the settle's boolean is checked — a lost write (the row was
-  // cancelled underneath this call) must never fire the notice.
-  const settled = db.settleReplyOutboxItem(item.id, {
-    state: 'abandoned',
-    settledAt: now,
-    consecutiveFailures: item.consecutiveFailures,
-    nextAttemptAfter: null,
-    lastErrorCode: item.lastErrorCode,
-    lastError: item.lastError
-  })
-  if (settled) {
-    if (shouldFireDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, now)) {
-      fireReplyRelayDispositionNotice(runtime, item, REPLY_RELAY_ABANDONED_NOTICE, null)
-    }
-  } else {
-    auditReplyRelaySettleRaced(db, item, 'abandoned')
-  }
-}
-
 export type PactDispositionResult = { queued: boolean; attempts: number; exhausted: boolean }
 
 // §2.6(c) steps 2/3/4/6 — the parts of the terminal-settle transaction that apply regardless of
 // WHICH terminal code triggered it and regardless of whether a specific outbox item is settling
 // alongside it (step 1's item-settle and step 7's notice/audit are each caller's own concern —
-// see firePactDesyncDispositionInbound/firePactTerminalSettleDisposition below). Idempotent: a
-// pact that is already paused gets the same pact_paused_at/pact_pause_reason written again — a
-// no-op in effect, per §2.9's "the disposition itself is never suppressed" instruction.
+// see firePactDesyncDispositionInbound below and pact-federated-terminal-settle.ts's
+// firePactTerminalSettleDisposition). Idempotent: a pact that is already paused gets the same
+// pact_paused_at/pact_pause_reason written again — a no-op in effect, per §2.9's "the
+// disposition itself is never suppressed" instruction.
 // B9c (D-R135 F9): the BODY only — no BEGIN/COMMIT/ROLLBACK of its own, so a caller that already
-// holds an open transaction (firePactTerminalSettleDisposition below) can include these steps in
-// its OWN transaction instead of committing them separately (SQLite has no nested transactions).
-// Exceptions propagate to the caller's own rollback.
-function cancelPactTailAndPauseBody(
+// holds an open transaction (firePactTerminalSettleDisposition, pact-federated-terminal-
+// settle.ts) can include these steps in its OWN transaction instead of committing them
+// separately (SQLite has no nested transactions). Exceptions propagate to the caller's rollback.
+// Exported for pact-federated-terminal-settle.ts (D-R136 B8d split) — its
+// firePactTerminalSettleDisposition shares this SAME body inside its own transaction.
+export function cancelPactTailAndPauseBody(
   db: Database.Database,
   threadId: string,
   terminalCode: string
@@ -346,63 +245,4 @@ export function firePactDesyncDispositionInbound(
     })
   }
   return result
-}
-
-export type PactTerminalSettleOutcome =
-  | { outcome: 'settled'; disposition: PactDispositionResult }
-  | { outcome: 'raced' }
-
-// §2.6(c), the outbound-pump call site: a specific outbox ITEM just classified `refused`
-// (design §2.6 table — every terminal pact-item cause reaches here uniformly, `pact_desync`
-// included). Step 1 settles that one item (checked boolean, same guarded shape as every other
-// settle on this path — a lost race applies no disposition at all); steps 2-4/6 are
-// cancelPactTailAndPause's job; step 7's audit fires unconditionally (never metered) — this is a
-// one-shot terminal settle of a specific item, not the INBOUND fence's repeat-fire hazard that
-// firePactDesyncDispositionInbound above exists to bound.
-export function firePactTerminalSettleDisposition(
-  db: Database.Database,
-  item: ReplyOutboxRow,
-  code: string,
-  errorMessage: string,
-  now: number
-): PactTerminalSettleOutcome {
-  if (item.pactThreadId === null) {
-    throw new Error(
-      `internal error: firePactTerminalSettleDisposition called for non-pact outbox item ${item.id}`
-    )
-  }
-  const pactThreadId = item.pactThreadId
-  // B9c (D-R135 F9): steps 1-6 are ONE transaction — settleReplyOutboxItem is a plain prepared
-  // UPDATE (no BEGIN/COMMIT of its own), so it and cancelPactTailAndPauseBody's steps now share
-  // this single BEGIN IMMEDIATE; a crash/throw between them rolls BOTH back, leaving the item
-  // 'sending' and the pact live rather than settled-but-unpaused.
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    const settled = settleReplyOutboxItem(db, item.id, {
-      state: 'refused',
-      settledAt: now,
-      consecutiveFailures: item.consecutiveFailures,
-      nextAttemptAfter: null,
-      lastErrorCode: code,
-      lastError: errorMessage
-    })
-    if (!settled) {
-      db.exec('ROLLBACK')
-      return { outcome: 'raced' }
-    }
-    const disposition = cancelPactTailAndPauseBody(db, pactThreadId, code)
-    writeAgentAudit(db, {
-      agentId: null,
-      actorPaneKey: null,
-      actorHostId: item.linkDeviceId,
-      verb: 'pactRelay',
-      outcome: 'terminal_settle',
-      reasonCode: JSON.stringify({ pactThreadId, outboxId: item.id, code })
-    })
-    db.exec('COMMIT')
-    return { outcome: 'settled', disposition }
-  } catch (err) {
-    db.exec('ROLLBACK')
-    throw err
-  }
 }

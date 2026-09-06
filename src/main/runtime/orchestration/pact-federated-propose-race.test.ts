@@ -293,4 +293,43 @@ describe('pact-federated-propose-race (S10-21b B10, T30)', () => {
       'pact_exists_with_peer'
     )
   })
+
+  // -------------------------------------------------------------------------------------------
+  // D-R136 N3: a malformed propose (seq !== 1) must be refused BEFORE the cross-propose
+  // auto-decline commits — else a hostile peer picking a low thread id destroys this host's own
+  // outstanding proposal and leaves neither side with a live pact.
+  // -------------------------------------------------------------------------------------------
+  it('N3: a propose with seq !== 1 is refused before the auto-decline runs, leaving the local proposal intact', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer(d, 'r1', 'peer-x')
+    // Local thread's minted id sorts higher than THREAD_ID_MIN — local loses the tie-break
+    // (incoming_wins), the exact path that reaches declineLosingLocalPropose.
+    const thread = localOutstandingPropose(d, a, peerKey, THREAD_ID_MIN)
+
+    expectRefusalCode(
+      () =>
+        d.applyInboundPactVerb(
+          inboundProposeArgs({
+            toAgentId: a,
+            senderAgentId: 'r1',
+            peerThreadId: THREAD_ID_MIN,
+            pact: { verb: 'propose', seq: 5, era: 1, stepsTotal: null }
+          })
+        ),
+      'pact_out_of_order'
+    )
+
+    // RED at base: the auto-decline already committed (its own transaction) before the seq
+    // check ran in propose-apply.ts — the local proposal was gone and no decline row/relay
+    // exists to undo it.
+    const row = rawDb(d).prepare('SELECT pact_state FROM threads WHERE id = ?').get(thread.id) as {
+      pact_state: string
+    }
+    expect(row.pact_state).toBe('proposed')
+    const declineStep = rawDb(d)
+      .prepare(`SELECT 1 FROM pact_steps WHERE thread_id = ? AND kind = 'decline'`)
+      .get(thread.id)
+    expect(declineStep).toBeUndefined()
+  })
 })

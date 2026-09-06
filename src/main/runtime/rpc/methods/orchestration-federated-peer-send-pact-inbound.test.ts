@@ -116,7 +116,11 @@ describe('S10-21b B8 inbound pact apply', () => {
   // every existing call site is unaffected) adds the SENDER_A rendered key as a participant,
   // matching the ordinary-mail-exchange precondition design's own comment describes; the new
   // A-F15 test below passes `false` to construct the one case that must still be refused.
-  function seedPeerThread(peerThreadId: string, includeSenderParticipant = true): string {
+  function seedPeerThread(
+    peerThreadId: string,
+    includeSenderParticipant = true,
+    sensitive = false
+  ): string {
     const participants: { participantKey: string; agentId: string | null; role: 'member' }[] = [
       { participantKey: agentB, agentId: agentB, role: 'member' }
     ]
@@ -131,6 +135,7 @@ describe('S10-21b B8 inbound pact apply', () => {
       subject: 'pact seed',
       createdByAgentId: null,
       origin: 'peer',
+      sensitive,
       participants
     })
     raw(db)
@@ -385,7 +390,10 @@ describe('S10-21b B8 inbound pact apply', () => {
     expect(row.pact_peer_paused_at).toBeNull()
   })
 
-  it('B8c item 2 (B-F3): inbound resume refuses pact_not_paused when the peer was never recorded as paused, never on effectivePaused', async () => {
+  it('B8c item 2 (B-F3/N5, CORRECTED): inbound resume against a peer never recorded as paused is an accepted idempotent no-op, never pact_not_paused', async () => {
+    // CORRECTED (D-R136 N5): `pact_not_paused` had no classifier entry (disposition.ts) and
+    // drove the link's own failure threshold on a duplicate/late resume — now an accepted
+    // idempotent no-op, mirroring A-F17's release_noop.
     const threadId = seedPeerThread('thr_aaaaaaaaaaa1')
     raw(db)
       .prepare(
@@ -393,9 +401,13 @@ describe('S10-21b B8 inbound pact apply', () => {
            pact_turn_agent_id = ? WHERE id = ?`
       )
       .run(agentB, `remote:${LINK_DEVICE_ID}:${SENDER_A}`, agentB, threadId)
-    await expect(pactSend({ verb: 'resume', seq: 1, era: 0 })).rejects.toMatchObject({
-      code: 'pact_not_paused'
+    await expect(pactSend({ verb: 'resume', seq: 1, era: 0 })).resolves.toMatchObject({
+      accepted: true
     })
+    const row = raw(db)
+      .prepare('SELECT pact_peer_paused_at FROM threads WHERE id = ?')
+      .get(threadId) as { pact_peer_paused_at: string | null }
+    expect(row.pact_peer_paused_at).toBeNull()
   })
 
   it('B8c item 3 (B-F13): inbound accept refuses pact_paused when this host has paused for containment', async () => {
@@ -515,11 +527,21 @@ describe('S10-21b B8 inbound pact apply', () => {
     ).rejects.toMatchObject({ code: 'pact_out_of_order' })
   })
 
-  it('B8c item 7 (A-F15): gate 12s propose limb refuses a sender who is not a live thread participant', async () => {
-    seedPeerThread('thr_aaaaaaaaaaa1', false)
+  it('B8c item 7 (A-F15/N2, CORRECTED): gate 12s propose limb refuses a sender who is not a live thread participant on a SENSITIVE thread', async () => {
+    // CORRECTED from a non-sensitive seed (D-R136 N2): the participant requirement now mirrors
+    // the local rule (pact-shared.ts's requireSensitiveMembership) and applies only when the
+    // thread is sensitive — this is the one case still refused.
+    seedPeerThread('thr_aaaaaaaaaaa1', false, true)
     await expect(
       pactSend({ verb: 'propose', seq: 1, era: 1, stepsTotal: null })
     ).rejects.toMatchObject({ code: 'not_a_participant' })
+  })
+
+  it('N2: a non-sensitive thread admits a propose from a sender who is not a live thread participant', async () => {
+    seedPeerThread('thr_aaaaaaaaaaa1', false, false)
+    await expect(
+      pactSend({ verb: 'propose', seq: 1, era: 1, stepsTotal: null })
+    ).resolves.toMatchObject({ accepted: true })
   })
 
   it('B8c item 8 (A-F17): inbound release on an unmapped thread is an accepted idempotent no-op; every other verb still pact_no_pact', async () => {
@@ -677,6 +699,39 @@ describe('S10-21b B8 inbound pact apply', () => {
       .prepare('SELECT pact_flight_token FROM threads WHERE id = ?')
       .get(threadId) as { pact_flight_token: number }
     expect(row.pact_flight_token).toBeGreaterThan(0)
+  })
+
+  // D-R136 N8 — unreachable through gate 12 today (it guarantees the sender is a named party and
+  // exactly one party is local), but the write was unguarded — a synthetic thread where the
+  // OTHER (non-sender) party is ALSO remote must refuse rather than null the turn column.
+  it('N8: an inbound step whose other local party is itself remote refuses pact_party_unresolved, never writes NULL into the turn column', async () => {
+    const senderKey = `remote:${LINK_DEVICE_ID}:${SENDER_A}`
+    const otherRemoteKey = `remote:${LINK_DEVICE_ID}:other_remote_1`
+    const { thread } = createThread(raw(db) as unknown as Database.Database, {
+      subject: 'pact seed n8',
+      createdByAgentId: null,
+      origin: 'peer',
+      participants: [
+        { participantKey: senderKey, agentId: null, role: 'member' },
+        { participantKey: otherRemoteKey, agentId: null, role: 'member' }
+      ]
+    })
+    raw(db)
+      .prepare(
+        `UPDATE threads SET pact_peer_link_device_id = ?, pact_peer_thread_id = ?,
+           pact_state = 'engaged', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_turn_agent_id = ?, pact_peer_seq = 0 WHERE id = ?`
+      )
+      .run(LINK_DEVICE_ID, 'thr_aaaaaaaaaaa8', senderKey, otherRemoteKey, senderKey, thread.id)
+
+    await expect(
+      pactSend({ verb: 'step', seq: 1, era: 0 }, { threadId: 'thr_aaaaaaaaaaa8', body: 'x' })
+    ).rejects.toMatchObject({ code: 'pact_party_unresolved' })
+
+    const row = raw(db)
+      .prepare('SELECT pact_turn_agent_id FROM threads WHERE id = ?')
+      .get(thread.id) as { pact_turn_agent_id: string | null }
+    expect(row.pact_turn_agent_id).toBe(senderKey)
   })
 })
 

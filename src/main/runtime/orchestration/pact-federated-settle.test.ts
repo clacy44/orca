@@ -237,9 +237,12 @@ describe('pact-federated-settle', () => {
     })
     expect(settled.outcome).toBe('stale')
 
-    // The pact half never ran: the turn-flip and in-flight clear did not land.
+    // The pact half never ran: the turn-flip did not land, but N1 releases the in-flight marker
+    // THIS item set (item.pactTurnAfter !== null) even on the stale branch — CORRECTED from
+    // "not.toBeNull()": that asserted the pre-N1-fix stranded-marker bug this same delta
+    // introduced (D-R136 N1 — see pact-federated-settle.ts's stale branch).
     const after = d.getThread(threadId)
-    expect(after?.pact_turn_in_flight_at).not.toBeNull()
+    expect(after?.pact_turn_in_flight_at).toBeNull()
     expect(after?.pact_turn_agent_id).toBe(turnBefore)
     const relay = pactStepRelay(d, threadId, messageId)
     expect(relay.relay_state).not.toBe('delivered')
@@ -342,14 +345,68 @@ describe('pact-federated-settle', () => {
     })
     expect(settled.outcome).toBe('stale')
 
+    // N1: the marker still releases even though the pause is what made this settle stale —
+    // CORRECTED from "not.toBeNull()" for the same reason as T12 above (D-R136 N1).
     const after = d.getThread(threadId)
-    expect(after?.pact_turn_in_flight_at).not.toBeNull()
+    expect(after?.pact_turn_in_flight_at).toBeNull()
     expect(after?.pact_turn_agent_id).toBe(turnBefore)
     const relay = pactStepRelay(d, threadId, messageId)
     expect(relay.relay_state).not.toBe('delivered')
 
     const audit = latestAudit(d)
     expect(audit.outcome).toBe('settle_stale')
+  })
+
+  // D-R136 N1 — the stale settle must release the marker THIS item set (never just leave the
+  // turn-flip undone), so B8c's pact_settling gate does not deadlock both sides forever.
+  it('D-R136 N1: a stale settle releases the in-flight marker; a subsequent inbound step is not refused pact_settling', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId, peerKey } = engagedFederatedPact(d, a)
+
+    const { outboxId } = emitStep(d, a, threadId)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    expect(item.pactTurnAfter).toBe(peerKey)
+
+    // Any commit landing in the dial window bumps pact_flight_token (D-R134 F4's real writers —
+    // a local pause/resume, or an inbound peer pause); the dial itself still succeeds.
+    rawDb(d)
+      .prepare(`UPDATE threads SET pact_flight_token = pact_flight_token + 1 WHERE id = ?`)
+      .run(threadId)
+    rawDb(d)
+      .prepare(`UPDATE threads SET pact_peer_thread_id = ? WHERE id = ?`)
+      .run('thr_aaaaaaaaaaa9', threadId)
+
+    const settled = d.settleFederatedPactDelivery(item, {
+      peerMessageId: 'peer_m1',
+      peerReplyThreadId: 'peer_t1'
+    })
+    expect(settled.outcome).toBe('stale')
+
+    const after = d.getThread(threadId)
+    expect(after?.pact_turn_in_flight_at).toBeNull()
+
+    // RED at base: the stranded marker refuses pact_settling forever, since a delivered outbox
+    // row never reaches a terminal settle to clear it any other way.
+    let caught: { code?: string } | undefined
+    try {
+      d.applyInboundPactVerb({
+        pairedDeviceId: ENV,
+        senderAgentId: REMOTE_AGENT_ID,
+        senderEnvironmentId: ENV,
+        messageId: 'msg_aaaaaaaaaaa9',
+        peerThreadId: 'thr_aaaaaaaaaaa9',
+        toAgentId: a,
+        body: 'did it',
+        pact: { verb: 'step', seq: 1, era: after?.pact_era ?? 0 }
+      })
+    } catch (err) {
+      caught = err as { code?: string }
+    }
+    expect(caught?.code).not.toBe('pact_settling')
   })
 
   // The brief's own literal scenario (D-R134 F4 local half): a local RELEASE between emit and

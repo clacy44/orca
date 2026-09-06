@@ -12,7 +12,7 @@ import {
   applyPactTerminalSettle,
   firePactHoldExpiredDisposition,
   fireReplyOutboxAgeAbandon
-} from './pact-federated-repair'
+} from './pact-federated-terminal-settle'
 import {
   fireReplyRelayDispositionNotice,
   shouldFireDispositionNotice,

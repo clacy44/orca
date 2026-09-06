@@ -14,7 +14,10 @@ import { createThread } from './thread-directory'
 import { enqueueReplyOutbox, type RelayKind } from './reply-outbox-store'
 import { claimNextReplyOutboxItem, retryReplyOutboxItem } from './reply-outbox-lifecycle'
 import { classifyReplyRelayError } from './reply-outbox-pump-disposition'
-import { firePactHoldExpiredDisposition, fireReplyOutboxAgeAbandon } from './pact-federated-repair'
+import {
+  firePactHoldExpiredDisposition,
+  fireReplyOutboxAgeAbandon
+} from './pact-federated-terminal-settle'
 import { holdOrRetargetReplyOutboxItem } from './reply-outbox-pump-hold'
 import type * as LinkBindingRoutable from './link-binding-routable'
 import {

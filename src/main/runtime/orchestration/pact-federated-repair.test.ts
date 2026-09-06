@@ -219,6 +219,7 @@ describe('gap_notice suppression (errata 21b-E5)', () => {
   })
 
   // NOTE on cancelPactTailAndPauseBody's own arm (~:266, the same shape added there): its step 2
+
   // (this same function, above the fresh-nonce gate) unconditionally cancels every
   // 'queued'/'sending' row for the pact — including any prior gap_notice — before the gate ever
   // runs, inside the SAME transaction (no concurrent writer can land between them, BEGIN
@@ -229,4 +230,272 @@ describe('gap_notice suppression (errata 21b-E5)', () => {
   // "the two suppression predicates") and as a defensive backstop if step 2's ordering ever
   // changes. Not testable as a red-at-base regression through the public API; left unasserted
   // rather than writing a test against an unreachable branch.
+})
+
+// D-R136 N4 — firePactTerminalSettleDisposition must guard on (era, state) exactly as the
+// delivery settle does (settle.ts), or a relay queued under a stale era pauses/tail-cancels a
+// freshly re-proposed pact it has nothing to do with.
+describe('D-R136 N4: firePactTerminalSettleDisposition is era/state-guarded', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function freshDb(): OrchestrationDb {
+    db = new OrchestrationDb(':memory:')
+    return db
+  }
+
+  function seedAgent(d: OrchestrationDb, id: string): string {
+    const params: UpsertAgentByPaneSuffixParams = {
+      displayName: id,
+      role: null,
+      hostId: 'local',
+      paneKey: `tab:${id}`,
+      terminalHandle: `term_${id}`,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: `term_${id}`,
+      originHostId: 'local'
+    }
+    const result = d.upsertAgentByPaneSuffix(params)
+    if (result.outcome === 'name_taken') {
+      throw new Error(`seedAgent: name taken for ${id}`)
+    }
+    return result.agent.id
+  }
+
+  function actor(agentId: string): {
+    callerAgentId: string
+    callerPaneKey: string | null
+    callerHostId: string
+  } {
+    return { callerAgentId: agentId, callerPaneKey: `tab:${agentId}`, callerHostId: 'local' }
+  }
+
+  const ENV = 'env_n4'
+  const REMOTE_AGENT_ID = 'peer_n4'
+
+  function engagedFederatedPactWithQueuedStep(d: OrchestrationDb): {
+    threadId: string
+    a: string
+    outboxId: string
+  } {
+    const raw = rawDb(d)
+    const a = seedAgent(d, 'a')
+    d.upsertRemoteAgent({
+      environmentId: ENV,
+      environmentName: ENV,
+      linkKind: 'environment',
+      remoteAgentId: REMOTE_AGENT_ID,
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw, {
+      linkDeviceId: ENV,
+      environmentId: ENV,
+      boundEndpointId: 'endpoint_n4',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp_n4',
+      peerCredentialFp: 'pcfp_n4',
+      peerKeyFingerprint: 'pkfp_n4',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({ linkDeviceId: ENV, remoteAgentId: REMOTE_AGENT_ID })
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+    raw
+      .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
+      .run(a, thread.id)
+    const result = d.appendPactStep({ ...actor(a), threadId: thread.id, done: 'x', runId: 'r1' })
+    if (result.outcome === 'refused') {
+      throw new Error('unexpected refusal')
+    }
+    const item = d.getReplyOutboxItemByLocalMessageId(result.message.id)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+    const claimed = d.claimNextReplyOutboxItem(Date.now())
+    if (!claimed || claimed.id !== item.id) {
+      throw new Error('claim did not select the expected outbox row')
+    }
+    return { threadId: thread.id, a, outboxId: item.id }
+  }
+
+  // RED at base: the terminal settle has no era/state guard — it cancels/pauses the BRAND-NEW
+  // era's pact even though the settling item belongs to the era that was just released.
+  it('a relay queued under a released era does not cancel/pause the freshly re-proposed pact', () => {
+    const d = freshDb()
+    const { threadId, a, outboxId } = engagedFederatedPactWithQueuedStep(d)
+    const item = d.getReplyOutboxItem(outboxId)
+    if (!item) {
+      throw new Error('outbox item missing')
+    }
+
+    // Release, then re-propose — a fresh era, unrelated to the item still in flight.
+    d.releasePact({ ...actor(a), threadId, reasonCode: null })
+    const other = seedAgent(d, 'other')
+    d.proposePact({ ...actor(a), threadId, peerAgentId: other, stepsTotal: null })
+    const reproposed = d.getThread(threadId)
+    expect(reproposed?.pact_era).not.toBe(item.pactEra)
+
+    const outcome = d.firePactTerminalSettleDisposition(
+      item,
+      'pact_relay_failed',
+      'transport failure',
+      Date.now()
+    )
+    expect(outcome.outcome).toBe('settled')
+
+    // The freshly re-proposed pact must be untouched: still proposed, not paused, no tail
+    // cancelled (there is nothing queued for the NEW era to cancel).
+    const after = d.getThread(threadId)
+    expect(after?.pact_state).toBe('proposed')
+    expect(after?.pact_paused_at).toBeNull()
+    expect(after?.pact_era).toBe(reproposed?.pact_era)
+  })
+})
+
+// D-R136 N7 — the gap_notice drain must not double-emit across a crash between the enqueue's own
+// commit and the token-clear UPDATE.
+describe('D-R136 N7: the gap_notice drain excludes a thread with an already-unsettled row', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function freshDb(): OrchestrationDb {
+    db = new OrchestrationDb(':memory:')
+    return db
+  }
+
+  function seedAgent(d: OrchestrationDb, id: string): string {
+    const params: UpsertAgentByPaneSuffixParams = {
+      displayName: id,
+      role: null,
+      hostId: 'local',
+      paneKey: `tab:${id}`,
+      terminalHandle: `term_${id}`,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: `term_${id}`,
+      originHostId: 'local'
+    }
+    const result = d.upsertAgentByPaneSuffix(params)
+    if (result.outcome === 'name_taken') {
+      throw new Error(`seedAgent: name taken for ${id}`)
+    }
+    return result.agent.id
+  }
+
+  function actor(agentId: string): {
+    callerAgentId: string
+    callerPaneKey: string | null
+    callerHostId: string
+  } {
+    return { callerAgentId: agentId, callerPaneKey: `tab:${agentId}`, callerHostId: 'local' }
+  }
+
+  const ENV = 'env_n7'
+  const REMOTE_AGENT_ID = 'peer_n7'
+
+  // RED at base: the SELECT has no NOT EXISTS guard, so a thread whose token got re-set to
+  // 'gap_notice' (simulating a crash between the enqueue commit and the token clear, then a
+  // second cause re-flagging it) while an unsettled row from the FIRST drain is still queued
+  // enqueues a SECOND gap_notice on the very next tick.
+  it('a thread with an unsettled pact_gap_notice row is excluded from the next drain tick', () => {
+    const d = freshDb()
+    const raw = rawDb(d)
+    const a = seedAgent(d, 'holder')
+    d.upsertRemoteAgent({
+      environmentId: ENV,
+      environmentName: ENV,
+      linkKind: 'environment',
+      remoteAgentId: REMOTE_AGENT_ID,
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw, {
+      linkDeviceId: ENV,
+      environmentId: ENV,
+      boundEndpointId: 'endpoint_n7',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp_n7',
+      peerCredentialFp: 'pcfp_n7',
+      peerKeyFingerprint: 'pkfp_n7',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({ linkDeviceId: ENV, remoteAgentId: REMOTE_AGENT_ID })
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+    raw
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?,
+           pact_relay_pending = 'gap_notice' WHERE id = ?`
+      )
+      .run(a, thread.id)
+
+    // First tick: real drain, enqueues one row, clears the token.
+    const firstDrain = drainPendingRebindParty(raw, null)
+    expect(firstDrain).toBe(1)
+    const rowCountAfterFirst = raw
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_gap_notice'`
+      )
+      .get(thread.id) as { n: number }
+    expect(rowCountAfterFirst.n).toBe(1)
+
+    // Simulate a second terminal-settle disposition re-flagging the token while the first
+    // gap_notice row is still unsettled ('queued') — the crash-window shape N7 describes.
+    raw.prepare(`UPDATE threads SET pact_relay_pending = 'gap_notice' WHERE id = ?`).run(thread.id)
+
+    const secondDrain = drainPendingRebindParty(raw, null)
+    expect(secondDrain).toBe(0)
+    const rowCountAfterSecond = raw
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_gap_notice'`
+      )
+      .get(thread.id) as { n: number }
+    expect(rowCountAfterSecond.n).toBe(1)
+  })
 })

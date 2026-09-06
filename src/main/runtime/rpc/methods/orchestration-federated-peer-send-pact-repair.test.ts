@@ -450,12 +450,16 @@ describe('S10-21b B9: strict fence, resync/resync_request/gap_notice, terminal d
       })
       // Claim it (state -> 'sending') so the settle's `WHERE state='sending'` matches.
       claimNextReplyOutboxItem(raw(db) as unknown as Database.Database, Date.now())
+      // D-R136 N4: the item's own (era, state) must match the thread's CURRENT (era, state) or
+      // this settle is now correctly classified stale — matching the fixture's own UPDATE above.
       const result = db.firePactTerminalSettleDisposition(
         {
           id: outboxId,
           pactThreadId: threadId,
           linkDeviceId: LINK_DEVICE_ID,
-          consecutiveFailures: 0
+          consecutiveFailures: 0,
+          pactEra: 0,
+          pactState: 'engaged'
         } as never,
         'body_gate_refused',
         'refused',
@@ -491,12 +495,16 @@ describe('S10-21b B9: strict fence, resync/resync_request/gap_notice, terminal d
         relayKind: 'pact_release' as RelayKind
       })
       claimNextReplyOutboxItem(raw(db) as unknown as Database.Database, Date.now())
+      // D-R136 N4: this thread never left seedPeerThread's default (pact_state NULL, era 0) —
+      // the item's own (era, state) must match, or the carve-out below is never reached.
       db.firePactTerminalSettleDisposition(
         {
           id: outboxId,
           pactThreadId: threadId,
           linkDeviceId: LINK_DEVICE_ID,
-          consecutiveFailures: 0
+          consecutiveFailures: 0,
+          pactEra: 0,
+          pactState: null
         } as never,
         'pact_no_pact',
         'refused',
@@ -794,13 +802,17 @@ describe('S10-21b B9: strict fence, resync/resync_request/gap_notice, terminal d
       vi.mocked(insertPactStepRow).mockImplementationOnce(() => {
         throw boom
       })
+      // D-R136 N4: (era, state) must match the thread's CURRENT values (set 'engaged' above) or
+      // this settle is stale and never reaches cancelPactTailAndPauseBody's insertPactStepRow.
       expect(() =>
         db.firePactTerminalSettleDisposition(
           {
             id: outboxId,
             pactThreadId: threadId,
             linkDeviceId: LINK_DEVICE_ID,
-            consecutiveFailures: 0
+            consecutiveFailures: 0,
+            pactEra: 0,
+            pactState: 'engaged'
           } as never,
           'body_gate_refused',
           'refused',

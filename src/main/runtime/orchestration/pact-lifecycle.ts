@@ -279,8 +279,11 @@ function autoPauseOneThread(
 ): AutoPauseOutcome {
   db.exec('BEGIN IMMEDIATE')
   try {
+    // R3 (D-R136): bumps pact_flight_token like every other pact-state writer — an auto-pause
+    // between emit and settle must show up in the settle guard's re-read too.
     db.prepare(
-      `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = ? WHERE id = ?`
+      `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = ?,
+         pact_flight_token = pact_flight_token + 1 WHERE id = ?`
     ).run(reason, thread.id)
     insertPactStepRow(db, {
       threadId: thread.id,

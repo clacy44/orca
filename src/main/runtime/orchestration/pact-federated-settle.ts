@@ -106,6 +106,14 @@ export function settleFederatedPactDelivery(
     }
 
     if (stale) {
+      // N1: release the in-flight marker THIS item set, or it strands forever — nothing else
+      // ever clears it (delivered items never reach a terminal settle), and B8c's pact_settling
+      // gate then refuses every subsequent inbound step/accept, deadlocking both sides.
+      if (item.pactTurnAfter !== null) {
+        db.prepare(
+          `UPDATE threads SET pact_turn_in_flight_at = NULL WHERE id = ? AND pact_turn_in_flight_at IS NOT NULL`
+        ).run(pactThreadId)
+      }
       writeAgentAudit(db, {
         agentId: null,
         actorPaneKey: null,
@@ -118,7 +126,9 @@ export function settleFederatedPactDelivery(
       return { outcome: 'stale' }
     }
 
-    // Steps 3/4 — the fresh path only.
+    // Steps 3/4 — the fresh path only. The marker clears UNCONDITIONALLY (closing B-16 properly
+    // — never only when item.pactTurnAfter !== null); the turn-holder write stays scoped to the
+    // verbs that actually carry one.
     let turnHolderAgentId: string | null = null
     if (item.pactTurnAfter !== null) {
       // D-R134 F4 local half: the settle's own turn flip bumps pact_flight_token too, so a
@@ -128,6 +138,8 @@ export function settleFederatedPactDelivery(
            pact_flight_token = pact_flight_token + 1 WHERE id = ?`
       ).run(item.pactTurnAfter, pactThreadId)
       turnHolderAgentId = item.pactTurnAfter.startsWith('remote:') ? null : item.pactTurnAfter
+    } else {
+      db.prepare(`UPDATE threads SET pact_turn_in_flight_at = NULL WHERE id = ?`).run(pactThreadId)
     }
     db.prepare(
       `UPDATE pact_steps SET relay_state = 'delivered', relay_settled_at = datetime('now')

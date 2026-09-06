@@ -226,6 +226,18 @@ describe('pact pause/resume/release', () => {
     expect(released.pact_state).toBe('released')
   })
 
+  it('D-R136 R3: autoPausePactOnThread bumps pact_flight_token like every other pact-state writer', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const b = seedAgent(d, 'b')
+    const threadId = engagedPact(d, a, b)
+    const before = d.getThread(threadId)?.pact_flight_token ?? -1
+    const outcome = d.autoPausePactOnThread(threadId, 'counterpart_left')
+    expect(outcome).not.toBeNull()
+    const after = d.getThread(threadId)?.pact_flight_token ?? -1
+    expect(after).toBe(before + 1)
+  })
+
   it('auto-pause is idempotent: an already-paused pact is left alone (no double pause row)', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')

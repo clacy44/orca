@@ -131,6 +131,16 @@ export function runPactGrammarGate(args: ApplyInboundPactVerbArgs): string {
   const { pact } = args
   requirePactSafeInt(pact.seq, 'seq')
   requirePactSafeInt(pact.era, 'era')
+  // N3: a propose's seq must be EXACTLY 1 (A-F8) — checked here, BEFORE thread resolution and
+  // resolveCrossProposeOutcome's auto-decline, so a malformed propose can never destroy this
+  // host's own outstanding proposal before being refused. propose-apply.ts's later check stays
+  // as defence.
+  if (pact.verb === 'propose' && pact.seq !== 1) {
+    throw new OrchestrationError(
+      'pact_out_of_order',
+      `Refused: a propose's seq must be 1 (relayed seq ${pact.seq}).`
+    )
+  }
   if (pact.ordinal !== undefined) {
     requirePactSafeInt(pact.ordinal, 'ordinal')
   }
@@ -162,14 +172,17 @@ export type PactThreadResolution =
   | { mode: 'apply'; thread: ThreadRow }
   | { mode: 'release_noop' }
 
-// Gate 12's propose limb (A-F15): the rendered sender must already be a LIVE participant on the
-// mapped thread — any peer that has ever sent one message on a thread could otherwise propose a
-// pact on it.
+// Gate 12's propose limb (A-F15, N2): mirrors the LOCAL rule (pact-shared.ts's
+// requireSensitiveMembership) — participation is required only on a SENSITIVE thread; a
+// non-sensitive thread may name a non-participant, exactly as a local proposer may.
 function requirePactProposeParticipant(
   db: Database.Database,
   thread: ThreadRow,
   senderKey: string
 ): void {
+  if (thread.sensitive !== 1) {
+    return
+  }
   const row = db
     .prepare(
       `SELECT 1 FROM thread_participants WHERE thread_id = ? AND participant_key = ? AND left_at IS NULL`
@@ -240,12 +253,16 @@ export function resolvePactThread(
   return { mode: 'apply', thread: threadRow }
 }
 
-// Gates 11-13 — era, party, matrix, applied against OUR columns. Throws; returns nothing (the
-// resolved thread is unchanged by these checks).
+// N5: 'ok' is the ordinary throws-or-passes shape; 'resume_noop' signals an inbound `resume`
+// against a peer this host never recorded as paused — an accepted idempotent no-op (mirrors
+// A-F17's release_noop), never the transport-shaped `pact_not_paused`.
+export type MatrixGateResult = { outcome: 'ok' } | { outcome: 'resume_noop' }
+
+// Gates 11-13 — era, party, matrix, applied against OUR columns. Throws on refusal.
 export function runPactPartyAndMatrixGates(
   args: ApplyInboundPactVerbArgs,
   thread: ThreadRow
-): void {
+): MatrixGateResult {
   const { pact } = args
   const senderKey = renderedSenderKey(args)
 
@@ -312,12 +329,13 @@ export function runPactPartyAndMatrixGates(
       throw new OrchestrationError('pact_not_engaged', `Refused: ${thread.id} has no engaged pact.`)
     }
     if (thread.pact_peer_paused_at === null) {
-      throw new OrchestrationError(
-        'pact_not_paused',
-        `Refused: ${thread.id}'s pact is not paused from the peer's side.`
-      )
+      // N5: idempotent no-op, not a refusal — `pact_not_paused` had no classifier entry
+      // (reply-outbox-pump-disposition.ts), so a duplicate/late resume fell through to the
+      // transport-shaped bumpFailure branch and degraded the link's failure threshold.
+      return { outcome: 'resume_noop' }
     }
   }
   // `release`/`gap_notice`/`resync`/`resync_request`/`rebind_party`: applicable from any state,
   // while paused — no gate, per §4.2/§2.5.
+  return { outcome: 'ok' }
 }
