@@ -54,6 +54,23 @@ export function findRemotePartyByRenderedKey(
 // but disqualified row throws here rather than falling through, so a superseded/quarantined
 // federated peer id always surfaces its real refusal instead of a misleading local
 // `agent_unknown`.
+// D-R133 F1 / errata 21b-E1: the matched row's own `local_quarantined` is not enough — the
+// `remote_agents` PK is (environment_id, remote_agent_id), so one peer agent legitimately has
+// two rows (paired_device + environment), and db.ts's `isRemoteAgentLocallyQuarantined` unions
+// the quarantine flag across every row sharing this remote_agent_id (D5 Rule 3). This mirrors
+// that exact query rather than calling the OrchestrationDb method, since every caller here holds
+// only the raw `Database.Database` handle (same shape as findRemotePartyByRenderedKey above).
+function isRemoteAgentLocallyQuarantinedAnywhere(
+  db: Database.Database,
+  remoteAgentId: string
+): boolean {
+  return (
+    db
+      .prepare(`SELECT 1 FROM remote_agents WHERE remote_agent_id = ? AND local_quarantined = 1`)
+      .get(remoteAgentId) !== undefined
+  )
+}
+
 export function resolveAccountableRemotePeer(
   db: Database.Database,
   renderedKey: string
@@ -62,7 +79,11 @@ export function resolveAccountableRemotePeer(
   if (!remote) {
     return undefined
   }
-  if (remote.local_quarantined === 1 || remote.remote_quarantined === 1) {
+  if (
+    remote.local_quarantined === 1 ||
+    remote.remote_quarantined === 1 ||
+    isRemoteAgentLocallyQuarantinedAnywhere(db, remote.remote_agent_id)
+  ) {
     throw new OrchestrationError(
       'agent_quarantined',
       `Refused: a pact needs two accountable participants and ${remote.display_name} is quarantined.`,

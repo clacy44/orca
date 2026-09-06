@@ -323,6 +323,106 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
     expect(rowCount(sqliteAgain, 'pact_applied_ids')).toBe(0)
   })
 
+  // D-R133 F4: pact-federated-schema-v42-migration.test.ts's own trigger assertions above only
+  // exercise trg_pact_steps_no_delete's TWO abort arms (local row; same-era remote row) — the
+  // EXEMPTION arm (era-age OR released-and-aged) was untested, so a trigger silently reverted to
+  // v35's unconditional abort would still pass this whole file. FAILS AT BASE: base's trigger has
+  // no exemption arm at all (bare RAISE(ABORT) unconditionally), so every DELETE below throws at
+  // base — these are strengthening additions, not weakenings.
+  it('era-age exemption: an actor_is_remote=1 row whose pact_era is less than the thread current pact_era IS deletable', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    sqlite
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era)
+         VALUES ('thr_era', 'era fixture', 'peer', 'agent:b', 'engaged', 'agent:a', 'agent:a', 5)`
+      )
+      .run()
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_is_remote,
+           actor_agent_id, summary_sha256)
+         VALUES ('thr_era', 0, 3, 'pause', 1, NULL, 'deadbee2')`
+      )
+      .run()
+    expect(() =>
+      sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_era'`).run()
+    ).not.toThrow()
+    expect(rowCount(sqlite, 'pact_steps')).toBe(0)
+  })
+
+  it('retention exemption: a released thread with pact_release_at backdated past PACT_RELEASED_RETENTION_MS (604_800_000ms) makes its actor_is_remote=1 row deletable', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    sqlite
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era, pact_release_at)
+         VALUES ('thr_released_old', 'released fixture', 'peer', 'agent:b', 'released',
+           'agent:a', 'agent:a', 5, datetime('now', '-8 days'))`
+      )
+      .run()
+    // Same era as the thread — only the released+aged disjunct can permit this delete.
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_is_remote,
+           actor_agent_id, summary_sha256)
+         VALUES ('thr_released_old', 0, 5, 'pause', 1, NULL, 'deadbee3')`
+      )
+      .run()
+    expect(() =>
+      sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_released_old'`).run()
+    ).not.toThrow()
+    expect(rowCount(sqlite, 'pact_steps')).toBe(0)
+  })
+
+  it('retention exemption: a released but not-yet-aged thread does NOT make its actor_is_remote=1 row deletable', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    sqlite
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era, pact_release_at)
+         VALUES ('thr_released_new', 'released fixture', 'peer', 'agent:b', 'released',
+           'agent:a', 'agent:a', 5, datetime('now'))`
+      )
+      .run()
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_is_remote,
+           actor_agent_id, summary_sha256)
+         VALUES ('thr_released_new', 0, 5, 'pause', 1, NULL, 'deadbee4')`
+      )
+      .run()
+    expect(() =>
+      sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_released_new'`).run()
+    ).toThrow(/append-only/)
+  })
+
+  // D-R133 F8 / errata 21b-E2: WHEN NULL means "trigger does not fire" in SQLite — before the
+  // IFNULL narrowing, an orphaned remote row (its thread already gone) made the era subquery
+  // NULL, which made the whole WHEN clause NULL, letting the DELETE through (fail-OPEN). FAILS AT
+  // BASE: base's trigger (no IFNULL) allows this delete instead of throwing.
+  it('era-age exemption fails CLOSED on an orphaned remote row (its thread_id matches no threads row)', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_is_remote,
+           actor_agent_id, summary_sha256)
+         VALUES ('thr_orphan_no_such_thread', 0, 0, 'pause', 1, NULL, 'deadbee6')`
+      )
+      .run()
+    expect(() =>
+      sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_orphan_no_such_thread'`).run()
+    ).toThrow(/append-only/)
+  })
+
   it('a v42-stamped DB with pact_applied_ids entirely absent is re-created empty on open (repairUnshippedV42FederatedPacts)', () => {
     const path = freshPath()
     db = new OrchestrationDb(path)
@@ -350,5 +450,54 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
     db = new OrchestrationDb(path)
     const sqlite = rawDb(db)
     expect(hasColumn(sqlite, 'threads', 'pact_pause_epoch')).toBe(true)
+  })
+
+  // D-R133 F6: a store already stamped v42 by an earlier in-review copy could carry v35's
+  // bare-abort trg_pact_steps_no_delete forever and never gain the three v42 indexes — neither
+  // was restored by the repair tier before this fix, since both lived only in the `current < 42`
+  // migration block. FAILS AT BASE: base's repair tier does neither.
+  it('a v42-stamped DB with the OLD bare-abort trg_pact_steps_no_delete and no v42 indexes is repaired on open: the era exemption works and all three indexes exist (repairUnshippedV42FederatedPacts)', () => {
+    const path = freshPath()
+    db = new OrchestrationDb(path)
+    const before = rawDb(db)
+    before.exec(`DROP INDEX IF EXISTS idx_threads_pact_peer`)
+    before.exec(`DROP INDEX IF EXISTS idx_peer_reply_outbox_pact`)
+    before.exec(`DROP INDEX IF EXISTS idx_pact_steps_remote`)
+    before.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
+    before.exec(`
+      CREATE TRIGGER trg_pact_steps_no_delete
+      BEFORE DELETE ON pact_steps
+      BEGIN
+        SELECT RAISE(ABORT, 'pact ledger is append-only');
+      END;
+    `)
+    db.close()
+    db = undefined
+
+    db = new OrchestrationDb(path)
+    const sqlite = rawDb(db)
+    expect(hasIndex(sqlite, 'idx_threads_pact_peer')).toBe(true)
+    expect(hasIndex(sqlite, 'idx_peer_reply_outbox_pact')).toBe(true)
+    expect(hasIndex(sqlite, 'idx_pact_steps_remote')).toBe(true)
+
+    // Behavioral proof it is the WHEN-clause trigger, not the restored bare abort: an
+    // actor_is_remote=1 row whose era is behind the thread's current era is deletable.
+    sqlite
+      .prepare(
+        `INSERT INTO threads (id, subject, origin, pact_with_agent_id, pact_state,
+           pact_proposer_agent_id, pact_turn_agent_id, pact_era)
+         VALUES ('thr_repair_trigger', 'x', 'peer', 'agent:b', 'engaged', 'agent:a', 'agent:a', 5)`
+      )
+      .run()
+    sqlite
+      .prepare(
+        `INSERT INTO pact_steps (thread_id, ordinal, pact_era, kind, actor_is_remote,
+           actor_agent_id, summary_sha256)
+         VALUES ('thr_repair_trigger', 0, 3, 'pause', 1, NULL, 'deadbee5')`
+      )
+      .run()
+    expect(() =>
+      sqlite.prepare(`DELETE FROM pact_steps WHERE thread_id = 'thr_repair_trigger'`).run()
+    ).not.toThrow()
   })
 })

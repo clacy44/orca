@@ -313,6 +313,52 @@ describe('pact-federated-identity', () => {
       )
     })
 
+    // D-R133 F1 / errata 21b-E1: the `remote_agents` PK is (environment_id, remote_agent_id), so
+    // one peer agent legitimately has two rows. Quarantining the paired_device row must still
+    // refuse a propose keyed on the clean environment row for the SAME remote_agent_id — the
+    // quarantine union, not the single matched row. FAILS AT BASE (D-R133 F1): base only checks
+    // `remote.local_quarantined`, which is 0 on the environment row.
+    it('refuses agent_quarantined when a DIFFERENT row (paired_device) for the same remote_agent_id is locally quarantined', () => {
+      const d = freshDb()
+      const raw = rawDb(d)
+      const local = seedAgent(d, 'caller-union')
+      const sharedRemoteId = 'agt_0000000000f1'
+      // The paired_device row: quarantined locally.
+      d.upsertRemoteAgent({
+        environmentId: 'paired-env',
+        environmentName: 'paired-env',
+        linkKind: 'paired_device',
+        remoteAgentId: sharedRemoteId,
+        displayName: 'peer-union',
+        role: null,
+        state: 'live',
+        derived: false,
+        remoteQuarantined: false
+      })
+      raw
+        .prepare(`UPDATE remote_agents SET local_quarantined = 1 WHERE remote_agent_id = ?`)
+        .run(sharedRemoteId)
+      // The environment row: clean, same remote_agent_id, different environment_id.
+      d.upsertRemoteAgent({
+        environmentId: 'env-row',
+        environmentName: 'env-row',
+        linkKind: 'environment',
+        remoteAgentId: sharedRemoteId,
+        displayName: 'peer-union',
+        role: null,
+        state: 'live',
+        derived: false,
+        remoteQuarantined: false
+      })
+      const key = renderFederatedPartyKey({
+        linkDeviceId: 'env-row',
+        remoteAgentId: sharedRemoteId
+      })
+      expect(() => requireAccountablePeer(raw, local, key)).toThrowError(
+        expect.objectContaining({ code: 'agent_quarantined' })
+      )
+    })
+
     it('refuses (agent_unknown-shaped) on superseded_at IS NOT NULL', () => {
       const d = freshDb()
       const raw = rawDb(d)

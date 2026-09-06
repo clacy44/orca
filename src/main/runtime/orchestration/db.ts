@@ -1888,6 +1888,65 @@ export class OrchestrationDb {
     if (!hasTable('pact_applied_ids')) {
       this.db.exec(FEDERATED_PACTS_V42_SCHEMA_SQL)
     }
+    // D-R133 F6: the trigger narrowing and the three v42 indexes previously lived ONLY in the
+    // `current < 42` migration block above — a store already stamped v42 by an earlier in-review
+    // copy (this repair tier's whole reason to exist) never re-enters that block, so it could
+    // keep v35's bare-abort trg_pact_steps_no_delete (or a pre-relay-seq trg_pact_steps_append_
+    // only, or no v42 indexes) forever. Idempotent DROP/CREATE + CREATE INDEX IF NOT EXISTS,
+    // IDENTICAL SQL to the migration block (including errata 21b-E2's IFNULL narrowing).
+    this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_append_only`)
+    this.db.exec(`
+      CREATE TRIGGER trg_pact_steps_append_only
+      BEFORE UPDATE ON pact_steps
+      WHEN NEW.seq <> OLD.seq
+        OR NEW.thread_id <> OLD.thread_id
+        OR NEW.ordinal <> OLD.ordinal
+        OR NEW.kind <> OLD.kind
+        OR IFNULL(NEW.actor_agent_id, '') <> IFNULL(OLD.actor_agent_id, '')
+        OR IFNULL(NEW.actor_pane_key, '') <> IFNULL(OLD.actor_pane_key, '')
+        OR IFNULL(NEW.actor_host_id, '') <> IFNULL(OLD.actor_host_id, '')
+        OR IFNULL(NEW.message_id, '') <> IFNULL(OLD.message_id, '')
+        OR NEW.summary_sha256 <> OLD.summary_sha256
+        OR IFNULL(NEW.turn_after_agent_id, '') <> IFNULL(OLD.turn_after_agent_id, '')
+        OR IFNULL(NEW.reason_code, '') <> IFNULL(OLD.reason_code, '')
+        OR NEW.at <> OLD.at
+        OR IFNULL(NEW.actor_is_remote, 0) <> IFNULL(OLD.actor_is_remote, 0)
+        OR IFNULL(NEW.actor_remote_agent_id, '') <> IFNULL(OLD.actor_remote_agent_id, '')
+        OR IFNULL(NEW.actor_environment_id, '') <> IFNULL(OLD.actor_environment_id, '')
+        OR IFNULL(NEW.relay_seq, -1) <> IFNULL(OLD.relay_seq, -1)
+        OR NOT (NEW.summary IS NULL AND OLD.summary IS NOT NULL
+                AND OLD.summary_purged_at IS NULL AND NEW.summary_purged_at IS NOT NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'pact ledger is append-only');
+      END;
+    `)
+    this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
+    this.db.exec(`
+      CREATE TRIGGER trg_pact_steps_no_delete BEFORE DELETE ON pact_steps
+      WHEN NOT (OLD.actor_is_remote = 1
+                AND (
+                  OLD.pact_era < IFNULL(
+                    (SELECT pact_era FROM threads WHERE id = OLD.thread_id), -1)
+                  OR EXISTS (
+                    SELECT 1 FROM threads t
+                    WHERE t.id = OLD.thread_id
+                      AND t.pact_state = 'released'
+                      AND t.pact_release_at IS NOT NULL
+                      AND (strftime('%s','now') - strftime('%s', t.pact_release_at)) * 1000
+                          >= 604800000  -- PACT_RELEASED_RETENTION_MS
+                  )
+                ))
+      BEGIN SELECT RAISE(ABORT, 'pact ledger is append-only'); END;
+    `)
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_threads_pact_peer
+        ON threads(pact_peer_link_device_id, pact_peer_thread_id)
+        WHERE pact_peer_agent_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_peer_reply_outbox_pact
+        ON peer_reply_outbox(pact_thread_id, seq) WHERE pact_thread_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_pact_steps_remote
+        ON pact_steps(actor_is_remote, actor_environment_id, thread_id);
+    `)
   }
 
   // S10-15 review m-2: scoped to host_id and capped at one match — deterministic today only
@@ -3135,16 +3194,22 @@ export class OrchestrationDb {
             SELECT RAISE(ABORT, 'pact ledger is append-only');
           END;
         `)
-        // design §4.6(b) exact SQL, quoted verbatim (era-age OR released-and-aged-past-
-        // PACT_RELEASED_RETENTION_MS=604_800_000 exemption; replaces v35's unconditional abort;
-        // "keyed on era AGE ... never on pact_state alone" — relaying release does not advance
-        // pact_era, so a peer cannot make its own rows deletable merely by releasing the pact).
+        // design §4.6(b) SQL (era-age OR released-and-aged-past-PACT_RELEASED_RETENTION_MS=
+        // 604_800_000 exemption; replaces v35's unconditional abort; "keyed on era AGE ... never
+        // on pact_state alone" — relaying release does not advance pact_era, so a peer cannot
+        // make its own rows deletable merely by releasing the pact). Errata 21b-E2 (D-R133 F8,
+        // strictly narrowing): the era subquery is wrapped in IFNULL(..., -1) — an orphaned
+        // remote row (its thread already deleted) previously made the subquery NULL, which made
+        // the whole WHEN clause NULL, which SQLite treats as "does not fire" — fail-OPEN, letting
+        // the DELETE through. IFNULL forces the era comparison false for an orphan, so the
+        // trigger fires and aborts (fail-closed) unless the released-and-aged disjunct applies.
         this.db.exec(`DROP TRIGGER IF EXISTS trg_pact_steps_no_delete`)
         this.db.exec(`
           CREATE TRIGGER trg_pact_steps_no_delete BEFORE DELETE ON pact_steps
           WHEN NOT (OLD.actor_is_remote = 1
                     AND (
-                      OLD.pact_era < (SELECT pact_era FROM threads WHERE id = OLD.thread_id)
+                      OLD.pact_era < IFNULL(
+                        (SELECT pact_era FROM threads WHERE id = OLD.thread_id), -1)
                       OR EXISTS (
                         SELECT 1 FROM threads t
                         WHERE t.id = OLD.thread_id

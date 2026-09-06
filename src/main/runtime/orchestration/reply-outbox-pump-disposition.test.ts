@@ -3,7 +3,7 @@
 // FAILS AT BASE: the base classifyReplyRelayError takes no relayKind and has no pact branch at
 // all, so every relayKind-scoped assertion below either throws (no such export) or falls through
 // to the mail-only KNOWN_REFUSAL_CODES/transport-retry paths, producing the wrong `kind`.
-import { describe, expect, it, afterEach } from 'vitest'
+import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import { OrchestrationError } from './orchestration-error'
@@ -176,7 +176,18 @@ function pactRelayAuditCount(sqlite: Database.Database, code: string): number {
 describe('S10-21b B5, T29: pact_settling audit suppression + growing backoff', () => {
   let db: OrchestrationDb | undefined
 
+  // D-R133 F7: shouldEmitPactRelayAudit's suppression window keys on real Date.now()
+  // (agent-rate-limit.ts's checkAndBumpRate, no injection point) — the 100-iteration loop below
+  // was flaky whenever real execution straddled a wall-clock minute boundary mid-loop. Pin the
+  // clock just after a window start, frozen for the whole test (never advanced), so the window
+  // cannot roll over mid-loop. Never relax the `toBe(1)` assertion instead.
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Math.ceil(Date.now() / 60_000) * 60_000 + 100)
+  })
+
   afterEach(() => {
+    vi.useRealTimers()
     db?.close()
     db = undefined
   })
