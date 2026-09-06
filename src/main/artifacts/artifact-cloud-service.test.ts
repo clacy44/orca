@@ -30,6 +30,7 @@ import { ArtifactCloudService } from './artifact-cloud-service'
 
 const createdPaths: string[] = []
 const apiUrl = 'http://localhost:3000'
+const FIXTURE_EXPIRES_AT = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
 const cloudA: OrcaProfileCloudSummary = {
   cloudProfileId: 'cloud-a',
   userId: 'user-a',
@@ -43,7 +44,7 @@ const cloudB: OrcaProfileCloudSummary = {
   linkedAt: 2
 }
 
-function createResponse(slug = 'artifact-a', expiresAt = '2026-09-06T00:00:00.000Z'): Response {
+function createResponse(slug = 'artifact-a', expiresAt = FIXTURE_EXPIRES_AT): Response {
   return new Response(
     JSON.stringify({
       artifact: {
@@ -455,7 +456,7 @@ describe('ArtifactCloudService record authorization', () => {
     let resolveUpdate: ((response: Response) => void) | undefined
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(createResponse('artifact-a', '2026-09-06T00:00:00.000Z'))
+      .mockResolvedValueOnce(createResponse('artifact-a', FIXTURE_EXPIRES_AT))
       .mockImplementationOnce(
         () =>
           new Promise<Response>((resolve) => {
