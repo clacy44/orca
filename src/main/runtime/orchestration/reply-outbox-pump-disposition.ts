@@ -3,7 +3,7 @@
 // fields R18.8 names (error.code, error.data.retryAfterMs) and returns a disposition; the pump
 // applies it (the DB writes, the notice) — no I/O happens in this file.
 import { OrchestrationError } from './orchestration-error'
-import { replyOutboxIntervalMs, applyReplyOutboxJitter } from './reply-outbox-store'
+import { replyOutboxIntervalMs, applyReplyOutboxJitter, type RelayKind } from './reply-outbox-store'
 import { classifyPeerRefusalCode, type ReplyRelayNoticeCode } from './reply-outbox-health'
 import {
   LINK_BINDING_RETRY_MIN_MS,
@@ -68,6 +68,36 @@ const KNOWN_REFUSAL_CODES = new Set([
   'invalid_argument'
 ])
 
+// S10-21b B5 (design §2.6(a)): for a PACT item only (`relay_kind !== 'reply'`), these four causes
+// are repairable (re-register, a quarantine lift, dial-time re-resolution) — hold via the retry
+// path (bumpFailure:false) instead of KNOWN_REFUSAL_CODES' terminal 'refused', bounded by
+// PACT_RELAY_HOLD_MAX_MS once `retryReplyOutboxItem`'s own first_held_at stamp (below) gives that
+// bound a clock to read (the bound-check-then-terminal-settle itself is commit 9's job — this
+// function only classifies the bucket). Checked BEFORE KNOWN_REFUSAL_CODES, which these four
+// codes also belong to, so a pact item never falls through to the terminal branch.
+const PACT_HOLD_CAUSES = new Set([
+  'agent_retired',
+  'agent_unknown',
+  'derived_agent_unaddressable',
+  'agent_quarantined'
+])
+
+// S10-21b B5 (design §2.9): none of these is evidence the transport is unreachable — retry,
+// bumpFailure:false, same growing-backoff derivation as PACT_HOLD_CAUSES above.
+const PACT_RETRY_CAUSES = new Set([
+  'pact_settling',
+  'pact_out_of_order',
+  'pact_identity_unmirrored',
+  'pact_ledger_capped'
+])
+
+// S10-21b B5 (design §2.9): deterministic on the same bytes, or a genuine protocol fault —
+// terminal for a pact item. The other terminal pact-item codes (body_gate_refused,
+// request_mismatch, not_the_addressee, invalid_argument, operation_unknown) are already terminal
+// via KNOWN_REFUSAL_CODES above for every relay kind; these three are net-new codes this slice
+// introduces and have no mail-path meaning.
+const PACT_TERMINAL_ONLY_CAUSES = new Set(['pact_desync', 'pact_era_mismatch', 'pact_no_pact'])
+
 // R18.5's disposition table + R18.8's closed error read, as one pure function.
 // Ruling 26 Addendum 1(r)/F5: the backoff curve's input is the row's persisted
 // consecutive_failures — the same counter the claim (reply-outbox-lifecycle.ts) and the
@@ -75,7 +105,14 @@ const KNOWN_REFUSAL_CODES = new Set([
 export function classifyReplyRelayError(
   error: unknown,
   consecutiveFailures: number,
-  now: number
+  now: number,
+  // S10-21b B5: defaulted so every pre-existing (mail) call site is byte-identical — the pact
+  // branch below never runs for 'reply'.
+  relayKind: RelayKind = 'reply',
+  // S10-21b B5 (design §2.9): the pact retry/hold backoff is derived from the item's own
+  // `attempts` (bumped on every claim), never `consecutiveFailures` — bumpFailure is always false
+  // for these causes, so consecutiveFailures alone would never grow the interval.
+  attempts = 0
 ): ReplyRelayErrorDisposition {
   const errorCode = (error as { code?: unknown } | null)?.code
   const code =
@@ -85,6 +122,21 @@ export function classifyReplyRelayError(
         ? errorCode
         : 'unknown_peer_refusal'
   const errorMessage = sanitizeErrorDetail(error instanceof Error ? error.message : String(error))
+
+  if (relayKind !== 'reply') {
+    if (PACT_TERMINAL_ONLY_CAUSES.has(code)) {
+      return { kind: 'refused', code, noticeCode: REPLY_RELAY_REFUSED_NOTICE, errorMessage }
+    }
+    if (PACT_HOLD_CAUSES.has(code) || PACT_RETRY_CAUSES.has(code)) {
+      return {
+        kind: 'retry',
+        disposition: code,
+        nextAttemptAfter: now + applyReplyOutboxJitter(replyOutboxIntervalMs(attempts)),
+        errorMessage,
+        bumpFailure: false
+      }
+    }
+  }
 
   if (KNOWN_REFUSAL_CODES.has(code)) {
     const noticeCode: ReplyRelayNoticeCode =

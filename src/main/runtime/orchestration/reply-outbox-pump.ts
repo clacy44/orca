@@ -15,6 +15,7 @@ import {
   auditReplyRelaySettleRaced as auditSettleRaced
 } from './reply-outbox-pump-notify'
 import { holdOrRetargetReplyOutboxItem } from './reply-outbox-pump-hold'
+import { shouldEmitPactRelayAudit } from './pact-relay-audit-meter'
 import {
   settleReplyOutboxDelivery,
   type FederatedSendResultShape
@@ -152,7 +153,16 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       // consecutive_failures — the SAME counter the claim (reply-outbox-lifecycle.ts) and the
       // unreachable/recovered edge use — never on `item.attempts` (which bumps on every claim,
       // including ones that end in a hold, and diverges from consecutive_failures under B1).
-      const disposition = classifyReplyRelayError(error, item.consecutiveFailures, at)
+      // S10-21b B5: relayKind/attempts drive the pact-item hold/retry classification and its
+      // attempts-derived backoff (design §2.9) — both defaulted away for mail (item.relayKind
+      // is always 'reply' there).
+      const disposition = classifyReplyRelayError(
+        error,
+        item.consecutiveFailures,
+        at,
+        item.relayKind,
+        item.attempts
+      )
       if (disposition.kind === 'refused') {
         // Ruling 26 Addendum 1(q)/F4: check the settle's boolean before firing.
         const settled = db.settleReplyOutboxItem(item.id, {
@@ -195,7 +205,8 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
         disposition.nextAttemptAfter,
         nextFailures,
         disposition.disposition,
-        disposition.errorMessage
+        disposition.errorMessage,
+        item.relayKind
       )
       if (!wrote) {
         auditSettleRaced(db, item, 'retry')
@@ -203,6 +214,30 @@ export function createReplyOutboxPump(runtime: OrcaRuntimeService): ReplyOutboxP
       }
       if (disposition.bumpFailure) {
         recordReplyOutboxFailureAndMaybeNotify(runtime, item, nextFailures)
+      }
+      // S10-21b B5 (design §2.9): a pact item's retryable disposition (the four PACT_HOLD_CAUSES
+      // and four PACT_RETRY_CAUSES rows in reply-outbox-pump-disposition.ts) writes at most one
+      // audit row per (link, pact) per LINK_BINDING_RATE_WINDOW_MS — never once per occurrence,
+      // since a peer retried at the jittered backoff floor could otherwise flood the audit trail
+      // (T29). Mail and any item with no pact thread are unaffected.
+      if (item.relayKind !== 'reply' && item.pactThreadId) {
+        if (
+          shouldEmitPactRelayAudit(
+            db,
+            item.linkDeviceId,
+            item.pactThreadId,
+            disposition.disposition
+          )
+        ) {
+          db.writeAgentAudit({
+            agentId: null,
+            actorPaneKey: null,
+            actorHostId: item.linkDeviceId,
+            verb: 'pactRelay',
+            outcome: disposition.disposition,
+            reasonCode: JSON.stringify({ pactThreadId: item.pactThreadId, outboxId: item.id })
+          })
+        }
       }
       // Ruling 26 Addendum 3(aa)/4(hh)/(ii): edge-triggered on the notice choke's OWN persisted
       // column (last_notified_condition), never on last_error_code — a hold's write to

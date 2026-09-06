@@ -102,6 +102,11 @@ export const REPLY_OUTBOX_UNREACHABLE_FAILURE_THRESHOLD = 7
 export const REPLY_OUTBOX_LEASE_GRACE_MS = 5_000
 export const REPLY_OUTBOX_HOLD_INTERVAL_MS = 30_000
 export const REPLY_OUTBOX_HOLD_MAX_MS = 900_000
+// S10-21b B5 (design §2.6(a)): a pact item's repairable relay causes (agent re-registered/
+// quarantined, route moved) hold for 24h before a later commit's terminal settle — bounded, but
+// far past mail's 15-minute REPLY_OUTBOX_HOLD_MAX_MS, since the repair (rebind_party, a
+// quarantine lift, dial-time re-resolution) is host-operator-paced, not transport-paced.
+export const PACT_RELAY_HOLD_MAX_MS = 86_400_000
 export const REPLY_OUTBOX_MAX_AGE_MS = 604_800_000
 export const REPLY_OUTBOX_MAX_BYTES = 65_536
 export const REPLY_OUTBOX_PER_LINK_CAP = 256

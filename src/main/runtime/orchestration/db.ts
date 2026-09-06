@@ -205,7 +205,8 @@ import {
   replyOutboxLinkLastDispositionNotifiedAt as replyOutboxLinkLastDispositionNotifiedAtImpl,
   nextReplyOutboxWakeAt as nextReplyOutboxWakeAtImpl,
   type EnqueueReplyOutboxParams,
-  type ReplyOutboxRow
+  type ReplyOutboxRow,
+  type RelayKind
 } from './reply-outbox-store'
 import {
   listReplyOutboxHealthRows as listReplyOutboxHealthRowsImpl,
@@ -5540,21 +5541,26 @@ export class OrchestrationDb {
     return holdReplyOutboxItemCollisionImpl(this.db, id, nextAttemptAfter)
   }
 
+  // S10-21b B5: `now` is now consumed (a pact item's first_held_at stamp) — no longer the
+  // call-site-symmetry-only `_now` of the pre-B5 signature.
   retryReplyOutboxItem(
     id: string,
-    _now: number,
+    now: number,
     nextAttemptAfter: number,
     consecutiveFailures: number,
     lastErrorCode: string | null,
-    lastError: string | null
+    lastError: string | null,
+    relayKind: RelayKind
   ): boolean {
     return retryReplyOutboxItemImpl(
       this.db,
       id,
+      now,
       nextAttemptAfter,
       consecutiveFailures,
       lastErrorCode,
-      lastError
+      lastError,
+      relayKind
     )
   }
 

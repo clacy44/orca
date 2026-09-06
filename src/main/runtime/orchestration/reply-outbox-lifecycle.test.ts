@@ -12,7 +12,8 @@ import {
   claimNextReplyOutboxItem,
   settleReplyOutboxItem,
   holdReplyOutboxItem,
-  retargetReplyOutboxItem
+  retargetReplyOutboxItem,
+  retryReplyOutboxItem
 } from './reply-outbox-lifecycle'
 
 // F15/SMOKE: one test per store module that calls EVERY exported statement once against a fresh
@@ -425,5 +426,84 @@ describe('S10-21b B4, T-NA7: the corrected parenthesised per-pact head-of-line e
     expect(getReplyOutboxItem(sqlite, id)?.pactThreadId).toBeNull()
     const claimed = claimNextReplyOutboxItem(sqlite, now)
     expect(claimed?.id).toBe(id)
+  })
+})
+
+// S10-21b B5 (design §2.8, NA9): retryReplyOutboxItem's first_held_at stamp, scoped to
+// relay_kind != 'reply'. FAILS AT BASE: the base retryReplyOutboxItem never touches
+// first_held_at at all, so a pact item's first_held_at would stay NULL forever, and the
+// PACT_RELAY_HOLD_MAX_MS bound a later commit reads against it would never start.
+describe('S10-21b B5, T29 (third assertion): retryReplyOutboxItem first_held_at scoping', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it("a 'reply' item's first_held_at is untouched by a post-dial retry", () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+    const id = enqueueOne(sqlite, now, 'na9-mail')
+    claimNextReplyOutboxItem(sqlite, now)
+    expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBeNull()
+
+    const wrote = retryReplyOutboxItem(
+      sqlite,
+      id,
+      now + 5_000,
+      now + 10_000,
+      1,
+      'runtime_timeout',
+      'timed out',
+      'reply'
+    )
+    expect(wrote).toBe(true)
+    // Mail's clock semantics are unchanged by B5 — first_held_at stays NULL across a retry,
+    // exactly as holdReplyOutboxItemLocalEvidence's own test-73 exclusion leaves it.
+    expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBeNull()
+  })
+
+  it("a pact item's first_held_at is stamped on the first retry and left alone on the second (COALESCE idempotency)", () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = rawDb(db)
+    const now = Date.now()
+    const id = enqueuePactItem(sqlite, now, {
+      suffix: 'na9-pact',
+      linkDeviceId: 'link_na9',
+      pactThreadId: 'thr_na9',
+      relayKind: 'pact_step'
+    })
+    claimNextReplyOutboxItem(sqlite, now)
+    expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBeNull()
+
+    const firstRetryAt = now + 5_000
+    retryReplyOutboxItem(
+      sqlite,
+      id,
+      firstRetryAt,
+      firstRetryAt + 10_000,
+      0,
+      'pact_settling',
+      'peer settling',
+      'pact_step'
+    )
+    expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBe(firstRetryAt)
+
+    // Second retry, later `now` — COALESCE leaves the FIRST stamp untouched.
+    claimNextReplyOutboxItem(sqlite, firstRetryAt + 10_000)
+    const secondRetryAt = now + 60_000
+    retryReplyOutboxItem(
+      sqlite,
+      id,
+      secondRetryAt,
+      secondRetryAt + 10_000,
+      0,
+      'pact_settling',
+      'peer settling',
+      'pact_step'
+    )
+    expect(getReplyOutboxItem(sqlite, id)?.firstHeldAt).toBe(firstRetryAt)
   })
 })

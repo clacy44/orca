@@ -9,6 +9,7 @@ import {
 } from './link-binding-constants'
 import {
   type ReplyOutboxRow,
+  type RelayKind,
   getReplyOutboxItem,
   replyOutboxIntervalMs,
   applyReplyOutboxJitter
@@ -205,22 +206,42 @@ export function holdReplyOutboxItem(
 // 'queued' with the backoff curve advanced and `consecutive_failures` bumped. Distinct from
 // holdReplyOutboxItem (a PRE-DIAL check that never touches consecutive_failures) and from
 // settleReplyOutboxItem (a terminal state). Guarded `state='sending' -> 'queued'` (P18/R14.3).
+// S10-21b B5 (design §2.8, NA9 fix): for a PACT item (`relayKind !== 'reply'`) only, also stamps
+// `first_held_at = COALESCE(first_held_at, now)` on first call — mirrors holdReplyOutboxItem's
+// own pre-dial COALESCE exactly, so both entry points measure the same PACT_RELAY_HOLD_MAX_MS
+// clock. Scoped OFF for 'reply': an unscoped stamp would make a mail reply that transport-fails
+// a few times abandon 15 minutes after its FIRST transport failure instead of its first genuine
+// hold — mail's clock semantics (including holdReplyOutboxItemLocalEvidence's test-73 exclusion)
+// are untouched. Gate-1: this narrows the observable behaviour of a function mail also uses.
 export function retryReplyOutboxItem(
   db: Database.Database,
   id: string,
+  now: number,
   nextAttemptAfter: number,
   consecutiveFailures: number,
   lastErrorCode: string | null,
-  lastError: string | null
+  lastError: string | null,
+  relayKind: RelayKind
 ): boolean {
-  const result = db
-    .prepare(
-      `UPDATE peer_reply_outbox
-          SET state = 'queued', lease_expires_at = NULL, consecutive_failures = ?,
-              next_attempt_after = ?, last_error_code = ?, last_error = ?
-        WHERE id = ? AND state = 'sending'`
-    )
-    .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, id)
+  const result =
+    relayKind !== 'reply'
+      ? db
+          .prepare(
+            `UPDATE peer_reply_outbox
+                SET state = 'queued', lease_expires_at = NULL, consecutive_failures = ?,
+                    next_attempt_after = ?, last_error_code = ?, last_error = ?,
+                    first_held_at = COALESCE(first_held_at, ?)
+              WHERE id = ? AND state = 'sending'`
+          )
+          .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, now, id)
+      : db
+          .prepare(
+            `UPDATE peer_reply_outbox
+                SET state = 'queued', lease_expires_at = NULL, consecutive_failures = ?,
+                    next_attempt_after = ?, last_error_code = ?, last_error = ?
+              WHERE id = ? AND state = 'sending'`
+          )
+          .run(consecutiveFailures, nextAttemptAfter, lastErrorCode, lastError, id)
   return result.changes === 1
 }
 
