@@ -85,12 +85,13 @@ export const PACT_RESERVED_VERBS: ReadonlySet<FederatedPactVerb> = new Set([
   'resume'
 ])
 
-// §2.2/§2.1: the in-flight guard applies to a verb that hands the turn to the peer. This
-// commit's own test coverage (T3) exercises `step` only — the one turn-consuming verb this
-// commit wires end to end; `accept`'s own turn-setting emit path is left for whichever commit
-// wires accept's federated arm, to avoid asserting an in-flight behaviour this commit does not
-// test.
-export const PACT_TURN_CONSUMING_VERBS: ReadonlySet<FederatedPactVerb> = new Set(['step'])
+// §2.2/§2.1: the in-flight guard applies to a verb that hands the turn to the peer.
+// S10-21b B6c wires `accept` in beside `step` for the in-flight MARKER and the outbox's
+// `pact_turn_after` field — settle still re-applies that same value once the peer acks. Unlike
+// `step`, accept's own `pact_turn_agent_id` write is NOT deferred (see the verb-specific special
+// case below): `trg_pact_turn_membership` (db.ts) requires a valid turn holder the instant
+// `pact_state` becomes 'engaged', which step never triggers since it never touches pact_state.
+export const PACT_TURN_CONSUMING_VERBS: ReadonlySet<FederatedPactVerb> = new Set(['step', 'accept'])
 
 // §2.11: `threads.pact_relay_pending` — DEVIATION (B9c, D-R134 F7/D-R135 F6): the design's
 // closed four-value vocabulary ('release'|'rebind'|'resync_request'|'gap_notice') has no slot
@@ -249,6 +250,40 @@ export function enqueueFederatedPactVerb(
     const psm = opts.threadStateMutation
     if (psm) {
       applyPactPauseResumeState(db, thread.id, psm.pausedAt, psm.pauseReason)
+    }
+
+    // S10-21b B6c: accept/release/decline's own host-local state transition, in this same
+    // transaction — mirrors `step`'s own pact_ordinal special case below (step 2's `if (verb ===
+    // 'step' ...)` block) rather than threading a fourth opts shape through every call site.
+    // MUST run before step 5 (the outbox enqueue) reads `threads.pact_state`/`pact_flight_token`
+    // fresh (reply-outbox-store.ts's enqueueReplyOutbox — never passed in by the caller) so the
+    // relayed row snapshots the POST-transition state. `propose`'s own transition (era/seq reset
+    // + peer-anchor population, B6b/B14) already committed in the CALLER's own transaction
+    // before this one opened (proposePact) — it never re-enters here.
+    if (verb === 'accept') {
+      // `trg_pact_turn_membership` (db.ts, load-bearing, untouched) fires on ANY update that
+      // leaves a row with pact_state='engaged' and demands pact_turn_agent_id be non-null and a
+      // participant — unlike `step` (which never changes pact_state and so never trips it), an
+      // engaged-but-turn-deferred accept is not a state the DB will accept. The turn write
+      // itself is therefore immediate, same value the local path writes; `pact_turn_in_flight_at`
+      // (turnConsuming, step 4 below) still tracks the unsettled relay, and settle's own
+      // (idempotent, same value) turn write is what actually clears it.
+      db.prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?,
+           pact_flight_token = pact_flight_token + 1
+         WHERE id = ?`
+      ).run(opts.turnAfterAgentId ?? null, thread.id)
+    } else if (verb === 'release' || verb === 'decline') {
+      // N9 (batch-1 review, binding): this UPDATE is reached ONLY from the LOCAL release/decline
+      // caller (releasePactRow) — never from inbound apply, a wholly separate code path — so
+      // `pact_release_at` here is always the local host's own release, never a peer's.
+      db.prepare(
+        `UPDATE threads SET pact_state = 'released', pact_turn_agent_id = NULL,
+           pact_paused_at = NULL, pact_pause_reason = NULL,
+           pact_flight_token = pact_flight_token + 1,
+           pact_release_at = CASE WHEN ? = 'release' THEN datetime('now') ELSE pact_release_at END
+         WHERE id = ?`
+      ).run(verb, thread.id)
     }
 
     // Step 2.

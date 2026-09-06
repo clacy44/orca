@@ -304,6 +304,8 @@ export type ReleasePactParams = PactActorContext & {
   // S10-21b B12b (design §5, SCOPE item 2): "<run id / suite citation>" — decline never carries
   // one (releasePactRow's other caller passes summary: null explicitly).
   evidence?: string | null
+  // S10-21b B6c: see ProposePactParams.runtime (pact-propose-accept.ts).
+  runtime?: FederatedPactEmitRuntime | null
 }
 
 // Always unilateral, always available to either participant, any state including paused (K11)

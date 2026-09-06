@@ -16,16 +16,23 @@ import {
   requireUnclaimedPact,
   type PactActorContext
 } from './pact-shared'
-import { findRemotePartyByRenderedKey } from './pact-federated-identity'
+import { findRemotePartyByRenderedKey, isFederatedPact } from './pact-federated-identity'
 import { refuseIfLinkCeilingSaturated } from './pact-federated-ledger-ceiling'
 import { findBindingsByEnvironment } from './link-binding-store'
 import { isPeerLinkQuarantined } from './link-binding-observations-store'
 import { OrchestrationError } from './orchestration-error'
+import { gateVerdictRefusalError } from './gate-refusal-error'
+import { enqueueFederatedPactVerb, type FederatedPactEmitRuntime } from './pact-federated-emit'
 
 export type ProposePactParams = PactActorContext & {
   threadId: string
   peerAgentId: string
   stepsTotal: number | null // null = --open
+  // S10-21b B6c (design §2.3, ruling 21b-E7): a federated propose's own emit — see
+  // AppendPactStepParams.runtime (pact-step.ts) for the same optional/omittable shape. No
+  // RPC-layer caller threads a real one through yet (brief item 1: "no RPC-layer change") — the
+  // pump's own idle-wake still drains a federated propose's outbox row eventually.
+  runtime?: FederatedPactEmitRuntime | null
 }
 
 export function proposePact(db: Database.Database, params: ProposePactParams): ThreadRow {
@@ -144,40 +151,91 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
         thread.id
       )
     }
-    insertPactStepRow(db, {
-      threadId: thread.id,
-      ordinal: 0,
-      kind: 'propose',
-      actorAgentId: params.callerAgentId,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.callerHostId,
-      messageId: null,
-      summary: null,
-      turnAfterAgentId: null,
-      reasonCode: null
-    })
-    auditPact(db, {
-      agentId: params.callerAgentId,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.callerHostId,
-      verb: 'pact_propose',
-      outcome: 'proposed'
-    })
+    // S10-21b B6c: a federated propose's ledger/message/outbox row is the single writer's job
+    // (enqueueFederatedPactVerb, called AFTER this transaction commits below — it opens its own
+    // `BEGIN IMMEDIATE` and SQLite cannot nest, the same constraint B10/B13 hit). The local
+    // (non-federated) path keeps writing its own ledger row here, inside this transaction,
+    // unchanged from before this commit.
+    if (!peer.federated) {
+      insertPactStepRow(db, {
+        threadId: thread.id,
+        ordinal: 0,
+        kind: 'propose',
+        actorAgentId: params.callerAgentId,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.callerHostId,
+        messageId: null,
+        summary: null,
+        turnAfterAgentId: null,
+        reasonCode: null
+      })
+      auditPact(db, {
+        agentId: params.callerAgentId,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.callerHostId,
+        verb: 'pact_propose',
+        outcome: 'proposed'
+      })
+    }
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
   }
+  if (peer.federated) {
+    const emitted = enqueueFederatedPactVerb(db, params.runtime ?? null, thread.id, 'propose', {
+      actorAgentId: params.callerAgentId,
+      actorPaneKey: params.callerPaneKey,
+      actorHostId: params.callerHostId,
+      runId: 'host',
+      ordinal: 0
+    })
+    if (emitted.outcome === 'refused') {
+      throw gateVerdictRefusalError(emitted.verdict, emitted.refusalId)
+    }
+    return emitted.thread
+  }
   return requireThread(db, thread.id)
 }
 
-export type AcceptPactParams = PactActorContext & { threadId: string }
+export type AcceptPactParams = PactActorContext & {
+  threadId: string
+  // S10-21b B6c: see ProposePactParams.runtime.
+  runtime?: FederatedPactEmitRuntime | null
+}
 
 // Turn moves to the proposer first (RPCS §).
 export function acceptPact(db: Database.Database, params: AcceptPactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
   requireProposedTo(thread, params.callerAgentId)
   requireCallerNotQuarantined(db, params.callerAgentId, thread.id, 'accept')
+
+  // S10-21b B6c (design §2.3, item 2): accept is turn-consuming — the proposer is the
+  // `turnAfterAgentId` the design names (PACT_TURN_CONSUMING_VERBS now includes 'accept',
+  // pact-federated-emit.ts, so pact_turn_in_flight_at is set and the outbox row carries
+  // pact_turn_after for settle). UNLIKE `step`, the turn column itself is NOT deferred:
+  // `trg_pact_turn_membership` (db.ts, load-bearing, untouched) fires on any UPDATE that leaves
+  // pact_state='engaged' and demands a valid participant turn holder right then — step never
+  // trips it because it never touches pact_state. The `pact_state='engaged'` write, the
+  // immediate turn write, and the flight-token bump (D-R134 F4) all stay INSIDE the emit's own
+  // transaction (pact-federated-emit.ts's accept special case) — one atomic write covering
+  // state + turn + ledger + message + outbox, never a window where one landed without another.
+  // Settle later re-applies the identical turn value (idempotent) purely to clear the in-flight
+  // marker.
+  if (isFederatedPact(thread)) {
+    const emitted = enqueueFederatedPactVerb(db, params.runtime ?? null, thread.id, 'accept', {
+      actorAgentId: params.callerAgentId,
+      actorPaneKey: params.callerPaneKey,
+      actorHostId: params.callerHostId,
+      runId: 'host',
+      ordinal: 0,
+      turnAfterAgentId: thread.pact_proposer_agent_id
+    })
+    if (emitted.outcome === 'refused') {
+      throw gateVerdictRefusalError(emitted.verdict, emitted.refusalId)
+    }
+    return emitted.thread
+  }
 
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -214,7 +272,12 @@ export function acceptPact(db: Database.Database, params: AcceptPactParams): Thr
   return requireThread(db, thread.id)
 }
 
-export type DeclinePactParams = PactActorContext & { threadId: string; reasonCode: string | null }
+export type DeclinePactParams = PactActorContext & {
+  threadId: string
+  reasonCode: string | null
+  // S10-21b B6c: see ProposePactParams.runtime.
+  runtime?: FederatedPactEmitRuntime | null
+}
 
 export function declinePact(db: Database.Database, params: DeclinePactParams): ThreadRow {
   const thread = requireThread(db, params.threadId)
@@ -241,9 +304,39 @@ function requireProposedTo(thread: ThreadRow, callerAgentId: string): void {
 export function releasePactRow(
   db: Database.Database,
   thread: ThreadRow,
-  params: PactActorContext & { reasonCode: string | null; summary?: string | null },
+  params: PactActorContext & {
+    reasonCode: string | null
+    summary?: string | null
+    // S10-21b B6c: see ProposePactParams.runtime.
+    runtime?: FederatedPactEmitRuntime | null
+  },
   kind: 'decline' | 'release'
 ): ThreadRow {
+  // S10-21b B6c (design §2.3/§2.9, ruling 21b-E7/N9): release AND decline both route through the
+  // same emit call, disposition-carried by `kind` — the peer-facing relay_kind (`pact_release`
+  // vs `pact_decline`) and the `pact_release_at` stamp (release only, NEVER
+  // `pact_peer_release_at` — that column is the inbound-apply's own, out of this function's
+  // reach entirely) both come from `verb` inside enqueueFederatedPactVerb's own special case.
+  // `--evidence` (B12b) rides in `summary` exactly as the local path below stores it.
+  if (isFederatedPact(thread)) {
+    const emitted = enqueueFederatedPactVerb(db, params.runtime ?? null, thread.id, kind, {
+      actorAgentId: params.callerAgentId,
+      actorPaneKey: params.callerPaneKey,
+      actorHostId: params.callerHostId,
+      runId: 'host',
+      ordinal: 0,
+      // FederatedSendParams.pact.reasonCode is `z.string().optional()`, never nullable — `??
+      // undefined` omits the wire field entirely for a null reasonCode (the ordinary release/
+      // decline case) rather than sending a literal JSON null the schema rejects.
+      reasonCode: params.reasonCode ?? undefined,
+      summary: params.summary ?? null
+    })
+    if (emitted.outcome === 'refused') {
+      throw gateVerdictRefusalError(emitted.verdict, emitted.refusalId)
+    }
+    return emitted.thread
+  }
+
   db.exec('BEGIN IMMEDIATE')
   try {
     // D-R134 F4 local half: pact_flight_token bumped alongside the state/turn write it guards.

@@ -183,7 +183,10 @@ describe('pact-federated-emit', () => {
     expect(result.turn).toBe(a) // deferred flip: the caller still holds the turn
     expect(result.thread.pact_turn_agent_id).toBe(a) // column unchanged
     expect(result.thread.pact_turn_in_flight_at).not.toBeNull()
-    expect(result.thread.pact_local_seq).toBe(1)
+    // SCENARIO_CORRECTION (S10-21b B6c): was `toBe(1)` — `engagedFederatedPact`'s own
+    // `d.proposePact(...)` now relays a real `propose` (this commit wires it through the same
+    // emit primitive), consuming seq 1 itself; this step is the SECOND relayed verb, seq 2.
+    expect(result.thread.pact_local_seq).toBe(2)
     expect(result.thread.pact_ordinal).toBe(1) // this host's own ledger progress DOES advance
 
     const ledger = d.getPactLedger({ threadId, revealSummaries: true })
@@ -430,5 +433,270 @@ describe('pact-federated-emit', () => {
     // always fell through to pact_proposer_agent_id, i.e. `a` itself.
     expect(result.message.to_handle).toBe(peerKey)
     expect(result.message.to_handle).not.toBe(a)
+  })
+})
+
+// ---------------------------------------------------------------------------------------
+// S10-21b B6c (design §2.3, ruling 21b-E7) — the remaining local arms B6/B15 left unwired:
+// propose, accept, decline, release. Every test here fails at base 7298dca7dd: proposePact/
+// acceptPact/releasePactRow write their own local ledger row directly on a federated pact and
+// never call enqueueFederatedPactVerb, so no peer_reply_outbox row exists for any of these
+// four verbs (only `step`, B15's pause/resume, and B10's auto-decline call the primitive).
+// ---------------------------------------------------------------------------------------
+describe('S10-21b B6c: propose/accept/decline/release route through enqueueFederatedPactVerb', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function freshDb(): OrchestrationDb {
+    db = new OrchestrationDb(':memory:')
+    return db
+  }
+
+  function seedAgent(d: OrchestrationDb, id: string): string {
+    const params: UpsertAgentByPaneSuffixParams = {
+      displayName: id,
+      role: null,
+      hostId: 'local',
+      paneKey: `tab:${id}`,
+      terminalHandle: `term_${id}`,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: `term_${id}`,
+      originHostId: 'local'
+    }
+    const result = d.upsertAgentByPaneSuffix(params)
+    if (result.outcome === 'name_taken') {
+      throw new Error(`seedAgent: name taken for ${id}`)
+    }
+    return result.agent.id
+  }
+
+  function actor(agentId: string): {
+    callerAgentId: string
+    callerPaneKey: string | null
+    callerHostId: string
+  } {
+    return { callerAgentId: agentId, callerPaneKey: `tab:${agentId}`, callerHostId: 'local' }
+  }
+
+  const ENV2 = 'env_b6c'
+  const REMOTE_AGENT_ID2 = 'peer_b6c'
+
+  function seedFederatedPeer2(d: OrchestrationDb): string {
+    d.upsertRemoteAgent({
+      environmentId: ENV2,
+      environmentName: ENV2,
+      linkKind: 'environment',
+      remoteAgentId: REMOTE_AGENT_ID2,
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(rawDb(d), {
+      linkDeviceId: ENV2,
+      environmentId: ENV2,
+      boundEndpointId: 'endpoint_b6c',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp_b6c',
+      peerCredentialFp: 'pcfp_b6c',
+      peerKeyFingerprint: 'pkfp_b6c',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    return renderFederatedPartyKey({ linkDeviceId: ENV2, remoteAgentId: REMOTE_AGENT_ID2 })
+  }
+
+  // Forces a federated pact straight to 'proposed' with the LOCAL agent as `pact_with_agent_id`
+  // (the answering side) — the shape acceptPact/declinePact both require.
+  function proposedToLocal(d: OrchestrationDb, a: string, peerKey: string): { threadId: string } {
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    rawDb(d)
+      .prepare(
+        `UPDATE threads SET pact_state = 'proposed', pact_proposer_agent_id = ?, pact_with_agent_id = ?,
+           pact_peer_agent_id = ?, pact_peer_link_device_id = ?, pact_peer_environment_id = ?
+         WHERE id = ?`
+      )
+      .run(peerKey, a, REMOTE_AGENT_ID2, ENV2, ENV2, thread.id)
+    return { threadId: thread.id }
+  }
+
+  // -------------------------------------------------------------------------------------
+  // Item 1 — proposePact: RED at base (no outbox row, no relayed message).
+  // -------------------------------------------------------------------------------------
+  it('item 1: proposePact (federated) is the single writer — one outbox row, one pact_steps row, a real message', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer2(d)
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    const raw = rawDb(d)
+
+    const proposed = d.proposePact({
+      ...actor(a),
+      threadId: thread.id,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    expect(proposed.pact_state).toBe('proposed')
+    expect(proposed.pact_local_seq).toBe(1)
+
+    const outboxRow = raw
+      .prepare(`SELECT relay_kind, pact_seq FROM peer_reply_outbox WHERE pact_thread_id = ?`)
+      .get(thread.id) as { relay_kind: string; pact_seq: number } | undefined
+    expect(outboxRow).toEqual({ relay_kind: 'pact_propose', pact_seq: 1 })
+
+    const stepCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'propose'`)
+      .get(thread.id) as { n: number }
+    expect(stepCount.n).toBe(1)
+    const stepRow = raw
+      .prepare(`SELECT message_id FROM pact_steps WHERE thread_id = ? AND kind = 'propose'`)
+      .get(thread.id) as { message_id: string | null }
+    // The old local-only path always stored `messageId: null` — the single-writer primitive
+    // stores the REAL relayed message id instead (the envelope contract requires messageId).
+    expect(stepRow.message_id).not.toBeNull()
+  })
+
+  // -------------------------------------------------------------------------------------
+  // Item 2 — acceptPact: RED at base. Turn is deferred to settle (accept is turn-consuming,
+  // PACT_TURN_CONSUMING_VERBS), same shape as `step`.
+  // -------------------------------------------------------------------------------------
+  it('item 2: acceptPact (federated) is the single writer — turn deferred to settle, one pact_steps row', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer2(d)
+    const { threadId } = proposedToLocal(d, a, peerKey)
+    const raw = rawDb(d)
+
+    const accepted = d.acceptPact({ ...actor(a), threadId })
+    expect(accepted.pact_state).toBe('engaged')
+    expect(accepted.pact_turn_in_flight_at).not.toBeNull()
+    // `trg_pact_turn_membership` (db.ts, load-bearing) requires an engaged pact's turn to be a
+    // valid participant the INSTANT pact_state becomes 'engaged' — unlike `step` (which never
+    // touches pact_state), accept cannot defer this write to settle. The turn lands immediately;
+    // `pact_turn_in_flight_at` still marks the relay unsettled, and settle's own (idempotent)
+    // turn write is what clears it.
+    expect(accepted.pact_turn_agent_id).toBe(peerKey)
+
+    const outboxRow = raw
+      .prepare(
+        `SELECT relay_kind, pact_seq, pact_turn_after FROM peer_reply_outbox WHERE pact_thread_id = ?`
+      )
+      .get(threadId) as { relay_kind: string; pact_seq: number; pact_turn_after: string | null }
+    expect(outboxRow.relay_kind).toBe('pact_accept')
+    expect(outboxRow.pact_turn_after).toBe(peerKey) // settle re-applies the same value, clearing in-flight
+
+    const stepCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'accept'`)
+      .get(threadId) as { n: number }
+    expect(stepCount.n).toBe(1)
+    const stepRow = raw
+      .prepare(
+        `SELECT message_id, turn_after_agent_id FROM pact_steps WHERE thread_id = ? AND kind = 'accept'`
+      )
+      .get(threadId) as { message_id: string | null; turn_after_agent_id: string | null }
+    expect(stepRow.message_id).not.toBeNull()
+    expect(stepRow.turn_after_agent_id).toBe(peerKey)
+  })
+
+  // -------------------------------------------------------------------------------------
+  // Item 3 — releasePactRow: RED at base. `release` stamps pact_release_at locally and NEVER
+  // pact_peer_release_at (N9); `decline` never stamps pact_release_at at all.
+  // -------------------------------------------------------------------------------------
+  it('item 3a: releasePact (federated, kind=release) stamps pact_release_at, never pact_peer_release_at', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer2(d)
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    const raw = rawDb(d)
+    d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+    raw
+      .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
+      .run(a, thread.id)
+
+    const released = d.releasePact({
+      ...actor(a),
+      threadId: thread.id,
+      reasonCode: null,
+      evidence: 'suite run R-1'
+    })
+    expect(released.pact_state).toBe('released')
+    expect(released.pact_release_at).not.toBeNull()
+    expect(released.pact_peer_release_at).toBeNull()
+
+    const outboxRow = raw
+      .prepare(
+        `SELECT relay_kind FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_release'`
+      )
+      .get(thread.id) as { relay_kind: string } | undefined
+    expect(outboxRow?.relay_kind).toBe('pact_release')
+
+    const stepRow = raw
+      .prepare(`SELECT summary FROM pact_steps WHERE thread_id = ? AND kind = 'release'`)
+      .get(thread.id) as { summary: string | null } | undefined
+    // --evidence rides in the ledger row's summary exactly as the local path stores it.
+    expect(stepRow?.summary).toBe('suite run R-1')
+    const stepCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'release'`)
+      .get(thread.id) as { n: number }
+    expect(stepCount.n).toBe(1)
+  })
+
+  it('item 3b: declinePact (federated) relays kind=decline and never stamps pact_release_at', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer2(d)
+    const { threadId } = proposedToLocal(d, a, peerKey)
+    const raw = rawDb(d)
+
+    const declined = d.declinePact({ ...actor(a), threadId, reasonCode: 'not_now' })
+    expect(declined.pact_state).toBe('released')
+    expect(declined.pact_release_at).toBeNull()
+    expect(declined.pact_peer_release_at).toBeNull()
+
+    const outboxRow = raw
+      .prepare(
+        `SELECT relay_kind FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_decline'`
+      )
+      .get(threadId) as { relay_kind: string } | undefined
+    expect(outboxRow?.relay_kind).toBe('pact_decline')
+
+    const stepCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'decline'`)
+      .get(threadId) as { n: number }
+    expect(stepCount.n).toBe(1)
   })
 })

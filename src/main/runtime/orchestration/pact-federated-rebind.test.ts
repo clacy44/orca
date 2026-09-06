@@ -109,6 +109,14 @@ describe('drainPendingRebindParty', () => {
       peerAgentId: peerKey,
       stepsTotal: null
     })
+    // S10-21b B6c: proposePact now relays for real (its own outbox row) — remove it so this
+    // test's own single-row assertion below (this file's own subject: the rebind_party drain)
+    // sees only the row THEY create.
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
     raw
       .prepare(
         `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_relay_pending = 'rebind' WHERE id = ?`
@@ -155,6 +163,14 @@ describe('drainPendingRebindParty', () => {
       peerAgentId: peerKey,
       stepsTotal: null
     })
+    // S10-21b B6c: proposePact now relays for real (its own outbox row) — remove it so this
+    // test's own "zero outbox rows" assertion below (this file's own subject: the rebind_party
+    // drain, absent a predecessor to report) sees a clean table.
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
     raw
       .prepare(
         `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_relay_pending = 'rebind' WHERE id = ?`
@@ -263,6 +279,16 @@ describe('drainPendingRebindParty — gap_notice (B9c)', () => {
       peerAgentId: peerKey,
       stepsTotal: null
     })
+    // S10-21b B6c: proposePact now relays for real (its own outbox row) — settle it out of the
+    // way so this fixture's own "exactly one outbox row" assertions (this file's own subject:
+    // the gap_notice drain) see only the row THEY create. `pact_local_seq = 3` below already
+    // overwrites the emit's own seq bump, so this settle is cosmetic for seq but load-bearing
+    // for row count/relay_kind.
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
     raw
       .prepare(
         `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?,

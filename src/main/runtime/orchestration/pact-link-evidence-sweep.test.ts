@@ -104,6 +104,14 @@ describe('pact-link-evidence-sweep / emitFederatedPactSideEffect (S10-21b B15)',
       ]
     })
     d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+    // S10-21b B6c: proposePact now relays for real (its own outbox row, seq 1) — settle it
+    // out of the way here so this fixture's later single-outstanding-item assertions (this
+    // file's own subject: the sweep's pause/resume relay) see only the row THEY create.
+    rawDb(d)
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
     rawDb(d)
       .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
       .run(a, thread.id)

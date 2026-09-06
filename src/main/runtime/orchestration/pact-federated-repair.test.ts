@@ -324,6 +324,14 @@ describe('D-R136 N4: firePactTerminalSettleDisposition is era/state-guarded', ()
       ]
     })
     d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+    // S10-21b B6c: proposePact now relays for real (its own outbox row, seq 1) — remove it so
+    // the claim below (this fixture's own subject: the STEP's outbox row) selects the row THIS
+    // helper's caller actually wants, not the propose relay ahead of it in queue order.
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
     raw
       .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
       .run(a, thread.id)
