@@ -6,8 +6,10 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalBoolean, requiredString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { gateVerdictRefusalError } from '../../orchestration/gate-refusal-error'
-import { PEER_RUN_ID } from '../../orchestration/db'
+import { PEER_RUN_ID, type OrchestrationDb } from '../../orchestration/db'
 import { pactWaiterHandle } from '../../orchestration/pact-shared'
+import { isFederatedPact } from '../../orchestration/pact-federated-identity'
+import type { ThreadRow } from '../../orchestration/types'
 import {
   NO_PANE_IDENTITY_NEXT_STEPS,
   NO_REGISTERED_IDENTITY_NEXT_STEPS,
@@ -22,8 +24,18 @@ const StepParams = z.object({
 })
 
 const PactLedgerParams = z.object({
-  threadId: requiredString('Missing --thread')
+  threadId: requiredString('Missing --thread'),
+  // S10-21b B12b (design §7): `pact --show --resync` — manually queues a resync_request via
+  // B9's own fresh-nonce-gated mint. A no-op (false) on a local pact or while a nonce is live.
+  resync: OptionalBoolean
 })
+
+// S10-21b B12b: shared by both pactLedger branches below — never mints for a local pact
+// (mintResyncRequestIfNeeded has no notion of "not federated"; gating here is this RPC's own
+// concern, not that function's).
+function resyncRequestedFor(db: OrchestrationDb, thread: ThreadRow, requested: boolean): boolean {
+  return requested && isFederatedPact(thread) ? db.mintResyncRequestIfNeeded(thread.id) : false
+}
 
 export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
   defineMethod({
@@ -126,6 +138,7 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
           ...ledger,
           linkHealth: facts.linkHealth,
           peerState: facts.peerState,
+          resyncRequested: resyncRequestedFor(db, thread, params.resync === true),
           nextSteps: []
         }
       }
@@ -152,6 +165,7 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
         ...ledger,
         linkHealth: facts.linkHealth,
         peerState: facts.peerState,
+        resyncRequested: resyncRequestedFor(db, thread, params.resync === true),
         nextSteps: []
       }
     }

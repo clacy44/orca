@@ -4,6 +4,7 @@ import type Database from '../../sqlite/sync-database'
 import type { ThreadRow } from './types'
 import type { PactPauseReason } from './pact-types'
 import { OrchestrationError } from './orchestration-error'
+import { sanitizeMessageText } from '../../../shared/message-text'
 import {
   auditPact,
   insertPactStepRow,
@@ -13,6 +14,11 @@ import {
   type PactActorContext
 } from './pact-shared'
 import { releasePactRow } from './pact-propose-accept'
+
+// S10-21b B12b (design §5, "`--evidence '<run id / suite citation>'`" — no length named; VERIFY
+// in b12-brief.md found no prior evidence-handling pattern for a pact release, so this reuses
+// pact-step.ts's own step-summary sanitizer/cap shape rather than inventing a second one).
+const PACT_RELEASE_EVIDENCE_MAX_LENGTH = 500
 
 export type PausePactParams = PactActorContext & { threadId: string; reasonCode: string | null }
 
@@ -231,7 +237,13 @@ export function resumePact(db: Database.Database, params: ResumePactParams): Thr
   return requireThread(db, thread.id)
 }
 
-export type ReleasePactParams = PactActorContext & { threadId: string; reasonCode: string | null }
+export type ReleasePactParams = PactActorContext & {
+  threadId: string
+  reasonCode: string | null
+  // S10-21b B12b (design §5, SCOPE item 2): "<run id / suite citation>" — decline never carries
+  // one (releasePactRow's other caller passes summary: null explicitly).
+  evidence?: string | null
+}
 
 // Always unilateral, always available to either participant, any state including paused (K11)
 // — the escape hatch of last resort is never gated on the counterpart.
@@ -245,7 +257,10 @@ export function releasePact(db: Database.Database, params: ReleasePactParams): T
     )
   }
   requirePactParticipant(thread, params.callerAgentId)
-  return releasePactRow(db, thread, params, 'release')
+  const summary = params.evidence
+    ? sanitizeMessageText(params.evidence, PACT_RELEASE_EVIDENCE_MAX_LENGTH).value
+    : null
+  return releasePactRow(db, thread, { ...params, summary }, 'release')
 }
 
 export type AutoPauseOutcome = {

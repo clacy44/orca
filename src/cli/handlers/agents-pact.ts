@@ -27,6 +27,7 @@ import {
   resolveAgentByNameOrId
 } from './agents-shared'
 import { LOCAL_FIND_HOST } from './agents-cross-host'
+import { parsePactWithSelector, runPurgePeerLedger } from './agents-pact-federated'
 
 type PactThread = {
   id: string
@@ -39,6 +40,9 @@ type PactThread = {
   pact_paused_at: string | null
   pact_pause_reason: string | null
   pact_last_inbound_at: string | null
+  // S10-21b B12b: the federated discriminator (§1.2) — non-null iff this pact is federated.
+  // Read by `agents step`'s CLI-layer `--acknowledge-gate` refusal, before the step RPC.
+  pact_peer_agent_id: string | null
 }
 type PactActionResult = { thread: PactThread; nextSteps: string[]; requested?: boolean }
 type PactLedgerEntry = {
@@ -61,6 +65,9 @@ type PactLedgerResult = {
   // outside a wait too (lastInboundAt already rides on `thread.pact_last_inbound_at`).
   linkHealth: string | null
   peerState: string | null
+  // S10-21b B12b (design §7): true only when THIS call's `--resync` actually minted a fresh
+  // nonce (false when not asked, not federated, or coalesced against one already outstanding).
+  resyncRequested: boolean
   nextSteps: string[]
 }
 type StepResult = {
@@ -119,7 +126,7 @@ function formatPactAction(
   return steps ? `${headline}\n${steps}` : headline
 }
 
-function formatPactShow(r: PactLedgerResult, threadId: string): string {
+function formatPactShow(r: PactLedgerResult, threadId: string, resyncFlag: boolean): string {
   const t = r.thread
   if (!t.pact_state) {
     return (
@@ -169,8 +176,15 @@ function formatPactShow(r: PactLedgerResult, threadId: string): string {
       ? `\nLast heard: ${t.pact_last_inbound_at ?? '(none)'}   ` +
         `Link: ${r.linkHealth ?? 'n/a'}   Peer: ${r.peerState ?? 'n/a'}`
       : ''
+  // S10-21b B12b (design §7): only rendered when this invocation actually passed --resync — a
+  // plain `--show` prints nothing about repair state.
+  const resyncLine = resyncFlag
+    ? r.resyncRequested
+      ? '\nResync requested.'
+      : '\nResync already in progress (or not applicable to a local pact).'
+    : ''
   return (
-    `${header}\n #   when      kind     who             what\n${rows.join('\n')}${omissionLine}${factsLine}\n` +
+    `${header}\n #   when      kind     who             what\n${rows.join('\n')}${omissionLine}${factsLine}${resyncLine}\n` +
     `Third-party check: orca agents pact --show ${threadId} --json`
   )
 }
@@ -188,11 +202,20 @@ export const AGENT_PACT_HANDLERS: Record<string, CommandHandler> = {
   'agents pact': async ({ flags, client, json }) => {
     const showId = getOptionalStringFlag(flags, 'show')
     if (showId) {
+      const resyncFlag = flags.has('resync')
       const result = await client.call<PactLedgerResult>('orchestration.threads.pactLedger', {
-        threadId: showId
+        threadId: showId,
+        resync: resyncFlag ? true : undefined
       })
-      printResult(result, json, (r) => formatPactShow(r, showId))
+      printResult(result, json, (r) => formatPactShow(r, showId, resyncFlag))
       return
+    }
+
+    // S10-21b B12b (design §7, §4.6(b)): `--purge-peer-ledger --link <id> [--force-released]` —
+    // parse and pass through only (commit 14 implements the purge). A separate mode from the
+    // propose/accept/.../release action set below, same as `--show`.
+    if (flags.has('purge-peer-ledger')) {
+      return runPurgePeerLedger(flags, client, json)
     }
 
     const onId = getOptionalStringFlag(flags, 'on')
@@ -229,24 +252,31 @@ export const AGENT_PACT_HANDLERS: Record<string, CommandHandler> = {
 
     let withParam: string | undefined
     let withDisplayName: string | undefined
+    let hostParam: string | undefined
     if (withName) {
-      // F-20/A1: pacts are host-local (pact-shared.ts requireAccountablePeer) - refuse a
-      // cross-host `name@host` selector here, before any RPC, rather than letting the raw
-      // string reach the local directory lookup below (which would misresolve it as a local
-      // display name and print a misleading "not found").
-      const withHost = parseAgentSelector(withName).host
-      if (withHost !== LOCAL_FIND_HOST) {
-        refuseCrossHostPact(withName, withHost)
+      const selector = parsePactWithSelector(withName)
+      if (selector.host === undefined) {
+        const agent = requireNonQuarantined(await resolveAgentByNameOrId(client, withName))
+        withParam = `agent:${agent.id}`
+        withDisplayName = agent.displayName
+      } else {
+        // S10-21b B12b (design §7, "--with name@host"/"PactParams.host, unchanged from v2"):
+        // the CLI-side host-local refusal (F-20/A1, refuseCrossHostPact) stays for
+        // `invite --agent` below, but no longer applies to `pact --with` — this host resolves
+        // and mirrors the peer server-side (same live-probe transport `agents ask --host`
+        // already uses), so the raw, UNRESOLVED name travels with the host it names.
+        withParam = selector.name
+        withDisplayName = `${selector.name}@${selector.host}`
+        hostParam = selector.host
       }
-      const agent = requireNonQuarantined(await resolveAgentByNameOrId(client, withName))
-      withParam = `agent:${agent.id}`
-      withDisplayName = agent.displayName
     }
 
     const reason = getOptionalStringFlag(flags, 'reason')
+    const evidence = isRelease ? getOptionalStringFlag(flags, 'evidence') : undefined
     const result = await client.call<PactActionResult>('orchestration.threads.pact', {
       id: onId,
       with: withParam,
+      host: hostParam,
       steps: stepsFlag,
       open: open ? true : undefined,
       accept: isAccept ? true : undefined,
@@ -254,7 +284,8 @@ export const AGENT_PACT_HANDLERS: Record<string, CommandHandler> = {
       pause: isPause ? true : undefined,
       resume: isResume ? true : undefined,
       release: isRelease ? true : undefined,
-      reasonCode: reason
+      reasonCode: reason,
+      evidence
     })
     const action = withName
       ? 'propose'
@@ -275,10 +306,29 @@ export const AGENT_PACT_HANDLERS: Record<string, CommandHandler> = {
   'agents step': async ({ flags, client, json }) => {
     const threadId = getRequiredStringFlag(flags, 'thread')
     const done = getRequiredStringFlag(flags, 'done')
+    const acknowledgeGate = flags.has('acknowledge-gate')
+    if (acknowledgeGate) {
+      // S10-21b B12b (design §7, §2.6(a)): a federated step never accepts this flag — the
+      // sender's gate can be acknowledged but the receiver's inbound apply passes no
+      // `acknowledgeGate`, so an acknowledged HARD body is guaranteed `body_gate_refused` at
+      // the peer. Refused here, before the step RPC (TESTS item 2: the RPC mock is never
+      // called), by reading the pact's federated-ness off the ledger read (never mutating).
+      const ledger = await client.call<{ thread: PactThread }>('orchestration.threads.pactLedger', {
+        threadId
+      })
+      if (ledger.result.thread.pact_peer_agent_id !== null) {
+        throw new RuntimeClientError(
+          'invalid_argument',
+          'Refused: --acknowledge-gate is not honored on a federated pact step — the peer never ' +
+            'sees it, so an acknowledged hard body is guaranteed to be refused there. Shorten or ' +
+            'rephrase --done instead.'
+        )
+      }
+    }
     const result = await client.call<StepResult>('orchestration.threads.step', {
       threadId,
       done,
-      acknowledgeGate: flags.has('acknowledge-gate') ? true : undefined
+      acknowledgeGate: acknowledgeGate ? true : undefined
     })
     printResult(result, json, formatStep)
   },

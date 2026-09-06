@@ -15,6 +15,7 @@ function pactThread(overrides: Record<string, unknown> = {}) {
     pact_ordinal: 3,
     pact_paused_at: null,
     pact_pause_reason: null,
+    pact_peer_agent_id: null,
     ...overrides
   }
 }
@@ -71,42 +72,58 @@ describe('agents pact CLI', () => {
     expect(printed).toContain('Next: orca agents wait --thread thr_9fk2 --for pact')
   })
 
-  // T1 (F-20/A1): a cross-host `name@host` selector is refused in the CLI itself, never
-  // reaching the runtime as a raw literal (the S10-20 defect: it would misresolve as a local
-  // display name and print a misleading "not found").
-  it('propose: --with a name@host selector is refused pact_not_federated before any RPC call', async () => {
-    const call = vi.fn().mockResolvedValue({ result: {} })
-    await expect(
-      AGENT_PACT_HANDLERS['agents pact']({
-        flags: new Map<string, string | boolean>([
-          ['with', 'peer@desktop'],
-          ['on', 'thr_9fk2']
-        ]),
-        client: { call } as unknown as RuntimeClient,
-        cwd: '/tmp',
-        json: false
-      } as never)
-    ).rejects.toMatchObject({ code: 'pact_not_federated' })
-    expect(call).not.toHaveBeenCalled()
+  // SCENARIO_CORRECTION (S10-21b B12b, design §7, "--with/PactParams.host, unchanged from v2"):
+  // these two cases used to assert `pact --with name@host` was refused `pact_not_federated`
+  // before any RPC (F-20/A1's blanket CLI-side host-local refusal). That refusal is now
+  // `invite --agent`'s only remaining caller (see "agents invite CLI" below, unchanged) — B12b
+  // flips `pact --with` alone: the raw, unresolved name now travels to the RPC with `host` set,
+  // and this host resolves/mirrors the peer server-side (never a second local RPC round trip).
+  it('propose: --with name@host sends the raw name and host straight through, no local resolve RPC', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        thread: pactThread({ pact_state: 'proposed', pact_turn_agent_id: null }),
+        nextSteps: []
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_PACT_HANDLERS['agents pact']({
+      flags: new Map<string, string | boolean>([
+        ['with', 'peer@desktop'],
+        ['on', 'thr_9fk2']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(call).toHaveBeenCalledWith(
+      'orchestration.threads.pact',
+      expect.objectContaining({ id: 'thr_9fk2', with: 'peer', host: 'desktop' })
+    )
+    const printed = String(log.mock.calls[0]?.[0])
+    expect(printed).toContain('pact proposed with peer@desktop on thr_9fk2')
   })
 
-  // T2 (F-20/A1): the `agt_<id>@host` form is parsed the same way (id part + host) and refused
-  // identically.
-  it('propose: --with an agt_<id>@host selector is refused pact_not_federated before any RPC call', async () => {
-    const call = vi.fn().mockResolvedValue({ result: {} })
-    await expect(
-      AGENT_PACT_HANDLERS['agents pact']({
-        flags: new Map<string, string | boolean>([
-          ['with', 'agt_16c53bc726b9@desktop'],
-          ['on', 'thr_9fk2']
-        ]),
-        client: { call } as unknown as RuntimeClient,
-        cwd: '/tmp',
-        json: false
-      } as never)
-    ).rejects.toMatchObject({ code: 'pact_not_federated' })
-    expect(call).not.toHaveBeenCalled()
-  })
+  // TESTS item 1: a malformed name@host selector (empty name or host half) is a typed refusal,
+  // not a raw parse exception, and never reaches the RPC.
+  it.each([['@desktop'], ['peer@'], ['@']])(
+    'propose: --with "%s" is a malformed selector, refused invalid_argument before any RPC call',
+    async (malformed) => {
+      const call = vi.fn().mockResolvedValue({ result: {} })
+      await expect(
+        AGENT_PACT_HANDLERS['agents pact']({
+          flags: new Map<string, string | boolean>([
+            ['with', malformed],
+            ['on', 'thr_9fk2']
+          ]),
+          client: { call } as unknown as RuntimeClient,
+          cwd: '/tmp',
+          json: false
+        } as never)
+      ).rejects.toMatchObject({ code: 'invalid_argument' })
+      expect(call).not.toHaveBeenCalled()
+    }
+  )
 
   it('accept: --on and --accept only, no peer resolution round trip', async () => {
     const call = vi.fn().mockResolvedValue({
@@ -298,17 +315,24 @@ describe('agents pact CLI', () => {
     expect(printed).toContain('orca agents pact --with <name> --on thr_plain')
   })
 
+  // S10-21b B12b: --acknowledge-gate is CLI-side (a pactLedger pre-check on a LOCAL pact), so
+  // the mock must answer pactLedger too — a local, non-federated pact still forwards the flag.
   it('step: forwards --thread/--done/--acknowledge-gate and prints the ordinal', async () => {
-    const call = vi.fn().mockResolvedValue({
-      result: {
-        ordinal: 3,
-        of: 6,
-        turn: 'agt_them',
-        messageId: 'msg_1',
-        sequence: 44,
-        gateFlags: null,
-        nextSteps: ['orca agents wait --thread thr_9fk2 --for step']
+    const call = vi.fn().mockImplementation((method: string) => {
+      if (method === 'orchestration.threads.pactLedger') {
+        return Promise.resolve({ result: { thread: pactThread() } })
       }
+      return Promise.resolve({
+        result: {
+          ordinal: 3,
+          of: 6,
+          turn: 'agt_them',
+          messageId: 'msg_1',
+          sequence: 44,
+          gateFlags: null,
+          nextSteps: ['orca agents wait --thread thr_9fk2 --for step']
+        }
+      })
     })
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     await AGENT_PACT_HANDLERS['agents step']({
@@ -329,6 +353,113 @@ describe('agents pact CLI', () => {
     const printed = String(log.mock.calls[0]?.[0])
     expect(printed).toContain('step 3/6 recorded')
     expect(printed).toContain('Next: orca agents wait --thread thr_9fk2 --for step')
+  })
+
+  // TESTS item 2: --acknowledge-gate is refused at the CLI for a federated step, never reaching
+  // the step RPC.
+  it('step: --acknowledge-gate on a federated pact is refused at the CLI, RPC step mock never called', async () => {
+    const call = vi.fn().mockImplementation((method: string) => {
+      if (method === 'orchestration.threads.pactLedger') {
+        return Promise.resolve({
+          result: { thread: pactThread({ pact_peer_agent_id: 'agt_them' }) }
+        })
+      }
+      return Promise.reject(new Error('orchestration.threads.step must never be called'))
+    })
+    await expect(
+      AGENT_PACT_HANDLERS['agents step']({
+        flags: new Map<string, string | boolean>([
+          ['thread', 'thr_9fk2'],
+          ['done', 'spec frozen'],
+          ['acknowledge-gate', true]
+        ]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp',
+        json: false
+      } as never)
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+    expect(call).toHaveBeenCalledWith('orchestration.threads.pactLedger', { threadId: 'thr_9fk2' })
+    expect(call).not.toHaveBeenCalledWith('orchestration.threads.step', expect.anything())
+  })
+
+  // TESTS item 3: --resync on `pact --show` queues exactly one resync_request; a second call
+  // while one is already outstanding is a no-op, not a second queue (asserted via the server's
+  // own `resyncRequested` field — the CLI trusts it, never re-derives coalescing itself).
+  it('--show --resync forwards resync:true and reports "Resync requested." when the server minted one', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        thread: pactThread({ pact_peer_agent_id: 'agt_them' }),
+        entries: [],
+        omitted: { purged: 0, withheld: 0 },
+        linkHealth: 'healthy',
+        peerState: 'live',
+        resyncRequested: true,
+        nextSteps: []
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_PACT_HANDLERS['agents pact']({
+      flags: new Map<string, string | boolean>([
+        ['show', 'thr_9fk2'],
+        ['resync', true]
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(call).toHaveBeenCalledWith('orchestration.threads.pactLedger', {
+      threadId: 'thr_9fk2',
+      resync: true
+    })
+    expect(String(log.mock.calls[0]?.[0])).toContain('Resync requested.')
+  })
+
+  it('--show --resync a second time while one is outstanding reports the coalesced no-op, not a second queue', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        thread: pactThread({ pact_peer_agent_id: 'agt_them' }),
+        entries: [],
+        omitted: { purged: 0, withheld: 0 },
+        linkHealth: 'healthy',
+        peerState: 'live',
+        resyncRequested: false,
+        nextSteps: []
+      }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_PACT_HANDLERS['agents pact']({
+      flags: new Map<string, string | boolean>([
+        ['show', 'thr_9fk2'],
+        ['resync', true]
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(String(log.mock.calls[0]?.[0])).toContain('Resync already in progress')
+  })
+
+  // S10-21b B12b (design §5): --evidence on --release only, sanitized/capped and passed through.
+  it('release: --evidence is forwarded to the RPC; other actions never send it', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: { thread: pactThread({ pact_state: 'released' }), nextSteps: [] }
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await AGENT_PACT_HANDLERS['agents pact']({
+      flags: new Map<string, string | boolean>([
+        ['on', 'thr_9fk2'],
+        ['release', true],
+        ['evidence', 'suite green: R-019']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp',
+      json: false
+    } as never)
+    expect(call).toHaveBeenCalledWith(
+      'orchestration.threads.pact',
+      expect.objectContaining({ release: true, evidence: 'suite green: R-019' })
+    )
+    expect(String(log.mock.calls[0]?.[0])).toContain('pact released.')
   })
 
   it('a typed pact refusal (pact_exists, with nextSteps) is never swallowed and renders its escape hatch', async () => {

@@ -6,6 +6,8 @@ import { z } from 'zod'
 import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, OptionalString, requiredString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
+import { renderFederatedPartyKey } from '../../orchestration/pact-federated-identity'
+import { LINK_BINDING_RPC_BUDGET_MS } from '../../orchestration/link-binding-constants'
 import { resolveCallerAgent, type ResolvedCallerAgent } from './orchestration-caller-identity'
 import { wakePactThread, wakePactThreadBoth, wakeTurnArrived } from './orchestration-pact-wake'
 import type { OrchestrationDb } from '../../orchestration/db'
@@ -14,6 +16,11 @@ import type { OrcaRuntimeService } from '../../orca-runtime'
 const PactParams = z.object({
   id: requiredString('Missing --on'),
   with: OptionalString,
+  // S10-21b B12b (design §7, "--with/PactParams.host, unchanged from v2"): a saved-environment
+  // name — present only for a federated propose. The CLI never pre-resolves a remote `with` to
+  // an id (there is no local directory to resolve it against); this host does, server-side,
+  // exactly the way `orchestration.ask --host` already does (S10-15 F1 R3).
+  host: OptionalString,
   steps: OptionalFiniteNumber,
   open: z.boolean().optional(),
   accept: z.boolean().optional(),
@@ -21,7 +28,9 @@ const PactParams = z.object({
   pause: z.boolean().optional(),
   resume: z.boolean().optional(),
   release: z.boolean().optional(),
-  reasonCode: OptionalString
+  reasonCode: OptionalString,
+  // S10-21b B12b (design §5): `--evidence` on `--release` only; ignored by every other verb.
+  evidence: OptionalString
 })
 
 function actorOf(caller: ResolvedCallerAgent): {
@@ -36,7 +45,7 @@ export const ORCHESTRATION_PACT_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.threads.pact',
     params: PactParams,
-    handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+    handler: async (params, { runtime, orchestrationCompatibilityEvidence }) => {
       const db = runtime.getOrchestrationDb()
       const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
       const actor = actorOf(caller)
@@ -54,9 +63,28 @@ export const ORCHESTRATION_PACT_METHODS: RpcMethod[] = [
         return handleResume(db, runtime, actor, params.id)
       }
       if (params.release) {
-        return handleRelease(db, runtime, actor, params.id, params.reasonCode ?? null)
+        return handleRelease(
+          db,
+          runtime,
+          actor,
+          params.id,
+          params.reasonCode ?? null,
+          params.evidence ?? null
+        )
       }
       if (params.with) {
+        if (params.host) {
+          return handleFederatedPropose(
+            db,
+            runtime,
+            actor,
+            params.id,
+            params.with,
+            params.steps,
+            params.open,
+            params.host
+          )
+        }
         return handlePropose(db, actor, params.id, params.with, params.steps, params.open)
       }
       throw new OrchestrationError(
@@ -92,6 +120,67 @@ function handlePropose(
       `orca agents wait --thread ${threadId} --for pact`
     ]
   }
+}
+
+// S10-21b B12b (design §7, "--with name@host"/"PactParams.host, unchanged from v2"): resolves
+// the peer live over the same paired-link transport `orchestration.ask --host` already uses
+// (runtime.resolveOrchestrationWorkerServer/callOrchestrationWorkerServer, S10-15 F1 R3), then
+// mirrors it into `remote_agents` the way every other federated arm does (S10-4 ruling 1,
+// upsertRemoteAgent, `link_kind: 'environment'` — the S10-15 D5 interface point
+// `listAddressableRemoteAgents` names but nothing wrote before this commit) before proposing
+// against its rendered party key (§1.1). `withName` is the CLI's raw, UNRESOLVED selector — a
+// remote name is meaningless against this host's own local directory.
+async function handleFederatedPropose(
+  db: OrchestrationDb,
+  runtime: OrcaRuntimeService,
+  actor: ReturnType<typeof actorOf>,
+  threadId: string,
+  withName: string,
+  steps: number | undefined,
+  open: boolean | undefined,
+  host: string
+): Promise<unknown> {
+  const server = runtime.resolveOrchestrationWorkerServer(host)
+  const remote = (await runtime.callOrchestrationWorkerServer(
+    host,
+    'orchestration.agents.get',
+    { name: withName },
+    LINK_BINDING_RPC_BUDGET_MS
+  )) as {
+    agent: {
+      id: string
+      displayName: string
+      role: string | null
+      state: 'live' | 'idle' | 'gone'
+      derived: boolean
+      quarantined: boolean
+    }
+  }
+  const agent = remote.agent
+  const upserted = db.upsertRemoteAgent({
+    environmentId: server.environmentId,
+    environmentName: server.name,
+    linkKind: 'environment',
+    remoteAgentId: agent.id,
+    displayName: agent.displayName,
+    role: agent.role,
+    state: agent.state,
+    derived: agent.derived,
+    remoteQuarantined: agent.quarantined,
+    peerFingerprint: server.peerFingerprint
+  })
+  if (upserted.outcome === 'capped') {
+    throw new OrchestrationError(
+      'remote_agents_capped',
+      `Refused: this host's mirror of ${server.name}'s agents is full; quarantine a stale peer to free a slot.`,
+      { nextSteps: [`orca agents quarantine <name>@${host}`] }
+    )
+  }
+  const peerId = renderFederatedPartyKey({
+    linkDeviceId: server.environmentId,
+    remoteAgentId: agent.id
+  })
+  return handlePropose(db, actor, threadId, peerId, steps, open)
 }
 
 function handleAccept(
@@ -174,10 +263,11 @@ function handleRelease(
   runtime: OrcaRuntimeService,
   actor: ReturnType<typeof actorOf>,
   threadId: string,
-  reasonCode: string | null
+  reasonCode: string | null,
+  evidence: string | null
 ): unknown {
   const before = db.getPactState(threadId)
-  const thread = db.releasePact({ ...actor, threadId, reasonCode })
+  const thread = db.releasePact({ ...actor, threadId, reasonCode, evidence })
   const other =
     before?.pact_proposer_agent_id === actor.callerAgentId
       ? before?.pact_with_agent_id
