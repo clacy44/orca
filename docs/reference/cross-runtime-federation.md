@@ -316,6 +316,16 @@ is unchanged — new methods and new optional params are additive.
   build has no `accessProfile` concept and treats every grant as full. Rolling back, or
   running a second older process against the same data directory, silently turns a
   least-privilege grant back into a full one with no error and no log line naming it.
+- **Federated (cross-host) pacts are landing incrementally — not yet operator-usable.**
+  The protocol layer (propose/accept/step/pause/resume/release across hosts, the
+  out-of-order fence, and automatic gap repair) is implemented, but `orca agents pact
+  --with <name>@<host>` still refuses every cross-host selector with `pact_not_federated`
+  — there is no CLI path today to create one. Once the CLI surface lands: a gap beyond
+  `PACT_MAX_GAP = 64` messages fails terminally as `pact_desync`, one within that bound is
+  refused `pact_out_of_order` (a retryable code, not terminal) while the two hosts
+  resynchronize; a stuck relay item holds for `PACT_RELAY_HOLD_MAX_MS` (24h, in
+  milliseconds `86_400_000`) before taking its terminal disposition; and the automatic
+  repair counter caps at 3 attempts per freshly-minted nonce.
 
 ## Verifying the pairing transport
 
