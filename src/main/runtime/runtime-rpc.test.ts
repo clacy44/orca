@@ -14,6 +14,7 @@ import { OrchestrationDb } from './orchestration/db'
 import * as runtimeMetadataModule from './runtime-metadata'
 import { readRuntimeMetadata, writeRuntimeMetadata } from './runtime-metadata'
 import { createRuntimeTransportMetadata, OrcaRuntimeRpcServer } from './runtime-rpc'
+import { RUNTIME_PEER_RPC_METHOD_ALLOWLIST } from './runtime-peer-rpc-allowlist'
 import { remoteRpcContentBudget } from '../../shared/remote-rpc-content-budget'
 import { parsePairingCode } from '../../shared/pairing'
 import { subscribeRemoteRuntimeRequest } from '../../shared/remote-runtime-client'
@@ -2333,11 +2334,12 @@ describe('OrcaRuntimeRpcServer', () => {
     const runtime = new OrcaRuntimeService()
     const db = new OrchestrationDb(':memory:')
     runtime.setOrchestrationDb(db)
+    // S10-21b B16a (§3.2): cap bumped by PACT_LONG_POLL_RESERVE(4) — pure 'wait'-class test, exact-preserving (threshold = cap - 4 = original cap).
     const server = new OrcaRuntimeRpcServer({
       runtime,
       userDataPath,
       enableWebSocket: false,
-      longPollCap: 1
+      longPollCap: 5
     })
     const device = server['deviceRegistry'] ?? null
     expect(device).toBeNull()
@@ -2677,13 +2679,17 @@ describe('OrcaRuntimeRpcServer', () => {
     const runtime = new OrcaRuntimeService()
     const db = new OrchestrationDb(':memory:')
     runtime.setOrchestrationDb(db)
-    seedSupervisedAskWorkers(db, ['term_w0', 'term_w1', 'term_w2'])
-    // Why: cap 4 → ask sub-cap 2, so the third ask must be shed while waits keep the other half.
+    // S10-21b B16a (§3.2, D-R69 R15): cap 4 no longer leaves any 'ask'/'wait' headroom once
+    // PACT_LONG_POLL_RESERVE(4) is reserved (4 - 4 = 0) — bumped to the production LONG_POLL_CAP
+    // (16) so the ask sub-cap (floor(16*0.5)=8) and the reserved-half assertions below keep
+    // their original shape at a larger scale. 9 workers so the 9th ask is the one shed.
+    const workerHandles = Array.from({ length: 9 }, (_, i) => `term_w${i}`)
+    seedSupervisedAskWorkers(db, workerHandles)
     const server = new OrcaRuntimeRpcServer({
       runtime,
       userDataPath,
       enableWebSocket: false,
-      longPollCap: 4
+      longPollCap: 16
     })
     server['deviceRegistry'] = new DeviceRegistry(userDataPath)
     // Why: 'runtime' scope, not 'mobile' — orchestration.ask is absent from the mobile allowlist.
@@ -2708,7 +2714,7 @@ describe('OrcaRuntimeRpcServer', () => {
       )
 
     try {
-      const asks = [0, 1].map((i) =>
+      const asks = [0, 1, 2, 3, 4, 5, 6, 7].map((i) =>
         dispatch(`req_ask_${i}`, 'orchestration.ask', {
           from: `term_w${i}`,
           to: 'term_coord',
@@ -2717,10 +2723,10 @@ describe('OrcaRuntimeRpcServer', () => {
         })
       )
       // Why: gate on the pre-existing total so a missing sub-cap fails on the shed below, not here.
-      await waitFor(() => server['activeLongPolls'] === 2)
+      await waitFor(() => server['activeLongPolls'] === 8)
 
       await dispatch('req_ask_overflow', 'orchestration.ask', {
-        from: 'term_w2',
+        from: 'term_w8',
         to: 'term_coord',
         question: 'proceed?',
         timeoutMs: 10_000
@@ -2736,16 +2742,16 @@ describe('OrcaRuntimeRpcServer', () => {
         })
       )
       // Shedding the ask must not burn a slot from the reserved half.
-      expect(server['activeLongPolls']).toBe(2)
-      expect(server['activeAskLongPolls']).toBe(2)
+      expect(server['activeLongPolls']).toBe(8)
+      expect(server['activeAskLongPolls']).toBe(8)
 
       const wait = dispatch('req_check_wait', 'orchestration.check', {
         terminal: 'term_other',
         wait: true,
         timeoutMs: 10_000
       })
-      await waitFor(() => server['activeLongPolls'] === 3)
-      expect(server['activeAskLongPolls']).toBe(2)
+      await waitFor(() => server['activeLongPolls'] === 9)
+      expect(server['activeAskLongPolls']).toBe(8)
 
       ws.readyState = 3
       ws.emit('close')
@@ -5750,11 +5756,12 @@ describe('OrcaRuntimeRpcServer', () => {
     it('releases terminal.wait long-poll slot when the client closes mid-wait', async () => {
       const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
       const runtime = new OrcaRuntimeService()
+      // S10-21b B16a (§3.2): cap bumped by PACT_LONG_POLL_RESERVE(4) — pure 'wait'-class test, exact-preserving (threshold = cap - 4 = original cap).
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
         keepaliveIntervalMs: 1000,
-        longPollCap: 1
+        longPollCap: 5
       })
       runtime.attachWindow(1)
       runtime.syncWindowGraph(1, {
@@ -5827,11 +5834,12 @@ describe('OrcaRuntimeRpcServer', () => {
       const runtime = new OrcaRuntimeService()
       const db = new OrchestrationDb(':memory:')
       runtime.setOrchestrationDb(db)
+      // S10-21b B16a (§3.2): cap bumped by PACT_LONG_POLL_RESERVE(4) — pure 'wait'-class test, exact-preserving (threshold = cap - 4 = original cap).
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
         keepaliveIntervalMs: 1000,
-        longPollCap: 2
+        longPollCap: 6
       })
       await server.start()
 
@@ -5887,11 +5895,12 @@ describe('OrcaRuntimeRpcServer', () => {
       const runtime = new OrcaRuntimeService()
       const db = new OrchestrationDb(':memory:')
       runtime.setOrchestrationDb(db)
+      // S10-21b B16a (§3.2): cap bumped by PACT_LONG_POLL_RESERVE(4) — pure 'wait'-class test, exact-preserving (threshold = cap - 4 = original cap).
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
         keepaliveIntervalMs: 1000,
-        longPollCap: 1
+        longPollCap: 5
       })
       await server.start()
 
@@ -5927,11 +5936,12 @@ describe('OrcaRuntimeRpcServer', () => {
       const runtime = new OrcaRuntimeService()
       const db = new OrchestrationDb(':memory:')
       runtime.setOrchestrationDb(db)
+      // S10-21b B16a (§3.2): cap bumped by PACT_LONG_POLL_RESERVE(4) — pure 'wait'-class test, exact-preserving (threshold = cap - 4 = original cap).
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
         keepaliveIntervalMs: 1000,
-        longPollCap: 1
+        longPollCap: 5
       })
       await server.start()
 
@@ -5984,13 +5994,18 @@ describe('OrcaRuntimeRpcServer', () => {
       const runtime = new OrcaRuntimeService()
       const db = new OrchestrationDb(':memory:')
       runtime.setOrchestrationDb(db)
-      seedSupervisedAskWorkers(db, ['term_w0', 'term_w1', 'term_w2', 'term_w3'])
-      // Why: cap 4 → ask sub-cap 2, so 4 concurrent asks can only take half the budget.
+      // S10-21b B16a (§3.2, D-R69 R15): cap 4 leaves zero 'ask'/'wait' headroom once
+      // PACT_LONG_POLL_RESERVE(4) is reserved (4 - 4 = 0) — bumped to the production
+      // LONG_POLL_CAP (16) so the ask sub-cap (floor(16*0.5)=8) still floods and sheds at the
+      // same relative half-the-budget shape, just at a larger scale. 9 workers so the 9th ask
+      // is the one shed.
+      const workerHandles = Array.from({ length: 9 }, (_, i) => `term_w${i}`)
+      seedSupervisedAskWorkers(db, workerHandles)
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
         keepaliveIntervalMs: 1000,
-        longPollCap: 4
+        longPollCap: 16
       })
       runtime.attachWindow(1)
       runtime.syncWindowGraph(1, {
@@ -6027,8 +6042,8 @@ describe('OrcaRuntimeRpcServer', () => {
         const handle = (listResponse.result as { terminals: { handle: string }[] }).terminals[0]!
           .handle
 
-        // Four workers block in ask; distinct `from` handles so no reply wakes another.
-        for (let i = 0; i < 4; i++) {
+        // Nine workers block in ask; distinct `from` handles so no reply wakes another.
+        for (let i = 0; i < 9; i++) {
           asks.push(
             openFramedSession(endpoint, {
               id: `req_ask_${i}`,
@@ -6044,7 +6059,7 @@ describe('OrcaRuntimeRpcServer', () => {
           )
         }
         // Let every ask reach the admission fence before probing the reserved half.
-        await waitFor(() => server['activeLongPolls'] >= 2)
+        await waitFor(() => server['activeLongPolls'] >= 8)
         await sleep(100)
 
         // The reserved half still admits a terminal.wait from any other client.
@@ -6075,11 +6090,11 @@ describe('OrcaRuntimeRpcServer', () => {
         })
 
         // Overflow asks are shed, not queued: the sub-cap holds at half the budget.
-        expect(server['activeAskLongPolls']).toBe(2)
+        expect(server['activeAskLongPolls']).toBe(8)
         const shed = asks
           .map((a) => a.frames.find((f) => f.ok !== undefined))
           .filter((f) => f !== undefined)
-        expect(shed).toHaveLength(2)
+        expect(shed).toHaveLength(1)
         expect(shed[0]).toMatchObject({ ok: false, error: { code: 'runtime_busy' } })
       } finally {
         for (const ask of asks) {
@@ -6096,11 +6111,12 @@ describe('OrcaRuntimeRpcServer', () => {
       const runtime = new OrcaRuntimeService()
       const db = new OrchestrationDb(':memory:')
       runtime.setOrchestrationDb(db)
+      // S10-21b B16a (§3.2): cap bumped by PACT_LONG_POLL_RESERVE(4) — pure 'wait'-class test, exact-preserving (threshold = cap - 4 = original cap).
       const server = new OrcaRuntimeRpcServer({
         runtime,
         userDataPath,
         keepaliveIntervalMs: 1000,
-        longPollCap: 4
+        longPollCap: 8
       })
       await server.start()
 
@@ -6135,6 +6151,246 @@ describe('OrcaRuntimeRpcServer', () => {
           wait.socket.destroy()
         }
         await Promise.all(waits.map((wait) => wait.done))
+        db.close()
+        await server.stop()
+      }
+    })
+
+    // S10-21b B16a T33 (design §8, §3.2, D-R69 R15): with PACT_LONG_POLL_RESERVE installed,
+    // reserve slots remain admissible to a `--for step` wait when every other class is
+    // saturated, and a peer cannot occupy one.
+    it('T33: pact reserve admits --for step while ask/wait is saturated at its ceiling', async () => {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const paneA = 'tab_a:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const paneB = 'tab_b:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const evidenceA = { terminalHandle: 'term_a', paneKey: paneA, launchToken: 'lt-a' }
+      const evidenceB = { terminalHandle: 'term_b', paneKey: paneB, launchToken: 'lt-b' }
+      vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+        if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === paneA) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneA,
+            terminalHandle: 'term_a',
+            processIncarnation: 'proc-a',
+            launchTokenHash: 'hash-a'
+          } as never
+        }
+        if (evidence?.terminalHandle === 'term_b' && evidence.paneKey === paneB) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneB,
+            terminalHandle: 'term_b',
+            processIncarnation: 'proc-b',
+            launchTokenHash: 'hash-b'
+          } as never
+        }
+        return null
+      })
+      // cap 6, reserve 4 → 'ask'/'wait' ceiling = 2; 'pact' can still use the full 6.
+      const server = new OrcaRuntimeRpcServer({
+        runtime,
+        userDataPath,
+        keepaliveIntervalMs: 1000,
+        longPollCap: 6
+      })
+      await server.start()
+
+      const waits: ReturnType<typeof openFramedSession>[] = []
+      try {
+        const metadata = readRuntimeMetadata(userDataPath)
+        const endpoint = metadata!.transports[0]!.endpoint
+        const authToken = metadata!.authToken
+
+        // Saturate the 'wait' class up to the reserve ceiling (longPollCap - PACT_LONG_POLL_RESERVE = 2).
+        for (let i = 0; i < 2; i++) {
+          waits.push(
+            openFramedSession(endpoint, {
+              id: `req_wait_${i}`,
+              authToken,
+              method: 'orchestration.check',
+              params: { terminal: `term_sat_${i}`, wait: true, timeoutMs: 10_000 }
+            })
+          )
+        }
+        await waitFor(() => server['activeLongPolls'] === 2)
+
+        // A third 'wait'-class request is refused: the reserve is off-limits to 'ask'/'wait',
+        // even though 4 more slots physically remain inside longPollCap.
+        const overflowWait = await sendRequest(endpoint, {
+          id: 'req_wait_overflow',
+          authToken,
+          method: 'orchestration.check',
+          params: { terminal: 'term_overflow', wait: true, timeoutMs: 1_000 }
+        })
+        expect(overflowWait).toMatchObject({ ok: false, error: { code: 'runtime_busy' } })
+        expect(server['activeLongPolls']).toBe(2)
+
+        // Register two agents and a thread so a real 'pact'-class wait (`--for step`) can park.
+        const registeredA = (await sendRequest(endpoint, {
+          id: 'req_register_a',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-a', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { agent: { id: string } } }
+        expect(registeredA.result).toBeDefined()
+
+        const registeredB = (await sendRequest(endpoint, {
+          id: 'req_register_b',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-b', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceB
+        })) as { result?: { agent: { id: string } } }
+        const agentBId = registeredB.result!.agent.id
+
+        const createdThread = (await sendRequest(endpoint, {
+          id: 'req_thread_create',
+          authToken,
+          method: 'orchestration.threads.create',
+          params: { subject: 'T33 fence', with: `agent:${agentBId}` },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { thread: { id: string } } }
+        const threadId = createdThread.result!.thread.id
+
+        // The reserve slot still admits a 'pact'-class `--for step` wait while 'ask'/'wait'
+        // stays saturated at its ceiling — this is the class the reserve exists to protect.
+        const pactWait = openFramedSession(endpoint, {
+          id: 'req_wait_step',
+          authToken,
+          method: 'orchestration.wait',
+          params: { threadId, for: 'step', timeoutMs: 300 },
+          orchestrationCompatibilityEvidence: evidenceA
+        })
+        await waitFor(() => server['activeLongPolls'] === 3)
+        await pactWait.done
+        expect(pactWait.frames.find((f) => f.ok !== undefined)).toMatchObject({
+          id: 'req_wait_step',
+          ok: true,
+          result: { outcome: 'timeout' }
+        })
+
+        // Sanity: a peer-originated request never reaches orchestration.wait at all — the
+        // reserve is unreachable from the peer side by construction, not merely by convention
+        // (§3.1's default-deny RUNTIME_PEER_RPC_METHOD_ALLOWLIST).
+        expect(RUNTIME_PEER_RPC_METHOD_ALLOWLIST.has('orchestration.wait')).toBe(false)
+      } finally {
+        for (const wait of waits) {
+          wait.socket.destroy()
+        }
+        await Promise.all(waits.map((wait) => wait.done))
+        db.close()
+        await server.stop()
+      }
+    })
+
+    // S10-21b B16a (design §3.2's third bullet): a runtime_busy refusal of a pact wait renders
+    // as "re-arm; steps are durable", never as a bare error — the message text itself plus
+    // structured `nextSteps` recovery data (the same channel `formatCliError`/`nextStepsFromData`
+    // render into "Next step: …" lines instead of a bare error string).
+    it('renders a pact-class runtime_busy refusal as "re-arm; steps are durable", not a bare error', async () => {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const paneA = 'tab_a:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const paneB = 'tab_b:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const evidenceA = { terminalHandle: 'term_a', paneKey: paneA, launchToken: 'lt-a' }
+      const evidenceB = { terminalHandle: 'term_b', paneKey: paneB, launchToken: 'lt-b' }
+      vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+        if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === paneA) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneA,
+            terminalHandle: 'term_a',
+            processIncarnation: 'proc-a',
+            launchTokenHash: 'hash-a'
+          } as never
+        }
+        if (evidence?.terminalHandle === 'term_b' && evidence.paneKey === paneB) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneB,
+            terminalHandle: 'term_b',
+            processIncarnation: 'proc-b',
+            launchTokenHash: 'hash-b'
+          } as never
+        }
+        return null
+      })
+      // cap 1: the single slot is a 'pact' wait itself, so the very next pact wait overflows
+      // the full cap (§3.2: 'pact' is admitted up to longPollCap, no reserve headroom above it).
+      const server = new OrcaRuntimeRpcServer({
+        runtime,
+        userDataPath,
+        keepaliveIntervalMs: 1000,
+        longPollCap: 1
+      })
+      await server.start()
+
+      try {
+        const metadata = readRuntimeMetadata(userDataPath)
+        const endpoint = metadata!.transports[0]!.endpoint
+        const authToken = metadata!.authToken
+
+        const registeredA = (await sendRequest(endpoint, {
+          id: 'req_register_a',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-a', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { agent: { id: string } } }
+        expect(registeredA.result).toBeDefined()
+
+        const registeredB = (await sendRequest(endpoint, {
+          id: 'req_register_b',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-b', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceB
+        })) as { result?: { agent: { id: string } } }
+        const agentBId = registeredB.result!.agent.id
+
+        const createdThread = (await sendRequest(endpoint, {
+          id: 'req_thread_create',
+          authToken,
+          method: 'orchestration.threads.create',
+          params: { subject: 'runtime_busy render', with: `agent:${agentBId}` },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { thread: { id: string } } }
+        const threadId = createdThread.result!.thread.id
+
+        const held = openFramedSession(endpoint, {
+          id: 'req_wait_step_hold',
+          authToken,
+          method: 'orchestration.wait',
+          params: { threadId, for: 'step', timeoutMs: 10_000 },
+          orchestrationCompatibilityEvidence: evidenceA
+        })
+        await waitFor(() => server['activeLongPolls'] === 1)
+
+        const overflow = await sendRequest(endpoint, {
+          id: 'req_wait_step_overflow',
+          authToken,
+          method: 'orchestration.wait',
+          params: { threadId, for: 'pact', timeoutMs: 1_000 },
+          orchestrationCompatibilityEvidence: evidenceB
+        })
+        expect(overflow).toMatchObject({
+          ok: false,
+          error: {
+            code: 'runtime_busy',
+            message: 're-arm; steps are durable',
+            data: { nextSteps: ['re-arm; steps are durable'] }
+          }
+        })
+
+        held.socket.destroy()
+        await held.done
+      } finally {
         db.close()
         await server.stop()
       }
