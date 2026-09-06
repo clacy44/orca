@@ -237,6 +237,7 @@ import {
 } from './pact-federated-inbound-apply'
 import {
   firePactTerminalSettleDisposition as firePactTerminalSettleDispositionImpl,
+  mintResyncRequestIfNeeded as mintResyncRequestIfNeededImpl,
   type PactTerminalSettleOutcome
 } from './pact-federated-repair'
 import {
@@ -9173,6 +9174,13 @@ export class OrchestrationDb {
     now: number
   ): PactTerminalSettleOutcome {
     return firePactTerminalSettleDispositionImpl(this.db, item, code, errorMessage, now)
+  }
+
+  // S10-21b B12b (design §7): `pact --show --resync` manual trigger — calls B9's own
+  // fresh-nonce-gated mint directly, never a second minting path; a live/undrained nonce makes
+  // this a no-op (returns false), matching TESTS item 3's coalescing requirement.
+  mintResyncRequestIfNeeded(threadId: string): boolean {
+    return mintResyncRequestIfNeededImpl(this.db, threadId)
   }
 
   // S10-16 C5, R28.1 rule 2: the continuation path for a multi-message exchange — a prior

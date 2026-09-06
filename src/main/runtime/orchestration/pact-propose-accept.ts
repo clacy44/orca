@@ -192,10 +192,12 @@ function requireProposedTo(thread: ThreadRow, callerAgentId: string): void {
 
 // Shared by declinePact and releasePact (pact-lifecycle.ts) — both move pact_state to
 // 'released' and clear the turn; the only difference is the ledger kind / audit verb.
+// S10-21b B12b: `summary` explicit (was hardcoded null) — releasePact's own caller sanitizes
+// `--evidence` into it; declinePact still passes null (decline never carries evidence, SCOPE).
 export function releasePactRow(
   db: Database.Database,
   thread: ThreadRow,
-  params: PactActorContext & { reasonCode: string | null },
+  params: PactActorContext & { reasonCode: string | null; summary?: string | null },
   kind: 'decline' | 'release'
 ): ThreadRow {
   db.exec('BEGIN IMMEDIATE')
@@ -213,7 +215,7 @@ export function releasePactRow(
       actorPaneKey: params.callerPaneKey,
       actorHostId: params.callerHostId,
       messageId: null,
-      summary: null,
+      summary: params.summary ?? null,
       turnAfterAgentId: null,
       reasonCode: params.reasonCode
     })

@@ -107,6 +107,17 @@ export const REPLY_OUTBOX_HOLD_MAX_MS = 900_000
 // far past mail's 15-minute REPLY_OUTBOX_HOLD_MAX_MS, since the repair (rebind_party, a
 // quarantine lift, dial-time re-resolution) is host-operator-paced, not transport-paced.
 export const PACT_RELAY_HOLD_MAX_MS = 86_400_000
+// S10-21b B12b (design §7): un-answered-proposal park block (§3, Addendum 6(12)) — no landed
+// consumer yet; B-NA10's fix imports this rather than a fresh literal.
+export const PACT_PROPOSAL_BLOCK_MS = 3_600_000
+// S10-21b B12b (design §6/§4.6(b), Addendum 6(14)): a released pact's remote rows free after
+// this age — no landed consumer yet; B14's era-age/retention purge arm imports this rather than
+// re-deriving the 604_800_000 literal already used inline in db.ts's trigger/repair SQL.
+export const PACT_RELEASED_RETENTION_MS = 604_800_000
+// S10-21b B12b (design §4.6(b), Addendum 6(14)): per-link cap on live `pact_steps`/
+// `pact_applied_ids` rows before a new proposal is refused — no landed consumer yet; B14 imports
+// this for the ceiling refusal (T-NA4/T-NB7).
+export const PACT_STEPS_PER_LINK_CEILING = 65_536
 export const REPLY_OUTBOX_MAX_AGE_MS = 604_800_000
 export const REPLY_OUTBOX_MAX_BYTES = 65_536
 export const REPLY_OUTBOX_PER_LINK_CAP = 256

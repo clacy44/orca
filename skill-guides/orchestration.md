@@ -48,7 +48,9 @@ orca agents pact --with <name> --on <thread>          -> propose/engage
 orca agents step --thread <t> --done "<what you did>" -> your turn, once
 orca agents wait --thread <t> --for step               -> blocks for theirs
 orca agents pact --show <t>                            -> a third party can check it tomorrow
-(Pacts are host-local: propose only with an agent on this host; reach a cross-host counterpart with orca orchestration send / orca agents ask instead.)
+(A pact reaches a peer on another host too: orca agents pact --with <name>@<host> --on <thread>
+ proposes and engages across the link, the same lock-step turn discipline on both sides. See
+ "Federated Pacts" below for the repair/pause vocabulary that comes with a cross-host pact.)
 
 New turn / lost context -> orca agents threads
   -> "Read one: orca agents thread --id thr_9fk2"
@@ -200,12 +202,13 @@ orca agents reply (--thread <t>|--id <msg>) --body "<text>" [--acknowledge-gate]
 orca agents wait --thread <t> --for reply|message|pact|step [--timeout-ms <n>] [--resume <token>] [--json]
 orca orchestration send --to <name>@<host> --subject <text> [--body <text>] [--type <type>] [--priority <level>] [--thread-id <id>] [--payload <json>] [--json]
 
-orca agents pact --with <name> --on <thread> [--steps <n>|--open] [--json]
+orca agents pact --with <name>[@<host>] --on <thread> [--steps <n>|--open] [--json]
 orca agents pact --on <t> --accept|--decline [--reason <code>] [--json]
 orca agents pact --pause --on <t> [--reason <code>] [--json]
 orca agents pact --resume --on <t> [--json]
-orca agents pact --release --on <t> [--reason <code>] [--json]
-orca agents pact --show <t> [--json]
+orca agents pact --release --on <t> [--reason <code>] [--evidence "<text>"] [--json]
+orca agents pact --show <t> [--json] [--resync]
+orca agents pact --purge-peer-ledger --link <id> [--force-released] [--json]
 orca agents step --thread <t> --done "<what>" [--acknowledge-gate] [--json]
 
 orca agents purge --message <id>|--thread <id> --reason "<text>" [--acknowledge-gate] [--json]
@@ -216,8 +219,10 @@ Rules:
 
 - `find`'s name resolution is CLI-layer sugar: every write RPC underneath (`ask`, `thread --new`,
   `pact --with`, `invite`) takes only a resolved `agent:<id>` address — never a bare name.
-- `pact --with`/`invite --agent` are host-local — a `name@host` selector naming a different host is
-  refused; coordinate across hosts with `orchestration send`/`agents ask` instead.
+- `pact --with <name>@<host>` reaches a peer on another saved environment — this host resolves and
+  mirrors it, then proposes across the link (see "Federated Pacts" below). `invite --agent` stays
+  host-local — a `name@host` selector there is refused; coordinate across hosts with
+  `orchestration send`/`agents ask` instead.
 - One engaged pact per agent pair at a time; propose only while the pact is unclaimed
   (`pact_state` null or `released`) — `pact --show <t>` says whose turn it is and how far along.
 - `pact --resume` is a boolean on the `pact` noun (`--resume --on <t>`); `wait --resume <token>`
@@ -235,6 +240,41 @@ Rules:
   with. Never work around a `name_taken` by registering under a different name unless the
   refusal's own suggested alternative is what you want — the identity you actually own is
   waiting to be re-adopted, not lost.
+
+### Federated Pacts
+
+`pact --with <name>@<host>` proposes across a saved environment link, same lock-step turn
+discipline as a local pact — `step`/`wait --for step`/`--show`/`--release` all work unchanged.
+
+- The relay bound is 24 hours (`PACT_RELAY_HOLD_MAX_MS = 86_400_000`), not mail's 15 minutes — a
+  pact verb cannot simply be re-sent, so a repairable cause (the counterpart re-registered, its
+  route moved, a link quarantine) holds for a full day before giving up, versus mail's 15
+  minutes.
+- A gap in the sequence is refused `pact_out_of_order` (retryable) when it is at most
+  `PACT_MAX_GAP = 64` verbs wide; wider than that is `pact_desync` (terminal — the pact pauses).
+  The receiver mints a nonce and queues one coalesced `resync_request`; `pact --show <t> --resync`
+  queues one manually (a second `--resync` while one is already outstanding is a no-op, not a
+  second queue). The repair counter is bounded at 3 attempts, incremented only on a *fresh* nonce
+  mint. `gap_notice` and `resync_request` are wire **verbs**, never error codes — a `gap_notice`
+  is processed as the gap it announces and produces `pact_out_of_order`/`pact_desync`, not a code
+  of its own.
+- There is **no** silence-based auto-pause — holding the turn for a long real task never pauses a
+  pact on its own. The *planned* auto-pause is link-evidence-driven, not yet wired on this build:
+  once the link's own liveness scan reports the peer unreachable continuously for
+  `PACT_LINK_SILENCE_MS = 900_000` (15 minutes), the pact will pause with reason
+  `counterpart_gone`/`counterpart_unreachable` — a pause *reason*, never an error code — and will
+  clear itself automatically once the link reports live again, with no operator verb needed
+  either way. Until that lands, the only way a federated pact pauses is the same as a local one:
+  `--pause`, or a genuine local liveness signal (quarantine, `gone`).
+- An unanswered remote proposal blocks your own `wait --for pact` park for at most
+  `PACT_PROPOSAL_BLOCK_MS = 3_600_000` (1 hour); past that it stops blocking and surfaces on
+  `orca orchestration check`.
+- A released pact's remote ledger rows free up after `PACT_RELEASED_RETENTION_MS = 604_800_000`
+  (7 days); `orca agents pact --purge-peer-ledger --link <id>` frees them immediately for a pact
+  this host has already released, or `--force-released` to force a still-inside-the-window one. A
+  link stuck at `PACT_STEPS_PER_LINK_CEILING = 65_536` rows refuses a *new* proposal with that
+  peer — the refusal names both the retention rule and
+  `orca agents quarantine <name>@<host>` (quarantining a stale peer frees the ceiling).
 
 ### Restarts without ritual
 
