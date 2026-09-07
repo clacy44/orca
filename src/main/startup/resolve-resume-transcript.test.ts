@@ -3,7 +3,9 @@
 // (execution-truth-2026-09-07.md:14 — 1 line, 267 bytes, `type":"bridge-session"`; verified
 // byte-for-byte against `~/.claude/projects/-home-ubuntu/b8d7ef3a-...jsonl` while drafting this
 // brief — see B2's RETURN).
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+// S10-21c B2b (D-R145 medium 5/low 9): the bounded (64 KiB) read and the third `{coverage:
+// 'uncovered'}` state.
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -81,5 +83,30 @@ describe('resolveResumeTranscript (S10-21c B2, design S4)', () => {
 
     const resolved = await resolveResumeTranscript('claude', 'empty-session', { claudeProjectsDir })
     expect(resolved).toEqual({ path: target, hasTurn: false })
+  })
+
+  it('[D-R145 medium 5] a >64 KiB transcript whose first record is a stub and second is a real turn -> hasTurn true, bounded read', async () => {
+    const root = await makeRoot('orca-resume-preflight-bounded-')
+    const claudeProjectsDir = join(root, 'claude-projects')
+    const projectDir = join(claudeProjectsDir, '-home-ubuntu')
+    await mkdir(projectDir, { recursive: true })
+    const target = join(projectDir, 'big-session.jsonl')
+    // First record: the real stub (267 B). Second: a synthetic turn padded well past 64 KiB, so
+    // the bounded read's prefix cannot see it directly — the resolver must fall back to "every
+    // complete record in the prefix was a stub AND the file continues beyond it".
+    const bigTurn = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: 'x'.repeat(80 * 1024) }
+    })
+    await writeFile(target, `${REAL_STUB_LINE}${bigTurn}\n`)
+    expect((await stat(target)).size).toBeGreaterThan(64 * 1024)
+
+    const resolved = await resolveResumeTranscript('claude', 'big-session', { claudeProjectsDir })
+    expect(resolved).toEqual({ path: target, hasTurn: true })
+  })
+
+  it('[D-R145 low 9] an agent type the resolver does not cover -> {coverage: "uncovered"}, never null', async () => {
+    const resolved = await resolveResumeTranscript('gemini', 'sess-uncovered')
+    expect(resolved).toEqual({ coverage: 'uncovered' })
   })
 })

@@ -18,11 +18,21 @@
 // (Ruling 32 Addendum 11 F2's `deliverPendingMessagesForLeaf` -> `resolveAgentMailboxForPaneKey`)
 // delivering the mail that was withheld because the pane had not been observed live yet — all
 // without a single `register` call, per the design's own closing assertion in §6.1 T11.
+//
+// [S10-21c B2b, D-R145 high 4] `resolveTabWorktreeId` and `resolveResumeTranscript` are wired to
+// the REAL `OrcaRuntimeService#resolveTabWorktreeId` / `resolveResumeTranscript` (not permissive
+// stand-ins) — this is the ONLY composed test in the suite that drives S8's worktree fence
+// against a real store-shaped `getWorkspaceSession` and a real on-disk transcript, so it is the
+// one place a regression in the fence itself (not just its unit tests) would be caught.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { OrchestrationDb } from '../runtime/orchestration/db'
 import { OrcaRuntimeService } from '../runtime/orca-runtime'
 import { runRestoreSweep, type RestoreSweepDeps } from './restore-registered-agent-panes'
+import { resolveResumeTranscript } from './resolve-resume-transcript'
 import { _resetRestoreSweepLockForTest } from '../runtime/restore-sweep-lock'
 import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
 
@@ -56,7 +66,7 @@ function stubLaunchScope(runtime: OrcaRuntimeService): void {
   })
 }
 
-function buildDeps(runtime: OrcaRuntimeService): RestoreSweepDeps {
+function buildDeps(runtime: OrcaRuntimeService, claudeProjectsDir: string): RestoreSweepDeps {
   return {
     getOrchestrationDb: () => runtime.getOrchestrationDb(),
     getOrchestrationCompatibilityHostId: () => runtime.getOrchestrationCompatibilityHostId(),
@@ -75,10 +85,14 @@ function buildDeps(runtime: OrcaRuntimeService): RestoreSweepDeps {
     collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
       runtime.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtime.getTerminalProcessIncarnation(handle),
-    // [S10-21c B2, design §2 S4/S8] Orthogonal to what T11 proves — permissive stand-ins, same
-    // reasoning as this file's own collectIncumbentEvidence/takeControllerInventoryForSweep use.
-    resolveResumeTranscript: async () => ({ path: 'stub-transcript.jsonl', hasTurn: true }),
-    resolveTabWorktreeId: () => 'wt-1',
+    // [S10-21c B2b, D-R145 high 4] The REAL resolver, pointed at a fixture transcript directory
+    // (never a permissive stand-in) — proves S4's preflight against an actual on-disk file.
+    resolveResumeTranscript: (agentType, sessionId) =>
+      resolveResumeTranscript(agentType, sessionId, { claudeProjectsDir }),
+    // [S10-21c B2b, D-R145 high 4] The REAL fence — the test seeds the stub store's
+    // `getWorkspaceSession` with the candidate's own tab under its own worktree (below), so this
+    // exercises the actual scan, never a fixed permissive return.
+    resolveTabWorktreeId: (tabId, hostId) => runtime.resolveTabWorktreeId(tabId, hostId ?? null),
     mintRestoreTicket: (payload) => runtime.mintRestoreTicket(payload),
     notifyRebindDelivery: (agentId) => runtime.notifyRebindDelivery(agentId),
     writeHostNoticeToPane: () => {}
@@ -103,22 +117,46 @@ function driveIdleTitle(runtime: OrcaRuntimeService, ptyId: string): void {
 
 describe('S10-21a C12, T11 end to end: registered pane + unread mail -> boot-time sweep -> delivery, no register', () => {
   let db: OrchestrationDb
+  let claudeProjectsRoot: string | undefined
 
-  afterEach(() => {
+  afterEach(async () => {
     db?.close()
     _resetRestoreSweepLockForTest()
+    if (claudeProjectsRoot) {
+      await rm(claudeProjectsRoot, { recursive: true, force: true })
+      claudeProjectsRoot = undefined
+    }
   })
 
   it("a registered pane whose recorded identity is absent from the one inventory round is restored (Layer 1 or 2), its waiting mail is delivered on the pane's first idle edge, and the identity is visible with the same id -- no register call anywhere in this test", async () => {
     vi.useFakeTimers()
     try {
       db = new OrchestrationDb(':memory:')
+      // [S10-21c B2b, D-R145 high 4] Fixture on-disk transcript for the REAL
+      // `resolveResumeTranscript` this test now wires (below) -- a real turn record, so S4's
+      // preflight sees an actual conversation rather than a permissive stub-in.
+      claudeProjectsRoot = await mkdtemp(join(tmpdir(), 'orca-t11-transcripts-'))
+      const claudeProjectsDir = join(claudeProjectsRoot, 'claude-projects')
+      const projectDir = join(claudeProjectsDir, '-home-ubuntu')
+      await mkdir(projectDir, { recursive: true })
+      await writeFile(
+        join(projectDir, 'sess-t11.jsonl'),
+        `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })}\n`
+      )
       const runtime = new OrcaRuntimeService({
         getSettings: () => ({
           disabledTuiAgents: [],
           agentCmdOverrides: {},
           agentDefaultArgs: {},
           agentDefaultEnv: {}
+        }),
+        // [S10-21c B2b, D-R145 high 4] Seeds the candidate's own tab ('tab-old', from
+        // `predPaneKey` below) under its own worktree ('wt-1') so the REAL
+        // `resolveTabWorktreeId` this test now wires (below) sees an agreeing fence, not an
+        // unresolvable one -- proves the fence is reachable and passes against a real store
+        // shape, not a permissive stand-in.
+        getWorkspaceSession: () => ({
+          tabsByWorktree: { 'wt-1': [{ id: 'tab-old', worktreeId: 'wt-1', title: 'chair-t11' }] }
         })
       } as never)
       runtime.setOrchestrationDb(db)
@@ -179,7 +217,7 @@ describe('S10-21a C12, T11 end to end: registered pane + unread mail -> boot-tim
       })
       expect(db.getUndeliveredUnreadMessages(`agent:${agentId}`).length).toBeGreaterThan(0)
 
-      const deps = buildDeps(runtime)
+      const deps = buildDeps(runtime, claudeProjectsDir)
       // The one daemon-inventory round: empty, i.e. the recorded identity is absent from it.
       // Orthogonal to the identity verdict itself (which reads agents.process_incarnation, per
       // errata 5(af)/Ruling 34 Addendum 27) -- an empty-but-non-null round, matching the T2

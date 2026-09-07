@@ -12,6 +12,7 @@ import {
 } from './agent-process-identity'
 import type { LaunchEvidence } from './agent-launch-sessions'
 import type { SelfResumeAuditHit } from './agent-sweep-self-resume-watermark'
+import { runtimeWorktreeIdsEqual } from '../runtime-worktree-id-equality'
 
 export type EarlyRowsDecision =
   | { kind: 'skipped_daemon_survived'; reasonCode: string }
@@ -220,4 +221,52 @@ export function routeDeadCandidate(
   }
   // Row 8, first half: no occupant, leaf present in the persisted layout.
   return { offerPlacement: true, audit: null }
+}
+
+export type WorktreeFenceDecision =
+  | { kind: 'mismatch'; reasonCode: string }
+  | { kind: 'unresolvable'; reasonCode: string }
+  | { kind: 'agree' }
+
+/** [S10-21c B2b, D-R145 blocking 1+2] The relocated worktree fence's own decision (split out so
+ * `restoreOneRegisteredPane` stays readable). `tabWorktreeId === undefined` (absent from every
+ * `tabsByWorktree` bucket) is UNRESOLVABLE — placement withheld, never a refusal — distinct from
+ * a RESOLVED tab that disagrees with the agent's own worktree (MISMATCH, Layer-3). */
+export function decideWorktreeFence(
+  tabWorktreeId: string | undefined,
+  agentWorktreeId: string,
+  tabId: string
+): WorktreeFenceDecision {
+  if (tabWorktreeId !== undefined && !runtimeWorktreeIdsEqual(tabWorktreeId, agentWorktreeId)) {
+    return {
+      kind: 'mismatch',
+      reasonCode: `sweep_worktree_mismatch: tab_disagrees ${tabWorktreeId}|${agentWorktreeId}`
+    }
+  }
+  if (tabWorktreeId === undefined) {
+    return { kind: 'unresolvable', reasonCode: `placement_withheld: tab_unresolvable ${tabId}` }
+  }
+  return { kind: 'agree' }
+}
+
+export type ResumePreflightDecision =
+  | { kind: 'uncovered'; reasonCode: string }
+  | { kind: 'refuse'; reasonCode: string }
+  | { kind: 'proceed' }
+
+/** [S10-21c B2, design §2 S4; B2b D-R145 low 9] S4's own decision, split out for readability.
+ * `{coverage: 'uncovered'}` means the resolver doesn't cover `agentType` yet — never a refusal,
+ * only a note. A miss or `hasTurn === false` refuses; anything else proceeds unchanged. */
+export function decideResumePreflight(
+  transcript: { path: string; hasTurn: boolean } | { coverage: 'uncovered' } | null,
+  agentType: string,
+  sessionId: string
+): ResumePreflightDecision {
+  if (transcript !== null && 'coverage' in transcript) {
+    return { kind: 'uncovered', reasonCode: `resume_preflight_uncovered ${agentType}` }
+  }
+  if (!transcript || !transcript.hasTurn) {
+    return { kind: 'refuse', reasonCode: `sweep_resume_target_absent: session ${sessionId}` }
+  }
+  return { kind: 'proceed' }
 }

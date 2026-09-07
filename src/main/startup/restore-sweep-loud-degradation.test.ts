@@ -61,6 +61,57 @@ describe('S10-21c B2/S6: loud degradation', () => {
     expect(notices[0].opts.rateKey).toBeTruthy()
   })
 
+  it('[D-R145 high 3] a throwing writeHostNoticeToPane on the no-row arm leaves summary.errors unchanged and the remaining candidates restored', async () => {
+    const db = rawDb()
+    const noRowPane = 'tab1:00000000-0000-4000-8000-0000000000ad'
+    const okPane = 'tab2:00000000-0000-4000-8000-0000000000ae'
+    insertAgent(db, { id: 'agent-ad', display_name: 'chair-ad', pane_key: noRowPane })
+    insertAgent(db, { id: 'agent-ae', display_name: 'chair-ae', pane_key: okPane })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: okPane,
+      agentType: 'claude',
+      sessionId: 'sess-ae',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-ae',
+        paneKey: okPane,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID as ExecutionHostId
+      },
+      disposition: 'created'
+    })
+    const summary = await runRestoreSweepBody(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        getTerminalProcessIncarnation: () => 'pty:inc',
+        writeHostNoticeToPane: () => {
+          throw new Error('pane_notice_boom')
+        }
+      })
+    )
+    // The throw never escapes the loop: no-row pane still counts as a layer-3 deferral (never
+    // `errors`), and the second candidate (a normal restore) still runs.
+    expect(summary.errors).toBe(0)
+    expect(summary.layer3).toBe(1)
+    expect(summary.layer1 + summary.layer2).toBe(1)
+    const auditRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE reason_code = 'sweep_no_launch_row'`)
+      .all()
+    expect(auditRows).toHaveLength(1)
+    const noticeFailedRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE reason_code LIKE 'notice_failed:%pane_notice_boom%'`
+      )
+      .all()
+    expect(noticeFailedRows).toHaveLength(1)
+  })
+
   it('a restore_selector_lost refusal out of ensureAgentSession is a Layer-3 audit for that pane only — a second candidate still restores', async () => {
     const db = rawDb()
     const refusedPane = 'tab1:00000000-0000-4000-8000-0000000000ab'

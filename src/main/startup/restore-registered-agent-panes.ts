@@ -42,12 +42,13 @@ import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import type { ResumableTuiAgent } from '../../shared/agent-session-resume'
 import type { RuntimeEnsureAgentSessionResult } from '../../shared/agent-session-host-authority'
 import { parsePaneKey } from '../../shared/stable-pane-id'
-import { runtimeWorktreeIdsEqual } from '../runtime/runtime-worktree-id-equality'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from '../runtime/restore-sweep-lock'
 import type { ControllerInventory } from '../runtime/orchestration/agent-process-identity'
 import {
   decideEarlyRows,
   decideLeafHoldRows,
+  decideResumePreflight,
+  decideWorktreeFence,
   routeDeadCandidate
 } from '../runtime/orchestration/restore-sweep-decision'
 import { collectSweepEvidence } from '../runtime/orchestration/restore-sweep-evidence'
@@ -90,16 +91,6 @@ export async function restoreOneRegisteredPane(
   const parsed = parsePaneKey(launchRow.pane_key)
   if (!parsed || !worktreeId) {
     const reasonCode = 'sweep_no_placement: unparseable_pane_or_no_worktree'
-    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
-    return { kind: 'layer3', reasonCode }
-  }
-  // [S10-21c B2, design §2 S8] Worktree fence — the resume's worktree (`worktreeId`, the
-  // agents row's own) and its placement (`parsed.tabId`, the launch row's pane key) come from
-  // two independent sources; nothing checked they agree. Unresolvable or mismatched -> Layer 3,
-  // never "assume it matches".
-  const tabWorktreeId = deps.resolveTabWorktreeId(parsed.tabId, hostId)
-  if (tabWorktreeId === undefined || !runtimeWorktreeIdsEqual(tabWorktreeId, worktreeId)) {
-    const reasonCode = `sweep_worktree_mismatch: tab=${tabWorktreeId ?? 'unresolvable'} agent=${worktreeId}`
     auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
     return { kind: 'layer3', reasonCode }
   }
@@ -188,26 +179,39 @@ export async function restoreOneRegisteredPane(
     inventory,
     early.status
   )
-  const offerPlacement = routing.offerPlacement
+  let offerPlacement = routing.offerPlacement
   if (routing.audit) {
     const write = routing.audit.verb === 'sweep_skip' ? auditSweepSkip : auditSweepNote
     write(db, hostId, launchRow.pane_key, agentId, routing.audit.reasonCode)
   }
-  // [S10-21c B2, design §2 S4] Resume preflight — never resume an empty transcript. A miss or
-  // a stub-only (`hasTurn === false`) transcript refuses here, before any ticket is minted. A
-  // resolver throw is NOT caught here — it propagates to the sweep's own per-candidate
-  // try/catch (`runRestoreSweepBody`'s loop over `restoreOneRegisteredPane`), which downgrades
-  // it to a Layer-3 audit for this pane only, never aborting the sweep for other panes.
+  // [S10-21c B2b, design §2 S8, D-R145 blocking 1+2] Worktree fence — RELOCATED after routing,
+  // so a remote/daemon-survived pane returns via its own earlier arm, never this one. `worktreeId`
+  // (agents row) always sets the spawn cwd; the tab only ever gates PLACEMENT (decideWorktreeFence
+  // doc comment has the mismatch/unresolvable split).
+  const tabWorktreeId = deps.resolveTabWorktreeId(parsed.tabId, hostId)
+  const fence = decideWorktreeFence(tabWorktreeId, worktreeId, parsed.tabId)
+  if (fence.kind === 'mismatch') {
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, fence.reasonCode)
+    return { kind: 'layer3', reasonCode: fence.reasonCode }
+  } else if (fence.kind === 'unresolvable') {
+    offerPlacement = false
+    auditSweepNote(db, hostId, launchRow.pane_key, agentId, fence.reasonCode)
+  }
+  // [S10-21c B2, design §2 S4] Resume preflight — never resume an empty transcript, before any
+  // ticket is minted. A resolver throw is NOT caught here — it propagates to the sweep's own
+  // per-candidate try/catch, downgraded to a Layer-3 audit for this pane only.
   const transcript = await deps.resolveResumeTranscript(launchRow.agent_type, launchRow.session_id)
-  if (!transcript || !transcript.hasTurn) {
-    const reasonCode = `sweep_resume_target_absent: ${launchRow.session_id}`
-    auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
-    deps.writeHostNoticeToPane(
-      launchRow.pane_key,
-      'Restore skipped: the recorded session has no conversation to resume.',
-      { rateKey: 'sweep_resume_target_absent' }
-    )
-    return { kind: 'layer3', reasonCode }
+  const preflight = decideResumePreflight(transcript, launchRow.agent_type, launchRow.session_id)
+  if (preflight.kind === 'uncovered') {
+    auditSweepNote(db, hostId, launchRow.pane_key, agentId, preflight.reasonCode)
+  } else if (preflight.kind === 'refuse') {
+    auditLayer3(db, hostId, launchRow.pane_key, agentId, preflight.reasonCode)
+    // [D-R145 medium 6a] Best-effort — inert on a pane with nothing live, per
+    // writeHostNoticeToPane's own doc comment; the audit row above is the record of truth.
+    // Asserted in the S4 test so it can't rot.
+    const msg = 'Restore skipped: the recorded session has no conversation to resume.'
+    deps.writeHostNoticeToPane(launchRow.pane_key, msg, { rateKey: 'sweep_resume_target_absent' })
+    return { kind: 'layer3', reasonCode: preflight.reasonCode }
   }
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,
@@ -347,13 +351,17 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
     const launchRow = db.newestLaunchForPane(hostId, paneKey)
     if (!launchRow) {
       auditLayer3(db, hostId, paneKey, R.id, 'sweep_no_launch_row')
-      // [S10-21c B2, design §2 S6(b)] Today audit-only, invisible in the pane — now ALSO a
-      // rate-clamped pane notice, alongside the existing audit.
-      deps.writeHostNoticeToPane(
-        paneKey,
-        'This pane is registered but Orca has no launch record for it, so it cannot be restored automatically.',
-        { rateKey: 'sweep_no_launch_row' }
-      )
+      // [S10-21c B2/S6(b); B2b D-R145 high 3] Also a rate-clamped pane notice — wrapped (this
+      // site is BEFORE the per-candidate try/catch below) so a throw here degrades to a note
+      // instead of aborting the sweep for every other pane.
+      const noRowNotice =
+        'This pane is registered but Orca has no launch record for it, so it cannot be restored automatically.'
+      try {
+        deps.writeHostNoticeToPane(paneKey, noRowNotice, { rateKey: 'sweep_no_launch_row' })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        auditSweepNote(db, hostId, paneKey, R.id, `notice_failed: ${msg}`)
+      }
       summary.layer3 += 1
       recordDeferral('sweep_no_launch_row')
       continue

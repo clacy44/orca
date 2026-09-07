@@ -63,11 +63,14 @@ export type RestoreSweepDeps = {
    * the sweep mints a restore ticket for it — a thin wrapper over
    * `session-file-resolver.ts#resolveSessionFilePath` (resolve-resume-transcript.ts). Null on a
    * miss; `hasTurn` false when the file exists but carries only the `bridge-session` stub Claude
-   * Code writes for `--session-id X` before any turn. Reused verbatim by S3(iii)/S5 (B4). */
+   * Code writes for `--session-id X` before any turn. Reused verbatim by S3(iii)/S5 (B4).
+   * [S10-21c B2b, D-R145 low 9] `{coverage: 'uncovered'}` is a THIRD state — the resolver does
+   * not cover `agentType` yet, distinct from "covered and absent/stub"; the caller must never
+   * refuse on this state, only note it. */
   resolveResumeTranscript(
     agentType: string,
     sessionId: string
-  ): Promise<{ path: string; hasTurn: boolean } | null>
+  ): Promise<{ path: string; hasTurn: boolean } | { coverage: 'uncovered' } | null>
   /** [S10-21c B2, design §2 S8] Resolves `tabId`'s owning worktree from the persisted session's
    * `tabsByWorktree` (`orca-runtime.ts#resolveTabWorktreeId`) — undefined when unresolvable,
    * never assumed to match the candidate's own worktree. */

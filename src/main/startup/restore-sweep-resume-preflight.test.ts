@@ -57,10 +57,15 @@ describe('S10-21c B2/S4: resume preflight (restoreOneRegisteredPane)', () => {
     })
     const ensureAgentSession = vi.fn()
     const mintRestoreTicket = vi.fn((payload: unknown) => JSON.stringify(payload) as never)
+    // [D-R145 medium 6] Asserted below so the notice call cannot silently rot — it is
+    // best-effort in the field (inert on a pane with nothing live), but the SWEEP must still
+    // issue it every time this refusal fires.
+    const writeHostNoticeToPane = vi.fn()
     const outcome = await restoreOneRegisteredPane(
       baseDeps(orchestrationDb!, {
         ensureAgentSession,
         mintRestoreTicket,
+        writeHostNoticeToPane,
         getTerminalProcessIncarnation: () => 'pty-f4:inc-f4',
         resolveResumeTranscript: async () => ({ path: '/does/not/matter', hasTurn: false })
       }),
@@ -77,6 +82,11 @@ describe('S10-21c B2/S4: resume preflight (restoreOneRegisteredPane)', () => {
     expect((outcome as { reasonCode: string }).reasonCode).toContain('stub-sess-f4')
     expect(mintRestoreTicket).not.toHaveBeenCalled()
     expect(ensureAgentSession).not.toHaveBeenCalled()
+    expect(writeHostNoticeToPane).toHaveBeenCalledWith(
+      predPaneKey,
+      expect.any(String),
+      expect.objectContaining({ rateKey: 'sweep_resume_target_absent' })
+    )
     const auditRow = db.prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`).get() as {
       verb: string
       reason_code: string
@@ -162,6 +172,53 @@ describe('S10-21c B2/S4: resume preflight (restoreOneRegisteredPane)', () => {
     expect(outcome.kind).toBe('layer1')
     expect(resolveResumeTranscript).toHaveBeenCalledWith('claude', 'real-sess-f6')
     expect(ensureAgentSession).toHaveBeenCalled()
+  })
+
+  it('[D-R145 low 9] an agent type the resolver does not cover -> proceeds (never Layer-3), audit note only', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-0000000000fa'
+    insertAgent(db, { id: 'agent-fa', display_name: 'chair-fa', pane_key: predPaneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'gemini',
+      sessionId: 'sess-fa',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-fa',
+        paneKey: predPaneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        getTerminalProcessIncarnation: () => 'pty-fa:inc-fa',
+        resolveResumeTranscript: async () => ({ coverage: 'uncovered' })
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-fa',
+      null,
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(ensureAgentSession).toHaveBeenCalled()
+    const noteRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE reason_code LIKE 'resume_preflight_uncovered%'`)
+      .all() as { verb: string; outcome: string; reason_code: string }[]
+    expect(noteRows).toHaveLength(1)
+    expect(noteRows[0]!.verb).toBe('sweep_note')
+    expect(noteRows[0]!.reason_code).toBe('resume_preflight_uncovered gemini')
   })
 
   it('a resolver throw is Layer-3 for that pane only; a second candidate still restores', async () => {
