@@ -3,7 +3,8 @@
 // does not exist, `peer_link_scan_facts.unreachable_since` is read/written nowhere,
 // `emitFederatedPactSideEffect` does not coalesce cross-kind, and the 21a rebind-unpause path
 // has no reason_code disambiguation.
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as PactShared from './pact-shared'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
@@ -215,6 +216,70 @@ describe('pact-link-evidence-sweep / emitFederatedPactSideEffect (S10-21b B15)',
   })
 
   // -------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R137 F4, D-R138 F3) — auto-resume must require CONTINUOUS recovery
+  // (`reachable_since`), not merely that the PAUSE is old. T-NA2b above happens not to
+  // distinguish the two anchors (its single good scan lands right after the pause fires, so
+  // pause-age and time-since-good-scan coincide); this test separates them: the pause is left
+  // to age for well over PACT_LINK_RECOVERY_MS BEFORE the first good scan ever lands.
+  // -------------------------------------------------------------------------------------
+  it('F4: a pause older than PACT_LINK_RECOVERY_MS plus ONE fresh good scan does NOT resume (RED at base: resumes on pause age alone)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const t0 = Date.now()
+    scanFact('unreachable', t0)
+    d.runPactLinkEvidenceSweep(t0 + PACT_LINK_SILENCE_MS)
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+    // The pause is now old (well past PACT_LINK_RECOVERY_MS), but the link has been silent the
+    // whole time — no scan at all until just now, one single good scan.
+    const longAfter = t0 + PACT_LINK_SILENCE_MS + PACT_LINK_RECOVERY_MS * 3
+    scanFact('proven', longAfter)
+    const result = d.runPactLinkEvidenceSweep(longAfter)
+    expect(result.resumed).toEqual([])
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+    // Continuous good scans for the full recovery window FROM the first one: resumes.
+    const afterContinuity = longAfter + PACT_LINK_RECOVERY_MS
+    scanFact('proven', afterContinuity)
+    const resumed = d.runPactLinkEvidenceSweep(afterContinuity)
+    expect(resumed.resumed.map((o) => o.threadId)).toEqual([threadId])
+    expect(d.getThread(threadId)?.pact_paused_at).toBeNull()
+  })
+
+  it('F4: a flap (unreachable scan) resets reachable_since, restarting the continuity requirement', () => {
+    const d = freshDb()
+    seedFederatedPeer(d)
+    const t0 = Date.now()
+    scanFact('proven', t0)
+    let fact = rawDb(d).prepare(`SELECT reachable_since FROM peer_link_scan_facts`).get() as {
+      reachable_since: number
+    }
+    expect(fact.reachable_since).toBe(t0)
+
+    // Continuing good scans hold reachable_since steady.
+    scanFact('proven', t0 + 1_000)
+    fact = rawDb(d).prepare(`SELECT reachable_since FROM peer_link_scan_facts`).get() as {
+      reachable_since: number
+    }
+    expect(fact.reachable_since).toBe(t0)
+
+    // A flap back to unreachable clears it.
+    scanFact('unreachable', t0 + 2_000)
+    const afterFlap = rawDb(d)
+      .prepare(`SELECT reachable_since FROM peer_link_scan_facts`)
+      .get() as { reachable_since: number | null }
+    expect(afterFlap.reachable_since).toBeNull()
+
+    // Recovery starts a NEW episode from this later timestamp.
+    scanFact('proven', t0 + 3_000)
+    const afterRecover = rawDb(d)
+      .prepare(`SELECT reachable_since FROM peer_link_scan_facts`)
+      .get() as { reachable_since: number }
+    expect(afterRecover.reachable_since).toBe(t0 + 3_000)
+  })
+
+  // -------------------------------------------------------------------------------------
   // T32 — cross-kind coalescing: three rapid local pause/resume flips enqueue ONE
   // outstanding relay item carrying the final absolute state.
   // -------------------------------------------------------------------------------------
@@ -268,6 +333,43 @@ describe('pact-link-evidence-sweep / emitFederatedPactSideEffect (S10-21b B15)',
       .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'resume'`)
       .get(threadId) as { n: number }
     expect(resumeRows.n).toBe(0)
+  })
+
+  // S10-21b B17 (D-R138 B-F7) restart-predicate half: NOT applied — STOP, contradicted by
+  // source. See agent-pact-unpause-lookup.ts's `pactsAwaitingUnpause` comment and
+  // agent-pact-resume-after-restore.ts's `resumeOnePactIfEligible` comment for the finding.
+
+  // -------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R138 B-F7) transactional half: the sweep's UPDATE + ledger insert now run
+  // in ONE BEGIN IMMEDIATE per thread — a failure partway through must roll BOTH back, never
+  // leave `pact_paused_at` set with no ledger row. RED at base: the base implementation wrote
+  // the UPDATE as its own auto-commit BEFORE the (here, failing) ledger insert, so the pause
+  // landed regardless.
+  // -------------------------------------------------------------------------------------
+  it('F17: a failure between the UPDATE and the ledger insert rolls BOTH back, in one transaction (RED at base)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const t0 = 1_000_000
+    scanFact('unreachable', t0)
+
+    const spy = vi.spyOn(PactShared, 'insertPactStepRow').mockImplementation(() => {
+      throw new Error('simulated crash between UPDATE and ledger insert')
+    })
+    try {
+      expect(() => d.runPactLinkEvidenceSweep(t0 + PACT_LINK_SILENCE_MS)).toThrow('simulated crash')
+    } finally {
+      spy.mockRestore()
+    }
+
+    // The UPDATE must NOT have survived the rollback.
+    const thread = d.getThread(threadId)
+    expect(thread?.pact_paused_at).toBeNull()
+    expect(thread?.pact_pause_reason).toBeNull()
+    const ledgerRows = rawDb(d)
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'pause'`)
+      .get(threadId) as { n: number }
+    expect(ledgerRows.n).toBe(0)
   })
 
   // -------------------------------------------------------------------------------------

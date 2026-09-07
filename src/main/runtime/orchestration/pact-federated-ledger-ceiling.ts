@@ -20,15 +20,32 @@ function linkRemoteStepCount(db: Database.Database, environmentId: string): numb
 // Errata NB7's exact refusal shape: names BOTH the retention rule AND the quarantine remedy for
 // an uncooperative peer that never releases — stated alongside the retention rule, never in
 // place of it.
+//
+// S10-21b B17 (D-R137 F13): the base implementation took `peerDisplayName`/`linkLabel` from the
+// CALLER — propose-apply.ts passed `(senderAgentId, pairedDeviceId)` (a raw remote agent id and
+// the link's own device id) and propose-accept.ts passed `(display_name, environment_id)` — so
+// the suggested `orca agents quarantine <x>@<y>` named an agent id / raw environment id where
+// `resolveOrchestrationWorkerServer` (quarantine's own resolver) expects a saved-environment
+// NAME. Resolved HERE instead, from the mirror row this function already keys its count
+// query by, so both call sites get the same correct, current values.
 export function refuseIfLinkCeilingSaturated(
   db: Database.Database,
   environmentId: string,
-  peerDisplayName: string,
-  linkLabel: string
+  remoteAgentId: string
 ): void {
   if (linkRemoteStepCount(db, environmentId) < PACT_STEPS_PER_LINK_CEILING) {
     return
   }
+  const mirror = db
+    .prepare(
+      `SELECT display_name, environment_name FROM remote_agents
+        WHERE environment_id = ? AND remote_agent_id = ?`
+    )
+    .get(environmentId, remoteAgentId) as
+    | { display_name: string; environment_name: string }
+    | undefined
+  const peerDisplayName = mirror?.display_name ?? remoteAgentId
+  const linkLabel = mirror?.environment_name ?? environmentId
   throw new OrchestrationError(
     'pact_link_ceiling',
     `Refused: this link's remote-row ceiling is saturated (${PACT_STEPS_PER_LINK_CEILING}); ` +

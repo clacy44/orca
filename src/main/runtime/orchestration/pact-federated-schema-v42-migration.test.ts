@@ -54,14 +54,19 @@ const PEER_REPLY_OUTBOX_V42_COLUMNS = [
   'pact_state',
   'pact_flight_token'
 ]
+// S10-21b B17 (D-R137 F4, D-R138 F3): `reachable_since` joins the unshipped v42 alongside
+// `unreachable_since` (both DROP-AND-RECREATE repair-tier columns on peer_link_scan_facts, not
+// a separate ALTER TABLE set) — the auto-resume continuity anchor.
+const PEER_LINK_SCAN_FACTS_V42_COLUMNS = ['reachable_since']
 
-// 19 + 6 + 2 + 7 = 34.
+// 19 + 6 + 2 + 7 + 1 = 35.
 expect(
   THREADS_V42_COLUMNS.length +
     PACT_STEPS_V42_COLUMNS.length +
     REMOTE_AGENTS_V42_COLUMNS.length +
-    PEER_REPLY_OUTBOX_V42_COLUMNS.length
-).toBe(34)
+    PEER_REPLY_OUTBOX_V42_COLUMNS.length +
+    PEER_LINK_SCAN_FACTS_V42_COLUMNS.length
+).toBe(35)
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -135,6 +140,7 @@ function downgradeToV41(sqlite: Database.Database): void {
     sqlite.exec(`ALTER TABLE peer_reply_outbox DROP COLUMN ${column}`)
   }
   sqlite.exec(`ALTER TABLE peer_link_scan_facts DROP COLUMN unreachable_since`)
+  sqlite.exec(`ALTER TABLE peer_link_scan_facts DROP COLUMN reachable_since`)
   sqlite.exec(`DROP TABLE IF EXISTS pact_applied_ids`)
 
   // Restore the pre-v42 trigger shapes (v35's unconditional-abort no-delete trigger; the
@@ -189,7 +195,7 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
     return join(tempDir, 'orchestration.db')
   }
 
-  it('a v41 store migrates to user_version 42: all 34 columns present, pact_applied_ids present and empty, unreachable_since present, both triggers present and still aborting, both new indexes present, no CHECK widened, row counts unchanged, a second open is a no-op', () => {
+  it('a v41 store migrates to user_version 42: all 35 columns present, pact_applied_ids present and empty, unreachable_since/reachable_since present, both triggers present and still aborting, both new indexes present, no CHECK widened, row counts unchanged, a second open is a no-op', () => {
     const path = freshPath()
 
     db = new OrchestrationDb(path)
@@ -236,6 +242,9 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
       expect(hasColumn(sqlite, 'peer_reply_outbox', column)).toBe(true)
     }
     expect(hasColumn(sqlite, 'peer_link_scan_facts', 'unreachable_since')).toBe(true)
+    for (const column of PEER_LINK_SCAN_FACTS_V42_COLUMNS) {
+      expect(hasColumn(sqlite, 'peer_link_scan_facts', column)).toBe(true)
+    }
 
     expect(hasTable(sqlite, 'pact_applied_ids')).toBe(true)
     expect(rowCount(sqlite, 'pact_applied_ids')).toBe(0)

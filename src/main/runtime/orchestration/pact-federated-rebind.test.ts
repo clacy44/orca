@@ -188,6 +188,142 @@ describe('drainPendingRebindParty', () => {
     }
     expect(outboxCount.n).toBe(0)
   })
+
+  // ---------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R138 A-F7/B-F11): the drain's double-emit guard must be PER TOKEN — a
+  // queued relay of one kind must never block a DIFFERENT kind's drain on the same thread.
+  // RED at base: the shared `relay_kind = 'pact_gap_notice'` guard blocked ANY token's drain
+  // for as long as a gap_notice sat queued.
+  // ---------------------------------------------------------------------------------------
+  it('F19a: a queued gap_notice does not block the rebind drain (RED at base)', () => {
+    const d = freshDb()
+    const raw = rawDb(d)
+    const successorId = seedAgent(d, 'chair-f19a')
+    raw
+      .prepare(
+        `INSERT INTO agents (id, display_name, host_id, state, derived, quarantined, origin_kind, origin_host_id, tombstoned_at)
+         VALUES ('agt_pred_f19a', 'chair-f19a', 'local', 'gone', 0, 0, 'pane', 'local', datetime('now'))`
+      )
+      .run()
+    const peerKey = seedFederatedPeer(d)
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: successorId,
+      participants: [
+        { participantKey: successorId, agentId: successorId },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({
+      callerAgentId: successorId,
+      callerPaneKey: null,
+      callerHostId: 'local',
+      threadId: thread.id,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
+    raw
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_relay_pending = 'rebind' WHERE id = ?`
+      )
+      .run(successorId, thread.id)
+    // A stuck/queued gap_notice relay item on this SAME thread — must not block the rebind.
+    raw
+      .prepare(
+        `INSERT INTO peer_reply_outbox (
+           id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
+           peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
+           peer_thread_id, local_thread_id, pact_thread_id, notice_run_id, notice_pane_key, payload,
+           byte_count, relay_kind, state, attempts, consecutive_failures, hold_count, created_at
+         ) VALUES ('stuck_gap_f19a', 1, 'msg_stuck_f19a', ?, ?, 1, 'pcfp', 'pkfp', 'msg_stuck_f19a',
+                   ?, NULL, ?, ?, NULL, NULL, '{}', 2, 'pact_gap_notice', 'queued', 0, 0, 0, ?)`
+      )
+      .run(ENV, ENV, REMOTE_AGENT_ID, thread.id, thread.id, Date.now())
+
+    const drained = drainPendingRebindParty(raw, null)
+    expect(drained).toBe(1)
+    const row = raw
+      .prepare('SELECT pact_relay_pending FROM threads WHERE id = ?')
+      .get(thread.id) as { pact_relay_pending: string | null }
+    expect(row.pact_relay_pending).toBeNull()
+    const rebindRow = raw
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_rebind_party'`
+      )
+      .get(thread.id) as { n: number }
+    expect(rebindRow.n).toBe(1)
+  })
+
+  it('F19b: a queued rebind is not double-emitted (RED at base)', () => {
+    const d = freshDb()
+    const raw = rawDb(d)
+    const successorId = seedAgent(d, 'chair-f19b')
+    raw
+      .prepare(
+        `INSERT INTO agents (id, display_name, host_id, state, derived, quarantined, origin_kind, origin_host_id, tombstoned_at)
+         VALUES ('agt_pred_f19b', 'chair-f19b', 'local', 'gone', 0, 0, 'pane', 'local', datetime('now'))`
+      )
+      .run()
+    const peerKey = seedFederatedPeer(d)
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: successorId,
+      participants: [
+        { participantKey: successorId, agentId: successorId },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({
+      callerAgentId: successorId,
+      callerPaneKey: null,
+      callerHostId: 'local',
+      threadId: thread.id,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
+    raw
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_relay_pending = 'rebind' WHERE id = ?`
+      )
+      .run(successorId, thread.id)
+    // An already-queued rebind_party relay on this thread (e.g. from a prior partial tick) —
+    // a second tick must not mint a SECOND one.
+    raw
+      .prepare(
+        `INSERT INTO peer_reply_outbox (
+           id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
+           peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
+           peer_thread_id, local_thread_id, pact_thread_id, notice_run_id, notice_pane_key, payload,
+           byte_count, relay_kind, state, attempts, consecutive_failures, hold_count, created_at
+         ) VALUES ('stuck_rebind_f19b', 1, 'msg_stuck_f19b', ?, ?, 1, 'pcfp', 'pkfp', 'msg_stuck_f19b',
+                   ?, NULL, ?, ?, NULL, NULL, '{}', 2, 'pact_rebind_party', 'queued', 0, 0, 0, ?)`
+      )
+      .run(ENV, ENV, REMOTE_AGENT_ID, thread.id, thread.id, Date.now())
+
+    const drained = drainPendingRebindParty(raw, null)
+    expect(drained).toBe(0)
+    const row = raw
+      .prepare('SELECT pact_relay_pending FROM threads WHERE id = ?')
+      .get(thread.id) as { pact_relay_pending: string | null }
+    // Still pending — the drain is deliberately skipped this tick, not cleared prematurely.
+    expect(row.pact_relay_pending).toBe('rebind')
+    const rebindRowCount = raw
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_rebind_party'`
+      )
+      .get(thread.id) as { n: number }
+    expect(rebindRowCount.n).toBe(1)
+  })
 })
 
 // B9c (D-R134 F3/D-R135 F2, chair NOTE "after B13"): the SAME drain extended to

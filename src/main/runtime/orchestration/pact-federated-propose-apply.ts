@@ -35,12 +35,7 @@ export function applyPropose(
   // S10-21b B14 (design §4.6(a), errata NB7) — per-link ceiling, evaluated ONLY here (propose/
   // inbound-propose-apply time), refusing only a NEW pact proposal; never touches an
   // already-engaged pact.
-  refuseIfLinkCeilingSaturated(
-    db,
-    args.senderEnvironmentId,
-    args.senderAgentId,
-    args.pairedDeviceId
-  )
+  refuseIfLinkCeilingSaturated(db, args.senderEnvironmentId, args.senderAgentId)
 
   // S10-21b B14 (design §3.3, errata NB8) — a proposal from this (peer, local agent) pair bumps
   // the per-peer-per-window park-block window on ARRIVAL, regardless of this propose's own

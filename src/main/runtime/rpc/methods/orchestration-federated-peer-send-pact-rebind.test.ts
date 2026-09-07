@@ -10,6 +10,7 @@ import { createThread } from '../../orchestration/thread-directory'
 import { adoptEraOnInboundPropose } from '../../orchestration/pact-federated-era'
 import type Database from '../../../sqlite/sync-database'
 import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
+import { repointFederatedPactParty } from '../../orchestration/pact-federated-identity'
 import type * as LinkBindingRoutable from '../../orchestration/link-binding-routable'
 import type { RpcContext } from '../core'
 
@@ -236,6 +237,63 @@ describe('S10-21b B13: rebind_party inbound apply', () => {
 
     expect(repointCountAfterRetry.n).toBe(repointCountAfterFirst.n)
     expect(appliedCountAfterRetry.n).toBe(appliedCountAfterFirst.n)
+  })
+
+  // S10-21b B17 (D-R137 F3): a crash between step 1 (repoint) and step 2 (supersede-stamp +
+  // applied-id write) leaves the thread's party already repointed to NEW_SENDER_ID while the
+  // old mirror row is still NOT superseded and no applied-id row exists — gate 8's messageId
+  // dedupe therefore does NOT short-circuit a retry (no stored receipt), so it reaches clause 5
+  // for real. RED at base: clause 5 checked only the OLD party key and threw
+  // `not_a_participant` on every such retry forever.
+  it('T-F3: retry after a crash between repoint and the ledger write applies cleanly (RED at base: not_a_participant)', async () => {
+    const threadId = seedEngagedFederatedPact('thr_aaaaaaaaaaa1')
+    // Simulate the crash: call the repoint alone (step 1), never step 2.
+    repointFederatedPactParty(raw(db) as unknown as Database.Database, threadId, {
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: LINK_DEVICE_ID,
+      remoteAgentId: NEW_SENDER_ID,
+      reason: 'rebind_party'
+    })
+    const midCrash = raw(db)
+      .prepare(`SELECT pact_proposer_agent_id FROM threads WHERE id = ?`)
+      .get(threadId) as { pact_proposer_agent_id: string }
+    expect(midCrash.pact_proposer_agent_id).toBe(`remote:${LINK_DEVICE_ID}:${NEW_SENDER_ID}`)
+    const oldMirrorMidCrash = raw(db)
+      .prepare(`SELECT superseded_at FROM remote_agents WHERE remote_agent_id = ?`)
+      .get(OLD_SENDER_ID) as { superseded_at: string | null }
+    expect(oldMirrorMidCrash.superseded_at).toBeNull()
+
+    const auditCountBeforeRetry = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'repointFederatedPactParty'`)
+      .get() as { n: number }
+
+    // Retry: the identical wire message.
+    await expect(rebindSend()).resolves.toMatchObject({ accepted: true })
+
+    const oldMirror = raw(db)
+      .prepare(
+        `SELECT superseded_at, succeeded_by_remote_agent_id FROM remote_agents WHERE remote_agent_id = ?`
+      )
+      .get(OLD_SENDER_ID) as {
+      superseded_at: string | null
+      succeeded_by_remote_agent_id: string | null
+    }
+    expect(oldMirror.superseded_at).not.toBeNull()
+    expect(oldMirror.succeeded_by_remote_agent_id).toBe(NEW_SENDER_ID)
+
+    const appliedCount = raw(db)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM pact_applied_ids WHERE thread_id = ? AND verb = 'rebind_party'`
+      )
+      .get(threadId) as { n: number }
+    expect(appliedCount.n).toBe(1)
+
+    const repointAuditCountAfterRetry = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'repointFederatedPactParty'`)
+      .get() as { n: number }
+    // The retry's own repoint call is exactly one more audit row than before it ran — not a
+    // double-repoint from clause 5 somehow being re-checked twice.
+    expect(repointAuditCountAfterRetry.n).toBe(auditCountBeforeRetry.n + 1)
   })
 
   it('T18: a locally-quarantined row in the supersession chain refuses agent_quarantined, nothing written, pact auto-paused counterpart_quarantined', async () => {

@@ -424,6 +424,7 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
   // and returns the three informative facts. Fails at base: `handlePactOrStepWait`'s timeout
   // branch returns no `lastInboundAt`/`linkHealth`/`peerState` fields and never calls
   // `queryCounterpartLiveState`.
+
   it('T22: a 40-minute-stale federated pact is not auto-paused on wait --for pact timeout; the fact-2 query runs and the three informative facts are returned', async () => {
     setup()
     const a = await registerAgent('agent-a', evidenceA)
@@ -604,9 +605,20 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
     expect(fact?.unreachable_since).toBeGreaterThan(0)
   })
 
-  it('B15b(b): a pact wait timeout against a live peer clears a previously stamped unreachable_since', async () => {
+  // SCENARIO_CORRECTION (S10-21b B17, D-R137 F2 / D-R138 F2): this test previously asserted "a
+  // reachable timeout clears it" (`fact?.outcome).not.toBe('unreachable')` /
+  // `unreachable_since).toBeNull()`) — that assertion encoded the very bug D-R137/D-R138 found:
+  // `putScanFact` clears `unreachable_since` on any non-`unreachable` outcome, so every
+  // wait-expiry poll against a link that is REALLY down but whose local mirror still reads
+  // `live`/`idle` (nothing marks the mirror `gone` on its own) reset the stamp and permanently
+  // prevented `pauseUnreachableLinks` from ever reaching its silence threshold. §3.3 names only
+  // the ADVERSE branch as a scan-equivalent fact. Corrected assertion: "a reachable timeout
+  // leaves the fact untouched" — a prior adverse stamp survives a reachable-looking wait expiry
+  // verbatim, exactly as a genuinely down link's evidence must.
+  it('B15b(b) [SCENARIO_CORRECTION]: a pact wait timeout against a (mirror-)live peer leaves a previously stamped unreachable_since untouched', async () => {
     const { threadId, raw } = await setupFederatedWaitPact('env-b15b-b', 'peer-b15b-b', 'live')
     // Seed a prior unreachable episode (as an ordinary periodic scan would have written it).
+    const priorObservedAt = Date.now() - 1_000
     putScanFact(raw, {
       linkDeviceId: 'env-b15b-b',
       environmentId: 'env-b15b-b',
@@ -614,8 +626,14 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
       environmentPairingRevision: 1,
       linkCredentialFp: 'lcfp',
       detail: null,
-      observedAt: Date.now() - 1_000
+      observedAt: priorObservedAt
     })
+    const before = raw
+      .prepare(
+        `SELECT outcome, unreachable_since, observed_at FROM peer_link_scan_facts
+         WHERE link_device_id = 'env-b15b-b' AND environment_id = 'env-b15b-b'`
+      )
+      .get() as { outcome: string; unreachable_since: number | null; observed_at: number }
 
     const result = (await call(
       'orchestration.wait',
@@ -625,14 +643,17 @@ describe('orchestration.threads.pact / .step / .pactLedger / orchestration.wait 
     expect(result.outcome).toBe('timeout')
     expect(result.peerState).toBe('live')
 
-    const fact = raw
+    const after = raw
       .prepare(
-        `SELECT outcome, unreachable_since FROM peer_link_scan_facts
+        `SELECT outcome, unreachable_since, observed_at FROM peer_link_scan_facts
          WHERE link_device_id = 'env-b15b-b' AND environment_id = 'env-b15b-b'`
       )
-      .get() as { outcome: string; unreachable_since: number | null } | undefined
-    expect(fact?.outcome).not.toBe('unreachable')
-    expect(fact?.unreachable_since).toBeNull()
+      .get() as { outcome: string; unreachable_since: number | null; observed_at: number }
+    // RED at base: the base write clears outcome to 'no_match' and unreachable_since to NULL, and
+    // refreshes observed_at — none of that may happen on a live/idle read.
+    expect(after).toEqual(before)
+    expect(after.outcome).toBe('unreachable')
+    expect(after.unreachable_since).toBeGreaterThan(0)
   })
 
   it('B15b(c) / T-NA2a second-source half: the sweep pauses the pact from (a) on unreachable_since alone, no periodic scan ever run', async () => {

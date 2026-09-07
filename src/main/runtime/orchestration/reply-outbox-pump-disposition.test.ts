@@ -46,6 +46,11 @@ const PACT_RETRY_CODES_B8C = [
   'not_found',
   'pact_repair_not_yet_available'
 ]
+// S10-21b B17 (D-R137 F5): `pact_link_ceiling` (the per-link ceiling refusal, relayed back to
+// the sender) and `pact_party_unresolved` were in NO classifier set — the D-R135 F10 class
+// reintroduced — falling through to the transport-shaped bumpFailure:true branch, letting a
+// saturated peer link or an unresolved party drive the sender's own unreachable threshold.
+const PACT_RETRY_CODES_F5 = ['pact_link_ceiling', 'pact_party_unresolved']
 
 describe('S10-21b B5: classifyReplyRelayError pact-item branch', () => {
   const now = Date.now()
@@ -104,6 +109,24 @@ describe('S10-21b B5: classifyReplyRelayError pact-item branch', () => {
 
   it.each(PACT_RETRY_CODES_B8C)(
     "pact item, code '%s': non-bumping retry, never the transport-shaped bumpFailure:true fallback (D-R135 finding 10)",
+    (code) => {
+      const d = classifyReplyRelayError(
+        new OrchestrationError(code, 'peer says so'),
+        0,
+        now,
+        'pact_step',
+        3
+      )
+      expect(d.kind).toBe('retry')
+      if (d.kind === 'retry') {
+        expect(d.bumpFailure).toBe(false)
+        expect(d.disposition).toBe(code)
+      }
+    }
+  )
+
+  it.each(PACT_RETRY_CODES_F5)(
+    "pact item, code '%s': non-bumping retry, never the transport-shaped bumpFailure:true fallback (D-R137 F5, RED at base)",
     (code) => {
       const d = classifyReplyRelayError(
         new OrchestrationError(code, 'peer says so'),

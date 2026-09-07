@@ -101,6 +101,12 @@ export const PACT_HOLD_CAUSES = new Set([
 // RECONCILED (lane-2-onto-lane-1 rebase): B8c's `pact_paused` and B11's `pact_paused` were
 // byte-identical additions to the same member; the union below has each of the seven codes
 // exactly once.
+// S10-21b B17 (D-R137 F5): `pact_link_ceiling` (thrown by the inbound propose apply's per-link
+// ceiling check, relayed back to the sender) and `pact_party_unresolved` were in NO classifier
+// set — the D-R135 F10 class reintroduced — so both fell through to the transport-shaped
+// terminal branch with bumpFailure:true, letting a saturated peer link (or an unresolved party)
+// drive the sender's own unreachable threshold and degrade unrelated mail. Both are repairable
+// by purge/quarantine, exactly like pact_ledger_capped.
 const PACT_RETRY_CAUSES = new Set([
   'pact_settling',
   'pact_out_of_order',
@@ -112,7 +118,9 @@ const PACT_RETRY_CAUSES = new Set([
   'pact_not_engaged',
   'not_a_participant',
   'not_found',
-  'pact_repair_not_yet_available'
+  'pact_repair_not_yet_available',
+  'pact_link_ceiling',
+  'pact_party_unresolved'
 ])
 
 // S10-21b B5 (design §2.9): deterministic on the same bytes, or a genuine protocol fault —

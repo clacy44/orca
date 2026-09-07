@@ -19,7 +19,8 @@ import { isFederatedPact } from './pact-federated-identity'
 import type { RelayKind } from './reply-outbox-store'
 import {
   enqueueReplyOutboxCoalesced,
-  enqueueReplyOutboxCoalescedAcrossKinds
+  enqueueReplyOutboxCoalescedAcrossKinds,
+  resolveCoalesceTarget
 } from './reply-outbox-pact-answer-coalesce'
 import { getPeerLinkBinding, LinkBindingCapError } from './link-binding-store'
 import { buildPactWirePayload } from './pact-federated-wire-envelope'
@@ -289,8 +290,22 @@ export function enqueueFederatedPactVerbWithin(
     }
   }
 
-  // Step 3.
-  db.prepare(`UPDATE threads SET pact_local_seq = pact_local_seq + 1 WHERE id = ?`).run(thread.id)
+  // Step 3. S10-21b B17 (D-R138 B-F1, errata 21b-E7a, LR-018 — the prior cross-kind coalescing
+  // ruling was WRONG): a coalesced REPLACEMENT must not consume a new wire seq — unconditional
+  // bumping let a rapid pause→resume flip burn a seq nothing was ever sent for, desyncing the
+  // peer's fence. Replace-vs-insert is decided HERE, before the bump, mirroring step 5's own
+  // coalesce lookup (guaranteed to find the same row within one transaction); a replacement
+  // reuses the current `pact_local_seq` untouched, only a fresh insert bumps.
+  const coalesceExistingId = resolveCoalesceTarget(
+    db,
+    thread.id,
+    verb,
+    relayKind,
+    opts.coalesceAcrossRelayKinds
+  )
+  if (coalesceExistingId === null) {
+    db.prepare(`UPDATE threads SET pact_local_seq = pact_local_seq + 1 WHERE id = ?`).run(thread.id)
+  }
   const seqRow = db
     .prepare(`SELECT pact_local_seq, pact_era FROM threads WHERE id = ?`)
     .get(thread.id) as { pact_local_seq: number; pact_era: number }

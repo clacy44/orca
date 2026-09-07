@@ -27,6 +27,7 @@ import { recordPactAppliedId } from './pact-federated-inbound-dedupe'
 import type { InboundPactWake } from './pact-federated-inbound-wake'
 import type { ThreadRow } from './thread-directory-types'
 import { enqueueFederatedPactVerb, type FederatedPactEmitRuntime } from './pact-federated-emit'
+import { emitFederatedPactSideEffect } from './pact-federated-pause-resume-emit'
 
 export type RebindPartyApplyResult = {
   accepted: true
@@ -124,12 +125,21 @@ export function applyInboundRebindPartyVerb(
     )
   }
 
-  // Clause 5: `remote:<link>:<oldAgentId>` — NOT the sender's own (new) rendered key, which by
-  // definition is not yet the recorded party — must be a party to this pact. Gate 12
-  // (pact-federated-inbound-gates.ts) is exempted for this verb precisely so this clause is the
-  // one authority on party membership here.
+  // Clause 5 (S10-21b B17, D-R137 F3): `remote:<link>:<oldAgentId>` OR
+  // `remote:<link>:<newAgentId>` must be a party to this pact. The new-key case is the
+  // self-repair for a crash between step 1 (repoint) and step 2 (supersede-stamp + applied-id)
+  // below: after step 1 alone, `threads.pact_*_agent_id` already reads the NEW rendered key
+  // while `oldMirror.superseded_at` is still NULL (that stamp is step 2's own write) — so a
+  // retry of the identical wire message reaches this clause with the party already repointed.
+  // Refusing it here (checking only the old key) meant clause 3's own idempotency claim never
+  // actually applied and every retry threw `not_a_participant` forever. Clause 3's
+  // `superseded_at IS NULL` check still keeps a FULLY completed rebind (old mirror superseded)
+  // from re-entering — it throws `agent_unknown` before this clause is ever reached.
   const oldPartyKey = renderFederatedPartyKey({ linkDeviceId: linkKey, remoteAgentId: oldAgentId })
-  if (thread.pact_proposer_agent_id !== oldPartyKey && thread.pact_with_agent_id !== oldPartyKey) {
+  const newPartyKey = renderFederatedPartyKey({ linkDeviceId: linkKey, remoteAgentId: newAgentId })
+  const isParty = (key: string): boolean =>
+    thread.pact_proposer_agent_id === key || thread.pact_with_agent_id === key
+  if (!isParty(oldPartyKey) && !isParty(newPartyKey)) {
     throw new OrchestrationError(
       'not_a_participant',
       `Refused: ${oldPartyKey} is not a party to the pact on ${thread.id}.`
@@ -199,34 +209,65 @@ function drainGapNotice(
   return 1
 }
 
+// S10-21b B17 (D-R137 F10, D-R138 F5/A-F7/B-F11): re-attempts a pause/resume side effect a
+// LinkBindingCapError left pending — the whole `enqueueFederatedPactVerb` transaction rolled
+// back with that error (nothing, not even the thread state, was applied), so a clean full
+// re-invocation of `emitFederatedPactSideEffect` is correct and cannot double-write anything.
+// DISCLOSED DEVIATION: the original caller's actor identity and (for `pause`) its specific
+// `reason_code` are lost with the rollback — the retry is host-actor with a generic reason
+// (`emitFederatedPactSideEffect`'s own `reasonCode=null` folds to `pact_pause_reason='operator'`
+// for `pause`; `resume` never carries one). Preferable to the base's silent, permanent
+// local-only degradation with no retry at all.
+function drainPausedOrResumed(
+  db: Database.Database,
+  runtime: FederatedPactEmitRuntime | null,
+  threadId: string,
+  token: 'pause' | 'resume'
+): number {
+  // Clear the token FIRST — `emitFederatedPactSideEffect` re-sets it itself if the cap is still
+  // hit, so this is never a lost-update window, only a harmless double-scan on the next tick.
+  db.prepare(
+    `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = ?`
+  ).run(threadId, token)
+  emitFederatedPactSideEffect(db, runtime, threadId, token, null)
+  return 1
+}
+
+// Per-token relay_kind this drain's own double-emit guard checks against — S10-21b B17
+// (D-R138 A-F7/B-F11): the base guard was a single `NOT EXISTS (... relay_kind = 'pact_gap_notice')`
+// shared by EVERY token, so a queued gap_notice blocked the rebind drain (and vice versa) for as
+// long as the unrelated relay stayed unsettled. Each token now checks only its OWN relay_kind.
+const RELAY_PENDING_TOKEN_RELAY_KIND: Record<string, string> = {
+  gap_notice: 'pact_gap_notice',
+  rebind: 'pact_rebind_party',
+  pause: 'pact_pause',
+  resume: 'pact_resume'
+}
+
 // §1.4's Local side / §2.11 — drains every thread flagged `pact_relay_pending = 'rebind'` (the
-// succession UPDATE, agent-thread-succession.ts) or `'gap_notice'` (B9c, above), emitting
-// `rebind_party`/`gap_notice` via B6's shared primitive. Deliberately NOT called from inside
-// `upsertAgentByPaneSuffix`'s own transaction (the design's explicit "no enqueue runs inside
-// that transaction" constraint) — this is the PUMP's own, separate call (reply-outbox-pump.ts,
-// once per tick, ahead of its ordinary claim loop).
+// succession UPDATE, agent-thread-succession.ts), `'gap_notice'` (B9c, above), or `'pause'`/
+// `'resume'` (B17, above), emitting `rebind_party`/`gap_notice`/pause/resume via B6's shared
+// primitive (or, for pause/resume, `emitFederatedPactSideEffect` directly). Deliberately NOT
+// called from inside `upsertAgentByPaneSuffix`'s own transaction (the design's explicit "no
+// enqueue runs inside that transaction" constraint) — this is the PUMP's own, separate call
+// (reply-outbox-pump.ts, once per tick, ahead of its ordinary claim loop).
 export function drainPendingRebindParty(
   db: Database.Database,
   runtime: FederatedPactEmitRuntime | null
 ): number {
   // N7: enqueueFederatedPactVerb opens its OWN `BEGIN IMMEDIATE` (SQLite cannot nest), so the
   // token clear cannot land inside its transaction — FORCED DEVIATION from the brief's preferred
-  // shape. The NOT EXISTS guard alone closes the window: a crash between the enqueue commit and
-  // the token-clear UPDATE leaves the token set, but this guard then excludes the thread from
-  // the NEXT tick's scan (the just-enqueued row is still 'queued'/'sending'), so no second
-  // gap_notice is minted; the token itself is cleared, late, whenever that tick's clear runs (or
-  // never, if the crash also lost the clear — a stuck token only ever suppresses a re-mint, per
-  // errata 21b-E5, never blocks anything else).
+  // shape. The per-token NOT EXISTS guard alone closes the window: a crash between the enqueue
+  // commit and the token-clear UPDATE leaves the token set, but this guard then excludes the
+  // thread from the NEXT tick's scan (the just-enqueued row is still 'queued'/'sending'), so no
+  // second emit of the SAME kind is minted; the token itself is cleared, late, whenever that
+  // tick's clear runs (or never, if the crash also lost the clear — a stuck token only ever
+  // suppresses a re-mint, per errata 21b-E5, never blocks anything else).
   const rows = db
     .prepare(
       `SELECT id, pact_relay_pending, pact_proposer_agent_id, pact_with_agent_id FROM threads
-       WHERE pact_relay_pending IN ('rebind', 'gap_notice')
-         AND pact_peer_agent_id IS NOT NULL AND purged_at IS NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM peer_reply_outbox
-            WHERE pact_thread_id = threads.id AND relay_kind = 'pact_gap_notice'
-              AND state IN ('queued', 'sending')
-         )`
+       WHERE pact_relay_pending IN ('rebind', 'gap_notice', 'pause', 'resume')
+         AND pact_peer_agent_id IS NOT NULL AND purged_at IS NULL`
     )
     .all() as {
     id: string
@@ -237,9 +278,25 @@ export function drainPendingRebindParty(
 
   let drained = 0
   for (const row of rows) {
+    const relayKind = RELAY_PENDING_TOKEN_RELAY_KIND[row.pact_relay_pending]
+    const blocked =
+      relayKind !== undefined &&
+      db
+        .prepare(
+          `SELECT 1 FROM peer_reply_outbox
+            WHERE pact_thread_id = ? AND relay_kind = ? AND state IN ('queued', 'sending')`
+        )
+        .get(row.id, relayKind) !== undefined
+    if (blocked) {
+      continue
+    }
     try {
       if (row.pact_relay_pending === 'gap_notice') {
         drained += drainGapNotice(db, runtime, row.id)
+        continue
+      }
+      if (row.pact_relay_pending === 'pause' || row.pact_relay_pending === 'resume') {
+        drained += drainPausedOrResumed(db, runtime, row.id, row.pact_relay_pending)
         continue
       }
       const localPartyId = [row.pact_proposer_agent_id, row.pact_with_agent_id].find(

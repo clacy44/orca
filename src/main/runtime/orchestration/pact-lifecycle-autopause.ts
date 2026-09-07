@@ -107,10 +107,15 @@ export function autoPausePactsForRemoteAgentChain(
   if (remoteAgentIds.length === 0) {
     return []
   }
+  // S10-21b B17 (D-R138 B-F6): mirrors `autoPauseEligible`'s own widening (below) — an
+  // outstanding `proposed` federated pact with a now-quarantined peer must be paused too, or
+  // quarantine leaves it live and `acceptPact` (which checks only the CALLER's own quarantine,
+  // not the counterpart's) can still create an engaged pact with an already-quarantined peer
+  // after containment. RED at base: `pact_state = 'engaged'` only.
   const placeholders = remoteAgentIds.map(() => '?').join(',')
   const rows = db
     .prepare(
-      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state = 'engaged'
+      `SELECT * FROM threads WHERE purged_at IS NULL AND pact_state IN ('engaged', 'proposed')
        AND pact_paused_at IS NULL AND pact_peer_link_device_id = ?
        AND pact_peer_agent_id IN (${placeholders})`
     )

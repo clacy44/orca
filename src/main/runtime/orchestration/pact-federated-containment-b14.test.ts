@@ -3,7 +3,7 @@
 // proposal block. Every test here FAILS AT BASE a725bedda3: the remote arms in
 // pauseConditionCleared do not exist, resetAll neither settles federated pacts nor deletes
 // pact_applied_ids, no per-pact-cap auto-pause/ceiling/purge/proposal-block code exists yet.
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
@@ -11,7 +11,13 @@ import { renderFederatedPartyKey } from './pact-federated-identity'
 import { putPeerLinkBinding } from './link-binding-store'
 import type { ApplyInboundPactVerbArgs } from './pact-federated-inbound-gates'
 import { PACT_STEPS_PER_PACT_CAP } from './pact-federated-inbound-gates'
-import { PACT_STEPS_PER_LINK_CEILING } from './link-binding-constants'
+import {
+  PACT_STEPS_PER_LINK_CEILING,
+  REPLY_OUTBOX_PER_LINK_CAP,
+  PACT_RESERVED_HEADROOM
+} from './link-binding-constants'
+import { pausePact } from './pact-lifecycle'
+import { drainPendingRebindParty } from './pact-federated-rebind'
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -261,6 +267,116 @@ describe('S10-21b B14 containment', () => {
   })
 
   // -----------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R137 F9) — a message-gate refusal on the reserved-release emit must still
+  // leave the pact locally released with `pact_release_at` stamped (the retention purge arm's
+  // load-bearing column), never a pact that reads 'released' but is permanently unpurgeable.
+  // RED at base: the base implementation discarded the emit result — no ledger row,
+  // `pact_release_at` stays NULL forever on a refused emit.
+  // -----------------------------------------------------------------------------------------
+  it('F9: resetAll falls back to a local release when the reserved-release relay is gate-refused (RED at base)', async () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a, 'r9f9', 'peer9f9')
+
+    const gateModule = await import('../../../shared/message-body-gate')
+    const spy = vi
+      .spyOn(gateModule, 'evaluateMessageBodyGate')
+      .mockReturnValue({ tier: 'hard', ruleIds: ['test-forced-refusal'] })
+    try {
+      d.resetAll()
+    } finally {
+      spy.mockRestore()
+    }
+
+    const thread = d.getThread(threadId)
+    expect(thread?.pact_state).toBe('released')
+    expect(thread?.pact_release_at).not.toBeNull()
+
+    const releaseRow = rawDb(d)
+      .prepare(
+        `SELECT reason_code, actor_is_remote FROM pact_steps WHERE thread_id = ? AND kind = 'release'`
+      )
+      .get(threadId) as { reason_code: string; actor_is_remote: number } | undefined
+    expect(releaseRow?.reason_code).toBe('local_reset')
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R137 F10, D-R138 F5) — pause/resume gain a `pact_relay_pending` token: a
+  // cap error on the emit sets the token (nothing else is written — the whole emit transaction
+  // rolled back with it); the NEXT pump drain tick, once headroom frees, completes the relay.
+  // RED at base: pause/resume had no token — the base's bare `catch` degraded to a permanent,
+  // silent local-only pause with no retry path at all (and, pre-F8-fix, even that local write
+  // never happened for THIS call shape either, since `pausePact` delegates entirely to
+  // `emitFederatedPactSideEffect` for a federated pact).
+  // -----------------------------------------------------------------------------------------
+  it('F10: a cap error on pause sets pact_relay_pending=pause (nothing else written); the next drain tick relays (RED at base)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a, 'r10f10', 'peer10f10')
+
+    // Fill the reserved-headroom cap for this link with unrelated queued outbox rows, exactly
+    // as T20 (pact-federated-emit.test.ts) does, so the pause's own enqueue hits
+    // LinkBindingCapError.
+    const raw = rawDb(d)
+    const capTotal = REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
+    const insert = raw.prepare(
+      `INSERT INTO peer_reply_outbox (
+         id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
+         peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
+         peer_thread_id, local_thread_id, notice_run_id, notice_pane_key, payload, byte_count,
+         state, attempts, consecutive_failures, hold_count, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, '{}', 2, 'queued', 0, 0, 0, ?)`
+    )
+    for (let i = 0; i < capTotal; i++) {
+      insert.run(
+        `filler_f10_${i}`,
+        i + 1,
+        `msg_filler_f10_${i}`,
+        ENV,
+        ENV,
+        1,
+        'pcfp',
+        'pkfp',
+        `msg_filler_f10_${i}`,
+        'r10f10',
+        Date.now()
+      )
+    }
+
+    pausePact(raw, {
+      callerAgentId: a,
+      callerPaneKey: `tab:${a}`,
+      callerHostId: 'local',
+      threadId,
+      reasonCode: 'counterpart_gone'
+    })
+
+    const capped = d.getThread(threadId)
+    expect(capped?.pact_relay_pending).toBe('pause')
+    // Nothing else was written — the whole emit transaction rolled back with the cap error.
+    expect(capped?.pact_paused_at).toBeNull()
+    const stepCount = raw
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'pause'`)
+      .get(threadId) as { n: number }
+    expect(stepCount.n).toBe(0)
+
+    // Free headroom, then let the pump drain retry.
+    raw.prepare(`DELETE FROM peer_reply_outbox WHERE id LIKE 'filler_f10_%'`).run()
+    const drained = drainPendingRebindParty(raw, null)
+    expect(drained).toBe(1)
+
+    const resolved = d.getThread(threadId)
+    expect(resolved?.pact_relay_pending).toBeNull()
+    expect(resolved?.pact_paused_at).not.toBeNull()
+    const pauseRelay = raw
+      .prepare(
+        `SELECT relay_kind FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_pause'`
+      )
+      .all(threadId) as { relay_kind: string }[]
+    expect(pauseRelay).toEqual([{ relay_kind: 'pact_pause' }])
+  })
+
+  // -----------------------------------------------------------------------------------------
   // T10 — no repair loop after resetAll: the peer's next verb gets pact_no_pact terminal, no
   // gap_notice queued; the reserved release from T15 is the peer's only path to learn of it.
   // -----------------------------------------------------------------------------------------
@@ -329,6 +445,15 @@ describe('S10-21b B14 containment', () => {
     )
     const capped = d.getThread(threadA)
     expect(capped?.pact_paused_at).not.toBeNull()
+    // S10-21b B17 (D-R137 F8): the over-cap auto-pause routes through the ONE relay hook — the
+    // peer must be told, not just paused locally. RED at base: no outbox row at all (the base
+    // implementation wrote the pause directly, bypassing emitFederatedPactSideEffect).
+    const pauseRelay = rawDb(d)
+      .prepare(
+        `SELECT relay_kind FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_pause'`
+      )
+      .all(threadA) as { relay_kind: string }[]
+    expect(pauseRelay).toEqual([{ relay_kind: 'pact_pause' }])
 
     // pact B, same link, is unaffected.
     const resultB = d.applyInboundPactVerb(
@@ -475,6 +600,122 @@ describe('S10-21b B14 containment', () => {
     }
 
     expect(() => d.purgePeerLedger({ linkId: ENV, forceReleased: true })).toThrow('still-engaged')
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R137 F13) — the ceiling refusal's suggested quarantine command must name a
+  // HOST LABEL (`resolveOrchestrationWorkerServer`'s own key — the saved-environment NAME) never
+  // an agent id / raw environment id. `environment_id`/`remote_agent_id` deliberately differ
+  // from `environment_name`/`display_name` here so the two cannot coincidentally match.
+  // RED at base: the message named `senderAgentId`/`environment_id` (propose-apply.ts) or
+  // `environment_id` twice (propose-accept.ts) — never `environment_name`.
+  // -----------------------------------------------------------------------------------------
+  it('F13: the ceiling refusal names the mirror display name and the saved-environment NAME, not raw ids (RED at base)', () => {
+    const d = freshDb()
+    const raw = rawDb(d)
+    const a = seedAgent(d, 'a_f13')
+    const ENV_F13 = 'env_id_f13_raw'
+    const ENV_NAME_F13 = 'my-saved-env-nickname'
+    const REMOTE_ID_F13 = 'r_f13_raw_id'
+    const DISPLAY_NAME_F13 = 'peer-f13-display'
+    d.upsertRemoteAgent({
+      environmentId: ENV_F13,
+      environmentName: ENV_NAME_F13,
+      linkKind: 'environment',
+      remoteAgentId: REMOTE_ID_F13,
+      displayName: DISPLAY_NAME_F13,
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw, {
+      linkDeviceId: ENV_F13,
+      environmentId: ENV_F13,
+      boundEndpointId: 'endpoint_f13',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      peerCredentialFp: 'pcfp',
+      peerKeyFingerprint: 'pkfp',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({ linkDeviceId: ENV_F13, remoteAgentId: REMOTE_ID_F13 })
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    insertRemoteSteps(thread.id, PACT_STEPS_PER_LINK_CEILING, ENV_F13)
+
+    expectErrorCode(
+      () =>
+        d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null }),
+      'pact_link_ceiling'
+    )
+    try {
+      d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+      throw new Error('expected pact_link_ceiling')
+    } catch (err) {
+      const message = String((err as Error).message)
+      expect(message).toContain(`quarantine ${DISPLAY_NAME_F13}@${ENV_NAME_F13}`)
+      expect(message).toContain(`purge-peer-ledger --link ${ENV_NAME_F13}`)
+      expect(message).not.toContain(REMOTE_ID_F13)
+      expect(message).not.toContain(ENV_F13)
+    }
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R138 B-F6) — quarantining a peer with an outstanding `proposed` (not yet
+  // accepted) federated pact must pause it too, mirroring `autoPauseEligible`'s own
+  // engaged-or-proposed widening — otherwise the proposal survives containment and
+  // `acceptPact` (which checks only the CALLER's own quarantine) can still create an engaged
+  // pact with an already-quarantined peer. RED at base: the chain query was `pact_state =
+  // 'engaged'` only, so the proposed pact was untouched and accept succeeded.
+  // -----------------------------------------------------------------------------------------
+  it('F18: quarantine pauses an outstanding proposed pact too; acceptPact then refuses (RED at base)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a_f18')
+    const peerKey = seedFederatedPeer(d, 'r_f18', 'peer-f18')
+    // The PEER proposes TO `a` (inbound) — `a` is the one who would later `acceptPact`.
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    seedPeerThreadMapping(d, thread.id, 'thr_f18000000f12', peerKey)
+    d.applyInboundPactVerb(
+      inboundArgs({
+        toAgentId: a,
+        senderAgentId: 'r_f18',
+        peerThreadId: 'thr_f18000000f12',
+        pact: { verb: 'propose', seq: 1, era: 1, stepsTotal: null }
+      })
+    )
+    const beforePause = d.getThread(thread.id)
+    expect(beforePause?.pact_state).toBe('proposed')
+    expect(beforePause?.pact_paused_at).toBeNull()
+
+    const outcomes = d.autoPausePactsForRemoteAgentChain(['r_f18'], ENV, 'counterpart_quarantined')
+    expect(outcomes.map((o) => o.threadId)).toEqual([thread.id])
+
+    const paused = d.getThread(thread.id)
+    expect(paused?.pact_state).toBe('proposed')
+    expect(paused?.pact_paused_at).not.toBeNull()
+    expect(paused?.pact_pause_reason).toBe('counterpart_quarantined')
+
+    // Simulate the peer answering after quarantine — accept must refuse, not silently engage.
+    expectErrorCode(() => d.acceptPact({ ...actor(a), threadId: thread.id }), 'pact_paused')
+    expect(d.getThread(thread.id)?.pact_state).toBe('proposed')
   })
 
   // -----------------------------------------------------------------------------------------

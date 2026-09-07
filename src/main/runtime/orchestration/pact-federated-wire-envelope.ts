@@ -50,7 +50,14 @@ export function buildPactWirePayload(
   if (params.wireOrdinal !== undefined) {
     wirePact.ordinal = params.wireOrdinal
   }
-  if (params.reasonCode !== undefined) {
+  // S10-21b B17 forced deviation (found by T32's round-trip harness, out of this item's
+  // assigned scope but blocking it): `FederatedSendParams`'s `reasonCode` is
+  // `z.string().max(64).optional()` — a string or OMITTED, never `null`. `resume` (and any
+  // other verb whose local `reasonCode` is explicitly `null`, never `undefined`) previously sent
+  // a literal `null`, which every real round trip fails to parse on the receiver
+  // (`invalid_type: expected string, received null`) — unreachable by any prior test since none
+  // drove a resume relay through a real dial before T32.
+  if (params.reasonCode !== undefined && params.reasonCode !== null) {
     wirePact.reasonCode = params.reasonCode
   }
   if (params.rebind !== undefined) {

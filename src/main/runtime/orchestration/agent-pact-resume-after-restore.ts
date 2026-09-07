@@ -78,9 +78,12 @@ function resumeOnePactIfEligible(
     thread0.pact_paused_at !== null &&
     thread0.pact_pause_reason === 'counterpart_gone' &&
     (thread0.pact_proposer_agent_id === agentId || thread0.pact_with_agent_id === agentId) &&
-    // B15 (§4.4, errata NB1, ruling 21b-E7): matches `pauseConditionCleared`'s own predicate —
-    // exclude ONLY the link-evidence reason_code (resumable solely by B15's recovery sweep);
-    // a host row with no ledger match at all stays eligible, same as before this commit.
+    // S10-21b B17 (D-R138 B-F7) — STOP, NOT applied: same source contradiction as
+    // agent-pact-unpause-lookup.ts's pactsAwaitingUnpause (see that file's comment) — the
+    // brief's POSITIVE form (`=== 'counterpart_gone'`) breaks two pre-existing S10-21a
+    // regression tests in agent-restore-rebind.test.ts whose fixtures set
+    // pact_pause_reason='counterpart_gone' with no ledger row by design. Reverted to base;
+    // returned to the chair per the brief's own STOP instruction.
     latestHostPauseReasonCode(db, threadId) !== 'counterpart_unreachable'
   if (!eligible0 || !thread0) {
     return

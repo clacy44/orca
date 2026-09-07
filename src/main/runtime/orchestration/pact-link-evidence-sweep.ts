@@ -17,7 +17,7 @@ import type { ThreadRow } from './types'
 import { getScanFact } from './link-binding-observations-store'
 import { PACT_LINK_SILENCE_MS, PACT_LINK_RECOVERY_MS } from './link-binding-constants'
 import { auditPact, insertPactStepRow } from './pact-shared'
-import { latestHostPauseReasonCode, latestHostPauseAtMs } from './pact-federated-pause-remote-arm'
+import { latestHostPauseReasonCode } from './pact-federated-pause-remote-arm'
 
 type FederatedLink = { linkDeviceId: string; environmentId: string }
 
@@ -74,22 +74,36 @@ function pauseUnreachableLinks(db: Database.Database, now: number): PactLinkEvid
       )
       .all(link.linkDeviceId, link.environmentId) as ThreadRow[]
     for (const thread of pacts) {
-      db.prepare(
-        `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = 'counterpart_gone',
-           pact_flight_token = pact_flight_token + 1 WHERE id = ?`
-      ).run(thread.id)
-      insertPactStepRow(db, {
-        threadId: thread.id,
-        ordinal: 0,
-        kind: 'pause',
-        actorAgentId: null,
-        actorPaneKey: null,
-        actorHostId: null,
-        messageId: null,
-        summary: null,
-        turnAfterAgentId: null,
-        reasonCode: 'counterpart_unreachable'
-      })
+      // S10-21b B17 (D-R138 B-F7): the UPDATE and the ledger insert were two separate
+      // auto-commits — a crash between them left `pact_paused_at` set with
+      // `pact_pause_reason='counterpart_gone'` and NO `counterpart_unreachable` ledger row, so
+      // `latestHostPauseReasonCode` returned the PRIOR code (or null), and
+      // `pactsAwaitingUnpause`'s `!==` form admitted it: the next agent restore resumed a pact
+      // whose link is still down (the sweep's own resume, gated `===`, could never reach it
+      // either). One `BEGIN IMMEDIATE` per thread closes the window.
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        db.prepare(
+          `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = 'counterpart_gone',
+             pact_flight_token = pact_flight_token + 1 WHERE id = ?`
+        ).run(thread.id)
+        insertPactStepRow(db, {
+          threadId: thread.id,
+          ordinal: 0,
+          kind: 'pause',
+          actorAgentId: null,
+          actorPaneKey: null,
+          actorHostId: null,
+          messageId: null,
+          summary: null,
+          turnAfterAgentId: null,
+          reasonCode: 'counterpart_unreachable'
+        })
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
       paused.push(toOutcome(thread))
     }
     if (pacts.length > 0) {
@@ -109,10 +123,14 @@ function pauseUnreachableLinks(db: Database.Database, now: number): PactLinkEvid
   return paused
 }
 
-// §3.3/errata NB3: once a link-evidence-paused pact's link has reported non-'unreachable'
-// continuously for PACT_LINK_RECOVERY_MS, resume it automatically. Anchored on the pause's own
-// ledger timestamp (not `unreachable_since`, which errata NB2 clears to NULL the instant the
-// scan recovers) — see latestHostPauseAtMs's own doc comment.
+// §3.3/errata NB3, corrected by S10-21b B17 (D-R137 F4, D-R138 F3): once a link-evidence-paused
+// pact's link has reported non-'unreachable' CONTINUOUSLY for PACT_LINK_RECOVERY_MS, resume it
+// automatically. The base implementation anchored on the pause's own ledger age
+// (`latestHostPauseAtMs`) — for any pause older than the recovery window (the common case), that
+// bound is vacuous and a SINGLE good scan resumed the pact with zero continuity required. Anchor
+// on `reachable_since` instead (the NB2-mirror continuity stamp `putScanFact` derives): the fact
+// must be non-'unreachable' AND `reachable_since` must be set AND continuous for
+// PACT_LINK_RECOVERY_MS.
 function resumeRecoveredPacts(db: Database.Database, now: number): PactLinkEvidenceOutcome[] {
   const resumed: PactLinkEvidenceOutcome[] = []
   const candidates = db
@@ -132,29 +150,37 @@ function resumeRecoveredPacts(db: Database.Database, now: number): PactLinkEvide
       continue
     }
     const fact = getScanFact(db, linkDeviceId, environmentId)
-    if (!fact || fact.outcome === 'unreachable') {
+    if (!fact || fact.outcome === 'unreachable' || fact.reachableSince === null) {
       continue
     }
-    const pausedAtMs = latestHostPauseAtMs(db, thread.id)
-    if (pausedAtMs === null || now - pausedAtMs < PACT_LINK_RECOVERY_MS) {
+    if (now - fact.reachableSince < PACT_LINK_RECOVERY_MS) {
       continue
     }
-    db.prepare(
-      `UPDATE threads SET pact_paused_at = NULL, pact_pause_reason = NULL,
-         pact_flight_token = pact_flight_token + 1 WHERE id = ?`
-    ).run(thread.id)
-    insertPactStepRow(db, {
-      threadId: thread.id,
-      ordinal: 0,
-      kind: 'resume',
-      actorAgentId: null,
-      actorPaneKey: null,
-      actorHostId: null,
-      messageId: null,
-      summary: null,
-      turnAfterAgentId: thread.pact_turn_agent_id,
-      reasonCode: null
-    })
+    // S10-21b B17 (D-R138 B-F7): same crash-window fix as the pause pass above — one
+    // `BEGIN IMMEDIATE` per thread around the UPDATE + ledger insert.
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.prepare(
+        `UPDATE threads SET pact_paused_at = NULL, pact_pause_reason = NULL,
+           pact_flight_token = pact_flight_token + 1 WHERE id = ?`
+      ).run(thread.id)
+      insertPactStepRow(db, {
+        threadId: thread.id,
+        ordinal: 0,
+        kind: 'resume',
+        actorAgentId: null,
+        actorPaneKey: null,
+        actorHostId: null,
+        messageId: null,
+        summary: null,
+        turnAfterAgentId: thread.pact_turn_agent_id,
+        reasonCode: null
+      })
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
     resumed.push(toOutcome(thread))
   }
   return resumed

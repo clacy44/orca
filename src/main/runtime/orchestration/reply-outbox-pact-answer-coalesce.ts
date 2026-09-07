@@ -148,3 +148,21 @@ export function enqueueReplyOutboxCoalesced(
   }
   return enqueueReplyOutbox(db, p)
 }
+
+// S10-21b B17 (D-R138 B-F1): the replace-vs-insert PRE-CHECK `enqueueFederatedPactVerbWithin`
+// runs before its own seq bump (a coalesced replacement must not consume a new wire seq) —
+// mirrors the lookup each `enqueueReplyOutboxCoalesced*` call above does internally, so the
+// same row is found deterministically within one transaction. Split out here (not left inline
+// in pact-federated-emit-steps.ts) to keep that file under the max-lines ratchet.
+export function resolveCoalesceTarget(
+  db: Database.Database,
+  threadId: string,
+  verb: string,
+  relayKind: RelayKind,
+  coalesceAcrossRelayKinds?: readonly RelayKind[]
+): string | null {
+  if (coalesceAcrossRelayKinds) {
+    return findUnsettledPactAnswerOutboxIdAcrossKinds(db, threadId, coalesceAcrossRelayKinds)
+  }
+  return verb === 'resync' ? findUnsettledPactAnswerOutboxId(db, threadId, relayKind) : null
+}

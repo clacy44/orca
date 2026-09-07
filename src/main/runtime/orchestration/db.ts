@@ -346,7 +346,10 @@ import {
   type GetPactLedgerParams
 } from './pact-queries'
 import type { PactLedgerResult, PactPauseReason } from './pact-types'
-import { proposalBlockingPeerKeys } from './pact-federated-proposal-block'
+import {
+  proposalBlockingPeerKeys,
+  isProposalReArmSuppressed
+} from './pact-federated-proposal-block'
 import {
   settleLiveFederatedPactsForReset,
   enqueueReservedReleasesAfterReset
@@ -1076,6 +1079,12 @@ const S10_16_LINK_BINDING_SCHEMA_SQL = `
         -- cleared to NULL on any other outcome (write rule is a commit-15 handler concern; this
         -- commit only adds the column and its DROP-AND-RECREATE probe entry above).
         unreachable_since            INTEGER,
+        -- S10-21b B17 (D-R137 F4, D-R138 F3): the mirror of unreachable_since for the RECOVERY
+        -- direction — set on the first transition INTO a non-'unreachable' outcome, held across
+        -- repeats, cleared on 'unreachable'. Anchors auto-resume on CONTINUOUS recovery
+        -- (now - reachable_since >= PACT_LINK_RECOVERY_MS), not on the pause row's own age (a
+        -- single good scan after a long pause used to resume unconditionally).
+        reachable_since              INTEGER,
         PRIMARY KEY (link_device_id, environment_id)
       );
 
@@ -1421,7 +1430,7 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7), v42 34 additive columns across threads (19)/pact_steps (6)/remote_agents (2)/peer_reply_outbox (7) + pact_applied_ids table + peer_link_scan_facts.unreachable_since (S10-21b B1, federated pacts, Ruling 34 Addendum 2/6/6(16)) — no CHECK widened anywhere (pact_pause_reason stays six values; a link-driven pause reuses 'counterpart_gone' with pact_steps.reason_code='counterpart_unreachable').
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7), v42 35 additive columns across threads (19)/pact_steps (6)/remote_agents (2)/peer_reply_outbox (7)/peer_link_scan_facts (1, reachable_since, B17) + pact_applied_ids table + peer_link_scan_facts.unreachable_since (S10-21b B1, federated pacts, Ruling 34 Addendum 2/6/6(16)) — no CHECK widened anywhere (pact_pause_reason stays six values; a link-driven pause reuses 'counterpart_gone' with pact_steps.reason_code='counterpart_unreachable').
 const SCHEMA_VERSION = 42
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
@@ -1901,7 +1910,10 @@ export class OrchestrationDb {
         // predicate (`outcome = 'unreachable' AND now - unreachable_since >= PACT_LINK_SILENCE_MS`,
         // commit 15). Probed here, not added to a separate v42 ALTER set, because this table is
         // already in the DROP-AND-RECREATE repair tier (genuinely re-derivable state).
-        'unreachable_since'
+        'unreachable_since',
+        // S10-21b B17 (D-R137 F4, D-R138 F3): the continuity source for auto-RESUME (mirror of
+        // unreachable_since, above).
+        'reachable_since'
       ],
       peer_link_confirm_observations: ['link_device_id', 'environment_id', 'kind', 'observed_at']
     }
@@ -5884,14 +5896,29 @@ export class OrchestrationDb {
     // periodic scan would write — through the one NB2 write rule (putScanFact), never a second
     // rule. A live/idle result clears `unreachable_since` on the same (any-non-'unreachable')
     // rule; 'unknown' with no failure (no mirror row yet) is neither signal and writes nothing.
+    // S10-21b B17 (D-R137 F11): a read-shaped call (a wait timeout, or `pact --show`) must
+    // never THROW because of a write side effect. `putScanFact` throws `LinkBindingCapError` on
+    // a first-ever fact at `LINK_BINDING_SCAN_FACTS_CAP` — before this fix, that turned a benign
+    // `outcome:'timeout'` into an RPC error. Loud degradation: audited, never silent.
     if (thread.pact_peer_link_device_id && thread.pact_peer_environment_id) {
-      this.recordWaitExpiryScanEquivalentFact(
-        thread.pact_peer_link_device_id,
-        thread.pact_peer_environment_id,
-        state,
-        failed,
-        now
-      )
+      try {
+        this.recordWaitExpiryScanEquivalentFact(
+          thread.pact_peer_link_device_id,
+          thread.pact_peer_environment_id,
+          state,
+          failed,
+          now
+        )
+      } catch (err) {
+        this.writeAgentAudit({
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: null,
+          verb: 'pact_wait_expiry_scan_fact_write_failed',
+          outcome: 'error',
+          reasonCode: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)
+        })
+      }
     }
     return {
       lastInboundAt: thread.pact_last_inbound_at,
@@ -5909,6 +5936,14 @@ export class OrchestrationDb {
   // performs a real link-credential probe); falls back to the same sentinel empty-fingerprint
   // convention `link-binding-prover-settle.ts:266` already uses for "no probe ran" when no prior
   // scan fact exists for this (link, environment).
+  //
+  // S10-21b B17 (D-R137 F2, D-R138 F2): the base implementation ALSO wrote a `no_match` fact
+  // (and refreshed `observed_at`) on the LIVE/IDLE branch — but `putScanFact` clears
+  // `unreachable_since` to NULL on any non-`unreachable` outcome, so a genuinely-down link's
+  // `unreachable_since` stamp got wiped by every wait-expiry poll against a stale local mirror
+  // that still says `live`, un-arming `pauseUnreachableLinks` forever. §3.3 names only the
+  // ADVERSE side as a scan-equivalent fact — write on the adverse branch only; a live/idle read
+  // returns without writing anything (no fact created, no existing fact touched).
   private recordWaitExpiryScanEquivalentFact(
     linkDeviceId: string,
     environmentId: string,
@@ -5917,24 +5952,21 @@ export class OrchestrationDb {
     now: number
   ): void {
     const adverse = peerStateQueryFailed || peerState === 'gone' || peerState === 'quarantined'
-    const reachable = !peerStateQueryFailed && (peerState === 'live' || peerState === 'idle')
-    if (!adverse && !reachable) {
+    if (!adverse) {
       return
     }
     const prior = this.getScanFact(linkDeviceId, environmentId)
     this.putScanFact({
       linkDeviceId,
       environmentId,
-      outcome: adverse ? 'unreachable' : 'no_match',
+      outcome: 'unreachable',
       environmentPairingRevision: prior?.environmentPairingRevision ?? 0,
       linkCredentialFp: prior?.linkCredentialFp ?? '',
-      detail: adverse
-        ? peerStateQueryFailed
-          ? 'wait_expiry_query_failed'
-          : peerState === 'gone'
-            ? 'wait_expiry_peer_gone'
-            : 'wait_expiry_peer_quarantined'
-        : null,
+      detail: peerStateQueryFailed
+        ? 'wait_expiry_query_failed'
+        : peerState === 'gone'
+          ? 'wait_expiry_peer_gone'
+          : 'wait_expiry_peer_quarantined',
       observedAt: now
     })
   }
@@ -5948,6 +5980,14 @@ export class OrchestrationDb {
   // against `agentId`, regardless of whether that peer's proposal is currently unanswered.
   pactProposalBlockingPeers(agentId: string): string[] {
     return proposalBlockingPeerKeys(this.db, agentId)
+  }
+
+  // S10-21b B17 (D-R137 F1/F14, D-R138 F1/F10): read-only "is the caller's CURRENT incoming
+  // unanswered proposal from this peer a re-propose inside an already-established window" check
+  // — the only thing the wait guard's `answer_first` throw is now allowed to be suppressed by.
+  // Never bumps; never itself a reason to throw.
+  isPactProposalReArmSuppressed(peerPartyKey: string, localAgentId: string): boolean {
+    return isProposalReArmSuppressed(this.db, peerPartyKey, localAgentId)
   }
 
   // S10-21b B14 (design §4.6(b)): `orca agents pact --purge-peer-ledger --link <id>

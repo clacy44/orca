@@ -3,7 +3,7 @@
 // Every test here fails at base 73984e659d: pact-federated-emit.ts / pact-federated-era.ts do
 // not exist yet, appendPactStep has no federated branch, and proposePact never writes the
 // pact_peer_* anchor columns.
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
@@ -163,6 +163,59 @@ describe('pact-federated-emit', () => {
     d.releasePact({ ...actor(a), threadId, reasonCode: null })
     const relocal = d.proposePact({ ...actor(a), threadId, peerAgentId: b, stepsTotal: null })
     expect(relocal.pact_peer_agent_id).toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------------------
+  // S10-21b B17 (D-R137 F6): proposePact's era-reset/anchor UPDATE and the federated emit
+  // primitive's ledger row/message/outbox row must be ONE transaction — a message-gate refusal
+  // (or a crash) between the two must roll the whole transition back, not leave a
+  // pact_state='proposed' row with zero pact_steps rows and no relay. RED at base: the base
+  // implementation committed the UPDATE, then called `enqueueFederatedPactVerb` (its OWN
+  // transaction) afterward — a refusal there left the thread proposed with no rows.
+  // ---------------------------------------------------------------------------------------
+  it('T-F6: a refusing message gate rolls the whole propose transition back — pact_state/era/anchors unchanged, no rows (RED at base)', async () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer(d)
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    const before = d.getThread(thread.id)
+
+    const gateModule = await import('../../../shared/message-body-gate')
+    const spy = vi
+      .spyOn(gateModule, 'evaluateMessageBodyGate')
+      .mockReturnValueOnce({ tier: 'hard', ruleIds: ['test-forced-refusal'] })
+    try {
+      expect(() =>
+        d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+      ).toThrow()
+    } finally {
+      spy.mockRestore()
+    }
+
+    const after = d.getThread(thread.id)
+    expect(after?.pact_state).toBe(before?.pact_state ?? null)
+    expect(after?.pact_era).toBe(before?.pact_era ?? 0)
+    expect(after?.pact_peer_agent_id).toBeNull()
+    expect(after?.pact_peer_link_device_id).toBeNull()
+    const stepRows = rawDb(d)
+      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ?`)
+      .get(thread.id) as { n: number }
+    expect(stepRows.n).toBe(0)
+    const messageRows = rawDb(d)
+      .prepare(`SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?`)
+      .get(thread.id) as { n: number }
+    expect(messageRows.n).toBe(0)
+    const outboxRows = rawDb(d)
+      .prepare(`SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE pact_thread_id = ?`)
+      .get(thread.id) as { n: number }
+    expect(outboxRows.n).toBe(0)
   })
 
   // ---------------------------------------------------------------------------------------

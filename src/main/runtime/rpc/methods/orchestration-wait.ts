@@ -72,42 +72,41 @@ function turnGuardResult(
 
 // K23: closes the proposal ring (A→B, B→C, C→A) — every member owes an answer, so nobody can
 // legally park `--for pact`. Global: not scoped to the thread the caller is trying to wait on.
+// S10-21b B17 (D-R137 F1/F14, D-R138 F1/F10): the block is ONLY the unanswered-proposal check
+// below (`incoming`, already thread-agnostic). The base implementation ALSO threw whenever
+// `pactProposalBlockingPeers(...).length > 0`, independently of whether any proposal was still
+// unanswered — a peer who was declined immediately then left the local chair refused
+// `answer_first` for up to an hour, naming a proposal that no longer existed. That standalone
+// throw is deleted; the per-peer-per-window state now has exactly one remaining job: when a NEW
+// unanswered proposal arrives from a peer whose PREVIOUS proposal to this local agent was
+// answered inside a still-live window, that new proposal does not re-arm the block (it is still
+// visible via `pact --show`/`getIncomingUnansweredProposal`, it simply does not refuse the
+// wait).
 function assertNoIncomingProposalOwed(
   db: ReturnType<WaitHandlerContext['runtime']['getOrchestrationDb']>,
   callerAgentId: string
 ): void {
   const incoming = db.getIncomingUnansweredProposal(callerAgentId)
-  if (incoming) {
-    const proposer = incoming.pact_proposer_agent_id
-      ? db.getAgentById(incoming.pact_proposer_agent_id)
-      : undefined
-    const proposerName = proposer?.display_name ?? incoming.pact_proposer_agent_id
-    throw new OrchestrationError(
-      'answer_first',
-      `Refused: ${proposerName} is waiting on YOUR answer to its proposal on ${incoming.id} — ` +
-        `accept or decline it first: orca agents pact --on ${incoming.id} --accept`,
-      {
-        nextSteps: [
-          `orca agents pact --on ${incoming.id} --accept`,
-          `orca agents pact --on ${incoming.id} --decline`
-        ]
-      }
-    )
+  if (!incoming) {
+    return
   }
-  // S10-21b B14 (design §3.3, errata NB8): even with NO currently-unanswered proposal (it was
-  // answered/declined), a still-live per-(peer, local agent) block window keeps blocking until
-  // the window elapses — a peer that declines then re-proposes cannot use the re-propose itself
-  // to dodge this read (a fresh unanswered proposal from the SAME window still falls into the
-  // `incoming` branch above); this branch only ever ADDS blocking, never removes the check above.
-  const blockingPeers = db.pactProposalBlockingPeers(callerAgentId)
-  if (blockingPeers.length > 0) {
-    throw new OrchestrationError(
-      'answer_first',
-      `Refused: a federated pact proposal from ${blockingPeers[0]} is still inside its answer ` +
-        `window — accept or decline it first, or wait for the window to elapse.`,
-      { nextSteps: [`orca agents pact --show`] }
-    )
+  const peerKey = incoming.pact_proposer_agent_id
+  if (peerKey && db.isPactProposalReArmSuppressed(peerKey, callerAgentId)) {
+    return
   }
+  const proposer = peerKey ? db.getAgentById(peerKey) : undefined
+  const proposerName = proposer?.display_name ?? peerKey
+  throw new OrchestrationError(
+    'answer_first',
+    `Refused: ${proposerName} is waiting on YOUR answer to its proposal on ${incoming.id} — ` +
+      `accept or decline it first: orca agents pact --on ${incoming.id} --accept`,
+    {
+      nextSteps: [
+        `orca agents pact --on ${incoming.id} --accept`,
+        `orca agents pact --on ${incoming.id} --decline`
+      ]
+    }
+  )
 }
 
 async function handlePactOrStepWait(

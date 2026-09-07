@@ -14,6 +14,7 @@ import {
   requireThread,
   requireThreadParticipant,
   requireUnclaimedPact,
+  requirePaused,
   type PactActorContext
 } from './pact-shared'
 import { findRemotePartyByRenderedKey, isFederatedPact } from './pact-federated-identity'
@@ -22,7 +23,12 @@ import { findBindingsByEnvironment } from './link-binding-store'
 import { isPeerLinkQuarantined } from './link-binding-observations-store'
 import { OrchestrationError } from './orchestration-error'
 import { gateVerdictRefusalError } from './gate-refusal-error'
-import { enqueueFederatedPactVerb, type FederatedPactEmitRuntime } from './pact-federated-emit'
+import {
+  enqueueFederatedPactVerb,
+  enqueueFederatedPactVerbWithin,
+  type EnqueueFederatedPactVerbResult,
+  type FederatedPactEmitRuntime
+} from './pact-federated-emit'
 
 export type ProposePactParams = PactActorContext & {
   threadId: string
@@ -46,6 +52,7 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
   requireUnclaimedPact(thread)
   requireNoEngagedPactWithPeer(db, params.callerAgentId, peer.id, peer.display_name)
 
+  let federatedEmit: EnqueueFederatedPactVerbResult | undefined
   db.exec('BEGIN IMMEDIATE')
   try {
     // pact_era + 1 (blocker fix): a fresh era per propose, so idx_pact_step_ordinal's
@@ -94,12 +101,7 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
       }
       // S10-21b B14 (design §4.6(a), errata NB7): the per-link ceiling, mirrored here for the
       // LOCAL propose direction (inbound propose has its own call, pact-federated-propose-apply.ts).
-      refuseIfLinkCeilingSaturated(
-        db,
-        remote.environment_id,
-        remote.display_name,
-        remote.environment_id
-      )
+      refuseIfLinkCeilingSaturated(db, remote.environment_id, remote.remote_agent_id)
       // R18.4(b)'s candidate lookup (link-binding-store.ts): CONFIRMED, unrevoked bindings for
       // this environment — the same two clauses findBindingCandidateByKeyFingerprint applies.
       // No binding yet (the environment was found by probe, never link-paired) leaves the two
@@ -151,11 +153,16 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
         thread.id
       )
     }
-    // S10-21b B6c: a federated propose's ledger/message/outbox row is the single writer's job
-    // (enqueueFederatedPactVerb, called AFTER this transaction commits below — it opens its own
-    // `BEGIN IMMEDIATE` and SQLite cannot nest, the same constraint B10/B13 hit). The local
-    // (non-federated) path keeps writing its own ledger row here, inside this transaction,
-    // unchanged from before this commit.
+    // S10-21b B17 (D-R137 F6): the base implementation called `enqueueFederatedPactVerb`
+    // (which opens its OWN `BEGIN IMMEDIATE`) AFTER this transaction committed — so the
+    // era-reset/anchor UPDATE above and the emit primitive's ledger row/message/outbox row
+    // were two separate commits. A message-gate refusal or a crash in between left
+    // `pact_state='proposed'`, era bumped, anchors set, ZERO `pact_steps` rows and no relay —
+    // `requireNoEngagedPactWithPeer` then refused the operator's own retry, leaving `--release`
+    // as the only exit. Fix: call `enqueueFederatedPactVerbWithin` (B7c's no-own-transaction
+    // form) from INSIDE this transaction, exactly as accept/release already do below — a gate
+    // refusal now throws HERE, rolling the whole transition back with it. The local
+    // (non-federated) path is unchanged.
     if (!peer.federated) {
       insertPactStepRow(db, {
         threadId: thread.id,
@@ -176,24 +183,30 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
         verb: 'pact_propose',
         outcome: 'proposed'
       })
+    } else {
+      federatedEmit = enqueueFederatedPactVerbWithin(db, thread.id, 'propose', {
+        actorAgentId: params.callerAgentId,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.callerHostId,
+        runId: 'host',
+        ordinal: 0
+      })
+      if (federatedEmit.outcome === 'refused') {
+        // Thrown INSIDE the transaction: the catch below rolls back the era bump/anchor writes
+        // together with this refusal, so a refused propose leaves no trace at all.
+        throw gateVerdictRefusalError(federatedEmit.verdict, federatedEmit.refusalId)
+      }
     }
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
   }
-  if (peer.federated) {
-    const emitted = enqueueFederatedPactVerb(db, params.runtime ?? null, thread.id, 'propose', {
-      actorAgentId: params.callerAgentId,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.callerHostId,
-      runId: 'host',
-      ordinal: 0
-    })
-    if (emitted.outcome === 'refused') {
-      throw gateVerdictRefusalError(emitted.verdict, emitted.refusalId)
-    }
-    return emitted.thread
+  // Step 6's OUTSIDE-transaction kick (design §2.3) — `enqueueFederatedPactVerb`'s wrapper does
+  // this for every other verb; `Within`'s caller owns it, same as resetAll's reset settlement.
+  if (federatedEmit && federatedEmit.outcome === 'enqueued') {
+    params.runtime?.replyOutbox?.kick(federatedEmit.thread.pact_peer_link_device_id as string)
+    return federatedEmit.thread
   }
   return requireThread(db, thread.id)
 }
@@ -209,6 +222,11 @@ export function acceptPact(db: Database.Database, params: AcceptPactParams): Thr
   const thread = requireThread(db, params.threadId)
   requireProposedTo(thread, params.callerAgentId)
   requireCallerNotQuarantined(db, params.callerAgentId, thread.id, 'accept')
+  // S10-21b B17 (D-R138 B-F6): a `proposed` pact is now auto-paused when its counterpart is
+  // quarantined (pact-lifecycle-autopause.ts's widened chain query, above) — refuse accepting
+  // it, exactly as a paused engaged pact already refuses `step`, rather than silently creating
+  // an engaged pact with an already-quarantined peer after containment.
+  requirePaused(thread)
 
   // S10-21b B6c (design §2.3, item 2): accept is turn-consuming — the proposer is the
   // `turnAfterAgentId` the design names (PACT_TURN_CONSUMING_VERBS now includes 'accept',

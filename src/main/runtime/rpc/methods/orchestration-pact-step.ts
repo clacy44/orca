@@ -44,6 +44,21 @@ export const ORCHESTRATION_PACT_STEP_METHODS: RpcMethod[] = [
     handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
       const db = runtime.getOrchestrationDb()
       const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
+      // S10-21b B17 (D-R137 F12): the CLI's own `--acknowledge-gate` refusal (agents-pact.ts) is
+      // a TOCTOU window (a separate pactLedger read, then this call) and any non-CLI client
+      // bypasses it entirely — §7 states the refusal as a property of the VERB, not the CLI.
+      // Refuse here too, typed, before any write.
+      if (params.acknowledgeGate) {
+        const thread = db.getThread(params.threadId)
+        if (thread && thread.pact_peer_agent_id !== null) {
+          throw new OrchestrationError(
+            'invalid_argument',
+            'Refused: --acknowledge-gate is not honored on a federated pact step — the peer ' +
+              'never sees it, so an acknowledged hard body is guaranteed to be refused there. ' +
+              'Shorten or rephrase --done instead.'
+          )
+        }
+      }
       const result = db.appendPactStep({
         callerAgentId: caller.id,
         callerPaneKey: caller.pane_key,

@@ -123,20 +123,44 @@ export function enqueueReservedReleasesAfterReset(
   pending: readonly PendingReservedRelease[]
 ): void {
   for (const item of pending) {
-    enqueueFederatedPactVerbWithin(db, item.threadId, 'release', {
+    // S10-21b B17 (D-R137 F9): the base implementation discarded this call's result. A
+    // message-gate refusal (`Within`'s `{outcome:'refused'}`) writes NO ledger row and never
+    // sets `pact_release_at` — the follow-up UPDATE below re-asserts `pact_state='released'`
+    // unconditionally but does not touch `pact_release_at` either, so `trg_pact_steps_no_delete`
+    // (whose retention arm requires `pact_release_at IS NOT NULL`) can never age this pact's
+    // remote rows out: they count against `PACT_STEPS_PER_LINK_CEILING` forever. Fall back to
+    // step 1's local-release branch (ledger row + `pact_release_at`) on refusal.
+    const result = enqueueFederatedPactVerbWithin(db, item.threadId, 'release', {
       actorAgentId: item.actorAgentId,
       actorPaneKey: null,
       actorHostId: null,
       runId: 'reset',
       reasonCode: 'local_reset'
     })
+    if (result.outcome === 'refused') {
+      insertPactStepRow(db, {
+        threadId: item.threadId,
+        ordinal: 0,
+        kind: 'release',
+        actorAgentId: item.actorAgentId,
+        actorPaneKey: null,
+        actorHostId: null,
+        messageId: null,
+        summary: null,
+        turnAfterAgentId: null,
+        reasonCode: 'local_reset'
+      })
+    }
     // resetAll's own reset-specific cleanup, plus an unconditional re-assert of the released
     // shape — clears `pact_relay_pending` even if the call above just set it (a reset always
     // fully clears coordination-bus state; that token has no drainer for 'release' regardless).
+    // `pact_release_at` is stamped here too (idempotent alongside `Within`'s own stamp on the
+    // non-refused path) so the refusal fallback above is never the only writer of it.
     db.prepare(
       `UPDATE threads SET
          pact_state = 'released', pact_turn_agent_id = NULL, pact_paused_at = NULL,
          pact_pause_reason = NULL, pact_at = datetime('now'), pact_turn_in_flight_at = NULL,
+         pact_release_at = COALESCE(pact_release_at, datetime('now')),
          pact_relay_pending = NULL, pact_resync_nonce = NULL, pact_resync_nonce_at = NULL,
          pact_repair_attempts = 0, pact_peer_agent_id = NULL, pact_peer_link_device_id = NULL,
          pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL

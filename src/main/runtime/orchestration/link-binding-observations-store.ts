@@ -30,11 +30,16 @@ export type ScanFactRow = {
   // left untouched on every subsequent 'unreachable' scan; cleared to null on any other outcome.
   // Derived by `putScanFact`, never caller-supplied — see `ScanFactWriteRow` below.
   unreachableSince: number | null
+  // S10-21b B17 (D-R137 F4, D-R138 F3): the mirror rule for RECOVERY — stamped on the FIRST scan
+  // that transitions OUT of 'unreachable' (previous outcome was 'unreachable' or no row
+  // existed); left untouched on every subsequent non-'unreachable' scan; cleared to null on
+  // 'unreachable'. Anchors auto-resume on continuous recovery, never a single good scan.
+  reachableSince: number | null
 }
 
-// The write-side shape `writeScanFact`/callers construct: `unreachableSince` is NEVER supplied by
-// a caller — `putScanFact` derives it from the prior row per the NB2 rule.
-export type ScanFactWriteRow = Omit<ScanFactRow, 'unreachableSince'>
+// The write-side shape `writeScanFact`/callers construct: `unreachableSince`/`reachableSince` are
+// NEVER supplied by a caller — `putScanFact` derives both from the prior row.
+export type ScanFactWriteRow = Omit<ScanFactRow, 'unreachableSince' | 'reachableSince'>
 
 export function getScanFact(
   db: Database.Database,
@@ -53,6 +58,7 @@ export function getScanFact(
         detail: string | null
         observed_at: number
         unreachable_since: number | null
+        reachable_since: number | null
       }
     | undefined
   return row
@@ -64,7 +70,8 @@ export function getScanFact(
         linkCredentialFp: row.link_credential_fp,
         detail: row.detail,
         observedAt: row.observed_at,
-        unreachableSince: row.unreachable_since
+        unreachableSince: row.unreachable_since,
+        reachableSince: row.reachable_since
       }
     : null
 }
@@ -92,6 +99,7 @@ export function listScanFacts(db: Database.Database, linkDeviceId: string): Scan
     detail: string | null
     observed_at: number
     unreachable_since: number | null
+    reachable_since: number | null
   }[]
   return rows.map((row) => ({
     linkDeviceId: row.link_device_id,
@@ -101,7 +109,8 @@ export function listScanFacts(db: Database.Database, linkDeviceId: string): Scan
     linkCredentialFp: row.link_credential_fp,
     detail: row.detail,
     observedAt: row.observed_at,
-    unreachableSince: row.unreachable_since
+    unreachableSince: row.unreachable_since,
+    reachableSince: row.reachable_since
   }))
 }
 
@@ -127,17 +136,28 @@ export function putScanFact(db: Database.Database, row: ScanFactWriteRow): void 
       : prior !== null && prior.outcome === 'unreachable'
         ? prior.unreachableSince
         : row.observedAt
+  // S10-21b B17 (D-R137 F4, D-R138 F3): the mirror of the NB2 rule above, for RECOVERY. Set on
+  // the first scan that transitions OUT of 'unreachable' (prior outcome was 'unreachable', or no
+  // row existed — a fresh non-'unreachable' row starts its own recovery episode from birth);
+  // held across repeats of the SAME non-'unreachable' episode; cleared to NULL on 'unreachable'.
+  const reachableSince =
+    row.outcome === 'unreachable'
+      ? null
+      : prior !== null && prior.outcome !== 'unreachable'
+        ? prior.reachableSince
+        : row.observedAt
   db.prepare(
     `INSERT INTO peer_link_scan_facts (
        link_device_id, environment_id, outcome, environment_pairing_revision,
-       link_credential_fp, detail, observed_at, unreachable_since
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       link_credential_fp, detail, observed_at, unreachable_since, reachable_since
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(link_device_id, environment_id) DO UPDATE SET
        outcome = excluded.outcome,
        environment_pairing_revision = excluded.environment_pairing_revision,
        link_credential_fp = excluded.link_credential_fp,
        detail = excluded.detail, observed_at = excluded.observed_at,
-       unreachable_since = excluded.unreachable_since`
+       unreachable_since = excluded.unreachable_since,
+       reachable_since = excluded.reachable_since`
   ).run(
     row.linkDeviceId,
     row.environmentId,
@@ -146,7 +166,8 @@ export function putScanFact(db: Database.Database, row: ScanFactWriteRow): void 
     row.linkCredentialFp,
     row.detail,
     row.observedAt,
-    unreachableSince
+    unreachableSince,
+    reachableSince
   )
 }
 
