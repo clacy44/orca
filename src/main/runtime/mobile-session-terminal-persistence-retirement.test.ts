@@ -188,6 +188,8 @@ describe('mobile session terminal persistence retirement', () => {
         }
       },
       terminalPtyIncarnationsByPaneKey: { 'terminal:left': 'incarnation-left' },
+      terminalLaunchTokenHashesByPaneKey: { 'terminal:left': 'e'.repeat(64) },
+      terminalLaunchTokenAnchorPtyByPaneKey: { 'terminal:left': 'pty-left:incarnation-left' },
       remoteSessionIdsByTabId: { terminal: 'pty-right' }
     }
 
@@ -206,6 +208,10 @@ describe('mobile session terminal persistence retirement', () => {
     expect(result.terminalPtyIncarnationsByPaneKey?.['terminal:left']).toBeUndefined()
     expect(result.terminalSurfaceTombstonesByPaneKey).toEqual({})
     expect(result.terminalTopologyRevisionByRepoId?.[REPO_ID]).toBe(1)
+    // [S10-21c B1b, D-R146 LOW] The binding is deleted beside its hash — neither orphans the
+    // retired pane.
+    expect(result.terminalLaunchTokenHashesByPaneKey?.['terminal:left']).toBeUndefined()
+    expect(result.terminalLaunchTokenAnchorPtyByPaneKey?.['terminal:left']).toBeUndefined()
   })
 
   it('does not treat a sibling parent PTY as the exact leaf when layout is unavailable', () => {

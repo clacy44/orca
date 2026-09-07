@@ -16,7 +16,9 @@ describe('profile project session state', () => {
     const base = {
       ...getDefaultWorkspaceSession(),
       terminalTopologyRevisionByRepoId: { [REMOVED_REPO_ID]: 5 },
-      terminalPtyIncarnationsByPaneKey: { 'base-tab:leaf': 'base-incarnation' }
+      terminalPtyIncarnationsByPaneKey: { 'base-tab:leaf': 'base-incarnation' },
+      terminalLaunchTokenHashesByPaneKey: { 'base-tab:leaf': 'a'.repeat(64) },
+      terminalLaunchTokenAnchorPtyByPaneKey: { 'base-tab:leaf': 'pty-base:inc-base' }
     }
     const incoming = {
       ...getDefaultWorkspaceSession(),
@@ -24,7 +26,9 @@ describe('profile project session state', () => {
         [REMOVED_REPO_ID]: 3,
         [RETAINED_REPO_ID]: 7
       },
-      terminalPtyIncarnationsByPaneKey: { 'incoming-tab:leaf': 'incoming-incarnation' }
+      terminalPtyIncarnationsByPaneKey: { 'incoming-tab:leaf': 'incoming-incarnation' },
+      terminalLaunchTokenHashesByPaneKey: { 'incoming-tab:leaf': 'b'.repeat(64) },
+      terminalLaunchTokenAnchorPtyByPaneKey: { 'incoming-tab:leaf': 'pty-incoming:inc-incoming' }
     }
 
     const result = mergeWorkspaceSessions(base, incoming)
@@ -36,6 +40,15 @@ describe('profile project session state', () => {
     expect(result.terminalPtyIncarnationsByPaneKey).toEqual({
       'base-tab:leaf': 'base-incarnation',
       'incoming-tab:leaf': 'incoming-incarnation'
+    })
+    // [S10-21c B1b, D-R146 LOW] The anchor binding merges beside its hash, key for key.
+    expect(result.terminalLaunchTokenHashesByPaneKey).toEqual({
+      'base-tab:leaf': 'a'.repeat(64),
+      'incoming-tab:leaf': 'b'.repeat(64)
+    })
+    expect(result.terminalLaunchTokenAnchorPtyByPaneKey).toEqual({
+      'base-tab:leaf': 'pty-base:inc-base',
+      'incoming-tab:leaf': 'pty-incoming:inc-incoming'
     })
   })
 
@@ -138,6 +151,14 @@ describe('profile project session state', () => {
       terminalPtyIncarnationsByPaneKey: {
         'removed-tab:removed-leaf': 'removed-incarnation',
         'retained-tab:retained-leaf': 'retained-incarnation'
+      },
+      terminalLaunchTokenHashesByPaneKey: {
+        'removed-tab:removed-leaf': 'c'.repeat(64),
+        'retained-tab:retained-leaf': 'd'.repeat(64)
+      },
+      terminalLaunchTokenAnchorPtyByPaneKey: {
+        'removed-tab:removed-leaf': 'pty-removed:inc-removed',
+        'retained-tab:retained-leaf': 'pty-retained:inc-retained'
       }
     }
 
@@ -152,6 +173,14 @@ describe('profile project session state', () => {
     })
     expect(result.terminalPtyIncarnationsByPaneKey).toEqual({
       'retained-tab:retained-leaf': 'retained-incarnation'
+    })
+    // [S10-21c B1b, D-R146 LOW] The binding is pruned in lockstep with its hash — neither
+    // orphans for the removed repo's tab.
+    expect(result.terminalLaunchTokenHashesByPaneKey).toEqual({
+      'retained-tab:retained-leaf': 'd'.repeat(64)
+    })
+    expect(result.terminalLaunchTokenAnchorPtyByPaneKey).toEqual({
+      'retained-tab:retained-leaf': 'pty-retained:inc-retained'
     })
   })
 })

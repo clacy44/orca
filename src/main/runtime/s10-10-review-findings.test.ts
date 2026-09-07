@@ -105,22 +105,32 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
     const localHash = createHash('sha256').update('local-token').digest('hex')
     const sshHash = createHash('sha256').update('ssh-token').digest('hex')
     // [S10-21c S1] The anchor is only honoured while the pty it was minted for stands on the pane,
-    // so both partitions' anchors name THIS pane's live pty. The pty itself is local (connectionId
-    // null) in both cases, which is what makes the partition claim below the only thing selecting
-    // the partition — sharper than the previous no-pty fixture, not weaker.
-    const anchorPty = `${PTY_ID}:findings-incarnation-f5`
+    // so each partition's anchor names a pty LIVE IN THAT SAME PARTITION.
+    // [S10-21c B1b, D-R146 INFO — adopted hardening] The identity conjunct's live-pty scan now
+    // also refuses a pty whose own partition differs from the hostId the anchor was read from, so
+    // this fixture registers ONE pty per partition under test (a single local pty satisfying both
+    // used to be enough; it is what the hardening exists to refuse).
+    const PTY_ID_SSH = 'pty-findings-1-ssh'
+    const anchorPtyLocal = `${PTY_ID}:findings-incarnation-f5`
+    const anchorPtySsh = `${PTY_ID_SSH}:findings-incarnation-f5-ssh`
     runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
       tabId: TAB_ID,
       leafId: LEAF_ID,
       incarnationId: 'findings-incarnation-f5',
       isReattach: true
     })
+    runtime.registerPty(PTY_ID_SSH, WORKTREE_ID, SSH_CONNECTION_ID, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: 'findings-incarnation-f5-ssh',
+      isReattach: true
+    })
     store?.persistTerminalLaunchTokenHash?.(
-      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: localHash, anchorPty },
+      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: localHash, anchorPty: anchorPtyLocal },
       undefined
     )
     store?.persistTerminalLaunchTokenHash?.(
-      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: sshHash, anchorPty },
+      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: sshHash, anchorPty: anchorPtySsh },
       SSH_HOST_ID
     )
 
@@ -131,6 +141,32 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
     expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, localHash, SSH_CONNECTION_ID)).toBe(
       false
     )
+  })
+
+  // [S10-21c B1b, D-R146 INFO — adopted hardening] Cross-partition looseness: the identity
+  // conjunct's live-pty scan must not let a LOCAL pty on the same paneKey satisfy an SSH-partition
+  // anchor.
+  it('D-R146 INFO: an SSH-partition anchor is NOT satisfied by a local pty on the same paneKey', () => {
+    const { store } = createMultiHostStore()
+    const runtime = new OrcaRuntimeService(store)
+    runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+
+    // Only a LOCAL pty stands on this pane. The SSH partition's anchor names that same
+    // local pty's identity — a misconfiguration/attacker shape, not a legitimate mint.
+    runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: 'findings-incarnation-cross-partition',
+      isReattach: true
+    })
+    const localPtyIdentity = `${PTY_ID}:findings-incarnation-cross-partition`
+    const sshHash = createHash('sha256').update('cross-partition-ssh-token').digest('hex')
+    store?.persistTerminalLaunchTokenHash?.(
+      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: sshHash, anchorPty: localPtyIdentity },
+      SSH_HOST_ID
+    )
+
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, sshHash, SSH_CONNECTION_ID)).toBe(false)
   })
 
   // S10-10 closeout (F1 residual): in a RESTORED generation the pty has neither a live

@@ -93,6 +93,12 @@ export function mergeWorkspaceSessions(
       ...base.terminalLaunchTokenHashesByPaneKey,
       ...incoming.terminalLaunchTokenHashesByPaneKey
     },
+    // [S10-21c B1b, D-R146 LOW] Mirrors the hash map exactly, beside it: the anchor binding must
+    // move with its hash, never be left behind in the `...base` spread alone.
+    terminalLaunchTokenAnchorPtyByPaneKey: {
+      ...base.terminalLaunchTokenAnchorPtyByPaneKey,
+      ...incoming.terminalLaunchTokenAnchorPtyByPaneKey
+    },
     terminalTopologyRevisionByRepoId: mergeTerminalTopologyRevisions(
       base.terminalTopologyRevisionByRepoId,
       incoming.terminalTopologyRevisionByRepoId
@@ -190,6 +196,16 @@ export function removeRepoFromWorkspaceSession(
   if (next.terminalLaunchTokenHashesByPaneKey) {
     next.terminalLaunchTokenHashesByPaneKey = Object.fromEntries(
       Object.entries(next.terminalLaunchTokenHashesByPaneKey).filter(([paneKey]) => {
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTerminalTabIds.has(paneKey.slice(0, separator))
+      })
+    )
+  }
+  // [S10-21c B1b, D-R146 LOW] Identical predicate to the hash filter above, so a removed tab's
+  // binding is pruned in lockstep with its hash rather than orphaned.
+  if (next.terminalLaunchTokenAnchorPtyByPaneKey) {
+    next.terminalLaunchTokenAnchorPtyByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalLaunchTokenAnchorPtyByPaneKey).filter(([paneKey]) => {
         const separator = paneKey.lastIndexOf(':')
         return separator < 1 || !removedTerminalTabIds.has(paneKey.slice(0, separator))
       })

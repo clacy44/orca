@@ -55,12 +55,19 @@ function recordTerminalSurfaceRetirement(
     ...session.terminalLaunchTokenHashesByPaneKey
   }
   delete terminalLaunchTokenHashesByPaneKey[paneKey]
+  // [S10-21c B1b, D-R146 LOW] Delete the binding beside its hash, or a retired pane's anchor
+  // orphans in storage with no hash left to gate it.
+  const terminalLaunchTokenAnchorPtyByPaneKey = {
+    ...session.terminalLaunchTokenAnchorPtyByPaneKey
+  }
+  delete terminalLaunchTokenAnchorPtyByPaneKey[paneKey]
   return advanceTerminalTopologyRevision(
     {
       ...session,
       terminalPtyIncarnationsByPaneKey,
       terminalSurfaceTombstonesByPaneKey,
-      terminalLaunchTokenHashesByPaneKey
+      terminalLaunchTokenHashesByPaneKey,
+      terminalLaunchTokenAnchorPtyByPaneKey
     },
     surface.worktreeId
   )

@@ -14163,6 +14163,15 @@ export class OrcaRuntimeService {
       if (pty.paneKey !== paneKey || !pty.connected) {
         continue
       }
+      // [S10-21c B1b, D-R146 INFO — adopted hardening] The anchor is read from the partition
+      // `hostId` names; a pty standing on the same paneKey in a DIFFERENT partition must never
+      // satisfy it, or an SSH-partition anchor could be satisfied by a same-paneKey local pty.
+      const ptyHostId = pty.connectionId
+        ? toSshExecutionHostId(pty.connectionId)
+        : LOCAL_EXECUTION_HOST_ID
+      if (ptyHostId !== hostId) {
+        continue
+      }
       const identity = this.ptyAnchorIdentity(pty)
       if (identity) {
         liveIdentities.push(identity)
@@ -14481,23 +14490,35 @@ export class OrcaRuntimeService {
     }
   }
 
-  /** [S10-21c S1, INV-P-013] Is this pane a peer-owned attachment? Resolved exactly the way
-   *  `closePeerOwnedPaneOnAgentExit` resolves it — the row is keyed on the terminal HANDLE, and an
-   *  absent DB (or a partial test stub, or an unresolvable handle) reads as "no peer-owned row",
-   *  the same non-destructive default that hook already takes. A DB that throws reads as peer-owned:
-   *  "cannot prove this pane is the operator's own" must never be the branch that keeps authority
-   *  alive. */
+  /** [S10-21c S1/B1b, INV-P-013] Is this pane a peer-owned attachment? Resolved primarily the way
+   *  `closePeerOwnedPaneOnAgentExit` resolves it — the row keyed on the terminal HANDLE — with a
+   *  pane-keyed fallback (D-R146 MEDIUM): the handle index can be empty, or the row's own
+   *  `terminal_handle` not yet stamped (`handle_bound_at` is a separate column, db.ts:2295), in
+   *  exactly the post-restart / pre-binding window this check most needs to still see the row. A
+   *  live peer attachment row standing on this pane's `paneKey` is peer-owned regardless of handle
+   *  binding. Absent DB (or a partial test stub, or no row by either key) reads as "no peer-owned
+   *  row", the same non-destructive default the hook path already takes. A DB that throws reads as
+   *  peer-owned: "cannot prove this pane is the operator's own" must never be the branch that keeps
+   *  authority alive. */
   private isPeerOwnedAttachmentPane(ptyId: string): boolean {
     const db = this._orchestrationDb
     if (!db || typeof db.findPeerOwnedAttachmentForHandle !== 'function') {
       return false
     }
-    const handle = this.handleByPtyId.get(ptyId)
-    if (!handle) {
-      return false
-    }
     try {
-      return db.findPeerOwnedAttachmentForHandle(handle) !== undefined
+      const handle = this.handleByPtyId.get(ptyId)
+      if (handle && db.findPeerOwnedAttachmentForHandle(handle) !== undefined) {
+        return true
+      }
+      const pty = this.ptysById.get(ptyId)
+      if (
+        pty?.paneKey &&
+        typeof db.findPeerOwnedAttachmentForPaneKey === 'function' &&
+        db.findPeerOwnedAttachmentForPaneKey(pty.paneKey) !== undefined
+      ) {
+        return true
+      }
+      return false
     } catch (error) {
       console.warn('[agent-authority] peer-owned attachment lookup failed', {
         ptyId,

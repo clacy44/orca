@@ -8349,6 +8349,23 @@ export class OrchestrationDb {
       .get(handle) as RemoteDispatchAttachmentRow | undefined
   }
 
+  // [S10-21c B1b, D-R146 MEDIUM] Sibling to findPeerOwnedAttachmentForHandle, keyed on pane_key
+  // instead of terminal_handle: the handle index can be empty, or this row's own terminal_handle
+  // not yet stamped (handle_bound_at is a separate column — see the v39 comment above), in exactly
+  // the post-restart / pre-binding window a caller most needs INV-P-013 to still see the row. No
+  // state filter, same as the handle lookup: the attacker/Ruling 20(c) close must fire regardless
+  // of succeeded/stopped/abandoned/ready/etc.
+  findPeerOwnedAttachmentForPaneKey(paneKey: string): RemoteDispatchAttachmentRow | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM remote_dispatch_attachments
+         WHERE pane_key IS NOT NULL AND agent_exited_at IS NULL
+         ORDER BY COALESCE(handle_bound_at, created_at) DESC, rowid DESC`
+      )
+      .all() as RemoteDispatchAttachmentRow[]
+    return rows.find((row) => row.pane_key && isEquivalentPaneKey(row.pane_key, paneKey))
+  }
+
   // S10-19 W-2 (ops MJ-1 / §D): agent_exited_at is stamped in EVERY case — the only durable fact
   // of the exit. `state`/`stage` move to 'agent_exited' ONLY from ready/start_unknown/failed
   // (§D — never from 'starting', where recordRemoteAttachmentStage/failRemoteAttachment are the

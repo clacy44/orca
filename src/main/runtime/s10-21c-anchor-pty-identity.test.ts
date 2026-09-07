@@ -269,6 +269,86 @@ describe('S10-21c S1: the launch-token anchor is bound to pane-pty identity, not
     }
   })
 
+  // [S10-21c B1b, D-R146 MEDIUM] isPeerOwnedAttachmentPane gains a pane-keyed fallback for
+  // exactly the window `handleByPtyId` cannot resolve, or the attachment row's own
+  // `terminal_handle` has not (yet) been stamped (`handle_bound_at` is a separate column,
+  // db.ts:2295). Three states, one function, one shared fixture shape:
+  it('D-R146 MEDIUM (a): a PEER-OWNED pane with an UNRESOLVABLE handle still loses its anchor, via the pane-key fallback', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      const token = await mintAnchoredPane(runtime)
+      const hash = createHash('sha256').update(token).digest('hex')
+      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash)
+
+      // The row is keyed on the PANE, not the handle — models the pre-handle-binding window
+      // (handle_bound_at stamped only later; terminal_handle left NULL here).
+      ;(
+        db as unknown as {
+          db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } }
+        }
+      ).db
+        .prepare(
+          `INSERT INTO remote_dispatch_attachments
+             (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, pane_key, agent_exited_at)
+           VALUES ('disp_s10_21c_b1b_a', 'task_x', 'fp_peer', ?, 'ready', 'input_accepted', ?, NULL)`
+        )
+        .run(runtime.getRuntimeId(), PANE_KEY)
+
+      // Model the unresolvable-handle state directly: handleByPtyId has no entry for this pty.
+      ;(runtime as unknown as { handleByPtyId: Map<string, string> }).handleByPtyId.delete(PTY_ID)
+
+      runtime.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+      expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
+      expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, hash)).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('D-R146 MEDIUM (b): a NON-peer pane with an unresolvable handle and no matching attachment row keeps its anchor', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      const token = await mintAnchoredPane(runtime)
+      const hash = createHash('sha256').update(token).digest('hex')
+
+      // A DB is attached and reachable, but no row names this pane by either handle or pane_key
+      // — this pane is genuinely not peer-owned.
+      ;(runtime as unknown as { handleByPtyId: Map<string, string> }).handleByPtyId.delete(PTY_ID)
+
+      runtime.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash)
+      expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBe(IDENTITY)
+      expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, hash)).toBe(true)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('D-R146 MEDIUM (c): the post-restart window (no handle yet, no attachment row at all) keeps the anchor, never guesses peer-owned', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    // No OrchestrationDb attached at all — the state a runtime is in immediately after a
+    // restart, before getOrchestrationDb()/setOrchestrationDb() has run.
+    const token = await mintAnchoredPane(runtime)
+    const hash = createHash('sha256').update(token).digest('hex')
+    ;(runtime as unknown as { handleByPtyId: Map<string, string> }).handleByPtyId.delete(PTY_ID)
+
+    runtime.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash)
+    expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBe(IDENTITY)
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, hash)).toBe(true)
+  })
+
   it('the persisted anchor verifies for the BOUND pty across a runtime restart, and refuses a different pty on the same pane', async () => {
     const { store } = createSharedStore()
     const runtime1 = new OrcaRuntimeService(store)
@@ -426,5 +506,57 @@ describe('S10-21c S1: the launch-token anchor is bound to pane-pty identity, not
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
     expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
     expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, hash)).toBe(false)
+  })
+
+  // [S10-21c B1b, D-R146 LOW finding 3] `verifyLivePaneLaunchTokenHash`'s legacy-lane upgrade is
+  // reachable from the hook channel (isCorroboratedAuthority arm 1). This proves the mutation
+  // guard: a queued retry from a FAILED upgrade write must not survive the pty's own exit, or a
+  // later unrelated drain could resurrect a binding for a pane that has already retired.
+  it('D-R146 LOW (item 3): a legacy-lane upgrade queued after a failed flush is dropped by a subsequent pty_exit retire, so a later drain cannot resurrect it', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const legacyHash = createHash('sha256').update('legacy-generation-token-retry').digest('hex')
+    const session = sessionSnapshot()
+    session.terminalLaunchTokenHashesByPaneKey = { [PANE_KEY]: legacyHash }
+    session.terminalLaunchTokenAnchorPtyByPaneKey = {}
+
+    const runtime = new OrcaRuntimeService(store)
+    runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: INCARNATION as never,
+      isReattach: true
+    })
+
+    // Force exactly one persist call to fail, so the legacy-lane upgrade's own write is queued
+    // for retry instead of landing on disk.
+    const originalPersist = store!.persistTerminalLaunchTokenHash!
+    let failNext = true
+    store!.persistTerminalLaunchTokenHash = ((...args: Parameters<typeof originalPersist>) => {
+      if (failNext) {
+        failNext = false
+        throw new Error('simulated flush failure')
+      }
+      return originalPersist(...args)
+    }) as typeof originalPersist
+
+    // The legacy entry is honoured in-memory even though its upgrade write failed.
+    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, legacyHash)).toBe(true)
+    expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
+
+    // The pty then genuinely exits. retirePtyAgentLaunchAuthority('pty_exit') must drop the
+    // queued retry for this pane's key, not just forget the (already-empty) persisted anchor.
+    runtime.onPtyExit(PTY_ID, 0, INCARNATION as never)
+
+    // Un-freeze the store, then drive exactly the mechanism the finding names: a LATER drain.
+    // If the queued upgrade survived the retire, this call would resurrect the binding for a
+    // pane whose pty has already exited.
+    failNext = false
+    ;(
+      runtime as unknown as { drainLaunchTokenAnchorRetryQueue: () => void }
+    ).drainLaunchTokenAnchorRetryQueue()
+
+    expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+    expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
   })
 })
