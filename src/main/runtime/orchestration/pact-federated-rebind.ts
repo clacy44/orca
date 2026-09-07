@@ -229,13 +229,24 @@ function drainPausedOrResumed(
   threadId: string,
   token: 'pause' | 'resume'
 ): number {
+  // D-R140 NF-2(b): derive the verb to relay from the pact's CURRENT paused state, never from
+  // the stale token — a cap error on pause sets the token to 'pause'; if the pact is then
+  // locally resumed (through the normal, non-cap-error path) before this drain next runs, the
+  // base kept relaying the now-superseded 'pause' token, leaving the two hosts disagreeing about
+  // who is paused. `emitFederatedPactSideEffect` also clears the token on a normal successful
+  // enqueue (pact-federated-pause-resume-emit.ts) — this is defense in depth, not the only fix.
+  const threadRow = db.prepare(`SELECT pact_paused_at FROM threads WHERE id = ?`).get(threadId) as
+    | { pact_paused_at: string | null }
+    | undefined
+  const verb: 'pause' | 'resume' = threadRow?.pact_paused_at != null ? 'pause' : 'resume'
+
   const latest = db
     .prepare(
       `SELECT reason_code, actor_agent_id, actor_pane_key, actor_host_id, turn_after_agent_id
          FROM pact_steps WHERE thread_id = ? AND kind = ? AND actor_is_remote = 0
          ORDER BY seq DESC LIMIT 1`
     )
-    .get(threadId, token) as
+    .get(threadId, verb) as
     | {
         reason_code: string | null
         actor_agent_id: string | null
@@ -248,7 +259,7 @@ function drainPausedOrResumed(
   db.exec('BEGIN IMMEDIATE')
   let result: ReturnType<typeof enqueueRelayForAppliedVerb>
   try {
-    result = enqueueRelayForAppliedVerb(db, threadId, token, {
+    result = enqueueRelayForAppliedVerb(db, threadId, verb, {
       actorAgentId: latest?.actor_agent_id ?? null,
       actorPaneKey: latest?.actor_pane_key ?? null,
       actorHostId: latest?.actor_host_id ?? null,
@@ -256,16 +267,19 @@ function drainPausedOrResumed(
       reasonCode: latest?.reason_code ?? null,
       turnAfterAgentId: latest?.turn_after_agent_id ?? null
     })
-    // Token clear rides the SAME transaction as the enqueue on success — no crash window
-    // between "relayed" and "no longer pending". On `relay_pending` the helper itself re-set
-    // the token; on `refused` (never expected for a locally-applied verb) leave it set so the
-    // next tick's scan re-attempts rather than silently dropping the relay.
+    // D-R140 NF-1: ROLLBACK unless the relay actually enqueued — a still-saturated cap (or a
+    // never-expected `refused`) must commit NOTHING; the token is already set (by the prior
+    // local fallback, or re-set by the relay-only helper's own headroom check), so rolling this
+    // transaction back loses nothing. Token clear rides the SAME transaction as a successful
+    // enqueue — no crash window between "relayed" and "no longer pending".
     if (result.outcome === 'enqueued') {
       db.prepare(
         `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = ?`
       ).run(threadId, token)
+      db.exec('COMMIT')
+    } else {
+      db.exec('ROLLBACK')
     }
-    db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err

@@ -11,7 +11,12 @@ import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
 import { renderFederatedPartyKey } from './pact-federated-identity'
 import { putPeerLinkBinding } from './link-binding-store'
 import { putScanFact } from './link-binding-observations-store'
-import { PACT_LINK_SILENCE_MS, PACT_LINK_RECOVERY_MS } from './link-binding-constants'
+import type { LinkScanFactOutcome } from './link-binding-observations-store'
+import {
+  PACT_LINK_SILENCE_MS,
+  PACT_LINK_RECOVERY_MS,
+  LINK_BINDING_REVERIFY_MS
+} from './link-binding-constants'
 import { emitFederatedPactSideEffect } from './pact-federated-pause-resume-emit'
 
 function rawDb(db: OrchestrationDb): Database.Database {
@@ -305,6 +310,46 @@ describe('pact-link-evidence-sweep / emitFederatedPactSideEffect (S10-21b B15)',
     )
     expect(result.resumed).toEqual([])
     expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+  })
+
+  // -------------------------------------------------------------------------------------
+  // D-R140 NF-4 — the recovery freshness bound must not be tighter than the PROVER'S OWN
+  // re-probe cadence for the fact's outcome. A `no_match` outcome is TTL'd on
+  // LINK_BINDING_REVERIFY_MS (24h) by the prover (link-binding-prover-probe.ts:126-134): once
+  // recovered, no NEW fact is expected to land for up to that long, and that must not itself
+  // block auto-resume. RED at base: base's PACT_LINK_SILENCE_MS-only bound (15 min) treated the
+  // (correctly) stale-by-design fact as stale evidence and never resumed.
+  // -------------------------------------------------------------------------------------
+  it('D-R140 NF-4: a recovered no_match link resumes even though the prover has not re-probed it for hours (RED at base: not resumed)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const t0 = Date.now()
+    scanFact('unreachable', t0)
+    d.runPactLinkEvidenceSweep(t0 + PACT_LINK_SILENCE_MS)
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+    // Recovery: a `no_match` outcome (not 'unreachable') establishes `reachable_since` and
+    // stays continuous for PACT_LINK_RECOVERY_MS with no further scan.
+    const recoveredScanAt = t0 + PACT_LINK_SILENCE_MS + 1_000
+    putScanFact(rawDb(d), {
+      linkDeviceId: ENV,
+      environmentId: ENV,
+      outcome: 'no_match' as LinkScanFactOutcome,
+      environmentPairingRevision: 1,
+      linkCredentialFp: 'lcfp',
+      detail: null,
+      observedAt: recoveredScanAt
+    })
+
+    // No NEW fact lands for two hours — well inside LINK_BINDING_REVERIFY_MS (24h), the
+    // prover's own deliberate re-probe TTL for `no_match` — but well outside
+    // PACT_LINK_SILENCE_MS (15 min).
+    const twoHoursLater = recoveredScanAt + PACT_LINK_RECOVERY_MS + 2 * 60 * 60 * 1000
+    expect(twoHoursLater - recoveredScanAt).toBeLessThan(LINK_BINDING_REVERIFY_MS)
+    const result = d.runPactLinkEvidenceSweep(twoHoursLater)
+    expect(result.resumed.map((o) => o.threadId)).toEqual([threadId])
+    expect(d.getThread(threadId)?.pact_paused_at).toBeNull()
   })
 
   // -------------------------------------------------------------------------------------

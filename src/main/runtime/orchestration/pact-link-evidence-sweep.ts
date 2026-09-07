@@ -15,9 +15,34 @@
 import type Database from '../../sqlite/sync-database'
 import type { ThreadRow } from './types'
 import { getScanFact } from './link-binding-observations-store'
-import { PACT_LINK_SILENCE_MS, PACT_LINK_RECOVERY_MS } from './link-binding-constants'
+import {
+  PACT_LINK_SILENCE_MS,
+  PACT_LINK_RECOVERY_MS,
+  LINK_BINDING_REVERIFY_MS,
+  LINK_BINDING_CAPABILITY_TTL_MS,
+  LINK_STORE_EMPTY_CODE
+} from './link-binding-constants'
 import { auditPact, insertPactStepRow } from './pact-shared'
 import { latestHostPauseReasonCode } from './pact-federated-pause-remote-arm'
+
+// D-R140 NF-4: the freshness bound the recovery pass requires must not be tighter than the
+// PROVER'S OWN cache TTL for the fact's outcome (link-binding-prover-probe.ts:126-134) — a
+// `no_match`/`unavailable(link_store_empty)` fact is deliberately not re-probed for
+// LINK_BINDING_REVERIFY_MS, and `unsupported` for LINK_BINDING_CAPABILITY_TTL_MS; requiring a
+// fact fresher than PACT_LINK_SILENCE_MS for those outcomes made an already-recovered link
+// unresumable for up to 24h even though the prover behaved exactly as designed.
+function cacheTtlForOutcome(outcome: string, detail: string | null): number {
+  if (outcome === 'no_match') {
+    return LINK_BINDING_REVERIFY_MS
+  }
+  if (outcome === 'unavailable' && detail === LINK_STORE_EMPTY_CODE) {
+    return LINK_BINDING_REVERIFY_MS
+  }
+  if (outcome === 'unsupported') {
+    return LINK_BINDING_CAPABILITY_TTL_MS
+  }
+  return 0
+}
 
 type FederatedLink = { linkDeviceId: string; environmentId: string }
 
@@ -156,11 +181,17 @@ function resumeRecoveredPacts(db: Database.Database, now: number): PactLinkEvide
     if (now - fact.reachableSince < PACT_LINK_RECOVERY_MS) {
       continue
     }
-    // D-R139 N8: `reachableSince` alone cannot tell "still good" from "no longer scanned" — a
-    // single good scan followed by a silent prover satisfies the continuity math above forever.
-    // The most recent fact must also be FRESH (a scan has actually landed inside the silence
-    // window), or this is stale evidence, not a proven-recovered link.
-    if (now - fact.observedAt >= PACT_LINK_SILENCE_MS) {
+    // D-R139 N8 / D-R140 NF-4: the most recent fact must also be FRESH (a scan has actually
+    // landed within the bound below), or this is stale evidence, not a proven-recovered link —
+    // but the bound is never tighter than the prover's OWN re-probe cadence for this outcome
+    // (`cacheTtlForOutcome`, above): a `no_match`/`unavailable(link_store_empty)`/`unsupported`
+    // fact that the prover deliberately did not re-probe is not stale just because it is older
+    // than PACT_LINK_SILENCE_MS.
+    const freshnessBoundMs = Math.max(
+      PACT_LINK_SILENCE_MS,
+      cacheTtlForOutcome(fact.outcome, fact.detail)
+    )
+    if (now - fact.observedAt >= freshnessBoundMs) {
       continue
     }
     // S10-21b B17 (D-R138 B-F7): same crash-window fix as the pause pass above — one

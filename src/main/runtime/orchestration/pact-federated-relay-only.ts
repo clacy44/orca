@@ -17,6 +17,8 @@ import { enqueueReplyOutboxCoalesced } from './reply-outbox-pact-answer-coalesce
 import { getPeerLinkBinding, LinkBindingCapError } from './link-binding-store'
 import { buildPactWirePayload } from './pact-federated-wire-envelope'
 import { PACT_VERB_RELAY_KIND } from './pact-federated-emit-steps'
+import { countPendingReplyOutbox } from './reply-outbox-store'
+import { REPLY_OUTBOX_PER_LINK_CAP, PACT_RESERVED_HEADROOM } from './link-binding-constants'
 
 export type EnqueueRelayForAppliedVerbOpts = {
   actorAgentId: string | null
@@ -71,6 +73,24 @@ export function enqueueRelayForAppliedVerb(
       : (thread.pact_with_agent_id as string)
   const relayKind = PACT_VERB_RELAY_KIND[verb]
 
+  // D-R140 NF-1: check the link's reserved headroom BEFORE minting anything — the base bumped
+  // `pact_local_seq` and inserted a message row on EVERY pump tick while the cap was still
+  // saturated (the enqueue's own cap error was caught AFTER those writes, and the caller then
+  // COMMITted them anyway). If the cap would still bite, return `relay_pending` having written
+  // NOTHING — the token this drain re-attempts on is already set by the local fallback that
+  // ran before this function was ever called.
+  const pendingCount = countPendingReplyOutbox(db, linkDeviceId)
+  if (pendingCount >= REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM) {
+    db.prepare(`UPDATE threads SET pact_relay_pending = ? WHERE id = ?`).run(verb, thread.id)
+    return { outcome: 'relay_pending', thread }
+  }
+
+  // K25 (D-R140): literal branches, never a computed `pact_${verb}` template — the static scan
+  // (`orchestration-federated-peer-send-pact-inbound.test.ts`'s K25 second-minter check) flags
+  // that shape by regex; a literal-per-branch kind needs no allowlist entry at all.
+  const hostPayloadKind: 'pact_pause' | 'pact_resume' =
+    verb === 'pause' ? 'pact_pause' : 'pact_resume'
+
   // Message only — no threadStateMutation, no ledger row (both already exist).
   const inserted = insertGatedMessage(db, {
     from: opts.actorAgentId ? pactWaiterHandle(opts.actorAgentId) : 'host',
@@ -79,7 +99,7 @@ export function enqueueRelayForAppliedVerb(
     body: '',
     type: 'status',
     threadId: thread.id,
-    hostPayloadKind: `pact_${verb}`,
+    hostPayloadKind,
     deliveryContract: 'audit_only',
     runId: opts.runId,
     senderPaneKey: opts.actorPaneKey,

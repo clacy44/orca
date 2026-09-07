@@ -151,6 +151,13 @@ export function emitFederatedPactSideEffect(
       localFallback('gate_refused')
       return
     }
+    // D-R140 NF-2(a): clear a stale `pact_relay_pending` token here — a prior cap error on the
+    // OPPOSITE verb (e.g. pause) left the token set; this call's own successful enqueue already
+    // carries the pact's CURRENT absolute state (coalesced cross-kind, 21b-E7a), so any leftover
+    // token from before is superseded and must not survive to relay stale state on a later tick.
+    db.prepare(
+      `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending IN ('pause', 'resume')`
+    ).run(thread.id)
   } catch (err) {
     if (err instanceof LinkBindingCapError) {
       // D-R139 N1: the whole `enqueueFederatedPactVerb` transaction rolled back with this

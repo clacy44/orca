@@ -56,6 +56,32 @@ function noopReceipt(messageId: string, threadId: string): ApplyInboundPactVerbR
   return { accepted: true, messageId, threadId, wake: { kind: 'none' } }
 }
 
+// D-R140 NF-3 (21b-E12): a `resume_noop` that lands on the pact's next expected seq still
+// consumed a delivered wire seq — advance `pact_peer_seq` to it and record the applied id (the
+// same dedupe-scoped write the NO_LEDGER_VERBS branch of `applyLedgerOrNoLedgerVerb` uses), one
+// transaction, then return the ordinary noop receipt. No message row, no `pact_steps` ledger
+// row — this verb had no state effect (the peer was never recorded as paused here), only a
+// fence advance.
+function applyResumeNoopWithFenceAdvance(
+  db: Database.Database,
+  thread: ThreadRow,
+  args: ApplyInboundPactVerbArgs
+): ApplyInboundPactVerbResult {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare(
+      `UPDATE threads SET pact_peer_seq = ?, pact_last_inbound_at = datetime('now'),
+         pact_repair_attempts = 0 WHERE id = ?`
+    ).run(args.pact.seq, thread.id)
+    recordPactAppliedId(db, thread.id, args.messageId, args.pact.verb)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  return noopReceipt(args.messageId, thread.id)
+}
+
 export function applyInboundPactVerb(
   db: Database.Database,
   args: ApplyInboundPactVerbArgs,
@@ -88,9 +114,6 @@ export function applyInboundPactVerb(
   }
 
   const matrixResult = runPactPartyAndMatrixGates(args, resolution.thread) // Gates 11-13
-  if (matrixResult.outcome === 'resume_noop') {
-    return noopReceipt(args.messageId, resolution.thread.id)
-  }
 
   // resync_request/resync bypass gate 14's strict fence entirely (§2.5: "the wire dedupe alone
   // is sufficient for it" — gate 8, above, already supplied that). gap_notice gets NO special
@@ -108,6 +131,19 @@ export function applyInboundPactVerb(
 
   // Gate 14 — the strict fence (§2.5, Ruling 34 Addendum 6(2)).
   const fence = resolvePactFenceOutcome(resolution.thread, args.pact.seq)
+
+  // D-R140 NF-3 (21b-E12): the `resume_noop` check moves to AFTER gate 14. The base short-
+  // circuited on `resume_noop` BEFORE the fence ever ran, so an inbound resume that coalesced
+  // with a pause this receiver never saw (cross-kind seq reuse reuses the replaced row's seq,
+  // 21b-E7a) consumed a delivered wire seq that the noop receipt never recorded — the receiver's
+  // fence never advanced, and the sender's next verb desynced. When the fence says this seq IS
+  // the pact's next expected one, the noop is an APPLIED verb with no state effect: advance
+  // `pact_peer_seq`, record the applied id, in the one transaction, then return the noop
+  // receipt. A gap/desync fence outcome is a genuine repair case regardless of `resume_noop` —
+  // it falls through to the ordinary gap/desync handling below, unchanged.
+  if (matrixResult.outcome === 'resume_noop' && fence.kind === 'apply') {
+    return applyResumeNoopWithFenceAdvance(db, resolution.thread, args)
+  }
   if (fence.kind === 'gap') {
     // The RECEIVER mints a nonce (fresh-nonce gated, NA6) and queues one coalesced
     // resync_request back to the sender — never applied speculatively (v2's tolerance is

@@ -41,11 +41,6 @@ export function applyPropose(
   // already-engaged pact.
   refuseIfLinkCeilingSaturated(db, args.senderEnvironmentId, args.senderAgentId)
 
-  // S10-21b B14 (design §3.3, errata NB8) — a proposal from this (peer, local agent) pair bumps
-  // the per-peer-per-window park-block window on ARRIVAL, regardless of this propose's own
-  // eventual outcome (race loss, era mismatch, etc.) — "on arrival" per §3.3's own wording.
-  bumpProposalBlockWindow(db, senderKey, args.toAgentId)
-
   // B10 (design §2.13) — pair guard + cross-propose tie-break (pact-federated-propose-race.ts).
   // 'incoming_wins': auto-decline+relay the local loser before era adoption/apply, below.
   const race = resolveCrossProposeOutcome(db, thread, args, senderKey)
@@ -149,6 +144,14 @@ export function applyPropose(
       outcome: 'proposed'
     })
     db.exec('COMMIT')
+    // D-R140 N3 (21b-E11): bump the per-peer-per-window park-block window AFTER commit — applied
+    // proposals only. The base bumped on arrival, before any of the throws above (ceiling
+    // saturated, bad seq) or the gate-refused message-gate throw inside this transaction, so a
+    // REFUSED propose still bumped `count`, and `isProposalReArmSuppressed`'s `count >= 2` could
+    // then suppress re-arm on a first proposal that was never actually applied (D-R140 (k)).
+    // `isProposalReArmSuppressed` itself is unchanged — "two applied proposals in the window" is
+    // now what `count >= 2` actually means.
+    bumpProposalBlockWindow(db, senderKey, args.toAgentId)
     return {
       accepted: true,
       messageId: inserted.message.id,

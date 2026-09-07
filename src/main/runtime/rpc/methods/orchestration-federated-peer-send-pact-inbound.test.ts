@@ -747,12 +747,10 @@ describe('K25 second minter (design §2.4 closing paragraph)', () => {
       // S10-21b B7c: the mint moved into this max-lines split of pact-federated-emit.ts — same
       // single writer, new file.
       'pact-federated-emit-steps.ts',
-      'pact-federated-inbound-apply.ts',
-      // D-R139 N1: relay-only helper split out of pact-federated-emit-steps.ts (max-lines
-      // ratchet) — its `verb` parameter is typed `'pause' | 'resume'` only, so its
-      // `hostPayloadKind: \`pact_${verb}\`` can never equal 'pact_step'; the regex flags the
-      // template-literal SHAPE, not the (statically narrower) value domain.
-      'pact-federated-relay-only.ts'
+      'pact-federated-inbound-apply.ts'
+      // D-R140 K25: `pact-federated-relay-only.ts` no longer needs an allowlist entry — its
+      // `hostPayloadKind` is two literal branches ('pact_pause' / 'pact_resume'), never a
+      // computed `pact_${verb}` template, so the regex this test scans for does not match it.
     ])
     const root = join(__dirname, '..', '..')
     const offenders: string[] = []
