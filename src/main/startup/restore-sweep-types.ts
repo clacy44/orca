@@ -78,7 +78,12 @@ export type RestoreSweepDeps = {
   /** In-process only (INV-P-021) — see orca-runtime.ts's `mintRestoreTicket`. */
   mintRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId
   /** [C9 hand-off, D-I80] `orca-runtime.ts#notifyRebindDelivery` — called once after a
-   * SUCCESSFUL Layer 1 or Layer 2 restore, never for a skipped/deferred candidate. */
+   * SUCCESSFUL Layer 1 or Layer 2 restore, and (S10-21c B5, design §2 S7) once after a
+   * `skipped_daemon_survived` outcome — the pane's own process survived the restart and needs no
+   * restore at all, but mail already queued against `agent:<id>` is still parked until this
+   * fires. `skipped_daemon_survived` is neither a Layer-1/2 restore nor a Layer-3 deferral; it is
+   * its own outcome kind. Still never called for a Layer-3 deferral (nothing yet to deliver
+   * into). */
   notifyRebindDelivery(agentId: string): void
   /** [S10-21c B2, design §2 S6] Generic pane notice — same primitive as
    * `session-identity-mismatch-alarm.ts`'s `SessionIdentityMismatchAlarmDeps`/orca-runtime.ts's

@@ -44,6 +44,7 @@ import type { RuntimeEnsureAgentSessionResult } from '../../shared/agent-session
 import { parsePaneKey } from '../../shared/stable-pane-id'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from '../runtime/restore-sweep-lock'
 import type { ControllerInventory } from '../runtime/orchestration/agent-process-identity'
+import { handleDaemonSurvivedSkip as daemonSkip } from './restore-sweep-daemon-survived-delivery'
 import {
   decideEarlyRows,
   decideLeafHoldRows,
@@ -116,9 +117,10 @@ export async function restoreOneRegisteredPane(
   // [C7k, Ruling 34 Addendum 28] Rows 1-4 — pure, inventory-availability judged before identity
   // (see restore-sweep-decision.ts's own doc comment).
   const early = decideEarlyRows(processIncarnation, inventory)
+  // [S10-21c B5, design §2 S7] Audits, refreshes the handle, and arms delivery — see
+  // restore-sweep-daemon-survived-delivery.ts's own doc comment for the shape mirrored.
   if (early.kind === 'skipped_daemon_survived') {
-    auditSweepSkip(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
-    return { kind: 'skipped_daemon_survived' }
+    return daemonSkip(db, deps, hostId, launchRow, agentId, early, processIncarnation, inventory)
   }
   if (early.kind === 'layer3') {
     auditLayer3(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
