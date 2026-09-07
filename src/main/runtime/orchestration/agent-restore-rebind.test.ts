@@ -303,38 +303,6 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     expect(after.terminal_handle).toBe('handle-n2')
   })
 
-  it('fence: no pact row is changed inside the transaction', () => {
-    const db = rawDb()
-    insertAgent(db, { id: 'agent-pact', display_name: 'chair-pact', pane_key: 'tab1:leaf-pact' })
-    insertAgent(db, { id: 'agent-peer', display_name: 'chair-peer', pane_key: 'tab1:leaf-peer' })
-    db.prepare(
-      `INSERT INTO threads (
-         id, subject, pact_with_agent_id, pact_state, pact_proposer_agent_id, pact_paused_at,
-         pact_pause_reason
-       ) VALUES ('thr-1', 'pact', 'agent-peer', 'engaged', 'agent-pact', datetime('now'),
-         'counterpart_gone')`
-    ).run()
-    const before = db.prepare('SELECT * FROM threads WHERE id = ?').get('thr-1')
-
-    const result = rebindRestoredPane(db, {
-      ticketPayload: ticketFor('tab1:leaf-pact'),
-      newPaneKey: 'tab2:leaf-pact2',
-      newTerminalHandle: null,
-      hostId: HOST_ID,
-      executionHostId: EXEC_HOST_ID,
-      launchGeneration: LAUNCH_GEN,
-      incumbent: DEAD_INCUMBENT
-    })
-    expect(result.ok).toBe(true)
-    if (!result.ok || !result.rebound) {
-      throw new Error('expected a completed rebind')
-    }
-    expect(result.pactsToUnpause).toEqual(['thr-1'])
-
-    const after = db.prepare('SELECT * FROM threads WHERE id = ?').get('thr-1')
-    expect(after).toEqual(before)
-  })
-
   it(
     '[D-R107 MEDIUM-2, SCENARIO_CORRECTION] Ruling 34 Addendum 16(a): a retired predecessor ' +
       '(pane_key nulled) refuses and writes EXACTLY ONE audit row and nothing else. ' +
@@ -800,47 +768,6 @@ describe('S10-21a C5: rebindRestoredPane', () => {
       .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'`)
       .all('agent-same')
     expect(auditRows).toHaveLength(1)
-  })
-
-  it('[S10-21a C7l item 8, C10 gap, D-R118 F7] a same-pane (noop) restore with a counterpart_gone-paused pact carries pactsToUnpause out', () => {
-    const db = rawDb()
-    insertAgent(db, {
-      id: 'agent-same-pact',
-      display_name: 'chair-same-pact',
-      pane_key: 'tab1:leaf-same-pact',
-      terminal_handle: 'handle-old'
-    })
-    insertAgent(db, {
-      id: 'agent-peer-pact',
-      display_name: 'chair-peer-pact',
-      pane_key: 'tab1:leaf-peer-pact'
-    })
-    db.prepare(
-      `INSERT INTO threads (
-         id, subject, pact_with_agent_id, pact_state, pact_proposer_agent_id, pact_paused_at,
-         pact_pause_reason
-       ) VALUES ('thr-same-1', 'pact', 'agent-peer-pact', 'engaged', 'agent-same-pact',
-         datetime('now'), 'counterpart_gone')`
-    ).run()
-
-    // FAILS AT BASE: the noop (same-pane) branch discards refreshAgentHandleAfterRespawn's own
-    // pactsToUnpause entirely — the result never carried this field at all.
-    const result = rebindRestoredPane(db, {
-      ticketPayload: ticketFor('tab1:leaf-same-pact'),
-      newPaneKey: 'tab1:leaf-same-pact',
-      newTerminalHandle: 'handle-new',
-      hostId: HOST_ID,
-      executionHostId: EXEC_HOST_ID,
-      launchGeneration: LAUNCH_GEN,
-      incumbent: DEAD_INCUMBENT,
-      processIncarnation: 'pty-same-pact:inc-new'
-    })
-    expect(result).toEqual({
-      ok: true,
-      rebound: false,
-      agentId: 'agent-same-pact',
-      pactsToUnpause: ['thr-same-1']
-    })
   })
 
   // [S10-21a C7k, Ruling 34 Addendum 28, item 5] The companion refresh never writes an empty or

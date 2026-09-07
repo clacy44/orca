@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { OrchestrationDb } from './db'
 import type Database from '../../sqlite/sync-database'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
+import { insertPactStepRow } from './pact-shared'
 
 describe('C10: resumePactsForRestoredAgent', () => {
   let db: OrchestrationDb | undefined
@@ -86,6 +87,84 @@ describe('C10: resumePactsForRestoredAgent', () => {
     expect(ledger.entries.at(-1)?.kind).toBe('resume')
     expect(ledger.entries.at(-1)?.actorAgentId).toBeNull()
   })
+
+  it(
+    '[S10-21b B17b, design v3.1:1111-1116, T32 :1555] the impossible state — ' +
+      "pact_pause_reason='counterpart_gone' with NO host pause ledger row — is NOT " +
+      'restart-resumable (fails closed on a missing/NULL reason_code)',
+    () => {
+      const d = freshDb()
+      const a = seedAgent(d, 'a')
+      const b = seedAgent(d, 'b')
+      const threadId = engagedPact(d, a, b)
+      const raw = (d as unknown as { db: Database.Database }).db
+      // Constructed raw, bypassing every producer: no autoPausePactsForAgent call, so no
+      // pact_steps 'pause' row is ever written — this state is not reachable through any real
+      // producer (O-21b-46).
+      raw
+        .prepare(
+          `UPDATE threads SET pact_paused_at = datetime('now'), pact_pause_reason = 'counterpart_gone' WHERE id = ?`
+        )
+        .run(threadId)
+
+      d.resumePactsForRestoredAgent(a, [threadId])
+
+      const thread = d.getThread(threadId)
+      expect(thread?.pact_paused_at).not.toBeNull()
+      expect(thread?.pact_pause_reason).toBe('counterpart_gone')
+    }
+  )
+
+  it(
+    '[S10-21b B17b guard] a thread whose latest host pause row is counterpart_unreachable ' +
+      'is NOT restart-resumable',
+    () => {
+      const d = freshDb()
+      const a = seedAgent(d, 'a')
+      const b = seedAgent(d, 'b')
+      const threadId = engagedPact(d, a, b)
+      d.autoPausePactsForAgent(a, 'counterpart_gone')
+      const raw = (d as unknown as { db: Database.Database }).db
+      // A later host pause row (e.g. B15's own link-evidence sweep) becomes the latest —
+      // reason_code disambiguates per design §4.4/NB1; the restart path must never resume it.
+      insertPactStepRow(raw, {
+        threadId,
+        ordinal: 0,
+        kind: 'pause',
+        actorAgentId: null,
+        actorPaneKey: null,
+        actorHostId: null,
+        messageId: null,
+        summary: null,
+        turnAfterAgentId: null,
+        reasonCode: 'counterpart_unreachable'
+      })
+
+      d.resumePactsForRestoredAgent(a, [threadId])
+
+      const thread = d.getThread(threadId)
+      expect(thread?.pact_paused_at).not.toBeNull()
+      expect(thread?.pact_pause_reason).toBe('counterpart_gone')
+    }
+  )
+
+  it(
+    '[S10-21b B17b guard] a thread whose latest host pause row is counterpart_gone IS ' +
+      'restart-resumable',
+    () => {
+      const d = freshDb()
+      const a = seedAgent(d, 'a')
+      const b = seedAgent(d, 'b')
+      const threadId = engagedPact(d, a, b)
+      d.autoPausePactsForAgent(a, 'counterpart_gone')
+
+      d.resumePactsForRestoredAgent(a, [threadId])
+
+      const thread = d.getThread(threadId)
+      expect(thread?.pact_paused_at).toBeNull()
+      expect(thread?.pact_pause_reason).toBeNull()
+    }
+  )
 
   it('fence: a pact paused for another reason stays paused', () => {
     const d = freshDb()

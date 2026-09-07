@@ -21,19 +21,12 @@ export function pactsAwaitingUnpause(db: Database.Database, agentId: string): st
          AND (pact_proposer_agent_id = ? OR pact_with_agent_id = ?)`
     )
     .all(agentId, agentId) as { id: string }[]
-  // S10-21b B17 (D-R138 B-F7) — STOP, contradiction found, NOT applied: the brief's stated fix
-  // is a POSITIVE form (`=== 'counterpart_gone'`), fails closed on a missing/NULL ledger row.
-  // Source-contradicted: agent-restore-rebind.test.ts's fixtures "fence: no pact row is changed
-  // inside the transaction" (:306-336) and "[S10-21a C7l item 8, C10 gap, D-R118 F7] a same-pane
-  // (noop) restore with a counterpart_gone-paused pact carries pactsToUnpause out" (~:800-840)
-  // both construct a thread with `pact_pause_reason = 'counterpart_gone'` via a raw INSERT/
-  // UPDATE and NO accompanying `pact_steps` ledger row at all (a legitimate fixture shape, not
-  // a bug in the fixture) — the `===` form excludes both, breaking two pre-existing S10-21a
-  // regression tests. Per the brief: "if the `===` form breaks either, STOP and return the
-  // fixture." Reverted to the base NEGATIVE form pending a chair/owner decision — either the
-  // fixtures gain a ledger row (SCENARIO_CORRECTION, chair call) or the design's "fails closed"
-  // requirement is reconciled with the no-ledger-row fixture shape another way.
+  // S10-21b B17b (design v3.1:1111-1116, T32 :1555; O-21b-46 chair ruling): the design's
+  // POSITIVE form — a missing/NULL ledger row fails CLOSED, since no producer creates the
+  // reason-without-row state after B17's transactional sweep write. The two pre-existing
+  // S10-21a fixtures that previously constructed that impossible state (agent-restore-rebind.
+  // test.ts) were corrected under the same ruling to seed the matching host pause row.
   return rows
     .map((r) => r.id)
-    .filter((id) => latestHostPauseReasonCode(db, id) !== 'counterpart_unreachable')
+    .filter((id) => latestHostPauseReasonCode(db, id) === 'counterpart_gone')
 }

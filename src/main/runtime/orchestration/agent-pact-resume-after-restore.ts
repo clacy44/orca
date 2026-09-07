@@ -78,13 +78,10 @@ function resumeOnePactIfEligible(
     thread0.pact_paused_at !== null &&
     thread0.pact_pause_reason === 'counterpart_gone' &&
     (thread0.pact_proposer_agent_id === agentId || thread0.pact_with_agent_id === agentId) &&
-    // S10-21b B17 (D-R138 B-F7) — STOP, NOT applied: same source contradiction as
-    // agent-pact-unpause-lookup.ts's pactsAwaitingUnpause (see that file's comment) — the
-    // brief's POSITIVE form (`=== 'counterpart_gone'`) breaks two pre-existing S10-21a
-    // regression tests in agent-restore-rebind.test.ts whose fixtures set
-    // pact_pause_reason='counterpart_gone' with no ledger row by design. Reverted to base;
-    // returned to the chair per the brief's own STOP instruction.
-    latestHostPauseReasonCode(db, threadId) !== 'counterpart_unreachable'
+    // S10-21b B17b (design v3.1:1111-1116, T32 :1555; O-21b-46 chair ruling): the design's
+    // POSITIVE form, same as agent-pact-unpause-lookup.ts's pactsAwaitingUnpause (see that
+    // file's comment) — a missing/NULL ledger row fails CLOSED.
+    latestHostPauseReasonCode(db, threadId) === 'counterpart_gone'
   if (!eligible0 || !thread0) {
     return
   }
