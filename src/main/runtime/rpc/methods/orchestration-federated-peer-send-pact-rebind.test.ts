@@ -8,9 +8,9 @@ import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { createThread } from '../../orchestration/thread-directory'
 import { adoptEraOnInboundPropose } from '../../orchestration/pact-federated-era'
+import { repointFederatedPactParty } from '../../orchestration/pact-federated-identity'
 import type Database from '../../../sqlite/sync-database'
 import { getRoutableLinkBinding } from '../../orchestration/link-binding-routable'
-import { repointFederatedPactParty } from '../../orchestration/pact-federated-identity'
 import type * as LinkBindingRoutable from '../../orchestration/link-binding-routable'
 import type { RpcContext } from '../core'
 
@@ -294,6 +294,156 @@ describe('S10-21b B13: rebind_party inbound apply', () => {
     // The retry's own repoint call is exactly one more audit row than before it ran — not a
     // double-repoint from clause 5 somehow being re-checked twice.
     expect(repointAuditCountAfterRetry.n).toBe(auditCountBeforeRetry.n + 1)
+  })
+
+  // S10-21b B18b (D-R137 F3): unlike the retry-idempotency test above (which retries AFTER a
+  // full successful apply, so gate 8's message-id dedupe returns the stored receipt without ever
+  // reaching clause 5), this simulates a crash BETWEEN step 1 (repoint, own transaction) and
+  // step 2 (supersede-stamp + applied-id write, a SECOND transaction) — the applied-id row from
+  // step 2 never landed, so gate 8's dedupe does NOT catch the retry; it re-runs clauses 3-5.
+  it('D-R137 F3: a retry after a crash between step 1 (repoint) and step 2 (supersede-stamp) applies cleanly', async () => {
+    const threadId = seedEngagedFederatedPact('thr_aaaaaaaaaaa1')
+
+    // Simulate the crash window directly: step 1 (repoint) already landed; step 2 never ran —
+    // the old mirror row is still un-superseded, no applied-id row exists yet.
+    repointFederatedPactParty(raw(db) as unknown as Database, threadId, {
+      linkDeviceId: LINK_DEVICE_ID,
+      environmentId: LINK_DEVICE_ID,
+      remoteAgentId: NEW_SENDER_ID,
+      reason: 'rebind_party'
+    })
+    const oldMirrorBeforeReplay = raw(db)
+      .prepare(
+        `SELECT superseded_at FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .get(LINK_DEVICE_ID, OLD_SENDER_ID) as { superseded_at: string | null }
+    expect(oldMirrorBeforeReplay.superseded_at).toBeNull()
+    const appliedBeforeReplay = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM pact_applied_ids WHERE thread_id = ?`)
+      .get(threadId) as { n: number }
+    expect(appliedBeforeReplay.n).toBe(0)
+    const repointAuditsBeforeReplay = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'repointFederatedPactParty'`)
+      .get() as { n: number }
+
+    // Replay the IDENTICAL wire message (same messageId, same rebind.oldAgentId).
+    await expect(rebindSend()).resolves.toMatchObject({ accepted: true })
+
+    const oldMirrorAfterReplay = raw(db)
+      .prepare(
+        `SELECT superseded_at, succeeded_by_remote_agent_id FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .get(LINK_DEVICE_ID, OLD_SENDER_ID) as {
+      superseded_at: string | null
+      succeeded_by_remote_agent_id: string | null
+    }
+    expect(oldMirrorAfterReplay.superseded_at).not.toBeNull()
+    expect(oldMirrorAfterReplay.succeeded_by_remote_agent_id).toBe(NEW_SENDER_ID)
+
+    const appliedAfterReplay = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM pact_applied_ids WHERE thread_id = ?`)
+      .get(threadId) as { n: number }
+    expect(appliedAfterReplay.n).toBe(1)
+
+    const repointAuditsAfterReplay = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'repointFederatedPactParty'`)
+      .get() as { n: number }
+    // Exactly one repoint audit is added BY THE RETRY itself (the simulated pre-crash repoint
+    // above already wrote its own row, counted in repointAuditsBeforeReplay) — the retry's own
+    // clause-5-gated repoint call runs once, cleanly, never a loop and never a second refusal.
+    expect(repointAuditsAfterReplay.n - repointAuditsBeforeReplay.n).toBe(1)
+  })
+
+  // S10-21b B18b (D-R138 F8).
+  it('D-R138 F8: a rebind whose new identity is already superseded refuses pact_rebind_target_superseded, nothing written', async () => {
+    const threadId = seedEngagedFederatedPact('thr_aaaaaaaaaaa1')
+    db.upsertRemoteAgent({
+      environmentId: LINK_DEVICE_ID,
+      environmentName: LINK_DEVICE_ID,
+      linkKind: 'paired_device',
+      remoteAgentId: NEW_SENDER_ID,
+      displayName: SENDER_DISPLAY_NAME,
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    raw(db)
+      .prepare(
+        `UPDATE remote_agents SET superseded_at = datetime('now'), succeeded_by_remote_agent_id = 'agt_zzzzzzzzzzz9'
+         WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .run(LINK_DEVICE_ID, NEW_SENDER_ID)
+
+    await expect(rebindSend()).rejects.toMatchObject({ code: 'pact_rebind_target_superseded' })
+
+    const threadRow = raw(db)
+      .prepare(`SELECT pact_peer_agent_id FROM threads WHERE id = ?`)
+      .get(threadId) as { pact_peer_agent_id: string }
+    expect(threadRow.pact_peer_agent_id).toBe(OLD_SENDER_ID)
+
+    const oldMirror = raw(db)
+      .prepare(
+        `SELECT superseded_at FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .get(LINK_DEVICE_ID, OLD_SENDER_ID) as { superseded_at: string | null }
+    expect(oldMirror.superseded_at).toBeNull()
+
+    const repointAudits = raw(db)
+      .prepare(`SELECT COUNT(*) AS n FROM agent_audit WHERE verb = 'repointFederatedPactParty'`)
+      .get() as { n: number }
+    expect(repointAudits.n).toBe(0)
+  })
+
+  // S10-21b B18b (D-R138 F8): the exact attack sequence the review names — identity A
+  // (OLD_SENDER_ID) already superseded by B (NEW_SENDER_ID, the pact's current live party); the
+  // peer resends authenticated AS A, claiming rebind.oldAgentId = B, to close the loop A<->B.
+  it('D-R138 F8: a rebind that would close a supersession cycle refuses pact_rebind_target_superseded, no cycle written', async () => {
+    const threadId = seedEngagedFederatedPact('thr_aaaaaaaaaaa1')
+    // The pact's CURRENT party is already B (NEW_SENDER_ID) — as if a prior, legitimate A→B
+    // rebind already landed.
+    raw(db)
+      .prepare(`UPDATE threads SET pact_proposer_agent_id = ?, pact_peer_agent_id = ? WHERE id = ?`)
+      .run(`remote:${LINK_DEVICE_ID}:${NEW_SENDER_ID}`, NEW_SENDER_ID, threadId)
+    db.upsertRemoteAgent({
+      environmentId: LINK_DEVICE_ID,
+      environmentName: LINK_DEVICE_ID,
+      linkKind: 'paired_device',
+      remoteAgentId: NEW_SENDER_ID,
+      displayName: SENDER_DISPLAY_NAME,
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    // The A→B succession already recorded (A superseded, succeeded_by = B).
+    raw(db)
+      .prepare(
+        `UPDATE remote_agents SET superseded_at = datetime('now'), succeeded_by_remote_agent_id = ?
+         WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .run(NEW_SENDER_ID, LINK_DEVICE_ID, OLD_SENDER_ID)
+
+    await expect(
+      rebindSend({
+        fromAgent: { id: OLD_SENDER_ID, displayName: SENDER_DISPLAY_NAME, role: null },
+        pact: { rebind: { oldAgentId: NEW_SENDER_ID } }
+      })
+    ).rejects.toMatchObject({ code: 'pact_rebind_target_superseded' })
+
+    const aRow = raw(db)
+      .prepare(
+        `SELECT succeeded_by_remote_agent_id FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .get(LINK_DEVICE_ID, OLD_SENDER_ID) as { succeeded_by_remote_agent_id: string | null }
+    expect(aRow.succeeded_by_remote_agent_id).toBe(NEW_SENDER_ID)
+
+    const bRow = raw(db)
+      .prepare(
+        `SELECT succeeded_by_remote_agent_id FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
+      )
+      .get(LINK_DEVICE_ID, NEW_SENDER_ID) as { succeeded_by_remote_agent_id: string | null }
+    expect(bRow.succeeded_by_remote_agent_id).toBeNull()
   })
 
   it('T18: a locally-quarantined row in the supersession chain refuses agent_quarantined, nothing written, pact auto-paused counterpart_quarantined', async () => {
