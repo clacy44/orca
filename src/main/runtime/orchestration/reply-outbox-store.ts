@@ -9,6 +9,7 @@ import {
   REPLY_OUTBOX_PER_LINK_CAP,
   REPLY_OUTBOX_JITTER_RATIO,
   PACT_RESERVED_HEADROOM,
+  PACT_PAUSE_RESUME_PER_LINK_CEILING,
   CANCELLED_LOCAL_RESET_CODE
 } from './link-binding-constants'
 import { LinkBindingCapError } from './link-binding-store'
@@ -96,15 +97,31 @@ export type EnqueueReplyOutboxParams = {
 // S10-21b B4 (design §2.11): a `reserved` item (release/rebind_party/resync/resync_request/
 // gap_notice/§2.7 side-effect verbs) is admitted up to REPLY_OUTBOX_PER_LINK_CAP +
 // PACT_RESERVED_HEADROOM rather than the ordinary per-link cap.
-// S10-21b B21: `capExempt` skips the cap entirely for the bounded pact_pause/pact_resume
-// insert (D-D3-A item 1) — the cap becomes structurally unreachable for that row, not widened.
+// S10-21b B21: `capExempt` skips the ORDINARY/RESERVED cap for the pact_pause/pact_resume
+// insert (D-D3-A item 1) — that cap becomes structurally unreachable for the row, not widened.
+// S10-21b B21b (D-R142 N1): the exemption is bounded separately below, by
+// PACT_PAUSE_RESUME_PER_LINK_CEILING — the per-pact bound (<= 1 queued + 1 sending, the
+// coalescer) does not bound pacts PER LINK, so without this check an unbounded number of
+// engaged federated pacts on one dead link could mint an unbounded number of cap-exempt rows.
 export function enqueueReplyOutbox(db: Database.Database, p: EnqueueReplyOutboxParams): string {
-  const pending = countPendingReplyOutbox(db, p.linkDeviceId)
+  const pending = countPendingReplyOutboxForCap(db, p.linkDeviceId)
   const cap = p.reserved
     ? REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
     : REPLY_OUTBOX_PER_LINK_CAP
   if (!p.capExempt && pending >= cap) {
     throw new LinkBindingCapError('peer_reply_outbox')
+  }
+  if (p.capExempt) {
+    const exemptPending = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox
+          WHERE link_device_id = ? AND state IN ('queued', 'sending') AND settled_at IS NULL
+            AND relay_kind IN ('pact_pause', 'pact_resume')`
+      )
+      .get(p.linkDeviceId) as { n: number }
+    if (exemptPending.n >= PACT_PAUSE_RESUME_PER_LINK_CEILING) {
+      throw new LinkBindingCapError('peer_reply_outbox')
+    }
   }
   const id = randomUUID()
   const nextSeq = db
@@ -197,15 +214,35 @@ export function listReplyOutbox(db: Database.Database, linkDeviceId?: string): R
 // repair's CHECK-rejection fallback (db.ts) can settle a row while leaving `state = 'queued'`
 // (a pre-review build's CHECK rejects the 'abandoned' write), and without this clause that zombie
 // counts against the per-link cap forever.
-// S10-21b B21 (SYNTHESIS S1): pact_pause/pact_resume rows are excluded from every OTHER row's
-// cap count — they are already bounded per pact by the coalescer (<= 1 queued + 1 sending per
-// pact), so counting them here would let them eat into §2.11's reserve headroom for other kinds.
-export function countPendingReplyOutbox(db: Database.Database, linkDeviceId: string): number {
+// S10-21b B21 (SYNTHESIS S1) / B21b (D-R142 N2): pact_pause/pact_resume rows are excluded here —
+// they are already bounded separately (per pact by the coalescer, per link by
+// PACT_PAUSE_RESUME_PER_LINK_CEILING; reply-outbox-store.ts's enqueueReplyOutbox), so counting
+// them here would let them eat into §2.11's reserve headroom for other kinds. CAP-SCOPED ONLY —
+// used by enqueueReplyOutbox's own ordinary/reserved admission check and by
+// orchestration-reply-foreign.ts's pre-check. Every OTHER reader of link outbox depth wants
+// countPendingReplyOutbox below (the true count), never this one.
+export function countPendingReplyOutboxForCap(db: Database.Database, linkDeviceId: string): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM peer_reply_outbox
         WHERE link_device_id = ? AND state IN ('queued', 'sending') AND settled_at IS NULL
           AND relay_kind NOT IN ('pact_pause', 'pact_resume')`
+    )
+    .get(linkDeviceId) as { n: number }
+  return row.n
+}
+
+// S10-21b B21b (D-R142 N2): RESTORED to count every unsettled row, pact_pause/pact_resume
+// included — the four non-cap consumers (link-binding-attention.ts's `wiringExpected`,
+// reply-outbox-pump-notify.ts's notice `queueDepth`, orchestration-link-binding-local.ts's
+// `outboxPending`, orchestration-link-binding-outbox.ts's `kicked`) need the TRUE pending depth;
+// excluding the exempt kinds here (as B21 did) made a link jammed on cap-exempt pause/resume
+// rows silently read as idle everywhere those consumers look. Same zombie exclusion as above.
+export function countPendingReplyOutbox(db: Database.Database, linkDeviceId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM peer_reply_outbox
+        WHERE link_device_id = ? AND state IN ('queued', 'sending') AND settled_at IS NULL`
     )
     .get(linkDeviceId) as { n: number }
   return row.n

@@ -219,9 +219,10 @@ function drainGapNotice(
 // (`drainPausedOrResumed` / `enqueueRelayForAppliedVerb` / the pause/resume `pact_relay_pending`
 // tokens) is DELETED — pause/resume now relay in the SAME transaction that applies them
 // (`enqueueFederatedPactVerb`'s cap exemption, reply-outbox-store.ts), so no drain-owed relay
-// for them can ever be minted again. See `drainLegacyPauseOrResumeToken` below for the
-// clear-only arm that retires any token a pre-B21 build may have left behind (v42 is unshipped,
-// so none exists at this tip; the arm is defensive, not lossy-repair).
+// for them can ever be minted again. See the B21 legacy-clear arm inside `drainPendingRebindParty`
+// below (item 4, no standalone symbol) for the clear-only handling that retires any token a
+// pre-B21 build may have left behind (v42 is unshipped, so none exists at this tip; the arm is
+// defensive, not lossy-repair).
 
 // Per-token relay_kind this drain's own double-emit guard checks against — S10-21b B17
 // (D-R138 A-F7/B-F11): the base guard was a single `NOT EXISTS (... relay_kind = 'pact_gap_notice')`
@@ -234,12 +235,13 @@ const RELAY_PENDING_TOKEN_RELAY_KIND: Record<string, string> = {
 }
 
 // §1.4's Local side / §2.11 — drains every thread flagged `pact_relay_pending = 'rebind'` (the
-// succession UPDATE, agent-thread-succession.ts), `'gap_notice'` (B9c, above), or `'pause'`/
-// `'resume'` (B17, above), emitting `rebind_party`/`gap_notice`/pause/resume via B6's shared
-// primitive (or, for pause/resume, `emitFederatedPactSideEffect` directly). Deliberately NOT
-// called from inside `upsertAgentByPaneSuffix`'s own transaction (the design's explicit "no
-// enqueue runs inside that transaction" constraint) — this is the PUMP's own, separate call
-// (reply-outbox-pump.ts, once per tick, ahead of its ordinary claim loop).
+// succession UPDATE, agent-thread-succession.ts) or `'gap_notice'` (B9c, above), emitting
+// `rebind_party`/`gap_notice` via B6's shared primitive. S10-21b B21: `'pause'`/`'resume'` are
+// the ARM CLEARS ONLY — a pre-B21 build's leftover token is NULLed and audited, never relayed
+// (pause/resume now relay in the SAME transaction that applies them, not via this drain).
+// Deliberately NOT called from inside `upsertAgentByPaneSuffix`'s own transaction (the design's
+// explicit "no enqueue runs inside that transaction" constraint) — this is the PUMP's own,
+// separate call (reply-outbox-pump.ts, once per tick, ahead of its ordinary claim loop).
 export function drainPendingRebindParty(
   db: Database.Database,
   runtime: FederatedPactEmitRuntime | null

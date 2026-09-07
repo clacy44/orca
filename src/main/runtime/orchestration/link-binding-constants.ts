@@ -130,6 +130,12 @@ export const PACT_LINK_RECOVERY_MS = 1_800_000
 export const REPLY_OUTBOX_MAX_AGE_MS = 604_800_000
 export const REPLY_OUTBOX_MAX_BYTES = 65_536
 export const REPLY_OUTBOX_PER_LINK_CAP = 256
+// S10-21b B21b (D-R142 N1): the per-LINK ceiling on unsettled cap-exempt pact_pause/pact_resume
+// rows (reply-outbox-store.ts's enqueueReplyOutbox) — defined FROM REPLY_OUTBOX_PER_LINK_CAP,
+// never a new literal, since it bounds the same physical resource (unsettled rows on one link)
+// the ordinary cap already bounds; the per-pact bound (<= 1 queued + 1 sending, the coalescer)
+// does not bound pacts PER LINK, so this is the actual per-link backstop.
+export const PACT_PAUSE_RESUME_PER_LINK_CEILING = REPLY_OUTBOX_PER_LINK_CAP
 // S10-21b B4 (design §2.11): reserved-item headroom past REPLY_OUTBOX_PER_LINK_CAP — release,
 // rebind_party, resync, resync_request, gap_notice and the §2.7 side-effect verbs.
 export const PACT_RESERVED_HEADROOM = 16

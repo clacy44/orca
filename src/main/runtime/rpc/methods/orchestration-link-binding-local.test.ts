@@ -15,6 +15,7 @@ import { OrcaRuntimeService } from '../../orca-runtime'
 import type Database from '../../../sqlite/sync-database'
 import { LINK_BINDING_STATUS_WAIT_CAP_MS } from '../../orchestration/link-binding-constants'
 import * as runtimeEnvironmentStore from '../../../../shared/runtime-environment-store'
+import { enqueueReplyOutbox } from '../../orchestration/reply-outbox-store'
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -392,6 +393,46 @@ describe('orchestration-link-binding-local RPC methods', () => {
       expect(result.links).toHaveLength(1)
       expect(result.links[0]?.routes).toBe(false)
       expect(result.links[0]?.routingClass).toBe('legacy_unattested')
+    })
+  })
+
+  // D-R142 N2: outboxPending is countPendingReplyOutbox (restored to count every unsettled
+  // row) — a link jammed on cap-exempt pact_pause/pact_resume rows must still show them here,
+  // or link-status silently reads it as idle.
+  describe('D-R142 N2: linkBindings outboxPending reports cap-exempt pause/resume rows', () => {
+    it('3 queued pact_pause rows on a link: outboxPending is 3 (RED at base: outboxPending was 0, the exempt kinds excluded)', async () => {
+      setup()
+      const linkDeviceId = 'lnk_n2_outbox_pending'
+      const sqlite = rawDb(db)
+      const now = Date.now()
+      for (let i = 0; i < 3; i++) {
+        enqueueReplyOutbox(sqlite, {
+          localMessageId: `msg_n2_rpc_${i}`,
+          linkDeviceId,
+          environmentId: 'env_n2_rpc',
+          boundPairingRevision: 1,
+          peerCredentialFp: 'pcfp',
+          peerKeyFingerprint: 'pkfp',
+          inReplyToMessageId: `msg_n2_rpc_${i}`,
+          peerAgentId: 'agent_n2_rpc',
+          peerThreadId: null,
+          localThreadId: null,
+          noticeRunId: null,
+          noticePaneKey: null,
+          payload: '{}',
+          byteCount: 2,
+          createdAt: now,
+          capExempt: true,
+          relayKind: 'pact_pause',
+          pactThreadId: `thr_n2_rpc_${i}`
+        })
+      }
+      const ctx: RpcContext = { runtime }
+      const result = (await call('orchestration.linkBindings', { link: linkDeviceId }, ctx)) as {
+        links: { outboxPending: number }[]
+      }
+      expect(result.links).toHaveLength(1)
+      expect(result.links[0]?.outboxPending).toBe(3)
     })
   })
 })

@@ -8,6 +8,7 @@ import {
   getReplyOutboxItem,
   listReplyOutbox,
   countPendingReplyOutbox,
+  countPendingReplyOutboxForCap,
   cancelQueuedReplyOutbox,
   replyOutboxIntervalMs,
   replyOutboxKickFloorAt,
@@ -246,5 +247,172 @@ describe('S10-21b B4: reserved-item headroom past REPLY_OUTBOX_PER_LINK_CAP', ()
 describe('S10-21b B4 groundwork: the msg_000000000000 sentinel and its reader are untouched', () => {
   it('isHostMessageId still matches the sentinel exactly as before this commit (pins pre-existing, unmodified behaviour)', () => {
     expect(isHostMessageId('msg_000000000000')).toBe(true)
+  })
+})
+
+// D-R142 N2: countPendingReplyOutbox is RESTORED to count every unsettled row, pact_pause/
+// pact_resume included; countPendingReplyOutboxForCap (the enqueue-admission-only count) still
+// excludes them.
+describe('D-R142 N2: countPendingReplyOutbox counts every unsettled row again; countPendingReplyOutboxForCap stays cap-scoped', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('with 3 exempt (pact_pause) rows queued on a link, countPendingReplyOutbox returns 3 and countPendingReplyOutboxForCap returns 0 (RED at base: countPendingReplyOutbox returns 0)', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = (db as unknown as { db: Database.Database }).db
+    const now = Date.now()
+    const linkDeviceId = 'link_n2_exempt'
+    for (let i = 0; i < 3; i++) {
+      enqueueReplyOutbox(sqlite, {
+        localMessageId: `msg_n2_${i}`,
+        linkDeviceId,
+        environmentId: 'env_n2',
+        boundPairingRevision: 1,
+        peerCredentialFp: 'pcfp',
+        peerKeyFingerprint: 'pkfp',
+        inReplyToMessageId: `msg_n2_${i}`,
+        peerAgentId: 'agent_n2',
+        peerThreadId: null,
+        localThreadId: null,
+        noticeRunId: null,
+        noticePaneKey: null,
+        payload: '{}',
+        byteCount: 2,
+        createdAt: now,
+        capExempt: true,
+        relayKind: 'pact_pause',
+        pactThreadId: `thr_n2_${i}`
+      })
+    }
+    expect(countPendingReplyOutbox(sqlite, linkDeviceId)).toBe(3)
+    expect(countPendingReplyOutboxForCap(sqlite, linkDeviceId)).toBe(0)
+  })
+})
+
+// D-R142 N1/N2/N3 SYNTHESIS S1: exempt pact_pause/pact_resume rows never consume the
+// ordinary/reserved headroom — a link filled to the FULL combined cap (ordinary +
+// PACT_RESERVED_HEADROOM) with non-exempt rows, plus any number of exempt rows on top, still
+// refuses an ordinary mail row at exactly the ordinary cap and still admits reserved items up to
+// the combined cap. (SYNTHESIS S1's property already held at base per D-R142's Q2 — this test
+// pins it directly; RED at base only by absence, since reply-outbox-store.test.ts had no test
+// exercising this combination before this commit.)
+describe('D-R142 N3 (SYNTHESIS S1): exempt pause/resume rows never eat the reserve headroom', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  it('256 ordinary fillers + 5 exempt pact_pause rows + 16 reserved fillers reach exactly the combined cap; the 17th reserved and any ordinary mail row both refuse', () => {
+    db = new OrchestrationDb(':memory:')
+    const sqlite = (db as unknown as { db: Database.Database }).db
+    const now = Date.now()
+    const linkDeviceId = 'link_n3_s1'
+
+    const enqueueOrdinary = (suffix: string): string =>
+      enqueueReplyOutbox(sqlite, {
+        localMessageId: `msg_n3_o_${suffix}`,
+        linkDeviceId,
+        environmentId: 'env_n3',
+        boundPairingRevision: 1,
+        peerCredentialFp: 'pcfp',
+        peerKeyFingerprint: 'pkfp',
+        inReplyToMessageId: `msg_n3_o_${suffix}`,
+        peerAgentId: 'agent_n3',
+        peerThreadId: null,
+        localThreadId: null,
+        noticeRunId: null,
+        noticePaneKey: null,
+        payload: '{}',
+        byteCount: 2,
+        createdAt: now
+      })
+
+    const enqueueReserved = (suffix: string): string =>
+      enqueueReplyOutbox(sqlite, {
+        localMessageId: `msg_n3_r_${suffix}`,
+        linkDeviceId,
+        environmentId: 'env_n3',
+        boundPairingRevision: 1,
+        peerCredentialFp: 'pcfp',
+        peerKeyFingerprint: 'pkfp',
+        inReplyToMessageId: `msg_n3_r_${suffix}`,
+        peerAgentId: 'agent_n3',
+        peerThreadId: null,
+        localThreadId: null,
+        noticeRunId: null,
+        noticePaneKey: null,
+        payload: '{}',
+        byteCount: 2,
+        createdAt: now,
+        reserved: true,
+        relayKind: 'pact_release'
+      })
+
+    const enqueueExempt = (suffix: string): string =>
+      enqueueReplyOutbox(sqlite, {
+        localMessageId: `msg_n3_x_${suffix}`,
+        linkDeviceId,
+        environmentId: 'env_n3',
+        boundPairingRevision: 1,
+        peerCredentialFp: 'pcfp',
+        peerKeyFingerprint: 'pkfp',
+        inReplyToMessageId: `msg_n3_x_${suffix}`,
+        peerAgentId: 'agent_n3',
+        peerThreadId: null,
+        localThreadId: null,
+        noticeRunId: null,
+        noticePaneKey: null,
+        payload: '{}',
+        byteCount: 2,
+        createdAt: now,
+        capExempt: true,
+        relayKind: 'pact_pause',
+        pactThreadId: `thr_n3_x_${suffix}`
+      })
+
+    // Fill the ordinary cap exactly.
+    for (let i = 0; i < REPLY_OUTBOX_PER_LINK_CAP; i++) {
+      enqueueOrdinary(String(i))
+    }
+    expect(countPendingReplyOutboxForCap(sqlite, linkDeviceId)).toBe(REPLY_OUTBOX_PER_LINK_CAP)
+
+    // An ordinary mail row now refuses.
+    expect(() => enqueueOrdinary('over')).toThrow()
+
+    // 5 cap-exempt pause rows, well under the ceiling — physically present, but must not move
+    // the cap-scoped count at all.
+    for (let i = 0; i < 5; i++) {
+      enqueueExempt(String(i))
+    }
+    expect(countPendingReplyOutboxForCap(sqlite, linkDeviceId)).toBe(REPLY_OUTBOX_PER_LINK_CAP)
+    // An ordinary mail row STILL refuses — the exempt rows did not free any ordinary headroom
+    // (they were never counted against it in the first place).
+    expect(() => enqueueOrdinary('still-over')).toThrow()
+
+    // The full reserved headroom is still available — the exempt rows above never touched it.
+    for (let i = 0; i < PACT_RESERVED_HEADROOM; i++) {
+      enqueueReserved(String(i))
+    }
+    expect(countPendingReplyOutboxForCap(sqlite, linkDeviceId)).toBe(
+      REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
+    )
+
+    // One more reserved item past the combined cap refuses.
+    expect(() => enqueueReserved('over')).toThrow()
+
+    // The exempt rows are still exactly 5 — unaffected by any of the above.
+    const exemptCount = sqlite
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox
+          WHERE link_device_id = ? AND relay_kind IN ('pact_pause', 'pact_resume')`
+      )
+      .get(linkDeviceId) as { n: number }
+    expect(exemptCount.n).toBe(5)
   })
 })

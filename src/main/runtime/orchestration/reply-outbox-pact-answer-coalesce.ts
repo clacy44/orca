@@ -120,10 +120,17 @@ export function enqueueReplyOutboxCoalescedAcrossKinds(
   // pause/resume pair this coalescer bounds to <= 1 queued row per pact — asserted, never
   // inferred from the caller, so a future cross-kind coalesce call does not silently inherit
   // the exemption.
+  // S10-21b B21b (D-R142 N4): ALSO require the ROW's OWN kind (p.relayKind) to be pause or
+  // resume — the coalesce SET alone (relayKinds) says what this call coalesces ACROSS, not what
+  // this particular row IS; they coincide today only because the sole caller
+  // (pause-resume-emit.ts) is typed `'pause'|'resume'`, but asserting the SET alone would exempt
+  // a differently-kinded row (e.g. a future pact_step call reusing this coalescer) that the
+  // per-pact/per-link bounds were never sized for.
   const capExempt =
     relayKinds.length === 2 &&
     relayKinds.includes('pact_pause') &&
-    relayKinds.includes('pact_resume')
+    relayKinds.includes('pact_resume') &&
+    (p.relayKind === 'pact_pause' || p.relayKind === 'pact_resume')
   return enqueueReplyOutbox(db, { ...p, capExempt })
 }
 

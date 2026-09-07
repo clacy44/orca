@@ -6,8 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
 import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
-import { enqueueReplyOutboxCoalesced } from './reply-outbox-pact-answer-coalesce'
-import type { EnqueueReplyOutboxParams } from './reply-outbox-store'
+import {
+  enqueueReplyOutboxCoalesced,
+  enqueueReplyOutboxCoalescedAcrossKinds
+} from './reply-outbox-pact-answer-coalesce'
+import { enqueueReplyOutbox, type EnqueueReplyOutboxParams } from './reply-outbox-store'
+import { REPLY_OUTBOX_PER_LINK_CAP } from './link-binding-constants'
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -129,5 +133,78 @@ describe('reply-outbox-pact-answer-coalesce (D-R136 N6)', () => {
     expect(row.local_message_id).toBe('msg_second0001')
     expect(row.pact_state).toBe('released')
     expect(row.pact_flight_token).toBe(2)
+  })
+
+  // D-R142 N3/N4 — the capExempt predicate: exactly the {pact_pause, pact_resume} relayKinds
+  // SET, AND the row's own relayKind must itself be pact_pause or pact_resume. Every case here
+  // saturates its (fresh) link to REPLY_OUTBOX_PER_LINK_CAP first with ordinary rows, so a
+  // non-exempt call is observably refused and an exempt one is observably admitted.
+  describe('D-R142 N3/N4: enqueueReplyOutboxCoalescedAcrossKinds sets capExempt for exactly {pact_pause, pact_resume}, keyed on the ROW kind', () => {
+    function fillOrdinary(raw: Database.Database, linkDeviceId: string, n: number): void {
+      for (let i = 0; i < n; i++) {
+        enqueueReplyOutbox(raw, {
+          localMessageId: `msg_fill_${linkDeviceId}_${i}`,
+          linkDeviceId,
+          environmentId: 'env_fill',
+          boundPairingRevision: 1,
+          peerCredentialFp: 'pcfp',
+          peerKeyFingerprint: 'pkfp',
+          inReplyToMessageId: `msg_fill_${linkDeviceId}_${i}`,
+          peerAgentId: 'agent_fill',
+          peerThreadId: null,
+          localThreadId: null,
+          noticeRunId: null,
+          noticePaneKey: null,
+          payload: '{}',
+          byteCount: 2,
+          createdAt: Date.now()
+        })
+      }
+    }
+
+    it("N3: relayKinds exactly {pact_pause, pact_resume} with the row's own relayKind = 'pact_pause' IS exempt — admitted past a saturated cap (RED at base by absence: no test pinned this predicate at all)", () => {
+      const d = freshDb()
+      const raw = rawDb(d)
+      const linkDeviceId = 'link_n3_exempt'
+      fillOrdinary(raw, linkDeviceId, REPLY_OUTBOX_PER_LINK_CAP)
+      expect(() =>
+        enqueueReplyOutboxCoalescedAcrossKinds(raw, ['pact_pause', 'pact_resume'], {
+          ...baseParams('thr_n3_exempt', 'msg_n3_exempt'),
+          linkDeviceId,
+          relayKind: 'pact_pause',
+          reserved: undefined
+        })
+      ).not.toThrow()
+    })
+
+    it("N3: relayKinds = ['pact_pause'] alone (not the exact pair) is NOT exempt — refused at a saturated cap", () => {
+      const d = freshDb()
+      const raw = rawDb(d)
+      const linkDeviceId = 'link_n3_single'
+      fillOrdinary(raw, linkDeviceId, REPLY_OUTBOX_PER_LINK_CAP)
+      expect(() =>
+        enqueueReplyOutboxCoalescedAcrossKinds(raw, ['pact_pause'], {
+          ...baseParams('thr_n3_single', 'msg_n3_single'),
+          linkDeviceId,
+          relayKind: 'pact_pause',
+          reserved: undefined
+        })
+      ).toThrow()
+    })
+
+    it("N4: relayKinds = {pact_pause, pact_resume} but the ROW's own relayKind is 'pact_step' is NOT exempt — refused at a saturated cap (RED at base: the base predicate asserts only the SET, not the row's own kind)", () => {
+      const d = freshDb()
+      const raw = rawDb(d)
+      const linkDeviceId = 'link_n4_wrong_row_kind'
+      fillOrdinary(raw, linkDeviceId, REPLY_OUTBOX_PER_LINK_CAP)
+      expect(() =>
+        enqueueReplyOutboxCoalescedAcrossKinds(raw, ['pact_pause', 'pact_resume'], {
+          ...baseParams('thr_n4_wrong_kind', 'msg_n4_wrong_kind'),
+          linkDeviceId,
+          relayKind: 'pact_step',
+          reserved: undefined
+        })
+      ).toThrow()
+    })
   })
 })

@@ -202,6 +202,7 @@ import {
   getReplyOutboxItem as getReplyOutboxItemImpl,
   listReplyOutbox as listReplyOutboxImpl,
   countPendingReplyOutbox as countPendingReplyOutboxImpl,
+  countPendingReplyOutboxForCap as countPendingReplyOutboxForCapImpl,
   cancelQueuedReplyOutbox as cancelQueuedReplyOutboxImpl,
   kickReplyOutboxForLink as kickReplyOutboxForLinkImpl,
   getReplyOutboxItemByLocalMessageId as getReplyOutboxItemByLocalMessageIdImpl,
@@ -5602,6 +5603,12 @@ export class OrchestrationDb {
 
   countPendingReplyOutbox(linkDeviceId: string): number {
     return countPendingReplyOutboxImpl(this.db, linkDeviceId)
+  }
+
+  // S10-21b B21b (D-R142 N2): the cap-scoped count (excludes pact_pause/pact_resume) — only
+  // enqueueReplyOutbox's own check and orchestration-reply-foreign.ts's pre-check want this.
+  countPendingReplyOutboxForCap(linkDeviceId: string): number {
+    return countPendingReplyOutboxForCapImpl(this.db, linkDeviceId)
   }
 
   cancelQueuedReplyOutbox(now: number): number {

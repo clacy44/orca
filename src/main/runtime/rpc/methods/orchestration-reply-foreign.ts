@@ -153,7 +153,10 @@ export function enqueueForeignReply(args: EnqueueForeignReplyArgs): EnqueueForei
   // transaction, so a refusal there orphans that row with no outbox item — the shape `sent --id`
   // (getMessageDeliverySnapshot) would otherwise report `relay_pending` for ever. Checking here
   // leaves no row at all on refusal.
-  if (db.countPendingReplyOutbox(binding.linkDeviceId) >= REPLY_OUTBOX_PER_LINK_CAP) {
+  // S10-21b B21b (D-R142 N2): the CAP-SCOPED count — pact_pause/pact_resume rows are bounded
+  // separately (per pact by the coalescer, per link by PACT_PAUSE_RESUME_PER_LINK_CEILING) and
+  // must not consume this mail-path pre-check's headroom.
+  if (db.countPendingReplyOutboxForCap(binding.linkDeviceId) >= REPLY_OUTBOX_PER_LINK_CAP) {
     throw new OrchestrationError(
       'link_binding_conflict',
       `This link's reply outbox is at capacity.`,

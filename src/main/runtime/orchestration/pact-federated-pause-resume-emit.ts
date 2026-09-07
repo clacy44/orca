@@ -25,11 +25,13 @@
 //
 // S10-21b B21 (D-D3 redesign — 21b-E8 REVOKED, one minter): pause/resume no longer have a
 // `pact_relay_pending` token or a drain — the coalescer bounds a pact to <= 1 queued
-// pause/resume row, so `enqueueReplyOutbox`'s cap admission is EXEMPT for them
-// (reply-outbox-store.ts) and `LinkBindingCapError` is unreachable-by-construction on this
-// path. The `catch (LinkBindingCapError)` branch below stays as a fail-safe carve-out only —
-// applied locally, nothing owed, nothing relayed — for a defect that would have to reintroduce
-// the cap on this insert to ever fire; its audit row is the durable trace if it ever does.
+// pause/resume row, so `enqueueReplyOutbox`'s ORDINARY/RESERVED cap admission is EXEMPT for
+// them (reply-outbox-store.ts). S10-21b B21b (D-R142 N1): that per-pact bound does not bound
+// pacts PER LINK, so `enqueueReplyOutbox` also enforces PACT_PAUSE_RESUME_PER_LINK_CEILING on
+// the exempt insert directly — `LinkBindingCapError` is now bounded by the per-link ceiling,
+// not unreachable-by-construction. The `catch (LinkBindingCapError)` branch below is the loud,
+// reachable local degradation past that ceiling: applied locally, nothing owed, nothing
+// relayed; its audit row is the durable trace.
 import type Database from '../../sqlite/sync-database'
 import {
   applyPactPauseResumeState,
@@ -148,11 +150,12 @@ export function emitFederatedPactSideEffect(
     }
   } catch (err) {
     if (err instanceof LinkBindingCapError) {
-      // S10-21b B21: unreachable-by-construction — the coalescer-bounded cap exemption
-      // (reply-outbox-store.ts) means this insert can no longer throw `LinkBindingCapError`
-      // for pause/resume. Retained as a fail-safe carve-out only: land the pause/resume
-      // LOCALLY, with the REAL reason and actor, in one transaction — nothing owed, nothing
-      // relayed. Its audit row is the durable trace if this ever fires.
+      // S10-21b B21b (D-R142 N1): bounded by the per-link ceiling — the coalescer bounds a
+      // pact to <= 1 queued pause/resume row, but pacts per link are unbounded, so
+      // `enqueueReplyOutbox` enforces PACT_PAUSE_RESUME_PER_LINK_CEILING on this exempt insert
+      // and this branch IS reachable (e.g. one quarantine sweep pausing every engaged pact on a
+      // dead link at once). Land the pause/resume LOCALLY, with the REAL reason and actor, in
+      // one transaction — nothing owed, nothing relayed. Its audit row is the durable trace.
       localFallback('relay_cap')
       return
     }
