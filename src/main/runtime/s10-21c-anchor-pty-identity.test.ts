@@ -269,11 +269,13 @@ describe('S10-21c S1: the launch-token anchor is bound to pane-pty identity, not
     }
   })
 
-  // [S10-21c B1b, D-R146 MEDIUM] isPeerOwnedAttachmentPane gains a pane-keyed fallback for
-  // exactly the window `handleByPtyId` cannot resolve, or the attachment row's own
-  // `terminal_handle` has not (yet) been stamped (`handle_bound_at` is a separate column,
-  // db.ts:2295). Three states, one function, one shared fixture shape:
-  it('D-R146 MEDIUM (a): a PEER-OWNED pane with an UNRESOLVABLE handle still loses its anchor, via the pane-key fallback', async () => {
+  // [S10-21c B1b, D-R146 MEDIUM; corrected by D-R147 LOW finding 2] isPeerOwnedAttachmentPane
+  // gains a pane-keyed fallback for the window the handle index misses: it is empty, OR the
+  // row's own `terminal_handle` is STALE versus the pty's current handle (`prepareRemoteAttachmentAuthority`
+  // is the only writer of `pane_key`, and it always stamps `terminal_handle` in the same UPDATE —
+  // a row with `pane_key` set and `terminal_handle` NULL is a shape no writer produces). Three
+  // states, one function, one shared fixture shape:
+  it('D-R146 MEDIUM (a): a PEER-OWNED pane with a STALE handle still loses its anchor, via the pane-key fallback', async () => {
     const { store, sessionSnapshot } = createSharedStore()
     const runtime = new OrcaRuntimeService(store)
     const db = new OrchestrationDb(':memory:')
@@ -283,8 +285,9 @@ describe('S10-21c S1: the launch-token anchor is bound to pane-pty identity, not
       const hash = createHash('sha256').update(token).digest('hex')
       expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash)
 
-      // The row is keyed on the PANE, not the handle — models the pre-handle-binding window
-      // (handle_bound_at stamped only later; terminal_handle left NULL here).
+      // The row's terminal_handle is STALE (does not match this pty's current handle), so the
+      // handle-keyed lookup misses — models a writable production shape, not the pane_key-only
+      // shape a writer never produces (D-R147 LOW finding 2).
       ;(
         db as unknown as {
           db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } }
@@ -292,13 +295,10 @@ describe('S10-21c S1: the launch-token anchor is bound to pane-pty identity, not
       ).db
         .prepare(
           `INSERT INTO remote_dispatch_attachments
-             (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, pane_key, agent_exited_at)
-           VALUES ('disp_s10_21c_b1b_a', 'task_x', 'fp_peer', ?, 'ready', 'input_accepted', ?, NULL)`
+             (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, pane_key, terminal_handle, agent_exited_at)
+           VALUES ('disp_s10_21c_b1b_a', 'task_x', 'fp_peer', ?, 'ready', 'input_accepted', ?, 'term_stale_s10_21c', NULL)`
         )
         .run(runtime.getRuntimeId(), PANE_KEY)
-
-      // Model the unresolvable-handle state directly: handleByPtyId has no entry for this pty.
-      ;(runtime as unknown as { handleByPtyId: Map<string, string> }).handleByPtyId.delete(PTY_ID)
 
       runtime.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
 
@@ -558,5 +558,152 @@ describe('S10-21c S1: the launch-token anchor is bound to pane-pty identity, not
 
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
     expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
+  })
+})
+
+// [S10-21c B1c, D-R147 MEDIUM] The hook-side authority retire must fire whenever the persisted
+// anchor is retired, even when the in-memory token/receipt were already null — a corroborated
+// hook POST can re-populate the hook server's own authority maps between an earlier
+// command_finished and a later pty_exit, and only the retire itself revokes them.
+describe('S10-21c B1c, D-R147 MEDIUM: the hook-side authority retire follows retiresPersistedAnchor, not the token/receipt early return', () => {
+  it('(a) command_finished then pty_exit on a non-peer pane: the hook authority is retired exactly once, at pty_exit, even though pty.launchToken was already null', async () => {
+    const { store } = createSharedStore()
+    const runtime1 = new OrcaRuntimeService(store)
+    await mintAnchoredPane(runtime1)
+
+    // A daemon-survived reattach: registerPty leaves pty.launchToken null and no receipt — the
+    // exact state command_finished sees when the pane's token was never re-minted this
+    // generation (S10-10 F1 residual, the comment at retirePtyAgentLaunchAuthority's call site).
+    const retireAgentHookCompatibilityAuthority = vi.fn()
+    const runtime2 = new OrcaRuntimeService(store, undefined, {
+      retireAgentHookCompatibilityAuthority
+    })
+    runtime2.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    runtime2.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: INCARNATION as never,
+      isReattach: true
+    })
+
+    runtime2.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+    expect(retireAgentHookCompatibilityAuthority).not.toHaveBeenCalled()
+
+    runtime2.onPtyExit(PTY_ID, 0, INCARNATION as never)
+    expect(retireAgentHookCompatibilityAuthority).toHaveBeenCalledTimes(1)
+    expect(retireAgentHookCompatibilityAuthority).toHaveBeenCalledWith(PANE_KEY)
+  })
+
+  it('(b) command_finished alone (non-peer pane, no live token/receipt): the hook authority is not retired', async () => {
+    const { store } = createSharedStore()
+    const runtime1 = new OrcaRuntimeService(store)
+    await mintAnchoredPane(runtime1)
+
+    const retireAgentHookCompatibilityAuthority = vi.fn()
+    const runtime2 = new OrcaRuntimeService(store, undefined, {
+      retireAgentHookCompatibilityAuthority
+    })
+    runtime2.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+    runtime2.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: INCARNATION as never,
+      isReattach: true
+    })
+
+    runtime2.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+    expect(retireAgentHookCompatibilityAuthority).not.toHaveBeenCalled()
+  })
+
+  it('(c) a PEER-OWNED pane on command_finished: the hook authority is still retired (unchanged)', async () => {
+    const { store } = createSharedStore()
+    const retireAgentHookCompatibilityAuthority = vi.fn()
+    const runtime = new OrcaRuntimeService(store, undefined, {
+      retireAgentHookCompatibilityAuthority
+    })
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      runtime.setPeerGrantProfileLookup(() => 'peer')
+      await mintAnchoredPane(runtime)
+
+      const handle = (
+        runtime as unknown as { handleByPtyId: Map<string, string> }
+      ).handleByPtyId.get(PTY_ID)!
+      ;(
+        db as unknown as {
+          db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } }
+        }
+      ).db
+        .prepare(
+          `INSERT INTO remote_dispatch_attachments
+             (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, terminal_handle, agent_exited_at)
+           VALUES ('disp_s10_21c_r147_c', 'task_x', 'fp_peer', ?, 'ready', 'input_accepted', ?, NULL)`
+        )
+        .run(runtime.getRuntimeId(), handle)
+
+      runtime.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+      expect(retireAgentHookCompatibilityAuthority).toHaveBeenCalledTimes(1)
+      expect(retireAgentHookCompatibilityAuthority).toHaveBeenCalledWith(PANE_KEY)
+    } finally {
+      db.close()
+    }
+  })
+})
+
+// [S10-21c B1c, D-R147 LOW finding 3] closePeerOwnedPaneOnAgentExit gains the same pane-keyed
+// fallback isPeerOwnedAttachmentPane already has, so both INV-P-013 halves (anchor delete, pane
+// close) agree on the same set of rows a stale/unresolvable handle can no longer find.
+describe('S10-21c B1c, D-R147 LOW finding 3: closePeerOwnedPaneOnAgentExit pane-keyed fallback', () => {
+  it('a PEER-OWNED pane with a STALE terminal_handle is both closed and has its anchor deleted, via the pane-key fallback', async () => {
+    const { store, sessionSnapshot } = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      runtime.setPeerGrantProfileLookup(() => 'peer')
+      const token = await mintAnchoredPane(runtime)
+      const hash = createHash('sha256').update(token).digest('hex')
+      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hash)
+
+      const closeTerminal = vi
+        .spyOn(runtime, 'closeTerminal')
+        .mockResolvedValue({ handle: 'unused', accepted: true, exited: true } as never)
+
+      // The row's terminal_handle is STALE — the handle-keyed lookup misses, so both halves must
+      // fall back to pane_key.
+      ;(
+        db as unknown as {
+          db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } }
+        }
+      ).db
+        .prepare(
+          `INSERT INTO remote_dispatch_attachments
+             (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, state, stage, pane_key, terminal_handle, agent_exited_at)
+           VALUES ('disp_s10_21c_r147_3', 'task_x', 'fp_peer', ?, 'ready', 'input_accepted', ?, 'term_stale_r147_3', NULL)`
+        )
+        .run(runtime.getRuntimeId(), PANE_KEY)
+
+      runtime.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+
+      // Anchor delete half (isPeerOwnedAttachmentPane's own pane-key fallback, D-R146 MEDIUM):
+      // synchronous within retirePtyAgentLaunchAuthority.
+      expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+      expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
+
+      // Pane-close half (this item's own fix): fire-and-forget, drain it.
+      await vi.waitFor(() => {
+        expect(
+          db.getRemoteDispatchAttachment('disp_s10_21c_r147_3')?.agent_exited_at
+        ).not.toBeNull()
+      })
+      expect(closeTerminal).toHaveBeenCalled()
+      const row = db.getRemoteDispatchAttachment('disp_s10_21c_r147_3')
+      expect(row?.state).toBe('agent_exited')
+    } finally {
+      db.close()
+    }
   })
 })

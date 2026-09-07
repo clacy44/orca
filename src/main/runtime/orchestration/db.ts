@@ -8355,15 +8355,19 @@ export class OrchestrationDb {
   // the post-restart / pre-binding window a caller most needs INV-P-013 to still see the row. No
   // state filter, same as the handle lookup: the attacker/Ruling 20(c) close must fire regardless
   // of succeeded/stopped/abandoned/ready/etc.
+  // [D-R147 INFO 1] pane_key suffix pre-filter (mirrors RUN_PANE_KEY_MATCH_SUFFIX_SQL's
+  // narrowing, db.ts:436-439): the suffix only narrows candidates, isEquivalentPaneKey still
+  // decides — avoids materialising every live attachment row on every non-peer command_finished.
   findPeerOwnedAttachmentForPaneKey(paneKey: string): RemoteDispatchAttachmentRow | undefined {
-    const rows = this.db
+    const row = this.db
       .prepare(
         `SELECT * FROM remote_dispatch_attachments
          WHERE pane_key IS NOT NULL AND agent_exited_at IS NULL
-         ORDER BY COALESCE(handle_bound_at, created_at) DESC, rowid DESC`
+           AND substr(pane_key, instr(pane_key, ':') + 1) = ?
+         ORDER BY COALESCE(handle_bound_at, created_at) DESC, rowid DESC LIMIT 1`
       )
-      .all() as RemoteDispatchAttachmentRow[]
-    return rows.find((row) => row.pane_key && isEquivalentPaneKey(row.pane_key, paneKey))
+      .get(paneKeyMatchSuffix(paneKey)) as RemoteDispatchAttachmentRow | undefined
+    return row?.pane_key && isEquivalentPaneKey(row.pane_key, paneKey) ? row : undefined
   }
 
   // S10-19 W-2 (ops MJ-1 / §D): agent_exited_at is stamped in EVERY case — the only durable fact

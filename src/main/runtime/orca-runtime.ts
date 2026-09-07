@@ -4592,11 +4592,16 @@ export class OrcaRuntimeService {
     if (!handle) {
       return
     }
+    // [D-R147 LOW, mirrors isPeerOwnedAttachmentPane] pane-keyed fallback: the handle-keyed row
+    // lookup can miss (empty index, or a row's own terminal_handle not yet stamped/stale) in
+    // exactly the window findPeerOwnedAttachmentForPaneKey covers.
+    const paneKey = this.ptysById.get(ptyId)?.paneKey ?? undefined
     closePeerOwnedPaneOnAgentExitImpl({
       db,
       runtime: this,
       lookup: this.peerGrantProfileLookup,
       handle,
+      paneKey,
       cause
     }).catch((error) => {
       console.warn('[orchestration] peer-owned pane exit hook failed', error)
@@ -14532,9 +14537,14 @@ export class OrcaRuntimeService {
    *  exit, or a pane/tab close that kills it) deletes the persisted anchor; `command_finished` (the
    *  agent's FOREGROUND command ended while its pty lives on) leaves it, because the anchor's
    *  lifetime is now the pty's — except for a peer-owned pane, which still loses its authority the
-   *  moment its agent exits (INV-P-013). The in-memory clear and the hook-side authority retire run
-   *  on BOTH reasons, so arm 1 of `verifyLivePaneLaunchTokenHash` correctly finds no live token
-   *  after a foreground exit and falls through to the still-bound persisted anchor. */
+   *  moment its agent exits (INV-P-013). The in-memory clear runs whenever a live token/receipt is
+   *  present, on either reason. [D-R147 MEDIUM] The hook-side authority retire runs whenever
+   *  `retiresPersistedAnchor` is true — hoisted ABOVE the token/receipt early return, the same
+   *  precedent the anchor delete above already sets — because a corroborated hook POST can
+   *  re-populate `persistedAuthorityCommitmentsByPaneKey`/`hydratedLaunchTokenHashByPaneKey` after
+   *  an earlier command_finished already nulled the in-memory token/receipt; without the hoist,
+   *  pty_exit's own retire never fires (it hits the early return) and that re-earned commitment
+   *  outlives the pty. */
   private retirePtyAgentLaunchAuthority(
     ptyId: string,
     reason: 'command_finished' | 'pty_exit'
@@ -14577,6 +14587,12 @@ export class OrcaRuntimeService {
           })
         }
       }
+      // [D-R147 MEDIUM] hoisted above the token/receipt early return below — retiring the
+      // persisted anchor must retire any re-earned hook authority too, even when the in-memory
+      // token/receipt were already cleared by an earlier command_finished on this same pty.
+      for (const paneKey of paneKeys) {
+        this.retireAgentHookCompatibilityAuthorityFn?.(paneKey)
+      }
     }
     if (!pty.launchToken && !receipt) {
       return
@@ -14584,8 +14600,10 @@ export class OrcaRuntimeService {
     this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
     pty.launchToken = null
     pty.launchIncarnationId = null
-    for (const paneKey of paneKeys) {
-      this.retireAgentHookCompatibilityAuthorityFn?.(paneKey)
+    if (!retiresPersistedAnchor) {
+      for (const paneKey of paneKeys) {
+        this.retireAgentHookCompatibilityAuthorityFn?.(paneKey)
+      }
     }
   }
 

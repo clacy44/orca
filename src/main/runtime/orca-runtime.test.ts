@@ -13537,7 +13537,16 @@ describe('OrcaRuntimeService', () => {
     expect(runtime.verifyOrchestrationCompatibilityCaller(evidence)).toBeNull()
   })
 
-  it('retires only receipted restored PTY authority on command completion and exit', () => {
+  // [S10-21c B1c, D-R147 MEDIUM, SCENARIO_CORRECTION] Was titled/asserted "retires only
+  // receipted restored PTY authority" and expected exactly 2 calls. That claim is now WRONG:
+  // the hook-side retire is hoisted to run whenever `retiresPersistedAnchor` is true, which for
+  // `pty_exit` is unconditional (reason === 'pty_exit'), not gated on a receipt or a live token —
+  // the whole point of the fix (a corroborated hook POST can re-populate the hook server's own
+  // authority maps after an earlier command_finished already cleared the in-memory token/receipt,
+  // and only the retire on pty_exit revokes them). The un-receipted, never-minted
+  // 'pty-ordinary-shell' now ALSO gets its paneKey retired on its own pty_exit — a no-op against
+  // authority that never existed for that pane, but no longer skipped.
+  it('retires hook authority for every exiting pty on pty_exit, receipted or not; command-finished retires only the receipted/live one', () => {
     const retireAuthority = vi.fn()
     const runtime = new OrcaRuntimeService(store, undefined, {
       retireAgentHookCompatibilityAuthority: retireAuthority
@@ -13590,9 +13599,12 @@ describe('OrcaRuntimeService', () => {
     runtime.onPtyExit('pty-restored-exit', 0, 'restored-exit')
     runtime.onPtyExit('pty-ordinary-shell', 0, 'ordinary-shell')
 
+    const ordinaryShellPane =
+      '55555555-5555-4555-8555-555555555555:66666666-6666-4666-8666-666666666666'
     expect(retireAuthority).toHaveBeenCalledWith(firstPane)
     expect(retireAuthority).toHaveBeenCalledWith(secondPane)
-    expect(retireAuthority).toHaveBeenCalledTimes(2)
+    expect(retireAuthority).toHaveBeenCalledWith(ordinaryShellPane)
+    expect(retireAuthority).toHaveBeenCalledTimes(3)
   })
 
   it('restores a retained coordinator handle after a late controller inventory', async () => {

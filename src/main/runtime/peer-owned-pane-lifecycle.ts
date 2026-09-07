@@ -94,9 +94,16 @@ export async function closePeerOwnedPaneOnAgentExit(args: {
   runtime: Pick<PeerOwnedPaneRuntime, 'closeTerminal'>
   lookup: PeerGrantProfileLookup | null
   handle: string
+  // [D-R147 LOW] mirrors isPeerOwnedAttachmentPane's pane-keyed fallback: covers the window the
+  // handle-keyed lookup can miss (empty handle index, or a row's own terminal_handle not yet
+  // stamped/stale versus this pty's current handle).
+  paneKey?: string
   cause: string
 }): Promise<void> {
-  const row = args.db.findPeerOwnedAttachmentForHandle(args.handle)
+  let row = args.db.findPeerOwnedAttachmentForHandle(args.handle)
+  if (!row && args.paneKey && typeof args.db.findPeerOwnedAttachmentForPaneKey === 'function') {
+    row = args.db.findPeerOwnedAttachmentForPaneKey(args.paneKey)
+  }
   if (!row) {
     return
   }
