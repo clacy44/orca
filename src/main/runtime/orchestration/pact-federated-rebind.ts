@@ -81,9 +81,9 @@ export function applyInboundRebindPartyVerb(
     .get(linkKey, oldAgentId) as { display_name: string; superseded_at: string | null } | undefined
   const newMirror = db
     .prepare(
-      `SELECT display_name FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
+      `SELECT display_name, superseded_at FROM remote_agents WHERE environment_id = ? AND remote_agent_id = ?`
     )
-    .get(linkKey, newAgentId) as { display_name: string } | undefined
+    .get(linkKey, newAgentId) as { display_name: string; superseded_at: string | null } | undefined
   if (
     !oldMirror ||
     oldMirror.superseded_at !== null ||
@@ -96,11 +96,21 @@ export function applyInboundRebindPartyVerb(
     )
   }
 
+  // D-R138 F8: refuse a rebind whose NEW identity is already superseded, or that would close a
+  // supersession cycle (a hostile peer host renaming both ends of a stale chain under its own
+  // link key). `chain` is oldAgentId's supersession chain (needed again by clause 4, below).
+  const chain = walkSupersessionChain(oldAgentId, linkKey)
+  if (newMirror.superseded_at !== null || chain.includes(newAgentId)) {
+    throw new OrchestrationError(
+      'pact_rebind_target_superseded',
+      `Refused: ${newAgentId} is superseded or already in ${oldAgentId}'s supersession chain.`
+    )
+  }
+
   // Clause 4: no row in oldAgentId's supersession chain is `local_quarantined`. Same
   // remote_agent_id-only union errata E1 already uses (pact-federated-identity.ts's
   // `isRemoteAgentLocallyQuarantinedAnywhere`) — a peer agent quarantined on its OTHER
   // (paired_device vs environment) row must still be refused here.
-  const chain = walkSupersessionChain(oldAgentId, linkKey)
   const quarantinedInChain = chain.some(
     (id) =>
       db
@@ -125,24 +135,21 @@ export function applyInboundRebindPartyVerb(
     )
   }
 
-  // Clause 5 (S10-21b B17, D-R137 F3): `remote:<link>:<oldAgentId>` OR
-  // `remote:<link>:<newAgentId>` must be a party to this pact. The new-key case is the
-  // self-repair for a crash between step 1 (repoint) and step 2 (supersede-stamp + applied-id)
-  // below: after step 1 alone, `threads.pact_*_agent_id` already reads the NEW rendered key
-  // while `oldMirror.superseded_at` is still NULL (that stamp is step 2's own write) — so a
-  // retry of the identical wire message reaches this clause with the party already repointed.
-  // Refusing it here (checking only the old key) meant clause 3's own idempotency claim never
-  // actually applied and every retry threw `not_a_participant` forever. Clause 3's
-  // `superseded_at IS NULL` check still keeps a FULLY completed rebind (old mirror superseded)
-  // from re-entering — it throws `agent_unknown` before this clause is ever reached.
+  // Clause 5: `remote:<link>:<oldAgentId>` OR `remote:<link>:<newAgentId>` must be a party to
+  // this pact. Gate 12 (pact-federated-inbound-gates.ts) is exempted for this verb precisely so
+  // this clause is the one authority on party membership here. D-R137 F3: accepting the NEW key
+  // too makes a retry after a crash between step 1 (repoint) and step 2 (supersede-stamp) a
+  // no-op instead of a permanent `not_a_participant` refusal — the new key already proves the
+  // repoint landed; clause 3's `superseded_at IS NULL` guard above is what stops a genuinely
+  // completed rebind from re-entering.
   const oldPartyKey = renderFederatedPartyKey({ linkDeviceId: linkKey, remoteAgentId: oldAgentId })
   const newPartyKey = renderFederatedPartyKey({ linkDeviceId: linkKey, remoteAgentId: newAgentId })
-  const isParty = (key: string): boolean =>
+  const isRecordedParty = (key: string): boolean =>
     thread.pact_proposer_agent_id === key || thread.pact_with_agent_id === key
-  if (!isParty(oldPartyKey) && !isParty(newPartyKey)) {
+  if (!isRecordedParty(oldPartyKey) && !isRecordedParty(newPartyKey)) {
     throw new OrchestrationError(
       'not_a_participant',
-      `Refused: ${oldPartyKey} is not a party to the pact on ${thread.id}.`
+      `Refused: neither ${oldPartyKey} nor ${newPartyKey} is a party to the pact on ${thread.id}.`
     )
   }
 

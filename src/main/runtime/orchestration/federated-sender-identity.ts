@@ -103,6 +103,126 @@ export type RemoteIdentityImport =
   // nothing was written.
   | { outcome: 'capped'; displayName: string; hostLabel: string; askerHandle: string }
 
+export type FederatedSenderGrammarCheck =
+  | { ok: true; displayName: string; role: string | null }
+  | {
+      ok: false
+      reason: 'id_shape' | 'local_collision' | 'display_name'
+      error: OrchestrationError
+    }
+
+// S10-21b B18 (D-R138 row (c)): the importer's steps 1-4 (id shape, local-id collision,
+// display-name sanitize+validate, role sanitize), factored out so a SECOND grammar is never
+// written — `importFederatedSenderIdentity` (below) and the CLI's live-resolution
+// `upsertRemoteAgent` (orchestration-pact.ts's `handleFederatedPropose`) both call this SAME
+// function rather than each re-deriving the checks.
+export function checkFederatedSenderGrammar(
+  db: OrchestrationDb,
+  identity: FederatedSenderIdentity
+): FederatedSenderGrammarCheck {
+  if (!FOREIGN_AGENT_ID_RE.test(identity.id)) {
+    return {
+      ok: false,
+      reason: 'id_shape',
+      error: new OrchestrationError(
+        'invalid_argument',
+        'The relayed sender id is not a valid agent directory id.',
+        {
+          nextSteps: [
+            'this indicates a version-mismatched or malformed peer relay — update Orca on the asking host'
+          ]
+        }
+      )
+    }
+  }
+
+  // S10-8 review fix (blocker: peer-controlled identity collides with the local namespace): a
+  // peer that claims a LOCAL agent's own id must never be trusted — S10-4 ruling 1 keeps foreign
+  // claims out of the `agents` id namespace specifically so a remote_agents row can never be
+  // mistaken for (or shadow) a real local one. Also closes a self-relay loop: a runtime relaying
+  // into itself presents an id this same check already owns locally.
+  if (db.getAgentById(identity.id)) {
+    return {
+      ok: false,
+      reason: 'local_collision',
+      error: new OrchestrationError(
+        'invalid_argument',
+        'The relayed sender id collides with an agent already registered on this host.',
+        {
+          nextSteps: [
+            'verify the paired link is a genuine remote peer, not a loop back to this same host'
+          ]
+        }
+      )
+    }
+  }
+
+  const displayNameCandidate = sanitizeDirectoryText(identity.displayName, 80).value
+  if (!displayNameCandidate || !validateDisplayNameCandidate(displayNameCandidate).ok) {
+    return {
+      ok: false,
+      reason: 'display_name',
+      error: new OrchestrationError(
+        'invalid_argument',
+        'The relayed sender display name is not addressable.',
+        {
+          nextSteps: [
+            'this indicates a version-mismatched or malformed peer relay — update Orca on the asking host'
+          ]
+        }
+      )
+    }
+  }
+
+  const role = sanitizeRole(identity.role ?? null)?.value ?? null
+  return { ok: true, displayName: displayNameCandidate, role }
+}
+
+export type FederatedPeerFingerprintCheck =
+  | { ok: true }
+  | { ok: false; scope: 'link_changed' | 'cross_link_duplicate'; error: OrchestrationError }
+
+// S10-21b B18 (D-R138 row (c)): ruling 2's binding check alone (importer step 6), factored out
+// for the same reuse reason as the grammar check above.
+export function checkFederatedPeerFingerprintConflict(
+  db: OrchestrationDb,
+  linkKey: string,
+  peerFingerprint: string
+): FederatedPeerFingerprintCheck {
+  // Ruling 2: bind on first use, refuse on any later mismatch in either direction.
+  const boundFingerprint = db.getBoundPeerFingerprintForLink(linkKey)
+  if (boundFingerprint !== null && boundFingerprint !== peerFingerprint) {
+    return {
+      ok: false,
+      scope: 'link_changed',
+      error: new OrchestrationError(
+        'invalid_argument',
+        'This link is asserting a different identity than it did on an earlier contact.',
+        {
+          nextSteps: [
+            're-pair the two hosts if the peer was genuinely reimaged or its keys rotated'
+          ]
+        }
+      )
+    }
+  }
+  const conflictingEnvironmentId = db.findEnvironmentIdForPeerFingerprint(peerFingerprint, linkKey)
+  if (conflictingEnvironmentId !== null) {
+    return {
+      ok: false,
+      scope: 'cross_link_duplicate',
+      error: new OrchestrationError(
+        'invalid_argument',
+        'This identity is already bound to a different paired link.',
+        {
+          nextSteps: ['verify the paired link is a genuine remote peer, not a duplicate pairing']
+        }
+      )
+    }
+  }
+  return { ok: true }
+}
+
 /**
  * The shared inbound-identity importer (D2). Preserves the EXACT order the pre-extraction code
  * ran in — load-bearing: the upsert happens before the quarantine reads so a quarantined peer's
@@ -160,94 +280,22 @@ export function importFederatedSenderIdentity(
     }
   }
 
-  if (!FOREIGN_AGENT_ID_RE.test(identity.id)) {
-    return {
-      outcome: 'invalid',
-      reason: 'id_shape',
-      error: new OrchestrationError(
-        'invalid_argument',
-        'The relayed sender id is not a valid agent directory id.',
-        {
-          nextSteps: [
-            'this indicates a version-mismatched or malformed peer relay — update Orca on the asking host'
-          ]
-        }
-      )
-    }
+  const grammarCheck = checkFederatedSenderGrammar(db, identity)
+  if (!grammarCheck.ok) {
+    return { outcome: 'invalid', reason: grammarCheck.reason, error: grammarCheck.error }
   }
-
-  // S10-8 review fix (blocker: peer-controlled identity collides with the local namespace): a
-  // peer that claims a LOCAL agent's own id must never be trusted — S10-4 ruling 1 keeps foreign
-  // claims out of the `agents` id namespace specifically so a remote_agents row can never be
-  // mistaken for (or shadow) a real local one. Also closes a self-relay loop: a runtime relaying
-  // into itself presents an id this same check already owns locally.
-  if (db.getAgentById(identity.id)) {
-    return {
-      outcome: 'invalid',
-      reason: 'local_collision',
-      error: new OrchestrationError(
-        'invalid_argument',
-        'The relayed sender id collides with an agent already registered on this host.',
-        {
-          nextSteps: [
-            'verify the paired link is a genuine remote peer, not a loop back to this same host'
-          ]
-        }
-      )
-    }
-  }
-
-  const displayNameCandidate = sanitizeDirectoryText(identity.displayName, 80).value
-  if (!displayNameCandidate || !validateDisplayNameCandidate(displayNameCandidate).ok) {
-    return {
-      outcome: 'invalid',
-      reason: 'display_name',
-      error: new OrchestrationError(
-        'invalid_argument',
-        'The relayed sender display name is not addressable.',
-        {
-          nextSteps: [
-            'this indicates a version-mismatched or malformed peer relay — update Orca on the asking host'
-          ]
-        }
-      )
-    }
-  }
-
-  const role = sanitizeRole(identity.role ?? null)?.value ?? null
+  const displayNameCandidate = grammarCheck.displayName
+  const role = grammarCheck.role
   // D1 amendment: no host field exists on the wire — this is always '', which is exactly
   // today's behavior when a peer omits `host`.
   const hostLabel = ''
 
-  // Ruling 2: bind on first use, refuse on any later mismatch in either direction.
-  const boundFingerprint = db.getBoundPeerFingerprintForLink(linkKey)
-  if (boundFingerprint !== null && boundFingerprint !== peerFingerprint) {
+  const fingerprintCheck = checkFederatedPeerFingerprintConflict(db, linkKey, peerFingerprint)
+  if (!fingerprintCheck.ok) {
     return {
       outcome: 'fingerprint_conflict',
-      scope: 'link_changed',
-      error: new OrchestrationError(
-        'invalid_argument',
-        'This link is asserting a different identity than it did on an earlier contact.',
-        {
-          nextSteps: [
-            're-pair the two hosts if the peer was genuinely reimaged or its keys rotated'
-          ]
-        }
-      )
-    }
-  }
-  const conflictingEnvironmentId = db.findEnvironmentIdForPeerFingerprint(peerFingerprint, linkKey)
-  if (conflictingEnvironmentId !== null) {
-    return {
-      outcome: 'fingerprint_conflict',
-      scope: 'cross_link_duplicate',
-      error: new OrchestrationError(
-        'invalid_argument',
-        'This identity is already bound to a different paired link.',
-        {
-          nextSteps: ['verify the paired link is a genuine remote peer, not a duplicate pairing']
-        }
-      )
+      scope: fingerprintCheck.scope,
+      error: fingerprintCheck.error
     }
   }
 

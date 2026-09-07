@@ -90,7 +90,10 @@ describe('S10-21b B2: remote_agents accessors exclude superseded rows', () => {
     ])
   })
 
-  it('stops at PACT_SUPERSESSION_CHAIN_MAX on a chain longer than the bound', () => {
+  // S10-21b B18 (D-R138 F9): the walker now grows to MAX + 1, not MAX, so a genuine overflow is
+  // distinguishable from a complete MAX-length chain (below). SCENARIO_CORRECTION, not a
+  // weakening: this pins the new intentional bound (MAX+1), the same rigor as before.
+  it('stops at PACT_SUPERSESSION_CHAIN_MAX + 1 on a chain longer than the bound', () => {
     db = new OrchestrationDb(':memory:')
     const total = PACT_SUPERSESSION_CHAIN_MAX + 10
     for (let i = 0; i < total; i++) {
@@ -101,8 +104,26 @@ describe('S10-21b B2: remote_agents accessors exclude superseded rows', () => {
     }
 
     const chain = db.walkRemoteAgentSupersessionChain('agent_0', 'env_z')
-    expect(chain.length).toBe(PACT_SUPERSESSION_CHAIN_MAX)
+    expect(chain.length).toBe(PACT_SUPERSESSION_CHAIN_MAX + 1)
     expect(chain[0]).toBe('agent_0')
+  })
+
+  // D-R138 F9: a COMPLETE chain of exactly MAX identities must be distinguishable from an
+  // overflowing one. RED at base: the old bound stopped growth at MAX either way, so both
+  // returned length MAX and quarantine-remote.ts's `length > MAX` (post-fix) or `>= MAX`
+  // (base) refused a complete, provable chain.
+  it('a complete MAX-length chain walks to exactly MAX (not MAX + 1)', () => {
+    db = new OrchestrationDb(':memory:')
+    const total = PACT_SUPERSESSION_CHAIN_MAX
+    for (let i = 0; i < total; i++) {
+      seedRemoteAgent(db, 'env_w', `agent_${i}`)
+    }
+    for (let i = 0; i < total - 1; i++) {
+      supersede(db, 'env_w', `agent_${i}`, `agent_${i + 1}`)
+    }
+
+    const chain = db.walkRemoteAgentSupersessionChain('agent_0', 'env_w')
+    expect(chain.length).toBe(PACT_SUPERSESSION_CHAIN_MAX)
   })
 
   it('a cycle (structurally impossible via the writer) does not infinite-loop', () => {

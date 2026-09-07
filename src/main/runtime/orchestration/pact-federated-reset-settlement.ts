@@ -51,6 +51,45 @@ export type PendingReservedRelease = {
   actorAgentId: string
 }
 
+// D-R137 F9 / D-R138 §E residual: the local-release shape (ledger row + `pact_release_at`
+// stamp), factored out so step 3's message-gate-refusal fallback (below) can reuse it exactly —
+// a message gate refusing the relay must still leave the pact locally released and purgeable,
+// never `pact_state='released'` with `pact_release_at` NULL forever (the retention trigger's arm
+// requires it non-null).
+function releasePactLocallyForReset(
+  db: Database.Database,
+  threadId: string,
+  actorAgentId: string
+): void {
+  const row = db.prepare(`SELECT pact_local_seq FROM threads WHERE id = ?`).get(threadId) as {
+    pact_local_seq: number
+  }
+  const nextSeq = row.pact_local_seq + 1
+  insertPactStepRow(db, {
+    threadId,
+    ordinal: 0,
+    kind: 'release',
+    actorAgentId,
+    actorPaneKey: null,
+    actorHostId: null,
+    messageId: null,
+    summary: null,
+    turnAfterAgentId: null,
+    reasonCode: 'local_reset'
+  })
+  db.prepare(
+    `UPDATE threads SET
+       pact_state = 'released', pact_turn_agent_id = NULL, pact_paused_at = NULL,
+       pact_pause_reason = NULL, pact_at = datetime('now'), pact_release_at = datetime('now'),
+       pact_flight_token = pact_flight_token + 1, pact_turn_in_flight_at = NULL,
+       pact_relay_pending = NULL, pact_resync_nonce = NULL, pact_resync_nonce_at = NULL,
+       pact_repair_attempts = 0, pact_local_seq = ?,
+       pact_peer_agent_id = NULL, pact_peer_link_device_id = NULL,
+       pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL
+     WHERE id = ?`
+  ).run(nextSeq, threadId)
+}
+
 // Step 1 of §4.5's corrected ordering. A pact with no relayable peer is released fully here
 // (unchanged from before B7c). A pact WITH one is left untouched — its full release (state,
 // ledger row, local_seq bump) now happens inside step 3's `enqueueFederatedPactVerbWithin`
@@ -81,30 +120,7 @@ export function settleLiveFederatedPactsForReset(db: Database.Database): Pending
     }
     // No relay is possible (never linked, or the link's binding is already gone) — release
     // locally, right here, exactly as before B7c.
-    const nextSeq = row.pact_local_seq + 1
-    insertPactStepRow(db, {
-      threadId: row.id,
-      ordinal: 0,
-      kind: 'release',
-      actorAgentId: localPartyOf(row),
-      actorPaneKey: null,
-      actorHostId: null,
-      messageId: null,
-      summary: null,
-      turnAfterAgentId: null,
-      reasonCode: 'local_reset'
-    })
-    db.prepare(
-      `UPDATE threads SET
-         pact_state = 'released', pact_turn_agent_id = NULL, pact_paused_at = NULL,
-         pact_pause_reason = NULL, pact_at = datetime('now'), pact_release_at = datetime('now'),
-         pact_flight_token = pact_flight_token + 1, pact_turn_in_flight_at = NULL,
-         pact_relay_pending = NULL, pact_resync_nonce = NULL, pact_resync_nonce_at = NULL,
-         pact_repair_attempts = 0, pact_local_seq = ?,
-         pact_peer_agent_id = NULL, pact_peer_link_device_id = NULL,
-         pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL
-       WHERE id = ?`
-    ).run(nextSeq, row.id)
+    releasePactLocallyForReset(db, row.id, localPartyOf(row))
   }
   return pending
 }
@@ -123,13 +139,6 @@ export function enqueueReservedReleasesAfterReset(
   pending: readonly PendingReservedRelease[]
 ): void {
   for (const item of pending) {
-    // S10-21b B17 (D-R137 F9): the base implementation discarded this call's result. A
-    // message-gate refusal (`Within`'s `{outcome:'refused'}`) writes NO ledger row and never
-    // sets `pact_release_at` — the follow-up UPDATE below re-asserts `pact_state='released'`
-    // unconditionally but does not touch `pact_release_at` either, so `trg_pact_steps_no_delete`
-    // (whose retention arm requires `pact_release_at IS NOT NULL`) can never age this pact's
-    // remote rows out: they count against `PACT_STEPS_PER_LINK_CEILING` forever. Fall back to
-    // step 1's local-release branch (ledger row + `pact_release_at`) on refusal.
     const result = enqueueFederatedPactVerbWithin(db, item.threadId, 'release', {
       actorAgentId: item.actorAgentId,
       actorPaneKey: null,
@@ -137,19 +146,14 @@ export function enqueueReservedReleasesAfterReset(
       runId: 'reset',
       reasonCode: 'local_reset'
     })
+    // D-R137 F9: a message-gate refusal here (step 1 of the primitive) never runs the
+    // primitive's own release-branch UPDATE — no ledger row, no `pact_release_at`. The
+    // follow-up UPDATE below re-asserted `pact_state='released'` regardless, leaving the pact
+    // unpurgeable forever (the retention trigger's arm requires `pact_release_at IS NOT NULL`).
+    // Fall back to the exact same local release step 1 uses instead of that follow-up UPDATE.
     if (result.outcome === 'refused') {
-      insertPactStepRow(db, {
-        threadId: item.threadId,
-        ordinal: 0,
-        kind: 'release',
-        actorAgentId: item.actorAgentId,
-        actorPaneKey: null,
-        actorHostId: null,
-        messageId: null,
-        summary: null,
-        turnAfterAgentId: null,
-        reasonCode: 'local_reset'
-      })
+      releasePactLocallyForReset(db, item.threadId, item.actorAgentId)
+      continue
     }
     // resetAll's own reset-specific cleanup, plus an unconditional re-assert of the released
     // shape — clears `pact_relay_pending` even if the call above just set it (a reset always

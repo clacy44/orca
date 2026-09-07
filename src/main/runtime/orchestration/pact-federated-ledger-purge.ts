@@ -26,8 +26,11 @@ export type PurgePeerLedgerParams = {
 
 export type PurgePeerLedgerResult = { purged: number; nextSteps: string[] }
 
-// Mirrors `trg_pact_steps_no_delete`'s WHEN clause exactly (db.ts, PACT_STEPS_NO_DELETE_TRIGGER_SQL)
-// so every row this DELETE selects is one the trigger already permits — the trigger never fires
+// D-R138 row (g): semantically identical to `trg_pact_steps_no_delete`'s WHEN clause (db.ts,
+// PACT_STEPS_NO_DELETE_TRIGGER_SQL) — same two disjuncts, same `IFNULL(...,-1)` — NOT
+// byte-identical: this predicate binds the retention literal as a parameter (the trigger inlines
+// it) and adds `actor_environment_id = ?` (a narrowing to one link, never a widening). Every row
+// this DELETE selects is still one the trigger already permits, so the trigger never fires
 // (aborts) for any row this statement touches.
 const ERA_AGE_OR_RELEASED_AGED_PACT_STEPS_PREDICATE = `
   actor_is_remote = 1 AND actor_environment_id = ?

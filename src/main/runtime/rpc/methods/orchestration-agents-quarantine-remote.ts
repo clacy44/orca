@@ -70,13 +70,12 @@ export const ORCHESTRATION_AGENTS_QUARANTINE_REMOTE_METHODS: RpcMethod[] = [
         target.remote_agent_id,
         server.environmentId
       )
-      // B2's walker stops growing once it reaches the bound rather than proving the chain ends
-      // there (belt-and-suspenders comment, db.ts) — a chain THAT long is refused, typed, rather
-      // than silently treated as the complete identity set.
-      if (chain.length >= PACT_SUPERSESSION_CHAIN_MAX) {
+      // D-R138 F9: the walker now grows to MAX + 1 (db.ts), so a chain STRICTLY LONGER than the
+      // bound is the only overflow signal — a complete chain of exactly MAX identities quarantines.
+      if (chain.length > PACT_SUPERSESSION_CHAIN_MAX) {
         throw new OrchestrationError(
           'pact_supersession_chain_too_long',
-          `Refused: ${target.display_name}'s supersession chain reaches the ${PACT_SUPERSESSION_CHAIN_MAX}-link bound; the identity set cannot be proven complete.`
+          `Refused: ${target.display_name}'s supersession chain exceeds the ${PACT_SUPERSESSION_CHAIN_MAX}-link bound; the identity set cannot be proven complete.`
         )
       }
       const quarantined = !params.lift

@@ -118,6 +118,34 @@ export type PactDispositionResult = { queued: boolean; attempts: number; exhaust
 // separately (SQLite has no nested transactions). Exceptions propagate to the caller's rollback.
 // Exported for pact-federated-terminal-settle.ts (D-R136 B8d split) — its
 // firePactTerminalSettleDisposition shares this SAME body inside its own transaction.
+// D-R138 F4 (S10-21b B18): the tail-cancel alone, factored out of step 2 below so a fresh era
+// (proposePact's own reset, and applyPropose's inbound era-adoption reset) can cancel a pact's
+// stale unsettled outbox rows too — a fresh era must never carry a relay item minted under the
+// era it replaced (the exact class of defect the cross-propose race's loser hit: its pre-race
+// propose/decline rows survived the era reset and retried against the peer's now-live pact).
+//
+// FORCED DEVIATION (disclosed, not in the brief): `includeSending` defaults to true (unchanged
+// scope) for `cancelPactTailAndPauseBody`'s own caller, below — a genuine desync/terminal
+// disposition makes every in-flight item on the pact suspect, claimed or not. The era-reset call
+// sites (proposePact, applyPropose) pass `includeSending: false` — cancelling an ALREADY-CLAIMED
+// ('sending') item there regresses D-R136 N4's own tested contract (pact-federated-
+// repair.test.ts, "a relay queued under a released era does not cancel/pause the freshly
+// re-proposed pact"): a prior-era item already claimed by the pump settles safely through
+// `firePactTerminalSettleDisposition`'s own era/state guard and must be left alone. F4's actual
+// defect (the race loser's pre-race `propose`/`decline` rows) are always still `queued` at this
+// point — nothing has claimed them — so this narrowing still closes F4 in full.
+export function cancelUnsettledPactOutboxTail(
+  db: Database.Database,
+  threadId: string,
+  options?: { includeSending?: boolean }
+): void {
+  const states = options?.includeSending === false ? ['queued'] : ['queued', 'sending']
+  db.prepare(
+    `UPDATE peer_reply_outbox SET state = 'cancelled', last_error_code = 'pact_tail_cancelled'
+       WHERE pact_thread_id = ? AND state IN (${states.map(() => '?').join(', ')})`
+  ).run(threadId, ...states)
+}
+
 export function cancelPactTailAndPauseBody(
   db: Database.Database,
   threadId: string,
@@ -125,10 +153,7 @@ export function cancelPactTailAndPauseBody(
 ): PactDispositionResult {
   // Step 2: cancel this PACT's own unsettled tail — every other queued/sending relay item on
   // the same pact is now suspect, not merely the one item (if any) that just settled.
-  db.prepare(
-    `UPDATE peer_reply_outbox SET state = 'cancelled', last_error_code = 'pact_tail_cancelled'
-       WHERE pact_thread_id = ? AND state IN ('queued', 'sending')`
-  ).run(threadId)
+  cancelUnsettledPactOutboxTail(db, threadId)
 
   // Step 3.
   db.prepare(`UPDATE threads SET pact_turn_in_flight_at = NULL WHERE id = ?`).run(threadId)

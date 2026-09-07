@@ -9259,12 +9259,16 @@ export class OrchestrationDb {
   // ordered id list, oldest predecessor first. A `seen` set makes a structurally-impossible cycle
   // (the writer never creates one) terminate immediately regardless of the bound; the
   // PACT_SUPERSESSION_CHAIN_MAX cap on each direction's walk is the belt-and-suspenders bound.
+  // D-R138 F9: walks to MAX + 1, not MAX — a COMPLETE chain of exactly MAX identities must be
+  // distinguishable from an overflowing one. Stopping growth AT MAX made both cases return the
+  // same length, so quarantine-remote.ts's overflow refusal (`length > MAX`, below) fired on a
+  // complete chain too — fail-closed in the wrong direction for a containment verb.
   walkRemoteAgentSupersessionChain(remoteAgentId: string, linkKey: string): string[] {
     const seen = new Set<string>([remoteAgentId])
     const chain: string[] = [remoteAgentId]
 
     let cursor = remoteAgentId
-    while (chain.length < PACT_SUPERSESSION_CHAIN_MAX) {
+    while (chain.length < PACT_SUPERSESSION_CHAIN_MAX + 1) {
       const predecessor = this.db
         .prepare(
           `SELECT remote_agent_id FROM remote_agents
@@ -9280,7 +9284,7 @@ export class OrchestrationDb {
     }
 
     cursor = remoteAgentId
-    while (chain.length < PACT_SUPERSESSION_CHAIN_MAX) {
+    while (chain.length < PACT_SUPERSESSION_CHAIN_MAX + 1) {
       const row = this.db
         .prepare(
           `SELECT succeeded_by_remote_agent_id FROM remote_agents

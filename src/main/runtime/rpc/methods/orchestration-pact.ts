@@ -7,6 +7,10 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalFiniteNumber, OptionalString, requiredString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { renderFederatedPartyKey } from '../../orchestration/pact-federated-identity'
+import {
+  checkFederatedPeerFingerprintConflict,
+  checkFederatedSenderGrammar
+} from '../../orchestration/federated-sender-identity'
 import { LINK_BINDING_RPC_BUDGET_MS } from '../../orchestration/link-binding-constants'
 import { resolveCallerAgent, type ResolvedCallerAgent } from './orchestration-caller-identity'
 import { wakePactThread, wakePactThreadBoth, wakeTurnArrived } from './orchestration-pact-wake'
@@ -157,13 +161,33 @@ async function handleFederatedPropose(
     }
   }
   const agent = remote.agent
+  // S10-21b B18 (D-R138 row (c)): this live-resolution answer is peer-asserted data landing in
+  // the SAME `remote_agents` mirror the inbound importer writes — it must pass the SAME grammar
+  // and fingerprint-conflict gates that importer runs, never a second, hand-rolled check.
+  const grammarCheck = checkFederatedSenderGrammar(db, {
+    id: agent.id,
+    displayName: agent.displayName,
+    role: agent.role,
+    quarantined: agent.quarantined
+  })
+  if (!grammarCheck.ok) {
+    throw grammarCheck.error
+  }
+  const fingerprintCheck = checkFederatedPeerFingerprintConflict(
+    db,
+    server.environmentId,
+    server.peerFingerprint
+  )
+  if (!fingerprintCheck.ok) {
+    throw fingerprintCheck.error
+  }
   const upserted = db.upsertRemoteAgent({
     environmentId: server.environmentId,
     environmentName: server.name,
     linkKind: 'environment',
     remoteAgentId: agent.id,
-    displayName: agent.displayName,
-    role: agent.role,
+    displayName: grammarCheck.displayName,
+    role: grammarCheck.role,
     state: agent.state,
     derived: agent.derived,
     remoteQuarantined: agent.quarantined,

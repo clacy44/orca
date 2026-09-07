@@ -194,10 +194,16 @@ describe('pact-federated-propose-race (S10-21b B10, T30)', () => {
   })
 
   // -------------------------------------------------------------------------------------------
-  // Full apply: incoming wins ⇒ local proposal auto-declined (real ledger row + relay), then
+  // Full apply: incoming wins ⇒ local proposal auto-declined (real ledger row, LOCAL ONLY), then
   // the incoming propose applies, in that order.
+  //
+  // SCENARIO_CORRECTION (21b-E9, chair ruling, D-R138 F4): the auto-decline is LOCAL-ONLY — the
+  // peer computed the identical deterministic tie-break and already applied the mirror-image
+  // outcome on its own side, so relaying our decline back is never correct (§2.13's plain
+  // reading asked for a relay; the chair ruling supersedes it). The prior assertion of a relayed
+  // `pact_decline` outbox row is now wrong by design; replaced with "no pact_decline row".
   // -------------------------------------------------------------------------------------------
-  it('T30: incoming propose wins ⇒ local proposal declined (ledger row + relay) before the incoming propose applies', () => {
+  it('T30: incoming propose wins ⇒ local proposal declined (ledger row, LOCAL ONLY — 21b-E9) before the incoming propose applies', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')
     const peerKey = seedFederatedPeer(d, 'r1', 'peer-x')
@@ -212,17 +218,20 @@ describe('pact-federated-propose-race (S10-21b B10, T30)', () => {
       .prepare(
         `SELECT kind, reason_code, relay_state FROM pact_steps WHERE thread_id = ? AND kind = 'decline'`
       )
-      .get(thread.id) as { kind: string; reason_code: string; relay_state: string } | undefined
+      .get(thread.id) as
+      | { kind: string; reason_code: string; relay_state: string | null }
+      | undefined
     expect(declineStep?.kind).toBe('decline')
     expect(declineStep?.reason_code).toBe('pact_cross_propose_race')
-    expect(declineStep?.relay_state).toBe('pending')
+    expect(declineStep?.relay_state).toBeNull()
 
+    // 21b-E9: no pact_decline row — the decline is never relayed.
     const outboxRow = rawDb(d)
       .prepare(
         `SELECT relay_kind FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_decline'`
       )
       .get(thread.id) as { relay_kind: string } | undefined
-    expect(outboxRow?.relay_kind).toBe('pact_decline')
+    expect(outboxRow).toBeUndefined()
 
     const row = rawDb(d)
       .prepare(
@@ -236,6 +245,45 @@ describe('pact-federated-propose-race (S10-21b B10, T30)', () => {
     expect(row.pact_state).toBe('proposed')
     expect(row.pact_proposer_agent_id).toBe(peerKey)
     expect(row.pact_with_agent_id).toBe(a)
+  })
+
+  // -------------------------------------------------------------------------------------------
+  // D-R138 F4: the loser's own pre-race outbox tail (its `propose` relay, still queued — nothing
+  // has drained it) is cancelled as part of the SAME era-reset transaction the winning inbound
+  // propose applies under, so it can never retry `pact_exists` against the peer's freshly-won
+  // pact and terminal-settle-pause it 7 days later. RED at base: the tail survives untouched.
+  // -------------------------------------------------------------------------------------------
+  it("D-R138 F4: the race resolution cancels the loser's own pre-race outbox tail", () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const peerKey = seedFederatedPeer(d, 'r1', 'peer-x')
+    const thread = localOutstandingPropose(d, a, peerKey, THREAD_ID_MIN)
+
+    const preRaceQueued = rawDb(d)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE pact_thread_id = ? AND state IN ('queued', 'sending')`
+      )
+      .get(thread.id) as { n: number }
+    expect(preRaceQueued.n).toBeGreaterThan(0)
+
+    d.applyInboundPactVerb(
+      inboundProposeArgs({ toAgentId: a, senderAgentId: 'r1', peerThreadId: THREAD_ID_MIN })
+    )
+
+    const stillQueued = rawDb(d)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox WHERE pact_thread_id = ? AND state IN ('queued', 'sending')`
+      )
+      .get(thread.id) as { n: number }
+    expect(stillQueued.n).toBe(0)
+
+    const cancelled = rawDb(d)
+      .prepare(
+        `SELECT COUNT(*) AS n FROM peer_reply_outbox
+         WHERE pact_thread_id = ? AND state = 'cancelled' AND last_error_code = 'pact_tail_cancelled'`
+      )
+      .get(thread.id) as { n: number }
+    expect(cancelled.n).toBeGreaterThan(0)
   })
 
   // -------------------------------------------------------------------------------------------

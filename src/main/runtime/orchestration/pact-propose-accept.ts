@@ -23,6 +23,7 @@ import { findBindingsByEnvironment } from './link-binding-store'
 import { isPeerLinkQuarantined } from './link-binding-observations-store'
 import { OrchestrationError } from './orchestration-error'
 import { gateVerdictRefusalError } from './gate-refusal-error'
+import { cancelUnsettledPactOutboxTail } from './pact-federated-repair'
 import {
   enqueueFederatedPactVerb,
   enqueueFederatedPactVerbWithin,
@@ -52,7 +53,9 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
   requireUnclaimedPact(thread)
   requireNoEngagedPactWithPeer(db, params.callerAgentId, peer.id, peer.display_name)
 
-  let federatedEmit: EnqueueFederatedPactVerbResult | undefined
+  // D-R137 F6: declared OUTSIDE the transaction's try block (below) so the post-commit kick can
+  // still read it — a `let` scoped to the try block would go out of scope there.
+  let emitted: EnqueueFederatedPactVerbResult | null = null
   db.exec('BEGIN IMMEDIATE')
   try {
     // pact_era + 1 (blocker fix): a fresh era per propose, so idx_pact_step_ordinal's
@@ -92,6 +95,9 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
          pact_peer_environment_id = NULL, pact_peer_key_fingerprint = NULL
        WHERE id = ?`
     ).run(params.callerAgentId, peer.id, params.stepsTotal, thread.id)
+    // D-R138 F4: cancel this pact's own unsettled outbox tail in the SAME era-reset transaction
+    // — a fresh era must not carry a relay item minted under the era it replaced.
+    cancelUnsettledPactOutboxTail(db, thread.id, { includeSending: false })
     if (peer.federated) {
       const remote = findRemotePartyByRenderedKey(db, peer.id)
       if (!remote) {
@@ -153,16 +159,12 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
         thread.id
       )
     }
-    // S10-21b B17 (D-R137 F6): the base implementation called `enqueueFederatedPactVerb`
-    // (which opens its OWN `BEGIN IMMEDIATE`) AFTER this transaction committed — so the
-    // era-reset/anchor UPDATE above and the emit primitive's ledger row/message/outbox row
-    // were two separate commits. A message-gate refusal or a crash in between left
-    // `pact_state='proposed'`, era bumped, anchors set, ZERO `pact_steps` rows and no relay —
-    // `requireNoEngagedPactWithPeer` then refused the operator's own retry, leaving `--release`
-    // as the only exit. Fix: call `enqueueFederatedPactVerbWithin` (B7c's no-own-transaction
-    // form) from INSIDE this transaction, exactly as accept/release already do below — a gate
-    // refusal now throws HERE, rolling the whole transition back with it. The local
-    // (non-federated) path is unchanged.
+    // S10-21b B18 (D-R137 F6): a federated propose's ledger/message/outbox row is written by the
+    // single writer's `Within` form, INSIDE this same transaction, so a message-gate refusal (or
+    // a crash) between the era-reset UPDATE above and the relay enqueue rolls the whole propose
+    // back — never a proposed pact left with a bumped era, populated peer anchors, and zero
+    // ledger rows (D-R137 F3's exact class of defect, for propose). The local (non-federated)
+    // path keeps writing its own ledger row here, inside this transaction, unchanged.
     if (!peer.federated) {
       insertPactStepRow(db, {
         threadId: thread.id,
@@ -184,17 +186,17 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
         outcome: 'proposed'
       })
     } else {
-      federatedEmit = enqueueFederatedPactVerbWithin(db, thread.id, 'propose', {
+      emitted = enqueueFederatedPactVerbWithin(db, thread.id, 'propose', {
         actorAgentId: params.callerAgentId,
         actorPaneKey: params.callerPaneKey,
         actorHostId: params.callerHostId,
         runId: 'host',
         ordinal: 0
       })
-      if (federatedEmit.outcome === 'refused') {
-        // Thrown INSIDE the transaction: the catch below rolls back the era bump/anchor writes
-        // together with this refusal, so a refused propose leaves no trace at all.
-        throw gateVerdictRefusalError(federatedEmit.verdict, federatedEmit.refusalId)
+      if (emitted.outcome === 'refused') {
+        // Caught below, which ROLLBACKs before re-throwing — the era reset and peer-anchor
+        // UPDATEs above never commit.
+        throw gateVerdictRefusalError(emitted.verdict, emitted.refusalId)
       }
     }
     db.exec('COMMIT')
@@ -202,11 +204,17 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
     db.exec('ROLLBACK')
     throw err
   }
-  // Step 6's OUTSIDE-transaction kick (design §2.3) — `enqueueFederatedPactVerb`'s wrapper does
-  // this for every other verb; `Within`'s caller owns it, same as resetAll's reset settlement.
-  if (federatedEmit && federatedEmit.outcome === 'enqueued') {
-    params.runtime?.replyOutbox?.kick(federatedEmit.thread.pact_peer_link_device_id as string)
-    return federatedEmit.thread
+  if (peer.federated) {
+    // `emitted` is non-null and not 'refused' here: a 'refused' outcome threw inside the
+    // transaction above and never reaches this line. Step 6's kick is the one piece of the
+    // primitive that stays OUTSIDE the transaction (pact-federated-emit.ts's wrapper does the
+    // same, post-COMMIT) — mirrored here rather than reusing that wrapper, which cannot nest.
+    if (emitted?.outcome === 'enqueued') {
+      params.runtime?.replyOutbox?.kick(emitted.thread.pact_peer_link_device_id as string)
+    }
+    return (
+      emitted as Extract<EnqueueFederatedPactVerbResult, { outcome: 'enqueued' | 'relay_pending' }>
+    ).thread
   }
   return requireThread(db, thread.id)
 }

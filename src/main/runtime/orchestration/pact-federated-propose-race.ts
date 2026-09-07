@@ -19,10 +19,13 @@
 // a second active proposal on a fresh thread (T30's second assertion). Both checks live here so
 // `applyPropose` has one call site.
 import type Database from '../../sqlite/sync-database'
-import { OrchestrationError } from './orchestration-error'
-import { requireNoEngagedPactWithPeer, requireUnclaimedPact } from './pact-shared'
+import {
+  auditPact,
+  insertPactStepRow,
+  requireNoEngagedPactWithPeer,
+  requireUnclaimedPact
+} from './pact-shared'
 import { findRemotePartyByRenderedKey } from './pact-federated-identity'
-import { enqueueFederatedPactVerb } from './pact-federated-emit'
 import type { ThreadRow } from './types'
 import type { ApplyInboundPactVerbArgs } from './pact-federated-inbound-gates'
 
@@ -85,31 +88,51 @@ export function resolveCrossProposeOutcome(
   return 'fresh'
 }
 
-// Auto-decline the LOCAL outstanding proposal that just lost the tie-break, and relay the
-// decline — called by `applyPropose` BEFORE era adoption, so the relay still carries the
-// pre-adoption era/seq the peer's own (winning) thread already expects (gate 11 era equality).
+// Auto-decline the LOCAL outstanding proposal that just lost the tie-break — called by
+// `applyPropose` BEFORE era adoption.
 //
-// FORCED DEVIATION from the design's literal "in the same transaction" wording:
-// enqueueFederatedPactVerb (B6's emit primitive, consumed not re-derived) opens its own `BEGIN
-// IMMEDIATE`; SQLite does not nest transactions (the same constraint the batch-1 review flagged
-// for `repointFederatedPactParty`/B13). The decline commits in its own transaction, immediately
-// followed — no gate work in between — by the propose-apply transaction, not one shared one.
+// 21b-E9 (chair ruling, D-R138 F4): LOCAL-ONLY — ledger row + state transition, NO relay. The
+// peer computed the IDENTICAL deterministic tie-break (same two thread ids, same comparison) and
+// has already applied the mirror-image outcome on its own side; relaying our decline back would
+// either race the peer's own winning propose's era/seq reset (this same race, on the peer, just
+// reset the fence this decline would be sent under) or tell the peer something it already
+// derived independently. No message, no `peer_reply_outbox` row — this pact's own stale outbox
+// tail (this host's pre-race propose/decline) is cancelled separately, inside applyPropose's
+// era-reset transaction (D-R138 F4's other half).
 export function declineLosingLocalPropose(
   db: Database.Database,
   threadId: string,
   args: ApplyInboundPactVerbArgs
 ): void {
-  const result = enqueueFederatedPactVerb(db, null, threadId, 'decline', {
-    actorAgentId: args.toAgentId,
-    actorPaneKey: null,
-    actorHostId: null,
-    runId: 'host',
-    reasonCode: 'pact_cross_propose_race'
-  })
-  if (result.outcome === 'refused') {
-    throw new OrchestrationError(
-      'gate_refused',
-      'The auto-decline of the losing local cross-propose was refused by the message gate.'
-    )
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare(
+      `UPDATE threads SET pact_state = 'released', pact_turn_agent_id = NULL,
+         pact_paused_at = NULL, pact_pause_reason = NULL, pact_flight_token = pact_flight_token + 1
+       WHERE id = ?`
+    ).run(threadId)
+    insertPactStepRow(db, {
+      threadId,
+      ordinal: 0,
+      kind: 'decline',
+      actorAgentId: args.toAgentId,
+      actorPaneKey: null,
+      actorHostId: null,
+      messageId: null,
+      summary: null,
+      turnAfterAgentId: null,
+      reasonCode: 'pact_cross_propose_race'
+    })
+    auditPact(db, {
+      agentId: args.toAgentId,
+      actorPaneKey: null,
+      actorHostId: null,
+      verb: 'pact_decline',
+      outcome: 'declined'
+    })
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
   }
 }

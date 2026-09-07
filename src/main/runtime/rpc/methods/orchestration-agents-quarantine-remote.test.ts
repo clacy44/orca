@@ -3,7 +3,7 @@
 // exist (no method of that name is registered).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ORCHESTRATION_AGENT_METHODS } from './orchestration-agents'
-import { OrchestrationDb } from '../../orchestration/db'
+import { OrchestrationDb, PACT_SUPERSESSION_CHAIN_MAX } from '../../orchestration/db'
 import type Database from '../../../sqlite/sync-database'
 import {
   OrcaRuntimeService,
@@ -261,6 +261,39 @@ describe('orchestration.agents.quarantineRemote RPC (S10-21b B16b)', () => {
       .prepare(`SELECT COUNT(*) AS n FROM remote_agents WHERE local_quarantined = 1`)
       .get() as { n: number }
     expect(quarantinedCount.n).toBe(0)
+  })
+
+  // S10-21b B18 (D-R138 F9): a COMPLETE chain of exactly PACT_SUPERSESSION_CHAIN_MAX identities
+  // is provably complete (the walker now grows to MAX + 1, so it stops short of the bound on its
+  // own) and must quarantine, not refuse. RED at base: the walker stopped growth AT MAX either
+  // way, so a complete 64-chain and an overflowing one were indistinguishable and this refused
+  // `pact_supersession_chain_too_long` too.
+  it('a complete PACT_SUPERSESSION_CHAIN_MAX-length chain quarantines (provably complete)', async () => {
+    setup()
+    const CHAIN_LEN = PACT_SUPERSESSION_CHAIN_MAX
+    for (let i = 0; i < CHAIN_LEN; i++) {
+      const id = `full_${i}`
+      const succ = i < CHAIN_LEN - 1 ? `full_${i + 1}` : null
+      rawDb(db)
+        .prepare(
+          `INSERT INTO remote_agents
+             (environment_id, environment_name, link_kind, remote_agent_id, display_name, role,
+              state, derived, remote_quarantined, local_quarantined, succeeded_by_remote_agent_id,
+              superseded_at)
+           VALUES (?, ?, 'environment', ?, ?, NULL, 'live', 0, 0, 0, ?, ?)`
+        )
+        .run(ENV, HOST, id, `full-display-${i}`, succ, succ ? '2024-01-01T00:00:00.000Z' : null)
+    }
+
+    await call('orchestration.agents.quarantineRemote', {
+      id: `full_${CHAIN_LEN - 1}`,
+      host: HOST
+    })
+
+    const quarantinedCount = rawDb(db)
+      .prepare(`SELECT COUNT(*) AS n FROM remote_agents WHERE local_quarantined = 1`)
+      .get() as { n: number }
+    expect(quarantinedCount.n).toBe(CHAIN_LEN)
   })
 
   it('lift is symmetric and never resumes a containment pause', async () => {

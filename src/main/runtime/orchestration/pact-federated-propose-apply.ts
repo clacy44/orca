@@ -17,6 +17,7 @@ import { renderedSenderKey, type ApplyInboundPactVerbArgs } from './pact-federat
 import type { InboundPactWake } from './pact-federated-inbound-wake'
 import { refuseIfLinkCeilingSaturated } from './pact-federated-ledger-ceiling'
 import { bumpProposalBlockWindow } from './pact-federated-proposal-block'
+import { cancelUnsettledPactOutboxTail } from './pact-federated-repair'
 
 export type ApplyInboundPactVerbResult = {
   accepted: true
@@ -67,6 +68,11 @@ export function applyPropose(
     // pact written whenever the apply below then failed, e.g. the message-gate refusal at
     // `gate_refused`).
     adoptEraOnInboundPropose(db, { id: thread.id }, { era: args.pact.era })
+    // D-R138 F4: cancel this pact's own unsettled outbox tail as part of the SAME era-reset
+    // transaction — a fresh era must not carry a relay item minted under the era it replaced
+    // (the cross-propose race's loser: its own pre-race propose/decline rows survived the reset
+    // above and retried against the peer's now-live, freshly-won pact).
+    cancelUnsettledPactOutboxTail(db, thread.id, { includeSending: false })
     db.prepare(
       `UPDATE threads SET
          pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',
