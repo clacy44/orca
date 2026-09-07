@@ -182,6 +182,7 @@ import {
   type RestoreSweepSummary
 } from './startup/restore-registered-agent-panes'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from './runtime/restore-sweep-lock'
+import { resolveResumeTranscript } from './startup/resolve-resume-transcript'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
 import { getDevInstanceIdentity } from './startup/dev-instance-identity'
 import { hydrateShellPath, mergePathSegments } from './startup/hydrate-shell-path'
@@ -1062,8 +1063,16 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
     collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
       runtimeService.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtimeService.getTerminalProcessIncarnation(handle),
+    // [S10-21c B2, design §2 S4] Thin wrapper over session-file-resolver.ts, never over the DB.
+    resolveResumeTranscript: (agentType, sessionId) =>
+      resolveResumeTranscript(agentType, sessionId),
+    // [S10-21c B2, design §2 S8]
+    resolveTabWorktreeId: (tabId, hostId) => runtimeService.resolveTabWorktreeId(tabId, hostId),
     mintRestoreTicket: (payload) => runtimeService.mintRestoreTicket(payload),
     notifyRebindDelivery: (agentId) => runtimeService.notifyRebindDelivery(agentId),
+    // [S10-21c B2, design §2 S6] Same primitive session-identity-mismatch-alarm.ts's wiring uses.
+    writeHostNoticeToPane: (paneKey, text, opts) =>
+      runtimeService.writeHostNoticeToPane(paneKey, text, opts),
     // S10-21b B15 (design §2.7): so the restore-driven pact resume relays through
     // emitFederatedPactSideEffect for a federated pact, same as every other producer.
     federatedPactEmitRuntime: runtimeService

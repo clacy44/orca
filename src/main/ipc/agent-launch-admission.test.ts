@@ -144,6 +144,42 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(admitted.classification).toBe('host_resume')
   })
 
+  it('S10-21c B2/S6: a host-resume admission whose command lost its selector refuses restore_selector_lost, never falls through to unrecorded', async () => {
+    const db = freshDb()
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'predecessor-sess',
+      predecessorPaneKey: 'tab1:leaf-old',
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1'
+    }
+    await expect(
+      admitAgentLaunch(() => db, opts({ command: 'claude --resume' }), admission, ctx())
+    ).rejects.toThrow(LaunchAdmissionRefusedError)
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_refused')
+    expect(auditRow.reason_code).toBe('restore_selector_lost')
+  })
+
+  it("S10-21c B2/S6: a NON-host-resume (caller) admission with an idless selector keeps today's unrecorded(resume_target_undeterminable) behavior unchanged", async () => {
+    const db = freshDb()
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume' }),
+      CALLER,
+      ctx()
+    )
+    expect(admitted.spawnOptions.command).toBe('claude --resume')
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_unrecorded')
+    expect(auditRow.reason_code).toBe('resume_target_undeterminable')
+  })
+
   it('T40: an uncovered/unpaned launch never writes a row (pass-through)', async () => {
     const db = freshDb()
     const admitted = await admitAgentLaunch(

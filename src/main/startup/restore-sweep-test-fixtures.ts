@@ -103,9 +103,20 @@ export function baseDeps(
     getSelfResumeWatermark: () => null,
     collectIncumbentEvidence: defaultCollectIncumbentEvidence,
     getTerminalProcessIncarnation: () => null,
+    // [S10-21c B2, design §2 S4] Default fixture has a real transcript with a turn — the
+    // permissive default every pre-existing (pre-S4) test relies on; a test exercising the
+    // preflight itself overrides this directly.
+    resolveResumeTranscript: async () => ({ path: 'fixture-transcript.jsonl', hasTurn: true }),
+    // [S10-21c B2, design §2 S8] Default fixture's only registered-agent worktree is 'wt-1'
+    // (insertAgent's own default, mirrored by every pre-existing test that doesn't override
+    // worktree_id) — the permissive default that keeps the fence a no-op for every pre-existing
+    // test; a test exercising the fence itself overrides this directly.
+    resolveTabWorktreeId: () => 'wt-1',
     mintRestoreTicket: (payload: RestoreTicketMintArgs) =>
       JSON.stringify(payload) as unknown as RestoreTicketId,
     notifyRebindDelivery: vi.fn(),
+    // [S10-21c B2, design §2 S6] No-op default — a test exercising a pane notice overrides this.
+    writeHostNoticeToPane: vi.fn(),
     ...overrides
   }
 }

@@ -254,6 +254,15 @@ export async function admitAgentLaunch(
 
     // [§C.4 "--continue ruled"] id-less/undeterminable resolution.
     if (effectiveId.kind === 'undeterminable') {
+      // [S10-21c B2, design §2 S6(a)] A host-resume admission is the sweep's OWN restore
+      // attempt — it names a specific predecessor session by construction (S2/HOST_MINTED
+      // never sets `admission.kind: 'host-resume'`). Losing the selector here means the sweep's
+      // own restore command was malformed; degrading to `unrecorded` would silently spawn an
+      // untracked fresh session instead. Refuse loudly. Every OTHER admission kind keeps
+      // today's `unrecorded` behavior unchanged.
+      if (admission.kind === 'host-resume') {
+        return refuse('restore_selector_lost')
+      }
       return unrecorded(owned ? 'pane_key_owned' : 'resume_target_undeterminable')
     }
 

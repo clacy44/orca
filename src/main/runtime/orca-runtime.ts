@@ -13968,6 +13968,24 @@ export class OrcaRuntimeService {
     return session?.terminalLayoutsByTabId?.[tabId]?.ptyIdsByLeafId?.[leafId]
   }
 
+  /** [S10-21c B2, design §2 S8] The restore sweep's worktree fence: resolves `tabId`'s OWNING
+   * worktree from the persisted session's `tabsByWorktree` (`Record<worktreeId, TerminalTab[]>`)
+   * — verified NOT to be a flat, tabId-unique namespace at the map-shape level (this class's own
+   * admission-time collision guard, `'terminal_orphan_surface_occupied'`, actively checks for
+   * and refuses a tabId claimed under two worktrees at once), so this scans every bucket rather
+   * than assuming the first hit. Returns undefined when the tab is absent from every bucket, or
+   * the workspace session/store is unavailable — the caller treats that as unresolvable, never
+   * "assume it matches". */
+  resolveTabWorktreeId(tabId: string, hostId?: string | null): string | undefined {
+    const session = this.store?.getWorkspaceSession?.(hostId ?? undefined)
+    for (const [worktreeId, tabs] of Object.entries(session?.tabsByWorktree ?? {})) {
+      if (tabs.some((tab) => tab.id === tabId)) {
+        return worktreeId
+      }
+    }
+    return undefined
+  }
+
   /** S10-1: the exact liveness signals agent-directory.ts's classifyAgentLiveness needs for a
    * durable pane key, mirroring the ambient-push gate's own read of these two leaf fields
    * (Why comment at deliverPendingMessagesForHandle). Delegating read, no new classification. */

@@ -75,8 +75,13 @@ function buildDeps(runtime: OrcaRuntimeService): RestoreSweepDeps {
     collectIncumbentEvidence: (paneKey, ptyId, now, preFetchedInventory) =>
       runtime.collectIncumbentEvidence(paneKey, ptyId, now, preFetchedInventory),
     getTerminalProcessIncarnation: (handle) => runtime.getTerminalProcessIncarnation(handle),
+    // [S10-21c B2, design §2 S4/S8] Orthogonal to what T11 proves — permissive stand-ins, same
+    // reasoning as this file's own collectIncumbentEvidence/takeControllerInventoryForSweep use.
+    resolveResumeTranscript: async () => ({ path: 'stub-transcript.jsonl', hasTurn: true }),
+    resolveTabWorktreeId: () => 'wt-1',
     mintRestoreTicket: (payload) => runtime.mintRestoreTicket(payload),
-    notifyRebindDelivery: (agentId) => runtime.notifyRebindDelivery(agentId)
+    notifyRebindDelivery: (agentId) => runtime.notifyRebindDelivery(agentId),
+    writeHostNoticeToPane: () => {}
   }
 }
 

@@ -59,11 +59,32 @@ export type RestoreSweepDeps = {
     preFetchedInventory?: ControllerInventory | null
   ): Promise<IncumbentEvidence>
   getTerminalProcessIncarnation(handle: string): string | null
+  /** [S10-21c B2, design §2 S4] Resolves whether `sessionId` names a REAL conversation before
+   * the sweep mints a restore ticket for it — a thin wrapper over
+   * `session-file-resolver.ts#resolveSessionFilePath` (resolve-resume-transcript.ts). Null on a
+   * miss; `hasTurn` false when the file exists but carries only the `bridge-session` stub Claude
+   * Code writes for `--session-id X` before any turn. Reused verbatim by S3(iii)/S5 (B4). */
+  resolveResumeTranscript(
+    agentType: string,
+    sessionId: string
+  ): Promise<{ path: string; hasTurn: boolean } | null>
+  /** [S10-21c B2, design §2 S8] Resolves `tabId`'s owning worktree from the persisted session's
+   * `tabsByWorktree` (`orca-runtime.ts#resolveTabWorktreeId`) — undefined when unresolvable,
+   * never assumed to match the candidate's own worktree. */
+  resolveTabWorktreeId(tabId: string, hostId?: string | null): string | undefined
   /** In-process only (INV-P-021) — see orca-runtime.ts's `mintRestoreTicket`. */
   mintRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId
   /** [C9 hand-off, D-I80] `orca-runtime.ts#notifyRebindDelivery` — called once after a
    * SUCCESSFUL Layer 1 or Layer 2 restore, never for a skipped/deferred candidate. */
   notifyRebindDelivery(agentId: string): void
+  /** [S10-21c B2, design §2 S6] Generic pane notice — same primitive as
+   * `session-identity-mismatch-alarm.ts`'s `SessionIdentityMismatchAlarmDeps`/orca-runtime.ts's
+   * own `writeHostNoticeToPane`. Rate-clamped by the caller-supplied `rateKey`/`windowMs`. */
+  writeHostNoticeToPane(
+    paneKey: string,
+    text: string,
+    opts: { rateKey: string; windowMs?: number }
+  ): void
   /** [S10-21b B15, design §2.7] Passed to `resumePactsForRestoredAgent` so a federated pact's
    * restore-driven resume relays through `emitFederatedPactSideEffect` — omitted/null is a valid
    * runtime (the emit primitive already degrades to "no post-commit kick"). Optional so every
