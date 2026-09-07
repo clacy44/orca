@@ -608,7 +608,7 @@ describe('S10-17: launch-token anchor correctness', () => {
     })
     attachEmptyWindow(runtime)
 
-    // --- Case 1: the S10-10/F1 retire lever (orca-runtime.ts ~:13497). ---
+    // --- Case 1: the S10-10/F1 retire lever, now fired by the PTY's exit. ---
     setFlushFailuresRemaining(1)
     await spawnTerminal(runtime, {
       credentialLane: { kind: 'shared' },
@@ -620,8 +620,10 @@ describe('S10-17: launch-token anchor correctness', () => {
     })
     // Queued, not yet anchored — the only flush attempt so far failed.
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
-    // command-finished fires the retire lever, which forgets pane P's anchor.
-    runtime.emitDaemonPtyTransientFact('pty-f1-1', { kind: 'command-finished', exitCode: 0 })
+    // SCENARIO_CORRECTION (S10-21c S1): a real pty exit fires the retire lever. `command-finished`
+    // deliberately no longer forgets a non-peer-owned pane's anchor, so it would leave the queued
+    // retry in place and this case would stop testing the drop it exists to test.
+    runtime.onPtyExit('pty-f1-1', 0)
 
     // An unrelated successful anchor persist must not resurrect P's retired anchor.
     await spawnTerminal(runtime, {

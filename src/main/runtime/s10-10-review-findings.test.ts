@@ -29,7 +29,11 @@ function createMultiHostStore(): {
     const key = hostId ?? LOCAL_EXECUTION_HOST_ID
     let session = sessions.get(key)
     if (!session) {
-      session = { ...getDefaultWorkspaceSession(), terminalLaunchTokenHashesByPaneKey: {} }
+      session = {
+        ...getDefaultWorkspaceSession(),
+        terminalLaunchTokenHashesByPaneKey: {},
+        terminalLaunchTokenAnchorPtyByPaneKey: {}
+      }
       sessions.set(key, session)
     }
     return session
@@ -54,19 +58,39 @@ function createMultiHostStore(): {
     getProjects: () => [],
     getWorkspaceSession: (hostId?: string | null) => getSession(hostId),
     persistTerminalLaunchTokenHash: (
-      args: { tabId: string; leafId: string; launchTokenHash: string },
+      args: {
+        tabId: string
+        leafId: string
+        launchTokenHash: string
+        anchorPty?: string | null
+      },
       hostId?: string | null
     ) => {
       const session = getSession(hostId)
+      const paneKey = makePaneKey(args.tabId, args.leafId)
       session.terminalLaunchTokenHashesByPaneKey = {
         ...session.terminalLaunchTokenHashesByPaneKey,
-        [makePaneKey(args.tabId, args.leafId)]: args.launchTokenHash
+        [paneKey]: args.launchTokenHash
       }
+      // S10-21c S1: the hash and its pty binding are one write, per partition.
+      if (args.anchorPty) {
+        session.terminalLaunchTokenAnchorPtyByPaneKey = {
+          ...session.terminalLaunchTokenAnchorPtyByPaneKey,
+          [paneKey]: args.anchorPty
+        }
+        return
+      }
+      const { [paneKey]: _unbound, ...restBindings } =
+        session.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
+      session.terminalLaunchTokenAnchorPtyByPaneKey = restBindings
     },
     forgetTerminalLaunchTokenHash: (paneKey: string, hostId?: string | null) => {
       const session = getSession(hostId)
       const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
       session.terminalLaunchTokenHashesByPaneKey = rest
+      const { [paneKey]: _removedBinding, ...restBindings } =
+        session.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
+      session.terminalLaunchTokenAnchorPtyByPaneKey = restBindings
     }
   }
   return { store, sessionSnapshot: (hostId?: string) => getSession(hostId) }
@@ -80,17 +104,27 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
 
     const localHash = createHash('sha256').update('local-token').digest('hex')
     const sshHash = createHash('sha256').update('ssh-token').digest('hex')
+    // [S10-21c S1] The anchor is only honoured while the pty it was minted for stands on the pane,
+    // so both partitions' anchors name THIS pane's live pty. The pty itself is local (connectionId
+    // null) in both cases, which is what makes the partition claim below the only thing selecting
+    // the partition — sharper than the previous no-pty fixture, not weaker.
+    const anchorPty = `${PTY_ID}:findings-incarnation-f5`
+    runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
+      tabId: TAB_ID,
+      leafId: LEAF_ID,
+      incarnationId: 'findings-incarnation-f5',
+      isReattach: true
+    })
     store?.persistTerminalLaunchTokenHash?.(
-      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: localHash },
+      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: localHash, anchorPty },
       undefined
     )
     store?.persistTerminalLaunchTokenHash?.(
-      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: sshHash },
+      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: sshHash, anchorPty },
       SSH_HOST_ID
     )
 
-    // No connected pty at all (e.g. the SSH relay is down) — the caller's own connectionId claim
-    // must select the partition, not a default/absent live-pty inference.
+    // The caller's own connectionId claim must select the partition, not a live-pty inference.
     expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, localHash, null)).toBe(true)
     expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, sshHash, null)).toBe(false)
     expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, sshHash, SSH_CONNECTION_ID)).toBe(true)
@@ -111,7 +145,13 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
     // Generation-1 leftover: anchor on disk; generation-2 pty restored WITHOUT a token or receipt.
     const staleHash = createHash('sha256').update('generation-1-token').digest('hex')
     store?.persistTerminalLaunchTokenHash?.(
-      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: staleHash },
+      {
+        tabId: TAB_ID,
+        leafId: LEAF_ID,
+        launchTokenHash: staleHash,
+        // Generation 1's pty, which is gone — this generation's pty is a different one.
+        anchorPty: `${PTY_ID}:restored-gen-1`
+      },
       undefined
     )
     runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
@@ -125,8 +165,12 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
     )
 
     ;(
-      runtime as unknown as { retirePtyAgentLaunchAuthority(ptyId: string): void }
-    ).retirePtyAgentLaunchAuthority(PTY_ID)
+      runtime as unknown as {
+        retirePtyAgentLaunchAuthority(ptyId: string, reason: 'command_finished' | 'pty_exit'): void
+      }
+    )
+      // [S10-21c S1] The reason names the lever: a real pty exit is what deletes the anchor.
+      .retirePtyAgentLaunchAuthority(PTY_ID, 'pty_exit')
 
     expect(
       sessionSnapshot(undefined).terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]
@@ -193,7 +237,12 @@ describe('S10-10 review findings: F3/F5/F7/F8', () => {
     const genuineToken = 'genuine-restored-token'
     const genuineHash = createHash('sha256').update(genuineToken).digest('hex')
     store?.persistTerminalLaunchTokenHash?.(
-      { tabId: TAB_ID, leafId: LEAF_ID, launchTokenHash: genuineHash },
+      {
+        tabId: TAB_ID,
+        leafId: LEAF_ID,
+        launchTokenHash: genuineHash,
+        anchorPty: `${PTY_ID}:findings-incarnation-3`
+      },
       undefined
     )
 

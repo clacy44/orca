@@ -30,6 +30,14 @@ const LEAF = '11111111-1111-4111-8111-1111111111aa'
 const PANE_A = `${TAB}:${LEAF}`
 const HOST_HASH = 'host-written-hash'
 const ATTACKER_HASH = 'attacker-supplied-hash'
+// [S10-21c S1] The anchor's second half: the `<ptyId>:<incarnationId>` of the pty that received
+// the token. It decides how long the hash is honoured, so it is host-owned on exactly the same
+// terms — a caller that could plant one could re-point a pane's anchor at its own pty.
+const HOST_ANCHOR_PTY = 'pty-host-1:inc-host-1'
+// The disk round-trip below reloads through the workspace-session zod schema, which only admits a
+// real sha256 for the hash map — the in-memory cases above never reload, so they can use a label.
+const HOST_HASH_HEX = 'a'.repeat(64)
+const ATTACKER_ANCHOR_PTY = 'pty-attacker-9:inc-attacker-9'
 
 async function createStore() {
   vi.resetModules()
@@ -50,7 +58,12 @@ describe('S10-21a C12b, D-R125 F1: the launch-token anchor map is host-owned end
   it("a session:set payload carrying a hash for an already-anchored pane leaves the host's value in place — the incoming map is discarded, not merged", async () => {
     const store = await createStore()
     // The host mints its OWN anchor for PANE_A first, exactly as a real launch does.
-    store.persistTerminalLaunchTokenHash({ tabId: TAB, leafId: LEAF, launchTokenHash: HOST_HASH })
+    store.persistTerminalLaunchTokenHash({
+      tabId: TAB,
+      leafId: LEAF,
+      launchTokenHash: HOST_HASH,
+      anchorPty: HOST_ANCHOR_PTY
+    })
     expect(store.getWorkspaceSession().terminalLaunchTokenHashesByPaneKey?.[PANE_A]).toBe(HOST_HASH)
 
     // A session:set write (what the IPC handler forwards from the renderer) carries an
@@ -86,7 +99,7 @@ describe('S10-21a C12b, D-R125 F1: the launch-token anchor map is host-owned end
     const sshHostId = 'ssh:test-host'
     // Seed the SSH partition's own host-written anchor the same way a real launch there does.
     store.persistTerminalLaunchTokenHash(
-      { tabId: TAB, leafId: LEAF, launchTokenHash: HOST_HASH },
+      { tabId: TAB, leafId: LEAF, launchTokenHash: HOST_HASH, anchorPty: HOST_ANCHOR_PTY },
       sshHostId
     )
     expect(store.getWorkspaceSession(sshHostId).terminalLaunchTokenHashesByPaneKey?.[PANE_A]).toBe(
@@ -108,5 +121,67 @@ describe('S10-21a C12b, D-R125 F1: the launch-token anchor map is host-owned end
     expect(store.getWorkspaceSession(sshHostId).terminalLaunchTokenHashesByPaneKey?.[PANE_A]).toBe(
       HOST_HASH
     )
+  })
+
+  it('[S10-21c S1] persist writes the hash and its pty binding in ONE flush, and forget deletes both', async () => {
+    const store = await createStore()
+    store.persistTerminalLaunchTokenHash({
+      tabId: TAB,
+      leafId: LEAF,
+      launchTokenHash: HOST_HASH_HEX,
+      anchorPty: HOST_ANCHOR_PTY
+    })
+    // Read back through a FRESH Store over the same data path: only what the synchronous flush
+    // actually put on disk can be seen here, so a binding written outside that flush would be lost.
+    const reread = await createStore()
+    expect(reread.getWorkspaceSession().terminalLaunchTokenHashesByPaneKey?.[PANE_A]).toBe(
+      HOST_HASH_HEX
+    )
+    expect(reread.getWorkspaceSession().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_A]).toBe(
+      HOST_ANCHOR_PTY
+    )
+
+    store.forgetTerminalLaunchTokenHash(PANE_A)
+    const afterForget = await createStore()
+    expect(
+      afterForget.getWorkspaceSession().terminalLaunchTokenHashesByPaneKey?.[PANE_A]
+    ).toBeUndefined()
+    // A binding that outlived its hash would re-arm the pane the moment any later mint landed
+    // without one — both halves die together or the revocation is incomplete.
+    expect(
+      afterForget.getWorkspaceSession().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_A]
+    ).toBeUndefined()
+  })
+
+  it('[S10-21c S1] a session:set payload carrying a FORGED pty binding is discarded — the host binding stands', async () => {
+    const store = await createStore()
+    store.persistTerminalLaunchTokenHash({
+      tabId: TAB,
+      leafId: LEAF,
+      launchTokenHash: HOST_HASH,
+      anchorPty: HOST_ANCHOR_PTY
+    })
+
+    const current = store.getWorkspaceSession()
+    store.setWorkspaceSession({
+      ...current,
+      terminalLaunchTokenAnchorPtyByPaneKey: {
+        ...current.terminalLaunchTokenAnchorPtyByPaneKey,
+        [PANE_A]: ATTACKER_ANCHOR_PTY
+      }
+    })
+
+    expect(store.getWorkspaceSession().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_A]).toBe(
+      HOST_ANCHOR_PTY
+    )
+    // And a binding for a pane the host never anchored is never adopted from the incoming write.
+    const secondPane = `${TAB}-other:${LEAF}`
+    store.setWorkspaceSession({
+      ...store.getWorkspaceSession(),
+      terminalLaunchTokenAnchorPtyByPaneKey: { [secondPane]: ATTACKER_ANCHOR_PTY }
+    })
+    expect(
+      store.getWorkspaceSession().terminalLaunchTokenAnchorPtyByPaneKey?.[secondPane]
+    ).toBeUndefined()
   })
 })

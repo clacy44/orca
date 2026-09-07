@@ -176,6 +176,12 @@ export const workspaceSessionStateSchema: z.ZodType<WorkspaceSessionState> = z.o
     'terminalLaunchTokenHashesByPaneKey',
     salvagingRecord(z.string(), z.string().regex(/^[0-9a-f]{64}$/))
   ),
+  // [S10-21c S1] Same shape as terminalPtyIncarnationsByPaneKey above, not the hash pattern: this
+  // stores a `<ptyId>:<incarnationId>` identity string, never a digest.
+  terminalLaunchTokenAnchorPtyByPaneKey: salvagedOptional(
+    'terminalLaunchTokenAnchorPtyByPaneKey',
+    salvagingRecord(z.string(), z.string().min(1).max(128))
+  ),
   terminalTopologyRevisionByRepoId: salvagedOptional(
     'terminalTopologyRevisionByRepoId',
     salvagingRecord(z.string(), z.number().int().nonnegative())

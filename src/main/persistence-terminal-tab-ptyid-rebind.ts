@@ -82,6 +82,13 @@ export function migrateTerminalTabId(
     oldTabId,
     newTabId
   )
+  // [S10-21c S1] The anchor's pty binding travels with the hash it belongs to; leaving it behind
+  // would demote a bound entry to the legacy (binding-less) lane on a tab rebind.
+  session.terminalLaunchTokenAnchorPtyByPaneKey = rekeyPaneKeyPrefix(
+    session.terminalLaunchTokenAnchorPtyByPaneKey,
+    oldTabId,
+    newTabId
+  )
   session.terminalSurfaceTombstonesByPaneKey = rekeyPaneKeyPrefix(
     session.terminalSurfaceTombstonesByPaneKey,
     oldTabId,

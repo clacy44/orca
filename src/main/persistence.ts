@@ -2688,6 +2688,16 @@ function deleteScannedSessionFieldsForOwners(
       })
     )
   }
+  // [S10-21c S1] The anchor's binding is pruned with the hash it belongs to — a binding left
+  // behind for a removed tab would outlive the anchor it describes.
+  if (next.terminalLaunchTokenAnchorPtyByPaneKey) {
+    next.terminalLaunchTokenAnchorPtyByPaneKey = Object.fromEntries(
+      Object.entries(next.terminalLaunchTokenAnchorPtyByPaneKey).filter(([paneKey]) => {
+        const separator = paneKey.lastIndexOf(':')
+        return separator < 1 || !removedTabIds.has(paneKey.slice(0, separator))
+      })
+    )
+  }
   if (next.terminalSurfaceTombstonesByPaneKey) {
     next.terminalSurfaceTombstonesByPaneKey = Object.fromEntries(
       Object.entries(next.terminalSurfaceTombstonesByPaneKey).filter(
@@ -6586,6 +6596,10 @@ export class Store {
     // [F1, D-R125] Host-wins: the launch-token anchor is host-written only (persistTerminalLaunchTokenHash/
     // forgetTerminalLaunchTokenHash below) — a renderer/relay-supplied session write must never replace it.
     session.terminalLaunchTokenHashesByPaneKey = prior?.terminalLaunchTokenHashesByPaneKey ?? {}
+    // [S10-21c S1] The anchor's pty binding is half of the same host-owned fact: a caller that
+    // could plant a binding could re-point a pane's anchor at its own pty, so it wins identically.
+    session.terminalLaunchTokenAnchorPtyByPaneKey =
+      prior?.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
     const pruned = pruneWorkspaceSessionBrowserHistory(
       pruneLocalTerminalScrollbackBuffers(session, this.state.repos)
     )
@@ -6612,6 +6626,10 @@ export class Store {
     // [F1, D-R125] Host-wins: the launch-token anchor is host-written only (persistTerminalLaunchTokenHash/
     // forgetTerminalLaunchTokenHash below) — a renderer-supplied session write must never replace it.
     session.terminalLaunchTokenHashesByPaneKey = prior?.terminalLaunchTokenHashesByPaneKey ?? {}
+    // [S10-21c S1] The anchor's pty binding is half of the same host-owned fact: a caller that
+    // could plant a binding could re-point a pane's anchor at its own pty, so it wins identically.
+    session.terminalLaunchTokenAnchorPtyByPaneKey =
+      prior?.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
     // Why (Issue #217): merge existing bindings when the incoming binding is empty, so a stale pre-spawn snapshot can't overwrite the durable PTY binding.
     const normalized = normalizeWorkspaceSessionPaneIdentities(
       session,
@@ -7032,7 +7050,16 @@ export class Store {
   // between mint and any later write — the same SIGKILL race persistPtyBinding closes below
   // (S10-10). Never stores the token itself, only its sha256.
   persistTerminalLaunchTokenHash(
-    args: { tabId: string; leafId: string; launchTokenHash: string },
+    args: {
+      tabId: string
+      leafId: string
+      launchTokenHash: string
+      /** [S10-21c S1] `<ptyId>:<incarnationId>` of the pty that received this token — the anchor's
+       *  whole validity window. Required (never optional) so no writer can leave it off by
+       *  accident; `null` is the explicit "this pty has no identity to bind to" case, which
+       *  DELETES any prior binding rather than letting a stale one adopt the new hash. */
+      anchorPty: string | null
+    },
     hostId?: string | null
   ): void {
     const resolvedHostId = this.resolveHostId(hostId)
@@ -7041,6 +7068,16 @@ export class Store {
     session.terminalLaunchTokenHashesByPaneKey = {
       ...session.terminalLaunchTokenHashesByPaneKey,
       [paneKey]: args.launchTokenHash
+    }
+    if (args.anchorPty) {
+      session.terminalLaunchTokenAnchorPtyByPaneKey = {
+        ...session.terminalLaunchTokenAnchorPtyByPaneKey,
+        [paneKey]: args.anchorPty
+      }
+    } else {
+      const { [paneKey]: _unbound, ...restBindings } =
+        session.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
+      session.terminalLaunchTokenAnchorPtyByPaneKey = restBindings
     }
     if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
       this.state.workspaceSessionsByHostId = {
@@ -7058,6 +7095,11 @@ export class Store {
     const session = this.getWorkspaceSession(resolvedHostId)
     const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
     session.terminalLaunchTokenHashesByPaneKey = rest
+    // [S10-21c S1] Both halves of the anchor die in the same flush — a binding that outlived its
+    // hash would silently re-arm the pane if a later mint landed without one.
+    const { [paneKey]: _removedBinding, ...restBindings } =
+      session.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
+    session.terminalLaunchTokenAnchorPtyByPaneKey = restBindings
     if (resolvedHostId !== LOCAL_EXECUTION_HOST_ID) {
       this.state.workspaceSessionsByHostId = {
         ...this.state.workspaceSessionsByHostId,

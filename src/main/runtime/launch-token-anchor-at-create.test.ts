@@ -50,6 +50,10 @@ const TAB_ID = 'tab-h2c'
 const LEAF_ID = '77777777-7777-4777-8777-777777777777'
 const PANE_KEY = makePaneKey(TAB_ID, LEAF_ID)
 const NEW_PTY_ID = 'pty-h2c-new-1'
+// [S10-21c S1] The identity a seeded "anchor left by an EARLIER create" is bound to. It is
+// deliberately not NEW_PTY_ID's: the H2d forget leg now turns on whether the pane's post-create
+// pty IS the pty the anchor was minted for, so a stale anchor must name the earlier one.
+const PRIOR_CREATE_ANCHOR_PTY = 'pty-h2c-old-1:h2c-old-incarnation'
 
 /** A minimal but faithful stand-in for persistence.ts's PersistenceStore: real read/write
  *  semantics for the members this ticket touches. */
@@ -376,7 +380,8 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
         store!.persistTerminalLaunchTokenHash?.({
           tabId: TAB_ID,
           leafId: LEAF_ID,
-          launchTokenHash: hOld
+          launchTokenHash: hOld,
+          anchorPty: PRIOR_CREATE_ANCHOR_PTY
         })
         expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
 
@@ -449,7 +454,8 @@ describe('H2c (F-6d, Ruling 32 Addendum 7): launch-token anchor at create', () =
     store!.persistTerminalLaunchTokenHash?.({
       tabId: TAB_ID,
       leafId: LEAF_ID,
-      launchTokenHash: hOld
+      launchTokenHash: hOld,
+      anchorPty: PRIOR_CREATE_ANCHOR_PTY
     })
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(hOld)
 

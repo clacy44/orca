@@ -57,7 +57,11 @@ const LEAF_ID = '11111111-1111-4111-8111-111111111111'
 const PANE_KEY = makePaneKey(TAB_ID, LEAF_ID)
 const PTY_ID = 'pty-anchor-1'
 const RESTORED_TERMINAL_HANDLE = 'term_restored-anchor-1'
-const GEN2_INCARNATION_ID = 'anchor-incarnation-gen2'
+// The pane's pty incarnation. It is issued at spawn and OUTLIVES the runtime: a serve restart over
+// a surviving daemon reports the pty's unchanged incarnationId (see the S10-13 case below), which
+// is exactly why S10-21c binds the persisted anchor to `<ptyId>:<incarnationId>`.
+const INCARNATION_ID = 'anchor-incarnation-1'
+const ANCHOR_IDENTITY = `${PTY_ID}:${INCARNATION_ID}`
 
 /** A minimal but faithful stand-in for persistence.ts's PersistenceStore: real read/write
  *  semantics for the two members this ticket touches (persistTerminalLaunchTokenHash /
@@ -69,7 +73,8 @@ function createSharedStore(): {
 } {
   const session: WorkspaceSessionState = {
     ...getDefaultWorkspaceSession(),
-    terminalLaunchTokenHashesByPaneKey: {}
+    terminalLaunchTokenHashesByPaneKey: {},
+    terminalLaunchTokenAnchorPtyByPaneKey: {}
   }
   const store = {
     getRepo: (id: string) => store.getRepos().find((repo) => repo.id === id),
@@ -116,11 +121,24 @@ function createSharedStore(): {
       tabId: string
       leafId: string
       launchTokenHash: string
+      anchorPty?: string | null
     }) => {
+      const paneKey = makePaneKey(args.tabId, args.leafId)
       session.terminalLaunchTokenHashesByPaneKey = {
         ...session.terminalLaunchTokenHashesByPaneKey,
-        [makePaneKey(args.tabId, args.leafId)]: args.launchTokenHash
+        [paneKey]: args.launchTokenHash
       }
+      // S10-21c S1: the hash and the pty identity it is bound to are one write.
+      if (args.anchorPty) {
+        session.terminalLaunchTokenAnchorPtyByPaneKey = {
+          ...session.terminalLaunchTokenAnchorPtyByPaneKey,
+          [paneKey]: args.anchorPty
+        }
+        return
+      }
+      const { [paneKey]: _unbound, ...restBindings } =
+        session.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
+      session.terminalLaunchTokenAnchorPtyByPaneKey = restBindings
     },
     // Why real semantics matter: F1's revoke path and F4's null-relaunch path both call this to
     // clear a stale anchor — faking its storage medium is fine, faking its behavior would defeat
@@ -128,13 +146,16 @@ function createSharedStore(): {
     forgetTerminalLaunchTokenHash: (paneKey: string) => {
       const { [paneKey]: _removed, ...rest } = session.terminalLaunchTokenHashesByPaneKey ?? {}
       session.terminalLaunchTokenHashesByPaneKey = rest
+      const { [paneKey]: _removedBinding, ...restBindings } =
+        session.terminalLaunchTokenAnchorPtyByPaneKey ?? {}
+      session.terminalLaunchTokenAnchorPtyByPaneKey = restBindings
     }
   }
   return { store, sessionSnapshot: () => session }
 }
 
 function fakePtyController(onSpawn: (env: Record<string, string> | undefined) => void): {
-  spawn: (args: { env?: Record<string, string> }) => Promise<{ id: string }>
+  spawn: (args: { env?: Record<string, string> }) => Promise<{ id: string; incarnationId: string }>
   write: () => boolean
   kill: () => boolean
   getForegroundProcess: () => Promise<null>
@@ -142,7 +163,8 @@ function fakePtyController(onSpawn: (env: Record<string, string> | undefined) =>
   return {
     spawn: async (args) => {
       onSpawn(args.env)
-      return { id: PTY_ID }
+      // S10-21c S1: a real spawn always issues an incarnation, and the anchor is bound to it.
+      return { id: PTY_ID, incarnationId: INCARNATION_ID }
     },
     write: () => true,
     kill: () => true,
@@ -181,8 +203,12 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     expect(generation1Token).toBeTruthy()
     const generation1Hash = createHash('sha256').update(generation1Token!).digest('hex')
 
-    // Proves A1: the hash (never the token) reached the shared store from the real launch path.
+    // Proves A1: the hash (never the token) reached the shared store from the real launch path,
+    // bound (S10-21c S1) to the identity of the pty that received the token.
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(generation1Hash)
+    expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBe(
+      ANCHOR_IDENTITY
+    )
     expect(JSON.stringify(sessionSnapshot())).not.toContain(generation1Token!)
 
     // ── Restart: fresh runtime, fresh hook server ─────────────────────────────────────────
@@ -200,7 +226,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime2.registerPty(PTY_ID, WORKTREE_ID, null, {
       tabId: TAB_ID,
       leafId: LEAF_ID,
-      incarnationId: GEN2_INCARNATION_ID,
+      incarnationId: INCARNATION_ID,
       isReattach: true
     })
     runtime2.registerPreAllocatedHandleForPty(PTY_ID, RESTORED_TERMINAL_HANDLE)
@@ -287,7 +313,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     ).toBeNull()
   })
 
-  it('F1: retirePtyAgentLaunchAuthority deletes the persisted anchor, so a revoked pane cannot corroborate its old token after a restart', async () => {
+  it('F1: a real pty exit deletes the persisted anchor, so a retired pane cannot corroborate its old token after a restart', async () => {
     const { store, sessionSnapshot } = createSharedStore()
     const runtime1 = new OrcaRuntimeService(store)
     let capturedEnv: Record<string, string> | undefined
@@ -312,11 +338,16 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     // Regression baseline: before F1, the anchor survived retirement and still verified live.
     expect(runtime1.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(true)
 
-    // The explicit revocation lever: command completion retires this pty's launch authority.
-    runtime1.emitDaemonPtyTransientFact(PTY_ID, { kind: 'command-finished', exitCode: 0 })
+    // SCENARIO_CORRECTION (S10-21c S1, INV-P-014 amendment #1 — UNRATIFIED): the revocation lever
+    // is the PTY's death, not the foreground command's. A `command-finished` fact leaves a
+    // non-peer-owned pane's anchor in place on purpose now (that is the whole item), so this drives
+    // the real exit event instead — the lever S10-10/F1 always meant: authority ends with the
+    // process that received the token.
+    runtime1.onPtyExit(PTY_ID, 0, INCARNATION_ID as never)
 
     // F1: the persisted hash must be gone, not just the live pty.launchToken.
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
+    expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
     expect(runtime1.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
 
     // End-to-end: even after a restart with no live pty, the retired token must never corroborate.
@@ -325,7 +356,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime2.registerPty(PTY_ID, WORKTREE_ID, null, {
       tabId: TAB_ID,
       leafId: LEAF_ID,
-      incarnationId: GEN2_INCARNATION_ID,
+      incarnationId: INCARNATION_ID,
       isReattach: true
     })
     expect(runtime2.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
@@ -342,7 +373,8 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     store?.persistTerminalLaunchTokenHash?.({
       tabId: TAB_ID,
       leafId: LEAF_ID,
-      launchTokenHash: staleHash
+      launchTokenHash: staleHash,
+      anchorPty: ANCHOR_IDENTITY
     })
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(staleHash)
 
@@ -353,7 +385,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     runtime.registerPty(PTY_ID, WORKTREE_ID, null, {
       tabId: TAB_ID,
       leafId: LEAF_ID,
-      incarnationId: GEN2_INCARNATION_ID,
+      incarnationId: INCARNATION_ID,
       agentLaunchAuthority: { launchToken: freshToken, launchAgent: 'claude' }
     })
 
@@ -385,8 +417,24 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
     const generation1Hash = createHash('sha256').update(generation1Token!).digest('hex')
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBe(generation1Hash)
 
+    // SCENARIO_CORRECTION (S10-21c S1): the plain-shell relaunch happens in a LATER generation,
+    // against a pane whose agent process is gone and whose anchor is on disk — the state F4 is
+    // really about (nothing live can contradict the persisted hash). It spawns a NEW pty, which is
+    // what a relaunch does once the previous process is gone, and it is now that pty's IDENTITY,
+    // not the absence of a minted token, that decides the anchor's fate. A create that lands back
+    // on the SAME live pty keeps the anchor deliberately: the token is a pane secret every child of
+    // that pty already inherits (INV-P-014 amendment #1, UNRATIFIED).
+    const runtime2 = new OrcaRuntimeService(store)
+    runtime2.setPtyController({
+      spawn: async () => ({ id: 'pty-anchor-2', incarnationId: 'anchor-incarnation-2' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    } as Parameters<typeof runtime2.setPtyController>[0])
+    runtime2.attachWindow(1)
+    runtime2.syncWindowGraph(1, { tabs: [], leaves: [] })
     // Relaunch the SAME pane as a plain shell — no launchToken this time.
-    await runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+    await runtime2.createTerminal(`path:${WORKTREE_PATH}`, {
       restoreProvenance: { kind: 'none' },
       credentialLane: { kind: 'shared' },
       command: 'bash',
@@ -397,7 +445,8 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
 
     // F4: the previous agent's anchor must not survive a null-token relaunch of the same pane.
     expect(sessionSnapshot().terminalLaunchTokenHashesByPaneKey?.[PANE_KEY]).toBeUndefined()
-    expect(runtime.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
+    expect(sessionSnapshot().terminalLaunchTokenAnchorPtyByPaneKey?.[PANE_KEY]).toBeUndefined()
+    expect(runtime2.verifyLivePaneLaunchTokenHash(PANE_KEY, generation1Hash)).toBe(false)
   })
 
   // ── S10-13 regression: the daemon-survived restart ALWAYS mints a restored receipt ─────────
@@ -461,7 +510,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
         ptyIdsByLeafId: { [LEAF_ID]: PTY_ID }
       }
     } as WorkspaceSessionState['terminalLayoutsByTabId']
-    session.terminalPtyIncarnationsByPaneKey = { [PANE_KEY]: GEN2_INCARNATION_ID }
+    session.terminalPtyIncarnationsByPaneKey = { [PANE_KEY]: INCARNATION_ID }
 
     // ── Restart: fresh runtime + fresh hook server (nothing hydrated from disk) ───────────────
     agentHookServer = new AgentHookServer()
@@ -477,7 +526,7 @@ describe('S10-10 persisted launch-token anchor: restored pane end-to-end', () =>
       listProcesses: async () => [
         {
           id: PTY_ID,
-          incarnationId: GEN2_INCARNATION_ID,
+          incarnationId: INCARNATION_ID,
           cwd: WORKTREE_PATH,
           title: 'anchor-agent',
           worktreeId: WORKTREE_ID,

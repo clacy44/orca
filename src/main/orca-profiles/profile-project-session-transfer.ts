@@ -142,6 +142,14 @@ export function extractSessionForTransfer(
       return separator > 0 && copiedTerminalTabIds.has(paneKey.slice(0, separator))
     })
   )
+  // [S10-21c S1] Carried under the same filter as the hash above: an anchor whose binding did not
+  // come with it would be honoured on the legacy lane instead of against its own pty.
+  transferred.terminalLaunchTokenAnchorPtyByPaneKey = Object.fromEntries(
+    Object.entries(source.terminalLaunchTokenAnchorPtyByPaneKey ?? {}).filter(([paneKey]) => {
+      const separator = paneKey.lastIndexOf(':')
+      return separator > 0 && copiedTerminalTabIds.has(paneKey.slice(0, separator))
+    })
+  )
   transferred.terminalSurfaceTombstonesByPaneKey = Object.fromEntries(
     Object.entries(source.terminalSurfaceTombstonesByPaneKey ?? {}).flatMap(
       ([paneKey, tombstone]) =>

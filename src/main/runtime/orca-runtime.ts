@@ -1262,6 +1262,14 @@ export type CodexRateLimitResetRpcResult = {
     }
 )
 
+/** [S10-21c S1] One anchor write: the hash and the pty identity it is bound to, always together. */
+type LaunchTokenAnchorWrite = {
+  tabId: string
+  leafId: string
+  launchTokenHash: string
+  anchorPty: string | null
+}
+
 type RuntimeStore = {
   getRepos: Store['getRepos']
   getRepo: Store['getRepo']
@@ -3000,7 +3008,16 @@ export class OrcaRuntimeService {
   // the one gap where a pane could hold a live token with no durable anchor until restart.
   private readonly launchTokenAnchorRetryQueue = new Map<
     string,
-    { tabId: string; leafId: string; launchTokenHash: string; hostId?: string | null }
+    {
+      tabId: string
+      leafId: string
+      launchTokenHash: string
+      // [S10-21c S1] Carried through the retry so a drained write anchors the SAME pty identity
+      // the failed write meant to; a retry that dropped it would silently demote the entry to the
+      // legacy (binding-less) lane.
+      anchorPty: string | null
+      hostId?: string | null
+    }
   >()
   private static readonly LAUNCH_TOKEN_ANCHOR_RETRY_CAP = 256
   // S10-17/F2: bound the per-drain retry burst — the rest stay queued for the next success.
@@ -10751,7 +10768,12 @@ export class OrcaRuntimeService {
       }
       try {
         this.store.persistTerminalLaunchTokenHash(
-          { tabId: entry.tabId, leafId: entry.leafId, launchTokenHash: entry.launchTokenHash },
+          {
+            tabId: entry.tabId,
+            leafId: entry.leafId,
+            launchTokenHash: entry.launchTokenHash,
+            anchorPty: entry.anchorPty
+          },
           entry.hostId
         )
         // F3: a frozen store flushes nothing and throws nothing — detect it explicitly.
@@ -10769,7 +10791,7 @@ export class OrcaRuntimeService {
   // later successful drain would resurrect the anchor the forget just deleted.
   private handleFailedLaunchTokenHashAnchor(
     key: string,
-    args: { tabId: string; leafId: string; launchTokenHash: string },
+    args: LaunchTokenAnchorWrite,
     hostId: string | null | undefined,
     logContext: string,
     error: unknown
@@ -10789,12 +10811,32 @@ export class OrcaRuntimeService {
     this.launchTokenAnchorRetryQueue.set(key, { ...args, hostId })
   }
 
+  /** [S10-21c S1] The pane-pty identity an anchor is bound to, in the same `<ptyId>:<incarnationId>`
+   *  form `getTerminalProcessIncarnation` and `agents.process_incarnation` use (so
+   *  `parseProcessIncarnation` reads it). null when the pty carries no incarnation: an
+   *  unidentifiable pty is never turned into a binding — a fabricated one would match the next
+   *  occupant of the same pane slot, which is the exact case the binding exists to refuse. */
+  private ptyAnchorIdentity(
+    pty: Pick<RuntimePtyWorktreeRecord, 'ptyId' | 'incarnationId'> | null | undefined
+  ): string | null {
+    return pty?.incarnationId ? `${pty.ptyId}:${pty.incarnationId}` : null
+  }
+
   // S10-17/F8: never aborts a launch on failure — logs loudly, queues the write for retry.
   private persistLaunchTokenHashAnchorWithRetry(
-    args: { tabId: string; leafId: string; launchTokenHash: string },
+    args: LaunchTokenAnchorWrite,
     hostId: string | null | undefined,
     logContext: string
   ): void {
+    // [S10-21c S1] Loud, never silent: an anchor with no binding is honoured on the legacy lane
+    // (one verify against whatever identified pty is live on the pane, then upgraded), so a mint
+    // that could not name its own pty is worth a line in the journal.
+    if (!args.anchorPty) {
+      console.warn('[runtime] launch-token anchor persisted with no pty identity binding', {
+        paneKey: makePaneKey(args.tabId, args.leafId),
+        logContext
+      })
+    }
     const key = `${makePaneKey(args.tabId, args.leafId)}::${hostId ?? ''}`
     // F7 residual: an absent store/method is not a successful persist — warn loudly instead
     // of silently no-opping (mirrors the drain's identical check, :10218-10221), so this path
@@ -10893,7 +10935,10 @@ export class OrcaRuntimeService {
           leafId: binding.leafId,
           launchTokenHash: createHash('sha256')
             .update(agentLaunchAuthority.launchToken)
-            .digest('hex')
+            .digest('hex'),
+          // [S10-21c S1] Bind the anchor to the pty that just received the token — the guard above
+          // already proved `pty.incarnationId === binding.incarnationId`, so this is that pty.
+          anchorPty: this.ptyAnchorIdentity(pty)
         },
         connectionId ? toSshExecutionHostId(connectionId) : undefined,
         'registerPty'
@@ -11507,7 +11552,7 @@ export class OrcaRuntimeService {
         this.recordTerminalSideEffectFact(ptyId, { kind: 'bell' })
         return
       case 'command-finished':
-        this.retirePtyAgentLaunchAuthority(ptyId)
+        this.retirePtyAgentLaunchAuthority(ptyId, 'command_finished')
         // S10-19 W-2: daemon relay exit hook (site 1/4).
         this.closePeerOwnedPaneOnAgentExit(ptyId, 'command_finished')
         this.recordTerminalSideEffectFact(ptyId, {
@@ -11839,7 +11884,7 @@ export class OrcaRuntimeService {
           this.confirmPtyAgentExit(ptyId)
         },
         onCommandFinished: (exitCode: number | null) => {
-          this.retirePtyAgentLaunchAuthority(ptyId)
+          this.retirePtyAgentLaunchAuthority(ptyId, 'command_finished')
           // S10-19 W-2: main scanner exit hook (site 2/4).
           this.closePeerOwnedPaneOnAgentExit(ptyId, 'command_finished')
           this.recordTerminalSideEffectFact(ptyId, { kind: 'command-finished', exitCode })
@@ -14079,7 +14124,10 @@ export class OrcaRuntimeService {
    * token supersedes the old on-disk anchor), the fallback is never consulted and this refuses —
    * the persisted-hash fallback only applies when there is nothing live to contradict it.
    * `connectionId` (F5) is the caller's own host claim — never inferred from a matched live pty's
-   * `connectionId`, so an SSH pane with no connected pty still resolves its own partition. */
+   * `connectionId`, so an SSH pane with no connected pty still resolves its own partition.
+   * [S10-21c S1] Arm (b) gained one conjunct: the persisted hash is honoured only while a CONNECTED
+   * pty whose `<ptyId>:<incarnationId>` equals the binding recorded at mint still stands on this
+   * pane (INV-P-014 amendment #1, UNRATIFIED). A pane with no live pty can no longer attest at all. */
   verifyLivePaneLaunchTokenHash(
     paneKey: string,
     launchTokenHash: string,
@@ -14099,9 +14147,55 @@ export class OrcaRuntimeService {
       return false
     }
     const hostId = connectionId ? toSshExecutionHostId(connectionId) : LOCAL_EXECUTION_HOST_ID
-    const persistedHash =
-      this.store?.getWorkspaceSession?.(hostId)?.terminalLaunchTokenHashesByPaneKey?.[paneKey]
-    return persistedHash !== undefined && persistedHash === launchTokenHash
+    const session = this.store?.getWorkspaceSession?.(hostId)
+    const persistedHash = session?.terminalLaunchTokenHashesByPaneKey?.[paneKey]
+    if (persistedHash === undefined || persistedHash !== launchTokenHash) {
+      return false
+    }
+    // [S10-21c S1] The anchor now outlives the agent's foreground command, so the hash alone no
+    // longer bounds it: it is honoured only while the pty that received the token at mint is still
+    // the pty standing on this pane. This is a NEW conjunct on top of the hash match, never a
+    // relaxation of one — a pane with no live pty, or one whose pty was replaced, cannot attest
+    // from the persisted anchor at all.
+    const boundIdentity = session?.terminalLaunchTokenAnchorPtyByPaneKey?.[paneKey]
+    const liveIdentities: string[] = []
+    for (const pty of this.ptysById.values()) {
+      if (pty.paneKey !== paneKey || !pty.connected) {
+        continue
+      }
+      const identity = this.ptyAnchorIdentity(pty)
+      if (identity) {
+        liveIdentities.push(identity)
+      }
+    }
+    if (boundIdentity !== undefined) {
+      return liveIdentities.includes(boundIdentity)
+    }
+    // Legacy entry, written before this shipped: it carries no binding. Honour it EXACTLY once —
+    // against the single identified pty live on this pane at this moment — and upgrade it in place
+    // to that pty's identity, so every later verify takes the bound path above. The compatibility
+    // lane is therefore one verify wide, can only ever bind to a pty already live on this exact
+    // pane, and an ambiguous pane (no identified pty, or more than one) is refused, never guessed.
+    if (liveIdentities.length !== 1) {
+      return false
+    }
+    const parsed = parsePaneKey(paneKey)
+    if (!parsed) {
+      return false
+    }
+    this.persistLaunchTokenHashAnchorWithRetry(
+      {
+        tabId: parsed.tabId,
+        leafId: parsed.leafId,
+        launchTokenHash: persistedHash,
+        anchorPty: liveIdentities[0]!
+      },
+      // The same hostId shape every other anchor write uses, so a later forget's retry-queue drop
+      // (keyed `${paneKey}::${hostId ?? ''}`) matches this entry and cannot resurrect it.
+      connectionId ? toSshExecutionHostId(connectionId) : undefined,
+      'verifyLivePaneLaunchTokenHash legacy anchor upgrade'
+    )
+    return true
   }
 
   verifyOrchestrationCompatibilityCaller(
@@ -14387,11 +14481,48 @@ export class OrcaRuntimeService {
     }
   }
 
-  private retirePtyAgentLaunchAuthority(ptyId: string): void {
+  /** [S10-21c S1, INV-P-013] Is this pane a peer-owned attachment? Resolved exactly the way
+   *  `closePeerOwnedPaneOnAgentExit` resolves it — the row is keyed on the terminal HANDLE, and an
+   *  absent DB (or a partial test stub, or an unresolvable handle) reads as "no peer-owned row",
+   *  the same non-destructive default that hook already takes. A DB that throws reads as peer-owned:
+   *  "cannot prove this pane is the operator's own" must never be the branch that keeps authority
+   *  alive. */
+  private isPeerOwnedAttachmentPane(ptyId: string): boolean {
+    const db = this._orchestrationDb
+    if (!db || typeof db.findPeerOwnedAttachmentForHandle !== 'function') {
+      return false
+    }
+    const handle = this.handleByPtyId.get(ptyId)
+    if (!handle) {
+      return false
+    }
+    try {
+      return db.findPeerOwnedAttachmentForHandle(handle) !== undefined
+    } catch (error) {
+      console.warn('[agent-authority] peer-owned attachment lookup failed', {
+        ptyId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return true
+    }
+  }
+
+  /** [S10-21c S1] `reason` decides the anchor's fate, and nothing else's. `pty_exit` (a real pty
+   *  exit, or a pane/tab close that kills it) deletes the persisted anchor; `command_finished` (the
+   *  agent's FOREGROUND command ended while its pty lives on) leaves it, because the anchor's
+   *  lifetime is now the pty's — except for a peer-owned pane, which still loses its authority the
+   *  moment its agent exits (INV-P-013). The in-memory clear and the hook-side authority retire run
+   *  on BOTH reasons, so arm 1 of `verifyLivePaneLaunchTokenHash` correctly finds no live token
+   *  after a foreground exit and falls through to the still-bound persisted anchor. */
+  private retirePtyAgentLaunchAuthority(
+    ptyId: string,
+    reason: 'command_finished' | 'pty_exit'
+  ): void {
     const pty = this.ptysById.get(ptyId)
     if (!pty) {
       return
     }
+    const retiresPersistedAnchor = reason === 'pty_exit' || this.isPeerOwnedAttachmentPane(ptyId)
     const receipt = this.restoredOrchestrationAuthorityByPtyId.get(ptyId)
     const paneKeys = new Set<string>()
     if (pty.paneKey && parsePaneKey(pty.paneKey)) {
@@ -14411,17 +14542,19 @@ export class OrcaRuntimeService {
     // receipt, yet its PERSISTED hash is exactly what keeps the inherited env token
     // corroborating - retiring it here is the whole point of the lever. Guarded like the mint
     // sites: a flush failure on the teardown path logs, never throws (verify MEDIUM).
-    for (const paneKey of paneKeys) {
-      // S10-17/F1: drop any queued retry for this pane too, or a later successful drain
-      // could resurrect the anchor this forget is about to delete.
-      this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${hostId ?? ''}`)
-      try {
-        this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
-      } catch (error) {
-        console.warn('[agent-authority] forgetting launch-token anchor failed', {
-          paneKey,
-          error: error instanceof Error ? error.message : String(error)
-        })
+    if (retiresPersistedAnchor) {
+      for (const paneKey of paneKeys) {
+        // S10-17/F1: drop any queued retry for this pane too, or a later successful drain
+        // could resurrect the anchor this forget is about to delete.
+        this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${hostId ?? ''}`)
+        try {
+          this.store?.forgetTerminalLaunchTokenHash?.(paneKey, hostId)
+        } catch (error) {
+          console.warn('[agent-authority] forgetting launch-token anchor failed', {
+            paneKey,
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
       }
     }
     if (!pty.launchToken && !receipt) {
@@ -15608,7 +15741,7 @@ export class OrcaRuntimeService {
     if (preservesAbnormalSshSurface) {
       this.restoredOrchestrationAuthorityByPtyId.delete(ptyId)
     } else {
-      this.retirePtyAgentLaunchAuthority(ptyId)
+      this.retirePtyAgentLaunchAuthority(ptyId, 'pty_exit')
       // S10-21a C4 (Ruling 34 Addendum 9): D1's exit-observed record — the real pty-exit event,
       // not the command-finished fact (§2.5 cites this call site specifically).
       this.exitedPtyIdsThisGeneration.add(ptyId)
@@ -28717,21 +28850,39 @@ export class OrcaRuntimeService {
               // only judges a MINTED token's delivery and says nothing when none was minted
               // (e.g. an agentSessionEnsure resume-adopt of an attach-only pane). Matches
               // fd0b4833d8's unconditional forget on the 'created'-disposition path.
+              // [S10-21c S1] NARROWED to the same identity predicate the verifier uses: forget iff
+              // the pane's post-create live pty is not the pty the anchor was minted for (or no
+              // binding was recorded). An attach-only adoption of the SAME surviving pty — the
+              // reattach that RECOVERS a daemon-survived pane, where E1 suppresses the mint at
+              // `!adoptedBeforeLaunch` — no longer destroys the anchor it just recovered, while a
+              // plain-shell relaunch still spawns a NEW pty whose identity differs, so S10-17/F4
+              // ("a null-token relaunch must not leave the previous agent's anchor live") is kept
+              // BY IDENTITY rather than by "no token was minted this call".
+              const postCreateIdentity = this.ptyAnchorIdentity(pty)
+              const boundIdentity = this.store?.getWorkspaceSession?.(
+                launchTokenHostId ?? LOCAL_EXECUTION_HOST_ID
+              )?.terminalLaunchTokenAnchorPtyByPaneKey?.[paneKey]
+              const anchorSurvivesThisCreate =
+                postCreateIdentity !== null &&
+                boundIdentity !== undefined &&
+                boundIdentity === postCreateIdentity
               pty.launchToken = null
               pty.launchIncarnationId = null
               pty.launchAgent = launchOpts.launchAgent ?? null
-              // S10-17/F1: drop any queued retry for this pane too, or a later successful
-              // drain could resurrect the anchor this forget is about to delete.
-              this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${launchTokenHostId ?? ''}`)
-              try {
-                // F4: a null-token relaunch (plain shell) must not leave the previous agent's
-                // anchor live for this pane — it would still verify against a stale token.
-                this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
-              } catch (error) {
-                console.warn(
-                  '[runtime] createTerminal: failed to update launch-token-hash anchor',
-                  error
-                )
+              if (!anchorSurvivesThisCreate) {
+                // S10-17/F1: drop any queued retry for this pane too, or a later successful
+                // drain could resurrect the anchor this forget is about to delete.
+                this.launchTokenAnchorRetryQueue.delete(`${paneKey}::${launchTokenHostId ?? ''}`)
+                try {
+                  // F4: a null-token relaunch (plain shell) must not leave the previous agent's
+                  // anchor live for this pane — it would still verify against a stale token.
+                  this.store?.forgetTerminalLaunchTokenHash?.(paneKey, launchTokenHostId)
+                } catch (error) {
+                  console.warn(
+                    '[runtime] createTerminal: failed to update launch-token-hash anchor',
+                    error
+                  )
+                }
               }
             } else if (deliveredToThisPane) {
               pty.launchToken = launchToken
@@ -28746,7 +28897,10 @@ export class OrcaRuntimeService {
                 {
                   tabId,
                   leafId,
-                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex')
+                  launchTokenHash: createHash('sha256').update(launchToken).digest('hex'),
+                  // [S10-21c S1] The anchor is valid only while THIS pty stands on the pane — the
+                  // same identity `pty.launchIncarnationId` is stamped from one line above.
+                  anchorPty: this.ptyAnchorIdentity(pty)
                 },
                 launchTokenHostId,
                 'createTerminal'

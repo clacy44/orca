@@ -104,6 +104,14 @@ export type WorkspaceSessionState = {
    *  token itself — a daemon-survived pty has no live token, only its process env does, so this
    *  anchor is what lets a restored pane corroborate against the genuine hook activity later. */
   terminalLaunchTokenHashesByPaneKey?: Record<string, string>
+  /** [S10-21c S1, INV-P-014 amendment #1 — UNRATIFIED] The `<ptyId>:<incarnationId>` identity of
+   *  the pty that received the token whose sha256 sits in `terminalLaunchTokenHashesByPaneKey` for
+   *  this pane. The anchor's lifetime is that pty's, not the agent's foreground command's: it is
+   *  honoured only while that exact pty still stands on the pane, so a later occupant of the same
+   *  pane slot can never present it. Same string form as `agents.process_incarnation`
+   *  (`parseProcessIncarnation` reads it). Entries written before this shipped carry no binding —
+   *  honoured once against whatever identified pty is live on that pane, then upgraded in place. */
+  terminalLaunchTokenAnchorPtyByPaneKey?: Record<string, string>
   /** Monotonic host authority watermark for terminal membership in each repo. */
   terminalTopologyRevisionByRepoId?: Record<string, number>
   /** Legacy per-surface fences migrated into terminalTopologyRevisionByRepoId on load. */
