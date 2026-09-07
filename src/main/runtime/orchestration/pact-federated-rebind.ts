@@ -27,7 +27,6 @@ import { recordPactAppliedId } from './pact-federated-inbound-dedupe'
 import type { InboundPactWake } from './pact-federated-inbound-wake'
 import type { ThreadRow } from './thread-directory-types'
 import { enqueueFederatedPactVerb, type FederatedPactEmitRuntime } from './pact-federated-emit'
-import { enqueueRelayForAppliedVerb } from './pact-federated-relay-only'
 
 export type RebindPartyApplyResult = {
   accepted: true
@@ -216,90 +215,22 @@ function drainGapNotice(
   return 1
 }
 
-// D-R139 N1: RELAY-ONLY — `emitFederatedPactSideEffect`'s `LinkBindingCapError` branch now
-// lands the pause/resume LOCALLY (state + ledger row with the REAL reason_code + audit, one
-// transaction) before ever reaching this drain, so re-invoking the whole side effect here would
-// write a SECOND ledger row for the same transition. Instead: read the latest host ledger row
-// this token's local fallback wrote (kind/reason_code/actor), then enqueue ONLY the relay
-// (message + outbox) for that already-applied verb via `enqueueRelayForAppliedVerb` — the
-// reason is never lost and no second ledger row is ever written.
-function drainPausedOrResumed(
-  db: Database.Database,
-  runtime: FederatedPactEmitRuntime | null,
-  threadId: string,
-  token: 'pause' | 'resume'
-): number {
-  // D-R140 NF-2(b): derive the verb to relay from the pact's CURRENT paused state, never from
-  // the stale token — a cap error on pause sets the token to 'pause'; if the pact is then
-  // locally resumed (through the normal, non-cap-error path) before this drain next runs, the
-  // base kept relaying the now-superseded 'pause' token, leaving the two hosts disagreeing about
-  // who is paused. `emitFederatedPactSideEffect` also clears the token on a normal successful
-  // enqueue (pact-federated-pause-resume-emit.ts) — this is defense in depth, not the only fix.
-  const threadRow = db.prepare(`SELECT pact_paused_at FROM threads WHERE id = ?`).get(threadId) as
-    | { pact_paused_at: string | null }
-    | undefined
-  const verb: 'pause' | 'resume' = threadRow?.pact_paused_at != null ? 'pause' : 'resume'
-
-  const latest = db
-    .prepare(
-      `SELECT reason_code, actor_agent_id, actor_pane_key, actor_host_id, turn_after_agent_id
-         FROM pact_steps WHERE thread_id = ? AND kind = ? AND actor_is_remote = 0
-         ORDER BY seq DESC LIMIT 1`
-    )
-    .get(threadId, verb) as
-    | {
-        reason_code: string | null
-        actor_agent_id: string | null
-        actor_pane_key: string | null
-        actor_host_id: string | null
-        turn_after_agent_id: string | null
-      }
-    | undefined
-
-  db.exec('BEGIN IMMEDIATE')
-  let result: ReturnType<typeof enqueueRelayForAppliedVerb>
-  try {
-    result = enqueueRelayForAppliedVerb(db, threadId, verb, {
-      actorAgentId: latest?.actor_agent_id ?? null,
-      actorPaneKey: latest?.actor_pane_key ?? null,
-      actorHostId: latest?.actor_host_id ?? null,
-      runId: 'host',
-      reasonCode: latest?.reason_code ?? null,
-      turnAfterAgentId: latest?.turn_after_agent_id ?? null
-    })
-    // D-R140 NF-1: ROLLBACK unless the relay actually enqueued — a still-saturated cap (or a
-    // never-expected `refused`) must commit NOTHING; the token is already set (by the prior
-    // local fallback, or re-set by the relay-only helper's own headroom check), so rolling this
-    // transaction back loses nothing. Token clear rides the SAME transaction as a successful
-    // enqueue — no crash window between "relayed" and "no longer pending".
-    if (result.outcome === 'enqueued') {
-      db.prepare(
-        `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = ?`
-      ).run(threadId, token)
-      db.exec('COMMIT')
-    } else {
-      db.exec('ROLLBACK')
-    }
-  } catch (err) {
-    db.exec('ROLLBACK')
-    throw err
-  }
-  if (result.outcome !== 'enqueued') {
-    return 0
-  }
-  runtime?.replyOutbox?.kick(result.thread.pact_peer_link_device_id as string)
-  return 1
-}
+// S10-21b B21 (D-D3-A/B redesign — 21b-E8 REVOKED): the relay-owed pause/resume mechanism
+// (`drainPausedOrResumed` / `enqueueRelayForAppliedVerb` / the pause/resume `pact_relay_pending`
+// tokens) is DELETED — pause/resume now relay in the SAME transaction that applies them
+// (`enqueueFederatedPactVerb`'s cap exemption, reply-outbox-store.ts), so no drain-owed relay
+// for them can ever be minted again. See `drainLegacyPauseOrResumeToken` below for the
+// clear-only arm that retires any token a pre-B21 build may have left behind (v42 is unshipped,
+// so none exists at this tip; the arm is defensive, not lossy-repair).
 
 // Per-token relay_kind this drain's own double-emit guard checks against — S10-21b B17
 // (D-R138 A-F7/B-F11): the base guard was a single `NOT EXISTS (... relay_kind = 'pact_gap_notice')`
 // shared by EVERY token, so a queued gap_notice blocked the rebind drain (and vice versa) for as
 // long as the unrelated relay stayed unsettled. Each token now checks only its OWN relay_kind.
+// B21: 'pause'/'resume' entries removed — those tokens are legacy-cleared, never relay-blocked.
 const RELAY_PENDING_TOKEN_RELAY_KIND: Record<string, string> = {
   gap_notice: 'pact_gap_notice',
-  rebind: 'pact_rebind_party',
-  pause: 'pact_pause',
-  resume: 'pact_resume'
+  rebind: 'pact_rebind_party'
 }
 
 // §1.4's Local side / §2.11 — drains every thread flagged `pact_relay_pending = 'rebind'` (the
@@ -354,7 +285,20 @@ export function drainPendingRebindParty(
         continue
       }
       if (row.pact_relay_pending === 'pause' || row.pact_relay_pending === 'resume') {
-        drained += drainPausedOrResumed(db, runtime, row.id, row.pact_relay_pending)
+        // B21 legacy-clear arm (item 4): mints nothing, contributes nothing to `drained` — a
+        // pre-B21 build could leave a 'pause'/'resume' token; NULL it (guarded on its own
+        // value so a concurrent write cannot clobber a freshly re-set token) and audit the
+        // clear so the retirement is never silent.
+        db.prepare(
+          `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = ?`
+        ).run(row.id, row.pact_relay_pending)
+        auditPact(db, {
+          agentId: null,
+          actorPaneKey: null,
+          actorHostId: null,
+          verb: 'pact_relay_pending_legacy_cleared',
+          outcome: 'cleared'
+        })
         continue
       }
       const localPartyId = [row.pact_proposer_agent_id, row.pact_with_agent_id].find(

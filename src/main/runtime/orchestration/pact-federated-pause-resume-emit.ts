@@ -18,16 +18,18 @@
 // S10-21b B17 (D-R137 D-R138 F5, item 10/16): the base implementation caught ANY error from the
 // emit primitive into a bare local-only fallback (three separate auto-commits, violating
 // INV-PACT-SINGLE-WRITER) and returned bare (no fallback at all) on a gate `refused` outcome,
-// leaving the pause NOT applied and no audit row. Reachable without a crash: pause/resume had no
-// `pact_relay_pending` token, so a `LinkBindingCapError` from a saturated link's reserved
-// headroom degraded EVERY containment pause on that link to local-only with no retry path, and a
-// transient SQLITE_BUSY did the same. Fix: check the two real preconditions (anchors present, a
-// live binding) BEFORE calling the primitive and fall back ONLY on those (one BEGIN IMMEDIATE
-// for all three writes); a `refused` outcome now goes through the same fallback instead of a
-// bare return; the catch narrows to `LinkBindingCapError` (errata 21b-E8: `pact_relay_pending`
-// gains 'pause'/'resume' tokens — nothing is written locally when this fires, since the whole
-// `enqueueFederatedPactVerb` transaction rolled back with it; the pump drain re-attempts this
-// SAME function in full on the next tick, host-actor/generic-reason, once headroom frees).
+// leaving the pause NOT applied and no audit row. Fix: check the two real preconditions (anchors
+// present, a live binding) BEFORE calling the primitive and fall back ONLY on those (one BEGIN
+// IMMEDIATE for all three writes); a `refused` outcome now goes through the same fallback
+// instead of a bare return.
+//
+// S10-21b B21 (D-D3 redesign — 21b-E8 REVOKED, one minter): pause/resume no longer have a
+// `pact_relay_pending` token or a drain — the coalescer bounds a pact to <= 1 queued
+// pause/resume row, so `enqueueReplyOutbox`'s cap admission is EXEMPT for them
+// (reply-outbox-store.ts) and `LinkBindingCapError` is unreachable-by-construction on this
+// path. The `catch (LinkBindingCapError)` branch below stays as a fail-safe carve-out only —
+// applied locally, nothing owed, nothing relayed — for a defect that would have to reintroduce
+// the cap on this insert to ever fire; its audit row is the durable trace if it ever does.
 import type Database from '../../sqlite/sync-database'
 import {
   applyPactPauseResumeState,
@@ -91,10 +93,9 @@ export function emitFederatedPactSideEffect(
     : null
   const preconditionsOk = anchorsPresent && binding !== null
 
-  // D-R139 N1: `pendingToken`, when given, is written in the SAME transaction as the state +
-  // ledger + audit row — a cap error must land the pact locally with its REAL reason intact
-  // AND mark it for relay, never one without the other.
-  const localFallback = (auditDetail: string, pendingToken?: 'pause' | 'resume'): void => {
+  // S10-21b B21: no `pendingToken` — applied locally, nothing owed, nothing relayed (one
+  // minter; the fallback never marks anything for a later drain to send).
+  const localFallback = (auditDetail: string): void => {
     db.exec('BEGIN IMMEDIATE')
     try {
       applyPactPauseResumeState(db, thread.id, pausedAt, pauseReason)
@@ -118,12 +119,6 @@ export function emitFederatedPactSideEffect(
         outcome: 'local_only',
         reasonCode: auditDetail
       })
-      if (pendingToken) {
-        db.prepare(`UPDATE threads SET pact_relay_pending = ? WHERE id = ?`).run(
-          pendingToken,
-          thread.id
-        )
-      }
       db.exec('COMMIT')
     } catch (err) {
       db.exec('ROLLBACK')
@@ -151,22 +146,14 @@ export function emitFederatedPactSideEffect(
       localFallback('gate_refused')
       return
     }
-    // D-R140 NF-2(a): clear a stale `pact_relay_pending` token here — a prior cap error on the
-    // OPPOSITE verb (e.g. pause) left the token set; this call's own successful enqueue already
-    // carries the pact's CURRENT absolute state (coalesced cross-kind, 21b-E7a), so any leftover
-    // token from before is superseded and must not survive to relay stale state on a later tick.
-    db.prepare(
-      `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending IN ('pause', 'resume')`
-    ).run(thread.id)
   } catch (err) {
     if (err instanceof LinkBindingCapError) {
-      // D-R139 N1: the whole `enqueueFederatedPactVerb` transaction rolled back with this
-      // throw — nothing was applied. The base fix here only set the token and returned,
-      // deferring containment entirely (no local pause at all) until a drain that then
-      // re-invoked this whole function with the actor/reason LOST to the rollback. Now: land
-      // the pause LOCALLY, with the REAL reason and actor, in one transaction — AND mark it
-      // pending so the drain relays the ALREADY-APPLIED verb (never a second local write).
-      localFallback('relay_cap', verb)
+      // S10-21b B21: unreachable-by-construction — the coalescer-bounded cap exemption
+      // (reply-outbox-store.ts) means this insert can no longer throw `LinkBindingCapError`
+      // for pause/resume. Retained as a fail-safe carve-out only: land the pause/resume
+      // LOCALLY, with the REAL reason and actor, in one transaction — nothing owed, nothing
+      // relayed. Its audit row is the durable trace if this ever fires.
+      localFallback('relay_cap')
       return
     }
     // Every other error (a genuine DB fault, a coding error) propagates — it must never be

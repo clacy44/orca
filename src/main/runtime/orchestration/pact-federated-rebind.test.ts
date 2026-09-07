@@ -468,3 +468,149 @@ describe('drainPendingRebindParty — gap_notice (B9c)', () => {
     expect(outboxCount.n).toBe(1)
   })
 })
+
+// S10-21b B21 (D-D3-A item 7, T5) — the legacy clear arm (item 4): a 'pause'/'resume' token is
+// no longer a mint instruction for this drain (21b-E8 REVOKED, the relay-owed drain and its
+// relay-only minter are deleted) — it is NULLed and audited, minting nothing.
+describe('drainPendingRebindParty — legacy pause/resume token (S10-21b B21)', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function freshDb(): OrchestrationDb {
+    db = new OrchestrationDb(':memory:')
+    return db
+  }
+
+  function seedFederatedThread(
+    d: OrchestrationDb,
+    token: 'pause' | 'resume'
+  ): { threadId: string; raw: Database.Database } {
+    const raw = rawDb(d)
+    const params: UpsertAgentByPaneSuffixParams = {
+      displayName: 'legacy-holder',
+      role: null,
+      hostId: 'local',
+      paneKey: 'tab:legacy-holder',
+      terminalHandle: 'term_legacy_holder',
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_legacy_holder',
+      originHostId: 'local'
+    }
+    const result = d.upsertAgentByPaneSuffix(params)
+    if (result.outcome === 'name_taken') {
+      throw new Error('seedAgent: name taken')
+    }
+    const successorId = result.agent.id
+    d.upsertRemoteAgent({
+      environmentId: 'env_legacy_drain',
+      environmentName: 'env_legacy_drain',
+      linkKind: 'environment',
+      remoteAgentId: 'peer_legacy',
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw, {
+      linkDeviceId: 'env_legacy_drain',
+      environmentId: 'env_legacy_drain',
+      boundEndpointId: 'endpoint_legacy',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp_legacy',
+      peerCredentialFp: 'pcfp_legacy',
+      peerKeyFingerprint: 'pkfp_legacy',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({
+      linkDeviceId: 'env_legacy_drain',
+      remoteAgentId: 'peer_legacy'
+    })
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: successorId,
+      participants: [
+        { participantKey: successorId, agentId: successorId },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({
+      callerAgentId: successorId,
+      callerPaneKey: null,
+      callerHostId: 'local',
+      threadId: thread.id,
+      peerAgentId: peerKey,
+      stepsTotal: null
+    })
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
+    // Simulates a token a pre-B21 build left behind — v42 is unshipped, so this never happens
+    // in practice; the arm is defensive, not lossy-repair.
+    raw
+      .prepare(
+        `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_relay_pending = ? WHERE id = ?`
+      )
+      .run(successorId, token, thread.id)
+    return { threadId: thread.id, raw }
+  }
+
+  it.each(['pause', 'resume'] as const)(
+    'T5 (%s): a legacy token is cleared and audited, minting nothing (RED at base: relays)',
+    (token) => {
+      const d = freshDb()
+      const { threadId, raw } = seedFederatedThread(d, token)
+      const before = raw
+        .prepare('SELECT pact_local_seq FROM threads WHERE id = ?')
+        .get(threadId) as { pact_local_seq: number }
+
+      const drained = drainPendingRebindParty(raw, null)
+      expect(drained).toBe(0)
+
+      const row = raw
+        .prepare('SELECT pact_relay_pending, pact_local_seq FROM threads WHERE id = ?')
+        .get(threadId) as { pact_relay_pending: string | null; pact_local_seq: number }
+      expect(row.pact_relay_pending).toBeNull()
+      expect(row.pact_local_seq).toBe(before.pact_local_seq)
+
+      const messageCount = raw
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages
+             WHERE thread_id = ? AND payload_kind IN ('pact_pause', 'pact_resume')`
+        )
+        .get(threadId) as { n: number }
+      expect(messageCount.n).toBe(0)
+
+      const outboxCount = raw
+        .prepare(
+          `SELECT COUNT(*) AS n FROM peer_reply_outbox
+             WHERE local_thread_id = ? AND relay_kind IN ('pact_pause', 'pact_resume')`
+        )
+        .get(threadId) as { n: number }
+      expect(outboxCount.n).toBe(0)
+
+      const auditRow = raw
+        .prepare(
+          `SELECT outcome FROM agent_audit WHERE verb = 'pact_relay_pending_legacy_cleared'
+             ORDER BY seq DESC LIMIT 1`
+        )
+        .get() as { outcome: string } | undefined
+      expect(auditRow?.outcome).toBe('cleared')
+    }
+  )
+})

@@ -85,18 +85,25 @@ export type EnqueueReplyOutboxParams = {
   pactEra?: number
   pactTurnAfter?: string
   relayKind?: RelayKind
+  // S10-21b B21 (D-D3-A item 1 + SYNTHESIS S1): set ONLY by
+  // enqueueReplyOutboxCoalescedAcrossKinds for a pact_pause/pact_resume insert — bounded to
+  // <= 1 queued row per pact by the coalescer (coalesce.ts) + 1 'sending' row per link
+  // (reply-outbox-lifecycle.ts), strictly under §2.11's reserve headroom. Nothing else sets it.
+  capExempt?: boolean
 }
 
 // R16 / R14.5: refuses `link_binding_conflict` past the per-link cap, never evicts.
 // S10-21b B4 (design §2.11): a `reserved` item (release/rebind_party/resync/resync_request/
 // gap_notice/§2.7 side-effect verbs) is admitted up to REPLY_OUTBOX_PER_LINK_CAP +
 // PACT_RESERVED_HEADROOM rather than the ordinary per-link cap.
+// S10-21b B21: `capExempt` skips the cap entirely for the bounded pact_pause/pact_resume
+// insert (D-D3-A item 1) — the cap becomes structurally unreachable for that row, not widened.
 export function enqueueReplyOutbox(db: Database.Database, p: EnqueueReplyOutboxParams): string {
   const pending = countPendingReplyOutbox(db, p.linkDeviceId)
   const cap = p.reserved
     ? REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
     : REPLY_OUTBOX_PER_LINK_CAP
-  if (pending >= cap) {
+  if (!p.capExempt && pending >= cap) {
     throw new LinkBindingCapError('peer_reply_outbox')
   }
   const id = randomUUID()
@@ -190,11 +197,15 @@ export function listReplyOutbox(db: Database.Database, linkDeviceId?: string): R
 // repair's CHECK-rejection fallback (db.ts) can settle a row while leaving `state = 'queued'`
 // (a pre-review build's CHECK rejects the 'abandoned' write), and without this clause that zombie
 // counts against the per-link cap forever.
+// S10-21b B21 (SYNTHESIS S1): pact_pause/pact_resume rows are excluded from every OTHER row's
+// cap count — they are already bounded per pact by the coalescer (<= 1 queued + 1 sending per
+// pact), so counting them here would let them eat into §2.11's reserve headroom for other kinds.
 export function countPendingReplyOutbox(db: Database.Database, linkDeviceId: string): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM peer_reply_outbox
-        WHERE link_device_id = ? AND state IN ('queued', 'sending') AND settled_at IS NULL`
+        WHERE link_device_id = ? AND state IN ('queued', 'sending') AND settled_at IS NULL
+          AND relay_kind NOT IN ('pact_pause', 'pact_resume')`
     )
     .get(linkDeviceId) as { n: number }
   return row.n

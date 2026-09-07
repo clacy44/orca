@@ -56,13 +56,14 @@ function noopReceipt(messageId: string, threadId: string): ApplyInboundPactVerbR
   return { accepted: true, messageId, threadId, wake: { kind: 'none' } }
 }
 
-// D-R140 NF-3 (21b-E12): a `resume_noop` that lands on the pact's next expected seq still
-// consumed a delivered wire seq — advance `pact_peer_seq` to it and record the applied id (the
-// same dedupe-scoped write the NO_LEDGER_VERBS branch of `applyLedgerOrNoLedgerVerb` uses), one
-// transaction, then return the ordinary noop receipt. No message row, no `pact_steps` ledger
-// row — this verb had no state effect (the peer was never recorded as paused here), only a
-// fence advance.
-function applyResumeNoopWithFenceAdvance(
+// D-R140 NF-3 (21b-E12), extended by S10-21b B21 (D-R141 NEW-4, D-D3-A item 5) to `pause_noop`:
+// a redundant relayed pause/resume that lands on the pact's next expected seq still consumed a
+// delivered wire seq — advance `pact_peer_seq` to it, record the applied id (the same
+// dedupe-scoped write the NO_LEDGER_VERBS branch of `applyLedgerOrNoLedgerVerb` uses), and audit
+// the consumed seq (closes D-R141 NEW-4 for BOTH noops — every other applied verb already
+// audits), all in one transaction, then return the ordinary noop receipt. No message row, no
+// `pact_steps` ledger row — the verb had no state effect here, only a fence advance.
+function applyNoopWithFenceAdvance(
   db: Database.Database,
   thread: ThreadRow,
   args: ApplyInboundPactVerbArgs
@@ -74,6 +75,13 @@ function applyResumeNoopWithFenceAdvance(
          pact_repair_attempts = 0 WHERE id = ?`
     ).run(args.pact.seq, thread.id)
     recordPactAppliedId(db, thread.id, args.messageId, args.pact.verb)
+    auditPact(db, {
+      agentId: null,
+      actorPaneKey: null,
+      actorHostId: args.pairedDeviceId,
+      verb: `pact_${args.pact.verb}`,
+      outcome: 'applied'
+    })
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
@@ -132,17 +140,21 @@ export function applyInboundPactVerb(
   // Gate 14 — the strict fence (§2.5, Ruling 34 Addendum 6(2)).
   const fence = resolvePactFenceOutcome(resolution.thread, args.pact.seq)
 
-  // D-R140 NF-3 (21b-E12): the `resume_noop` check moves to AFTER gate 14. The base short-
-  // circuited on `resume_noop` BEFORE the fence ever ran, so an inbound resume that coalesced
-  // with a pause this receiver never saw (cross-kind seq reuse reuses the replaced row's seq,
-  // 21b-E7a) consumed a delivered wire seq that the noop receipt never recorded — the receiver's
-  // fence never advanced, and the sender's next verb desynced. When the fence says this seq IS
-  // the pact's next expected one, the noop is an APPLIED verb with no state effect: advance
-  // `pact_peer_seq`, record the applied id, in the one transaction, then return the noop
-  // receipt. A gap/desync fence outcome is a genuine repair case regardless of `resume_noop` —
-  // it falls through to the ordinary gap/desync handling below, unchanged.
-  if (matrixResult.outcome === 'resume_noop' && fence.kind === 'apply') {
-    return applyResumeNoopWithFenceAdvance(db, resolution.thread, args)
+  // D-R140 NF-3 (21b-E12), extended by S10-21b B21 to `pause_noop` (D-D3-A item 5): the noop
+  // check moves to AFTER gate 14. The base short-circuited BEFORE the fence ever ran, so an
+  // inbound resume/pause that coalesced with a verb this receiver never saw (cross-kind seq
+  // reuse reuses the replaced row's seq, 21b-E7a) consumed a delivered wire seq that the noop
+  // receipt never recorded — the receiver's fence never advanced, and the sender's next verb
+  // desynced. When the fence says this seq IS the pact's next expected one, the noop is an
+  // APPLIED verb with no state effect: advance `pact_peer_seq`, record the applied id and audit
+  // it, in one transaction, then return the noop receipt. A gap/desync fence outcome is a
+  // genuine repair case regardless of the noop — it falls through to the ordinary gap/desync
+  // handling below, unchanged.
+  if (
+    (matrixResult.outcome === 'resume_noop' || matrixResult.outcome === 'pause_noop') &&
+    fence.kind === 'apply'
+  ) {
+    return applyNoopWithFenceAdvance(db, resolution.thread, args)
   }
   if (fence.kind === 'gap') {
     // The RECEIVER mints a nonce (fresh-nonce gated, NA6) and queues one coalesced
@@ -214,9 +226,12 @@ function applyLedgerOrNoLedgerVerb(
     let ordinal = thread.pact_ordinal
     if (pact.verb === 'accept') {
       turnAfterAgentId = thread.pact_proposer_agent_id
+      // S10-21b B21 (21b-E13 H3, SYNTHESIS S2): a peer that accepts has provably resumed —
+      // its own `requirePaused` (pact-shared.ts) forbids accepting while paused — so this
+      // applied accept supersedes (clears) any pause we had recorded for them.
       db.prepare(
         `UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ?, pact_at = datetime('now'),
-           pact_flight_token = pact_flight_token + 1
+           pact_flight_token = pact_flight_token + 1, pact_peer_paused_at = NULL
          WHERE id = ?`
       ).run(turnAfterAgentId, thread.id)
     } else if (pact.verb === 'decline' || pact.verb === 'release') {
@@ -254,8 +269,12 @@ function applyLedgerOrNoLedgerVerb(
           `Refused: ${thread.id} has no resolvable local counterpart for the turn.`
         )
       }
+      // S10-21b B21 (21b-E13 H3, SYNTHESIS S2): same supersession as `accept` above — an
+      // applied inbound `step` is proof the peer resumed (its own `requirePaused` forbids
+      // stepping while paused), so it clears the stale `pact_peer_paused_at` flag too.
       db.prepare(
-        `UPDATE threads SET pact_ordinal = ?, pact_turn_agent_id = ?, pact_flight_token = pact_flight_token + 1
+        `UPDATE threads SET pact_ordinal = ?, pact_turn_agent_id = ?, pact_flight_token = pact_flight_token + 1,
+           pact_peer_paused_at = NULL
          WHERE id = ?`
       ).run(ordinal, turnAfterAgentId, thread.id)
     } // gap_notice: no state effect beyond the fence advance + the pact_applied_ids write.

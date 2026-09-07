@@ -17,7 +17,6 @@ import {
   PACT_RESERVED_HEADROOM
 } from './link-binding-constants'
 import { pausePact } from './pact-lifecycle'
-import { drainPendingRebindParty } from './pact-federated-rebind'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 
 function rawDb(db: OrchestrationDb): Database.Database {
@@ -302,24 +301,23 @@ describe('S10-21b B14 containment', () => {
   })
 
   // -----------------------------------------------------------------------------------------
-  // S10-21b B17 (D-R137 F10, D-R138 F5) / D-R139 N1 SCENARIO_CORRECTION — a cap error on pause
-  // now lands LOCALLY (state + one ledger row with the REAL reason_code + audit, one
-  // transaction) AND sets `pact_relay_pending=pause`; the base F10 asserted the OLD, defective
-  // shape (nothing written at all — containment silently deferred). D-R139 N1: "on
-  // LinkBindingCapError run localFallback('relay_cap') (state + ledger row with the REAL
-  // reasonCode + audit, one BEGIN IMMEDIATE) AND set pact_relay_pending = verb... after the
-  // drain: one outbox row, still one ledger row, reason intact, pact restart-resumable when the
-  // reason is counterpart_gone." The NEXT pump drain tick, once headroom frees, relays the
-  // ALREADY-APPLIED verb (relay-only — never a second ledger row).
+  // S10-21b B21 (D-D3-A item 7, T1) SCENARIO_CORRECTION of F10 — the cap can no longer refuse
+  // a pause/resume at all: `enqueueReplyOutboxCoalescedAcrossKinds` sets `capExempt: true` for
+  // the pact_pause/pact_resume insert (reply-outbox-store.ts, bounded by the coalescer to <= 1
+  // queued row per pact), so the base F10's premise (a `LinkBindingCapError` on pause, landing
+  // locally with a `pact_relay_pending` token for a later drain to relay) no longer arises —
+  // the relay-owed drain itself is deleted (21b-E8 REVOKED). The corrected scenario: pause
+  // relays IMMEDIATELY, in the same transaction that applies it, even with the link's ordinary
+  // headroom fully saturated by unrelated rows.
   // -----------------------------------------------------------------------------------------
-  it('F10: a cap error on pause lands locally with the real reason immediately; the next drain tick relays it (RED at base: nothing written)', () => {
+  it('T1 (F10 SCENARIO_CORRECTION): a saturated link still relays pause immediately — no token, no drain (RED at base: pact_relay_pending=pause, outbox []))', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')
     const { threadId } = engagedFederatedPact(d, a, 'r10f10', 'peer10f10')
 
     // Fill the reserved-headroom cap for this link with unrelated queued outbox rows, exactly
-    // as T20 (pact-federated-emit.test.ts) does, so the pause's own enqueue hits
-    // LinkBindingCapError.
+    // as T20 (pact-federated-emit.test.ts) does — at base this saturation is what forces
+    // pause's own enqueue into LinkBindingCapError; under B21 it must NOT.
     const raw = rawDb(d)
     const capTotal = REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
     const insert = raw.prepare(
@@ -346,6 +344,9 @@ describe('S10-21b B14 containment', () => {
       )
     }
 
+    const before = d.getThread(threadId)
+    const seqBefore = before!.pact_local_seq
+
     pausePact(raw, {
       callerAgentId: a,
       callerPaneKey: `tab:${a}`,
@@ -354,42 +355,84 @@ describe('S10-21b B14 containment', () => {
       reasonCode: 'counterpart_gone'
     })
 
-    const capped = d.getThread(threadId)
-    expect(capped?.pact_relay_pending).toBe('pause')
-    // The local fallback landed IMMEDIATELY, with the REAL reason — containment is never
-    // deferred just because the relay's headroom is saturated.
-    expect(capped?.pact_paused_at).not.toBeNull()
+    const after = d.getThread(threadId)
+    // No token — there is nothing owed to a drain.
+    expect(after?.pact_relay_pending).toBeNull()
+    expect(after?.pact_paused_at).not.toBeNull()
+    // Exactly one relayed pause/resume row, minted immediately by the pause's own transaction
+    // (the propose's own earlier relay, out of this test's scope, is a separate row).
+    const outboxRows = raw
+      .prepare(
+        `SELECT relay_kind FROM peer_reply_outbox
+           WHERE local_thread_id = ? AND relay_kind IN ('pact_pause', 'pact_resume')`
+      )
+      .all(threadId) as { relay_kind: string }[]
+    expect(outboxRows.map((r) => r.relay_kind)).toEqual(['pact_pause'])
+    // One host pause ledger row, the real reason intact.
     const stepRows = raw
       .prepare(
         `SELECT reason_code FROM pact_steps WHERE thread_id = ? AND kind = 'pause' AND actor_is_remote = 0`
       )
       .all(threadId) as { reason_code: string }[]
     expect(stepRows).toEqual([{ reason_code: 'counterpart_gone' }])
-
-    // Free headroom, then let the pump drain retry.
-    raw.prepare(`DELETE FROM peer_reply_outbox WHERE id LIKE 'filler_f10_%'`).run()
-    const drained = drainPendingRebindParty(raw, null)
-    expect(drained).toBe(1)
-
-    const resolved = d.getThread(threadId)
-    expect(resolved?.pact_relay_pending).toBeNull()
-    expect(resolved?.pact_paused_at).not.toBeNull()
-    const pauseRelay = raw
-      .prepare(
-        `SELECT relay_kind FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_pause'`
-      )
-      .all(threadId) as { relay_kind: string }[]
-    expect(pauseRelay).toEqual([{ relay_kind: 'pact_pause' }])
-    // Still exactly ONE ledger row, reason intact — the drain never wrote a second one.
-    const stepRowsAfter = raw
-      .prepare(
-        `SELECT reason_code FROM pact_steps WHERE thread_id = ? AND kind = 'pause' AND actor_is_remote = 0`
-      )
-      .all(threadId) as { reason_code: string }[]
-    expect(stepRowsAfter).toEqual([{ reason_code: 'counterpart_gone' }])
+    // pact_local_seq bumped by exactly one fresh insert — never a coalesced replacement (no
+    // prior queued row existed).
+    expect(after?.pact_local_seq).toBe(seqBefore + 1)
     // Restart-resumable: the reason is `counterpart_gone`, so the agent-restore path's
     // `pactsAwaitingUnpause` sees it as eligible.
     expect(pactsAwaitingUnpause(raw, a)).toContain(threadId)
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // S10-21b B21 (D-D3-A item 7, T2) — guard, pre-existing: a second `pausePact` while the
+  // first row is still `queued` coalesces (21b-E7a) — one unsettled pause/resume row, seq
+  // unchanged by the replacement.
+  // -----------------------------------------------------------------------------------------
+  it('T2: a second pausePact while the first is still queued leaves one row and an unchanged seq', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a, 'r10t2', 'peer10t2')
+    const raw = rawDb(d)
+
+    pausePact(raw, {
+      callerAgentId: a,
+      callerPaneKey: `tab:${a}`,
+      callerHostId: 'local',
+      threadId,
+      reasonCode: 'counterpart_gone'
+    })
+    const afterFirst = d.getThread(threadId)
+    const seqAfterFirst = afterFirst!.pact_local_seq
+    const outboxIdAfterFirst = (
+      raw
+        .prepare(
+          `SELECT id FROM peer_reply_outbox
+             WHERE local_thread_id = ? AND state = 'queued' AND relay_kind IN ('pact_pause', 'pact_resume')`
+        )
+        .all(threadId) as { id: string }[]
+    ).map((r) => r.id)
+    expect(outboxIdAfterFirst).toHaveLength(1)
+
+    // A second pause while the pact is already paused re-emits (pausePact has no
+    // already-paused guard, D-D3-A EVIDENCE) — the coalescer must still leave exactly one row.
+    pausePact(raw, {
+      callerAgentId: a,
+      callerPaneKey: `tab:${a}`,
+      callerHostId: 'local',
+      threadId,
+      reasonCode: 'counterpart_gone'
+    })
+    const afterSecond = d.getThread(threadId)
+    const outboxIdsAfterSecond = (
+      raw
+        .prepare(
+          `SELECT id FROM peer_reply_outbox
+             WHERE local_thread_id = ? AND state = 'queued' AND relay_kind IN ('pact_pause', 'pact_resume')`
+        )
+        .all(threadId) as { id: string }[]
+    ).map((r) => r.id)
+    expect(outboxIdsAfterSecond).toEqual(outboxIdAfterFirst)
+    expect(afterSecond?.pact_local_seq).toBe(seqAfterFirst)
   })
 
   // -----------------------------------------------------------------------------------------

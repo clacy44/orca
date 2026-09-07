@@ -116,7 +116,15 @@ export function enqueueReplyOutboxCoalescedAcrossKinds(
   ) {
     return existing
   }
-  return enqueueReplyOutbox(db, p)
+  // S10-21b B21 (D-D3-A item 1, R2): capExempt ONLY when relayKinds is exactly the
+  // pause/resume pair this coalescer bounds to <= 1 queued row per pact — asserted, never
+  // inferred from the caller, so a future cross-kind coalesce call does not silently inherit
+  // the exemption.
+  const capExempt =
+    relayKinds.length === 2 &&
+    relayKinds.includes('pact_pause') &&
+    relayKinds.includes('pact_resume')
+  return enqueueReplyOutbox(db, { ...p, capExempt })
 }
 
 // One call for "coalesce if this relay kind coalesces, else plain enqueue" — keeps the

@@ -1,7 +1,14 @@
-// S10-21b B20 (D-R140 NF-1/NF-2, N3/21b-E11) — the relay-owed drain's cap-saturation and
-// stale-token fixes, and the propose block window's applied-only bump. Split into its own file
-// (max-lines discipline) rather than growing pact-federated-containment-b14.test.ts (already at
-// its own budget) or pact-federated-propose-race.test.ts further.
+// S10-21b B20 (D-R140 N3/21b-E11) — the propose block window's applied-only bump. Split into
+// its own file (max-lines discipline) rather than growing pact-federated-containment-b14.test.ts
+// (already at its own budget) or pact-federated-propose-race.test.ts further.
+//
+// S10-21b B21 (D-D3 redesign — SCENARIO_CORRECTION, declared test deletions): NF-1 and NF-2
+// DELETED — they asserted properties of the relay-owed pause/resume drain
+// (`drainPausedOrResumed`/`enqueueRelayForAppliedVerb`), a mechanism this commit removes
+// entirely (21b-E8 REVOKED). N3 and its two guards are KEPT byte-identical; unused NF-1/NF-2
+// imports (`REPLY_OUTBOX_PER_LINK_CAP`, `PACT_RESERVED_HEADROOM`, `pausePact`, `resumePact`,
+// `drainPendingRebindParty`) and their now-orphaned `engagedFederatedPact`/`fillOutboxCap`
+// helpers are dropped with them.
 import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
@@ -9,9 +16,6 @@ import type { UpsertAgentByPaneSuffixParams } from './agent-directory'
 import { renderFederatedPartyKey } from './pact-federated-identity'
 import { putPeerLinkBinding } from './link-binding-store'
 import type { ApplyInboundPactVerbArgs } from './pact-federated-inbound-gates'
-import { REPLY_OUTBOX_PER_LINK_CAP, PACT_RESERVED_HEADROOM } from './link-binding-constants'
-import { pausePact, resumePact } from './pact-lifecycle'
-import { drainPendingRebindParty } from './pact-federated-rebind'
 import { OrchestrationError } from './orchestration-error'
 
 function rawDb(db: OrchestrationDb): Database.Database {
@@ -93,56 +97,6 @@ describe('S10-21b B20 (D-R140 NF-1/NF-2/N3)', () => {
     return renderFederatedPartyKey({ linkDeviceId: ENV, remoteAgentId })
   }
 
-  function engagedFederatedPact(
-    d: OrchestrationDb,
-    a: string,
-    remoteAgentId: string,
-    name: string
-  ): { threadId: string; peerKey: string } {
-    const peerKey = seedFederatedPeer(d, remoteAgentId, name)
-    const { thread } = d.createThread({
-      subject: 's',
-      createdByAgentId: a,
-      participants: [
-        { participantKey: a, agentId: a },
-        { participantKey: peerKey, agentId: null }
-      ]
-    })
-    d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
-    rawDb(d)
-      .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
-      .run(a, thread.id)
-    return { threadId: thread.id, peerKey }
-  }
-
-  // Same filler-row cap-saturation technique as F10 (pact-federated-containment-b14.test.ts).
-  function fillOutboxCap(raw: Database.Database, remoteAgentId: string, tag: string): void {
-    const capTotal = REPLY_OUTBOX_PER_LINK_CAP + PACT_RESERVED_HEADROOM
-    const insert = raw.prepare(
-      `INSERT INTO peer_reply_outbox (
-         id, seq, local_message_id, link_device_id, environment_id, bound_pairing_revision,
-         peer_credential_fp, peer_key_fingerprint, in_reply_to_message_id, peer_agent_id,
-         peer_thread_id, local_thread_id, notice_run_id, notice_pane_key, payload, byte_count,
-         state, attempts, consecutive_failures, hold_count, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, '{}', 2, 'queued', 0, 0, 0, ?)`
-    )
-    for (let i = 0; i < capTotal; i++) {
-      insert.run(
-        `filler_${tag}_${i}`,
-        i + 1,
-        `msg_filler_${tag}_${i}`,
-        ENV,
-        ENV,
-        1,
-        'pcfp',
-        'pkfp',
-        `msg_filler_${tag}_${i}`,
-        remoteAgentId,
-        Date.now()
-      )
-    }
-  }
-
   function seedPeerThreadMapping(
     d: OrchestrationDb,
     threadId: string,
@@ -173,92 +127,6 @@ describe('S10-21b B20 (D-R140 NF-1/NF-2/N3)', () => {
       ...overrides
     }
   }
-
-  // -----------------------------------------------------------------------------------------
-  // D-R140 NF-1 (HIGH) — the relay-owed drain must burn nothing while the cap is still
-  // saturated. RED at base: each of the three ticks bumped `pact_local_seq` and minted a
-  // message row (+3 rows, +3 seq) before ever hitting the enqueue's own cap error.
-  // -----------------------------------------------------------------------------------------
-  it('NF-1: three pump ticks under a still-saturated cap mint nothing and leave pact_local_seq untouched (RED at base: +3 rows, +3 seq)', () => {
-    const d = freshDb()
-    const a = seedAgent(d, 'a_nf1')
-    const { threadId } = engagedFederatedPact(d, a, 'r_nf1', 'peer_nf1')
-    const raw = rawDb(d)
-    fillOutboxCap(raw, 'r_nf1', 'nf1')
-
-    pausePact(raw, { ...actor(a), threadId, reasonCode: 'counterpart_gone' })
-    const before = d.getThread(threadId)
-    expect(before?.pact_relay_pending).toBe('pause')
-    const seqBefore = before!.pact_local_seq
-    const messageCountBefore = (
-      raw.prepare(`SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?`).get(threadId) as {
-        n: number
-      }
-    ).n
-
-    // Cap stays saturated across all three ticks — never freed.
-    for (let i = 0; i < 3; i++) {
-      const drained = drainPendingRebindParty(raw, null)
-      expect(drained).toBe(0)
-    }
-
-    const after = d.getThread(threadId)
-    expect(after?.pact_local_seq).toBe(seqBefore)
-    expect(after?.pact_relay_pending).toBe('pause')
-    const messageCountAfter = (
-      raw.prepare(`SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?`).get(threadId) as {
-        n: number
-      }
-    ).n
-    expect(messageCountAfter).toBe(messageCountBefore)
-    const outboxRows = raw
-      .prepare(
-        `SELECT id FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind IN ('pact_pause', 'pact_resume')`
-      )
-      .all(threadId)
-    expect(outboxRows).toEqual([])
-  })
-
-  // -----------------------------------------------------------------------------------------
-  // D-R140 NF-2 — a drain racing a fresh local resume must not relay a superseded pause. RED at
-  // base: the drain read the stale `pact_relay_pending = 'pause'` token and relayed
-  // `pact_pause` even though the pact was resumed in the meantime, leaving the two hosts
-  // disagreeing about who is paused.
-  // -----------------------------------------------------------------------------------------
-  it('NF-2: a local resume after a cap-error pause relays only the resume, never a stale pause (RED at base: a stale pact_pause relayed)', () => {
-    const d = freshDb()
-    const a = seedAgent(d, 'a_nf2')
-    const { threadId } = engagedFederatedPact(d, a, 'r_nf2', 'peer_nf2')
-    const raw = rawDb(d)
-    fillOutboxCap(raw, 'r_nf2', 'nf2')
-
-    pausePact(raw, { ...actor(a), threadId, reasonCode: 'counterpart_gone' })
-    expect(d.getThread(threadId)?.pact_relay_pending).toBe('pause')
-
-    // Headroom frees.
-    raw.prepare(`DELETE FROM peer_reply_outbox WHERE id LIKE 'filler_nf2_%'`).run()
-
-    // Local resume through the NORMAL (non-cap) path — races the drain, which has not ticked
-    // yet.
-    resumePact(raw, { ...actor(a), threadId })
-    const afterResume = d.getThread(threadId)
-    expect(afterResume?.pact_relay_pending).toBeNull()
-    expect(afterResume?.pact_paused_at).toBeNull()
-
-    const outboxRows = () =>
-      raw
-        .prepare(
-          `SELECT relay_kind FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind IN ('pact_pause', 'pact_resume')`
-        )
-        .all(threadId) as { relay_kind: string }[]
-    expect(outboxRows()).toEqual([{ relay_kind: 'pact_resume' }])
-
-    // The next tick relays nothing further — the token is gone, and there is nothing else
-    // pending.
-    const drained = drainPendingRebindParty(raw, null)
-    expect(drained).toBe(0)
-    expect(outboxRows()).toEqual([{ relay_kind: 'pact_resume' }])
-  })
 
   // -----------------------------------------------------------------------------------------
   // D-R140 N3 (21b-E11) — `bumpProposalBlockWindow` runs AFTER the propose's own transaction

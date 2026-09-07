@@ -255,8 +255,13 @@ export function resolvePactThread(
 
 // N5: 'ok' is the ordinary throws-or-passes shape; 'resume_noop' signals an inbound `resume`
 // against a peer this host never recorded as paused — an accepted idempotent no-op (mirrors
-// A-F17's release_noop), never the transport-shaped `pact_not_paused`.
-export type MatrixGateResult = { outcome: 'ok' } | { outcome: 'resume_noop' }
+// A-F17's release_noop), never the transport-shaped `pact_not_paused`. S10-21b B21 (21b-E13,
+// D-D3-A item 5): 'pause_noop' is the symmetric case for an inbound `pause` against a peer
+// this host already recorded as paused.
+export type MatrixGateResult =
+  | { outcome: 'ok' }
+  | { outcome: 'resume_noop' }
+  | { outcome: 'pause_noop' }
 
 // Gates 11-13 — era, party, matrix, applied against OUR columns. Throws on refusal.
 export function runPactPartyAndMatrixGates(
@@ -308,18 +313,34 @@ export function runPactPartyAndMatrixGates(
     if (thread.pact_paused_at !== null) {
       throw new OrchestrationError('pact_paused', `Refused: this pact is paused.`)
     }
-  } else if (pact.verb === 'step' || pact.verb === 'pause') {
+  } else if (pact.verb === 'step') {
+    // S10-21b B21 (21b-E13(i)/SYNTHESIS S2): `step` refuses `pact_paused` on OUR
+    // `pact_paused_at` ONLY — never on the peer's recorded pause. §4.2's matrix row is
+    // amended: a peer's OWN later verb is a fresher assertion by the same authority that set
+    // `pact_peer_paused_at`, and `requirePaused` (pact-shared.ts) already forbids that peer
+    // from stepping while genuinely paused, so an applied inbound `step` is proof they
+    // resumed (H3, below, clears the stale flag on apply).
     if (thread.pact_state !== 'engaged') {
       throw new OrchestrationError('pact_not_engaged', `Refused: ${thread.id} has no engaged pact.`)
     }
-    if (thread.pact_paused_at !== null || thread.pact_peer_paused_at !== null) {
+    if (thread.pact_paused_at !== null) {
       throw new OrchestrationError('pact_paused', `Refused: this pact is paused.`)
     }
-    if (pact.verb === 'step' && thread.pact_turn_agent_id !== senderKey) {
+    if (thread.pact_turn_agent_id !== senderKey) {
       throw new OrchestrationError(
         'not_a_participant',
         `Refused: ${senderKey} does not hold the turn on ${thread.id}.`
       )
+    }
+  } else if (pact.verb === 'pause') {
+    // S10-21b B21 (21b-E13(ii)/D-D3-A item 5): an inbound `pause` never consults OUR pause —
+    // only whether we already recorded THEIRS. A redundant relayed pause (their pause already
+    // recorded) is acknowledged as `pause_noop`, symmetric to `resume_noop` below.
+    if (thread.pact_state !== 'engaged') {
+      throw new OrchestrationError('pact_not_engaged', `Refused: ${thread.id} has no engaged pact.`)
+    }
+    if (thread.pact_peer_paused_at !== null) {
+      return { outcome: 'pause_noop' }
     }
   } else if (pact.verb === 'resume') {
     // B-F3: an inbound `resume` clears the PEER's pause as WE recorded it — gated on
