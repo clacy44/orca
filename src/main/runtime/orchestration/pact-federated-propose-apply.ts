@@ -17,7 +17,10 @@ import { renderedSenderKey, type ApplyInboundPactVerbArgs } from './pact-federat
 import type { InboundPactWake } from './pact-federated-inbound-wake'
 import { refuseIfLinkCeilingSaturated } from './pact-federated-ledger-ceiling'
 import { bumpProposalBlockWindow } from './pact-federated-proposal-block'
-import { cancelUnsettledPactOutboxTail } from './pact-federated-repair'
+import {
+  cancelUnsettledPactOutboxTail,
+  PACT_ERA_RESET_CANCELLABLE_RELAY_KINDS
+} from './pact-federated-repair'
 
 export type ApplyInboundPactVerbResult = {
   accepted: true
@@ -72,7 +75,10 @@ export function applyPropose(
     // transaction — a fresh era must not carry a relay item minted under the era it replaced
     // (the cross-propose race's loser: its own pre-race propose/decline rows survived the reset
     // above and retried against the peer's now-live, freshly-won pact).
-    cancelUnsettledPactOutboxTail(db, thread.id, { includeSending: false })
+    cancelUnsettledPactOutboxTail(db, thread.id, {
+      includeSending: false,
+      relayKinds: PACT_ERA_RESET_CANCELLABLE_RELAY_KINDS
+    })
     db.prepare(
       `UPDATE threads SET
          pact_proposer_agent_id = ?, pact_with_agent_id = ?, pact_state = 'proposed',

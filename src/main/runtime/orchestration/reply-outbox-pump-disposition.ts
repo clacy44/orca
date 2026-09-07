@@ -128,7 +128,16 @@ const PACT_RETRY_CAUSES = new Set([
 // request_mismatch, not_the_addressee, invalid_argument, operation_unknown) are already terminal
 // via KNOWN_REFUSAL_CODES above for every relay kind; these three are net-new codes this slice
 // introduces and have no mail-path meaning.
-const PACT_TERMINAL_ONLY_CAUSES = new Set(['pact_desync', 'pact_era_mismatch', 'pact_no_pact'])
+// D-R139 N4: `pact_rebind_target_superseded` (pact-federated-rebind.ts) was in NO classifier
+// set — the same class as D-R137 F5 — so it fell through to the transport-shaped bumpFailure:
+// true branch, driving the sender's unreachable threshold for a refusal that is deterministic
+// on the same bytes and can never succeed on retry.
+const PACT_TERMINAL_ONLY_CAUSES = new Set([
+  'pact_desync',
+  'pact_era_mismatch',
+  'pact_no_pact',
+  'pact_rebind_target_superseded'
+])
 
 // R18.5's disposition table + R18.8's closed error read, as one pure function.
 // Ruling 26 Addendum 1(r)/F5: the backoff curve's input is the row's persisted

@@ -747,7 +747,12 @@ describe('K25 second minter (design §2.4 closing paragraph)', () => {
       // S10-21b B7c: the mint moved into this max-lines split of pact-federated-emit.ts — same
       // single writer, new file.
       'pact-federated-emit-steps.ts',
-      'pact-federated-inbound-apply.ts'
+      'pact-federated-inbound-apply.ts',
+      // D-R139 N1: relay-only helper split out of pact-federated-emit-steps.ts (max-lines
+      // ratchet) — its `verb` parameter is typed `'pause' | 'resume'` only, so its
+      // `hostPayloadKind: \`pact_${verb}\`` can never equal 'pact_step'; the regex flags the
+      // template-literal SHAPE, not the (statically narrower) value domain.
+      'pact-federated-relay-only.ts'
     ])
     const root = join(__dirname, '..', '..')
     const offenders: string[] = []

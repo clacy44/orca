@@ -507,3 +507,124 @@ describe('D-R136 N7: the gap_notice drain excludes a thread with an already-unse
     expect(rowCountAfterSecond.n).toBe(1)
   })
 })
+
+// D-R139 N2 — the era-reset tail cancel must be kind-scoped: a queued `pact_release` the peer
+// still needs must survive a re-propose on the same thread.
+describe('D-R139 N2: the era-reset tail cancel is kind-scoped', () => {
+  let db: OrchestrationDb | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+  })
+
+  function freshDb(): OrchestrationDb {
+    db = new OrchestrationDb(':memory:')
+    return db
+  }
+
+  function seedAgent(d: OrchestrationDb, id: string): string {
+    const params: UpsertAgentByPaneSuffixParams = {
+      displayName: id,
+      role: null,
+      hostId: 'local',
+      paneKey: `tab:${id}`,
+      terminalHandle: `term_${id}`,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: `term_${id}`,
+      originHostId: 'local'
+    }
+    const result = d.upsertAgentByPaneSuffix(params)
+    if (result.outcome === 'name_taken') {
+      throw new Error(`seedAgent: name taken for ${id}`)
+    }
+    return result.agent.id
+  }
+
+  function actor(agentId: string): {
+    callerAgentId: string
+    callerPaneKey: string | null
+    callerHostId: string
+  } {
+    return { callerAgentId: agentId, callerPaneKey: `tab:${agentId}`, callerHostId: 'local' }
+  }
+
+  const ENV = 'env_n2'
+  const REMOTE_AGENT_ID = 'peer_n2'
+
+  it('release queued on a downed link, re-propose → the pact_release row survives (RED at base: cancelled)', () => {
+    const d = freshDb()
+    const raw = rawDb(d)
+    const a = seedAgent(d, 'a')
+    d.upsertRemoteAgent({
+      environmentId: ENV,
+      environmentName: ENV,
+      linkKind: 'environment',
+      remoteAgentId: REMOTE_AGENT_ID,
+      displayName: 'peer (remote)',
+      role: null,
+      state: 'live',
+      derived: false,
+      remoteQuarantined: false
+    })
+    putPeerLinkBinding(raw, {
+      linkDeviceId: ENV,
+      environmentId: ENV,
+      boundEndpointId: 'endpoint_n2',
+      boundPairingRevision: 1,
+      linkCredentialFp: 'lcfp_n2',
+      peerCredentialFp: 'pcfp_n2',
+      peerKeyFingerprint: 'pkfp_n2',
+      grantClass: 'minted',
+      scanCompleteness: 'complete',
+      proofProtocol: 'v1',
+      provedAt: Date.now(),
+      lastVerifiedAt: Date.now()
+    })
+    const peerKey = renderFederatedPartyKey({ linkDeviceId: ENV, remoteAgentId: REMOTE_AGENT_ID })
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+    raw
+      .prepare(
+        `DELETE FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_propose'`
+      )
+      .run(thread.id)
+    raw
+      .prepare(`UPDATE threads SET pact_state = 'engaged', pact_turn_agent_id = ? WHERE id = ?`)
+      .run(a, thread.id)
+
+    // Release — relays a `pact_release`; the link is down, so the pump never drains it, leaving
+    // the row 'queued'.
+    d.releasePact({ ...actor(a), threadId: thread.id, reasonCode: null })
+    const releaseRow = raw
+      .prepare(
+        `SELECT id, state FROM peer_reply_outbox WHERE pact_thread_id = ? AND relay_kind = 'pact_release'`
+      )
+      .get(thread.id) as { id: string; state: string } | undefined
+    if (!releaseRow) {
+      throw new Error('expected a queued pact_release row')
+    }
+    expect(releaseRow.state).toBe('queued')
+
+    // Re-propose on the same thread — requireUnclaimedPact permits a `released` pact.
+    d.proposePact({ ...actor(a), threadId: thread.id, peerAgentId: peerKey, stepsTotal: null })
+
+    const afterRepropose = raw
+      .prepare(`SELECT state, last_error_code FROM peer_reply_outbox WHERE id = ?`)
+      .get(releaseRow.id) as { state: string; last_error_code: string | null }
+    expect(afterRepropose.state).toBe('queued')
+    expect(afterRepropose.last_error_code).not.toBe('pact_tail_cancelled')
+  })
+})

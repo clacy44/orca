@@ -156,6 +156,13 @@ function resumeRecoveredPacts(db: Database.Database, now: number): PactLinkEvide
     if (now - fact.reachableSince < PACT_LINK_RECOVERY_MS) {
       continue
     }
+    // D-R139 N8: `reachableSince` alone cannot tell "still good" from "no longer scanned" — a
+    // single good scan followed by a silent prover satisfies the continuity math above forever.
+    // The most recent fact must also be FRESH (a scan has actually landed inside the silence
+    // window), or this is stale evidence, not a proven-recovered link.
+    if (now - fact.observedAt >= PACT_LINK_SILENCE_MS) {
+      continue
+    }
     // S10-21b B17 (D-R138 B-F7): same crash-window fix as the pause pass above — one
     // `BEGIN IMMEDIATE` per thread around the UPDATE + ledger insert.
     db.exec('BEGIN IMMEDIATE')

@@ -88,6 +88,8 @@ export function bumpProposalBlockWindow(
 // established it. The window-establishing proposal itself (count === 1) still blocks normally;
 // once the window fully elapses the stored row is stale (`windowLive` is false) and this
 // returns false — the block re-arms, exactly as §3.3's closing sentence requires.
+//
+// D-R139 N3 was investigated and NOT applied — see this commit's body for the contradiction.
 export function isProposalReArmSuppressed(
   db: Database.Database,
   peerPartyKey: string,

@@ -25,7 +25,11 @@ function autoPauseOneThread(
   reason: PactPauseReason,
   runtime: FederatedPactEmitRuntime | null = null
 ): AutoPauseOutcome {
-  if (isFederatedPact(thread)) {
+  // D-R139 N5: a federated pact still `proposed` (not yet accepted) must pause LOCALLY — the
+  // peer's inbound gate for `pause` hard-requires `pact_state === 'engaged'`
+  // (pact-federated-inbound-gates.ts), so relaying a pause for a `proposed` pact is refused
+  // `pact_not_engaged` and just drives seven days of retries then a terminal settle.
+  if (isFederatedPact(thread) && thread.pact_state === 'engaged') {
     emitFederatedPactSideEffect(db, runtime, thread.id, 'pause', reason)
     return {
       threadId: thread.id,

@@ -91,7 +91,10 @@ export function emitFederatedPactSideEffect(
     : null
   const preconditionsOk = anchorsPresent && binding !== null
 
-  const localFallback = (auditDetail: string): void => {
+  // D-R139 N1: `pendingToken`, when given, is written in the SAME transaction as the state +
+  // ledger + audit row — a cap error must land the pact locally with its REAL reason intact
+  // AND mark it for relay, never one without the other.
+  const localFallback = (auditDetail: string, pendingToken?: 'pause' | 'resume'): void => {
     db.exec('BEGIN IMMEDIATE')
     try {
       applyPactPauseResumeState(db, thread.id, pausedAt, pauseReason)
@@ -115,6 +118,12 @@ export function emitFederatedPactSideEffect(
         outcome: 'local_only',
         reasonCode: auditDetail
       })
+      if (pendingToken) {
+        db.prepare(`UPDATE threads SET pact_relay_pending = ? WHERE id = ?`).run(
+          pendingToken,
+          thread.id
+        )
+      }
       db.exec('COMMIT')
     } catch (err) {
       db.exec('ROLLBACK')
@@ -144,10 +153,13 @@ export function emitFederatedPactSideEffect(
     }
   } catch (err) {
     if (err instanceof LinkBindingCapError) {
-      // The whole `enqueueFederatedPactVerb` transaction rolled back with this throw — nothing
-      // (state, ledger, message) was applied. Mark it pending; the pump drain re-attempts this
-      // SAME function in full once the link's reserved headroom frees.
-      db.prepare(`UPDATE threads SET pact_relay_pending = ? WHERE id = ?`).run(verb, threadId)
+      // D-R139 N1: the whole `enqueueFederatedPactVerb` transaction rolled back with this
+      // throw — nothing was applied. The base fix here only set the token and returned,
+      // deferring containment entirely (no local pause at all) until a drain that then
+      // re-invoked this whole function with the actor/reason LOST to the rollback. Now: land
+      // the pause LOCALLY, with the REAL reason and actor, in one transaction — AND mark it
+      // pending so the drain relays the ALREADY-APPLIED verb (never a second local write).
+      localFallback('relay_cap', verb)
       return
     }
     // Every other error (a genuine DB fault, a coding error) propagates — it must never be

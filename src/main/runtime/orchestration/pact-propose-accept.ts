@@ -23,7 +23,10 @@ import { findBindingsByEnvironment } from './link-binding-store'
 import { isPeerLinkQuarantined } from './link-binding-observations-store'
 import { OrchestrationError } from './orchestration-error'
 import { gateVerdictRefusalError } from './gate-refusal-error'
-import { cancelUnsettledPactOutboxTail } from './pact-federated-repair'
+import {
+  cancelUnsettledPactOutboxTail,
+  PACT_ERA_RESET_CANCELLABLE_RELAY_KINDS
+} from './pact-federated-repair'
 import {
   enqueueFederatedPactVerb,
   enqueueFederatedPactVerbWithin,
@@ -97,7 +100,10 @@ export function proposePact(db: Database.Database, params: ProposePactParams): T
     ).run(params.callerAgentId, peer.id, params.stepsTotal, thread.id)
     // D-R138 F4: cancel this pact's own unsettled outbox tail in the SAME era-reset transaction
     // — a fresh era must not carry a relay item minted under the era it replaced.
-    cancelUnsettledPactOutboxTail(db, thread.id, { includeSending: false })
+    cancelUnsettledPactOutboxTail(db, thread.id, {
+      includeSending: false,
+      relayKinds: PACT_ERA_RESET_CANCELLABLE_RELAY_KINDS
+    })
     if (peer.federated) {
       const remote = findRemotePartyByRenderedKey(db, peer.id)
       if (!remote) {

@@ -199,6 +199,11 @@ describe('pact-link-evidence-sweep / emitFederatedPactSideEffect (S10-21b B15)',
     expect(result.resumed).toEqual([])
     expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
 
+    // D-R139 N8: recovery now also requires the evidence to be FRESH, not merely old-enough-
+    // since-reachable — a periodic prover keeps scanning through the window, so pin a second
+    // good scan close to the recovery boundary (same episode: reachable_since untouched).
+    scanFact('proven', t0 + PACT_LINK_SILENCE_MS + PACT_LINK_RECOVERY_MS)
+
     // Past PACT_LINK_RECOVERY_MS since the pause: resumes automatically.
     result = d.runPactLinkEvidenceSweep(t0 + PACT_LINK_SILENCE_MS + PACT_LINK_RECOVERY_MS + 1_000)
     expect(result.resumed.map((o) => o.threadId)).toEqual([threadId])
@@ -277,6 +282,29 @@ describe('pact-link-evidence-sweep / emitFederatedPactSideEffect (S10-21b B15)',
       .prepare(`SELECT reachable_since FROM peer_link_scan_facts`)
       .get() as { reachable_since: number }
     expect(afterRecover.reachable_since).toBe(t0 + 3_000)
+  })
+
+  // -------------------------------------------------------------------------------------
+  // D-R139 N8 — the clock must distinguish "still good" from "no longer scanned": one good
+  // scan right after the pause, then a silent prover for the whole recovery window, must NOT
+  // resume — reachable_since alone is satisfied by clock passage with no further evidence.
+  // -------------------------------------------------------------------------------------
+  it('N8: one good scan then a silent prover for PACT_LINK_RECOVERY_MS does NOT resume (RED at base: resumes)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a')
+    const { threadId } = engagedFederatedPact(d, a)
+    const t0 = Date.now()
+    scanFact('unreachable', t0)
+    d.runPactLinkEvidenceSweep(t0 + PACT_LINK_SILENCE_MS)
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
+
+    // ONE good scan, then the prover goes silent — no further scan lands.
+    scanFact('proven', t0 + PACT_LINK_SILENCE_MS + 1_000)
+    const result = d.runPactLinkEvidenceSweep(
+      t0 + PACT_LINK_SILENCE_MS + PACT_LINK_RECOVERY_MS + 1_000
+    )
+    expect(result.resumed).toEqual([])
+    expect(d.getThread(threadId)?.pact_paused_at).not.toBeNull()
   })
 
   // -------------------------------------------------------------------------------------

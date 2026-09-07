@@ -31,7 +31,14 @@ const PACT_RETRY_CODES = [
   'pact_ledger_capped',
   'pact_paused'
 ]
-const PACT_TERMINAL_ONLY_CODES = ['pact_desync', 'pact_era_mismatch', 'pact_no_pact']
+// D-R139 N4: `pact_rebind_target_superseded` pinned alongside the other three — RED at base
+// (unclassified, falls through to the transport-shaped bumpFailure:true branch).
+const PACT_TERMINAL_ONLY_CODES = [
+  'pact_desync',
+  'pact_era_mismatch',
+  'pact_no_pact',
+  'pact_rebind_target_superseded'
+]
 // S10-21b B8c (D-R135 finding 10, item 12): seven refusal codes that were in NO classifier set
 // at base — falling through to the transport-shaped branch (bumpFailure:true), wrongly bumping
 // consecutive_failures toward the link's unreachable threshold for a non-transport pact refusal.

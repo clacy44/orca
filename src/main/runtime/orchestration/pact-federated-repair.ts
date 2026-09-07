@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto'
 import type Database from '../../sqlite/sync-database'
 import { writeAgentAudit } from './agent-audit-log'
 import { checkAndBumpRate } from './agent-rate-limit'
-import { enqueueFederatedPactVerb } from './pact-federated-emit'
+import { enqueueFederatedPactVerb, PACT_VERB_RELAY_KIND } from './pact-federated-emit'
 import { insertPactStepRow, requireThread } from './pact-shared'
 import { LINK_BINDING_RATE_WINDOW_MS, PACT_RELAY_HOLD_MAX_MS } from './link-binding-constants'
 import type { ThreadRow } from './thread-directory-types'
@@ -134,16 +134,32 @@ export type PactDispositionResult = { queued: boolean; attempts: number; exhaust
 // `firePactTerminalSettleDisposition`'s own era/state guard and must be left alone. F4's actual
 // defect (the race loser's pre-race `propose`/`decline` rows) are always still `queued` at this
 // point — nothing has claimed them — so this narrowing still closes F4 in full.
+// D-R139 N2: the era-reset call sites' scope, closed over the BODY verbs of the replaced era —
+// NEVER `pact_release`/`pact_gap_notice`/`pact_resync*`, which the peer still needs delivered
+// regardless of a local re-propose. Cancelling a queued `pact_release` here strands the peer's
+// thread `engaged`, and its retried propose then collides on `pact_exists`.
+export const PACT_ERA_RESET_CANCELLABLE_RELAY_KINDS: readonly string[] = [
+  PACT_VERB_RELAY_KIND.propose,
+  PACT_VERB_RELAY_KIND.accept,
+  PACT_VERB_RELAY_KIND.decline,
+  PACT_VERB_RELAY_KIND.step,
+  PACT_VERB_RELAY_KIND.pause,
+  PACT_VERB_RELAY_KIND.resume,
+  PACT_VERB_RELAY_KIND.rebind_party
+]
+
 export function cancelUnsettledPactOutboxTail(
   db: Database.Database,
   threadId: string,
-  options?: { includeSending?: boolean }
+  options?: { includeSending?: boolean; relayKinds?: readonly string[] }
 ): void {
   const states = options?.includeSending === false ? ['queued'] : ['queued', 'sending']
+  const kindScope = options?.relayKinds
+  const kindClause = kindScope ? ` AND relay_kind IN (${kindScope.map(() => '?').join(', ')})` : ''
   db.prepare(
     `UPDATE peer_reply_outbox SET state = 'cancelled', last_error_code = 'pact_tail_cancelled'
-       WHERE pact_thread_id = ? AND state IN (${states.map(() => '?').join(', ')})`
-  ).run(threadId, ...states)
+       WHERE pact_thread_id = ? AND state IN (${states.map(() => '?').join(', ')})${kindClause}`
+  ).run(threadId, ...states, ...(kindScope ?? []))
 }
 
 export function cancelPactTailAndPauseBody(

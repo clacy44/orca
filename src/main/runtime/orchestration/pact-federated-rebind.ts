@@ -27,7 +27,7 @@ import { recordPactAppliedId } from './pact-federated-inbound-dedupe'
 import type { InboundPactWake } from './pact-federated-inbound-wake'
 import type { ThreadRow } from './thread-directory-types'
 import { enqueueFederatedPactVerb, type FederatedPactEmitRuntime } from './pact-federated-emit'
-import { emitFederatedPactSideEffect } from './pact-federated-pause-resume-emit'
+import { enqueueRelayForAppliedVerb } from './pact-federated-relay-only'
 
 export type RebindPartyApplyResult = {
   accepted: true
@@ -216,27 +216,64 @@ function drainGapNotice(
   return 1
 }
 
-// S10-21b B17 (D-R137 F10, D-R138 F5/A-F7/B-F11): re-attempts a pause/resume side effect a
-// LinkBindingCapError left pending — the whole `enqueueFederatedPactVerb` transaction rolled
-// back with that error (nothing, not even the thread state, was applied), so a clean full
-// re-invocation of `emitFederatedPactSideEffect` is correct and cannot double-write anything.
-// DISCLOSED DEVIATION: the original caller's actor identity and (for `pause`) its specific
-// `reason_code` are lost with the rollback — the retry is host-actor with a generic reason
-// (`emitFederatedPactSideEffect`'s own `reasonCode=null` folds to `pact_pause_reason='operator'`
-// for `pause`; `resume` never carries one). Preferable to the base's silent, permanent
-// local-only degradation with no retry at all.
+// D-R139 N1: RELAY-ONLY — `emitFederatedPactSideEffect`'s `LinkBindingCapError` branch now
+// lands the pause/resume LOCALLY (state + ledger row with the REAL reason_code + audit, one
+// transaction) before ever reaching this drain, so re-invoking the whole side effect here would
+// write a SECOND ledger row for the same transition. Instead: read the latest host ledger row
+// this token's local fallback wrote (kind/reason_code/actor), then enqueue ONLY the relay
+// (message + outbox) for that already-applied verb via `enqueueRelayForAppliedVerb` — the
+// reason is never lost and no second ledger row is ever written.
 function drainPausedOrResumed(
   db: Database.Database,
   runtime: FederatedPactEmitRuntime | null,
   threadId: string,
   token: 'pause' | 'resume'
 ): number {
-  // Clear the token FIRST — `emitFederatedPactSideEffect` re-sets it itself if the cap is still
-  // hit, so this is never a lost-update window, only a harmless double-scan on the next tick.
-  db.prepare(
-    `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = ?`
-  ).run(threadId, token)
-  emitFederatedPactSideEffect(db, runtime, threadId, token, null)
+  const latest = db
+    .prepare(
+      `SELECT reason_code, actor_agent_id, actor_pane_key, actor_host_id, turn_after_agent_id
+         FROM pact_steps WHERE thread_id = ? AND kind = ? AND actor_is_remote = 0
+         ORDER BY seq DESC LIMIT 1`
+    )
+    .get(threadId, token) as
+    | {
+        reason_code: string | null
+        actor_agent_id: string | null
+        actor_pane_key: string | null
+        actor_host_id: string | null
+        turn_after_agent_id: string | null
+      }
+    | undefined
+
+  db.exec('BEGIN IMMEDIATE')
+  let result: ReturnType<typeof enqueueRelayForAppliedVerb>
+  try {
+    result = enqueueRelayForAppliedVerb(db, threadId, token, {
+      actorAgentId: latest?.actor_agent_id ?? null,
+      actorPaneKey: latest?.actor_pane_key ?? null,
+      actorHostId: latest?.actor_host_id ?? null,
+      runId: 'host',
+      reasonCode: latest?.reason_code ?? null,
+      turnAfterAgentId: latest?.turn_after_agent_id ?? null
+    })
+    // Token clear rides the SAME transaction as the enqueue on success — no crash window
+    // between "relayed" and "no longer pending". On `relay_pending` the helper itself re-set
+    // the token; on `refused` (never expected for a locally-applied verb) leave it set so the
+    // next tick's scan re-attempts rather than silently dropping the relay.
+    if (result.outcome === 'enqueued') {
+      db.prepare(
+        `UPDATE threads SET pact_relay_pending = NULL WHERE id = ? AND pact_relay_pending = ?`
+      ).run(threadId, token)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  if (result.outcome !== 'enqueued') {
+    return 0
+  }
+  runtime?.replyOutbox?.kick(result.thread.pact_peer_link_device_id as string)
   return 1
 }
 

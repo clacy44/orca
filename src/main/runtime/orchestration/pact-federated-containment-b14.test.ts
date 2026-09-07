@@ -18,6 +18,7 @@ import {
 } from './link-binding-constants'
 import { pausePact } from './pact-lifecycle'
 import { drainPendingRebindParty } from './pact-federated-rebind'
+import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -301,15 +302,17 @@ describe('S10-21b B14 containment', () => {
   })
 
   // -----------------------------------------------------------------------------------------
-  // S10-21b B17 (D-R137 F10, D-R138 F5) — pause/resume gain a `pact_relay_pending` token: a
-  // cap error on the emit sets the token (nothing else is written — the whole emit transaction
-  // rolled back with it); the NEXT pump drain tick, once headroom frees, completes the relay.
-  // RED at base: pause/resume had no token — the base's bare `catch` degraded to a permanent,
-  // silent local-only pause with no retry path at all (and, pre-F8-fix, even that local write
-  // never happened for THIS call shape either, since `pausePact` delegates entirely to
-  // `emitFederatedPactSideEffect` for a federated pact).
+  // S10-21b B17 (D-R137 F10, D-R138 F5) / D-R139 N1 SCENARIO_CORRECTION — a cap error on pause
+  // now lands LOCALLY (state + one ledger row with the REAL reason_code + audit, one
+  // transaction) AND sets `pact_relay_pending=pause`; the base F10 asserted the OLD, defective
+  // shape (nothing written at all — containment silently deferred). D-R139 N1: "on
+  // LinkBindingCapError run localFallback('relay_cap') (state + ledger row with the REAL
+  // reasonCode + audit, one BEGIN IMMEDIATE) AND set pact_relay_pending = verb... after the
+  // drain: one outbox row, still one ledger row, reason intact, pact restart-resumable when the
+  // reason is counterpart_gone." The NEXT pump drain tick, once headroom frees, relays the
+  // ALREADY-APPLIED verb (relay-only — never a second ledger row).
   // -----------------------------------------------------------------------------------------
-  it('F10: a cap error on pause sets pact_relay_pending=pause (nothing else written); the next drain tick relays (RED at base)', () => {
+  it('F10: a cap error on pause lands locally with the real reason immediately; the next drain tick relays it (RED at base: nothing written)', () => {
     const d = freshDb()
     const a = seedAgent(d, 'a')
     const { threadId } = engagedFederatedPact(d, a, 'r10f10', 'peer10f10')
@@ -353,12 +356,15 @@ describe('S10-21b B14 containment', () => {
 
     const capped = d.getThread(threadId)
     expect(capped?.pact_relay_pending).toBe('pause')
-    // Nothing else was written — the whole emit transaction rolled back with the cap error.
-    expect(capped?.pact_paused_at).toBeNull()
-    const stepCount = raw
-      .prepare(`SELECT COUNT(*) AS n FROM pact_steps WHERE thread_id = ? AND kind = 'pause'`)
-      .get(threadId) as { n: number }
-    expect(stepCount.n).toBe(0)
+    // The local fallback landed IMMEDIATELY, with the REAL reason — containment is never
+    // deferred just because the relay's headroom is saturated.
+    expect(capped?.pact_paused_at).not.toBeNull()
+    const stepRows = raw
+      .prepare(
+        `SELECT reason_code FROM pact_steps WHERE thread_id = ? AND kind = 'pause' AND actor_is_remote = 0`
+      )
+      .all(threadId) as { reason_code: string }[]
+    expect(stepRows).toEqual([{ reason_code: 'counterpart_gone' }])
 
     // Free headroom, then let the pump drain retry.
     raw.prepare(`DELETE FROM peer_reply_outbox WHERE id LIKE 'filler_f10_%'`).run()
@@ -374,6 +380,16 @@ describe('S10-21b B14 containment', () => {
       )
       .all(threadId) as { relay_kind: string }[]
     expect(pauseRelay).toEqual([{ relay_kind: 'pact_pause' }])
+    // Still exactly ONE ledger row, reason intact — the drain never wrote a second one.
+    const stepRowsAfter = raw
+      .prepare(
+        `SELECT reason_code FROM pact_steps WHERE thread_id = ? AND kind = 'pause' AND actor_is_remote = 0`
+      )
+      .all(threadId) as { reason_code: string }[]
+    expect(stepRowsAfter).toEqual([{ reason_code: 'counterpart_gone' }])
+    // Restart-resumable: the reason is `counterpart_gone`, so the agent-restore path's
+    // `pactsAwaitingUnpause` sees it as eligible.
+    expect(pactsAwaitingUnpause(raw, a)).toContain(threadId)
   })
 
   // -----------------------------------------------------------------------------------------
@@ -716,6 +732,51 @@ describe('S10-21b B14 containment', () => {
     // Simulate the peer answering after quarantine — accept must refuse, not silently engage.
     expectErrorCode(() => d.acceptPact({ ...actor(a), threadId: thread.id }), 'pact_paused')
     expect(d.getThread(thread.id)?.pact_state).toBe('proposed')
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // D-R139 N5 — a `proposed` federated pact's quarantine auto-pause must be LOCAL ONLY: the
+  // peer's inbound gate refuses a `pause` for a not-yet-`engaged` pact (`pact_not_engaged`),
+  // so relaying one just drives seven days of retries then a terminal settle. RED at base: the
+  // pause relayed (a queued `pact_pause` outbox row).
+  // -----------------------------------------------------------------------------------------
+  it('N5: quarantine pauses a proposed federated pact LOCALLY, no relay row (RED at base: a pact_pause row)', () => {
+    const d = freshDb()
+    const a = seedAgent(d, 'a_n5')
+    const peerKey = seedFederatedPeer(d, 'r_n5', 'peer-n5')
+    const { thread } = d.createThread({
+      subject: 's',
+      createdByAgentId: a,
+      participants: [
+        { participantKey: a, agentId: a },
+        { participantKey: peerKey, agentId: null }
+      ]
+    })
+    seedPeerThreadMapping(d, thread.id, 'thr_a5000000000f', peerKey)
+    d.applyInboundPactVerb(
+      inboundArgs({
+        toAgentId: a,
+        senderAgentId: 'r_n5',
+        peerThreadId: 'thr_a5000000000f',
+        pact: { verb: 'propose', seq: 1, era: 1, stepsTotal: null }
+      })
+    )
+    expect(d.getThread(thread.id)?.pact_state).toBe('proposed')
+
+    const outcomes = d.autoPausePactsForRemoteAgentChain(['r_n5'], ENV, 'counterpart_quarantined')
+    expect(outcomes.map((o) => o.threadId)).toEqual([thread.id])
+
+    const paused = d.getThread(thread.id)
+    expect(paused?.pact_state).toBe('proposed')
+    expect(paused?.pact_paused_at).not.toBeNull()
+    expect(paused?.pact_pause_reason).toBe('counterpart_quarantined')
+
+    const relayRows = rawDb(d)
+      .prepare(
+        `SELECT relay_kind FROM peer_reply_outbox WHERE local_thread_id = ? AND relay_kind = 'pact_pause'`
+      )
+      .all(thread.id) as { relay_kind: string }[]
+    expect(relayRows).toEqual([])
   })
 
   // -----------------------------------------------------------------------------------------
