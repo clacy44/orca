@@ -241,19 +241,40 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')?.session_id).toBe(MINTED_B)
   })
 
-  it("T47: pty:spawn naming a registered pane's key (no host-resume, no matching id) is UNRECORDED(pane_key_owned), no row, no delete", async () => {
+  // [S10-21c B3, design §2 S2 — SCENARIO_CORRECTION of T47] T47 asserted the behaviour S2
+  // DELETES. Its subject (a covered, selector-free launch naming a registered pane's key) is
+  // unchanged; only the expected outcome moves, from UNRECORDED(pane_key_owned) to HOST_MINTED.
+  // Nothing is weakened: every T47 assertion has a strictly stronger counterpart below (a row
+  // IS written, the argv IS spliced, current_sessions DOES move, and no `launch_unrecorded`
+  // audit is written at all). The takeover fence T47's name gestures at lives in
+  // `createTerminal`'s E1/E2, not here — proven independently in
+  // orca-runtime-pane-key-gate.test.ts (T27, T45, and the B3 fence-independence test).
+  it("T47/S2: a covered, selector-free launch naming a pane with only a NON-DERIVED REGISTERED row is HOST_MINTED — row written, argv spliced (closes R2's second half)", async () => {
     const db = freshDb()
     insertRegisteredAgent(db, 'tab1:leaf-a')
-    const admitted = await admitAgentLaunch(() => db, opts({ command: 'claude' }), CALLER, ctx())
-    expect(admitted.spawnOptions.command).toBe('claude') // no splice
-    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined() // no row
-    const auditRow = rawDb(db)
-      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
-      .get() as { verb: string; reason_code: string }
-    expect(auditRow.verb).toBe('launch_unrecorded')
-    expect(auditRow.reason_code).toBe('pane_key_owned')
-    // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
-    expect(admitted.classification).toBe('unrecorded')
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude' }),
+      CALLER,
+      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+    )
+    expect(admitted.spawnOptions.command).toBe(`claude --session-id '${MINTED_A}'`)
+    const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+    expect(row?.session_id).toBe(MINTED_A)
+    expect(row?.evidence).toBe('host_launch')
+    expect(admitted.classification).toBe('host_minted')
+    expect(notices).toEqual([
+      { paneKey: 'tab1:leaf-a', verb: 'launch_host_minted', reasonCode: 'launch_host_minted' }
+    ])
+    const currentSession = rawDb(db)
+      .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab1:leaf-a') as { session_id: string }
+    expect(currentSession.session_id).toBe(MINTED_A)
+    const unrecorded = rawDb(db)
+      .prepare(`SELECT COUNT(*) as n FROM agent_audit WHERE verb = 'launch_unrecorded'`)
+      .get() as { n: number }
+    expect(unrecorded.n).toBe(0)
   })
 
   it('T49: launchAgent omitted, command carries claude + --session-id -> REFUSE (sniff reaches refusal)', async () => {
@@ -428,7 +449,12 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
 
   const REMOTE_EXECUTION_HOST_ID = 'ssh:conn-1'
 
-  it('T-B1 (D-R104 B-1): a covered, remote launch naming a REGISTERED pane is UNRECORDED(pane_key_owned), no row, notice called', async () => {
+  // [S10-21c B3, design §2 S2 — SCENARIO_CORRECTION of T-B1] D-R104 B-1's actual subject is the
+  // HOST NAMESPACE (`ctx.hostId` must be the compatibility id, never the ssh execution id, or the
+  // registered-pane lookup misses). That is asserted here unchanged and strengthened: the row is
+  // now written, and it is written under HOST_ID with the ssh id in `execution_host_id`. Only the
+  // outcome that S2 deletes (UNRECORDED(pane_key_owned)) moves to HOST_MINTED.
+  it('T-B1 (D-R104 B-1)/S2: a covered, REMOTE launch naming a REGISTERED pane is HOST_MINTED and its row is keyed by the COMPATIBILITY host id, never the ssh one', async () => {
     const db = freshDb()
     insertRegisteredAgent(db, 'tab1:leaf-a')
     const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
@@ -441,16 +467,14 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
         notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode })
       })
     )
-    expect(admitted.spawnOptions.command).toBe('claude') // no splice
-    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined() // no row, HOST_ID (compat), not the ssh id
-    const auditRow = rawDb(db)
-      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
-      .get() as { verb: string; reason_code: string; actor_host_id: string }
-    expect(auditRow.verb).toBe('launch_unrecorded')
-    expect(auditRow.reason_code).toBe('pane_key_owned')
-    expect(auditRow.actor_host_id).toBe(HOST_ID) // the compatibility id, never the ssh execution id
+    expect(admitted.spawnOptions.command).toBe(`claude --session-id '${MINTED_A}'`)
+    // Found under HOST_ID (compat), NOT the ssh id — the B-1 fence, unchanged.
+    const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+    expect(row?.session_id).toBe(MINTED_A)
+    expect(row?.execution_host_id).toBe(REMOTE_EXECUTION_HOST_ID)
+    expect(db.newestLaunchForPane(REMOTE_EXECUTION_HOST_ID, 'tab1:leaf-a')).toBeUndefined()
     expect(notices).toEqual([
-      { paneKey: 'tab1:leaf-a', verb: 'launch_unrecorded', reasonCode: 'pane_key_owned' }
+      { paneKey: 'tab1:leaf-a', verb: 'launch_host_minted', reasonCode: 'launch_host_minted' }
     ])
   })
 
@@ -576,6 +600,204 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     ).n
     expect(countAfter).toBe(countBefore)
   })
+
+  // ---------------------------------------------------------------------------------------
+  // S10-21c B3 (design §2 S2 + its ADDENDUM): admission records the pane's own relaunch
+  // instead of silently dropping it. Every test below is RED at eaefe28aab (B2b) — the
+  // `owned` early return drops the selector-free case, the caller-selector arm returns
+  // `unrecorded`, and no host-resume selector fence exists on either arm.
+  // ---------------------------------------------------------------------------------------
+
+  it('S2/R1: a covered, selector-free RELAUNCH into a pane that already has a launch row mints a NEW session and records it (the row no longer stays pinned to the first, often stub, id)', async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'stub-first-id',
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    vi.mocked(randomUUID).mockReturnValue(MINTED_B)
+    const admitted = await admitAgentLaunch(() => db, opts({ command: 'claude' }), CALLER, ctx())
+    expect(admitted.spawnOptions.command).toBe(`claude --session-id '${MINTED_B}'`)
+    expect(admitted.classification).toBe('host_minted')
+    const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+    expect(row?.session_id).toBe(MINTED_B)
+    expect(row?.evidence).toBe('host_launch')
+    // Append-only ledger: the first row is still there, the new one is newest by seq.
+    const rows = rawDb(db)
+      .prepare('SELECT COUNT(*) as n FROM agent_launch_sessions WHERE pane_key = ?')
+      .get('tab1:leaf-a') as { n: number }
+    expect(rows.n).toBe(2)
+    const currentSession = rawDb(db)
+      .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab1:leaf-a') as { session_id: string }
+    expect(currentSession.session_id).toBe(MINTED_B)
+  })
+
+  it("S2: a caller's `claude --resume X` into an owned pane is RECORDED with evidence 'caller_resume' — never spliced, never dropped", async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'first-sess',
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume real-conversation' }),
+      CALLER,
+      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+    )
+    // The caller's own argv, byte-for-byte: no `--session-id` splice, no `--resume` rewrite.
+    expect(admitted.spawnOptions.command).toBe('claude --resume real-conversation')
+    const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+    expect(row?.session_id).toBe('real-conversation')
+    expect(row?.evidence).toBe('caller_resume')
+    const currentSession = rawDb(db)
+      .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab1:leaf-a') as { session_id: string }
+    expect(currentSession.session_id).toBe('real-conversation')
+    expect(notices).toEqual([
+      { paneKey: 'tab1:leaf-a', verb: 'launch_caller_resume', reasonCode: 'launch_caller_resume' }
+    ])
+    // No classification is claimed: see buildRecordedAdmission's own doc comment (every existing
+    // value would be a lie and a new one is a renderer-facing wire enum change).
+    expect(admitted.classification).toBeUndefined()
+  })
+
+  it("S2: a caller's `claude --resume X` naming ANOTHER pane's current session is REFUSED (resume_target_owned_by_another_pane) — no row, no supersede, the victim pane untouched", async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-victim',
+      agentType: 'claude',
+      sessionId: 'victims-live-session',
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    await expect(
+      admitAgentLaunch(
+        () => db,
+        opts({ command: 'claude --resume victims-live-session' }),
+        CALLER,
+        ctx()
+      )
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'resume_target_owned_by_another_pane'
+    })
+    // Nothing recorded for the claimant pane.
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    // The victim keeps both its launch row and its current_sessions row — the UNIQUE(host_id,
+    // session_id) fence adjudicated, and `supersedePaneKey` was never set from this call site.
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-victim')?.session_id).toBe(
+      'victims-live-session'
+    )
+    const victimCurrent = rawDb(db)
+      .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab1:leaf-victim') as { session_id: string }
+    expect(victimCurrent.session_id).toBe('victims-live-session')
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; outcome: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_refused')
+    expect(auditRow.outcome).toBe('refused')
+    expect(auditRow.reason_code).toBe('resume_target_owned_by_another_pane')
+  })
+
+  it('S2 ADDENDUM: a host-resume admission whose command names a DIFFERENT session id is REFUSED (restore_selector_mismatch) — no row, no spawnable admission', async () => {
+    const db = freshDb()
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'the-ticket-session',
+      predecessorPaneKey: 'tab1:leaf-old',
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1'
+    }
+    await expect(
+      admitAgentLaunch(
+        () => db,
+        opts({ command: 'claude --resume a-completely-different-session' }),
+        admission,
+        ctx()
+      )
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'restore_selector_mismatch'
+    })
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; outcome: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_refused')
+    expect(auditRow.outcome).toBe('refused')
+    expect(auditRow.reason_code).toBe('restore_selector_mismatch')
+  })
+
+  // The other half of the same fence, on the arm B3 itself opens: with the `owned` early return
+  // deleted, a host-resume that reaches the SELECTOR-FREE arm would take HOST_MINTED and mint a
+  // fresh id FOR A RESTORE — recording a brand-new empty conversation as the pane's newest and
+  // destroying the pointer to the real one. Same reason code as B2's `undeterminable` arm: the
+  // selector is gone either way. Asserted with AND without a registered row, because the
+  // `owned`-true half is the one the deleted early return used to catch.
+  it.each([
+    ['an owned pane (a registered row)', true],
+    ['an unowned pane', false]
+  ])(
+    'S2 ADDENDUM: a host-resume admission whose command lost its selector entirely into %s is REFUSED (restore_selector_lost) — never HOST_MINTED',
+    async (_label, seedRegistered) => {
+      const db = freshDb()
+      if (seedRegistered) {
+        insertRegisteredAgent(db, 'tab1:leaf-a')
+      }
+      const admission: LaunchAdmission = {
+        kind: 'host-resume',
+        sessionId: 'the-ticket-session',
+        predecessorPaneKey: 'tab1:leaf-old',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-1'
+      }
+      await expect(
+        admitAgentLaunch(() => db, opts({ command: 'claude' }), admission, ctx())
+      ).rejects.toMatchObject({
+        name: 'LaunchAdmissionRefusedError',
+        reasonCode: 'restore_selector_lost'
+      })
+      expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+      const auditRow = rawDb(db)
+        .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+        .get() as { verb: string; reason_code: string }
+      expect(auditRow.verb).toBe('launch_refused')
+      expect(auditRow.reason_code).toBe('restore_selector_lost')
+    }
+  )
+
+  // [S10-21c B3 regression guard — GREEN at base, must stay green] `scanRefusal` runs BEFORE the
+  // pane lock and before any `owned` reasoning, so deleting the `owned` early return cannot make
+  // either hard refusal reachable-around. Seeded with a registered row so the deleted branch
+  // would have been the very next thing to run.
+  it.each([
+    ['--session-id', 'claude --session-id smuggled', 'launch_session_id_forbidden'],
+    ['--fork-session', 'claude --resume real-sess --fork-session', 'launch_fork_forbidden']
+  ])(
+    'S10-21c B3 regression: %s into an OWNED pane still hard-refuses via scanRefusal, no row',
+    async (_label, command, reasonCode) => {
+      const db = freshDb()
+      insertRegisteredAgent(db, 'tab1:leaf-a')
+      await expect(
+        admitAgentLaunch(() => db, opts({ command }), CALLER, ctx())
+      ).rejects.toMatchObject({ name: 'LaunchAdmissionRefusedError', reasonCode })
+      expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    }
+  )
 })
 
 describe("S10-21a C3-v2, errata 5(p) T50: no non-test writer of delivery: 'terminal-paste'", () => {

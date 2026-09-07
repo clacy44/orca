@@ -10,8 +10,19 @@ import { prunePaneRows, pruneGlobalRows } from './agent-launch-sessions-retentio
 import { upsertCurrentSession } from './current-session-upsert'
 
 /** [D-R92 P5] 'self_report_rotation' is the one value not written by the launch path itself —
- * only by recordSelfReportRotation, gated by §1.6's four conjuncts (checked by C6, not here). */
-export type LaunchEvidence = 'host_launch' | 'sweep_record' | 'self_report_rotation'
+ * only by recordSelfReportRotation, gated by §1.6's four conjuncts (checked by C6, not here).
+ *
+ * [S10-21c B3, design §2 S2] 'caller_resume' is the pane's OWN caller-typed
+ * `claude --resume <id>`, recorded by admission instead of dropped (R1). Additive only: the
+ * `evidence` column carries no CHECK constraint (db.ts's AGENT_LAUNCH_SESSIONS_SCHEMA_SQL says so
+ * in as many words), so this widening is TypeScript-level, and no consumer switches exhaustively
+ * on this union (`decideLeafHoldRows`, restore-sweep-decision.ts, and
+ * agent-directory-rpc-liveness.ts both narrow with `===` comparisons). */
+export type LaunchEvidence =
+  | 'host_launch'
+  | 'sweep_record'
+  | 'self_report_rotation'
+  | 'caller_resume'
 
 export type AgentLaunchSessionRow = {
   seq: number
@@ -34,7 +45,7 @@ export type RecordLaunchParams = {
   sessionId: string
   launchGeneration: string
   executionHostId: string
-  evidence: Extract<LaunchEvidence, 'host_launch' | 'sweep_record'>
+  evidence: Extract<LaunchEvidence, 'host_launch' | 'sweep_record' | 'caller_resume'>
   /** [S10-21a C1a, errata 5(p)-5 item 3] Set ONLY from a verified host-resume (Layer-2 restore)
    * admission. Deletes `supersedePaneKey`'s current_sessions row inside this same transaction,
    * before the insert — without it, a restore's recordLaunch(P_new, X) collides with

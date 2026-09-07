@@ -255,6 +255,61 @@ describe('S10-21a C3a-v2, errata 5(p) v2.1 §D: the pane-key gate', () => {
     expect(controller.spawnCallCount()).toBe(0)
   })
 
+  // [S10-21c B3, design §2 S2 — the reviewer-independence requirement, made executable] S2
+  // deletes `agent-launch-admission.ts`'s `owned` early return on the selector-free covered
+  // branch. This test proves the placed-create takeover fence does not depend on that boolean:
+  // the pane here is owned BOTH ways admission's `owned` was computed (a non-derived REGISTERED
+  // row AND an existing launch row), and the create is still refused `pane_key_owned` by E1's
+  // `assertPaneKeyNotOwned` — with NO second launch row and NO spawn, which is what proves
+  // admission never ran at all (a HOST_MINTED admission would have inserted a row before
+  // `provider.spawn`, and `spawnCallCount` would be 1).
+  it('S10-21c B3: a placed create onto a registered pane that ALSO has a launch row is still refused at E1, before admission runs (no second row, no spawn)', async () => {
+    db = new OrchestrationDb(':memory:')
+    const paneKey = makePaneKey(REGISTERED_TAB, LEAF_A)
+    insertRegisteredAgent(db, paneKey)
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'the-owners-session',
+      launchGeneration: 'gen-owner',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const store = createSharedStore()
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setOrchestrationDb(db)
+    const controller = fakePtyController()
+    runtime.setPtyController(controller)
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+
+    await expect(
+      runtime.createTerminal(`path:${WORKTREE_PATH}`, {
+        restoreProvenance: { kind: 'none' },
+        credentialLane: { kind: 'shared' },
+        // A COVERED, selector-free launch — exactly the shape S2 now routes to HOST_MINTED at
+        // admission. It never gets there.
+        launchAgent: 'claude',
+        command: 'claude',
+        tabId: REGISTERED_TAB,
+        leafId: LEAF_A
+      })
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'pane_key_owned'
+    })
+
+    const refusal = lastAuditRow(db)
+    expect(refusal.verb).toBe('launch_refused')
+    expect(refusal.outcome).toBe('refused')
+    expect(refusal.reason_code).toBe('pane_key_owned')
+    // Still exactly the owner's own row: admission wrote nothing, because it never ran.
+    expect(launchSessionCount(db, paneKey)).toBe(1)
+    expect(db.newestLaunchForPane(HOST_ID, paneKey)?.session_id).toBe('the-owners-session')
+    expect(controller.spawnCallCount()).toBe(0)
+  })
+
   // T43: [JUDGMENT CALL, see RETURN] a covered, placed launch with NO db ever attached in this
   // process is admitted at the gate — vacuously safe, since no db means no row was ever
   // registered to own this pane, never a silent skip of a real risk (see the doc comment on

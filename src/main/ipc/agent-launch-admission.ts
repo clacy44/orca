@@ -101,7 +101,16 @@ function buildRecordedAdmission(
   paneKey: string,
   seq: number,
   spawnOptions: PtySpawnOptions,
-  classification: LaunchAdmissionClassification,
+  /** [S10-21c B3] Optional: the caller-resume path below records a row but claims NO
+   * classification. Every existing value would be a lie (`host_minted` means the host minted the
+   * id; `self_resume_*` means the pane's own newest row) and a NEW value would have to be added
+   * to the renderer-facing `LaunchAdmissionNoticeClassification` wire enum
+   * (src/shared/launch-admission-notice.ts) — a wire change this brief does not carry. Omitting
+   * it is behaviour-preserving at both consumers: `resolveDaemonRespawnGateAction` returns
+   * `{kind:'none'}` for undefined exactly as it does for today's 'unrecorded', and pty.ts's
+   * push at :6973 is already `admittedLaunch?.classification`-gated (the renderer's own
+   * reconciliation maps 'UNRECORDED' to `{kind:'none'}` too). */
+  classification?: LaunchAdmissionClassification,
   onRowDeleted?: () => void
 ): AdmittedLaunch {
   let settled = false
@@ -324,15 +333,77 @@ export async function admitAgentLaunch(
           reasonCode === 'caller' ? registeredRow?.id : undefined
         )
       }
-      return unrecorded(owned ? 'pane_key_owned' : 'foreign_selector')
+      // [S10-21c B3, design §2 S2 ADDENDUM] A host-resume admission whose command RESOLVES to a
+      // session id that is neither the ticket's own nor this pane's newest row: the sweep's
+      // restore is about to become a FOREIGN conversation. Refuse — a restore may never silently
+      // do that. Distinct from B2's `restore_selector_lost` above (there the selector is gone;
+      // here it is present and points elsewhere). Unreachable for a well-formed sweep restore:
+      // it builds `claude --resume <launchRow.session_id>` (agent-session-resume.ts:259) from the
+      // same row whose id the ticket carries (restore-registered-agent-panes.ts:219/229), so this
+      // is the defence-in-depth arm, not a routine one.
+      if (admission.kind === 'host-resume') {
+        return refuse('restore_selector_mismatch')
+      }
+      // [S10-21c B3, design §2 S2] R1's second half: a caller-typed `claude --resume X` used to
+      // be dropped (`unrecorded(owned ? 'pane_key_owned' : 'foreign_selector')`), which left the
+      // pane's row pinned to its FIRST session id forever and the sweep resuming a stub. X is
+      // what the child will actually run — `scanRefusal` above already hard-refused
+      // `--session-id`/`--fork-session` (agent-launch-classification.ts:138-150), so a covered
+      // `claude --resume X` can only continue X itself — so the host records it.
+      // `supersedePaneKey` is deliberately NEVER set here: it is restore-only by contract
+      // (agent-launch-sessions.ts's own comment on the field), so `current_sessions`'
+      // UNIQUE(host_id, session_id) stays the sole cross-pane successor fence and now does the
+      // adjudication this arm used to duck. `recordLaunch`'s only non-ok result is
+      // `foreign_session_id` — another pane currently holds X — and that is a hard refusal:
+      // never a silent drop, never a supersede, never a `--resume` spliced behind the caller.
+      const recorded = db.recordLaunch({
+        hostId: ctx.hostId,
+        paneKey,
+        agentType: spawnOptions.launchAgent ?? 'claude',
+        sessionId: x,
+        launchGeneration: ctx.launchGeneration,
+        executionHostId: ctx.executionHostId,
+        evidence: 'caller_resume'
+      })
+      if (!recorded.ok) {
+        return refuse('resume_target_owned_by_another_pane')
+      }
+      // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
+      // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
+      // notice claiming a resume that did not happen.
+      ctx.notice(paneKey, 'launch_caller_resume', 'launch_caller_resume')
+      // [D-R104 F-12] A restated row is not this call's to confirm/compensate over. Not reachable
+      // from here (a restatement needs this pane's newest row to already BE X, which the
+      // SELF_RESUME arm above consumed under the same pane lock) — handled because the typed
+      // result carries it, never because it is expected.
+      if (recorded.restated) {
+        return passThrough(spawnOptions)
+      }
+      return buildRecordedAdmission(db, ctx, paneKey, recorded.row.seq, spawnOptions)
     }
 
     // effectiveId.kind === 'none': no selector.
     if (!covered) {
       return unrecorded('sniffed_no_lineage')
     }
-    if (owned) {
-      return unrecorded('pane_key_owned')
+    // [S10-21c B3, design §2 S2] The `owned` early return that used to sit here
+    // (`if (owned) return unrecorded('pane_key_owned')`) is DELETED: a covered, selector-free
+    // launch into a pane that already has a launch row (or a non-derived registered row) is that
+    // pane's OWN relaunch, and dropping it is what pinned every pane on this box to its first,
+    // often stub, session id (R1). It now takes HOST_MINTED below, owned or not. This never
+    // admitted the launch — `unrecorded` passed the spawn through too; it only decided whether
+    // the host wrote down what it had already agreed to run. The pane-takeover fence is two
+    // layers earlier and independent of this boolean: `createTerminal`'s E1
+    // (`assertPaneKeyNotOwned`, orca-runtime.ts:13768-13793, called at :28357) and E2
+    // (:28409-28410, adding `assertLeafNotOccupied`) refuse every PLACED create onto a registered
+    // or occupied pane before admission runs at all.
+    // [S10-21c B3, design §2 S2 ADDENDUM] With that early return gone, a host-resume admission
+    // that reaches this arm has lost its `--resume <id>` outright and would MINT a fresh session
+    // for a restore — turning the restore into a brand-new empty conversation and recording it as
+    // the pane's newest, destroying the pointer to the real one. Same condition and same reason
+    // code as B2's `undeterminable` arm above (the selector is gone either way).
+    if (admission.kind === 'host-resume') {
+      return refuse('restore_selector_lost')
     }
 
     // HOST_MINTED

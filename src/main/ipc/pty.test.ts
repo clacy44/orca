@@ -20822,7 +20822,15 @@ describe('registerPtyHandlers', () => {
       )
     })
 
-    it('a caller-chosen pane key naming an already-registered row is admitted UNRECORDED(pane_key_owned) — no new launch-table row', async () => {
+    // [S10-21c B3, design §2 S2 — SCENARIO_CORRECTION] This asserted the behaviour S2 deletes.
+    // Subject unchanged (a caller-driven `pty:spawn` naming an already-registered pane's key);
+    // outcome moves from UNRECORDED(pane_key_owned) to HOST_MINTED, which is the whole point of
+    // R1: the pane's own relaunch is now written down instead of dropped. Nothing is weakened —
+    // the audit-only ownership consult (pty.ts's `pty_spawn_pane_owned`, which was NEVER a
+    // refusal) is asserted here for the first time, and the placed-create takeover fence is
+    // proven separately in orca-runtime-pane-key-gate.test.ts (this `pty:spawn` handler path
+    // does not run createTerminal's E1/E2 at all).
+    it('a caller-chosen pane key naming an already-registered row is HOST_MINTED — a second launch row, and the audit-only ownership consult still fires', async () => {
       const runtime = registerCoveredSpawnRuntime()
       const db = runtime.getOrchestrationDb()
       const ownedPaneKey = makePaneKey('tab-owned', '00000000-0000-4000-8000-0000000000f3')
@@ -20855,8 +20863,8 @@ describe('registerPtyHandlers', () => {
       })
 
       // A caller-driven spawn naming that SAME pane key — no `--resume`/`--session-id` selector,
-      // so admission's own classification table reaches `owned && not host-resume` ->
-      // UNRECORDED(pane_key_owned) — never HOST_MINTED, never a second row.
+      // so admission's selector-free covered branch now takes HOST_MINTED: a fresh id is minted,
+      // spliced, and INSERTed as this pane's newest row.
       await handlers.get('pty:spawn')!(mainWindowIpcEvent, {
         cols: 80,
         rows: 24,
@@ -20873,15 +20881,26 @@ describe('registerPtyHandlers', () => {
         }
       ).db
       const launchRows = rawDb
-        .prepare(`SELECT * FROM agent_launch_sessions WHERE pane_key = ?`)
-        .all(ownedPaneKey) as unknown[]
-      expect(launchRows).toHaveLength(1)
+        .prepare(`SELECT * FROM agent_launch_sessions WHERE pane_key = ? ORDER BY seq`)
+        .all(ownedPaneKey) as { session_id: string; evidence: string }[]
+      // Append-only: the pre-existing row survives, the pane's own relaunch is recorded after it.
+      expect(launchRows).toHaveLength(2)
+      expect(launchRows[0].session_id).toBe('sess-owned')
+      expect(launchRows[1].evidence).toBe('host_launch')
+      expect(launchRows[1].session_id).not.toBe('sess-owned')
+      // The drop this replaces is gone...
       const unrecordedAudit = rawDb
         .prepare(
           `SELECT * FROM agent_audit WHERE verb = 'launch_unrecorded' AND reason_code = 'pane_key_owned'`
         )
         .all()
-      expect(unrecordedAudit.length).toBeGreaterThanOrEqual(1)
+      expect(unrecordedAudit).toHaveLength(0)
+      // ...and the visibility it used to come with is not: pty.ts's audit-only ownership consult
+      // (never a refusal, by its own comment) still records that this pane has a registered owner.
+      const ownedConsult = rawDb
+        .prepare(`SELECT * FROM agent_audit WHERE verb = 'pty_spawn_pane_owned'`)
+        .all()
+      expect(ownedConsult.length).toBeGreaterThanOrEqual(1)
     })
   })
 
@@ -21086,8 +21105,19 @@ describe('registerPtyHandlers', () => {
       expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('rebind')
     })
 
-    it('Case B: a plain claude (no selector) on an already-owned pane classifies unrecorded — the gate never touches the row', async () => {
+    // [S10-21c B3, design §2 S2 — SCENARIO_CORRECTION] Case B's classification moves from
+    // `unrecorded` to `host_minted`, because S2 deletes admission's `owned` early return. The
+    // gate's action moves with it, from {kind:'none'} to `refuse_fresh_session` — which is the
+    // SAME arm Case B2 below already asserts for the identical situation on an UNOWNED pane, and
+    // which Case B2's own comment calls "not naturally reachable in production". After S2 it is:
+    // this test is now that arm's naturally-reachable form. Nothing is weakened — Case B's own
+    // load-bearing assertions (the dead agent row is NOT rebound to the fresh process) are kept
+    // verbatim, and the refusal audit + pane notice are new, stronger assertions on top. The
+    // outcome/reason_code are asserted explicitly so this 'rebind' verb can never be mistaken for
+    // Case A's SUCCESSFUL rebind.
+    it('Case B: a plain claude (no selector) on an already-owned pane classifies host_minted — the gate REFUSES the fresh session loudly and still never rebinds the row', async () => {
       const { runtime, db } = setUpRealRuntime()
+      const noticeSpy = vi.spyOn(runtime, 'writeHostNoticeToPane')
       const tabId = '99999999-9999-4999-8999-bbbbbbbbbb01'
       const leafId = '99999999-9999-4999-8999-bbbbbbbbbb02'
       const paneKey = makePaneKey(tabId, leafId)
@@ -21121,12 +21151,28 @@ describe('registerPtyHandlers', () => {
         leafId
       })
 
+      // Unchanged and still load-bearing: the dead agent's row is NEVER rebound to the fresh
+      // process — a fresh session may not inherit a dead agent's identity.
       const row = db.getAgentByIdIncludingTombstoned(agentId)
       expect(row?.terminal_handle).toBe('term_dead_old_b')
       expect(row?.process_incarnation).toBe('pty-old:inc-old-b')
-      // No 'rebind' audit — the gate's action for 'unrecorded' is {kind: 'none'}, the newest
-      // daemon_died/rebind verb for the pane is still 'daemon_died'.
-      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('daemon_died')
+      // The gate's action for 'host_minted' is refuse_fresh_session: a REFUSAL audit (never a
+      // successful rebind) plus a pane notice, so the operator is told the pane came back as a
+      // fresh session instead of the host silently doing nothing.
+      const rawDbB = (db as unknown as { db: Database.Database }).db
+      const refusedB = rawDbB
+        .prepare(
+          `SELECT * FROM agent_audit WHERE actor_pane_key = ? AND verb = 'rebind'
+             AND outcome = 'refused' AND reason_code = 'daemon_respawn_fresh_session'`
+        )
+        .all(paneKey)
+      expect(refusedB).toHaveLength(1)
+      expect(noticeSpy).toHaveBeenCalledWith(
+        paneKey,
+        expect.stringContaining('daemon_respawn_fresh_session'),
+        expect.objectContaining({ rateKey: 'rebind:daemon_respawn_fresh_session' })
+      )
+      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('rebind')
     })
 
     it('Case B2: host_minted on an unowned pane with a daemon_died fact refuses the fresh session and notices — row untouched', async () => {
