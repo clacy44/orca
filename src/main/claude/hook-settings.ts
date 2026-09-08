@@ -143,11 +143,15 @@ export function getWindowsManagedLifecycleHook(scriptPath: string): HookCommandC
     'agent-hooks',
     win32.basename(scriptPath)
   )
-  // Why: Claude's Windows shell form opens Git Bash consoles; exec form hosts the client in a windowless console.
+  // Why (R105, field proof drills/readouts/E-R105-desktop-2026-09-08.md): the owner's live desktop
+  // run of the plain exec form `cmd.exe /d /c <script>` (no conhost wrapper) produced no console
+  // flash at pane start or across a run of tool calls; the conhost.exe --headless wrapper this
+  // replaced is what dropped stdin delivery to the hook client, so it is removed rather than kept
+  // as a windowless host.
   return {
     type: 'command',
-    command: win32.join(system32, 'conhost.exe'),
-    args: ['--headless', win32.join(system32, 'cmd.exe'), '/d', '/c', runtimeScriptPath],
+    command: win32.join(system32, 'cmd.exe'),
+    args: ['/d', '/c', runtimeScriptPath],
     timeout: MANAGED_HOOK_TIMEOUT_SECONDS
   }
 }
