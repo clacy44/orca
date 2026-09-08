@@ -151,13 +151,7 @@ export class ClaudeHookService {
     // (nothing is broken) or a false 'installed'/'not_installed' read of an entry that was
     // never computed.
     if (expectedHook === null) {
-      const scriptFileName = getManagedScriptFileName(this.options.settings)
-      return buildWindowsHookHostUnavailableStatus(
-        this.options.agent,
-        configPath,
-        config,
-        scriptFileName
-      )
+      return buildWindowsHookHostUnavailableStatus(this.options, configPath, config)
     }
     const missing: string[] = []
     let presentCount = 0

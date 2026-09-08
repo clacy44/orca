@@ -294,13 +294,13 @@ export const WINDOWS_HOOK_HOST_UNAVAILABLE_DETAIL =
 // Builds the loud getStatus() reply for the M3 exe-absent case — shared so hook-service.ts's
 // getStatus() needs only one call site instead of constructing the object inline.
 export function buildWindowsHookHostUnavailableStatus(
-  agent: AgentHookInstallStatus['agent'],
+  options: { agent: AgentHookInstallStatus['agent']; settings: ClaudeCompatibleHookSettings },
   configPath: string,
-  config: HooksConfig,
-  scriptFileName = getManagedScriptFileName()
+  config: HooksConfig
 ): AgentHookInstallStatus {
+  const scriptFileName = getManagedScriptFileName(options.settings)
   return {
-    agent,
+    agent: options.agent,
     state: 'skipped',
     configPath,
     managedHooksPresent: hasAnyManagedLifecycleHook(config, scriptFileName),
