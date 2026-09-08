@@ -839,6 +839,10 @@ export class RateLimitService {
         return
       }
       void this.fetchAll()
+      // Why: keeps the inactive-account switcher cache warm while visible, so the popover shows
+      // a recent value instead of nothing; fetchInactiveClaudeAccountsOnOpen's own debounce and
+      // resolver already bound cost and scope.
+      void this.fetchInactiveClaudeAccountsOnOpen()
     }, this.pollInterval)
   }
 

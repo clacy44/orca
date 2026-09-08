@@ -766,14 +766,17 @@ export function ClaudeSwitcherMenu({
     }
   }, [])
 
-  // Why: fetch inactive-account usage only on switcher expansion; remote-owned accounts have no local cache to fill.
+  // Why: fetch inactive-account usage on switcher expansion for every locally-managed account
+  // (fetchInactiveClaudeAccountUsage resolves only accounts with a local managedAuthPath) —
+  // independent of the active runtime environment, so the owner's normal remote-paired state
+  // still shows local Claude accounts' usage instead of none.
   const handleAccountsExpandedToggle = useCallback((): void => {
     const nextExpanded = !accountsExpanded
     setAccountsExpanded(nextExpanded)
-    if (nextExpanded && !hasActiveRuntimeEnvironment) {
+    if (nextExpanded) {
       void fetchInactiveClaudeAccountUsage()
     }
-  }, [accountsExpanded, fetchInactiveClaudeAccountUsage, hasActiveRuntimeEnvironment])
+  }, [accountsExpanded, fetchInactiveClaudeAccountUsage])
 
   const handleSelectAccount = async (
     accountId: string | null,
@@ -927,10 +930,17 @@ export function ClaudeSwitcherMenu({
                     {inactiveUsage?.isFetching && !inactiveUsage.rateLimits ? (
                       <InlineUsageSkeleton />
                     ) : inactiveUsage?.rateLimits ? (
-                      <InlineUsageBars
-                        limits={inactiveUsage.rateLimits}
-                        isFetching={inactiveUsage.isFetching}
-                      />
+                      <>
+                        <InlineUsageBars
+                          limits={inactiveUsage.rateLimits}
+                          isFetching={inactiveUsage.isFetching}
+                        />
+                        {Date.now() - inactiveUsage.updatedAt > INACTIVE_USAGE_STALE_AFTER_MS ? (
+                          <span className="text-[9px] text-muted-foreground/70">
+                            {formatInactiveUsageAge(inactiveUsage.updatedAt, Date.now())}
+                          </span>
+                        ) : null}
+                      </>
                     ) : null}
                   </div>
                 </DropdownMenuItem>
@@ -1052,6 +1062,25 @@ export function InlineUsageBars({
 
 function isUnavailableInactiveUsage(limits: ProviderRateLimits | null | undefined): boolean {
   return limits?.status === 'error' && !limits.session && !limits.weekly && !limits.fableWeekly
+}
+
+// Why: mirrors service.ts STALE_THRESHOLD_MS — past this age a cached inactive-account
+// snapshot still renders, but with an "N min ago" caption instead of looking live.
+const INACTIVE_USAGE_STALE_AFTER_MS = 30 * 60 * 1000
+
+function formatInactiveUsageAge(updatedAt: number, now: number): string {
+  const minutes = Math.max(0, Math.round((now - updatedAt) / 60000))
+  if (minutes < 1) {
+    return translate('auto.components.status.bar.StatusBar.inactiveUsageAgeNow', 'just now')
+  }
+  if (minutes === 1) {
+    return translate('auto.components.status.bar.StatusBar.inactiveUsageAgeOneMin', '1 min ago')
+  }
+  return translate(
+    'auto.components.status.bar.StatusBar.inactiveUsageAgeMins',
+    '{{value0}} min ago',
+    { value0: minutes }
+  )
 }
 
 function InlineUsageSignInAction({
