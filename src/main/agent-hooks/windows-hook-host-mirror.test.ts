@@ -2,7 +2,7 @@
 // AgentHookServer, plus a Windows-only spawn of the exact produced entry. See
 // windows-hook-host-mirror.ts and native/windows-hook-host/OrcaHookHost.cs.
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -170,7 +170,7 @@ describe('runWindowsHookHostOnce against a live AgentHookServer', () => {
 
   beforeEach(() => {
     server = new AgentHookServer()
-    tmpDir = mkdtempSync(join(tmpdir(), 'orca-hook-host-mirror-'))
+    tmpDir = mkdtempSync(join(tmpdir(), 'orca hook host mirror '))
   })
 
   afterEach(() => {
@@ -200,6 +200,63 @@ describe('runWindowsHookHostOnce against a live AgentHookServer', () => {
       stdin,
       endpointFileContents: readFileSync(endpointFilePath, 'utf-8'),
       descriptorJson: null,
+      processEnv: {
+        ORCA_PANE_KEY: paneKey,
+        ORCA_TAB_ID: 'tab-1',
+        ORCA_WORKTREE_ID: 'wt-1',
+        ORCA_AGENT_LAUNCH_TOKEN: undefined
+      }
+    })
+
+    expect(outcome).toBe('sent')
+    const snapshot = server.getStatusSnapshot()
+    expect(snapshot.some((entry) => entry.paneKey === paneKey)).toBe(true)
+  })
+
+  // D-R162 M4: tmpDir itself already carries a space (see beforeEach) — this test lays the
+  // endpoint file AND the descriptor at the exact relative layout the real host resolves under
+  // an expanded %USERPROFILE% (\.orca\agent-hooks\...), so both the descriptor-path expansion
+  // and the endpoint-file read are proven against a space-bearing profile path, not just the
+  // space-free default tmpdir() prefix.
+  it('resolves the endpoint file and a custom descriptor from a space-bearing %USERPROFILE%', async () => {
+    await server.start({ env: 'production' })
+    const env = server.buildPtyEnv()
+    const paneKey = makePaneKey('tab-1', '55555555-5555-4555-8555-555555555555')
+
+    expect(tmpDir).toContain(' ')
+    const agentHooksDir = join(tmpDir, '.orca', 'agent-hooks')
+    mkdirSync(agentHooksDir, { recursive: true })
+
+    const endpointFilePath = join(agentHooksDir, 'endpoint.cmd')
+    writeFileSync(
+      endpointFilePath,
+      `set ORCA_AGENT_HOOK_PORT=${env.ORCA_AGENT_HOOK_PORT}\r\n` +
+        `set ORCA_AGENT_HOOK_TOKEN=${env.ORCA_AGENT_HOOK_TOKEN}\r\n` +
+        `set ORCA_AGENT_HOOK_ENV=${env.ORCA_AGENT_HOOK_ENV}\r\n` +
+        `set ORCA_AGENT_HOOK_VERSION=${env.ORCA_AGENT_HOOK_VERSION}\r\n`
+    )
+
+    const descriptorPath = join(agentHooksDir, 'claude-hook.json')
+    const descriptorOnDisk = {
+      source: 'claude',
+      pathname: '/hook/claude',
+      fields: [...WINDOWS_HOOK_HOST_DEFAULT_FIELDS]
+    }
+    writeFileSync(descriptorPath, JSON.stringify(descriptorOnDisk))
+
+    // Prove the descriptor itself round-trips through the parser unchanged before using it —
+    // isolates "the file read off a spaced path is intact" from "the mirror's own delivery path
+    // still works", which the outcome assertion below covers.
+    const descriptorJson = readFileSync(descriptorPath, 'utf-8')
+    expect(parseWindowsHookHostDescriptor(descriptorJson)).toEqual(descriptorOnDisk)
+
+    const stdin = new PassThrough()
+    stdin.end(JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' }))
+
+    const outcome = await runWindowsHookHostOnce({
+      stdin,
+      endpointFileContents: readFileSync(endpointFilePath, 'utf-8'),
+      descriptorJson,
       processEnv: {
         ORCA_PANE_KEY: paneKey,
         ORCA_TAB_ID: 'tab-1',

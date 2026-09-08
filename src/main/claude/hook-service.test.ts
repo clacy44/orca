@@ -520,7 +520,7 @@ describe('ClaudeHookService.install', () => {
   it.skipIf(process.platform !== 'win32')(
     'M3: dev install with no exe leaves an existing packaged exe-form entry intact',
     () => {
-      const tmpHome = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-dev-no-exe-'))
+      const tmpHome = mkdtempSync(join(tmpdir(), 'orca claude hookhost dev no exe '))
       const tmpResources = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-dev-no-exe-res-'))
       vi.stubEnv('HOME', tmpHome)
       vi.stubEnv('USERPROFILE', tmpHome)
@@ -567,7 +567,7 @@ describe('ClaudeHookService.install', () => {
   it.skipIf(process.platform !== 'win32')(
     'posts from the managed .cmd via curl.exe, not a second PowerShell',
     () => {
-      const tmpHome = mkdtempSync(join(tmpdir(), 'orca-claude-curl-'))
+      const tmpHome = mkdtempSync(join(tmpdir(), 'orca claude curl '))
       vi.stubEnv('HOME', tmpHome)
       vi.stubEnv('USERPROFILE', tmpHome)
       try {
@@ -591,7 +591,7 @@ describe('ClaudeHookService.install', () => {
     'R105-b: installs the winexe hook host + descriptor when orca-hook-host.exe is packaged, ' +
       'and two consecutive installs leave exactly one entry',
     () => {
-      const tmpHome = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-'))
+      const tmpHome = mkdtempSync(join(tmpdir(), 'orca claude hookhost '))
       const tmpResources = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-resources-'))
       vi.stubEnv('HOME', tmpHome)
       vi.stubEnv('USERPROFILE', tmpHome)
