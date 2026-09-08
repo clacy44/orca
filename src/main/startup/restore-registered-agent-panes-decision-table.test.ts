@@ -285,6 +285,48 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     expect(rows).toHaveLength(1)
   })
 
+  // [S10-21c B3b, D-R149 LOW 4] rows 5-6 now also hold the leaf for a same-generation
+  // caller_resume row — a caller's `claude --resume X` the host recorded is exactly as much
+  // "this generation's admitted launch" as sweep_record/host_launch.
+  it('rows 5-6: dead, launch row admitted THIS generation via caller_resume, a LIVE occupant on the row own pane — skipped_leaf_held (yield)', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a007'
+    insertAgent(db, { id: 'agent-row7cr', display_name: 'chair-row7cr', pane_key: paneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-row7cr',
+      launchGeneration: LAUNCH_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'caller_resume'
+    })
+    const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    const ensureAgentSession = vi.fn()
+    const mintRestoreTicket = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        mintRestoreTicket,
+        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-row7cr-occ' })
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-row7cr',
+      null,
+      'wt-1',
+      launchRow,
+      emptyInventory({ allLivePtyIds: new Set(['pty-row7cr-occ']) })
+    )
+    expect(outcome.kind).toBe('skipped_leaf_held')
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+    expect(mintRestoreTicket).not.toHaveBeenCalled()
+    const rows = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = ?`)
+      .all(`leaf_held: caller_resume_admitted_this_generation seq=${launchRow.seq}`)
+    expect(rows).toHaveLength(1)
+  })
+
   it("[S10-21a C7l item 3] row 5: no leaf occupant, but a connected pty record on the pane (runtime's own records) — skipped_leaf_held (yield)", async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000c003'

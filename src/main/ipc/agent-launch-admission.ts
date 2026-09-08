@@ -14,6 +14,7 @@ import { spliceHostMintedSessionId } from '../../shared/agent-resume-launch-comm
 import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
+import { isStablePaneId } from '../../shared/stable-pane-id'
 import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
 // [JUDGMENT CALL, see RETURN] `OrchestrationDb` (db.ts), not the raw `Database.Database` the
 // store module (agent-launch-sessions.ts) takes: `OrchestrationDb.db` is private with no public
@@ -258,8 +259,6 @@ export async function admitAgentLaunch(
   return await withPaneLock(`${ctx.hostId}\0${paneKey}`, async () => {
     const newestRow = db.newestLaunchForPane(ctx.hostId, paneKey)
     const registeredRow = db.getAgentByPaneKey(ctx.hostId, paneKey)
-    const owned =
-      newestRow !== undefined || (registeredRow !== undefined && registeredRow.derived === 0)
 
     // [§C.4 "--continue ruled"] id-less/undeterminable resolution.
     if (effectiveId.kind === 'undeterminable') {
@@ -272,7 +271,12 @@ export async function admitAgentLaunch(
       if (admission.kind === 'host-resume') {
         return refuse('restore_selector_lost')
       }
-      return unrecorded(owned ? 'pane_key_owned' : 'resume_target_undeterminable')
+      // [S10-21c B3b, D-R149 INFO 2] The `owned ? 'pane_key_owned' : ...` ternary that used to
+      // sit here is DELETED: `owned` (newestRow/registeredRow presence) has nothing to do with
+      // WHY the selector could not be resolved — it made the audit lie about the actual cause
+      // on every owned pane. The reason is always that the resume target could not be
+      // determined; the audit now says exactly that.
+      return unrecorded('resume_target_undeterminable')
     }
 
     if (effectiveId.kind === 'id') {
@@ -356,6 +360,17 @@ export async function admitAgentLaunch(
       // adjudication this arm used to duck. `recordLaunch`'s only non-ok result is
       // `foreign_session_id` — another pane currently holds X — and that is a hard refusal:
       // never a silent drop, never a supersede, never a `--resume` spliced behind the caller.
+      // [S10-21c B3b, D-R149 MEDIUM 2] `scanEffectiveResumeId`'s own documented safety argument
+      // ("a false positive here only costs coverage on one exotic command — it never breaks a
+      // launch") stops being true the moment `x` is WRITTEN DOWN as the pane's resume target:
+      // every other writer of this column wrote either a host-minted randomUUID or an id the
+      // host already held. Require `x` to be shaped like one before it becomes durable state —
+      // a mis-parsed or typo'd token is refused loudly here instead of silently becoming the
+      // pane's newest row (which would cost that pane its restore until the next successful
+      // launch, per B2's transcript preflight).
+      if (!isStablePaneId(x)) {
+        return unrecorded('resume_target_unparseable')
+      }
       const recorded = db.recordLaunch({
         hostId: ctx.hostId,
         paneKey,
@@ -367,6 +382,13 @@ export async function admitAgentLaunch(
       })
       if (!recorded.ok) {
         return refuse('resume_target_owned_by_another_pane')
+      }
+      // [S10-21c B3b, D-R149 MEDIUM 1] The same contested-lineage signal SELF_RESUME(caller)
+      // raises above (:326) — this arm writes to the pane too, and a registered chair's pane
+      // changing its recorded session needs the same trace. Fires regardless of `restated`: the
+      // write happened either way.
+      if (registeredRow !== undefined && registeredRow.derived === 0) {
+        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
       }
       // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
       // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
@@ -438,6 +460,14 @@ export async function admitAgentLaunch(
     const result = db.recordLaunch(params)
     if (!result.ok) {
       return refuse('launch_record_write_failed')
+    }
+    // [S10-21c B3b, D-R149 MEDIUM 1] Same signal as the caller_resume arm above and
+    // SELF_RESUME(caller) (:326): this arm now writes to a registered chair's pane too (the
+    // `owned` early return that used to sit here is gone, per the comment block above), and
+    // without this the only trace that the pane's recorded session changed was the launch row
+    // plus a pty text notice — no `agent_audit` row at all.
+    if (registeredRow !== undefined && registeredRow.derived === 0) {
+      ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
     }
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {

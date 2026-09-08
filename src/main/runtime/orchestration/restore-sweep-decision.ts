@@ -78,14 +78,20 @@ export function decideLeafHoldRows(
   occupantOnOwnPaneLive: boolean
 ): LeafHoldDecision {
   if (launchGeneration === currentGeneration) {
-    if (evidence === 'sweep_record' || evidence === 'host_launch') {
+    // [S10-21c B3b, D-R149 LOW 4] `caller_resume` (S2 part 2) is a same-generation admitted
+    // launch exactly like `sweep_record`/`host_launch` — a caller's `claude --resume X` that the
+    // host recorded holds the leaf under the identical rule. Own reason code so the audit trail
+    // still names the evidence kind that held it.
+    if (evidence === 'sweep_record' || evidence === 'host_launch' || evidence === 'caller_resume') {
       if (occupantOnOwnPaneLive) {
         return {
           kind: 'skipped_leaf_held',
           reasonCode:
             evidence === 'sweep_record'
               ? `leaf_held: resume_admitted_this_generation seq=${seq}`
-              : `leaf_held: new_launch_admitted_this_generation seq=${seq}`
+              : evidence === 'host_launch'
+                ? `leaf_held: new_launch_admitted_this_generation seq=${seq}`
+                : `leaf_held: caller_resume_admitted_this_generation seq=${seq}`
         }
       }
       return {

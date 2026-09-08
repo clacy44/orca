@@ -78,6 +78,33 @@ describe('S10-21a C7g: newestDaemonDeathOrRebindVerbForPane', () => {
     expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBeNull()
   })
 
+  it("[S10-21c B3b, D-R149 LOW 5] a REFUSED rebind (the gate's own refuse_fresh_session audit) does not outrank an earlier daemon_died — a later host_resume/self_resume_caller still refreshes", () => {
+    const db = freshDb()
+    // daemon_died: the pane's controller died.
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: PANE_KEY,
+      actorHostId: HOST_ID,
+      verb: 'daemon_died',
+      outcome: 'observed',
+      reasonCode: null
+    })
+    // plain `claude` (host_minted) reaches the gate and is refused a fresh session — this is
+    // exactly the audit pty.ts writes for `refuse_fresh_session` (verb 'rebind', outcome
+    // 'refused', reasonCode 'daemon_respawn_fresh_session'). Nothing was resolved.
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: PANE_KEY,
+      actorHostId: HOST_ID,
+      verb: 'rebind',
+      outcome: 'refused',
+      reasonCode: 'daemon_respawn_fresh_session'
+    })
+    // The pane's daemon_died fact still stands — a subsequent `--resume <real id>` must still see
+    // it and refresh, not see the refusal and stay silent.
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBe('daemon_died')
+  })
+
   it('[S10-21a C14b, D-R128 host_id scoping] is scoped per host, never bleeding across hosts sharing a pane suffix', () => {
     const db = freshDb()
     db.writeAgentAudit({

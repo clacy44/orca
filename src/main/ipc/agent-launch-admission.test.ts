@@ -18,6 +18,10 @@ import type * as NodeCrypto from 'node:crypto'
 
 const MINTED_A = '11111111-1111-4111-8111-111111111111'
 const MINTED_B = '22222222-2222-4222-8222-222222222222'
+// [S10-21c B3b, D-R149 MEDIUM 2] caller_resume now requires a UUID-shaped selector before it is
+// recorded — these two are valid shapes for the caller_resume tests below.
+const REAL_CONVERSATION_ID = '33333333-3333-4333-8333-333333333333'
+const VICTIM_SESSION_ID = '44444444-4444-4444-8444-444444444444'
 
 vi.mock('node:crypto', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeCrypto>()
@@ -180,6 +184,31 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(auditRow.reason_code).toBe('resume_target_undeterminable')
   })
 
+  it("S10-21c B3b, D-R149 INFO 2: a NON-host-resume (caller) admission with an idless selector into an OWNED pane is STILL unrecorded(resume_target_undeterminable) — the `owned ? 'pane_key_owned' : ...` ternary is deleted, the audit tells the truth either way", async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'first-sess',
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume' }),
+      CALLER,
+      ctx()
+    )
+    expect(admitted.spawnOptions.command).toBe('claude --resume')
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_unrecorded')
+    expect(auditRow.reason_code).toBe('resume_target_undeterminable')
+  })
+
   it('T40: an uncovered/unpaned launch never writes a row (pass-through)', async () => {
     const db = freshDb()
     const admitted = await admitAgentLaunch(
@@ -253,11 +282,18 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     const db = freshDb()
     insertRegisteredAgent(db, 'tab1:leaf-a')
     const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    // [S10-21c B3b, D-R149 MEDIUM 1] contested-lineage is now raised on this arm too — the
+    // pane it writes to is a registered chair's pane.
+    const contested: [string, string, string][] = []
     const admitted = await admitAgentLaunch(
       () => db,
       opts({ command: 'claude' }),
       CALLER,
-      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+      ctx({
+        notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }),
+        contestedLineage: (claimantPaneKey, registeredPaneKey, registeredAgentId) =>
+          contested.push([claimantPaneKey, registeredPaneKey, registeredAgentId])
+      })
     )
     expect(admitted.spawnOptions.command).toBe(`claude --session-id '${MINTED_A}'`)
     const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
@@ -267,6 +303,7 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(notices).toEqual([
       { paneKey: 'tab1:leaf-a', verb: 'launch_host_minted', reasonCode: 'launch_host_minted' }
     ])
+    expect(contested).toEqual([['tab1:leaf-a', 'tab1:leaf-a', 'agt_tab1:leaf-a']])
     const currentSession = rawDb(db)
       .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
       .get(HOST_ID, 'tab1:leaf-a') as { session_id: string }
@@ -651,19 +688,19 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
     const admitted = await admitAgentLaunch(
       () => db,
-      opts({ command: 'claude --resume real-conversation' }),
+      opts({ command: `claude --resume ${REAL_CONVERSATION_ID}` }),
       CALLER,
       ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
     )
     // The caller's own argv, byte-for-byte: no `--session-id` splice, no `--resume` rewrite.
-    expect(admitted.spawnOptions.command).toBe('claude --resume real-conversation')
+    expect(admitted.spawnOptions.command).toBe(`claude --resume ${REAL_CONVERSATION_ID}`)
     const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
-    expect(row?.session_id).toBe('real-conversation')
+    expect(row?.session_id).toBe(REAL_CONVERSATION_ID)
     expect(row?.evidence).toBe('caller_resume')
     const currentSession = rawDb(db)
       .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
       .get(HOST_ID, 'tab1:leaf-a') as { session_id: string }
-    expect(currentSession.session_id).toBe('real-conversation')
+    expect(currentSession.session_id).toBe(REAL_CONVERSATION_ID)
     expect(notices).toEqual([
       { paneKey: 'tab1:leaf-a', verb: 'launch_caller_resume', reasonCode: 'launch_caller_resume' }
     ])
@@ -672,13 +709,60 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(admitted.classification).toBeUndefined()
   })
 
+  it("S10-21c B3b, D-R149 MEDIUM 1: a caller's `claude --resume X` into a REGISTERED pane's own relaunch raises contestedLineage", async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'first-sess',
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    insertRegisteredAgent(db, 'tab1:leaf-a')
+    const contested: [string, string, string][] = []
+    await admitAgentLaunch(
+      () => db,
+      opts({ command: `claude --resume ${REAL_CONVERSATION_ID}` }),
+      CALLER,
+      ctx({
+        contestedLineage: (claimantPaneKey, registeredPaneKey, registeredAgentId) =>
+          contested.push([claimantPaneKey, registeredPaneKey, registeredAgentId])
+      })
+    )
+    expect(contested).toEqual([['tab1:leaf-a', 'tab1:leaf-a', 'agt_tab1:leaf-a']])
+  })
+
+  it("S10-21c B3b, D-R149 MEDIUM 2: a caller's `claude --resume X` where X is NOT UUID-shaped is UNRECORDED (resume_target_unparseable) — no row, spawn still proceeds", async () => {
+    const db = freshDb()
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume not-a-uuid' }),
+      CALLER,
+      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+    )
+    // Unrecorded still passes the spawn through untouched — never a splice, never a drop.
+    expect(admitted.spawnOptions.command).toBe('claude --resume not-a-uuid')
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    expect(notices).toEqual([
+      { paneKey: 'tab1:leaf-a', verb: 'launch_unrecorded', reasonCode: 'resume_target_unparseable' }
+    ])
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_unrecorded')
+    expect(auditRow.reason_code).toBe('resume_target_unparseable')
+  })
+
   it("S2: a caller's `claude --resume X` naming ANOTHER pane's current session is REFUSED (resume_target_owned_by_another_pane) — no row, no supersede, the victim pane untouched", async () => {
     const db = freshDb()
     db.recordLaunch({
       hostId: HOST_ID,
       paneKey: 'tab1:leaf-victim',
       agentType: 'claude',
-      sessionId: 'victims-live-session',
+      sessionId: VICTIM_SESSION_ID,
       launchGeneration: 'gen-0',
       executionHostId: HOST_ID,
       evidence: 'host_launch'
@@ -686,7 +770,7 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     await expect(
       admitAgentLaunch(
         () => db,
-        opts({ command: 'claude --resume victims-live-session' }),
+        opts({ command: `claude --resume ${VICTIM_SESSION_ID}` }),
         CALLER,
         ctx()
       )
@@ -698,13 +782,11 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
     // The victim keeps both its launch row and its current_sessions row — the UNIQUE(host_id,
     // session_id) fence adjudicated, and `supersedePaneKey` was never set from this call site.
-    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-victim')?.session_id).toBe(
-      'victims-live-session'
-    )
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-victim')?.session_id).toBe(VICTIM_SESSION_ID)
     const victimCurrent = rawDb(db)
       .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
       .get(HOST_ID, 'tab1:leaf-victim') as { session_id: string }
-    expect(victimCurrent.session_id).toBe('victims-live-session')
+    expect(victimCurrent.session_id).toBe(VICTIM_SESSION_ID)
     const auditRow = rawDb(db)
       .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
       .get() as { verb: string; outcome: string; reason_code: string }

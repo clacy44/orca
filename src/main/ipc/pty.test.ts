@@ -21172,7 +21172,11 @@ describe('registerPtyHandlers', () => {
         expect.stringContaining('daemon_respawn_fresh_session'),
         expect.objectContaining({ rateKey: 'rebind:daemon_respawn_fresh_session' })
       )
-      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('rebind')
+      // [S10-21c B3b, D-R149 LOW 5 — SCENARIO_CORRECTION] A refused rebind resolves nothing —
+      // the pane's daemon_died fact still stands, so it must not outrank it (the query now
+      // excludes verb='rebind'/outcome='refused'). A later legitimate host_resume/
+      // self_resume_caller on this pane must still see 'daemon_died' and refresh.
+      expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('daemon_died')
     })
 
     it('Case B2: host_minted on an unowned pane with a daemon_died fact refuses the fresh session and notices — row untouched', async () => {
