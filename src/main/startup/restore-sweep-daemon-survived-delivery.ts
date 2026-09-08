@@ -90,6 +90,11 @@ export function handleDaemonSurvivedSkip(
     return { kind: 'skipped_daemon_survived' }
   }
   if (res !== undefined && res.ok) {
+    // [S10-21d D-R162 M-2] Post-commit, same as recordLaunch's own wrapper and
+    // rebindRestoredPane (agent-restore-rebind.ts:437-438): without this, a pane surviving N
+    // daemon restarts accumulates N+1 launch rows, violating PRUNE_PER_PANE. Self-transacting,
+    // never inside refreshAgentHandleAfterRespawn's own transaction (already closed above).
+    db.pruneLaunchRowRetention(hostId, launchRow.pane_key)
     try {
       // [S10-21c B3c, D-R151 LOW 1] Own try, placed AFTER the refresh try: a throw here must
       // never be labelled a refresh failure (the refresh already committed successfully) and

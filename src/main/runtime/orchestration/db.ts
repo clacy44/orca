@@ -136,7 +136,9 @@ import {
 // one. Added here rather than left unreachable; mirrors every other launch-session delegate above.
 import {
   deleteLaunchRow as deleteLaunchRowImpl,
-  restoreCurrentSessionForPane as restoreCurrentSessionForPaneImpl
+  restoreCurrentSessionForPane as restoreCurrentSessionForPaneImpl,
+  prunePaneRows as prunePaneRowsImpl,
+  pruneGlobalRows as pruneGlobalRowsImpl
 } from './agent-launch-sessions-retention'
 import {
   clearSweepRestoreMark as clearSweepRestoreMarkImpl,
@@ -5344,6 +5346,14 @@ export class OrchestrationDb {
     params: RefreshAgentHandleAfterRespawnParams
   ): RefreshAgentHandleAfterRespawnResult {
     return refreshAgentHandleAfterRespawnImpl(this.db, params)
+  }
+
+  // [S10-21d D-R162 M-2] `db` is private on this class — the daemon-survived sweep arm
+  // (restore-sweep-daemon-survived-delivery.ts) needs the same post-commit §7 prunes
+  // rebindRestoredPane runs (agent-restore-rebind.ts:437-438) and has no other way to reach them.
+  pruneLaunchRowRetention(hostId: string, paneKey: string): void {
+    prunePaneRowsImpl(this.db, hostId, paneKey)
+    pruneGlobalRowsImpl(this.db, hostId)
   }
 
   // S10-21a C10 (design v3.2 §2.11 N4 fix; Ruling 34 Addendum 25): host-authored pact un-pause
