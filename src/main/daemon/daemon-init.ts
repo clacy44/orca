@@ -83,6 +83,12 @@ function logDaemonMilestone(event: string, details: Record<string, unknown> = {}
 // Why: extra hello+listSessions probes (~5s each) giving a wedged-but-connectable daemon ~60s grace to answer and keep its live sessions before a permanent wedge (#8689) is replaced; raise only alongside the fail-open cap.
 export const WEDGED_DAEMON_GRACE_RETRIES = 11
 const DAEMON_SELF_SHUTDOWN_WAIT_MS = 5_000
+// R117 FIX 4: the daemon fork previously ran at V8's unset default (~4GB on a 64-bit host) — the
+// field cliff (two OOM deaths, diag-r117-2026-09-08.md). Pinning it moves the cliff to a
+// predictable point far above SOCKET_WRITE_CEILING_BYTES (64MB, daemon-stream-data-batcher.ts) on
+// both platforms; 2048 is a deliberate floor, not a measurement — no lower-bound data exists yet
+// for the daemon's steady-state footprint, so this is chosen conservative rather than tight.
+const DAEMON_MAX_OLD_SPACE_SIZE_MB = 2048
 const DAEMON_CHILD_TERMINATION_GRACE_MS = 5_000
 const DAEMON_CHILD_FORCE_EXIT_WAIT_MS = 1_000
 
@@ -900,6 +906,9 @@ function createOutOfProcessLauncher(
             // the fd failed to open.
             detached: true,
             stdio: ['ignore', 'ignore', stderrFd ?? 'ignore', 'ipc'],
+            // R117 FIX 4: bound the daemon's heap so it degrades loudly (dataGap) instead of
+            // dying at V8's unset default (~4GB field cliff).
+            execArgv: [`--max-old-space-size=${DAEMON_MAX_OLD_SPACE_SIZE_MB}`],
             // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
             ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
             // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.
