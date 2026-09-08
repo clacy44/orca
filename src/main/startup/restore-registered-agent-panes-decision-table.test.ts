@@ -327,6 +327,48 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     expect(rows).toHaveLength(1)
   })
 
+  // [S10-21c B4b, D-R152-b4 finding 5] self_report_bootstrap (S5) records a launch that is
+  // provably live THIS generation — the pane is running the agent, which is how the bootstrap
+  // fired — so it holds the leaf exactly like sweep_record/host_launch/caller_resume.
+  it('rows 5-6: dead, launch row admitted THIS generation via self_report_bootstrap, a LIVE occupant on the row own pane — skipped_leaf_held (yield)', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a008'
+    insertAgent(db, { id: 'agent-row8srb', display_name: 'chair-row8srb', pane_key: paneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-row8srb',
+      launchGeneration: LAUNCH_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'self_report_bootstrap'
+    })
+    const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    const ensureAgentSession = vi.fn()
+    const mintRestoreTicket = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        mintRestoreTicket,
+        findConnectedLeafOccupant: () => ({ paneKey, ptyId: 'pty-row8srb-occ' })
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-row8srb',
+      null,
+      'wt-1',
+      launchRow,
+      emptyInventory({ allLivePtyIds: new Set(['pty-row8srb-occ']) })
+    )
+    expect(outcome.kind).toBe('skipped_leaf_held')
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+    expect(mintRestoreTicket).not.toHaveBeenCalled()
+    const rows = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code = ?`)
+      .all(`leaf_held: self_report_bootstrap_this_generation seq=${launchRow.seq}`)
+    expect(rows).toHaveLength(1)
+  })
+
   it("[S10-21a C7l item 3] row 5: no leaf occupant, but a connected pty record on the pane (runtime's own records) — skipped_leaf_held (yield)", async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000c003'

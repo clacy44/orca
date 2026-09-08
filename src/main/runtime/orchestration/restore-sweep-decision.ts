@@ -82,7 +82,19 @@ export function decideLeafHoldRows(
     // launch exactly like `sweep_record`/`host_launch` — a caller's `claude --resume X` that the
     // host recorded holds the leaf under the identical rule. Own reason code so the audit trail
     // still names the evidence kind that held it.
-    if (evidence === 'sweep_record' || evidence === 'host_launch' || evidence === 'caller_resume') {
+    // [S10-21c B4b, D-R152-b4 finding 5] 'self_report_bootstrap' (S5) records a launch that is
+    // provably live THIS generation — the pane is running the agent, which is how the bootstrap
+    // fired — so it holds the leaf exactly like the other same-generation admitted evidences.
+    // 'live_report' (S3) is deliberately EXCLUDED: it is an in-place rotation that keeps the
+    // row's original `launch_generation`, so a prior-generation row rotated this generation would
+    // otherwise start holding the leaf on the strength of a generation it never actually admitted
+    // into.
+    if (
+      evidence === 'sweep_record' ||
+      evidence === 'host_launch' ||
+      evidence === 'caller_resume' ||
+      evidence === 'self_report_bootstrap'
+    ) {
       if (occupantOnOwnPaneLive) {
         return {
           kind: 'skipped_leaf_held',
@@ -91,7 +103,9 @@ export function decideLeafHoldRows(
               ? `leaf_held: resume_admitted_this_generation seq=${seq}`
               : evidence === 'host_launch'
                 ? `leaf_held: new_launch_admitted_this_generation seq=${seq}`
-                : `leaf_held: caller_resume_admitted_this_generation seq=${seq}`
+                : evidence === 'caller_resume'
+                  ? `leaf_held: caller_resume_admitted_this_generation seq=${seq}`
+                  : `leaf_held: self_report_bootstrap_this_generation seq=${seq}`
         }
       }
       return {

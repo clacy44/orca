@@ -145,7 +145,10 @@ describe('S10-21a C12b, D-R125 S-A/S-B: forged hook report, valid OWN anchor —
     // row (UNIQUE(host_id, session_id)), so recordSelfReportRotation refuses; never rewritten.
     const newestB = db!.newestLaunchForPane(HOST, PANE_B)
     expect(newestB?.session_id).toBe(SID_B)
-    expect(newestB?.evidence).not.toBe('self_report_rotation')
+    // [S10-21c B4b, D-R152-b4 finding 9] Post-B4 this path can only ever write 'live_report', so
+    // the old `.not.toBe('self_report_rotation')` is vacuous — assert the row was not rewritten
+    // by ANY rotation mechanism, not by one obsolete name.
+    expect(newestB?.evidence).toBe('host_launch')
     // (iii) A's row is untouched, byte-identical to the seeded row.
     expect(db!.newestLaunchForPane(HOST, PANE_A)).toEqual(seededA)
     expect(db!.newestLaunchForPane(HOST, PANE_B)).toEqual(seededB)

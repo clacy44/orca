@@ -131,6 +131,64 @@ describe('AgentHookServer pane authority', () => {
     expect(server.canTransferPaneAuthority(SOURCE, 'pty-1', () => false)).toBe(true)
   })
 
+  it('[S10-21c B4b, D-R152-b4 finding 1] drops the travelling authority verdict across a transfer — the destination re-earns it only from its OWN next host-verified hook event', () => {
+    const server = new AgentHookServer()
+    server.setPaneLaunchAuthorityVerifier(() => true)
+    server.ingestRemote(
+      {
+        paneKey: SOURCE,
+        worktreeId: 'wt-1',
+        source: 'claude',
+        launchToken: 'source-launch-token',
+        hookEventName: 'SessionStart',
+        providerSession: { key: 'session_id', id: 'sess-1' },
+        payload: { state: 'done', sessionBoundary: true }
+      },
+      'conn-1'
+    )
+    expect(server.getProviderSessionIdentities()).toEqual([
+      expect.objectContaining({
+        paneKey: SOURCE,
+        anchorHostVerified: true,
+        anchorCorroborated: true
+      })
+    ])
+
+    server.transferPaneAuthority(SOURCE, TARGET, 'pty-1')
+
+    // The IPC gate authenticates only `fromPaneKey` — the runtime never attested TARGET, so the
+    // travelling stamp must not ride along as TARGET's own.
+    expect(server.getProviderSessionIdentities()).toEqual([
+      expect.objectContaining({
+        paneKey: TARGET,
+        anchorHostVerified: false,
+        anchorCorroborated: false
+      })
+    ])
+
+    // A subsequent real hook event ON THE DESTINATION re-earns the verdict from the runtime's
+    // own verifier for THAT key.
+    server.ingestRemote(
+      {
+        paneKey: TARGET,
+        worktreeId: 'wt-1',
+        source: 'claude',
+        launchToken: 'target-launch-token',
+        hookEventName: 'SessionStart',
+        providerSession: { key: 'session_id', id: 'sess-2' },
+        payload: { state: 'done', sessionBoundary: true }
+      },
+      'conn-1'
+    )
+    expect(server.getProviderSessionIdentities()).toEqual([
+      expect.objectContaining({
+        paneKey: TARGET,
+        anchorHostVerified: true,
+        anchorCorroborated: true
+      })
+    ])
+  })
+
   it('bounds persisted aliases by evicting the oldest authority', () => {
     const server = new AgentHookServer()
     const listener = vi.fn()

@@ -274,8 +274,11 @@ export function recordSelfReportRotation(
   try {
     const updated = db
       .prepare(
+        // [R87] execution_host_id now rides this UPDATE too — was a dead parameter (D-R152-b4
+        // residual): a rotation reported on a different partition than the row's own left the
+        // row still claiming a stale one.
         `UPDATE agent_launch_sessions
-           SET session_id = ?, previous_session_id = ?, evidence = ?,
+           SET session_id = ?, previous_session_id = ?, evidence = ?, execution_host_id = ?,
                recorded_at = datetime('now')
          WHERE seq = (
            SELECT seq FROM agent_launch_sessions
@@ -287,6 +290,7 @@ export function recordSelfReportRotation(
         params.sessionId,
         params.previousSessionId,
         params.evidence,
+        params.executionHostId,
         params.hostId,
         params.paneKey
       )

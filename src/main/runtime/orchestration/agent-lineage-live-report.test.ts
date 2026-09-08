@@ -6,10 +6,11 @@
 // The two questions every case here answers, in the order framing B's attacks pose them:
 //   - can a report move ANOTHER pane's row?    (conjunct (ii) exact match, conjunct (iv) UNIQUE)
 //   - can a report establish a NEW identity?   (S5's registered/non-derived/non-quarantined gate)
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import {
   evaluateLiveHookReportMismatch,
+  resetNegativeTranscriptVerdictCacheForTests,
   type LiveHookReportMismatchParams,
   type ResolveLiveReportTranscript
 } from './agent-lineage-mismatch'
@@ -35,6 +36,13 @@ const UNCOVERED: ResolveLiveReportTranscript = async () => ({ coverage: 'uncover
 
 describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', () => {
   let orchestrationDb: OrchestrationDb | undefined
+
+  // [S10-21c B4b, D-R152-b4 finding 2] The negative-transcript memo cache is module-scoped and
+  // outlives any one `it()` — this file reuses PANE/session ids with a negative resolver across
+  // cases, so a stale cache entry would leak a stale verdict into the next case.
+  beforeEach(() => {
+    resetNegativeTranscriptVerdictCacheForTests()
+  })
 
   afterEach(() => {
     orchestrationDb?.close()
@@ -179,7 +187,7 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(newestLaunchForPane(db, HOST_ID, PANE)?.evidence).toBe('host_launch')
   })
 
-  it("S3 conjunct (ii) — CROSS-PANE: a report from a pane whose row the SUFFIX lookup resolves to a SIBLING never touches that sibling's row; the alarm is attributed to the row's real owner", async () => {
+  it("S3 conjunct (ii) — CROSS-PANE: a report from a pane whose row the SUFFIX lookup resolves to a SIBLING never touches that sibling's row; a CORROBORATED claimant is attributed to the REPORTING pane, never re-attributed to the sibling", async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-sibling', SIBLING)
     const result = await evaluateLiveHookReportMismatch(db, params({ paneKey: PANE }), REAL)
@@ -193,6 +201,12 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(currentSessionPane(db, 'sess-live')).toBeUndefined()
     // No row was created for the reporting pane either: reconciliation never inserts.
     expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
+    // [S10-21c B4b, D-R152-b4 finding 8] `params()` defaults `anchorCorroborated: true` — the
+    // claimant IS authenticated for ITSELF, so the audit charges the REPORTING pane (PANE), not
+    // `row.pane_key` (SIBLING). Re-attribution to the row's owner is reserved for an
+    // UNCORROBORATED claim naming a different pane (raiseMismatchAlarm's own F2/D-R125 case).
+    expect(audits(db, PANE, 'session_identity_mismatch')).toHaveLength(1)
+    expect(audits(db, SIBLING, 'session_identity_mismatch')).toHaveLength(0)
   })
 
   it("S3 conjunct (iv) — CROSS-PANE: a report naming a session another pane currently holds is refused by current_sessions UNIQUE, never absorbed, and the victim's row is untouched", async () => {
@@ -350,7 +364,9 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
       params({ reportedSessionId: 'sess-victim' }),
       REAL
     )
-    expect(result).toEqual({ kind: 'no_row' })
+    // [S10-21c B4b, D-R152-b4 finding 2] DISTINCT from the ordinary `no_row` (unregistered/
+    // unverified) cases above: this refusal reached conjunct (iv) and is worth noticing once.
+    expect(result).toEqual({ kind: 'bootstrap_refused', reason: 'foreign_session_id sess-victim' })
     expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
     expect(newestLaunchForPane(db, HOST_ID, 'tab9:leaf-victim')?.session_id).toBe('sess-victim')
     expect(currentSessionPane(db, 'sess-victim')).toBe('tab9:leaf-victim')
@@ -359,13 +375,16 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     ])
   })
 
-  it('S5 conjunct (iii): a stub-only transcript refuses with a coded, deduped audit and writes no row', async () => {
+  it('S5 conjunct (iii): a stub-only transcript refuses with a coded, deduped audit and writes no row; the SECOND (missing-transcript) report never calls its own resolver at all', async () => {
     const db = rawDb()
     insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
-    expect(await evaluateLiveHookReportMismatch(db, params(), STUB_ONLY)).toEqual({
-      kind: 'no_row'
-    })
-    expect(await evaluateLiveHookReportMismatch(db, params(), MISSING)).toEqual({ kind: 'no_row' })
+    const refused = { kind: 'bootstrap_refused', reason: 'resume_target_absent session sess-live' }
+    expect(await evaluateLiveHookReportMismatch(db, params(), STUB_ONLY)).toEqual(refused)
+    // [S10-21c B4b, D-R152-b4 finding 2] Same (host, pane, reported id), same generation: the
+    // negative verdict from the STUB_ONLY call above is memoized, so this MISSING-backed call
+    // never invokes its own resolver — proven by a spy in the memoization test below, asserted
+    // here only by the identical outcome a fresh call to MISSING would also have produced.
+    expect(await evaluateLiveHookReportMismatch(db, params(), MISSING)).toEqual(refused)
     expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
     // Both refusals carry the same code and the same outcome, so the dedupe keeps one row: a
     // pane reporting every few seconds must not flood agent_audit.
@@ -382,11 +401,48 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
       params({ reportedAgentType: 'nonesuch' }),
       UNCOVERED
     )
-    expect(result).toEqual({ kind: 'no_row' })
+    expect(result).toEqual({
+      kind: 'bootstrap_refused',
+      reason: 'resume_preflight_uncovered nonesuch'
+    })
     expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
     expect(audits(db, PANE, 'session_identity_bootstrap')).toEqual([
       { outcome: 'refused', reason_code: 'resume_preflight_uncovered nonesuch' }
     ])
+  })
+
+  it('S10-21c B4b, D-R152-b4 finding 2: the negative transcript verdict is memoized per (host, pane, reported id) this generation — a second refused report never calls the resolver again, a different id does, and a new generation does too', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const resolver = vi.fn(STUB_ONLY)
+    const refused = (reason: string) => ({ kind: 'bootstrap_refused', reason })
+
+    expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual(
+      refused('resume_target_absent session sess-live')
+    )
+    expect(resolver).toHaveBeenCalledTimes(1)
+
+    // Same id, same generation — cache hit, resolver not called again.
+    expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual(
+      refused('resume_target_absent session sess-live')
+    )
+    expect(resolver).toHaveBeenCalledTimes(1)
+
+    // A DIFFERENT reported id — cache miss, resolver called again.
+    expect(
+      await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: 'sess-other' }),
+        resolver
+      )
+    ).toEqual(refused('resume_target_absent session sess-other'))
+    expect(resolver).toHaveBeenCalledTimes(2)
+
+    // A NEW generation — the whole cache is cleared, so the ORIGINAL id is a cache miss again.
+    expect(
+      await evaluateLiveHookReportMismatch(db, params({ launchGeneration: 'gen-2' }), resolver)
+    ).toEqual(refused('resume_target_absent session sess-live'))
+    expect(resolver).toHaveBeenCalledTimes(3)
   })
 
   it('S5: without a host-owned agent type or execution host the bootstrap cannot fire — no row is ever written from a guessed value', async () => {

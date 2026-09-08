@@ -52,7 +52,10 @@ describe('S10-21a C6b: raiseSessionIdentityMismatchAlarms', () => {
 
   it('drives a distinct notice text for unrecorded_launch, naming the reason', async () => {
     const evaluateLiveHookReportMismatch = vi.fn(
-      async (): Promise<LiveHookReportMismatchResult> => ({ kind: 'unrecorded_launch', reason: 'pane_key_owned' })
+      async (): Promise<LiveHookReportMismatchResult> => ({
+        kind: 'unrecorded_launch',
+        reason: 'pane_key_owned'
+      })
     )
     const writeHostNoticeToPane = vi.fn()
     await raiseSessionIdentityMismatchAlarms(
@@ -72,7 +75,9 @@ describe('S10-21a C6b: raiseSessionIdentityMismatchAlarms', () => {
 
   it('never notices on match/no_row — the audit call still always happens (unconditional per Addendum 18) but no notice text is generated', async () => {
     for (const result of [{ kind: 'match' } as const, { kind: 'no_row' } as const]) {
-      const evaluateLiveHookReportMismatch = vi.fn(async () => result as LiveHookReportMismatchResult)
+      const evaluateLiveHookReportMismatch = vi.fn(
+        async () => result as LiveHookReportMismatchResult
+      )
       const writeHostNoticeToPane = vi.fn()
       await raiseSessionIdentityMismatchAlarms(
         {
@@ -132,7 +137,9 @@ describe('S10-21a C6b: raiseSessionIdentityMismatchAlarms', () => {
       .mockImplementationOnce(async () => {
         throw new Error('boom')
       })
-      .mockImplementationOnce(async (): Promise<LiveHookReportMismatchResult> => ({ kind: 'foreign_mismatch' }))
+      .mockImplementationOnce(
+        async (): Promise<LiveHookReportMismatchResult> => ({ kind: 'foreign_mismatch' })
+      )
     const writeHostNoticeToPane = vi.fn()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     await raiseSessionIdentityMismatchAlarms(
@@ -202,6 +209,30 @@ describe('S10-21a C6b: raiseSessionIdentityMismatchAlarms', () => {
     expect(paneKey).toBe('tab1:leaf-a')
     expect(text).toContain('sess-new')
     expect(opts).toMatchObject({ rateKey: 'session_identity_bootstrapped' })
+  })
+
+  it('S10-21c B4b, D-R152-b4 finding 2: a bootstrap_refused outcome notices the pane under its own rate key, naming the reason — was silent before this fix', async () => {
+    const evaluateLiveHookReportMismatch = vi.fn(
+      async (): Promise<LiveHookReportMismatchResult> => ({
+        kind: 'bootstrap_refused',
+        reason: 'resume_target_absent session sess-live'
+      })
+    )
+    const writeHostNoticeToPane = vi.fn()
+    await raiseSessionIdentityMismatchAlarms(
+      {
+        hostId: 'local',
+        launchGeneration: 'gen-1',
+        evaluateLiveHookReportMismatch,
+        writeHostNoticeToPane
+      },
+      [identity('tab1:leaf-a', 'sess-live')]
+    )
+    expect(writeHostNoticeToPane).toHaveBeenCalledTimes(1)
+    const [paneKey, text, opts] = writeHostNoticeToPane.mock.calls[0]
+    expect(paneKey).toBe('tab1:leaf-a')
+    expect(text).toContain('resume_target_absent session sess-live')
+    expect(opts).toMatchObject({ rateKey: 'session_identity_bootstrap_refused' })
   })
 
   it('S10-21c B4: the four hook-derived conjunct inputs are forwarded verbatim from the identity', async () => {

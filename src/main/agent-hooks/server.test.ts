@@ -6998,6 +6998,12 @@ describe('Last-status persistence', () => {
       expect(file.entries[PANE].claudeRunningNonAgentTask).toBeUndefined()
       expect(readFileSync(lastStatusPath(), 'utf8')).not.toContain('claudeRunningNonAgentTask')
       expect(readFileSync(lastStatusPath(), 'utf8')).not.toContain('launch-bearer-must-not-persist')
+      // [S10-21c B4b, D-R152-b4 finding 11] This event was corroborated AND host-verified (the
+      // verifier above returns true) — proving both verdicts are still scrubbed at the moment
+      // they would otherwise persist true, not merely absent because nothing corroborated.
+      expect(file.entries[PANE].anchorCorroborated).toBeUndefined()
+      expect(file.entries[PANE].anchorHostVerified).toBeUndefined()
+      expect(readFileSync(lastStatusPath(), 'utf8')).not.toContain('anchorHostVerified')
     } finally {
       server.stop()
     }

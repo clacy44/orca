@@ -161,7 +161,9 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
       previousSessionId: 'sess-a',
       sessionId: 'sess-a2',
       launchGeneration: 'gen-1',
-      executionHostId: 'local',
+      // [R87] the report's own partition — DIFFERENT from the row's seeded 'local', to prove the
+      // UPDATE re-stamps it rather than leaving the row's stale value untouched.
+      executionHostId: 'ssh:conn-1',
       evidence: 'self_report_rotation'
     })
     expect(rotation.ok).toBe(true)
@@ -171,6 +173,7 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
     expect(rotation.row.session_id).toBe('sess-a2')
     expect(rotation.row.previous_session_id).toBe('sess-a')
     expect(rotation.row.evidence).toBe('self_report_rotation')
+    expect(rotation.row.execution_host_id).toBe('ssh:conn-1')
 
     expect(currentSessionRow(db, 'local', 'tab1:leaf-a')?.session_id).toBe('sess-a2')
     // no new row: the original session id no longer resolves via agent_launch_sessions.

@@ -37,11 +37,15 @@ type PaneNotice = { paneKey: string; text: string; rateKey: string }
 
 /** [D-R107 fix item 6] T23's missing half: per identity, calls `evaluateLiveHookReportMismatch`
  * and raises `writeHostNoticeToPane` on `foreign_mismatch`/`unrecorded_launch`/`reconciled`/
- * `bootstrapped`. [D-R108 fix item ii] Each identity is isolated in its own try/catch — a throw
- * for one malformed/edge-case identity (a DB hiccup, an unexpected shape, a filesystem error
- * from the transcript conjunct) must never abort the rest of the batch. Identities are processed
- * SEQUENTIALLY (awaited in turn, never `Promise.all`) so two panes can never interleave their
- * read-decide-write cycles against the same launch ledger. */
+ * `bootstrapped`/`bootstrap_refused`. [D-R108 fix item ii] Each identity is isolated in its own
+ * try/catch — a throw for one malformed/edge-case identity (a DB hiccup, an unexpected shape, a
+ * filesystem error from the transcript conjunct) must never abort the rest of the batch.
+ * [S10-21c B4b, D-R152-b4 finding 6] Within ONE batch, identities are awaited in turn, never
+ * `Promise.all` — but nothing serialises ACROSS batches (index.ts's subscription callback fires
+ * this fire-and-forget, so a second hook event can start a second overlapping batch while the
+ * first still awaits). That is exactly why every gating fact the evaluator relies on is re-read
+ * in the same synchronous tick as the write it authorises, rather than resting on any claim of
+ * cross-batch serialisation. */
 export async function raiseSessionIdentityMismatchAlarms(
   deps: SessionIdentityMismatchAlarmDeps,
   sessions: readonly AgentHookProviderSessionIdentity[]
@@ -122,6 +126,18 @@ function noticeForResult(
         `Orca had no launch record for this registered pane and has recorded the session it is ` +
         `running (${result.row.session_id}) — the pane is now restorable.`,
       rateKey: 'session_identity_bootstrapped'
+    }
+  }
+  // [S10-21c B4b, D-R152-b4 finding 2] Was silent: the underlying audit already dedupes (fires
+  // once per new fact), and this notice rides the SAME 24h rate clamp as every other outcome
+  // here, so a persistently refused bootstrap is visible instead of only cheap to keep repeating.
+  if (result.kind === 'bootstrap_refused') {
+    return {
+      paneKey: identity.paneKey,
+      text:
+        `Orca could not record this registered pane's running session (${result.reason}) — ` +
+        `the pane will not be restorable until it does.`,
+      rateKey: 'session_identity_bootstrap_refused'
     }
   }
   return undefined

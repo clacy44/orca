@@ -320,6 +320,10 @@ function isValidPiProviderSessionOnly(
   return Boolean(providerSession && agentType === 'pi' && getAgentResumeArgv('pi', providerSession))
 }
 
+// [S10-21c B4b, D-R152-b4 finding 11] Builds its result field-by-field below and copies neither
+// `anchorCorroborated` nor `anchorHostVerified` — deliberate: a restored entry always reads as
+// unverified, which is what makes serializeStatusFile's own discard of both fields defence-in-
+// depth rather than the only fence.
 function sanitizeHydratedEntry(
   paneKey: string,
   rawEntry: unknown
@@ -1673,11 +1677,19 @@ export class AgentHookServer {
       | undefined
     if (movedStatus) {
       const owner = parsePaneKey(toPaneKey)
-      this.state.lastStatusByPaneKey.set(toPaneKey, {
+      // [S10-21c B4b, D-R152-b4 finding 1] Neither verdict is host-derived for `toPaneKey` — the
+      // IPC gate authenticates only `fromPaneKey` (agent-pane-authority-ipc.ts), so a stamp
+      // earned on the source pane must never ride along as the destination's own. Fail-closed:
+      // the next real hook event on `toPaneKey` re-stamps both against the runtime's verdict for
+      // THAT key (stampAuthorityVerdict, called from the two ingestion sites only).
+      const retargeted: EnrichedAgentHookEventPayload = {
         ...movedStatus,
         paneKey: toPaneKey,
-        tabId: owner?.tabId
-      })
+        tabId: owner?.tabId,
+        anchorCorroborated: undefined,
+        anchorHostVerified: undefined
+      }
+      this.state.lastStatusByPaneKey.set(toPaneKey, retargeted)
     }
     const hydratedLaunchTokenHash = this.hydratedLaunchTokenHashByPaneKey.get(previousOwnerPaneKey)
     if (hydratedLaunchTokenHash) {
@@ -3164,6 +3176,11 @@ export class AgentHookServer {
         // Why: never persisted — hydrate re-stamps it, so a stored copy could only drift.
         restoredUnconfirmed: _restoredUnconfirmed,
         launchToken,
+        // [S10-21c B4b, D-R152-b4 finding 11] Neither verdict may ride to disk: a restored entry
+        // must always read as unverified (sanitizeHydratedEntry already copies neither field —
+        // this discard is defence-in-depth against a future hydration change promoting one).
+        anchorCorroborated: _anchorCorroborated,
+        anchorHostVerified: _anchorHostVerified,
         ...persistedPayload
       } = payload as EnrichedAgentHookEventPayload
       const launchTokenHash = launchToken?.trim()

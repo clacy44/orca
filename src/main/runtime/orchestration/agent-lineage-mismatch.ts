@@ -117,6 +117,11 @@ export type LiveHookReportMismatchResult =
   | { kind: 'reconciled'; row: AgentLaunchSessionRow }
   /** [S10-21c B4, design §2 S5] The pane had no launch row and earned its first one. */
   | { kind: 'bootstrapped'; row: AgentLaunchSessionRow }
+  /** [S10-21c B4b, D-R152-b4 finding 2] The `no_row` arm reached conjunct (iii) or (iv) and one
+   * of them refused (an uncovered/absent transcript, or a session id another pane already holds)
+   * — DISTINCT from the ordinary `no_row` a routine/unregistered/unverified report returns, so
+   * the caller can notice it once instead of leaving a persistently-refused bootstrap silent. */
+  | { kind: 'bootstrap_refused'; reason: string }
   // [F2, D-R125] `attributedPaneKey`, present ONLY when it differs from `params.paneKey` (an
   // uncorroborated report naming a pane other than the row's own owner — an unauthenticated
   // claim): the pane the audit was actually charged to (`row.pane_key`), so the caller
@@ -128,6 +133,59 @@ export type LiveHookReportMismatchResult =
   | { kind: 'unrecorded_launch'; reason: string }
 
 const BOOTSTRAP_AUDIT_VERB = 'session_identity_bootstrap'
+
+/** [S10-21c B4b, D-R152-b4 finding 2] Conjunct (iii) is one recursive filesystem walk
+ * (resolve-resume-transcript.ts), and the alarm batch redrives every identity on EVERY accepted
+ * hook status change — a pane whose reported id never resolves would otherwise pay one full walk
+ * per hook event, forever, invisibly (the audit dedupe already silences the repeat). Memoized by
+ * (host, pane, reported id) for the CURRENT launch generation only — cleared wholesale on a
+ * generation change rather than keyed by it, so the map never carries a stale generation's
+ * entries. NEVER holds a positive verdict: a transcript may gain its first turn later, and a
+ * cached `true` would make that permanently unobservable. */
+const NEGATIVE_TRANSCRIPT_VERDICT_CACHE_MAX = 512
+let negativeTranscriptVerdictGeneration: string | undefined
+const negativeTranscriptVerdictCache = new Map<string, { ok: false; note?: string }>()
+
+async function checkTranscriptConjunctMemoized(
+  resolveResumeTranscript: ResolveLiveReportTranscript,
+  agentType: string,
+  params: Pick<
+    LiveHookReportMismatchParams,
+    'hostId' | 'paneKey' | 'reportedSessionId' | 'launchGeneration'
+  >
+): Promise<{ ok: true } | { ok: false; note?: string }> {
+  if (negativeTranscriptVerdictGeneration !== params.launchGeneration) {
+    negativeTranscriptVerdictGeneration = params.launchGeneration
+    negativeTranscriptVerdictCache.clear()
+  }
+  const key = `${params.hostId}:${params.paneKey}:${params.reportedSessionId}`
+  const cached = negativeTranscriptVerdictCache.get(key)
+  if (cached) {
+    return cached
+  }
+  const verdict = await checkTranscriptConjunct(
+    resolveResumeTranscript,
+    agentType,
+    params.reportedSessionId
+  )
+  if (!verdict.ok) {
+    if (negativeTranscriptVerdictCache.size >= NEGATIVE_TRANSCRIPT_VERDICT_CACHE_MAX) {
+      const oldest = negativeTranscriptVerdictCache.keys().next().value
+      if (oldest !== undefined) {
+        negativeTranscriptVerdictCache.delete(oldest)
+      }
+    }
+    negativeTranscriptVerdictCache.set(key, verdict)
+  }
+  return verdict
+}
+
+/** Test-only: the memo cache above is module-scoped so it survives across `it()` blocks in the
+ * same file — tests reusing a (host, pane, session id) between cases must reset it first. */
+export function resetNegativeTranscriptVerdictCacheForTests(): void {
+  negativeTranscriptVerdictGeneration = undefined
+  negativeTranscriptVerdictCache.clear()
+}
 
 /** §2.3/§2.6/§1.6 + §2 S3/S5, Layer 1. Compares a live pane's hook-reported session id against
  * its own newest `agent_launch_sessions` row (resolved by pane SUFFIX, D-R107 MEDIUM-1). A
@@ -155,10 +213,10 @@ export async function evaluateLiveHookReportMismatch(
   // a sibling-suffix report never reaches the write path at all.
   let refusalNote: string | undefined
   if (params.anchorHostVerified && row.pane_key === params.paneKey) {
-    const transcript = await checkTranscriptConjunct(
+    const transcript = await checkTranscriptConjunctMemoized(
       resolveResumeTranscript,
       row.agent_type,
-      params.reportedSessionId
+      params
     )
     // Everything past the await is re-derived from a same-tick read. The row above is now stale
     // evidence: across one filesystem read it can have been retired, superseded by a newer row
@@ -172,7 +230,10 @@ export async function evaluateLiveHookReportMismatch(
     if (fresh.session_id === params.reportedSessionId) {
       return { kind: 'match' }
     }
-    if (transcript.ok && fresh.pane_key === params.paneKey) {
+    // [S10-21c B4b, D-R152-b4 finding 4] The transcript was resolved against the PRE-await
+    // `row.agent_type`; refuse if the same-tick re-read's row now names a different agent type
+    // (fail-closed) rather than land a session validated under one type onto a row of another.
+    if (transcript.ok && fresh.pane_key === params.paneKey && fresh.agent_type === row.agent_type) {
       const reconciled = applyLiveReportReconciliation(db, params, fresh)
       if (reconciled) {
         return reconciled
@@ -242,7 +303,9 @@ function applyLiveReportReconciliation(
     previousSessionId: row.session_id,
     sessionId: params.reportedSessionId,
     launchGeneration: row.launch_generation,
-    executionHostId: row.execution_host_id,
+    // [R87] The REPORT's own partition when known, not the row's possibly-stale one — a report
+    // arriving on a different partition than the row currently claims should re-stamp it.
+    executionHostId: params.executionHostId ?? row.execution_host_id,
     evidence: 'live_report'
   })
   if (!rotation.ok) {
@@ -291,20 +354,15 @@ async function bootstrapRowFromLiveReport(
   if (!isBootstrappableAgentRow(agent, params)) {
     return { kind: 'no_row' }
   }
-  const transcript = await checkTranscriptConjunct(
+  const transcript = await checkTranscriptConjunctMemoized(
     resolveResumeTranscript,
     agentType,
-    params.reportedSessionId
+    params
   )
   if (!transcript.ok) {
-    writeBootstrapAudit(
-      db,
-      params,
-      agent.id,
-      'refused',
-      transcript.note ?? `resume_target_absent session ${params.reportedSessionId}`
-    )
-    return { kind: 'no_row' }
+    const reason = transcript.note ?? `resume_target_absent session ${params.reportedSessionId}`
+    writeBootstrapAudit(db, params, agent.id, 'refused', reason)
+    return { kind: 'bootstrap_refused', reason }
   }
   // Same-tick re-reads (the transcript resolve above is an await, so BOTH facts read before it
   // are stale by now): a launch row that appeared across the await means this is no longer the
@@ -313,7 +371,12 @@ async function bootstrapRowFromLiveReport(
   if (newestLaunchForPaneSuffix(db, params.hostId, params.paneKey)) {
     return { kind: 'no_row' }
   }
-  if (!isBootstrappableAgentRow(getAgentByPaneKey(db, params.hostId, params.paneKey), params)) {
+  const freshAgent = getAgentByPaneKey(db, params.hostId, params.paneKey)
+  // [S10-21c B4b, D-R152-b4 finding 3] Gate with the RE-READ value, not the pre-await `agent` —
+  // ids churn on retire/re-register, and binding the new row's launch under an old, now-
+  // tombstoned agent id would leave a stale row holding the current_sessions UNIQUE fence
+  // forever once the current agent later retires (deleteLaunchRowsForAgent then never matches).
+  if (!isBootstrappableAgentRow(freshAgent, params) || freshAgent.id !== agent.id) {
     return { kind: 'no_row' }
   }
   const recorded = recordLaunch(db, {
@@ -327,24 +390,19 @@ async function bootstrapRowFromLiveReport(
   })
   if (!recorded.ok) {
     // conjunct (iv): another pane currently holds this session. Never absorbed, never superseded.
-    writeBootstrapAudit(
-      db,
-      params,
-      agent.id,
-      'refused',
-      `foreign_session_id ${params.reportedSessionId}`
-    )
-    return { kind: 'no_row' }
+    const reason = `foreign_session_id ${params.reportedSessionId}`
+    writeBootstrapAudit(db, params, freshAgent.id, 'refused', reason)
+    return { kind: 'bootstrap_refused', reason }
   }
-  setLaunchAgentId(db, { seq: recorded.row.seq }, agent.id)
+  setLaunchAgentId(db, { seq: recorded.row.seq }, freshAgent.id)
   writeBootstrapAudit(
     db,
     params,
-    agent.id,
+    freshAgent.id,
     'bootstrapped',
     `session=${params.reportedSessionId} agent_type=${agentType}`
   )
-  return { kind: 'bootstrapped', row: { ...recorded.row, agent_id: agent.id } }
+  return { kind: 'bootstrapped', row: { ...recorded.row, agent_id: freshAgent.id } }
 }
 
 /** [S10-21c B4, design §2 S5] The three agent-row predicates, plus conjunct (ii)'s exact match.

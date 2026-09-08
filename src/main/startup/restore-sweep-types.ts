@@ -66,8 +66,12 @@ export type RestoreSweepDeps = {
    * miss; `hasTurn` false when the file exists but carries only the `bridge-session` stub Claude
    * Code writes for `--session-id X` before any turn. Reused verbatim by S3(iii)/S5 (B4).
    * [S10-21c B2b, D-R145 low 9] `{coverage: 'uncovered'}` is a THIRD state — the resolver does
-   * not cover `agentType` yet, distinct from "covered and absent/stub"; the caller must never
-   * refuse on this state, only note it. */
+   * not cover `agentType` yet, distinct from "covered and absent/stub". [S10-21c B4b,
+   * D-R152-b4 finding 10] That "never refuse" rule is THIS caller's own (the sweep resumes an
+   * id the HOST already authored, so it only notes the gap and proceeds) — the live-report
+   * reconciliation/bootstrap in agent-lineage-mismatch.ts is a DIFFERENT caller and DOES refuse
+   * on it, deliberately: it is deciding whether to believe an id the PANE itself authored, where
+   * an unverifiable transcript is the difference between a weaker check and no check at all. */
   resolveResumeTranscript(
     agentType: string,
     sessionId: string
