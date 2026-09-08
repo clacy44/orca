@@ -20,7 +20,7 @@ import { inlineAgentDraftFitsPlatform } from './agent-draft-platform-limit'
 import type { TuiAgent } from './tui-agent'
 import type { SessionOptionValue } from './native-chat-session-options'
 import { resolveAgentLaunchCommand } from './tui-agent-launch-command'
-import { buildAgentResumeLaunchCommand } from './agent-resume-launch-command'
+import { finishAgentResumeStartupPlan } from './agent-resume-launch-command'
 
 export type AgentStartupPlan = {
   agent: TuiAgent
@@ -76,8 +76,12 @@ export function buildAgentStartupPlan(args: {
   }
   const launchConfig = buildSleepingAgentLaunchConfig({
     ...args,
-    // Why: picker flags are a one-time launch choice; a resumed provider
-    // session restores its own state and must retain only explicit user args.
+    // [S10-21d R118, corrects the prior comment here, which was FALSE per the design's own
+    // binary-verified finding] A resumed Claude session does NOT restore its own model/effort —
+    // `claude --resume` takes the config-dir DEFAULT, dropping whatever the pane last ran with.
+    // Orca is the one that re-applies them, from the launch row, on the NEXT restore
+    // (buildAgentResumeStartupPlan below) — so the picker flags must not be folded into this
+    // persisted launchConfig's own command; they are re-derived fresh from stored prefs instead.
     agentCommand: baseCommand.commandWithoutSessionOptions
   })
 
@@ -214,23 +218,23 @@ export function buildAgentResumeStartupPlan(args: {
         platform: args.platform,
         shell,
         agentArgs: args.agentArgs,
+        // [S10-21d R118, design (c)] The one fix this slice makes here: the create path
+        // (buildAgentStartupPlan above, :64-72) already threads sessionOptions into
+        // resolveAgentLaunchCommand; this resume path used to accept the same param and silently
+        // drop it (diag-r118-2026-09-08.md) — args.sessionOptions undefined (design (d)) emits no
+        // flags, byte-identical to today's argv either way.
+        sessionOptions: args.sessionOptions,
         isRemote: args.isRemote
       })
   if (!baseCommand.ok) {
     return null
   }
-  const launchConfig = buildSleepingAgentLaunchConfig({
-    ...args,
-    agentCommand: baseCommand.command
-  })
-  return {
-    agent: args.agent,
-    launchCommand: buildAgentResumeLaunchCommand(args.agent, baseCommand.command, argv, shell),
-    expectedProcess: config.expectedProcess,
-    followupPrompt: null,
-    launchConfig,
-    ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
-  }
+  // [S10-21d R118, design (c)/(e), forced deviation — see RETURN] The rest of this function
+  // (launchConfig + modelEffort + launchCommand + return assembly) is
+  // finishAgentResumeStartupPlan (agent-resume-launch-command.ts, split out to stay under this
+  // file's max-lines budget) — see its own doc comment for why modelEffort is applied
+  // UNCONDITIONALLY (the 'ultracode' gap) and why launchConfig strips the picker flags.
+  return finishAgentResumeStartupPlan(args, baseCommand, argv, shell, config.expectedProcess)
 }
 
 export type AgentDraftLaunchPlan = {

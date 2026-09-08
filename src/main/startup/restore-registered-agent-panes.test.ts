@@ -104,6 +104,85 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     expect(rebindRows).toHaveLength(1)
   })
 
+  // [S10-21d R118, design (c)] restore-registered-agent-panes.ts passes launchPreferences
+  // {model, effort} from the launch row into ensureAgentSession's request — undefined when both
+  // columns are NULL (T1 above already covers that NULL case via objectContaining, which never
+  // asserts the field's absence; this test asserts both directions explicitly).
+  it('R118: launchPreferences threads through from the launch row pref_model/pref_effort, undefined when both are NULL', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-0000000000f1'
+    insertAgent(db, { id: 'agent-f1', display_name: 'chair-f1', pane_key: predPaneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-f1',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch',
+      prefs: { model: 'claude-opus-4-8', effort: 'max', source: 'launch' }
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-f1',
+        paneKey: predPaneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    await runRestoreSweep(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        getTerminalProcessIncarnation: () => 'pty-f1:aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaf1'
+      })
+    )
+    expect(ensureAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchPreferences: { model: 'claude-opus-4-8', effort: 'max' }
+      }),
+      {},
+      expect.anything()
+    )
+  })
+
+  it('R118: launchPreferences is undefined when the launch row has no stored prefs', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-0000000000f2'
+    insertAgent(db, { id: 'agent-f2', display_name: 'chair-f2', pane_key: predPaneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-f2',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-f2',
+        paneKey: predPaneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    await runRestoreSweep(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        getTerminalProcessIncarnation: () => 'pty-f2:aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaf2'
+      })
+    )
+    expect(ensureAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({ launchPreferences: undefined }),
+      {},
+      expect.anything()
+    )
+  })
+
   it("T21: a leaf occupied by something OTHER than the pane's own live session gets a FRESH pane, no placement, Layer 2 (row 9)", async () => {
     const db = rawDb()
     const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000002'

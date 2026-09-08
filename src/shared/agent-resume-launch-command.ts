@@ -1,4 +1,8 @@
 import type { ResumableTuiAgent } from './agent-session-resume'
+import type { SessionOptionValue } from './native-chat-session-options'
+import { buildSleepingAgentLaunchConfig } from './sleeping-agent-launch-config'
+import type { ResolvedAgentLaunchCommand } from './tui-agent-launch-command'
+import type { AgentStartupPlan } from './tui-agent-startup'
 import {
   quoteStartupArg,
   tokenizeStartupCommand,
@@ -17,6 +21,86 @@ function isClaudeResumeSelector(token: string): boolean {
   // and no arity table can keep up with the CLI. Only exact selector shapes
   // are stripped; a persisted joined form degrades to pre-guard behavior.
   return token === '-r' || token.startsWith('-r=') || token === '-c' || token.startsWith('-c=')
+}
+
+/** [S10-21d R118, design (c)/(e)] Only a field actually present in `modelEffort` is ever
+ * matched — an untouched field (undefined) never causes an unrelated existing flag to be cut,
+ * which is what keeps the NULL-prefs case byte-identical to today (design (d)). */
+function isClaudeModelOrEffortToken(
+  token: string,
+  modelEffort: { model?: string; effort?: string } | undefined
+): boolean {
+  if (modelEffort?.model !== undefined && (token === '--model' || token.startsWith('--model='))) {
+    return true
+  }
+  return (
+    modelEffort?.effort !== undefined && (token === '--effort' || token.startsWith('--effort='))
+  )
+}
+
+/** [S10-21d R118, design (c)/(e)] Coerces a sessionOptions record's loosely-typed values
+ * (SessionOptionValue = string | boolean) down to buildAgentResumeLaunchCommand's own
+ * model/effort shape. Exported here (not tui-agent-startup.ts) since it exists purely to feed
+ * this module's own new parameter. */
+export function resumeModelEffort(o?: { model?: string | boolean; effort?: string | boolean }): {
+  model?: string
+  effort?: string
+} {
+  return {
+    model: typeof o?.model === 'string' ? o.model : undefined,
+    effort: typeof o?.effort === 'string' ? o.effort : undefined
+  }
+}
+
+// [S10-21d R118, forced deviation — see RETURN] Split out of buildAgentResumeStartupPlan
+// (tui-agent-startup.ts) purely to stay under that file's max-lines budget after this slice's
+// modelEffort/sessionOptions fixes — no behavior change, this is the exact tail of that function
+// (launchConfig construction included). `baseCommand` is `ResolvedAgentLaunchCommand |
+// { ok: true; command: string }` (the `agentCommand` short-circuit has no
+// commandWithoutSessionOptions/appliedSessionOptions — falls back to `.command` for both).
+export function finishAgentResumeStartupPlan(
+  args: {
+    agent: ResumableTuiAgent
+    agentArgs?: string | null
+    agentEnv?: Record<string, string> | null
+    ompResumeFilePath?: string | null
+    sessionOptions?: Record<string, SessionOptionValue>
+  },
+  baseCommand: Extract<ResolvedAgentLaunchCommand, { ok: true }> | { ok: true; command: string },
+  argv: readonly string[],
+  shell: AgentStartupShell,
+  expectedProcess: string
+): AgentStartupPlan {
+  const commandForLaunchConfig =
+    'commandWithoutSessionOptions' in baseCommand
+      ? baseCommand.commandWithoutSessionOptions
+      : baseCommand.command
+  const launchConfig = buildSleepingAgentLaunchConfig({
+    ...args,
+    agentCommand: commandForLaunchConfig
+  })
+  const modelEffort = resumeModelEffort(args.sessionOptions)
+  const appliedSessionOptions =
+    'appliedSessionOptions' in baseCommand ? baseCommand.appliedSessionOptions : undefined
+  return {
+    agent: args.agent,
+    launchCommand: buildAgentResumeLaunchCommand(
+      args.agent,
+      baseCommand.command,
+      argv,
+      shell,
+      modelEffort
+    ),
+    expectedProcess,
+    followupPrompt: null,
+    launchConfig,
+    ...(appliedSessionOptions
+      ? Object.keys(appliedSessionOptions).length > 0
+        ? { sessionOptions: { ...appliedSessionOptions } }
+        : {}
+      : {}),
+    ...(args.agentEnv ? { env: { ...args.agentEnv } } : {})
+  }
 }
 
 function isClaudeExecutableToken(token: string): boolean {
@@ -66,11 +150,16 @@ export function buildAgentResumeLaunchCommand(
   agent: ResumableTuiAgent,
   baseCommand: string,
   resumeArgv: readonly string[],
-  shell: AgentStartupShell
+  shell: AgentStartupShell,
+  // [S10-21d R118, design (c)/(e)] Claude-only (the design's own catalog citation is Claude's
+  // `--model`/`--effort`, agent-session-option-catalog-claude-codex.ts:88/164-166) — undefined
+  // fields are never stripped or added, so a pane with no stored prefs gets a byte-identical
+  // command to today (design (d)).
+  modelEffort?: { model?: string; effort?: string }
 ): string {
   const argv = resumeArgv.slice(1)
   if (agent === 'claude') {
-    return buildClaudeResumeLaunchCommand(baseCommand, argv, shell)
+    return buildClaudeResumeLaunchCommand(baseCommand, argv, shell, modelEffort)
   }
   const resumeArgs = argv.map((arg) => quoteStartupArg(arg, shell)).join(' ')
   return resumeArgs ? `${baseCommand} ${resumeArgs}` : baseCommand
@@ -90,13 +179,21 @@ export function buildAgentResumeLaunchCommand(
 export function buildClaudeResumeLaunchCommand(
   baseCommand: string,
   resumeArgs: readonly string[],
-  shell: AgentStartupShell
+  shell: AgentStartupShell,
+  modelEffort?: { model?: string; effort?: string }
 ): string {
   const quotedResume = resumeArgs.map((arg) => quoteStartupArg(arg, shell)).join(' ')
-  if (!quotedResume) {
+  const quotedModelEffort = [
+    ...(modelEffort?.model !== undefined ? ['--model', modelEffort.model] : []),
+    ...(modelEffort?.effort !== undefined ? ['--effort', modelEffort.effort] : [])
+  ]
+    .map((arg) => quoteStartupArg(arg, shell))
+    .join(' ')
+  const insertion = [quotedModelEffort, quotedResume].filter(Boolean).join(' ')
+  if (!insertion) {
     return baseCommand
   }
-  const appended = `${baseCommand} ${quotedResume}`
+  const appended = `${baseCommand} ${insertion}`
   const tokenized = tokenizeStartupCommand(baseCommand, shell)
   if (!tokenized.ok) {
     return appended
@@ -146,7 +243,9 @@ export function buildClaudeResumeLaunchCommand(
       terminatorStart = spans[i].start
       break
     }
-    if (!isClaudeResumeSelector(token)) {
+    const isSelector = isClaudeResumeSelector(token)
+    const isModelOrEffort = !isSelector && isClaudeModelOrEffortToken(token, modelEffort)
+    if (!isSelector && !isModelOrEffort) {
       continue
     }
     // Why: absorb the separator before the selector, but never cross into the
@@ -157,8 +256,13 @@ export function buildClaudeResumeLaunchCommand(
     }
     let end = spans[i].end
     const next = tokens[i + 1]
-    if ((token === '--resume' || token === '-r') && next !== undefined && !next.startsWith('-')) {
-      // A stale session locator rides along with its selector.
+    const bareWithValue =
+      ((isSelector && (token === '--resume' || token === '-r')) ||
+        (isModelOrEffort && (token === '--model' || token === '--effort'))) &&
+      next !== undefined &&
+      !next.startsWith('-')
+    if (bareWithValue) {
+      // A stale session locator, model id, or effort level rides along with its flag.
       end = spans[i + 1].end
       i += 1
     }
@@ -166,12 +270,12 @@ export function buildClaudeResumeLaunchCommand(
   }
   let result = baseCommand
   if (terminatorStart !== null) {
-    result = `${result.slice(0, terminatorStart)}${quotedResume} ${result.slice(terminatorStart)}`
+    result = `${result.slice(0, terminatorStart)}${insertion} ${result.slice(terminatorStart)}`
   }
   for (let i = cuts.length - 1; i >= 0; i -= 1) {
     result = `${result.slice(0, cuts[i].start)}${result.slice(cuts[i].end)}`
   }
-  return terminatorStart !== null ? result : `${result} ${quotedResume}`
+  return terminatorStart !== null ? result : `${result} ${insertion}`
 }
 
 export type ClaudeSessionIdSpliceResult = { ok: true; command: string } | { ok: false }

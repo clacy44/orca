@@ -35,7 +35,10 @@
 // [C7b, Addendum 22(v)] Before minting, if the pane's newest admission audit (any generation) is
 // UNRECORDED and at least as new as the row's own `recorded_at`, the row is superseded — Layer 3,
 // audited, never resumed over a newer unrecorded conversation.
-import type { AgentLaunchSessionRow } from '../runtime/orchestration/agent-launch-sessions'
+import {
+  launchPreferencesFromRow,
+  type AgentLaunchSessionRow
+} from '../runtime/orchestration/agent-launch-sessions'
 import { resolveIncumbentDeath } from '../runtime/incumbent-death'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
@@ -223,7 +226,8 @@ export async function restoreOneRegisteredPane(
         agent: launchRow.agent_type as ResumableTuiAgent,
         providerSession: { key: 'session_id', id: launchRow.session_id },
         presentation: 'background',
-        placement: offerPlacement ? { tabId: parsed.tabId, leafId: parsed.leafId } : undefined
+        placement: offerPlacement ? { tabId: parsed.tabId, leafId: parsed.leafId } : undefined,
+        launchPreferences: launchPreferencesFromRow(launchRow)
       },
       {},
       { restoreProvenance: { kind: 'host-restore', ticket } }

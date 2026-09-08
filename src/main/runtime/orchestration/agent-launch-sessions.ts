@@ -453,3 +453,14 @@ export function deleteLaunchRowsForAgent(db: Database.Database, agentId: string)
   const result = db.prepare(`DELETE FROM agent_launch_sessions WHERE agent_id = ?`).run(agentId)
   return Number(result.changes)
 }
+
+// [S10-21d R118, design (c)] undefined when NULL (both columns) — the restore sweep's
+// ensureAgentSession call passes no sessionOptions in that case, so the relaunch command is
+// byte-identical to today (design (d)).
+export function launchPreferencesFromRow(
+  row: AgentLaunchSessionRow
+): { model?: string; effort?: string } | undefined {
+  return row.pref_model || row.pref_effort
+    ? { model: row.pref_model ?? undefined, effort: row.pref_effort ?? undefined }
+    : undefined
+}

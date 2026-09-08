@@ -140,7 +140,15 @@ describe('tui agent startup session options', () => {
     expect(plan?.sessionOptions).toEqual({ model: 'opus', effort: 'high' })
   })
 
-  it('never injects session options into resume commands', () => {
+  // [S10-21d R118, SCENARIO_CORRECTION] This scenario used to be "never injects session options
+  // into resume commands", asserting the exact defect R118 fixes: buildAgentResumeStartupPlan
+  // accepted `sessionOptions` and silently dropped them on every resumable agent, not only
+  // claude (diag-r118-2026-09-08.md — the root cause named this function, not a claude-specific
+  // branch of it). Design (c) is explicit: sessionOptions now flows into resolveAgentLaunchCommand
+  // "exactly as the create path" — agent-generic, so codex resuming with a stored model/effort
+  // now carries them too, the same way it already did on a fresh create (the `never injects`
+  // premise was the bug this whole brief exists to remove).
+  it('injects session options into resume commands, same as create (S10-21d R118)', () => {
     const plan = buildAgentResumeStartupPlan({
       agent: 'codex',
       providerSession: { key: 'session_id', id: 'thread-1' },
@@ -148,7 +156,8 @@ describe('tui agent startup session options', () => {
       platform: 'linux',
       sessionOptions: { model: 'gpt-5.5', effort: 'high' }
     })
-    expect(plan?.launchCommand).toBe("codex 'resume' 'thread-1'")
-    expect(plan?.sessionOptions).toBeUndefined()
+    expect(plan?.launchCommand).toBe(
+      "codex '-m' 'gpt-5.5' '-c' 'model_reasoning_effort=high' 'resume' 'thread-1'"
+    )
   })
 })
