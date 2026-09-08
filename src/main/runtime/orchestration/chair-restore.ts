@@ -32,17 +32,18 @@ export type ChairRestoreDeps = {
 // process. A LIVE holder refuses loudly (DEC-2's "no fork, no stub"). model/effort (b4, DEC-9/
 // R118) thread through as launchPreferences when given. Extracted from orca-runtime.ts in b3b
 // (D-R163 M4/MAX-LINES) to keep that file's ratchet.
-export async function requestChairRestore(
-  deps: ChairRestoreDeps,
-  request: {
-    worktreeSelector: string
-    sessionId: string
-    displayName: string
-    role?: string
-    model?: string
-    effort?: string
-  }
-): Promise<
+// Named (not inlined at the call below) so orca-runtime.ts's thin wrapper can import these
+// instead of deriving them via Parameters<>/ReturnType<> locally — one fewer pair of type
+// aliases against that file's own line ratchet.
+export type ChairRestoreRequest = {
+  worktreeSelector: string
+  sessionId: string
+  displayName: string
+  role?: string
+  model?: string
+  effort?: string
+}
+export type ChairRestoreResult =
   | {
       ok: true
       paneKey: string
@@ -53,7 +54,11 @@ export async function requestChairRestore(
   | { ok: false; reason: 'restore_target_live_elsewhere'; holderPaneKey: string }
   | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string }
   | { ok: false; reason: string }
-> {
+
+export async function requestChairRestore(
+  deps: ChairRestoreDeps,
+  request: ChairRestoreRequest
+): Promise<ChairRestoreResult> {
   const db = deps.runtime.getOrchestrationDb()
   const hostId = deps.runtime.getOrchestrationCompatibilityHostId()
   const agentType = 'claude'
@@ -175,9 +180,11 @@ export async function requestChairRestore(
       inventoryRoundNonNull,
       holderHasConnectedPty,
       // [S10-21d b3b, D-R163 M1 fix] Exclude the holder's own stale rehydrated row (OD-21d-1).
-      liveHookReportOfSessionElsewhere: deps.runtime.hasLiveHookReportOfSession(request.sessionId, {
-        excludePaneKey: holderPaneKey
-      }),
+      // [b3b M5] null (unwired) coerces to false here — conservative, matches DEC-3's own default.
+      liveHookReportOfSessionElsewhere:
+        deps.runtime.hasLiveHookReportOfSession(request.sessionId, {
+          excludePaneKey: holderPaneKey
+        }) ?? false,
       sweepLockHeld: isRestoreSweepLockHeld(),
       sweepRestoreMarkSetForHolder: db.getSweepRestoreMark(hostId, holderPaneKey),
       holderHasOtherLiveRegisteredRow,

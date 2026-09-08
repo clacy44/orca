@@ -72,3 +72,37 @@ export function checkHostResumeHolderUnmoved(
     ? 'restore_holder_current_generation'
     : null
 }
+
+/** [S10-21d b3b, D-R163 H1/H2 LOW] One call-site wrapper for the admission's HOST_RESUME arm:
+ * runs the fresh re-check (see checkHostResumeHolderUnmoved) then builds the record-launch
+ * params — collapses the call site to a few lines, keeping agent-launch-admission.ts under its
+ * own 300-line budget regardless of how the formatter reflows individual call expressions. */
+export function resolveHostResumeRecordLaunch(
+  db: OrchestrationDb,
+  ctx: { hostId: string; launchGeneration: string },
+  write: {
+    paneKey: string
+    agentType: string
+    sessionId: string
+    admission: HostResumeAdmission
+    refuse: (reasonCode: HostResumeHolderRefusal) => never
+  }
+): RecordLaunchParams {
+  const holderMoved = checkHostResumeHolderUnmoved(
+    db,
+    ctx.hostId,
+    ctx.launchGeneration,
+    write.sessionId,
+    write.admission
+  )
+  if (holderMoved) {
+    write.refuse(holderMoved)
+  }
+  return buildHostResumeRecordLaunchParams(
+    ctx.hostId,
+    write.paneKey,
+    write.agentType,
+    write.sessionId,
+    write.admission
+  )
+}
