@@ -48,7 +48,6 @@ import { handleDaemonSurvivedSkip as daemonSkip } from './restore-sweep-daemon-s
 import {
   decideEarlyRows,
   decideLeafHoldRows,
-  decideResumePreflight,
   decideWorktreeFence,
   routeDeadCandidate
 } from '../runtime/orchestration/restore-sweep-decision'
@@ -56,6 +55,7 @@ import { collectSweepEvidence } from '../runtime/orchestration/restore-sweep-evi
 import { noteSelfResumeWatermarkAbsent, evaluateRow7 } from './restore-sweep-row7-watermark'
 import { restoreSweepDeferralFamily } from './restore-sweep-deferral-family'
 import { notifyPaneBestEffort } from './restore-sweep-pane-notice'
+import { applyResumePreflight } from './restore-sweep-resume-preflight-arm'
 import {
   auditSweepSkip,
   auditLayer3,
@@ -200,30 +200,11 @@ export async function restoreOneRegisteredPane(
     offerPlacement = false
     auditSweepNote(db, hostId, launchRow.pane_key, agentId, fence.reasonCode)
   }
-  // [S10-21c B2, design §2 S4] Resume preflight — never resume an empty transcript, before any
-  // ticket is minted. A resolver throw is NOT caught here — it propagates to the sweep's own
-  // per-candidate try/catch, downgraded to a Layer-3 audit for this pane only.
-  const transcript = await deps.resolveResumeTranscript(launchRow.agent_type, launchRow.session_id)
-  const preflight = decideResumePreflight(transcript, launchRow.agent_type, launchRow.session_id)
-  if (preflight.kind === 'uncovered') {
-    auditSweepNote(db, hostId, launchRow.pane_key, agentId, preflight.reasonCode)
-  } else if (preflight.kind === 'refuse') {
-    auditLayer3(db, hostId, launchRow.pane_key, agentId, preflight.reasonCode)
-    // [D-R145 medium 6a, D-R148 low 7] Best-effort — inert on a pane with nothing live, per
-    // writeHostNoticeToPane's own doc comment; the audit row above is the record of truth. A
-    // throw here degrades to a `notice_failed:` note (never aborts this outcome) — asserted in
-    // the S4 test so neither behaviour can rot.
-    const msg = 'Restore skipped: the recorded session has no conversation to resume.'
-    notifyPaneBestEffort(
-      deps,
-      db,
-      hostId,
-      launchRow.pane_key,
-      agentId,
-      msg,
-      'sweep_resume_target_absent'
-    )
-    return { kind: 'layer3', reasonCode: preflight.reasonCode }
+  // [S10-21c B2, design §2 S4] Resume preflight — split into restore-sweep-resume-preflight-arm.ts
+  // (chore, 2026-09-08) to stay under the max-lines ratchet; see its own doc comment.
+  const preflightOutcome = await applyResumePreflight(deps, db, hostId, launchRow, agentId)
+  if (preflightOutcome) {
+    return preflightOutcome
   }
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,
