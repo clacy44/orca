@@ -36310,6 +36310,12 @@ export class OrcaRuntimeService {
     delivery: MessageDeliveryState
     recipient: MessageRecipientPresence
     environment?: string
+    /** R106: set only when `delivery` is 'relayed' and the row's own peer_relayed_at (UTC,
+     *  sqlite `datetime('now')`) is known — lets the CLI render an honest timestamp instead of
+     *  a live-presence claim it cannot back. Absent (e.g. the reply-outbox 'delivered' branch,
+     *  which has no peer_relayed_at column) means "relayed, timestamp unknown", not "not
+     *  relayed". */
+    relayedAt?: string
   } {
     // S10-15 verifier V-4 (was F4): a relayed-send mirror row (to_handle
     // `remote:<environmentId>:<agentId>`, S10-15 F1 R6) is never "pointed" to a live pane on
@@ -36375,7 +36381,10 @@ export class OrcaRuntimeService {
       return {
         delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',
         recipient: { state: 'unresolved', lastSeenAt: null },
-        ...(environment ? { environment } : {})
+        ...(environment ? { environment } : {}),
+        // R106: peer_relayed_at is set only once the peer accepted the relay (`relayed`); a
+        // `relay_pending` row never carries a timestamp to report.
+        ...(message.peer_relayed_at ? { relayedAt: message.peer_relayed_at } : {})
       }
     }
     const baseDelivery = resolveMessageDeliveryState(

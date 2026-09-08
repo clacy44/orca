@@ -31,6 +31,10 @@ export type OrchestrationMessageDelivery = {
   /** Set only when state is 'relayed' or 'relay_pending' — the saved-environment id parsed out
    *  of the row's `remote:<environmentId>:<agentId>` to_handle. */
   environment?: string
+  /** R106: set only when state is 'relayed' and the row's peer_relayed_at is known (UTC,
+   *  sqlite `datetime('now')`) — the CLI renders it verbatim rather than any live-presence
+   *  claim, since a relay acceptance is not a delivery receipt. */
+  relayedAt?: string
 }
 
 export type OrchestrationSentResult = {

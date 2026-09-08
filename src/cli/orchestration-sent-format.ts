@@ -6,6 +6,22 @@ export function formatOrchestrationSent(
   cliCommand: string
 ): string {
   const { delivery } = result
+  // R106: a cross-host row (relay accepted by the peer, or still awaiting acceptance) has no
+  // receipt from the far side at all — 'unresolved' recipient state for these two is a
+  // hardcoded placeholder (never a live predicate; see diag-r106-r110-2026-09-08.md), so the
+  // generic "recipient not currently resolvable" wording claims knowledge nobody has. Render it
+  // honestly instead: what the sender host actually knows (relay accepted/pending, when) and an
+  // explicit "delivery state unknown" rather than any resolvability claim.
+  if (delivery.state === 'relayed' || delivery.state === 'relay_pending') {
+    const environment = delivery.environment ?? 'unknown environment'
+    const headline =
+      delivery.state === 'relayed'
+        ? `${messageId}: relayed to ${environment}${
+            delivery.relayedAt ? ` at ${delivery.relayedAt} UTC` : ''
+          }; delivery state unknown.`
+        : `${messageId}: relay pending to ${environment}; delivery state unknown.`
+    return `${headline}\nNext step: ${cliCommand} orchestration sent --id ${messageId} --json — check again for a state change.`
+  }
   const recipient =
     delivery.recipient.state === 'unresolved'
       ? 'recipient not currently resolvable'
