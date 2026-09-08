@@ -46,6 +46,36 @@ describe('startDaemonHeapObservabilitySampler', () => {
     }
   })
 
+  it('D-R164 L4: omits zero-backlog clients and sessions', () => {
+    vi.useFakeTimers()
+    try {
+      const log = createFakeLog()
+      const sample = vi.fn(() => ({
+        clients: [
+          { clientId: 'idle-client', socketBufferedBytes: 0, batcherQueuedChars: 0 },
+          { clientId: 'busy-client', socketBufferedBytes: 0, batcherQueuedChars: 50 }
+        ],
+        sessions: [
+          { sessionId: 'idle-session', pendingOutputBytes: 0 },
+          { sessionId: 'busy-session', pendingOutputBytes: 10 }
+        ]
+      }))
+      const stop = startDaemonHeapObservabilitySampler(sample, log)
+
+      vi.advanceTimersByTime(60_000)
+
+      const [, details] = log.calls[0]!
+      expect(details?.clients).toEqual([
+        { clientId: 'busy-client', socketBufferedBytes: 0, batcherQueuedChars: 50 }
+      ])
+      expect(details?.sessions).toEqual([{ sessionId: 'busy-session', pendingOutputBytes: 10 }])
+
+      stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('samples every 60s, not more often and not less', () => {
     vi.useFakeTimers()
     try {

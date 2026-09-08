@@ -34,12 +34,15 @@ export function startDaemonHeapObservabilitySampler(
     const { heapUsed, rss } = memoryUsage()
     const { heap_size_limit: heapSizeLimit } = getHeapStatistics()
     const { clients, sessions } = sample()
+    // D-R164 L4: at ~20 idle sessions this line was ~1.7MB/day against a 5MB×3 rotation
+    // (daemon-file-log.ts:26-27) — omit entries with nothing backed up; a congested hop is what
+    // this line exists to attribute, and an idle one has nothing to say.
     log.log('daemon-heap-sample', {
       heapUsed,
       heap_size_limit: heapSizeLimit,
       rss,
-      clients,
-      sessions
+      clients: clients.filter((c) => c.socketBufferedBytes > 0 || c.batcherQueuedChars > 0),
+      sessions: sessions.filter((s) => s.pendingOutputBytes > 0)
     })
   }, intervalMs)
   timer.unref?.()
