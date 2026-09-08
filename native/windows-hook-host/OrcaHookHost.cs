@@ -27,7 +27,11 @@ using Microsoft.Win32.SafeHandles;
 internal static class OrcaHookHost
 {
     private const int StdinDeadlineMilliseconds = 2000;
-    private const int StdinCapBytes = 1_000_000;
+    // Bounds raw stdin bytes read from Claude, not the encoded POST body: percent-encoding a
+    // JSON payload (BuildFormBody) grows it roughly 1.6-2.2x, and HOOK_REQUEST_MAX_BYTES
+    // (agent-hook-listener.ts:82) bounds that larger encoded body server-side — the two limits
+    // are deliberately different quantities, not a shared cap.
+    private const int StdinCapBytes = 1000000;
     // Why: HttpWebRequest has no separate connect/total timeout knobs for a plain synchronous
     // request; 1500ms approximates the spec's "connect 500ms, total 1500ms" as one total budget
     // (see docs/windows-hook-host.md — R-note, unverified on this box).
@@ -37,7 +41,14 @@ internal static class OrcaHookHost
         "paneKey", "tabId", "launchToken", "worktreeId", "env", "version", "payload"
     };
     private const string DefaultDescriptorPathname = "/hook/claude";
-    private const string DefaultDescriptorSource = "claude";
+
+    // Why not readonly field initializers: a Regex constructor can throw (malformed pattern),
+    // and no static initializer here may be able to throw — that would raise before Main's
+    // try/catch runs and surface as a Windows Error Reporting dialog. Constructed inside Main's
+    // try instead; PortPattern/PathnamePattern are also RegexOptions.None (no .Compiled), which
+    // is unnecessary JIT cost for a process that runs the pattern once and exits.
+    private static Regex s_portPattern;
+    private static Regex s_pathnamePattern;
 
     private static int Main(string[] args)
     {
@@ -45,6 +56,8 @@ internal static class OrcaHookHost
         // surface an error to Claude.
         try
         {
+            s_portPattern = new Regex(@"^\d{1,5}$");
+            s_pathnamePattern = new Regex(@"^/[A-Za-z0-9._~/-]*$");
             Run(args);
         }
         catch
@@ -150,10 +163,15 @@ internal static class OrcaHookHost
         {
             return null;
         }
+        // M2: the env-fallback port is otherwise unvalidated — an unvalidated port string is
+        // interpolated straight into the request URL (PostPayload's string.Format) where a
+        // crafted value could redirect the POST off 127.0.0.1.
+        if (!s_portPattern.IsMatch(coordinates.Port))
+        {
+            return null;
+        }
         return coordinates;
     }
-
-    private static readonly Regex PortPattern = new Regex(@"^\d{1,5}$", RegexOptions.Compiled);
 
     private static EndpointCoordinates ParseEndpointFile(string contents)
     {
@@ -181,7 +199,7 @@ internal static class OrcaHookHost
 
         string port;
         values.TryGetValue("ORCA_AGENT_HOOK_PORT", out port);
-        if (string.IsNullOrEmpty(port) || !PortPattern.IsMatch(port))
+        if (string.IsNullOrEmpty(port) || !s_portPattern.IsMatch(port))
         {
             return null;
         }
@@ -262,20 +280,29 @@ internal static class OrcaHookHost
         {
             // best-effort
         }
+        try
+        {
+            // M5: Close() unblocks the reader thread's Read() call but does not wait for it to
+            // finish tearing down; without a join, ToArray() below can race the reader thread's
+            // last Write() into `buffer` and lose the tail of the payload.
+            readerThread.Join(200);
+        }
+        catch
+        {
+            // best-effort
+        }
 
         return Encoding.UTF8.GetString(buffer.ToArray());
     }
 
     private sealed class Descriptor
     {
-        public string Source;
         public string Pathname;
         public string[] Fields;
     }
 
     private static readonly Descriptor BuiltInDescriptor = new Descriptor
     {
-        Source = DefaultDescriptorSource,
         Pathname = DefaultDescriptorPathname,
         Fields = DefaultDescriptorFields
     };
@@ -300,7 +327,6 @@ internal static class OrcaHookHost
             {
                 return BuiltInDescriptor;
             }
-            Match sourceMatch = Regex.Match(json, "\"source\"\\s*:\\s*\"([^\"]*)\"");
 
             var fields = new List<string>();
             foreach (Match fieldMatch in Regex.Matches(fieldsMatch.Groups[1].Value, "\"([^\"]*)\""))
@@ -312,10 +338,18 @@ internal static class OrcaHookHost
                 return BuiltInDescriptor;
             }
 
+            // M2: an unvalidated Pathname is interpolated straight into the request URL
+            // (PostPayload's string.Format) — a crafted `@evil.example/x` value can turn the
+            // URL's authority into an attacker host, leaking the token and payload off-box.
+            string pathname = pathnameMatch.Groups[1].Value;
+            if (!s_pathnamePattern.IsMatch(pathname))
+            {
+                return BuiltInDescriptor;
+            }
+
             return new Descriptor
             {
-                Source = sourceMatch.Success ? sourceMatch.Groups[1].Value : DefaultDescriptorSource,
-                Pathname = pathnameMatch.Groups[1].Value,
+                Pathname = pathname,
                 Fields = fields.ToArray()
             };
         }
@@ -357,11 +391,46 @@ internal static class OrcaHookHost
             }
             string value;
             values.TryGetValue(fields[i], out value);
-            builder.Append(Uri.EscapeDataString(fields[i]));
+            builder.Append(EncodeRfc3986(fields[i]));
             builder.Append('=');
-            builder.Append(Uri.EscapeDataString(value ?? string.Empty));
+            builder.Append(EncodeRfc3986(value ?? string.Empty));
         }
         return builder.ToString();
+    }
+
+    // H2: hand-rolled RFC-3986 percent-encoder over UTF-8 bytes, replacing Uri.EscapeDataString
+    // (which throws on inputs over ~65,520 chars in .NET Framework — c_MaxUriBufferSize — and
+    // that throw would be swallowed by Main's blanket catch, silently dropping the POST for any
+    // large tool payload). Unreserved set per RFC 3986: A-Z a-z 0-9 - . _ ~.
+    private static string EncodeRfc3986(string value)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(value);
+        var builder = new StringBuilder(bytes.Length);
+        for (int i = 0; i < bytes.Length; i += 1)
+        {
+            byte b = bytes[i];
+            bool isUnreserved =
+                (b >= (byte)'A' && b <= (byte)'Z') ||
+                (b >= (byte)'a' && b <= (byte)'z') ||
+                (b >= (byte)'0' && b <= (byte)'9') ||
+                b == (byte)'-' || b == (byte)'.' || b == (byte)'_' || b == (byte)'~';
+            if (isUnreserved)
+            {
+                builder.Append((char)b);
+            }
+            else
+            {
+                builder.Append('%');
+                builder.Append(HexDigit(b >> 4));
+                builder.Append(HexDigit(b & 0xF));
+            }
+        }
+        return builder.ToString();
+    }
+
+    private static char HexDigit(int nibble)
+    {
+        return (char)(nibble < 10 ? '0' + nibble : 'A' + (nibble - 10));
     }
 
     // Counterpart: `postWindowsHookHostPayload`. Every exception here is caught by Main's
@@ -373,6 +442,12 @@ internal static class OrcaHookHost
         request.Method = "POST";
         request.ContentType = "application/x-www-form-urlencoded";
         request.Headers["X-Orca-Agent-Hook-Token"] = token;
+        // M1: this is a fixed loopback POST — no proxy, no Expect: 100-continue round trip, and
+        // no redirect following (a redirect response would otherwise re-send the token header
+        // to whatever Location a compromised local listener names).
+        request.Proxy = null;
+        request.ServicePoint.Expect100Continue = false;
+        request.AllowAutoRedirect = false;
         // Why: HttpWebRequest has no independent connect-phase timeout for a plain sync
         // request; this bounds the whole call (see RequestTimeoutMilliseconds comment above).
         request.Timeout = RequestTimeoutMilliseconds;
@@ -383,9 +458,10 @@ internal static class OrcaHookHost
         {
             requestStream.Write(bodyBytes, 0, bodyBytes.Length);
         }
-        using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+        // L2: response is intentionally unread — fire-and-forget status reporting; the `using`
+        // still disposes it without naming an unused local.
+        using (request.GetResponse())
         {
-            // Response is intentionally unread/unused — fire-and-forget status reporting.
         }
     }
 }
