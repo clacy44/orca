@@ -16,6 +16,7 @@ import {
   type PendingStreamDataBatch,
   type StreamQueueEntry
 } from './daemon-stream-keep-tail-drop'
+import type { DaemonEvent } from './types'
 
 export const SOCKET_WRITE_CEILING_BYTES = 64 * 1024 * 1024
 // D-R164 L3: a full TUI repaint is ~cols×rows×SGR ≈ 100KB (daemon-stream-keep-tail-drop.ts:45-50);
@@ -28,11 +29,11 @@ export const SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS = 128 * 1024
 // loud-degradation signal — coalesced to one entry per session, so it's already bounded, and must
 // reach the client promptly, not wait behind the very flood it's reporting).
 export function shouldHoldControlEntryOverCeiling(
-  eventName: string,
+  control: DaemonEvent,
   writableLength: number,
   ceilingBytes: number
 ): boolean {
-  return eventName !== 'exit' && eventName !== 'dataGap' && writableLength > ceilingBytes
+  return control.event !== 'exit' && control.event !== 'dataGap' && writableLength > ceilingBytes
 }
 
 export type SocketWriteCeilingHold = (

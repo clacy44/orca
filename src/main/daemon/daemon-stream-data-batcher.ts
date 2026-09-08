@@ -174,6 +174,7 @@ export class DaemonStreamDataBatcher {
     // A session that held an entry must hold all its later entries this pass — writing around a held entry would reorder that session's bytes.
     const heldSessions = new Set<string>()
     const retained: PendingStreamDataBatch['queue'] = []
+    const ceiling = this.socketWriteCeilingBytes
     while (batch.queue.length > 0) {
       const entry = batch.queue[0]
       if (entry.control) {
@@ -181,12 +182,8 @@ export class DaemonStreamDataBatcher {
         // socket is as harmless as the small-session bypass. D-R164 L1: past the hard socket-write
         // ceiling itself, hold most of the rest too (see shouldHoldControlEntryOverCeiling).
         const writableLength = socket.writableLength ?? 0
-        const holdControl = shouldHoldControlEntryOverCeiling(
-          entry.control.event,
-          writableLength,
-          this.socketWriteCeilingBytes
-        )
-        if (heldSessions.has(entry.sessionId) || holdControl) {
+        const hold = shouldHoldControlEntryOverCeiling(entry.control, writableLength, ceiling)
+        if (heldSessions.has(entry.sessionId) || hold) {
           heldSessions.add(entry.sessionId)
           retained.push(entry)
           batch.queue.shift()
