@@ -128,7 +128,8 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
       previousSessionId: 'sess-b',
       sessionId: 'sess-a',
       launchGeneration: 'gen-2',
-      executionHostId: 'local'
+      executionHostId: 'local',
+      evidence: 'self_report_rotation'
     })
     expect(rotation).toEqual({ ok: false, reason: 'foreign_session_id' })
 
@@ -160,7 +161,8 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
       previousSessionId: 'sess-a',
       sessionId: 'sess-a2',
       launchGeneration: 'gen-1',
-      executionHostId: 'local'
+      executionHostId: 'local',
+      evidence: 'self_report_rotation'
     })
     expect(rotation.ok).toBe(true)
     if (!rotation.ok) {
@@ -210,7 +212,8 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
       previousSessionId: 'sess-a2',
       sessionId: 'sess-a3',
       launchGeneration: 'gen-1',
-      executionHostId: 'local'
+      executionHostId: 'local',
+      evidence: 'self_report_rotation'
     })
     expect(rotation.ok).toBe(true)
     if (!rotation.ok) {
@@ -237,7 +240,8 @@ describe('S10-21a C1/C1a: agent-launch-sessions store', () => {
       previousSessionId: 'sess-x',
       sessionId: 'sess-y',
       launchGeneration: 'gen-ghost',
-      executionHostId: 'local'
+      executionHostId: 'local',
+      evidence: 'self_report_rotation'
     })
     expect(rotation).toEqual({ ok: false, reason: 'no_matching_launch_row' })
     expect(currentSessionRow(db, 'local', 'tab1:leaf-ghost')).toBeUndefined()

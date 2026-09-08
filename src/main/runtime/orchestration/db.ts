@@ -119,7 +119,8 @@ import {
 import {
   evaluateLiveHookReportMismatch as evaluateLiveHookReportMismatchImpl,
   type LiveHookReportMismatchParams,
-  type LiveHookReportMismatchResult
+  type LiveHookReportMismatchResult,
+  type ResolveLiveReportTranscript
 } from './agent-lineage-mismatch'
 import {
   isNewestAdmissionUnrecordedAndNewer as isNewestAdmissionUnrecordedAndNewerImpl,
@@ -5355,10 +5356,13 @@ export class OrchestrationDb {
   }
 
   // S10-21a C6a (design v3.2 §2.3/§2.6/§1.6, D-R107): Layer 1's live-hook-report mismatch check.
+  // [S10-21c B4, design §2 S3/S5] Async since B4: conjunct (iii) resolves the reported session's
+  // transcript on disk, so the resolver is injected here rather than imported by the evaluator.
   evaluateLiveHookReportMismatch(
-    params: LiveHookReportMismatchParams
-  ): LiveHookReportMismatchResult {
-    return evaluateLiveHookReportMismatchImpl(this.db, params)
+    params: LiveHookReportMismatchParams,
+    resolveResumeTranscript: ResolveLiveReportTranscript
+  ): Promise<LiveHookReportMismatchResult> {
+    return evaluateLiveHookReportMismatchImpl(this.db, params, resolveResumeTranscript)
   }
 
   // S10-21a C7b (D-R110 Addendum 22(v)): the sweep's pre-mint unrecorded-newer check.

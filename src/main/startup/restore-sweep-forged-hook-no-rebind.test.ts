@@ -98,12 +98,17 @@ describe('S10-21a C12b, D-R125 S-C: T3b — an unrelated sweep restore landing o
       })
     })
     expect(response.status).toBe(204)
-    raiseSessionIdentityMismatchAlarms(
+    await raiseSessionIdentityMismatchAlarms(
       {
         hostId: HOST_ID,
         launchGeneration: LAUNCH_GEN,
+        // [S10-21c B4] Conjunct (iii) stubbed REAL — the fence this test proves is pane-locality,
+        // and a stubbed-absent transcript would let it pass for the wrong reason.
         evaluateLiveHookReportMismatch: (params) =>
-          orchestrationDb!.evaluateLiveHookReportMismatch(params),
+          orchestrationDb!.evaluateLiveHookReportMismatch(params, async () => ({
+            path: '/transcripts/real.jsonl',
+            hasTurn: true
+          })),
         writeHostNoticeToPane: vi.fn()
       },
       server.getProviderSessionIdentities()

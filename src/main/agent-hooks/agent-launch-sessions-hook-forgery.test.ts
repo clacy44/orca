@@ -114,11 +114,17 @@ describe('S10-21a C12b, D-R125 S-A/S-B: forged hook report, valid OWN anchor —
   async function driveAlarmsAndAssertUnchanged(seededA: unknown, seededB: unknown) {
     const notice = vi.fn()
     const identities = server!.getProviderSessionIdentities()
-    raiseSessionIdentityMismatchAlarms(
+    await raiseSessionIdentityMismatchAlarms(
       {
         hostId: HOST,
         launchGeneration: GEN,
-        evaluateLiveHookReportMismatch: (params) => db!.evaluateLiveHookReportMismatch(params),
+        // [S10-21c B4] Conjunct (iii) stubbed REAL so the transcript can never be what refuses:
+        // this test proves the CROSS-PANE fence (current_sessions UNIQUE) holds on its own.
+        evaluateLiveHookReportMismatch: (params) =>
+          db!.evaluateLiveHookReportMismatch(params, async () => ({
+            path: '/transcripts/real.jsonl',
+            hasTurn: true
+          })),
         writeHostNoticeToPane: notice
       },
       identities

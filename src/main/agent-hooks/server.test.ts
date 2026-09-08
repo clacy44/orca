@@ -1880,13 +1880,22 @@ describe('AgentHookServer listener replay', () => {
     // `anchorCorroborated` field. AFTER: every provider-session identity now carries the
     // captured `isCorroboratedAuthority` verdict (§1.6 conjunct 1's evidence) — `false` here
     // since `ingestRemote`'s stub payload above supplies no launch-token evidence to corroborate.
+    // [S10-21c B4, design §2 S3/S5, SCENARIO_CORRECTION] Three more fields, same reason: the
+    // runtime's own verdict (`anchorHostVerified`, false for the same lack of evidence), the
+    // pane's own agent type, and the partition the report ARRIVED on — `ssh:conn-1` here because
+    // this is `ingestRemote`, whose connection id is a method argument the mux supplies, never a
+    // field the payload can choose. That is exactly why S5 may record it as a launch row's
+    // execution host.
     expect(sessions).toHaveBeenCalledWith([
       {
         paneKey: PANE,
         sessionId: 'pi-session-1',
         transcriptPath: '/tmp/pi-session-1.jsonl',
         worktreeId: 'wt-1',
-        anchorCorroborated: false
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        agentType: 'pi',
+        executionHostId: 'ssh:conn-1'
       }
     ])
   })
@@ -1928,7 +1937,7 @@ describe('AgentHookServer listener replay', () => {
     }
   })
 
-  it('S10-21a C6c, Ruling 34 Addendum 20 (closes residual R-21a-2): a relay-ingested fork carries sessionStartSource "fork" and, fed into the real evaluator, classifies rotated (not foreign_mismatch)', () => {
+  it('S10-21a C6c, Ruling 34 Addendum 20 (closes residual R-21a-2): a relay-ingested fork carries sessionStartSource "fork" and, fed into the real evaluator, classifies reconciled (not foreign_mismatch)', async () => {
     const server = new AgentHookServer()
     server.setPaneLaunchAuthorityVerifier(() => true)
     const sessions = vi.fn()
@@ -1978,15 +1987,25 @@ describe('AgentHookServer listener replay', () => {
         evidence: 'host_launch'
       })
       expect(seeded.ok).toBe(true)
-      const result = db.evaluateLiveHookReportMismatch({
-        hostId: 'local',
-        paneKey: identity.paneKey,
-        reportedSessionId: identity.sessionId,
-        anchorCorroborated: identity.anchorCorroborated === true,
-        sessionStartSource: identity.sessionStartSource,
-        launchGeneration: 'gen-1'
-      })
-      expect(result.kind).toBe('rotated')
+      // [S10-21c B4] The conjuncts moved (1 -> anchorHostVerified, 4 dropped, + exact pane and a
+      // real transcript), so this drives the CURRENT fence with the identity's own stamped
+      // verdict. The point of the test is unchanged: the relay path carries enough evidence for
+      // the real evaluator to classify a rotation rather than a permanent foreign mismatch.
+      const result = await db.evaluateLiveHookReportMismatch(
+        {
+          hostId: 'local',
+          paneKey: identity.paneKey,
+          reportedSessionId: identity.sessionId,
+          anchorCorroborated: identity.anchorCorroborated === true,
+          anchorHostVerified: identity.anchorHostVerified === true,
+          sessionStartSource: identity.sessionStartSource,
+          launchGeneration: 'gen-1',
+          reportedAgentType: identity.agentType,
+          executionHostId: identity.executionHostId
+        },
+        async () => ({ path: '/transcripts/real.jsonl', hasTurn: true })
+      )
+      expect(result.kind).toBe('reconciled')
     } finally {
       db.close()
     }

@@ -79,6 +79,7 @@ import {
   type AgentQuestionAnsweredInferenceRequest
 } from '../../shared/agent-question-answered-intent'
 import { parseLegacyNumericPaneKey, parsePaneKey } from '../../shared/stable-pane-id'
+import { LOCAL_EXECUTION_HOST_ID, toSshExecutionHostId } from '../../shared/execution-host'
 import type { LegacyPaneKeyAliasEntry } from '../../shared/persisted-state-types'
 import {
   getAgentResumeArgv,
@@ -104,6 +105,14 @@ type EnrichedAgentHookEventPayload = AgentHookEventPayload & {
    * "may only fill a void" comment) and would silently misreport an unauthenticated event as
    * anchored. Absent when the event carried no launch-token evidence to corroborate at all. */
   anchorCorroborated?: boolean
+  /** [S10-21c B4, design §2 S3 conjunct (i)] The RUNTIME's own verdict for THIS event — the
+   * `paneLaunchAuthorityVerifier` arm of `isCorroboratedAuthority` ALONE, never its
+   * hydrated/persisted continuity arms. Strictly stronger than `anchorCorroborated`, which those
+   * hook-server caches can satisfy on their own. Absent for the same reason as
+   * `anchorCorroborated` (no launch-token evidence on the event). NOT rehydrated from disk:
+   * `sanitizeHydratedEntry` builds its result field-by-field and copies neither verdict, so a
+   * restored entry always reads as unverified — which is the whole point of the distinction. */
+  anchorHostVerified?: boolean
 }
 
 type NormalizedLocalHook = {
@@ -158,6 +167,19 @@ export type AgentHookProviderSessionIdentity = {
    * `getCurrentAuthorityObservations()` (that map records uncorroborated fill-the-void
    * observations too — see `recordCurrentAuthorityObservation`). */
   anchorCorroborated?: boolean
+  /** [S10-21c B4, design §2 S3 conjunct (i)] The runtime's own launch-token verdict for the
+   * pane's NEWEST status entry (`anchorHostVerified` on the enriched entry). Optional; absent
+   * must be read as unverified by every consumer, same as `false`. */
+  anchorHostVerified?: boolean
+  /** [S10-21c B4, design §2 S5] The agent type this pane's own status entry names
+   * (`payload.agentType`), so the bootstrap can INSERT a launch row without guessing one. */
+  agentType?: string
+  /** [S10-21c B4, design §2 S5] The execution host the report ARRIVED on, derived from the
+   * connection id this server stamped (local for the loopback HTTP path; `ssh:<connectionId>` for
+   * a relay ingest, where the connection id is a method argument supplied by the mux, never a
+   * field the hook payload can choose). Same mapping `verifyLivePaneLaunchTokenHash` uses to pick
+   * the partition it verified the anchor in, so a bootstrapped row records that same partition. */
+  executionHostId?: string
 }
 
 export type AgentHookAuthorityEvidence = Readonly<{
@@ -173,6 +195,25 @@ export type AgentHookAuthorityAttestation = Readonly<{
   paneKey: string
   source: 'current_hook' | 'hydrated_commitment'
 }>
+
+/** [S10-21c B4] The two verdicts `recordCurrentAuthorityObservation` returns for one observation:
+ * the runtime's own (`hostVerified`, S3 conjunct (i)) and the combined ladder (`corroborated`,
+ * unchanged). Undefined-vs-present still means "the event carried no launch-token evidence". */
+type AgentHookAuthorityVerdict = { corroborated: boolean; hostVerified: boolean }
+
+type AgentHookStampedAuthority = { anchorCorroborated?: boolean; anchorHostVerified?: boolean }
+
+/** Stamps BOTH verdicts on the event before `applyNormalizedStatus` carries it into
+ * `lastStatusByPaneKey`. One function so the two ingestion call sites cannot drift apart — a
+ * site that stamped only `anchorCorroborated` would leave S3's conjunct (i) permanently false on
+ * that path, which is a silent loss of capability rather than a visible failure. */
+function stampAuthorityVerdict(
+  event: AgentHookStampedAuthority,
+  verdict: AgentHookAuthorityVerdict | undefined
+): void {
+  event.anchorCorroborated = verdict?.corroborated
+  event.anchorHostVerified = verdict?.hostVerified
+}
 
 type StatusChangeListener = (statuses: AgentHookStatusChangeEntry[]) => void
 type ProviderSessionChangeListener = (providerSessions: AgentHookProviderSessionIdentity[]) => void
@@ -1009,7 +1050,12 @@ export class AgentHookServer {
           ...(enriched.sessionStartSource
             ? { sessionStartSource: enriched.sessionStartSource }
             : {}),
-          anchorCorroborated: enriched.anchorCorroborated === true
+          anchorCorroborated: enriched.anchorCorroborated === true,
+          anchorHostVerified: enriched.anchorHostVerified === true,
+          ...(enriched.payload.agentType ? { agentType: enriched.payload.agentType } : {}),
+          executionHostId: enriched.connectionId
+            ? toSshExecutionHostId(enriched.connectionId)
+            : LOCAL_EXECUTION_HOST_ID
         })
       }
       if (!enriched.providerSessionOnly) {
@@ -2115,7 +2161,7 @@ export class AgentHookServer {
       env: envelope.env,
       expectedEnv: this.env
     })
-    const event: AgentHookEventPayload & { anchorCorroborated?: boolean } = {
+    const event: AgentHookEventPayload & AgentHookStampedAuthority = {
       paneKey,
       source,
       launchToken: statusDisposition === 'restart' ? undefined : envelope.launchToken,
@@ -2149,7 +2195,7 @@ export class AgentHookServer {
           : undefined,
       payload: normalizedPayload
     }
-    event.anchorCorroborated = this.recordCurrentAuthorityObservation(event)
+    stampAuthorityVerdict(event, this.recordCurrentAuthorityObservation(event))
     this.applyNormalizedStatus(
       event,
       applyClaudeBackgroundWork
@@ -2248,11 +2294,11 @@ export class AgentHookServer {
             })
           : 'suppress'
         if (normalized.event && statusDisposition !== 'suppress') {
-          const event: AgentHookEventPayload & { anchorCorroborated?: boolean } =
+          const event: AgentHookEventPayload & AgentHookStampedAuthority =
             statusDisposition === 'restart'
               ? { ...normalized.event, launchToken: undefined }
               : normalized.event
-          event.anchorCorroborated = this.recordCurrentAuthorityObservation(event)
+          stampAuthorityVerdict(event, this.recordCurrentAuthorityObservation(event))
           const enriched = this.applyNormalizedStatus(event, normalized.onAccepted)
           this.scheduleAssistantMessageRetry(source, aliasedBody, enriched)
           this.scheduleCodexSubagentPoll(source, aliasedBody, enriched)
@@ -3003,9 +3049,28 @@ export class AgentHookServer {
     launchTokenHash: string,
     connectionId: string | null
   ): boolean {
-    if (this.paneLaunchAuthorityVerifier?.(paneKey, launchTokenHash, connectionId)) {
-      return true
-    }
+    return (
+      this.isHostVerifiedAuthority(paneKey, launchTokenHash, connectionId) ||
+      this.hasContinuityCorroboration(paneKey, launchTokenHash)
+    )
+  }
+
+  // [S10-21c B4, design §2 S3 conjunct (i)] The runtime arm of the corroboration ladder, split
+  // out so `recordCurrentAuthorityObservation` can stamp it SEPARATELY from the weaker combined
+  // verdict — and so the verifier is still consulted exactly ONCE per observation, which matters:
+  // orca-runtime.ts#verifyLivePaneLaunchTokenHash's legacy-anchor arm has a persist side effect.
+  private isHostVerifiedAuthority(
+    paneKey: string,
+    launchTokenHash: string,
+    connectionId: string | null
+  ): boolean {
+    return this.paneLaunchAuthorityVerifier?.(paneKey, launchTokenHash, connectionId) === true
+  }
+
+  // The hook server's OWN caches: continuity with a hash it already hydrated from disk or already
+  // committed this generation. Hook-derived, never host-derived — which is exactly why S3's
+  // conjunct (i) does not accept it.
+  private hasContinuityCorroboration(paneKey: string, launchTokenHash: string): boolean {
     if (this.hydratedLaunchTokenHashByPaneKey.get(paneKey) === launchTokenHash) {
       return true
     }
@@ -3029,20 +3094,25 @@ export class AgentHookServer {
   private recordCurrentAuthorityObservation(
     payload: AgentHookEventPayload,
     options?: { persist?: boolean }
-  ): boolean | undefined {
+  ): AgentHookAuthorityVerdict | undefined {
     const evidence = this.toAuthorityEvidence(payload)
     if (!evidence) {
       return undefined
     }
-    const corroborated = this.isCorroboratedAuthority(
+    // [S10-21c B4] ONE verifier call, two verdicts: `hostVerified` is the runtime's own answer
+    // (S3 conjunct (i)); `corroborated` is that OR this server's continuity caches (unchanged).
+    const hostVerified = this.isHostVerifiedAuthority(
       evidence.paneKey,
       evidence.launchTokenHash,
       evidence.connectionId
     )
+    const corroborated =
+      hostVerified || this.hasContinuityCorroboration(evidence.paneKey, evidence.launchTokenHash)
+    const verdict: AgentHookAuthorityVerdict = { corroborated, hostVerified }
     // An uncorroborated claim never DISPLACES existing authority state (the forged-/reattest
     // revocation lever) — it may only fill a void, observation-only.
     if (!corroborated && this.hasAnyAuthorityEntry(evidence.paneKey)) {
-      return corroborated
+      return verdict
     }
     this.currentAuthorityObservations.set(evidence.paneKey, evidence)
     // Persistence (what the NEXT generation hydrates into authority) requires corroboration on
@@ -3052,7 +3122,7 @@ export class AgentHookServer {
       this.persistedAuthorityCommitmentsByPaneKey.set(evidence.paneKey, evidence)
       this.hydratedLaunchTokenHashByPaneKey.set(evidence.paneKey, evidence.launchTokenHash)
     }
-    return corroborated
+    return verdict
   }
 
   private toAuthorityEvidence(

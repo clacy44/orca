@@ -17,12 +17,21 @@ import { upsertCurrentSession } from './current-session-upsert'
  * `evidence` column carries no CHECK constraint (db.ts's AGENT_LAUNCH_SESSIONS_SCHEMA_SQL says so
  * in as many words), so this widening is TypeScript-level, and no consumer switches exhaustively
  * on this union (`decideLeafHoldRows`, restore-sweep-decision.ts, and
- * agent-directory-rpc-liveness.ts both narrow with `===` comparisons). */
+ * agent-directory-rpc-liveness.ts both narrow with `===` comparisons).
+ *
+ * [S10-21c B4, design §2 S3/S5] Two more, same additive story. 'live_report' is the
+ * host-verified live-report reconciliation (S3) — DISTINCT from 'self_report_rotation' so that
+ * value keeps meaning "the fork-only conjunct-4 rotation" for every row already on disk and every
+ * downstream consumer can tell the two mechanisms apart. 'self_report_bootstrap' is S5's first
+ * row for a registered pane that had none. Neither is written by the launch path: they are
+ * written only by agent-lineage-mismatch.ts, under §2 S3's four conjuncts. */
 export type LaunchEvidence =
   | 'host_launch'
   | 'sweep_record'
   | 'self_report_rotation'
   | 'caller_resume'
+  | 'live_report'
+  | 'self_report_bootstrap'
 
 export type AgentLaunchSessionRow = {
   seq: number
@@ -45,7 +54,10 @@ export type RecordLaunchParams = {
   sessionId: string
   launchGeneration: string
   executionHostId: string
-  evidence: Extract<LaunchEvidence, 'host_launch' | 'sweep_record' | 'caller_resume'>
+  evidence: Extract<
+    LaunchEvidence,
+    'host_launch' | 'sweep_record' | 'caller_resume' | 'self_report_bootstrap'
+  >
   /** [S10-21a C1a, errata 5(p)-5 item 3] Set ONLY from a verified host-resume (Layer-2 restore)
    * admission. Deletes `supersedePaneKey`'s current_sessions row inside this same transaction,
    * before the insert — without it, a restore's recordLaunch(P_new, X) collides with
@@ -64,6 +76,13 @@ export type RecordSelfReportRotationParams = {
   sessionId: string
   launchGeneration: string
   executionHostId: string
+  /** [S10-21c B4, design §2 S3] Which rotation mechanism authored this UPDATE. Was a hardcoded
+   * `'self_report_rotation'` SQL literal until B4; threaded as a bound parameter (rather than
+   * split into a sibling function) so this stays the ONE in-place writer of a launch row, and
+   * therefore the one place the `current_sessions` UNIQUE successor fence has to be enforced.
+   * Narrowed to the two rotation evidences: no caller may relabel a row as a launch-path
+   * evidence value through this door. */
+  evidence: Extract<LaunchEvidence, 'self_report_rotation' | 'live_report'>
 }
 
 /** [errata 5(l)] `current_sessions.UNIQUE(host_id, session_id)` violation — the
@@ -256,7 +275,7 @@ export function recordSelfReportRotation(
     const updated = db
       .prepare(
         `UPDATE agent_launch_sessions
-           SET session_id = ?, previous_session_id = ?, evidence = 'self_report_rotation',
+           SET session_id = ?, previous_session_id = ?, evidence = ?,
                recorded_at = datetime('now')
          WHERE seq = (
            SELECT seq FROM agent_launch_sessions
@@ -264,7 +283,13 @@ export function recordSelfReportRotation(
              ORDER BY seq DESC LIMIT 1
          )`
       )
-      .run(params.sessionId, params.previousSessionId, params.hostId, params.paneKey)
+      .run(
+        params.sessionId,
+        params.previousSessionId,
+        params.evidence,
+        params.hostId,
+        params.paneKey
+      )
     if (updated.changes === 0) {
       db.exec('ROLLBACK')
       return { ok: false, reason: 'no_matching_launch_row' }

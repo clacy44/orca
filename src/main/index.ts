@@ -2446,16 +2446,24 @@ void app.whenReady().then(async () => {
     if (!hostId || !launchGeneration) {
       return
     }
-    raiseSessionIdentityMismatchAlarms(
+    // [S10-21c B4, design §2 S3/S5] Fire-and-forget: the evaluator is async since B4 (conjunct
+    // (iii) reads the transcript off disk) and this is a synchronous subscription callback. The
+    // helper isolates every identity in its own try/catch, so the promise settles rather than
+    // rejects; the catch below is the loud belt for anything outside that loop.
+    void raiseSessionIdentityMismatchAlarms(
       {
         hostId,
         launchGeneration,
-        evaluateLiveHookReportMismatch: (params) => db.evaluateLiveHookReportMismatch(params),
+        evaluateLiveHookReportMismatch: (params) =>
+          // [S10-21c B4] conjunct (iii) — the same host-side resolver S4's sweep preflight uses.
+          db.evaluateLiveHookReportMismatch(params, resolveResumeTranscript),
         writeHostNoticeToPane: (paneKey, text, opts) =>
           runtime?.writeHostNoticeToPane(paneKey, text, opts)
       },
       sessions
-    )
+    ).catch((err: unknown) => {
+      console.error('[S10-21a] session identity mismatch alarm batch failed', err)
+    })
   }
   const unsubscribeProviderSessionChanges = agentHookServer.subscribeProviderSessionChanges(
     (sessions) => {
