@@ -105,6 +105,32 @@ describe('S10-21a C7g: newestDaemonDeathOrRebindVerbForPane', () => {
     expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBe('daemon_died')
   })
 
+  it('[S10-21c B3c, D-R151 MEDIUM 2] a CONTESTED rebind (incumbent_alive/predecessor_moved) does not outrank an earlier daemon_died either — nothing was rebound', () => {
+    const db = freshDb()
+    // daemon_died: the pane's controller died.
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: PANE_KEY,
+      actorHostId: HOST_ID,
+      verb: 'daemon_died',
+      outcome: 'observed',
+      reasonCode: null
+    })
+    // rebindRestoredPane's own contested-refusal audit (agent-restore-rebind.ts): verb 'rebind',
+    // outcome 'contested', for either CONTESTED_REFUSAL_REASONS. Nothing was resolved.
+    db.writeAgentAudit({
+      agentId: null,
+      actorPaneKey: PANE_KEY,
+      actorHostId: HOST_ID,
+      verb: 'rebind',
+      outcome: 'contested',
+      reasonCode: 'incumbent_alive'
+    })
+    // The pane's daemon_died fact still stands — a subsequent host_resume/self_resume_caller must
+    // still see it and refresh, not see the contested rebind and stay silent.
+    expect(db.newestDaemonDeathOrRebindVerbForPane(PANE_KEY, HOST_ID)).toBe('daemon_died')
+  })
+
   it('[S10-21a C14b, D-R128 host_id scoping] is scoped per host, never bleeding across hosts sharing a pane suffix', () => {
     const db = freshDb()
     db.writeAgentAudit({

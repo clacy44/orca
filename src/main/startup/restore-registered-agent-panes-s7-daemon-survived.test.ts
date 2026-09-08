@@ -276,6 +276,70 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     expect(orchestrationDb!.getThread(threadId)?.pact_state).toBe('engaged')
   })
 
+  it('[S10-21c B3c, D-R151 LOW 1] a throw from resumePactsForRestoredAgent gets its own code, is never mislabelled a refresh failure, and never suppresses notifyRebindDelivery', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7f2'
+    insertAgent(db, {
+      id: 'agent-s7g',
+      display_name: 'chair-s7g',
+      pane_key: paneKey,
+      process_incarnation: 'pty-s7g:inc-s7g'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-s7g',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const threadId = seedPausedPact(orchestrationDb!, 'agent-s7g', paneKey)
+    const inventory = emptyInventory({
+      allLivePtyIds: new Set(['pty-s7g']),
+      terminalIdentityByPtyId: new Map([
+        ['pty-s7g', { handle: 'term_fresh_s7g', incarnationId: 'inc-s7g' }]
+      ])
+    })
+    const notifyRebindDelivery = vi.fn()
+    const refreshSpy = vi.spyOn(orchestrationDb!, 'refreshAgentHandleAfterRespawn')
+    vi.spyOn(orchestrationDb!, 'resumePactsForRestoredAgent').mockImplementation(() => {
+      throw new Error('pact resume boom')
+    })
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { notifyRebindDelivery }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-s7g',
+      'pty-s7g:inc-s7g',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      inventory
+    )
+    expect(outcome.kind).toBe('skipped_daemon_survived')
+    // The refresh itself succeeded — never mislabelled a refresh failure.
+    expect(refreshSpy).toHaveBeenCalledTimes(1)
+    const pactRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
+           AND reason_code = 'daemon_survived_pact_resume_failed: pact resume boom'`
+      )
+      .all()
+    expect(pactRows).toHaveLength(1)
+    const mislabelled = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
+           AND reason_code LIKE 'daemon_survived_refresh_failed:%'`
+      )
+      .all()
+    expect(mislabelled).toHaveLength(0)
+    // The pact-resume failure must never suppress the notify step (the R5 symptom S7 cures).
+    expect(notifyRebindDelivery).toHaveBeenCalledTimes(1)
+    expect(notifyRebindDelivery).toHaveBeenCalledWith('agent-s7g')
+    // The pact is left paused — the failed resume did not fake a commit.
+    expect(orchestrationDb!.getThread(threadId)?.pact_paused_at).not.toBeNull()
+  })
+
   it('[D-R150 low 1] a typed ok:false refusal from refreshAgentHandleAfterRespawn is a loud sweep note, never silently arms delivery unlogged', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7f1'

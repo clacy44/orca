@@ -3,11 +3,15 @@
 // 'rebind' (this gate's own prior fire, or C5's `rebindRestoredPane`) always outranks an older
 // 'daemon_died' fact and the gate never re-fires once the pane is resolved. Query SHAPE reused
 // from `agent-sweep-unrecorded-check.ts`.
-// [S10-21c B3b, D-R149 LOW 5] A `verb='rebind', outcome='refused'` row (the gate's own
-// `refuse_fresh_session` audit, pty.ts) is EXCLUDED: a refusal resolves nothing — the pane's
-// `daemon_died` fact still stands — so it must never outrank it. Without this, a refused fresh
-// session permanently disarms the gate for that pane: a later legitimate host_resume/
-// self_resume_caller would see 'rebind' as newest and skip `refreshAgentHandleAfterRespawn`.
+// [S10-21c B3b, D-R149 LOW 5; widened B3c, D-R151 MEDIUM 2] A `verb='rebind', outcome='refused'`
+// row (the gate's own `refuse_fresh_session` audit, pty.ts) is EXCLUDED: a refusal resolves
+// nothing — the pane's `daemon_died` fact still stands — so it must never outrank it. Without
+// this, a refused fresh session permanently disarms the gate for that pane: a later legitimate
+// host_resume/self_resume_caller would see 'rebind' as newest and skip
+// `refreshAgentHandleAfterRespawn`. `outcome='contested'` resolves nothing either:
+// `rebindRestoredPane` writes it for both CONTESTED_REFUSAL_REASONS (`incumbent_alive`,
+// `predecessor_moved`, agent-restore-rebind.ts) and returns `{ok:false, reason}` — nothing is
+// rebound — so it is excluded on the same reasoning, not just the same shape.
 import type Database from '../../sqlite/sync-database'
 import { paneSuffix } from './agent-restore-rebind-predicate'
 
@@ -24,7 +28,7 @@ export function newestDaemonDeathOrRebindVerb(
          WHERE substr(actor_pane_key, instr(actor_pane_key, ':') + 1) = ?
            AND actor_host_id = ?
            AND verb IN ('daemon_died', 'rebind')
-           AND NOT (verb = 'rebind' AND outcome = 'refused')
+           AND NOT (verb = 'rebind' AND outcome IN ('refused', 'contested'))
          ORDER BY seq DESC LIMIT 1`
     )
     .get(paneSuffix(paneKey), hostId) as { verb: DaemonRespawnGateVerb } | undefined

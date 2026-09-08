@@ -380,8 +380,19 @@ export async function admitAgentLaunch(
         executionHostId: ctx.executionHostId,
         evidence: 'caller_resume'
       })
+      // [S10-21c B3c, D-R151 HIGH, chair ruling 21c-E2] `current_sessions` has no liveness test:
+      // the UNIQUE(host_id, session_id) collision this arm sees fires for ANY pane that has ever
+      // recorded X, dead panes included — on this box, 6 of 8 rows name panes whose tab no longer
+      // exists. A hard refusal here throws (LaunchAdmissionRefusedError), which
+      // `spawnWithLane` does not catch, so `provider.spawn` never runs — regressing a launch the
+      // base performed for the common "resume my old conversation in a new pane" recovery. The
+      // fence INV-P-022's amendment protects (a session another pane currently holds is refused,
+      // never SUPERSEDED) is fully served by not recording: no row, no current_sessions move, X
+      // stays pointed at its original holder. `unrecorded` is still LOUD — launch_unrecorded
+      // audit row plus the pane notice — it just lets the spawn proceed instead of failing it.
+      // Scoping this to a genuinely LIVE holder is deferred to R84 (next train).
       if (!recorded.ok) {
-        return refuse('resume_target_owned_by_another_pane')
+        return unrecorded('resume_target_owned_by_another_pane')
       }
       // [S10-21c B3b, D-R149 MEDIUM 1] The same contested-lineage signal SELF_RESUME(caller)
       // raises above (:326) — this arm writes to the pane too, and a registered chair's pane
@@ -419,6 +430,11 @@ export async function admitAgentLaunch(
     // (`assertPaneKeyNotOwned`, orca-runtime.ts:13768-13793, called at :28357) and E2
     // (:28409-28410, adding `assertLeafNotOccupied`) refuse every PLACED create onto a registered
     // or occupied pane before admission runs at all.
+    // [S10-21c B3c, D-R151 MEDIUM 1] QUALIFIER: E1 fences NON-DERIVED, NON-QUARANTINED
+    // REGISTERED rows only (orca-runtime.ts:13780 returns early for derived-or-quarantined rows)
+    // — the renderer's `pty:spawn` path runs no ownership fence at all (its ownership consult is
+    // explicitly audit-only, never a refusal, per pty.ts). This fence protects the covered-launch
+    // population it was built for; it is not a universal takeover guard.
     // [S10-21c B3, design §2 S2 ADDENDUM] With that early return gone, a host-resume admission
     // that reaches this arm has lost its `--resume <id>` outright and would MINT a fresh session
     // for a restore — turning the restore into a brand-new empty conversation and recording it as
