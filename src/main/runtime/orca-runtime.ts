@@ -14176,6 +14176,13 @@ export class OrcaRuntimeService {
     this.hasLiveHookReportOfSessionCheck = check
   }
 
+  /** [S10-21d b4] Read-side of the above, for the executor's verification table's `attested`
+   * column — never wire-reachable (no RPC/IPC schema exposes this), same conservative default
+   * (unwired -> false) as the write side. */
+  hasLiveHookReportOfSession(sessionId: string): boolean {
+    return this.hasLiveHookReportOfSessionCheck?.(sessionId) ?? false
+  }
+
   /** [S10-21d b3, DEC-2] The launcher's own restore: mints an in-process ticket for conversation
    * `sessionId` — adopting a DEAD holder pane per DEC-3 (`resolveHolderAdoption`), or recording
    * an unheld restore (no current_sessions row on this host) with no supersede — then opens the
@@ -14184,12 +14191,20 @@ export class OrcaRuntimeService {
    * `displayName`/`role` for the new pane in-process (`registerAgentForPane`). No CLI/RPC surface
    * calls this yet — b4 adds the executor/CLI. A LIVE holder refuses loudly, naming the pane, per
    * DEC-2's "no fork, no stub" consequence (the manual `--fork-session` path stays the operator's
-   * own tool for that case). */
+   * own tool for that case).
+   *
+   * [S10-21d b4, DEC-9/R118] `model`/`effort`, when a manifest entry carries them, thread through
+   * as `launchPreferences` to the SAME `ensureAgentSession` call below (already supported today
+   * via `toAgentSessionOptions` — no new plumbing). Omitted -> `launchPreferences` stays unset,
+   * preserving every existing caller's behaviour byte-for-byte. Row-persisted preferences (the
+   * sweep path, after lane 1's b7) are explicitly out of scope for this method. */
   async requestChairRestore(request: {
     worktreeSelector: string
     sessionId: string
     displayName: string
     role?: string
+    model?: string
+    effort?: string
   }): Promise<
     | {
         ok: true
@@ -14332,7 +14347,15 @@ export class OrcaRuntimeService {
           worktree: request.worktreeSelector,
           agent: 'claude',
           providerSession: { key: 'session_id', id: request.sessionId },
-          presentation: 'background'
+          presentation: 'background',
+          ...(request.model || request.effort
+            ? {
+                launchPreferences: {
+                  ...(request.model ? { model: request.model } : {}),
+                  ...(request.effort ? { effort: request.effort } : {})
+                }
+              }
+            : {})
         },
         {},
         { restoreProvenance: { kind: 'host-restore', ticket, evidence: 'host_restore' } }
