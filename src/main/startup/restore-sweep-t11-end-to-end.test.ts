@@ -248,6 +248,16 @@ describe('S10-21a C12, T11 end to end: registered pane + unread mail -> boot-tim
       // the fence a precise statement of what this fixture actually drives.
       expect(summary.layer1).toBe(0)
       expect(summary.layer2).toBe(1)
+      // [D-R148 low 8] The seeded tabsByWorktree agrees with the candidate's own worktree, so
+      // the REAL fence this test wires must never withhold placement -- a regression that made
+      // the fence unresolvable here would still land Layer 2 (placement withheld, not refused)
+      // and pass the two assertions above alone.
+      const placementWithheldRows = (
+        db as unknown as { db: { prepare: (sql: string) => { all: () => unknown[] } } }
+      ).db
+        .prepare(`SELECT * FROM agent_audit WHERE reason_code LIKE 'placement_withheld:%'`)
+        .all()
+      expect(placementWithheldRows).toHaveLength(0)
 
       const restoredRow = db.getAgentByIdIncludingTombstoned(agentId)
       expect(restoredRow?.id).toBe(agentId)

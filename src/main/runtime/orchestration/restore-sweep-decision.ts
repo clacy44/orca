@@ -238,9 +238,14 @@ export function decideWorktreeFence(
   tabId: string
 ): WorktreeFenceDecision {
   if (tabWorktreeId !== undefined && !runtimeWorktreeIdsEqual(tabWorktreeId, agentWorktreeId)) {
+    // [D-R148 low 10] Worktree ids embed filesystem paths and can carry spaces — the reason
+    // code doubles as the deferral-family key (`restoreSweepDeferralFamily`, space-delimited),
+    // so a raw space would fragment one mismatch family per distinct path. Space-free, not
+    // truncated — the full ids survive, just re-encoded.
+    const digest = (id: string): string => id.replace(/\s/g, '_')
     return {
       kind: 'mismatch',
-      reasonCode: `sweep_worktree_mismatch: tab_disagrees ${tabWorktreeId}|${agentWorktreeId}`
+      reasonCode: `sweep_worktree_mismatch: tab_disagrees ${digest(tabWorktreeId)}|${digest(agentWorktreeId)}`
     }
   }
   if (tabWorktreeId === undefined) {

@@ -46,18 +46,24 @@ export async function resolveResumeTranscript(
   }
   const fileStat = await stat(path)
   const readLength = Math.min(fileStat.size, PREFLIGHT_READ_BYTES)
-  const truncated = readLength < fileStat.size
   let raw = ''
+  // [D-R148 low 9] `bytesRead` (never assumed to equal the requested `readLength`) bounds both
+  // the decoded prefix and `truncated` — a short OS read must not smuggle `Buffer.alloc`'s NUL
+  // zero-fill into `raw`, where it would fail `JSON.parse` and the catch below would misread
+  // that failure as "not the stub" (hasTurn=true by accident rather than by the deliberate
+  // truncated-read fallback a few lines down).
+  let bytesRead = 0
   if (readLength > 0) {
     const handle = await open(path, 'r')
     try {
       const buf = Buffer.alloc(readLength)
-      await handle.read(buf, 0, readLength, 0)
-      raw = buf.toString('utf8')
+      ;({ bytesRead } = await handle.read(buf, 0, readLength, 0))
+      raw = buf.subarray(0, bytesRead).toString('utf8')
     } finally {
       await handle.close()
     }
   }
+  const truncated = bytesRead < fileStat.size
   const lines = raw.split('\n')
   // A truncated read may have cut the final line mid-record — drop it rather than risk parsing
   // a partial JSON fragment as "not the stub" on incomplete evidence.

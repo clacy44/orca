@@ -82,6 +82,55 @@ describe('S10-21c B2/S8: worktree fence on restore', () => {
     expect(ensureAgentSession).not.toHaveBeenCalled()
   })
 
+  it('[D-R148 low 10] worktree ids containing spaces -> the mismatch reason code stays space-free, ids fully present', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000021'
+    const agentWorktreeId = '00000000-0000-4000-8000-0000000000a1::/home/u/My Repo'
+    const tabWorktreeId = '00000000-0000-4000-8000-0000000000a2::/home/u/Other Repo'
+    insertAgent(db, {
+      id: 'agent-21',
+      display_name: 'chair-21',
+      pane_key: predPaneKey,
+      worktree_id: agentWorktreeId
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-21',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const ensureAgentSession = vi.fn()
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession,
+        resolveTabWorktreeId: () => tabWorktreeId
+      }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-21',
+      null,
+      agentWorktreeId,
+      orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer3')
+    const reasonCode = (outcome as { reasonCode: string }).reasonCode
+    // The colon-namespace prefix keeps its own spaces; only the interpolated ids must be
+    // space-free (a raw space would fragment `restoreSweepDeferralFamily`'s per-family key).
+    const afterPrefix = reasonCode.split('tab_disagrees ')[1]
+    expect(afterPrefix).not.toContain(' ')
+    expect(afterPrefix).toContain('My_Repo')
+    expect(afterPrefix).toContain('Other_Repo')
+    const auditRow = db
+      .prepare(`SELECT * FROM agent_audit WHERE reason_code LIKE 'sweep_worktree_mismatch:%'`)
+      .get() as { reason_code: string }
+    expect(auditRow.reason_code).toBe(reasonCode)
+    expect(ensureAgentSession).not.toHaveBeenCalled()
+  })
+
   it('[D-R145 blocking 1] an unresolvable tab (absent from tabsByWorktree) -> NOT a refusal: proceeds without placement, note only', async () => {
     const db = rawDb()
     const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000022'

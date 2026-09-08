@@ -288,4 +288,48 @@ describe('S10-21c B2/S4: resume preflight (restoreOneRegisteredPane)', () => {
       .all()
     expect(threwAudit).toHaveLength(1)
   })
+
+  it('[D-R148 low 7] a throwing writeHostNoticeToPane on the S4 refusal still returns Layer-3 with sweep_resume_target_absent, degrading the notice to a note', async () => {
+    const db = rawDb()
+    const predPaneKey = 'tab1:00000000-0000-4000-8000-0000000000f9'
+    insertAgent(db, { id: 'agent-f9', display_name: 'chair-f9', pane_key: predPaneKey })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'stub-sess-f9',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const summary = await runRestoreSweepBody(
+      baseDeps(orchestrationDb!, {
+        getTerminalProcessIncarnation: () => 'pty-f9:inc-f9',
+        resolveResumeTranscript: async () => ({ path: '/does/not/matter', hasTurn: false }),
+        writeHostNoticeToPane: () => {
+          throw new Error('pane_notice_boom_f9')
+        }
+      })
+    )
+    // The throw is now contained at its own call site — it must never escape as a
+    // `sweep_row_threw` (the pre-D-R148 shape), which would lose the coded
+    // `sweep_resume_target_absent` deferral family and report a harness-shaped error instead.
+    expect(summary.errors).toBe(0)
+    expect(summary.layer3).toBe(1)
+    expect(summary.deferredByReason['sweep_resume_target_absent: session']).toBe(1)
+    const refusalRow = db
+      .prepare(`SELECT * FROM agent_audit WHERE reason_code LIKE 'sweep_resume_target_absent:%'`)
+      .all()
+    expect(refusalRow).toHaveLength(1)
+    const noticeFailedRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE reason_code LIKE 'notice_failed:%pane_notice_boom_f9%'`
+      )
+      .all()
+    expect(noticeFailedRows).toHaveLength(1)
+    const threwRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE reason_code LIKE 'sweep_row_threw:%'`)
+      .all()
+    expect(threwRows).toHaveLength(0)
+  })
 })

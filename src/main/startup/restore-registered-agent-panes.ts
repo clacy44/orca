@@ -55,6 +55,7 @@ import {
 import { collectSweepEvidence } from '../runtime/orchestration/restore-sweep-evidence'
 import { noteSelfResumeWatermarkAbsent, evaluateRow7 } from './restore-sweep-row7-watermark'
 import { restoreSweepDeferralFamily } from './restore-sweep-deferral-family'
+import { notifyPaneBestEffort } from './restore-sweep-pane-notice'
 import {
   auditSweepSkip,
   auditLayer3,
@@ -208,11 +209,20 @@ export async function restoreOneRegisteredPane(
     auditSweepNote(db, hostId, launchRow.pane_key, agentId, preflight.reasonCode)
   } else if (preflight.kind === 'refuse') {
     auditLayer3(db, hostId, launchRow.pane_key, agentId, preflight.reasonCode)
-    // [D-R145 medium 6a] Best-effort — inert on a pane with nothing live, per
-    // writeHostNoticeToPane's own doc comment; the audit row above is the record of truth.
-    // Asserted in the S4 test so it can't rot.
+    // [D-R145 medium 6a, D-R148 low 7] Best-effort — inert on a pane with nothing live, per
+    // writeHostNoticeToPane's own doc comment; the audit row above is the record of truth. A
+    // throw here degrades to a `notice_failed:` note (never aborts this outcome) — asserted in
+    // the S4 test so neither behaviour can rot.
     const msg = 'Restore skipped: the recorded session has no conversation to resume.'
-    deps.writeHostNoticeToPane(launchRow.pane_key, msg, { rateKey: 'sweep_resume_target_absent' })
+    notifyPaneBestEffort(
+      deps,
+      db,
+      hostId,
+      launchRow.pane_key,
+      agentId,
+      msg,
+      'sweep_resume_target_absent'
+    )
     return { kind: 'layer3', reasonCode: preflight.reasonCode }
   }
   const ticket = deps.mintRestoreTicket({
@@ -358,12 +368,7 @@ export async function runRestoreSweepBody(deps: RestoreSweepDeps): Promise<Resto
       // instead of aborting the sweep for every other pane.
       const noRowNotice =
         'This pane is registered but Orca has no launch record for it, so it cannot be restored automatically.'
-      try {
-        deps.writeHostNoticeToPane(paneKey, noRowNotice, { rateKey: 'sweep_no_launch_row' })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        auditSweepNote(db, hostId, paneKey, R.id, `notice_failed: ${msg}`)
-      }
+      notifyPaneBestEffort(deps, db, hostId, paneKey, R.id, noRowNotice, 'sweep_no_launch_row')
       summary.layer3 += 1
       recordDeferral('sweep_no_launch_row')
       continue
