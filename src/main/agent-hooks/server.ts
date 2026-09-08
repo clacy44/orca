@@ -1691,6 +1691,12 @@ export class AgentHookServer {
       }
       this.state.lastStatusByPaneKey.set(toPaneKey, retargeted)
     }
+    // [S10-21c B4c, D-R154-b4b finding 3, chair decision] These three continuity caches DO move
+    // with the pane — "authority follows the pane" is the existing design for the continuity
+    // arms (isCorroboratedAuthority's own persisted/hydrated commitment cache). Only the two
+    // HOST-VERIFIED verdicts above are pane-bound and dropped on transfer; a continuity cache
+    // re-earning `anchorCorroborated` (never `anchorHostVerified`) on the destination is accepted
+    // residual R88 (gate1-notes-21c.md).
     const hydratedLaunchTokenHash = this.hydratedLaunchTokenHashByPaneKey.get(previousOwnerPaneKey)
     if (hydratedLaunchTokenHash) {
       this.hydratedLaunchTokenHashByPaneKey.delete(previousOwnerPaneKey)

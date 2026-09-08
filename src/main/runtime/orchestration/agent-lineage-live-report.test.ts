@@ -445,6 +445,149 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(resolver).toHaveBeenCalledTimes(3)
   })
 
+  // ------------------------------------------------------------- B4c: D-R154 findings 1/2/4/5 --
+
+  it('S10-21c B4c, D-R154 finding 1: a negative transcript verdict becomes positive again once its backoff elapses (fake timers) — the mismatch stops within one cycle, not never', async () => {
+    vi.useFakeTimers()
+    try {
+      const db = rawDb()
+      insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+      let hasTurn = false
+      const resolver = vi.fn(async () =>
+        hasTurn ? { path: '/t.jsonl', hasTurn: true } : { path: '/t.jsonl', hasTurn: false }
+      )
+
+      expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual({
+        kind: 'bootstrap_refused',
+        reason: 'resume_target_absent session sess-live'
+      })
+      expect(resolver).toHaveBeenCalledTimes(1)
+
+      // Still inside the 60s backoff — cache hit, no re-walk, still refused.
+      vi.advanceTimersByTime(59_000)
+      expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual({
+        kind: 'bootstrap_refused',
+        reason: 'resume_target_absent session sess-live'
+      })
+      expect(resolver).toHaveBeenCalledTimes(1)
+
+      // Backoff elapsed AND the transcript now carries a turn — re-walked, and now bootstraps.
+      hasTurn = true
+      vi.advanceTimersByTime(2_000)
+      const result = await evaluateLiveHookReportMismatch(db, params(), resolver)
+      expect(result.kind).toBe('bootstrapped')
+      expect(resolver).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('S10-21c B4c, D-R154 finding 1/2: a POSITIVE transcript verdict is cached for the whole generation — a second report that still refuses on conjunct (iv) never re-walks', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    seedLaunch(db, 'sess-live', 'tab9:leaf-victim') // another pane already holds the reported id.
+    const resolver = vi.fn(REAL)
+    const refused = { kind: 'bootstrap_refused', reason: 'foreign_session_id sess-live' }
+
+    expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual(refused)
+    expect(resolver).toHaveBeenCalledTimes(1)
+
+    // Same (host, pane, id), same generation — the POSITIVE verdict is cached; conjunct (iv)
+    // still refuses (the victim still holds the id), but the resolver is never called again.
+    expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual(refused)
+    expect(resolver).toHaveBeenCalledTimes(1)
+  })
+
+  it('S10-21c B4c, D-R154 finding 1: a new launch generation clears both the positive and the negative transcript caches', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    seedLaunch(db, 'sess-live', 'tab9:leaf-victim')
+    const positiveResolver = vi.fn(REAL)
+    const negativeResolver = vi.fn(STUB_ONLY)
+
+    expect(await evaluateLiveHookReportMismatch(db, params(), positiveResolver)).toEqual({
+      kind: 'bootstrap_refused',
+      reason: 'foreign_session_id sess-live'
+    })
+    expect(
+      await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: 'sess-neg' }),
+        negativeResolver
+      )
+    ).toEqual({ kind: 'bootstrap_refused', reason: 'resume_target_absent session sess-neg' })
+    expect(positiveResolver).toHaveBeenCalledTimes(1)
+    expect(negativeResolver).toHaveBeenCalledTimes(1)
+
+    // Same generation, same ids — both cached, neither resolver called again.
+    await evaluateLiveHookReportMismatch(db, params(), positiveResolver)
+    await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedSessionId: 'sess-neg' }),
+      negativeResolver
+    )
+    expect(positiveResolver).toHaveBeenCalledTimes(1)
+    expect(negativeResolver).toHaveBeenCalledTimes(1)
+
+    // A NEW generation — both caches clear, both ids are walked again.
+    await evaluateLiveHookReportMismatch(
+      db,
+      params({ launchGeneration: 'gen-2' }),
+      positiveResolver
+    )
+    await evaluateLiveHookReportMismatch(
+      db,
+      params({ launchGeneration: 'gen-2', reportedSessionId: 'sess-neg' }),
+      negativeResolver
+    )
+    expect(positiveResolver).toHaveBeenCalledTimes(2)
+    expect(negativeResolver).toHaveBeenCalledTimes(2)
+  })
+
+  it('S10-21c B4c, D-R154 finding 4: at most 8 distinct reported ids per pane per generation pay a transcript walk — the 9th is refused without walking, audited once', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const resolver = vi.fn(STUB_ONLY)
+    for (let i = 0; i < 8; i++) {
+      await evaluateLiveHookReportMismatch(db, params({ reportedSessionId: `sess-${i}` }), resolver)
+    }
+    expect(resolver).toHaveBeenCalledTimes(8)
+
+    const ninth = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedSessionId: 'sess-9' }),
+      resolver
+    )
+    expect(resolver).toHaveBeenCalledTimes(8) // the 9th distinct id never reaches the walk.
+    expect(ninth).toEqual({ kind: 'bootstrap_refused', reason: 'live_report_id_churn_bounded' })
+    expect(audits(db, PANE, 'live_report_id_churn_bounded')).toEqual([
+      { outcome: 'refused', reason_code: 'distinct_ids_exceeded limit=8' }
+    ])
+
+    // A TENTH distinct id also skips the walk and does not write a second churn audit row.
+    const tenth = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedSessionId: 'sess-10' }),
+      resolver
+    )
+    expect(resolver).toHaveBeenCalledTimes(8)
+    expect(tenth).toEqual({ kind: 'bootstrap_refused', reason: 'live_report_id_churn_bounded' })
+    expect(audits(db, PANE, 'live_report_id_churn_bounded')).toHaveLength(1)
+  })
+
+  it('S10-21c B4c, D-R154 finding 5: the bootstrap transcript-refusal audit re-reads the agent row post-await — a row that vanishes across the walk audits nothing and returns no_row', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const vanishing: ResolveLiveReportTranscript = async () => {
+      db.prepare('UPDATE agents SET tombstoned_at = CURRENT_TIMESTAMP WHERE id = ?').run('agt_1')
+      return { path: '/t.jsonl', hasTurn: false }
+    }
+    const result = await evaluateLiveHookReportMismatch(db, params(), vanishing)
+    expect(result).toEqual({ kind: 'no_row' })
+    expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
+    expect(audits(db, PANE, 'session_identity_bootstrap')).toHaveLength(0)
+  })
+
   it('S5: without a host-owned agent type or execution host the bootstrap cannot fire — no row is ever written from a guessed value', async () => {
     const db = rawDb()
     insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })

@@ -58,23 +58,21 @@ import {
   newestUnrecordedAdmissionThisGeneration,
   raiseMismatchAlarm
 } from './agent-lineage-contest-audit'
+import {
+  checkTranscriptConjunctMemoized,
+  resetTranscriptVerdictCacheForTests,
+  type LiveReportTranscriptVerdict,
+  type ResolveLiveReportTranscript
+} from './agent-lineage-transcript-memo'
 
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'fork'
 
-/** [S10-21c B4] S4's landed three-state resolver verdict (restore-sweep-types.ts:70-73), reused
- * verbatim: a hit, the "this resolver does not cover that agentType yet" third state, or a miss. */
-export type LiveReportTranscriptVerdict =
-  | { path: string; hasTurn: boolean }
-  | { coverage: 'uncovered' }
-  | null
-
-/** [S10-21c B4, design §2 S3/S5 conjunct (iii)] `resolve-resume-transcript.ts#resolveResumeTranscript`,
- * injected rather than imported so this module keeps no filesystem dependency of its own and the
- * conjunct is stubbable in one place. */
-export type ResolveLiveReportTranscript = (
-  agentType: string,
-  sessionId: string
-) => Promise<LiveReportTranscriptVerdict>
+// [S10-21c B4] S4's landed three-state resolver verdict (restore-sweep-types.ts:70-73), the
+// memoized conjunct (iii) check, and its test reset now live in agent-lineage-transcript-memo.ts
+// (D-R154-b4b findings 1/2/4) — re-exported here so the public surface of this module is
+// unchanged.
+export type { LiveReportTranscriptVerdict, ResolveLiveReportTranscript }
+export { resetTranscriptVerdictCacheForTests as resetNegativeTranscriptVerdictCacheForTests }
 
 export type LiveHookReportMismatchParams = {
   hostId: string
@@ -133,60 +131,6 @@ export type LiveHookReportMismatchResult =
   | { kind: 'unrecorded_launch'; reason: string }
 
 const BOOTSTRAP_AUDIT_VERB = 'session_identity_bootstrap'
-
-/** [S10-21c B4b, D-R152-b4 finding 2] Conjunct (iii) is one recursive filesystem walk
- * (resolve-resume-transcript.ts), and the alarm batch redrives every identity on EVERY accepted
- * hook status change — a pane whose reported id never resolves would otherwise pay one full walk
- * per hook event, forever, invisibly (the audit dedupe already silences the repeat). Memoized by
- * (host, pane, reported id) for the CURRENT launch generation only — cleared wholesale on a
- * generation change rather than keyed by it, so the map never carries a stale generation's
- * entries. NEVER holds a positive verdict: a transcript may gain its first turn later, and a
- * cached `true` would make that permanently unobservable. */
-const NEGATIVE_TRANSCRIPT_VERDICT_CACHE_MAX = 512
-let negativeTranscriptVerdictGeneration: string | undefined
-const negativeTranscriptVerdictCache = new Map<string, { ok: false; note?: string }>()
-
-async function checkTranscriptConjunctMemoized(
-  resolveResumeTranscript: ResolveLiveReportTranscript,
-  agentType: string,
-  params: Pick<
-    LiveHookReportMismatchParams,
-    'hostId' | 'paneKey' | 'reportedSessionId' | 'launchGeneration'
-  >
-): Promise<{ ok: true } | { ok: false; note?: string }> {
-  if (negativeTranscriptVerdictGeneration !== params.launchGeneration) {
-    negativeTranscriptVerdictGeneration = params.launchGeneration
-    negativeTranscriptVerdictCache.clear()
-  }
-  const key = `${params.hostId}:${params.paneKey}:${params.reportedSessionId}`
-  const cached = negativeTranscriptVerdictCache.get(key)
-  if (cached) {
-    return cached
-  }
-  const verdict = await checkTranscriptConjunct(
-    resolveResumeTranscript,
-    agentType,
-    params.reportedSessionId
-  )
-  if (!verdict.ok) {
-    if (negativeTranscriptVerdictCache.size >= NEGATIVE_TRANSCRIPT_VERDICT_CACHE_MAX) {
-      const oldest = negativeTranscriptVerdictCache.keys().next().value
-      if (oldest !== undefined) {
-        negativeTranscriptVerdictCache.delete(oldest)
-      }
-    }
-    negativeTranscriptVerdictCache.set(key, verdict)
-  }
-  return verdict
-}
-
-/** Test-only: the memo cache above is module-scoped so it survives across `it()` blocks in the
- * same file — tests reusing a (host, pane, session id) between cases must reset it first. */
-export function resetNegativeTranscriptVerdictCacheForTests(): void {
-  negativeTranscriptVerdictGeneration = undefined
-  negativeTranscriptVerdictCache.clear()
-}
-
 /** §2.3/§2.6/§1.6 + §2 S3/S5, Layer 1. Compares a live pane's hook-reported session id against
  * its own newest `agent_launch_sessions` row (resolved by pane SUFFIX, D-R107 MEDIUM-1). A
  * disagreement satisfying the four conjuncts in this file's header is a legitimate live-report
@@ -214,6 +158,7 @@ export async function evaluateLiveHookReportMismatch(
   let refusalNote: string | undefined
   if (params.anchorHostVerified && row.pane_key === params.paneKey) {
     const transcript = await checkTranscriptConjunctMemoized(
+      db,
       resolveResumeTranscript,
       row.agent_type,
       params
@@ -261,27 +206,6 @@ export async function evaluateLiveHookReportMismatch(
   return attributedPaneKey === params.paneKey
     ? { kind: 'foreign_mismatch' }
     : { kind: 'foreign_mismatch', attributedPaneKey }
-}
-
-/** [S10-21c B4, design §2 S3/S5 conjunct (iii)] `{path, hasTurn:true}` is real. `{coverage}` is
- * S4's third state — the resolver does not cover this agent type yet — and REFUSES here (unlike
- * the sweep, which only notes it and proceeds: the sweep is resuming an id the HOST authored,
- * while this path is deciding whether to believe an id the PANE authored, so an unverifiable
- * transcript is the difference between a weaker check and no check). A miss or a turn-less
- * transcript refuses with the alarm path unchanged (no note). */
-async function checkTranscriptConjunct(
-  resolveResumeTranscript: ResolveLiveReportTranscript,
-  agentType: string,
-  sessionId: string
-): Promise<{ ok: true } | { ok: false; note?: string }> {
-  const transcript = await resolveResumeTranscript(agentType, sessionId)
-  if (transcript !== null && 'coverage' in transcript) {
-    return { ok: false, note: `resume_preflight_uncovered ${agentType}` }
-  }
-  if (!transcript || !transcript.hasTurn) {
-    return { ok: false }
-  }
-  return { ok: true }
 }
 
 /** [S10-21c B4, design §2 S3] Conjunct (iv) plus the write. `row` MUST be the caller's same-tick
@@ -355,13 +279,22 @@ async function bootstrapRowFromLiveReport(
     return { kind: 'no_row' }
   }
   const transcript = await checkTranscriptConjunctMemoized(
+    db,
     resolveResumeTranscript,
     agentType,
     params
   )
   if (!transcript.ok) {
+    // [S10-21c B4c, D-R154-b4b finding 5] Re-read post-await, same as every other fact this
+    // function gates on — `agent` above is pre-await and can be stale by the time the walk
+    // returns. If the row vanished across it (retired/re-registered), charge no audit to a
+    // registration that no longer exists; just refuse.
+    const refusalAgent = getAgentByPaneKey(db, params.hostId, params.paneKey)
+    if (!refusalAgent) {
+      return { kind: 'no_row' }
+    }
     const reason = transcript.note ?? `resume_target_absent session ${params.reportedSessionId}`
-    writeBootstrapAudit(db, params, agent.id, 'refused', reason)
+    writeBootstrapAudit(db, params, refusalAgent.id, 'refused', reason)
     return { kind: 'bootstrap_refused', reason }
   }
   // Same-tick re-reads (the transcript resolve above is an await, so BOTH facts read before it
