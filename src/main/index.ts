@@ -2793,6 +2793,23 @@ void app.whenReady().then(async () => {
     orchestrationEnvironmentTransport
   })
   runtime = runtimeService
+  // [S10-21d R118, design (b)] The one caller of updateLaunchPrefsForPane with source
+  // 'observed' — server.ts already fail-closed the effort level and required a known paneKey
+  // before invoking this listener; best-effort here too (a throw must never take the hook
+  // server's request handling down with it), and the payload itself is never logged.
+  agentHookServer.setClaudeSessionPrefsListener((event) => {
+    try {
+      const db = runtimeService.getOrchestrationDb()
+      const hostId = runtimeService.getOrchestrationCompatibilityHostId()
+      db.updateLaunchPrefsForPane(hostId, event.paneKey, {
+        model: event.model,
+        effort: event.effort,
+        source: 'observed'
+      })
+    } catch (err) {
+      console.error('[agent-hooks] updateLaunchPrefsForPane threw', err)
+    }
+  })
   // [S10-21a C7d, Ruling 34 Addendum 23] One 'daemon_died' audit row per killed pane, from the
   // synthetic-exit fanout (daemon-init.ts Step 1) — the host-authored "awaiting restore" fact.
   // Best-effort: a throw here must never take the daemon-restart/death path down with it.

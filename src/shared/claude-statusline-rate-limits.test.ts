@@ -86,6 +86,55 @@ describe('parseClaudeStatusLineBody', () => {
     ).toBeNull()
   })
 
+  // [S10-21d R118, design (b)] model/effort surface even with no rate_limits at all — the
+  // gate this parse used to have (`rate_limits` required) is exactly the bug: a payload posted
+  // purely for prefs capture must not be dropped for lacking usage windows.
+  describe('S10-21d R118: model/effort capture', () => {
+    it('surfaces model and effort alongside rate limits', () => {
+      const parsed = parseClaudeStatusLineBody(
+        formBody({
+          rate_limits: { five_hour: { used_percentage: 1 } },
+          model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+          effort: { level: 'xhigh' }
+        })
+      )
+      expect(parsed?.model).toEqual({ id: 'claude-opus-4-8', displayName: 'Opus 4.8' })
+      expect(parsed?.effort).toEqual({ level: 'xhigh' })
+    })
+
+    it('surfaces model/effort with NO rate_limits at all (would have returned null before this slice)', () => {
+      const parsed = parseClaudeStatusLineBody(
+        formBody({ model: { id: 'claude-sonnet-5' }, effort: { level: 'medium' } })
+      )
+      expect(parsed).not.toBeNull()
+      expect(parsed?.fiveHour).toBeNull()
+      expect(parsed?.sevenDay).toBeNull()
+      // display_name absent -> falls back to id.
+      expect(parsed?.model).toEqual({ id: 'claude-sonnet-5', displayName: 'claude-sonnet-5' })
+      expect(parsed?.effort).toEqual({ level: 'medium' })
+    })
+
+    it('omits model/effort entirely when absent — existing rate-limit-only callers see no new keys', () => {
+      const parsed = parseClaudeStatusLineBody(
+        formBody({ rate_limits: { five_hour: { used_percentage: 1 } } })
+      )
+      expect(parsed).toEqual({
+        paneKey: null,
+        configDir: null,
+        fiveHour: { used_percentage: 1, resets_at: undefined },
+        sevenDay: null
+      })
+      expect('model' in (parsed ?? {})).toBe(false)
+      expect('effort' in (parsed ?? {})).toBe(false)
+    })
+
+    it('still returns null when payload has none of rate_limits/model/effort', () => {
+      expect(parseClaudeStatusLineBody(formBody({ model: {} }))).toBeNull()
+      expect(parseClaudeStatusLineBody(formBody({ effort: { level: '' } }))).toBeNull()
+      expect(parseClaudeStatusLineBody(formBody({ model: { id: '' } }))).toBeNull()
+    })
+  })
+
   describe("the posted paneKey — S9 §2k's attribution key", () => {
     const windows = { rate_limits: { five_hour: { used_percentage: 4 } } }
 

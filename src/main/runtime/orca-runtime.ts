@@ -1919,6 +1919,10 @@ type RuntimePtyController = {
      * `RuntimePtyController.spawn` caller — the same rationale as `TerminalCreateOptions`'s
      * `credentialLane`/`restoreProvenance`. Non-wire; never on `PtySpawnOptions`. */
     launchAdmission: LaunchAdmission
+    /** [S10-21d R118, design (a)/(b)] `createTerminal`'s own `opts.launchPreferences`
+     * (TerminalCreateOptions), narrowed to model/effort — threaded to `agent-launch-admission.ts`
+     * so a fresh HOST_MINTED/HOST_RESUME/caller_resume row records what it launched with. */
+    launchPreferences?: { model?: string; effort?: string }
     signal?: AbortSignal
     onPtySpawnCommitted?: () => void
     adoptedStablePane?: {
@@ -28775,6 +28779,11 @@ export class OrcaRuntimeService {
             rows: 40,
             cwd,
             launchAdmission,
+            // [S10-21d R118, design (a)/(b)] model/effort only — `mode` is unrelated to this
+            // slice and is never forwarded to admission/recordLaunch.
+            launchPreferences: opts.launchPreferences
+              ? { model: opts.launchPreferences.model, effort: opts.launchPreferences.effort }
+              : undefined,
             command: sequencedStartupCommand
               ? launchOpts.command
               : (agentTeamsPlan?.command ?? launchOpts.command),

@@ -28,6 +28,7 @@ import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
 import { withPaneLock } from './agent-launch-admission-lock'
 import {
   audit,
+  launchPrefsForCtx,
   passThrough,
   preflightResumeTranscript,
   type AdmittedLaunch,
@@ -66,6 +67,13 @@ export type AgentLaunchAdmissionContext = {
   hostId: string
   executionHostId: string
   launchGeneration: string
+  /** [S10-21d R118, design (a)/(b)] Threaded from `createTerminal`'s own `opts.launchPreferences`
+   * (TerminalCreateOptions) down through `RuntimePtyController.spawn` and
+   * `launchAdmissionBundle` — undefined for the overwhelming majority of launches that name no
+   * preference, in which case every `recordLaunch` call below passes no `prefs` and the INSERT
+   * writes NULL (design (d), byte-identical to today). model/effort only — `mode` is a separate,
+   * unrelated preference this slice does not touch. */
+  launchPreferences?: { model?: string; effort?: string }
   /** [D-R104 F-3] REQUIRED — every production caller (launchAdmissionBundle, pty.ts) now wires a
    * real pane notice; a caller cannot silently omit it and have every UNRECORDED/self-resume
    * signal go audit-only. [§2.6] Raised on SELF_RESUME(caller) into a registered pane and on
@@ -296,7 +304,8 @@ export async function admitAgentLaunch(
           launchGeneration: admission.launchGeneration,
           executionHostId: admission.executionHostId,
           evidence: 'sweep_record',
-          supersedePaneKey: admission.predecessorPaneKey
+          supersedePaneKey: admission.predecessorPaneKey,
+          ...launchPrefsForCtx(ctx.launchPreferences)
         }
         const result = db.recordLaunch(params)
         if (!result.ok) {
@@ -394,7 +403,8 @@ export async function admitAgentLaunch(
         sessionId: x,
         launchGeneration: ctx.launchGeneration,
         executionHostId: ctx.executionHostId,
-        evidence: 'caller_resume'
+        evidence: 'caller_resume',
+        ...launchPrefsForCtx(ctx.launchPreferences)
       })
       // [S10-21c B3c, D-R151 HIGH, chair ruling 21c-E2] `current_sessions` has no liveness test:
       // the UNIQUE(host_id, session_id) collision this arm sees fires for ANY pane that has ever
@@ -495,7 +505,8 @@ export async function admitAgentLaunch(
       sessionId,
       launchGeneration: ctx.launchGeneration,
       executionHostId: ctx.executionHostId,
-      evidence: 'host_launch'
+      evidence: 'host_launch',
+      ...launchPrefsForCtx(ctx.launchPreferences)
     }
     const result = db.recordLaunch(params)
     if (!result.ok) {

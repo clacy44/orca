@@ -2,8 +2,20 @@
 // agent-launch-admission.ts to stay under the repo's max-lines budget.
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
+import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import type { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
+
+// [S10-21d R118, design (a)] Split out of agent-launch-admission.ts (same max-lines-budget
+// reason this whole file exists) — takes the narrow shape directly, not
+// AgentLaunchAdmissionContext itself, to avoid importing back into the module that imports this
+// one. Undefined input (the overwhelming majority of launches) spreads to nothing, so
+// params.prefs is omitted and the INSERT writes NULL (design (d)).
+export function launchPrefsForCtx(
+  launchPreferences: { model?: string; effort?: string } | undefined
+): Pick<RecordLaunchParams, 'prefs'> {
+  return launchPreferences ? { prefs: { ...launchPreferences, source: 'launch' as const } } : {}
+}
 
 /** [S10-21a C7f, D-R114 fix 1] The admission outcome pty.ts's post-spawn-commit gate needs at
  * :6937 — HOST_MINTED and HOST_RESUME both come from `buildRecordedAdmission`; the two

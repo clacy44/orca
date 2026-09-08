@@ -836,7 +836,12 @@ function launchAdmissionClassificationToWire(
 export function launchAdmissionBundle(
   runtime: OrcaRuntimeService | undefined,
   connectionId: string | null | undefined,
-  admission: LaunchAdmission = { kind: 'caller' }
+  admission: LaunchAdmission = { kind: 'caller' },
+  // [S10-21d R118, design (a)/(b)] Threaded from RuntimePtyController.spawn's own
+  // `launchPreferences` opt (createTerminal's `opts.launchPreferences`, model/effort only).
+  // Undefined for the three call sites that never pass a 4th argument (respawn gate, existing
+  // sessions) — `ctx.launchPreferences` stays undefined there too, same as today.
+  launchPreferences?: { model?: string; effort?: string }
 ): {
   getDb: () => OrchestrationDb | undefined
   launchAdmission: LaunchAdmission
@@ -868,6 +873,7 @@ export function launchAdmissionBundle(
     ctx: {
       hostId,
       executionHostId,
+      launchPreferences,
       // [S10-21a C3-v2c, errata 5(o)] Sourced from the runtime's own per-process id — no more
       // module-lifetime fallback UUID. [JUDGMENT CALL, see RETURN] The same typeof guard as
       // `getDb` above: a `runtime` stub lacking this method (or `runtime` undefined outright)
@@ -935,6 +941,10 @@ type StablePaneSpawnContext = {
   resolveOwner?: () => StablePaneOwner | null
   onFreshSpawn?: (result: PtySpawnResult) => void
   launchAdmission?: LaunchAdmission
+  // [S10-21d R118, design (a)/(b)] Threaded straight through to `launchAdmissionBundle` in
+  // `spawnForStablePane` below — same field, same undefined-by-default story as
+  // `launchAdmission` immediately above.
+  launchPreferences?: { model?: string; effort?: string }
 }
 
 function stablePanePersistenceFence(
@@ -1069,7 +1079,12 @@ async function spawnForStablePane(
     args.provider,
     args.spawnOptions,
     args.paneLane,
-    launchAdmissionBundle(args.runtime, args.connectionId, args.launchAdmission),
+    launchAdmissionBundle(
+      args.runtime,
+      args.connectionId,
+      args.launchAdmission,
+      args.launchPreferences
+    ),
     onAdmitted
   )
   args.onFreshSpawn?.(result)
@@ -5223,7 +5238,12 @@ export function registerPtyHandlers(
                   provider,
                   spawnOptions,
                   paneLane,
-                  launchAdmissionBundle(runtime, args.connectionId, args.launchAdmission),
+                  launchAdmissionBundle(
+                    runtime,
+                    args.connectionId,
+                    args.launchAdmission,
+                    args.launchPreferences
+                  ),
                   (admitted) => {
                     admittedLaunch = admitted
                   }
@@ -5293,7 +5313,8 @@ export function registerPtyHandlers(
                         args.connectionId
                       ),
                     onFreshSpawn: reportPtySpawnCommitted,
-                    launchAdmission: args.launchAdmission
+                    launchAdmission: args.launchAdmission,
+                    launchPreferences: args.launchPreferences
                   },
                   (admitted) => {
                     // [S10-21a C7, D-R105 F-5 partial] Same capture the `agentSessionEnsure`

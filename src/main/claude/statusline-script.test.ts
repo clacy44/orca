@@ -345,11 +345,26 @@ describe.skipIf(process.platform === 'win32')('statusline curl throttle (posix b
     expect(readFileSync(stampPathFor(dir, 'legacy-tab-b_1'), 'utf8')).toBe('1')
   })
 
-  it('never touches curl or the stamp for payloads without rate_limits', async () => {
+  // [S10-21d R118, SCENARIO_CORRECTION] This scenario's payload used to be `{"model":...}` and
+  // asserted NO post at all — that premise is exactly what this slice changes on purpose (design
+  // (b)): the gate now also fires on model/effort. The corrected payload carries none of
+  // rate_limits/model/effort, so "never touches curl" is still the right assertion for it.
+  it('never touches curl or the stamp for payloads without rate_limits/model/effort', async () => {
     const { scriptPath, dir, curlLog, dateLog } = makeHarness()
-    await runScript(scriptPath, dir, '{"model":{"id":"claude-fable-5"}}')
+    await runScript(scriptPath, dir, '{"context_window":{"used_percentage":12}}')
     expect(lineCount(curlLog)).toBe(0)
     expect(lineCount(dateLog)).toBe(0)
     expect(() => readFileSync(stampPathFor(dir), 'utf8')).toThrow()
+  })
+
+  // [S10-21d R118, design (b)] The new half of the gate: a payload with model/effort but no
+  // rate_limits at all now posts too (a non-subscriber session, or a pane whose statusline
+  // hasn't seen a rate_limits tick yet still needs its prefs captured).
+  it('posts for a payload that carries model/effort but no rate_limits', async () => {
+    const { scriptPath, dir, curlLog, payloadLog } = makeHarness()
+    const payload = '{"model":{"id":"claude-opus-4-8"},"effort":{"level":"max"}}'
+    await runScript(scriptPath, dir, payload)
+    expect(lineCount(curlLog)).toBe(1)
+    expect(readFileSync(payloadLog, 'utf8')).toBe(payload)
   })
 })

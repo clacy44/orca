@@ -31,6 +31,16 @@ export type ClaudeStatusLineRateLimits = {
   paneKey?: string | null
   fiveHour: ClaudeStatusLineWindow | null
   sevenDay: ClaudeStatusLineWindow | null
+  /** [S10-21d R118, design (b)] Present only when the payload's `model` object carries a
+   * non-empty `id`. `displayName` falls back to `id` when `display_name` is absent, so a caller
+   * never has to null-check a second field just to log/show something. */
+  model?: { id: string; displayName: string }
+  /** [S10-21d R118, design (b)] Present only when the payload's `effort` object carries a
+   * non-empty `level`. The value is passed through UNVALIDATED — 'ultracode' renders as 'xhigh'
+   * here (CANNOT distinguish, per design), and any other unexpected string is possible too; the
+   * low|medium|high|xhigh|max allow-list check is the CALLER's job (server.ts's
+   * onClaudeSessionPrefs sink), not this parse. */
+  effort?: { level: string }
 }
 
 /** Bounds an untrusted loopback field before it is parsed; a real paneKey is far shorter. */
@@ -38,6 +48,31 @@ const PANE_KEY_MAX_LENGTH = 256
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function parseModel(value: unknown): { id: string; displayName: string } | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined
+  }
+  const raw = value as { id?: unknown; display_name?: unknown }
+  const id = typeof raw.id === 'string' ? raw.id.trim() : ''
+  if (!id) {
+    return undefined
+  }
+  const displayName = typeof raw.display_name === 'string' ? raw.display_name.trim() : ''
+  return { id, displayName: displayName || id }
+}
+
+function parseEffort(value: unknown): { level: string } | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined
+  }
+  const raw = value as { level?: unknown }
+  const level = typeof raw.level === 'string' ? raw.level.trim() : ''
+  if (!level) {
+    return undefined
+  }
+  return { level }
 }
 
 function parseWindow(value: unknown): ClaudeStatusLineWindow | null {
@@ -67,7 +102,8 @@ function parseWindow(value: unknown): ClaudeStatusLineWindow | null {
 
 /**
  * Parses the form-encoded body posted by the managed Claude statusline script.
- * Returns null when the payload carries no usable rate-limit windows.
+ * Returns null when the payload carries no usable rate-limit windows AND no model/effort
+ * (S10-21d R118) — any one of the four being present is enough to return a result.
  */
 export function parseClaudeStatusLineBody(body: unknown): ClaudeStatusLineRateLimits | null {
   if (typeof body !== 'object' || body === null) {
@@ -86,13 +122,21 @@ export function parseClaudeStatusLineBody(body: unknown): ClaudeStatusLineRateLi
   if (typeof payload !== 'object' || payload === null) {
     return null
   }
+  // [S10-21d R118] `rate_limits` is no longer a hard gate: a payload that carries model/effort
+  // but no rate_limits object (e.g. a non-subscriber session) must still surface those two
+  // fields, not return null before ever looking at them.
   const rateLimits = (payload as { rate_limits?: unknown }).rate_limits
-  if (typeof rateLimits !== 'object' || rateLimits === null) {
-    return null
-  }
-  const fiveHour = parseWindow((rateLimits as { five_hour?: unknown }).five_hour)
-  const sevenDay = parseWindow((rateLimits as { seven_day?: unknown }).seven_day)
-  if (!fiveHour && !sevenDay) {
+  const fiveHour =
+    typeof rateLimits === 'object' && rateLimits !== null
+      ? parseWindow((rateLimits as { five_hour?: unknown }).five_hour)
+      : null
+  const sevenDay =
+    typeof rateLimits === 'object' && rateLimits !== null
+      ? parseWindow((rateLimits as { seven_day?: unknown }).seven_day)
+      : null
+  const model = parseModel((payload as { model?: unknown }).model)
+  const effort = parseEffort((payload as { effort?: unknown }).effort)
+  if (!fiveHour && !sevenDay && !model && !effort) {
     return null
   }
   const configDir = typeof fields.configDir === 'string' ? fields.configDir.trim() : ''
@@ -100,7 +144,9 @@ export function parseClaudeStatusLineBody(body: unknown): ClaudeStatusLineRateLi
     configDir: configDir || null,
     paneKey: parsePostedPaneKey(fields.paneKey),
     fiveHour,
-    sevenDay
+    sevenDay,
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {})
   }
 }
 
