@@ -28,6 +28,11 @@ export type AgentHookInstallSkipReason =
   | 'cli_not_found'
   | 'cli_presence_unknown'
   | 'hooks_disabled'
+  // M3 (D-R166 lane3): Windows exec-form hook (Claude) with orca-hook-host.exe absent from
+  // this build — a dev/unpackaged build that has not run build:native. install() leaves any
+  // existing managed entry untouched and writes no new lifecycle entry rather than falling
+  // back to the conhost form (which swallows Claude's stdin payload).
+  | 'windows_hook_host_unavailable'
 
 export type AgentHookInstallStatus = {
   agent: AgentHookTarget

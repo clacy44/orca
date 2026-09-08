@@ -26,6 +26,7 @@ import {
   applyManagedHooks,
   applyManagedStatusLine,
   buildWindowsHookHostDescriptor,
+  buildWindowsHookHostUnavailableStatus,
   CLAUDE_EVENTS,
   CLAUDE_HOOK_SETTINGS,
   getManagedScriptFileName,
@@ -146,6 +147,18 @@ export class ClaudeHookService {
 
     // Why: report partial registration instead of a false installed state.
     const expectedHook = getManagedLifecycleHook(scriptPath, this.options.settings)
+    // M3: no exe in this build to compare against — report loudly rather than as 'error'
+    // (nothing is broken) or a false 'installed'/'not_installed' read of an entry that was
+    // never computed.
+    if (expectedHook === null) {
+      const scriptFileName = getManagedScriptFileName(this.options.settings)
+      return buildWindowsHookHostUnavailableStatus(
+        this.options.agent,
+        configPath,
+        config,
+        scriptFileName
+      )
+    }
     const missing: string[] = []
     let presentCount = 0
     for (const event of CLAUDE_EVENTS) {
@@ -203,19 +216,20 @@ export class ClaudeHookService {
       }
     }
 
+    // M3: null hook means the exe is absent in this build — preserve whatever managed entry
+    // already exists (any generation) untouched and write NO new lifecycle entry.
+    // applyManagedHooks() always sweeps the existing entry first, so it must not run here.
     const hook = getManagedLifecycleHook(scriptPath, this.options.settings)
-    let nextConfig = applyManagedHooks(
-      config,
-      hook,
-      getManagedScriptFileName(this.options.settings)
-    )
+    const scriptFileName = getManagedScriptFileName(this.options.settings)
+    let nextConfig = hook ? applyManagedHooks(config, hook, scriptFileName) : config
     writeManagedScript(
       scriptPath,
       getManagedScript('local', { skipWhenDevinImportsClaude: this.options.agent === 'claude' })
     )
     // Why: only Claude's Windows hook uses the exec form the descriptor feeds (D4/D3); the .cmd
-    // above stays the OpenClaude/rollback path regardless of platform.
-    if (process.platform === 'win32' && this.options.settings.supportsExecHookArgs) {
+    // above stays the OpenClaude/rollback path regardless of platform. `hook` gates it too (M3)
+    // — nothing would ever read this descriptor without the exe.
+    if (hook && process.platform === 'win32' && this.options.settings.supportsExecHookArgs) {
       writeManagedScript(
         getWindowsHookHostDescriptorPath(this.options.settings),
         `${JSON.stringify(buildWindowsHookHostDescriptor(), null, 2)}\n`

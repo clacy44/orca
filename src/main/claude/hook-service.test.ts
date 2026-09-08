@@ -23,6 +23,7 @@ import {
   CLAUDE_HOOK_SETTINGS,
   getManagedScriptFileName,
   getWindowsManagedLifecycleHook,
+  hasAnyManagedLifecycleHook,
   OPENCLAUDE_HOOK_SETTINGS
 } from './hook-settings'
 
@@ -41,14 +42,43 @@ function hasManagedCommand(hook: TestHook, matcher: (command: string | undefined
 }
 
 describe('getWindowsManagedLifecycleHook', () => {
-  it('falls back to the conhost form when orca-hook-host.exe is absent (dev/unpackaged)', () => {
+  // SCENARIO_CORRECTION (M3, D-R166-lane3-b1c-review.md chair decision): the exe-absent path
+  // must NEVER fall back to the conhost form (it swallows Claude's stdin payload) — it now
+  // returns null so the caller (hook-service.ts install()) can leave any existing entry
+  // untouched instead. Replaces the prior "falls back to the conhost form" expectation.
+  it('returns null (never the conhost form) when orca-hook-host.exe is absent (dev/unpackaged)', () => {
     const scriptPath = 'C:\\Users\\%name%\\a^b&c\\.orca\\agent-hooks\\claude-hook.cmd'
-    const hook = getWindowsManagedLifecycleHook(scriptPath)
+    expect(getWindowsManagedLifecycleHook(scriptPath)).toBeNull()
+  })
 
-    expect(hook.args?.[0]).toBe('--headless')
-    expect(hook.args?.[1]).toMatch(/\\System32\\cmd\.exe$/i)
-    expect(hook.args?.at(-1)).toBe('%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.cmd')
-    expect(hook.args).not.toContain(scriptPath)
+  it('returns null when resourcesPath is undefined (readResourcesPath fallback), same as absent', () => {
+    const scriptPath = 'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd'
+    expect(getWindowsManagedLifecycleHook(scriptPath, undefined)).toBeNull()
+  })
+
+  // M3: hasAnyManagedLifecycleHook backs getStatus()'s managedHooksPresent read when
+  // getManagedLifecycleHook() returns null — platform-independent, unlike the hook itself.
+  it('hasAnyManagedLifecycleHook detects any existing managed generation (exe, conhost, cmd.exe)', () => {
+    const scriptFileName = getManagedScriptFileName(CLAUDE_HOOK_SETTINGS)
+    expect(hasAnyManagedLifecycleHook({}, scriptFileName)).toBe(false)
+
+    const legacyConhostHook = {
+      type: 'command' as const,
+      command: 'C:\\Windows\\System32\\conhost.exe',
+      args: [
+        '--headless',
+        'C:\\Windows\\System32\\cmd.exe',
+        '/d',
+        '/c',
+        '%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.cmd'
+      ],
+      timeout: 10
+    }
+    const config: HooksConfig = { hooks: {} }
+    for (const event of CLAUDE_EVENTS) {
+      config.hooks![event.eventName] = [{ ...event.definition, hooks: [legacyConhostHook] }]
+    }
+    expect(hasAnyManagedLifecycleHook(config, scriptFileName)).toBe(true)
   })
 
   it('R105-b: uses the winexe hook host when orca-hook-host.exe is present at resourcesPath', () => {
@@ -61,6 +91,10 @@ describe('getWindowsManagedLifecycleHook', () => {
         'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd',
         tmpResources
       )
+      expect(hook).not.toBeNull()
+      if (hook === null) {
+        throw new Error('unreachable')
+      }
 
       expect(hook.command).toBe(join(tmpResources, 'bin', 'orca-hook-host.exe'))
       expect(hook.args).toEqual([
@@ -104,6 +138,10 @@ describe('getWindowsManagedLifecycleHook', () => {
         'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd',
         tmpResources
       )
+      expect(newHook).not.toBeNull()
+      if (newHook === null) {
+        throw new Error('unreachable')
+      }
       const migrated = applyManagedHooks(config, newHook, scriptFileName)
       const twiceInstalled = applyManagedHooks(migrated, newHook, scriptFileName)
 
@@ -138,6 +176,10 @@ describe('getWindowsManagedLifecycleHook', () => {
         'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd',
         tmpResources
       )
+      expect(newHook).not.toBeNull()
+      if (newHook === null) {
+        throw new Error('unreachable')
+      }
       const migrated = applyManagedHooks(config, newHook, scriptFileName)
 
       for (const event of CLAUDE_EVENTS) {
@@ -443,41 +485,81 @@ describe('ClaudeHookService.install', () => {
     }
   })
 
+  // SCENARIO_CORRECTION (M3): replaces the prior "runs portable managed hooks through headless
+  // exec form" expectation, which asserted the now-forbidden conhost fallback on a fresh
+  // install. Fresh settings + no exe must write NO lifecycle entry and report the loud status.
   it.skipIf(process.platform !== 'win32')(
-    'runs portable managed hooks through headless exec form',
+    'M3: fresh settings + no exe → no lifecycle entry written, loud skipped status',
     () => {
       const tmpHome = mkdtempSync(join(tmpdir(), 'orca claude home with spaces '))
       vi.stubEnv('HOME', tmpHome)
       vi.stubEnv('USERPROFILE', tmpHome)
       try {
-        expect(new ClaudeHookService().install().state).toBe('installed')
+        const status = new ClaudeHookService().install()
+        expect(status.state).toBe('skipped')
+        expect(status.skipReason).toBe('windows_hook_host_unavailable')
+        expect(status.managedHooksPresent).toBe(false)
 
         const settings = JSON.parse(
           readFileSync(join(tmpHome, '.claude', 'settings.json'), 'utf-8')
-        ) as { hooks: Record<string, { hooks: TestHook[] }[]> }
-
-        const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
-        const scriptPath = join(tmpHome, '.orca', 'agent-hooks', CLAUDE_SCRIPT_FILE_NAME)
-        const runtimeScriptPath = join(
-          '%USERPROFILE%',
-          '.orca',
-          'agent-hooks',
-          CLAUDE_SCRIPT_FILE_NAME
-        )
+        ) as { hooks?: Record<string, { hooks: TestHook[] }[]> }
 
         for (const eventName of ['UserPromptSubmit', 'Stop', 'StopFailure']) {
-          const hook = settings.hooks[eventName]?.[0]?.hooks?.[0]
-          expect(hook).toEqual({
-            type: 'command',
-            command: join(system32, 'conhost.exe'),
-            args: ['--headless', join(system32, 'cmd.exe'), '/d', '/c', runtimeScriptPath],
-            timeout: 10
-          })
-          expect(hook.args).not.toContain(scriptPath)
+          expect(settings.hooks?.[eventName]).toBeUndefined()
         }
+        expect(new ClaudeHookService().getStatus()).toEqual(status)
       } finally {
         vi.unstubAllEnvs()
         rmSync(tmpHome, { recursive: true, force: true })
+      }
+    }
+  )
+
+  // M3: an install that already has a valid exe-form entry (e.g. from a previous packaged run)
+  // must leave it untouched when a later run's exe is absent, not sweep it away.
+  it.skipIf(process.platform !== 'win32')(
+    'M3: dev install with no exe leaves an existing packaged exe-form entry intact',
+    () => {
+      const tmpHome = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-dev-no-exe-'))
+      const tmpResources = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-dev-no-exe-res-'))
+      vi.stubEnv('HOME', tmpHome)
+      vi.stubEnv('USERPROFILE', tmpHome)
+      const originalResourcesPath = process.resourcesPath
+      mkdirSync(join(tmpResources, 'bin'), { recursive: true })
+      writeFileSync(join(tmpResources, 'bin', 'orca-hook-host.exe'), '')
+      Object.defineProperty(process, 'resourcesPath', { value: tmpResources, configurable: true })
+      try {
+        expect(new ClaudeHookService().install().state).toBe('installed')
+        const settingsPath = join(tmpHome, '.claude', 'settings.json')
+        const before = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
+          hooks: Record<string, { hooks: TestHook[] }[]>
+        }
+
+        // The exe disappears (e.g. a dev run pointed at a build without build:native).
+        rmSync(join(tmpResources, 'bin', 'orca-hook-host.exe'))
+        const status = new ClaudeHookService().install()
+        expect(status.state).toBe('skipped')
+        expect(status.skipReason).toBe('windows_hook_host_unavailable')
+        expect(status.managedHooksPresent).toBe(true)
+
+        const after = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
+          hooks: Record<string, { hooks: TestHook[] }[]>
+        }
+        for (const eventName of ['UserPromptSubmit', 'Stop', 'StopFailure']) {
+          expect(after.hooks[eventName]).toEqual(before.hooks[eventName])
+        }
+      } finally {
+        if (originalResourcesPath === undefined) {
+          delete (process as { resourcesPath?: string }).resourcesPath
+        } else {
+          Object.defineProperty(process, 'resourcesPath', {
+            value: originalResourcesPath,
+            configurable: true
+          })
+        }
+        vi.unstubAllEnvs()
+        rmSync(tmpHome, { recursive: true, force: true })
+        rmSync(tmpResources, { recursive: true, force: true })
       }
     }
   )

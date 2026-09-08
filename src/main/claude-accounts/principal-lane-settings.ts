@@ -65,11 +65,14 @@ export function buildLaneSettings(
     options.statusLineScriptPath ?? getStatusLineScriptPath(CLAUDE_HOOK_SETTINGS)
   // Why: build from empty rather than from the host file — the mirror is an allowlist, so anything
   // not named below must be absent by construction rather than by removal.
-  const withHooks = applyManagedHooks(
-    {},
-    getManagedLifecycleHook(managedScriptPath, CLAUDE_HOOK_SETTINGS),
-    getManagedScriptFileName(CLAUDE_HOOK_SETTINGS)
-  )
+  // M3: getManagedLifecycleHook() returns null only for Claude's Windows exec form when
+  // orca-hook-host.exe is absent from this build — same contract as hook-service.ts's
+  // install(): write no lifecycle entry for the lane rather than crash on a null hook.
+  const lifecycleHook = getManagedLifecycleHook(managedScriptPath, CLAUDE_HOOK_SETTINGS)
+  const withHooks =
+    lifecycleHook !== null
+      ? applyManagedHooks({}, lifecycleHook, getManagedScriptFileName(CLAUDE_HOOK_SETTINGS))
+      : {}
   const withStatusLine = applyManagedStatusLine(
     withHooks,
     getManagedCommand(statusLineScriptPath),

@@ -1,10 +1,12 @@
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join, win32 } from 'node:path'
+import type { AgentHookInstallStatus } from '../../shared/agent-hook-types'
 import {
   buildManagedCommandHook,
   createManagedCommandMatcher,
   getSharedManagedScriptPath,
+  hookDefinitionHasManagedCommand,
   isPlainObject,
   MANAGED_HOOK_TIMEOUT_SECONDS,
   removeManagedCommands,
@@ -126,11 +128,13 @@ export function getManagedCommand(scriptPath: string): string {
   )
 }
 
+// Returns null only for the Windows exec-form path (Claude) when orca-hook-host.exe is absent
+// from this build (M3) — every other agent/platform combination always returns a hook.
 export function getManagedLifecycleHook(
   scriptPath: string,
   settings = CLAUDE_HOOK_SETTINGS,
   resourcesPath?: string
-): HookCommandConfig {
+): HookCommandConfig | null {
   if (process.platform !== 'win32' || !settings.supportsExecHookArgs) {
     return buildManagedCommandHook(getManagedCommand(scriptPath))
   }
@@ -146,18 +150,25 @@ function readResourcesPath(): string | undefined {
   return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined
 }
 
-// R105-b: conhost gives cmd.exe a headless pseudoconsole that SWALLOWS Claude's stdin payload
-// (field-proven, drills/readouts/E-R105-desktop-2026-09-08.md) — kept only as the dev/unpackaged
-// fallback below, when orca-hook-host.exe hasn't been built into resources/bin yet.
+// M3 (chair decision, D-R166-lane3-b1c-review.md): conhost gives cmd.exe a headless
+// pseudoconsole that SWALLOWS Claude's stdin payload (field-proven,
+// drills/readouts/E-R105-desktop-2026-09-08.md) — a dev/unpackaged build without
+// orca-hook-host.exe must NEVER fall back to that (or any) shelled-out form. Returning null
+// instead is the contract: the caller (hook-service.ts install()) leaves any existing managed
+// entry untouched and writes no new lifecycle entry; getStatus() surfaces this loudly via
+// state 'skipped' / skipReason 'windows_hook_host_unavailable', not just a console line.
 let loggedMissingWindowsHookHostOnce = false
 
 export function getWindowsManagedLifecycleHook(
   scriptPath: string,
   resourcesPath: string | undefined = readResourcesPath()
-): HookCommandConfig {
-  const hookHostExePath = resourcesPath
-    ? win32.join(resourcesPath, 'bin', 'orca-hook-host.exe')
-    : null
+): HookCommandConfig | null {
+  // Why plain `join`, not `win32.join`: resourcesPath is always the running process's own
+  // (OS-native) resourcesPath — on real Windows that's already backslash-form, so `join` and
+  // `win32.join` agree there; on a non-Windows dev/test host (this exe-path is also unit-tested
+  // with a real POSIX tmpdir standing in for resourcesPath) `win32.join` would silently mangle
+  // that into a string existsSync can never resolve, so exe presence would never be detected.
+  const hookHostExePath = resourcesPath ? join(resourcesPath, 'bin', 'orca-hook-host.exe') : null
   if (hookHostExePath && existsSync(hookHostExePath)) {
     const scriptStem = win32.basename(scriptPath, win32.extname(scriptPath))
     const runtimeDescriptorPath = win32.join(
@@ -177,27 +188,11 @@ export function getWindowsManagedLifecycleHook(
     loggedMissingWindowsHookHostOnce = true
     console.error(
       `[agent-hooks] orca-hook-host.exe not found at ${hookHostExePath ?? '<no resourcesPath>'}; ` +
-        'falling back to the conhost hook form (expected on a dev/unpackaged build).'
+        'Windows lifecycle hooks are unavailable in this build (expected on a dev/unpackaged ' +
+        'build that has not run build:native) — see getStatus().skipReason.'
     )
   }
-  return getConhostManagedLifecycleHook(scriptPath)
-}
-
-// Why kept: the only fallback for dev/unpackaged builds that haven't run build:native yet.
-function getConhostManagedLifecycleHook(scriptPath: string): HookCommandConfig {
-  const system32 = win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
-  const runtimeScriptPath = win32.join(
-    '%USERPROFILE%',
-    '.orca',
-    'agent-hooks',
-    win32.basename(scriptPath)
-  )
-  return {
-    type: 'command',
-    command: win32.join(system32, 'conhost.exe'),
-    args: ['--headless', win32.join(system32, 'cmd.exe'), '/d', '/c', runtimeScriptPath],
-    timeout: MANAGED_HOOK_TIMEOUT_SECONDS
-  }
+  return null
 }
 
 // Field order matches buildWindowsAgentHookCurlPostCommand (installer-utils.ts:182-198); kept in
@@ -265,6 +260,53 @@ export function applyManagedHooks(
   }
 
   return { ...config, hooks: nextHooks }
+}
+
+// M3: used only when getManagedLifecycleHook() returned null (exe absent) — reports whether
+// ANY managed entry (any generation: exe-form, conhost, cmd.exe-direct) already exists, so
+// getStatus() can tell "left an existing install untouched" from "never installed" without
+// computing an `expectedHook` to compare against (there isn't one to write).
+export function hasAnyManagedLifecycleHook(
+  config: HooksConfig,
+  scriptFileName = getManagedScriptFileName()
+): boolean {
+  const isManagedCommand = createManagedCommandMatcher(scriptFileName)
+  return CLAUDE_EVENTS.some((event) => {
+    const definitions = Array.isArray(config.hooks?.[event.eventName])
+      ? config.hooks![event.eventName]!
+      : []
+    // Why hookDefinitionHasManagedCommand, not a bare `hook.command` check: the conhost/
+    // cmd.exe-direct generations carry the identifying script path in `args`, not `command`
+    // (command is conhost.exe/cmd.exe itself) — this is the same matcher removeManagedCommands
+    // uses to sweep every generation, so "any managed generation present" stays in sync with it.
+    return definitions.some((definition) =>
+      hookDefinitionHasManagedCommand(definition, isManagedCommand)
+    )
+  })
+}
+
+// M3: orca-hook-host.exe absent from this build (dev/unpackaged, no build:native yet) — never
+// surfaced as 'error' (nothing is broken) or silently as 'installed' (nothing was written).
+export const WINDOWS_HOOK_HOST_UNAVAILABLE_DETAIL =
+  'orca-hook-host.exe was not found in this build; Windows lifecycle hooks for Claude are ' +
+  'unavailable until a build that runs build:native (or build) is installed.'
+
+// Builds the loud getStatus() reply for the M3 exe-absent case — shared so hook-service.ts's
+// getStatus() needs only one call site instead of constructing the object inline.
+export function buildWindowsHookHostUnavailableStatus(
+  agent: AgentHookInstallStatus['agent'],
+  configPath: string,
+  config: HooksConfig,
+  scriptFileName = getManagedScriptFileName()
+): AgentHookInstallStatus {
+  return {
+    agent,
+    state: 'skipped',
+    configPath,
+    managedHooksPresent: hasAnyManagedLifecycleHook(config, scriptFileName),
+    detail: WINDOWS_HOOK_HOST_UNAVAILABLE_DETAIL,
+    skipReason: 'windows_hook_host_unavailable'
+  }
 }
 
 export type StatusLineSlotState = 'managed' | 'user' | 'empty'
