@@ -154,6 +154,7 @@ import {
 import { openMobileEmulatorTab } from '@/lib/open-mobile-emulator-tab'
 import { launchAgentInNewTab } from '@/lib/launch-agent-in-new-tab'
 import { resumeSleepingAgentSessionsForWorktree } from '@/lib/resume-sleeping-agent-session'
+import { tabHasLivePty } from '@/lib/tab-has-live-pty'
 import { listBoundAgentTabActions, resolveDefaultAgentForNewTab } from '@/lib/agent-tab-shortcuts'
 import { terminalProviderHasAuthoritativeSnapshot } from './terminal/terminal-provider-snapshot-capability'
 import { useTerminalProviderSnapshotCapability } from './terminal/use-terminal-provider-snapshot-capability'
@@ -1477,6 +1478,45 @@ function Terminal(): React.JSX.Element | null {
   ])
   // Why: on host unmount no reconciliation effect runs again, so dispose every remaining parked watcher.
   useEffect(() => () => disposeAllParkedTerminalWatchers(), [])
+  // Why: after a relaunch only the landed worktree mounts, so a daemon-survived tab in any other
+  // worktree never runs the byte watcher that restores its title — its sidebar row stays missing
+  // until the user visits it. Run once, independent of mountedWorktreeIdsRef's lazy-mount gate, for
+  // every live-pty tab; the ongoing sync effect above keeps its existing mount gate unchanged.
+  const startupParkedTitleRestoreDoneRef = useRef(false)
+  useEffect(() => {
+    if (!workspaceSessionReady || startupParkedTitleRestoreDoneRef.current) {
+      return
+    }
+    startupParkedTitleRestoreDoneRef.current = true
+    const ptyIdsByTabId = useAppStore.getState().ptyIdsByTabId
+    for (const workspace of workspaceSurfaces) {
+      if (
+        mountedWorktreeIdsRef.current.has(workspace.id) &&
+        getEffectiveLayoutForWorktree(workspace.id)
+      ) {
+        continue
+      }
+      const tabs = tabsByWorktree[workspace.id] ?? []
+      const restoreTitleOnStartTabIds = new Set(
+        tabs
+          .filter(
+            (tab) =>
+              tabHasLivePty(ptyIdsByTabId, tab.id) &&
+              canWatcherCoverParkedTerminalTab(workspace.id, tab)
+          )
+          .map((tab) => tab.id)
+      )
+      if (restoreTitleOnStartTabIds.size === 0) {
+        continue
+      }
+      syncParkedTerminalTabWatchers({
+        worktreeId: workspace.id,
+        tabs,
+        parkedTabIds: restoreTitleOnStartTabIds,
+        restoreTitleOnStartTabIds
+      })
+    }
+  }, [workspaceSessionReady, workspaceSurfaces, tabsByWorktree, getEffectiveLayoutForWorktree])
   // Auto-create first tab when worktree activates
   useEffect(() => {
     if (!workspaceSessionReady) {
