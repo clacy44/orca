@@ -544,7 +544,7 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(negativeResolver).toHaveBeenCalledTimes(2)
   })
 
-  it('S10-21c B4c, D-R154 finding 4: at most 8 distinct reported ids per pane per generation pay a transcript walk — the 9th is refused without walking, audited once', async () => {
+  it('S10-21c B4c, D-R154 finding 4: at most 8 distinct reported ids per pane inside the window pay a transcript walk — the 9th is refused without walking, audited once', async () => {
     const db = rawDb()
     insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
     const resolver = vi.fn(STUB_ONLY)
@@ -560,8 +560,10 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     )
     expect(resolver).toHaveBeenCalledTimes(8) // the 9th distinct id never reaches the walk.
     expect(ninth).toEqual({ kind: 'bootstrap_refused', reason: 'live_report_id_churn_bounded' })
+    // [SCENARIO_CORRECTION, S10-21c B4d D-R156 finding 5] reason_code now carries the generation
+    // (was 'distinct_ids_exceeded limit=8') so the once-per-lifetime dedupe becomes once-per-gen.
     expect(audits(db, PANE, 'live_report_id_churn_bounded')).toEqual([
-      { outcome: 'refused', reason_code: 'distinct_ids_exceeded limit=8' }
+      { outcome: 'refused', reason_code: 'distinct_ids_exceeded limit=8 gen=gen-1' }
     ])
 
     // A TENTH distinct id also skips the walk and does not write a second churn audit row.
@@ -573,6 +575,160 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(resolver).toHaveBeenCalledTimes(8)
     expect(tenth).toEqual({ kind: 'bootstrap_refused', reason: 'live_report_id_churn_bounded' })
     expect(audits(db, PANE, 'live_report_id_churn_bounded')).toHaveLength(1)
+  })
+
+  it('S10-21c B4d, D-R156 finding 3: the distinct-id churn budget is a ROLLING WINDOW, not generation-scoped — the 9th id is refused inside the window and walks once older ids age out (fake timers)', async () => {
+    vi.useFakeTimers()
+    try {
+      const db = rawDb()
+      insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+      const resolver = vi.fn(STUB_ONLY)
+      for (let i = 0; i < 8; i++) {
+        await evaluateLiveHookReportMismatch(
+          db,
+          params({ reportedSessionId: `sess-${i}` }),
+          resolver
+        )
+      }
+      expect(resolver).toHaveBeenCalledTimes(8)
+
+      // Still inside the window (< 15 min since the first 8 walked) — the 9th is refused.
+      vi.advanceTimersByTime(14 * 60_000)
+      const ninth = await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: 'sess-9' }),
+        resolver
+      )
+      expect(resolver).toHaveBeenCalledTimes(8)
+      expect(ninth).toEqual({ kind: 'bootstrap_refused', reason: 'live_report_id_churn_bounded' })
+
+      // Past the window since the first 8 were recorded — they age out, so the 9th now walks.
+      vi.advanceTimersByTime(2 * 60_000)
+      const ninthRetry = await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: 'sess-9' }),
+        resolver
+      )
+      expect(resolver).toHaveBeenCalledTimes(9)
+      expect(ninthRetry).toEqual({
+        kind: 'bootstrap_refused',
+        reason: 'resume_target_absent session sess-9'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('S10-21c B4d, D-R156 finding 5: the churn audit dedupes per GENERATION, not for the life of the database — a second generation that also hits the bound audits again', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const resolver = vi.fn(STUB_ONLY)
+
+    async function hitChurnBound(generation: string, idPrefix: string): Promise<void> {
+      for (let i = 0; i < 8; i++) {
+        await evaluateLiveHookReportMismatch(
+          db,
+          params({ reportedSessionId: `${idPrefix}-${i}`, launchGeneration: generation }),
+          resolver
+        )
+      }
+      await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: `${idPrefix}-9`, launchGeneration: generation }),
+        resolver
+      )
+    }
+
+    await hitChurnBound('gen-1', 'a')
+    expect(audits(db, PANE, 'live_report_id_churn_bounded')).toEqual([
+      { outcome: 'refused', reason_code: 'distinct_ids_exceeded limit=8 gen=gen-1' }
+    ])
+
+    // Hitting the bound again in the SAME generation is still deduped (unchanged).
+    await hitChurnBound('gen-1', 'a')
+    expect(audits(db, PANE, 'live_report_id_churn_bounded')).toHaveLength(1)
+
+    // A NEW generation hitting the bound audits again — the old (verb, outcome)-only dedupe
+    // would have suppressed this forever.
+    await hitChurnBound('gen-2', 'b')
+    expect(audits(db, PANE, 'live_report_id_churn_bounded')).toEqual([
+      { outcome: 'refused', reason_code: 'distinct_ids_exceeded limit=8 gen=gen-1' },
+      { outcome: 'refused', reason_code: 'distinct_ids_exceeded limit=8 gen=gen-2' }
+    ])
+  })
+
+  it('S10-21c B4d, D-R156 finding 2: once the churn bound is hit, the mismatch-alarm ledger stops growing for further distinct ids in that window — at most 9 agent_audit rows for 20 distinct ids (8 mismatch rows + 1 churn row), console.warn still fires', async () => {
+    const db = rawDb()
+    seedLaunch(db, 'sess-seed') // a row exists on PANE so every report reaches the ROTATION arm.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (let i = 0; i < 20; i++) {
+        const result = await evaluateLiveHookReportMismatch(
+          db,
+          params({ reportedSessionId: `mismatch-${i}` }),
+          STUB_ONLY
+        )
+        expect(result.kind).toBe('foreign_mismatch')
+      }
+      const mismatchRows = audits(db, PANE, 'session_identity_mismatch')
+      const churnRows = audits(db, PANE, 'live_report_id_churn_bounded')
+      expect(mismatchRows.length).toBeLessThanOrEqual(9)
+      expect(mismatchRows).toHaveLength(8)
+      expect(churnRows).toHaveLength(1)
+      expect(mismatchRows.length + churnRows.length).toBeLessThanOrEqual(9)
+      // console.warn keeps firing for every distinct id, even once the ledger stops growing.
+      expect(warn).toHaveBeenCalledTimes(20)
+      expect(warn.mock.calls[19][1]).toMatchObject({ churnBounded: true })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('S10-21c B4d, D-R156 finding 1: a positive transcript verdict cached under one agent type is NOT served for the same id under a different one — the resolver runs again and, for an uncovered type, refuses', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    seedLaunch(db, 'sess-live', 'tab9:leaf-victim') // another pane already holds the reported id.
+    const resolver = vi.fn(async (agentType: string) =>
+      agentType === 'claude'
+        ? { path: '/t.jsonl', hasTurn: true }
+        : ({ coverage: 'uncovered' } as const)
+    )
+
+    const first = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedAgentType: 'claude' }),
+      resolver
+    )
+    expect(first).toEqual({ kind: 'bootstrap_refused', reason: 'foreign_session_id sess-live' })
+    expect(resolver).toHaveBeenCalledTimes(1)
+
+    const second = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedAgentType: 'codex' }),
+      resolver
+    )
+    expect(resolver).toHaveBeenCalledTimes(2) // a NEW agent type must re-walk, not hit the cache.
+    expect(second).toEqual({
+      kind: 'bootstrap_refused',
+      reason: 'resume_preflight_uncovered codex'
+    })
+  })
+
+  it("S10-21c B4d, D-R156 finding 4: getAgentByPaneKey's post-await re-read is exact-pane, not suffix — a sibling pane's row must never receive the bootstrap-refusal audit", async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_pane', display_name: 'vps-services', pane_key: PANE })
+    const vanishOntoSibling: ResolveLiveReportTranscript = async () => {
+      // Across the walk, PANE's own row is retired and a SIBLING on the same leaf suffix
+      // registers — `getAgentByPaneKey`'s suffix match would now resolve to the sibling.
+      db.prepare('UPDATE agents SET tombstoned_at = CURRENT_TIMESTAMP WHERE id = ?').run('agt_pane')
+      insertAgent(db, { id: 'agt_sibling', display_name: 'sibling', pane_key: SIBLING })
+      return { path: '/t.jsonl', hasTurn: false }
+    }
+    const result = await evaluateLiveHookReportMismatch(db, params(), vanishOntoSibling)
+    expect(result).toEqual({ kind: 'no_row' })
+    expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
+    expect(audits(db, PANE, 'session_identity_bootstrap')).toHaveLength(0)
+    expect(audits(db, SIBLING, 'session_identity_bootstrap')).toHaveLength(0)
   })
 
   it('S10-21c B4c, D-R154 finding 5: the bootstrap transcript-refusal audit re-reads the agent row post-await — a row that vanishes across the walk audits nothing and returns no_row', async () => {

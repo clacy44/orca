@@ -61,6 +61,7 @@ import {
 import {
   checkTranscriptConjunctMemoized,
   resetTranscriptVerdictCacheForTests,
+  ID_CHURN_REFUSAL_NOTE,
   type LiveReportTranscriptVerdict,
   type ResolveLiveReportTranscript
 } from './agent-lineage-transcript-memo'
@@ -202,7 +203,11 @@ export async function evaluateLiveHookReportMismatch(
     return { kind: 'unrecorded_launch', reason: unrecorded }
   }
 
-  const attributedPaneKey = raiseMismatchAlarm(db, row, params, refusalNote)
+  // [S10-21c B4d, D-R156 finding 2] The churn-bounded refusal note is the one signal this arm has
+  // that the pane's per-(host,pane) walk budget is exhausted — bound the mismatch ledger the same
+  // way, keeping the console.warn.
+  const churnBounded = refusalNote === ID_CHURN_REFUSAL_NOTE
+  const attributedPaneKey = raiseMismatchAlarm(db, row, params, refusalNote, churnBounded)
   return attributedPaneKey === params.paneKey
     ? { kind: 'foreign_mismatch' }
     : { kind: 'foreign_mismatch', attributedPaneKey }
@@ -285,12 +290,14 @@ async function bootstrapRowFromLiveReport(
     params
   )
   if (!transcript.ok) {
-    // [S10-21c B4c, D-R154-b4b finding 5] Re-read post-await, same as every other fact this
-    // function gates on — `agent` above is pre-await and can be stale by the time the walk
-    // returns. If the row vanished across it (retired/re-registered), charge no audit to a
-    // registration that no longer exists; just refuse.
+    // [S10-21c B4c, D-R154-b4b finding 5; S10-21c B4d, D-R156 finding 4] Re-read post-await, same
+    // as every other fact this function gates on — `agent` above is pre-await and can be stale by
+    // the time the walk returns. `isBootstrappableAgentRow` is the SAME exact-pane predicate the
+    // pre-await gate and the pre-INSERT re-read both use (not a bare truthiness check): a bare
+    // `!refusalAgent` let `getAgentByPaneKey`'s suffix match charge the audit to a SIBLING pane's
+    // agent id when the exact-pane row was retired but a sibling on the same leaf remained.
     const refusalAgent = getAgentByPaneKey(db, params.hostId, params.paneKey)
-    if (!refusalAgent) {
+    if (!isBootstrappableAgentRow(refusalAgent, params)) {
       return { kind: 'no_row' }
     }
     const reason = transcript.note ?? `resume_target_absent session ${params.reportedSessionId}`

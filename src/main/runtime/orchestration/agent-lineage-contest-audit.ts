@@ -73,12 +73,18 @@ export function newestUnrecordedAdmissionThisGeneration(
  * (e.g. `unrecorded_launch`, or B4's `reconciled`) — still audits unconditionally, no matter how
  * recently. [S10-21c B4] `refusalNote` rides the SAME reason code rather than a second audit row,
  * so a persistently uncovered agent type is recorded once per new fact instead of once per hook
- * report, and the dedupe above keeps working unchanged. */
+ * report, and the dedupe above keeps working unchanged. [S10-21c B4d, D-R156 finding 2] Once the
+ * pane's own churn bound (agent-lineage-transcript-memo.ts) is hit, `churnBounded` skips the
+ * agent_audit row for every further distinct reported id in that window — the transcript memo's
+ * own once-per-generation churn row already carries that fact, so this alarm would otherwise
+ * write one unbounded row per distinct id straight into the append-only ledger. The console.warn
+ * stays unconditional (still the journal-visible signal). */
 export function raiseMismatchAlarm(
   db: Database.Database,
   row: AgentLaunchSessionRow,
   params: LineageContestParams,
-  refusalNote?: string
+  refusalNote?: string,
+  churnBounded = false
 ): string {
   // [F2, D-R125] An uncorroborated report naming a pane other than the row's own owner is an
   // unauthenticated claim — attribute the audit (and notice, session-identity-mismatch-alarm.ts)
@@ -97,7 +103,7 @@ export function raiseMismatchAlarm(
     .get(attributedPaneKey) as { outcome: string; reason_code: string | null } | undefined
   const isDuplicateOfNewest =
     newest !== undefined && newest.outcome === 'contested' && newest.reason_code === reasonCode
-  if (!isDuplicateOfNewest) {
+  if (!isDuplicateOfNewest && !churnBounded) {
     writeAgentAudit(db, {
       agentId: row.agent_id,
       actorPaneKey: attributedPaneKey,
@@ -109,14 +115,16 @@ export function raiseMismatchAlarm(
   }
   // [§2.6 item 4, D-R107 LOW-1/fix item 7] Structured console.warn so it lands in the service
   // journal on the VPS, same as §2.6's contested-lineage alarm requires for Layer 2 — kept
-  // unconditional (Addendum 20 scopes the dedupe to "the audit write" only).
+  // unconditional (Addendum 20 scopes the dedupe to "the audit write" only; D-R156 finding 2
+  // scopes the churn bound the same way).
   console.warn('[S10-21a] session_identity_mismatch', {
     hostId: params.hostId,
     paneKey: attributedPaneKey,
     agentId: row.agent_id,
     recordedSessionId: row.session_id,
     reportedSessionId: params.reportedSessionId,
-    deduped: isDuplicateOfNewest
+    deduped: isDuplicateOfNewest,
+    churnBounded
   })
   return attributedPaneKey
 }
