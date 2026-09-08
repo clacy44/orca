@@ -14,12 +14,19 @@ export function formatOrchestrationSent(
   // explicit "delivery state unknown" rather than any resolvability claim.
   if (delivery.state === 'relayed' || delivery.state === 'relay_pending') {
     const environment = delivery.environment ?? 'unknown environment'
+    // [S10-21d D-R162 M-3] deliveryConfirmed (reply-outbox 'delivered' branch) is a real receipt
+    // from the far side — render "delivered", never the generic relay-acceptance wording below,
+    // which explicitly disclaims knowing whether the far side received it.
     const headline =
-      delivery.state === 'relayed'
-        ? `${messageId}: relayed to ${environment}${
+      delivery.state === 'relayed' && delivery.deliveryConfirmed
+        ? `${messageId}: delivered to ${environment}${
             delivery.relayedAt ? ` at ${delivery.relayedAt} UTC` : ''
-          }; delivery state unknown.`
-        : `${messageId}: relay pending to ${environment}; delivery state unknown.`
+          }.`
+        : delivery.state === 'relayed'
+          ? `${messageId}: relayed to ${environment}${
+              delivery.relayedAt ? ` at ${delivery.relayedAt} UTC` : ''
+            }; delivery state unknown.`
+          : `${messageId}: relay pending to ${environment}; delivery state unknown.`
     return `${headline}\nNext step: ${cliCommand} orchestration sent --id ${messageId} --json — check again for a state change.`
   }
   const recipient =

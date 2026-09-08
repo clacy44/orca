@@ -20549,6 +20549,52 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  // [S10-21d D-R162 M-3] The reply-outbox 'delivered' branch (the far side itself accepted this
+  // reply) mapped to 'relayed' with no relayedAt, which the formatter then rendered as "relayed
+  // ...; delivery state unknown" — indistinguishable from relay_pending, though the outbox says
+  // the far side accepted it. deliveryConfirmed carries that stronger claim through.
+  it('M-3: a reply-outbox row with state "delivered" reports deliveryConfirmed, not just "relayed"', () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setOrchestrationDb({
+      getReplyOutboxItemByLocalMessageId: (localMessageId: string) =>
+        localMessageId === 'msg_confirmed' ? { state: 'delivered' } : null
+    } as unknown as OrchestrationDb)
+    const snapshot = runtime.getMessageDeliverySnapshot({
+      id: 'msg_confirmed',
+      to_handle: 'remote:env_1:agent_peer',
+      read: 0,
+      peer_agent_id: 'agent_peer',
+      peer_link_device_id: null
+    })
+    expect(snapshot).toEqual({
+      delivery: 'relayed',
+      recipient: { state: 'unresolved', lastSeenAt: null },
+      environment: 'env_1',
+      deliveryConfirmed: true
+    })
+  })
+
+  // Every other outbox state omits deliveryConfirmed — only 'delivered' is a real receipt.
+  it('M-3: a reply-outbox row with state "sending" omits deliveryConfirmed', () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setOrchestrationDb({
+      getReplyOutboxItemByLocalMessageId: () => ({ state: 'sending' })
+    } as unknown as OrchestrationDb)
+    const snapshot = runtime.getMessageDeliverySnapshot({
+      id: 'msg_sending',
+      to_handle: 'remote:env_1:agent_peer',
+      read: 0,
+      peer_agent_id: 'agent_peer',
+      peer_link_device_id: null
+    })
+    expect(snapshot).toEqual({
+      delivery: 'sending',
+      recipient: { state: 'unresolved', lastSeenAt: null },
+      environment: 'env_1'
+    })
+    expect('deliveryConfirmed' in snapshot).toBe(false)
+  })
+
   it('submits the mail pointer in an active coordinator pane', async () => {
     vi.useFakeTimers()
     try {
