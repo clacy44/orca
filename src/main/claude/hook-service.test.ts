@@ -38,9 +38,8 @@ describe('getWindowsManagedLifecycleHook', () => {
     const scriptPath = 'C:\\Users\\%name%\\a^b&c\\.orca\\agent-hooks\\claude-hook.cmd'
     const hook = getWindowsManagedLifecycleHook(scriptPath)
 
-    expect(hook.command).toMatch(/\\System32\\cmd\.exe$/i)
-    expect(hook.args?.[0]).toBe('/d')
-    expect(hook.args?.[1]).toBe('/c')
+    expect(hook.args?.[0]).toBe('--headless')
+    expect(hook.args?.[1]).toMatch(/\\System32\\cmd\.exe$/i)
     expect(hook.args?.at(-1)).toBe('%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.cmd')
     expect(hook.args).not.toContain(scriptPath)
   })
@@ -340,7 +339,7 @@ describe('ClaudeHookService.install', () => {
   })
 
   it.skipIf(process.platform !== 'win32')(
-    'runs portable managed hooks through the plain cmd.exe exec form (no conhost, R105)',
+    'runs portable managed hooks through headless exec form',
     () => {
       const tmpHome = mkdtempSync(join(tmpdir(), 'orca claude home with spaces '))
       vi.stubEnv('HOME', tmpHome)
@@ -365,64 +364,12 @@ describe('ClaudeHookService.install', () => {
           const hook = settings.hooks[eventName]?.[0]?.hooks?.[0]
           expect(hook).toEqual({
             type: 'command',
-            command: join(system32, 'cmd.exe'),
-            args: ['/d', '/c', runtimeScriptPath],
+            command: join(system32, 'conhost.exe'),
+            args: ['--headless', join(system32, 'cmd.exe'), '/d', '/c', runtimeScriptPath],
             timeout: 10
           })
           expect(hook.args).not.toContain(scriptPath)
         }
-      } finally {
-        vi.unstubAllEnvs()
-        rmSync(tmpHome, { recursive: true, force: true })
-      }
-    }
-  )
-
-  it.skipIf(process.platform !== 'win32')(
-    'sweeps a legacy conhost --headless entry into the new cmd.exe exec form without duplicating it (R105 migration)',
-    () => {
-      const tmpHome = mkdtempSync(join(tmpdir(), 'orca-claude-conhost-migration-'))
-      vi.stubEnv('HOME', tmpHome)
-      vi.stubEnv('USERPROFILE', tmpHome)
-      try {
-        const settingsPath = join(tmpHome, '.claude', 'settings.json')
-        mkdirSync(join(tmpHome, '.claude'), { recursive: true })
-        const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
-        const runtimeScriptPath = join(
-          '%USERPROFILE%',
-          '.orca',
-          'agent-hooks',
-          CLAUDE_SCRIPT_FILE_NAME
-        )
-        // Fixture: the old R105 conhost --headless wrapper entry, as written by a prior install.
-        const conhostEntry = {
-          type: 'command',
-          command: join(system32, 'conhost.exe'),
-          args: ['--headless', join(system32, 'cmd.exe'), '/d', '/c', runtimeScriptPath]
-        }
-        writeFileSync(
-          settingsPath,
-          JSON.stringify({ hooks: { Stop: [{ hooks: [conhostEntry] }] } })
-        )
-
-        expect(new ClaudeHookService().install().state).toBe('installed')
-        const afterFirst = (
-          JSON.parse(readFileSync(settingsPath, 'utf-8')).hooks.Stop as { hooks: TestHook[] }[]
-        ).flatMap((definition) => definition.hooks)
-        expect(afterFirst).toHaveLength(1)
-        expect(afterFirst[0]).toEqual({
-          type: 'command',
-          command: join(system32, 'cmd.exe'),
-          args: ['/d', '/c', runtimeScriptPath],
-          timeout: 10
-        })
-
-        expect(new ClaudeHookService().install().state).toBe('installed')
-        const afterSecond = (
-          JSON.parse(readFileSync(settingsPath, 'utf-8')).hooks.Stop as { hooks: TestHook[] }[]
-        ).flatMap((definition) => definition.hooks)
-        expect(afterSecond).toHaveLength(1)
-        expect(afterSecond[0]).toEqual(afterFirst[0])
       } finally {
         vi.unstubAllEnvs()
         rmSync(tmpHome, { recursive: true, force: true })
