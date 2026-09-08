@@ -17,7 +17,7 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
     } as unknown as OrcaRuntimeService
 
     const { ctx } = launchAdmissionBundle(runtimeStub, null)
-    ctx.contestedLineage('tab1:leaf-a', 'tabOLD:leaf-a', 'agent-registered-1')
+    ctx.contestedLineage('tab1:leaf-a', 'tabOLD:leaf-a', 'agent-registered-1', 'rec-1', 'rep-1')
 
     expect(writeAgentAudit).toHaveBeenCalledTimes(2)
     for (const call of writeAgentAudit.mock.calls) {
@@ -26,6 +26,11 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
         verb: 'launch',
         outcome: 'contested'
       })
+      // [S10-21d b6, R119 fix 2] Both panes get the SAME reasonCode, carrying both ids plus the
+      // registered pane (they differ here).
+      expect(call[0].reasonCode).toBe(
+        'self_resume recorded=rec-1 reported=rep-1 holder=tab1:leaf-a registered_pane=tabOLD:leaf-a'
+      )
     }
     const auditedPanes = writeAgentAudit.mock.calls.map((call) => call[0].actorPaneKey).sort()
     expect(auditedPanes).toEqual(['tab1:leaf-a', 'tabOLD:leaf-a'])
@@ -43,7 +48,7 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
     } as unknown as OrcaRuntimeService
 
     const { ctx } = launchAdmissionBundle(runtimeStub, null)
-    ctx.contestedLineage('tab1:leaf-a', 'tab1:leaf-a', 'agent-registered-1')
+    ctx.contestedLineage('tab1:leaf-a', 'tab1:leaf-a', 'agent-registered-1', 'rec-1', 'rep-1')
 
     expect(writeAgentAudit).toHaveBeenCalledTimes(1)
     expect(writeAgentAudit.mock.calls[0][0]).toMatchObject({
@@ -52,6 +57,10 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
       verb: 'launch',
       outcome: 'contested'
     })
+    // [S10-21d b6, R119 fix 2] No `registered_pane=` suffix when the two panes coincide.
+    expect(writeAgentAudit.mock.calls[0][0].reasonCode).toBe(
+      'self_resume recorded=rec-1 reported=rep-1 holder=tab1:leaf-a'
+    )
     expect(writeHostNoticeToPane).toHaveBeenCalledTimes(1)
   })
 })
@@ -114,7 +123,7 @@ describe('S10-21a C11: launchAdmissionBundle notice text (snapshot)', () => {
     } as unknown as OrcaRuntimeService
 
     const { ctx } = launchAdmissionBundle(runtimeStub, null)
-    ctx.contestedLineage('tab1:leaf-a', 'tab1:leaf-a', 'agent-registered-1')
+    ctx.contestedLineage('tab1:leaf-a', 'tab1:leaf-a', 'agent-registered-1', 'rec-1', 'rep-1')
 
     expect(writeHostNoticeToPane).toHaveBeenCalledWith(
       'tab1:leaf-a',

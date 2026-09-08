@@ -40,6 +40,7 @@ import {
   type AdmittedLaunch,
   type LaunchAdmissionClassification
 } from './agent-launch-admission-support'
+import { auditSelfResume, contestOrSupersedeDerivedRow } from './agent-launch-self-resume-arm'
 import {
   claudeIndexInSubject,
   resolveAdmissionShell,
@@ -89,7 +90,9 @@ export type AgentLaunchAdmissionContext = {
   contestedLineage: (
     claimantPaneKey: string,
     registeredPaneKey: string,
-    registeredAgentId: string
+    registeredAgentId: string,
+    recordedSessionId: string,
+    reportedSessionId: string
   ) => void
 }
 
@@ -326,16 +329,11 @@ export async function admitAgentLaunch(
         )
       }
       if (newestRow !== undefined && newestRow.session_id === x) {
-        // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice.
+        // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice. [S10-21d b6, R119 fix 1]
+        // Same-pane-vs-contested split lives in agent-launch-self-resume-arm.ts (max-lines
+        // budget).
         const reasonCode = admission.kind === 'host-resume' ? 'host' : 'caller'
-        audit(db, paneKey, ctx.hostId, 'launch_self_resume', 'admitted', reasonCode)
-        if (reasonCode === 'caller' && registeredRow !== undefined && registeredRow.derived === 0) {
-          ctx.notice(paneKey, 'launch_self_resume', 'caller')
-          // getAgentByPaneKey matches by pane SUFFIX (derived-agent-rows.ts) and its own WHERE
-          // clause requires pane_key IS NOT NULL for any row it returns — the `?? paneKey`
-          // fallback is defensive only, never actually reached.
-          ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-        }
+        auditSelfResume(db, ctx, paneKey, reasonCode, registeredRow, newestRow.session_id, x)
         return passThrough(
           spawnOptions,
           reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller',
@@ -425,11 +423,10 @@ export async function admitAgentLaunch(
       // admission surface still must not supersede a derived row's recorded session silently).
       // A distinct outcome, never `contestedLineage` (which is reserved for the non-derived,
       // registered-owner signal), so a supersession here is never traceless either way.
-      if (registeredRow !== undefined && registeredRow.derived === 0) {
-        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-      } else if (registeredRow !== undefined) {
-        audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
-      }
+      // [S10-21d b6, R119 fix 2] Shared contest-or-supersede helper — now threads both session
+      // ids through to `contestedLineage`.
+      const priorSessionId = newestRow?.session_id ?? 'none'
+      contestOrSupersedeDerivedRow(db, ctx, paneKey, registeredRow, priorSessionId, x)
       // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
       // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
       // notice claiming a resume that did not happen.
@@ -513,11 +510,9 @@ export async function admitAgentLaunch(
     // plus a pty text notice — no `agent_audit` row at all.
     // [S10-21c B-final F5, D-R159 finding 5] Same derived-row fix as the caller_resume arm above:
     // a DERIVED registered row gets its own distinct audit outcome instead of silence.
-    if (registeredRow !== undefined && registeredRow.derived === 0) {
-      ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-    } else if (registeredRow !== undefined) {
-      audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
-    }
+    // [S10-21d b6, R119 fix 2] Shared contest-or-supersede helper — both session ids threaded.
+    const priorSessionId = newestRow?.session_id ?? 'none'
+    contestOrSupersedeDerivedRow(db, ctx, paneKey, registeredRow, priorSessionId, sessionId)
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {
       return passThrough(nextSpawnOptions, 'host_minted')

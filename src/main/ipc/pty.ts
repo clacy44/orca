@@ -898,12 +898,28 @@ export function launchAdmissionBundle(
       // named the same row. One audit row per distinct pane (never two for the common case where
       // they coincide); each pane gets its own rate-limited notice (writeHostNoticeToPane's own
       // per-paneKey clamp — no shared counter to double-consume across the two panes).
-      contestedLineage: (claimantPaneKey, registeredPaneKey, registeredAgentId) => {
+      // [S10-21d b6, R119 fix 2] reasonCode is now composed, not the literal `null` it used to
+      // be — `agent_audit.reason_code` is append-only, so it is capped at 200 chars rather than
+      // trusting either session id (or the registered pane suffix) to stay short forever.
+      contestedLineage: (
+        claimantPaneKey,
+        registeredPaneKey,
+        registeredAgentId,
+        recordedSessionId,
+        reportedSessionId
+      ) => {
         const contestDb =
           typeof runtime?.getOrchestrationDb === 'function'
             ? runtime.getOrchestrationDb()
             : undefined
         const panes = new Set([claimantPaneKey, registeredPaneKey])
+        const registeredPaneSuffix =
+          registeredPaneKey !== claimantPaneKey ? ` registered_pane=${registeredPaneKey}` : ''
+        const reasonCode =
+          `self_resume recorded=${recordedSessionId} reported=${reportedSessionId} holder=${claimantPaneKey}${registeredPaneSuffix}`.slice(
+            0,
+            200
+          )
         for (const paneKey of panes) {
           contestDb?.writeAgentAudit({
             agentId: registeredAgentId,
@@ -911,7 +927,7 @@ export function launchAdmissionBundle(
             actorHostId: hostId,
             verb: 'launch',
             outcome: 'contested',
-            reasonCode: null
+            reasonCode
           })
           if (typeof runtime?.writeHostNoticeToPane === 'function') {
             runtime.writeHostNoticeToPane(paneKey, 'Launch admission: contested lineage.', {
