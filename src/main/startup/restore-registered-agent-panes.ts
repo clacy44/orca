@@ -53,6 +53,7 @@ import {
 } from '../runtime/orchestration/restore-sweep-decision'
 import { collectSweepEvidence } from '../runtime/orchestration/restore-sweep-evidence'
 import { noteSelfResumeWatermarkAbsent, evaluateRow7 } from './restore-sweep-row7-watermark'
+import { recordDesktopMaterialize } from './restore-sweep-desktop-materialize-queue'
 import { restoreSweepDeferralFamily } from './restore-sweep-deferral-family'
 import { notifyPaneBestEffort } from './restore-sweep-pane-notice'
 import { applyResumePreflight } from './restore-sweep-resume-preflight-arm'
@@ -234,6 +235,7 @@ export async function restoreOneRegisteredPane(
   }
   const newPaneKey = created.terminal.paneKey ?? launchRow.pane_key
   const newTerminalHandle = created.terminal.handle
+  const newProcessIncarnation = deps.getTerminalProcessIncarnation(newTerminalHandle)
   const result = db.rebindRestoredPane({
     ticketPayload: {
       predecessorPaneKey: launchRow.pane_key,
@@ -248,7 +250,7 @@ export async function restoreOneRegisteredPane(
     executionHostId: created.terminal.executionHostId ?? launchRow.execution_host_id,
     launchGeneration: currentGeneration,
     incumbent,
-    processIncarnation: deps.getTerminalProcessIncarnation(newTerminalHandle)
+    processIncarnation: newProcessIncarnation
   })
   if (!result.ok) {
     const reasonCode = `rebind_refused: ${result.reason}`
@@ -266,6 +268,10 @@ export async function restoreOneRegisteredPane(
   // discarding a same-pane restore's counterpart_gone-paused pacts (D-R118 F7).
   if (result.rebound) {
     db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause, deps.federatedPactEmitRuntime)
+    // [S10-21c B6, design §2 S9] Layer 2 only — the renderer lost this pane's tab, so desktop
+    // needs to materialize it via the reveal primitive once hydrated. See
+    // restore-sweep-desktop-materialize-queue.ts's own doc comment.
+    recordDesktopMaterialize(deps, created, newPaneKey, newTerminalHandle, newProcessIncarnation)
   } else if (result.pactsToUnpause && result.pactsToUnpause.length > 0) {
     db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause, deps.federatedPactEmitRuntime)
   }

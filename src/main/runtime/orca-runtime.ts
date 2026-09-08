@@ -202,6 +202,12 @@ import type { ArtifactCloudService } from '../artifacts/artifact-cloud-service'
 import { ORCHESTRATION_MESSAGE_WAIT_DEFAULT_TIMEOUT_MS } from '../../shared/orchestration-message-wait-timeout'
 import { shouldForwardHeadlessTerminalQueryReply } from './headless-terminal-query-reply-policy'
 import type { TerminalRevealIdentity } from '../../shared/terminal-reveal-identity'
+import {
+  createDesktopMaterializeQueueState,
+  drainDesktopMaterializeQueue,
+  enqueueRestoredPaneForMaterialization,
+  type RestoredPaneMaterializeSurface
+} from '../startup/restore-sweep-desktop-materialize-queue'
 import type {
   OrchestrationCompatibilityEvidence,
   OrchestrationCompatibilityHostStamp
@@ -3709,6 +3715,9 @@ export class OrcaRuntimeService {
   >()
   private legacyWorkerTerminalReceiptEpochByPane = new Map<string, number>()
   private legacyWorkerRecoveredPtys = new Set<string>()
+  // [S10-21c B6, design §2 S9] Desktop materialization queue — populated by the restore sweep
+  // (recordRestoredPaneForDesktopMaterialization), drained by materializeRestoredAgentPanes.
+  private desktopRestoredPaneMaterializeQueue = createDesktopMaterializeQueueState()
   private restoredOrchestrationAuthorityByPtyId = new Map<
     string,
     RestoredOrchestrationAuthorityReceipt
@@ -35918,6 +35927,28 @@ export class OrcaRuntimeService {
     const handle = `agent:${agentId}`
     this.notifyMessageArrived(handle, 'status', null, null)
     this.deliverPendingMessagesForHandle(handle)
+  }
+
+  // [S10-21c B6, design §2 S9] Called by the restore sweep after a successful Layer-2 restore —
+  // see restore-sweep-desktop-materialize-queue.ts's own doc comment for why this state lives in
+  // a sibling module rather than inline here.
+  recordRestoredPaneForDesktopMaterialization(surface: RestoredPaneMaterializeSurface): void {
+    enqueueRestoredPaneForMaterialization(this.desktopRestoredPaneMaterializeQueue, surface)
+  }
+
+  // [S10-21c B6, design §2 S9] Drains the desktop-materialization queue through the existing
+  // `notifier.revealTerminalSession` primitive — no-op on serve (no notifier installed). Called
+  // from the SAME main-process handler the legacy-worker-terminal recovery drain uses
+  // (`app:recoverLegacyWorkerTerminalsForRendererStartup`); see
+  // restore-sweep-desktop-materialize-queue.ts's own doc comment for why firing on both that
+  // handler's pre- and post-reconnect invocations is safe (the epoch guard). T2 is CODE here —
+  // NOT claimed met until Field Drill B1's readout (design doc §5, OD-E).
+  async materializeRestoredAgentPanes(): Promise<void> {
+    await drainDesktopMaterializeQueue(
+      this.desktopRestoredPaneMaterializeQueue,
+      this.notifier,
+      this.rendererGraphEpoch
+    )
   }
 
   // Why split from deliverPendingMessagesForHandle: R1+R2 both need an await, so this can only

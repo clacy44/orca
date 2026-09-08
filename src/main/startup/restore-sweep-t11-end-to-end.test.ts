@@ -95,7 +95,11 @@ function buildDeps(runtime: OrcaRuntimeService, claudeProjectsDir: string): Rest
     resolveTabWorktreeId: (tabId, hostId) => runtime.resolveTabWorktreeId(tabId, hostId ?? null),
     mintRestoreTicket: (payload) => runtime.mintRestoreTicket(payload),
     notifyRebindDelivery: (agentId) => runtime.notifyRebindDelivery(agentId),
-    writeHostNoticeToPane: () => {}
+    writeHostNoticeToPane: () => {},
+    // [S10-21c B6, design §2 S9] Real runtime method — no notifier installed in this fixture, so
+    // the queue accumulates but nothing drains it; not what this file proves.
+    recordRestoredPaneForDesktopMaterialization: (surface) =>
+      runtime.recordRestoredPaneForDesktopMaterialization(surface)
   }
 }
 

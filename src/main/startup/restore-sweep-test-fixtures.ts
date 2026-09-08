@@ -117,6 +117,9 @@ export function baseDeps(
     notifyRebindDelivery: vi.fn(),
     // [S10-21c B2, design §2 S6] No-op default — a test exercising a pane notice overrides this.
     writeHostNoticeToPane: vi.fn(),
+    // [S10-21c B6, design §2 S9] No-op default — a test exercising the desktop-materialization
+    // queue overrides this directly.
+    recordRestoredPaneForDesktopMaterialization: vi.fn(),
     ...overrides
   }
 }

@@ -11,6 +11,7 @@ import type {
 import type { RestoreTicketId, RestoreTicketMintArgs } from '../runtime/restore-ticket-registry'
 import type { ControllerInventory } from '../runtime/orchestration/agent-process-identity'
 import type { FederatedPactEmitRuntime } from '../runtime/orchestration/pact-federated-pause-resume-emit'
+import type { RestoredPaneMaterializeSurface } from './restore-sweep-desktop-materialize-queue'
 
 export type RestoreSweepDeps = {
   getOrchestrationDb(): OrchestrationDb
@@ -93,6 +94,11 @@ export type RestoreSweepDeps = {
     text: string,
     opts: { rateKey: string; windowMs?: number }
   ): void
+  /** [S10-21c B6, design §2 S9] Records a successful Layer-2 restore's surface into the
+   * runtime's desktop-materialization queue (`orca-runtime.ts#
+   * recordRestoredPaneForDesktopMaterialization`) — never called for a Layer-1 restore. See
+   * restore-sweep-desktop-materialize-queue.ts's own doc comment for the drain side. */
+  recordRestoredPaneForDesktopMaterialization(surface: RestoredPaneMaterializeSurface): void
   /** [S10-21b B15, design §2.7] Passed to `resumePactsForRestoredAgent` so a federated pact's
    * restore-driven resume relays through `emitFederatedPactSideEffect` — omitted/null is a valid
    * runtime (the emit primitive already degrades to "no post-commit kick"). Optional so every

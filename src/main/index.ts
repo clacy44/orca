@@ -897,6 +897,15 @@ ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () =>
     localPtyProviderStartupReady,
     reconcile: async () => {
       await runtime?.refreshRestoredOrchestrationAuthority()
+      // [S10-21c B6, design §2 S9] Same reconcile closure the legacy-worker drain uses — no
+      // discriminator distinguishes this handler's pre- from post-reconnect invocation (App.tsx
+      // calls it with no argument either time), so this fires on both; the epoch guard inside
+      // materializeRestoredAgentPanes makes every call after the first successful reveal a
+      // no-op. On serve this is unreachable (no renderer round-trip there at all); on desktop
+      // with no notifier installed yet, it is a clean no-op (see the method's own doc comment).
+      // Never throws (every failure inside is caught and logged), so awaiting it here adds no
+      // new failure mode to this reconcile closure.
+      await runtime?.materializeRestoredAgentPanes()
       return runtime?.reconcileLegacyWorkerTerminals({ materializeRenderer: true })
     },
     onDeferredRecoveryError: (error) => {
@@ -1073,6 +1082,10 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
     // [S10-21c B2, design §2 S6] Same primitive session-identity-mismatch-alarm.ts's wiring uses.
     writeHostNoticeToPane: (paneKey, text, opts) =>
       runtimeService.writeHostNoticeToPane(paneKey, text, opts),
+    // [S10-21c B6, design §2 S9] Records a successful Layer-2 restore's surface for desktop
+    // materialization; drained by materializeRestoredAgentPanes (see the IPC handler below).
+    recordRestoredPaneForDesktopMaterialization: (surface) =>
+      runtimeService.recordRestoredPaneForDesktopMaterialization(surface),
     // S10-21b B15 (design §2.7): so the restore-driven pact resume relays through
     // emitFederatedPactSideEffect for a federated pact, same as every other producer.
     federatedPactEmitRuntime: runtimeService
