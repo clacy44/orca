@@ -35,22 +35,37 @@ console is ever allocated for it) that reads stdin and does the HTTP POST to Orc
   carries the same tests the C# would need — endpoint-file parsing, the PORT/TOKEN/PANE_KEY
   guard, descriptor parsing, and form-body assembly — and is what CI actually runs. Any change
   to the C#'s behavior must be mirrored there by hand.
-- **SignPath scope (R3, unverified from this repo):** SignPath signs the packaged Windows
-  build externally; confirm `resources/bin/*.exe` is in its signing glob before shipping — it
-  already covers `orca.exe` (the CLI launcher) but `orca-hook-host.exe` is a new file in that
-  same directory and needs the same check.
+  **M4 — this is a LOGIC mirror, not a WIRE mirror:** the TS side POSTs via Node's `fetch`; the
+  C# side POSTs via `HttpWebRequest`. The mirror's tests prove parsing/encoding/guard behavior
+  identical to the C#, never `HttpWebRequest`-specific transport details (redirect handling,
+  `Expect: 100-continue`, proxy resolution, .NET's own request-size limits) — those are provable
+  only by the `describe.skipIf(win32)` spawn test in `windows-hook-host-mirror.test.ts`, which
+  runs the real compiled `.exe` and is gated to actual Windows CI.
+- **SignPath scope (R3 — OWNER ACTION ITEM, unverified from this repo):** SignPath signs the
+  packaged Windows build externally, from outside this repo, so this cannot be confirmed here.
+  Before shipping a build containing `orca-hook-host.exe`, the owner must confirm SignPath's
+  signing glob covers `resources/bin/*.exe` — it already covers `orca.exe` (the CLI launcher),
+  but `orca-hook-host.exe` is a new file in that same directory and needs the same check. An
+  unsigned `orca-hook-host.exe` would fail SmartScreen/AV reputation checks the same way an
+  unsigned `orca.exe` would.
 
 ## How it's migrated
 
 `hook-settings.ts`'s `getWindowsManagedLifecycleHook` picks the host-exe form when
-`resources/bin/orca-hook-host.exe` exists next to the running app (`process.resourcesPath`);
-otherwise it falls back to the old conhost form and logs once (dev/unpackaged builds that
-haven't run `build:native`). `installer-utils.ts`'s `createManagedCommandMatcher` needle is
-extension-less (`agent-hooks/<stem>`, not `<stem>.cmd`), so it matches the new host's
+`resources/bin/orca-hook-host.exe` exists next to the running app (`process.resourcesPath`).
+**M3 (chair decision, superseding the original conhost fallback):** when the exe is absent —
+a dev/unpackaged build that hasn't run `build:native` — it returns `null` instead, and NEVER
+falls back to the conhost form (conhost swallows Claude's stdin payload; see "Why" above).
+`ClaudeHookService.install()` then leaves any existing managed entry (any generation: exe-form,
+conhost, cmd.exe-direct) untouched rather than sweeping it, writes no new lifecycle entry, and
+reports the loud `getStatus()` state `'skipped'` / `skipReason: 'windows_hook_host_unavailable'`
+— surfaced wherever agent-hook status is shown, not just a once-only `console.error` line (the
+line still fires too, for local debugging). `installer-utils.ts`'s `createManagedCommandMatcher`
+needle is extension-less (`agent-hooks/<stem>`, not `<stem>.cmd`), so it matches the new host's
 `--descriptor <path>.json` argument as well as every legacy `.cmd`/`.ps1`/`.sh`-carrying entry —
-a fresh install sweeps a conhost OR a direct-cmd.exe entry down to exactly one new entry, and a
-second consecutive `install()` stays at one. OpenClaude never takes this path
-(`supportsExecHookArgs: false`) and keeps its `.cmd` unchanged.
+a fresh install (once the exe IS present) sweeps a conhost OR a direct-cmd.exe entry down to
+exactly one new entry, and a second consecutive `install()` stays at one. OpenClaude never takes
+this path (`supportsExecHookArgs: false`) and keeps its `.cmd` unchanged.
 
 `ClaudeHookService.install()` writes a small JSON descriptor
 (`~/.orca/agent-hooks/claude-hook.json`) beside the `.cmd` (kept for OpenClaude and as the
@@ -58,6 +73,29 @@ rollback target): `{"source":"claude","pathname":"/hook/claude","fields":[...]}`
 descriptor is ever missing or unreadable, the host falls open to the same built-in defaults
 (`/hook/claude`, the 7-field list `buildWindowsAgentHookCurlPostCommand` already uses) rather
 than failing the hook.
+
+## Which build script actually produces this exe (L5)
+
+`orca-hook-host.exe` is only ever produced by `build:native` (`config/scripts/
+build-native-for-platform.mjs`, per "How it's built" above). Verified against this repo's
+`package.json` (2026-09-08):
+
+- `build` (line 76) runs `build:desktop && build:native` — includes it.
+- `build:release` (line 77) runs `build:native` directly — includes it.
+- **`build:win` (line 82) runs `build:desktop && ensure:electron-runtime && electron-builder`
+  — it does NOT run `build:native`.** A Windows package built via `build:win` alone ships
+  without `resources/bin/orca-hook-host.exe` (and without the CLI launcher `orca.exe`, the
+  other `build:native` output) — `getWindowsManagedLifecycleHook` then always reports the M3
+  unavailable-skip state on that package, on every install.
+- CI's `.github/workflows/pr.yml:381` runs `build:native` as its own step before packaging,
+  so PR builds are unaffected. This asymmetry between `build` / `build:release` and `build:win`
+  predates this change (`config/scripts/package-electron-runtime-contract.test.mjs` already
+  pins `build:win` to exclude `pnpm run build `) — this doc does not resolve it, only names it.
+
+**Verify which script the owner's desktop release actually invokes before shipping a build
+containing this exe** — if it is `build:win` on its own, that pipeline needs `build:native`
+added ahead of it (or switched to `build:release`), or the shipped app will run in the
+unavailable-skip state for every user.
 
 ## How to verify on a desktop
 
@@ -73,3 +111,8 @@ than failing the hook.
 5. **No window during 30 s of tool calls** — run a tool-heavy prompt (or a scripted loop of
    short tool calls) for at least 30 seconds and watch for ANY console flash. None should
    appear — this is the negative check the R105 field reversal exists to re-prove.
+6. **M3 negative check — a build without the exe never shows a false "installed" state.** On a
+   dev/unpackaged build missing `resources/bin/orca-hook-host.exe`, agent-hook status (wherever
+   it's surfaced in the app) must read `skipped` / `windows_hook_host_unavailable`, never
+   `installed` — and any pre-existing managed hook entry in `settings.json` (from an earlier
+   packaged run) must be byte-for-byte unchanged, not swept.
