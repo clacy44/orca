@@ -237,6 +237,11 @@ export class Session {
     return this._state !== 'exited'
   }
 
+  /** R117 FIX 5: exposes the private pendingOutputBytes total for the 60s heap/backlog self-report. */
+  get pendingOutputByteCount(): number {
+    return this.pendingOutputBytes
+  }
+
   /** A viewing client is attached; a dropped transport must clear this or pause/resume semantics leak. */
   get hasAttachedClients(): boolean {
     return this.attachedClients.length > 0

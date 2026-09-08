@@ -224,6 +224,22 @@ export class TerminalHost {
     return listLiveTerminalHostSessions(this.sessions, this.agentSessionOwners)
   }
 
+  /** R117 FIX 5: per-session pendingOutputBytes for the 60s heap/backlog self-report — bypasses
+   *  SessionInfo/listSessions on purpose so the log line stays off the RPC wire contract. */
+  listPendingOutputByteCounts(): { sessionId: string; pendingOutputBytes: number }[] {
+    const result: { sessionId: string; pendingOutputBytes: number }[] = []
+    for (const session of this.sessions.values()) {
+      if (!session.isAlive) {
+        continue
+      }
+      result.push({
+        sessionId: session.sessionId,
+        pendingOutputBytes: session.pendingOutputByteCount
+      })
+    }
+    return result
+  }
+
   dispose(): Promise<void> {
     this.creationFenced = true
     if (this.disposePromise) {
