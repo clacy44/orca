@@ -60,6 +60,17 @@ export function planChairsRestore(
   lookups: ReadonlyMap<string, ChairPlanLookup>,
   only?: ReadonlySet<string>
 ): ChairsRestorePlan {
+  // [S10-21d b3b, D-R165 L2 fix] An `only` name absent from the manifest was previously silently
+  // dropped (the loop below simply never visits it) — refuse loudly instead of a no-op that
+  // reads as success.
+  if (only) {
+    const knownNames = new Set(manifest.chairs.map((entry) => entry.name))
+    const unknown = [...only].filter((name) => !knownNames.has(name))
+    if (unknown.length > 0) {
+      throw new Error(`chairs-restore-plan: --only names unknown chair(s): ${unknown.join(', ')}`)
+    }
+  }
+
   const actions: ChairsRestorePlanAction[] = []
   const remote: { name: string; host: string }[] = []
 
@@ -78,10 +89,14 @@ export function planChairsRestore(
     const sessionId = chairTargetSessionId(entry)
 
     if (lookup.ownRow && lookup.ownRow.isLive && lookup.ownRow.paneKey !== null) {
+      // [S10-21d b3b, D-R165 L1 fix] The live pane may not be the one holding THIS entry's
+      // target session — checked here, before the holder-collision branch below ever runs for
+      // this entry, so that case would otherwise read as an unqualified "already registered".
+      const runningDifferentSession = lookup.holder.paneKey !== lookup.ownRow.paneKey
       actions.push({
         name: entry.name,
         kind: 'skip_live',
-        reason: `already registered and live on pane ${lookup.ownRow.paneKey}`,
+        reason: `already registered and live on pane ${lookup.ownRow.paneKey}${runningDifferentSession ? ' (running a different session)' : ''}`,
         paneKey: lookup.ownRow.paneKey
       })
       continue

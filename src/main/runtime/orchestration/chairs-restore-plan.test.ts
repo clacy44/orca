@@ -141,4 +141,59 @@ describe('planChairsRestore', () => {
     ])
     expect(() => planChairsRestore(m, HOST, new Map())).toThrow()
   })
+
+  // [S10-21d b3b, D-R165 H1] the caller passes a machine-distinct id (os.hostname()), never the
+  // orchestration-compatibility constant — two different hostname strings classify correctly.
+  it('classifies foreign vs local by whatever machine-distinct id the caller passes in', () => {
+    const m = manifest([
+      {
+        name: 'a',
+        worktree: 'path:/repo',
+        agent: 'claude',
+        conversationId: 'sess-1',
+        host: 'desktop'
+      },
+      { name: 'b', worktree: 'path:/repo', agent: 'claude', conversationId: 'sess-2', host: 'vps' }
+    ])
+    const lookups = new Map<string, ChairPlanLookup>([
+      ['b', { ownRow: null, holder: { paneKey: null, isLive: false } }]
+    ])
+    const plan = planChairsRestore(m, 'vps', lookups)
+    expect(plan.remote).toEqual([{ name: 'a', host: 'desktop' }])
+    expect(plan.actions.map((a) => a.name)).toEqual(['b'])
+  })
+
+  // [S10-21d b3b, D-R165 L1] a live own-pane that is NOT the holder of the target session is
+  // running something else — the skip_live reason must say so, not read as an unqualified skip.
+  it('skip_live reason flags when the live pane is running a DIFFERENT session than the target', () => {
+    const m = manifest([
+      { name: 'a', worktree: 'path:/repo', agent: 'claude', conversationId: 'sess-1' }
+    ])
+    const lookups = new Map<string, ChairPlanLookup>([
+      [
+        'a',
+        {
+          ownRow: { paneKey: 'tab:leaf-1', isLive: true },
+          holder: { paneKey: 'tab:leaf-other', isLive: true }
+        }
+      ]
+    ])
+    const plan = planChairsRestore(m, HOST, lookups)
+    expect(plan.actions[0]).toMatchObject({
+      kind: 'skip_live',
+      reason: expect.stringContaining('running a different session')
+    })
+  })
+
+  // [S10-21d b3b, D-R165 L2] an `only` name absent from the manifest previously vanished
+  // silently (the loop simply never visits it) — refuse loudly instead.
+  it('throws when --only names a chair absent from the manifest', () => {
+    const m = manifest([
+      { name: 'a', worktree: 'path:/repo', agent: 'claude', conversationId: 'sess-1' }
+    ])
+    const lookups = new Map<string, ChairPlanLookup>([
+      ['a', { ownRow: null, holder: { paneKey: null, isLive: false } }]
+    ])
+    expect(() => planChairsRestore(m, HOST, lookups, new Set(['nope']))).toThrow(/unknown chair/)
+  })
 })

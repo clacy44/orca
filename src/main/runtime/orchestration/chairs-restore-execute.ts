@@ -5,7 +5,9 @@
 // `requestChairRestore` for every `rebind`/`launch` action (which already performs its own
 // in-process `registerAgentForPane` — see DEVIATION note on `executeChairsRestorePlan` below),
 // writing `lastSessionId` back onto the manifest object in place, and building the verification
-// table (recorded == running == minted; paneLive; attested; autoRestoreArmed).
+// table (name, pane, recorded, minted, paneLive, attested, autoRestoreArmed — [S10-21d b3b,
+// D-R165 M3] no `running` column: no primitive on this surface exposes the live pty's resolved
+// launch command, so `ok` is `recorded === minted && paneLive`, never a claim about the process).
 import type { ChairsManifest, ChairsManifestEntry } from './chairs-manifest'
 import {
   chairTargetSessionId,
@@ -30,6 +32,10 @@ export type RequestChairRestoreOutcome =
  * surface. */
 export type ChairsRestoreExecutorDeps = {
   hostId: string
+  // [S10-21d b3b, D-R165 H1 fix] The machine-distinct id (`os.hostname()`) a manifest entry's
+  // `host` field is compared against — NEVER `hostId` above, which is the orchestration-
+  // compatibility constant ('local' on every host) and made every entry compare as local.
+  machineId: string
   getAgentByName: (hostId: string, name: string) => { pane_key: string | null } | undefined
   paneHoldingSession: (hostId: string, sessionId: string) => string | undefined
   newestLaunchForPane: (hostId: string, paneKey: string) => { session_id: string } | undefined
@@ -42,23 +48,29 @@ export type ChairsRestoreExecutorDeps = {
     model?: string
     effort?: string
   }) => Promise<RequestChairRestoreOutcome>
-  hasLiveHookReportOfSession: (sessionId: string) => boolean
+  // [S10-21d b3b, D-R165 M5] null = the hook-report check is unwired — never a wired false.
+  hasLiveHookReportOfSession: (sessionId: string) => boolean | null
   hasResumableTranscriptTurn: (agentType: string, sessionId: string) => Promise<boolean>
 }
 
+// The verification row buildVerificationRow always returns — split out so that function's
+// return type stays narrow (its callers never need to re-narrow away the refuse/error variants).
+export type ChairsRestoreVerificationRow = {
+  name: string
+  kind: 'skip_live' | 'rebind' | 'launch'
+  paneKey: string
+  recorded: string | null
+  minted: string
+  paneLive: boolean
+  // [S10-21d b3b, D-R165 M5] null = the hook-report check is unwired (never observed), not "no
+  // live report" — CLI/JSON prints `attested=unknown`, distinct from a wired false.
+  attested: boolean | null
+  autoRestoreArmed: boolean
+  ok: boolean
+}
+
 export type ChairsRestoreResultRow =
-  | {
-      name: string
-      kind: 'skip_live' | 'rebind' | 'launch'
-      paneKey: string
-      recorded: string | null
-      running: string | null
-      minted: string
-      paneLive: boolean
-      attested: boolean
-      autoRestoreArmed: boolean
-      ok: boolean
-    }
+  | ChairsRestoreVerificationRow
   | { name: string; kind: 'refuse'; reason: string; holderPaneKey: string; ok: false }
   | { name: string; kind: 'error'; reason: string; ok: false }
 
@@ -66,6 +78,8 @@ export type ChairsRestoreExecutionSummary = {
   plan: ChairsRestorePlan
   rows: ChairsRestoreResultRow[]
   exitNonZero: boolean
+  // [S10-21d b3b, D-R165 L5] True iff any entry's `lastSessionId` write-back actually changed.
+  changed: boolean
 }
 
 /** Gathers the planner's per-chair lookups from the db/runtime — the ONLY place executeChairs*
@@ -74,12 +88,12 @@ export function gatherChairsRestoreLookups(
   manifest: ChairsManifest,
   deps: Pick<
     ChairsRestoreExecutorDeps,
-    'hostId' | 'getAgentByName' | 'paneHoldingSession' | 'isPaneLive'
+    'hostId' | 'machineId' | 'getAgentByName' | 'paneHoldingSession' | 'isPaneLive'
   >
 ): Map<string, ChairPlanLookup> {
   const lookups = new Map<string, ChairPlanLookup>()
   for (const entry of manifest.chairs) {
-    if (entry.host !== undefined && entry.host !== deps.hostId) {
+    if (entry.host !== undefined && entry.host !== deps.machineId) {
       continue
     }
     const row = deps.getAgentByName(deps.hostId, entry.name)
@@ -102,25 +116,21 @@ async function buildVerificationRow(
   kind: 'skip_live' | 'rebind' | 'launch',
   paneKey: string,
   deps: ChairsRestoreExecutorDeps
-): Promise<ChairsRestoreResultRow> {
+): Promise<ChairsRestoreVerificationRow> {
   const minted = chairTargetSessionId(entry)
   const launchRow = deps.newestLaunchForPane(deps.hostId, paneKey)
   const recorded = launchRow?.session_id ?? null
-  // DEVIATION (see RETURN): "running" is read off the SAME launch row rather than re-parsing the
-  // live pty's actual `--resume`/`--session-id` argv — that row is written by the very admission
-  // that spawned the process, so the two can only diverge on a bug this brief's surface does not
-  // introduce; no pty-argv inspection primitive exists on b3's surface to do otherwise.
-  const running = recorded
   const paneLive = deps.isPaneLive(paneKey)
   const attested = deps.hasLiveHookReportOfSession(minted)
   const autoRestoreArmed = await deps.hasResumableTranscriptTurn(entry.agent, minted)
-  const ok = recorded === minted && running === minted && paneLive
+  // [S10-21d b3b, D-R165 M3] "running" dropped — no primitive on this surface exposes the live
+  // pty's resolved launch command, so recorded/paneLive is all this table can honestly claim.
+  const ok = recorded === minted && paneLive
   return {
     name: entry.name,
     kind,
     paneKey,
     recorded,
-    running,
     minted,
     paneLive,
     attested,
@@ -147,6 +157,9 @@ export async function executeChairsRestorePlan(
 ): Promise<ChairsRestoreExecutionSummary> {
   const rows: ChairsRestoreResultRow[] = []
   let exitNonZero = false
+  // [S10-21d b3b, D-R165 L5] Only true once a write-back actually changes an entry — the caller
+  // (chairs-restore.ts) skips rewriting the manifest file when this stays false.
+  let changed = false
   const byName = new Map(manifest.chairs.map((entry) => [entry.name, entry]))
 
   for (const action of plan.actions) {
@@ -193,15 +206,22 @@ export async function executeChairsRestorePlan(
       exitNonZero = true
       continue
     }
-    entry.lastSessionId = action.sessionId
     const row = await buildVerificationRow(entry, action.kind, outcome.paneKey, deps)
+    // [S10-21d b3b, D-R165 M1 fix] The RECORDED id (what the admission actually wrote), never the
+    // requested `action.sessionId` blindly — a mismatch there is exactly what `row.ok` catches,
+    // and pinning the requested id anyway would make the write-back lie about what happened.
+    const nextSessionId = row.recorded ?? action.sessionId
+    if (entry.lastSessionId !== nextSessionId) {
+      entry.lastSessionId = nextSessionId
+      changed = true
+    }
     rows.push(row)
     if (!row.ok) {
       exitNonZero = true
     }
   }
 
-  return { plan, rows, exitNonZero }
+  return { plan, rows, exitNonZero, changed }
 }
 
 /** One-shot convenience: gather lookups, plan, execute. The CLI handler (via the RPC method)
@@ -212,6 +232,6 @@ export async function runChairsRestore(
   only?: ReadonlySet<string>
 ): Promise<ChairsRestoreExecutionSummary> {
   const lookups = gatherChairsRestoreLookups(manifest, deps)
-  const plan = planChairsRestore(manifest, deps.hostId, lookups, only)
+  const plan = planChairsRestore(manifest, deps.machineId, lookups, only)
   return executeChairsRestorePlan(manifest, plan, deps)
 }

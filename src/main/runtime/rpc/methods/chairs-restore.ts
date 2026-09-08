@@ -10,12 +10,16 @@
 // authority literally does not exist yet the first time this command is useful). The "same
 // authority check ... for a host-side action" this brief names is read here as the RATE-LIMIT
 // half of that check (host-keyed, since there is no pane to rate-limit by), not the pane-
-// attestation half — flagged as a judgment call, not asserted as settled.
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+// attestation half — flagged as a judgment call, not asserted as settled. [S10-21d b3b, D-R165
+// M4 fix] What IS enforced regardless: no paired device (mobile or a runtime-kind peer) may call
+// this surface at all — `assertLocalCaller` below refuses any `accessProfile`/`clientKind`-
+// bearing caller, leaving only the local socket / in-process transports, which set neither.
+import { homedir, hostname } from 'node:os'
+import { dirname, join } from 'node:path'
+import { readFile, writeFile, rename, mkdir, access } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { defineMethod, type RpcMethod } from '../core'
+import { defineMethod, type RpcMethod, type RpcContext } from '../core'
 import { OptionalString, OptionalBoolean } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { hostIdFor, rateLimited } from './agent-directory-rpc-view'
@@ -39,6 +43,35 @@ const HOUR_MS = 60 * 60 * 1000
 
 function defaultManifestPath(): string {
   return join(homedir(), '.orca', 'chairs.json')
+}
+
+// [S10-21d b3b, D-R165 M4 fix] `accessProfile`/`clientKind` are unset only for the local socket
+// and in-process callers (core.ts's own doc comments on both fields) — any paired device (mobile
+// or a runtime-kind peer) sets one, so this is a strict local-transport gate, not an allowlist.
+export function assertLocalCaller(ctx: Pick<RpcContext, 'accessProfile' | 'clientKind'>): void {
+  if (ctx.accessProfile !== undefined || ctx.clientKind !== undefined) {
+    throw new OrchestrationError(
+      'forbidden',
+      'orca chairs restore|status|export is local-transport only (no paired device).'
+    )
+  }
+}
+
+export async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// [S10-21d b3b, D-R165 M2 fix] tmp-write + rename so a crash mid-write never leaves a truncated
+// file the parser refuses whole (chairs-manifest.ts's own "refuse the whole file" contract).
+export async function writeFileAtomic(path: string, content: string): Promise<void> {
+  const tmpPath = `${path}.${randomUUID()}.tmp`
+  await writeFile(tmpPath, content, 'utf8')
+  await rename(tmpPath, path)
 }
 
 async function readManifest(
@@ -77,11 +110,14 @@ function buildExecutorDeps(
 ): ChairsRestoreExecutorDeps {
   return {
     hostId,
+    // [S10-21d b3b, D-R165 H1 fix] machine-distinct — see ChairsRestoreExecutorDeps's own doc.
+    machineId: hostname(),
     getAgentByName: (h, name) => db.getAgentByName(h, name),
     paneHoldingSession: (h, sessionId) => db.paneHoldingSession(h, sessionId),
     newestLaunchForPane: (h, paneKey) => db.newestLaunchForPane(h, paneKey),
     isPaneLive: isPaneLiveFor(runtime),
     requestChairRestore: (request) => runtime.requestChairRestore(request),
+    // [S10-21d b3b, D-R165 M5 fix] null (unwired) is distinct from a wired false — passed through.
     hasLiveHookReportOfSession: (sessionId) => runtime.hasLiveHookReportOfSession(sessionId),
     hasResumableTranscriptTurn: async (agentType, sessionId) => {
       const result = await resolveResumeTranscript(agentType, sessionId)
@@ -101,6 +137,24 @@ function onlySetFrom(only: string | undefined): Set<string> | undefined {
   return names.length > 0 ? new Set(names) : undefined
 }
 
+// [S10-21d b3b, D-R165 L2 fix] planChairsRestore throws on an `only` name absent from the
+// manifest — surfaced here as a typed refusal rather than an unhandled RPC exception.
+function planOrRefuse(
+  manifest: ChairsManifest,
+  machineId: string,
+  lookups: ReturnType<typeof gatherChairsRestoreLookups>,
+  only: Set<string> | undefined
+): ReturnType<typeof planChairsRestore> {
+  try {
+    return planChairsRestore(manifest, machineId, lookups, only)
+  } catch (err) {
+    throw new OrchestrationError(
+      'chairs_restore_only_unknown',
+      err instanceof Error ? err.message : String(err)
+    )
+  }
+}
+
 const ChairsRestoreParams = z.object({
   manifestPath: OptionalString,
   only: OptionalString,
@@ -116,7 +170,9 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.chairs.restore',
     params: ChairsRestoreParams,
-    handler: async (params, { runtime }) => {
+    handler: async (params, ctx) => {
+      assertLocalCaller(ctx)
+      const { runtime } = ctx
       const db = runtime.getOrchestrationDb()
       const hostId = hostIdFor(runtime)
       const hostRate = db.checkAndBumpRate({
@@ -137,7 +193,7 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
       const deps = buildExecutorDeps(runtime, db, hostId)
       if (params.dryRun) {
         const lookups = gatherChairsRestoreLookups(parsed.manifest, deps)
-        const plan = planChairsRestore(parsed.manifest, hostId, lookups, only)
+        const plan = planOrRefuse(parsed.manifest, deps.machineId, lookups, only)
         return {
           path,
           plan,
@@ -147,7 +203,10 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
         }
       }
       const summary = await runChairsRestore(parsed.manifest, deps, only)
-      await writeFile(path, `${JSON.stringify(parsed.manifest, null, 2)}\n`, 'utf8')
+      // [S10-21d b3b, D-R165 L5 fix] no rewrite when nothing changed; M2: atomic write.
+      if (summary.changed) {
+        await writeFileAtomic(path, `${JSON.stringify(parsed.manifest, null, 2)}\n`)
+      }
       return {
         path,
         plan: summary.plan,
@@ -160,7 +219,9 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.chairs.status',
     params: ChairsRestoreParams,
-    handler: async (params, { runtime }) => {
+    handler: async (params, ctx) => {
+      assertLocalCaller(ctx)
+      const { runtime } = ctx
       const db = runtime.getOrchestrationDb()
       const hostId = hostIdFor(runtime)
       const path = params.manifestPath ?? defaultManifestPath()
@@ -171,25 +232,27 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
       const only = onlySetFrom(params.only)
       const deps = buildExecutorDeps(runtime, db, hostId)
       const lookups = gatherChairsRestoreLookups(parsed.manifest, deps)
-      const plan = planChairsRestore(parsed.manifest, hostId, lookups, only)
+      const plan = planOrRefuse(parsed.manifest, deps.machineId, lookups, only)
       return { path, plan }
     }
   }),
   defineMethod({
     name: 'orchestration.chairs.export',
     params: ChairsExportParams,
-    handler: async (params, { runtime }) => {
+    handler: async (params, ctx) => {
+      assertLocalCaller(ctx)
+      const { runtime } = ctx
       const db = runtime.getOrchestrationDb()
       const hostId = hostIdFor(runtime)
       const path = params.manifestPath ?? defaultManifestPath()
-      if (!params.force) {
-        const existing = await readManifest(path)
-        if (existing.ok) {
-          throw new OrchestrationError(
-            'chairs_manifest_exists',
-            `${path} already exists; pass --force to overwrite`
-          )
-        }
+      // [S10-21d b3b, D-R165 H2 fix] Existence, not parseability — a non-manifest file at `path`
+      // must not be silently overwritten either. [L3 fix] mkdir only `path`'s own parent, never
+      // an unconditional `~/.orca` when `--manifest` points elsewhere.
+      if (!params.force && (await pathExists(path))) {
+        throw new OrchestrationError(
+          'chairs_manifest_exists',
+          `${path} already exists; pass --force to overwrite`
+        )
       }
       const { agents } = db.listAgents({ hostId, includeDerived: false, includeQuarantined: false })
       const chairs: ChairsManifestEntry[] = []
@@ -215,13 +278,15 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
           worktree,
           agent: 'claude',
           conversationId: launch.session_id,
-          host: hostId
+          // [S10-21d b3b, D-R165 H1 fix] machine-distinct id, never the orchestration-
+          // compatibility constant (always 'local') — see ChairsRestoreExecutorDeps's own doc.
+          host: hostname()
           // model/effort omitted: no pref_* columns exist on agent_launch_sessions in this lane.
         })
       }
       const manifest: ChairsManifest = { version: 1, chairs }
-      await mkdir(join(homedir(), '.orca'), { recursive: true })
-      await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+      await mkdir(dirname(path), { recursive: true })
+      await writeFileAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`)
       return { path, manifest }
     }
   })

@@ -29,6 +29,6 @@ export const CHAIRS_COMMAND_SPECS: CommandSpec[] = [
     summary: 'Write a manifest from the current agent directory',
     usage: 'orca chairs export [--manifest <path>] [--force] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'manifest', 'force'],
-    notes: ['Refuses to overwrite an existing manifest file unless --force is passed.']
+    notes: ['Refuses to overwrite any existing file at the target path unless --force is passed.']
   }
 ]

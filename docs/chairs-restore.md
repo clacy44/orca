@@ -45,8 +45,10 @@ Fields:
 - `conversationId` — the immutable seed: the conversation's original id. Always present.
 - `lastSessionId` — the live head, written back automatically after every successful restore.
   Omit it on first use; `orca chairs restore` fills it in.
-- `host` — which machine this chair runs on. Omit it for a chair that lives on every machine the
-  manifest is used on; set it when a manifest is shared across machines (see below).
+- `host` — which machine this chair runs on, compared against that machine's own `os.hostname()`
+  (never an internal id — a manifest shared across machines names each with its real hostname).
+  Omit it for a chair that lives on every machine the manifest is used on; set it when a manifest
+  is shared across machines (see below).
 - `model` / `effort` — optional per-chair launch preferences, threaded straight through to the
   new session (e.g. `"model": "opus"`, `"effort": "max"`).
 
@@ -74,24 +76,31 @@ Restore only some chairs with `--only`:
 orca chairs restore --only backend-dll,frontend-stack
 ```
 
+A name absent from the manifest refuses the whole call (never a silent no-op for that name).
+
+This whole surface (`restore`/`status`/`export`) is local-transport only: a paired device (mobile
+or a runtime-kind peer) is refused regardless of any other check.
+
 ## Reading the output
 
 Each restored or already-live chair prints one line:
 
 ```
-backend-dll  [ok]  pane=tab:leaf-1 recorded=sess-abc running=sess-abc minted=sess-abc paneLive=true attested=true autoRestoreArmed=true
+backend-dll  [ok]  pane=tab:leaf-1 recorded=sess-abc minted=sess-abc paneLive=true attested=true autoRestoreArmed=true
 ```
 
 - `pane` — the pane key the chair now lives on.
 - `recorded` — the session id the host's own launch record carries for that pane.
-- `running` — the session id the live process is actually running under.
 - `minted` — the session id the manifest asked for (`lastSessionId` if set, else `conversationId`).
 - `paneLive` — whether the pane currently resolves live.
-- `attested` — whether the hook channel has reported this session live.
+- `attested` — whether the hook channel has reported this session live; `unknown` when that check
+  is unwired (never a silent false).
 - `autoRestoreArmed` — whether the conversation's own transcript carries a real turn (a
   zero-turn stub transcript would not auto-restore on the next restart).
 
-`[ok]` means `recorded == running == minted` and the pane is live. Any inequality prints as
+There is no independent `running` column: no primitive on this surface reads back the live pty's
+actual resolved launch command, so this table makes no claim about the process beyond `recorded`
+and `paneLive`. `[ok]` means `recorded == minted` and the pane is live. Any inequality prints as
 `[SHORT]`, and the command exits non-zero.
 
 A chair whose conversation id is currently live on a DIFFERENT pane than the manifest names is
@@ -109,10 +118,12 @@ orca chairs status
 ## `orca chairs export`
 
 Writes a manifest from the current agent directory (this machine's currently registered
-chairs and their newest launch session ids):
+chairs and their newest launch session ids), stamping each entry's `host` with THIS machine's
+own `os.hostname()`:
 
 ```
 orca chairs export
 ```
 
-Refuses to overwrite an existing manifest file unless `--force` is passed.
+Refuses to overwrite any existing file at the target path unless `--force` is passed (an
+existence check, not a parse attempt — a non-manifest file there is refused too).

@@ -29,10 +29,9 @@ type ChairsRestoreResultRow =
       kind: 'skip_live' | 'rebind' | 'launch'
       paneKey: string
       recorded: string | null
-      running: string | null
       minted: string
       paneLive: boolean
-      attested: boolean
+      attested: boolean | null
       autoRestoreArmed: boolean
       ok: boolean
     }
@@ -94,8 +93,8 @@ function formatRow(row: ChairsRestoreResultRow): string {
   const status = row.ok ? 'ok' : 'SHORT'
   return (
     `${row.name}  [${status}]  pane=${row.paneKey} recorded=${row.recorded ?? '-'} ` +
-    `running=${row.running ?? '-'} minted=${row.minted} paneLive=${row.paneLive} ` +
-    `attested=${row.attested} autoRestoreArmed=${row.autoRestoreArmed}`
+    `minted=${row.minted} paneLive=${row.paneLive} ` +
+    `attested=${row.attested === null ? 'unknown' : row.attested} autoRestoreArmed=${row.autoRestoreArmed}`
   )
 }
 

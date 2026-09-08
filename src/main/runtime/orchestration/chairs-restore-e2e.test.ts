@@ -3,7 +3,7 @@
 // harness shape restore-sweep-t11-end-to-end.test.ts already proved sound — but driving
 // `requestChairRestore` (this brief's own rail), never the boot-time sweep. Two-chair manifest ->
 // two panes, two launch rows with evidence 'host_restore', two registered names, recorded ==
-// running == minted; re-run -> skip_live, zero new panes/rows.
+// minted; re-run -> skip_live, zero new panes/rows.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
@@ -46,6 +46,7 @@ function buildDeps(runtime: OrcaRuntimeService, db: OrchestrationDb): ChairsRest
   const hostId = runtime.getOrchestrationCompatibilityHostId()
   return {
     hostId,
+    machineId: hostId,
     getAgentByName: (h, name) => db.getAgentByName(h, name),
     paneHoldingSession: (h, sessionId) => db.paneHoldingSession(h, sessionId),
     newestLaunchForPane: (h, paneKey) => db.newestLaunchForPane(h, paneKey),
@@ -123,7 +124,7 @@ describe('S10-21d b4 e2e: two-chair manifest through requestChairRestore, then a
         const id = randomUUID()
         const admission = (opts as { launchAdmission?: { kind: string } }).launchAdmission
         if (admission && admission.kind === 'host-resume') {
-          const hostResume = admission as {
+          const hostResume = admission as unknown as {
             sessionId: string
             predecessorPaneKey: string | null
             executionHostId: string
@@ -169,7 +170,6 @@ describe('S10-21d b4 e2e: two-chair manifest through requestChairRestore, then a
       }
       expect(row.ok).toBe(true)
       expect(row.recorded).toBe(row.minted)
-      expect(row.running).toBe(row.minted)
       expect(row.paneLive).toBe(true)
     }
     expect(manifest.chairs[0].lastSessionId).toBe('sess-e2e-a')

@@ -20,6 +20,7 @@ function fakeDeps(overrides: Partial<ChairsRestoreExecutorDeps> = {}): {
   const livePanes = new Set<string>()
   const deps: ChairsRestoreExecutorDeps = {
     hostId: HOST,
+    machineId: HOST,
     getAgentByName: () => undefined,
     paneHoldingSession: () => undefined,
     newestLaunchForPane: (_h, paneKey) => {
@@ -173,5 +174,56 @@ describe('executeChairsRestorePlan', () => {
     const plan = planChairsRestore(m, HOST, lookups, new Set(['b']))
     await executeChairsRestorePlan(m, plan, deps)
     expect(calls).toEqual(['b'])
+  })
+
+  // [S10-21d b3b, D-R165 M1] the write-back must use the RECORDED id (what the admission
+  // actually wrote), never the requested id blindly, or a mismatch would be pinned forever.
+  it('writes back the RECORDED session id, not the requested one, when they diverge', async () => {
+    const { deps } = fakeDeps({
+      requestChairRestore: async (request) => {
+        // admission actually recorded a DIFFERENT session than requested (a stale-generation race)
+        const paneKey = `tab:${request.displayName}`
+        return { ok: true, paneKey, agentId: 'agent-a', holderPaneKey: null, adoptionSignal: null }
+      },
+      newestLaunchForPane: () => ({ session_id: 'sess-actually-recorded' })
+    })
+    const m = manifest([
+      { name: 'a', worktree: 'path:/repo/a', agent: 'claude', conversationId: 'sess-requested' }
+    ])
+    const summary = await runChairsRestore(m, deps)
+    expect(m.chairs[0].lastSessionId).toBe('sess-actually-recorded')
+    expect(summary.changed).toBe(true)
+  })
+
+  // [S10-21d b3b, D-R165 L5] no manifest rewrite is warranted when every write-back is a no-op.
+  it('summary.changed stays false when skip_live is the only action (no write-back at all)', async () => {
+    const { deps } = fakeDeps({
+      getAgentByName: () => ({ pane_key: 'tab:a' }),
+      paneHoldingSession: () => 'tab:a',
+      isPaneLive: () => true,
+      newestLaunchForPane: () => ({ session_id: 'sess-a' })
+    })
+    const m = manifest([
+      { name: 'a', worktree: 'path:/repo/a', agent: 'claude', conversationId: 'sess-a' }
+    ])
+    const summary = await runChairsRestore(m, deps)
+    expect(summary.changed).toBe(false)
+  })
+
+  // [S10-21d b3b, D-R165 M5] attested must read as unknown (null), never a silent false, when
+  // the hook-report check itself is unwired — distinct from a wired check that answers false.
+  it('attested is null (unknown) rather than false when the hook-report check is unwired', async () => {
+    const { deps } = fakeDeps({
+      getAgentByName: () => ({ pane_key: 'tab:a' }),
+      paneHoldingSession: () => 'tab:a',
+      isPaneLive: () => true,
+      newestLaunchForPane: () => ({ session_id: 'sess-a' }),
+      hasLiveHookReportOfSession: () => null
+    })
+    const m = manifest([
+      { name: 'a', worktree: 'path:/repo/a', agent: 'claude', conversationId: 'sess-a' }
+    ])
+    const summary = await runChairsRestore(m, deps)
+    expect(summary.rows[0]).toMatchObject({ attested: null })
   })
 })

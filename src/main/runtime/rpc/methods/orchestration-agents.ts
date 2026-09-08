@@ -23,6 +23,7 @@ export const ORCHESTRATION_AGENT_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_AGENTS_RELINK_METHODS,
   ...ORCHESTRATION_AGENTS_RETIRE_METHODS,
   // S10-21d b4: `orca chairs restore|status|export` — no pane attestation (see chairs-restore.ts's
-  // own JUDGMENT CALL note); a host-keyed rate limit stands in its place.
+  // own JUDGMENT CALL note); a host-keyed rate limit stands in its place, plus (b3b, D-R165 M4) a
+  // strict local-transport fence: any paired-device caller is refused regardless.
   ...CHAIRS_RESTORE_METHODS
 ]
