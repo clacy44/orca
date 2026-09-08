@@ -22,27 +22,33 @@ export const SOCKET_WRITE_CEILING_BYTES = 64 * 1024 * 1024
 // BACKGROUND_SESSION_MIN_KEEP_TAIL_CHARS) — comfortably covers a full TUI repaint.
 export const SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS = 64 * 1024
 
-/** Returns true (and mutates batch/heldSessions/retained) when the socket is over ceiling and this
- *  entry must be held without writing this pass; false when the caller should proceed normally. */
-export function holdForSocketWriteCeiling(
+export type SocketWriteCeilingHold = (
   batch: PendingStreamDataBatch,
   entry: StreamQueueEntry,
   writableLength: number,
-  ceilingBytes: number,
-  keepTailChars: number,
-  salvageDroppedData: (dropped: string) => string,
   heldSessions: Set<string>,
   retained: PendingStreamDataBatch['queue']
-): boolean {
-  if (writableLength <= ceilingBytes) {
-    return false
+) => boolean
+
+/** Binds the per-instance salvage/ceiling/keep-tail so the batcher's flush() loop calls a
+ *  5-arg function per entry instead of repeating its own fixed config at every call site.
+ *  ceilingBytes/keepTailChars default to the constants above; overridable for tests only. */
+export function createSocketWriteCeilingHold(
+  salvageDroppedData: (dropped: string) => string,
+  ceilingBytes: number = SOCKET_WRITE_CEILING_BYTES,
+  keepTailChars: number = SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS
+): SocketWriteCeilingHold {
+  return (batch, entry, writableLength, heldSessions, retained) => {
+    if (writableLength <= ceilingBytes) {
+      return false
+    }
+    dropOldestQueuedForSession(batch, entry.sessionId, keepTailChars, salvageDroppedData)
+    heldSessions.add(entry.sessionId)
+    const heldEntry = batch.queue[0]
+    if (heldEntry) {
+      retained.push(heldEntry)
+      batch.queue.shift()
+    }
+    return true
   }
-  dropOldestQueuedForSession(batch, entry.sessionId, keepTailChars, salvageDroppedData)
-  heldSessions.add(entry.sessionId)
-  const heldEntry = batch.queue[0]
-  if (heldEntry) {
-    retained.push(heldEntry)
-    batch.queue.shift()
-  }
-  return true
 }

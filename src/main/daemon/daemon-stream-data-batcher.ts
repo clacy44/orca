@@ -13,11 +13,7 @@ import {
   evaluateDroppableEnqueue,
   refreshDroppableSessionMembership
 } from './daemon-stream-droppable-membership'
-import {
-  holdForSocketWriteCeiling,
-  SOCKET_WRITE_CEILING_BYTES,
-  SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS
-} from './daemon-stream-socket-write-ceiling'
+import { createSocketWriteCeilingHold } from './daemon-stream-socket-write-ceiling'
 
 type StreamDataClient = {
   streamSocket: Socket | null
@@ -60,7 +56,7 @@ export class DaemonStreamDataBatcher {
   private onAfterSocketWrite: ((clientId: string, sessionId: string) => void) | undefined
   private isSessionDroppable: (sessionId: string) => boolean
   private salvageDroppedData: (dropped: string) => string
-  private socketWriteCeilingBytes: number
+  private holdOverSocketWriteCeiling: ReturnType<typeof createSocketWriteCeilingHold>
 
   constructor(
     getClient: (clientId: string) => StreamDataClient | undefined,
@@ -71,7 +67,10 @@ export class DaemonStreamDataBatcher {
     this.onAfterSocketWrite = options.onAfterSocketWrite
     this.isSessionDroppable = options.isSessionDroppable ?? (() => false)
     this.salvageDroppedData = options.salvageDroppedData ?? (() => '')
-    this.socketWriteCeilingBytes = options.socketWriteCeilingBytes ?? SOCKET_WRITE_CEILING_BYTES
+    this.holdOverSocketWriteCeiling = createSocketWriteCeilingHold(
+      this.salvageDroppedData,
+      options.socketWriteCeilingBytes
+    )
   }
 
   enqueue(
@@ -186,18 +185,7 @@ export class DaemonStreamDataBatcher {
       // R117 FIX 1 (daemon-stream-socket-write-ceiling.ts): the socket's own OS write buffer, not
       // just this batcher's queue, is what actually grows unbounded — hold this pass and trim.
       const writableLength = socket.writableLength ?? 0
-      if (
-        holdForSocketWriteCeiling(
-          batch,
-          entry,
-          writableLength,
-          this.socketWriteCeilingBytes,
-          SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS,
-          this.salvageDroppedData,
-          heldSessions,
-          retained
-        )
-      ) {
+      if (this.holdOverSocketWriteCeiling(batch, entry, writableLength, heldSessions, retained)) {
         continue
       }
       const socketDeep = writableLength >= SHALLOW_SOCKET_WRITE_GATE_BYTES
