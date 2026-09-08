@@ -78,5 +78,9 @@ export const ADMISSION_AUDIT_VERBS = [
   'launch_surface_diverged',
   'launch_ensure_failed_after_spawn',
   'launch_spawn_failed',
+  // [S10-21c B-final F5, D-R159 finding 5] HOST_MINTED/caller_resume superseding a DERIVED
+  // registered row's session — a newer 'launch_recorded' row here correctly restores normal
+  // classification (never shadowed by an older unrecorded audit), same as every other verb below.
+  'launch_recorded',
   'launch'
 ] as const

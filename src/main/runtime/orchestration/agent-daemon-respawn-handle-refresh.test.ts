@@ -1,5 +1,9 @@
 // S10-21a C7d (Ruling 34 Addendum 23): the same-pane-key "narrowed identity rebind" sibling of
 // rebindRestoredPane (C5) — updates terminal_handle/process_incarnation ONLY, never pane_key.
+// [S10-21c B-final F1, D-R159 finding 1, SCENARIO_CORRECTION] Every "canonical, parseable
+// identity" fixture below is now UUID-shaped in its incarnation half — parseProcessIncarnation's
+// new explicit shape check (agent-process-identity.ts) requires one. The bare-id-refusal test
+// (item 1 below) is intentionally unaffected: its whole point is an unparseable value.
 import { afterEach, describe, expect, it } from 'vitest'
 import type Database from '../../sqlite/sync-database'
 import { OrchestrationDb } from './db'
@@ -71,14 +75,14 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
       hostId: HOST_ID,
       paneKey,
       newTerminalHandle: 'term_new',
-      processIncarnation: 'pty-new:inc-new'
+      processIncarnation: 'pty-new:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee5'
     })
 
     expect(result).toMatchObject({ ok: true, agentId: 'agent-respawn', pactsToUnpause: [] })
     const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-respawn')
     expect(row?.pane_key).toBe(paneKey)
     expect(row?.terminal_handle).toBe('term_new')
-    expect(row?.process_incarnation).toBe('pty-new:inc-new')
+    expect(row?.process_incarnation).toBe('pty-new:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee5')
     const audit = db
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
       .all()
@@ -204,14 +208,14 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
       // Names the OTHER row's own pane/suffix — a pane-suffix lookup would find 'agent-other'.
       paneKey: 'tab2:leaf-other',
       newTerminalHandle: 'term-new',
-      processIncarnation: 'pty-x:inc-x',
+      processIncarnation: 'pty-x:ffffffff-ffff-4fff-8fff-fffffffffff6',
       agentId: 'agent-by-id'
     })
     expect(result).toMatchObject({ ok: true, agentId: 'agent-by-id' })
 
     const targetRow = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-by-id')
     expect(targetRow?.terminal_handle).toBe('term-new')
-    expect(targetRow?.process_incarnation).toBe('pty-x:inc-x')
+    expect(targetRow?.process_incarnation).toBe('pty-x:ffffffff-ffff-4fff-8fff-fffffffffff6')
 
     const otherRow = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-other')
     expect(otherRow?.terminal_handle).toBe('term-other-old')
@@ -252,19 +256,22 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
       hostId: HOST_ID,
       paneKey,
       newTerminalHandle: 'term_new',
-      processIncarnation: 'pty-chain:inc-chain'
+      processIncarnation: 'pty-chain:11111111-2222-4333-8444-555555555556'
     })
     expect(result).toMatchObject({ ok: true, agentId: 'agent-chain' })
 
     const row = orchestrationDb!.getAgentByIdIncludingTombstoned('agent-chain')
     const identity = parseProcessIncarnation(row?.process_incarnation ?? null)
-    expect(identity).toEqual({ ptyId: 'pty-chain', incarnationId: 'inc-chain' })
+    expect(identity).toEqual({
+      ptyId: 'pty-chain',
+      incarnationId: '11111111-2222-4333-8444-555555555556'
+    })
 
     // The next sweep's inventory round lists the respawned pty under the SAME incarnation.
     const inventory: ControllerInventory = {
       allLivePtyIds: new Set(['pty-chain']),
       terminalIdentityByPtyId: new Map([
-        ['pty-chain', { handle: 'term_new', incarnationId: 'inc-chain' }]
+        ['pty-chain', { handle: 'term_new', incarnationId: '11111111-2222-4333-8444-555555555556' }]
       ])
     }
     expect(agentAlive(identity, inventory)).toBe('alive')

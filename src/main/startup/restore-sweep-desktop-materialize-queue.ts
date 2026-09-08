@@ -62,7 +62,12 @@ export type RestoredPaneMaterializeSurface = {
   // identity.ts`'s `ProcessIdentity.incarnationId`) means the bare form; this field is unused by
   // anything downstream today (never forwarded to the renderer), but a shape mismatch here would
   // be a trap for the next reader who wires it up.
-  expectedProcessIdentity: { terminalHandle: string; incarnationId: string }
+  // [S10-21c B-final F1, D-R159 finding 1] OPTIONAL: an unparseable `agents.process_incarnation`
+  // (measured on-box to be the COMMON case pre-fix, and possible even post-fix for a genuinely
+  // legacy row) must never refuse the whole Layer-2 surface over an unused field — the consumer
+  // (`DesktopMaterializeNotifier#revealTerminalSession`) only ever tests this for presence, never
+  // reads through it (attach-main-window-services.ts:388-392).
+  expectedProcessIdentity?: { terminalHandle: string; incarnationId: string }
 }
 
 /** Runtime-held state: one queue entry per pane. No separate "already materialized" tracker —
@@ -117,7 +122,7 @@ export function recordDesktopMaterialize(
     const parsed = parsePaneKey(newPaneKey)
     const ptyId = created.terminal.ptyId
     const parsedIdentity = parseProcessIncarnation(newProcessIncarnation)
-    if (!parsed || !ptyId || !parsedIdentity) {
+    if (!parsed || !ptyId) {
       auditSweepNoteSafe(
         db,
         hostId,
@@ -126,6 +131,19 @@ export function recordDesktopMaterialize(
         'desktop_materialize_refused: incomplete_surface'
       )
       return
+    }
+    // [S10-21c B-final F1, D-R159 finding 1] An unparseable incarnation is NOT a refusal — the
+    // consumer only tests `expectedProcessIdentity` for presence (attach-main-window-services.ts
+    // :388-392), so gating the whole surface on it disabled S9 for every real worktree pty
+    // (finding 1's measured population). Note it, carry the field undefined, still enqueue.
+    if (!parsedIdentity) {
+      auditSweepNoteSafe(
+        db,
+        hostId,
+        newPaneKey,
+        agentId,
+        'desktop_materialize: incarnation_unparsed'
+      )
     }
     // [D-R153-b6 F6] The restore already committed above (`db.rebindRestoredPane`) — a throw here
     // is an audited note, never a failed restore, same shape as `notifyRebindDelivery`'s own
@@ -139,10 +157,14 @@ export function recordDesktopMaterialize(
       ptyId,
       title: created.terminal.title,
       launchAgent,
-      expectedProcessIdentity: {
-        terminalHandle: newTerminalHandle,
-        incarnationId: parsedIdentity.incarnationId
-      }
+      ...(parsedIdentity
+        ? {
+            expectedProcessIdentity: {
+              terminalHandle: newTerminalHandle,
+              incarnationId: parsedIdentity.incarnationId
+            }
+          }
+        : {})
     })
   } catch (err) {
     auditSweepNoteSafe(

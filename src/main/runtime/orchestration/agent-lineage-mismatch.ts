@@ -104,6 +104,15 @@ export type LiveHookReportMismatchParams = {
    * row; S3's reconciliation reuses the row's own columns and ignores them. Absent -> S5 cannot
    * fire (fail-closed: no row is ever written from a guessed agent type or partition). */
   reportedAgentType?: string
+  /** [S10-21c B-final F2, D-R159 finding 2] The HOST-OWNED counterpart to `reportedAgentType`
+   * above — the authenticated hook route (`AgentHookSource`) that produced the pane's newest
+   * status entry, never a value the payload can choose. Cross-checked against `reportedAgentType`
+   * before that caller-asserted field is threaded into `bootstrapRowFromLiveReport`'s
+   * `recordLaunch` — a disagreement refuses the bootstrap rather than trusting the payload's own
+   * claim. Optional (a pre-existing test fixture predates this field, and a non-SessionStart
+   * status entry may lack it) — `undefined` skips the cross-check rather than refusing every
+   * bootstrap outright, since the field is new and not every code path stamps it yet. */
+  reportedSource?: string
   executionHostId?: string
 }
 
@@ -143,7 +152,14 @@ const BOOTSTRAP_AUDIT_VERB = 'session_identity_bootstrap'
 export async function evaluateLiveHookReportMismatch(
   db: Database.Database,
   params: LiveHookReportMismatchParams,
-  resolveResumeTranscript: ResolveLiveReportTranscript
+  resolveResumeTranscript: ResolveLiveReportTranscript,
+  // [S10-21c B-final F7, D-R159 finding 6] Re-runs conjunct (i)'s host-verification check in the
+  // SAME synchronous tick as the reconciliation write, beside the DB re-reads — `anchorHostVerified`
+  // above is a SNAPSHOT stamped at hook ingestion (server.ts:1059) and can be stale by the time the
+  // transcript's `await` returns (a rotation or the pane's pty dying in that window). Optional and
+  // defaulting to "still verified": every pre-existing caller/test that does not supply one keeps
+  // today's snapshot-only behaviour unchanged.
+  reverifyPaneLaunchAuthority: (paneKey: string) => boolean = () => true
 ): Promise<LiveHookReportMismatchResult> {
   let row = newestLaunchForPaneSuffix(db, params.hostId, params.paneKey)
   if (!row) {
@@ -179,7 +195,14 @@ export async function evaluateLiveHookReportMismatch(
     // [S10-21c B4b, D-R152-b4 finding 4] The transcript was resolved against the PRE-await
     // `row.agent_type`; refuse if the same-tick re-read's row now names a different agent type
     // (fail-closed) rather than land a session validated under one type onto a row of another.
-    if (transcript.ok && fresh.pane_key === params.paneKey && fresh.agent_type === row.agent_type) {
+    // [S10-21c B-final F7, D-R159 finding 6] AND re-verify conjunct (i) itself, same-tick — a
+    // reconciliation write may never rest on a snapshot the reporter no longer actually holds.
+    if (
+      transcript.ok &&
+      fresh.pane_key === params.paneKey &&
+      fresh.agent_type === row.agent_type &&
+      reverifyPaneLaunchAuthority(params.paneKey)
+    ) {
       const reconciled = applyLiveReportReconciliation(db, params, fresh)
       if (reconciled) {
         return reconciled
@@ -259,12 +282,17 @@ function applyLiveReportReconciliation(
 /** [S10-21c B4, design §2 S5] The `no_row` arm: a REGISTERED, non-derived, non-quarantined pane
  * with no launch row earns its first one from its own host-verified live report — the shape
  * `vps-services` is in today, permanently exiled by the sweep's `sweep_no_launch_row`. Every
- * conjunct in this file's header applies, plus the agent row's own three predicates. Two
- * host-owned facts the hook payload cannot choose are required and never guessed: the execution
- * host the report arrived on, and the agent type its status entry names (which conjunct (iii)
- * then binds — an unknown type is `{coverage:'uncovered'}` and refuses). `supersedePaneKey` stays
- * unset: it is restore-only by contract (INV-P-021), so current_sessions UNIQUE remains the sole
- * cross-pane fence. Anything short of all of it returns the pre-B4 `{kind:'no_row'}` unchanged. */
+ * conjunct in this file's header applies, plus the agent row's own three predicates. One
+ * genuinely host-owned fact is required and never guessed: the execution host the report arrived
+ * on (`executionHostId`, from the server-stamped connection id). The agent type its status entry
+ * names is CALLER-ASSERTED — the hook payload's own field, which `normalizeAgentStatusPayload`
+ * only trims/truncates (D-R159 finding 2) — narrowed rather than host-owned: conjunct (iii)
+ * requires it to resolve a covered transcript agent WITH a matching on-disk transcript (an
+ * unknown type is `{coverage:'uncovered'}` and refuses), and it is now ALSO cross-checked
+ * against `reportedSource` (the authenticated hook route) before being threaded into
+ * `recordLaunch`, refusing on a present disagreement. `supersedePaneKey` stays unset: it is
+ * restore-only by contract (INV-P-021), so current_sessions UNIQUE remains the sole cross-pane
+ * fence. Anything short of all of it returns the pre-B4 `{kind:'no_row'}` unchanged. */
 async function bootstrapRowFromLiveReport(
   db: Database.Database,
   params: LiveHookReportMismatchParams,
@@ -282,6 +310,17 @@ async function bootstrapRowFromLiveReport(
   const agent = getAgentByPaneKey(db, params.hostId, params.paneKey)
   if (!isBootstrappableAgentRow(agent, params)) {
     return { kind: 'no_row' }
+  }
+  // [S10-21c B-final F2, D-R159 finding 2] `agentType` above is CALLER-ASSERTED (the hook
+  // payload's own field) — cross-check it against the HOST-OWNED `reportedSource` (the
+  // authenticated hook route) before it is threaded into `recordLaunch` below, the same check
+  // server.ts:2131 already applies to the PreCompact/PostCompact transition. `reportedSource ===
+  // undefined` skips the check (not every code path stamps it yet) rather than refusing every
+  // bootstrap outright; a PRESENT disagreement refuses.
+  if (params.reportedSource !== undefined && agentType !== params.reportedSource) {
+    const reason = `agent_type_mismatch reported=${agentType} source=${params.reportedSource}`
+    writeBootstrapAudit(db, params, agent.id, 'refused', reason)
+    return { kind: 'bootstrap_refused', reason }
   }
   const transcript = await checkTranscriptConjunctMemoized(
     db,

@@ -61,6 +61,9 @@ export async function raiseSessionIdentityMismatchAlarms(
         sessionStartSource: identity.sessionStartSource,
         launchGeneration: deps.launchGeneration,
         reportedAgentType: identity.agentType,
+        // [S10-21c B-final F2, D-R159 finding 2] The host-owned counterpart `bootstrapRowFrom
+        // LiveReport` cross-checks `reportedAgentType` against.
+        reportedSource: identity.source,
         executionHostId: identity.executionHostId
       })
       const notice = noticeForResult(result, identity)

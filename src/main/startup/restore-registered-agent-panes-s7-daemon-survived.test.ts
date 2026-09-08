@@ -3,6 +3,11 @@
 // restore-registered-agent-panes-decision-table.test.ts or restore-registered-agent-panes.test.ts,
 // both already near the max-lines ratchet) per _common-rules.md's "split modules if needed and
 // say so".
+// [S10-21c B-final F1, D-R159 finding 1, SCENARIO_CORRECTION] Every fixture is now UUID-shaped
+// in its incarnation half — D-R159 finding 1 measured this exact file's whole positive-fixture
+// population as the blind spot that made S7 unreachable in production (base's parser rejected
+// every real worktree ptyId), and the new explicit shape check requires a UUID incarnation id
+// before a fixture can reach 'alive'/skipped_daemon_survived at all.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
@@ -86,7 +91,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7',
       display_name: 'chair-s7',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7:inc-s7'
+      process_incarnation: 'pty-s7:80808080-8080-4808-8808-808080808088'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -100,7 +105,10 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-s7']),
       terminalIdentityByPtyId: new Map([
-        ['pty-s7', { handle: 'term_fresh_s7', incarnationId: 'inc-s7' }]
+        [
+          'pty-s7',
+          { handle: 'term_fresh_s7', incarnationId: '80808080-8080-4808-8808-808080808088' }
+        ]
       ])
     })
     const notifyRebindDelivery = vi.fn()
@@ -110,7 +118,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7',
-      'pty-s7:inc-s7',
+      'pty-s7:80808080-8080-4808-8808-808080808088',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -121,7 +129,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       hostId: HOST_ID,
       paneKey,
       newTerminalHandle: 'term_fresh_s7',
-      processIncarnation: 'pty-s7:inc-s7',
+      processIncarnation: 'pty-s7:80808080-8080-4808-8808-808080808088',
       agentId: 'agent-s7'
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(1)
@@ -135,7 +143,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7b',
       display_name: 'chair-s7b',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7b:inc-s7b'
+      process_incarnation: 'pty-s7b:30303030-3030-4303-8303-303030303033'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -149,7 +157,10 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-s7b']),
       terminalIdentityByPtyId: new Map([
-        ['pty-s7b', { handle: 'term_fresh_s7b', incarnationId: 'inc-s7b' }]
+        [
+          'pty-s7b',
+          { handle: 'term_fresh_s7b', incarnationId: '30303030-3030-4303-8303-303030303033' }
+        ]
       ])
     })
     const notifyRebindDelivery = vi.fn()
@@ -161,7 +172,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7b',
-      'pty-s7b:inc-s7b',
+      'pty-s7b:30303030-3030-4303-8303-303030303033',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -184,7 +195,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7c',
       display_name: 'chair-s7c',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7c:inc-s7c'
+      process_incarnation: 'pty-s7c:40404040-4040-4404-8404-404040404044'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -198,7 +209,10 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-s7c']),
       terminalIdentityByPtyId: new Map([
-        ['pty-s7c', { handle: 'term_fresh_s7c', incarnationId: 'inc-s7c' }]
+        [
+          'pty-s7c',
+          { handle: 'term_fresh_s7c', incarnationId: '40404040-4040-4404-8404-404040404044' }
+        ]
       ])
     })
     const notifyRebindDelivery = vi.fn(() => {
@@ -210,7 +224,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7c',
-      'pty-s7c:inc-s7c',
+      'pty-s7c:40404040-4040-4404-8404-404040404044',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -243,7 +257,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7e',
       display_name: 'chair-s7e',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7e:inc-s7e'
+      process_incarnation: 'pty-s7e:50505050-5050-4505-8505-505050505055'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -258,7 +272,10 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-s7e']),
       terminalIdentityByPtyId: new Map([
-        ['pty-s7e', { handle: 'term_fresh_s7e', incarnationId: 'inc-s7e' }]
+        [
+          'pty-s7e',
+          { handle: 'term_fresh_s7e', incarnationId: '50505050-5050-4505-8505-505050505055' }
+        ]
       ])
     })
     const outcome = await restoreOneRegisteredPane(
@@ -266,7 +283,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7e',
-      'pty-s7e:inc-s7e',
+      'pty-s7e:50505050-5050-4505-8505-505050505055',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -283,7 +300,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7g',
       display_name: 'chair-s7g',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7g:inc-s7g'
+      process_incarnation: 'pty-s7g:60606060-6060-4606-8606-606060606066'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -298,7 +315,10 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-s7g']),
       terminalIdentityByPtyId: new Map([
-        ['pty-s7g', { handle: 'term_fresh_s7g', incarnationId: 'inc-s7g' }]
+        [
+          'pty-s7g',
+          { handle: 'term_fresh_s7g', incarnationId: '60606060-6060-4606-8606-606060606066' }
+        ]
       ])
     })
     const notifyRebindDelivery = vi.fn()
@@ -311,7 +331,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7g',
-      'pty-s7g:inc-s7g',
+      'pty-s7g:60606060-6060-4606-8606-606060606066',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -347,7 +367,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7f',
       display_name: 'chair-s7f',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7f:inc-s7f'
+      process_incarnation: 'pty-s7f:70707070-7070-4707-8707-707070707077'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -361,7 +381,10 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-s7f']),
       terminalIdentityByPtyId: new Map([
-        ['pty-s7f', { handle: 'term_fresh_s7f', incarnationId: 'inc-s7f' }]
+        [
+          'pty-s7f',
+          { handle: 'term_fresh_s7f', incarnationId: '70707070-7070-4707-8707-707070707077' }
+        ]
       ])
     })
     const notifyRebindDelivery = vi.fn()
@@ -374,7 +397,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7f',
-      'pty-s7f:inc-s7f',
+      'pty-s7f:70707070-7070-4707-8707-707070707077',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -399,7 +422,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7d-a',
       display_name: 'chair-s7d-a',
       pane_key: paneKeyA,
-      process_incarnation: 'pty-s7d-a:inc-s7d-a'
+      process_incarnation: 'pty-s7d-a:10101010-1010-4101-8101-101010101011'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -415,7 +438,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7d-b',
       display_name: 'chair-s7d-b',
       pane_key: paneKeyB,
-      process_incarnation: 'pty-s7d-b:inc-s7d-b'
+      process_incarnation: 'pty-s7d-b:20202020-2020-4202-8202-202020202022'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -435,8 +458,20 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
           emptyInventory({
             allLivePtyIds: new Set(['pty-s7d-a', 'pty-s7d-b']),
             terminalIdentityByPtyId: new Map([
-              ['pty-s7d-a', { handle: 'term_fresh_s7d_a', incarnationId: 'inc-s7d-a' }],
-              ['pty-s7d-b', { handle: 'term_fresh_s7d_b', incarnationId: 'inc-s7d-b' }]
+              [
+                'pty-s7d-a',
+                {
+                  handle: 'term_fresh_s7d_a',
+                  incarnationId: '10101010-1010-4101-8101-101010101011'
+                }
+              ],
+              [
+                'pty-s7d-b',
+                {
+                  handle: 'term_fresh_s7d_b',
+                  incarnationId: '20202020-2020-4202-8202-202020202022'
+                }
+              ]
             ])
           })
       })
@@ -447,14 +482,14 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       hostId: HOST_ID,
       paneKey: paneKeyA,
       newTerminalHandle: 'term_fresh_s7d_a',
-      processIncarnation: 'pty-s7d-a:inc-s7d-a',
+      processIncarnation: 'pty-s7d-a:10101010-1010-4101-8101-101010101011',
       agentId: 'agent-s7d-a'
     })
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey: paneKeyB,
       newTerminalHandle: 'term_fresh_s7d_b',
-      processIncarnation: 'pty-s7d-b:inc-s7d-b',
+      processIncarnation: 'pty-s7d-b:20202020-2020-4202-8202-202020202022',
       agentId: 'agent-s7d-b'
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(2)

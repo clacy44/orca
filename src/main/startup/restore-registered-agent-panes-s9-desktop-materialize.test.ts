@@ -66,7 +66,7 @@ describe('S10-21c B6, design §2 S9: Layer-2 restore records the desktop-materia
         ensureAgentSession,
         // [design §2.1b, D-R110 (δ)] someone else's live pty on the old leaf — forces Layer 2.
         findConnectedLeafOccupant: () => ({ paneKey: 'tab9:other-leaf', ptyId: 'pty-other' }),
-        getTerminalProcessIncarnation: () => 'pty-20:inc-20',
+        getTerminalProcessIncarnation: () => 'pty-20:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
         recordRestoredPaneForDesktopMaterialization
       }),
       orchestrationDb!,
@@ -90,7 +90,10 @@ describe('S10-21c B6, design §2 S9: Layer-2 restore records the desktop-materia
       launchAgent: 'claude',
       // [D-R153-b6 F5] The BARE incarnation, never the composite `agents.process_incarnation`
       // form `getTerminalProcessIncarnation` returns.
-      expectedProcessIdentity: { terminalHandle: 'handle-20', incarnationId: 'inc-20' }
+      expectedProcessIdentity: {
+        terminalHandle: 'handle-20',
+        incarnationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+      }
     })
   })
 

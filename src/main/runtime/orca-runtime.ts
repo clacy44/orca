@@ -14220,6 +14220,12 @@ export class OrcaRuntimeService {
     // to that pty's identity, so every later verify takes the bound path above. The compatibility
     // lane is therefore one verify wide, can only ever bind to a pty already live on this exact
     // pane, and an ambiguous pane (no identified pty, or more than one) is refused, never guessed.
+    // [S10-21c B-final F6, D-R159 finding 6, R92 — CARRIED OPEN, chair decision] A function named
+    // "verify" still mutates durable state on this arm, reachable from every hook POST carrying
+    // launch-token evidence (server.ts:3078's `paneLaunchAuthorityVerifier`, now ALSO re-run a
+    // second time per event by F7's same-tick re-verify). Splitting this into an explicit
+    // `upgradeLegacyPaneAnchor(paneKey, hostId)` the hook ingestion calls once per pane per
+    // generation, called from a name that says so, is deferred to R92 — not done here.
     if (liveIdentities.length !== 1) {
       return false
     }
@@ -35955,15 +35961,19 @@ export class OrcaRuntimeService {
     // [D-R155-b6b finding 2] getOrchestrationDb() is a lazy constructor (opens sqlite, arms four
     // subsystems) that can throw — never let that take the drain down with it: skip audits (db:
     // null), still drain.
+    // [S10-21c B-final F9, D-R159 finding 9] A transient failure (the lazy open racing something
+    // on first use) is retried once before falling back — draining audit-less on the FIRST throw
+    // discarded evidence for a failure a bare retry often clears. Only a SECOND failure warns.
     let db: OrchestrationDb | null
     try {
       db = this.getOrchestrationDb()
-    } catch (error) {
-      console.warn(
-        '[restore-sweep] desktop materialize: getOrchestrationDb() failed; draining without audit rows',
-        error
-      )
-      db = null
+    } catch {
+      try {
+        db = this.getOrchestrationDb()
+      } catch (error) {
+        console.warn('[restore-sweep] desktop_materialize_audit_unavailable', error)
+        db = null
+      }
     }
     const run = this.desktopMaterializeDrainQueue.then(() =>
       drainDesktopMaterializeQueue(

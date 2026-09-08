@@ -15,6 +15,16 @@ export function isStablePaneId(value: string): value is StablePaneId {
   return UUID_RE.test(value)
 }
 
+/** [S10-21c B-final F4/F1, D-R159 finding 4] A UUID predicate for values that are NOT pane
+ * ids — a `--resume <id>` session target (agent-launch-admission.ts), an `agents.process_
+ * incarnation` incarnation id (agent-process-identity.ts) — deliberately its own name rather
+ * than a reuse of `isStablePaneId`, so a future change to the pane-id shape cannot silently
+ * change which session/incarnation ids are recordable. Same UUID shape today by construction
+ * (every real writer mints with `randomUUID()`), not by contract. */
+export function isSessionId(value: string): boolean {
+  return UUID_RE.test(value)
+}
+
 export function isTerminalLeafId(value: string): value is TerminalLeafId {
   return isStablePaneId(value)
 }

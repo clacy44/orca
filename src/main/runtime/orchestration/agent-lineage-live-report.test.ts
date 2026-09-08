@@ -299,6 +299,50 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     ])
   })
 
+  // [S10-21c B-final F2, D-R159 finding 2] `reportedAgentType` is caller-asserted (the hook
+  // payload's own field) — it must equal the host-owned `reportedSource` before it is threaded
+  // into recordLaunch, mirroring server.ts:2131's own PreCompact/PostCompact check.
+  it('S5 F2: a reportedAgentType that disagrees with the host-stamped reportedSource refuses the bootstrap (bootstrap_refused, agent_type_mismatch) — fails at base: base has no cross-check', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedAgentType: 'claude', reportedSource: 'codex' }),
+      REAL
+    )
+    expect(result.kind).toBe('bootstrap_refused')
+    if (result.kind !== 'bootstrap_refused') {
+      return
+    }
+    expect(result.reason).toBe('agent_type_mismatch reported=claude source=codex')
+    expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
+    expect(audits(db, PANE, 'session_identity_bootstrap')).toEqual([
+      { outcome: 'refused', reason_code: 'agent_type_mismatch reported=claude source=codex' }
+    ])
+  })
+
+  it('S5 F2: a reportedAgentType that AGREES with reportedSource still bootstraps normally', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedAgentType: 'claude', reportedSource: 'claude' }),
+      REAL
+    )
+    expect(result.kind).toBe('bootstrapped')
+  })
+
+  it('S5 F2: reportedSource ABSENT skips the cross-check — bootstraps unchanged from pre-F2 behaviour', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedAgentType: 'claude', reportedSource: undefined }),
+      REAL
+    )
+    expect(result.kind).toBe('bootstrapped')
+  })
+
   it('S5: the bootstrap is idempotent — the second report of the same id is a match, and no second row appears', async () => {
     const db = rawDb()
     insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })

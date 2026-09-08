@@ -1,5 +1,7 @@
 // S10-21a C7i (Ruling 34 Addendum 27): survival is the agent's OWN process identity, joined
 // against one controller-inventory round the sweep takes once. Pure — no IO, no DB, no timers.
+import { isSessionId } from '../../../shared/stable-pane-id'
+
 export type ProcessIdentity = { ptyId: string; incarnationId: string }
 
 /** One controller-inventory round, as the sweep needs it: which ptyIds the controller currently
@@ -18,22 +20,32 @@ export type ControllerInventory = {
   roundSeq?: number
 }
 
-/** `agents.process_incarnation` is `"<ptyId>:<incarnationId>"`, split at the FIRST ':' — a
- * 3-segment legacy form ("<runtimeId>:<ptyId>:<gen>") is NOT an identity and parses to null. */
+/** `agents.process_incarnation` is `"<ptyId>:<incarnationId>"`, split at the LAST ':' — a
+ * worktree ptyId is itself `${repoId}::${path}@@${short}` (pty-session-id.ts:23,
+ * pty-session-id-format.ts:15), so the composite routinely carries 3+ colons and splitting at
+ * the FIRST one (the pre-D-R159 behaviour) tore the ptyId in half and rejected every real local
+ * identity. [D-R159 finding 1] Splitting at the last ':' alone is not enough to reject the
+ * legacy 3-segment form ("<runtimeId>:<ptyId>:<gen>", agent-restore-rebind.ts:168's else-branch,
+ * still written by `identity_unavailable: legacy_form`) — that form ALSO has its last colon
+ * separate a non-empty prefix from a non-empty suffix, so an EXPLICIT shape check on the
+ * suffix does the rejection instead: the incarnation id must be a UUID (every real minter uses
+ * `randomUUID()` — orca-runtime.ts's `onPtySpawned`/pty.ts's `onSpawned`), and a legacy form's
+ * trailing `<gen>` segment never is one. `ptyId` (the prefix) is checked only for
+ * non-emptiness — it legitimately contains '::' and '@@' now. */
 export function parseProcessIncarnation(value: string | null | undefined): ProcessIdentity | null {
   if (!value) {
     return null
   }
-  const colonIndex = value.indexOf(':')
+  const colonIndex = value.lastIndexOf(':')
   if (colonIndex === -1) {
     return null
   }
   const ptyId = value.slice(0, colonIndex)
-  const rest = value.slice(colonIndex + 1)
-  if (!ptyId || !rest || rest.includes(':')) {
+  const incarnationId = value.slice(colonIndex + 1)
+  if (!ptyId || !isSessionId(incarnationId)) {
     return null
   }
-  return { ptyId, incarnationId: rest }
+  return { ptyId, incarnationId }
 }
 
 export type AgentAliveResult =

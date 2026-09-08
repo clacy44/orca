@@ -28,7 +28,18 @@ vi.mock('node:crypto', async (importOriginal) => {
   return { ...actual, randomUUID: vi.fn(() => MINTED_A) }
 })
 
+// [S10-21c B-final F4, D-R159 finding 4] caller_resume now calls the REAL resolveResumeTranscript
+// (a thin fs wrapper — see resolve-resume-transcript.ts) directly, never through injected deps
+// (mirrors the brief's own literal instruction). Mocked here so every pre-existing caller_resume
+// test — none of which name a transcript that exists on this box's real filesystem — keeps its
+// prior behaviour (a real, turn-carrying transcript) by default; the two new tests below override
+// this per-call for the miss/stub and hit cases the brief names.
+vi.mock('../startup/resolve-resume-transcript', () => ({
+  resolveResumeTranscript: vi.fn(async () => ({ path: '/fake/transcript.jsonl', hasTurn: true }))
+}))
+
 import { randomUUID } from 'node:crypto'
+import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 
 const CALLER: LaunchAdmission = { kind: 'caller' }
 const HOST_ID = 'local'
@@ -38,6 +49,8 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
 
   afterEach(() => {
     vi.mocked(randomUUID).mockReturnValue(MINTED_A)
+    vi.mocked(resolveResumeTranscript).mockReset()
+    vi.mocked(resolveResumeTranscript).mockResolvedValue({ path: '/fake.jsonl', hasTurn: true })
     orchestrationDb?.close()
   })
 

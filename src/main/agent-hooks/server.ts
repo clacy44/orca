@@ -172,8 +172,17 @@ export type AgentHookProviderSessionIdentity = {
    * must be read as unverified by every consumer, same as `false`. */
   anchorHostVerified?: boolean
   /** [S10-21c B4, design §2 S5] The agent type this pane's own status entry names
-   * (`payload.agentType`), so the bootstrap can INSERT a launch row without guessing one. */
+   * (`payload.agentType`), so the bootstrap can INSERT a launch row without guessing one.
+   * CALLER-ASSERTED (the hook payload's own field, `normalizeAgentStatusPayload` only trims/
+   * truncates it — D-R159 finding 2) — cross-checked against `source` below before it is
+   * threaded into a host-only decision. */
   agentType?: string
+  /** [S10-21c B-final F2, D-R159 finding 2] The authenticated hook ROUTE that produced this
+   * event (`enriched.source`, stamped from the URL path server-side — `resolveHookSource`,
+   * never a value the payload can choose), carried verbatim from the pane's newest status
+   * entry. HOST-OWNED, unlike `agentType` above — the fact `bootstrapRowFromLiveReport` cross-
+   * checks `agentType` against. */
+  source?: AgentHookSource
   /** [S10-21c B4, design §2 S5] The execution host the report ARRIVED on, derived from the
    * connection id this server stamped (local for the loopback HTTP path; `ssh:<connectionId>` for
    * a relay ingest, where the connection id is a method argument supplied by the mux, never a
@@ -1057,6 +1066,9 @@ export class AgentHookServer {
           anchorCorroborated: enriched.anchorCorroborated === true,
           anchorHostVerified: enriched.anchorHostVerified === true,
           ...(enriched.payload.agentType ? { agentType: enriched.payload.agentType } : {}),
+          // [S10-21c B-final F2, D-R159 finding 2] The host-owned counterpart to `agentType`
+          // above — the authenticated route, never the caller's own payload.
+          ...(enriched.source ? { source: enriched.source } : {}),
           executionHostId: enriched.connectionId
             ? toSshExecutionHostId(enriched.connectionId)
             : LOCAL_EXECUTION_HOST_ID
@@ -3094,6 +3106,26 @@ export class AgentHookServer {
     }
     return (
       this.persistedAuthorityCommitmentsByPaneKey.get(paneKey)?.launchTokenHash === launchTokenHash
+    )
+  }
+
+  // [S10-21c B-final F7, D-R159 finding 6] Re-runs the SAME host-verification check the
+  // mismatch evaluator's conjunct (i) captured at ingestion (`isHostVerifiedAuthority`), against
+  // this pane's CURRENT authority observation — so a reconciliation write can confirm the anchor
+  // still holds in the same tick as the write, not merely at whatever earlier moment the snapshot
+  // was stamped. `false` when the pane carries no current observation at all (nothing to
+  // re-verify). Carries the SAME bounded, at-most-once-per-generation legacy-anchor persist side
+  // effect `isHostVerifiedAuthority` always has (R92, carried open — D-R146 finding 3/D-R159
+  // finding 6): calling this a second time in one tick is accepted, not newly introduced.
+  reverifyPaneLaunchAuthorityNow(paneKey: string): boolean {
+    const evidence = this.currentAuthorityObservations.get(paneKey)
+    if (!evidence) {
+      return false
+    }
+    return this.isHostVerifiedAuthority(
+      evidence.paneKey,
+      evidence.launchTokenHash,
+      evidence.connectionId
     )
   }
 

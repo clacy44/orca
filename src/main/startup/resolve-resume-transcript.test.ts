@@ -99,6 +99,30 @@ describe('resolveResumeTranscript (S10-21c B2, design S4)', () => {
     expect(resolved).toEqual({ path: target, hasTurn: false })
   })
 
+  // [S10-21c B-final F3, D-R159 finding 3] A SECOND, distinct zero-turn stub shape Claude Code
+  // writes on a `fork_inherit` bridge — measured live on this box at ~137 bytes / 1 line /
+  // `{"type":"history-suppression","cause":"fork_inherit",...}`, no `bridge-session` field
+  // anywhere in it. The pre-fix predicate ("anything but bridge-session") returned `hasTurn:
+  // true` for this; the fixed predicate (turn types only) returns false, same as the stub.
+  it('a history-suppression fork_inherit stub (a second, distinct zero-turn shape) -> hasTurn false (fails at base: base returns hasTurn true)', async () => {
+    const root = await makeRoot('orca-resume-preflight-history-suppression-')
+    const claudeProjectsDir = join(root, 'claude-projects')
+    const projectDir = join(claudeProjectsDir, '-home-ubuntu')
+    await mkdir(projectDir, { recursive: true })
+    const target = join(projectDir, 'e105424a-92d2-4dd1-9299-83e797970cbd.jsonl')
+    const historySuppressionLine =
+      '{"type":"history-suppression","cause":"fork_inherit","sessionId":' +
+      '"e105424a-92d2-4dd1-9299-83e797970cbd"}\n'
+    await writeFile(target, historySuppressionLine)
+
+    const resolved = await resolveResumeTranscript(
+      'claude',
+      'e105424a-92d2-4dd1-9299-83e797970cbd',
+      { claudeProjectsDir }
+    )
+    expect(resolved).toEqual({ path: target, hasTurn: false })
+  })
+
   it('a transcript with a real record after the bridge-session stub -> hasTurn true', async () => {
     const root = await makeRoot('orca-resume-preflight-turn-')
     const claudeProjectsDir = join(root, 'claude-projects')

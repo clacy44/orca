@@ -165,7 +165,7 @@ describe('S10-21a C7i: SCENARIO_CORRECTIONS (Ruling 34 Addendum 27, D-R116 REJEC
       id: 'agent-respawn',
       display_name: 'chair-respawn',
       pane_key: paneKey,
-      process_incarnation: 'pty-respawn:inc-OLD'
+      process_incarnation: 'pty-respawn:13131313-1313-4131-8131-313131313131'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -194,7 +194,10 @@ describe('S10-21a C7i: SCENARIO_CORRECTIONS (Ruling 34 Addendum 27, D-R116 REJEC
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-respawn']),
       terminalIdentityByPtyId: new Map([
-        ['pty-respawn', { handle: 'term_respawn', incarnationId: 'inc-NEW' }]
+        [
+          'pty-respawn',
+          { handle: 'term_respawn', incarnationId: '14141414-1414-4141-8141-414141414141' }
+        ]
       ])
     })
     const outcome = await restoreOneRegisteredPane(
@@ -207,7 +210,7 @@ describe('S10-21a C7i: SCENARIO_CORRECTIONS (Ruling 34 Addendum 27, D-R116 REJEC
       orchestrationDb!,
       HOST_ID,
       'agent-respawn',
-      'pty-respawn:inc-OLD',
+      'pty-respawn:13131313-1313-4131-8131-313131313131',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory

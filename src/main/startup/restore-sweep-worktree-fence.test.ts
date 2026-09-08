@@ -241,7 +241,7 @@ describe('S10-21c B2/S8: worktree fence on restore', () => {
       display_name: 'chair-26',
       pane_key: predPaneKey,
       worktree_id: 'wt-agent',
-      process_incarnation: 'pty-alive:inc-alive'
+      process_incarnation: 'pty-alive:99999999-9999-4999-8999-999999999999'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -258,13 +258,16 @@ describe('S10-21c B2/S8: worktree fence on restore', () => {
       orchestrationDb!,
       HOST_ID,
       'agent-26',
-      'pty-alive:inc-alive',
+      'pty-alive:99999999-9999-4999-8999-999999999999',
       'wt-agent',
       orchestrationDb!.newestLaunchForPane(HOST_ID, predPaneKey)!,
       {
         allLivePtyIds: new Set(['pty-alive']),
         terminalIdentityByPtyId: new Map([
-          ['pty-alive', { handle: 'handle-alive', incarnationId: 'inc-alive' }]
+          [
+            'pty-alive',
+            { handle: 'handle-alive', incarnationId: '99999999-9999-4999-8999-999999999999' }
+          ]
         ])
       }
     )

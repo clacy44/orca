@@ -479,11 +479,15 @@ describe('S10-21c B-final, D-R157-b6c finding 3: recordDesktopMaterialize', () =
       .all(agentId) as { reason_code: string }[]
   }
 
+  // [S10-21c B-final F1, SCENARIO_CORRECTION] Was 'pty-30:inc-30' — a non-UUID incarnation id
+  // that the new explicit shape check (D-R159 finding 1) now correctly treats as unparseable,
+  // which would add a SECOND `incarnation_unparsed` audit row to every test below that doesn't
+  // expect one. UUID-shaped so the default stays a fully-parseable identity, same as before.
   function fakeDeps(over: Partial<RestoreSweepDeps> = {}): RestoreSweepDeps {
     return {
       getOrchestrationDb: () => db,
       getOrchestrationCompatibilityHostId: () => HOST_ID,
-      getTerminalProcessIncarnation: () => 'pty-30:inc-30',
+      getTerminalProcessIncarnation: () => 'pty-30:11111111-1111-4111-8111-111111111111',
       recordRestoredPaneForDesktopMaterialization: () => {},
       ...over
     } as unknown as RestoreSweepDeps
@@ -576,5 +580,46 @@ describe('S10-21c B-final, D-R157-b6c finding 3: recordDesktopMaterialize', () =
     const rows = auditRowsForRecord('agent-30')
     expect(rows).toHaveLength(1)
     expect(rows[0].reason_code).toBe('desktop_materialize_refused: incomplete_surface')
+  })
+
+  // [S10-21c B-final F1, D-R159 finding 1] The real worktree-pty shape
+  // `${repoId}::${path}@@${short}:${uuid}` now parses — S9's enqueue is no longer disabled for
+  // the population finding 1 measured.
+  it('enqueues with the real worktree-pty process-incarnation shape (fails at base: base rejects it as incomplete_surface)', () => {
+    rawDbForRecord()
+    let enqueued: RestoredPaneMaterializeSurface | undefined
+    const deps = fakeDeps({
+      getTerminalProcessIncarnation: () =>
+        '214dd5c0-7235-4fed-99c9-9d9480fca577::/home/ubuntu@@Zb7_DmyB:11aa1e44-9e8f-4ea0-b1c6-7604ce8bf246',
+      recordRestoredPaneForDesktopMaterialization: (surface: RestoredPaneMaterializeSurface) => {
+        enqueued = surface
+      }
+    })
+    recordDesktopMaterialize(deps, 'agent-30', createdResult(), fakeLaunchRow())
+    expect(auditRowsForRecord('agent-30')).toHaveLength(0)
+    expect(enqueued?.expectedProcessIdentity).toEqual({
+      terminalHandle: 'handle-30',
+      incarnationId: '11aa1e44-9e8f-4ea0-b1c6-7604ce8bf246'
+    })
+  })
+
+  // [S10-21c B-final F1, D-R159 finding 1] An unparseable incarnation (the legacy 3-segment form,
+  // or anything else that fails the shape check) is noted, never refused — the surface still
+  // enqueues, with `expectedProcessIdentity` omitted.
+  it('an unparseable incarnation is noted (incarnation_unparsed) but still enqueues, with expectedProcessIdentity omitted', () => {
+    rawDbForRecord()
+    let enqueued: RestoredPaneMaterializeSurface | undefined
+    const deps = fakeDeps({
+      getTerminalProcessIncarnation: () => 'runtime-1:pty-1:gen-1',
+      recordRestoredPaneForDesktopMaterialization: (surface: RestoredPaneMaterializeSurface) => {
+        enqueued = surface
+      }
+    })
+    recordDesktopMaterialize(deps, 'agent-30', createdResult(), fakeLaunchRow())
+    const rows = auditRowsForRecord('agent-30')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reason_code).toBe('desktop_materialize: incarnation_unparsed')
+    expect(enqueued).toBeDefined()
+    expect(enqueued?.expectedProcessIdentity).toBeUndefined()
   })
 })

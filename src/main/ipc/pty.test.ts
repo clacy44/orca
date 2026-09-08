@@ -21077,7 +21077,9 @@ describe('registerPtyHandlers', () => {
       }
 
       const ptyId = 'pty-case-a'
-      const incarnationId = 'inc-new-a'
+      // [S10-21c B-final F1, SCENARIO_CORRECTION] UUID-shaped — D-R159 finding 1's explicit
+      // shape check requires one before rebindRestoredPane's companion refresh will write it.
+      const incarnationId = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc3'
       setLocalPtyProvider(createSelfResumeProvider(runtime, ptyId, incarnationId) as never)
 
       // FAILS AT BASE (be7a229c76): the renderer funnel's own gate sat at the pre-registerPty

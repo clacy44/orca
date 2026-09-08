@@ -17,10 +17,15 @@ import {
 const PREFLIGHT_READ_BYTES = 64 * 1024
 
 /** `hasTurn` is true iff the bounded read prefix carries >=1 COMPLETE JSON record whose `type`
- * is not `'bridge-session'` — the stub's exact, verified shape (267 B, 1 line,
- * `{"type":"bridge-session",...}`, no other record). An unparseable line is, by that same
- * definition, not equal to the stub record, so it counts as a turn rather than being silently
- * treated as absent. No records at all (empty/whitespace-only file) means `hasTurn` is false.
+ * IS one of the turn types (`user`/`assistant`/`summary`) — inverted from the pre-D-R159 "not
+ * bridge-session" predicate, which missed every OTHER zero-turn stub shape Claude Code writes:
+ * measured on this box, a `fork_inherit` stub is 137 B / 1 line /
+ * `{"type":"history-suppression","cause":"fork_inherit",...}`, no `bridge-session` anywhere in
+ * it, and the old predicate returned `hasTurn: true` for it (D-R159 finding 3). An unparseable
+ * line still counts as a turn (its own separate catch-block arm below, unchanged) — a resolver
+ * that cannot even parse the record must fail toward "assume real", never toward a false refusal
+ * of an actual conversation it merely could not read. No records at all (empty/whitespace-only
+ * file) means `hasTurn` is false.
  * [D-R145 medium 5] When every COMPLETE record in the read prefix is a stub AND the file
  * continues beyond the prefix, `hasTurn` is true — a stub-only transcript is always exactly
  * 267 B, so a larger file is provably a real conversation the bounded read merely could not
@@ -81,7 +86,10 @@ export async function resolveResumeTranscript(
       hasTurn = true
       break
     }
-    if ((record as { type?: unknown } | null)?.type !== 'bridge-session') {
+    const recordType = (record as { type?: unknown } | null)?.type
+    // [D-R159 finding 3] Turn types only — inverted from "anything but bridge-session", which
+    // missed every OTHER zero-turn stub shape (e.g. `history-suppression`, `ai-title`, `mode`).
+    if (recordType === 'user' || recordType === 'assistant' || recordType === 'summary') {
       hasTurn = true
       break
     }

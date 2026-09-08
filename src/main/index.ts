@@ -2482,7 +2482,10 @@ void app.whenReady().then(async () => {
         launchGeneration,
         evaluateLiveHookReportMismatch: (params) =>
           // [S10-21c B4] conjunct (iii) — the same host-side resolver S4's sweep preflight uses.
-          db.evaluateLiveHookReportMismatch(params, resolveResumeTranscript),
+          // [S10-21c B-final F7, D-R159 finding 6] The re-verify callback for conjunct (i).
+          db.evaluateLiveHookReportMismatch(params, resolveResumeTranscript, (paneKey) =>
+            agentHookServer.reverifyPaneLaunchAuthorityNow(paneKey)
+          ),
         writeHostNoticeToPane: (paneKey, text, opts) =>
           runtime?.writeHostNoticeToPane(paneKey, text, opts)
       },

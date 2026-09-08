@@ -754,7 +754,9 @@ describe('S10-21a C5: rebindRestoredPane', () => {
       executionHostId: EXEC_HOST_ID,
       launchGeneration: LAUNCH_GEN,
       incumbent: DEAD_INCUMBENT,
-      processIncarnation: 'pty-new:inc-new'
+      // [S10-21c B-final F1, SCENARIO_CORRECTION] UUID-shaped incarnation id — D-R159 finding
+      // 1's explicit shape check requires one before the companion refresh writes it.
+      processIncarnation: 'pty-new:dddddddd-dddd-4ddd-8ddd-ddddddddddd4'
     })
     expect(result).toEqual({ ok: true, rebound: false, agentId: 'agent-same' })
 
@@ -762,7 +764,7 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     // FAILS AT BASE (033bc1f4d9): the clause-3 noop path returns before any UPDATE runs, so
     // both columns stay at their pre-restore values ('handle-old', null).
     expect(row.terminal_handle).toBe('handle-new')
-    expect(row.process_incarnation).toBe('pty-new:inc-new')
+    expect(row.process_incarnation).toBe('pty-new:dddddddd-dddd-4ddd-8ddd-ddddddddddd4')
 
     const auditRows = db
       .prepare(`SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'rebind'`)

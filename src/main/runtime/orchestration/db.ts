@@ -739,6 +739,16 @@ const AGENT_DIRECTORY_SCHEMA_SQL = `
         reason_code       TEXT,
         at                TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- [S10-21c B-final F8, D-R159 finding 8] agent_audit had NO index despite being append-
+      -- only and ever-growing (137 rows measured on this box); this range's own two new
+      -- per-hook-event lookups (writeBootstrapAudit, writeIdChurnAuditOnce) join
+      -- raiseMismatchAlarm's existing 'WHERE actor_pane_key = ? AND verb = ? ORDER BY seq DESC
+      -- LIMIT 1' full scan. Index only -- SCHEMA_VERSION stays 42, this statement is inside the
+      -- unconditional createTables() block (runs on every open regardless of stored version, no
+      -- separate repair-tier entry needed -- unlike the v42 pact indexes, this table's CREATE
+      -- already lives outside any version gate).
+      CREATE INDEX IF NOT EXISTS idx_agent_audit_pane_verb
+        ON agent_audit(actor_pane_key, verb, seq DESC);
       CREATE TRIGGER IF NOT EXISTS trg_agent_audit_no_update
       BEFORE UPDATE ON agent_audit
       BEGIN
@@ -5360,9 +5370,17 @@ export class OrchestrationDb {
   // transcript on disk, so the resolver is injected here rather than imported by the evaluator.
   evaluateLiveHookReportMismatch(
     params: LiveHookReportMismatchParams,
-    resolveResumeTranscript: ResolveLiveReportTranscript
+    resolveResumeTranscript: ResolveLiveReportTranscript,
+    // [S10-21c B-final F7, D-R159 finding 6] Threaded straight through — see the impl's own
+    // doc comment for why this is optional.
+    reverifyPaneLaunchAuthority?: (paneKey: string) => boolean
   ): Promise<LiveHookReportMismatchResult> {
-    return evaluateLiveHookReportMismatchImpl(this.db, params, resolveResumeTranscript)
+    return evaluateLiveHookReportMismatchImpl(
+      this.db,
+      params,
+      resolveResumeTranscript,
+      reverifyPaneLaunchAuthority
+    )
   }
 
   // S10-21a C7b (D-R110 Addendum 22(v)): the sweep's pre-mint unrecorded-newer check.

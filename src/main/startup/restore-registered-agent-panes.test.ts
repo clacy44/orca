@@ -2,6 +2,10 @@
 // The decision-table (rows 1-11, Ruling 34 Addendum 27, C7i) tests live in
 // restore-registered-agent-panes-decision-table.test.ts — split out to stay under the max-lines
 // ratchet. This file keeps the pre-existing, non-decision-table sweep-mechanics tests.
+// [S10-21c B-final F1, D-R159 finding 1, SCENARIO_CORRECTION] Every fixture whose scenario
+// depends on a SUCCESSFUL identity parse (the pty-evidence dead-detection case and the three
+// pty-ambiguous cases) is now UUID-shaped in its incarnation half — parseProcessIncarnation's new
+// explicit shape check (agent-process-identity.ts) requires one.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
@@ -68,7 +72,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
         // empty/legacy one, so the default fixture's `() => null` no longer produces the
         // 'reminted' row this assertion (below) needs — the same fixture change T3b already
         // required for the same reason.
-        getTerminalProcessIncarnation: () => 'pty-t1:inc-t1'
+        getTerminalProcessIncarnation: () => 'pty-t1:aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaa1'
       })
     )
     expect(summary.layer1).toBe(1)
@@ -289,7 +293,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     const outcome = await restoreOneRegisteredPane(
       baseDeps(orchestrationDb!, {
         ensureAgentSession,
-        getTerminalProcessIncarnation: () => 'pty-12:inc-12'
+        getTerminalProcessIncarnation: () => 'pty-12:bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbb2'
       }),
       orchestrationDb!,
       HOST_ID,
@@ -427,7 +431,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       // [S10-21a C7k, Ruling 34 Addendum 28, item 9b Gate-1 restoration] A REAL 2-segment
       // identity — the companion refresh (item 5) now refuses to write an empty/legacy one, so
       // the strict assertion below needs a value that actually parses.
-      getTerminalProcessIncarnation: () => 'pty-t3b:inc-t3b'
+      getTerminalProcessIncarnation: () => 'pty-t3b:cccccccc-3333-4ccc-8ccc-ccccccccccc3'
     })
     const first = await runRestoreSweepBody(deps)
     expect(first.layer1).toBe(1)
@@ -465,7 +469,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       id: 'agent-evidence-identity',
       display_name: 'chair-evidence-identity',
       pane_key: paneKey,
-      process_incarnation: 'pty-evidence:inc-OLD'
+      process_incarnation: 'pty-evidence:aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaa1'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -504,7 +508,10 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-evidence']),
       terminalIdentityByPtyId: new Map([
-        ['pty-evidence', { handle: 'term_evidence', incarnationId: 'inc-NEW' }]
+        [
+          'pty-evidence',
+          { handle: 'term_evidence', incarnationId: 'bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbb2' }
+        ]
       ])
     })
     await restoreOneRegisteredPane(
@@ -512,7 +519,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       orchestrationDb!,
       HOST_ID,
       'agent-evidence-identity',
-      'pty-evidence:inc-OLD',
+      'pty-evidence:aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaa1',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -609,7 +616,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       id: 'agent-ambiguous',
       display_name: 'chair-ambiguous',
       pane_key: paneKeyAmbiguous,
-      process_incarnation: 'pty-ambiguous:inc-1'
+      process_incarnation: 'pty-ambiguous:cccccccc-3333-4ccc-8ccc-ccccccccccc3'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -644,7 +651,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       id: 'agent-ambiguous-a',
       display_name: 'chair-ambiguous-a',
       pane_key: paneKeyA,
-      process_incarnation: 'pty-ambiguous-a:inc-1'
+      process_incarnation: 'pty-ambiguous-a:dddddddd-4444-4ddd-8ddd-ddddddddddd4'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -660,7 +667,7 @@ describe('S10-21a C7b/C7i: runRestoreSweep', () => {
       id: 'agent-ambiguous-b',
       display_name: 'chair-ambiguous-b',
       pane_key: paneKeyB,
-      process_incarnation: 'pty-ambiguous-b:inc-1'
+      process_incarnation: 'pty-ambiguous-b:eeeeeeee-5555-4eee-8eee-eeeeeeeeeee5'
     })
     recordLaunch(db, {
       hostId: HOST_ID,

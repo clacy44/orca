@@ -78,8 +78,15 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   function auditRows(db: Database.Database, paneKey: string) {
     return db
       .prepare(
+        // [S10-21c B-final F8, D-R159 finding 8, SCENARIO_CORRECTION] Explicit ORDER BY seq —
+        // the new idx_agent_audit_pane_verb(actor_pane_key, verb, seq DESC) index makes SQLite's
+        // query planner pick it for this exact WHERE shape, so the previously-implicit (and
+        // never actually guaranteed) ascending insertion order is no longer incidental. The
+        // multi-row assertion this affects (Ruling 34 Addendum 20, below) tests chronological
+        // ordering, not descending — ASC is the correct, deliberate order.
         `SELECT verb, outcome, reason_code FROM agent_audit
-           WHERE actor_pane_key = ? AND verb = 'session_identity_mismatch'`
+           WHERE actor_pane_key = ? AND verb = 'session_identity_mismatch'
+           ORDER BY seq ASC`
       )
       .all(paneKey) as { verb: string; outcome: string; reason_code: string | null }[]
   }
@@ -93,30 +100,38 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   it('an agreeing report is a match — no audit, no row change', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-a',
-      anchorCorroborated: true,
-      anchorHostVerified: false,
-      sessionStartSource: 'fork',
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-a',
+        anchorCorroborated: true,
+        anchorHostVerified: false,
+        sessionStartSource: 'fork',
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'match' })
     expect(auditRows(db, PANE)).toHaveLength(0)
   })
 
   it('a pane with no launch row reports no_row — nothing to compare against', async () => {
     const db = rawDb()
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-a',
-      anchorCorroborated: true,
-      anchorHostVerified: false,
-      sessionStartSource: 'fork',
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-a',
+        anchorCorroborated: true,
+        anchorHostVerified: false,
+        sessionStartSource: 'fork',
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'no_row' })
   })
 
@@ -185,15 +200,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   it('T31 (anchor clause; previous-id clause retired by errata 5(ab)): anchor not corroborated — foreign-id mismatch, alarm, row unchanged', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: 'fork',
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: 'fork',
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch' })
     expect(newestLaunchForPane(db, HOST_ID, PANE)?.session_id).toBe('sess-a')
     const rows = auditRows(db, PANE)
@@ -207,15 +226,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   it('no SessionStart observed at all AND no host verdict — alarm, row unchanged (the host verdict is what refuses; the absent source no longer gates: see agent-lineage-live-report.test.ts)', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: true,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: true,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch' })
     expect(newestLaunchForPane(db, HOST_ID, PANE)?.session_id).toBe('sess-a')
   })
@@ -248,39 +271,51 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   it('D-R107 MEDIUM-1/fix item 2: a pane that moved tabs (same suffix, new tabId prefix) is still resolved — no false no_row', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a', 'tab-OLD:leaf-a')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: 'tab-NEW:leaf-a',
-      reportedSessionId: 'sess-a',
-      anchorCorroborated: true,
-      anchorHostVerified: false,
-      sessionStartSource: 'fork',
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: 'tab-NEW:leaf-a',
+        reportedSessionId: 'sess-a',
+        anchorCorroborated: true,
+        anchorHostVerified: false,
+        sessionStartSource: 'fork',
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'match' })
   })
 
   it('Ruling 34 Addendum 18/20: two DIFFERENT mismatches (each a new fact) produce TWO audit rows', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
-    const first = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
-    const second = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-c',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const first = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
+    const second = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-c',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(first).toEqual({ kind: 'foreign_mismatch' })
     expect(second).toEqual({ kind: 'foreign_mismatch' })
     expect(auditRows(db, PANE)).toHaveLength(2)
@@ -289,24 +324,32 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   it('Ruling 34 Addendum 20: a REPEATED identical mismatch (same recorded/reported pair) is DEDUPED — one audit row, not clamped away', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
-    const first = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
-    const second = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b', // identical reported id — the SAME fact as `first`
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const first = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
+    const second = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b', // identical reported id — the SAME fact as `first`
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(first).toEqual({ kind: 'foreign_mismatch' })
     expect(second).toEqual({ kind: 'foreign_mismatch' })
     const rows = auditRows(db, PANE)
@@ -317,33 +360,45 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
   it('Ruling 34 Addendum 20: a CHANGED reported id after a dedupe run still writes a NEW row', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
-    await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
-    await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b', // duplicate — deduped
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
-    await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-c', // a NEW fact — must audit regardless of the dedupe above
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
+    await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b', // duplicate — deduped
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
+    await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-c', // a NEW fact — must audit regardless of the dedupe above
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     const rows = auditRows(db, PANE)
     expect(rows).toHaveLength(2)
     expect(rows.map((r) => r.reason_code)).toEqual([
@@ -358,15 +413,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
     writeAdmissionAudit(db, 'launch_unrecorded', 'pane_key_owned')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'unrecorded_launch', reason: 'pane_key_owned' })
     const rows = db
       .prepare(
@@ -384,15 +443,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     seedLaunch(db, 'sess-a')
     writeAdmissionAudit(db, 'launch_unrecorded', 'pane_key_owned', PANE, '+1 second')
     writeAdmissionAudit(db, 'launch_refused', 'some_refusal', PANE, '+2 seconds')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch' })
   })
 
@@ -400,15 +463,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     const db = rawDb()
     writeAdmissionAudit(db, 'launch_unrecorded', 'pane_key_owned', PANE, '-1 second')
     seedLaunch(db, 'sess-a') // the "later HOST_MINTED launch" — recorded_at is now
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch' })
   })
 
@@ -417,15 +484,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     // The row's own generation differs from what the live pane now reports under.
     seedLaunch(db, 'sess-a', PANE, 'gen-0')
     writeAdmissionAudit(db, 'launch_unrecorded', 'pane_key_owned', PANE, '+1 second')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: 'gen-1' // the CURRENT generation, distinct from the row's 'gen-0'
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: 'gen-1' // the CURRENT generation, distinct from the row's 'gen-0'
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch' })
   })
 
@@ -433,15 +504,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     const db = rawDb()
     writeAdmissionAudit(db, 'launch_unrecorded', 'pane_key_owned', PANE, '-5 seconds')
     seedLaunch(db, 'sess-a') // the recorded launch, newer than the unrecorded admission above
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch' })
     const rows = db
       .prepare(
@@ -456,15 +531,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a', 'tab-OLD:leaf-a')
     writeAdmissionAudit(db, 'launch_unrecorded', 'pane_key_owned', 'tab-OLD:leaf-a', '+1 second')
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: 'tab-NEW:leaf-a',
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: 'tab-NEW:leaf-a',
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'unrecorded_launch', reason: 'pane_key_owned' })
   })
 
@@ -472,15 +551,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a')
     const before = currentSessionRow(db, PANE)
-    await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: PANE,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: PANE,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(currentSessionRow(db, PANE)).toEqual(before)
   })
 
@@ -488,15 +571,19 @@ describe('S10-21a C6b: evaluateLiveHookReportMismatch', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-a', PANE) // PANE = 'tab1:leaf-a' — the real, registered pane.
     const forgedPaneKey = 'forged-tab:leaf-a' // same suffix (resolves to PANE's row), forged prefix.
-    const result = await evaluateLiveHookReportMismatch(db, {
-      hostId: HOST_ID,
-      paneKey: forgedPaneKey,
-      reportedSessionId: 'sess-b',
-      anchorCorroborated: false,
-      anchorHostVerified: false,
-      sessionStartSource: undefined,
-      launchGeneration: GEN
-    }, REAL_TRANSCRIPT)
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      {
+        hostId: HOST_ID,
+        paneKey: forgedPaneKey,
+        reportedSessionId: 'sess-b',
+        anchorCorroborated: false,
+        anchorHostVerified: false,
+        sessionStartSource: undefined,
+        launchGeneration: GEN
+      },
+      REAL_TRANSCRIPT
+    )
     expect(result).toEqual({ kind: 'foreign_mismatch', attributedPaneKey: PANE })
     expect(newestLaunchForPane(db, HOST_ID, PANE)?.session_id).toBe('sess-a')
     // Audited under the row's REAL pane key — never the forged claimant.

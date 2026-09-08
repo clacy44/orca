@@ -212,8 +212,11 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
       hostId: HOST_ID,
       paneKey: predPaneKey,
       terminalHandle: 'term_old',
-      // The registered agent's OWN identity: this ptyId, an OLD incarnation.
-      processIncarnation: `${reusedPtyId}:inc-OLD`,
+      // The registered agent's OWN identity: this ptyId, an OLD incarnation. [S10-21c B-final
+      // F1, SCENARIO_CORRECTION] UUID-shaped incarnation id — the new explicit shape check
+      // (D-R159 finding 1) requires one; the test's own point (same ptyId, DIFFERENT
+      // incarnation -> provably dead) is orthogonal to whether the id looks like a UUID.
+      processIncarnation: `${reusedPtyId}:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1`,
       worktreeId: 'wt-1',
       worktreePath: null,
       branch: null,
@@ -246,7 +249,7 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
       allLivePtyIds: new Set([reusedPtyId]),
       // The daemon relists the SAME ptyId under a NEW incarnation — provably not this agent.
       terminalIdentityByPtyId: new Map([
-        [reusedPtyId, { handle: 'term_new', incarnationId: 'inc-NEW' }]
+        [reusedPtyId, { handle: 'term_new', incarnationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2' }]
       ])
     })
     const summary = await runRestoreSweep(deps)
@@ -350,6 +353,63 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
 
     await runtime.materializeRestoredAgentPanes()
     expect(revealTerminalSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+// [S10-21c B-final F9, D-R159 finding 9] materializeRestoredAgentPanes' getOrchestrationDb()
+// retry — own describe (no `db` fixture needed, the queue is empty and the drain has nothing to
+// reveal either way; only the retry/warn behaviour is under test).
+describe('S10-21c B-final F9: materializeRestoredAgentPanes getOrchestrationDb() retry', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function bareRuntime(): OrcaRuntimeService {
+    const runtime = new OrcaRuntimeService({
+      getSettings: () => ({
+        disabledTuiAgents: [],
+        agentCmdOverrides: {},
+        agentDefaultArgs: {},
+        agentDefaultEnv: {}
+      })
+    } as never)
+    runtime.setNotifier({ revealTerminalSession: vi.fn() } as never)
+    return runtime
+  }
+
+  it('a SECOND getOrchestrationDb() throw warns exactly once (desktop_materialize_audit_unavailable) and still drains (never throws) — fails at base: base warns on the FIRST throw with no retry', async () => {
+    const runtime = bareRuntime()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(runtime, 'getOrchestrationDb').mockImplementation(() => {
+      throw new Error('db unavailable')
+    })
+    await expect(runtime.materializeRestoredAgentPanes()).resolves.toBeUndefined()
+    expect(runtime.getOrchestrationDb).toHaveBeenCalledTimes(2)
+    const auditUnavailableCalls = warn.mock.calls.filter(
+      (call) => call[0] === '[restore-sweep] desktop_materialize_audit_unavailable'
+    )
+    expect(auditUnavailableCalls).toHaveLength(1)
+  })
+
+  it('a transient (first-call-only) getOrchestrationDb() throw is recovered by the retry — no warning, db attached', async () => {
+    const runtime = bareRuntime()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const realDb = new OrchestrationDb(':memory:')
+    let calls = 0
+    vi.spyOn(runtime, 'getOrchestrationDb').mockImplementation(() => {
+      calls += 1
+      if (calls === 1) {
+        throw new Error('transient')
+      }
+      return realDb
+    })
+    await expect(runtime.materializeRestoredAgentPanes()).resolves.toBeUndefined()
+    expect(runtime.getOrchestrationDb).toHaveBeenCalledTimes(2)
+    const auditUnavailableCalls = warn.mock.calls.filter(
+      (call) => call[0] === '[restore-sweep] desktop_materialize_audit_unavailable'
+    )
+    expect(auditUnavailableCalls).toHaveLength(0)
+    realDb.close()
   })
 })
 

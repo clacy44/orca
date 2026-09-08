@@ -14,8 +14,9 @@ import { spliceHostMintedSessionId } from '../../shared/agent-resume-launch-comm
 import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
-import { isStablePaneId } from '../../shared/stable-pane-id'
+import { isSessionId } from '../../shared/stable-pane-id'
 import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
+import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // [JUDGMENT CALL, see RETURN] `OrchestrationDb` (db.ts), not the raw `Database.Database` the
 // store module (agent-launch-sessions.ts) takes: `OrchestrationDb.db` is private with no public
 // accessor, so a pty.ts call site — which only ever holds `runtime.getOrchestrationDb()` — cannot
@@ -368,8 +369,22 @@ export async function admitAgentLaunch(
       // a mis-parsed or typo'd token is refused loudly here instead of silently becoming the
       // pane's newest row (which would cost that pane its restore until the next successful
       // launch, per B2's transcript preflight).
-      if (!isStablePaneId(x)) {
+      if (!isSessionId(x)) {
         return unrecorded('resume_target_unparseable')
+      }
+      // [S10-21c B-final F4, D-R159 finding 4] X is shaped like a session id, but shape alone
+      // does not prove it NAMES one — S4's own preflight (resolve-resume-transcript.ts) refuses
+      // exactly this at the NEXT sweep (`sweep_resume_target_absent`), after this arm has already
+      // superseded the pane's good row and cost it its automatic restore. Reuse the same resolver
+      // here, before recording: a miss, an empty/stub-only transcript, or an agent type S4 does
+      // not cover yet all refuse loudly (`unrecorded`, spawn still proceeds) rather than writing
+      // an id that the sweep's own preflight would only tear back out later.
+      const resumeTranscript = await resolveResumeTranscript(
+        spawnOptions.launchAgent ?? 'claude',
+        x
+      )
+      if (!resumeTranscript || 'coverage' in resumeTranscript || !resumeTranscript.hasTurn) {
+        return unrecorded('resume_target_absent')
       }
       const recorded = db.recordLaunch({
         hostId: ctx.hostId,
@@ -398,8 +413,18 @@ export async function admitAgentLaunch(
       // raises above (:326) — this arm writes to the pane too, and a registered chair's pane
       // changing its recorded session needs the same trace. Fires regardless of `restated`: the
       // write happened either way.
-      if (registeredRow !== undefined && registeredRow.derived === 0) {
-        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
+      // [S10-21c B-final F5, D-R159 finding 5] A DERIVED registered row (`derived === 1`) gets
+      // NO trace at all from the branch below — the contested-lineage signal is fenced on
+      // non-derived rows only (OD-H: S3 applies no registration predicate by design, but THIS
+      // admission surface still must not supersede a derived row's recorded session silently).
+      // A distinct outcome, never `contestedLineage` (which is reserved for the non-derived,
+      // registered-owner signal), so a supersession here is never traceless either way.
+      if (registeredRow !== undefined) {
+        if (registeredRow.derived === 0) {
+          ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
+        } else {
+          audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
+        }
       }
       // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
       // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
@@ -482,8 +507,14 @@ export async function admitAgentLaunch(
     // `owned` early return that used to sit here is gone, per the comment block above), and
     // without this the only trace that the pane's recorded session changed was the launch row
     // plus a pty text notice — no `agent_audit` row at all.
-    if (registeredRow !== undefined && registeredRow.derived === 0) {
-      ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
+    // [S10-21c B-final F5, D-R159 finding 5] Same derived-row fix as the caller_resume arm above:
+    // a DERIVED registered row gets its own distinct audit outcome instead of silence.
+    if (registeredRow !== undefined) {
+      if (registeredRow.derived === 0) {
+        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
+      } else {
+        audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
+      }
     }
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {

@@ -157,7 +157,9 @@ describe('S10-21a C5: rebindRestoredPane — pact fixtures', () => {
       executionHostId: EXEC_HOST_ID,
       launchGeneration: LAUNCH_GEN,
       incumbent: DEAD_INCUMBENT,
-      processIncarnation: 'pty-same-pact:inc-new'
+      // [S10-21c B-final F1, D-R159 finding 1, SCENARIO_CORRECTION] UUID-shaped incarnation id —
+      // the new explicit shape check requires one before the refresh (and its pact-unpause) runs.
+      processIncarnation: 'pty-same-pact:12121212-1212-4121-8121-212121212121'
     })
     expect(result).toEqual({
       ok: true,

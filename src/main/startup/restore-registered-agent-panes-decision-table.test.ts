@@ -3,6 +3,12 @@
 // table's rows 1-11 (row 7/self-resume watermark is C7j, not here). Split out of
 // restore-registered-agent-panes.test.ts (which keeps the pre-existing sweep-mechanics tests) to
 // stay under the max-lines ratchet.
+// [S10-21c B-final F1, D-R159 finding 1, SCENARIO_CORRECTION] Every fixture whose scenario
+// depends on a SUCCESSFUL identity parse (rows 1 and 3, and both "same ptyId, different
+// incarnation" cases) is now UUID-shaped in its incarnation half — parseProcessIncarnation's new
+// explicit shape check (agent-process-identity.ts) requires one. Rows 2/4-11 are unaffected: row
+// 2 short-circuits before the parse (a null inventory), and rows 4-11 treat 'dead' and
+// 'unknown_no_identity' identically (row 4's own title says so).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
@@ -40,7 +46,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       id: 'agent-row1',
       display_name: 'chair-row1',
       pane_key: paneKey,
-      process_incarnation: 'pty-1:inc-1'
+      process_incarnation: 'pty-1:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -55,14 +61,16 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const mintRestoreTicket = vi.fn()
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-1']),
-      terminalIdentityByPtyId: new Map([['pty-1', { handle: 'term_1', incarnationId: 'inc-1' }]])
+      terminalIdentityByPtyId: new Map([
+        ['pty-1', { handle: 'term_1', incarnationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1' }]
+      ])
     })
     const outcome = await restoreOneRegisteredPane(
       baseDeps(orchestrationDb!, { ensureAgentSession, mintRestoreTicket }),
       orchestrationDb!,
       HOST_ID,
       'agent-row1',
-      'pty-1:inc-1',
+      'pty-1:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -73,7 +81,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const rows = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_skip'
-           AND reason_code = 'daemon_survived: agent_pty_identity_matched pty-1:inc-1'`
+           AND reason_code = 'daemon_survived: agent_pty_identity_matched pty-1:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'`
       )
       .all()
     expect(rows).toHaveLength(1)
@@ -126,7 +134,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       id: 'agent-row3',
       display_name: 'chair-row3',
       pane_key: paneKey,
-      process_incarnation: 'pty-3:inc-3'
+      process_incarnation: 'pty-3:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -144,7 +152,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       orchestrationDb!,
       HOST_ID,
       'agent-row3',
-      'pty-3:inc-3',
+      'pty-3:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -685,7 +693,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       id: 'agent-samepty-held',
       display_name: 'chair-samepty-held',
       pane_key: paneKey,
-      process_incarnation: 'pty-same:inc-OLD'
+      process_incarnation: 'pty-same:cccccccc-cccc-4ccc-8ccc-ccccccccccc4'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -712,7 +720,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-same']),
       terminalIdentityByPtyId: new Map([
-        ['pty-same', { handle: 'term_same', incarnationId: 'inc-NEW' }]
+        ['pty-same', { handle: 'term_same', incarnationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd5' }]
       ])
     })
     const outcome = await restoreOneRegisteredPane(
@@ -723,7 +731,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       orchestrationDb!,
       HOST_ID,
       'agent-samepty-held',
-      'pty-same:inc-OLD',
+      'pty-same:cccccccc-cccc-4ccc-8ccc-ccccccccccc4',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -750,7 +758,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       id: 'agent-samepty-free',
       display_name: 'chair-samepty-free',
       pane_key: paneKey,
-      process_incarnation: 'pty-same2:inc-OLD'
+      process_incarnation: 'pty-same2:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee6'
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -774,7 +782,10 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-same2']),
       terminalIdentityByPtyId: new Map([
-        ['pty-same2', { handle: 'term_same2', incarnationId: 'inc-NEW' }]
+        [
+          'pty-same2',
+          { handle: 'term_same2', incarnationId: 'ffffffff-ffff-4fff-8fff-fffffffffff7' }
+        ]
       ])
     })
     const outcome = await restoreOneRegisteredPane(
@@ -786,7 +797,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
       orchestrationDb!,
       HOST_ID,
       'agent-samepty-free',
-      'pty-same2:inc-OLD',
+      'pty-same2:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee6',
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
