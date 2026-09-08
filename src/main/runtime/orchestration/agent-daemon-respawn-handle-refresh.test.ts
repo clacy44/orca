@@ -377,4 +377,53 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
       evidence: 'host_launch'
     })
   })
+
+  // [S10-21d D-R162 M-1] The daemon_survived row was inserted with agent_id NULL — every sibling
+  // writer binds it (agent-restore-rebind.ts:196,357,408; agent-lineage-mismatch.ts:387) — so
+  // retiring the agent left an orphan newest row that suppresses S5 bootstrap for the pane's next
+  // occupant (agent-lineage-mismatch.ts). FIX: setLaunchAgentId in the same transaction.
+  it('R162 M-1: the fresh daemon_survived launch row is bound to the agent id, and retire deletes it', () => {
+    const db = rawDb()
+    const paneKey = 'tab1:leaf-daemon-survived-m1'
+    insertAgent(db, {
+      id: 'agent-daemon-survived-m1',
+      display_name: 'chair-daemon-survived-m1',
+      pane_key: paneKey,
+      terminal_handle: 'term_old'
+    })
+    orchestrationDb!.recordLaunch({
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-m1',
+      launchGeneration: 'gen-old',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      paneKey,
+      newTerminalHandle: 'term_new',
+      agentId: 'agent-daemon-survived-m1',
+      currentLaunchGeneration: 'gen-new'
+    })
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-daemon-survived-m1' })
+
+    const newestRow = db
+      .prepare(
+        `SELECT agent_id FROM agent_launch_sessions WHERE host_id = ? AND pane_key = ?
+           ORDER BY seq DESC LIMIT 1`
+      )
+      .get(HOST_ID, paneKey) as { agent_id: string | null }
+    expect(newestRow.agent_id).toBe('agent-daemon-survived-m1')
+
+    orchestrationDb!.retireAgent('agent-daemon-survived-m1')
+    const boundRowsAfterRetire = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM agent_launch_sessions WHERE agent_id = 'agent-daemon-survived-m1'`
+      )
+      .get() as { n: number }
+    expect(boundRowsAfterRetire.n).toBe(0)
+  })
 })

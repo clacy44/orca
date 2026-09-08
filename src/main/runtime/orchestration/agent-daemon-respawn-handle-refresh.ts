@@ -12,7 +12,11 @@ import { getAgentByIdIncludingTombstoned } from './agent-retire'
 import { writeAgentAudit } from './agent-audit-log'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 import { parseProcessIncarnation } from './agent-process-identity'
-import { newestLaunchForPane, recordLaunchInTransaction } from './agent-launch-sessions'
+import {
+  newestLaunchForPane,
+  recordLaunchInTransaction,
+  setLaunchAgentId
+} from './agent-launch-sessions'
 
 export type RefreshAgentHandleAfterRespawnParams = {
   hostId: string
@@ -130,7 +134,13 @@ export function refreshAgentHandleAfterRespawn(
           executionHostId: newest.execution_host_id,
           evidence: 'daemon_survived'
         })
-        if (!launchResult.ok) {
+        if (launchResult.ok) {
+          // [S10-21d D-R162 M-1] Every sibling writer of a launch row binds agent_id
+          // (agent-restore-rebind.ts:196,357,408; agent-lineage-mismatch.ts:387) — this one
+          // didn't, leaving retire() an orphan newest row that suppresses S5 bootstrap for the
+          // pane's next occupant (agent-lineage-mismatch.ts).
+          setLaunchAgentId(db, { seq: launchResult.row.seq }, row.id)
+        } else {
           writeAgentAudit(db, {
             agentId: row.id,
             actorPaneKey: params.paneKey,
