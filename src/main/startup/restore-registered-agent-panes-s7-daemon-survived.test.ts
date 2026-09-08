@@ -84,6 +84,18 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     return thread.id
   }
 
+  // [S10-21c B-final M4, D-R160 medium 4] REAL-SHAPED end to end: `agents.process_incarnation`,
+  // the `processIncarnation` argument `restoreOneRegisteredPane` receives (mirroring what
+  // `runRestoreSweepBody` reads straight off the registered row, restore-registered-agent-
+  // panes.ts:375), and the inventory key are all `${repoId}::${worktreePath}@@${short}:${uuid}`
+  // — the shape the minter actually produces (worktree ptyId, `pty-session-id.ts:23`), never the
+  // colon-free synthetic `pty-s7` every OTHER fixture in this file still uses. Proves
+  // `decideEarlyRows` AND `restoreOneRegisteredPane` reach `skipped_daemon_survived` on this
+  // shape; red at `bc3dcdc684` (this worker's own red-at-base run, before F1's parser fix).
+  const REAL_PTY_ID = '214dd5c0-7235-4fed-99c9-9d9480fca577::/home/ubuntu@@Zb7_DmyB'
+  const REAL_INCARNATION_ID = '80808080-8080-4808-8808-808080808088'
+  const REAL_PROCESS_INCARNATION = `${REAL_PTY_ID}:${REAL_INCARNATION_ID}`
+
   it("calls refreshAgentHandleAfterRespawn with the candidate's own agentId, then notifyRebindDelivery once", async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7a0'
@@ -91,7 +103,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       id: 'agent-s7',
       display_name: 'chair-s7',
       pane_key: paneKey,
-      process_incarnation: 'pty-s7:80808080-8080-4808-8808-808080808088'
+      process_incarnation: REAL_PROCESS_INCARNATION
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -103,12 +115,9 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       evidence: 'host_launch'
     })
     const inventory = emptyInventory({
-      allLivePtyIds: new Set(['pty-s7']),
+      allLivePtyIds: new Set([REAL_PTY_ID]),
       terminalIdentityByPtyId: new Map([
-        [
-          'pty-s7',
-          { handle: 'term_fresh_s7', incarnationId: '80808080-8080-4808-8808-808080808088' }
-        ]
+        [REAL_PTY_ID, { handle: 'term_fresh_s7', incarnationId: REAL_INCARNATION_ID }]
       ])
     })
     const notifyRebindDelivery = vi.fn()
@@ -118,7 +127,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       orchestrationDb!,
       HOST_ID,
       'agent-s7',
-      'pty-s7:80808080-8080-4808-8808-808080808088',
+      REAL_PROCESS_INCARNATION,
       'wt-1',
       orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
       inventory
@@ -129,7 +138,7 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
       hostId: HOST_ID,
       paneKey,
       newTerminalHandle: 'term_fresh_s7',
-      processIncarnation: 'pty-s7:80808080-8080-4808-8808-808080808088',
+      processIncarnation: REAL_PROCESS_INCARNATION,
       agentId: 'agent-s7'
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(1)

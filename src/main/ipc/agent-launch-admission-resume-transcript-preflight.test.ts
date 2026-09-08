@@ -103,4 +103,51 @@ describe('S10-21c B-final F4, D-R159 finding 4: caller_resume resume-transcript 
     expect(row?.session_id).toBe(REAL_CONVERSATION_ID)
     expect(row?.evidence).toBe('caller_resume')
   })
+
+  // [S10-21c B-final M2, D-R160 medium 2] A throwing resolver (a transcript-file race, EACCES,
+  // EMFILE) must never fail the spawn — loud `unrecorded`, no row, no throw out of the pane lock.
+  it('a resolveResumeTranscript that THROWS is unrecorded (resume_preflight_failed), no row, and the spawn still proceeds — fails at base: base had no try/catch here', async () => {
+    const db = freshDb()
+    vi.mocked(resolveResumeTranscript).mockRejectedValue(new Error('EACCES'))
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: `claude --resume ${REAL_CONVERSATION_ID}` }),
+      CALLER,
+      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+    )
+    expect(admitted.spawnOptions.command).toBe(`claude --resume ${REAL_CONVERSATION_ID}`)
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    expect(notices).toEqual([
+      {
+        paneKey: 'tab1:leaf-a',
+        verb: 'launch_unrecorded',
+        reasonCode: 'resume_preflight_failed'
+      }
+    ])
+  })
+
+  // [S10-21c B-final M3, D-R160 medium 3] `{coverage:'uncovered'}` is a distinct reason from a
+  // genuine miss — S4's own `decideResumePreflight` treats "not covered yet" as never a refusal
+  // of a MISSING target; this arm's audit must not claim the wrong cause either.
+  it("{coverage:'uncovered'} is unrecorded resume_preflight_uncovered, never resume_target_absent", async () => {
+    const db = freshDb()
+    vi.mocked(resolveResumeTranscript).mockResolvedValue({ coverage: 'uncovered' })
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: `claude --resume ${REAL_CONVERSATION_ID}` }),
+      CALLER,
+      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+    )
+    expect(admitted.spawnOptions.command).toBe(`claude --resume ${REAL_CONVERSATION_ID}`)
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    expect(notices).toEqual([
+      {
+        paneKey: 'tab1:leaf-a',
+        verb: 'launch_unrecorded',
+        reasonCode: 'resume_preflight_uncovered'
+      }
+    ])
+  })
 })

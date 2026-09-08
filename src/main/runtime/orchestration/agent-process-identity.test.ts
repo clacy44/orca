@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   agentAlive,
+  classifyUnparseableProcessIncarnation,
   parseProcessIncarnation,
   type ControllerInventory
 } from './agent-process-identity'
@@ -44,6 +45,25 @@ describe('parseProcessIncarnation', () => {
     expect(parseProcessIncarnation('')).toBeNull()
     expect(parseProcessIncarnation(null)).toBeNull()
     expect(parseProcessIncarnation(undefined)).toBeNull()
+  })
+})
+
+// [S10-21c B-final L6, D-R160 low 6]
+describe('classifyUnparseableProcessIncarnation', () => {
+  it("the legacy 3-segment '<runtimeId>:<ptyId>:<gen>' shape -> 'legacy_form'", () => {
+    expect(classifyUnparseableProcessIncarnation('runtime-1:pty-1:gen-1')).toBe('legacy_form')
+  })
+
+  it("a 2-segment ptyId:incarnation pair whose incarnation just isn't a UUID -> 'non_uuid_incarnation'", () => {
+    expect(classifyUnparseableProcessIncarnation('pty-1:not-a-uuid')).toBe('non_uuid_incarnation')
+  })
+
+  it("a real worktree ptyId (its own '::' colons) with a non-UUID incarnation -> 'non_uuid_incarnation', never 'legacy_form'", () => {
+    expect(
+      classifyUnparseableProcessIncarnation(
+        '214dd5c0-7235-4fed-99c9-9d9480fca577::/home/ubuntu@@Zb7_DmyB:not-a-uuid'
+      )
+    ).toBe('non_uuid_incarnation')
   })
 })
 

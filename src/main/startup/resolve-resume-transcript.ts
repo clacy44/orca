@@ -5,7 +5,10 @@
 // before any turn?" B2b bounds the read (real transcripts on this box run tens of MB) and
 // distinguishes "this resolver doesn't cover the agent type yet" from "covered and absent".
 import { open, stat } from 'node:fs/promises'
-import { resolveNativeChatTranscriptAgent } from '../../shared/native-chat-agent-support'
+import {
+  resolveNativeChatTranscriptAgent,
+  type NativeChatTranscriptAgent
+} from '../../shared/native-chat-agent-support'
 import {
   resolveSessionFilePath,
   type ResolveSessionFileOptions
@@ -16,10 +19,29 @@ import {
  * regardless of how large the transcript actually is. */
 const PREFLIGHT_READ_BYTES = 64 * 1024
 
-/** `hasTurn` is true iff the bounded read prefix carries >=1 COMPLETE JSON record whose `type`
- * IS one of the turn types (`user`/`assistant`/`summary`) — inverted from the pre-D-R159 "not
- * bridge-session" predicate, which missed every OTHER zero-turn stub shape Claude Code writes:
- * measured on this box, a `fork_inherit` stub is 137 B / 1 line /
+/** [D-R160 high 1] Turn types are PER TRANSCRIPT AGENT, never one global set — the pre-fix
+ * predicate used claude's own vocabulary inside a resolver that also covers codex/grok/omp, so a
+ * real codex or omp conversation under the 64 KiB bounded read was classified as having no turns
+ * and loudly, falsely refused. Derived from each agent's own decoder: claude/openclaude (via
+ * `resolveNativeChatTranscriptAgent` -> `'claude'`) and grok both decode `user`/`assistant` turns
+ * (transcript-line-decoders-grok.ts:33; claude's own transcript format additionally writes
+ * `summary` records); codex decodes `response_item`/`event_msg`
+ * (transcript-line-decoders-codex.ts:33,36) — `session_meta`/`turn_context` records never match
+ * either branch there and so are correctly never turns; omp decodes `message`/`custom_message`
+ * (transcript-line-decoders-omp.ts:36). */
+const TURN_TYPES_BY_TRANSCRIPT_AGENT: Readonly<
+  Record<NativeChatTranscriptAgent, ReadonlySet<string>>
+> = {
+  claude: new Set(['user', 'assistant', 'summary']),
+  grok: new Set(['user', 'assistant', 'summary']),
+  codex: new Set(['response_item', 'event_msg']),
+  omp: new Set(['message', 'custom_message'])
+}
+
+/** `hasTurn` is true iff the bounded read prefix carries >=1 COMPLETE JSON record whose `type` IS
+ * one of `agentType`'s own turn types (`TURN_TYPES_BY_TRANSCRIPT_AGENT` above) — inverted from
+ * the pre-D-R159 "not bridge-session" predicate, which missed every OTHER zero-turn stub shape
+ * Claude Code writes: measured on this box, a `fork_inherit` stub is 137 B / 1 line /
  * `{"type":"history-suppression","cause":"fork_inherit",...}`, no `bridge-session` anywhere in
  * it, and the old predicate returned `hasTurn: true` for it (D-R159 finding 3). An unparseable
  * line still counts as a turn (its own separate catch-block arm below, unchanged) — a resolver
@@ -42,9 +64,11 @@ export async function resolveResumeTranscript(
   sessionId: string,
   options: ResolveSessionFileOptions = {}
 ): Promise<{ path: string; hasTurn: boolean } | { coverage: 'uncovered' } | null> {
-  if (!resolveNativeChatTranscriptAgent(agentType)) {
+  const transcriptAgent = resolveNativeChatTranscriptAgent(agentType)
+  if (!transcriptAgent) {
     return { coverage: 'uncovered' }
   }
+  const turnTypes = TURN_TYPES_BY_TRANSCRIPT_AGENT[transcriptAgent]
   const path = await resolveSessionFilePath(agentType, sessionId, options)
   if (!path) {
     return null
@@ -87,9 +111,10 @@ export async function resolveResumeTranscript(
       break
     }
     const recordType = (record as { type?: unknown } | null)?.type
-    // [D-R159 finding 3] Turn types only — inverted from "anything but bridge-session", which
-    // missed every OTHER zero-turn stub shape (e.g. `history-suppression`, `ai-title`, `mode`).
-    if (recordType === 'user' || recordType === 'assistant' || recordType === 'summary') {
+    // [D-R159 finding 3, D-R160 high 1] Turn types only, per transcript agent — inverted from
+    // "anything but bridge-session", which missed every OTHER zero-turn stub shape (e.g.
+    // `history-suppression`, `ai-title`, `mode`).
+    if (typeof recordType === 'string' && turnTypes.has(recordType)) {
       hasTurn = true
       break
     }

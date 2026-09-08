@@ -17851,6 +17851,12 @@ export class OrcaRuntimeService {
   // encodes the stable identity instead (ptyId is persisted per pane in the workspace session
   // store, pty.ts's resolvePersistedStablePaneOwner). Once this process's pty graph has
   // reconnected that same ptyId, re-derive whatever handle currently names it.
+  // [D-R160 low 7, R95 — CARRIED OPEN, out of range, chair decision] Still splits at the FIRST
+  // ':', the same defect F1 fixed one module over (agent-process-identity.ts's
+  // `parseProcessIncarnation`) — a worktree ptyId's own `::` tears the ptyId in half here too,
+  // so this returns null for every worktree pty on this box. Fail-safe (the caller falls back
+  // to `inspectTerminalProcessIncarnationLiveness`'s `startsWith` match), so INV-P-013's runtime
+  // prune merely misses its fast path rather than misidentifying a pane. Deferred to next train.
   resolveLivePeerPaneHandle(processIncarnation: string): string | null {
     const colonIndex = processIncarnation.indexOf(':')
     if (colonIndex <= 0) {

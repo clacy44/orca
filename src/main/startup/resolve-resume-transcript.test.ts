@@ -175,6 +175,86 @@ describe('resolveResumeTranscript (S10-21c B2, design S4)', () => {
     expect(resolved).toEqual({ coverage: 'uncovered' })
   })
 
+  // [S10-21c B-final H1, D-R160 high 1] Turn types are PER TRANSCRIPT AGENT (resolved from each
+  // agent's own decoder) — the pre-fix predicate used claude's vocabulary globally, so a real
+  // codex/omp conversation under the 64 KiB bounded read was misclassified as turn-free.
+  describe('[D-R160 high 1] turn types are per transcript agent', () => {
+    it('claude: a minimal transcript with one user turn -> hasTurn true', async () => {
+      const root = await makeRoot('orca-resume-preflight-claude-turn-')
+      const claudeProjectsDir = join(root, 'claude-projects')
+      const projectDir = join(claudeProjectsDir, '-home-ubuntu')
+      await mkdir(projectDir, { recursive: true })
+      const target = join(projectDir, 'claude-minimal.jsonl')
+      await writeFile(target, '{"type":"user","message":{"role":"user","content":"hi"}}\n')
+
+      const resolved = await resolveResumeTranscript('claude', 'claude-minimal', {
+        claudeProjectsDir
+      })
+      expect(resolved).toEqual({ path: target, hasTurn: true })
+    })
+
+    it('codex: a rollout with a session_meta record then a response_item turn -> hasTurn true (fails at base: base predicate only recognized user/assistant/summary)', async () => {
+      const root = await makeRoot('orca-resume-preflight-codex-turn-')
+      const codexDir = join(root, 'codex-sessions')
+      await mkdir(codexDir, { recursive: true })
+      const target = join(codexDir, 'rollout-codex-turn.jsonl')
+      await writeFile(
+        target,
+        '{"type":"session_meta","payload":{"id":"codex-turn"}}\n' +
+          '{"type":"response_item","payload":{"id":"codex-turn","type":"message","role":"assistant","content":[]}}\n'
+      )
+
+      const resolved = await resolveResumeTranscript('codex', 'codex-turn', {
+        codexSessionsDirs: [codexDir]
+      })
+      expect(resolved).toEqual({ path: target, hasTurn: true })
+    })
+
+    it('codex: a session_meta-only rollout -> hasTurn false', async () => {
+      const root = await makeRoot('orca-resume-preflight-codex-meta-only-')
+      const codexDir = join(root, 'codex-sessions')
+      await mkdir(codexDir, { recursive: true })
+      const target = join(codexDir, 'rollout-codex-meta-only.jsonl')
+      await writeFile(target, '{"type":"session_meta","payload":{"id":"codex-meta-only"}}\n')
+
+      const resolved = await resolveResumeTranscript('codex', 'codex-meta-only', {
+        codexSessionsDirs: [codexDir]
+      })
+      expect(resolved).toEqual({ path: target, hasTurn: false })
+    })
+
+    it('omp: a session with one message turn -> hasTurn true (fails at base)', async () => {
+      const root = await makeRoot('orca-resume-preflight-omp-turn-')
+      const ompDir = join(root, 'omp-sessions')
+      const workspaceDir = join(ompDir, '-home-ubuntu-project')
+      await mkdir(workspaceDir, { recursive: true })
+      const target = join(workspaceDir, '2026-01-01T00-00-00_omp-turn.jsonl')
+      await writeFile(
+        target,
+        '{"type":"message","id":"m1","message":{"role":"user","content":"hi"}}\n'
+      )
+
+      const resolved = await resolveResumeTranscript('omp', 'omp-turn', {
+        ompSessionsDir: ompDir
+      })
+      expect(resolved).toEqual({ path: target, hasTurn: true })
+    })
+
+    it('grok: a chat_history with one user turn -> hasTurn true', async () => {
+      const root = await makeRoot('orca-resume-preflight-grok-turn-')
+      const grokDir = join(root, 'grok-sessions')
+      const sessionDir = join(grokDir, 'workspace-group', 'grok-turn')
+      await mkdir(sessionDir, { recursive: true })
+      const target = join(sessionDir, 'chat_history.jsonl')
+      await writeFile(target, '{"type":"user","content":"hi"}\n')
+
+      const resolved = await resolveResumeTranscript('grok', 'grok-turn', {
+        grokSessionsDir: grokDir
+      })
+      expect(resolved).toEqual({ path: target, hasTurn: true })
+    })
+  })
+
   it('[D-R148 low 3] a whole file of nothing but repeated bridge-session stubs, >64 KiB -> hasTurn true (the deliberate false positive; red against a whole-file scan)', async () => {
     const root = await makeRoot('orca-resume-preflight-allstub-')
     const claudeProjectsDir = join(root, 'claude-projects')

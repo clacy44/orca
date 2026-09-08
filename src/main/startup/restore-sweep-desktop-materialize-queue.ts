@@ -64,9 +64,12 @@ export type RestoredPaneMaterializeSurface = {
   // be a trap for the next reader who wires it up.
   // [S10-21c B-final F1, D-R159 finding 1] OPTIONAL: an unparseable `agents.process_incarnation`
   // (measured on-box to be the COMMON case pre-fix, and possible even post-fix for a genuinely
-  // legacy row) must never refuse the whole Layer-2 surface over an unused field — the consumer
-  // (`DesktopMaterializeNotifier#revealTerminalSession`) only ever tests this for presence, never
-  // reads through it (attach-main-window-services.ts:388-392).
+  // legacy row) must never refuse the whole Layer-2 surface over an unused field. [S10-21c
+  // B-final L7, D-R160 low 7] The field is not inert, though: its PRESENCE gates the reveal
+  // primitive's own identity assertion (`attach-main-window-services.ts:388-392` builds
+  // `expectedIdentity` only when this field is present, and enforces it only when built) — but
+  // omitting it loses nothing, because the drain re-checks the same four fields
+  // (worktreeId/tabId/leafId/ptyId, this file's own drain, :265-273) either way.
   expectedProcessIdentity?: { terminalHandle: string; incarnationId: string }
 }
 

@@ -54,6 +54,13 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
   }
 
   function params(over: Partial<LiveHookReportMismatchParams> = {}): LiveHookReportMismatchParams {
+    // [S10-21c B-final F2, D-R160 F2 chair decision] `reportedSource` now FAILS CLOSED when
+    // absent (agent-lineage-mismatch.ts), so every fixture here defaults it to AGREE with
+    // whatever `reportedAgentType` it ends up with — every pre-existing test in this file that
+    // never mentioned `reportedSource` at all predates the field and must keep bootstrapping
+    // exactly as before. A test that overrides `reportedSource` explicitly (including to
+    // `undefined`, for the dedicated fail-closed case below) still wins via the spread.
+    const reportedAgentType = over.reportedAgentType ?? 'claude'
     return {
       hostId: HOST_ID,
       paneKey: PANE,
@@ -62,7 +69,8 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
       anchorHostVerified: true,
       sessionStartSource: 'resume',
       launchGeneration: GEN,
-      reportedAgentType: 'claude',
+      reportedAgentType,
+      reportedSource: reportedAgentType,
       executionHostId: 'local',
       ...over
     }
@@ -332,7 +340,12 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(result.kind).toBe('bootstrapped')
   })
 
-  it('S5 F2: reportedSource ABSENT skips the cross-check — bootstraps unchanged from pre-F2 behaviour', async () => {
+  // [S10-21c B-final, D-R160 F2 chair decision, SCENARIO_CORRECTION] Was "reportedSource ABSENT
+  // skips the cross-check — bootstraps unchanged" (pre-D-R160 skip-on-absent behaviour). The
+  // chair decision reverses this: an absent reportedSource now REFUSES (fail-closed) — a
+  // bootstrap must never trust the payload's own unverified agentType claim with no host-owned
+  // fact to check it against. Fails at base (60765cd75f): base bootstraps here.
+  it('S5 F2 [D-R160 chair decision]: reportedSource ABSENT refuses the bootstrap (bootstrap_refused, source_missing)', async () => {
     const db = rawDb()
     insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
     const result = await evaluateLiveHookReportMismatch(
@@ -340,7 +353,11 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
       params({ reportedAgentType: 'claude', reportedSource: undefined }),
       REAL
     )
-    expect(result.kind).toBe('bootstrapped')
+    expect(result).toEqual({ kind: 'bootstrap_refused', reason: 'source_missing' })
+    expect(newestLaunchForPane(db, HOST_ID, PANE)).toBeUndefined()
+    expect(audits(db, PANE, 'session_identity_bootstrap')).toEqual([
+      { outcome: 'refused', reason_code: 'source_missing' }
+    ])
   })
 
   it('S5: the bootstrap is idempotent — the second report of the same id is a match, and no second row appears', async () => {

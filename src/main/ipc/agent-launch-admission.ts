@@ -29,6 +29,7 @@ import { withPaneLock } from './agent-launch-admission-lock'
 import {
   audit,
   passThrough,
+  preflightResumeTranscript,
   type AdmittedLaunch,
   type LaunchAdmissionClassification
 } from './agent-launch-admission-support'
@@ -380,9 +381,11 @@ export async function admitAgentLaunch(
       // not cover yet all refuse loudly (`unrecorded`, spawn still proceeds) rather than writing
       // an id that the sweep's own preflight would only tear back out later.
       const agentType = spawnOptions.launchAgent ?? 'claude'
-      const resumeTranscript = await resolveResumeTranscript(agentType, x)
-      if (!resumeTranscript || 'coverage' in resumeTranscript || !resumeTranscript.hasTurn) {
-        return unrecorded('resume_target_absent')
+      // [S10-21c B-final M2/M3, D-R160 medium 2/3] Guarded, three-state — see
+      // `preflightResumeTranscript`'s own doc comment (agent-launch-admission-support.ts).
+      const preflight = await preflightResumeTranscript(resolveResumeTranscript, agentType, x)
+      if (!preflight.ok) {
+        return unrecorded(preflight.reasonCode)
       }
       const recorded = db.recordLaunch({
         hostId: ctx.hostId,

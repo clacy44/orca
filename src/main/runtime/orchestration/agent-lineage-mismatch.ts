@@ -109,9 +109,10 @@ export type LiveHookReportMismatchParams = {
    * status entry, never a value the payload can choose. Cross-checked against `reportedAgentType`
    * before that caller-asserted field is threaded into `bootstrapRowFromLiveReport`'s
    * `recordLaunch` — a disagreement refuses the bootstrap rather than trusting the payload's own
-   * claim. Optional (a pre-existing test fixture predates this field, and a non-SessionStart
-   * status entry may lack it) — `undefined` skips the cross-check rather than refusing every
-   * bootstrap outright, since the field is new and not every code path stamps it yet. */
+   * claim. [D-R160 F2 chair decision] FAIL-CLOSED: `undefined` also refuses (`source_missing`) —
+   * a bootstrap that would guess the agent type from the unverified payload alone is exactly what
+   * this field exists to prevent. Optional only because a pre-existing test fixture predates it;
+   * every real hook-ingestion path stamps it. */
   reportedSource?: string
   executionHostId?: string
 }
@@ -197,18 +198,22 @@ export async function evaluateLiveHookReportMismatch(
     // (fail-closed) rather than land a session validated under one type onto a row of another.
     // [S10-21c B-final F7, D-R159 finding 6] AND re-verify conjunct (i) itself, same-tick — a
     // reconciliation write may never rest on a snapshot the reporter no longer actually holds.
-    if (
-      transcript.ok &&
-      fresh.pane_key === params.paneKey &&
-      fresh.agent_type === row.agent_type &&
-      reverifyPaneLaunchAuthority(params.paneKey)
-    ) {
+    // [S10-21c B-final L5, D-R160 low 5] Each refusal reason coded distinctly — a durable audit
+    // row must never leave a failed re-verify (or a row that moved / changed agent type across
+    // the await) indistinguishable from an ordinary unreconciled mismatch (no note at all).
+    if (!transcript.ok) {
+      refusalNote = transcript.note
+    } else if (fresh.pane_key !== params.paneKey) {
+      refusalNote = 'row_moved'
+    } else if (fresh.agent_type !== row.agent_type) {
+      refusalNote = 'agent_type_changed'
+    } else if (!reverifyPaneLaunchAuthority(params.paneKey)) {
+      refusalNote = 'reverify_failed'
+    } else {
       const reconciled = applyLiveReportReconciliation(db, params, fresh)
       if (reconciled) {
         return reconciled
       }
-    } else if (!transcript.ok) {
-      refusalNote = transcript.note
     }
     row = fresh
   }
@@ -314,10 +319,16 @@ async function bootstrapRowFromLiveReport(
   // [S10-21c B-final F2, D-R159 finding 2] `agentType` above is CALLER-ASSERTED (the hook
   // payload's own field) — cross-check it against the HOST-OWNED `reportedSource` (the
   // authenticated hook route) before it is threaded into `recordLaunch` below, the same check
-  // server.ts:2131 already applies to the PreCompact/PostCompact transition. `reportedSource ===
-  // undefined` skips the check (not every code path stamps it yet) rather than refusing every
-  // bootstrap outright; a PRESENT disagreement refuses.
-  if (params.reportedSource !== undefined && agentType !== params.reportedSource) {
+  // server.ts:2131 already applies to the PreCompact/PostCompact transition. [S10-21c B-final,
+  // D-R160 F2 chair decision] FAIL-CLOSED: `reportedSource` is stamped on every real hook-
+  // ingestion path (server.ts:2310 local, :2090 relay) — an ABSENT value refuses too
+  // (`source_missing`), rather than trusting the payload's own unverified `agentType` claim.
+  if (params.reportedSource === undefined) {
+    const reason = 'source_missing'
+    writeBootstrapAudit(db, params, agent.id, 'refused', reason)
+    return { kind: 'bootstrap_refused', reason }
+  }
+  if (agentType !== params.reportedSource) {
     const reason = `agent_type_mismatch reported=${agentType} source=${params.reportedSource}`
     writeBootstrapAudit(db, params, agent.id, 'refused', reason)
     return { kind: 'bootstrap_refused', reason }

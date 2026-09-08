@@ -77,6 +77,22 @@ describe('S10-21c B-final F7, D-R159 finding 6: evaluateLiveHookReportMismatch r
     expect(row?.session_id).toBe('sess-stub') // untouched — never reconciled onto sess-live
   })
 
+  // [S10-21c B-final L5, D-R160 low 5] The refusal must carry a CODED reason ('reverify_failed')
+  // in the durable audit row, never leave it indistinguishable from an ordinary mismatch.
+  it("a re-verify callback that returns false codes the audit row's reason_code 'reverify_failed'", async () => {
+    const db = rawDb()
+    seedLaunch(db, 'sess-stub')
+    const reverify = vi.fn(() => false)
+    await evaluateLiveHookReportMismatch(db, params(), REAL, reverify)
+    const rawDbHandle = (orchestrationDb as unknown as { db: Database.Database }).db
+    const audit = rawDbHandle
+      .prepare(
+        `SELECT reason_code FROM agent_audit WHERE actor_pane_key = ? AND verb = 'session_identity_mismatch' ORDER BY seq DESC LIMIT 1`
+      )
+      .get(PANE) as { reason_code: string } | undefined
+    expect(audit?.reason_code).toContain('reverify_failed')
+  })
+
   it('a re-verify callback that still returns true reconciles exactly as the snapshot alone would', async () => {
     const db = rawDb()
     seedLaunch(db, 'sess-stub')

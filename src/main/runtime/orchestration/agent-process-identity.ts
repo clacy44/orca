@@ -48,6 +48,21 @@ export function parseProcessIncarnation(value: string | null | undefined): Proce
   return { ptyId, incarnationId }
 }
 
+/** [S10-21c B-final L6, D-R160 low 6] Distinguishes WHY a non-null `processIncarnation` failed
+ * `parseProcessIncarnation` above, so a durable audit row never claims the wrong cause: the
+ * legacy form (`runtime:<runtimeId>:<generation>`, orca-runtime.ts:15836) is always exactly 3
+ * `:`-separated segments — a real worktree ptyId's own `::`/`@@` (this module's own header
+ * comment) never produces exactly 3 — so segment count alone tells the legacy shape apart from
+ * any OTHER value whose incarnation half simply isn't a UUID (e.g. one minted by a different
+ * build). Call only on a value `parseProcessIncarnation` already rejected — undefined for one it
+ * accepted, [chair decision, R94] `isPtyIncarnationId` (shared/pty-incarnation.ts) stays looser
+ * for admission; aligning it is deferred to next train. */
+export function classifyUnparseableProcessIncarnation(
+  value: string
+): 'legacy_form' | 'non_uuid_incarnation' {
+  return value.split(':').length === 3 ? 'legacy_form' : 'non_uuid_incarnation'
+}
+
 export type AgentAliveResult =
   | 'alive'
   | 'dead'

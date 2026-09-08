@@ -849,6 +849,39 @@ describe('S10-21a C5: rebindRestoredPane', () => {
     expect(noteRows).toHaveLength(1)
   })
 
+  // [S10-21c B-final L6, D-R160 low 6] A non-legacy-shaped, non-UUID incarnation must NOT be
+  // misattributed to the legacy minter — fails at base: base's blanket 'legacy_form' claimed
+  // this shape too.
+  it('C7k item 5: a same-pane noop restore with a NON-UUID (but non-legacy-shaped) processIncarnation notes identity_unavailable: non_uuid_incarnation', () => {
+    const db = rawDb()
+    insertAgent(db, {
+      id: 'agent-same-nonuuid',
+      display_name: 'chair-same-nonuuid',
+      pane_key: 'tab1:leaf-same-nonuuid',
+      terminal_handle: 'handle-old-nonuuid'
+    })
+
+    const result = rebindRestoredPane(db, {
+      ticketPayload: ticketFor('tab1:leaf-same-nonuuid'),
+      newPaneKey: 'tab1:leaf-same-nonuuid',
+      newTerminalHandle: 'handle-new-nonuuid',
+      hostId: HOST_ID,
+      executionHostId: EXEC_HOST_ID,
+      launchGeneration: LAUNCH_GEN,
+      incumbent: DEAD_INCUMBENT,
+      processIncarnation: 'pty-1:not-a-uuid'
+    })
+    expect(result).toEqual({ ok: true, rebound: false, agentId: 'agent-same-nonuuid' })
+
+    const noteRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'sweep_note'
+           AND reason_code = 'identity_unavailable: non_uuid_incarnation'`
+      )
+      .all('agent-same-nonuuid')
+    expect(noteRows).toHaveLength(1)
+  })
+
   // [S10-21a C7k, Ruling 34 Addendum 28, item 6] The noop-path refresh call now threads
   // `agentId: predicate.agentId` through to `refreshAgentHandleAfterRespawn` — see
   // agent-daemon-respawn-handle-refresh.test.ts for the direct unit test proving that parameter

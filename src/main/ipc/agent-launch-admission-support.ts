@@ -3,6 +3,7 @@
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
+import type { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 
 /** [S10-21a C7f, D-R114 fix 1] The admission outcome pty.ts's post-spawn-commit gate needs at
  * :6937 — HOST_MINTED and HOST_RESUME both come from `buildRecordedAdmission`; the two
@@ -44,6 +45,32 @@ export function passThrough(
   }
 }
 
+/** [S10-21c B-final M2/M3, D-R160 medium 2/3] caller_resume's resume-transcript preflight,
+ * extracted to stay under agent-launch-admission.ts's own max-lines budget. THREE outcomes,
+ * never collapsed: a throw (unguarded filesystem IO, D-R151 HIGH's own reasoning) refuses loudly
+ * rather than failing the spawn; `{coverage:'uncovered'}` is S4's own "not covered yet" state,
+ * not a claim the target is missing; only a genuine miss/stub-only transcript is
+ * `resume_target_absent`. */
+export async function preflightResumeTranscript(
+  resolve: typeof resolveResumeTranscript,
+  agentType: string,
+  sessionId: string
+): Promise<{ ok: true } | { ok: false; reasonCode: string }> {
+  let resumeTranscript: Awaited<ReturnType<typeof resolveResumeTranscript>>
+  try {
+    resumeTranscript = await resolve(agentType, sessionId)
+  } catch {
+    return { ok: false, reasonCode: 'resume_preflight_failed' }
+  }
+  if (resumeTranscript && 'coverage' in resumeTranscript) {
+    return { ok: false, reasonCode: 'resume_preflight_uncovered' }
+  }
+  if (!resumeTranscript || !resumeTranscript.hasTurn) {
+    return { ok: false, reasonCode: 'resume_target_absent' }
+  }
+  return { ok: true }
+}
+
 export function audit(
   db: OrchestrationDb,
   paneKey: string | null,
@@ -66,10 +93,12 @@ export function audit(
  * launch-admission surface writes — agent-launch-admission.ts's own `audit()` calls, plus
  * pty.ts's `contestedLineage` (R(i), verb 'launch'). A plain HOST_MINTED/HOST_RESUME success
  * writes NO audit row at all (the launch row write itself is the record), so it is deliberately
- * absent from this list. agent-lineage-mismatch.ts's `unrecorded_launch` downgrade consumes this
- * SAME constant (D-R108 R1(a)) — a future admission verb must be added here deliberately, or it
- * is silently excluded from the downgrade (fail toward contest, the safe default), never silently
- * included. `agent-launch-admission-audit-verbs.test.ts` greps every verb literal in
+ * absent from this list. TWO consumers share this SAME constant (D-R108 R1(a); [D-R160 low 8]
+ * named explicitly, both fail safe): agent-lineage-mismatch.ts's `unrecorded_launch` downgrade,
+ * and agent-sweep-unrecorded-check.ts's own sweep-side unrecorded-launch gate — a future
+ * admission verb must be added here deliberately, or it is silently excluded from BOTH (fail
+ * toward contest / fail toward Layer-3, the safe default in each), never silently included.
+ * `agent-launch-admission-audit-verbs.test.ts` greps every verb literal in
  * agent-launch-admission*.ts/pty.ts's contestedLineage and asserts none escapes this list. */
 export const ADMISSION_AUDIT_VERBS = [
   'launch_unrecorded',

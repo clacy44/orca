@@ -50,7 +50,10 @@ import {
   type RebindRestoredPaneParams
 } from './agent-restore-rebind-predicate'
 import { refreshAgentHandleAfterRespawn } from './agent-daemon-respawn-handle-refresh'
-import { parseProcessIncarnation } from './agent-process-identity'
+import {
+  classifyUnparseableProcessIncarnation,
+  parseProcessIncarnation
+} from './agent-process-identity'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 export type {
   RebindRefusalReason,
@@ -159,13 +162,20 @@ export function rebindRestoredPane(
           noopPactsToUnpause = refreshResult.pactsToUnpause
         }
       } else {
+        // [S10-21c B-final L6, D-R160 low 6] Coded by WHY the parse failed, never a blanket
+        // 'legacy_form' — a non-null, non-legacy-shaped unparseable value (e.g. a non-UUID
+        // incarnation minted by a different build) must not be misattributed to the legacy minter.
+        const cause =
+          params.processIncarnation === null
+            ? 'null'
+            : classifyUnparseableProcessIncarnation(params.processIncarnation)
         writeAgentAudit(db, {
           agentId: predicate.agentId,
           actorPaneKey: params.newPaneKey,
           actorHostId: params.hostId,
           verb: 'sweep_note',
           outcome: 'proceeded',
-          reasonCode: `identity_unavailable: ${params.processIncarnation === null ? 'null' : 'legacy_form'}`
+          reasonCode: `identity_unavailable: ${cause}`
         })
       }
     }
