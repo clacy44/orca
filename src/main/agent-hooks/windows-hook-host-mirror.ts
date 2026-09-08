@@ -5,6 +5,11 @@
 // This module never runs in production — Windows uses the compiled .exe; POSIX/SSH/remote never
 // reach it. It exists solely so `windows-hook-host-mirror.test.ts` can exercise the host's
 // endpoint-file parsing, guard, and form-body assembly against a real AgentHookServer.
+//
+// M4: this is a LOGIC mirror (Node's `fetch`), not a WIRE mirror of `HttpWebRequest` — it proves
+// parsing/encoding/guard behavior, not HttpWebRequest-specific transport details (redirect
+// handling, Expect: 100-continue, proxy resolution). Those are covered only by the
+// Windows-only `describe.skipIf` spawn test in the same test file.
 
 export type WindowsHookHostEndpointCoordinates = {
   port: string
@@ -14,6 +19,7 @@ export type WindowsHookHostEndpointCoordinates = {
 }
 
 const ENDPOINT_PORT_PATTERN = /^\d{1,5}$/
+const DESCRIPTOR_PATHNAME_PATTERN = /^\/[A-Za-z0-9._~/-]*$/
 
 // Counterpart: OrcaHookHost.cs `ParseEndpointFile`. Mirrors
 // src/shared/agent-hook-endpoint-file.ts:25-61's `set K=V` CRLF parsing + port guard.
@@ -68,6 +74,11 @@ export function resolveWindowsHookHostContext(opts: {
   if (!coordinates.port || !coordinates.token || !paneKey) {
     return null
   }
+  // M2 (counterpart: OrcaHookHost.cs `ResolveCoordinates`): the env-fallback port is otherwise
+  // unvalidated — it is interpolated straight into the request URL in postWindowsHookHostPayload.
+  if (!ENDPOINT_PORT_PATTERN.test(coordinates.port)) {
+    return null
+  }
   return {
     port: coordinates.port,
     token: coordinates.token,
@@ -119,6 +130,12 @@ export function parseWindowsHookHostDescriptor(json: string | null): WindowsHook
     if (fields.length === 0) {
       return DEFAULT_DESCRIPTOR
     }
+    // M2 (counterpart: OrcaHookHost.cs `ParseDescriptor`): an unvalidated pathname is
+    // interpolated straight into the request URL — a crafted `@evil.example/x` value could
+    // redirect the POST (and its token) off 127.0.0.1.
+    if (!DESCRIPTOR_PATHNAME_PATTERN.test(record.pathname)) {
+      return DEFAULT_DESCRIPTOR
+    }
     return {
       source: typeof record.source === 'string' ? record.source : DEFAULT_DESCRIPTOR.source,
       pathname: record.pathname,
@@ -129,13 +146,31 @@ export function parseWindowsHookHostDescriptor(json: string | null): WindowsHook
   }
 }
 
+// Counterpart: OrcaHookHost.cs `EncodeRfc3986` (H2). A hand-rolled RFC-3986 percent-encoder over
+// UTF-8 bytes, not `encodeURIComponent` — the C# side cannot use `encodeURIComponent` (it does
+// not exist in .NET) and `Uri.EscapeDataString` throws past ~65,520 chars on .NET Framework, so
+// the fix there is a byte-level encoder; this mirrors that byte-level behavior exactly rather
+// than JS's own (unlimited, but differently-escaping) built-in.
+const UNRESERVED_BYTE = /^[A-Za-z0-9\-._~]$/
+function encodeRfc3986(value: string): string {
+  const bytes = Buffer.from(value, 'utf-8')
+  let out = ''
+  for (const byte of bytes) {
+    const char = String.fromCharCode(byte)
+    out += UNRESERVED_BYTE.test(char)
+      ? char
+      : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+  }
+  return out
+}
+
 // Counterpart: OrcaHookHost.cs `BuildFormBody`.
 export function buildWindowsHookHostFormBody(
   fields: readonly string[],
   values: Partial<Record<string, string>>
 ): string {
   return fields
-    .map((field) => `${encodeURIComponent(field)}=${encodeURIComponent(values[field] ?? '')}`)
+    .map((field) => `${encodeRfc3986(field)}=${encodeRfc3986(values[field] ?? '')}`)
     .join('&')
 }
 

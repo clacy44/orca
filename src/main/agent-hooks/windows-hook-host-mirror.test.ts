@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AgentHookServer } from './server'
 import { getWindowsManagedLifecycleHook } from '../claude/hook-settings'
 import { makePaneKey } from '../../shared/stable-pane-id'
+import { HOOK_REQUEST_MAX_BYTES } from '../../shared/agent-hook-listener'
 import {
   buildWindowsHookHostFormBody,
   parseWindowsHookHostDescriptor,
@@ -69,6 +70,20 @@ describe('resolveWindowsHookHostContext', () => {
       })
     ).toBeNull()
   })
+
+  // M2: the env-fallback port is validated the same way the endpoint-file port already was.
+  it('rejects a malformed env-fallback port', () => {
+    expect(
+      resolveWindowsHookHostContext({
+        endpointFileContents: null,
+        processEnv: {
+          ORCA_AGENT_HOOK_PORT: '9999/evil',
+          ORCA_AGENT_HOOK_TOKEN: 't',
+          ORCA_PANE_KEY: 'pane-1'
+        }
+      })
+    ).toBeNull()
+  })
 })
 
 describe('parseWindowsHookHostDescriptor', () => {
@@ -95,6 +110,24 @@ describe('parseWindowsHookHostDescriptor', () => {
         })
       )
     ).toEqual({ source: 'claude', pathname: '/hook/claude', fields: ['paneKey', 'payload'] })
+  })
+
+  // M2: a pathname outside the allow-list falls open to the built-in default rather than
+  // being interpolated into the request URL unchecked.
+  it('falls open to the built-in default when pathname fails validation', () => {
+    expect(
+      parseWindowsHookHostDescriptor(
+        JSON.stringify({
+          source: 'claude',
+          pathname: '@evil.example/x',
+          fields: ['paneKey', 'payload']
+        })
+      )
+    ).toEqual({
+      source: 'claude',
+      pathname: '/hook/claude',
+      fields: WINDOWS_HOOK_HOST_DEFAULT_FIELDS
+    })
   })
 })
 
@@ -193,6 +226,75 @@ describe('runWindowsHookHostOnce against a live AgentHookServer', () => {
     expect(outcome).toBe('guard-exit')
     expect(server.getStatusSnapshot()).toHaveLength(0)
   })
+
+  // H2: a payload past Uri.EscapeDataString's ~65,520-char .NET Framework limit — the boundary
+  // the C# fix (EncodeRfc3986, byte-level, no library length cap) exists to clear. Chosen from
+  // unreserved characters only, so the encoded body stays small and delivery succeeds.
+  it('ingests a > 64 KB payload without error (H2 boundary)', async () => {
+    await server.start({ env: 'production' })
+    const paneKey = makePaneKey('tab-1', '33333333-3333-4333-8333-333333333333')
+    // Why a valid JSON envelope, not raw bytes: the server ingests SessionStart payloads by
+    // parsing them, so the size has to come from a field inside valid JSON to prove ingestion,
+    // not just that the POST itself didn't throw.
+    const bigPayload = JSON.stringify({
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      pad: 'a'.repeat(70_000)
+    })
+    const stdin = new PassThrough()
+    stdin.end(bigPayload)
+
+    const outcome = await runWindowsHookHostOnce({
+      stdin,
+      endpointFileContents: null,
+      descriptorJson: null,
+      processEnv: {
+        ORCA_AGENT_HOOK_PORT: server.buildPtyEnv().ORCA_AGENT_HOOK_PORT,
+        ORCA_AGENT_HOOK_TOKEN: server.buildPtyEnv().ORCA_AGENT_HOOK_TOKEN,
+        ORCA_PANE_KEY: paneKey,
+        ORCA_TAB_ID: 'tab-1'
+      }
+    })
+
+    expect(outcome).toBe('sent')
+    const snapshot = server.getStatusSnapshot()
+    expect(snapshot.some((entry) => entry.paneKey === paneKey)).toBe(true)
+  })
+
+  // M2/H2 composition: a 900 KB raw stdin payload built entirely of characters that each
+  // percent-encode to 3 bytes (the encoder's worst case) — the encoded body lands well past
+  // HOOK_REQUEST_MAX_BYTES even though the raw payload is under the host's own StdinCapBytes
+  // (1,000,000). The server's own byte cap (agent-hook-listener.ts:512) then destroys the
+  // connection before any entry is ingested; postWindowsHookHostPayload's catch swallows the
+  // resulting fetch failure the same way OrcaHookHost.cs's Main swallows every exception —
+  // truncate-and-drop, not a thrown error, not an ingested entry.
+  it('drops a 900 KB payload that encodes past HOOK_REQUEST_MAX_BYTES without throwing or ingesting', async () => {
+    await server.start({ env: 'production' })
+    const paneKey = makePaneKey('tab-1', '44444444-4444-4444-8444-444444444444')
+    // '"' is not in the unreserved set, so each byte becomes the 3-byte sequence %22.
+    const oversizedPayload = '"'.repeat(900_000)
+    expect(Buffer.byteLength(oversizedPayload, 'utf-8') * 3).toBeGreaterThan(HOOK_REQUEST_MAX_BYTES)
+    const stdin = new PassThrough()
+    stdin.end(oversizedPayload)
+
+    // Why: a bare await, not `.resolves` — the assertion is that this never rejects/throws
+    // ("exit 0"), which `.resolves` cannot express on its own without a value matcher.
+    const outcome = await runWindowsHookHostOnce({
+      stdin,
+      endpointFileContents: null,
+      descriptorJson: null,
+      processEnv: {
+        ORCA_AGENT_HOOK_PORT: server.buildPtyEnv().ORCA_AGENT_HOOK_PORT,
+        ORCA_AGENT_HOOK_TOKEN: server.buildPtyEnv().ORCA_AGENT_HOOK_TOKEN,
+        ORCA_PANE_KEY: paneKey,
+        ORCA_TAB_ID: 'tab-1'
+      }
+    })
+    expect(outcome).toBe('sent')
+
+    const snapshot = server.getStatusSnapshot()
+    expect(snapshot.some((entry) => entry.paneKey === paneKey)).toBe(false)
+  })
 })
 
 // Windows-only: spawns the exact entry getWindowsManagedLifecycleHook() produces (the real .exe,
@@ -209,6 +311,11 @@ describe.skipIf(process.platform !== 'win32')('windows-only: the produced exe en
       const hook = getWindowsManagedLifecycleHook(
         'C:\\Users\\test\\.orca\\agent-hooks\\claude-hook.cmd'
       )
+      // M3: null only when orca-hook-host.exe is absent — this CI job builds it first, so a
+      // null here means the build step itself failed silently rather than a real skip case.
+      if (hook === null) {
+        throw new Error('orca-hook-host.exe not found — did build:native run before this test?')
+      }
 
       const stdout = execFileSync(hook.command, hook.args ?? [], {
         env: {
