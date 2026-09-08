@@ -1,9 +1,15 @@
-// S10-21d b6 (R119 fix 1/2): SELF_RESUME's same-pane/contested split and the derived-row
-// contest-or-supersede pattern shared by the caller_resume and HOST_MINTED arms — split out of
-// agent-launch-admission.ts to stay under the max-lines ratchet (that file sat at the wall
-// before this brief).
+// S10-21d b6 (R119 fix 1/2/3): SELF_RESUME's same-pane/contested split, the derived-row
+// contest-or-supersede pattern shared by the caller_resume and HOST_MINTED arms, and
+// SELF_RESUME's own confirm/compensate — split out of agent-launch-admission.ts to stay under
+// the max-lines ratchet (that file sat at the wall before this brief).
+import type { PtySpawnOptions } from '../providers/pty-provider-contract'
+import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
-import { audit } from './agent-launch-admission-support'
+import {
+  audit,
+  type AdmittedLaunch,
+  type LaunchAdmissionClassification
+} from './agent-launch-admission-support'
 
 export type SelfResumeCtx = {
   hostId: string
@@ -85,4 +91,45 @@ export function contestOrSupersedeDerivedRow(
     return
   }
   audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
+}
+
+/** [S10-21d b6, R119 fix 3] SELF_RESUME writes no row, so `compensate` had nothing to delete —
+ * the shared no-op `passThrough` (agent-launch-admission-support.ts) made a spawn failure after
+ * this admission silent. `confirm` mirrors `buildRecordedAdmission`'s own (surface-divergence
+ * audit); `compensate` audits `launch_spawn_failed`. Never a refusal — stays a pass-through. */
+export function selfResumePassThrough(
+  db: OrchestrationDb,
+  ctx: SelfResumeCtx,
+  paneKey: string,
+  spawnOptions: PtySpawnOptions,
+  classification: LaunchAdmissionClassification,
+  registeredAgentId?: string
+): AdmittedLaunch {
+  let settled = false
+  return {
+    spawnOptions,
+    classification,
+    ...(registeredAgentId ? { registeredAgentId } : {}),
+    confirm: (spawnResult: PtySpawnResult) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      const surface = spawnResult.agentSessionEnsure?.owner.surface
+      if (surface !== undefined) {
+        const actualPaneKey = `${surface.tabId}:${surface.leafId}`
+        if (actualPaneKey !== paneKey) {
+          audit(db, paneKey, ctx.hostId, 'launch_surface_diverged', 'compensated', null)
+          ctx.notice(paneKey, 'launch_surface_diverged', 'launch_surface_diverged')
+        }
+      }
+    },
+    compensate: () => {
+      if (settled) {
+        return
+      }
+      settled = true
+      audit(db, paneKey, ctx.hostId, 'launch_spawn_failed', 'compensated', null)
+    }
+  }
 }

@@ -40,7 +40,11 @@ import {
   type AdmittedLaunch,
   type LaunchAdmissionClassification
 } from './agent-launch-admission-support'
-import { auditSelfResume, contestOrSupersedeDerivedRow } from './agent-launch-self-resume-arm'
+import {
+  auditSelfResume,
+  contestOrSupersedeDerivedRow,
+  selfResumePassThrough
+} from './agent-launch-self-resume-arm'
 import {
   claudeIndexInSubject,
   resolveAdmissionShell,
@@ -329,18 +333,16 @@ export async function admitAgentLaunch(
         )
       }
       if (newestRow !== undefined && newestRow.session_id === x) {
-        // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice. [S10-21d b6, R119 fix 1]
-        // Same-pane-vs-contested split lives in agent-launch-self-resume-arm.ts (max-lines
-        // budget).
+        // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice. [S10-21d b6, R119 fix]
+        // Same-pane-vs-contested split and the passThrough's own confirm/compensate live in
+        // agent-launch-self-resume-arm.ts (max-lines budget).
         const reasonCode = admission.kind === 'host-resume' ? 'host' : 'caller'
         auditSelfResume(db, ctx, paneKey, reasonCode, registeredRow, newestRow.session_id, x)
-        return passThrough(
-          spawnOptions,
-          reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller',
-          // [S10-21a C14b, D-R128 F6] Binds the renderer-funnel gate's refresh to this specific
-          // registered row — two registered rows can share a pane suffix.
-          reasonCode === 'caller' ? registeredRow?.id : undefined
-        )
+        const classification = reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller'
+        // [S10-21a C14b, D-R128 F6] Binds the renderer-funnel gate's refresh to this specific
+        // registered row — two registered rows can share a pane suffix.
+        const agentId = reasonCode === 'caller' ? registeredRow?.id : undefined
+        return selfResumePassThrough(db, ctx, paneKey, spawnOptions, classification, agentId)
       }
       // [S10-21c B3, design §2 S2 ADDENDUM] A host-resume admission whose command RESOLVES to a
       // session id that is neither the ticket's own nor this pane's newest row: the sweep's
