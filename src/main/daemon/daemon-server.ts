@@ -293,12 +293,15 @@ export class DaemonServer {
   }
 
   // R117 FIX 3 (D-R164 H1): pause this session's producer while its client socket is deep, with
-  // hysteresis (PRODUCER_PAUSE_HIGH/LOW_WATERMARK_BYTES, distinct from the batcher's own
-  // SHALLOW_SOCKET_WRITE_GATE_BYTES hold-gate) so a draining queue cannot flap pause/resume once
-  // per flush slice; reassert below the daemon's 5s self-resume failsafe (session.ts
-  // PRODUCER_PAUSE_FAILSAFE_MS) until the socket drains BELOW LOW. The 'drain' handler below also
-  // resumes directly — this per-write path alone misses the case where the pause-crossing write is
-  // the pass's last entry (no later write to observe the drop).
+  // hysteresis (PRODUCER_PAUSE_HIGH/LOW_WATERMARK_BYTES) so a draining queue cannot flap
+  // pause/resume once per flush slice; reassert below the daemon's 5s self-resume failsafe
+  // (session.ts PRODUCER_PAUSE_FAILSAFE_MS) until the socket drains BELOW LOW. The 'drain' handler
+  // below also resumes directly — this per-write path alone misses the case where the
+  // pause-crossing write is the pass's last entry (no later write to observe the drop).
+  // D-R167 M-1: HIGH (256KB) is composed UNREACHABLE — the batcher's own shallow-echo hold-gate
+  // (128KB) plus its 64KB write slice cap the client socket around ~192KB, so this pacer only ever
+  // fires as the BACKSTOP behind the batcher's 32MB write-through valve, never off raw socket
+  // depth alone. See daemon-stream-data-batcher.ts's watermark comment for the full accounting.
   private handleAfterStreamSocketWrite(clientId: string, sessionId: string): void {
     const client = this.clients.get(clientId)
     const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0

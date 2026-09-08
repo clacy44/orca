@@ -27,9 +27,14 @@ type StreamDataClient = {
 const STREAM_DATA_BATCH_INTERVAL_MS = 2
 
 // R117 FIX 3 hysteresis (D-R164 H1): the PTY-producer pause daemon-server.ts drives off client
-// socket depth is a SEPARATE decision from daemon-stream-shallow-echo-hold's own hold-gate —
-// single-valued pause=resume=128KB flapped once per flush slice. Mirrors the reference
-// controller's HIGH/LOW (pty-producer-flow-control.ts:8-9,44-64). Exported here (not from
+// socket depth is a SEPARATE decision from daemon-stream-shallow-echo-hold's own hold-gate.
+// Mirrors the reference controller's HIGH/LOW shape (pty-producer-flow-control.ts:8-9,44-64), but
+// this 256KB HIGH is composed UNREACHABLE in practice (D-R167 M-1): the shallow gate holds bulk at
+// 128KB and a held slice writes at most BULK_WRITE_SLICE_CHARS (64KB below), so the client socket
+// peaks around ~192KB — never far enough past LOW to need this HIGH. The pacer therefore engages
+// only as the BACKSTOP behind daemon-stream-shallow-echo-hold's 32MB write-through valve
+// (heldWriteThrough), not as a socket-depth pacer. Memory stays bounded (~32MB queue +
+// SOCKET_WRITE_CEILING_BYTES's 64MB + 128KB × sessions per client). Exported here (not from
 // daemon-stream-shallow-echo-hold.ts) because daemon-server.ts already imports from this file.
 export const PRODUCER_PAUSE_HIGH_WATERMARK_BYTES = 256 * 1024
 export const PRODUCER_PAUSE_LOW_WATERMARK_BYTES = 32 * 1024
