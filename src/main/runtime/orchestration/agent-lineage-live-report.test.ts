@@ -524,17 +524,18 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
       })
       expect(resolver).toHaveBeenCalledTimes(1)
 
-      // Still inside the 60s backoff — cache hit, no re-walk, still refused.
-      vi.advanceTimersByTime(59_000)
+      // [SCENARIO_CORRECTION (chair decision 21d-R107b)] Still inside the fixed 10s pending
+      // retry (S10-21d R107, PENDING_TRANSCRIPT_RETRY_MS) — cache hit, no re-walk, still refused.
+      vi.advanceTimersByTime(9_000)
       expect(await evaluateLiveHookReportMismatch(db, params(), resolver)).toEqual({
         kind: 'bootstrap_refused',
         reason: 'resume_target_absent session sess-live'
       })
       expect(resolver).toHaveBeenCalledTimes(1)
 
-      // Backoff elapsed AND the transcript now carries a turn — re-walked, and now bootstraps.
+      // Retry elapsed (10s total) AND the transcript now carries a turn — re-walked, bootstraps.
       hasTurn = true
-      vi.advanceTimersByTime(2_000)
+      vi.advanceTimersByTime(1_000)
       const result = await evaluateLiveHookReportMismatch(db, params(), resolver)
       expect(result.kind).toBe('bootstrapped')
       expect(resolver).toHaveBeenCalledTimes(2)
