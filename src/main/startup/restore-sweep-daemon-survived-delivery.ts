@@ -62,7 +62,11 @@ export function handleDaemonSurvivedSkip(
       paneKey: launchRow.pane_key,
       newTerminalHandle: controllerIdentity.handle,
       processIncarnation,
-      agentId
+      agentId,
+      // [S10-21d R110] Records this pane's launch row afresh in the SAME transaction, evidence
+      // 'daemon_survived', so sessionLaunchKnown does not go stale for a daemon-survived pane
+      // (diag-r106-r110-2026-09-08.md).
+      currentLaunchGeneration: deps.getLaunchGenerationId()
     })
     if (!res.ok) {
       auditSweepNote(

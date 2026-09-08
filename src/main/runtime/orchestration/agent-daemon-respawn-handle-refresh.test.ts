@@ -276,4 +276,105 @@ describe('S10-21a C7d: refreshAgentHandleAfterRespawn', () => {
     }
     expect(agentAlive(identity, inventory)).toBe('alive')
   })
+
+  // [S10-21d R110] diag-r106-r110-2026-09-08.md: the daemon-survived arm never called
+  // recordLaunch, so the pane's newest launch row stayed on the PREVIOUS generation forever and
+  // sessionLaunchKnown (orchestration-agents-directory.ts) flipped false after a desktop
+  // relaunch. `currentLaunchGeneration` closes that gap in the SAME transaction as the handle
+  // refresh.
+  it('R110: currentLaunchGeneration records a fresh daemon_survived launch row in the new generation', () => {
+    const db = rawDb()
+    const paneKey = 'tab1:leaf-daemon-survived'
+    insertAgent(db, {
+      id: 'agent-daemon-survived',
+      display_name: 'chair-daemon-survived',
+      pane_key: paneKey,
+      terminal_handle: 'term_old'
+    })
+    const priorLaunch = orchestrationDb!.recordLaunch({
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-1',
+      launchGeneration: 'gen-old',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    expect(priorLaunch.ok).toBe(true)
+    const rowsBefore = db.prepare(`SELECT COUNT(*) AS n FROM agent_launch_sessions`).get() as {
+      n: number
+    }
+
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      paneKey,
+      newTerminalHandle: 'term_new',
+      processIncarnation: 'pty-ds:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
+      agentId: 'agent-daemon-survived',
+      currentLaunchGeneration: 'gen-new'
+    })
+    expect(result).toMatchObject({ ok: true, agentId: 'agent-daemon-survived' })
+
+    const newest = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)
+    expect(newest).toMatchObject({
+      session_id: 'sess-1',
+      launch_generation: 'gen-new',
+      evidence: 'daemon_survived'
+    })
+
+    const rowsAfter = db.prepare(`SELECT COUNT(*) AS n FROM agent_launch_sessions`).get() as {
+      n: number
+    }
+    expect(rowsAfter.n).toBe(rowsBefore.n + 1)
+
+    const currentSessionRow = db
+      .prepare(`SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?`)
+      .get(HOST_ID, paneKey) as { session_id: string } | undefined
+    expect(currentSessionRow?.session_id).toBe('sess-1')
+
+    const handleRefreshAudit = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
+      .all()
+    expect(handleRefreshAudit).toHaveLength(1)
+  })
+
+  it('R110: omitting currentLaunchGeneration leaves the launch ledger untouched (byte-identical prior behaviour)', () => {
+    const db = rawDb()
+    const paneKey = 'tab1:leaf-daemon-survived-omit'
+    insertAgent(db, {
+      id: 'agent-daemon-survived-omit',
+      display_name: 'chair-daemon-survived-omit',
+      pane_key: paneKey,
+      terminal_handle: 'term_old'
+    })
+    orchestrationDb!.recordLaunch({
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-2',
+      launchGeneration: 'gen-old',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const rowsBefore = db.prepare(`SELECT COUNT(*) AS n FROM agent_launch_sessions`).get() as {
+      n: number
+    }
+
+    const result = orchestrationDb!.refreshAgentHandleAfterRespawn({
+      hostId: HOST_ID,
+      paneKey,
+      newTerminalHandle: 'term_new',
+      agentId: 'agent-daemon-survived-omit'
+    })
+    expect(result).toMatchObject({ ok: true })
+
+    const rowsAfter = db.prepare(`SELECT COUNT(*) AS n FROM agent_launch_sessions`).get() as {
+      n: number
+    }
+    expect(rowsAfter.n).toBe(rowsBefore.n)
+    expect(orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)).toMatchObject({
+      launch_generation: 'gen-old',
+      evidence: 'host_launch'
+    })
+  })
 })

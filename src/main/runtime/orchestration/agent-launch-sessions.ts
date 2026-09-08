@@ -24,7 +24,14 @@ import { upsertCurrentSession } from './current-session-upsert'
  * value keeps meaning "the fork-only conjunct-4 rotation" for every row already on disk and every
  * downstream consumer can tell the two mechanisms apart. 'self_report_bootstrap' is S5's first
  * row for a registered pane that had none. Neither is written by the launch path: they are
- * written only by agent-lineage-mismatch.ts, under §2 S3's four conjuncts. */
+ * written only by agent-lineage-mismatch.ts, under §2 S3's four conjuncts.
+ *
+ * [S10-21d R110] 'daemon_survived' is the daemon-respawn arm's own launch row — recorded by
+ * refreshAgentHandleAfterRespawn in the SAME transaction as its terminal_handle/
+ * process_incarnation refresh, stamped with the CURRENT launch_generation, so
+ * `sessionLaunchKnown` does not go stale after a desktop relaunch for a pane the daemon kept
+ * alive across the restart (diag-r106-r110-2026-09-08.md). Holds the leaf exactly like
+ * 'sweep_record' (decideLeafHoldRows, restore-sweep-decision.ts). */
 export type LaunchEvidence =
   | 'host_launch'
   | 'sweep_record'
@@ -32,6 +39,7 @@ export type LaunchEvidence =
   | 'caller_resume'
   | 'live_report'
   | 'self_report_bootstrap'
+  | 'daemon_survived'
 
 export type AgentLaunchSessionRow = {
   seq: number
@@ -56,7 +64,7 @@ export type RecordLaunchParams = {
   executionHostId: string
   evidence: Extract<
     LaunchEvidence,
-    'host_launch' | 'sweep_record' | 'caller_resume' | 'self_report_bootstrap'
+    'host_launch' | 'sweep_record' | 'caller_resume' | 'self_report_bootstrap' | 'daemon_survived'
   >
   /** [S10-21a C1a, errata 5(p)-5 item 3] Set ONLY from a verified host-resume (Layer-2 restore)
    * admission. Deletes `supersedePaneKey`'s current_sessions row inside this same transaction,

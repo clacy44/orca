@@ -18,6 +18,7 @@ import {
   HOST_ID,
   EXEC_HOST_ID,
   PRIOR_GEN,
+  LAUNCH_GEN,
   emptyInventory,
   insertAgent,
   baseDeps
@@ -134,12 +135,16 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     )
     expect(outcome.kind).toBe('skipped_daemon_survived')
     expect(refreshSpy).toHaveBeenCalledTimes(1)
+    // [S10-21d R110, SCENARIO_CORRECTION] Adds `currentLaunchGeneration` to the expected call —
+    // was missing this field entirely (the daemon-survived arm never recorded a launch row, the
+    // exact staleness diag-r106-r110-2026-09-08.md reports).
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey,
       newTerminalHandle: 'term_fresh_s7',
       processIncarnation: REAL_PROCESS_INCARNATION,
-      agentId: 'agent-s7'
+      agentId: 'agent-s7',
+      currentLaunchGeneration: LAUNCH_GEN
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(1)
     expect(notifyRebindDelivery).toHaveBeenCalledWith('agent-s7')
@@ -487,19 +492,22 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     )
     expect(summary.skippedDaemonSurvived).toBe(2)
     expect(refreshSpy).toHaveBeenCalledTimes(2)
+    // [S10-21d R110, SCENARIO_CORRECTION] Same addition as above, both candidates.
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey: paneKeyA,
       newTerminalHandle: 'term_fresh_s7d_a',
       processIncarnation: 'pty-s7d-a:10101010-1010-4101-8101-101010101011',
-      agentId: 'agent-s7d-a'
+      agentId: 'agent-s7d-a',
+      currentLaunchGeneration: LAUNCH_GEN
     })
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey: paneKeyB,
       newTerminalHandle: 'term_fresh_s7d_b',
       processIncarnation: 'pty-s7d-b:20202020-2020-4202-8202-202020202022',
-      agentId: 'agent-s7d-b'
+      agentId: 'agent-s7d-b',
+      currentLaunchGeneration: LAUNCH_GEN
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(2)
     expect(notifyRebindDelivery).toHaveBeenCalledWith('agent-s7d-a')
