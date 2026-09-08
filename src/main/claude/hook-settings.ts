@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join, win32 } from 'node:path'
 import {
@@ -127,15 +128,63 @@ export function getManagedCommand(scriptPath: string): string {
 
 export function getManagedLifecycleHook(
   scriptPath: string,
-  settings = CLAUDE_HOOK_SETTINGS
+  settings = CLAUDE_HOOK_SETTINGS,
+  resourcesPath?: string
 ): HookCommandConfig {
   if (process.platform !== 'win32' || !settings.supportsExecHookArgs) {
     return buildManagedCommandHook(getManagedCommand(scriptPath))
   }
-  return getWindowsManagedLifecycleHook(scriptPath)
+  return getWindowsManagedLifecycleHook(scriptPath, resourcesPath ?? readResourcesPath())
 }
 
-export function getWindowsManagedLifecycleHook(scriptPath: string): HookCommandConfig {
+// Why not `process.resourcesPath` directly: this file is also compiled under the CLI's
+// tsconfig (tsconfig.cli.json), which never loads Electron's ambient `Process` augmentation —
+// a direct reference fails that build with TS2339. Mirrors the runtime-only-if-present check
+// daemon-host-relocation.ts uses for the same field.
+function readResourcesPath(): string | undefined {
+  const candidate = (process as unknown as { resourcesPath?: unknown }).resourcesPath
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined
+}
+
+// R105-b: conhost gives cmd.exe a headless pseudoconsole that SWALLOWS Claude's stdin payload
+// (field-proven, drills/readouts/E-R105-desktop-2026-09-08.md) — kept only as the dev/unpackaged
+// fallback below, when orca-hook-host.exe hasn't been built into resources/bin yet.
+let loggedMissingWindowsHookHostOnce = false
+
+export function getWindowsManagedLifecycleHook(
+  scriptPath: string,
+  resourcesPath: string | undefined = readResourcesPath()
+): HookCommandConfig {
+  const hookHostExePath = resourcesPath
+    ? win32.join(resourcesPath, 'bin', 'orca-hook-host.exe')
+    : null
+  if (hookHostExePath && existsSync(hookHostExePath)) {
+    const scriptStem = win32.basename(scriptPath, win32.extname(scriptPath))
+    const runtimeDescriptorPath = win32.join(
+      '%USERPROFILE%',
+      '.orca',
+      'agent-hooks',
+      `${scriptStem}.json`
+    )
+    return {
+      type: 'command',
+      command: hookHostExePath,
+      args: ['--descriptor', runtimeDescriptorPath],
+      timeout: MANAGED_HOOK_TIMEOUT_SECONDS
+    }
+  }
+  if (!loggedMissingWindowsHookHostOnce) {
+    loggedMissingWindowsHookHostOnce = true
+    console.error(
+      `[agent-hooks] orca-hook-host.exe not found at ${hookHostExePath ?? '<no resourcesPath>'}; ` +
+        'falling back to the conhost hook form (expected on a dev/unpackaged build).'
+    )
+  }
+  return getConhostManagedLifecycleHook(scriptPath)
+}
+
+// Why kept: the only fallback for dev/unpackaged builds that haven't run build:native yet.
+function getConhostManagedLifecycleHook(scriptPath: string): HookCommandConfig {
   const system32 = win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
   const runtimeScriptPath = win32.join(
     '%USERPROFILE%',
@@ -143,13 +192,44 @@ export function getWindowsManagedLifecycleHook(scriptPath: string): HookCommandC
     'agent-hooks',
     win32.basename(scriptPath)
   )
-  // Why: Claude's Windows shell form opens Git Bash consoles; exec form hosts the client in a windowless console.
   return {
     type: 'command',
     command: win32.join(system32, 'conhost.exe'),
     args: ['--headless', win32.join(system32, 'cmd.exe'), '/d', '/c', runtimeScriptPath],
     timeout: MANAGED_HOOK_TIMEOUT_SECONDS
   }
+}
+
+// Field order matches buildWindowsAgentHookCurlPostCommand (installer-utils.ts:182-198); kept in
+// sync by hand with native/windows-hook-host/OrcaHookHost.cs's BuiltInDescriptor.
+export const WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS = [
+  'paneKey',
+  'tabId',
+  'launchToken',
+  'worktreeId',
+  'env',
+  'version',
+  'payload'
+] as const
+
+export type WindowsHookHostDescriptor = {
+  source: 'claude'
+  pathname: string
+  fields: readonly string[]
+}
+
+export function getWindowsHookHostDescriptorFileName(settings = CLAUDE_HOOK_SETTINGS): string {
+  return `${settings.scriptBaseName}.json`
+}
+
+export function getWindowsHookHostDescriptorPath(settings = CLAUDE_HOOK_SETTINGS): string {
+  return getSharedManagedScriptPath(getWindowsHookHostDescriptorFileName(settings))
+}
+
+export function buildWindowsHookHostDescriptor(
+  pathname = '/hook/claude'
+): WindowsHookHostDescriptor {
+  return { source: 'claude', pathname, fields: WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS }
 }
 
 export function hasSameManagedHookInvocation(

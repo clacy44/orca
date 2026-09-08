@@ -256,6 +256,10 @@ describe('createManagedCommandMatcher', () => {
     expect(match(command)).toBe(true)
   })
 
+  it('matches the winexe hook host descriptor arg (R105-b D4: .json, not .cmd/.ps1/.sh)', () => {
+    expect(match('C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.json')).toBe(true)
+  })
+
   it('matches PowerShell and POSIX variants across Copilot platform switches', () => {
     const matchPosix = createManagedCommandMatcher('copilot-hook.sh')
     const matchPowerShell = createManagedCommandMatcher('copilot-hook.ps1')
@@ -336,6 +340,26 @@ describe('removeManagedCommands', () => {
                 '/c',
                 'C:\\Users\\alice\\.orca\\agent-hooks\\copilot-hook.cmd'
               ]
+            },
+            { type: 'command', command: 'echo keep me' }
+          ]
+        }
+      ],
+      match
+    )
+
+    expect(cleaned).toEqual([{ hooks: [{ type: 'command', command: 'echo keep me' }] }])
+  })
+
+  it('removes the winexe hook host entry whose descriptor arg is a .json path (R105-b)', () => {
+    const cleaned = removeManagedCommands(
+      [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: 'C:\\Program Files\\Orca\\resources\\bin\\orca-hook-host.exe',
+              args: ['--descriptor', 'C:\\Users\\alice\\.orca\\agent-hooks\\copilot-hook.json']
             },
             { type: 'command', command: 'echo keep me' }
           ]

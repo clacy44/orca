@@ -25,6 +25,7 @@ import { getManagedStatusLineScript } from './statusline-script'
 import {
   applyManagedHooks,
   applyManagedStatusLine,
+  buildWindowsHookHostDescriptor,
   CLAUDE_EVENTS,
   CLAUDE_HOOK_SETTINGS,
   getManagedScriptFileName,
@@ -39,6 +40,7 @@ import {
   getStatusLineScriptFileName,
   getStatusLineScriptPath,
   getStatusLineSlotState,
+  getWindowsHookHostDescriptorPath,
   hasSameManagedHookInvocation,
   removeManagedHooks,
   removeManagedStatusLine,
@@ -211,6 +213,14 @@ export class ClaudeHookService {
       scriptPath,
       getManagedScript('local', { skipWhenDevinImportsClaude: this.options.agent === 'claude' })
     )
+    // Why: only Claude's Windows hook uses the exec form the descriptor feeds (D4/D3); the .cmd
+    // above stays the OpenClaude/rollback path regardless of platform.
+    if (process.platform === 'win32' && this.options.settings.supportsExecHookArgs) {
+      writeManagedScript(
+        getWindowsHookHostDescriptorPath(this.options.settings),
+        `${JSON.stringify(buildWindowsHookHostDescriptor(), null, 2)}\n`
+      )
+    }
     // Why: the statusline usage feed is Claude-only — OpenClaude data would be misattributed to the Claude provider.
     if (this.options.agent === 'claude') {
       nextConfig = this.installManagedStatusLine(nextConfig)

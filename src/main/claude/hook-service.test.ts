@@ -15,9 +15,16 @@ vi.mock('electron', () => ({
 }))
 
 import type { SFTPWrapper } from 'ssh2'
-import { createManagedCommandMatcher } from '../agent-hooks/installer-utils'
+import { createManagedCommandMatcher, type HooksConfig } from '../agent-hooks/installer-utils'
 import { ClaudeHookService } from './hook-service'
-import { getWindowsManagedLifecycleHook, OPENCLAUDE_HOOK_SETTINGS } from './hook-settings'
+import {
+  applyManagedHooks,
+  CLAUDE_EVENTS,
+  CLAUDE_HOOK_SETTINGS,
+  getManagedScriptFileName,
+  getWindowsManagedLifecycleHook,
+  OPENCLAUDE_HOOK_SETTINGS
+} from './hook-settings'
 
 const CLAUDE_SCRIPT_FILE_NAME = process.platform === 'win32' ? 'claude-hook.cmd' : 'claude-hook.sh'
 const STATUSLINE_SCRIPT_FILE_NAME =
@@ -34,7 +41,7 @@ function hasManagedCommand(hook: TestHook, matcher: (command: string | undefined
 }
 
 describe('getWindowsManagedLifecycleHook', () => {
-  it('resolves the managed script from the runtime Windows profile', () => {
+  it('falls back to the conhost form when orca-hook-host.exe is absent (dev/unpackaged)', () => {
     const scriptPath = 'C:\\Users\\%name%\\a^b&c\\.orca\\agent-hooks\\claude-hook.cmd'
     const hook = getWindowsManagedLifecycleHook(scriptPath)
 
@@ -42,6 +49,104 @@ describe('getWindowsManagedLifecycleHook', () => {
     expect(hook.args?.[1]).toMatch(/\\System32\\cmd\.exe$/i)
     expect(hook.args?.at(-1)).toBe('%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.cmd')
     expect(hook.args).not.toContain(scriptPath)
+  })
+
+  it('R105-b: uses the winexe hook host when orca-hook-host.exe is present at resourcesPath', () => {
+    const tmpResources = mkdtempSync(join(tmpdir(), 'orca-hook-host-resources-'))
+    try {
+      mkdirSync(join(tmpResources, 'bin'), { recursive: true })
+      writeFileSync(join(tmpResources, 'bin', 'orca-hook-host.exe'), '')
+
+      const hook = getWindowsManagedLifecycleHook(
+        'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd',
+        tmpResources
+      )
+
+      expect(hook.command).toBe(join(tmpResources, 'bin', 'orca-hook-host.exe'))
+      expect(hook.args).toEqual([
+        '--descriptor',
+        '%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.json'
+      ])
+      expect(hook.timeout).toBe(10)
+      // The command is an absolute literal (CreateProcess never expands %VAR%); only the
+      // descriptor arg carries the runtime-expanded %USERPROFILE% token, unexpanded and unquoted.
+      expect(hook.command.includes('%')).toBe(false)
+    } finally {
+      rmSync(tmpResources, { recursive: true, force: true })
+    }
+  })
+
+  it('R105-b D6: migrates a legacy conhost entry to exactly one new host-exe entry', () => {
+    const tmpResources = mkdtempSync(join(tmpdir(), 'orca-hook-host-migration-'))
+    try {
+      mkdirSync(join(tmpResources, 'bin'), { recursive: true })
+      writeFileSync(join(tmpResources, 'bin', 'orca-hook-host.exe'), '')
+
+      const scriptFileName = getManagedScriptFileName(CLAUDE_HOOK_SETTINGS)
+      const legacyConhostHook = {
+        type: 'command' as const,
+        command: 'C:\\Windows\\System32\\conhost.exe',
+        args: [
+          '--headless',
+          'C:\\Windows\\System32\\cmd.exe',
+          '/d',
+          '/c',
+          '%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.cmd'
+        ],
+        timeout: 10
+      }
+      const config: HooksConfig = { hooks: {} }
+      for (const event of CLAUDE_EVENTS) {
+        config.hooks![event.eventName] = [{ ...event.definition, hooks: [legacyConhostHook] }]
+      }
+
+      const newHook = getWindowsManagedLifecycleHook(
+        'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd',
+        tmpResources
+      )
+      const migrated = applyManagedHooks(config, newHook, scriptFileName)
+      const twiceInstalled = applyManagedHooks(migrated, newHook, scriptFileName)
+
+      for (const event of CLAUDE_EVENTS) {
+        expect(twiceInstalled.hooks?.[event.eventName]).toHaveLength(1)
+        expect(twiceInstalled.hooks?.[event.eventName]?.[0]?.hooks).toEqual([newHook])
+      }
+    } finally {
+      rmSync(tmpResources, { recursive: true, force: true })
+    }
+  })
+
+  it('R105-b D6: migrates a legacy cmd.exe-direct entry to exactly one new host-exe entry', () => {
+    const tmpResources = mkdtempSync(join(tmpdir(), 'orca-hook-host-migration-cmd-'))
+    try {
+      mkdirSync(join(tmpResources, 'bin'), { recursive: true })
+      writeFileSync(join(tmpResources, 'bin', 'orca-hook-host.exe'), '')
+
+      const scriptFileName = getManagedScriptFileName(CLAUDE_HOOK_SETTINGS)
+      const legacyDirectCmdHook = {
+        type: 'command' as const,
+        command: 'C:\\WINDOWS\\System32\\cmd.exe',
+        args: ['/d', '/c', '%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.cmd'],
+        timeout: 10
+      }
+      const config: HooksConfig = { hooks: {} }
+      for (const event of CLAUDE_EVENTS) {
+        config.hooks![event.eventName] = [{ ...event.definition, hooks: [legacyDirectCmdHook] }]
+      }
+
+      const newHook = getWindowsManagedLifecycleHook(
+        'C:\\Users\\alice\\.orca\\agent-hooks\\claude-hook.cmd',
+        tmpResources
+      )
+      const migrated = applyManagedHooks(config, newHook, scriptFileName)
+
+      for (const event of CLAUDE_EVENTS) {
+        expect(migrated.hooks?.[event.eventName]).toHaveLength(1)
+        expect(migrated.hooks?.[event.eventName]?.[0]?.hooks).toEqual([newHook])
+      }
+    } finally {
+      rmSync(tmpResources, { recursive: true, force: true })
+    }
   })
 })
 
@@ -396,6 +501,68 @@ describe('ClaudeHookService.install', () => {
       } finally {
         vi.unstubAllEnvs()
         rmSync(tmpHome, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it.skipIf(process.platform !== 'win32')(
+    'R105-b: installs the winexe hook host + descriptor when orca-hook-host.exe is packaged, ' +
+      'and two consecutive installs leave exactly one entry',
+    () => {
+      const tmpHome = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-'))
+      const tmpResources = mkdtempSync(join(tmpdir(), 'orca-claude-hookhost-resources-'))
+      vi.stubEnv('HOME', tmpHome)
+      vi.stubEnv('USERPROFILE', tmpHome)
+      const originalResourcesPath = process.resourcesPath
+      mkdirSync(join(tmpResources, 'bin'), { recursive: true })
+      writeFileSync(join(tmpResources, 'bin', 'orca-hook-host.exe'), '')
+      Object.defineProperty(process, 'resourcesPath', { value: tmpResources, configurable: true })
+      try {
+        expect(new ClaudeHookService().install().state).toBe('installed')
+        const settings = JSON.parse(
+          readFileSync(join(tmpHome, '.claude', 'settings.json'), 'utf-8')
+        ) as { hooks: Record<string, { hooks: TestHook[] }[]> }
+
+        const expectedCommand = join(tmpResources, 'bin', 'orca-hook-host.exe')
+        for (const eventName of ['UserPromptSubmit', 'Stop', 'StopFailure']) {
+          const hook = settings.hooks[eventName]?.[0]?.hooks?.[0]
+          expect(hook?.command).toBe(expectedCommand)
+          // Absolute literal command; only the descriptor arg carries the runtime %USERPROFILE%
+          // token — unexpanded (CreateProcess never expands %VAR%) and unquoted.
+          expect(hook?.args).toEqual([
+            '--descriptor',
+            '%USERPROFILE%\\.orca\\agent-hooks\\claude-hook.json'
+          ])
+        }
+
+        const descriptor = JSON.parse(
+          readFileSync(join(tmpHome, '.orca', 'agent-hooks', 'claude-hook.json'), 'utf-8')
+        )
+        expect(descriptor).toEqual({
+          source: 'claude',
+          pathname: '/hook/claude',
+          fields: ['paneKey', 'tabId', 'launchToken', 'worktreeId', 'env', 'version', 'payload']
+        })
+
+        new ClaudeHookService().install()
+        const afterSecondInstall = JSON.parse(
+          readFileSync(join(tmpHome, '.claude', 'settings.json'), 'utf-8')
+        ) as { hooks: Record<string, { hooks: TestHook[] }[]> }
+        for (const eventName of ['UserPromptSubmit', 'Stop', 'StopFailure']) {
+          expect(afterSecondInstall.hooks[eventName]).toHaveLength(1)
+        }
+      } finally {
+        if (originalResourcesPath === undefined) {
+          delete (process as { resourcesPath?: string }).resourcesPath
+        } else {
+          Object.defineProperty(process, 'resourcesPath', {
+            value: originalResourcesPath,
+            configurable: true
+          })
+        }
+        vi.unstubAllEnvs()
+        rmSync(tmpHome, { recursive: true, force: true })
+        rmSync(tmpResources, { recursive: true, force: true })
       }
     }
   )
